@@ -7,6 +7,7 @@ import {
   EnvParseError,
   isUserAbort,
   classifySelectedSteps,
+  matchText,
   composeEnv,
   extractSteps,
   resolveRunSelection,
@@ -16,6 +17,7 @@ import {
   parseConfig,
   parseFrontmatter,
   parseDataRows,
+  scanSectionDataTables,
   parseParameters,
   readEnvFile,
   readEnvOverlayFile,
@@ -30,8 +32,10 @@ import {
   type CompileProgressEvent,
   type CompileResultEvent,
   type CompileSummary,
+  type DataRowStatus,
   type ErrorPayload,
   type FrameInfo,
+  type HostRowsMsg,
   type HostToWebviewMsg,
   type RunEvent,
   type StepMode,
@@ -43,6 +47,28 @@ import { EnvSelector } from './env-selector.js';
 import { resolveProjectDirs } from './aiui-config.js';
 import { buildSectionsPayload, preflightSections, sectionedSkillRefusal } from './sections.js';
 import { decideViewportRecycle } from './viewport-recycle.js';
+import {
+  rowFailureDetail,
+  rowFailureError,
+  rowSkipDetail,
+  rowSkipHover,
+  rowStatusFromLineStatus,
+  rowStoppedHover,
+  withRunRowsNote,
+  worseRowStatus,
+  type RowSkipReason,
+  type RowTableKind,
+} from './row-summary-core.js';
+import {
+  failedRowsFrom,
+  rowOutcomeLine,
+  rowValuesText,
+  rowsSummaryLine,
+  sectionRowsIgnoredLogLine,
+  sectionRowsLogLine,
+  stepRangeText,
+  stepsPerRowLogLine,
+} from './row-selection-core.js';
 import {
   decideServerAction,
   defaultHealthProbe,
@@ -333,6 +359,85 @@ export interface SkillDebugContext {
   frameId: string;
 }
 
+/** One row of a data table, as the controller tracks it through a run. */
+interface RowState {
+  /** 1-based table position — the number every surface names the row by. */
+  row: number;
+  /** 1-based editor line the row occupies. */
+  line: number;
+  /** `"k=v, k=v"`, masked. Built once, from `maskIfSecret`, so the gutter
+   *  hover, the panel and the Output banner cannot word it differently. */
+  values: string;
+  status: DataRowStatus;
+  detail?: string;
+  /** The gutter hover — the long form of `detail`. */
+  hover?: string;
+  durationMs?: number;
+  /**
+   * Is this row part of THIS run?
+   *
+   * Every row of every table on a whole-file run; only the chosen ones when a
+   * selection narrowed an axis. The difference is what decision 6 turns on:
+   * an unselected row is untouched — it keeps the mark it already had and is
+   * never painted `skip`, because skip means "was going to run and did not"
+   * and a hover saying so would lie about this run.
+   */
+  planned: boolean;
+  /**
+   * The worst TERMINAL state this row reached in the whole run, and the run
+   * rows it reached it on.
+   *
+   * A section table inside a data-driven run is looped once per run row, so
+   * `status` is repeatedly reset to `running` at the start of each iteration —
+   * which is what makes the band follow the loop, and which also wipes a
+   * failure from three run rows back the moment a later run row starts. The
+   * merge cannot live in `status` for that reason; it lives here, and
+   * `finalizeRowTables` paints it once the loop is over (§"Across run rows").
+   */
+  worst?: {
+    status: DataRowStatus;
+    detail?: string;
+    hover?: string;
+    /** The 1-based RUN rows this status was reached on; empty outside a
+     *  data-driven run, where there is no run row to name. */
+    runRows: number[];
+  };
+}
+
+/**
+ * The step failure a row (or a section iteration) died at.
+ *
+ * `sourceUri` is the fsPath of the file the failing step LIVES in, taken from
+ * the event's frame, and it is present only when that is not the test
+ * document. Without it a failure inside a `[skill:]` body was described by
+ * reading the test file at the skill's line number: a skill-body failure on
+ * line 12 read as `Row 3 failed at step 2 — "<whatever the test's line 12
+ * says>"`, which is a step the row may never have run.
+ */
+interface RowFailure {
+  line: number;
+  error: string;
+  sourceUri?: string;
+}
+
+/** The file a row's failure came from, named the way a reader would name it —
+ *  `login.md`. `undefined` when it came from the test document itself, which
+ *  is the case that gets an ordinal and a quoted step instead. */
+function basenameOfSource(sourceUri: string | undefined): string | undefined {
+  return sourceUri === undefined ? undefined : path.basename(sourceUri);
+}
+
+/** One data table of the document, and the state of its rows. */
+interface RowTableState {
+  /** The wire discriminator: `'run'` or `{ section }`. */
+  table: 'run' | { section: string };
+  /** `'run'` counts rows, `'section'` counts iterations — one word, every
+   *  string this table produces. */
+  kind: RowTableKind;
+  headerLine: number;
+  rows: RowState[];
+}
+
 /**
  * One controller per .md test document. Owns the abort controller for the
  * active run; refuses to start a second run while one is in flight.
@@ -454,8 +559,95 @@ export class RunController {
   /** 1-based row being executed, or null outside a data-driven loop. */
   private currentRowNumber: number | null = null;
 
+  /**
+   * The matrix a pause left parked, or null when no run is parked.
+   *
+   * A pause ends the loop after the current row (rows story, decision 6), and
+   * that row is NOT finished: a breakpoint trimmed its steps, so half of them
+   * ran. Painting it `passed` — which is what happened before, five times over
+   * for a five-row test — claims the whole test passed while the pause arrow
+   * sits on step 4. So the row keeps its band and this remembers the matrix
+   * until the Continue of that run settles it, or a Stop paints it ■.
+   *
+   * `row` is the run row the loop parked in, or null when the run was not a
+   * row loop at all — a file whose only table is a section's still has rows
+   * mid-flight when a breakpoint parks the run, and its matrix has to survive
+   * the Continue for the frames to keep painting into.
+   *
+   * Outlives the run on purpose: the Continue is a separate `runLines` call.
+   */
+  private parkedRowState: { row: number | null } | null = null;
+
+  /**
+   * The row a batch runner should prefix its failure messages with.
+   *
+   * Read by the Test Explorer, which sees the run only through `onEvent` and
+   * so cannot tell five rows failing step 6 apart from five identical
+   * failures (§What does not change).
+   */
+  get currentRow(): number | null {
+    return this.currentRowNumber;
+  }
+
+  /**
+   * How the editor currently paints this document's lines, and what the
+   * hovers say — set by the registry, absent for a batch controller (which
+   * paints nothing).
+   *
+   * Read once per run, to seed the rows a narrowed run did NOT select: the
+   * row boundary clears the file's statuses and the matrix is what puts them
+   * back, so without this an unselected row's ✓ would vanish the first time a
+   * neighbour was re-run on its own.
+   */
+  lineStatuses?: () => Map<number, string>;
+  lineHovers?: () => Map<number, string>;
+
+  /** The section-loop narrowings in force for the run in flight, handed to
+   *  `buildSectionsPayload` on every block. Undefined outside a narrowed run,
+   *  which is what makes the sections payload byte-identical to before. */
+  private sectionRowsOfRun: Record<string, number[]> | undefined;
+
   /** Line → the rows that failed on it, for the end-of-loop repaint. */
   private rowFailuresByLine = new Map<number, number[]>();
+
+  /**
+   * The live matrix — every data table in the document and the state of each
+   * of its rows (stories/data-row-progress-and-selection.md).
+   *
+   * One structure, two surfaces: it is posted as the `rows` message, which
+   * the Runner panel's Rows section renders and the extension host paints
+   * into the gutter. Keeping them on one message is what makes the table and
+   * the panel incapable of disagreeing.
+   *
+   * It also has to *survive* the row boundary's `clearStatusesForUris`, which
+   * wipes the whole file's statuses so the next row's steps repaint from
+   * blank. Re-posting the matrix after that clear is what puts rows 1..n-1's
+   * marks back; without the structure there would be nothing to put back.
+   */
+  private rowTables: RowTableState[] = [];
+  /** Wall clock of the run row that is executing, for its `durationMs`. */
+  private rowStartedAt: number | null = null;
+  /** Frame id → the section-table row that frame is running. Populated from
+   *  `frame.iteration`, which the server stamps on every looped body's frame. */
+  private sectionIterationFrames = new Map<
+    string,
+    { section: string; row: number; startedAt: number }
+  >();
+  /** Section name → how many of its iteration frames this run has seen. Only
+   *  consulted for a NARROWED section, where the k-th frame is the k-th row
+   *  the client shipped whatever the server called it (`rowForIteration`). */
+  private sectionIterationsSeen = new Map<string, number>();
+  /** One warning per run about a server that ignored `rowNumbers`, not one
+   *  per iteration: the fact is about the server, and three rows would say it
+   *  three times. */
+  private oldServerNumberingWarned = false;
+  /** Frame id → the first `step:fail` seen inside that frame's subtree. Read
+   *  on `frame:pop` to say WHICH body step an iteration died at. */
+  private frameFailures = new Map<string, RowFailure>();
+  /** The failure the current run row died at, for that row's ✗ hover. The
+   *  FIRST one wins: it is the step that stopped the row, and the ones after
+   *  it (if any) are consequences. */
+  private lastFailureThisRow: RowFailure | null = null;
   /** Token totals for the most recently finalized run (issue 021). Set from the
    *  `done` event on a normal run, or recovered via `getLastRun` on STOP (where
    *  the `done` is dropped). null until a run finalizes. */
@@ -721,6 +913,11 @@ export class RunController {
     // been popped (the live stack alone isn't enough when step:fail and
     // frame:pop arrive close together).
     this.frameParents.set(frame.id, frame.parentId);
+    // A looped section's frame carries the table position it is running
+    // (`iteration`), which is the only thing that knows which row of the
+    // section's table to band. Paints and posts; a frame without it is an
+    // ordinary descent and this is a no-op.
+    this.startSectionIteration(frame);
     this.frameStackEmitter.fire();
   }
 
@@ -737,6 +934,11 @@ export class RunController {
     // Deliberately keep frameRoot / frameParents populated until run end:
     // a late step:fail (after pop) needs ancestry to propagate the failure
     // to the test file's [skill:] line. resetFrameState clears them.
+    //
+    // The iteration's row is closed out here for the same reason the
+    // aggregate `[skill:]` status is: the pop is the only event that says the
+    // body is done. Pass, or fail with the body step it died at.
+    this.endSectionIteration(frameId);
     this.frameStackEmitter.fire();
     return { failed, root };
   }
@@ -806,6 +1008,10 @@ export class RunController {
     this.failedFrames.clear();
     this.revealedFrameUris.clear();
     this.clearedDescentUris.clear();
+    this.sectionIterationFrames.clear();
+    this.sectionIterationsSeen.clear();
+    this.frameFailures.clear();
+    this.lastFailureThisRow = null;
     this.scopesByFrame.clear();
     // The parked skill failure's seed scope lives in scopesByFrame, which we
     // just wiped — drop the failure too so the re-run affordance can't offer a
@@ -1365,7 +1571,38 @@ export class RunController {
     // Deliberately NOT done in `pause()`: that parks the run for a Resume,
     // which SHOULD inherit.
     this.compileModeOfRun = undefined;
+    // A Stop while the loop is PARKED has no run to abort — the parked run
+    // returned long ago — so nothing else here reaches the row it left
+    // `running`. It is the one row with no result and no explanation, and the
+    // Stop is what settles it: ■, with the hover the ■ always carries. The
+    // rows after it keep their `not run (paused)`, which is still what
+    // happened to them.
+    if (this.active === null && this.parkedRowState !== null) {
+      this.parkedRowState = null;
+      this.finalizeRowTables({ kind: 'stopped' });
+    }
     this.active?.abort();
+  }
+
+  /**
+   * A `step:fail` as a row failure, remembering which FILE the step is in.
+   *
+   * A step event's `frame.uri` is an fsPath naming the file the step lives in
+   * — the test document for an inline step, a skill `.md` for a skill-body
+   * one. Everything that turns a failure into words (`mainFlowOrdinal`,
+   * `sectionBodyOrdinal`, `stepTextAt`) reads the TEST document at
+   * `failure.line`, so a skill-body failure without this described a step of
+   * the test the row may never have run. Same URI check `sectionPauseAt`
+   * makes, for the same reason: an fsPath, not a `file://` URI.
+   */
+  private rowFailureOf(event: { line: number; error: string; frame?: FrameInfo }): RowFailure {
+    const uri = event.frame?.uri;
+    const elsewhere = uri !== undefined && uri !== this.document.uri.fsPath;
+    return {
+      line: event.line,
+      error: event.error,
+      ...(elsewhere && { sourceUri: uri }),
+    };
   }
 
   /** Post a run event to the webview AND notify any registered per-run
@@ -1383,6 +1620,32 @@ export class RunController {
         if (!at.includes(this.currentRowNumber)) at.push(this.currentRowNumber);
       } else {
         this.rowFailuresByLine.set(event.line, [this.currentRowNumber]);
+      }
+    }
+    // The run row's own ✗ hover names the step it died at, so the row and the
+    // step point at each other (decision 9). Also recorded while a Continue
+    // finishes a row a pause parked in, which is the run that decides whether
+    // that row ends up ✓ or ✗ — `currentRowNumber` is null there, because the
+    // continuation is not itself a loop.
+    if (
+      event.type === 'step:fail' &&
+      (this.currentRowNumber !== null || this.parkedRowState?.row != null)
+    ) {
+      this.lastFailureThisRow ??= this.rowFailureOf(event);
+    }
+    // The same question, one level down: which section ITERATION died, and at
+    // which body step. Attributed by walking the frame's ancestry, because
+    // the failing step can be several frames below the iteration's own —
+    // a skill called from a looped body still fails that iteration.
+    if (event.type === 'step:fail' && event.frame) {
+      let cur: string | null = event.frame.id;
+      const seen = new Set<string>();
+      while (cur && !seen.has(cur)) {
+        seen.add(cur);
+        if (this.sectionIterationFrames.has(cur) && !this.frameFailures.has(cur)) {
+          this.frameFailures.set(cur, this.rowFailureOf(event));
+        }
+        cur = this.frameParents.get(cur) ?? null;
       }
     }
     this.post({ type: 'runEvent', event });
@@ -1661,6 +1924,61 @@ export class RunController {
     }
   }
 
+  /**
+   * Start a planned run row in a fresh browser
+   * (stories/data-row-progress-and-selection.md §Running rows).
+   *
+   * Called for EVERY planned row, `rowIndex` 0 included, which is the whole
+   * point: the close used to happen only at the boundary BETWEEN rows, so the
+   * first row of any row run — row 1 of a Run All, the single row of Run This
+   * Row, the first of a subset — reused whatever interactive session was
+   * already open. It therefore started on the page the previous run left, with
+   * that browser's localStorage: *Run This Row* on row 4 of
+   * `securebank-matrix.md` after a full run navigated fine and then failed
+   * "Reject non-essential cookies in the cookie banner", because the cookie
+   * choice row 5 made was remembered and the banner never appeared.
+   *
+   * Order matters and is the same at every row: the session goes before the
+   * row's batch so that batch creates it afresh, and `forgetSentConfig` goes
+   * with it — `includeConfig` is `!configSentForSession`, which is otherwise
+   * reset only in the run's `finally`, so without it the next session would
+   * launch with no baseUrl, viewport or timeout and step 1 would fail.
+   *
+   * Two rows are exempt, both for the same reason — there is nothing of ours
+   * to close:
+   *
+   *  - `freshBrowserPerRow` false, i.e. a selection of *some* steps: those run
+   *    where the session is, once per row (decision 4), and closing the browser
+   *    would put every row on a blank page rather than the one the author is
+   *    standing on.
+   *  - row 0 of a BATCH run: a batch mints its own `<path>::run-N` session and
+   *    always launches fresh, so the close would be a no-op against a session
+   *    that does not exist yet. Its later rows still recycle, exactly as before.
+   *
+   * The status clear stays a BOUNDARY job. At row 0 the run has already
+   * cleared the file and posted the row matrix over it; clearing again here
+   * would wipe the marks that seed the unselected rows.
+   */
+  private async recycleSessionForRow(args: {
+    client: ApiClientLike;
+    sessionId: string;
+    rowIndex: number;
+    freshBrowserPerRow: boolean;
+    batchMode: boolean;
+  }): Promise<void> {
+    if (!args.freshBrowserPerRow) return;
+    if (args.rowIndex === 0 && args.batchMode) return;
+    try {
+      await args.client.closeSession(args.sessionId);
+    } catch {
+      /* best effort — a stale session must not fail the row that follows */
+    }
+    this.forgetSentConfig();
+    if (args.rowIndex > 0 && this.clearStatusesForUris) {
+      this.clearStatusesForUris([this.document.uri]);
+    }
+  }
+
   async closeSession(): Promise<void> {
     const out = getOutputChannel();
     const ts = () => new Date().toISOString().slice(11, 23);
@@ -1831,6 +2149,24 @@ export class RunController {
        * at the root frame, exactly as Run Step Here runs them.
        */
       compileScope?: { section: string };
+      /**
+       * Run only these rows of the table under `## Steps`, by 1-based TABLE
+       * position (stories/data-row-progress-and-selection.md §Running rows).
+       *
+       * The plan is filtered, never renumbered: `dataRow.row` stays the table
+       * position and `dataRow.count` stays the table's row count, so a one-row
+       * run's report reads `Row 4 of 5` and lines up with the full matrix
+       * (decision 1). Omitted means every row, which is what a whole-file run
+       * has always done.
+       */
+      rows?: number[];
+      /**
+       * Narrow a `### Section`'s own loop, keyed by the section name as
+       * authored. Handed to `buildSectionsPayload`, which ships the chosen
+       * rows plus the `rowNumbers`/`rowCount` pair that keeps the server's
+       * iteration numbering on the author's table.
+       */
+      sectionRows?: Record<string, number[]>;
     } = {},
   ): Promise<RunOutcome> {
     if (this.isRunning) {
@@ -1865,6 +2201,15 @@ export class RunController {
     // this time (and making a failure-short-circuit scenario look like
     // "test continued past the failure").
     const previousTouchedSkillUris = [...this.revealedFrameUris];
+
+    // What the table's rows show right now — read BEFORE the fresh-run clear
+    // below wipes the file. A run that narrows an axis seeds the rows it did
+    // not select from this, which is what makes an unselected row untouched
+    // rather than blanked (decision 6).
+    const rowSeed = {
+      statuses: this.lineStatuses?.() ?? new Map<number, string>(),
+      hovers: this.lineHovers?.() ?? new Map<number, string>(),
+    };
 
     // Record continuation intent BEFORE resetFrameState so the descent-clear
     // (gated by shouldClearDescentStatuses) can suppress itself on a
@@ -2317,13 +2662,152 @@ export class RunController {
      * whose rows have already been decided, and re-entering the loop would
      * start it again from row 1.
      */
+    /**
+     * The section-loop narrowings that survive this run's step selection.
+     *
+     * A narrowing whose call line is not among the steps about to execute has
+     * nothing to narrow — the section will not be entered — so it is dropped
+     * and said out loud. Logged rather than refused, because an axis nobody
+     * selected means all of it, and a drag that stopped a line short of the
+     * call has already said which steps it wants ("Open for review").
+     */
+    const sectionRowsForRun = this.narrowSectionRows(options.sectionRows, classified);
+    this.sectionRowsOfRun = sectionRowsForRun;
+    // The "your server is too old to number these rows" warning is a fact
+    // about this run's server, said once (`rowForIteration`).
+    this.oldServerNumberingWarned = false;
+
     const wholeFileRun =
       options.rerun === undefined &&
       options.isContinuation !== true &&
       options.isResume !== true;
-    const dataRows = wholeFileRun ? this.readDataRows(text, filePath, log) : null;
-    /** One entry per iteration: the row, or a single `null` for an ordinary run. */
-    const rowPlan: Array<Record<string, string> | null> = dataRows ?? [null];
+    /**
+     * The matrix a pause parked, when THIS call is the Continue of that run.
+     *
+     * A pause ends the loop after the current row, and that row is left
+     * `running` because it is not finished. This call is what finishes it, so
+     * it keeps the matrix alive (the `else` below would otherwise empty it)
+     * and closes the row out in the `finally` — pass, fail, or still parked if
+     * it hits the next breakpoint.
+     *
+     * Anything that is not a resume abandons the park: a fresh run rebuilds
+     * the matrix from scratch, and there is nothing left to go back to.
+     */
+    const resumingParked = options.isResume === true ? this.parkedRowState : null;
+    if (resumingParked === null) this.parkedRowState = null;
+    const allRows = wholeFileRun ? this.readDataRows(text, filePath, log) : null;
+    // A malformed SECTION table used to be silent everywhere: `readDataRows`
+    // reports the run table's parse error, `buildSectionsPayload` swallows the
+    // section scan's, and the decoration pass swallows it again — so the
+    // section simply ran once with `{{file}}` unresolved and the author had no
+    // line to look at. Said here, in the same place and the same voice as the
+    // run table's.
+    if (wholeFileRun) this.reportSectionTableErrors(text, filePath, log);
+    /**
+     * The rows this run will actually execute, each keeping its TABLE number.
+     *
+     * `options.rows` filters; it never renumbers. `row` is the position the
+     * author sees in the file and `count` is the whole table's, so the
+     * report's `Row 4 of 5`, the panel's numbering and the gutter's mark all
+     * name the same row whether the run was the whole table or one line of it
+     * (decision 1).
+     */
+    /** The narrowing, or undefined for "every row". An EMPTY list is not a
+     *  narrowing: an axis with nothing selected means all of that axis
+     *  (decision 3), and the panel never sends one for exactly that reason. */
+    const narrowRows =
+      options.rows !== undefined && options.rows.length > 0 ? options.rows : undefined;
+    const dataRows = ((): Array<{ row: number; values: Record<string, string> }> | null => {
+      if (allRows === null) return null;
+      const planned = allRows
+        .map((values, index) => ({ row: index + 1, values }))
+        .filter((r) => narrowRows === undefined || narrowRows.includes(r.row));
+      // Nothing matched — every number was out of range, which the pre-flight
+      // refusal catches before we get here. Falling back to "no loop" rather
+      // than an empty plan matters anyway: an empty plan would run no steps at
+      // all and report the test green.
+      return planned.length > 0 ? planned : null;
+    })();
+    /** The table's row count — the `of M`, which a subset does not shrink. */
+    const rowCount = allRows?.length ?? 0;
+    /**
+     * Does the row boundary restart the browser?
+     *
+     * A fresh browser per row belongs to the whole-file run; a selection of
+     * steps runs where the session is, once per row, which is what Run
+     * Selected Steps has always meant (decision 4). The loop itself is gated
+     * by `wholeFileRun` as before — this narrows what the boundary DOES, not
+     * whether it happens.
+     *
+     * "Whole file" is a fact about coverage, not about how the run was
+     * started: Ctrl+A then F5, or shift-clicking the first step and the last
+     * in the panel, both arrive here with a non-empty `lines` naming every
+     * step there is. Reading that as a step selection put five rows in one
+     * browser and started rows 2..5 on the dashboard row 1 signed into — a
+     * selection that covers everything means everything, which is what it
+     * already means for steps.
+     *
+     * Decided from the RESOLVED steps, not from the raw lines. The two are not
+     * the same question, and the gesture that separates them is the most
+     * natural one there is: drag from `## Steps` down to step 1 and the raw
+     * lines are a heading, a table and a blank — no step among them — while
+     * `resolveRunSelection`'s fallback ("every main-flow step at or below the
+     * lowest selected line") correctly resolves it to the whole flow. Asking
+     * the raw set whether it covers every step answered no, and five rows ran
+     * in one browser: rows 2..5 started on the dashboard row 1 signed into,
+     * with no cookie banner left to reject.
+     */
+    const freshBrowserPerRow =
+      lines.length === 0 ||
+      (selection.scope === 'main-flow' &&
+        effectiveLines.length === extractSteps(text).length);
+    // The live matrix behind the row marks and the panel's Rows section.
+    //
+    // Built for a whole-file run only, and emptied otherwise. A partial run —
+    // a re-run from a step, a Continue, a selection — is a continuation of a
+    // run whose rows were already decided and already painted, and posting an
+    // all-`pending` matrix into it would wipe those marks. Running a CHOSEN
+    // subset of rows is the next wave; it seeds the matrix from what the rows
+    // already are rather than from `pending`.
+    if (wholeFileRun) {
+      this.buildRowTables(
+        text,
+        filePath,
+        {
+          ...(narrowRows && { rows: narrowRows }),
+          ...(sectionRowsForRun && { sectionRows: sectionRowsForRun }),
+        },
+        rowSeed,
+      );
+      this.postRows();
+    } else if (resumingParked === null) {
+      this.rowTables = [];
+      // …and say so. A file that HAD a table and no longer has one (the table
+      // was deleted, then Run) would otherwise leave the panel showing rows
+      // that are not in the file any more: `postRows` used to return early on
+      // an empty list, so the last thing the panel ever heard was the old
+      // matrix.
+      this.postRows();
+    }
+    /** One entry per iteration: the row and its table number, or a single
+     *  `null` for an ordinary run. */
+    const rowPlan: Array<{ row: number; values: Record<string, string> } | null> =
+      dataRows ?? [null];
+    // A step selection in a data-driven file runs those steps once PER ROW,
+    // which is right (decision 3, an unselected axis means all of it) and was
+    // also the one thing nothing on screen said: F5 on one highlighted step
+    // repainted it five times and the only clue was five `Row N of 5` banners.
+    // Said once, before the first batch, on every path that gets here — the
+    // editor's F5, the panel's Run, the palette.
+    if (dataRows !== null && lines.length > 0 && narrowRows === undefined && !freshBrowserPerRow) {
+      this.postOutput(
+        stepsPerRowLogLine(
+          classified.filter((c) => c.kind === 'step').length,
+          dataRows.length,
+        ),
+        'info',
+      );
+    }
     /** Per-row outcome, for the end-of-run summary. */
     const rowOutcomes: Array<{ row: number; values: Record<string, string>; failed: boolean }> = [];
     /**
@@ -2355,6 +2839,14 @@ export class RunController {
     // inherited it — the silent inheritance `isResume` exists to stop, one
     // site short.
     if (options.isResume !== true) this.compileModeOfRun = options.compile;
+    // Which row the recording will be of. Every row runs, but only the first
+    // one's actions are recorded (rows story, decision 11) — so an entry that
+    // references a column the first selected row leaves empty is a surprise
+    // unless the log says whose values it recorded. "First SELECTED": with a
+    // narrowed run that is the first row of the selection, not of the table.
+    if (compileMode && dataRows !== null && dataRows.length > 0) {
+      this.postOutput(`compile records row ${dataRows[0]!.row}`, 'info');
+    }
     /** Step-blocks already sent in THIS call — the second onwards continues
      *  the compiler the first opened. */
     let compileBlocksSent = 0;
@@ -2369,45 +2861,66 @@ export class RunController {
     // resumes, because every earlier re-run flow sent exactly one step.
     let pendingRerun = options.rerun;
 
+    /**
+     * Why the row loop stopped early, when it did — the four exits that are
+     * not "the last row finished".
+     *
+     * `paused` is the one that used to be missing entirely. `parkedAtPause` is
+     * assigned AFTER the loop (a breakpoint trim) or in the catch (a Pause),
+     * so the `if (this.parkedAtPause) break` at the top of each iteration
+     * never fired for a breakpoint: `trimAtBreakpoint` handed the loop steps
+     * 1..3, and the loop ran those three steps five times and painted every
+     * row ✓ — a green `5 rows · 5 passed` with the pause arrow sitting on step
+     * 4. The decision to end the loop has to be taken where the row's block
+     * ends, not two exits later.
+     */
+    let loopEnd: RowSkipReason | null = null;
+
     try {
-      for (const [rowIndex, row] of rowPlan.entries()) {
-      if (row !== null) {
-        // The row boundary. Order matters: the session has to go before the
-        // next row's batch so that batch creates it afresh (row 1 signs in;
-        // row 2 must not start on the dashboard), and `forgetSentConfig` has
-        // to go with it — `includeConfig` is `!configSentForSession`, which is
-        // otherwise reset only in this run's `finally`, so without it row 2's
-        // session would launch with no baseUrl, viewport or timeout and step 1
-        // would fail.
-        if (rowIndex > 0) {
-          if (this.parkedAtPause) {
-            // A pause ends the loop after the current row (decision 6).
-            // Resuming the loop itself would need a row cursor that survives a
-            // Continue; the debugging loop is Run This Row instead.
-            log(`run paused during row ${rowIndex} — remaining rows not run`);
-            break;
-          }
-          if (ac.signal.aborted) break;
-          try {
-            await client.closeSession(sessionId);
-          } catch {
-            /* best effort — a stale session must not fail the next row */
-          }
-          this.forgetSentConfig();
-          if (this.clearStatusesForUris) this.clearStatusesForUris([this.document.uri]);
-        }
+      for (const [rowIndex, planned] of rowPlan.entries()) {
+      const row = planned?.values ?? null;
+      const rowNumber = planned?.row ?? 0;
+      if (planned !== null && row !== null) {
+        // A pause ends the loop after the current row (decision 6), and it is
+        // decided at the END of that row's block (`loopEnd`), not here:
+        // `parkedAtPause` is only assigned once the loop is over, so a guard
+        // reading it at the TOP of the next iteration could never fire.
+        // Resuming the loop itself would need a row cursor that survives a
+        // Continue; the debugging loop is Run This Row instead.
+        if (rowIndex > 0 && ac.signal.aborted) break;
+        // Every planned row starts in a fresh browser — the FIRST one included.
+        await this.recycleSessionForRow({
+          client,
+          sessionId,
+          rowIndex,
+          freshBrowserPerRow,
+          batchMode,
+        });
         // Rebuilt rather than mutated: `[input:]` answers write into `params`,
         // and one row's answer must not leak into the next.
         for (const key of Object.keys(params)) delete params[key];
         Object.assign(params, resolvedParameters, row);
         this.post({ type: 'parametersResolved', values: { ...params } });
-        const shown = Object.entries(row)
-          .map(([k, v]) => `${k}=${maskIfSecret(k, v)}`)
-          .join(', ');
-        this.postOutput(`Row ${rowIndex + 1} of ${rowPlan.length} — ${shown}`, 'info');
-        log(`row ${rowIndex + 1}/${rowPlan.length}`);
-        this.currentRowNumber = rowIndex + 1;
-        attemptedRows.add(rowIndex + 1);
+        const shown = rowValuesText(row);
+        // `(steps 3–6)` when the run named steps, so the log says what ran as
+        // well as which row it ran for — a partial row is not the same event
+        // as a whole one and the report has to be readable against it.
+        const scope = stepRangeText(
+          classified
+            .filter((c) => c.kind === 'step')
+            .map((c) => mainFlowOrdinal(text, c.line))
+            .filter((n): n is number => n !== null),
+        );
+        const scopeText = freshBrowserPerRow || scope === null ? '' : ` (${scope})`;
+        this.postOutput(`Row ${rowNumber} of ${rowCount}${scopeText} — ${shown}`, 'info');
+        log(`row ${rowNumber}/${rowCount}`);
+        this.currentRowNumber = rowNumber;
+        attemptedRows.add(rowNumber);
+        // After the boundary's status clear, not before: that clear wipes the
+        // whole file, row marks included, and re-posting the matrix here is
+        // what puts rows 1..n-1 back on the table.
+        this.lastFailureThisRow = null;
+        this.startRunRow(rowNumber);
       }
       const rowFailedAtStart = anyFailed;
       let i = 0;
@@ -2432,7 +2945,7 @@ export class RunController {
             logging,
             cacheOverride: rawConfig['cache'],
             ...(row !== null && {
-              dataRow: { row: rowIndex + 1, count: rowPlan.length, values: row },
+              dataRow: { row: rowNumber, count: rowCount, values: row },
             }),
             signal: ac.signal,
             log,
@@ -2491,6 +3004,14 @@ export class RunController {
           );
           if (answer === null) {
             log(`input on line ${item.line} canceled — aborting run`);
+            // Cancelling is how you say "not this run". In a data-driven file
+            // it used to say it once per row: the break left `anyFailed`
+            // false, so the row was painted ✓, the loop moved on and prompted
+            // again — five prompts to cancel a five-row test, and five ✓ marks
+            // for steps that never ran. It ends the loop, like a Stop, and the
+            // row it happened in says what happened rather than claiming a
+            // pass.
+            loopEnd = { kind: 'prompt-cancelled' };
             break;
           }
           params[item.varName] = answer;
@@ -2529,21 +3050,59 @@ export class RunController {
               log,
             }),
           );
-          if (!exitedCleanly) break;
+          // `/quit`, a cancelled prompt, or an abort. All three mean the
+          // author is finished with this run — so, as for a cancelled
+          // `[input:]`, the LOOP is finished too rather than starting the next
+          // row's REPL.
+          if (!exitedCleanly) {
+            loopEnd = { kind: 'prompt-cancelled' };
+            break;
+          }
           i++;
           continue;
         }
       }
 
-      if (row !== null) {
+      // Will this row's block leave the run PARKED at a breakpoint? The post-
+      // loop code below turns `pausedAt` into the yellow ▶ under exactly these
+      // conditions; asked here because that is where the loop can still act on
+      // the answer, and because the row that is parked in is not a row that
+      // has passed — half its steps have not run.
+      const parkedHere =
+        row !== null && pausedAt !== null && !anyFailed && !ac.signal.aborted;
+      if (parkedHere) loopEnd = { kind: 'paused' };
+
+      if (row !== null && !parkedHere && loopEnd === null) {
         // A failing row does not stop the loop (decision 6) — a matrix exists
         // to show *which* rows fail. The run as a whole is still failed if any
         // row was, which is what `anyFailed` carries forward.
+        const rowFailed = anyFailed && !rowFailedAtStart;
         rowOutcomes.push({
-          row: rowIndex + 1,
+          row: rowNumber,
           values: row,
-          failed: anyFailed && !rowFailedAtStart,
+          failed: rowFailed,
         });
+        // The row's own mark. A row cut off by Stop leaves the loop through
+        // the `break` above, never reaching here, and is closed out as
+        // `stopped` by `finalizeRowTables` instead.
+        if (!ac.signal.aborted) {
+          this.endRunRow(rowNumber, rowFailed ? this.lastFailureThisRow : null, text);
+        }
+      }
+      // A pause ends the loop after the current row (rows story, decision 6),
+      // and so does a cancelled prompt. Both leave the row they happened in
+      // `running` — where the run actually is — for `finalizeRowTables` to
+      // settle, and every row after them is one the loop planned and never
+      // reached.
+      if (loopEnd !== null) {
+        if (row !== null) {
+          log(
+            loopEnd.kind === 'paused'
+              ? `run paused during row ${rowNumber} — remaining rows not run`
+              : `run ended during row ${rowNumber} — remaining rows not run`,
+          );
+        }
+        break;
       }
       } // end of the row loop
 
@@ -2647,6 +3206,57 @@ export class RunController {
       this.emitRunEvent({ type: 'done', status: 'error' });
       return this.fail(payload, log);
     } finally {
+      // Close out the table marks FIRST: the row that was cut off goes ■, the
+      // row a pause parked keeps its band, and the rows the loop planned and
+      // never reached go to the skip mark with the reason. Before
+      // `pauseRequested` is reset below, since a pause, a Stop and a run that
+      // died leave different hovers behind — and `parkedAtPause` is in the
+      // test alongside it because a breakpoint parks the run without anyone
+      // pressing Pause, and the rows after it are just as re-runnable.
+      //
+      // `loopEnd` outranks both: the loop itself decided to stop, at the point
+      // the row's block ended, and it knows why.
+      //
+      // Before `finishRowRun`, not after, because that is what makes the
+      // Output's per-row lines and its `Rows:` summary readable off the
+      // matrix. A Stop mid-row leaves that row in neither `rowOutcomes` (it
+      // never finished its steps) nor `notRun` (its batch was sent), so
+      // without a finalised matrix to read, the row had no line at all and the
+      // summary's parts summed to one less than the count.
+      const endReason: RowSkipReason =
+        loopEnd !== null
+          ? loopEnd
+          : this.pauseRequested || this.parkedAtPause
+            ? { kind: 'paused' }
+            : ac.signal.aborted
+              ? { kind: 'stopped' }
+              : { kind: 'ended' };
+      // The Continue of a parked row is what settles that row. Before
+      // `finalizeRowTables`, which would otherwise read a row still marked
+      // `running` as one the run was cut off inside and paint it ■.
+      //
+      // Not when this Continue parked again — the run is then still inside
+      // that row, one breakpoint further on — and not when it was Stopped,
+      // which is the ■ case for real.
+      if (
+        resumingParked?.row != null &&
+        !this.parkedAtPause &&
+        !ac.signal.aborted
+      ) {
+        this.endRunRow(resumingParked.row, anyFailed ? this.lastFailureThisRow : null, text);
+      }
+      this.finalizeRowTables(endReason);
+      // Who owns the matrix now this call is over.
+      //
+      // A pause leaves it PARKED — the row it stopped in keeps its band and
+      // the Continue of this run is what settles it. Anything else ends the
+      // park: the run finished, was stopped, or died. `currentRowNumber` is
+      // still the row the loop was on (it is cleared below); a Continue that
+      // parks again is not itself a loop, so it inherits the row it resumed.
+      this.parkedRowState =
+        endReason.kind === 'paused' && this.parkedAtPause && this.rowTables.length > 0
+          ? { row: this.currentRowNumber ?? resumingParked?.row ?? null }
+          : null;
       // The one report a data-driven run gets. Here rather than after the
       // loop because the loop has four exits — the last row, Stop, a pause
       // parking the run, and a thrown row — and three of them leave through a
@@ -2660,9 +3270,15 @@ export class RunController {
           rowPlan,
           rowOutcomes,
           attemptedRows,
+          endReason,
+          batchMode,
           log,
         });
       }
+      // The narrowing belonged to this run. A Continue after a pause is its
+      // own `runLines` call and re-states what it wants; leaving it set would
+      // silently narrow a section the next run never asked to narrow.
+      this.sectionRowsOfRun = undefined;
       // A stream that ended without a `compile:result` (a dropped connection,
       // a server error) must not leave a spinner running for the rest of the
       // session. On the ordinary path the result already took it down and this
@@ -2709,6 +3325,556 @@ export class RunController {
     }
   }
 
+  // ---- narrowing a section's loop ----------------------------------------
+
+  /**
+   * Drop the section narrowings this run cannot honour, and say so.
+   *
+   * A section is entered only by a step that calls it, so a narrowing whose
+   * call line is not among the steps about to run narrows nothing — the loop
+   * will not happen. The surviving ones each announce themselves, because a
+   * narrowed section changes what the steps AFTER the call see (a count that
+   * was 3 is now 1) and the failure downstream has to read as a consequence
+   * rather than a mystery.
+   *
+   * Matched on `matchText`, the same rule the server expands by, so the two
+   * cannot disagree about which step calls which section.
+   */
+  private narrowSectionRows(
+    requested: Record<string, number[]> | undefined,
+    classified: ClassifiedStep[],
+  ): Record<string, number[]> | undefined {
+    if (!requested || Object.keys(requested).length === 0) return undefined;
+    const text = this.document.getText();
+    let tables: Map<string, { rows: unknown[] }>;
+    try {
+      tables = scanSectionDataTables(text, this.document.uri.fsPath) as Map<
+        string,
+        { rows: unknown[] }
+      >;
+    } catch {
+      return undefined;
+    }
+    const called = new Set(
+      classified
+        .filter((c): c is Extract<ClassifiedStep, { kind: 'step' }> => c.kind === 'step')
+        .map((c) => matchText(c.instruction)),
+    );
+    const out: Record<string, number[]> = {};
+    for (const [name, requestedRows] of Object.entries(requested)) {
+      const table = tables.get(name);
+      if (!table) continue;
+      const rows = [...new Set(requestedRows)]
+        .sort((a, b) => a - b)
+        .filter((n) => n >= 1 && n <= table.rows.length);
+      if (rows.length === 0) continue;
+      if (!called.has(matchText(name))) {
+        this.postOutput(sectionRowsIgnoredLogLine(name, rows), 'warn');
+        continue;
+      }
+      out[name] = rows;
+      this.postOutput(sectionRowsLogLine(name, rows, table.rows.length), 'info');
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+  }
+
+  // ---- which rows are red -------------------------------------------------
+
+  /**
+   * The rows to re-run, as `runLines` options, or null when there are none.
+   *
+   * Read off the GUTTER — the tracker's own marks on the row lines — rather
+   * than remembered from the last run this window happened to see. That is
+   * what makes the offer survive a window reload: the marks are persisted,
+   * and the tracker's signature check already drops them when the table
+   * changes, row line by row line, so there is nothing left for a separate
+   * shape check to catch. It also means a red row is re-runnable in a window
+   * that never ran it, which is how a reader who reopens yesterday's failure
+   * expects a "re-run the failures" button to behave.
+   */
+  get failedRowsToRerun(): { rows?: number[]; sectionRows?: Record<string, number[]> } | null {
+    const statuses = this.lineStatuses?.();
+    if (!statuses) return null;
+    return failedRowsFrom(this.document.getText(), (line) => statuses.get(line));
+  }
+
+  // ---- the row matrix ----------------------------------------------------
+
+  /**
+   * Snapshot every data table in the document into `rowTables`, all rows
+   * `pending`.
+   *
+   * Snapshotted, like `readDataRows`, rather than re-read per boundary: an
+   * edit to a table mid-run could otherwise change a row's line number and
+   * send a ✓ to the wrong row.
+   *
+   * A malformed table contributes nothing — the run already reported the
+   * parse error and goes ahead unlooped, and a matrix built from a table the
+   * runner refused would describe a loop that is not happening.
+   */
+  private buildRowTables(
+    text: string,
+    filePath: string,
+    /**
+     * Which rows this run planned, per table — omit a table's entry and every
+     * one of its rows is planned, which is the whole-file case.
+     *
+     * A row this run did NOT plan is seeded from what the editor already
+     * shows rather than from `pending`, because `pending` is a cleared cell:
+     * the row boundary wipes the file's statuses and the matrix is what puts
+     * them back, so seeding an unselected row `pending` would erase the ✓ it
+     * earned last time (decision 6 — untouched, never skipped).
+     */
+    plan?: { rows?: number[]; sectionRows?: Record<string, number[]> },
+    /**
+     * What the gutter showed BEFORE this run's opening status clear.
+     *
+     * Read at the top of `runLines`, not here: the fresh-run clear wipes the
+     * whole file (row marks included) long before this is called, so reading
+     * the tracker now would seed every unselected row `pending` — which is
+     * exactly the erasure decision 6 forbids.
+     */
+    seed?: { statuses: Map<number, string>; hovers: Map<number, string> },
+  ): void {
+    const tables: RowTableState[] = [];
+    const painted = seed?.statuses ?? new Map<number, string>();
+    const hovers = seed?.hovers ?? new Map<number, string>();
+    const toState = (
+      scan: { headerLine: number; rowLines: number[]; rows: Array<Record<string, string>> },
+      table: 'run' | { section: string },
+      kind: RowTableKind,
+      chosen: number[] | undefined,
+    ): RowTableState => ({
+      table,
+      kind,
+      headerLine: scan.headerLine,
+      rows: scan.rows.map((values, index) => {
+        const row = index + 1;
+        const line = scan.rowLines[index] ?? scan.headerLine;
+        const planned = chosen === undefined || chosen.includes(row);
+        const carried = planned ? undefined : painted.get(line);
+        const hover = planned ? undefined : hovers.get(line);
+        return {
+          row,
+          line,
+          values: rowValuesText(values),
+          status: planned
+            ? ('pending' as DataRowStatus)
+            : rowStatusFromLineStatus(carried),
+          ...(hover !== undefined && { hover }),
+          planned,
+        };
+      }),
+    });
+    try {
+      const run = parseDataRows(text, filePath);
+      if (run) tables.push(toState(run, 'run', 'run', plan?.rows));
+    } catch {
+      /* reported by readDataRows; the run goes ahead unlooped */
+    }
+    try {
+      for (const [section, scan] of scanSectionDataTables(text, filePath)) {
+        tables.push(toState(scan, { section }, 'section', plan?.sectionRows?.[section]));
+      }
+    } catch {
+      /* a half-written section table paints nothing */
+    }
+    this.rowTables = tables;
+    this.rowStartedAt = null;
+    this.sectionIterationFrames.clear();
+    this.sectionIterationsSeen.clear();
+    this.frameFailures.clear();
+  }
+
+  /** The run-level table, or undefined when the file has none. */
+  private runTable(): RowTableState | undefined {
+    return this.rowTables.find((t) => t.table === 'run');
+  }
+
+  /** A section's table by the name the author wrote on the `###` heading. */
+  private sectionTable(name: string): RowTableState | undefined {
+    return this.rowTables.find(
+      (t) => typeof t.table === 'object' && t.table.section === name,
+    );
+  }
+
+  /**
+   * Post the matrix. Every boundary that changes a row's state ends here, so
+   * there is exactly one place that decides what the panel and the gutter
+   * see.
+   *
+   * An EMPTY list is a message too, not a reason to stay quiet: it is what a
+   * file whose table has been deleted has to say about itself, and the panel's
+   * Rows section only disappears because it was told.
+   */
+  private postRows(): void {
+    const msg: HostRowsMsg = {
+      type: 'rows',
+      uri: this.document.uri.toString(),
+      tables: this.rowTables.map((t) => ({
+        table: t.table,
+        headerLine: t.headerLine,
+        rows: t.rows.map((r) => ({
+          row: r.row,
+          line: r.line,
+          values: r.values,
+          status: r.status,
+          ...(r.detail !== undefined && { detail: r.detail }),
+          ...(r.hover !== undefined && { hover: r.hover }),
+          ...(r.durationMs !== undefined && { durationMs: r.durationMs }),
+        })),
+      })),
+    };
+    this.post(msg);
+  }
+
+  /**
+   * Write one row's state, keeping the worse of the old and the new.
+   *
+   * The never-downgrade rule is what makes a section table honest inside a
+   * data-driven run: its rows are looped once per RUN row, so the last clean
+   * run row would otherwise erase a failure three rows back. `running` and
+   * `pending` are the two exceptions — a row that starts again is running,
+   * whatever it was last time, and that is how the band follows the loop.
+   */
+  private setRowState(
+    table: RowTableState | undefined,
+    row: number,
+    patch: { status: DataRowStatus; detail?: string; hover?: string; durationMs?: number },
+  ): void {
+    const entry = table?.rows.find((r) => r.row === row);
+    if (!entry) return;
+    const next =
+      patch.status === 'running' || patch.status === 'pending'
+        ? patch.status
+        : worseRowStatus(entry.status, patch.status);
+    entry.status = next;
+    if (next === 'running' || next === 'pending') {
+      entry.detail = undefined;
+      entry.hover = undefined;
+    } else if (next === patch.status) {
+      // Only the winning status describes itself: a `passed` that lost to a
+      // previous run row's `failed` must not overwrite that failure's hover.
+      entry.detail = patch.detail;
+      entry.hover = patch.hover;
+    }
+    if (patch.durationMs !== undefined) entry.durationMs = patch.durationMs;
+    this.recordWorst(entry, patch);
+  }
+
+  /**
+   * Remember the worst TERMINAL state a row has reached, and on which run rows.
+   *
+   * `status` alone cannot carry this. A section table inside a data-driven run
+   * is looped once per RUN row, and each iteration starts by setting the row
+   * `running` — the exception in `setRowState` above, which is what makes the
+   * band follow the loop and which also clears the detail and the hover. So a
+   * section row that failed on run row 1 was reset to `running` on run row 2
+   * and then to `passed`, and the failure and its explanation were gone: the
+   * green mark after a red one that §"Across run rows" exists to forbid.
+   */
+  private recordWorst(entry: RowState, patch: { status: DataRowStatus; detail?: string; hover?: string }): void {
+    if (patch.status === 'running' || patch.status === 'pending') return;
+    const runRow = this.currentRowNumber;
+    const prior = entry.worst;
+    if (prior === undefined || worseRowStatus(prior.status, patch.status) !== prior.status) {
+      entry.worst = {
+        status: patch.status,
+        ...(patch.detail !== undefined && { detail: patch.detail }),
+        ...(patch.hover !== undefined && { hover: patch.hover }),
+        runRows: runRow === null ? [] : [runRow],
+      };
+      return;
+    }
+    // Same verdict again, one run row later — name that row too, so the hover
+    // that survives the loop says which run rows it is about.
+    if (prior.status === patch.status && runRow !== null && !prior.runRows.includes(runRow)) {
+      prior.runRows.push(runRow);
+    }
+  }
+
+  /**
+   * Paint each row's worst terminal state, once the loop that repainted it is
+   * over — with the run rows it failed on named in the hover, the way a step
+   * line's worst-of-rows hover says *Failed on rows 2, 4* (decision 9).
+   */
+  private applyWorstAcrossRunRows(table: RowTableState): void {
+    for (const entry of table.rows) {
+      const worst = entry.worst;
+      if (worst === undefined) continue;
+      // A row still `running` is where the run is parked, and its verdict is
+      // not in yet — a Continue decides it. Overwriting the band with an
+      // earlier run row's ✓ would hide the one thing the reader needs.
+      if (entry.status === 'running') continue;
+      if (worst.status === entry.status && worst.runRows.length <= 1) continue;
+      entry.status = worst.status;
+      entry.detail = worst.detail;
+      entry.hover = withRunRowsNote(worst.hover, worst.runRows);
+    }
+  }
+
+  /**
+   * A run row is starting: band it, clear the rest of its state, post.
+   *
+   * Called *after* the boundary's `clearStatusesForUris`, which is what puts
+   * the earlier rows' marks back on the file.
+   */
+  private startRunRow(row: number): void {
+    this.rowStartedAt = Date.now();
+    // A section's loop starts over inside every run row, so the "k-th
+    // iteration frame of this section" counter does too — otherwise run row
+    // 2's first iteration would be counted as the run's second.
+    this.sectionIterationsSeen.clear();
+    this.setRowState(this.runTable(), row, { status: 'running' });
+    this.postRows();
+  }
+
+  /**
+   * A run row's steps have ended. `failure` is the step:fail this row died
+   * at, or null when it passed.
+   */
+  private endRunRow(
+    row: number,
+    failure: RowFailure | null,
+    text: string,
+  ): void {
+    const table = this.runTable();
+    const entry = table?.rows.find((r) => r.row === row);
+    const durationMs =
+      this.rowStartedAt === null ? undefined : Date.now() - this.rowStartedAt;
+    this.rowStartedAt = null;
+    if (failure) {
+      // A failure in another FILE — a `[skill:]` body this row descended into
+      // — has no ordinal and no step text here: both would be read out of the
+      // test document at a line that belongs to the skill. It names the file
+      // instead (§Hovers).
+      const sourceName = basenameOfSource(failure.sourceUri);
+      const ordinal = sourceName === undefined ? mainFlowOrdinal(text, failure.line) : null;
+      const stepText = sourceName === undefined ? stepTextAt(text, failure.line) : null;
+      this.setRowState(table, row, {
+        status: 'failed',
+        detail: rowFailureDetail('run', ordinal, sourceName),
+        hover: rowFailureError({
+          kind: 'run',
+          row,
+          stepOrdinal: ordinal,
+          ...(stepText && { stepText }),
+          ...(sourceName !== undefined && { sourceName }),
+          error: failure.error,
+          ...(entry?.values && { values: entry.values }),
+        }),
+        ...(durationMs !== undefined && { durationMs }),
+      });
+    } else {
+      this.setRowState(table, row, {
+        status: 'passed',
+        ...(durationMs !== undefined && { durationMs }),
+      });
+    }
+    this.postRows();
+  }
+
+  /**
+   * A looped section body has entered its iteration: band that row of the
+   * section's table.
+   *
+   * Driven by the frame rather than by anything client-side, because the
+   * section loop is the server's — `frame.iteration` is the only thing that
+   * knows which row is running, and it carries the TABLE position, so a
+   * narrowed run still bands the row the author sees.
+   *
+   * The frame has to be one of THIS document's sections. A looped section
+   * inside a skill file arrives with that file's `uri` and its own name, and a
+   * name is not unique across files — so a skill with a `### Upload each
+   * statement` would have painted the test file's table of the same name, for
+   * iterations of a table that is not on screen. The same fsPath comparison
+   * `sectionPauseAt` makes (`frame.uri` is a path, not a `file://` URI).
+   */
+  private startSectionIteration(frame: FrameInfo): void {
+    if (frame.iteration === undefined || !frame.skillName) return;
+    if (frame.uri !== this.document.uri.fsPath) return;
+    const table = this.sectionTable(frame.skillName);
+    if (!table) return;
+    const row = this.rowForIteration(frame);
+    this.sectionIterationFrames.set(frame.id, {
+      section: frame.skillName,
+      row,
+      startedAt: Date.now(),
+    });
+    this.setRowState(table, row, { status: 'running' });
+    this.postRows();
+  }
+
+  /**
+   * Which row of the section's table this iteration frame is, when the client
+   * knows better than the frame does.
+   *
+   * `rowNumbers`/`rowCount` are new optional fields on a section payload, and
+   * an older Sessions API server drops what it does not know: it receives one
+   * row, numbers it `iteration 1 of 1`, and the extension would paint row 1 of
+   * a run narrowed to row 2 — green mark on the wrong line, `(1/1)` in the
+   * report, no error anywhere. The client shipped the rows, so it knows what
+   * the k-th of them is called; that answer wins, and the mismatch is said out
+   * loud once because the *report* is still wrong and only a server restart
+   * fixes that.
+   */
+  private rowForIteration(frame: FrameInfo): number {
+    const requested = frame.skillName ? this.sectionRowsOfRun?.[frame.skillName] : undefined;
+    if (!requested) return frame.iteration ?? 1;
+    const k = this.sectionIterationsSeen.get(frame.skillName!) ?? 0;
+    this.sectionIterationsSeen.set(frame.skillName!, k + 1);
+    const row = requested[k];
+    if (row === undefined) return frame.iteration ?? 1;
+    if (frame.iteration !== row && !this.oldServerNumberingWarned) {
+      this.oldServerNumberingWarned = true;
+      this.postOutput(
+        `${frame.skillName} — the server numbered this iteration ` +
+          `${frame.iteration ?? '?'} of ${frame.iterationCount ?? '?'}; restart or ` +
+          'update the Sessions API server for correct row numbering in the report',
+        'warn',
+      );
+    }
+    return row;
+  }
+
+  /** The matching `frame:pop`: pass, or fail when a step:fail arrived inside. */
+  private endSectionIteration(frameId: string): void {
+    const active = this.sectionIterationFrames.get(frameId);
+    if (!active) return;
+    this.sectionIterationFrames.delete(frameId);
+    const table = this.sectionTable(active.section);
+    const entry = table?.rows.find((r) => r.row === active.row);
+    const failure = this.frameFailures.get(frameId);
+    const durationMs = Date.now() - active.startedAt;
+    if (failure) {
+      const text = this.document.getText();
+      // As for a run row: a failure that happened in a skill the body called
+      // is not a body step, and reading `text` at its line would quote one.
+      const sourceName = basenameOfSource(failure.sourceUri);
+      const ordinal = sourceName === undefined ? sectionBodyOrdinal(text, failure.line) : null;
+      const stepText = sourceName === undefined ? stepTextAt(text, failure.line) : null;
+      this.setRowState(table, active.row, {
+        status: 'failed',
+        detail: rowFailureDetail('section', ordinal, sourceName),
+        hover: rowFailureError({
+          kind: 'section',
+          row: active.row,
+          stepOrdinal: ordinal,
+          ...(stepText && { stepText }),
+          ...(sourceName !== undefined && { sourceName }),
+          error: failure.error,
+          ...(entry?.values && { values: entry.values }),
+        }),
+        durationMs,
+      });
+      // A failed iteration ends the run (part B's rule), so every LATER row
+      // of this table is a row the loop planned and never reached.
+      this.skipRestOfTable(table, active.row, {
+        kind: 'iteration-failed',
+        iteration: active.row,
+      });
+    } else {
+      this.setRowState(table, active.row, { status: 'passed', durationMs });
+    }
+    this.postRows();
+  }
+
+  /** Mark every row of `table` after `after` as never-reached, with the
+   *  reason. Rows that already ran keep their marks — skip means "was going
+   *  to run and did not", not "has no result". */
+  private skipRestOfTable(
+    table: RowTableState | undefined,
+    after: number,
+    reason: RowSkipReason,
+  ): void {
+    if (!table) return;
+    for (const entry of table.rows) {
+      if (entry.row <= after) continue;
+      // Not in this run's plan: it was never going to run, so "not run" would
+      // be a claim about a run it had nothing to do with (decision 6).
+      if (!entry.planned) continue;
+      if (entry.status !== 'pending') continue;
+      this.setRowState(table, entry.row, {
+        status: 'skipped',
+        detail: rowSkipDetail(reason),
+        hover: rowSkipHover(table.kind, entry.row, reason),
+      });
+    }
+  }
+
+  /**
+   * The run is over: close out every table and post the matrix one last time.
+   *
+   * A row still `running` was interrupted, and every `pending` row after it is
+   * one the loop planned and never reached. `reason` is the ways that happens,
+   * and they are not interchangeable to a reader: a pause is one gesture from
+   * running (so its hover says so), a Stop is somebody's doing, and a run that
+   * ended on an error is neither — telling the author their rows were "not run
+   * (stopped)" sends them looking for a Stop nobody pressed.
+   *
+   * A PAUSE is the exception to the first sentence. The row it parked in is
+   * not interrupted, it is unfinished: a Continue will run the rest of its
+   * steps, and until then the band is the truest thing on screen about where
+   * the run is. So it stays `running` and only the rows after it are settled.
+   */
+  private finalizeRowTables(reason: RowSkipReason): void {
+    if (this.rowTables.length === 0) return;
+    const parked = reason.kind === 'paused';
+    for (const table of this.rowTables) {
+      // Planned rows only, throughout: an unselected row's mark is last run's
+      // news, and reading it here would let it decide where "the loop got to".
+      const planned = table.rows.filter((r) => r.planned);
+      const runningRow = planned.find((r) => r.status === 'running');
+      if (runningRow) {
+        // How long the row got. The only number an unfinished row has, and
+        // what puts it in the Output's per-row list alongside the rows that
+        // finished — a row with no line at all made the `Rows:` summary's
+        // parts sum to one less than the count.
+        const startedAt =
+          table.kind === 'run'
+            ? this.rowStartedAt
+            : ([...this.sectionIterationFrames.values()].find(
+                (f) =>
+                  typeof table.table === 'object' &&
+                  f.section === table.table.section &&
+                  f.row === runningRow.row,
+              )?.startedAt ?? null);
+        const durationMs = startedAt === null ? undefined : Date.now() - startedAt;
+        // A pause leaves the row where the run IS: unfinished, not
+        // interrupted, and one Continue from being decided. It keeps the band
+        // and gains nothing else.
+        //
+        // Anything else cut it off, and the ■ is the one mark with no other
+        // explanation anywhere — the row has no failure and no skip reason —
+        // so it carries its own, worded by what actually ended the run.
+        this.setRowState(
+          table,
+          runningRow.row,
+          parked
+            ? { status: 'running', ...(durationMs !== undefined && { durationMs }) }
+            : {
+                status: 'stopped',
+                detail: 'stopped',
+                hover: rowStoppedHover(table.kind, runningRow.row, reason),
+                ...(durationMs !== undefined && { durationMs }),
+              },
+        );
+      }
+      const reached = runningRow
+        ? runningRow.row
+        : Math.max(0, ...planned.filter((r) => r.status !== 'pending').map((r) => r.row));
+      // Nothing ran at all (a run that never reached the loop) — the rows are
+      // untouched, not skipped: skip is for rows the loop planned.
+      if (reached > 0) this.skipRestOfTable(table, reached, reason);
+      this.applyWorstAcrossRunRows(table);
+    }
+    this.postRows();
+    this.rowStartedAt = null;
+    this.sectionIterationFrames.clear();
+    this.sectionIterationsSeen.clear();
+    this.frameFailures.clear();
+  }
+
   /**
    * The rows that make this run loop, or null when the file has none.
    *
@@ -2737,6 +3903,34 @@ export class RunController {
   }
 
   /**
+   * Say so when a `### Section`'s table cannot be read.
+   *
+   * Three separate places swallow this throw on purpose — `buildSectionsPayload`
+   * (so a bad table does not stop the run), `dataTablesOf` (so it does not take
+   * the step marks down with it) and `scanTables` (so a selection cannot name
+   * rows of a table that does not parse) — and the sum of three sensible local
+   * decisions was that nothing ever told the author. The section then runs once
+   * with its `{{placeholders}}` unresolved, which looks like a model failure
+   * three steps later.
+   *
+   * One message per run: `scanSectionDataTables` stops at the first bad table,
+   * so there is only ever one to report anyway.
+   */
+  private reportSectionTableErrors(
+    text: string,
+    filePath: string,
+    log: (msg: string) => void,
+  ): void {
+    try {
+      scanSectionDataTables(text, filePath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.postOutput(`Section data table not read: ${message}`, 'error');
+      log(`section data table error: ${message}`);
+    }
+  }
+
+  /**
    * Close out a data-driven run: repaint the gutter with each line's worst
    * status, print the per-row summary, and ask the server to render the run's
    * one report.
@@ -2749,17 +3943,28 @@ export class RunController {
   private async finishRowRun(args: {
     client: ApiClientLike;
     sessionId: string;
-    rowPlan: Array<Record<string, string> | null>;
+    rowPlan: Array<{ row: number; values: Record<string, string> } | null>;
     rowOutcomes: Array<{ row: number; values: Record<string, string>; failed: boolean }>;
     attemptedRows: Set<number>;
+    /** Why the loop ended, for the rows it never reached. The same value
+     *  `finalizeRowTables` painted with, so the Output log and the gutter
+     *  cannot give a row two different reasons. */
+    endReason: RowSkipReason;
+    /** A batch run closes its session as it finishes, so the "which row is
+     *  the browser on" line is only true of an interactive one. */
+    batchMode: boolean;
     log: (msg: string) => void;
   }): Promise<void> {
-    const { client, sessionId, rowPlan, rowOutcomes, attemptedRows, log } = args;
+    const { client, sessionId, rowPlan, rowOutcomes, attemptedRows, endReason, log } = args;
     const ran = attemptedRows;
+    const notRunReason = rowSkipDetail(endReason).replace(/^not run \((.*)\)$/, '$1');
+    // PLANNED rows only. An unselected row was never part of this run, so it
+    // is not "not run" — passing it to `finalizeRowReport` would put a row in
+    // the report's matrix that nobody asked to run (decision 6, §The report).
     const notRun = rowPlan
-      .map((values, index) => ({ row: index + 1, values: values ?? {} }))
+      .map((planned) => ({ row: planned?.row ?? 0, values: planned?.values ?? {} }))
       .filter((r) => !ran.has(r.row))
-      .map((r) => ({ ...r, reason: this.pauseRequested ? 'paused' : 'stopped' }));
+      .map((r) => ({ ...r, reason: notRunReason }));
 
     // Worst-status repaint. A green gutter after a red row is a lie, so a line
     // that failed on any row stays red — with the failing rows named in the
@@ -2773,14 +3978,97 @@ export class RunController {
     }
     this.rowFailuresByLine.clear();
 
-    for (const outcome of rowOutcomes) {
+    // Per-row lines, then the rows line the CLI prints. `detail` and
+    // `durationMs` come off the matrix rather than being recomputed: the
+    // gutter hover, the panel row and this line then say `failed at step 6`
+    // and `7.4s` from one place, and cannot drift.
+    //
+    // The matrix is also where the STOPPED row comes from. Stop unwinds the
+    // loop by throwing, so the row it interrupted never reaches
+    // `rowOutcomes`, and its batch was sent so it is not in `notRun` either —
+    // it used to have no line at all, while the summary counted it and the
+    // gutter said `stopped`. `finalizeRowTables` has already marked it by the
+    // time we get here, which is why it runs first.
+    const table = this.runTable();
+    const outcomeRows = new Set(rowOutcomes.map((o) => o.row));
+    const stoppedRows = (table?.rows ?? []).filter(
+      (r) => r.planned && r.status === 'stopped' && !outcomeRows.has(r.row),
+    );
+    // …and the PARKED row, for exactly the same reason. A pause ends the loop
+    // after the current row, and that row is not finished: half its steps ran,
+    // a Continue will run the rest. It is in neither `rowOutcomes` nor
+    // `notRun`, so without its own line the summary would count a row that has
+    // no line, or (worse) claim it passed.
+    const pausedRows = (table?.rows ?? []).filter(
+      (r) => r.planned && r.status === 'running' && !outcomeRows.has(r.row),
+    );
+    const lines: Array<{ row: number; text: string; level: 'info' | 'warn' | 'error' }> = [
+      ...rowOutcomes.map((outcome) => {
+        const entry = table?.rows.find((r) => r.row === outcome.row);
+        return {
+          row: outcome.row,
+          text: rowOutcomeLine({
+            row: outcome.row,
+            failed: outcome.failed,
+            ...(outcome.failed && entry?.detail !== undefined && { detail: entry.detail }),
+            ...(entry?.durationMs !== undefined && { durationMs: entry.durationMs }),
+          }),
+          level: (outcome.failed ? 'error' : 'info') as 'info' | 'error',
+        };
+      }),
+      ...stoppedRows.map((entry) => ({
+        row: entry.row,
+        text: rowOutcomeLine({
+          row: entry.row,
+          failed: false,
+          stopped: true,
+          ...(entry.durationMs !== undefined && { durationMs: entry.durationMs }),
+        }),
+        level: 'warn' as const,
+      })),
+      ...pausedRows.map((entry) => ({
+        row: entry.row,
+        text: rowOutcomeLine({
+          row: entry.row,
+          failed: false,
+          paused: true,
+          ...(entry.durationMs !== undefined && { durationMs: entry.durationMs }),
+        }),
+        level: 'warn' as const,
+      })),
+      ...notRun.map((skipped) => ({
+        row: skipped.row,
+        text: `  Row ${skipped.row}: not run (${skipped.reason})`,
+        level: 'warn' as const,
+      })),
+    ].sort((a, b) => a.row - b.row);
+    for (const line of lines) this.postOutput(line.text, line.level);
+    if (rowPlan.length > 0) {
+      // The parts sum to `planned`, always: every row the loop planned is in
+      // exactly one of the five buckets.
       this.postOutput(
-        `  Row ${outcome.row}: ${outcome.failed ? 'failed' : 'passed'}`,
-        outcome.failed ? 'error' : 'info',
+        rowsSummaryLine({
+          planned: rowPlan.length,
+          passed: rowOutcomes.filter((o) => !o.failed).length,
+          failed: rowOutcomes.filter((o) => o.failed).length,
+          stopped: stoppedRows.length,
+          paused: pausedRows.length,
+          notRun: notRun.length,
+        }),
+        'info',
       );
     }
-    for (const skipped of notRun) {
-      this.postOutput(`  Row ${skipped.row}: not run (${skipped.reason})`, 'warn');
+    // Whose browser is still open. After a multi-row run the interactive
+    // session belongs to the LAST row that ran — the last SELECTED row, once
+    // a subset can be chosen — so Re-run from step N and the Variables view
+    // are about that row, not row 1 and not the last row of the table (rows
+    // story, decision 7: "the output log says so").
+    const lastRan = rowOutcomes[rowOutcomes.length - 1];
+    if (rowOutcomes.length > 1 && lastRan && !args.batchMode) {
+      this.postOutput(
+        `Session left on row ${lastRan.row} — Re-run from step N re-runs that row.`,
+        'info',
+      );
     }
 
     // Never fails the run: report generation has that posture everywhere else,
@@ -2879,7 +4167,7 @@ export class RunController {
     // continuation that omitted these would expand differently from the
     // batch before it and hash differently too. Same reason `fullSteps` is
     // re-sent, and same reason it reads the buffer rather than disk.
-    const sections = buildSectionsPayload(this.document.getText());
+    const sections = buildSectionsPayload(this.document.getText(), this.sectionRowsOfRun);
 
     // Resolve the project's skills directory so the server can expand
     // `[skill: ...]` lines and emit `frame:push` / `frame:pop` events around
@@ -3374,4 +4662,36 @@ function resolveCacheOverride(raw: string | undefined, fallback: boolean): boole
   if (v === 'on' || v === 'true' || v === 'yes' || v === 'enabled') return true;
   if (v === 'off' || v === 'false' || v === 'no' || v === 'disabled') return false;
   return fallback;
+}
+
+// `rowValuesText` — the one masked `k=v, k=v` text every surface shows — now
+// lives in row-selection-core.ts, which the quick pick also reads it from.
+
+/** 1-based position of `line` among the file's MAIN-FLOW steps, or null when
+ *  it is not one (a body line, a line the file no longer has). */
+function mainFlowOrdinal(text: string, line: number): number | null {
+  const index = extractSteps(text).findIndex((s) => s.line === line);
+  return index < 0 ? null : index + 1;
+}
+
+/** 1-based position of `line` within the body of the section that contains
+ *  it — what "failed at body step 1" counts. */
+function sectionBodyOrdinal(text: string, line: number): number | null {
+  const index = sectionBodyLinesAt(text, line).indexOf(line);
+  return index < 0 ? null : index + 1;
+}
+
+/**
+ * The step's text as authored, without its list number, or null when the line
+ * is not a numbered item.
+ *
+ * Read off the raw buffer rather than through `extractSteps`, because the
+ * lines this is asked about are as often section-body steps as main-flow
+ * ones and one lookup has to answer for both.
+ */
+function stepTextAt(text: string, line: number): string | null {
+  const raw = text.split(/\r?\n/)[line - 1];
+  if (raw === undefined) return null;
+  const m = /^\s*\d+\.\s+(.*)$/.exec(raw);
+  return m ? m[1]!.trim() : null;
 }

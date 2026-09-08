@@ -706,6 +706,145 @@ describe('section frames', () => {
   });
 });
 
+// ── Narrowed section loops ───────────────────────────────────────────
+
+/**
+ * A client may ship only SOME of a section table's rows, and then says where
+ * each one sits in the authored table (`rowNumbers`) and how many rows that
+ * table has (`rowCount`) — stories/data-row-progress-and-selection.md,
+ * decision 1. The iteration keeps its TABLE number, so a one-row run's badge
+ * still reads `(2/3)` and names the row the reader picked.
+ */
+describe('a narrowed section loop keeps the table row numbers', () => {
+  /** Two of a three-row table, as a narrowed client would send them. */
+  const narrowed = (over: Record<string, unknown>) => ({
+    steps: ['Upload each statement'],
+    sourceLines: [3],
+    testFilePath,
+    sections: {
+      'upload each statement': {
+        name: 'Upload each statement',
+        headingLine: 5,
+        steps: ['Upload file {{file}}'],
+        stepLines: [9],
+        rows: [{ file: 'b.png' }, { file: 'c.png' }],
+        ...over,
+      },
+    },
+  });
+
+  it('stamps iteration from rowNumbers and iterationCount from rowCount', async () => {
+    executedSteps.length = 0;
+    const frames: any[] = [];
+    for await (const ev of sseEvents(narrowed({ rowNumbers: [2, 3], rowCount: 3 }))) {
+      if (ev.type === 'frame:push' && ev.frame.kind === 'section') frames.push(ev.frame);
+      if (ev.type === 'done') break;
+    }
+
+    // 2 of 3 and 3 of 3 — not 1 of 2 and 2 of 2, which is what numbering by
+    // arrival position would give. Every downstream label (the report band,
+    // the section chip's `(2/3)`, the Variables frame) reads these two.
+    expect(frames.map((f) => [f.iteration, f.iterationCount])).toEqual([
+      [2, 3],
+      [3, 3],
+    ]);
+    expect(frames.map((f) => f.skillName)).toEqual([
+      'Upload each statement',
+      'Upload each statement',
+    ]);
+    // The rows still bind, in the order they arrived.
+    expect(executedSteps).toEqual(['Upload file b.png', 'Upload file c.png']);
+  });
+
+  it('numbers by arrival position when neither field is sent', async () => {
+    // The CLI path and every un-narrowed client: unchanged behaviour, which
+    // is the same answer because the whole table was shipped.
+    executedSteps.length = 0;
+    const frames: any[] = [];
+    for await (const ev of sseEvents(narrowed({}))) {
+      if (ev.type === 'frame:push' && ev.frame.kind === 'section') frames.push(ev.frame);
+      if (ev.type === 'done') break;
+    }
+
+    expect(frames.map((f) => [f.iteration, f.iterationCount])).toEqual([
+      [1, 2],
+      [2, 2],
+    ]);
+    expect(executedSteps).toEqual(['Upload file b.png', 'Upload file c.png']);
+  });
+
+  it.each([
+    [
+      'rowNumbers shorter than rows',
+      { rowNumbers: [2], rowCount: 3 },
+      /rowNumbers and .*\.rows must be the same length.*parallel arrays/is,
+    ],
+    [
+      'rowNumbers that descend',
+      { rowNumbers: [3, 2], rowCount: 3 },
+      /rowNumbers must be strictly ascending/i,
+    ],
+    [
+      'a duplicated row number',
+      { rowNumbers: [2, 2], rowCount: 3 },
+      /rowNumbers must be strictly ascending/i,
+    ],
+    [
+      'a row number past rowCount',
+      { rowNumbers: [2, 4], rowCount: 3 },
+      /rowNumbers must all be <=/i,
+    ],
+    [
+      'rowNumbers without rowCount',
+      { rowNumbers: [2, 3] },
+      /must be sent together or not at all \(got rowNumbers alone\)/i,
+    ],
+    [
+      'rowCount without rowNumbers',
+      { rowCount: 3 },
+      /must be sent together or not at all \(got rowCount alone\)/i,
+    ],
+    [
+      'a rowCount smaller than the shipped rows',
+      { rowNumbers: [1, 2], rowCount: 1 },
+      /rowCount is 1 but .*\.rows holds 2 rows/is,
+    ],
+    [
+      'a non-integer row number',
+      { rowNumbers: [1, 2.5], rowCount: 3 },
+      /rowNumbers must be an array of positive integers/i,
+    ],
+    [
+      'a zero row number',
+      { rowNumbers: [0, 2], rowCount: 3 },
+      /rowNumbers must be an array of positive integers/i,
+    ],
+    [
+      'a non-integer rowCount',
+      { rowNumbers: [1, 2], rowCount: 2.5 },
+      /rowCount must be a positive integer/i,
+    ],
+  ])('400 on %s', async (_label, over, pattern) => {
+    // Refused, not repaired: every one of these numbers an iteration wrong,
+    // and a wrong number only shows up as an off-by-one in a badge later.
+    const res = await postSteps(narrowed(over as Record<string, unknown>));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(pattern as RegExp);
+  });
+
+  it('400 on rowNumbers for a section with no rows at all', async () => {
+    const res = await postSteps({
+      steps: ['Anything'],
+      testFilePath,
+      sections: {
+        x: { name: 'X', headingLine: 1, steps: ['a'], stepLines: [1], rowNumbers: [1], rowCount: 1 },
+      },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/rowNumbers requires .*\.rows/is);
+  });
+});
+
 // ── Reporting ────────────────────────────────────────────────────────
 
 describe('sourceSection attribution', () => {

@@ -1131,3 +1131,488 @@ describe('TestBench frame events (Phase 2)', function () {
     await waitFor('still idle', () => !hooks.isRunning());
   });
 });
+
+/**
+ * Section tables paint from the frames (stories/data-row-progress-and-selection.md
+ * §Section tables).
+ *
+ * The section-level loop is the SERVER's — the expander stamps every looped
+ * body's frame with `iteration` and `iterationCount`, and the session manager
+ * copies both onto the wire frame. So the only thing that knows which row of a
+ * section's table is running is the frame, and these tests drive exactly that:
+ * a `frame:push` carrying `iteration: n` bands row n, the matching `frame:pop`
+ * resolves it, and a failed iteration — which ends the run, part B's rule —
+ * leaves every later row as never-reached.
+ */
+describe('TestBench section-table painting', function () {
+  this.timeout(20_000);
+
+  /** @type {FakeApiClient} */
+  let fake;
+  let hooks;
+
+  const fs = require('node:fs');
+  const FIXTURE = 'section-rows.tmp.md';
+
+  // Line 9 is the section table's header; 11, 12 and 13 are its three rows;
+  // 15 is the body's one step; 5 is the step whose text names the section.
+  const HEADER_LINE = 9;
+  const ROW_LINES = [11, 12, 13];
+  const BODY_STEP_LINE = 15;
+  const CALL_LINE = 5;
+  const SECTION = 'Upload each statement';
+
+  const CONTENT = [
+    '# Section rows',            // 1
+    '',                          // 2
+    '## Steps',                  // 3
+    '1. Sign in',                // 4
+    '2. Upload each statement',    // 5
+    '3. Check the count',        // 6
+    '',                          // 7
+    '### Upload each statement', // 8
+    '| file |',                  // 9
+    '|------|',                  // 10
+    '| a.pdf |',                 // 11
+    '| b.pdf |',                 // 12
+    '| c.pdf |',                 // 13
+    '',                          // 14
+    '1. Upload {{file}}',        // 15
+    '',                          // 16
+  ].join('\n');
+
+  const uriOf = () => fixtureUri(FIXTURE);
+
+  before(async () => {
+    fs.writeFileSync(path.resolve(FIXTURES_DIR, FIXTURE), CONTENT);
+    const ext = vscode.extensions.getExtension(EXT_ID);
+    assert.ok(ext, `${EXT_ID} not loaded`);
+    if (!ext.isActive) await ext.activate();
+    hooks = ext.exports?.__testHooks;
+    assert.ok(hooks, '__testHooks not exposed');
+  });
+
+  after(() => {
+    try { fs.unlinkSync(path.resolve(FIXTURES_DIR, FIXTURE)); } catch { /* ignore */ }
+  });
+
+  beforeEach(async () => {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    if (vscode.debug.breakpoints.length > 0) {
+      vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
+    }
+    fake = new FakeApiClient();
+    hooks.setApiClientFactory(() => fake);
+
+    const uri = uriOf();
+    await vscode.commands.executeCommand('vscode.open', uri);
+    await waitFor('fixture editor active', () => {
+      const editor = vscode.window.activeTextEditor;
+      return editor && editor.document.uri.toString() === uri.toString();
+    });
+    await waitFor('detected as test file', () => hooks.tracker.snapshot().isTestFile === true);
+  });
+
+  /** A looped section body's frame, as the server stamps it. */
+  const iterationFrame = (n) => ({
+    id: `s${n}`,
+    parentId: null,
+    kind: 'section',
+    uri: uriOf().fsPath,
+    line: CALL_LINE,
+    skillName: SECTION,
+    iteration: n,
+    iterationCount: 3,
+  });
+
+  /** The status on each section-table row line, in table order. */
+  const rowStatuses = () => {
+    const snap = hooks.tracker.snapshotFor(uriOf());
+    const byLine = new Map(snap ? snap.statuses : []);
+    return ROW_LINES.map((line) => byLine.get(line) ?? null);
+  };
+
+  const sectionTable = () =>
+    hooks.rowTablesForTests(uriOf()).find((t) => t.section === SECTION);
+
+  it('sees the section table, and only its data rows', async () => {
+    const table = sectionTable();
+    assert.ok(table, 'the section table must be discovered');
+    assert.equal(table.headerLine, HEADER_LINE);
+    // Not the header, not the delimiter — a status cell on either would read
+    // as "the table passed", which is not a thing.
+    assert.deepEqual(table.rowLines, ROW_LINES);
+  });
+
+  it('a frame push with an iteration bands that row; the pop resolves it', async () => {
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'frame:push', frame: iterationFrame(1) });
+    await waitFor('iteration 1 running', () => rowStatuses()[0] === 'running');
+    assert.deepEqual(rowStatuses(), ['running', null, null]);
+    assert.equal(sectionTable().summary, '3 rows · iteration 1 of 3 running');
+
+    fake.push({ type: 'frame:pop', frameId: 's1', outputs: {} });
+    await waitFor('iteration 1 passed', () => rowStatuses()[0] === 'pass');
+
+    fake.push({ type: 'frame:push', frame: iterationFrame(2) });
+    await waitFor('iteration 2 running', () => rowStatuses()[1] === 'running');
+    assert.equal(sectionTable().summary, '3 rows · iteration 2 of 3 running · 1 passed');
+
+    fake.push({ type: 'frame:pop', frameId: 's2', outputs: {} });
+    fake.push({ type: 'frame:push', frame: iterationFrame(3) });
+    fake.push({ type: 'frame:pop', frameId: 's3', outputs: {} });
+    await waitFor('all three iterations passed', () =>
+      rowStatuses().every((s) => s === 'pass'));
+
+    fake.end();
+    await waitFor('idle after stream ends', () => !hooks.isRunning());
+    assert.equal(sectionTable().summary, '3 rows · 3 passed');
+  });
+
+  it('a failed iteration marks its row and leaves the later rows never-reached', async () => {
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({ type: 'frame:push', frame: iterationFrame(1) });
+    fake.push({ type: 'frame:pop', frameId: 's1', outputs: {} });
+    await waitFor('iteration 1 passed', () => rowStatuses()[0] === 'pass');
+
+    const frame = iterationFrame(2);
+    fake.push({ type: 'frame:push', frame });
+    fake.push({
+      type: 'step:fail',
+      line: BODY_STEP_LINE,
+      error: 'no file chooser appeared',
+      frame,
+    });
+    fake.push({ type: 'frame:pop', frameId: 's2', outputs: {} });
+    await waitFor('iteration 2 failed', () => rowStatuses()[1] === 'fail');
+
+    // A failed iteration ends the run, so row 3 is a row the loop planned and
+    // never reached — not an unrun row with no result.
+    assert.deepEqual(rowStatuses(), ['pass', 'fail', 'skip']);
+
+    const failures = new Map(hooks.tracker.snapshotFor(uriOf()).failures);
+    // A section's steps are counted within the section: "step 1 of the
+    // section", not "step 15" — and not "body step 1", which was jargon.
+    assert.match(
+      failures.get(ROW_LINES[1]).error,
+      /^Iteration 2 failed at step 1 of the section — "Upload \{\{file\}\}"/,
+    );
+    assert.match(failures.get(ROW_LINES[1]).error, /no file chooser appeared/);
+    assert.equal(
+      failures.get(ROW_LINES[2]).error,
+      'Iteration 3 not run (iteration 2 failed)',
+    );
+
+    fake.end();
+    await waitFor('idle after stream ends', () => !hooks.isRunning());
+    assert.equal(sectionTable().summary, '3 rows · 1 passed · 1 failed · 1 not run');
+  });
+
+  it('a server too old to honour rowNumbers cannot paint the wrong row', async () => {
+    // `rowNumbers`/`rowCount` are new optional fields on a section payload,
+    // and a pre-upgrade Sessions API server drops what it does not know: it
+    // receives one row, numbers it `iteration 1 of 1`, and the extension would
+    // paint row 1 of a run narrowed to row 2 — a green mark on the wrong line,
+    // `(1/1)` in the report, and no error anywhere.
+    //
+    // The client shipped the rows, so it knows what the k-th of them is
+    // called; the frame does not get to overrule that. The mismatch is still
+    // said out loud, because the REPORT is written by the old server and only
+    // a restart fixes it.
+    const mark = hooks.hostMessageCount();
+    void hooks.dispatchWebviewMessage({
+      type: 'runRows',
+      sectionRows: { [SECTION]: [2] },
+    });
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    // Exactly what an old server sends: iteration 1 of 1, for row 2.
+    fake.push({
+      type: 'frame:push',
+      frame: { ...iterationFrame(1), iterationCount: 1 },
+    });
+    await waitFor('a row is banded', () => rowStatuses().some((s) => s === 'running'));
+    assert.deepEqual(
+      rowStatuses(),
+      [null, 'running', null],
+      'the row the author chose, not the one the server numbered',
+    );
+
+    fake.push({ type: 'frame:pop', frameId: 's1', outputs: {} });
+    await waitFor('row 2 passed', () => rowStatuses()[1] === 'pass');
+    assert.deepEqual(rowStatuses(), [null, 'pass', null]);
+
+    const warnings = hooks
+      .hostMessagesSince(mark)
+      .filter((m) => m.type === 'runEvent' && m.event.type === 'output')
+      .map((m) => m.event.msg)
+      .filter((msg) => msg.includes('the server numbered this iteration'));
+    assert.deepEqual(warnings, [
+      `${SECTION} — the server numbered this iteration 1 of 1; restart or update ` +
+        'the Sessions API server for correct row numbering in the report',
+    ], 'said once, and only once — the fact is about the server, not the row');
+
+    fake.end();
+    await waitFor('idle after stream ends', () => !hooks.isRunning());
+  });
+
+  it('says nothing when the server DOES honour rowNumbers', async () => {
+    const mark = hooks.hostMessageCount();
+    void hooks.dispatchWebviewMessage({
+      type: 'runRows',
+      sectionRows: { [SECTION]: [2] },
+    });
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'frame:push', frame: iterationFrame(2) });
+    await waitFor('row 2 running', () => rowStatuses()[1] === 'running');
+    fake.push({ type: 'frame:pop', frameId: 's2', outputs: {} });
+    await waitFor('row 2 passed', () => rowStatuses()[1] === 'pass');
+
+    const warnings = hooks
+      .hostMessagesSince(mark)
+      .filter((m) => m.type === 'runEvent' && m.event.type === 'output')
+      .map((m) => m.event.msg)
+      .filter((msg) => msg.includes('the server numbered this iteration'));
+    assert.deepEqual(warnings, [], 'a current server is not warned about');
+
+    fake.end();
+    await waitFor('idle after stream ends', () => !hooks.isRunning());
+  });
+});
+
+/**
+ * The three ways a row's mark can be written by something that is NOT a step
+ * of this test file (stories/data-row-progress-and-selection.md §Hovers,
+ * §"Across run rows", §"Painting follows the frames").
+ *
+ * All three are the same mistake in different clothes: a frame belongs to a
+ * FILE, and reading the test document at that frame's line numbers — or
+ * matching that frame's section name against this document's tables — puts a
+ * mark, or a quoted step, where it does not belong.
+ */
+describe('TestBench row marks from other files and other run rows', function () {
+  this.timeout(20_000);
+
+  /** @type {FakeApiClient} */
+  let fake;
+  let hooks;
+
+  const fs = require('node:fs');
+  const SKILL_FIXTURE = 'rows-skill.tmp.md';
+  const BOTH_FIXTURE = 'rows-and-section.tmp.md';
+
+  // rows-skill.tmp.md — a run table whose step calls a skill.
+  // Line 7 header, 9/10 the rows, 12/13 the steps.
+  const SKILL_CONTENT = [
+    '# Rows into a skill',                 // 1
+    '',                                    // 2
+    '## Config',                           // 3
+    '- baseUrl: http://localhost:8787/',   // 4
+    '',                                    // 5
+    '## Steps',                            // 6
+    '| email |',                           // 7
+    '|-------|',                           // 8
+    '| a@b.c |',                           // 9
+    '| d@e.f |',                           // 10
+    '',                                    // 11
+    '1. [skill: sign in] as {{email}}',    // 12
+    '2. Check the dashboard',              // 13
+    '',                                    // 14
+  ].join('\n');
+
+  // rows-and-section.tmp.md — BOTH tables, which is the only shape in which a
+  // section row is repainted by a later run row.
+  // Line 7 header, 9/10 the run rows, 12/13 the steps, 15 the section heading,
+  // 16 header, 18/19 the section rows, 20 the body step.
+  const BOTH_CONTENT = [
+    '# Both tables',                       // 1
+    '',                                    // 2
+    '## Config',                           // 3
+    '- baseUrl: http://localhost:8787/',   // 4
+    '',                                    // 5
+    '## Steps',                            // 6
+    '| email |',                           // 7
+    '|-------|',                           // 8
+    '| a@b.c |',                           // 9
+    '| d@e.f |',                           // 10
+    '',                                    // 11
+    '1. Sign in as {{email}}',             // 12
+    '2. Upload each statement',            // 13
+    '',                                    // 14
+    '### Upload each statement',           // 15
+    '| file  |',                           // 16
+    '|-------|',                           // 17
+    '| a.pdf |',                           // 18
+    '| b.pdf |',                           // 19
+    '1. Upload {{file}}',                  // 20
+    '',                                    // 21
+  ].join('\n');
+
+  before(async () => {
+    fs.writeFileSync(path.resolve(FIXTURES_DIR, SKILL_FIXTURE), SKILL_CONTENT);
+    fs.writeFileSync(path.resolve(FIXTURES_DIR, BOTH_FIXTURE), BOTH_CONTENT);
+    const ext = vscode.extensions.getExtension(EXT_ID);
+    assert.ok(ext, `${EXT_ID} not loaded`);
+    if (!ext.isActive) await ext.activate();
+    hooks = ext.exports?.__testHooks;
+    assert.ok(hooks, '__testHooks not exposed');
+  });
+
+  after(() => {
+    for (const name of [SKILL_FIXTURE, BOTH_FIXTURE]) {
+      try { fs.unlinkSync(path.resolve(FIXTURES_DIR, name)); } catch { /* ignore */ }
+    }
+  });
+
+  beforeEach(async () => {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    if (vscode.debug.breakpoints.length > 0) {
+      vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
+    }
+    fake = new FakeApiClient();
+    hooks.setApiClientFactory(() => fake);
+  });
+
+  async function open(name) {
+    const uri = fixtureUri(name);
+    await vscode.commands.executeCommand('vscode.open', uri);
+    await waitFor('fixture editor active', () => {
+      const editor = vscode.window.activeTextEditor;
+      return editor && editor.document.uri.toString() === uri.toString();
+    });
+    await waitFor('detected as test file', () => hooks.tracker.snapshot().isTestFile === true);
+    return uri;
+  }
+
+  const statusesOf = (uri, lines) => {
+    const snap = hooks.tracker.snapshotFor(uri);
+    const byLine = new Map(snap ? snap.statuses : []);
+    return lines.map((line) => byLine.get(line) ?? null);
+  };
+  const failureAt = (uri, line) =>
+    new Map(hooks.tracker.snapshotFor(uri).failures).get(line);
+
+  it('a row that dies inside a skill names the SKILL, not a step of the test', async () => {
+    // `mainFlowOrdinal` and `stepTextAt` read the TEST document at the
+    // failure's line, so a skill-body failure on line 12 was reported as
+    // `Row 1 failed at step 1 — "[skill: sign in] as {{email}}"`: the call
+    // rather than the step that failed, with an ordinal that means nothing in
+    // the skill.
+    const uri = await open(SKILL_FIXTURE);
+    const skillPath = path.resolve(FIXTURES_DIR, 'sign-in.tmp.md');
+    const frame = {
+      id: 'f1',
+      parentId: null,
+      kind: 'skill',
+      uri: skillPath,
+      line: 12,
+      skillName: 'sign in',
+    };
+    fake.streamScripts = [
+      (f) => {
+        f.push({ type: 'frame:push', frame });
+        f.push({ type: 'step:fail', line: 12, error: 'no sign-in button', frame });
+        f.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
+        f.end();
+      },
+      (f) => f.end(),
+    ];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('two requests', () => fake.requests.length >= 2);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    assert.deepEqual(statusesOf(uri, [9, 10]), ['fail', 'pass']);
+    const hover = failureAt(uri, 9).error;
+    assert.match(hover, /^Row 1 failed in sign-in\.tmp\.md/);
+    assert.match(hover, /no sign-in button/);
+    assert.doesNotMatch(hover, /failed at step/, 'the test file has no say about a skill line');
+    assert.doesNotMatch(hover, /\{\{email\}\}/, 'and its step text must not be quoted');
+  });
+
+  it('a looped section in ANOTHER file does not paint this file’s table', async () => {
+    // A section name is unique within a file and not across files. Without the
+    // URI guard, a skill with its own `### Upload each statement` painted the
+    // TEST's table of that name, for iterations of a table nobody can see.
+    const uri = await open(BOTH_FIXTURE);
+    fake.streamScripts = [() => { /* leave row 1 running */ }];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    fake.push({
+      type: 'frame:push',
+      frame: {
+        id: 'x1',
+        parentId: null,
+        kind: 'section',
+        uri: path.resolve(FIXTURES_DIR, 'some-skill.tmp.md'),
+        line: 13,
+        skillName: 'Upload each statement',
+        iteration: 1,
+        iterationCount: 2,
+      },
+    });
+    // The frame reaches the controller through the same router as any other,
+    // so give it long enough to have painted if it were going to.
+    await sleep(300);
+    assert.deepEqual(
+      statusesOf(uri, [18, 19]),
+      [null, null],
+      'a section of another file cannot mark this table',
+    );
+
+    await vscode.commands.executeCommand('testbench-native.stop');
+    await waitFor('idle', () => hooks.isRunning() === false);
+  });
+
+  it('a section row that failed on run row 1 stays failed after a clean run row 2', async () => {
+    // The section table is looped once per RUN row, and each iteration starts
+    // by setting its row `running` — which clears the detail and the hover. So
+    // run row 2 erased run row 1's failure and the row ended green: the "green
+    // after red" that §"Across run rows" forbids.
+    const uri = await open(BOTH_FIXTURE);
+    const iterationFrame = (id) => ({
+      id,
+      parentId: null,
+      kind: 'section',
+      uri: uri.fsPath,
+      line: 13,
+      skillName: 'Upload each statement',
+      iteration: 1,
+      iterationCount: 2,
+    });
+    fake.streamScripts = [
+      (f) => {
+        const frame = iterationFrame('a1');
+        f.push({ type: 'frame:push', frame });
+        f.push({ type: 'step:fail', line: 20, error: 'no file chooser appeared', frame });
+        f.push({ type: 'frame:pop', frameId: 'a1', outputs: {} });
+        f.end();
+      },
+      (f) => {
+        const frame = iterationFrame('b1');
+        f.push({ type: 'frame:push', frame });
+        f.push({ type: 'frame:pop', frameId: 'b1', outputs: {} });
+        f.end();
+      },
+    ];
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('two requests', () => fake.requests.length >= 2);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    assert.equal(
+      statusesOf(uri, [18])[0],
+      'fail',
+      'run row 2 repainted this row; the worst of the two is what stays',
+    );
+    const hover = failureAt(uri, 18).error;
+    assert.match(hover, /^Iteration 1 failed at step 1 of the section/);
+    assert.match(hover, /no file chooser appeared/);
+    // …and it says which run row it is about, since the reader cannot see
+    // that from the table any more.
+    assert.match(hover, /On run row 1\.$/);
+  });
+});

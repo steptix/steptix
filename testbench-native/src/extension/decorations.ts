@@ -3,11 +3,16 @@ import type { ActiveFileTracker, FileStateSnapshot } from './active-file-tracker
 import { classifyLines, extractSteps } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds, findStepsHeadingLine } from './step-lines.js';
 import { failHoverMessage, staleHoverMessage, STALE_HOVER_MESSAGE } from './failure-hover-core.js';
+import { rowHeaderSummary } from './row-summary-core.js';
+import { alignmentLinesOf, dataTablesOf, type DataTableLines } from './data-tables-core.js';
 
 // The hover wording lives in failure-hover-core.ts (pure, node-testable);
 // re-exported here because this module is where every consumer historically
-// found it.
-export { STALE_HOVER_MESSAGE };
+// found it. Same for the table scan, which moved to data-tables-core.ts so
+// the fast suite can pin which lines take a status and which only reserve the
+// cell (`alignmentLinesOf`).
+export { STALE_HOVER_MESSAGE, dataTablesOf, alignmentLinesOf };
+export type { DataTableLines };
 
 /**
  * The N/M pass-summary counts for a snapshot.
@@ -75,6 +80,7 @@ export class DecorationManager implements vscode.Disposable {
   private readonly inertStep: vscode.TextEditorDecorationType;
   private readonly stepsSummary: vscode.TextEditorDecorationType;
   private readonly errorLine: vscode.TextEditorDecorationType;
+  private readonly runningRow: vscode.TextEditorDecorationType;
 
   constructor(
     context: vscode.ExtensionContext,
@@ -151,6 +157,24 @@ export class DecorationManager implements vscode.Disposable {
       overviewRulerLane: vscode.OverviewRulerLane.Right,
     });
 
+    // The data row that is executing right now, banded across the whole line.
+    // The spinner alone is a 1.2em glyph in a table that can be a hundred
+    // columns wide; the band is what makes "row 3 is running" readable at a
+    // glance.
+    //
+    // `editor.stackFrameHighlightBackground` is the debugger's "the line
+    // executing now" colour, which is exactly what this is, and — unlike
+    // `editor.rangeHighlightBackground`, which is ~4% white in Dark+ and
+    // invisible over a table — it is legible in both default themes. The
+    // overview ruler gets a solid token rather than the same translucent
+    // wash, because a 4%-alpha tick in the scrollbar is no tick at all.
+    this.runningRow = vscode.window.createTextEditorDecorationType({
+      isWholeLine: true,
+      backgroundColor: new vscode.ThemeColor('editor.stackFrameHighlightBackground'),
+      overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.infoForeground'),
+      overviewRulerLane: vscode.OverviewRulerLane.Right,
+    });
+
     this.subs.push(
       tracker.onChange((snap) => this.refresh(snap)),
       vscode.window.onDidChangeVisibleTextEditors(() => this.refresh(tracker.snapshot())),
@@ -172,6 +196,7 @@ export class DecorationManager implements vscode.Disposable {
     this.inertStep.dispose();
     this.stepsSummary.dispose();
     this.errorLine.dispose();
+    this.runningRow.dispose();
   }
 
   /**
@@ -222,6 +247,7 @@ export class DecorationManager implements vscode.Disposable {
     editor.setDecorations(this.statusPlaceholder, []);
     editor.setDecorations(this.stepsSummary, []);
     editor.setDecorations(this.errorLine, []);
+    editor.setDecorations(this.runningRow, []);
   }
 
   private apply(editor: vscode.TextEditor, snap: FileStateSnapshot): void {
@@ -244,6 +270,12 @@ export class DecorationManager implements vscode.Disposable {
       stopped.push(range(snap.breakpointStop));
     }
 
+    // Which lines are data rows, read before the status loop because a row's
+    // ✗ / ◌ / ■ hovers are not a step's (below).
+    const tables = dataTablesOf(snap.text);
+    const rowLines = tables.flatMap((t) => t.rowLines);
+    const rowLineSet = new Set(rowLines);
+
     // Statuses — running supersedes pass/fail/skip if both happen to land
     // on the same line during a re-run.
     const passRanges: vscode.Range[] = [];
@@ -256,9 +288,15 @@ export class DecorationManager implements vscode.Disposable {
     const staleRanges: vscode.DecorationOptions[] = [];
     const failRanges: vscode.DecorationOptions[] = [];
     const runningRanges: vscode.Range[] = [];
-    const skipRanges: vscode.Range[] = [];
-    const stoppedRanges: vscode.Range[] = [];
+    // Options, not bare Ranges: a skipped or interrupted DATA ROW says why it
+    // never ran or never finished ("not run (stopped)", "not run (iteration 2
+    // failed)", "stopped — the run was stopped while this row was running") —
+    // the one thing those marks cannot say on their own. A skipped or stopped
+    // STEP still carries no hover, because nothing pins a detail to it.
+    const skipRanges: vscode.DecorationOptions[] = [];
+    const stoppedRanges: vscode.DecorationOptions[] = [];
     const linesWithStatus = new Set<number>();
+    const runningLines = new Set<number>();
     const failures = new Map(snap.failures);
     for (const [line, status] of snap.statuses) {
       if (line === snap.breakpointStop) continue;
@@ -275,22 +313,50 @@ export class DecorationManager implements vscode.Disposable {
         case 'fail':
           failRanges.push({
             range: r,
-            // No detail (state persisted by an older build) → no hover,
-            // exactly as before the detail existed.
-            ...(failure && { hoverMessage: failHoverMessage(failure) }),
+            // A DATA ROW's hover is rendered verbatim: it is authored by
+            // `rowFailureError`, which already leads with the row heading and
+            // the values as prose and fences only the error. Sending it
+            // through `failHoverMessage` put "This step failed:" over a row —
+            // it is not a step — and fenced the whole thing at 1000
+            // characters, so a long Playwright log clipped the values off the
+            // end of the very hover that exists to name them.
+            //
+            // A step with no detail (state persisted by an older build) gets
+            // no hover, exactly as before the detail existed.
+            ...(failure?.error !== undefined &&
+              rowLineSet.has(line) && { hoverMessage: failure.error }),
+            ...(!rowLineSet.has(line) && failure && { hoverMessage: failHoverMessage(failure) }),
           });
           break;
-        case 'running': runningRanges.push(r); break;
-        case 'skip': skipRanges.push(r); break;
-        case 'stopped': stoppedRanges.push(r); break;
+        case 'running':
+          runningRanges.push(r);
+          runningLines.add(line);
+          break;
+        case 'skip':
+          skipRanges.push({
+            range: r,
+            ...(rowLineSet.has(line) && failure?.error && { hoverMessage: failure.error }),
+          });
+          break;
+        case 'stopped':
+          stoppedRanges.push({
+            range: r,
+            ...(rowLineSet.has(line) && failure?.error && { hoverMessage: failure.error }),
+          });
+          break;
       }
     }
 
     // Paintable lines: main flow AND section bodies, so body steps get the
     // same ✓ / ✗ / ⚡ / ▶ treatment. This is where sections beat skills
     // ergonomically — the whole run paints in one editor.
-    const stepLines = extractStepLineIds(snap.text);
-    const stepLineSet = new Set(stepLines);
+    // The data rows of every table join the paintable set: they wear the same
+    // status vocabulary as the steps and are the control surface the author
+    // reads a matrix run off (stories/data-row-progress-and-selection.md,
+    // decision 2). The header and the delimiter never take a status — a
+    // status cell on a header would read as "the table passed", which is not
+    // a thing — but they DO reserve the cell, below.
+    const stepLines = [...extractStepLineIds(snap.text), ...rowLines];
     // The "N/M passed" summary counts MAIN-FLOW steps only. M is the
     // author's step count, and a body line can be visited zero times (never
     // invoked) or many (invoked repeatedly), so counting body lines makes M
@@ -299,7 +365,7 @@ export class DecorationManager implements vscode.Disposable {
     // frame:pop aggregate.
     const summary = computeStepsSummary(snap);
     const summaryLines = summary.mainFlowLines;
-    const placeholderRanges = stepLines
+    const placeholderRanges = [...stepLines, ...alignmentLinesOf(tables)]
       .filter((line) => line !== snap.breakpointStop && !linesWithStatus.has(line))
       .map((line) => range(line));
 
@@ -337,6 +403,38 @@ export class DecorationManager implements vscode.Disposable {
           }]
         : [];
 
+    // Each table's own summary, on its header line, in the same after-text
+    // style as the `## Steps` one. The two lines are one apart and say
+    // different things: `## Steps` counts steps (during a loop, the current
+    // row's; after it, worst-of-rows), the header counts rows.
+    //
+    // Derived entirely from the statuses already on the row lines — no run
+    // state — so it is right after a reload, after a partial run, and for a
+    // file nobody has run.
+    const statusByLine = new Map(snap.statuses);
+    if (snap.isTestFile) {
+      for (const table of tables) {
+        summaryRanges.push({
+          range: rangeAtLineEnd(table.headerLine),
+          renderOptions: {
+            after: {
+              contentText: rowHeaderSummary(
+                table.rowLines.map((line) => statusByLine.get(line)),
+                table.kind,
+              ),
+            },
+          },
+        });
+      }
+    }
+
+    // The whole-line band on the row that is executing. Only data rows get it:
+    // a running STEP has never been banded, and banding one now would be a
+    // separate decision about how the editor reads during a run.
+    const runningRowRanges = rowLines
+      .filter((line) => runningLines.has(line))
+      .map((line) => range(line));
+
     editor.setDecorations(this.breakpointStopped, stopped);
     editor.setDecorations(this.statusPass, passRanges);
     editor.setDecorations(this.statusPassCached, passCachedRanges);
@@ -362,6 +460,7 @@ export class DecorationManager implements vscode.Disposable {
     );
     editor.setDecorations(this.stepsSummary, summaryRanges);
     editor.setDecorations(this.errorLine, errorRanges);
+    editor.setDecorations(this.runningRow, runningRowRanges);
   }
 
 }

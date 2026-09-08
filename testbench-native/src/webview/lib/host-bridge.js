@@ -53,6 +53,34 @@ export const hostBridge = {
 
   postReady() { post({ type: 'ready' }); },
   postRun(lines) { post({ type: 'run', lines }); },
+  /**
+   * Run a chosen set of data rows (stories/data-row-progress-and-selection.md).
+   * `payload` is `{ rows?, sectionRows?, lines? }` — run-table rows, section
+   * tables keyed by the section name as authored, and any selected step
+   * lines. An absent key means "that axis was not narrowed", which the host
+   * reads as all of it, so the panel never sends an empty list.
+   */
+  postRunRows(payload) { post({ type: 'runRows', ...payload }); },
+  /**
+   * Run every row of one table. `table` is the wire's table ref — `'run'`, or
+   * `{ section: '<name as authored>' }`.
+   *
+   * Deliberately NOT the row numbers on screen, for the same reason
+   * `postRerunFailedRows` is not: this list came from a `rows` message that
+   * may be a run old, so a row added to the table since would be the one row
+   * "run all" left out. The host resolves the set from the file as it is.
+   */
+  postRunAllRows(table) { post({ type: 'runRows', all: table }); },
+  /**
+   * Re-run the rows one table left red. `table` is the wire's table ref —
+   * `'run'`, or `{ section: '<name as authored>' }`.
+   *
+   * Deliberately NOT the row numbers the panel is showing: those came from a
+   * `rows` message that may be a run old, and re-running a stale number would
+   * run whatever row now sits in that position. The host resolves the set
+   * from the file as it is, through the same code the palette command uses.
+   */
+  postRerunFailedRows(table) { post({ type: 'rerunFailedRows', table }); },
   postRunAll() { post({ type: 'runAll' }); },
   postStop() { post({ type: 'stop' }); },
   postRestartSession() { post({ type: 'restartSession' }); },

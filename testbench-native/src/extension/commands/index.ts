@@ -12,7 +12,14 @@ import {
 import { extractStepLineIds } from '../step-lines.js';
 import { parseInvocationLine } from '../invocation-target-core.js';
 import { computeRenumberEdits } from '../renumber-core.js';
-import type { ActiveFileTracker } from '../active-file-tracker.js';
+import { selectionLines, type ActiveFileTracker } from '../active-file-tracker.js';
+import {
+  buildRowPickEntries,
+  rowAtLine,
+  rowSelectionRefusal,
+  splitRowSelection,
+  type RowPickEntry,
+} from '../row-selection-core.js';
 import type { CompileOutcome, RunController, SkillDebugContext } from '../run-controller.js';
 import { codeBehindPathFor, findEntryLine, type CodeBehindDiffs } from '../codebehind-diff.js';
 import { getOutputChannel } from '../output-channel.js';
@@ -678,22 +685,61 @@ export function registerCommands(
     // highlighted range), which runLines interprets as "run every step in
     // the document" — the same behavior as Run All. See selectionLines'
     // doc comment for why.
-    const lines = selectionLines(editor);
+    const selected = selectionLines(editor);
+    const text = editor.document.getText();
+    // The selection narrows every axis it names — the steps in it and the rows
+    // in it — and an axis with nothing in it means all of that axis
+    // (decision 3). Header and delimiter lines are not rows, so selecting a
+    // whole table is "every row" rather than "none".
+    const split = splitRowSelection(text, selected);
+    const lines = split.lines;
     // A selection of nothing but inert items would reach `runLines`, resolve
     // to no steps, and surface as TB025 ("that selection named no step") —
     // true, and no help at all. A mixed selection is left alone: the real
     // steps run and the inert ones are dropped, which is what the author
     // asked for. Contract §5 rule 4a.
-    const text = editor.document.getText();
+    //
+    // Rows are exempt on both sides: a selection of rows ALONE is a complete
+    // instruction (run the whole test for these rows), and a table line is
+    // "inert" to `inertLineRefusal`, which only knows about steps.
+    const rowsOnly = split.rows !== undefined || split.sectionRows !== undefined;
     const inertOnly =
-      lines.length > 0 && lines.every((l) => inertLineRefusal(text, l) !== null);
+      !rowsOnly && lines.length > 0 && lines.every((l) => inertLineRefusal(text, l) !== null);
     if (inertOnly) {
       vscode.window.showWarningMessage(inertLineRefusal(text, lines[0]!)!);
       return;
     }
+    await runRowsOnActive(lines, split);
+  };
+
+  /**
+   * Start a run with a row narrowing, refusing first.
+   *
+   * One body behind *Run This Row*, *Run Rows…*, *Re-run Failed Rows* and a
+   * selection that named rows: they differ only in where the numbers came
+   * from, and a second copy of the refusal is a second chance to disagree
+   * about what row 6 of a five-row table means.
+   */
+  const runRowsOnActive = async (
+    lines: number[],
+    selection: { rows?: number[]; sectionRows?: Record<string, number[]> },
+  ): Promise<void> => {
+    const controller = registry.active();
+    if (!controller) return notifyNoActive();
+    const refusal = rowSelectionRefusal(controller.document.getText(), selection);
+    if (refusal) {
+      vscode.window.showWarningMessage(refusal);
+      return;
+    }
     const breakpoints = tracker.breakpoints(controller.document.uri);
     registry.notifyRunning(true);
-    await controller.runLines(lines, { breakpoints }).finally(() => registry.notifyRunning(false));
+    await controller
+      .runLines(lines, {
+        breakpoints,
+        ...(selection.rows && { rows: selection.rows }),
+        ...(selection.sectionRows && { sectionRows: selection.sectionRows }),
+      })
+      .finally(() => registry.notifyRunning(false));
   };
 
   /**
@@ -764,6 +810,124 @@ export function registerCommands(
 
   return [
     vscode.commands.registerCommand('testbench-native.runSelected', runSelected),
+
+    // "Run This Row" — the gutter's one-row gesture
+    // (stories/data-row-progress-and-selection.md §How you run one row).
+    //
+    // A RUN-table row is one ordinary interactive run with that row's values:
+    // pause, breakpoints, F11 and Re-run from step N all work, because it is
+    // the run-level loop with one row in it. A SECTION-table row runs the
+    // whole flow with that section's loop narrowed to the row — the steps
+    // that lead to the call, then that one iteration, then the steps after
+    // (decision 7, which reverses the rows story's refusal).
+    vscode.commands.registerCommand(
+      'testbench-native.runRow',
+      async (target?: { lineNumber?: number }) => {
+        const editor = tracker.activeEditor;
+        if (!editor || !tracker.isActiveTestFile) return notifyNoActive();
+        const line =
+          typeof target?.lineNumber === 'number'
+            ? target.lineNumber
+            : editor.selection.active.line + 1;
+        const hit = rowAtLine(editor.document.getText(), line);
+        if (!hit) {
+          vscode.window.showWarningMessage(
+            'TestBench: that line is not a data row. Right-click the line number of a table row.',
+          );
+          return;
+        }
+        await runRowsOnActive(
+          [],
+          hit.section === null
+            ? { rows: [hit.row] }
+            : { sectionRows: { [hit.section]: [hit.row] } },
+        );
+      },
+    ),
+
+    // "Run Rows…" — the keyboard path to the same choice. One checkbox per
+    // row of every table, grouped by table, each showing its values and what
+    // it did last time.
+    vscode.commands.registerCommand('testbench-native.runRows', async () => {
+      const editor = tracker.activeEditor;
+      if (!editor || !tracker.isActiveTestFile) return notifyNoActive();
+      const uri = editor.document.uri;
+      const snap = tracker.snapshotFor(uri);
+      const statusByLine = new Map(snap?.statuses ?? []);
+      const hoverByLine = new Map(
+        (snap?.failures ?? []).map(([line, detail]) => [line, detail.error]),
+      );
+      const entries = buildRowPickEntries(editor.document.getText(), (line) => {
+        const status = statusByLine.get(line);
+        const hover = hoverByLine.get(line);
+        if (status === undefined && hover === undefined) return undefined;
+        return {
+          ...(status !== undefined && { status }),
+          ...(hover !== undefined && { hover }),
+        };
+      });
+      if (entries.every((e) => e.kind === 'separator')) {
+        vscode.window.showWarningMessage(
+          'TestBench: this test has no data table, so there are no rows to run.',
+        );
+        return;
+      }
+      type Item = vscode.QuickPickItem & { entry?: Extract<RowPickEntry, { kind: 'row' }> };
+      const items: Item[] = entries.map((e) =>
+        e.kind === 'separator'
+          ? { label: e.label, kind: vscode.QuickPickItemKind.Separator }
+          : {
+              label: e.label,
+              description: e.description,
+              ...(e.detail !== undefined && { detail: e.detail }),
+              entry: e,
+            },
+      );
+      const picked = await vscode.window.showQuickPick(items, {
+        canPickMany: true,
+        title: 'Run rows',
+        placeHolder: 'Tick the rows to run — type to filter by value or status',
+        // The label is only "Row 3"; everything that identifies a row to its
+        // author is in the description (its values) and the detail (what it
+        // did last time). Without these, typing the email address you came
+        // here to re-run matches nothing.
+        matchOnDescription: true,
+        matchOnDetail: true,
+      });
+      if (!picked || picked.length === 0) return;
+      const selection: { rows?: number[]; sectionRows?: Record<string, number[]> } = {};
+      const sectionRows: Record<string, number[]> = {};
+      for (const item of picked) {
+        const entry = item.entry;
+        if (!entry) continue;
+        if (entry.section === null) (selection.rows ??= []).push(entry.row);
+        else (sectionRows[entry.section] ??= []).push(entry.row);
+      }
+      if (selection.rows) selection.rows.sort((a, b) => a - b);
+      for (const rows of Object.values(sectionRows)) rows.sort((a, b) => a - b);
+      if (Object.keys(sectionRows).length > 0) selection.sectionRows = sectionRows;
+      if (selection.rows === undefined && selection.sectionRows === undefined) return;
+      await runRowsOnActive([], selection);
+    }),
+
+    // "Re-run Failed Rows" — the palette twin of the panel's ↻ button, which
+    // posts the same `runRows` message. The set is the last run's, held on the
+    // controller and dropped when the table it came from changes shape: the
+    // numbers name table positions, so a row added or removed makes them name
+    // different rows.
+    vscode.commands.registerCommand('testbench-native.rerunFailedRows', async () => {
+      const controller = registry.active();
+      if (!controller) return notifyNoActive();
+      const failed = controller.failedRowsToRerun;
+      if (!failed) {
+        vscode.window.setStatusBarMessage(
+          'TestBench: no failing rows from the last run of this test',
+          2500,
+        );
+        return;
+      }
+      await runRowsOnActive([], failed);
+    }),
 
     vscode.commands.registerCommand('testbench-native.runAll', async () => {
       const controller = registry.active();
@@ -1337,22 +1501,11 @@ export function registerCommands(
   ];
 }
 
-/**
- * 1-based line numbers covered by every *range* selection in the editor.
- * Cursor-only "selections" (no highlighted range) are ignored: a cursor
- * just means "I'm parked here," not "run this." See the same helper in
- * active-file-tracker.ts for the full rationale.
- */
-function selectionLines(editor: vscode.TextEditor): number[] {
-  const set = new Set<number>();
-  for (const sel of editor.selections) {
-    if (sel.isEmpty) continue;
-    const start = sel.start.line;
-    const end = sel.end.line;
-    for (let i = start; i <= end; i++) set.add(i + 1);
-  }
-  return [...set].sort((a, b) => a - b);
-}
+// `selectionLines` is imported from active-file-tracker.ts, which is the one
+// place the rules live (`selection-lines-core.ts`). It used to be duplicated
+// here WITHOUT the whole-line guard, so triple-clicking step 2 ran steps 2 and
+// 3 — and would have selected the table row below a triple-clicked row
+// (decision 10).
 
 /**
  * `selectionLines` narrowed for MUTATING commands: a selection ending at
@@ -1361,9 +1514,9 @@ function selectionLines(editor: vscode.TextEditor): number[] {
  * (`effectiveEndLine`, ../step-lines.ts). Every line-wise gesture (gutter
  * click/drag, Ctrl+L, Shift+Down, triple-click) produces exactly that shape,
  * so without the trim, renumbering a whole-line selection would also rewrite
- * the step BELOW it. Run Selected keeps the untrimmed helper on purpose: an
- * extra step in a run is visible (it executes and paints), a silent rewrite
- * is not. Spec §4.2.
+ * the step BELOW it. Kept separate from `selectionLines` only because a
+ * multi-line renumber wants the same rule for its own reasons; the two now
+ * agree. Spec §4.2.
  */
 function selectionLinesForEdit(editor: vscode.TextEditor): number[] {
   const set = new Set<number>();

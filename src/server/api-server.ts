@@ -757,6 +757,8 @@ export function createApiServer(
               steps: string[];
               stepLines: number[];
               rows?: Array<Record<string, string>>;
+              rowNumbers?: number[];
+              rowCount?: number;
             };
             sections[key] = {
               name: entry.name,
@@ -767,6 +769,13 @@ export function createApiServer(
               // travels only if it is listed. The seam that once dropped
               // `envName`.
               ...(entry.rows && { rows: entry.rows }),
+              // Validated as a pair above, so listing them as a pair here
+              // keeps "both or neither" true of what actually travels.
+              ...(entry.rowNumbers !== undefined &&
+                entry.rowCount !== undefined && {
+                  rowNumbers: entry.rowNumbers,
+                  rowCount: entry.rowCount,
+                }),
             };
           }
           request.sections = sections;
@@ -2844,6 +2853,70 @@ function validateSectionEntry(key: string, raw: unknown): string | null {
       ) {
         return `${where}.rows entries must be objects of string values`;
       }
+    }
+  }
+  // The row NUMBERING of a narrowed section loop
+  // (stories/data-row-progress-and-selection.md, decision 1). A client that
+  // ships only some of the table's rows says where each one sits in the
+  // authored table, so the iteration keeps its table number everywhere.
+  //
+  // Refused rather than repaired, and refused as a PAIR: a `rowNumbers` with
+  // no `rowCount` would number iterations 2 and 3 "of 2", and a `rowCount`
+  // with no `rowNumbers` would say "of 3" while numbering from 1 — both are
+  // wrong in a way that only shows up as an off-by-one in a badge, days later.
+  const hasRowNumbers = entry.rowNumbers !== undefined;
+  const hasRowCount = entry.rowCount !== undefined;
+  if (hasRowNumbers !== hasRowCount) {
+    return (
+      `${where}.rowNumbers and ${where}.rowCount must be sent together or not at all ` +
+      `(got ${hasRowNumbers ? 'rowNumbers' : 'rowCount'} alone)`
+    );
+  }
+  if (hasRowNumbers) {
+    const rowNumbers = entry.rowNumbers;
+    if (
+      !Array.isArray(rowNumbers) ||
+      !rowNumbers.every((n) => typeof n === 'number' && Number.isInteger(n) && n >= 1)
+    ) {
+      return `${where}.rowNumbers must be an array of positive integers`;
+    }
+    const rows = entry.rows;
+    if (!Array.isArray(rows)) {
+      return `${where}.rowNumbers requires ${where}.rows — it numbers them`;
+    }
+    if (rowNumbers.length !== rows.length) {
+      return (
+        `${where}.rowNumbers and ${where}.rows must be the same length ` +
+        `(got ${rowNumbers.length} and ${rows.length}) — they are parallel arrays`
+      );
+    }
+    // Strictly ascending, which rules out a duplicate in the same test: rows
+    // run in table order, and a list that says otherwise means the client
+    // built it from something other than the table.
+    for (let i = 1; i < rowNumbers.length; i++) {
+      if ((rowNumbers[i] as number) <= (rowNumbers[i - 1] as number)) {
+        return (
+          `${where}.rowNumbers must be strictly ascending ` +
+          `(got ${rowNumbers[i - 1]} then ${rowNumbers[i]})`
+        );
+      }
+    }
+    const rowCount = entry.rowCount;
+    if (typeof rowCount !== 'number' || !Number.isInteger(rowCount) || rowCount < 1) {
+      return `${where}.rowCount must be a positive integer`;
+    }
+    if (rowCount < rows.length) {
+      return (
+        `${where}.rowCount is ${rowCount} but ${where}.rows holds ${rows.length} rows — ` +
+        `the count is the whole table's, so it can never be smaller`
+      );
+    }
+    const last = rowNumbers[rowNumbers.length - 1] as number;
+    if (last > rowCount) {
+      return (
+        `${where}.rowNumbers must all be <= ${where}.rowCount ` +
+        `(got ${last} with a rowCount of ${rowCount})`
+      );
     }
   }
   if (

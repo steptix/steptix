@@ -40,8 +40,13 @@ export const STALE_HOVER_MESSAGE =
   'This step passed under AI — its compiled code-behind threw.\n\n' + REPAIR_HINT;
 
 /** The error, fenced so multi-line Playwright call logs keep their shape,
- *  clipped so a hover stays a hover. */
-function fenced(text: string): string {
+ *  clipped so a hover stays a hover.
+ *
+ *  Exported for the row hovers (`row-summary-core.ts`), which are *not* built
+ *  by `failHoverMessage` — a row's hover leads with prose the step's does not
+ *  have — but must fence and clip an error identically, so the same
+ *  Playwright log reads the same on a row and on the step it died at. */
+export function fenced(text: string): string {
   const clipped =
     text.length > MAX_ERROR_CHARS ? `${text.slice(0, MAX_ERROR_CHARS)}…` : text;
   // A ``` inside the error would end the fence early and render the rest as

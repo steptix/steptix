@@ -401,6 +401,72 @@ describe('section rows on the wire', () => {
     });
   });
 
+  it('numbers a NARROWED loop by its position in the authored table', async () => {
+    // Rows 2 and 3 of a three-row table, the shape the extension sends when
+    // the reader selected them (stories/data-row-progress-and-selection.md,
+    // decision 1). `loop.index` / `loop.count` are the report band's
+    // `iteration 2 of 3` and the section chip's `(2/3)` — both read these two
+    // numbers and nothing else, so numbering them right here is the whole fix.
+    const id = sessionId('section-subset');
+    const { status } = await postSteps(id, {
+      testFilePath: '/tests/loop.md',
+      steps: ['Upload each file'],
+      sourceLines: [3],
+      sections: {
+        'upload each file': {
+          name: 'Upload each file',
+          headingLine: 5,
+          steps: ['Upload {{file}}'],
+          stepLines: [9],
+          rows: [{ file: 'b.png' }, { file: 'c.png' }],
+          rowNumbers: [2, 3],
+          rowCount: 3,
+        },
+      },
+      dataRow: 1,
+      dataRowCount: 1,
+      dataRowValues: {},
+    });
+    expect(status).toBe(200);
+
+    await postReport(id);
+    const report = renderedReport();
+    expect(report.steps).toHaveLength(2);
+    expect(report.steps.map((s) => [s.loop?.index, s.loop?.count])).toEqual([
+      [2, 3],
+      [3, 3],
+    ]);
+    expect(report.steps[0]!.loop).toMatchObject({
+      kind: 'iteration',
+      label: 'Upload each file',
+      values: { file: 'b.png' },
+    });
+  });
+
+  it('rejects rowNumbers that do not match the rows', async () => {
+    // The pairing and the ordering rules are pinned in
+    // api-server-sections.test.ts; this is the one guard that has to hold at
+    // THIS seam too, since the entry is rebuilt field by field on the way in.
+    const { status } = await postSteps(sessionId('bad-rownumbers'), {
+      testFilePath: '/tests/loop.md',
+      steps: ['Upload each file'],
+      sourceLines: [3],
+      sections: {
+        'upload each file': {
+          name: 'Upload each file',
+          headingLine: 5,
+          steps: ['Upload {{file}}'],
+          stepLines: [9],
+          rows: [{ file: 'b.png' }, { file: 'c.png' }],
+          rowNumbers: [2, 4],
+          rowCount: 3,
+        },
+      },
+    });
+    expect(status).toBe(400);
+    expect(generateReportMock).not.toHaveBeenCalled();
+  });
+
   it('rejects a malformed rows field', async () => {
     const { status } = await postSteps(sessionId('bad-rows'), {
       testFilePath: '/tests/loop.md',

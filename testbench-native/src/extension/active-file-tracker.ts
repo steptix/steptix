@@ -9,6 +9,8 @@ import {
 } from 'ai-ui-automation-runner-core';
 import type { ErrorPayload, StepFailureDetail } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds, shiftAnchorForChanges } from './step-lines.js';
+import { selectionLinesFrom } from './selection-lines-core.js';
+import { dataTablesOf } from './data-tables-core.js';
 
 /**
  * What the gutter says about one step line.
@@ -128,6 +130,11 @@ export class ActiveFileTracker {
    *  "Repair this step" is visible in the gutter menu only on a line this
    *  array contains (see `refreshStaleStepsContextKeys`). */
   lastStaleLinesContextValue: number[] = [];
+  /** Same, for `testbench-native.dataRowLines` — the array *Run This Row*'s
+   *  `when` clause tests the clicked line against. Also the test-only
+   *  readback: a `when` clause's evaluation is not observable from the
+   *  extension host, so without this nothing pins which lines offer the item. */
+  lastDataRowLinesContextValue: number[] = [];
   private readonly listeners = new Set<Listener>();
   private readonly subs: vscode.Disposable[] = [];
   /** Step-line signature each URI's persisted state was captured against.
@@ -411,6 +418,45 @@ export class ActiveFileTracker {
     state.failures.delete(line);
     if (failure) state.failures.set(line, failure);
     this.emit();
+  }
+
+  /**
+   * Apply many lines' statuses at once — one `emit()`, not one per line.
+   *
+   * The data-row matrix rewrites every row of every table at each boundary
+   * (that is what puts the earlier rows back after the boundary's file-wide
+   * clear), and a per-line emit would mean a full snapshot, a persist
+   * schedule and two context-key refreshes per row per boundary.
+   *
+   * `status: null` clears the line — a `pending` row has no mark at all.
+   * Lines whose status and detail are already what they should be are
+   * skipped, so a matrix re-post that changes one row is one write.
+   */
+  setStatuses(
+    uri: vscode.Uri,
+    entries: Array<{
+      line: number;
+      status: LineStatus | null;
+      failure?: StepFailureDetail;
+    }>,
+  ): void {
+    const state = this.state(uri);
+    let changed = false;
+    for (const { line, status, failure } of entries) {
+      const currentStatus = state.statuses.get(line);
+      const currentError = state.failures.get(line)?.error;
+      if (status === null) {
+        if (state.statuses.delete(line)) changed = true;
+        if (state.failures.delete(line)) changed = true;
+        continue;
+      }
+      if (currentStatus === status && currentError === failure?.error) continue;
+      state.statuses.set(line, status);
+      state.failures.delete(line);
+      if (failure) state.failures.set(line, failure);
+      changed = true;
+    }
+    if (changed) this.emit();
   }
 
   markRunningStopped(uri: vscode.Uri): void {
@@ -715,6 +761,10 @@ export class ActiveFileTracker {
     // change funnels through here, which is exactly when a step becomes (or
     // stops being) stale.
     this.refreshStaleStepsContextKeys();
+    // The data-row lines the gutter's Run This Row item is gated on. Same
+    // chokepoint, and cheap: an edit reaches here too, which is when a table
+    // gains or loses a row.
+    this.refreshDataRowLinesContextKey();
   }
 
   // ---- persistence -------------------------------------------------------
@@ -777,6 +827,19 @@ export class ActiveFileTracker {
     // would be restored onto the new one.
     for (const section of extractSections(text)) {
       parts.push(`h${section.headingLine}:${section.name}`);
+    }
+    // Data rows carry statuses too (stories/data-row-progress-and-selection.md
+    // §Row status in the table), so they have to join the signature or a ✓
+    // would be restored onto a row that now holds different values. Every
+    // table's rows: the one under `## Steps` and each section's.
+    //
+    // A malformed table is not a reason to drop the whole signature — the
+    // step lines are still a valid surface and the file still has statuses on
+    // them — so a throw here just contributes nothing.
+    // `dataRowSignatureLines` makes that "contributes nothing" explicit per
+    // table rather than letting one bad table hide another's rows.
+    for (const line of dataRowSignatureLines(text)) {
+      parts.push(`r${line}:${lines[line - 1] ?? ''}`);
     }
     return hashString(parts.join('\n'));
   }
@@ -914,6 +977,7 @@ export class ActiveFileTracker {
     // so keep the per-file `paused` / ⚠ keys in lockstep here too.
     this.refreshPausedContextKey();
     this.refreshStaleStepsContextKeys();
+    this.refreshDataRowLinesContextKey();
   }
 
   /**
@@ -972,6 +1036,32 @@ export class ActiveFileTracker {
   }
 
   /**
+   * Publish the active file's data-row lines, so *Run This Row* appears in the
+   * gutter menu on exactly those lines — the same mechanism *Repair this step*
+   * uses (`editorLineNumber in <array key>`, the only per-line `when` VS Code
+   * offers).
+   *
+   * Unlike the stale-step key this is a fact about the TEXT, not about run
+   * state: a table nobody has run still has rows to run. So it is refreshed
+   * where the text can change — the active-editor switch and the document
+   * change — rather than on every status write, and deduped against the last
+   * pushed value so a keystroke inside a step costs one array compare.
+   */
+  private refreshDataRowLinesContextKey(): void {
+    const doc = this.currentEditor?.document;
+    const lines =
+      doc && this.isActiveTestFile ? dataRowSignatureLines(doc.getText()) : [];
+    const previous = this.lastDataRowLinesContextValue;
+    if (lines.length === previous.length && lines.every((l, i) => l === previous[i])) return;
+    this.lastDataRowLinesContextValue = lines;
+    void vscode.commands.executeCommand(
+      'setContext',
+      'testbench-native.dataRowLines',
+      lines,
+    );
+  }
+
+  /**
    * The active editor's ⚠ lines, ascending. Reads `states` directly rather
    * than via `state()` so merely looking at a file with no run state doesn't
    * lazily allocate one for it — same rule as `activeFileResumeLine`.
@@ -1009,6 +1099,23 @@ function countNewlines(s: string): number {
   return s.split('\n').length - 1;
 }
 
+/**
+ * Every data-row line in the file — the run table's and each section's —
+ * ascending. Used by the run-state signature, so a table edit drops that
+ * table's row marks.
+ *
+ * A projection of `dataTablesOf`, which is where the two guarded scans live
+ * (a half-written table throws, and the signature is still a useful surface
+ * without it — the step lines anchor the state on their own). Sharing that
+ * function rather than repeating its scans is also what keeps this off the hot
+ * path: `dataTablesOf` memoises on the document text, and this is asked for on
+ * every tracker emit, i.e. every caret move.
+ */
+export function dataRowSignatureLines(text: string): number[] {
+  const lines = dataTablesOf(text).flatMap((t) => t.rowLines);
+  return [...new Set(lines)].sort((a, b) => a - b);
+}
+
 /** djb2 string hash, base-36 encoded. Not cryptographic — only needs to
  *  change when the step lines change, to invalidate stale persisted state. */
 function hashString(s: string): string {
@@ -1029,22 +1136,33 @@ function isTestbenchDocument(doc: vscode.TextDocument): boolean {
 
 /**
  * 1-based line numbers covered by every *range* selection in the editor.
- * Cursor-only "selections" (no highlighted range) are ignored — they
- * represent "I'm parked here", not "run this." Treating a cursor as a
- * single-line selection caused empty-trim bugs when the cursor sat on a
- * step that also had a breakpoint (e.g. after a reload mid-pause): the
- * trimmed run was empty, the pause indicator went up immediately, and the
- * user thought their test had silently jumped to the breakpoint without
- * running the preceding steps. With this rule, cursor-only → [] → run
- * everything; explicit highlight → run those lines.
+ *
+ * The rules — cursor-only selections are ignored, and a selection ending at
+ * column 0 of a later line does not include that line unless dropping it would
+ * leave the selection naming nothing runnable — live in
+ * `selection-lines-core.ts` so the fast `node --test` suite can pin them.
+ * Exported because `runSelected`, `snapshot.selectedLines` and the data-row
+ * split must all read a selection the same way.
+ *
+ * The runnable set is the document's step lines (main flow and section bodies
+ * alike, which is what `extractStepLineIds` returns) plus every data-row line
+ * — exactly the lines a selection can name and have narrow the run.
  */
-function selectionLines(editor: vscode.TextEditor): number[] {
-  const set = new Set<number>();
-  for (const sel of editor.selections) {
-    if (sel.isEmpty) continue;
-    const start = sel.start.line;
-    const end = sel.end.line;
-    for (let i = start; i <= end; i++) set.add(i + 1);
-  }
-  return [...set].sort((a, b) => a - b);
+export function selectionLines(editor: vscode.TextEditor): number[] {
+  return selectionLinesFrom(editor.selections, runnableLinesOf(editor.document.getText()));
+}
+
+/**
+ * The lines a selection can name — step lines and data rows — as a set.
+ *
+ * One entry, keyed by the document text, for the same reason `dataTablesOf`
+ * has one: `selectionLines` is called on every tracker emit, i.e. every caret
+ * move, and `extractStepLineIds` classifies the whole file.
+ */
+let runnableCache: { text: string; lines: Set<number> } | null = null;
+function runnableLinesOf(text: string): ReadonlySet<number> {
+  if (runnableCache !== null && runnableCache.text === text) return runnableCache.lines;
+  const lines = new Set<number>([...extractStepLineIds(text), ...dataRowSignatureLines(text)]);
+  runnableCache = { text, lines };
+  return lines;
 }

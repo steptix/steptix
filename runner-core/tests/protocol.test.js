@@ -11,6 +11,10 @@ test('isHostMsg: accepts every host variant', () => {
     'prompt',
     'promptDone',
     'parametersResolved',
+    // The data-row pair: the end-of-loop worst-status repaint, and the live
+    // matrix the Rows section renders.
+    'rowSummary',
+    'rows',
     'running',
     'breakpointStop',
     'batchBanner',
@@ -42,6 +46,7 @@ test('isWebviewMsg: accepts every webview variant', () => {
   for (const type of [
     'ready',
     'run',
+    'runRows',
     'runAll',
     'stop',
     'restartSession',
@@ -54,6 +59,8 @@ test('isWebviewMsg: accepts every webview variant', () => {
     'focusTestResults',
     'clearStatus',
     'webviewState',
+    'rerunSkillStep',
+    'compile',
   ]) {
     assert.equal(isWebviewMsg({ type }), true, type);
   }

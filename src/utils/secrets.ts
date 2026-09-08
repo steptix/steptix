@@ -112,13 +112,24 @@ function walk(value: unknown, secrets: string[], key: string | undefined): unkno
   return value;
 }
 
+/** What an empty secret-named value renders as. Nothing is disclosed by
+ *  saying a field was blank, and `***` over an empty cell makes a report's
+ *  matrix unable to tell "wrong password" from "no password" — the two rows
+ *  of a data table that most need telling apart. Same word the client's
+ *  `maskIfSecret` (runner-core) uses, so the Output banner and the report
+ *  say the same thing about the same cell. */
+export const EMPTY = '(empty)';
+
 /** A map of values held under their names — resolved parameters, captured
- *  outputs: secret-named entries masked outright, every other value masked
- *  by value. Outright, because the name is the rule: a secret-named entry
- *  whose value is not in `secrets` (an empty one, say) still says what it is. */
+ *  outputs, a data row's cells: secret-named entries masked outright, every
+ *  other value masked by value. Outright, because the name is the rule: a
+ *  secret-named entry whose value is not in `secrets` still says what it is.
+ *  The one exception is an EMPTY one, which says {@link EMPTY} instead. */
 export function redactMap(map: Record<string, string>, secrets: string[]): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(map)) out[k] = isSecretName(k) ? MASK : redact(v, secrets);
+  for (const [k, v] of Object.entries(map)) {
+    out[k] = isSecretName(k) ? (v === '' ? EMPTY : MASK) : redact(v, secrets);
+  }
   return out;
 }
 

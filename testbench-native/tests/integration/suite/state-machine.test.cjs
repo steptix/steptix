@@ -415,7 +415,12 @@ describe('TestBench debug state machine', function () {
     const editor = vscode.window.activeTextEditor;
     editor.selection = new vscode.Selection(
       new vscode.Position(8, 0),
-      new vscode.Position(9, 0),
+      // Ends PAST column 0 of line 10 so that line is part of the selection.
+      // A selection ending AT column 0 of a later line stops before it
+      // (stories/data-row-progress-and-selection.md, decision 10) — that
+      // position is the line break a whole-line gesture swallowed, not a
+      // line the user chose. This test wants both steps.
+      new vscode.Position(9, 10),
     );
 
     void vscode.commands.executeCommand('testbench-native.runSelected');
@@ -455,7 +460,12 @@ describe('TestBench debug state machine', function () {
     const editor = vscode.window.activeTextEditor;
     editor.selection = new vscode.Selection(
       new vscode.Position(8, 0),
-      new vscode.Position(9, 0),
+      // Ends PAST column 0 of line 10 so that line is part of the selection.
+      // A selection ending AT column 0 of a later line stops before it
+      // (stories/data-row-progress-and-selection.md, decision 10) — that
+      // position is the line break a whole-line gesture swallowed, not a
+      // line the user chose. This test wants both steps.
+      new vscode.Position(9, 10),
     );
 
     void vscode.commands.executeCommand('testbench-native.runSelected');
@@ -497,7 +507,12 @@ describe('TestBench debug state machine', function () {
     const editor = vscode.window.activeTextEditor;
     editor.selection = new vscode.Selection(
       new vscode.Position(8, 0),
-      new vscode.Position(9, 0),
+      // Ends PAST column 0 of line 10 so that line is part of the selection.
+      // A selection ending AT column 0 of a later line stops before it
+      // (stories/data-row-progress-and-selection.md, decision 10) — that
+      // position is the line break a whole-line gesture swallowed, not a
+      // line the user chose. This test wants both steps.
+      new vscode.Position(9, 10),
     );
 
     void vscode.commands.executeCommand('testbench-native.runSelected');
@@ -728,7 +743,12 @@ describe('TestBench debug state machine', function () {
     const editor = vscode.window.activeTextEditor;
     editor.selection = new vscode.Selection(
       new vscode.Position(8, 0),
-      new vscode.Position(9, 0),
+      // Ends PAST column 0 of line 10 so that line is part of the selection.
+      // A selection ending AT column 0 of a later line stops before it
+      // (stories/data-row-progress-and-selection.md, decision 10) — that
+      // position is the line break a whole-line gesture swallowed, not a
+      // line the user chose. This test wants both steps.
+      new vscode.Position(9, 10),
     );
 
     void vscode.commands.executeCommand('testbench-native.runSelected');

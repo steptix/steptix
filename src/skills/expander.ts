@@ -130,6 +130,21 @@ export type SectionDefs = Record<
      *  section runs its body once per row (part B). Optional for the same
      *  reason `rawSteps` is — a wire entry may omit it. */
     rows?: Array<Record<string, string>> | undefined;
+    /**
+     * Where each shipped row sits in the AUTHORED table, 1-based, parallel to
+     * `rows` (stories/data-row-progress-and-selection.md, decision 1). Sent
+     * only by a client that shipped a SUBSET of the table's rows; the CLI
+     * parser never sets it, because it always ships all of them.
+     *
+     * Present together with `rowCount` or not at all — the server refuses one
+     * without the other at the wire, so the two are read here as a pair.
+     * Without them an iteration is numbered by its position in `rows`, which
+     * is the same answer whenever the whole table was shipped.
+     */
+    rowNumbers?: number[] | undefined;
+    /** The authored table's total row count — the `of M` half of the pair
+     *  above, so a one-row run still reads `iteration 2 of 3`. */
+    rowCount?: number | undefined;
   }
 >;
 
@@ -561,6 +576,16 @@ async function expandRecursive(
         // has always been.
         const iterations = section.rows ?? [null];
 
+        // A client may ship only SOME of the table's rows
+        // (stories/data-row-progress-and-selection.md, "Selecting rows of a
+        // section"). When it does it says which ones, and the iteration is
+        // numbered by its position in the AUTHORED table rather than by its
+        // position in what arrived — so a narrowed run's badge still reads
+        // `(2/3)` and names the row the reader selected. Absent, the two are
+        // the same answer: everything was shipped, in order.
+        const rowNumbers = section.rowNumbers;
+        const rowCount = section.rowCount;
+
         for (const [iteration, row] of iterations.entries()) {
           const instanceId = ++ctx.seq.n;
           const newFrameId = `f${instanceId}`;
@@ -581,8 +606,8 @@ async function expandRecursive(
               // Variables view shows the iteration's values at a pause with no
               // new wire shape.
               inputs: { ...row },
-              iteration: iteration + 1,
-              iterationCount: iterations.length,
+              iteration: rowNumbers?.[iteration] ?? iteration + 1,
+              iterationCount: rowCount ?? iterations.length,
             }),
           };
 

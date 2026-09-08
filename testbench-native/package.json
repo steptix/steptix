@@ -2,7 +2,7 @@
   "name": "testbench-native",
   "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.5.123",
+  "version": "0.5.124",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
@@ -269,6 +269,18 @@
         "title": "TestBench: Run This Step"
       },
       {
+        "command": "testbench-native.runRow",
+        "title": "TestBench: Run This Row"
+      },
+      {
+        "command": "testbench-native.runRows",
+        "title": "TestBench: Run Rows…"
+      },
+      {
+        "command": "testbench-native.rerunFailedRows",
+        "title": "TestBench: Re-run Failed Rows"
+      },
+      {
         "command": "testbench-native.renumberSteps",
         "title": "TestBench: Renumber Steps"
       },
@@ -423,6 +435,11 @@
           "group": "2_run@1"
         },
         {
+          "command": "testbench-native.runRow",
+          "when": "testbench-native.activeFile && editorLineNumber in testbench-native.dataRowLines",
+          "group": "2_run@2"
+        },
+        {
           "command": "testbench-native.repairStep",
           "when": "testbench-native.activeFile && editorLineNumber in testbench-native.staleStepLines",
           "group": "2_run@2"
@@ -473,6 +490,18 @@
         {
           "command": "testbench-native.repairStep",
           "when": "testbench-native.activeFile && testbench-native.hasStaleStep"
+        },
+        {
+          "command": "testbench-native.runRow",
+          "when": "false"
+        },
+        {
+          "command": "testbench-native.runRows",
+          "when": "testbench-native.activeFile"
+        },
+        {
+          "command": "testbench-native.rerunFailedRows",
+          "when": "testbench-native.activeFile && testbench-native.hasFailedRows"
         },
         {
           "command": "testbench-native.renumberSteps",
