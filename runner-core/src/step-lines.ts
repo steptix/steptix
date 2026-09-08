@@ -32,9 +32,11 @@
 
 import { matchText, NO_HOOKS_MARKER } from './section-match.js';
 import {
+  chainAfterFlowControlMessage,
   chainMemberWord,
   closedChainMemberMessage,
   danglingChainMemberMessage,
+  isFlowControlLine,
   parseControlLine,
 } from './control-line.js';
 
@@ -598,19 +600,35 @@ export function danglingChainMemberError(text: string): string | null {
     let previous: 'if' | 'elseif' | 'else' | null = null;
     /** Whether that chain has already had its `Otherwise`. */
     let closed = false;
+    /** The previous step line when it was a FLOW-CONTROL step — an `If` that
+     *  ends the flow rather than choosing a branch, and the one an author is
+     *  most likely to write an `Otherwise` under. */
+    let previousFlowControl: string | null = null;
     for (const step of flow.steps) {
       if (sectionNames.has(matchText(step.instruction))) {
         previous = null;
+        previousFlowControl = null;
         closed = false;
         continue;
       }
       const control = parseControlLine(step.instruction);
       if (!control) {
         previous = null;
+        // Rung 0 declined it as a control line, so this is where a
+        // flow-control step lands and the only place it can be remembered.
+        previousFlowControl = isFlowControlLine(step.instruction) ? step.instruction : null;
         closed = false;
         continue;
       }
       if (control.kind === 'elseif' || control.kind === 'else') {
+        if (previousFlowControl !== null) {
+          return chainAfterFlowControlMessage({
+            line: step.instruction,
+            word: chainMemberWord(control.kind),
+            previous: previousFlowControl,
+            where: `Line ${step.line}`,
+          });
+        }
         if (previous === null) {
           return danglingChainMemberMessage({
             line: step.instruction,
@@ -632,10 +650,12 @@ export function danglingChainMemberError(text: string): string | null {
           });
         }
         previous = control.kind;
+        previousFlowControl = null;
         closed = control.kind === 'else';
         continue;
       }
       previous = control.kind === 'if' ? 'if' : null;
+      previousFlowControl = null;
       closed = false;
     }
   }

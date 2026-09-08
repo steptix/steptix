@@ -79,3 +79,24 @@ export function formatStepFailure(failure, isStale) {
 export function isSkippedPass(event) {
   return event.output === "skipped";
 }
+
+/**
+ * `SKIP_GLYPH` and `skipPanelLine` MIRROR `src/extension/step-skip-core.ts`,
+ * for the same interop reason, and are pinned to it by
+ * `tests/failure-text-copy-parity.test.js`.
+ *
+ * A skipped step reaches the panel two ways — `step:skip` with a reason, and
+ * `step:pass` carrying `output: 'skipped'` without one — and both print this
+ * sentence. One glyph and one wording, or the panel says two different things
+ * about the same event, which is what it did before these were merged.
+ *
+ * @param {number} line
+ * @param {string} [reason]
+ * @returns {string}
+ */
+export const SKIP_GLYPH = "◌";
+
+export function skipPanelLine(line, reason) {
+  const trimmed = reason?.trim();
+  return `${SKIP_GLYPH} Step on line ${line} skipped${trimmed ? ` — ${trimmed}` : ""}`;
+}

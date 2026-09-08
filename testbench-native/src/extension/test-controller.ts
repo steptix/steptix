@@ -489,7 +489,7 @@ export class TestBenchTestController implements vscode.Disposable {
           // event because the wire has no third verdict
           // (stories/control-flow.md).
           if (isSkippedPass(event)) {
-            emit(`— step on line ${event.line}${whereOf(event)} skipped`);
+            emit(skipTestOutputLine(event.line, whereOf(event)));
             break;
           }
           if (event.codeBehindStale) {

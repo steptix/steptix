@@ -43,7 +43,7 @@ import {
   type StepMode,
 } from 'ai-ui-automation-runner-core';
 import { getOutputChannel } from './output-channel.js';
-import { SKIP_GLYPH, skipRunLogLine } from './step-skip-core.js';
+import { skipCompileLogLine, skipRunLogLine } from './step-skip-core.js';
 import type { CompileTail } from './compile-progress-core.js';
 import type { CompileTailSignals } from './compile-tail-signals.js';
 import { EnvSelector } from './env-selector.js';
@@ -243,7 +243,7 @@ export function compileLogLine(event: CompileEvent): string | null {
         // chain, which a compile is allowed to contain — did not run, so it
         // gets the same `—` the interactive run log gives it rather than a ✓.
         if (isSkippedPass(inner)) {
-          return `  ${' '.repeat(11)} — step on line ${inner.line} skipped`;
+          return `  ${' '.repeat(11)} ${skipCompileLogLine(inner.line)}`;
         }
         const how = inner.codeBehindStale
           ? ` ⚠ under AI — code-behind failed: ${inner.codeBehindStale.error}`
@@ -265,7 +265,7 @@ export function compileLogLine(event: CompileEvent): string | null {
       // and "this entry failed" — and the compile's own status (`partial`)
       // only says the first of those about the file as a whole.
       if (inner.type === 'step:skip') {
-        return `  ${' '.repeat(11)} ${SKIP_GLYPH} step on line ${inner.line} — ${inner.reason}`;
+        return `  ${' '.repeat(11)} ${skipCompileLogLine(inner.line, inner.reason)}`;
       }
       if (inner.type === 'output') return `  ${' '.repeat(11)} [${inner.kind}] ${inner.msg}`;
       return null;
@@ -4337,7 +4337,7 @@ export class RunController {
         // which counts a skipped step for the same reason the `[input:]` skip
         // path always has.
         if (isSkippedPass(event)) {
-          log(`— step ${event.line} skipped`);
+          log(skipRunLogLine(event.line));
         } else if (event.codeBehindStale) {
           staleCount += 1;
           log(`⚠ step ${event.line} passed under AI — code-behind failed: ${event.codeBehindStale.error}`);

@@ -1039,3 +1039,151 @@ describe('the console announces the guard visits that are recorded', () => {
     }
   });
 });
+
+/**
+ * `If … then return` inside a structure this story built — the CLI's half of
+ * the composition (stories/control-flow.md §"Composition with `If … then
+ * return`"; stories/step-flow-control.md decision 1).
+ *
+ * The server suite checks the same three shapes over HTTP, where there are
+ * per-pass frame clones to get wrong. Here there are none, and that is the
+ * point of testing it twice: the rule is `returnExit`'s, not the wire's, and
+ * the two loops must reach the same answer by the same route.
+ */
+describe('a return meets a loop, a chain and a guard', () => {
+  const RETURN_IN_LOOP = [
+    '# Return in a loop body',
+    '',
+    '## Steps',
+    '1. Open the statements page',
+    '2. While the Next button is enabled, Go to the next page',
+    '3. Verify the last page is shown',
+    '',
+    '### Go to the next page',
+    '1. Return',
+    '2. Click Next',
+    '',
+  ].join('\n');
+
+  it('ends the pass and lets the loop re-evaluate, rather than ending the run', async () => {
+    // Holds, holds, then does not. `Return` is unconditional, so it costs no
+    // model call — the judge is asked only about the loop's own condition, and
+    // three times, which is what says the loop kept going.
+    judgeAnswers(0, 0, null);
+    const report = await runTest(await instance(RETURN_IN_LOOP), makeConfig());
+
+    expect(evaluateConditionsMock).toHaveBeenCalledTimes(3);
+    // `Click Next` is skipped on every pass, so the only steps a model saw are
+    // the two outside the loop.
+    expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual([
+      'Open the statements page',
+      'Verify the last page is shown',
+    ]);
+    expect(report.status).toBe('passed');
+  });
+
+  it('skips only the rest of the body, and the step after the loop still runs', async () => {
+    judgeAnswers(0, null);
+    const report = await runTest(await instance(RETURN_IN_LOOP), makeConfig());
+    const skipped = report.steps.filter((s) => s.status === 'skipped').map((s) => s.instruction);
+    // Only the body's second step. `Verify the last page is shown` sits
+    // outside the loop: an unclamped `frameExitIndex` would have reported it
+    // skipped and ended the run there.
+    expect(skipped).toEqual(['Click Next']);
+    expect(rows(report.steps).at(-1)).toEqual(['Verify the last page is shown', 'passed']);
+  });
+
+  const RETURN_IN_CHAIN_TAIL = [
+    '# Return in a chain tail',
+    '',
+    '## Steps',
+    '1. Open the payments page',
+    '2. If the Cash checkbox is ticked, then Pay with cash',
+    '3. Otherwise, Pay by card',
+    '4. Verify the order confirmation is shown',
+    '',
+    '### Pay with cash',
+    '1. Return',
+    '2. Verify the receipt says Paid in cash',
+    '',
+    '### Pay by card',
+    '1. Enter the card details',
+    '2. Submit the card form',
+    '',
+  ].join('\n');
+
+  it('a return in a chain tail continues after the chain, siblings still skipped', async () => {
+    judgeAnswers(0);
+    const report = await runTest(await instance(RETURN_IN_CHAIN_TAIL), makeConfig());
+
+    expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual([
+      'Open the payments page',
+      'Verify the order confirmation is shown',
+    ]);
+    // The taken tail's remaining step, and the whole untaken half — each
+    // reported exactly once. The clamp is what keeps the return from
+    // re-reporting the siblings the decision had already skipped.
+    const skipped = report.steps.filter((s) => s.status === 'skipped').map((s) => s.instruction);
+    expect(skipped).toEqual([
+      'Verify the receipt says Paid in cash',
+      'Otherwise, Pay by card',
+      'Enter the card details',
+      'Submit the card form',
+    ]);
+    expect(report.status).toBe('passed');
+  });
+
+  const RETURN_OVER_A_GUARD = [
+    '# Return over a guard',
+    '',
+    '## Steps',
+    '1. Open the payments page',
+    '2. Return',
+    '3. If the Cash checkbox is ticked, then Pay with cash',
+    '4. Verify the order confirmation is shown',
+    '',
+    '### Pay with cash',
+    '1. Click Pay now',
+    '',
+  ].join('\n');
+
+  it('a main-flow return walks past a guard without evaluating it', async () => {
+    const report = await runTest(await instance(RETURN_OVER_A_GUARD), makeConfig());
+
+    // The decision is never made: the run had already left the flow the guard
+    // is in, so asking a model about it would spend a call on a branch nobody
+    // will take — and would file a guard row for a decision that did not
+    // happen.
+    expect(evaluateConditionsMock).not.toHaveBeenCalled();
+    expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual(['Open the payments page']);
+    expect(rows(report.steps)).toEqual([
+      ['Open the payments page', 'passed'],
+      ['Return', 'passed'],
+      ['If the Cash checkbox is ticked, then Pay with cash', 'skipped'],
+      ['Click Pay now', 'skipped'],
+      ['Verify the order confirmation is shown', 'skipped'],
+    ]);
+    // A return is a pass with N skipped, never a timeout and never a failure.
+    expect(report.status).toBe('passed');
+  });
+
+  it('a bare Return in the main flow still ends the whole run', async () => {
+    const report = await runTest(
+      await instance(
+        [
+          '# Plain return',
+          '',
+          '## Steps',
+          '1. Open the statements page',
+          '2. Return',
+          '3. Verify the last page is shown',
+          '',
+        ].join('\n'),
+      ),
+      makeConfig(),
+    );
+    expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual(['Open the statements page']);
+    expect(rows(report.steps).at(-1)).toEqual(['Verify the last page is shown', 'skipped']);
+    expect(report.status).toBe('passed');
+  });
+});

@@ -24,7 +24,7 @@ import {
   setStrip,
   stripFor,
 } from "./lib/panel-scope-inline.js";
-import { describeStepFailure, formatStepFailure, isSkippedPass } from "./lib/failure-text-inline.js";
+import { describeStepFailure, formatStepFailure, isSkippedPass, skipPanelLine } from "./lib/failure-text-inline.js";
 import {
   applyRowClick,
   buildRunRowsPayload,
@@ -621,7 +621,7 @@ function TestBenchRunner() {
         // "skipped" for the same event, one line apart
         // (stories/control-flow.md).
         if (isSkippedPass(event)) {
-          log(`− Step on line ${event.line} skipped`, "info", uri);
+          log(skipPanelLine(event.line), "info", uri);
           break;
         }
         if (event.codeBehindStale) {
@@ -648,7 +648,7 @@ function TestBenchRunner() {
         // A line an `If … then return` left behind. Logged "info", not "fail":
         // nothing went wrong, the flow ended early on purpose, and the reason
         // the server sends says which step ended it.
-        log(`◌ Step on line ${event.line} skipped — ${event.reason}`, "info", uri);
+        log(skipPanelLine(event.line, event.reason), "info", uri);
         break;
       case "output":
         log(event.msg, event.kind, uri);

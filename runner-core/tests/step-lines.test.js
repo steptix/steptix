@@ -348,6 +348,52 @@ test('danglingChainMemberError: an ORDINARY step between them is the same fault'
   );
 });
 
+test('danglingChainMemberError: a flow-control step above gets its own sentence', () => {
+  // The composition with `If … then return` (stories/control-flow.md
+  // §"Composition with `If … then return`"). The line above opens `If`, so
+  // "no decision to be the alternative of" would send the author looking for a
+  // decision they can see. Refused here, in the CLI parser and in the
+  // expander, in one wording.
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. If the balance is zero, then return',
+    '2. Otherwise, Pay by card',
+  ].join('\n');
+  const problem = danglingChainMemberError(text);
+  assert.match(problem ?? '', /^Line 6 — /);
+  assert.match(problem ?? '', /"Otherwise, Pay by card" follows "If the balance is zero, then return"/);
+  assert.match(problem ?? '', /ends the flow rather than choosing a branch/);
+  assert.match(problem ?? '', /already run only when the return did NOT fire/);
+  assert.match(problem ?? '', /write the alternative as the next step/);
+  // …and it is NOT the plain dangling sentence.
+  assert.ok(!/has no decision to be the alternative of/.test(problem ?? ''));
+});
+
+test('danglingChainMemberError: an unconditional Return above does it too', () => {
+  const text = ['# T', '', '## Steps', '', '1. Return', '2. Else if b, then Y'].join('\n');
+  assert.match(
+    danglingChainMemberError(text) ?? '',
+    /ends the flow rather than choosing a branch/,
+  );
+});
+
+test('danglingChainMemberError: a near miss above is a chain head, so it is accepted', () => {
+  // `then return to the dashboard` is not flow control — the grammar is
+  // `$`-anchored — so this is a well-formed two-member chain.
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. If a, then return to the dashboard',
+    '2. Otherwise, Pay by card',
+  ].join('\n');
+  assert.equal(danglingChainMemberError(text), null);
+});
+
 test('danglingChainMemberError: a well-formed chain is accepted', () => {
   const text = [
     '# T',

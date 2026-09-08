@@ -101,6 +101,58 @@ describe('chain structure', () => {
     ).toThrow(/follows an `Otherwise`, which ends a chain/);
   });
 
+  it('an Otherwise under an `If … then return` gets its own sentence', () => {
+    // The composition rule (stories/control-flow.md §"Composition with
+    // `If … then return`"). The line above IS an `If`, so the plain dangling
+    // message — "no decision to be the alternative of" — would read as a
+    // parser bug to the author looking straight at it.
+    expect(() =>
+      parseTestContent(
+        doc('1. If the balance is zero, then return', '2. Otherwise, Pay by card'),
+        'tests/t.md',
+      ),
+    ).toThrow(/ends the flow rather than choosing a branch/);
+  });
+
+  it('…and that sentence teaches the fix, naming the line above', () => {
+    let message = '';
+    try {
+      parseTestContent(
+        doc('1. If the list is empty, then stop here', '2. Else if b, then Y'),
+        'tests/t.md',
+      );
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('"If the list is empty, then stop here"');
+    expect(message).toContain('already run only when the return did NOT fire');
+    expect(message).toContain('write the alternative as the next step');
+    // …and NOT the wording for a genuinely dangling member.
+    expect(message).not.toContain('has no decision to be the alternative of');
+  });
+
+  it('a flow-control step between two members breaks the chain like any step', () => {
+    // It is not a control line, so it is an ordinary step for chain purposes
+    // — and the message is the flow-control one, because it is the line
+    // immediately above.
+    expect(() =>
+      parseTestContent(
+        doc('1. If a, then X', '2. If b then return', '3. Otherwise, Y'),
+        'tests/t.md',
+      ),
+    ).toThrow(/ends the flow rather than choosing a branch/);
+  });
+
+  it('a near miss is a chain head, so an Otherwise under it is fine', () => {
+    // `then return to the dashboard` is not flow control — the grammar is
+    // anchored — so this really is a two-member chain.
+    const parsed = parseTestContent(
+      doc('1. If a, then return to the dashboard', '2. Otherwise, Pay by card'),
+      'tests/t.md',
+    );
+    expect(parsed.steps.length).toBeGreaterThan(0);
+  });
+
   it('an ordinary step between the members breaks the chain', () => {
     expect(() =>
       parseTestContent(

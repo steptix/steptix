@@ -5648,6 +5648,26 @@ export class SessionManager {
             // `[skill: …]` line they all point at is one line in one file.
             // Only the address the client paints is the same in both cases.
             const callLinesEmitted = new Set<string>();
+            /**
+             * The returning step's frame in the ORIGINAL id space — not
+             * `stepFrameId`, which is `emittedFrameId(i)` and is a per-pass
+             * CLONE inside a loop body.
+             *
+             * Both this comparison and the walk below run over `origins` and
+             * `expandedFrames`, and neither of those ever holds a clone: the
+             * origins are static, and the clones live only in the wire
+             * `FrameInfo` table (`cloneFramesForPass`). Comparing a clone id
+             * against an original never matched, so every step of a returning
+             * loop pass looked like it belonged to a DIFFERENT frame and the
+             * loop's own guard line was announced skipped — while the loop was
+             * still running (stories/control-flow.md §"Composition with
+             * `If … then return`").
+             */
+            const returningFrameId = expansionOrigins?.[i]?.frameId ?? '';
+            /** The address a client paints: the file a line lives in, and the
+             *  line. One key space for call lines and step lines alike. */
+            const addressOf = (uri: string | undefined, line: number): string =>
+              `${uri ?? request.testFilePath ?? ''}#${line}`;
             const emitCallLineFor = (frameId: string): void => {
               // Walk out to the returning step's own frame, then report inwards,
               // so a section called from a section names the outer call first
@@ -5655,7 +5675,7 @@ export class SessionManager {
               const chain: string[] = [];
               let cur: string | null = frameId;
               const seen = new Set<string>();
-              while (cur && cur !== '' && cur !== stepFrameId && !seen.has(cur)) {
+              while (cur && cur !== '' && cur !== returningFrameId && !seen.has(cur)) {
                 seen.add(cur);
                 chain.unshift(cur);
                 cur = expandedFrames[cur]?.parentId ?? null;
@@ -5682,7 +5702,7 @@ export class SessionManager {
                 // The parent frame's own file, which is where this call line
                 // lives. Falls back to the parent's id only when no frame
                 // answers for it, which leaves the key no worse than it was.
-                const address = `${parentFrame?.uri ?? parentId}#${f.invocationLine}`;
+                const address = addressOf(parentFrame?.uri ?? parentId, f.invocationLine);
                 if (callLinesEmitted.has(address)) continue;
                 callLinesEmitted.add(address);
                 emit({
@@ -5695,8 +5715,16 @@ export class SessionManager {
             };
             for (let j = i + 1; j <= exit; j++) {
               const skippedFrameId = expansionOrigins?.[j]?.frameId ?? '';
-              if (skippedFrameId !== stepFrameId) emitCallLineFor(skippedFrameId);
+              if (skippedFrameId !== returningFrameId) emitCallLineFor(skippedFrameId);
               const skippedFrame = frameInfoFor(j);
+              // A step line and a call line can be the SAME line, and with
+              // control flow they routinely are: a section used as a control
+              // line's tail is invoked from the guard's own line, so the
+              // guard's `invocationLine` is a numbered step in the expanded
+              // list. Recording the step's address in the same set the call
+              // lines use is what stops one line being announced skipped
+              // twice — once as itself and once as the call it also is.
+              callLinesEmitted.add(addressOf(skippedFrame?.uri, sourceLineFor(j)));
               emit({
                 type: 'step:skip',
                 line: sourceLineFor(j),

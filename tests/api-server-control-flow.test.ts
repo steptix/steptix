@@ -1163,3 +1163,203 @@ describe('a breakpoint on a loop body line', () => {
     expect(awaiting).toBe(1);
   });
 });
+
+// ── Where the two features meet ──────────────────────────────────────
+
+/**
+ * `If … then return` (stories/step-flow-control.md) inside a structure this
+ * story built (stories/control-flow.md §"Composition with `If … then
+ * return`").
+ *
+ * The two features answer the same question — "which later steps does this
+ * step leave behind" — from opposite ends, and each is right about its own
+ * half. `frameExitIndex` knows about FRAMES and nothing about control records,
+ * so from inside a loop body it hands back the last index of the TEST;
+ * `returnExit` clamps that to the innermost control body and says whether the
+ * planner gets the last word on where to resume. Both halves are checked here
+ * rather than in a unit test of the helper, because what the helper returns
+ * only matters through the run loop that consumes it.
+ *
+ * The server path specifically, because it is the only one with per-pass frame
+ * CLONES: `origins[i].frameId` is always an original id and the clones live in
+ * the wire `FrameInfo` table, so the frame walk never meets one. That is a
+ * claim, and a loop that runs twice is what tests it.
+ */
+describe('a return inside a loop body ends the PASS, not the run', () => {
+  /**
+   * A `While` whose section body returns on its first step.
+   *
+   *     3. Open the statements page
+   *     4. While the Next button is enabled, Go to the next page
+   *     5. Verify the last page is shown
+   *     ### Go to the next page   (heading 7)
+   *     8. Return
+   *     9. Click Next
+   */
+  const returnInLoopBody = (extra: Record<string, unknown> = {}) => ({
+    steps: [
+      'Open the statements page',
+      'While the Next button is enabled, Go to the next page',
+      'Verify the last page is shown',
+    ],
+    sourceLines: [3, 4, 5],
+    testFilePath,
+    sections: {
+      'go to the next page': {
+        name: 'Go to the next page',
+        headingLine: 7,
+        steps: ['Return', 'Click Next'],
+        stepLines: [8, 9],
+      },
+    },
+    ...extra,
+  });
+
+  it('re-evaluates the guard after the return, and stops when it says no', async () => {
+    // Holds, holds, then does not. Each pass runs the body's first step (the
+    // unconditional `Return`, which needs no model at all) and returns, which
+    // must end THAT PASS and send the run back to the guard — not end the run
+    // and not skip to step 5.
+    judgeScript = [0, 0, null];
+    const events = await collect(returnInLoopBody());
+
+    // Two passes' worth of decisions plus the one that ended the loop.
+    expect(judgeCalls).toEqual([
+      ['the Next button is enabled'],
+      ['the Next button is enabled'],
+      ['the Next button is enabled'],
+    ]);
+    // `Return` is dispatched, so the only steps a model saw are the ones
+    // outside the loop. `Click Next` never ran: the return skipped it, twice.
+    expect(executedSteps).toEqual(['Open the statements page', 'Verify the last page is shown']);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+
+  it('skips only the rest of the BODY, never the step after the loop', async () => {
+    judgeScript = [0, null];
+    const events = await collect(returnInLoopBody());
+    const skipped = events.filter((e) => e.type === 'step:skip').map((e) => e.line);
+    // Line 9 is the body's second step. Line 5 — `Verify the last page is
+    // shown` — is outside the loop and must never appear here: it is the step
+    // the run continues at, and an unclamped `frameExitIndex` would have
+    // reported it skipped and ended the run.
+    expect(skipped).toEqual([9]);
+    expect(executedSteps).toContain('Verify the last page is shown');
+  });
+
+  it('the returning pass still gets its own frame, so two passes are two frames', async () => {
+    judgeScript = [0, 0, null];
+    const events = await collect(returnInLoopBody());
+    const pushed = events
+      .filter((e) => e.type === 'frame:push')
+      .map((e) => e.frame?.id as string);
+    // One frame per pass, and they are DIFFERENT — the per-pass clones. If the
+    // return had ended the run there would be one; if the clone table and the
+    // frame walk disagreed there would be one id twice.
+    expect(pushed.length).toBe(2);
+    expect(new Set(pushed).size).toBe(2);
+  });
+
+  it('a bare Return in the MAIN flow still ends the whole run', async () => {
+    // The other side of the clamp. Nothing encloses this step, so the planner
+    // is not consulted — and it must not be, or a test whose last expanded
+    // step closes a loop body would jump back into the loop it just skipped.
+    judgeScript = [];
+    const events = await collect({
+      steps: ['Open the statements page', 'Return', 'Verify the last page is shown'],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+    });
+    expect(executedSteps).toEqual(['Open the statements page']);
+    const skipped = events.filter((e) => e.type === 'step:skip').map((e) => e.line);
+    expect(skipped).toEqual([5]);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+});
+
+describe('a return inside a chain tail ends the tail, not the chain', () => {
+  /**
+   * The `chainBody` shape, with the taken tail returning on its first step.
+   *
+   *     ### Pay with cash   (heading 8)
+   *     9.  Return
+   *     10. Verify the receipt says Paid in cash
+   */
+  const returnInChainTail = () => ({
+    ...chainBody(),
+    sections: {
+      'pay with cash': {
+        name: 'Pay with cash',
+        headingLine: 8,
+        steps: ['Return', 'Verify the receipt says Paid in cash'],
+        stepLines: [9, 10],
+      },
+      'pay by card': {
+        name: 'Pay by card',
+        headingLine: 12,
+        steps: ['Enter the card details', 'Submit the card form'],
+        stepLines: [13, 14],
+      },
+    },
+  });
+
+  it('continues after the chain, with the siblings still skipped exactly once', async () => {
+    judgeScript = [0];
+    const events = await collect(returnInChainTail());
+
+    expect(executedSteps).toEqual([
+      'Open the payments page',
+      'Verify the order confirmation is shown',
+    ]);
+
+    // The return's own skips: the rest of the taken tail, and nothing else.
+    const returnSkipped = events.filter((e) => e.type === 'step:skip').map((e) => e.line);
+    expect(returnSkipped).toEqual([10]);
+
+    // The chain's own skips: the untaken `Otherwise` and its body. Reported
+    // by the DECISION, on the older convention, and reported once — a return
+    // whose range was not clamped would have re-reported all three.
+    const chainSkipped = events
+      .filter((e) => e.type === 'step:pass' && e.output === 'skipped')
+      .map((e) => e.line);
+    expect(chainSkipped).toEqual([5, 13, 14]);
+
+    // No line is announced skipped twice, whichever event carried it.
+    const all = [...returnSkipped, ...chainSkipped];
+    expect(new Set(all).size).toBe(all.length);
+  });
+});
+
+describe('a main-flow return walks past a guard without evaluating it', () => {
+  it('the skipped guard costs no model call and its tail never runs', async () => {
+    // The third interaction the composition has to get right: a `return` whose
+    // skipped range covers one of this story's guards. The guard is reported
+    // skipped like any other line — and crucially never VISITED, so the judge
+    // is not asked a question about a decision the run has already walked past.
+    const events = await collect({
+      steps: [
+        'Open the payments page',
+        'Return',
+        'If the Cash checkbox is ticked, then Pay with cash',
+        'Verify the order confirmation is shown',
+      ],
+      sourceLines: [3, 4, 5, 6],
+      testFilePath,
+      sections: {
+        'pay with cash': {
+          name: 'Pay with cash',
+          headingLine: 8,
+          steps: ['Click Pay now'],
+          stepLines: [9],
+        },
+      },
+    });
+
+    expect(judgeCalls).toEqual([]);
+    expect(executedSteps).toEqual(['Open the payments page']);
+    const skipped = events.filter((e) => e.type === 'step:skip').map((e) => e.line);
+    // The guard's line, its tail's line, and the step after the chain.
+    expect(skipped).toEqual([5, 9, 6]);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+});

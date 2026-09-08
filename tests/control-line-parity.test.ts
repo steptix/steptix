@@ -6,7 +6,9 @@ import {
   closedChainMemberMessage as cliClosed,
   danglingChainMemberMessage as cliDangling,
   chainMemberWord as cliWord,
+  chainAfterFlowControlMessage as cliAfterFlow,
 } from '../src/parser/control-line.js';
+import { parseFlowControlStep } from '../src/parser/flow-control-step.js';
 import {
   parseControlLine as coreParse,
   isControlLineClaim as coreClaims,
@@ -14,6 +16,7 @@ import {
   closedChainMemberMessage as coreClosed,
   danglingChainMemberMessage as coreDangling,
   chainMemberWord as coreWord,
+  chainAfterFlowControlMessage as coreAfterFlow,
 } from '../runner-core/dist/control-line.js';
 
 /**
@@ -100,6 +103,42 @@ const CORPUS = [
   'For each {{2nd}} in {{accounts}}, Check it',
   'For each {{account}}, Check it',
   'For each {{a}} in {{b}} Check it',
+
+  // ── the overlap with `If … then return` (stories/step-flow-control.md) ──
+  //
+  // Both grammars claim these, and flow control wins them — in the CLI parser
+  // by calling `parseFlowControlStep`, in the mirror by a hand copy of that
+  // regex, which is exactly the drift this suite exists to catch. The mirror
+  // is what decides whether the editor underlines `return` as a section call
+  // site, so a disagreement here shows up as a squiggle under a keyword.
+  'If the page title contains "Dashboard", then return',
+  'If the page title contains "Dashboard" then return',
+  'If the balance is zero, then stop here',
+  'If the list is empty, then stop running the remaining steps',
+  'When the dashboard is shown, then return',
+  // Case, and the `[no-hooks]` marker, on the same overlap.
+  'If X, then Return',
+  'IF X, THEN STOP HERE',
+  '[no-hooks] If X, then return',
+  // One trailing full stop, which the flow-control grammar drops and this one
+  // keeps — so the two normalisations have to agree about the claim anyway.
+  'If X, then return.',
+  // The near miss, and the whole reason the flow-control grammar is anchored:
+  // the trailing words leave it unmatched, so this IS a chain whose tail is
+  // the prose "return to the dashboard".
+  'If X, then return to the dashboard',
+  'If X, then stop the upload',
+  'If X, then retun',
+  // A bare return is claimed by neither: no control-line head matches it.
+  'Return',
+  'Stop here',
+  'Stop running the remaining steps',
+  // …but a bare return as somebody else's TAIL is a control line, because the
+  // guard is on the HEAD. The body is then an unconditional flow-control step,
+  // which is a sentence with one meaning.
+  'Otherwise, return',
+  'While the banner is visible, return',
+  'For each {{a}} in {{b}}, return',
 
   // ── prose, which must stay prose in both ──────────────────────────────
   'If a Remember this device prompt appears, click Not now',
@@ -242,5 +281,128 @@ describe('the closed-chain message is one wording, mirrored', () => {
     expect(message).toContain('follows an `Otherwise`, which ends a chain');
     expect(message).toContain('put any further alternative in an `Else if` above it');
     expect(cliClosed(CASES[2]!).startsWith('"Otherwise, Sec3"')).toBe(true);
+  });
+});
+
+describe('flow control wins the overlap, identically on both sides', () => {
+  // Rung 0 of the resolution order. The CLI parser asks
+  // `parseFlowControlStep`; the mirror carries a hand copy of that regex,
+  // because runner-core cannot import `src/`. The CORPUS above already
+  // compares the two on the overlapping lines — this says out loud WHICH way
+  // the overlap goes, so a future reader cannot mistake agreement for
+  // agreement on the wrong answer.
+  const FLOW_CONTROL = [
+    'If the page title contains "Dashboard", then return',
+    'If the page title contains "Dashboard" then return',
+    'If the balance is zero, then stop here',
+    'If the list is empty, then stop running the remaining steps',
+    'When the dashboard is shown, then return',
+    'If X, then Return',
+    'IF X, THEN STOP HERE',
+    '[no-hooks] If X, then return',
+    'If X, then return.',
+  ];
+  const STILL_CONTROL_LINES = [
+    // `$`-anchored, so the trailing words leave the flow-control grammar
+    // unmatched and this stays a chain whose tail is prose.
+    'If X, then return to the dashboard',
+    'If X, then stop the upload',
+    'If X, then retun',
+    // The guard is on the HEAD, so a bare return as a BODY is untouched.
+    'Otherwise, return',
+    'While the banner is visible, return',
+    'For each {{a}} in {{b}}, return',
+  ];
+
+  it('a flow-control line is no control line, in either implementation', () => {
+    for (const line of FLOW_CONTROL) {
+      expect(cliParse(line), line).toBeNull();
+      expect(coreParse(line), line).toBeNull();
+      expect(cliClaims(line), line).toBe(false);
+      expect(coreClaims(line), line).toBe(false);
+      expect(cliForm(line), line).toBeNull();
+      // …and it really is claimed by the other grammar, or this suite would
+      // pass just as well on a typo nobody claims.
+      expect(parseFlowControlStep(line.replace(/^\[no-hooks\]\s*/i, '')), line).not.toBeNull();
+    }
+  });
+
+  it('a near miss stays a control line, in either implementation', () => {
+    for (const line of STILL_CONTROL_LINES) {
+      expect(cliParse(line), line).not.toBeNull();
+      expect(coreParse(line), line).not.toBeNull();
+      expect(coreParse(line), line).toEqual(cliParse(line));
+    }
+    // The one the anchor exists for, spelled out: the tail is the prose, and
+    // it is the whole prose.
+    expect(cliParse('If X, then return to the dashboard')).toMatchObject({
+      kind: 'if',
+      condition: 'X',
+      tail: 'return to the dashboard',
+    });
+  });
+
+  it('a bare Return is neither: no control-line head matches it', () => {
+    for (const line of ['Return', 'Stop here', 'Stop running the remaining steps']) {
+      expect(cliClaims(line), line).toBe(false);
+      expect(coreClaims(line), line).toBe(false);
+      expect(parseFlowControlStep(line), line).not.toBeNull();
+    }
+  });
+});
+
+describe('the chain-after-flow-control message is one wording, mirrored', () => {
+  // The third refusal wording, added when the two features met. An `Otherwise`
+  // under an `If … then return` is refused in all three places the dangling
+  // rule is refused in, and has to read the same in each.
+  const CASES = [
+    {
+      line: 'Otherwise, Pay by card',
+      word: 'Otherwise',
+      previous: 'If the balance is zero then return',
+      where: 'tests/t.md:7',
+    },
+    {
+      line: 'Else if b, then Y',
+      word: 'Else if',
+      previous: 'If the list is empty, then stop here',
+      where: 'Line 11',
+    },
+    { line: 'Otherwise, Y', word: 'Otherwise', previous: 'Return' },
+  ];
+
+  it('character for character, on both sides', () => {
+    for (const args of CASES) {
+      expect(coreAfterFlow(args), args.line).toBe(cliAfterFlow(args));
+    }
+  });
+
+  it('and teaches the fix rather than restating the rule', () => {
+    const message = cliAfterFlow(CASES[0]!);
+    expect(message).toContain('tests/t.md:7 — ');
+    expect(message).toContain('"Otherwise, Pay by card"');
+    // It names the line above, which is the thing the author is looking at.
+    expect(message).toContain('"If the balance is zero then return"');
+    expect(message).toContain('ends the flow rather than choosing a branch');
+    // The teaching half: why no alternative is needed at all.
+    expect(message).toContain('already run only when the return did NOT fire');
+    expect(message).toContain('write the alternative as the next step');
+    expect(cliAfterFlow(CASES[2]!).startsWith('"Otherwise, Y"')).toBe(true);
+  });
+
+  it('is a different sentence from the plain dangling one', () => {
+    // Or the wording would be a rename rather than a rule: the dangling
+    // message says "no decision above you", which reads as a parser bug to
+    // someone looking straight at an `If`.
+    const after = cliAfterFlow(CASES[0]!);
+    const dangling = cliDangling({
+      line: CASES[0]!.line,
+      word: CASES[0]!.word,
+      flow: '## Steps',
+      where: CASES[0]!.where,
+    });
+    expect(after).not.toBe(dangling);
+    expect(dangling).toContain('has no decision to be the alternative of');
+    expect(after).not.toContain('has no decision to be the alternative of');
   });
 });

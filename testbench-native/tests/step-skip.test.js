@@ -92,7 +92,18 @@ test('both single-line surfaces carry the same glyph and the same separator', ()
 });
 
 test('a reason with no text still reads as a sentence, not a dangling dash', () => {
-  // Defensive: an older or hand-rolled server could send an empty reason. The
-  // line must still identify the line that did not run.
-  assert.equal(skipRunLogLine(12, ''), '◌ step 12 skipped — ');
+  // Defensive, and now literally what the title says. Two ways to arrive with
+  // no reason: an older or hand-rolled server sending an empty string, and the
+  // OTHER producer of a skipped step — `step:pass` carrying
+  // `output: 'skipped'`, whose event shape has no reason field at all
+  // (stories/control-flow.md). Both print the same sentence, and neither
+  // trails an em dash with nothing after it.
+  //
+  // This row used to assert the dangling dash it is named after, which is the
+  // shape of a test written from the implementation rather than from the
+  // sentence the reader gets.
+  assert.equal(skipRunLogLine(12, ''), '◌ step 12 skipped');
+  assert.equal(skipRunLogLine(12, '   '), '◌ step 12 skipped');
+  assert.equal(skipRunLogLine(12), '◌ step 12 skipped');
+  assert.equal(skipTestOutputLine(9, ' of login.md'), '◌ step on line 9 of login.md skipped');
 });

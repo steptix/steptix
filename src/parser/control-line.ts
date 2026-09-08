@@ -41,11 +41,36 @@
  * a step on the wire, so the server and the errand runner would otherwise see
  * `[no-hooks] If …, then …` and hand it to a model as prose.
  *
- * Kept import-free on purpose. `runner-core/src/control-line.ts` is a mirror
- * of the regexes below (runner-core cannot import `src/`), pinned by
- * `tests/control-line-parity.test.ts`, and a mirror is cheapest to keep honest
- * when the original depends on nothing.
+ * **Flow control wins the overlap.** `If the page title contains "Dashboard"
+ * then return` is claimed by BOTH grammars — it is an `If … then <tail>` here,
+ * and a conditional `return` in `flow-control-step.ts`. It is flow control, in
+ * every reader, and this module is where that is decided: rung 0 of the
+ * resolution order, ahead of everything above. The alternative — resolving it
+ * per caller — is a rule that has to be right in eight places and reads
+ * differently in each, and the failure mode is the worst one available: the
+ * line would dispatch as a chain, its `return` action would be refused for
+ * want of a `flowControlClaim`, and the steps the author expected to be
+ * skipped would all run and pass.
+ *
+ * Only a line the flow-control grammar matches WHOLE is taken: its expression
+ * is `$`-anchored, so `If x, then return to the dashboard` stays a chain whose
+ * tail is prose, which is what an author means by it. And the guard is on the
+ * head only — `Otherwise, return` and `While x, return` are still control
+ * lines whose BODY is a bare return, which is a sentence with an obvious
+ * meaning and no ambiguity in it.
+ *
+ * The one import, and why it is worth breaking the rule below: the check has
+ * to be the same answer as the executor's, and a second copy of that grammar
+ * in this file could drift from `flow-control-step.ts` silently. Both modules
+ * are themselves import-free, so nothing else follows.
+ *
+ * Otherwise kept import-free on purpose. `runner-core/src/control-line.ts` is
+ * a mirror of the regexes below (runner-core cannot import `src/`), pinned by
+ * `tests/control-line-parity.test.ts` — including this guard, which the mirror
+ * has to duplicate the shape of — and a mirror is cheapest to keep honest when
+ * the original depends on almost nothing.
  */
+import { parseFlowControlStep } from './flow-control-step.js';
 
 export type ControlLine =
   | { kind: 'if' | 'elseif'; condition: string; tail: string }
@@ -79,6 +104,18 @@ const NO_HOOKS_PREFIX = /^\[no-hooks\]\s*/i;
 /** The instruction as the grammar sees it: trimmed, marker removed. */
 function normalise(instruction: string): string {
   return instruction.trim().replace(NO_HOOKS_PREFIX, '').trim();
+}
+
+/**
+ * True when the flow-control grammar claims the WHOLE line — the one case
+ * this module declines outright (see the file docstring).
+ *
+ * `parseFlowControlStep` normalises the line itself (including the trailing
+ * full stop, which `normalise` above deliberately keeps), so it is handed the
+ * already-normalised text and does the rest.
+ */
+export function isFlowControlLine(instruction: string): boolean {
+  return parseFlowControlStep(instruction) !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +279,45 @@ export function closedChainMemberMessage(args: { line: string; where?: string })
   );
 }
 
+/**
+ * The one wording for an `Else if` / `Otherwise` written under a FLOW-CONTROL
+ * step — `If the balance is zero then return` and an `Otherwise` beneath it
+ * (stories/control-flow.md §"Composition with `If … then return`").
+ *
+ * Its own sentence rather than the dangling one above, because "has no
+ * decision to be the alternative of" is true but useless here: the author is
+ * looking straight at a line that starts `If`, and being told there is no
+ * decision above it reads as a parser bug. What they need to know is that this
+ * shape does not need an `Otherwise` at all — a return either fires or it does
+ * not, and the steps below it already run only in the second case. So the
+ * refusal names the line above, says why it is not a decision, and gives the
+ * one-line fix.
+ *
+ * Refused in the same three places the dangling rule is refused in — the CLI
+ * parser, the expander (the wire path's only parser) and runner-core's
+ * pre-flight — and mirrored in `runner-core/src/control-line.ts` under the
+ * same parity assertion, for the same reason: three refusals blaming one line
+ * in three different sentences is how an author learns to distrust all three.
+ */
+export function chainAfterFlowControlMessage(args: {
+  line: string;
+  /** `'Else if'` or `'Otherwise'` — whichever the author wrote. */
+  word: string;
+  /** The flow-control line on the previous step line. */
+  previous: string;
+  where?: string;
+}): string {
+  const prefix = args.where ? `${args.where} — ` : '';
+  return (
+    `${prefix}"${args.line}" follows "${args.previous.trim()}", which ends ` +
+    `the flow rather than choosing a branch, so there is no decision for an ` +
+    `\`${args.word}\` to be the alternative of. The steps after a ` +
+    `\`then return\` / \`then stop\` already run only when the return did ` +
+    `NOT fire — write the alternative as the next step, with no ` +
+    `\`${args.word}\` in front of it.`
+  );
+}
+
 /** The word a chain member is named by in a diagnostic. */
 export function chainMemberWord(kind: ChainKind): string {
   return kind === 'elseif' ? 'Else if' : 'Otherwise';
@@ -251,6 +327,13 @@ export function chainMemberWord(kind: ChainKind): string {
  *  Exported for diagnostics that want to say what the author reached for. */
 export function claimedControlForm(instruction: string): ControlKind | null {
   const s = normalise(instruction);
+
+  // Rung 0: a line the flow-control grammar claims whole is flow control and
+  // nothing else — see the file docstring. `parseControlLine` asks the same
+  // question at its own head, rather than deferring to this one, because the
+  // two entry points are independent by design and a reader of either should
+  // find the rule in it.
+  if (isFlowControlLine(s)) return null;
 
   if (ELSE_IF_HEAD_RE.test(s)) return 'elseif';
   if (ELSE_HEAD_RE.test(s)) return 'else';
@@ -304,6 +387,11 @@ export function parseControlLineAt(
   instruction: string,
 ): (ControlLine & { tailStart: number }) | null {
   const s = normalise(instruction);
+
+  // Rung 0 — see the file docstring. `If x, then return` is flow control, so
+  // it is not a chain head, its `then` is not a split, and no tail of it is a
+  // section call site.
+  if (isFlowControlLine(s)) return null;
 
   // `Else if` / `Otherwise if` before the bare `Else`, or the longer form can
   // never be reached.

@@ -96,3 +96,65 @@ test("nobody compares output to the sentinel by hand any more", () => {
   });
   assert.deepEqual(offenders, []);
 });
+
+/**
+ * The OTHER producer of a skipped step, and why these two suites sit together.
+ *
+ * A step that never ran reaches the client two ways: this file's
+ * `step:pass` + `output: 'skipped'`, and the `step:skip` event
+ * `stories/step-flow-control.md` added, which carries a reason. Neither is
+ * going away — the extension is an HTTP client of whichever server the
+ * workspace points at, so dropping the older convention would repaint the
+ * untaken branch green against a server that had not been restarted.
+ *
+ * What IS single: the sentence. Both producers print one glyph and one wording
+ * (`step-skip-core.ts`, mirrored into `failure-text-inline.js` for the
+ * webview). They had already drifted once — `— step 12 skipped` on one path
+ * and `◌ step 12 skipped — …` on the other, in adjacent branches of the same
+ * `if` — which is exactly what a merge of two features that never met produces
+ * and exactly what nobody notices in review.
+ */
+test("both producers of a skipped step print the one wording", () => {
+  const LINE_BUILDERS = /\b(skipRunLogLine|skipCompileLogLine|skipTestOutputLine|skipPanelLine)\s*\(/g;
+  for (const rel of Object.keys(CONSUMERS)) {
+    const text = fs.readFileSync(path.join(SRC, rel), "utf-8");
+    // Each of these files logs or paints; the gutter files paint, so a file
+    // with no line builder must be one that only sets a status.
+    const builds = countOf(text, LINE_BUILDERS);
+    const paints = /skipPaintsOver\s*\(/.test(text);
+    assert.ok(
+      builds > 0 || paints,
+      `${rel} reports a skipped step without using the shared wording or the shared paint rule`,
+    );
+  }
+});
+
+test("no source file hand-rolls a skipped-step sentence", () => {
+  // The glyph, or the word, written next to a line number by hand. The two
+  // modules that OWN the sentence are the exception.
+  const OWNERS = ["extension/step-skip-core.ts", "webview/lib/failure-text-inline.js"];
+  const offenders = sourceFiles().filter((rel) => {
+    if (OWNERS.includes(rel)) return false;
+    const text = fs.readFileSync(path.join(SRC, rel), "utf-8");
+    // A template literal that puts `skipped` after an interpolated line
+    // number is the shape both drifted copies had.
+    return /`[^`]*\$\{[^}]*\.line\}[^`]*skipped/i.test(text);
+  });
+  assert.deepEqual(offenders, []);
+});
+
+test("the paint rule is asked by every path that can write a skip status", () => {
+  // A ✗ is the one status a run must not lose, and it is `skipPaintsOver` that
+  // says so. Both the `step:skip` handler and the `isSkippedPass` branch of
+  // `step:pass` go through it — the second did not, until the two features
+  // were merged, so a chain's untaken half could overwrite a red step from an
+  // earlier pass through the same body.
+  const text = fs.readFileSync(path.join(SRC, "extension/extension.ts"), "utf-8");
+  const guards = countOf(text, /skipPaintsOver\s*\(/g);
+  const writes = countOf(text, /['"]skip['"]/g);
+  assert.ok(
+    guards >= 4,
+    `extension.ts guards ${guards} skip paints; both gutters have a step:skip AND a ` +
+      `step:pass path, so all four must ask (found ${writes} mentions of the status)`,
+  );
+});

@@ -525,17 +525,25 @@ export class UIRunnerAdapter {
     const flushSkips = (before: number | 'all'): void => {
       const due = before === 'all' ? skipQueue.takeAll() : skipQueue.take(before);
       for (const k of due) {
+        const reason = skipReasons.get(k) ?? 'Skipped';
         const result = skippedResult({
           index: k + 1,
           instruction: parsedTest.steps[k] ?? '',
-          reason: skipReasons.get(k) ?? 'Skipped',
+          reason,
           loop: loops.markerFor(k),
         });
         this.stepResults.push(result);
         // `skipped`, not `passed`: the untaken half of a decision is the one
         // thing a chain leaves behind for the reader, and painting it green
-        // says the opposite of what happened.
-        this.emit('runner:step-complete', { stepIndex: k + 1, status: 'skipped', durationMs: 0 });
+        // says the opposite of what happened. The reason rides along on the
+        // same field a `return`'s skips use, so the renderer's log says why
+        // in one sentence whichever kind of skip this was.
+        this.emit('runner:step-complete', {
+          stepIndex: k + 1,
+          status: 'skipped',
+          durationMs: 0,
+          reason,
+        });
       }
     };
     /**

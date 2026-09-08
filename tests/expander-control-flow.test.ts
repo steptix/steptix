@@ -6,6 +6,7 @@ import { expandSkills, clearSkillCache } from '../src/skills/expander.js';
 import { parseTestContent } from '../src/parser/markdown.js';
 import {
   closedChainMemberMessage,
+  chainAfterFlowControlMessage,
   danglingChainMemberMessage,
 } from '../src/parser/control-line.js';
 import { logger } from '../src/utils/logger.js';
@@ -682,6 +683,60 @@ describe('a dangling chain member is refused here too', () => {
       doc('1. If a, then X', '2. Else if b, then Y', '3. Otherwise, Z'),
     );
     const ids = [controls[0], controls[2], controls[4]].map((c) => (c as { chainId: string }).chainId);
+    expect(new Set(ids).size).toBe(1);
+  });
+});
+
+/**
+ * An `Else if` / `Otherwise` under an `If … then return`
+ * (stories/control-flow.md §"Composition with `If … then return`").
+ *
+ * The third refusal in this family, and the one an author actually writes: the
+ * line above opens `If`, so the plain dangling sentence reads as a parser bug.
+ * Refused in the same three places — the CLI parser, here, and runner-core's
+ * pre-flight — in one wording, because an author who meets it in TestBench and
+ * then again from the CLI must read the same sentence about the same line.
+ */
+describe('a chain member under a flow-control step is refused here too', () => {
+  it('an Otherwise under an `If … then return`', async () => {
+    await expect(
+      expandInline(doc('1. If the balance is zero, then return', '2. Otherwise, Y')),
+    ).rejects.toThrow(/ends the flow rather than choosing a branch/);
+  });
+
+  it('an Else if under a `then stop here`', async () => {
+    await expect(
+      expandInline(doc('1. If the list is empty, then stop here', '2. Else if b, then Y')),
+    ).rejects.toThrow(/ends the flow rather than choosing a branch/);
+  });
+
+  it('an Otherwise under an unconditional Return', async () => {
+    // `Return` is a flow-control step too, and one whose `Otherwise` is even
+    // less meaningful — nothing was decided at all.
+    await expect(expandInline(doc('1. Return', '2. Otherwise, Y'))).rejects.toThrow(
+      /ends the flow rather than choosing a branch/,
+    );
+  });
+
+  it('the parser`s wording, character for character', async () => {
+    const expected = chainAfterFlowControlMessage({
+      line: 'Otherwise, Y',
+      word: 'Otherwise',
+      previous: 'If the balance is zero, then return',
+      where: '/t/inline.md:6',
+    });
+    await expect(
+      expandInline(doc('1. If the balance is zero, then return', '2. Otherwise, Y')),
+    ).rejects.toThrow(expected);
+  });
+
+  it('a near miss is a chain head, so the Otherwise under it expands', async () => {
+    // `then return to the dashboard` is a chain whose tail is prose, so this
+    // is a well-formed two-member decision.
+    const { controls } = await expandInline(
+      doc('1. If a, then return to the dashboard', '2. Otherwise, Z'),
+    );
+    const ids = [controls[0], controls[2]].map((c) => (c as { chainId: string }).chainId);
     expect(new Set(ids).size).toBe(1);
   });
 });

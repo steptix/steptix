@@ -792,6 +792,13 @@ class RunControllerRegistry implements vscode.Disposable {
               : ev.fromCache
                 ? 'pass-cached'
                 : 'pass';
+          // The same precedence a `step:skip` gets, and for the same reason:
+          // a ✗ is the one status a run must not lose, and the two producers
+          // of a skipped step must not disagree about that
+          // (`skipPaintsOver`, step-skip-core.ts).
+          if (status === 'skip' && !skipPaintsOver(this.tracker.state(target).statuses.get(ev.line))) {
+            break;
+          }
           // A ⚠ pins the code-behind crash to the line, so the hover and the
           // panel row can say WHAT threw, not just that something did. No
           // `error`: the STEP passed, it is the entry that failed.
@@ -1005,28 +1012,34 @@ class RunControllerRegistry implements vscode.Disposable {
         case 'step:start':
           this.tracker.setStatus(uri, ev.line, 'running');
           break;
-        case 'step:pass':
+        case 'step:pass': {
+          // A compile of a file with a chain is allowed — its steps run at
+          // most once — and the Record run emits `step:pass output:'skipped'`
+          // for the untaken branch. Same rule as the run gutter above: the
+          // step did not run, so it is not a ✓, and like a `step:skip` it
+          // never paints over a ✗.
+          const status = isSkippedPass(ev)
+            ? 'skip'
+            : ev.codeBehindStale
+              ? 'pass-stale'
+              : ev.fromCodeBehind
+                ? 'pass-code-behind'
+                : ev.fromCache
+                  ? 'pass-cached'
+                  : 'pass';
+          if (status === 'skip' && !skipPaintsOver(this.tracker.state(uri).statuses.get(ev.line))) {
+            break;
+          }
           this.tracker.setStatus(
             uri,
             ev.line,
-            // A compile of a file with a chain is allowed — its steps run at
-            // most once — and the Record run emits `step:pass output:'skipped'`
-            // for the untaken branch. Same rule as the run gutter above: the
-            // step did not run, so it is not a ✓.
-            isSkippedPass(ev)
-              ? 'skip'
-              : ev.codeBehindStale
-                ? 'pass-stale'
-                : ev.fromCodeBehind
-                  ? 'pass-code-behind'
-                  : ev.fromCache
-                    ? 'pass-cached'
-                    : 'pass',
+            status,
             ev.codeBehindStale
               ? stepFailureDetail({ codeBehindStale: ev.codeBehindStale })
               : undefined,
           );
           break;
+        }
         case 'step:fail':
           // A Replay's red step is the compile's whole point (strict mode:
           // broken code fails instead of healing) — pin the error so the ✗

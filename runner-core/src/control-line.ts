@@ -43,6 +43,34 @@ function normalise(instruction: string): string {
   return instruction.trim().replace(NO_HOOKS_PREFIX, '').trim();
 }
 
+/**
+ * The flow-control grammar's whole-line shape — a hand copy of
+ * `FLOW_CONTROL_RE` in `src/parser/flow-control-step.ts`, which runner-core
+ * cannot import any more than it can import the module this file mirrors.
+ *
+ * `If the page title contains "Dashboard" then return` is claimed by both
+ * grammars, and flow control wins it (stories/control-flow.md §"Composition
+ * with `If … then return`"). The CLI parser decides that by calling
+ * `parseFlowControlStep`; here it is a second copy, and
+ * `tests/control-line-parity.test.ts` is what keeps the two agreeing — the
+ * corpus carries `If X, then return`, `then stop here`, `then stop running the
+ * remaining steps`, `then Return` and the near miss `then return to the
+ * dashboard`, which the `$` anchor leaves as an ordinary chain.
+ *
+ * Only the *whole-line* claim matters to this file, so the captures are
+ * dropped: what a caller here needs to know is that the line is not a control
+ * line, never what verb it used.
+ */
+const FLOW_CONTROL_RE =
+  /^(?:(?:if|when)\s+(?:.+?)(?:\s*,\s*(?:then\s+|and\s+)?|\s+then\s+|\s+and\s+))?(?:return|stop)(?:\s+here|\s+running\s+the(?:\s+(?:rest\s+of\s+the|remaining|below|following))?\s+steps)?$/i;
+
+/** True when the flow-control grammar claims the whole line. The trailing
+ *  full stop comes off here, matching `normalise` in `flow-control-step.ts`;
+ *  exactly one, so `Return...` stays prose. */
+export function isFlowControlLine(instruction: string): boolean {
+  return FLOW_CONTROL_RE.test(normalise(instruction).replace(/\.$/, '').trim());
+}
+
 /** `Else if` / `Otherwise if`, with NO comma between the two words — the comma
  *  is what makes `Otherwise, if the banner appears, dismiss it` an `Otherwise`
  *  whose tail is a watch step. */
@@ -74,6 +102,9 @@ const FOREACH_RE =
 export function claimedControlForm(instruction: string): ControlKind | null {
   const s = normalise(instruction);
 
+  // Rung 0: flow control wins the overlap — see `isFlowControlLine`.
+  if (isFlowControlLine(s)) return null;
+
   if (ELSE_IF_HEAD_RE.test(s)) return 'elseif';
   if (ELSE_HEAD_RE.test(s)) return 'else';
 
@@ -101,6 +132,11 @@ export function isControlLineClaim(instruction: string): boolean {
  *  line that claimed a form and failed to complete it). */
 export function parseControlLine(instruction: string): ControlLineHit | null {
   const s = normalise(instruction);
+
+  // Rung 0: flow control wins the overlap — see `isFlowControlLine`. So a
+  // `then return` tail is not a section call site, and `section-index.ts` will
+  // not underline `return` as a near miss.
+  if (isFlowControlLine(s)) return null;
 
   const elseIfHead = ELSE_IF_HEAD_RE.exec(s);
   if (elseIfHead) return conditionThenTail(s, elseIfHead[0].length, 'elseif');
@@ -250,6 +286,29 @@ export function closedChainMemberMessage(args: { line: string; where?: string })
     `${prefix}"${args.line}" follows an \`Otherwise\`, which ends a chain. ` +
     `A decision has at most one \`Else\` / \`Otherwise\`, and it comes ` +
     `last; put any further alternative in an \`Else if\` above it.`
+  );
+}
+
+/**
+ * The one wording for an `Else if` / `Otherwise` written under a FLOW-CONTROL
+ * step — the mirror of `chainAfterFlowControlMessage` in
+ * `src/parser/control-line.ts`, mirrored for the reason the two sentences
+ * above it are, and pinned by `tests/control-line-parity.test.ts`.
+ */
+export function chainAfterFlowControlMessage(args: {
+  line: string;
+  word: string;
+  previous: string;
+  where?: string;
+}): string {
+  const prefix = args.where ? `${args.where} — ` : '';
+  return (
+    `${prefix}"${args.line}" follows "${args.previous.trim()}", which ends ` +
+    `the flow rather than choosing a branch, so there is no decision for an ` +
+    `\`${args.word}\` to be the alternative of. The steps after a ` +
+    `\`then return\` / \`then stop\` already run only when the return did ` +
+    `NOT fire — write the alternative as the next step, with no ` +
+    `\`${args.word}\` in front of it.`
   );
 }
 

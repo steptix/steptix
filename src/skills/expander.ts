@@ -8,12 +8,14 @@ import { logger } from '../utils/logger.js';
 import { parseSkillCall as parseSkillCallSyntax } from './skill-call-parser.js';
 import { parseSetStep, substitutePreservingSet } from '../parser/set-step.js';
 import {
+  chainAfterFlowControlMessage,
   chainMemberWord,
   closedChainMemberMessage,
   danglingChainMemberMessage,
   isControlLineClaim,
   parseControlLine,
 } from '../parser/control-line.js';
+import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import type { ControlRecord } from '../runner/control-flow.js';
 
 // Re-exported so a consumer of the expansion has one import for the whole
@@ -665,6 +667,13 @@ async function expandRecursive(
   /** Whether the chain the previous step line belonged to has already had its
    *  `Otherwise`. Read and cleared exactly as `openChain` is. */
   let chainClosed = false;
+  /** The previous step line when it was a FLOW-CONTROL step — the one kind of
+   *  `If` that is not a decision. Read and cleared exactly as `openChain` is,
+   *  and set from the ONE place a flow-control step can be recognised on this
+   *  path: rung 0 declines it as a control line, so it falls through to the
+   *  ordinary-step branch (stories/control-flow.md §"Composition with
+   *  `If … then return`"). */
+  let openFlowControl: string | null = null;
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]!;
@@ -673,11 +682,17 @@ async function expandRecursive(
     // chain member leaves it null, and only the control branch sets it again.
     const previousChain: string | null = openChain;
     const previousClosed = chainClosed;
+    const previousFlowControl = openFlowControl;
     openChain = null;
     chainClosed = false;
+    openFlowControl = null;
     const call = parseSkillCall(step);
     const matchSide = matchInput({ steps, rawSteps: ctx.rawSteps }, i);
     const control = ctx.controlFlow ? parseControlLine(matchSide) : null;
+    // Remembered for the NEXT line, which is the only one that can be wrong
+    // about it. `parseControlLine` has already declined this line at rung 0,
+    // so the two are mutually exclusive by construction.
+    if (ctx.controlFlow && parseFlowControlStep(matchSide)) openFlowControl = matchSide;
     // A hook scope is the one step list control flow does not reach
     // (`opts.expandControlLines`), and until now it said so to nobody: the
     // line simply became prose, so an author who wrote a decision in
@@ -936,6 +951,22 @@ async function expandRecursive(
             // of its own would be selected by its own fallback and run its tail
             // unconditionally. Refusing costs a failed run; not refusing runs
             // the branch the author wrote as the alternative to something else.
+            // The dangling rule's first case, and the one an author actually
+            // writes: the line above IS an `If`, but a flow-control one, which
+            // ends the flow rather than choosing a branch. Its own sentence,
+            // or "no decision above you" reads as a parser bug to someone
+            // looking straight at an `If` (stories/control-flow.md
+            // §"Composition with `If … then return`").
+            if (control.kind !== 'if' && previousFlowControl !== null) {
+              throw new Error(
+                chainAfterFlowControlMessage({
+                  line: matchSide,
+                  word: chainMemberWord(control.kind),
+                  previous: previousFlowControl,
+                  where: `${ctx.sectionsFilePath}${stepLines?.[i] ? `:${stepLines[i]}` : ''}`,
+                }),
+              );
+            }
             if (control.kind !== 'if' && previousChain === null) {
               throw new Error(
                 danglingChainMemberMessage({

@@ -15,6 +15,7 @@ import { parseToolCall } from '../tools/tool-call-parser.js';
 import { parseSetStep, setStepError, substitutePreservingSet } from './set-step.js';
 import { parseFlowControlStep, flowControlInHookError } from './flow-control-step.js';
 import {
+  chainAfterFlowControlMessage,
   chainMemberWord,
   closedChainMemberMessage,
   controlLineError,
@@ -942,15 +943,23 @@ function validateControlFlow(
 ): void {
   /** The chain member on the PREVIOUS step line, or null. */
   let previous: ControlLine | null = null;
+  /** The previous step line when it was a FLOW-CONTROL step — the one kind of
+   *  `If` that is not a decision, and the one an author is most likely to
+   *  write an `Otherwise` under (stories/control-flow.md §"Composition with
+   *  `If … then return`"). Null on every other line, chain members included. */
+  let previousFlowControl: string | null = null;
   /** Whether the open chain has already had its `Otherwise`. */
   let closed = false;
 
   for (let i = 0; i < rawSteps.length; i++) {
     const raw = rawSteps[i]!;
     const at = ` in ${filePath}${stepLines[i] ? ` at line ${stepLines[i]}` : ''}`;
+    // Read before the line is judged, and carried to the NEXT iteration.
+    const flowControlHere = parseFlowControlStep(raw) !== null;
 
     if (sectionNames.has(matchText(raw))) {
       previous = null;
+      previousFlowControl = null;
       closed = false;
       continue;
     }
@@ -961,6 +970,10 @@ function validateControlFlow(
     const control = parseControlLine(raw);
     if (!control) {
       previous = null;
+      // A flow-control step is not a control line — `parseControlLine`
+      // declines it at rung 0 — so this is the branch it lands in, and the
+      // only place its text can be remembered for the line below.
+      previousFlowControl = flowControlHere ? raw : null;
       closed = false;
       continue;
     }
@@ -968,6 +981,11 @@ function validateControlFlow(
     const where = `${filePath}${stepLines[i] ? `:${stepLines[i]}` : ''}`;
     if (control.kind === 'elseif' || control.kind === 'else') {
       const word = chainMemberWord(control.kind);
+      if (previousFlowControl !== null) {
+        throw new Error(
+          chainAfterFlowControlMessage({ line: raw, word, previous: previousFlowControl, where }),
+        );
+      }
       if (previous === null) {
         throw new Error(danglingChainMemberMessage({ line: raw, word, flow, where }));
       }
@@ -985,6 +1003,8 @@ function validateControlFlow(
     const chained =
       control.kind === 'if' || control.kind === 'elseif' || control.kind === 'else';
     previous = chained ? control : null;
+    // A control line is never flow control (rung 0), so this always clears.
+    previousFlowControl = null;
     if (!chained) closed = false;
 
     const tail = control.tail;
