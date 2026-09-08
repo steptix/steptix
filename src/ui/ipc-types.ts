@@ -30,7 +30,9 @@ export type RunState =
 export interface StepOutput {
   stepIndex: number;
   instruction: string;
-  status: 'pending' | 'running' | 'passed' | 'failed';
+  /** `skipped` is a step a `return` / `stop` left behind
+   *  (stories/step-flow-control.md) — it never ran and never will. */
+  status: 'pending' | 'running' | 'passed' | 'failed' | 'skipped';
   aiReasoning: string;
   aiInteractions: AiInteraction[];
   subActions: SubActionResult[];
@@ -61,9 +63,14 @@ export interface MainToRendererEvents {
   };
   'runner:step-complete': {
     stepIndex: number;
-    status: 'passed' | 'failed';
+    /** `skipped` carries no failure: the step was left behind by a `return`
+     *  and its `error` is absent (stories/step-flow-control.md). */
+    status: 'passed' | 'failed' | 'skipped';
     durationMs: number;
     error?: string;
+    /** Why a skipped step never ran, e.g. `Not run: step 3 returned from
+     *  "Sign in"`. Set only with `status: 'skipped'`. */
+    reason?: string;
   };
   'runner:subaction': {
     stepIndex: number;

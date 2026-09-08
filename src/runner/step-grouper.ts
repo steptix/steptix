@@ -7,6 +7,7 @@
  * simultaneously rather than evaluating them sequentially.
  */
 import { parseSetStep } from '../parser/set-step.js';
+import { parseFlowControlStep } from '../parser/flow-control-step.js';
 
 /** A single step reference within a group */
 export interface GroupedStep {
@@ -40,6 +41,12 @@ export interface StepGroup {
 export function isConditionalStep(instruction: string): boolean {
   // Strip leading [prefix] markers
   const stripped = instruction.replace(/^\[.*?\]\s*/gi, '').trim();
+  // A flow-control step is never a conditional, even though it opens `If`
+  // (stories/step-flow-control.md, decision 7). Grouping one would hand it to
+  // `executeBranchedStep`, which runs the matched conditional AND the
+  // continuation in a single call — so the very step the return exists to
+  // skip would run immediately after it.
+  if (parseFlowControlStep(stripped)) return false;
   return /^(if\s|when\s(prompted|asked))/i.test(stripped);
 }
 
@@ -96,7 +103,16 @@ export function identifyStepGroups(steps: string[]): Map<number, StepGroup> {
     // So: emit no group. The conditionals run as ordinary AI steps, which is
     // what they were before grouping existed, and the assignment runs as
     // itself. Nothing jumps, so nothing can be skipped.
-    if (i < steps.length && parseSetStep(steps[i]!)) continue;
+    // A flow-control step takes the SAME exemption, for the same reason
+    // (stories/step-flow-control.md, decision 7). `isConditionalStep` already
+    // refuses to collect one as a conditional; this is the other half —
+    // swallowing it as the CONTINUATION would jump `i` past it, so the step
+    // that was meant to end the flow would never run and the steps it was
+    // meant to skip would all run instead. A green report for work that did
+    // not happen is the one failure direction this codebase treats as worst,
+    // and this is the shape that produces it. Emit no group: the conditionals
+    // before it run as ordinary AI steps, and the return runs as itself.
+    if (i < steps.length && (parseSetStep(steps[i]!) || parseFlowControlStep(steps[i]!))) continue;
 
     let continuation: GroupedStep;
     if (i < steps.length) {

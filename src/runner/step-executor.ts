@@ -43,11 +43,12 @@ import {
   type PlaceholderValues,
 } from './placeholder-substitution.js';
 import { referencedVariableNames } from '../skills/expander.js';
+import type { ParsedFlowControlStep } from '../parser/flow-control-step.js';
 import { envDataRefsIn, resolveEnvDataRef } from '../parser/interpolate-env-data.js';
 import { parseOutputPrefixes, buildEnrichedInstruction } from '../server/run-helpers.js';
 import { redact, runSecrets } from '../utils/secrets.js';
 import type { CodeBehindBinding } from '../codebehind/loader.js';
-import { entrySourceText, runCodeBehindEntry } from '../codebehind/execute.js';
+import { entrySourceText, runCodeBehindEntry, EXIT_NOT_CLAIMED } from '../codebehind/execute.js';
 import { makeBrowserApi, makeTabApi } from '../codebehind/tabs.js';
 import type { EnvDataContext } from '../parser/interpolate-env-data.js';
 import type { StepGroup } from './step-grouper.js';
@@ -247,7 +248,42 @@ export interface StepExecutorOptions {
    * Absent on a run with no test file, where only absolute paths resolve.
    */
   uploadPaths?: UploadPathContext;
+  /**
+   * This step's text claims the `If … then return` / `… then stop` form —
+   * `parseFlowControlStep(<authored line>)`, computed by the run loop
+   * (stories/step-flow-control.md, decision 2).
+   *
+   * It is the ONLY thing that lets a `return` action through. Set, a `return`
+   * ends the step passed with `flowControl` on the result and the loop skips
+   * the rest of the flow; absent, the sub-action fails with
+   * {@link RETURN_NOT_CLAIMED} and the model is told why on its next attempt.
+   * Without that guard a model could end a run early from any line, and the
+   * report would be green for work not done.
+   *
+   * Only the CONDITIONAL form ever reaches here: the unconditional `Return` /
+   * `Stop` is dispatched by the loop with no model call at all (decision 3).
+   * A claim carrying a `body` also turns on the settle gate below.
+   *
+   * `| undefined` explicitly (`exactOptionalPropertyTypes` is on) so a caller
+   * forwarding someone else's options can CLEAR it — `{ ...opts,
+   * flowControlClaim: undefined }` — rather than having to rebuild the object
+   * to leave the key out. Every such site is a step that is not the claiming
+   * step, and the clear is the whole guard for it.
+   */
+  flowControlClaim?: ParsedFlowControlStep | undefined;
 }
+
+/**
+ * What a `return` action is refused with on a step that did not ask for one
+ * (stories/step-flow-control.md, decision 2).
+ *
+ * Retryable on purpose: it comes back to the model as prior-failure context,
+ * which is how it learns the rule mid-step rather than after the run.
+ */
+export const RETURN_NOT_CLAIMED =
+  'this step does not say to return — only a step written as ' +
+  '"If <condition> then return" (or "… then stop"), or a step that is just ' +
+  '"Return"/"Stop", may end the flow. Do what this step asks instead.';
 
 /** Extract text-only content from a ChatMessage (strips base64 image blocks) */
 function extractTextFromMessage(msg: ChatMessage): string {
@@ -427,6 +463,35 @@ export function isExtractionStep(instruction: string): boolean {
 }
 
 /**
+ * The action cache, minus the one step it must never touch.
+ *
+ * A flow-control step's whole job is to JUDGE a condition against the live page
+ * (stories/step-flow-control.md, decision 2): the model answers `return` when
+ * it holds and `noop` when it does not. The cache replays turn 1 verbatim, so a
+ * cached `return` is a decision taken against a page that is no longer there —
+ * run 1 signs in and the condition holds, run 2 lands on a different page and
+ * the cache HITs anyway, with no model call and no page read. The rest of the
+ * flow is skipped and the run reports green for work nobody did, which is the
+ * failure direction this codebase treats as worst.
+ *
+ * Read AND write, at one seam so all four loops are covered: withholding the
+ * read alone would leave run 1 writing an entry that a later run with the
+ * feature disabled would replay. `cacheEnabledForRun` in test-runner.ts and the
+ * server's equivalent already exempt data rows for the neighbouring reason;
+ * this is the same exemption, taken where the claim is known.
+ *
+ * A FUNCTION rather than a local const because "one seam" has to mean it: the
+ * assertion cache is read and written from `executeStepAttempt`, a different
+ * module-level function, and it spent this feature's first round consulting
+ * `opts.cacheEnabled` directly — so a flow-control step whose model emitted an
+ * `assert` sub-action still cached a judgement about a live page, under a
+ * comment saying it could not.
+ */
+function cacheEnabledFor(opts: StepExecutorOptions): boolean {
+  return opts.cacheEnabled === true && opts.flowControlClaim === undefined;
+}
+
+/**
  * Execute a single test step with retry logic.
  * Returns a StepResult regardless of pass/fail.
  *
@@ -483,8 +548,10 @@ export async function executeStep(
   const withStale = (result: StepResult): StepResult =>
     staleAfterHeal ? { ...result, codeBehindStale: staleAfterHeal } : result;
 
+  const cacheEnabled = cacheEnabledFor(opts);
+
   // --- Cache attempt (before normal AI flow) ---
-  if (opts.stepCache && opts.cacheEnabled) {
+  if (opts.stepCache && cacheEnabled) {
     const cached = await opts.stepCache.read(cacheKey, opts.resolvedParameters ?? {});
     if (cached) {
       logger.info(`Cache HIT for step ${stepIndex} — replaying ${cached.length} cached turn(s)`);
@@ -571,7 +638,7 @@ export async function executeStep(
     });
 
     // Write all turns to cache on success (non-assertion steps only)
-    if (opts.stepCache && opts.cacheEnabled && cacheCapture.turns.length > 0) {
+    if (opts.stepCache && cacheEnabled && cacheCapture.turns.length > 0) {
       await opts.stepCache.write(
         cacheKey,
         cacheCapture.turns,
@@ -739,6 +806,10 @@ async function runCodeBehindStep(
     ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }),
     ...(opts.codeBehindPauseBeforeRun && { pauseBeforeRun: true }),
     ...(opts.uploadPaths !== undefined && { uploadPaths: opts.uploadPaths }),
+    // What lets this entry call `step.exit()` (stories/step-flow-control.md,
+    // decision 11). The claim is the authored line's, computed by the run loop,
+    // so a compiled return is legal exactly where the AI `return` action is.
+    ...(opts.flowControlClaim !== undefined && { flowControlClaim: opts.flowControlClaim }),
     label: `codebehind:${stepIndex}`,
   });
 
@@ -757,6 +828,12 @@ async function runCodeBehindStep(
   // A `step.filePath` that could not resolve is not broken code: the entry is
   // fine and the file is missing, so healing under AI would spend a turn and
   // throw away a working entry for nothing.
+  //
+  // A `step.exit()` is not broken code either, and it is covered twice over
+  // (stories/step-flow-control.md, decision 11): a claimed exit comes back
+  // `passed`, and an unclaimed one comes back `nonRetryable`. Neither can be
+  // true here — which is the point. Every compiled return would otherwise heal
+  // under AI and discard its entry on the first run that took the branch.
   const brokenCode =
     outcome.status === 'failed' && !outcome.expectationFailed && !outcome.nonRetryable;
   // Strict first: a compile replay that also happens to run keyless is still a
@@ -800,6 +877,26 @@ async function runCodeBehindStep(
   };
 
   if (outcome.status === 'passed') {
+    // The entry ended the flow (stories/step-flow-control.md, decision 11).
+    // The verb comes from the claim, not from the outcome: `return` and `stop`
+    // are one meaning, and only the report echoes which the author wrote.
+    //
+    // The explanation is the bare DETAIL, exactly as the AI path leaves it —
+    // the run loop prefixes it with the flow's name through
+    // `flowControlExplanation`, because the executor holds no expansion and
+    // cannot know whether this was "Sign in" or the whole test. So this reads
+    // out as `Returned from "Sign in": via code-behind`.
+    const claim = opts.flowControlClaim;
+    if (outcome.flowControl && claim) {
+      logger.success(`Step ${stepIndex} returned (code-behind)`);
+      return {
+        result: {
+          ...base,
+          aiExplanation: 'via code-behind',
+          flowControl: { kind: 'return', verb: claim.verb },
+        },
+      };
+    }
     logger.success(`Step ${stepIndex} passed (code-behind)`);
     return { result: { ...base, aiExplanation: 'Ran this step\'s code-behind — no AI call.' } };
   }
@@ -861,9 +958,27 @@ async function runCodeBehindStep(
   }
 
   if (outcome.nonRetryable) {
-    // Neither broken code nor a failed expectation: the entry is fine and the
-    // file it names is not there. Saying "code-behind assertion" here would
-    // send the reader to look for a `step.expect` that does not exist.
+    // Neither broken code nor a failed expectation. Two different facts arrive
+    // here and they need opposite sentences, so the kind is read off the
+    // outcome rather than off the message: an unclaimed `step.exit()` used to
+    // land in the missing-file branch and tell the author to go looking for a
+    // file the step never named. Saying "code-behind assertion" would be wrong
+    // for both — it sends the reader after a `step.expect` that does not exist.
+    if (outcome.nonRetryableKind === 'exit-unclaimed') {
+      logger.error(`Step ${stepIndex} FAILED (code-behind, unclaimed exit): ${outcome.error ?? ''}`);
+      return {
+        result: {
+          ...base,
+          error: outcome.error ?? EXIT_NOT_CLAIMED,
+          aiExplanation:
+            'This step\'s code-behind called `step.exit()`, but the step\'s own text does '
+            + 'not say it returns. The markdown is what a reader sees, so it has to say '
+            + 'what the code does: write the step as "If <condition> then return", or as a '
+            + 'step whose whole text is the tail. The entry was kept — re-running under AI '
+            + 'would not change the rule.',
+        },
+      };
+    }
     logger.error(`Step ${stepIndex} FAILED (code-behind): ${outcome.error ?? ''}`);
     return {
       result: {
@@ -1054,6 +1169,13 @@ async function executeStepAttempt(
   /** Ad-hoc StepResults produced inside the clarification REPL (typed Flick steps,
    *  /screenshot captures). Returned via a side-channel for the runner to merge. */
   const clarificationAdHoc: StepResult[] = [];
+  /** Set when the model answered a claimed flow-control step with `return`.
+   *  Ends the turn loop and rides out on the StepResult, where the run loop
+   *  reads it (stories/step-flow-control.md). */
+  let flowControlSignal: StepResult['flowControl'] | undefined;
+  /** The model's own words for WHY it returned — the tail of the returning
+   *  step's explanation, which the loop prefixes with the flow's name. */
+  let flowControlDetail: string | undefined;
 
   try {
   for (let currentTurn = 1; currentTurn <= maxTurns; currentTurn++) {
@@ -1076,6 +1198,28 @@ async function executeStepAttempt(
       page = pageTracker.getActive();
     }
     const tracker = trackerFor(page);
+
+    // 0b. The settle gate before a flow-control judgement
+    //     (stories/step-flow-control.md, decision 6).
+    //
+    // A conditional return is decided by reading the page ONCE, and a title
+    // read a millisecond after the click that changes it is the stale answer
+    // that makes the return miss. `executeBranchedStep` waits for exactly this
+    // reason before its first evaluation, and this is that same budget — up to
+    // 10 s, 1 s quiet. Only the conditional form pays it: the unconditional
+    // one never reaches the executor at all.
+    if (currentTurn === 1 && opts.flowControlClaim?.body !== undefined) {
+      await traceOp('settle.flow-control-judgement', () =>
+        waitForPageStability(page, {
+          timeoutMs: Math.min(10_000, config.execution.timeout * 1000),
+          quiesceMs: 1000,
+        }),
+      ).catch(() => {
+        // A settle that cannot complete is not a failed step — the judgement
+        // then runs against whatever the page is, exactly as it did before
+        // this gate existed.
+      });
+    }
 
     // 1b. On retry attempts, diagnose page state and auto-wait if loading
     let pageDiagnosis: PageStateDiagnosis | undefined;
@@ -1348,7 +1492,13 @@ async function executeStepAttempt(
         page,
         testSteps: opts.testSteps ?? [],
         currentStepIndex: stepIndex,
-        executorOptions: opts,
+        // The claim belongs to THIS step's authored line and to nothing else
+        // (stories/step-flow-control.md, decision 2). Ad-hoc lines the user
+        // types at the REPL run through `executeStep` with these options, so
+        // handing `opts` over whole let a `return` action end the flow from a
+        // line the framework never read the form off — the exact hole the
+        // claim exists to close.
+        executorOptions: { ...opts, flowControlClaim: undefined },
         adHocResults: clarificationAdHoc,
       });
 
@@ -1433,6 +1583,46 @@ async function executeStepAttempt(
       const subStartTime = Date.now();
       const aiReasoningVal = config.reports.includeAiReasoning ? aiResponse.reasoning : undefined;
 
+      // ── return action: end the flow this step is in ──────────────────────
+      // The claim is what makes this legal (stories/step-flow-control.md,
+      // decision 2). Checked here rather than in `executeAction`, because the
+      // authored step text is an executor fact and the browser layer has no
+      // idea what step it is running.
+      if (action.action === 'return') {
+        const returnSub: SubActionResult = {
+          index: ++globalSubActionIndex,
+          action: emitted,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          durationMs: Date.now() - subStartTime,
+          pageUrl: page.url(),
+          timestamp: new Date().toISOString(),
+        };
+        if (opts.flowControlClaim) {
+          turnSubActions.push(returnSub);
+          flowControlSignal = { kind: 'return', verb: opts.flowControlClaim.verb };
+          flowControlDetail = action.description;
+          logger.info(
+            `Step ${stepIndex} returned: ${action.description || 'condition holds'}`,
+          );
+          // Nothing after a return runs — not the rest of this turn's actions,
+          // and not another turn.
+          break;
+        }
+        turnSubActions.push({ ...returnSub, error: RETURN_NOT_CLAIMED });
+        turnFailed = true;
+        turnError = RETURN_NOT_CLAIMED;
+        logger.warn(`Step ${stepIndex}: ${RETURN_NOT_CLAIMED}`);
+        collectedFailures.push({
+          selector: '',
+          error: RETURN_NOT_CLAIMED,
+          actionType: 'return',
+          startUrl: attemptStartUrl,
+          failureUrl: page.url(),
+          navigated: page.url() !== attemptStartUrl,
+        });
+        break;
+      }
+
       // ── assert action: evaluate inline against current page state ────────
       if (action.action === 'assert') {
         const myAssertIndex = assertCounter++;
@@ -1460,7 +1650,8 @@ async function executeStepAttempt(
           baseUrl,
           aiClient,
           stepCache: opts.stepCache,
-          cacheEnabled: opts.cacheEnabled === true,
+          // The same gate the action cache is under — see `cacheEnabledFor`.
+          cacheEnabled: cacheEnabledFor(opts),
           resolvedParams: opts.resolvedParameters ?? {},
           apiResponseStore,
           attemptNumber,
@@ -2137,6 +2328,13 @@ async function executeStepAttempt(
       );
     }
 
+    // 9. The step returned: it is over whatever `needs_reeval` says. A model
+    // that asked for another turn after ending the flow would be asking to act
+    // inside a flow that no longer exists.
+    if (flowControlSignal) {
+      break;
+    }
+
     // 9a. Check needs_reeval: if false/absent, the step is complete after this turn
     if (!aiResponse.needs_reeval) {
       break;
@@ -2259,7 +2457,14 @@ async function executeStepAttempt(
     ...(stepContext !== undefined && { stepContext }),
     durationMs,
     retried,
-    aiExplanation: lastAiResponse?.reasoning ?? 'No reasoning provided',
+    // A returning step explains itself with the model's own account of why the
+    // condition held. The run loop prefixes it with the flow's name — the
+    // executor has no expansion and cannot know whether this is "Sign in" or
+    // the whole test (stories/step-flow-control.md).
+    aiExplanation: flowControlSignal
+      ? (flowControlDetail?.trim() || lastAiResponse?.reasoning || '')
+      : (lastAiResponse?.reasoning ?? 'No reasoning provided'),
+    ...(flowControlSignal && { flowControl: flowControlSignal }),
   };
 }
 
@@ -2847,7 +3052,13 @@ export async function executeBranchedStep(
       // cache as `executeStep(i + 1, …)`; without this override a branched step
       // and a normal step one position apart would share `step-<n>.json`.
       // `result.index` stays 0-based for the skip/display logic below.
-      { ...opts, cacheKey: matchedOutcome.index + 1 },
+      //
+      // `flowControlClaim` is cleared for the reason it is cleared at the REPL
+      // seam: a claim is read off ONE authored line, and the line running here
+      // is a group member, not the line the claim was parsed from. The grouper
+      // never puts a flow-control step in a group (decision 7), so a claim
+      // reaching this call is already a claim about a different step.
+      { ...opts, cacheKey: matchedOutcome.index + 1, flowControlClaim: undefined },
       matchedOutcome.instruction,
     );
   } else {
@@ -2890,7 +3101,8 @@ export async function executeBranchedStep(
       totalSteps,
       substituteBranchInstruction(group.continuationStep.instruction, opts),
       // 1-based cache identity, matching the normal step loop (issue 017).
-      { ...opts, cacheKey: group.continuationStep.index + 1 },
+      // No claim: see the matched-step call above.
+      { ...opts, cacheKey: group.continuationStep.index + 1, flowControlClaim: undefined },
       group.continuationStep.instruction,
     );
     results.push(contResult);

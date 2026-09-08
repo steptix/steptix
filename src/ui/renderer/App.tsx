@@ -293,6 +293,14 @@ export function App() {
         const dur = (data.durationMs / 1000).toFixed(1);
         if (data.status === 'passed') {
           dispatch({ type: 'ADD_LOG', level: 'success', message: `✓ Step ${data.stepIndex} passed (${dur}s)` });
+        } else if (data.status === 'skipped') {
+          // A step a `return` left behind (stories/step-flow-control.md). Not
+          // a failure and not a pass: it never ran, and the reason says why.
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'info',
+            message: `— Step ${data.stepIndex} skipped${data.reason ? `: ${data.reason}` : ''}`,
+          });
         } else {
           const errPart = data.error ? `: ${data.error}` : '';
           dispatch({ type: 'ADD_LOG', level: 'error', message: `✗ Step ${data.stepIndex} failed${errPart} (${dur}s)` });

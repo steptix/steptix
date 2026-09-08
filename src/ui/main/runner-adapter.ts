@@ -26,6 +26,13 @@ import { loadContextFiles } from '../../context/loader.js';
 import { interpolate } from '../../parser/parameters.js';
 import { interpolateEnvData, type EnvDataContext } from '../../parser/interpolate-env-data.js';
 import { parseSetStep } from '../../parser/set-step.js';
+import { parseFlowControlStep } from '../../parser/flow-control-step.js';
+import {
+  flowControlExplanation,
+  frameExitIndex,
+  frameLabel,
+  skippedByReturn,
+} from '../../runner/flow-control.js';
 import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 import { runSetStep } from '../../runner/set-step-runner.js';
 import { redactReport, runSecrets } from '../../utils/secrets.js';
@@ -506,7 +513,59 @@ export class UIRunnerAdapter {
       // would replace the TARGET with its own value once it holds one
       // (stories/variable-assignment.md §Locked).
       const setStep = parseSetStep(rawInstruction);
+      // The flow-control claim, read off the AUTHORED line like `Set`
+      // (stories/step-flow-control.md, decision 2).
+      const flowControlClaim = setStep ? null : parseFlowControlStep(rawInstruction);
       const instruction = setStep ? rawInstruction : this.resolveStepText(rawInstruction);
+
+      // ── Flow control, in two halves (stories/step-flow-control.md) ───────
+      // Split because the ORDER matters to a watching UI: the returning step
+      // has to be named before its `ai-reasoning` is emitted, and its own
+      // step-complete has to land before the skipped ones that follow it.
+      const flowFrame = (): string | null =>
+        frameLabel(parsedTest.expansion?.origins, parsedTest.expansion?.frames, i);
+
+      /** Name the flow on the returning step, in place. The executor produced
+       *  the model's own account and nothing more — it holds no expansion, so
+       *  it cannot know which flow this is. */
+      const nameFlow = (result: StepResult, label: string | null): void => {
+        result.aiExplanation = flowControlExplanation(label, result.aiExplanation);
+      };
+
+      /** Push and emit a `skipped` result for every step the return leaves
+       *  behind, and answer with the index to resume from. */
+      const skipRestOfFlow = (label: string | null): number => {
+        const exit = frameExitIndex(
+          parsedTest.expansion?.origins,
+          parsedTest.expansion?.frames,
+          i,
+          totalSteps,
+        );
+        // The reason string carries the returning step's line so it is findable
+        // from the editor, which does not number by the expanded index the
+        // reason's `step N` uses.
+        //
+        // `expansion.rawSteps`, not `rawInstruction`: `parsedTest.steps[i]` is
+        // the EXPANDED list, so inside a skill body it has already had the
+        // call's arguments interpolated into it — `[skill: Login
+        // password="hunter2"]` over a body step `If {{password}} is remembered
+        // then return` would otherwise write the literal password into a run
+        // log, a report cell and an IPC message. `rawSteps` is the match side,
+        // which the expander never interpolates. Same fallback as the CLI and
+        // the server take, and for the same reason.
+        const returningText = parsedTest.expansion?.rawSteps[i] ?? rawInstruction;
+        for (let j = i + 1; j <= exit; j++) {
+          const skipped = skippedByReturn(j, parsedTest.steps[j] ?? '', i, label, returningText);
+          this.stepResults.push(skipped);
+          this.emit('runner:step-complete', {
+            stepIndex: j + 1,
+            status: 'skipped',
+            durationMs: 0,
+            ...(skipped.aiExplanation !== undefined && { reason: skipped.aiExplanation }),
+          });
+        }
+        return exit + 1;
+      };
 
       // --- Check for breakpoint or stepOverNext BEFORE executing ---
       if (this.breakpoints.has(stepIndex) || this.stepOverNext) {
@@ -553,6 +612,34 @@ export class UIRunnerAdapter {
           break;
         }
         i++;
+        continue;
+      }
+
+      // --- Handle a bare `Return` / `Stop` step ---
+      // No condition to judge, so no model call, no page snapshot
+      // (stories/step-flow-control.md, decision 3).
+      if (flowControlClaim && flowControlClaim.body === undefined) {
+        this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
+        const stepResult: StepResult = {
+          index: stepIndex,
+          instruction,
+          status: 'passed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          flowControl: { kind: 'return', verb: flowControlClaim.verb },
+        };
+        const label = flowFrame();
+        nameFlow(stepResult, label);
+        this.stepResults.push(stepResult);
+        this.emit('runner:step-complete', { stepIndex, status: 'passed', durationMs: 0 });
+        i = skipRestOfFlow(label);
+        this.conversationHistory.push(
+          formatStepHistoryEntry(stepIndex, instruction, true, this.page?.url()),
+        );
+        this.conversationHistory.push(
+          `[flow] step ${stepIndex} ${stepResult.aiExplanation} — the rest of that flow was skipped`,
+        );
         continue;
       }
 
@@ -678,6 +765,9 @@ export class UIRunnerAdapter {
         // about whether there is AI to heal with.
         ...(runIsKeyless(this.config) && { keyless: true }),
         ...(this.config.ai.allowInRuns === false && { keylessReason: 'policy' as const }),
+        // What lets the model's `return` action end the step. Only the
+        // conditional form reaches here (stories/step-flow-control.md).
+        ...(flowControlClaim && { flowControlClaim }),
       },
       // The step as AUTHORED, tokens intact: what the model reads, beside a
       // `## Values` block in which a secret is masked. Without it the executor
@@ -687,6 +777,14 @@ export class UIRunnerAdapter {
 
       // Emit sub-actions and screenshots
       this.emitStepDetails(stepIndex, result);
+
+      // Named before `ai-reasoning` is emitted, so the UI shows "Returned
+      // from …" rather than the model's bare fragment.
+      const flowLabel = result.flowControl ? flowFrame() : null;
+      if (result.flowControl) nameFlow(result, flowLabel);
+
+      // Pushed before the skipped steps so the report keeps its order.
+      this.stepResults.push(result);
 
       // Emit AI reasoning
       if (result.aiExplanation) {
@@ -701,20 +799,28 @@ export class UIRunnerAdapter {
         ...(result.error !== undefined && { error: result.error }),
       });
 
-      this.stepResults.push(result);
+      // The skipped steps come after the returning step's own completion.
+      const resumeAt = result.flowControl ? skipRestOfFlow(flowLabel) : i + 1;
 
       // Add to conversation history
       const currentUrl = this.page.url();
       this.conversationHistory.push(
         formatStepHistoryEntry(stepIndex, instruction, result.status === 'passed', currentUrl),
       );
+      // The skipped steps are not in the history, so the returning step's own
+      // line has to explain the gap (story decision 4).
+      if (result.flowControl) {
+        this.conversationHistory.push(
+          `[flow] step ${stepIndex} ${result.aiExplanation ?? 'returned'} — the rest of that flow was skipped`,
+        );
+      }
 
       if (result.status === 'failed') {
         bail = true;
       }
 
       this.tokenTracker.resetStep();
-      i++;
+      i = resumeAt;
     }
 
     // 10. Emit completion
@@ -736,6 +842,11 @@ export class UIRunnerAdapter {
           totalSteps: this.stepResults.length,
           passedSteps: this.stepResults.filter((s) => s.status === 'passed').length,
           failedSteps,
+          // Steps a `return` left behind. Omitted (not 0) when there were
+          // none (stories/step-flow-control.md, decision 15).
+          ...(this.stepResults.some((s) => s.status === 'skipped') && {
+            skippedSteps: this.stepResults.filter((s) => s.status === 'skipped').length,
+          }),
           totalSubActions: this.stepResults.reduce((sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0), 0),
           durationMs,
           tokensUsed: this.tokenTracker.total,

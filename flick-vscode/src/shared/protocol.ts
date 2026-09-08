@@ -6,7 +6,19 @@
 // Sessions API shapes (subset of SPEC-SESSIONS-API.md that the UI consumes)
 // ---------------------------------------------------------------------------
 
-export type StepStatus = 'passed' | 'failed' | 'error';
+/**
+ * `skipped` joined the union when `If … then return` shipped
+ * (stories/step-flow-control.md, decision 9): a Flick user can type a
+ * flow-control step like anyone else, and the server then answers with
+ * `status: 'skipped'` for every step the return left behind. Until this widened
+ * it, those rows fell through the webview's `!== 'passed'` branches and
+ * rendered ⚠ with an auto-expanded body — a run that did exactly what the
+ * author asked, reported as a wall of errors.
+ *
+ * `BatchStatus` is deliberately NOT widened: a batch that returned is still
+ * `passed`. A return is not a failure and it is not a status of its own.
+ */
+export type StepStatus = 'passed' | 'failed' | 'error' | 'skipped';
 export type BatchStatus = 'passed' | 'failed' | 'error';
 
 export interface StepAction {

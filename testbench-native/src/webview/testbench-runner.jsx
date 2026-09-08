@@ -11,7 +11,7 @@ import { createRoot } from "react-dom/client";
 
 import { hostBridge } from "./lib/host-bridge.js";
 import { collectVariables, parseParametersInline, maskIfSecretInline, classifyCaptureSource } from "./lib/variables-panel.js";
-import { extractStepLineIds } from "./lib/step-lines-inline.js";
+import { countStepLineStatuses, extractStepLineIds } from "./lib/step-lines-inline.js";
 import {
   stripDetailInline,
   stripFractionInline,
@@ -635,6 +635,12 @@ function TestBenchRunner() {
         // or the code-behind crash that started it would be invisible here.
         log(`✗ Step on line ${event.line} failed: ${describeStepFailure(event)}`, "fail", uri);
         break;
+      case "step:skip":
+        // A line an `If … then return` left behind. Logged "info", not "fail":
+        // nothing went wrong, the flow ended early on purpose, and the reason
+        // the server sends says which step ended it.
+        log(`◌ Step on line ${event.line} skipped — ${event.reason}`, "info", uri);
+        break;
       case "output":
         log(event.msg, event.kind, uri);
         break;
@@ -728,12 +734,6 @@ function TestBenchRunner() {
 
   const isTestFile = snapshot?.isTestFile === true;
   const statuses = useMemo(() => statusFromTuple(snapshot?.statuses ?? []), [snapshot]);
-  const passCount = Object.values(statuses).filter(
-    (s) => s === "pass" || s === "pass-cached" || s === "pass-code-behind" || s === "pass-stale",
-  ).length;
-  const codeBehindCount = Object.values(statuses).filter((s) => s === "pass-code-behind").length;
-  const staleCount = Object.values(statuses).filter((s) => s === "pass-stale").length;
-  const failCount = Object.values(statuses).filter((s) => s === "fail").length;
   const errorMap = useMemo(() => {
     const m = {};
     for (const [line, payload] of snapshot?.errors ?? []) m[line] = payload;
@@ -758,6 +758,25 @@ function TestBenchRunner() {
     if (!snapshot?.text) return [];
     return extractStepLineIds(snapshot.text);
   }, [snapshot]);
+
+  // The header tally, over STEP lines only. A snapshot also carries a status
+  // per data-table ROW line, and a row the run never reached is painted `skip`
+  // — which the Rows section below calls "not run". Counting those here made a
+  // Stop mid-loop read `◌ 3 skipped` with nothing returned.
+  //
+  // Skipped is said separately from passed and failed, never folded into
+  // either: a skipped step is neither, and a run that returns would otherwise
+  // report "✓ 4 passed" with the fifth step accounted for nowhere
+  // (stories/step-flow-control.md, decision 15).
+  const runCounts = useMemo(
+    () => countStepLineStatuses(statuses, stepLines),
+    [statuses, stepLines],
+  );
+  const passCount = runCounts.pass;
+  const codeBehindCount = runCounts.codeBehind;
+  const staleCount = runCounts.stale;
+  const failCount = runCounts.fail;
+  const skipCount = runCounts.skip;
 
   const stepRows = useMemo(() => {
     if (!snapshot?.text) return [];
@@ -1191,12 +1210,13 @@ function TestBenchRunner() {
             {"Run & Compile"}
           </button>
         </div>
-        {(passCount > 0 || failCount > 0) && (
+        {(passCount > 0 || failCount > 0 || skipCount > 0) && (
           <div style={{ display: "flex", gap: 12, fontSize: "0.85em" }}>
             {passCount > 0 && <span style={{ color: "var(--vscode-testing-iconPassed, #22c55e)" }}>✓ {passCount} passed</span>}
             {codeBehindCount > 0 && <span style={{ opacity: 0.75 }}><CodeBehindIcon size={12} style={{ marginRight: 3 }} /> {codeBehindCount} code-behind</span>}
             {staleCount > 0 && <span style={{ color: "var(--vscode-editorWarning-foreground, #f59e0b)" }}>⚠ {staleCount} stale</span>}
             {failCount > 0 && <span style={{ color: "var(--vscode-testing-iconFailed, #f87171)" }}>✗ {failCount} failed</span>}
+            {skipCount > 0 && <span style={{ opacity: 0.75 }}>◌ {skipCount} skipped</span>}
           </div>
         )}
       </div>
@@ -1445,7 +1465,7 @@ function TestBenchRunner() {
               status === STATUS.PASS ? "tb-step--pass" : "",
               // Cache replays share the green pass color — the ⚡ glyph
               // is the only visual difference. Counted as pass in the
-              // run summary too (see passCount filter above).
+              // run summary too (see `countStepLineStatuses` above).
               status === STATUS.PASS_CACHED ? "tb-step--pass" : "",
               // Code-behind and stale are passes too — the glyph carries the
               // difference, the colour stays green.
@@ -1453,6 +1473,9 @@ function TestBenchRunner() {
               status === STATUS.PASS_STALE ? "tb-step--pass" : "",
               status === STATUS.FAIL ? "tb-step--fail" : "",
               status === STATUS.RUNNING ? "tb-step--running" : "",
+              // A step an `If … then return` left behind. Same slate as a row
+              // the loop never reached — "planned, not run" is one idea.
+              status === STATUS.SKIP ? "tb-step--skip" : "",
               status === STATUS.STOPPED ? "tb-step--stopped" : "",
               webviewSelection.has(lineNumber) ? "tb-step--selected" : "",
             ].filter(Boolean).join(" ");
@@ -1490,7 +1513,7 @@ function TestBenchRunner() {
                     onMouseLeave={(e) => { if (!hasBreakpoint) e.currentTarget.style.opacity = 0.25; }}
                   >●</span>
                   <span style={{ width: 14, textAlign: "center" }}>
-                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.PASS_CACHED ? "⚡︎" : status === STATUS.PASS_CODE_BEHIND ? <CodeBehindIcon /> : status === STATUS.PASS_STALE ? "⚠" : status === STATUS.FAIL ? "✗" : status === STATUS.RUNNING ? "…" : status === STATUS.STOPPED ? "■" : ""}
+                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.PASS_CACHED ? "⚡︎" : status === STATUS.PASS_CODE_BEHIND ? <CodeBehindIcon /> : status === STATUS.PASS_STALE ? "⚠" : status === STATUS.FAIL ? "✗" : status === STATUS.RUNNING ? "…" : status === STATUS.SKIP ? "◌" : status === STATUS.STOPPED ? "■" : ""}
                   </span>
                   <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
                   <span style={{ opacity: 0.5, fontSize: "0.85em" }}>{lineNumber}</span>

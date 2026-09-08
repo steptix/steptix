@@ -90,6 +90,62 @@ describe('SseParser', () => {
     expect(dropped[0]).toContain('step:teleported');
   });
 
+  it('delivers a step:skip frame instead of dropping it as unrecognised', () => {
+    // stories/step-flow-control.md, decision 9. The parser drops any type it
+    // does not know into `dropped[]`, which the fold turns into a run WARNING —
+    // so an omission here does not fail loudly, it reports a green run as
+    // `PASSED — 2/4 steps passed` with two "unrecognised event" warnings and no
+    // rows for the steps the return skipped. The whole `case 'step:skip'` in
+    // run-fold.ts is unreachable from the real transport without this line.
+    const parser = new SseParser();
+    const { events, dropped } = parser.push(
+      'event: step:skip\ndata: {"type":"step:skip","line":9,' +
+        '"reason":"Not run: step 3 returned from \\"Sign in\\" — If … then return"}\n\n',
+    );
+
+    expect(dropped).toEqual([]);
+    expect(events).toEqual([
+      {
+        type: 'step:skip',
+        line: 9,
+        reason: 'Not run: step 3 returned from "Sign in" — If … then return',
+      },
+    ]);
+  });
+
+  it('rejects a step:skip whose fields the fold would index into', () => {
+    // The shape check exists because the fold reads `line` and `reason` without
+    // guarding: a frame with the right type and a wrong payload throws AFTER
+    // the run completed, and a throw there is indistinguishable at the handler
+    // from a pre-flight failure — the run then reports as though it never ran.
+    const noLine = new SseParser().push('data: {"type":"step:skip","reason":"x"}\n\n');
+    const noReason = new SseParser().push('data: {"type":"step:skip","line":9}\n\n');
+    const badFrame = new SseParser().push(
+      'data: {"type":"step:skip","line":9,"reason":"x","frame":{"id":"s1"}}\n\n',
+    );
+
+    expect(noLine.events).toEqual([]);
+    expect(noLine.dropped[0]).toContain('line is not a number');
+    expect(noReason.events).toEqual([]);
+    expect(noReason.dropped[0]).toContain('reason is not a string');
+    expect(badFrame.events).toEqual([]);
+    expect(badFrame.dropped[0]).toContain('frame is malformed');
+  });
+
+  it('accepts a step:skip carrying a well-formed frame', () => {
+    // `frame` is optional on the wire (the server omits it when nothing
+    // expanded) and every skipped step inside a section carries one, so both
+    // arms have to pass.
+    const frame = { id: 's1', parentId: null, kind: 'section', uri: 'c:/t.md', line: 4 };
+    const parser = new SseParser();
+    const { events, dropped } = parser.push(
+      `data: ${JSON.stringify({ type: 'step:skip', line: 9, reason: 'r', frame })}\n\n`,
+    );
+
+    expect(dropped).toEqual([]);
+    expect(events[0]).toMatchObject({ type: 'step:skip', frame: { id: 's1' } });
+  });
+
   it('delivers several frames from one chunk in order', () => {
     const parser = new SseParser();
     const { events } = parser.push(
@@ -151,6 +207,43 @@ describe('createApiClient.streamSteps', () => {
 
     expect(result.streamDropped).toBe(false);
     expect(seen).toEqual(['step:start', 'step:pass', 'done']);
+  });
+
+  it('delivers step:skip events over the socket, to both streaming routes', async () => {
+    // `consumeRunStream` is shared by `streamSteps` and `runErrand`, and the
+    // whitelist it consults is one set — so an event type missing from it is
+    // missing from `run_test`, `run_steps` AND `run_errand` at once. Driven
+    // through the real client over a real socket rather than through the fake
+    // ApiClient the seam suite uses, because the whitelist is exactly what a
+    // fake replaces.
+    const body =
+      'data: {"type":"step:start","line":1}\n\n' +
+      'data: {"type":"step:pass","line":1}\n\n' +
+      'data: {"type":"step:skip","line":2,"reason":"Not run: step 1 ended the run — Stop"}\n\n' +
+      'data: {"type":"done","status":"passed"}\n\n';
+    const baseUrl = await startServer((_url, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(body);
+      res.end();
+    });
+
+    const client = createApiClient({ baseUrl, apiKey: 'k' });
+    const streamed = await client.streamSteps('s1', { steps: ['x'] });
+    const errand = await client.runErrand({ steps: ['x'], tab: 't' } as never);
+
+    for (const result of [streamed, errand]) {
+      expect(result.dropped).toEqual([]);
+      expect(result.events.map((e) => e.type)).toEqual([
+        'step:start',
+        'step:pass',
+        'step:skip',
+        'done',
+      ]);
+      expect(result.events[2]).toMatchObject({
+        line: 2,
+        reason: 'Not run: step 1 ended the run — Stop',
+      });
+    }
   });
 
   it('reports a stream that ends without done', async () => {

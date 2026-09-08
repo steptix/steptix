@@ -2,6 +2,7 @@ import type { AIAction, ChatMessage, MessageContentBlock } from './types.js';
 import type { ActionTargeting } from '../browser/actions.js';
 import type { PageInfo } from '../browser/manager.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
+import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import { isSecretName, isSecretRef, MASK } from '../utils/secrets.js';
 
 /**
@@ -265,7 +266,8 @@ Plan your next action based on the observed result — do not batch multiple act
        { "action": "click", "selector": "#login-btn", "description": "Click Login" },
        { "action": "wait", "waitType": "url", "condition": "**/otp", "description": "Wait for OTP page" }
      ], "reasoning": "...", "needs_reeval": false }
-   When the instruction does NOT name a completion condition (e.g. just "click Login"), return only the triggering action — do not invent speculative waits`, true),
+   When the instruction does NOT name a completion condition (e.g. just "click Login"), return only the triggering action — do not invent speculative waits
+23. LEAVING A FLOW EARLY. Some steps are written as flow control: "If <condition> then return", "When <condition> then stop", "If <condition> then stop running the remaining steps", and the compound form "If the Save button is visible, click it and return". On such a step, judge the condition against the page. If it HOLDS, return { "action": "return", "description": "<why the condition holds>", "needs_reeval": false } — after any action the step also asks for, in the same response. If it does NOT hold, return { "action": "noop", "description": "<why the condition does not hold>", "needs_reeval": false } and the next step will run. NEVER return "return" on a step that does not say to return or stop: the framework rejects it and the step fails. A step that merely mentions going back ("Click the details link then return", "Navigate back") is an ordinary browser step, not flow control`, true),
   ];
 
   if (contextContent) {
@@ -797,7 +799,7 @@ ${domSnapshot}
 \`\`\`${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
 
 What is the next action needed to complete the original instruction: "${instructionText}"?
-Return ONE action. Set needs_reeval: false if this instruction is now fully satisfied — do NOT continue into actions that belong to subsequent steps. If the instruction is already satisfied and no further action is required, return { "action": "noop", "description": "<why nothing is needed>", "needs_reeval": false }.`;
+Return ONE action. Set needs_reeval: false if this instruction is now fully satisfied — do NOT continue into actions that belong to subsequent steps. If the instruction is already satisfied and no further action is required, return { "action": "noop", "description": "<why nothing is needed>", "needs_reeval": false }. If the instruction says to return or stop and its condition holds, return { "action": "return", "description": "<why the condition holds>", "needs_reeval": false } instead; if it does not hold, "noop". Never "return" on an instruction that does not say to.`;
 
   if (screenshotBase64) {
     return {
@@ -1259,6 +1261,48 @@ function trackerPostCondition(actions: TranscriptAction[]): string {
 }
 
 /**
+ * The `step.exit()` bullet, for a step that claims the flow-control form
+ * (stories/step-flow-control.md, decision 11).
+ *
+ * Gated, like every other conditional clause in this prompt: a step that
+ * cannot use `exit` is not told it exists, and an ordinary step's prompt stays
+ * byte-identical to the one built before this existed.
+ */
+const FLOW_CONTROL_API =
+  '\n- `step.exit()` — end the flow this step is in, as a pass. It throws, so nothing after it runs.';
+
+/**
+ * The one rule a flow-control step adds (stories/step-flow-control.md,
+ * decision 11).
+ *
+ * Numbered `Na` off the post-condition rule rather than `N+1`, for the reason
+ * `tabHandleRule` is `7a`: the post-condition number is COMPUTED from the last
+ * numbered line of the selector rules, and a new whole number here would
+ * collide with it. It sits directly after that rule because what it mostly
+ * does is except this step from it.
+ *
+ * The transcript is named explicitly, because it is the trap. A recording shows
+ * only the branch this run took — a `return` action or a `noop` — and a model
+ * writing "what the transcript did" would emit an entry that returns every time
+ * or one that never returns. Either is right on the recording run and wrong on
+ * the next.
+ */
+function flowControlRule(number: number): string {
+  return (
+    `\n\n${number}a. **This step is a flow-control step: evaluate its condition and call \`step.exit()\` when it holds.** ` +
+    `Its text says to return (or stop) under a condition, so the entry reads that condition off the page and exits ` +
+    `only if it is true — and does nothing at all if it is not:\n` +
+    '```ts\nif ((await page.title()).includes(\'Dashboard\')) step.exit();\n```\n' +
+    `Write BOTH branches from the step's own words, never from what this run happened to do: a \`return\` action in ` +
+    `the transcript means the condition HELD on the recording run, a \`noop\` means it did NOT, and the entry you ` +
+    `write is the same \`if\` either way. It is judged afresh on every future run. An entry that exits ` +
+    `unconditionally, or one that never exits, is right on this run and wrong on the next. ` +
+    `This step needs NO post-condition: \`step.exit()\` throws, so there is nothing after it to assert on, and when ` +
+    `the condition does not hold the step is meant to leave the page exactly as it found it.`
+  );
+}
+
+/**
  * Ask the model to turn one successful step into its code-behind entry
  * (stories/step-codebehind.md, "Generation").
  *
@@ -1331,6 +1375,11 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
   const numbered = [...selectorRules.matchAll(/^(\d+)\. /gm)];
   const postConditionNumber = Number(numbered[numbered.length - 1]?.[1] ?? 8) + 1;
 
+  // Does this step CLAIM the `If … then return` form? The same textual test
+  // every runner applies to the authored line (stories/step-flow-control.md,
+  // decision 2), on the same text — `rawStepText` is the step as authored.
+  const claimsFlowControl = parseFlowControlStep(input.rawStepText) !== null;
+
   // The one re-ask the static backstop buys. The refused entry goes back with
   // the complaint, because a model shown only "do it again" tends to return
   // what it returned.
@@ -1378,7 +1427,7 @@ The "entry" string holds one TypeScript object literal with exactly this shape:
 - \`page\`, \`context\`, \`browser\` — the live Playwright instances the run is driving.
 - \`step.getVar(name)\` / \`step.setVar(name, value)\` — the test's variable scope, by the name as written in the markdown: \`{{username}}\` is \`step.getVar('username')\`. An environment placeholder is read by the name inside its braces: \`\${data.url}\` is \`step.getVar('data.url')\`, \`\${env.BASE_URL}\` is \`step.getVar('env.BASE_URL')\`. It returns a string (or undefined).
 - \`step.expect(condition, message)\` — a failed expectation fails the step.
-- \`step.filePath(relative)\` — turns a path written in a step (relative to the test file's folder) into the absolute path Playwright needs. Synchronous; throws if the file is missing.
+- \`step.filePath(relative)\` — turns a path written in a step (relative to the test file's folder) into the absolute path Playwright needs. Synchronous; throws if the file is missing.${claimsFlowControl ? FLOW_CONTROL_API : ''}
 - \`log.info(...)\` / \`log.warn(...)\` / \`log.error(...)\` — recorded into the report.
 - \`baseUrl\` — the test's configured base URL, when it has one.
 - \`tabs\` — tab control, the code equivalent of the \`openPage\` / \`switchPage\` / \`closePage\` actions:
@@ -1417,7 +1466,7 @@ ${postConditionNumber}. **End with a post-condition, and make it wait.** The las
 
    Wait on the state itself. \`await page.locator('#upload-status', { hasText: 'Uploaded logo.png' }).waitFor()\` — or \`.filter({ hasText: '…' })\` on a locator you already hold — does not resolve until that text is there, so the wait IS the assertion. \`await page.waitForFunction(...)\` covers what a text filter cannot: a count that has to change, an attribute that has to flip, a value computed from the page. Reading a value into \`step.expect\` is right once something has proved the page moved — wait first, then read. (Rule 6 rules out Playwright's \`expect(locator).toHaveText(...)\`; the forms above are the waiting ones you have.)
 
-   **And it has to be able to FAIL.** A post-condition that cannot go red proves nothing at all — it is the same as having none, only harder to notice. Never compare a value to itself, or to a variable you just assigned from the same read: \`step.expect((await rows.count()) === rowCount)\` re-reads what it has already stored, so it passes just as happily on an empty page. When the step states an expectation, assert THAT — the literal it names, the count it names. When it states none, which is the usual shape of a capture step ("Count the rows [as: n]", "Read the balance [as: b]"), assert what makes the capture worth trusting instead: that the thing you read from was really there and really populated, e.g. \`await page.locator('#documents-body > tr').first().waitFor()\` before reading the count. Never that the number equals itself.${trackerPostCondition(input.actions)}
+   **And it has to be able to FAIL.** A post-condition that cannot go red proves nothing at all — it is the same as having none, only harder to notice. Never compare a value to itself, or to a variable you just assigned from the same read: \`step.expect((await rows.count()) === rowCount)\` re-reads what it has already stored, so it passes just as happily on an empty page. When the step states an expectation, assert THAT — the literal it names, the count it names. When it states none, which is the usual shape of a capture step ("Count the rows [as: n]", "Read the balance [as: b]"), assert what makes the capture worth trusting instead: that the thing you read from was really there and really populated, e.g. \`await page.locator('#documents-body > tr').first().waitFor()\` before reading the count. Never that the number equals itself.${trackerPostCondition(input.actions)}${claimsFlowControl ? flowControlRule(postConditionNumber) : ''}
 
 Respond with ONLY the JSON object — no prose around it.`;
 

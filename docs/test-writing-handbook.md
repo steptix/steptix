@@ -354,16 +354,22 @@ File `tests/sign-in-with-prompt.md`:
 ```
 
 Keep branch bodies to ordinary page instructions. A `[tool:]` or `[skill:]`
-call inside an `If` clause is not conditional dispatch. A `Set` step directly
-after a branch is not a continuation and the branches then run as plain steps.
-For real branching logic, write a tool.
+call inside an `If` clause is not conditional dispatch. A `Set` step, or a
+flow-control step (§3.6), directly after a branch is not a continuation and
+the branches then run as plain steps. For anything more than choosing between
+outcomes and leaving a flow early, write a tool.
 
 ### 3.5 What does not exist
 
 - No selector language in prose beyond what the model infers. A test id can
   be mentioned when you know it exists.
-- No arithmetic, string functions, loops or variables inside step text. `Set`
+- No arithmetic, string functions or loops inside step text. `Set`
   concatenates text; tools do the rest.
+- No general branching. The two shapes that exist are choosing between
+  outcomes (§3.4) and leaving a flow early (§3.6). There is no way to break
+  out of a loop, to return from an outer flow by name, or to end the whole
+  test from inside a section — a return leaves the innermost flow, and that
+  is all it does.
 - No implicit variables. `baseUrl` from `## Config` is available to `[tool:]`
   arguments as a convenience, but `{{baseUrl}}` in a prose step is just the
   model reading the test information block.
@@ -377,6 +383,81 @@ For real branching logic, write a tool.
 - A `prompt` for clarification is what the model does when a step is
   underspecified. On the CLI a person answers; on TestBench, MCP and CI the
   step is skipped or fails. Underspecified steps are therefore not portable.
+
+### 3.6 Leaving a flow early
+
+A step that ends `then return` or `then stop` ends the flow it is in, as a
+pass. The rest of a `### Section` body, the rest of a skill body, or the rest
+of the test when the step is in the main flow. The steps it leaves behind are
+marked skipped with a reason, and the run carries on after the flow that
+ended. The condition is judged against the live page, the way an `If …` step
+is.
+
+```markdown
+### Sign in
+1. If the page title contains "Dashboard" then return
+2. Reject non-essential cookies in the cookie banner
+3. Enter the username {{username}}
+4. Enter the password {{password}}
+5. Click the Sign in button
+```
+
+The first call to `Sign in` finds the Sign In page, the condition fails, and
+steps 2 to 5 run. The second call finds Dashboard, step 1 returns, steps 2 to
+5 are skipped with the reason
+
+```
+Not run: step 7 returned from "Sign in" — If the page title contains "Dashboard" then return
+```
+
+and the caller continues at the step after the call. The call line passes both
+times.
+
+The number is the step's position in the **expanded** test — sections and
+skills flattened into one list — which is what the report rows and the run log
+count by, so a reason and a log line can be read side by side. It is not a line
+you can find in the editor, which is why the returning step's own text comes
+with it, clipped to 80 characters. That half you can search for anywhere.
+
+In the main flow the same line ends the run as passed:
+
+```markdown
+4. If the page title contains "Dashboard" then stop running the remaining steps
+5. Click "Sign out"
+```
+
+Step 5 is skipped, the `after` hooks still run, and the report reads 4 passed,
+1 skipped. Nothing that did not run is counted as passed.
+
+The details:
+
+- `return` and `stop` mean the same thing, and either may be written bare or
+  with one of six tails — `here`, `running the steps`, `running the rest of the
+  steps`, `running the remaining steps`, `running the below steps`, `running
+  the following steps`. So `then stop`, `then stop here` and `then stop running
+  the remaining steps` are one instruction written three ways.
+- A step whose **whole text** is the tail, with no `If`/`When` in front of it,
+  is unconditional and costs no model call at all. `Return` is one; so is `Stop
+  running the remaining steps`. It is the missing condition that makes it
+  unconditional, not the shortness of the line.
+- `If the Save button is visible, click it and return` is one compound step:
+  the model clicks Save and then returns.
+- `Return` inside a looped section ends that iteration; the next one starts.
+  There is no way to break out of a loop.
+- A skipped step runs no hooks and spends no tokens. The returning step runs
+  its `afterEach` hooks like any passed step.
+- A hook may not return. There is no flow to leave from inside one, and the
+  line is refused at parse.
+- A conditional flow-control step compiles like any other: `aiui compile`
+  writes an entry that reads the condition off the page and calls
+  `step.exit()` when it holds, so the replay returns with no model call. The
+  unconditional form is never compiled — it already costs nothing.
+- Only a line that opens `If` or `When`, or a line that is nothing but the
+  tail, is flow control. `Click the details link then return` is an ordinary
+  step — after an action, "then return" reads as *navigate back*, and the
+  framework does not guess. For the same reason a typo (`then retun`) is
+  ordinary prose: the following steps then run and fail loudly, which is the
+  direction to be wrong in.
 
 ## 4. Variables and data
 
@@ -1098,6 +1179,8 @@ report's skipped steps and warnings, not just the summary.
 | `## Steps (login)` | `## Steps` | Any other heading yields no steps. |
 | `Wait for .spinner:hidden` | `Wait until the spinner disappears` | State belongs in words, not selectors. |
 | A section body's steps before the main flow ends | Main flow first, then `###` headings | Everything after the first `###` belongs to a section. |
+| `If we are signed in then skip ahead` | `If we are signed in then return` | Only `return` / `stop` (and their longer tails) end a flow; anything else is prose to a model. |
+| `beforeEach: If already signed in then return` | Put the line in `## Steps` | A hook has no flow to leave; the file is refused at parse. |
 
 ## 12. Checklist before handing a test over
 
@@ -1126,6 +1209,7 @@ report's skipped steps and warnings, not just the summary.
 | What the model sees and the action rules | [prompts.ts](../src/ai/prompts.ts), [types.ts](../src/ai/types.ts), [placeholder-substitution.ts](../src/runner/placeholder-substitution.ts) |
 | Action execution, waits, reads, uploads | [actions.ts](../src/browser/actions.ts), [step-executor.ts](../src/runner/step-executor.ts), [upload-paths.ts](../src/browser/upload-paths.ts) |
 | Conditionals and hooks | [step-grouper.ts](../src/runner/step-grouper.ts), [hooks.ts](../src/runner/hooks.ts), [test-runner.ts](../src/runner/test-runner.ts) |
+| `return` / `stop`, and which steps a return skips | [flow-control-step.ts](../src/parser/flow-control-step.ts), [flow-control.ts](../src/runner/flow-control.ts), [test-runner.ts](../src/runner/test-runner.ts) |
 | Skill files, calls, expansion | [expander.ts](../src/skills/expander.ts), [invocation-parser.ts](../src/parser/invocation-parser.ts) |
 | Tools | [types.ts](../src/tools/types.ts), [define-tool.ts](../src/tools/define-tool.ts), [tool-helper.ts](../src/tools/tool-helper.ts), [registry.ts](../src/tools/registry.ts), [executor.ts](../src/tools/executor.ts), working examples in [fixtures/tools/src](../fixtures/tools/src) |
 | Tab and browser tracking | [manager.ts](../src/browser/manager.ts), [step-executor.ts](../src/runner/step-executor.ts), [tabs.ts](../src/codebehind/tabs.ts) |

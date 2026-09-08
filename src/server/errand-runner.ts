@@ -20,6 +20,11 @@ import { captureScreenshot } from '../browser/screenshot.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
+import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import {
+  flowControlExplanation,
+  skippedByReturnReason,
+} from '../runner/flow-control.js';
 import { runSetStep } from '../runner/set-step-runner.js';
 import { redact, runSecrets } from '../utils/secrets.js';
 import { interpolateEnvData, type EnvDataContext } from '../parser/interpolate-env-data.js';
@@ -671,6 +676,14 @@ export class ErrandRunner {
       // would replace the TARGET with its own value once it holds one
       // (stories/variable-assignment.md §Locked).
       const setStep = parseSetStep(originalStep);
+      // `If … then return` / `… then stop`, off the AUTHORED step for the same
+      // reason `Set` is (stories/step-flow-control.md, decision 2). An errand
+      // is a flat list with no expansion, so the only flow there is to leave is
+      // the errand itself — `frameExitIndex`'s no-expansion answer, applied
+      // directly: everything after this step.
+      const flowControlClaim = setStep ? null : parseFlowControlStep(originalStep);
+      const unconditionalFlowControl =
+        flowControlClaim && flowControlClaim.body === undefined ? flowControlClaim : null;
       let interpolated: string;
       try {
         // Not evaluated for a Set step — `interpolateEnvData` throws on an
@@ -724,7 +737,22 @@ export class ErrandRunner {
       // it reports a capture. Emitted here rather than there so the `source`
       // can say `assignment`.
       let setAssigned: { name: string; value: string } | undefined;
-      if (setStep) {
+      if (unconditionalFlowControl) {
+        // `Return` / `Stop` as a whole step: no condition, so no model call, no
+        // page read, nothing to reclaim — which is why, like `Set`, it sits
+        // outside the try/finally (decision 3). The label is null because an
+        // errand has no frames, so the phrase is "Ended the run".
+        stepResult = {
+          index: line,
+          instruction,
+          status: 'passed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          aiExplanation: flowControlExplanation(null),
+          flowControl: { kind: 'return', verb: unconditionalFlowControl.verb },
+        };
+      } else if (setStep) {
         // Assignment: no model, no page, no tabs to reclaim — which is why
         // this sits outside the try/finally rather than inside it.
         const setOutcome = runSetStep(setStep, instruction, line, scope, args.envDataCtx);
@@ -765,6 +793,10 @@ export class ErrandRunner {
             // No console is attached to an errand either, so an AI clarification
             // must fail the step fast rather than block on stdin.
             nonInteractive: true,
+            // The CONDITIONAL form only — the unconditional one took its own
+            // branch above. Present, the model's `return` action ends the step;
+            // absent, it is refused and the model is told why (decision 2).
+            ...(flowControlClaim && { flowControlClaim }),
             ...(signal && { signal }),
           },
           // The step as the caller wrote it, `{{}}` and `${}` intact — the model
@@ -805,6 +837,15 @@ export class ErrandRunner {
         outcome.status = 'aborted';
         logger.info(`Errand ${errandId}: aborted by client during step ${line}/${steps.length}`);
         break;
+      }
+
+      // Name what the step left. The executor returns the model's own account
+      // of why the condition held and nothing more; the loop is what knows
+      // which flow ended. Before the receipt row and the `step:pass` event are
+      // built from it, so both read the same sentence
+      // (stories/step-flow-control.md). The unconditional branch wrote its own.
+      if (stepResult.flowControl && !unconditionalFlowControl) {
+        stepResult.aiExplanation = flowControlExplanation(null, stepResult.aiExplanation);
       }
 
       // Captures: explicit `[output: X]` declarations plus this step's own
@@ -874,6 +915,33 @@ export class ErrandRunner {
           ...(screenshotValue && { screenshot: screenshotValue }),
           ...tabAfterStep,
         });
+        // ── The step ended the errand ────────────────────────────────────
+        //
+        // A flat list has one flow, so a return ends it: every remaining step
+        // is skipped, and the errand still reports `passed` — a return is not a
+        // failure (stories/step-flow-control.md, decisions 4 and 9). No
+        // conversation-history line here, unlike the two frame-aware runners:
+        // there is no later step in an outer flow that could need to know why
+        // the numbering has a gap.
+        if (stepResult.flowControl) {
+          // `originalStep` is the AUTHORED line: it rides on the reason so a
+          // reader can find the step that ended the errand, and being
+          // authored it cannot carry a resolved secret into a log line.
+          const reason = skippedByReturnReason(i, null, originalStep);
+          for (let j = i + 1; j < steps.length; j++) {
+            emit({ type: 'step:skip', line: j + 1, reason });
+            results.push({
+              step: steps[j] ?? '',
+              status: 'skipped',
+              actions: [],
+              screenshot: '',
+              reasoning: reason,
+              outputs: {},
+            });
+            logger.info(`Errand ${errandId} step ${j + 1} skipped — ${reason}`);
+          }
+          break;
+        }
       } else {
         outcome.status = 'failed';
         outcome.error = { step: line, message: stepResult.error ?? 'Step failed' };

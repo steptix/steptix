@@ -1,12 +1,15 @@
 // Thin client for the ai-ui-automation Sessions API (see SPEC-SESSIONS-API.md).
 // Uses the global `fetch` available in the VS Code extension host (Node 18+).
 
-import type { FlickSettings } from '../shared/protocol';
+import type { FlickSettings, StepStatus } from '../shared/protocol';
 
 /** Per-step result exactly as the API returns it (screenshot still base64). */
 export interface RawStepResult {
   step: string;
-  status: 'passed' | 'failed' | 'error';
+  /** Shared with the webview's `StepResult` rather than spelled out again: the
+   *  union gained `skipped` when `If … then return` shipped, and two copies of
+   *  it is how one of them gets missed (stories/step-flow-control.md). */
+  status: StepStatus;
   actions: Array<{ action: string; [key: string]: unknown }>;
   reasoning: string;
   outputs: Record<string, string>;

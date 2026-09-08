@@ -15,6 +15,7 @@ import {
   resolveEnvDataRef,
   type EnvDataContext,
 } from '../parser/interpolate-env-data.js';
+import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import { interpolate } from '../parser/parameters.js';
 import type { AssertionResult } from '../report/types.js';
 import { referencedVariableNames } from '../skills/expander.js';
@@ -1012,6 +1013,8 @@ export interface PlaceholderAccounting extends PlaceholderReport {
  *   measurement in cases nobody can act on.
  * - **Pre-change recordings** (`recordingCarriesPlaceholders: false`). Same
  *   value match, for every reference, plus a note from the caller.
+ * - **Flow-control steps** (stories/step-flow-control.md, decisions 2 and 11).
+ *   See below.
  *
  * A skill RENAME is not a carve-out: the expander rewrites the step text to
  * `{{__skill1_username}}` and the runtime substitutes that at run time, so the
@@ -1027,6 +1030,31 @@ export function accountPlaceholders(options: {
   recordingCarriesPlaceholders: boolean;
 }): PlaceholderAccounting {
   const { binding, actions } = options;
+  /**
+   * A step whose text CLAIMS the flow-control form is exempt from the
+   * accounting (stories/step-flow-control.md, decisions 2 and 11).
+   *
+   * The accounting exists to stop the model freezing a resolved VALUE into
+   * code: a reference is only vouched for by a value-bearing field of a
+   * recorded action, because that is where a value the model typed would show
+   * up. A flow-control step has no such field to vouch from — its recorded
+   * action is `return` or `noop`, which carry no value, no selector, no url and
+   * no expected — so `If {{username}} is shown then return` would decline with
+   * "{{username}} appears in no recorded action" and be written a permanent
+   * `ai: true` entry. It could never compile, which contradicts the handbook
+   * and the story's own worked example.
+   *
+   * The exemption is safe precisely because there is nothing to freeze: the
+   * body of a flow-control step is JUDGED by the model against the live page,
+   * never typed into it. And it is only the ACCOUNTING that is lifted, not the
+   * leak guard — `guardedValues` still carries every resolved value into
+   * `findInlinedParameterValue`, so generated code that inlines the username's
+   * value is still rejected and re-asked. That guard is what actually protects
+   * the failure direction this rule was written for.
+   */
+  if (parseFlowControlStep(binding.source.trim())) {
+    return { recoveredByValue: [], preChangeFallback: false };
+  }
   const literals = actions.flatMap(valueBearingStrings);
   const vouched = referencesIn(literals);
   const inCondition = referencesIn(actions.flatMap((a) => freeTextStrings(a, 'condition')));

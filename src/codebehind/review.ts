@@ -6,6 +6,7 @@ import {
   extractJson,
   findInlinedParameterValue,
 } from '../ai/action-parser.js';
+import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import type { Candidate } from './candidate.js';
 import { describeGuardedName } from './generate.js';
 import { listEntries, validateCodeBehindSource } from './writer.js';
@@ -33,6 +34,19 @@ export function buildFileReviewPrompt(input: FileReviewInput): ChatMessage {
     ? '(step list unavailable)'
     : input.steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
 
+  // The post-condition rule's one exception (stories/step-flow-control.md,
+  // decision 11). Emitted only when a step in this test actually claims the
+  // form, so a test with no flow-control step is reviewed against the checklist
+  // exactly as it was before — and, more to the point, so a reviewer that has
+  // never seen a `step.exit()` is not invited to add post-conditions to
+  // entries that must not have one.
+  const flowControlException = input.steps.some((s) => parseFlowControlStep(s) !== null)
+    ? ' The one exception is a **flow-control step** — one whose text ends `then return` or\n' +
+      '   `then stop`. Its entry evaluates the condition and calls `step.exit()` when it holds;\n' +
+      '   `step.exit()` throws, so there is nothing after it to assert on. An entry that is an\n' +
+      "   `if (…) step.exit();` and nothing else is complete: leave it alone."
+    : '';
+
   return {
     role: 'user',
     content: `Review a generated Playwright code-behind file before it is committed.
@@ -59,7 +73,7 @@ ${input.file}
    literals.
 3. **Every entry ends with a post-condition** — a \`locator.waitFor()\` on what
    the step produced, or a \`step.expect(...)\` over a value read back from the
-   page — so "did not throw" means "the step worked".
+   page — so "did not throw" means "the step worked".${flowControlException}
 4. **Captures are written**: a step with \`[as: x]\` must call
    \`step.setVar('x', ...)\`.
 5. **Stable selectors** (ids, \`data-testid\`, roles, labels) over positional

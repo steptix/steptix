@@ -20,9 +20,17 @@ import type {
   ServerSessionItem,
   SessionMeta,
   StepResult,
+  StepStatus,
   WebviewToHost,
 } from '../shared/protocol';
 import { buildOutputSections } from './output-sections';
+import {
+  autoExpandsOnFirstRender,
+  showsBatchError,
+  skipReason,
+  statusGlyph,
+  statusLabel,
+} from './step-status';
 
 interface VsCodeApi {
   postMessage(msg: WebviewToHost): void;
@@ -887,8 +895,9 @@ function renderStepRow(
   const key = `${entryId}:${index}`;
   // Failed/error steps auto-expand ONCE on first render so the user
   // immediately sees what went wrong — but a subsequent user collapse must
-  // stick (don't re-expand every renderChat).
-  if (result.status !== 'passed' && !state.autoExpanded.has(key)) {
+  // stick (don't re-expand every renderChat). `skipped` is excluded by
+  // `autoExpandsOnFirstRender`, not by `!== 'passed'`: see its doc comment.
+  if (autoExpandsOnFirstRender(result.status) && !state.autoExpanded.has(key)) {
     state.expanded.add(key);
     state.autoExpanded.add(key);
   }
@@ -900,6 +909,10 @@ function renderStepRow(
   header.appendChild(el('span', 'chevron', expanded ? '▾' : '▸'));
   header.appendChild(el('span', 'step-num', String(index + 1)));
   header.appendChild(el('span', 'step-text', result.step));
+  // A skipped row's one fact, on the collapsed row: the row does not open
+  // itself, so without this a ◌ would sit there explaining nothing.
+  const reason = skipReason(result.status, result.reasoning);
+  if (reason !== null) header.appendChild(el('span', 'step-skip-reason', reason));
   header.appendChild(statusBadge(result.status));
   header.addEventListener('click', () => {
     if (state.expanded.has(key)) state.expanded.delete(key);
@@ -935,7 +948,7 @@ function renderStepRow(
     }
 
     if (
-      result.status !== 'passed' &&
+      showsBatchError(result.status) &&
       batchError &&
       batchError.step === index &&
       batchError.message
@@ -978,12 +991,12 @@ function field(label: string, value: string, extra = ''): HTMLElement {
   return wrap;
 }
 
-function statusBadge(status: 'passed' | 'failed' | 'error'): HTMLElement {
-  // Matches TestBench: ✓ for pass, ✗ for fail, ⚠ for error. Coloured via
-  // VS Code's --vscode-testing-icon* tokens with our pass/fail/error
-  // CSS vars as fallback.
-  const icon = status === 'passed' ? '✓' : status === 'failed' ? '✗' : '⚠';
-  const label = status.charAt(0).toUpperCase() + status.slice(1);
+function statusBadge(status: StepStatus): HTMLElement {
+  // Matches TestBench: ✓ for pass, ✗ for fail, ⚠ for error, ◌ for a step a
+  // return left unrun. Coloured via VS Code's --vscode-testing-icon* tokens
+  // with our pass/fail/error CSS vars as fallback.
+  const icon = statusGlyph(status);
+  const label = statusLabel(status);
   const badge = el('span', `status-icon status-${status}`, icon);
   badge.setAttribute('title', label);
   badge.setAttribute('aria-label', label);

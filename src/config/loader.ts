@@ -5,6 +5,10 @@ import { AIGateway } from '@pkent/aigateway';
 import { DEFAULT_CONFIG } from './defaults.js';
 import type { AiConfig, Config, UserConfig } from './types.js';
 import { parseBoolEnv } from '../env/loader.js';
+import {
+  parseFlowControlStep,
+  flowControlInHookError,
+} from '../parser/flow-control-step.js';
 import { readUserRootEnv } from '../env/user-root.js';
 import { logger } from '../utils/logger.js';
 
@@ -333,7 +337,43 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
   // field — strip it before merging so it never reaches the resolved config.
   const { $schema: _schema, ...userConfig } = parsed;
   const typed = userConfig as UserConfig;
-  return withMachineAiFloor(withEnvDefaults(mergeConfig(baseDefaults, typed)), typed.ai ?? null);
+  const merged = withMachineAiFloor(
+    withEnvDefaults(mergeConfig(baseDefaults, typed)),
+    typed.ai ?? null,
+  );
+  assertNoFlowControlInDefaultHooks(merged, resolvedPath);
+  return merged;
+}
+
+/**
+ * A project default hook may not be a flow-control step
+ * (stories/step-flow-control.md, decision 8).
+ *
+ * At LOAD, beside the JSON-parse failure, and for the same reason: a typo in
+ * the sole config source should fail loudly rather than silently change how
+ * every test runs. `defaultHooks` merges into every test in the project, so a
+ * `Return` there would otherwise be handed to a model on every hook of every
+ * run — a per-step cost for a line that can never do what it says.
+ *
+ * Only the authored strings are checked here. A default hook that reaches a
+ * flow-control line through a `[skill: …]` expansion cannot be seen from the
+ * config, and is caught by the hook loop's own refusal at run time.
+ */
+function assertNoFlowControlInDefaultHooks(config: Config, configPath: string): void {
+  const defaults = config.execution.defaultHooks;
+  if (!defaults) return;
+  for (const scope of ['before', 'beforeEach', 'afterEach', 'after'] as const) {
+    for (const instruction of defaults[scope] ?? []) {
+      if (parseFlowControlStep(instruction)) {
+        throw new Error(
+          flowControlInHookError(
+            instruction,
+            ` in ${configPath} (execution.defaultHooks.${scope})`,
+          ),
+        );
+      }
+    }
+  }
 }
 
 /** Apply CLI flag overrides onto an already-loaded config */

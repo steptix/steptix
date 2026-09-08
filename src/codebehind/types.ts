@@ -46,6 +46,26 @@ export interface CodeBehindStepApi {
   /** Throw a labelled assertion error if `condition` is false. A failed
    *  `expect` is a real step failure, never a fall-through to AI. */
   expect(condition: boolean, message?: string): void;
+  /**
+   * End the flow this step is in, as a PASS — the code form of a
+   * `If … then return` / `… then stop` step
+   * (stories/step-flow-control.md, decision 11).
+   *
+   * It throws a sentinel, so nothing after it in the entry runs. The runner
+   * reads that throw as a passed step carrying `flowControl`, and the run loop
+   * skips the rest of the innermost flow: the `### Section` body, the skill
+   * body, or the test itself. Write it as the branch of the condition the step
+   * states, and write the other branch by leaving it out:
+   *
+   * ```ts
+   * if ((await page.title()).includes('Dashboard')) step.exit();
+   * ```
+   *
+   * Only an entry bound to a step whose text CLAIMS the form may call it. On
+   * any other step the call fails the step non-retryably, naming the rule: the
+   * markdown is what a reader sees, so it has to say what the code does.
+   */
+  exit(): never;
 }
 
 /** One tab, as `tabs.list()` reports it. */

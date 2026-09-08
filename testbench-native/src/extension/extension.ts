@@ -11,6 +11,7 @@ import { DecorationManager, computeStepsSummary, dataTablesOf } from './decorati
 // The same builder the ⚠ decoration calls, so the test hook cannot drift from
 // what actually renders.
 import { staleHoverMessage } from './failure-hover-core.js';
+import { skipPaintsOver } from './step-skip-core.js';
 import { lineStatusFromRowStatus, rowHeaderSummary } from './row-summary-core.js';
 import { allRowsOfTable, buildRowsMessage, rowSelectionRefusal } from './row-selection-core.js';
 import { TestBenchRunnerView } from './runner-view.js';
@@ -793,6 +794,27 @@ class RunControllerRegistry implements vscode.Disposable {
           );
           break;
         }
+        case 'step:skip': {
+          // A step an `If … then return` left behind
+          // (stories/step-flow-control.md, decision 9). Routed by `frame` the
+          // way step:pass is — a section body line reports with the section
+          // frame, whose `uri` is the test file, a skill-body line with the
+          // skill file — so ◌ lands in the editor the author is looking at.
+          //
+          // Two things this deliberately does NOT do. It does not touch the
+          // returned frame's own CALL line: that frame ran and returned, and
+          // the ✓ it earns comes from the clean `frame:pop` the next executed
+          // step's transition emits. And it never paints over a ✗, the one
+          // status a run must not lose (`skipPaintsOver`).
+          const target = this.targetUriFor(uri, ev.frame);
+          if (skipPaintsOver(this.tracker.state(target).statuses.get(ev.line))) {
+            // The reason as the line's detail, so the hover can say WHY this
+            // line is blank — the run log is the only other place it exists,
+            // and it scrolls.
+            this.tracker.setStatus(target, ev.line, 'skip', stepFailureDetail({ error: ev.reason }));
+          }
+          break;
+        }
         case 'step:fail': {
           const target = this.targetUriFor(uri, ev.frame);
           // Pin the failure text to the line: the ✗ hover and the panel's
@@ -993,6 +1015,18 @@ class RunControllerRegistry implements vscode.Disposable {
           // broken code fails instead of healing) — pin the error so the ✗
           // says what the code did wrong.
           this.tracker.setStatus(uri, ev.line, 'fail', stepFailureDetail(ev));
+          break;
+        case 'step:skip':
+          // A compile's run can return too — an entry that calls
+          // `step.exit()`, or the AI step it was generated from. The replay
+          // then never reaches the rest of that flow, which is why such a
+          // compile ends `partial` rather than green
+          // (stories/step-flow-control.md, decision 12). Painted here so the
+          // gutter says which lines the round never got to, instead of
+          // leaving last run's marks standing.
+          if (skipPaintsOver(this.tracker.state(uri).statuses.get(ev.line))) {
+            this.tracker.setStatus(uri, ev.line, 'skip', stepFailureDetail({ error: ev.reason }));
+          }
           break;
         default:
           break;

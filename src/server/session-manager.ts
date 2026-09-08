@@ -40,6 +40,14 @@ import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { runSetStep } from '../runner/set-step-runner.js';
+import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import {
+  flowControlExplanation,
+  frameExitIndex,
+  frameLabel,
+  skippedByReturn,
+  skippedByReturnReason,
+} from '../runner/flow-control.js';
 import {
   envDataSecretValues,
   interpolateEnvData,
@@ -571,6 +579,23 @@ export type RunEvent =
        *  the step on that path. */
       codeBehindStale?: { file: string; error: string };
     }
+  /**
+   * A step that never ran because an earlier step ended the flow it was in
+   * (stories/step-flow-control.md, decision 9). Mirrors `StepSkipEvent` in
+   * runner-core/src/protocol.ts, which is the client's copy of this contract.
+   *
+   * One per skipped step line, PLUS one per skipped nested call line — a
+   * section or skill invoked inside the returned body, addressed by that
+   * frame's `invocationLine` in its parent's file. The call line has no step of
+   * its own in the expansion, so without an event it would keep whatever glyph
+   * the gutter last painted on it.
+   *
+   * There is no matching `step:start`, and no `frame:push` for a skipped
+   * step's frame. That is the load-bearing part: if the skipped steps went
+   * through the frame transitions, a nested call inside the returned body would
+   * push, pop clean, and paint ✓ for work that never ran.
+   */
+  | { type: 'step:skip'; line: number; frame?: FrameInfo; reason: string }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
   | { type: 'capture'; line: number; name: string; value: string; source: 'capture' | 'toolOutput' | 'assignment' }
   | {
@@ -731,7 +756,13 @@ export interface InternalRunOptions {
 
 export interface StepResultResponse {
   step: string;
-  status: 'passed' | 'failed' | 'error';
+  /**
+   * `'skipped'` is additive (stories/step-flow-control.md, decision 9): the
+   * step did not run because an earlier one ended the flow it was in, and
+   * `reasoning` says which step and which flow. Reporting it `passed` would
+   * be a green row for work that never happened.
+   */
+  status: 'passed' | 'failed' | 'error' | 'skipped';
   actions: unknown[];
   screenshot: string;
   reasoning: string;
@@ -3093,6 +3124,41 @@ export class SessionManager {
     // registry binds through the compiler's frames rather than a second
     // expansion the server would have to reproduce exactly.
     const cb = internal?.codeBehind;
+
+    // The compile route posts steps that are ALREADY expanded.
+    //
+    // `POST /codebehind/compile` (src/server/compile-runner.ts, `sessionRunner`)
+    // sends `test.steps` with no `skillsDir` and no `sections`, deliberately —
+    // re-expanding server-side would be a second answer to "which `.steps.ts`
+    // does step 7 bind into". So the block above never runs, and without this
+    // `expansionOrigins` stays null: every step then reads as the ROOT frame.
+    // A `### Section` body that returns would skip the rest of the TEST rather
+    // than the rest of the section, call it "ended the run", and quote the
+    // interpolated line — the one thing decision 4 says a reason may never do.
+    //
+    // Only these three. `expansionFrames` (the wire `FrameInfo` table) stays
+    // null on purpose: seeding it would start emitting `frame:push`/`frame:pop`
+    // on a route that has never sent them, which changes what a compile's
+    // clients see rather than fixing what the run does.
+    if (expansionOrigins === null && cb?.expansion) {
+      // A prefix replay sends fewer steps than the compiler expanded
+      // (`throughStep`), and the parallel arrays are indexed from 0 either way
+      // — so they are clipped to this batch rather than trusted whole. A
+      // shorter-than-expected table means the caller is describing some other
+      // list, and the safe answer there is the fallback we already had.
+      //
+      // All three or none. Seeding the frames without the authored lines
+      // would give a return frame-scoped reach while its reason quoted the
+      // interpolated text — the one combination decision 4 forbids — and it
+      // would do so silently, because both halves are individually valid.
+      const n = effectiveSteps.length;
+      if (cb.expansion.origins.length >= n && cb.expansion.rawSteps.length >= n) {
+        expansionOrigins = cb.expansion.origins.slice(0, n);
+        expandedFrames = cb.expansion.frames;
+        expansionRawSteps = cb.expansion.rawSteps.slice(0, n);
+      }
+    }
+
     const expansionForBinding = (): Parameters<typeof buildCodeBehindRegistry>[0] =>
       cb?.expansion ?? {
         steps: effectiveSteps,
@@ -4004,6 +4070,9 @@ export class SessionManager {
           break;
         }
         const originalStep = effectiveSteps[i]!;
+        /** Set when this step ended its flow: the last index the return skips,
+         *  which the loop tail resumes after (stories/step-flow-control.md). */
+        let flowControlJumpTo: number | null = null;
         // Baseline for this step's token attribution, read back below if the
         // step turns out to have healed a broken code-behind entry.
         tokensAtStepStart = session.tokenTracker.runTotal;
@@ -4015,6 +4084,19 @@ export class SessionManager {
         // value on a re-run (stories/variable-assignment.md §Locked). Its
         // template is resolved inside the branch, below.
         const setStep = parseSetStep(originalStep);
+        // `If … then return` / `… then stop`, read off the AUTHORED line, before
+        // interpolation (stories/step-flow-control.md, decision 2). The claim is
+        // textual and must be the same answer in every runner whatever a `{{…}}`
+        // in the body holds; the model only judges the CONDITION, and only on
+        // the conditional form.
+        const flowControlClaim = setStep ? null : parseFlowControlStep(originalStep);
+        // The unconditional form — a step whose WHOLE text is the tail, so
+        // `Stop running the remaining steps` as much as `Return` — has no
+        // condition to judge, so it is dispatched below beside `Set`: no model
+        // call, no page snapshot, no cache entry (decision 3). The test is the
+        // absent `body`, never the length of the line.
+        const unconditionalFlowControl =
+          flowControlClaim && flowControlClaim.body === undefined ? flowControlClaim : null;
         // NOT evaluated for a Set step. `interpolateEnvData` THROWS on an
         // unknown `${…}`, and this loop is `try { … } finally` with no catch,
         // so a bad reference inside a Set template escaped `executeRun`
@@ -4342,10 +4424,32 @@ export class SessionManager {
         // into a `StepResult` so the rest of the loop is unchanged. Without
         // a catalogue, fall through to `executeStep` and let the AI loop
         // see the raw `[tool: ...]` text (legacy behaviour).
-        const toolCall = setStep ? null : toolCatalogue ? parseToolCall(originalStep) : null;
+        const toolCall =
+          setStep || unconditionalFlowControl
+            ? null
+            : toolCatalogue
+              ? parseToolCall(originalStep)
+              : null;
         let stepResult: StepResult;
         try {
-          if (setStep) {
+          if (unconditionalFlowControl) {
+            // `Return` / `Stop` as a whole step: nothing to judge, so nothing
+            // to ask the model (stories/step-flow-control.md, decision 3). Its
+            // explanation is the bare phrase — `Returned from "Sign in"` or
+            // `Ended the run` — because there is no model detail to append.
+            stepResult = {
+              index: i + 1,
+              instruction: interpolated,
+              status: 'passed',
+              turns: [],
+              durationMs: 0,
+              retried: false,
+              aiExplanation: flowControlExplanation(
+                frameLabel(expansionOrigins ?? undefined, expandedFrames, i),
+              ),
+              flowControl: { kind: 'return', verb: unconditionalFlowControl.verb },
+            };
+          } else if (setStep) {
             // Assignment: no model, no page, no cache. The capture event is
             // emitted here rather than by the common sweep below so its
             // `source` can say `assignment` — the sweep labels everything it
@@ -4576,6 +4680,13 @@ export class SessionManager {
                 // matches but this test says are not secrets
                 // (stories/placeholder-preserving-actions.md, decision 2).
                 ...(unmaskNames.size > 0 && { unmask: unmaskNames }),
+                // The CONDITIONAL form only — the unconditional one took its
+                // own branch above and never reaches here. Present, this is
+                // what lets the model's `return` action end the step; absent,
+                // the action is refused with RETURN_NOT_CLAIMED and the model
+                // is told why on its next turn (decision 2). It also turns on
+                // the executor's settle gate before the judgement (decision 6).
+                ...(flowControlClaim && { flowControlClaim }),
                 // Run abort signal — cancels in-flight AI calls and stops the
                 // step's turn loop the instant the client stops. See issues/020.
                 ...(signal && { signal }),
@@ -4661,6 +4772,20 @@ export class SessionManager {
           logger.info(`Session "${sessionId}": run aborted by client during step ${i + 1}/${stepsTotal}`);
           recordInterruptedStep(i + 1, originalStep, stepResult);
           break;
+        }
+
+        // Name the flow the step left. `executeStep` produced the model's own
+        // account of why the condition held and nothing more — it holds no
+        // expansion, so it cannot know whether this was "Sign in" or the whole
+        // test. Done HERE, before `results[]`, the report row and the
+        // `step:pass` event are built from it, so all three read the same
+        // sentence. The unconditional branch already wrote its own
+        // (stories/step-flow-control.md).
+        if (stepResult.flowControl && !unconditionalFlowControl) {
+          stepResult.aiExplanation = flowControlExplanation(
+            frameLabel(expansionOrigins ?? undefined, expandedFrames, i),
+            stepResult.aiExplanation,
+          );
         }
 
         // Collect per-step output captures from resolvedParameters. Union
@@ -4815,6 +4940,23 @@ export class SessionManager {
             currentUrl,
           ),
         );
+        // The steps a return skips are NOT added to the history (decision 4),
+        // and `formatStepHistoryEntry` carries no explanation — so without this
+        // line the model's `## Prior Steps` would show a section that started
+        // and then simply stopped, with nothing saying it ended on purpose.
+        //
+        // Numbered off `totalStepsExecuted`, like the line above it and unlike
+        // the reason strings: this history is the model's, it counts executed
+        // steps and spans batches, and a 1-based EXPANSION index dropped into
+        // it would name a different step than the one the model just read
+        // about.
+        if (stepResult.flowControl) {
+          session.conversationHistory.push(
+            `[flow] step ${session.totalStepsExecuted + 1} ` +
+              `${stepResult.aiExplanation ?? 'returned'} — ` +
+              'the rest of that flow was skipped',
+          );
+        }
 
         session.tokenTracker.resetStep();
         session.totalStepsExecuted++;
@@ -4886,6 +5028,162 @@ export class SessionManager {
             }
           }
 
+          // ── The step ended the flow it was in ───────────────────────
+          //
+          // Everything from here to the end of the returning step's frame is
+          // skipped: no hooks, no tokens, no screenshot, no conversation
+          // history — and, crucially, no `transitionToFrame`. A nested call
+          // inside the returned body must not push and pop clean, or its call
+          // line would paint ✓ for work that never ran
+          // (stories/step-flow-control.md, decision 9).
+          if (stepResult.flowControl) {
+            const label = frameLabel(expansionOrigins ?? undefined, expandedFrames, i);
+            // The reason carries the returning step's line so it is findable
+            // from the editor — which numbers by source line, not by the
+            // expanded index the reason's `step N` uses.
+            //
+            // `expansionRawSteps`, not `originalStep`: the latter is
+            // `effectiveSteps[i]`, which the expander has already put skill
+            // arguments and row values through, so a body step reading `If
+            // {{password}} is remembered then return` would put the literal
+            // password on the wire, in the run log, in the report and on a
+            // TestBench hover. `rawSteps` is the match side — deliberately
+            // never interpolated (expander.ts, `applySkillScope`) — so it is
+            // the line as authored. It falls back to `originalStep` for the
+            // one case with no authored form on this side of the wire: a
+            // LOOPED SECTION body, whose `rawSteps` the wire shape does not
+            // carry (contract §3.2), leaving `matchInput` to fall back to the
+            // row-interpolated text. Skill bodies and unlooped sections are
+            // authored either way.
+            const returningText = expansionRawSteps[i] ?? originalStep;
+            const reason = skippedByReturnReason(i, label, returningText);
+            // `endIndex` still bounds the run. A bounded re-run must not report
+            // steps it was never going to reach in this batch as skipped.
+            const exit = Math.min(
+              frameExitIndex(
+                expansionOrigins ?? undefined,
+                expandedFrames,
+                i,
+                effectiveSteps.length,
+              ),
+              endIndex,
+            );
+            // Call lines already reported, keyed by the DOCUMENT ADDRESS the
+            // client acts on — the parent frame's file and the line in it —
+            // rather than by frame id or by parent frame id.
+            //
+            // A looped section is one frame per iteration, and every iteration
+            // shares the one call line. Keyed by the frame's own id, that line
+            // would be announced skipped three times over for a three-row
+            // table. Keyed by the PARENT's id it is still announced once per
+            // iteration whenever the call sits INSIDE the loop body: the
+            // parents are the iteration frames, which are distinct, while the
+            // `[skill: …]` line they all point at is one line in one file.
+            // Only the address the client paints is the same in both cases.
+            const callLinesEmitted = new Set<string>();
+            const emitCallLineFor = (frameId: string): void => {
+              // Walk out to the returning step's own frame, then report inwards,
+              // so a section called from a section names the outer call first
+              // and the stream reads in document order: call, then body.
+              const chain: string[] = [];
+              let cur: string | null = frameId;
+              const seen = new Set<string>();
+              while (cur && cur !== '' && cur !== stepFrameId && !seen.has(cur)) {
+                seen.add(cur);
+                chain.unshift(cur);
+                cur = expandedFrames[cur]?.parentId ?? null;
+              }
+              for (const id of chain) {
+                const f = expandedFrames[id];
+                // The call line lives in the PARENT's file, not this frame's:
+                // a skill frame's own `uri` is the skill file, while the
+                // `[skill: ...]` line the author sees is in whatever called it.
+                if (!f || f.invocationLine === null) continue;
+                const parentId = f.parentId ?? '';
+                const parentFrame =
+                  parentId === ''
+                    ? request.testFilePath
+                      ? ({
+                          id: '',
+                          parentId: null,
+                          kind: 'test',
+                          uri: request.testFilePath,
+                          line: 0,
+                        } as FrameInfo)
+                      : undefined
+                    : expansionFrames?.[parentId];
+                // The parent frame's own file, which is where this call line
+                // lives. Falls back to the parent's id only when no frame
+                // answers for it, which leaves the key no worse than it was.
+                const address = `${parentFrame?.uri ?? parentId}#${f.invocationLine}`;
+                if (callLinesEmitted.has(address)) continue;
+                callLinesEmitted.add(address);
+                emit({
+                  type: 'step:skip',
+                  line: f.invocationLine,
+                  ...(parentFrame && { frame: parentFrame }),
+                  reason,
+                });
+              }
+            };
+            for (let j = i + 1; j <= exit; j++) {
+              const skippedFrameId = expansionOrigins?.[j]?.frameId ?? '';
+              if (skippedFrameId !== stepFrameId) emitCallLineFor(skippedFrameId);
+              const skippedFrame = frameInfoFor(j);
+              emit({
+                type: 'step:skip',
+                line: sourceLineFor(j),
+                ...(skippedFrame && { frame: skippedFrame }),
+                reason,
+              });
+              const skippedInstruction = effectiveSteps[j] ?? '';
+              results.push({
+                step: skippedInstruction,
+                status: 'skipped',
+                actions: [],
+                screenshot: '',
+                reasoning: reason,
+                outputs: {},
+              });
+              // The report's row, so the HTML says "N passed, M skipped" with
+              // the reason on each skipped row rather than losing them
+              // (decision 15).
+              const skippedResult = skippedByReturn(j, skippedInstruction, i, label, returningText);
+              const skippedSkill = outermostSkillName(skippedFrameId, expansionFrames);
+              const skippedSection = outermostSectionName(skippedFrameId, expansionFrames);
+              const skippedLoop = loopMarkerFor(skippedFrameId, expansionFrames, frameInputs);
+              const fullSkipped: StepResult = {
+                ...skippedResult,
+                ...(skippedSkill && { sourceSkill: skippedSkill }),
+                ...(skippedSection && { sourceSection: skippedSection }),
+                ...(skippedLoop && { loop: skippedLoop }),
+              };
+              fullStepResults.push(fullSkipped);
+              // Offered to the compile too, and for the opposite reason to the
+              // one that might suggest withholding it: a step that never ran is
+              // no evidence, so it must be NAMED as not attempted rather than
+              // quietly left without an entry (decision 12, and the same
+              // bookkeeping a client stop gets). `generationRefusal` is the one
+              // place that decides that; it already has the `skipped` branch,
+              // and this is what reaches it. Without the offer, a Run & Compile
+              // of a test that returns wrote entries for what ran and said
+              // nothing at all about the rest.
+              if (liveCompile) {
+                const skippedBinding = generationBindings.bindingFor(j);
+                liveCompile.offer({
+                  index: j,
+                  ...(skippedBinding && { binding: skippedBinding }),
+                  result: fullSkipped,
+                  resolvedParameters: { ...resolvedParameters },
+                });
+              }
+              logger.info(`Session "${sessionId}" step ${j + 1} skipped — ${reason}`);
+            }
+            // Consumed by the loop tail. `stepsCompleted` is untouched on
+            // purpose: it counts steps that EXECUTED (decision 9).
+            flowControlJumpTo = exit;
+          }
+
           // ── Step-mode pause decision ────────────────────────────────
           //
           // When the client started this batch with `stepMode !== 'continue'`,
@@ -4894,8 +5192,13 @@ export class SessionManager {
           // moves to the next step's frame/line on the client; the loop
           // blocks on `pendingRunControl` until the client sends a new
           // mode via the `run-control` endpoint.
-          if (currentMode !== 'continue' && i < endIndex) {
-            const nextI = i + 1;
+          //
+          // `nextI` is the POST-JUMP index (decision 10). After a return the
+          // step that will actually run next is the one after the flow that
+          // ended, and pausing on `i + 1` would park the yellow ▶ on a line
+          // this run has already declared skipped.
+          const nextI = (flowControlJumpTo ?? i) + 1;
+          if (currentMode !== 'continue' && nextI <= endIndex) {
             const curDepth = depthOf(i);
             const nextDepth = depthOf(nextI);
             const shouldPause =
@@ -4997,6 +5300,12 @@ export class SessionManager {
           this.sessions.delete(this.sessionKey(sessionId));
           break;
         }
+
+        // Resume after the flow that ended. Last thing in the body so every
+        // per-step tail above (the browser refresh included) still ran for the
+        // returning step, which is an ordinary passed step
+        // (stories/step-flow-control.md, decision 4).
+        if (flowControlJumpTo !== null) i = flowControlJumpTo;
       }
     } finally {
       // The run's steps are done; everything from here is tail
@@ -5057,6 +5366,14 @@ export class SessionManager {
         // Exclude the interrupted (stopped) step from the failed count — it's
         // rendered as its own "aborted" state, not a failure (issue 021).
         const failedSteps = fullStepResults.filter((s) => s.status === 'failed' && !s.interrupted).length;
+        // The steps a return left behind (stories/step-flow-control.md,
+        // decision 15). The CLI and the Electron runner have always set this;
+        // the server did not, so a TestBench run — the way most people run a
+        // test — produced a report whose header said "4 passed" of 5 steps and
+        // never said where the fifth went. `generateReport` reads
+        // `skippedSteps ?? 0` and the template hides the tile at 0, so the
+        // count was silently dropped rather than rendered wrong.
+        const skippedSteps = fullStepResults.filter((s) => s.status === 'skipped').length;
         const totalSubActions = fullStepResults.reduce(
           (sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0),
           0,
@@ -5078,6 +5395,9 @@ export class SessionManager {
           totalSteps: stepsTotal,
           passedSteps,
           failedSteps,
+          // Omitted (not 0) on a run that skipped nothing, so a run that never
+          // returns writes the report it always did — the CLI's rule.
+          ...(skippedSteps > 0 && { skippedSteps }),
           totalSubActions,
           durationMs: Date.now() - runStartTime,
           tokensUsed: runTokens.total,
@@ -5169,6 +5489,15 @@ export class SessionManager {
       const lastRunSteps: LastRunStep[] = [];
       for (const result of fullStepResults) {
         if (result.hookScope || result.interactiveAdHoc || result.interactiveChild) continue;
+        // A step a return left unrun is deliberately absent, exactly as the
+        // CLI writer leaves it absent (test-runner.ts): the sidecar answers
+        // "which entries does the next compile need to regenerate", and a step
+        // that never ran is no evidence either way
+        // (stories/step-flow-control.md, decision 12). Written, its row would
+        // claim `fromCodeBehind: false, stale: false` — "ran under AI and was
+        // fine" — about a step nothing executed, and `--only-stale` would then
+        // skip a broken entry on the strength of it.
+        if (result.status === 'skipped') continue;
         const i = result.index - 1;
         const binding = codeBehind.bindingFor(i);
         const stale = result.codeBehindStale;

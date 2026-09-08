@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { createServer, type Server } from 'node:http';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../src/mcp/server.js';
+import { createApiClient as realCreateApiClient } from '../src/mcp/api-client.js';
 import { resetRegistry } from '../src/mcp/registry.js';
 import { ApiHttpError, PreflightFailure, type ApiClient, type McpDeps, type ProjectContext, type RunEvent, type StreamResult } from '../src/mcp/types.js';
 import { preflightError } from '../src/mcp/errors.js';
@@ -232,6 +234,81 @@ async function connect(opts: {
   };
 }
 
+// ---------------------------------------------------------------------------
+// The same tools, but with the REAL api-client on the streaming route and a
+// real socket under it.
+//
+// Everything above replaces `ApiClient` wholesale, which is the right trade for
+// asserting on the agent-facing contract — and exactly the wrong one for
+// anything the client itself decides. The client keeps a whitelist of event
+// types and records the rest in `dropped[]`; a fake that hands `events` back
+// verbatim cannot see an omission from it, and one has already shipped this way
+// (`step:skip`, stories/step-flow-control.md). So a run that has to prove it
+// crossed the wire scripts the SSE BODY instead of the event array.
+// ---------------------------------------------------------------------------
+
+let sseServer: Server | undefined;
+
+/** Serve one scripted SSE body to any `?stream=1` POST, and a finalized
+ *  last-run to the poll that follows. Everything else 404s, which every caller
+ *  of it already degrades from. */
+async function startSseServer(sse: string): Promise<string> {
+  sseServer = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      const url = req.url ?? '';
+      if (url.includes('stream=1')) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sse);
+        res.end();
+        return;
+      }
+      if (url.includes('/last-run')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ finalized: true, reportPath: null, tokens: null }));
+        return;
+      }
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not in this fixture' }));
+    });
+  });
+  await new Promise<void>((resolve) => sseServer!.listen(0, '127.0.0.1', resolve));
+  const address = sseServer.address();
+  if (typeof address === 'string' || address === null) throw new Error('no port');
+  return `http://127.0.0.1:${address.port}`;
+}
+
+/** An MCP client whose tools drive the real `createApiClient` against
+ *  `startSseServer`. Same server, same transport, same tool handlers as
+ *  `connect` — only the client under them is the shipping one. */
+async function connectOverSse(sse: string): Promise<Client> {
+  const baseUrl = await startSseServer(sse);
+  const project = fakeProject({ serverUrl: baseUrl, apiKey: 'server-key' });
+  const deps: McpDeps = {
+    createApiClient: realCreateApiClient,
+    ensureServerReady: async () => {},
+    assertServerRecognized: async () => {},
+    resolveProject: async () => project,
+  };
+  const server = createMcpServer(deps);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'test', version: '0' });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  return client;
+}
+
+function sseFrames(...events: Record<string, unknown>[]): string {
+  return events.map((e) => `event: ${String(e.type)}\ndata: ${JSON.stringify(e)}\n\n`).join('');
+}
+
+afterEach(async () => {
+  if (sseServer) {
+    await new Promise<void>((resolve) => sseServer!.close(() => resolve()));
+    sseServer = undefined;
+  }
+});
+
 beforeEach(() => {
   resetRegistry();
 });
@@ -324,6 +401,221 @@ describe('run_steps', () => {
     const first = (res.content as { type: string; text?: string }[])[0];
     expect(first?.type).toBe('text');
     expect(first?.text).toContain('PASSED');
+  });
+
+  it('counts the steps a return skipped, instead of reporting them as a shortfall', async () => {
+    // stories/step-flow-control.md. The line counted `status === 'passed'`
+    // over every row, so a run that RETURNED came back as
+    // `PASSED — 2/4 steps passed` — which to an agent reading only the text
+    // half reads as two failures on a green run, with nothing saying the other
+    // two were skipped on purpose.
+    const { client } = await connect({
+      script: {
+        events: [
+          { type: 'step:start', line: 1 },
+          { type: 'step:pass', line: 1 },
+          { type: 'step:start', line: 2 },
+          { type: 'step:pass', line: 2, output: 'Ended the run' },
+          { type: 'step:skip', line: 3, reason: 'Not run: step 2 ended the run — Stop' },
+          { type: 'step:skip', line: 4, reason: 'Not run: step 2 ended the run — Stop' },
+          { type: 'done', status: 'passed' },
+        ],
+      },
+    });
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: {
+        steps: ['open it', 'Stop', 'click sign out', 'check the form'],
+        project_root: PROJECT_ROOT,
+      },
+    });
+
+    const first = (res.content as { type: string; text?: string }[])[0];
+    expect(first?.text).toContain('PASSED — 2 passed, 2 skipped (a step returned early) of 4');
+    expect(first?.text).not.toContain('2/4 steps passed');
+  });
+
+  it('counts a returned run the same way over the REAL client and a real socket', async () => {
+    // The composition the fake above cannot see. Every layer is the shipping
+    // one — SseParser, its event whitelist, `consumeRunStream`, `foldRun`,
+    // `stepTally`, the tool handler, the MCP transport — and only the server
+    // answering is a fixture. With `step:skip` missing from the whitelist this
+    // returns `PASSED — 2/4 steps passed` plus two "unrecognised event"
+    // warnings, and `structuredContent.steps` holds two rows instead of four.
+    const client = await connectOverSse(
+      sseFrames(
+        { type: 'step:start', line: 1 },
+        { type: 'step:pass', line: 1 },
+        { type: 'step:start', line: 2 },
+        { type: 'step:pass', line: 2, output: 'Ended the run' },
+        {
+          type: 'step:skip',
+          line: 3,
+          reason: 'Not run: step 2 ended the run — If the title is Dashboard then stop',
+        },
+        {
+          type: 'step:skip',
+          line: 4,
+          reason: 'Not run: step 2 ended the run — If the title is Dashboard then stop',
+        },
+        { type: 'done', status: 'passed' },
+      ),
+    );
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: {
+        steps: [
+          'open it',
+          'If the title is Dashboard then stop',
+          'click sign out',
+          'check the form',
+        ],
+        project_root: PROJECT_ROOT,
+      },
+    });
+
+    const structured = res.structuredContent as Record<string, unknown>;
+    const steps = structured.steps as {
+      line: number;
+      status: string;
+      output: string | null;
+      skipCause?: string;
+    }[];
+    expect(steps.map((s) => [s.line, s.status])).toEqual([
+      [1, 'passed'],
+      [2, 'passed'],
+      [3, 'skipped'],
+      [4, 'skipped'],
+    ]);
+    // The cause reaches the agent per row, not only in the one-liner — and the
+    // schema declares it, so the SDK's own validation lets it through.
+    expect(steps.map((s) => s.skipCause)).toEqual([
+      undefined,
+      undefined,
+      'returned',
+      'returned',
+    ]);
+    // The reason rides out on the row, which is the only place an agent can
+    // read WHY the last two steps have no result.
+    expect(steps[2]?.output).toContain('Not run: step 2 ended the run');
+    // No warning about it: a return is the test doing what it was told, and an
+    // unknown event would have produced one per frame.
+    expect(structured.warnings).toEqual([]);
+    const first = (res.content as { type: string; text?: string }[])[0];
+    expect(first?.text).toContain('PASSED — 2 passed, 2 skipped (a step returned early) of 4');
+  });
+
+  it('says which KIND of skip happened, and says both when a run had both', async () => {
+    // `skipped` arrives from two places that want opposite reactions: a return
+    // (nothing to do) and an `[input:]` / `[interactive]` step the server
+    // declined to run unattended (needs a person before it can ever pass). One
+    // clause for both sent the agent after the wrong one half the time.
+    const client = await connectOverSse(
+      sseFrames(
+        { type: 'step:start', line: 1 },
+        { type: 'step:pass', line: 1 },
+        { type: 'step:start', line: 2 },
+        { type: 'step:pass', line: 2, output: 'skipped' },
+        { type: 'step:start', line: 3 },
+        { type: 'step:pass', line: 3, output: 'Ended the run' },
+        { type: 'step:skip', line: 4, reason: 'Not run: step 3 ended the run — Stop' },
+        { type: 'done', status: 'passed' },
+      ),
+    );
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: {
+        steps: ['open it', '[input: code] Type the code', 'Stop', 'click sign out'],
+        project_root: PROJECT_ROOT,
+      },
+    });
+
+    const first = (res.content as { type: string; text?: string }[])[0];
+    expect(first?.text).toContain(
+      'PASSED — 2 passed, 1 skipped (a step returned early), 1 skipped (need a human) of 4',
+    );
+    // The human-needed warning belongs to the unattended one only, and still
+    // fires when a return happened in the same run.
+    expect((res.structuredContent as { warnings: string[] }).warnings).toEqual([
+      expect.stringContaining('need a human'),
+    ]);
+  });
+
+  it('reports a run that skipped only unattended steps in those words', async () => {
+    const client = await connectOverSse(
+      sseFrames(
+        { type: 'step:start', line: 1 },
+        { type: 'step:pass', line: 1 },
+        { type: 'step:start', line: 2 },
+        { type: 'step:pass', line: 2, output: 'skipped' },
+        { type: 'done', status: 'passed' },
+      ),
+    );
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['open it', '[input: code] Type the code'], project_root: PROJECT_ROOT },
+    });
+
+    const first = (res.content as { type: string; text?: string }[])[0];
+    expect(first?.text).toContain('PASSED — 1 passed, 1 skipped (need a human) of 2');
+    expect(first?.text).not.toContain('returned early');
+  });
+
+  it('counts a skipped step towards progress, so a returned run still reaches total', async () => {
+    // Progress counts terminal events, and `step:skip` is the only terminal a
+    // skipped step gets. Left out, a run that returns stops the bar wherever
+    // the return happened — which reads as a run that hung.
+    const client = await connectOverSse(
+      sseFrames(
+        { type: 'step:start', line: 1 },
+        { type: 'step:pass', line: 1 },
+        { type: 'step:skip', line: 2, reason: 'Not run: step 1 ended the run — Stop' },
+        { type: 'step:skip', line: 3, reason: 'Not run: step 1 ended the run — Stop' },
+        { type: 'done', status: 'passed' },
+      ),
+    );
+
+    const progress: { progress: number; total?: number }[] = [];
+    await client.callTool(
+      {
+        name: 'run_steps',
+        arguments: { steps: ['Stop', 'click sign out', 'check the form'], project_root: PROJECT_ROOT },
+      },
+      undefined,
+      { onprogress: (p) => progress.push(p) },
+    );
+
+    expect(progress.map((p) => p.progress)).toEqual([1, 2, 3]);
+    expect(progress.at(-1)?.total).toBe(3);
+  });
+
+  it('leaves the wording byte-identical when nothing was skipped', async () => {
+    // The other half of the same claim: every run that does not return must
+    // read exactly as it always did.
+    const { client } = await connect({
+      script: {
+        events: [
+          { type: 'step:start', line: 1 },
+          { type: 'step:pass', line: 1 },
+          { type: 'step:start', line: 2 },
+          { type: 'step:pass', line: 2 },
+          { type: 'done', status: 'passed' },
+        ],
+      },
+    });
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: { steps: ['open it', 'click sign out'], project_root: PROJECT_ROOT },
+    });
+
+    const first = (res.content as { type: string; text?: string }[])[0];
+    expect(first?.text).toMatch(/^PASSED — 2\/2 steps passed \(session mcp:steps-/);
+    expect(first?.text).not.toContain('skipped');
   });
 
   it('reuses one session id across calls in a process', async () => {

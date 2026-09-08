@@ -523,6 +523,29 @@ describe('the receipt', () => {
       { targetId: null, url: 'https://shop.example/print', title: 'Print' },
     ]);
     expect(receipt.keptOpen).toHaveLength(1);
+    // The one-line headline, unchanged for a run that skipped nothing: the
+    // count reads `N/M steps` exactly as it always has.
+    expect(text(result)).toContain('PASSED — 2/2 steps in "Cart — Checkout"');
+  });
+
+  it('says how many steps a return skipped, on the one line a text-only host shows', async () => {
+    // stories/step-flow-control.md. Counting only `passed` made an errand that
+    // returned read `PASSED — 1/3 steps in "…"` — two shortfalls with nothing
+    // saying they were skipped on purpose.
+    const h = await connect({
+      events: (body) => [
+        { type: 'step:start', line: 1 },
+        { type: 'step:pass', line: 1, output: 'Ended the run' },
+        { type: 'step:skip', line: 2, reason: 'Not run: step 1 ended the run — Stop' },
+        { type: 'step:skip', line: 3, reason: 'Not run: step 1 ended the run — Stop' },
+        { type: 'done', status: 'passed', errand: errandBlock(body, {}) },
+      ],
+    });
+
+    const result = await errand(h, { steps: ['Stop', 'click checkout', 'read the total'] });
+    expect(text(result)).toContain(
+      'PASSED — 1 passed, 2 skipped (a step returned early) of 3 in "Cart — Checkout"',
+    );
   });
 
   it('never says a tab closed when the receipt says it is still open', async () => {

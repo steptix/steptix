@@ -134,6 +134,61 @@ no folder to resolve a relative path against, so it can only use absolute paths.
 - If a step fails, execution **stops immediately**. Remaining steps are not executed.
 - The response includes results for all steps that were attempted (including the failed one).
 
+#### Leaving a flow early
+
+A step written `If <condition> then return` (or `… then stop`), and a step whose
+whole text is that tail (`Return`, `Stop here`, `Stop running the remaining
+steps`), ends the innermost flow it is in **as a pass**: the
+rest of a `### Section` body, the rest of a skill body, or the rest of the run
+when the step is in the main flow. The run status is unaffected — a return is
+not a failure — and the steps left behind are reported as **skipped**, never as
+passed. See `stories/step-flow-control.md`.
+
+- The returning step itself is an ordinary passed step: `status: "passed"`, with
+  `reasoning` reading `Returned from "<section or skill>"` or `Ended the run`,
+  plus the model's own account of why the condition held.
+- Every step the return leaves behind gets a `results[]` entry with
+  `status: "skipped"` and `reasoning` of the form
+  `Not run: step 3 returned from "Sign in" — <the returning step's authored
+  line>` (or `Not run: step 3 ended the run — …`), the appended line clipped to
+  80 characters with `…`. The number is the **expanded** step index, matching
+  the `results[]` order and the run log; the text is the step as AUTHORED,
+  never interpolated, so a resolved secret cannot ride out on it. One exception:
+  a step in the body of a **looped section** has no authored form on this side
+  of the wire — the request's `sections` carry no `rawSteps` parallel (§3.2), so
+  the row values are already interpolated into the only text the server has —
+  and that one reason quotes the interpolated line. Skipped steps take no
+  screenshot and capture no outputs.
+- `stepsCompleted` counts steps that **executed**. Skipped steps are not
+  counted, so a run that returned from the main flow reports fewer completed
+  steps than `stepsTotal` and still has `"status": "passed"`.
+
+On the SSE stream (`?stream=1`) each skipped step is announced by its own event:
+
+```
+event: step:skip
+data: {"type":"step:skip","line":9,"frame":{…},"reason":"Not run: step 3 returned from \"Sign in\" — If the page title contains \"Dashboard\" then return"}
+```
+
+| Field    | Description |
+|----------|-------------|
+| `line`   | 1-based source line, in `frame`'s file, of the step (or call) that did not run. |
+| `frame`  | Origin frame, when the request asked for skill/section expansion. Optional, as on every other step event. |
+| `reason` | The same sentence the step's `results[]` row carries. |
+
+A `step:skip` has **no matching `step:start`**, and no `frame:push` is emitted
+for a skipped step's frame. That is deliberate: a section or skill invoked
+inside the returned body must not push and pop cleanly, or its call line would
+paint as passed for work that never ran. Such a nested call gets a
+`step:skip` of its own, addressed by the **invocation line in the parent
+frame's file** — the line the author sees in the editor. The frame the return
+left pops normally, at the next executed step's frame transition or at end of
+run, so the call line that invoked it does show as passed: it ran, and it
+returned.
+
+Clients that do not know `step:skip` drop it, which is the safe direction —
+the line keeps whatever it was showing rather than the run failing.
+
 #### Response Body
 
 ```json
@@ -208,14 +263,14 @@ no folder to resolve a relative path against, so it can only use absolute paths.
 |------------------|-------------|
 | `sessionId`      | The session ID from the request. |
 | `status`         | `"passed"` if all steps succeeded, `"failed"` if an assertion failed, `"error"` if a step encountered an unexpected error. |
-| `stepsCompleted` | Number of steps that executed successfully. |
+| `stepsCompleted` | Number of steps that executed successfully. Steps skipped by a `return`/`stop` are not counted — they did not execute. |
 | `stepsTotal`     | Total number of steps in the request. |
 | `results`        | Array of per-step results, in execution order. Includes all attempted steps (up to and including the failed step, if any). |
 | `results[].step` | The original step text as provided. |
-| `results[].status` | `"passed"`, `"failed"`, or `"error"` for this individual step. |
+| `results[].status` | `"passed"`, `"failed"`, `"error"`, or `"skipped"` for this individual step. `"skipped"` means an earlier step ended the flow this one was in (see *Leaving a flow early*); it did not run. |
 | `results[].actions` | Array of structured actions the AI determined and executed for this step. |
 | `results[].screenshot` | Base64-encoded screenshot taken after the step completed. |
-| `results[].reasoning` | The AI's reasoning for how it interpreted and executed the step. |
+| `results[].reasoning` | The AI's reasoning for how it interpreted and executed the step. On a `"skipped"` step, why it did not run — e.g. `Not run: step 3 returned from "Sign in" — If the page title contains "Dashboard" then return`. |
 | `results[].outputs` | Outputs captured by this specific step. Empty object `{}` if no `[output:]` prefix was used. |
 | `outputs`        | Accumulated outputs across all steps in this request, merged with outputs from any previous requests in this session. |
 | `error`          | `null` on success. On failure: `{ "step": <index>, "message": "..." }` where `step` is the zero-based index of the failing step. |

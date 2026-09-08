@@ -76,6 +76,10 @@ test('isRunEvent: accepts every event variant', () => {
     'step:start',
     'step:pass',
     'step:fail',
+    // A step an `If … then return` left behind (stories/step-flow-control.md,
+    // decision 9). A client that does not know it drops it here, which is the
+    // safe direction: the line keeps its old glyph rather than the run failing.
+    'step:skip',
     'output',
     'capture',
     'done',
@@ -112,6 +116,34 @@ test('isRunEvent: step events still narrow when carrying frame info', () => {
     },
   };
   assert.equal(isRunEvent(stepWithFrame), true);
+});
+
+test('isRunEvent: a skip event narrows with its line, frame and reason', () => {
+  // The two shapes a skip is emitted in (stories/step-flow-control.md,
+  // decision 9): a skipped STEP, tagged with its own frame, and a skipped
+  // nested CALL line, tagged with the frame the call is written in. Both are
+  // the same event type — the difference is only which frame it names.
+  assert.equal(
+    isRunEvent({
+      type: 'step:skip',
+      line: 9,
+      frame: {
+        id: 'f1',
+        parentId: null,
+        kind: 'section',
+        uri: '/fixtures/checkout.md',
+        line: 4,
+        skillName: 'Sign in',
+      },
+      reason: 'Not run: step 3 returned from "Sign in"',
+    }),
+    true,
+  );
+  // A frameless skip — what a runner with no expansion (an errand) emits.
+  assert.equal(
+    isRunEvent({ type: 'step:skip', line: 5, reason: 'Not run: step 3 ended the run' }),
+    true,
+  );
 });
 
 test('isRunEvent: capture event narrows with a source discriminator', () => {

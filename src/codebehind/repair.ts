@@ -1,4 +1,5 @@
 import { formatParameterBlock } from '../ai/prompts.js';
+import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import type { ChatMessage, MessageContentBlock } from '../ai/types.js';
 
 /**
@@ -33,6 +34,17 @@ export interface RepairPromptInput {
 
 export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
   const paramBlock = formatParameterBlock(input.parameters, input.envRefs ?? []);
+
+  // A repair must not "fix" a flow-control entry by giving it the
+  // post-condition rule 5 asks for (stories/step-flow-control.md, decision 11).
+  // Gated on the claim, so an ordinary step's repair prompt is unchanged.
+  const flowControl = parseFlowControlStep(input.rawStepText);
+  const postConditionRule = flowControl
+    ? '5. This step is a flow-control step: it evaluates its condition and calls `step.exit()` when ' +
+      'it holds, and does nothing when it does not. It needs NO post-condition — `step.exit()` throws, ' +
+      'so there is nothing after it to assert on. Do not add one; fix the condition or the read it is ' +
+      'built from.'
+    : '5. End with a post-condition — a `locator.waitFor()` on what the step produced, or a `step.expect(...)` over a value read back from the page.';
 
   const roundLine = input.round
     ? `\nThis is repair round ${input.round.number} of ${input.round.max}. If you cannot make this step work as code, say so with {"entry": null, "reason": "..."} rather than guessing again.\n`
@@ -72,7 +84,7 @@ Rules:
 2. Fix the cause the error and the DOM actually show. A locator that timed out usually means the selector is wrong or the code raced the page, not that it needs a longer timeout.
 3. Read parameters via \`step.getVar\`, never inline their values — and an environment placeholder by the name inside its braces: \`\${data.url}\` is \`step.getVar('data.url')\`. Its value is this environment's; the file must run against the others.
 4. Compute dynamic values (dates, derived codes) at runtime.
-5. End with a post-condition — a \`locator.waitFor()\` on what the step produced, or a \`step.expect(...)\` over a value read back from the page.
+${postConditionRule}
 6. No imports; everything arrives via the context object.
 
 If this step genuinely cannot be expressed as code, decline instead:

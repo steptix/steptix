@@ -64,6 +64,7 @@ export function getReportTemplate(): string {
     .summary-stat .label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
     .stat-pass { color: var(--pass); }
     .stat-fail { color: var(--fail); }
+    .stat-skip { color: var(--warn); }
 
     /* Steps */
     .steps-section h2 { font-size: 1.1rem; font-weight: 700; margin-bottom: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
@@ -379,6 +380,12 @@ export function getReportTemplate(): string {
       <span class="number stat-fail">{{failedSteps}}</span>
       <span class="label">Failed</span>
     </div>
+    {{#if skippedSteps}}
+    <div class="summary-stat">
+      <span class="number stat-skip">{{skippedSteps}}</span>
+      <span class="label">Skipped</span>
+    </div>
+    {{/if}}
     <div class="summary-stat">
       <span class="number">{{totalSubActions}}</span>
       <span class="label">Sub-actions</span>
