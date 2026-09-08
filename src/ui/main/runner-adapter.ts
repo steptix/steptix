@@ -853,6 +853,11 @@ export class UIRunnerAdapter {
       // No condition to judge, so no model call, no page snapshot
       // (stories/step-flow-control.md, decision 3).
       if (flowControlClaim && flowControlClaim.body === undefined) {
+        // Skipped lines BELOW this one first, exactly as the ordinary step
+        // path does — a chain's untaken members sit on both sides of the taken
+        // one, and a `Return` written as a chain tail is a step like any other
+        // as far as ordering goes.
+        flushSkips(i);
         this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
         const stepResult: StepResult = {
           index: stepIndex,
