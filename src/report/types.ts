@@ -269,6 +269,22 @@ export interface StepResult {
     domAfter?: string;
     urlAfter?: string;
   };
+  /**
+   * This step ended the flow it was in, as a pass
+   * (stories/step-flow-control.md). Present only on the step that returned —
+   * the steps it left behind carry `status: 'skipped'` and a reason instead.
+   *
+   * The four run loops read it to decide where to resume: from the step after
+   * the last one in this step's frame. `verb` records which word was written
+   * (`return` / `stop`); both mean the same thing (decision 1), and it is kept
+   * so a report and a code-behind generator can echo the author's own wording.
+   *
+   * `kind` is a discriminant with one member today. It is here because the
+   * story explicitly leaves "break out of a loop" and "end the whole test from
+   * inside a section" for later, and a second kind arriving as a widened union
+   * is found by the compiler at every consumer.
+   */
+  flowControl?: { kind: 'return'; verb: 'return' | 'stop' };
   /** True when this step was typed into the interactive REPL rather than being part of the test file. */
   interactiveAdHoc?: boolean;
   /** True when this step is a user-typed command captured inside an [interactive] step. */
@@ -373,6 +389,20 @@ export interface TestReport {
   totalSteps: number;
   passedSteps: number;
   failedSteps: number;
+  /**
+   * Steps with `status: 'skipped'` — ones a `return` / `stop` left behind
+   * (stories/step-flow-control.md, decision 15), and the unmatched branches of
+   * a conditional group, which have always carried that status and were simply
+   * never counted.
+   *
+   * Counted separately so the header stays honest: nothing that did not run is
+   * counted as passed, and a run that returned from the main flow reads as a
+   * pass with N skipped rather than as a timeout.
+   *
+   * Omitted (not `0`) when nothing was skipped, so a run that skips nothing
+   * writes the report it always did.
+   */
+  skippedSteps?: number;
   totalSubActions: number;
   durationMs: number;
   tokensUsed: number;

@@ -12,6 +12,10 @@ const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   'read', 'count',
   'find', 'expand',
   'noop',
+  // stories/step-flow-control.md — the model's "the condition holds" answer.
+  // Valid vocabulary everywhere; the CLAIM guard lives in the step executor,
+  // which is the only place that knows the step's authored text.
+  'return',
 ]);
 
 /**

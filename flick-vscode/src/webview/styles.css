@@ -640,6 +640,25 @@ body {
 .status-error {
   color: var(--vscode-testing-iconErrored, var(--error));
 }
+/* A step a return left unrun (stories/step-flow-control.md). Deliberately the
+   muted description colour, not a status colour: it is neither a pass nor a
+   failure, and painting it warning-orange was the bug this replaced. */
+.status-skipped {
+  color: var(--vscode-testing-iconSkipped, var(--vscode-descriptionForeground));
+  font-weight: 400;
+}
+
+/* The reason on a collapsed skipped row. Shrinks before .step-text does, so a
+   long reason never pushes the step out of view. */
+.step-skip-reason {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
 
 .step-body {
   padding: 4px 8px 10px 32px;

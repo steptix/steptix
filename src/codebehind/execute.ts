@@ -10,6 +10,7 @@ import {
   isNonRetryable,
   type UploadPathContext,
 } from '../browser/upload-paths.js';
+import type { ParsedFlowControlStep } from '../parser/flow-control-step.js';
 import type {
   CodeBehindBrowserApi,
   CodeBehindContext,
@@ -33,6 +34,75 @@ export class CodeBehindExpectationError extends Error {
     super(message);
     this.name = 'CodeBehindExpectationError';
   }
+}
+
+/**
+ * What `step.exit()` throws (stories/step-flow-control.md, decision 11).
+ *
+ * A throw rather than a return value, because the contract is "nothing after
+ * it runs" and only an exception gives that from anywhere inside the entry —
+ * a nested helper, a `.forEach`, the middle of an `if`. It is a control
+ * signal, not a failure: `runCodeBehindEntry` catches it BEFORE the generic
+ * handler and answers `passed`.
+ */
+export class CodeBehindExitSignal extends Error {
+  constructor() {
+    super('step.exit() ended the flow this step is in');
+    this.name = 'CodeBehindExitSignal';
+  }
+}
+
+/**
+ * `step.exit()` called from an entry whose step does not claim the form
+ * (stories/step-flow-control.md, decision 11).
+ *
+ * Non-retryable, and that is the point: the entry is not broken, so healing it
+ * under AI would spend a turn and discard working code over a rule no
+ * re-planning can satisfy. The fix is one line of markdown.
+ */
+export const EXIT_NOT_CLAIMED =
+  'step.exit() was called for a step whose text does not say to return. The markdown is ' +
+  'what a reader sees, so it has to say what the code does: write the step as ' +
+  '"If <condition> then return" (or "… then stop"), or as a step whose whole text is the ' +
+  'tail ("Return", "Stop", "Stop running the remaining steps"). ' +
+  'Until the step claims the form, its entry may not end the flow.';
+
+/**
+ * Which of the two non-retryable failures an entry raised.
+ *
+ * Both are "the entry is fine, do not heal it under AI", and that is all
+ * `nonRetryable` says — but they need opposite sentences in the report cell
+ * and the TestBench hover, and the runner must not have to read the message
+ * text to tell them apart. So the kind rides out structurally, set where each
+ * is thrown.
+ *
+ *  - `file` — `step.filePath` named something missing, a folder, or a path
+ *    outside the project.
+ *  - `exit-unclaimed` — `step.exit()` on a step whose markdown does not claim
+ *    the flow-control form ({@link EXIT_NOT_CLAIMED}).
+ */
+export type CodeBehindNonRetryableKind = 'file' | 'exit-unclaimed';
+
+/**
+ * The unclaimed-exit refusal, tagged so the runner can tell it from a missing
+ * file without matching on the message.
+ *
+ * `nonRetryable` for the reason above: the entry is not broken, so healing it
+ * under AI would spend a turn and discard working code over a rule no
+ * re-planning can satisfy. The fix is one line of markdown.
+ */
+function exitNotClaimed(): Error {
+  return Object.assign(nonRetryable(EXIT_NOT_CLAIMED), {
+    codeBehindNonRetryableKind: 'exit-unclaimed' as const,
+  });
+}
+
+/** The kind off a thrown error. Everything untagged is a `file` failure —
+ *  the `upload-paths.ts` throws, which are all of them. */
+function nonRetryableKindOf(err: unknown): CodeBehindNonRetryableKind {
+  const tagged = (err as { codeBehindNonRetryableKind?: unknown } | null)
+    ?.codeBehindNonRetryableKind;
+  return tagged === 'exit-unclaimed' ? 'exit-unclaimed' : 'file';
 }
 
 export interface RunCodeBehindOptions {
@@ -75,6 +145,23 @@ export interface RunCodeBehindOptions {
    *  folder, fenced by the project root. Absent on a run with no test file,
    *  where `step.filePath` accepts only absolute paths. */
   uploadPaths?: UploadPathContext | undefined;
+  /**
+   * This step's AUTHORED text claims the `If … then return` / `… then stop`
+   * form — `parseFlowControlStep(<authored line>)`, computed by the run loop
+   * (stories/step-flow-control.md, decision 11).
+   *
+   * It is the only thing that lets `step.exit()` through. Present, an exit
+   * ends the step passed with `flowControl` on the outcome and the loop skips
+   * the rest of the flow; absent, the call fails the step non-retryably with
+   * {@link EXIT_NOT_CLAIMED}. Same guard the AI path puts on the `return`
+   * action, for the same reason: the markdown has to say the step returns, or
+   * a reader of the test has no way to know that it does.
+   *
+   * The verb is not read here — the runner stamps it onto the StepResult from
+   * the same claim — so a caller with nothing but a boolean answer can pass
+   * `{ verb: 'return' }`.
+   */
+  flowControlClaim?: ParsedFlowControlStep | undefined;
 }
 
 export interface CodeBehindOutcome {
@@ -95,6 +182,24 @@ export interface CodeBehindOutcome {
    * entry for a failure no re-planning can fix.
    */
   nonRetryable?: boolean;
+  /**
+   * Which non-retryable failure it was — present exactly when `nonRetryable`
+   * is. The runner writes a different explanation for each, and reading the
+   * message text to decide would tie the report cell to the wording of an
+   * error string (which is how the unclaimed exit came to be reported as a
+   * file that could not be resolved).
+   */
+  nonRetryableKind?: CodeBehindNonRetryableKind;
+  /**
+   * The entry called `step.exit()`: the step PASSED and the flow it is in ends
+   * (stories/step-flow-control.md, decision 11).
+   *
+   * No verb here. The verb belongs to the authored line — `return` and `stop`
+   * mean the same thing and only the report echoes which was written — so the
+   * runner takes it from the claim it passed in, and this stays the bare fact
+   * that the entry asked to leave.
+   */
+  flowControl?: { kind: 'return' };
 }
 
 /** Execute an entry's `run`. Never throws — the caller decides what a failure
@@ -128,6 +233,7 @@ export async function runCodeBehindEntry(
       outputs,
       options.envData,
       options.uploadPaths,
+      options.flowControlClaim !== undefined,
     ),
     log: createCapturingLog(options.label, logs),
     tabs: options.tabs ?? unavailableTabApi(),
@@ -154,6 +260,21 @@ export async function runCodeBehindEntry(
       outputs,
     };
   } catch (err) {
+    // The exit signal FIRST, ahead of every failure reading below
+    // (stories/step-flow-control.md, decision 11). `step.exit()` is how a
+    // compiled `If … then return` succeeds; taken as a throw it would be
+    // "broken code", and `runCodeBehindStep` would heal the step under AI and
+    // discard the entry — on every run, for every compiled return.
+    if (err instanceof CodeBehindExitSignal) {
+      return {
+        status: 'passed',
+        expectationFailed: false,
+        durationMs: Date.now() - start,
+        logs,
+        outputs,
+        flowControl: { kind: 'return' },
+      };
+    }
     return {
       status: 'failed',
       expectationFailed: err instanceof CodeBehindExpectationError,
@@ -161,7 +282,10 @@ export async function runCodeBehindEntry(
       logs,
       outputs,
       error: err instanceof Error ? err.message : String(err),
-      ...(isNonRetryable(err) && { nonRetryable: true }),
+      ...(isNonRetryable(err) && {
+        nonRetryable: true,
+        nonRetryableKind: nonRetryableKindOf(err),
+      }),
     };
   }
 }
@@ -200,6 +324,9 @@ function makeStepApi(
   outputs: Record<string, string>,
   envData?: EnvDataContext | undefined,
   uploadPaths?: UploadPathContext | undefined,
+  /** Whether the step's authored text claims the flow-control form — what
+   *  `step.exit()` is allowed on (stories/step-flow-control.md, decision 11). */
+  claimsFlowControl = false,
 ): CodeBehindStepApi {
   return {
     getVar(name) {
@@ -242,6 +369,15 @@ function makeStepApi(
       if (!condition) {
         throw new CodeBehindExpectationError(message ?? 'Code-behind expectation failed');
       }
+    },
+    exit() {
+      // The claim guard (stories/step-flow-control.md, decision 11). Refused
+      // here rather than at generation time because a `.steps.ts` is a
+      // hand-editable file: an author can write `step.exit()` into any entry,
+      // and the rule that the markdown must say what the code does has to hold
+      // for hand-written entries too.
+      if (!claimsFlowControl) throw exitNotClaimed();
+      throw new CodeBehindExitSignal();
     },
     filePath(relative) {
       // `step.filePath(step.getVar('x'))` is the parameterised form, and

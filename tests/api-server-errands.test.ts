@@ -774,6 +774,126 @@ describe('POST /errands', () => {
     });
   });
 
+  it('an unconditional Return ends the errand as a pass, with the rest skipped', async () => {
+    // stories/step-flow-control.md over the errand loop. An errand is a flat
+    // list with no expansion, so the only flow there is to leave is the errand
+    // itself — a return ends it, and it still reports `passed`, because a
+    // return is not a failure.
+    const seen = recordInstructions();
+
+    const { status, body } = await api('POST', '/errands', {
+      ...errandBody({ steps: ['click the export button', 'Return', 'never reached'] }),
+    });
+
+    expect(status).toBe(200);
+    expect(body.status).toBe('passed');
+    expect(body.error).toBeNull();
+    // `Return` never reaches the executor at all — no model call, no page
+    // read (decision 3) — and the step it skipped never reaches it either.
+    expect(seen).toEqual(['click the export button']);
+    expect(body.results.map((r: any) => r.status)).toEqual(['passed', 'passed', 'skipped']);
+    expect(body.results[1].reasoning).toBe('Ended the run');
+    expect(body.results[2]).toMatchObject({
+      step: 'never reached',
+      status: 'skipped',
+      // The reason names the expanded step AND quotes its authored line —
+      // `Return` here — so a reader who only has the errand's step list can
+      // find the one that ended it.
+      reasoning: 'Not run: step 2 ended the run — Return',
+      screenshot: '',
+    });
+    // Two steps ran; the third did not, and `stepsCompleted` counts what
+    // executed rather than what the receipt has rows for.
+    expect(body.stepsCompleted).toBe(2);
+    expect(body.stepsTotal).toBe(3);
+  });
+
+  it('a conditional return gets a claim, and streams step:skip for the rest', async () => {
+    const line = 'If the page title contains "Dashboard" then stop';
+    const claims: unknown[] = [];
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, instruction, opts) => {
+      claims.push(opts.flowControlClaim ?? null);
+      const claim = opts.flowControlClaim;
+      return {
+        index: idx as number,
+        instruction: instruction as string,
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+        // The bare detail, as the real executor produces it: the loop is what
+        // knows which flow ended and phrases the explanation.
+        aiExplanation: claim ? 'the title is Dashboard' : 'ok',
+        ...(claim && { flowControl: { kind: 'return' as const, verb: claim.verb } }),
+      };
+    });
+
+    const res = await fetch(`${baseUrl}/errands?stream=1`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify(errandBody({ steps: ['open the page', line, 'third', 'fourth'] })),
+    });
+    const events = await readSse(res);
+
+    // Only the claiming line is allowed to end the flow. On every other step
+    // the claim is absent, which is what makes `executeStep` refuse a `return`
+    // action with RETURN_NOT_CLAIMED (decision 2).
+    expect(claims).toEqual([null, { verb: 'stop', body: 'the page title contains "Dashboard"' }]);
+
+    const skips = events.filter((e) => e.data?.type === 'step:skip').map((e) => e.data);
+    expect(skips.map((e) => e.line)).toEqual([3, 4]);
+    expect(skips[0].reason).toBe(`Not run: step 2 ended the run — ${line}`);
+    // No `step:start` for a skipped step, and no failure: the errand did what
+    // it was told and stopped.
+    expect(events.filter((e) => e.data?.type === 'step:start')).toHaveLength(2);
+    expect(events.filter((e) => e.data?.type === 'step:fail')).toHaveLength(0);
+    expect(events.at(-1)!.data).toMatchObject({ type: 'done', status: 'passed' });
+  });
+
+  it('quotes the AUTHORED line even when a capture would have filled it in', async () => {
+    // An errand has no expansion, so its steps ARE the authored list — but they
+    // are still interpolated before execution, from whatever earlier steps
+    // captured. The reason has to be built from the request's step, not from
+    // the text the executor was handed, or a captured secret reaches the
+    // receipt, the SSE stream and the run log. Pinned so the errand loop cannot
+    // drift from the two frame-aware loops, which take the same care for the
+    // same reason.
+    const line = 'If {{code}} is already remembered then stop';
+    const seen: string[] = [];
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _t, instruction, opts) => {
+      seen.push(instruction as string);
+      const claim = opts.flowControlClaim;
+      if (!claim) opts.resolvedParameters!['code'] = 'hunter2';
+      return {
+        index: idx as number,
+        instruction: instruction as string,
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+        aiExplanation: claim ? 'it is' : 'ok',
+        ...(claim && { flowControl: { kind: 'return' as const, verb: claim.verb } }),
+      };
+    });
+
+    const { body } = await api('POST', '/errands', {
+      ...errandBody({ steps: ['read the code', line, 'never reached'] }),
+    });
+
+    // The MODEL saw the resolved line — it has to judge the real page.
+    expect(seen[1]).toBe('If hunter2 is already remembered then stop');
+    // The receipt did not.
+    expect(body.results[2]).toMatchObject({
+      status: 'skipped',
+      reasoning: `Not run: step 2 ended the run — ${line}`,
+    });
+    expect(JSON.stringify(body.results)).not.toContain('hunter2');
+  });
+
   it('a Set step whose template cannot resolve fails the errand', async () => {
     const { body } = await api('POST', '/errands', {
       ...errandBody({ steps: ['Set {{a}} to "{{missing}}"', 'never reached'] }),

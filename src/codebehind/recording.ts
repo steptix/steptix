@@ -102,6 +102,18 @@ export interface RecordedStep {
   recordedAt?: string;
   status: StepStatus;
   error?: string;
+  /**
+   * Why a `skipped` step never ran — the runner's own sentence, `Not run: step
+   * 3 returned from "Sign in"` (stories/step-flow-control.md, decisions 4 and
+   * 12).
+   *
+   * A field of its own rather than `error`, because a skipped step did not
+   * fail and every reader of `error` renders it as a failure. Absent on every
+   * other status — and absent on a recording written before this field
+   * existed, which a reader must take as "skipped, cause unrecorded" rather
+   * than as some different kind of step.
+   */
+  skipReason?: string;
   fromCodeBehind?: boolean;
   codeBehindStale?: { file: string; source: string; error: string };
   urlBefore?: string;
@@ -265,6 +277,12 @@ async function writeRecordedStep(
     recordedAt,
     status: result.status,
     ...(result.error !== undefined && { error: redact(result.error, secrets) }),
+    // The reason rides only on a skipped step: on a passed one `aiExplanation`
+    // is the model's account of what it did, which the transcript already says
+    // better (stories/step-flow-control.md, decision 12).
+    ...(result.status === 'skipped'
+      && result.aiExplanation !== undefined
+      && { skipReason: redact(result.aiExplanation, secrets) }),
     ...(result.fromCodeBehind && { fromCodeBehind: true }),
     ...(result.codeBehindStale && { codeBehindStale: result.codeBehindStale }),
     ...(ctx?.urlBefore !== undefined && { urlBefore: ctx.urlBefore }),
@@ -425,7 +443,12 @@ export async function spliceRecording(
       test: path.resolve(testFilePath),
       startedAt: existing.manifest?.startedAt ?? input.startedAt,
       finishedAt: new Date().toISOString(),
-      status: all.every((s) => s.status === 'passed') ? 'passed' : 'failed',
+      // A skipped step does not make the recording a failed one: a return ends
+      // its flow as a PASS, and the run status is unchanged by it
+      // (stories/step-flow-control.md, decision 4). Asking whether any step
+      // FAILED, rather than whether every step passed, is what keeps a spliced
+      // recording that holds one honest.
+      status: all.some((s) => s.status === 'failed') ? 'failed' : 'passed',
       steps: all.length,
       parameters: [...new Set([...(existing.manifest?.parameters ?? []), ...Object.keys(input.parameters)])],
       source: input.source,

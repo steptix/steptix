@@ -273,6 +273,114 @@ describe('step outcomes', () => {
     expect(result.warnings.join(' ')).toContain('need a human');
   });
 
+  it('folds step:skip to skipped WITHOUT the needs-a-human warning', () => {
+    // stories/step-flow-control.md, decision 9. Both statuses read `skipped`,
+    // and they mean different things: one is a step the server could not run
+    // unattended, the other is a step the TEST said not to run. The warning
+    // belongs to the first only — raising it here sends an agent looking for
+    // an intervention that was never needed.
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 10 },
+        { type: 'step:pass', line: 10, output: 'Ended the run' },
+        { type: 'step:skip', line: 11, reason: 'Not run: step 1 ended the run' },
+        { type: 'step:skip', line: 12, reason: 'Not run: step 1 ended the run' },
+        { type: 'done', status: 'passed' },
+      ],
+    });
+
+    expect(result.steps.map((s) => s.status)).toEqual(['passed', 'skipped', 'skipped']);
+    // The reason is what the agent reads to know WHY the gap is there.
+    expect(result.steps[1]).toMatchObject({
+      sentIndex: 1,
+      text: 'step two',
+      output: 'Not run: step 1 ended the run',
+      // Not zero: a duration is only meaningful between a start and its own
+      // terminal, and 0 ms would read as "ran, instantly".
+      durationMs: null,
+    });
+    expect(result.warnings.join(' ')).not.toContain('need a human');
+    // And it is not one of the rows the "could not be attributed" warning is
+    // about either — a skip says exactly what happened.
+    expect(result.warnings.join(' ')).not.toContain('could not be attributed');
+    expect(result.status).toBe('passed');
+  });
+
+  it('still warns about a human-gated step in a run that ALSO returned', () => {
+    // The composition, not just the shape: a fold that dropped `sawSkipped`
+    // for `step:skip` by turning the flag off would pass the test above and
+    // lose the real warning here.
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 10 },
+        { type: 'step:pass', line: 10, output: 'skipped' },
+        { type: 'step:start', line: 11 },
+        { type: 'step:pass', line: 11, output: 'Ended the run' },
+        { type: 'step:skip', line: 12, reason: 'Not run: step 2 ended the run' },
+        { type: 'done', status: 'passed' },
+      ],
+    });
+
+    expect(result.steps.map((s) => s.status)).toEqual(['skipped', 'passed', 'skipped']);
+    expect(result.warnings.join(' ')).toContain('need a human');
+  });
+
+  it('records WHICH kind of skip each row was', () => {
+    // `status: 'skipped'` alone cannot be worded: the summary line has to say
+    // "a step returned early" over one and "need a human" over the other, and
+    // by the time it reads the rows the events are gone. So the cause is
+    // recorded on the row where the distinction is still available.
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 10 },
+        { type: 'step:pass', line: 10, output: 'skipped' },
+        { type: 'step:start', line: 11 },
+        { type: 'step:pass', line: 11, output: 'Ended the run' },
+        { type: 'step:skip', line: 12, reason: 'Not run: step 2 ended the run' },
+        { type: 'done', status: 'passed' },
+      ],
+    });
+
+    expect(result.steps.map((s) => s.skipCause)).toEqual([
+      'unattended',
+      // A passed row carries none at all — the field is about skips only.
+      undefined,
+      'returned',
+    ]);
+  });
+
+  it('attributes a skipped section-body line to the call that invoked it', () => {
+    // A skip inside an expanded body carries the body's frame, so the fold
+    // resolves it back to the sent step the same way a pass does — via the
+    // outermost frame's invocation line.
+    const result = fold({
+      events: [
+        { type: 'frame:push', frame: skillFrame('f1', 11, 'Sign in') },
+        { type: 'step:start', line: 40, frame: skillFrame('f1', 11, 'Sign in') },
+        { type: 'step:pass', line: 40, frame: skillFrame('f1', 11, 'Sign in') },
+        {
+          type: 'step:skip',
+          line: 41,
+          frame: skillFrame('f1', 11, 'Sign in'),
+          reason: 'Not run: step 1 returned from "Sign in"',
+        },
+        { type: 'frame:pop', frameId: 'f1', outputs: {} },
+        { type: 'done', status: 'passed' },
+      ],
+    });
+
+    // Found by status, not by position: the sent steps this fixture never
+    // executed are back-filled as rows of their own, so the index is a
+    // property of the fixture rather than of the behaviour under test.
+    expect(result.steps.find((row) => row.status === 'skipped')).toMatchObject({
+      sentIndex: 1,
+      frameKind: 'skill',
+      frameName: 'Sign in',
+      line: 41,
+      output: 'Not run: step 1 returned from "Sign in"',
+    });
+  });
+
   it('marks a step that started but never terminated as unknown', () => {
     const result = fold({
       events: [{ type: 'step:start', line: 10 }],

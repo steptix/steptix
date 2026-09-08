@@ -41,6 +41,7 @@ import {
   type StepMode,
 } from 'ai-ui-automation-runner-core';
 import { getOutputChannel } from './output-channel.js';
+import { SKIP_GLYPH, skipRunLogLine } from './step-skip-core.js';
 import type { CompileTail } from './compile-progress-core.js';
 import type { CompileTailSignals } from './compile-tail-signals.js';
 import { EnvSelector } from './env-selector.js';
@@ -250,6 +251,13 @@ export function compileLogLine(event: CompileEvent): string | null {
         // but say so only when the event does, in the same words every other
         // single-line surface uses.
         return `  ${' '.repeat(11)} ✗ step on line ${inner.line} — ${describeStepFailure(inner)}`;
+      }
+      // A round that returned never reached the rest of that flow. Said out
+      // loud, because it is the difference between "this entry is unproven"
+      // and "this entry failed" — and the compile's own status (`partial`)
+      // only says the first of those about the file as a whole.
+      if (inner.type === 'step:skip') {
+        return `  ${' '.repeat(11)} ${SKIP_GLYPH} step on line ${inner.line} — ${inner.reason}`;
       }
       if (inner.type === 'output') return `  ${' '.repeat(11)} [${inner.kind}] ${inner.msg}`;
       return null;
@@ -4318,6 +4326,13 @@ export class RunController {
         // whose AI attempt failed too). Same vocabulary as every other
         // single-line surface.
         log(`✗ step ${event.line} failed: ${describeStepFailure(event)}`);
+      } else if (event.type === 'step:skip') {
+        // A line an `If … then return` left behind. It carries its own reason
+        // — `Not run: step 3 returned from "Sign in"` — built server-side by
+        // the one formatter the report also uses, so the log and the report
+        // cannot describe the same skip in two different ways. Not counted:
+        // `passCount` is what EXECUTED, and a skipped step spent nothing.
+        log(skipRunLogLine(event.line, event.reason));
       } else if (event.type === 'output') {
         // The compile's own prose — the run-end forecast, and the warning a
         // failed generation leaves — plus anything else the server says out of

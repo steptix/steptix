@@ -468,9 +468,14 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
     // Progress counts terminal events only. Counting starts as well would
     // repeat a value, and MCP requires `progress` to increase on every
     // notification; counting every event would sail past `total`.
+    //
+    // `step:skip` is a terminal event too — the only one a step a return left
+    // behind ever gets (stories/step-flow-control.md, decision 9). Without it
+    // a run that returns stalls the progress bar wherever the return happened
+    // and never reaches `total`, which reads as a run that hung.
     let completed = 0;
     const onEvent = (event: RunEvent): void => {
-      if (event.type === 'step:pass' || event.type === 'step:fail') {
+      if (event.type === 'step:pass' || event.type === 'step:fail' || event.type === 'step:skip') {
         completed++;
         // The step's own text where we can recover it — a bare "step 3" tells
         // a watching human nothing about what is happening. Root-frame events
@@ -751,13 +756,52 @@ async function withProject(
   }
 }
 
+/**
+ * The step count on the one line a host that ignores structured output shows.
+ *
+ * `3/7 steps passed` for as long as nothing is skipped — byte for byte the
+ * sentence this line has always carried. Once a return leaves steps unrun
+ * (stories/step-flow-control.md), that sentence is a lie by omission: a run
+ * that returned reports `PASSED — 3/7 steps passed`, which reads as four
+ * failures on a run that is green, and the agent reading it has no way to tell
+ * this from a genuinely partial run. So the skipped ones are counted out loud,
+ * and named as deliberate.
+ *
+ * `verb` is the word that follows a plain `N/M steps` count in the caller's own
+ * sentence — `passed` for a run, empty for the errand receipt, whose frame
+ * supplies `in "<tab>"`. It is dropped once the tally spells the statuses out,
+ * because `… of 7 passed` would say "passed" twice.
+ *
+ * Two different things reach the fold as `skipped` and the clause names
+ * whichever actually happened, counted apart. A return is the test doing what
+ * it was told and needs nothing from the reader; an `[input:]` /
+ * `[interactive]` step the server declined to run unattended needs a human
+ * before it can ever pass, and the fold already warns about it in those words.
+ * One clause for both would send the agent after the wrong thing half the time,
+ * so a run that managed both says both.
+ */
+function stepTally(steps: readonly Pick<FoldedStep, 'status' | 'skipCause'>[], verb: string): string {
+  const passed = steps.filter((s) => s.status === 'passed').length;
+  const skipped = steps.filter((s) => s.status === 'skipped');
+  if (skipped.length === 0) return `${passed}/${steps.length} steps${verb ? ` ${verb}` : ''}`;
+  // An older server sends no `step:skip`, so a row can be `skipped` with no
+  // cause recorded. It came from `output: 'skipped'` — the only other source —
+  // which is the unattended one.
+  const returned = skipped.filter((s) => s.skipCause === 'returned').length;
+  const unattended = skipped.length - returned;
+  const clauses = [
+    returned > 0 ? `${returned} skipped (a step returned early)` : '',
+    unattended > 0 ? `${unattended} skipped (need a human)` : '',
+  ].filter((c) => c !== '');
+  return `${passed} passed, ${clauses.join(', ')} of ${steps.length}`;
+}
+
 /** One-line headline plus the first failure — what a host that ignores
  *  structured output will show, and what a human skimming a transcript reads.
  *  The SDK synthesizes nothing from `structuredContent`. */
 function summarize(outcome: RunOutcome): string {
-  const counted = outcome.steps.filter((s) => s.status === 'passed').length;
   const lines = [
-    `${outcome.status.toUpperCase()} — ${counted}/${outcome.steps.length} steps passed ` +
+    `${outcome.status.toUpperCase()} — ${stepTally(outcome.steps, 'passed')} ` +
       `(session ${outcome.sessionId})`,
   ];
   // Rule 7 of stories/mcp-no-project.md, on the line a host that ignores
@@ -1639,9 +1683,8 @@ function summarizeErrand(
   borrowed: CdpTab,
   browser: string,
 ): string {
-  const passed = receipt.steps.filter((s) => s.status === 'passed').length;
   const lines = [
-    `${receipt.status.toUpperCase()} — ${passed}/${receipt.steps.length} steps in ` +
+    `${receipt.status.toUpperCase()} — ${stepTally(receipt.steps, '')} in ` +
       `"${borrowed.title || borrowed.url}" (${browser}, ` +
       // Empty only on the stream-died-mid-errand path: the id rides the `done`
       // frame that never arrived, and "errand " followed by nothing reads as a

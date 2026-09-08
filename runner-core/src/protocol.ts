@@ -13,7 +13,15 @@ import type { ErrorPayload } from './errors.js';
 // ---------------------------------------------------------------------------
 
 export type RunStatus = 'passed' | 'failed' | 'error' | 'aborted';
-export type StepStatus = 'passed' | 'failed' | 'error';
+/**
+ * `'skipped'` is additive (stories/step-flow-control.md, decision 9): a step an
+ * `If … then return` left behind DID NOT RUN, and calling that `passed` is a
+ * green report for work that never happened — the failure direction this
+ * codebase treats as the worst. The union widens rather than being re-encoded
+ * as a boolean beside it, so the compiler finds every consumer that switches
+ * on a step status.
+ */
+export type StepStatus = 'passed' | 'failed' | 'error' | 'skipped';
 
 /**
  * Origin frame for a step event. Present from servers that support the
@@ -128,6 +136,45 @@ export interface StepFailEvent {
    * could only report the second failure of the two.
    */
   codeBehindStale?: { file: string; error: string };
+}
+
+/**
+ * A step that never ran because an earlier step ended the flow it was in
+ * (stories/step-flow-control.md, decision 9).
+ *
+ * One per skipped step line, plus one per skipped nested CALL line — a
+ * `### Section` or `[skill: ...]` invocation inside the returned body,
+ * addressed by that frame's `invocationLine` in its PARENT frame's file. The
+ * call line is what the author sees in the editor and has no step of its own in
+ * the expansion, so without an event of its own it would keep whatever glyph
+ * the gutter last painted on it.
+ *
+ * Deliberately NOT a `step:start` + terminal pair. A skipped step is never
+ * started: nothing settles, nothing is captured, no frame is pushed for it. A
+ * client that pairs starts with terminals therefore sees a `step:skip` for a
+ * line it never saw start, which is exactly the shape of what happened.
+ *
+ * `reason` is the same sentence the step's `results[]` row carries — `Not run:
+ * step 3 returned from "Sign in"` — built by one formatter
+ * (`skippedByReturnReason`, src/runner/flow-control.ts) so the wire and the
+ * report cannot describe one skip in two different ways.
+ */
+export interface StepSkipEvent {
+  type: 'step:skip';
+  /** 1-based source line, in `frame`'s file, of the step (or call) not run. */
+  line: number;
+  /**
+   * The frame the line belongs to. For a skipped step that is the step's own
+   * frame; for a skipped nested call line it is the frame the CALL is written
+   * in — the parent — because that is the file the line lives in.
+   *
+   * No `frame:push` is emitted for a skipped step, so this may name a frame the
+   * client never saw pushed. That is the point: a nested call inside a returned
+   * body must not push and pop clean, or its call line would paint ✓ for work
+   * that never ran.
+   */
+  frame?: FrameInfo;
+  reason: string;
 }
 
 /**
@@ -306,6 +353,7 @@ export type RunEvent =
   | StepStartEvent
   | StepPassEvent
   | StepFailEvent
+  | StepSkipEvent
   | OutputEvent
   | CaptureEvent
   | DoneEvent
@@ -1200,6 +1248,8 @@ export function isRunEvent(value: unknown): value is RunEvent {
     t === 'step:start' ||
     t === 'step:pass' ||
     t === 'step:fail' ||
+    // A step an `If … then return` left behind (stories/step-flow-control.md).
+    t === 'step:skip' ||
     t === 'output' ||
     t === 'capture' ||
     t === 'done' ||

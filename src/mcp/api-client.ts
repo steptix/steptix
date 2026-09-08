@@ -39,6 +39,13 @@ const KNOWN_EVENTS = new Set([
   'step:start',
   'step:pass',
   'step:fail',
+  // A step an `If … then return` left behind (stories/step-flow-control.md,
+  // decision 9). It has to be listed here or the fold never sees one: an
+  // unknown type is recorded in `dropped[]`, which surfaces as a run WARNING —
+  // so a `run_test` of a test that returned would report "N unrecognised
+  // event" warnings, no rows for the skipped steps, and a step tally counting
+  // only what executed.
+  'step:skip',
   'output',
   'capture',
   'done',
@@ -159,6 +166,15 @@ function shapeProblem(type: string, event: Record<string, unknown>): string | nu
       if (type === 'step:fail' && typeof event['error'] !== 'string') {
         return 'error is not a string';
       }
+      return null;
+    case 'step:skip':
+      // The fold reads all three: `line` to open the row, `frame` to attribute
+      // it, `reason` as the row's output. `frame` is optional on the wire —
+      // the server omits it when nothing expanded — and `beginRow` already
+      // handles its absence, so only a MALFORMED one is a problem.
+      if (typeof event['line'] !== 'number') return 'line is not a number';
+      if (typeof event['reason'] !== 'string') return 'reason is not a string';
+      if (event['frame'] !== undefined && !isFrame(event['frame'])) return 'frame is malformed';
       return null;
     case 'output':
       return typeof event['msg'] === 'string' ? null : 'msg is not a string';

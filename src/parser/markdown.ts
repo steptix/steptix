@@ -13,6 +13,7 @@ import {
 import { expandSkills } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { parseSetStep, setStepError, substitutePreservingSet } from './set-step.js';
+import { parseFlowControlStep, flowControlInHookError } from './flow-control-step.js';
 import type { ToolCall } from '../tools/types.js';
 import {
   interpolateDataSourcePath,
@@ -1153,6 +1154,13 @@ function extractHooks(listToken: Tokens.List, hooks: TestHooks, filePath: string
     if (!instruction || instruction.toLowerCase() === 'none') {
       // Explicit "none" allows a test to declare an empty scope override
       continue;
+    }
+    // A hook may not return (stories/step-flow-control.md, decision 8). Thrown
+    // rather than warned: an unknown scope degrades to "this hook does not
+    // run", which is visible, whereas a silently-ignored return would leave
+    // the author believing a flow ends where it never does.
+    if (parseFlowControlStep(instruction)) {
+      throw new Error(flowControlInHookError(instruction, ` in ${filePath}`));
     }
     if (scope === 'before') hooks.before.push(instruction);
     else if (scope === 'beforeeach') hooks.beforeEach.push(instruction);

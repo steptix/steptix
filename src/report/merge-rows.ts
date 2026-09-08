@@ -56,6 +56,10 @@ export function mergeRowReports(rows: RowReport[], unrun: UnrunRow[] = []): Test
   let totalSteps = 0;
   let passedSteps = 0;
   let failedSteps = 0;
+  /** Steps a `return` left behind, summed across rows
+   *  (stories/step-flow-control.md). A row that returned early is a normal
+   *  outcome, so the merged header has to be able to say so too. */
+  let skippedSteps = 0;
   let totalSubActions = 0;
   let durationMs = 0;
   let tokensUsed = 0;
@@ -89,6 +93,7 @@ export function mergeRowReports(rows: RowReport[], unrun: UnrunRow[] = []): Test
     totalSteps += r.totalSteps;
     passedSteps += r.passedSteps;
     failedSteps += r.failedSteps;
+    skippedSteps += r.skippedSteps ?? 0;
     totalSubActions += r.totalSubActions;
     durationMs += r.durationMs;
     tokensUsed += r.tokensUsed;
@@ -127,6 +132,9 @@ export function mergeRowReports(rows: RowReport[], unrun: UnrunRow[] = []): Test
     totalSteps,
     passedSteps,
     failedSteps,
+    // Omitted (not 0) when no row returned, so a merged report of ordinary
+    // rows is byte-identical to one from before this feature.
+    ...(skippedSteps > 0 && { skippedSteps }),
     totalSubActions,
     durationMs,
     tokensUsed,

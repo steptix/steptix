@@ -65,6 +65,20 @@ vi.mock('../src/browser/manager.js', () => {
  *  handed the executor (or did not) is observable. */
 const stepCalls: { instruction: string; opts: Record<string, unknown> }[] = [];
 
+/**
+ * Which OCCURRENCE of a flow-control step returns: instruction → 1-based call
+ * number (stories/step-flow-control.md). A section called twice is the shape
+ * the story and the live fixture are both written around — the body runs on
+ * the first call and returns at its first line on the second — and the only
+ * way to say that to a mock is by counting the calls.
+ *
+ * Only ever consulted for a step the SERVER decided claims the form: the
+ * `flowControlClaim` option is the server's own half of the contract, so a
+ * mock that returned without one would be testing nothing.
+ */
+const returnsOnCall = new Map<string, number>();
+const claimsSeen = new Map<string, number>();
+
 vi.mock('../src/runner/step-executor.js', () => ({
   executeStep: vi.fn(async (
     stepIndex: number,
@@ -73,10 +87,18 @@ vi.mock('../src/runner/step-executor.js', () => ({
     opts: Record<string, unknown>,
   ): Promise<StepResult> => {
     stepCalls.push({ instruction, opts });
+    const claim = opts['flowControlClaim'] as { verb: 'return' | 'stop' } | undefined;
+    let flowControl: { kind: 'return'; verb: 'return' | 'stop' } | undefined;
+    if (claim) {
+      const nth = (claimsSeen.get(instruction) ?? 0) + 1;
+      claimsSeen.set(instruction, nth);
+      if (returnsOnCall.get(instruction) === nth) flowControl = { kind: 'return', verb: claim.verb };
+    }
     return {
       index: stepIndex,
       instruction,
       status: 'passed',
+      ...(flowControl && { flowControl }),
       turns: [
         {
           turnNumber: 1,
@@ -86,7 +108,13 @@ vi.mock('../src/runner/step-executor.js', () => ({
           subActions: [
             {
               index: 1,
-              action: { action: 'click', selector: '#go' },
+              // What the model answers on a flow-control step: `return` when
+              // the condition holds, `noop` when it does not. Neither carries
+              // a selector or a value, which is the whole reason the
+              // placeholder accounting had to be exempted for these steps.
+              action: claim
+                ? { action: flowControl ? 'return' : 'noop' }
+                : { action: 'click', selector: '#go' },
               durationMs: 3,
             },
           ],
@@ -213,6 +241,7 @@ vi.mock('../src/utils/logger.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
+import { SKIPPED_BY_RETURN_REFUSAL } from '../src/codebehind/live-compile.js';
 import { readRecording, recordingDirFor } from '../src/codebehind/recording.js';
 import { compileLock, compileLockKey } from '../src/server/compile-lock.js';
 
@@ -263,6 +292,8 @@ beforeEach(async () => {
   stepCalls.length = 0;
   aiPrompts.length = 0;
   aiCalls.length = 0;
+  returnsOnCall.clear();
+  claimsSeen.clear();
   await fs.rm(stepsFilePath, { force: true });
   await fs.rm(path.join(tmpDir, '.aiui-codebehind-cache'), { recursive: true, force: true });
 });
@@ -1090,5 +1121,117 @@ describe('recompiling a step whose entry broke', () => {
       expect(stepCalls.map((c) => c.instruction)).toEqual(['Press the go button']);
       expect(frames.some((f) => f.type.startsWith('compile:'))).toBe(false);
     });
+  });
+});
+
+/**
+ * A compile of a run that RETURNED (stories/step-flow-control.md, decision 12).
+ *
+ * **Through the real HTTP entry, and deliberately not against `LiveCompiler`
+ * directly.** The compiler has had the skipped-step branch since the feature
+ * landed — `generationRefusal` answers `SKIPPED_BY_RETURN_REFUSAL` for
+ * `status: 'skipped'`, and `finish` folds `skippedByReturn` into
+ * `notAttempted` — and a unit test that handed it a hand-built skipped
+ * `StepResult` passed all along. Nothing produced one: the server's skip loop
+ * built the results, pushed them to the report, and never offered them, so the
+ * whole branch was unreachable in production. A Run & Compile of a test that
+ * returns wrote entries for the steps that ran and said nothing whatever about
+ * the rest. Only the composition can see that, which is why it is here.
+ */
+describe('compile a run whose section returns', () => {
+  const RETURN_STEP = 'If the page title contains "Dashboard" then return';
+
+  /**
+   * The live fixture's shape, one section shorter.
+   *
+   *   4. Open the dashboard        <- main
+   *   5. Sign in                   <- main, calls the section
+   *   6. Sign in                   <- main, calls it again
+   *   7. Search for the order      <- main
+   *   ### Sign in                  (heading, line 10)
+   *   11. If … then return
+   *   12. Enter the username
+   *   13. Click Sign in
+   *
+   * Expanded, eight steps: 1 main, then the body three times over two calls,
+   * then the last main step. With the condition holding on the SECOND call,
+   * steps 6 and 7 never run.
+   */
+  const returningBody = (extra: Record<string, unknown> = {}) => ({
+    steps: ['Open the dashboard', 'Sign in', 'Sign in', 'Search for the order'],
+    sourceLines: [4, 5, 6, 7],
+    testFilePath,
+    sections: {
+      'sign in': {
+        name: 'Sign in',
+        headingLine: 10,
+        steps: [RETURN_STEP, 'Enter the username', 'Click Sign in'],
+        stepLines: [11, 12, 13],
+      },
+    },
+    ...extra,
+  });
+
+  it('names the steps it never saw, and still compiles everything it did', async () => {
+    returnsOnCall.set(RETURN_STEP, 2);
+    const { frames } = await runSteps(returningBody({ compile: 'run' }));
+
+    // The run half first: the second call returned at its first body line, so
+    // the two body lines after it are skipped and nothing else is.
+    expect(frames.filter((f) => f.type === 'step:skip').map((f) => f.line)).toEqual([12, 13]);
+
+    const result = frames.find((f) => f.type === 'compile:result')!;
+    // THE finding. Expanded step numbers, as every number in this summary is:
+    // steps 6 and 7 are the second call's body, which no transcript covers.
+    expect(result.summary.notAttempted).toEqual([6, 7]);
+    // …with the reason on the stream, per step, rather than only a count.
+    const declined = frames.filter(
+      (f) => f.type === 'compile:step' && f.message === SKIPPED_BY_RETURN_REFUSAL,
+    );
+    expect(declined.map((f) => [f.step, f.line])).toEqual([[6, 12], [7, 13]]);
+
+    // And the other half of decision 12: a return is not the end of the
+    // recording. The returning step compiles (the conditional form is exactly
+    // what this story adds to the compiler), and so does the main-flow step
+    // AFTER the flow that ended.
+    expect(result.summary.compiled).toBe(6);
+    const proposed = result.files[stepsFilePath] as string;
+    expect(proposed).toContain(`source: 'If the page title contains "Dashboard" then return'`);
+    expect(proposed).toContain("source: 'Search for the order'");
+    expect(proposed).toContain("section: 'Sign in'");
+    // Unproven, never green: the entries exist and nothing replayed them.
+    expect(result.status).toBe('partial');
+  });
+
+  it('says so even when the return left NOTHING to compile in the body', async () => {
+    // The first call returns, so the body's other two lines never run at all
+    // and no entry is written for either. Without the offer this compile
+    // reported `notAttempted: []` — a proposal missing two of the author's
+    // steps with nothing anywhere saying why.
+    returnsOnCall.set(RETURN_STEP, 1);
+    const { frames } = await runSteps(
+      returningBody({ compile: 'run', steps: ['Open the dashboard', 'Sign in'], sourceLines: [4, 5] }),
+    );
+
+    const result = frames.find((f) => f.type === 'compile:result')!;
+    expect(result.summary.notAttempted).toEqual([3, 4]);
+    const proposed = result.files[stepsFilePath] as string;
+    expect(proposed).not.toContain("source: 'Enter the username'");
+    expect(proposed).not.toContain("source: 'Click Sign in'");
+    // The steps that DID run are still there, return step included.
+    expect(proposed).toContain("source: 'Open the dashboard'");
+    expect(proposed).toContain(`source: 'If the page title contains "Dashboard" then return'`);
+  });
+
+  it('leaves a run that returned nowhere alone — no notAttempted, byte for byte as before', async () => {
+    // The narrowness check: the same test, same shape, condition never holds.
+    // Every step runs, every step compiles, and the summary says nothing about
+    // skips, so nothing this change added can leak into an ordinary compile.
+    const { frames } = await runSteps(returningBody({ compile: 'run' }));
+
+    expect(frames.some((f) => f.type === 'step:skip')).toBe(false);
+    const result = frames.find((f) => f.type === 'compile:result')!;
+    expect(result.summary.notAttempted).toEqual([]);
+    expect(result.summary.compiled).toBe(8);
   });
 });

@@ -6,6 +6,80 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — a step can leave the flow it is in
+
+A test ran top to bottom and the only way out early was to fail. There was no
+way to say "if we are already signed in, skip the rest of this section", so
+authors wrote a conditional on every line that might not apply, or wrote a
+tool.
+
+A step ending `then return` — or `then stop`, `stop here`, `stop running the
+remaining steps` — now ends the flow it is in, as a pass: the rest of a
+`### Section` body, the rest of a skill body, or the rest of the test when the
+step is in the main flow. The condition is judged against the live page the way
+an `If …` step is. Both verbs also take a tail — `here`, `running the steps`,
+`running the rest of the steps`, `running the remaining steps`, `running the
+below steps`, `running the following steps` — and a step whose *whole text* is
+one of those, with no `If`/`When` in front of it, is unconditional and costs no
+model call at all. `Return` is one of those; so is `Stop running the remaining
+steps`.
+
+The steps a return leaves behind are reported `skipped` with a reason —
+*Not run: step 7 returned from "Sign in" — If the page title contains
+"Dashboard" then return* — rather than passed, and the report header counts
+them separately, so a run that returned reads as a pass with N skipped rather
+than as a green run that did the work. The number is the expanded step index,
+which is what the report rows and the run log count by; the text after the dash
+is the returning step as authored, clipped to 80 characters, which is what you
+can find in the editor. It is not read as a timeout either: the runner's
+step-count inference has been replaced with an explicit flag set where the
+timeout actually fires.
+
+The MCP one-liner says it too — `PASSED — 3 passed, 4 skipped (a step returned
+early) of 7` instead of `3/7 steps passed`, which read as four failures on a
+green run. A step the server declined to run unattended (`[input:]`,
+`[interactive]`) is also skipped, and is counted and worded apart —
+`2 skipped (need a human)` — because the two want opposite reactions.
+
+The HTML report's new Skipped tile counts **every** skipped row, which includes
+one that predates this feature: the unmatched branches of a conditional group
+have always been recorded `skipped`, and were simply never counted. So a test
+with `If …` groups in it now shows a Skipped tile where it showed none. Nothing
+about those runs changed; the header stopped leaving them out.
+
+Only a line that opens `If`/`When`, or a line that is nothing but the tail, is
+flow control. `Click the details link then return` stays an ordinary step —
+after an action, "then return" reads as *navigate back* — and a typo in the
+verb stays prose. The grammar errs towards missing a return, because a missed
+one fails loudly downstream while a spurious one would pass a run that did no
+work. A hook may not return, and the line is refused in `## Hooks` at parse and
+in `execution.defaultHooks` at config load.
+
+Code-behind can return too. `step.exit()` is new on the step API, the code form
+of `return` / `stop`: it ends the entry wherever it is called from — a nested
+helper, the middle of an `if` — and the step passes and the flow it is in ends,
+exactly as the AI step's return does. A conditional flow-control step therefore
+compiles like any other, into an entry that reads the condition off the page and
+calls `step.exit()` when it holds, so a replay returns for no tokens:
+
+```ts
+{
+  source: 'If the page title contains "Dashboard" then return',
+  async run({ page, step }) {
+    if ((await page.title()).includes('Dashboard')) step.exit();
+  },
+}
+```
+
+The unconditional form is not compiled at all — it already runs without a model,
+so an entry could only make it slower, the same exemption `Set` has.
+
+`step.exit()` from an entry whose step does **not** say it returns fails that
+step, and does not heal it under AI: the entry is not broken, and the rule it
+broke is one no re-planning can satisfy. The markdown is what a reader of the
+test sees, so it has to say what the code does. The fix is one line of markdown,
+which is what the failure says.
+
 ### Added — "Capture the current page URL" can now be said
 
 No element carries the page's address as an attribute, so a step asking for the

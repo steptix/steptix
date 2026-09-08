@@ -28,6 +28,19 @@ export interface FoldedStep {
   frameName: string | null;
   text: string | null;
   status: StepStatus;
+  /**
+   * Why a `skipped` row was skipped — absent on every other status.
+   *
+   * Two different things arrive as `skipped` and they want opposite reactions.
+   * `'returned'` is an `If … then return` doing exactly what the test asked
+   * (stories/step-flow-control.md); `'unattended'` is an `[input:]` /
+   * `[interactive]` step the server declined to run with nobody watching, which
+   * needs a human before it can ever pass. A summary that says "a step returned
+   * early" over the second sends an agent looking for a return that is not
+   * there; one that says "needs a human" over the first sends it looking for an
+   * intervention that was never needed.
+   */
+  skipCause?: 'returned' | 'unattended';
   output: string | null;
   error: string | null;
   fromCache: boolean;
@@ -315,9 +328,14 @@ export function foldRun(input: FoldInput): FoldedRun {
    * terminal — measuring to "whenever we gave up" would report a number that
    * looks like a step time and isn't.
    */
-  const closeRow = (status: StepStatus, at: number | null): void => {
+  const closeRow = (
+    status: StepStatus,
+    at: number | null,
+    skipCause?: FoldedStep['skipCause'],
+  ): void => {
     if (!open) return;
     open.row.status = status;
+    if (skipCause) open.row.skipCause = skipCause;
     open.row.durationMs =
       at === null || open.startedAt === null ? null : at - open.startedAt;
     executed.push(open.row);
@@ -356,7 +374,30 @@ export function foldRun(input: FoldInput): FoldedRun {
         // "passed" is a false green on work that never happened.
         const status: StepStatus = event.output === 'skipped' ? 'skipped' : 'passed';
         if (status === 'skipped') sawSkipped = true;
-        closeRow(status, at);
+        closeRow(status, at, status === 'skipped' ? 'unattended' : undefined);
+        break;
+      }
+
+      case 'step:skip': {
+        // A step an `If … then return` left behind
+        // (stories/step-flow-control.md, decision 9). It never STARTED — no
+        // `step:start`, no frame push — so there is no open row to close;
+        // begin one and close it in the same breath.
+        //
+        // Closed with a null terminal timestamp deliberately: a duration is
+        // only meaningful between a start and its own terminal, and reporting
+        // 0 ms here would read as "ran, instantly" rather than "did not run".
+        if (open) closeRow('unknown', null);
+        open = beginRow(event.line, event.frame, at);
+        open.row.output = event.reason;
+        // `sawSkipped` is NOT set. That flag drives the "these steps need a
+        // human" warning, which belongs to `[input:]` / `[interactive]` steps
+        // the server declined to run unattended. A return is the test doing
+        // exactly what it was told, so a warning here would send an agent
+        // looking for an intervention that was never needed. The cause is
+        // recorded on the row instead, so the one-line summary can word the
+        // two apart rather than guessing at one of them.
+        closeRow('skipped', null, 'returned');
         break;
       }
 

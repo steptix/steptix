@@ -7,6 +7,7 @@ import {
   type EnvDataContext,
 } from '../parser/interpolate-env-data.js';
 import { isCodeStep } from '../parser/invocation-parser.js';
+import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import { logger } from '../utils/logger.js';
 import {
   actionsOf,
@@ -182,6 +183,16 @@ export interface LiveCompileFinish {
 }
 
 /**
+ * A step a return left unrun (stories/step-flow-control.md, decision 12).
+ *
+ * Its own reason, rather than the general "did not pass": a skipped step did
+ * not fail, it never ran, and the two lead an author to different places. It is
+ * also the string `offer` keys its `notAttempted` bookkeeping off, which is why
+ * it is a const rather than a literal in two places.
+ */
+export const SKIPPED_BY_RETURN_REFUSAL = 'the step did not run — a return ended its flow';
+
+/**
  * Why a step is not generated from, or undefined when it is.
  *
  * Mirrors `compileTest`'s selection rules, decided per step from what the run
@@ -189,6 +200,12 @@ export interface LiveCompileFinish {
  *
  * - **no binding** — nothing to write into; `[tool:]` and `[skill:]` markers
  *   are expanded or dispatched before the AI loop and are never generated.
+ * - **an unconditional `Return` / `Stop`** — dispatched by the loop with no
+ *   model call, as `Set` is, so there is nothing to record and nothing to make
+ *   cheaper (stories/step-flow-control.md, decisions 3 and 11). The CONDITIONAL
+ *   form is not refused: it compiles to `if (…) step.exit()`.
+ * - **skipped** — a return ended its flow before it ran, so there is no
+ *   transcript to generate from.
  * - **did not pass** — a failed step's transcript is a recording of the
  *   failure; the boxed pipeline stops at the same place.
  * - **ran as code** — it needs no transcript, because its code already is the
@@ -217,7 +234,12 @@ export function generationRefusal(input: {
   if (isCodeStep(input.text.trim())) {
     return 'a [skill:] or [tool:] step is expanded or dispatched, never generated';
   }
+  const flowControl = parseFlowControlStep(input.text.trim());
+  if (flowControl && flowControl.body === undefined) {
+    return 'a Return/Stop step is dispatched, not compiled';
+  }
   if (!input.binding) return 'the step has no code-behind file to bind into';
+  if (input.status === 'skipped') return SKIPPED_BY_RETURN_REFUSAL;
   if (input.status !== 'passed') return 'the step did not pass';
   if (input.binding.entry?.ai === true) return 'the entry is marked `ai: true`';
   // An entry that threw and healed under AI produced a transcript and is
@@ -233,6 +255,16 @@ export class LiveCompiler {
   private readonly compiled: number[] = [];
   private readonly declined: number[] = [];
   private readonly skippedByStop: number[] = [];
+  /**
+   * Steps a return left unrun (stories/step-flow-control.md, decision 12).
+   *
+   * The same bookkeeping `skippedByStop` gets, for the same reason: an entry
+   * that never got a transcript has to be NAMED in `notAttempted`, or the
+   * author is left with a step that quietly has no entry and no explanation.
+   * The difference is where the skip came from — a stop is the client's, a
+   * return is the test's own — and both end with a step nobody recorded.
+   */
+  private readonly skippedByReturn: number[] = [];
   private kept = 0;
   private keptAiExisting = 0;
   private errors = 0;
@@ -498,6 +530,14 @@ export class LiveCompiler {
     if (refusal !== undefined) {
       if (refusal === 'the step ran as code') this.kept++;
       if (refusal === 'the entry is marked `ai: true`') this.keptAiExisting++;
+      // Named in the summary rather than only counted, exactly as a
+      // stop-skipped entry is: "3 step(s) not attempted" does not tell the
+      // author WHICH of their steps still has no entry
+      // (stories/step-flow-control.md, decision 12).
+      if (refusal === SKIPPED_BY_RETURN_REFUSAL) {
+        this.skippedByReturn.push(at + 1);
+        this.stepEvent('generate', { index: at, number: at + 1, text, hasEntry: false, isAiEntry: false }, refusal);
+      }
       logger.debug(`Compile-as-you-go skipped step ${input.index + 1}: ${refusal}`);
       return;
     }
@@ -814,10 +854,18 @@ export class LiveCompiler {
     }
 
     const files = this.candidate.changedFiles();
-    const notAttempted = [...new Set([...(final.notAttempted ?? []), ...this.skippedByStop])].sort(
-      (a, b) => a - b,
-    );
-    const nothingToDo = this.attempted === 0 && final.stoppedAt === undefined && !final.aborted;
+    const notAttempted = [
+      ...new Set([...(final.notAttempted ?? []), ...this.skippedByStop, ...this.skippedByReturn]),
+    ].sort((a, b) => a - b);
+    // A step a return left unrun is work still owed, so a compile that
+    // attempted nothing BECAUSE of a return is not "already compiled"
+    // (stories/step-flow-control.md, decision 12) — the same reason a stopped
+    // run is not.
+    const nothingToDo =
+      this.attempted === 0
+      && final.stoppedAt === undefined
+      && !final.aborted
+      && this.skippedByReturn.length === 0;
     const summary: CompileSummary = {
       test: this.options.testFilePath,
       totalSteps: this.scopedTotal,

@@ -466,6 +466,15 @@ export async function executeAction(
         logger.debug(`noop action: ${eff.description}`);
         break;
 
+      // A no-op on the PAGE, exactly like `noop`. The flow-control decision is
+      // made by the step executor — the only place that knows whether the
+      // step's authored text claimed the form — and acted on by the run loop,
+      // which knows the frame (stories/step-flow-control.md). Listed rather
+      // than left to `default` so the unknown-action warning keeps its meaning.
+      case 'return':
+        logger.debug(`return action: ${eff.description}`);
+        break;
+
       default:
         logger.warn(`Unknown action type: ${(eff as AIAction).action}`);
     }

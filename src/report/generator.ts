@@ -143,6 +143,11 @@ export function renderReport(report: TestReport): string {
     totalSteps: report.totalSteps,
     passedSteps: report.passedSteps,
     failedSteps: report.failedSteps,
+    // Its own stat, shown only when there is something to say
+    // (stories/step-flow-control.md, decision 15). Without it a run that
+    // returned would read as "8 steps, 4 passed, 0 failed" and leave the
+    // reader to work out where the other four went.
+    skippedSteps: report.skippedSteps ?? 0,
     totalSubActions: report.totalSubActions,
     tokensUsed,
     inputTokens,
@@ -588,6 +593,12 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
         <div class="failure-message">${escapeHtml(step.error ?? 'Unknown error')}</div>
         ${step.aiExplanation ? `<div class="reasoning-block">${escapeHtml(step.aiExplanation)}</div>` : ''}
        </div>`
+    // A skipped step has no turns, so without this its body would be empty and
+    // the row would say only "SKIPPED" — the reader's next question is "why",
+    // and the answer is already on the result (stories/step-flow-control.md,
+    // decision 15).
+    : step.status === 'skipped' && step.aiExplanation
+    ? `<div class="reasoning-block">${escapeHtml(step.aiExplanation)}</div>`
     : '';
 
   const toolHtml = step.toolStep ? renderToolStep(step.toolStep) : '';

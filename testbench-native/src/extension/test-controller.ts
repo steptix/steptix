@@ -6,6 +6,7 @@ import { frameTargetUri } from './workspace.js';
 import type { TestDiscovery, DiscoveredTest, DiscoveryEvent } from './test-discovery.js';
 import type { RunController } from './run-controller.js';
 import { getOutputChannel } from './output-channel.js';
+import { skipTestOutputLine } from './step-skip-core.js';
 import { EnvSelector } from './env-selector.js';
 
 /** Subset of RunControllerRegistry that the test controller needs. Batch
@@ -496,6 +497,14 @@ export class TestBenchTestController implements vscode.Disposable {
             );
           }
           if (event.output) emit(`  ${event.output}`);
+          break;
+        case 'step:skip':
+          // A step an `If … then return` left behind. Streamed, never
+          // collected: `failures` is what turns into TestMessages and decides
+          // the item's red X, and a step that did not run is not a failure —
+          // the run that skipped it is a pass with N skipped
+          // (stories/step-flow-control.md, decision 4).
+          emit(skipTestOutputLine(event.line, whereOf(event), event.reason));
           break;
         case 'step:fail': {
           // Fold the code-behind context into the one string both surfaces

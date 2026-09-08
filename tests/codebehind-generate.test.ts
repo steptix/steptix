@@ -943,6 +943,109 @@ describe('generateStepEntry', () => {
 });
 
 /**
+ * A flow-control step whose CONDITION names a placeholder
+ * (stories/step-flow-control.md, decisions 2 and 11, against
+ * stories/placeholder-preserving-actions.md decision 5).
+ *
+ * The placeholder accounting asks "did the model NAME this reference in a
+ * value-bearing field of a recorded action" — `value`, `filePath`, `url`,
+ * `selector`, `expected`, `key`, a predicate `condition`. A flow-control step
+ * records `return` or `noop`, and neither carries any of those, so every
+ * reference it makes is unvouchable by construction and the step declined
+ * permanently: `{{username}} appears in no recorded action`, written into an
+ * `ai: true` entry a later compile never revisits. `If {{username}} is shown
+ * then return` could not compile at all, which the handbook and the story both
+ * say it can.
+ *
+ * The exemption has to be NARROW, which is why the last two cases are here: an
+ * ordinary step with the same placeholder and the same unvouching actions is
+ * still declined, and a flow-control entry that inlines the resolved value is
+ * still rejected by the leak guard. That guard, not the accounting, is what
+ * stops a value being frozen into code — and it is untouched.
+ */
+describe('generateStepEntry — a flow-control step that names a placeholder', () => {
+  const FLOW_STEP = 'If {{username}} is shown then return';
+  const EXIT_ENTRY = JSON.stringify({
+    entry: [
+      `{`,
+      `  source: ${JSON.stringify(FLOW_STEP)},`,
+      `  async run({ page, step }) {`,
+      `    if (await page.getByText(step.getVar('username')).isVisible()) step.exit();`,
+      `  },`,
+      `}`,
+    ].join('\n'),
+  });
+
+  /** The two shapes a judged condition records: it held, or it did not. */
+  for (const action of [{ action: 'return' as const }, { action: 'noop' as const }]) {
+    it(`compiles when the recorded action is "${action.action}"`, async () => {
+      const { client, calls } = stubClient(EXIT_ENTRY);
+      const result = await generateStepEntry({
+        binding: bindingFor(FLOW_STEP),
+        actions: [action],
+        resolvedParameters: { username: 'octocat-the-first' },
+        recordingCarriesPlaceholders: true,
+        aiClient: client,
+        contextContent: '',
+        testName: 'demo',
+      });
+
+      // Not `declined`: the model was actually asked, and what came back is an
+      // entry. Before the exemption this returned
+      // `{ kind: 'declined', reason: '{{username}} appears in no recorded action' }`
+      // without ever making the call.
+      expect(result.kind).toBe('entry');
+      expect(calls).toHaveLength(1);
+      expect(result.kind === 'entry' && result.code).toContain('step.exit()');
+      expect(result.kind === 'entry' && result.code).toContain("step.getVar('username')");
+    });
+  }
+
+  it('still rejects an entry that inlines the resolved value', async () => {
+    // The leak guard is a different mechanism to the accounting and the
+    // exemption does not touch it: `guardedValues` still carries every
+    // resolved parameter into `findInlinedParameterValue`. If it did not, the
+    // exemption would be exactly the hole the accounting exists to close.
+    const { client } = stubClient(JSON.stringify({
+      entry: `{ source: ${JSON.stringify(FLOW_STEP)}, async run({ page, step }) { if (await page.getByText('octocat-the-first').isVisible()) step.exit(); } }`,
+    }));
+    const result = await generateStepEntry({
+      binding: bindingFor(FLOW_STEP),
+      actions: [{ action: 'return' }],
+      resolvedParameters: { username: 'octocat-the-first' },
+      recordingCarriesPlaceholders: true,
+      aiClient: client,
+      contextContent: '',
+      testName: 'demo',
+    });
+    expect(result.kind).toBe('error');
+    expect(result.kind === 'error' && result.message).toMatch(/{{username}}/);
+  });
+
+  it('declines an ORDINARY step with the same placeholder and the same actions', async () => {
+    // The composition that proves the exemption is narrow. Same placeholder,
+    // same unvouching actions, same recording — the only difference is that
+    // this line does not claim the flow-control form, so the rule applies to
+    // it exactly as it always did.
+    const { client, calls } = stubClient('should never be asked');
+    const result = await generateStepEntry({
+      binding: bindingFor('Enter the username {{username}}'),
+      actions: [{ action: 'noop' }],
+      resolvedParameters: { username: 'octocat-the-first' },
+      recordingCarriesPlaceholders: true,
+      aiClient: client,
+      contextContent: '',
+      testName: 'demo',
+    });
+    expect(result).toEqual({
+      kind: 'declined',
+      reason: '{{username}} appears in no recorded action',
+    });
+    expect(calls).toHaveLength(0);
+  });
+});
+
+/**
  * The backstop as generation drives it: one re-ask, never two, and never worse
  * than the answer it already had
  * (stories/codebehind-selector-ambiguity.md, "The static backstop").

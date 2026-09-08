@@ -86,6 +86,41 @@ export function extractStepLineIds(text) {
 }
 
 /**
+ * The panel header's run tally, over STEP lines only.
+ *
+ * `statuses` is the whole snapshot's line → status map, and a snapshot holds
+ * more than steps: since PR #137 every data-table ROW line wears a status too,
+ * and a row the run never reached is painted `skip` — which the Rows panel two
+ * inches below calls "not run". Counted with the steps, a Stop part-way through
+ * a three-row table renders `◌ 3 skipped` in the header with nothing returned
+ * and no step skipped, contradicting the panel's own Rows section.
+ *
+ * `stepLineIds` is `extractStepLineIds` of the same text: main-flow and inline
+ * section body lines, which is exactly what the header means by a step. Row
+ * lines are table pipes and match no numbered-item regex, so they are outside
+ * it by construction rather than by an exclusion list that could drift.
+ *
+ * The pass breakdown is folded in here too, so all five numbers come from one
+ * filter and cannot disagree about which lines they were counting.
+ */
+export function countStepLineStatuses(statuses, stepLineIds) {
+  const ids = new Set(stepLineIds ?? []);
+  const mine = Object.entries(statuses ?? {})
+    .filter(([line]) => ids.has(Number(line)))
+    .map(([, status]) => status);
+  const count = (...wanted) => mine.filter((s) => wanted.includes(s)).length;
+  return {
+    // Every 'pass*' is a passed step; what differs is what it cost, which is
+    // what the breakdown beside it says.
+    pass: count("pass", "pass-cached", "pass-code-behind", "pass-stale"),
+    codeBehind: count("pass-code-behind"),
+    stale: count("pass-stale"),
+    fail: count("fail"),
+    skip: count("skip"),
+  };
+}
+
+/**
  * Filter a list of {id, text, ...} entries to only those whose `id` is
  * a real step line in `text`. Preserves all extra fields on each entry.
  */

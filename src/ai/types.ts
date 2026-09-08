@@ -33,7 +33,13 @@ export type ActionType =
   // Return the full DOM subtree for a given selector (expand collapsed content)
   | 'expand'
   // Explicit no-op: AI signals the step/instruction is already satisfied
-  | 'noop';
+  | 'noop'
+  // End the flow this step is in, as a pass — the model's answer when an
+  // `If … then return` / `… then stop` step's condition HOLDS
+  // (stories/step-flow-control.md). Honoured only on a step whose text claims
+  // that form; on any other step the executor refuses it and tells the model
+  // why. It performs nothing on the page: it is a signal to the run loop.
+  | 'return';
 
 /** A single action returned by the AI */
 export interface AIAction {

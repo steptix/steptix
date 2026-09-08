@@ -5,6 +5,11 @@ import { extractStepLineIds, findStepsHeadingLine } from './step-lines.js';
 import { failHoverMessage, staleHoverMessage, STALE_HOVER_MESSAGE } from './failure-hover-core.js';
 import { rowHeaderSummary } from './row-summary-core.js';
 import { alignmentLinesOf, dataTablesOf, type DataTableLines } from './data-tables-core.js';
+import {
+  countMainFlowStatuses,
+  stepsSummaryText,
+  type StepsSummaryCounts,
+} from './steps-summary-core.js';
 
 // The hover wording lives in failure-hover-core.ts (pure, node-testable);
 // re-exported here because this module is where every consumer historically
@@ -26,33 +31,15 @@ export type { DataTableLines };
  * `mainFlowLines` is the denominator's source, returned so the render path
  * can reuse it for the "any steps at all?" gate without re-extracting.
  */
-export function computeStepsSummary(snap: FileStateSnapshot): {
-  passed: number;
-  passedCached: number;
-  /** Passed by running compiled code — no model call. */
-  passedCodeBehind: number;
-  /** Passed under AI after the compiled entry threw. */
-  stale: number;
-  total: number;
-  mainFlowLines: number[];
-} {
+export function computeStepsSummary(
+  snap: FileStateSnapshot,
+): StepsSummaryCounts & { mainFlowLines: number[] } {
   const mainFlowLines = extractSteps(snap.text).map((s) => s.line);
-  const mainFlowSet = new Set(mainFlowLines);
-  const count = (...wanted: string[]): number =>
-    snap.statuses.filter(([line, status]) => wanted.includes(status) && mainFlowSet.has(line))
-      .length;
-  // Every 'pass*' counts as passed — a cache hit, a code-behind entry and a
-  // step that healed under AI are all successful steps. What differs is what
-  // it cost and whether it needs attention, which is what the breakdown says.
-  const passed = count('pass', 'pass-cached', 'pass-code-behind', 'pass-stale');
-  return {
-    passed,
-    passedCached: count('pass-cached'),
-    passedCodeBehind: count('pass-code-behind'),
-    stale: count('pass-stale'),
-    total: mainFlowLines.length,
-    mainFlowLines,
-  };
+  // The counting and the wording both live in steps-summary-core.ts, which
+  // imports no VS Code, so the fast suite pins THEM rather than a copy of the
+  // rule. What stays here is the one thing that needs a snapshot: which lines
+  // the author wrote under `## Steps`.
+  return { ...countMainFlowStatuses(snap.statuses, mainFlowLines), mainFlowLines };
 }
 
 /**
@@ -291,8 +278,10 @@ export class DecorationManager implements vscode.Disposable {
     // Options, not bare Ranges: a skipped or interrupted DATA ROW says why it
     // never ran or never finished ("not run (stopped)", "not run (iteration 2
     // failed)", "stopped — the run was stopped while this row was running") —
-    // the one thing those marks cannot say on their own. A skipped or stopped
-    // STEP still carries no hover, because nothing pins a detail to it.
+    // the one thing those marks cannot say on their own. A skipped STEP now
+    // says the same kind of thing, since `step:skip` pins its reason to the
+    // line (stories/step-flow-control.md); a stopped step still carries no
+    // hover, because nothing pins a detail to it.
     const skipRanges: vscode.DecorationOptions[] = [];
     const stoppedRanges: vscode.DecorationOptions[] = [];
     const linesWithStatus = new Set<number>();
@@ -335,7 +324,14 @@ export class DecorationManager implements vscode.Disposable {
         case 'skip':
           skipRanges.push({
             range: r,
-            ...(rowLineSet.has(line) && failure?.error && { hoverMessage: failure.error }),
+            // Verbatim, and for both kinds of skipped line. A ROW's hover is
+            // authored by `rowSkipHover`; a STEP's is the `reason` off the
+            // wire — `Not run: step 3 returned from "Sign in"`. Both are prose
+            // written to be read, so neither goes through `failHoverMessage`,
+            // which would put "This step failed:" over a line that did not
+            // fail and fence a sentence as if it were a stack trace. No
+            // detail (an older build's persisted state) still means no hover.
+            ...(failure?.error !== undefined && { hoverMessage: failure.error }),
           });
           break;
         case 'stopped':
@@ -371,26 +367,15 @@ export class DecorationManager implements vscode.Disposable {
 
     const errorRanges = snap.errors.map(([line]) => range(line));
     const headingLine = findStepsHeadingLine(snap.text);
-    const passed = summary.passed;
-    const passedCached = summary.passedCached;
     // The "N/M passed" summary belongs on the user's actual test file —
     // not on skill `.md`s we surfaced during a descent. A skill running
     // halfway through its own body would otherwise show a misleading
     // "0/4 passed" while it's still executing, and a skill the user
     // never wrote a test for shouldn't carry a passed-count signal at
     // all. Phase 2.1 cleanup.
-    // "12/12 passed (7 code-behind, 1 stale, 2 cached)" — one parenthesis
-    // listing only what actually happened, so an ordinary all-AI run reads
-    // exactly as it did before this feature existed.
-    const notes = [
-      summary.passedCodeBehind > 0 ? `${summary.passedCodeBehind} code-behind` : '',
-      summary.stale > 0 ? `${summary.stale} stale` : '',
-      passedCached > 0 ? `${passedCached} cached` : '',
-    ].filter((n) => n !== '');
-    const summaryText =
-      notes.length > 0
-        ? `${passed}/${summaryLines.length} passed (${notes.join(', ')})`
-        : `${passed}/${summaryLines.length} passed`;
+    // "12/12 passed (7 code-behind, 1 stale, 2 cached), 1 skipped" — the
+    // wording lives in steps-summary-core.ts so the fast suite can pin it.
+    const summaryText = stepsSummaryText(summary);
     const summaryRanges: vscode.DecorationOptions[] =
       snap.isTestFile && headingLine && summaryLines.length > 0
         ? [{

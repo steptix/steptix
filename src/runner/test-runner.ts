@@ -23,6 +23,16 @@ import { runInteractiveRepl } from './interactive-repl.js';
 import { loadContextFiles } from '../context/loader.js';
 import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
+import {
+  parseFlowControlStep,
+  flowControlInHookError,
+} from '../parser/flow-control-step.js';
+import {
+  flowControlExplanation,
+  frameExitIndex,
+  frameLabel,
+  skippedByReturn,
+} from './flow-control.js';
 import { runSetStep } from './set-step-runner.js';
 import { generateReport, getPrimaryModel, videoBaseNameFor, countStepOrigins } from '../report/generator.js';
 import { mergeRowReports, type RowReport } from '../report/merge-rows.js';
@@ -601,6 +611,17 @@ export async function runTest(
     let timeoutDeadline = Date.now() + testTimeout;
     let bail = false;
     let humanIntervened = false;
+    /**
+     * The run ran out of time.
+     *
+     * An explicit flag, set where the timeout `break` is, replacing the old
+     * inference `stepResults.length < stepLimit` — which was already loose
+     * (hook results inflate that array) and became WRONG once a return could
+     * legitimately leave steps unrun (stories/step-flow-control.md, decision
+     * 15). A main-flow return must read as a pass with N skipped, never as a
+     * timeout.
+     */
+    let timedOut = false;
 
     /**
      * The code-behind slice of `StepExecutorOptions` for expanded step `i`.
@@ -755,7 +776,28 @@ export async function runTest(
         const hookInstruction = hookSetStep ? raw : interpolate(raw, resolvedParameters);
 
         let result: StepResult;
-        if (hookSetStep) {
+        // A hook may not return (stories/step-flow-control.md, decision 8).
+        // `## Hooks` and project `defaultHooks` are both refused earlier, at
+        // parse and at config load — this is the backstop for the third way a
+        // hook line arrives, which neither of those sees: a `[skill: …]` named
+        // as a default hook, whose body is read at run time and can hold a
+        // flow-control line the config check never looked at. There is no flow
+        // to leave from inside a hook, so the hook fails rather than guessing
+        // whether it meant the hook scope, the step, or the run.
+        if (parseFlowControlStep(hookInstruction)) {
+          const error = flowControlInHookError(hookInstruction, ` (${scope} hook)`);
+          logger.error(error);
+          result = {
+            index: hookIndex,
+            instruction: hookInstruction,
+            status: 'failed',
+            turns: [],
+            durationMs: 0,
+            retried: false,
+            error,
+            aiExplanation: error,
+          };
+        } else if (hookSetStep) {
           logger.info(`Running ${scope} hook: ${hookInstruction}`);
           const outcome = runSetStep(
             hookSetStep,
@@ -865,6 +907,7 @@ export async function runTest(
 
       if (Date.now() > timeoutDeadline) {
         logger.error(`Test timeout after ${testTimeout}ms at step ${i + 1}`);
+        timedOut = true;
         break;
       }
 
@@ -980,6 +1023,13 @@ export async function runTest(
       // (stories/variable-assignment.md §Locked, "Recognised on the authored
       // line"). Its own template is resolved inside the branch instead.
       const setStep = parseSetStep(rawInstruction);
+      // `If … then return` / `… then stop`, likewise read off the AUTHORED
+      // line (stories/step-flow-control.md, decision 2). The claim is textual
+      // and is the same answer in every runner; the model only judges the
+      // condition, and only on the conditional form. The line is still
+      // interpolated below — a body may reference `{{…}}`, and it is the whole
+      // line the model reads.
+      const flowControlClaim = setStep ? null : parseFlowControlStep(rawInstruction);
       // Env/data first (parse-time semantics: fixed for the whole run), then
       // runtime `{{...}}` — the server's order, now the CLI's too.
       const instruction = setStep
@@ -999,15 +1049,41 @@ export async function runTest(
       // (`recordLastRun` reads it back once the step is done).
       tokensAtStepStart = tokenTracker.total;
 
+      // The unconditional form — a step whose WHOLE text is the tail, so
+      // `Stop running the remaining steps` as much as `Return` — has no
+      // condition to judge, so it is dispatched here beside `Set`: no model
+      // call, no page snapshot, no cache entry (story decision 3). The test is
+      // the absent `body`, never the length of the line.
+      const unconditionalFlowControl =
+        flowControlClaim && flowControlClaim.body === undefined ? flowControlClaim : null;
+
       // Handle [input: variable_name] steps — pause for user input
-      const inputStep = setStep ? null : parseInputStep(instruction);
-      const interactiveStep = !inputStep && !setStep ? parseInteractiveStep(instruction) : null;
+      const inputStep = setStep || unconditionalFlowControl ? null : parseInputStep(instruction);
+      const interactiveStep =
+        !inputStep && !setStep && !unconditionalFlowControl
+          ? parseInteractiveStep(instruction)
+          : null;
       const outputStep =
-        !inputStep && !interactiveStep && !setStep ? parseOutputStep(instruction) : null;
+        !inputStep && !interactiveStep && !setStep && !unconditionalFlowControl
+          ? parseOutputStep(instruction)
+          : null;
       let stepResult: StepResult;
       let interactiveResults: StepResult[] = [];
 
-      if (setStep) {
+      if (unconditionalFlowControl) {
+        stepResult = {
+          index: i + 1,
+          instruction,
+          status: 'passed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          aiExplanation: flowControlExplanation(
+            frameLabel(test.expansion?.origins, test.expansion?.frames, i),
+          ),
+          flowControl: { kind: 'return', verb: unconditionalFlowControl.verb },
+        };
+      } else if (setStep) {
         const setOutcome = runSetStep(
           setStep,
           instruction,
@@ -1202,6 +1278,11 @@ export async function runTest(
           testSteps: test.steps,
           ...placeholderOpts,
           ...codeBehindOptionsFor(i),
+          // The conditional form only — the unconditional one never reaches
+          // here. Present, this is what lets the model's `return` action end
+          // the step (stories/step-flow-control.md, decision 2); absent, the
+          // action is refused and the model is told why.
+          ...(flowControlClaim && { flowControlClaim }),
         },
         rawInstruction);
       }
@@ -1216,6 +1297,18 @@ export async function runTest(
 
       const stepCaptures = computeStepCaptures(stepResult, resolvedParameters);
       if (stepCaptures) stepResult.outputs = stepCaptures;
+
+      // Name the flow the step left. The executor produced the model's own
+      // account of why the condition held and nothing more — it holds no
+      // expansion, so it cannot know whether this was "Sign in" or the whole
+      // test. One formatter for every loop, so the phrasing cannot drift
+      // (stories/step-flow-control.md).
+      if (stepResult.flowControl && !unconditionalFlowControl) {
+        stepResult.aiExplanation = flowControlExplanation(
+          frameLabel(test.expansion?.origins, test.expansion?.frames, i),
+          stepResult.aiExplanation,
+        );
+      }
 
       recordLastRun(i, stepResult);
       stepResults.push(stepResult);
@@ -1233,6 +1326,14 @@ export async function runTest(
           currentUrl,
         ),
       );
+      // The steps a return skips are NOT added to the history, so without this
+      // line a later step would see an unexplained gap in the numbering and
+      // have to guess what happened in it (story decision 4).
+      if (stepResult.flowControl) {
+        conversationHistory.push(
+          `[flow] step ${i + 1} ${stepResult.aiExplanation ?? 'returned'} — the rest of that flow was skipped`,
+        );
+      }
 
       // ── runnerControl from the AI clarification REPL ───────────────────────
       // The user took control inside the clarification prompt (typed /repl,
@@ -1370,6 +1471,47 @@ export async function runTest(
         }
       }
 
+      // ── The step ended the flow it was in ───────────────────────────────
+      //
+      // Last thing in the loop body, and that position is the story's: the
+      // returning step is an ordinary passed step, so it has already run its
+      // `afterEach` hooks above (decision 4). Everything from here to the end
+      // of its frame is skipped — no hooks, no tokens, no screenshot, and no
+      // conversation history, which is why the returning step's own history
+      // line says it returned: a later step needs to know why the gap is
+      // there (stories/step-flow-control.md).
+      if (!bail && stepResult.flowControl) {
+        const label = frameLabel(test.expansion?.origins, test.expansion?.frames, i);
+        // `stepLimit` still bounds the run: a prefix replay
+        // (`stopAfterStep`) must not report steps it was never going to
+        // reach as skipped.
+        const exit = Math.min(
+          frameExitIndex(test.expansion?.origins, test.expansion?.frames, i, test.steps.length),
+          stepLimit - 1,
+        );
+        // The returning step's AUTHORED line rides on every reason string, so
+        // a reader who only has the editor can find the step that ended the
+        // flow (the `step N` half is the expanded index, which the editor does
+        // not number by). Authored, never interpolated — see
+        // `skippedByReturnReason`.
+        const returningText = test.expansion?.rawSteps[i] ?? test.steps[i] ?? '';
+        for (let j = i + 1; j <= exit; j++) {
+          const skipped = skippedByReturn(j, test.steps[j] ?? '', i, label, returningText);
+          const skippedSkill = test.sourceSkills[j] ?? null;
+          if (skippedSkill) skipped.sourceSkill = skippedSkill;
+          const skippedSection = test.sourceSections[j] ?? null;
+          if (skippedSection) skipped.sourceSection = skippedSection;
+          // Deliberately NOT through `recordLastRun`: the sidecar answers
+          // "which entries does the next compile need to regenerate", and a
+          // step that never ran is no evidence either way (decision 12).
+          stepResults.push(skipped);
+          logger.info(`Step ${j + 1} skipped — ${skipped.aiExplanation}`);
+        }
+        i = exit;
+        tokenTracker.resetStep();
+        continue;
+      }
+
       tokenTracker.resetStep();
     }
 
@@ -1403,7 +1545,7 @@ export async function runTest(
     const passedSteps = stepResults.filter((s) => s.status === 'passed').length;
     const failedSteps = stepResults.filter((s) => s.status === 'failed').length;
     const totalSubActions = stepResults.reduce((sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0), 0);
-    const timedOut = stepResults.length < stepLimit && !bail;
+    const skippedSteps = stepResults.filter((s) => s.status === 'skipped').length;
     overallStatus = failedSteps > 0 || timedOut || strictLoadError !== undefined ? 'failed' : 'passed';
 
     // The recording, beside the test, when this run was asked to capture —
@@ -1441,6 +1583,18 @@ export async function runTest(
       totalSteps: test.steps.length,
       passedSteps,
       failedSteps,
+      // Omitted (not 0) on a run that skipped nothing, so a report only grows
+      // the field when there is something to say.
+      //
+      // It counts every `skipped` result, which is MORE than the returns:
+      // `executeBranchedStep` has always marked the unmatched branches of a
+      // conditional group `skipped`, and nothing ever counted them. So a test
+      // with conditional groups grows a Skipped tile it did not have before.
+      // That is the intended change and not a leak from this feature — see the
+      // field's doc comment in report/types.ts. The alternative, counting only
+      // the rows a return produced, would print "4/5 passed" over a report
+      // whose fifth row already said SKIPPED.
+      ...(skippedSteps > 0 && { skippedSteps }),
       totalSubActions,
       durationMs,
       tokensUsed: tokenTracker.total,

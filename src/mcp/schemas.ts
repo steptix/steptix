@@ -1149,6 +1149,19 @@ const foldedStep = z.object({
   frameName: z.string().nullable(),
   text: z.string().nullable(),
   status: z.enum(['passed', 'failed', 'skipped', 'not-run', 'unknown']),
+  // Declared rather than stripped because `validated()` hands the agent the
+  // ORIGINAL object, not the parsed one — so an undeclared key would reach it
+  // anyway, just undocumented. Optional and not nullable: it is meaningless on
+  // any status but `skipped`, and absent is the honest way to say so.
+  skipCause: z
+    .enum(['returned', 'unattended'])
+    .optional()
+    .describe(
+      'Why a skipped step was skipped. "returned" — an `If … then return` ' +
+        'step ended the flow, which is the test doing what it was told. ' +
+        '"unattended" — an `[input:]` / `[interactive]` step the server would ' +
+        'not run with nobody watching; it needs a person before it can pass.',
+    ),
   output: z.string().nullable(),
   error: z.string().nullable(),
   fromCache: z.boolean(),

@@ -12,6 +12,7 @@ esbuild
       'tests/unit/cdp-discovery.test.ts',
       'tests/unit/browser-launcher.test.ts',
       'tests/unit/output-sections.test.ts',
+      'tests/unit/step-status.test.ts',
       'tests/integration/controller.test.ts',
     ],
     outdir: 'dist-test',
