@@ -946,3 +946,110 @@ server-side with the request held open, so the controller's `isRunning` stays
 true and `isStepPaused` is the flag to wait on; and the fixture app's pinned
 port 8787 is shared across worktrees, so a run that adopts another worktree's
 older app gets a 404 for a page only this branch has.
+
+### Composition with `If … then return`
+
+`stories/step-flow-control.md` landed on main while this branch was in review,
+and the two grammars overlap on exactly one line shape:
+`If <condition>, then return`. Both would claim it — a chain head with the tail
+`return` here, a conditional flow-control step there — and the composition is
+this feature's, not that one's, because this is the grammar that widened.
+
+**Flow control claims first, everywhere.** The decision is made once, at rung 0
+of `parseControlLine` and `claimedControlForm`, rather than at each of the
+eight callers: the parse-time validator, the expander, the grouper,
+runner-core's section-index (where a control line's tail is a call site) and
+its dangling-member pre-flight all inherit it. The CLI parser asks
+`parseFlowControlStep`; runner-core's mirror carries a hand copy of that
+regex, because it cannot import `src/` any more than it can import the module
+it already mirrors, and `tests/control-line-parity.test.ts` is what keeps the
+two honest — its corpus now carries `If X, then return`, `then stop here`,
+`then stop running the remaining steps`, `then Return`, and the near miss
+`then return to the dashboard`.
+
+Why that direction. A `return` is honoured by the executor only on a step the
+flow-control parser accepted — that guard is the whole safety argument of the
+other story — so a line read as a chain here would have had its `return`
+action refused, and the steps the author expected to be skipped would all have
+run and passed. Green for work not done is the failure this codebase treats as
+worst, and it is the one this ordering avoids. The reverse mistake costs a
+model call and a tail that fails loudly.
+
+Two boundaries, both load-bearing and both already in the other grammar:
+
+- Only a WHOLE-line claim is taken. `If x, then return to the dashboard` leaves
+  `to the dashboard` unmatched by the `$`-anchored flow-control expression, so
+  it stays a decision whose tail is prose — which is what an author means by
+  it. The cost is that it is no longer a *watch* either: ` then ` is this
+  story's opt-in, so the line is dispatched rather than polled for. Three rows
+  in main's grouper suite say so now, where they used to say "still an ordinary
+  conditional".
+- The guard is on the HEAD only. `Otherwise, return` and
+  `While the banner is visible, return` are still a branch and a loop whose
+  body is an unconditional return — a sentence with one meaning, and no reason
+  to refuse it.
+
+**An `Otherwise` under a flow-control `If` is refused**, in the three places
+the dangling rule is refused in and in its own wording. The dangling sentence
+("has no decision to be the alternative of") is true and useless here: the
+author is looking straight at a line that starts `If`, so being told there is
+no decision above reads as a parser bug. The refusal names that line, says it
+ends the flow rather than choosing a branch, and gives the fix — which is to
+delete the `Otherwise`, because *the steps after a `then return` already run
+only when the return did not fire*.
+
+**Where a return lands** is the runtime half, and it is one helper —
+`returnExit` in `control-flow.ts` — called by all three run loops.
+`frameExitIndex` (the other story's) knows about frames and nothing about
+control records, so from inside a loop body it hands back the last index of the
+test; the other story's own rule is that "a return never breaks out of a loop;
+it leaves the flow it is in, and an iteration is a flow", so that answer is one
+flow too many. `returnExit` clamps it to the innermost control body containing
+the returning step, and returns whether a clamp was possible at all. That
+second half is what the caller consults before running `planAfterStep` on the
+exit index:
+
+- inside a loop body it must — the pass ends and the loop re-evaluates;
+- inside a chain member's body it must — the walk goes out to `chainEnd + 1`,
+  and the siblings the decision already skipped are not skipped a second time;
+- in the MAIN flow it must not. A main-flow return ends the run, and if the
+  test's last expanded step happens to close a loop body then `planAfterStep`
+  would read that as a pass ending and jump the run back into the loop it had
+  just declared skipped.
+
+A return from a skill called inside a loop body needs no case of its own: the
+frame answers with the skill's last step, well short of the body's end, and
+the `Math.min` keeps it.
+
+**Two defects that exist only where the features meet**, both found by writing
+the interaction tests rather than by reading the code:
+
+- The returning step's frame was compared in the CLONE id space (`stepFrameId`
+  is `emittedFrameId(i)`) while the skipped steps' came from `origins`, which
+  only ever holds originals. Inside a loop pass those are never equal, so every
+  skipped body step looked like it belonged to a different frame and the
+  server announced the loop's own guard line skipped — while the loop was
+  still running. The comparison and the frame walk now both run in the original
+  id space, which is also the space `expandedFrames` is in.
+- A section used as a control line's tail is invoked from the guard's own line,
+  so that line is both a numbered step and a call site, and it was announced
+  skipped twice: once as itself, once as the call. The call-line dedupe set is
+  now keyed by document address for both.
+
+**One thing does not compose, and it is narrow.** A loop whose tail is a plain
+instruction has no frame of its own, so a `return` written as that tail —
+`While x, If y then return` — has nothing to clamp to and ends the whole run.
+Writing the body as a `### Section` gives it a frame and the iteration
+semantics. Not worth a special case: a one-line loop body that is nothing but a
+conditional return is a `Repeat … until` written the hard way.
+
+**TestBench paints one skip.** A step that never ran reaches the client two
+ways — `step:skip` with a reason, and `step:pass` carrying `output: 'skipped'`
+— and both stay, because the extension is an HTTP client of whichever server
+the workspace points at and dropping the older convention would repaint the
+untaken branch green against a server nobody had restarted. What is single is
+the presentation: one glyph, one paint precedence (a ✗ is never overwritten,
+which the `step:pass` path did not honour), one sentence. They had already
+drifted into `— step 12 skipped` and `◌ step 12 skipped — …` in adjacent
+branches of the same `if`, which is what a merge of two features that never met
+produces and what nobody notices in review.

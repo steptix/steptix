@@ -467,6 +467,36 @@ decision to be the alternative of"* — by the parser, by the server, and by
 TestBench before it runs, in that one wording and naming that one line. Put the
 input step before the `If`. Inside a tail's section body it is fine.
 
+#### `then return` is not a tail
+
+One `If … then …` line is **not** a decision: the one whose tail is exactly
+`return` or `stop` (§3.6). `If the page title contains "Dashboard" then return`
+is a flow-control step and is read as one everywhere — by the parser, the
+runner, the compiler and the editor — because two grammars claiming one line
+and disagreeing is the one way this could quietly do the wrong thing.
+
+The anchor is exact, and it cuts both ways. `If x then return to the dashboard`
+has words after the tail, so it is not flow control: it is an ordinary
+decision whose tail is the prose "return to the dashboard", which is what you
+meant by it. And the rule is on the *head* only, so `Otherwise, return` and
+`While the banner is visible, return` are still a branch and a loop whose body
+happens to be a return.
+
+Because a flow-control step is not a chain member, an `Else if` or `Otherwise`
+directly under one is refused — and refused with its own sentence rather than
+the dangling one, since the line above plainly does open `If`. You do not need
+one: the steps after a `then return` already run only when the return did not
+fire, so the alternative is just the next step.
+
+```markdown
+1. If the page title contains "Dashboard" then return
+2. Enter the username {{username}}
+```
+
+A `return` inside a loop body ends that **pass**, not the loop — an iteration
+is a flow, and the loop asks its condition again. Inside a chain's tail it ends
+the tail, and the run carries on after the whole chain.
+
 #### A loop decides again
 
 `While` asks before each pass, `Repeat … until` asks after each one, and `For
@@ -587,7 +617,15 @@ The details:
 - `If the Save button is visible, click it and return` is one compound step:
   the model clicks Save and then returns.
 - `Return` inside a looped section ends that iteration; the next one starts.
-  There is no way to break out of a loop.
+  There is no way to break out of a loop. That holds for a `While`, a `Repeat`
+  and a `For each` from §3.5 too: the loop asks its condition again, or moves
+  to the next element.
+- Inside the tail of a decision (§3.5), a return ends that tail. The run
+  carries on after the whole chain — the branches that were not taken were
+  already skipped by the decision itself and are not skipped twice.
+- A flow-control line is never a chain member, so an `Else if` / `Otherwise`
+  directly under one is refused. Nothing is lost: the steps below already run
+  only when the return did not fire.
 - A skipped step runs no hooks and spends no tokens. The returning step runs
   its `afterEach` hooks like any passed step.
 - A hook may not return. There is no flow to leave from inside one, and the
@@ -599,9 +637,10 @@ The details:
 - Only a line that opens `If` or `When`, or a line that is nothing but the
   tail, is flow control. `Click the details link then return` is an ordinary
   step — after an action, "then return" reads as *navigate back*, and the
-  framework does not guess. For the same reason a typo (`then retun`) is
-  ordinary prose: the following steps then run and fail loudly, which is the
-  direction to be wrong in.
+  framework does not guess. A typo (`then retun`) is not flow control either,
+  but it does still have a ` then ` in it, so it is a decision (§3.5) whose
+  tail is the prose "retun" — the tail fails loudly rather than the return
+  quietly not happening, which is the direction to be wrong in.
 
 ### 3.7 What does not exist
 

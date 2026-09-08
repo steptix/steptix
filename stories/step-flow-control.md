@@ -75,7 +75,10 @@ is honest: nothing that did not run is counted as passed.
 **You write:** `Return` as a whole step, inside a looped section.
 **You get:** that iteration ends and the next iteration starts. A return
 never breaks out of a loop; it leaves the flow it is in, and an iteration is
-a flow.
+a flow. (How that rule and the `While` / `Repeat` / `For each` loops of
+stories/control-flow.md compose — and which grammar owns
+`If <condition>, then return` — is settled in that story's §"Composition with
+`If … then return`".)
 
 **You write:** `If the Save button is visible, click it and return`.
 **You get:** a compound step. The model clicks Save and then returns; the
