@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import { expandSkills, clearSkillCache } from '../src/skills/expander.js';
+import { buildCodeBehindRegistry } from '../src/codebehind/loader.js';
 import { parseTestFile, parseTestContent } from '../src/parser/markdown.js';
 import { logger } from '../src/utils/logger.js';
 
@@ -632,5 +633,86 @@ describe('parseTestFile gating', () => {
     const parsed = await parseTestFile(file);
     // Body steps point at the call site — the line the author has open.
     expect(parsed.stepLines).toEqual([4, 4, 5]);
+  });
+});
+
+// ── Narrowed section bodies ──────────────────────────────────────────────
+
+/**
+ * `runSteps` — run only some of a section's body steps, per iteration
+ * (stories/data-row-progress-and-selection.md, decision 3).
+ *
+ * The body arrives whole and the indices say which of it runs, so a narrowed
+ * run is a SUBSET of the run it narrows rather than a differently-numbered run
+ * of its own: same lines, same code-behind slots, same frames.
+ */
+describe('runSteps narrows a section body', () => {
+  /** Expand `steps` against one section definition, wire-style (no rawSteps). */
+  const expandWith = async (
+    steps: string[],
+    section: Record<string, unknown>,
+  ) =>
+    expandSkills(steps, undefined, undefined, '/t/n.md', [4], {
+      sections: { 'log in': section } as never,
+      warnDeadSections: false,
+    });
+
+  const LOG_IN = {
+    name: 'Log In',
+    headingLine: 6,
+    steps: ['Enter the email {{email}}', 'Enter the password {{password}}'],
+    stepLines: [11, 12],
+    rows: [{ email: 'a@b.c', password: 'pw1' }, { email: 'd@e.f', password: 'pw2' }],
+  };
+
+  it('emits only the named body steps, on their authored lines', async () => {
+    const exp = await expandWith(['Log In'], { ...LOG_IN, runSteps: [1] });
+    expect(exp.steps).toEqual(['Enter the password pw1', 'Enter the password pw2']);
+    // Line 12, not 11: filtering the parallel arrays together is what keeps a
+    // kept step pointing at the line the author selected.
+    expect(exp.origins.map((o) => o.skillLine)).toEqual([12, 12]);
+    // And the iterations still number themselves off the table.
+    expect(
+      Object.values(exp.frames)
+        .filter((f) => f.kind === 'section')
+        .map((f) => [f.iteration, f.iterationCount]),
+    ).toEqual([[1, 2], [2, 2]]);
+  });
+
+  it('runs the whole body for an absent, empty or complete list', async () => {
+    // An axis nobody narrowed means all of it, and a list that keeps
+    // everything has narrowed nothing.
+    for (const runSteps of [undefined, [], [0, 1], [0, 1, 5]]) {
+      const exp = await expandWith(['Log In'], { ...LOG_IN, ...(runSteps && { runSteps }) });
+      expect(exp.steps).toHaveLength(4);
+      expect(exp.origins.every((o) => o.occurrenceOffset === undefined)).toBe(true);
+    }
+  });
+
+  it('keeps a kept step in the code-behind slot a full run would give it', async () => {
+    // The one thing filtering could silently break. Occurrence is a count of
+    // same-text steps within the frame, so dropping the first `Click Next`
+    // would slide the third into the first one's entry — a different piece of
+    // code, run without a word.
+    const wizard = {
+      name: 'Log In',
+      headingLine: 6,
+      steps: ['Click Next', 'Enter the email', 'Click Next', 'Click Next'],
+      stepLines: [11, 12, 13, 14],
+    };
+    const full = await expandWith(['Log In'], wizard);
+    const narrow = await expandWith(['Log In'], { ...wizard, runSteps: [3] });
+
+    const occurrences = async (exp: Awaited<ReturnType<typeof expandWith>>) => {
+      const registry = await buildCodeBehindRegistry(
+        { steps: exp.steps, rawSteps: exp.rawSteps, origins: exp.origins, frames: exp.frames },
+        { testFilePath: '/t/n.md', onWarn: () => {} },
+      );
+      return exp.steps.map((_, i) => registry.bindingFor(i)?.occurrence);
+    };
+
+    expect(await occurrences(full)).toEqual([0, 0, 1, 2]);
+    // The fourth body step alone, and it still binds the THIRD `Click Next`.
+    expect(await occurrences(narrow)).toEqual([2]);
   });
 });

@@ -146,6 +146,31 @@ function checkedRowInterpolate(
 const MAX_DEPTH = 10;
 
 /**
+ * The body-step indices a `runSteps` narrowing keeps, or null for "all of
+ * them".
+ *
+ * Null rather than `[0..n-1]` on purpose: the caller uses it to decide whether
+ * to filter *anything*, and an unnarrowed body must go through the same code
+ * it always did — no re-derived arrays, no offsets on its origins.
+ *
+ * Sanitised here as well as at the wire, because `expandSkills` is also called
+ * in-process (the CLI, the tests) where nothing validated the list. An empty
+ * result is "all of them", the same reading every other unselected axis gets:
+ * a narrowing that names nothing has narrowed nothing.
+ */
+function keptBodySteps(
+  runSteps: number[] | undefined,
+  bodyLength: number,
+): number[] | null {
+  if (runSteps === undefined) return null;
+  const kept = [...new Set(runSteps)]
+    .filter((n) => Number.isInteger(n) && n >= 0 && n < bodyLength)
+    .sort((a, b) => a - b);
+  if (kept.length === 0 || kept.length === bodyLength) return null;
+  return kept;
+}
+
+/**
  * `interpolate`, minus the warning on an unresolved placeholder.
  *
  * A looped section's body is interpolated with its row, and a body may
@@ -198,6 +223,18 @@ export type SectionDefs = Record<
     /** The authored table's total row count — the `of M` half of the pair
      *  above, so a one-row run still reads `iteration 2 of 3`. */
     rowCount?: number | undefined;
+    /**
+     * 0-based indices into `steps`: run only these body steps, per iteration
+     * (stories/data-row-progress-and-selection.md, decision 3 — "the selection
+     * narrows every axis"). Sent only by a client whose author selected some
+     * of the body; the CLI parser never sets it.
+     *
+     * Every kept step keeps the identity a full run would have given it — its
+     * `stepLines` entry, and its code-behind occurrence among body steps with
+     * the same authored text — so a narrowed run binds to the same entries and
+     * reports the same lines as the run it is a subset of.
+     */
+    runSteps?: number[] | undefined;
   }
 >;
 
@@ -296,12 +333,18 @@ export interface ExpandedFrame {
  *    steps (the test frame).
  *  - `skillFilePath` / `skillLine` — the per-step origin inside a skill
  *    body, when the entry came from a skill. Absent for inline entries.
+ *  - `occurrenceOffset` — how many steps a narrowing DROPPED ahead of this one
+ *    would have carried the same authored text in the same frame. Added to the
+ *    live count in `buildCodeBehindRegistry`, so a step that is the second
+ *    `Click Next` of a body binds to the second entry even when the first
+ *    `Click Next` was not selected.
  */
 export interface ExpandedStepOrigin {
   inputIndex: number;
   frameId: string;
   skillFilePath?: string;
   skillLine?: number;
+  occurrenceOffset?: number;
 }
 
 /**
@@ -639,6 +682,13 @@ async function expandRecursive(
    *  test file's pre-expansion `stepLines`; recursive callers pass the
    *  skill's `stepLines`. */
   stepLines: number[] | null,
+  /**
+   * Parallel to `steps`: how many same-text steps a narrowing dropped ahead of
+   * each one. Non-null only for a section body a `runSteps` narrowed — it is
+   * what keeps a kept step's code-behind occurrence equal to the occurrence it
+   * would have had in a full run.
+   */
+  occurrenceOffsets: number[] | null = null,
 ): Promise<Omit<SkillExpansion, 'frames'>> {
   if (depth > MAX_DEPTH) {
     throw new Error(`Skill expansion exceeded max depth of ${MAX_DEPTH} (possible recursion)`);
@@ -793,16 +843,14 @@ async function expandRecursive(
           // and if that were the interpolated text, the match side and the
           // code-behind binding `source` would differ between the CLI and the
           // server, binding entries on one path and not the other.
-          const bodyCtx: ExpandContext = {
-            ...ctx,
-            ...(section.rawSteps
-              ? { rawSteps: section.rawSteps }
-              : { rawSteps: undefined }),
-            // An inner looped body sees its enclosing rows too, innermost
-            // winning: a section shares the caller's scope, and a nested loop
-            // that could not read the outer row would contradict that.
-            ...(row && { rowBindings: { ...(ctx.rowBindings ?? {}), ...row } }),
-          };
+          // An inner looped body sees its enclosing rows too, innermost
+          // winning: a section shares the caller's scope, and a nested loop
+          // that could not read the outer row would contradict that. An
+          // iteration with no row of its own inherits the caller's, which is
+          // what lets an unlooped inner section read the outer table.
+          const rowBindings = row
+            ? { ...(ctx.rowBindings ?? {}), ...row }
+            : ctx.rowBindings;
           // Strip a leading `[no-hooks]` from each body step as it is inlined.
           // The CLI parser already stripped these, but the wire shape carries
           // markers verbatim (the client can't strip them — they are part of
@@ -811,16 +859,72 @@ async function expandRecursive(
           // stripped and ignored either way: it is the *invocation's* marker
           // that opts the whole body out, via origin mapping.
           let bodySteps = section.steps.map((s) => s.replace(NO_HOOKS_MARKER, ''));
-          if (bodyCtx.rowBindings) {
+          if (rowBindings) {
             // Interpolated BEFORE the recursion, so a `[skill: x arg="{{col}}"]`
             // line inside the body reaches the skill-call parser with the value
             // already in place — the same order `applySkillScope` uses for a
             // skill's own args. `interpolateQuiet` leaves an unknown
             // placeholder alone without warning: a body may legitimately
             // reference a caller variable that only exists at run time.
-            const bindings = bodyCtx.rowBindings;
-            bodySteps = bodySteps.map((s) => checkedRowInterpolate(s, bindings, section.name));
+            bodySteps = bodySteps.map((s) =>
+              checkedRowInterpolate(s, rowBindings, section.name),
+            );
           }
+
+          // The BODY-STEP narrowing, the sibling axis of the row one: a
+          // selection may name some of a section's body steps as well as some
+          // of its rows, and neither narrowing knows about the other
+          // (stories/data-row-progress-and-selection.md, decision 3). Absent —
+          // the CLI, and every client that predates it — means the whole body.
+          //
+          // Filtered here rather than by the caller so `stepLines`, `rawSteps`
+          // and the steps themselves can only ever be filtered together: they
+          // are parallel arrays, and a skew between them is a body step
+          // attributed to another one's line.
+          const keep = keptBodySteps(section.runSteps, section.steps.length);
+          let bodyLines = section.stepLines;
+          let bodyRaws = section.rawSteps;
+          let occurrenceOffsets: number[] | null = null;
+          if (keep) {
+            // What each body step BINDS as — the loader's occurrence key is
+            // (frame, section, this text), so dropping an earlier step with
+            // the same text would slide every later one down a slot. A body
+            // that says `Click Next` three times and runs only the third must
+            // still bind the third entry, so each kept step carries how many
+            // same-text steps ahead of it were dropped.
+            const sourceOf = (k: number): string =>
+              (section.rawSteps?.[k] ?? bodySteps[k] ?? '').trim();
+            const kept = new Set(keep);
+            occurrenceOffsets = keep.map((k) => {
+              let dropped = 0;
+              for (let d = 0; d < k; d++) {
+                if (!kept.has(d) && sourceOf(d) === sourceOf(k)) dropped += 1;
+              }
+              return dropped;
+            });
+            bodySteps = keep.map((k) => bodySteps[k]!);
+            bodyLines = keep.map((k) => section.stepLines[k] ?? 0);
+            bodyRaws = section.rawSteps
+              ? keep.map((k) => section.rawSteps![k] ?? '')
+              : undefined;
+          }
+
+          // A section is a macro: it shares the caller's scope, so there is no
+          // scope pass here and `ctx` carries through unchanged. The body may
+          // call sibling sections, so the sections map stays put — only the
+          // match-side array swaps to this body's own.
+          //
+          // `rawSteps` stays the AUTHORED text even when a row is interpolated
+          // into the body below. The wire carries no `rawSteps` (contract
+          // §3.2), so `matchInput` falls back to `steps[i]` on the server —
+          // and if that were the interpolated text, the match side and the
+          // code-behind binding `source` would differ between the CLI and the
+          // server, binding entries on one path and not the other.
+          const bodyCtx: ExpandContext = {
+            ...ctx,
+            ...(bodyRaws ? { rawSteps: bodyRaws } : { rawSteps: undefined }),
+            ...(rowBindings && { rowBindings }),
+          };
 
           const recursed = await expandRecursive(
             bodySteps,
@@ -834,7 +938,8 @@ async function expandRecursive(
             ctx.insideSkill ? sourceSection : (sourceSection ?? section.name),
             newFrameId,
             attribInputIndex ?? i,
-            section.stepLines,
+            bodyLines,
+            occurrenceOffsets,
           );
 
           const base = out.length;
@@ -1055,6 +1160,12 @@ async function expandRecursive(
         }),
         ...(stepLines?.[i] !== undefined && stepLines![i]! > 0 && {
           skillLine: stepLines![i]!,
+        }),
+        // Only ever set inside a narrowed section body, and only when
+        // something with the same text was actually dropped ahead of this
+        // step — so an ordinary expansion's origins are byte-identical.
+        ...(occurrenceOffsets?.[i] !== undefined && occurrenceOffsets[i]! > 0 && {
+          occurrenceOffset: occurrenceOffsets[i]!,
         }),
       });
       controls.push(null);

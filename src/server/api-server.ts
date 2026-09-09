@@ -759,6 +759,7 @@ export function createApiServer(
               rows?: Array<Record<string, string>>;
               rowNumbers?: number[];
               rowCount?: number;
+              runSteps?: number[];
             };
             sections[key] = {
               name: entry.name,
@@ -776,6 +777,12 @@ export function createApiServer(
                   rowNumbers: entry.rowNumbers,
                   rowCount: entry.rowCount,
                 }),
+              // The body-step narrowing, on the allow-list for the same
+              // reason: a field this copy does not name never travels, and a
+              // dropped `runSteps` runs the WHOLE body — silently, which is
+              // exactly the failure the client's old-server warning exists to
+              // notice from the outside.
+              ...(entry.runSteps !== undefined && { runSteps: entry.runSteps }),
             };
           }
           request.sections = sections;
@@ -2916,6 +2923,40 @@ function validateSectionEntry(key: string, raw: unknown): string | null {
       return (
         `${where}.rowNumbers must all be <= ${where}.rowCount ` +
         `(got ${last} with a rowCount of ${rowCount})`
+      );
+    }
+  }
+  // Which BODY STEPS of the section this run executes, when a selection
+  // narrowed them (stories/data-row-progress-and-selection.md, decision 3).
+  // 0-based indices into `steps` — the same axis `rowNumbers` is for rows.
+  //
+  // Refused rather than repaired, for the reason `rows` is: a list the server
+  // quietly cleaned up would run a body step the author excluded, or skip one
+  // they picked, and neither says anything at the time. Ascending and unique
+  // because a body runs in document order — a list that says otherwise was
+  // built from something other than the body.
+  if (entry.runSteps !== undefined) {
+    const runSteps = entry.runSteps;
+    if (
+      !Array.isArray(runSteps) ||
+      runSteps.length === 0 ||
+      !runSteps.every((n) => typeof n === 'number' && Number.isInteger(n) && n >= 0)
+    ) {
+      return `${where}.runSteps must be a non-empty array of 0-based step indices`;
+    }
+    for (let i = 1; i < runSteps.length; i++) {
+      if ((runSteps[i] as number) <= (runSteps[i - 1] as number)) {
+        return (
+          `${where}.runSteps must be strictly ascending ` +
+          `(got ${runSteps[i - 1]} then ${runSteps[i]})`
+        );
+      }
+    }
+    const last = runSteps[runSteps.length - 1] as number;
+    if (last >= entry.steps.length) {
+      return (
+        `${where}.runSteps must all be < ${where}.steps.length ` +
+        `(got ${last} with ${entry.steps.length} step${entry.steps.length === 1 ? '' : 's'})`
       );
     }
   }

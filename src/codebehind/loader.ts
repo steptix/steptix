@@ -184,8 +184,15 @@ export async function buildCodeBehindRegistry(
     const source = (expansion.rawSteps[i] ?? expansion.steps[i] ?? '').trim();
     const scopeKey = site.section ? matchText(site.section) : '';
     const counterKey = `${frameId}\u0000${scopeKey}\u0000${source}`;
-    const occurrence = perFrameCounts.get(counterKey) ?? 0;
-    perFrameCounts.set(counterKey, occurrence + 1);
+    const seen = perFrameCounts.get(counterKey) ?? 0;
+    perFrameCounts.set(counterKey, seen + 1);
+    // A selection that narrows a section's body drops steps this frame would
+    // otherwise have counted. `occurrenceOffset` is how many of the dropped
+    // ones carried this same text ahead of this step, so the sum is the slot
+    // it holds in the AUTHORED body: a body whose third `Click Next` is the
+    // only one selected still binds the third entry, not the first. Absent
+    // (and zero) everywhere else, which is every run that narrows nothing.
+    const occurrence = seen + (origin?.occurrenceOffset ?? 0);
 
     const stepsFile = codeBehindPathFor(site.file);
     filesNeeded.add(stepsFile);

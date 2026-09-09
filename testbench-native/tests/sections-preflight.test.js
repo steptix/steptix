@@ -182,6 +182,54 @@ test("payload: a section nobody narrowed is untouched", () => {
   assert.equal(payload["beta"].rows.length, 1);
 });
 
+// ---------------------------------------------------------------------------
+// buildSectionsPayload — a narrowed section BODY
+// (stories/data-row-progress-and-selection.md, decision 3)
+// ---------------------------------------------------------------------------
+
+test("payload: without a body filter, `runSteps` never appears", () => {
+  assert.equal(buildSectionsPayload(ROWS_DOC)["upload each statement"].runSteps, undefined);
+});
+
+test("payload: a body filter ships runSteps, and the whole body stays put", () => {
+  // `steps` and `stepLines` are unchanged — the server needs the WHOLE body
+  // to know what `runSteps` indexes into, and every kept step keeps the line
+  // it would have had in a full run.
+  const entry = buildSectionsPayload(ROWS_DOC, undefined, {
+    "Upload each statement": [1],
+  })["upload each statement"];
+  assert.deepEqual(entry.runSteps, [1]);
+  assert.deepEqual(entry.steps, ["Upload {{file}}", "Assert {{status}}"]);
+  assert.deepEqual(entry.stepLines, [10, 11]);
+});
+
+test("payload: rows and body steps are independent axes on one section", () => {
+  const entry = buildSectionsPayload(
+    ROWS_DOC,
+    { "Upload each statement": [2] },
+    { "Upload each statement": [1] },
+  )["upload each statement"];
+  assert.deepEqual(entry.rowNumbers, [2]);
+  assert.equal(entry.rowCount, 3);
+  assert.deepEqual(entry.runSteps, [1]);
+});
+
+test("payload: a body filter is sorted, de-duped and clipped to the body", () => {
+  const entry = buildSectionsPayload(ROWS_DOC, undefined, {
+    "Upload each statement": [1, 1, 7, -1],
+  })["upload each statement"];
+  assert.deepEqual(entry.runSteps, [1]);
+});
+
+test("payload: a filter that keeps the WHOLE body is not a narrowing", () => {
+  // Which is what a drag over the file looks like. The wire has to stay
+  // byte-identical for it, or every run would start shipping `runSteps`.
+  const entry = buildSectionsPayload(ROWS_DOC, undefined, {
+    "Upload each statement": [0, 1],
+  })["upload each statement"];
+  assert.equal(entry.runSteps, undefined);
+});
+
 test("payload: a filter naming a section with no table changes nothing", () => {
   // The refusal for an unknown name is `rowSelectionRefusal`'s job, before
   // the run. Here it must simply not corrupt the payload.

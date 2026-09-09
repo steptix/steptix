@@ -10,7 +10,9 @@
  */
 
 import {
+  extractSections,
   maskIfSecret,
+  matchText,
   parseDataRows,
   scanSectionDataTables,
   type DataTableScan,
@@ -106,6 +108,73 @@ export function splitRowSelection(text: string, lines: number[]): RowSelection {
   }
   if (Object.keys(sectionRows).length > 0) out.sectionRows = sectionRows;
   return out;
+}
+
+/**
+ * One section whose BODY a selection named some steps of.
+ *
+ * The sibling of a `sectionRows` entry, and independent of it: a selection may
+ * narrow a section's rows, its body steps, both or neither, and no axis knows
+ * about the others (decision 3).
+ */
+export interface BodyStepPick {
+  /** The section name as authored. */
+  section: string;
+  /** 0-based indices into the section's body, ascending — the wire's
+   *  `runSteps`. */
+  indices: number[];
+  /** The same steps as 1-based ordinals: what the reader counts in the file,
+   *  and what the Output lines say. */
+  ordinals: number[];
+  /** How many body steps the section has. */
+  total: number;
+}
+
+/**
+ * Split the body-step lines a selection names, grouped by section, and say
+ * which of those narrowings this run can honour.
+ *
+ * A section is entered only by a step that calls it, so a narrowing whose call
+ * is not among the steps about to run narrows nothing — the body will not
+ * execute at all. Those come back as `ignored`, to be logged and dropped, for
+ * the reason the row equivalent is: an axis nobody selected means all of it,
+ * and a drag that stopped a line short of the call has already said which
+ * steps it wants.
+ *
+ * A section whose WHOLE body is selected is in neither list. That is not a
+ * narrowing — it is what a drag over the file looks like — and shipping
+ * `runSteps` for it would put a line in the log saying the run was narrowed to
+ * everything.
+ *
+ * `runningInstructions` is the instruction text of the main-flow steps this
+ * run will execute, matched with `matchText`: the same rule the server expands
+ * by, so the two cannot disagree about which step calls which section.
+ */
+export function splitBodySteps(
+  text: string,
+  lines: number[],
+  runningInstructions: string[],
+): { narrowed: BodyStepPick[]; ignored: BodyStepPick[] } {
+  const narrowed: BodyStepPick[] = [];
+  const ignored: BodyStepPick[] = [];
+  if (lines.length === 0) return { narrowed, ignored };
+  const selected = new Set(lines);
+  const called = new Set(runningInstructions.map((s) => matchText(s)));
+  for (const section of extractSections(text)) {
+    const indices = section.steps
+      .map((step, index) => ({ line: step.line, index }))
+      .filter((s) => selected.has(s.line))
+      .map((s) => s.index);
+    if (indices.length === 0 || indices.length === section.steps.length) continue;
+    const pick: BodyStepPick = {
+      section: section.name,
+      indices,
+      ordinals: indices.map((n) => n + 1),
+      total: section.steps.length,
+    };
+    (called.has(matchText(section.name)) ? narrowed : ignored).push(pick);
+  }
+  return { narrowed, ignored };
 }
 
 /** `row 6 is` / `rows 6, 7 are` — the subject of a refusal, agreeing with
@@ -411,6 +480,76 @@ export function sectionRowsIgnoredLogLine(name: string, rows: number[]): string 
   return (
     `${name} — rows ${rows.join(', ')} ignored: ` +
     'the step that calls this section is not in your selection'
+  );
+}
+
+/**
+ * `steps 2` / `steps 1, 3` / `steps 2–3` — the body steps a narrowing kept.
+ *
+ * Always plural, like `rows 2 of 3` a line above it: this names positions in a
+ * list, and "step 2 of 2" would read as a progress counter. A contiguous run
+ * is a range for the reason `stepRangeText` makes one — an Alt+click pick of
+ * body steps 1 and 3 must not read as if it ran 2 as well.
+ */
+export function bodyStepsText(ordinals: number[]): string {
+  const sorted = [...new Set(ordinals)].sort((a, b) => a - b);
+  if (sorted.length > 1 && sorted.every((n, i) => i === 0 || n === sorted[i - 1]! + 1)) {
+    return `steps ${sorted[0]}–${sorted[sorted.length - 1]}`;
+  }
+  return `steps ${sorted.join(', ')}`;
+}
+
+/**
+ * The line a section with a narrowed BODY prints at run start:
+ *
+ *     Log In — running body steps 2 of 2
+ *
+ * The sibling of `sectionRowsLogLine`, in the same voice, and posted beside it
+ * when a selection narrowed both axes of the same section. It says less than
+ * the rows line because it has less to warn about: a body step that did not
+ * run changes what the steps after the call see just as a skipped row does,
+ * but the author picked the steps one at a time and can see which.
+ */
+export function sectionStepsLogLine(
+  name: string,
+  ordinals: number[],
+  total: number,
+): string {
+  return `${name} — running body ${bodyStepsText(ordinals)} of ${total}`;
+}
+
+/**
+ * …and the line it prints instead when the call is not among the steps this
+ * run will execute:
+ *
+ *     Log In — body steps 2 ignored: the step that calls this section is not in your selection
+ *
+ * Logged rather than refused, exactly as the row equivalent is: the body will
+ * not be entered at all, and a selection that stops short of the call has
+ * already said which steps it wants.
+ */
+export function sectionStepsIgnoredLogLine(name: string, ordinals: number[]): string {
+  return (
+    `${name} — body ${bodyStepsText(ordinals)} ignored: ` +
+    'the step that calls this section is not in your selection'
+  );
+}
+
+/**
+ * The one warning a run gives about a server that ran the WHOLE body of a
+ * section this selection narrowed.
+ *
+ * `runSteps` is a new optional field, and a server that predates it drops what
+ * it does not know — so the body runs whole, the unselected steps paint marks
+ * the author did not ask for, and nothing anywhere says why. Detected from the
+ * outside: a step event for a body line this run did not select can only mean
+ * the narrowing never arrived. Said once, because it is a fact about the
+ * server rather than about the step that revealed it.
+ */
+export function oldServerBodyStepsWarning(name: string): string {
+  return (
+    `${name} — the server ran the whole section body; restart or update the ` +
+    'Sessions API server so a selection can narrow it'
   );
 }
 

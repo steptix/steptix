@@ -33,6 +33,11 @@ export interface SectionPayloadEntry {
    *  reads `(2/3)`. Sent with `rowNumbers` or not at all — the server refuses
    *  one without the other. */
   rowCount?: number;
+  /** 0-based indices into `steps`: run only these body steps, per iteration —
+   *  a selection narrows the body the way it narrows the rows
+   *  (stories/data-row-progress-and-selection.md, decision 3). Ascending and
+   *  unique; absent means the whole body. */
+  runSteps?: number[];
 }
 
 /**
@@ -65,6 +70,17 @@ export function buildSectionsPayload(
    * wrong row.
    */
   sectionRows?: Record<string, number[]>,
+  /**
+   * Narrow a `### Section`'s BODY to these 0-based step indices, keyed by the
+   * section name as authored. The sibling axis of `sectionRows`: a selection
+   * that names three main-flow steps, one body step and one table row narrows
+   * all three, and none of the three knows about the others (decision 3).
+   *
+   * A section not named here ships its whole body, which is every run that
+   * existed before this — and so does one whose whole body was selected: a
+   * narrowing that keeps everything has narrowed nothing.
+   */
+  sectionSteps?: Record<string, number[]>,
 ): Record<string, SectionPayloadEntry> | null {
   const sections = extractSections(text);
   if (sections.length === 0) return null;
@@ -98,11 +114,27 @@ export function buildSectionsPayload(
             .sort((a, b) => a - b)
             .filter((n) => n >= 1 && n <= allRows.length)
         : null;
+    // Sanitised the way the rows are, and for the same reason: the numbers
+    // came from a selection made against a buffer the caller has since let go
+    // of, so an index the body does not have is dropped rather than shipped
+    // for the server to refuse. A list that survives as "every step" is not a
+    // narrowing and is not sent — the wire stays byte-identical for it.
+    const chosenSteps = sectionSteps?.[section.name];
+    const runSteps =
+      chosenSteps === undefined
+        ? null
+        : (() => {
+            const kept = [...new Set(chosenSteps)]
+              .filter((n) => Number.isInteger(n) && n >= 0 && n < section.steps.length)
+              .sort((a, b) => a - b);
+            return kept.length === 0 || kept.length === section.steps.length ? null : kept;
+          })();
     payload[key] = {
       name: section.name,
       headingLine: section.headingLine,
       steps: section.steps.map((s) => s.instruction),
       stepLines: section.steps.map((s) => s.line),
+      ...(runSteps && { runSteps }),
       ...(allRows !== undefined &&
         (narrowed && narrowed.length > 0
           ? {

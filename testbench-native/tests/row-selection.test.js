@@ -13,10 +13,12 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
   allRowsOfTable,
+  bodyStepsText,
   buildRowPickEntries,
   buildRowsMessage,
   dataRowLinesOf,
   failedRowsFrom,
+  oldServerBodyStepsWarning,
   rowAtLine,
   rowOutcomeLine,
   rowSelectionRefusal,
@@ -24,6 +26,9 @@ import {
   rowsSummaryLine,
   sectionRowsIgnoredLogLine,
   sectionRowsLogLine,
+  sectionStepsIgnoredLogLine,
+  sectionStepsLogLine,
+  splitBodySteps,
   splitRowSelection,
   stepRangeText,
   stepsPerRowLogLine,
@@ -140,6 +145,124 @@ test('split: a file with no table is passed through untouched', () => {
 
 test('split: an empty selection stays empty — that is "run everything"', () => {
   assert.deepEqual(splitRowSelection(BOTH, []), { lines: [] });
+});
+
+// ---------------------------------------------------------------------------
+// splitBodySteps — the sibling axis: which BODY STEPS of a section run
+// ---------------------------------------------------------------------------
+
+//  1 # Login
+//  2
+//  3 ## Steps
+//  4 1. Navigate to the baseUrl
+//  5 2. Reject non-essential cookies in the cookie banner
+//  6 3. Log In
+//  7
+//  8 ### Log In
+//  9 | email | password |
+// 10 |-------|----------|
+// 11 | demo  | pw1      |
+// 12 | nobody| pw2      |
+// 13 1. Enter the email {{email}}
+// 14 2. Enter the password {{password}}
+const LOGIN = doc(
+  '# Login',
+  '',
+  '## Steps',
+  '1. Navigate to the baseUrl',
+  '2. Reject non-essential cookies in the cookie banner',
+  '3. Log In',
+  '',
+  '### Log In',
+  '| email | password |',
+  '|-------|----------|',
+  '| demo  | pw1      |',
+  '| nobody| pw2      |',
+  '1. Enter the email {{email}}',
+  '2. Enter the password {{password}}',
+);
+
+/** The main flow of LOGIN, as `classifySelectedSteps` would hand it over. */
+const MAIN_FLOW = [
+  'Navigate to the baseUrl',
+  'Reject non-essential cookies in the cookie banner',
+  'Log In',
+];
+
+test('body split: the reported gesture — three steps, one body step, one row', () => {
+  // Lines 4-6 are the main flow, 14 is body step 2. The row (line 12) is
+  // `splitRowSelection`'s business and never reaches here.
+  const { narrowed, ignored } = splitBodySteps(LOGIN, [4, 5, 6, 12, 14], MAIN_FLOW);
+  assert.deepEqual(ignored, []);
+  assert.deepEqual(narrowed, [
+    { section: 'Log In', indices: [1], ordinals: [2], total: 2 },
+  ]);
+});
+
+test('body split: the call has to be among the steps that will run', () => {
+  // A drag that stopped a line short of `3. Log In`. Ignored and said out
+  // loud, not refused: the body will not be entered at all, so there is
+  // nothing for the narrowing to narrow.
+  const { narrowed, ignored } = splitBodySteps(LOGIN, [4, 5, 14], MAIN_FLOW.slice(0, 2));
+  assert.deepEqual(narrowed, []);
+  assert.deepEqual(ignored, [
+    { section: 'Log In', indices: [1], ordinals: [2], total: 2 },
+  ]);
+});
+
+test('body split: the call is matched by matchText, so case does not matter', () => {
+  // The same rule the server expands by. A step written `LOG IN` and the
+  // heading `### Log In` are one call, and the two must not disagree.
+  const { narrowed } = splitBodySteps(LOGIN, [6, 14], ['LOG IN']);
+  assert.deepEqual(narrowed.map((p) => p.section), ['Log In']);
+});
+
+test('body split: selecting the WHOLE body is not a narrowing', () => {
+  // Which is what a drag over the file looks like. Shipping `runSteps` for it
+  // would put a line in the log saying the run was narrowed to everything.
+  assert.deepEqual(splitBodySteps(LOGIN, [4, 5, 6, 13, 14], MAIN_FLOW), {
+    narrowed: [],
+    ignored: [],
+  });
+});
+
+test('body split: no body lines, or none at all, narrows nothing', () => {
+  assert.deepEqual(splitBodySteps(LOGIN, [4, 5, 6], MAIN_FLOW), {
+    narrowed: [],
+    ignored: [],
+  });
+  assert.deepEqual(splitBodySteps(LOGIN, [], MAIN_FLOW), { narrowed: [], ignored: [] });
+  assert.deepEqual(splitBodySteps(PLAIN, [4], ['Do a thing']), {
+    narrowed: [],
+    ignored: [],
+  });
+});
+
+test('body split: two sections are two independent answers', () => {
+  //  7 ### Alpha   8 1. a1   9 2. a2  |  11 ### Beta  12 1. b1  13 2. b2
+  const two = doc(
+    '# Two',
+    '',
+    '## Steps',
+    '1. Alpha',
+    '2. Beta',
+    '',
+    '### Alpha',
+    '1. a1',
+    '2. a2',
+    '',
+    '### Beta',
+    '1. b1',
+    '2. b2',
+  );
+  const { narrowed, ignored } = splitBodySteps(two, [4, 8, 12], ['Alpha']);
+  // Alpha's call runs, Beta's does not — so one narrows and one is dropped.
+  assert.deepEqual(narrowed, [
+    { section: 'Alpha', indices: [0], ordinals: [1], total: 2 },
+  ]);
+  assert.deepEqual(ignored, [
+    { section: 'Beta', indices: [0], ordinals: [1], total: 2 },
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -376,6 +499,38 @@ test('narrowed section: a call outside the selected steps is logged, not refused
     sectionRowsIgnoredLogLine('Upload each statement', [2, 3]),
     'Upload each statement — rows 2, 3 ignored: ' +
       'the step that calls this section is not in your selection',
+  );
+});
+
+test('narrowed body: the line says which body steps, of how many', () => {
+  // The sibling of the rows line, in the same voice. Always plural — this
+  // names positions in a list, and "step 2 of 2" reads as a progress counter.
+  assert.equal(sectionStepsLogLine('Log In', [2], 2), 'Log In — running body steps 2 of 2');
+  assert.equal(sectionStepsLogLine('Log In', [1, 3], 3), 'Log In — running body steps 1, 3 of 3');
+  assert.equal(sectionStepsLogLine('Log In', [2, 3], 4), 'Log In — running body steps 2–3 of 4');
+});
+
+test('narrowed body: a contiguous run is a range, a gapped one is a list', () => {
+  // An Alt+click pick of body steps 1 and 3 must not read as if 2 ran too.
+  assert.equal(bodyStepsText([2]), 'steps 2');
+  assert.equal(bodyStepsText([1, 2, 3]), 'steps 1–3');
+  assert.equal(bodyStepsText([3, 1]), 'steps 1, 3');
+  assert.equal(bodyStepsText([2, 2, 3]), 'steps 2–3');
+});
+
+test('narrowed body: a call outside the selected steps is logged, not refused', () => {
+  assert.equal(
+    sectionStepsIgnoredLogLine('Log In', [2]),
+    'Log In — body steps 2 ignored: ' +
+      'the step that calls this section is not in your selection',
+  );
+});
+
+test('narrowed body: a server that ignored runSteps is named once', () => {
+  assert.equal(
+    oldServerBodyStepsWarning('Log In'),
+    'Log In — the server ran the whole section body; restart or update the ' +
+      'Sessions API server so a selection can narrow it',
   );
 });
 

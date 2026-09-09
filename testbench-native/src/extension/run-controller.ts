@@ -9,6 +9,7 @@ import {
   classifySelectedSteps,
   matchText,
   composeEnv,
+  extractSections,
   extractSteps,
   danglingChainMemberError,
   resolveRunSelection,
@@ -65,11 +66,15 @@ import {
 } from './row-summary-core.js';
 import {
   failedRowsFrom,
+  oldServerBodyStepsWarning,
   rowOutcomeLine,
   rowValuesText,
   rowsSummaryLine,
   sectionRowsIgnoredLogLine,
   sectionRowsLogLine,
+  sectionStepsIgnoredLogLine,
+  sectionStepsLogLine,
+  splitBodySteps,
   stepRangeText,
   stepsPerRowLogLine,
 } from './row-selection-core.js';
@@ -624,6 +629,21 @@ export class RunController {
    *  `buildSectionsPayload` on every block. Undefined outside a narrowed run,
    *  which is what makes the sections payload byte-identical to before. */
   private sectionRowsOfRun: Record<string, number[]> | undefined;
+
+  /** The section-BODY narrowings in force for the run in flight — section name
+   *  → 0-based body-step indices — handed to `buildSectionsPayload` as
+   *  `runSteps`. Undefined outside a narrowed run, which is what keeps the
+   *  sections payload byte-identical to before. */
+  private sectionStepsOfRun: Record<string, number[]> | undefined;
+
+  /** Body-step line → the narrowed section it belongs to, for every body line
+   *  this run did NOT select. A step event on one of these can only mean the
+   *  server ignored `runSteps` and ran the whole body. */
+  private unselectedBodyLines = new Map<number, string>();
+
+  /** One warning per run about a server that ignored `runSteps`, not one per
+   *  body step: like the `rowNumbers` warning, the fact is about the server. */
+  private oldServerBodyStepsWarned = false;
 
   /** Line → the rows that failed on it, for the end-of-loop repaint. */
   private rowFailuresByLine = new Map<number, number[]>();
@@ -1627,6 +1647,33 @@ export class RunController {
    *  event listener. Used by every code path that emits step:start /
    *  step:pass / step:fail / output / capture / done. */
   private emitRunEvent(event: RunEvent): void {
+    // A body step this run did not select, executing anyway: the server is
+    // older than `runSteps` and dropped the field, so it ran the whole body.
+    // Detected from the outside because that is the only place it shows —
+    // a server that ignores a field it does not know says nothing about it,
+    // and the run otherwise reads as green. Nothing is painted differently:
+    // the step really did run, and pretending otherwise would be a second
+    // untruth on top of the server's.
+    if (
+      !this.oldServerBodyStepsWarned &&
+      this.unselectedBodyLines.size > 0 &&
+      (event.type === 'step:start' ||
+        event.type === 'step:pass' ||
+        event.type === 'step:fail')
+    ) {
+      // The line is a TEST-file line, so a step of the same number in a skill
+      // must not answer for it — the same fsPath check `sectionPauseAt` and
+      // `startSectionIteration` make.
+      const uri = event.frame?.uri;
+      const section =
+        uri === undefined || uri === this.document.uri.fsPath
+          ? this.unselectedBodyLines.get(event.line)
+          : undefined;
+      if (section !== undefined) {
+        this.oldServerBodyStepsWarned = true;
+        this.postOutput(oldServerBodyStepsWarning(section), 'warn');
+      }
+    }
     // Which rows failed on which line, gathered as the run goes so the gutter
     // can be repainted with the WORST status once the loop ends. Read off the
     // events rather than threaded through the loop because a step can fail in
@@ -2705,9 +2752,22 @@ export class RunController {
      */
     const sectionRowsForRun = this.narrowSectionRows(options.sectionRows, classified);
     this.sectionRowsOfRun = sectionRowsForRun;
+    /**
+     * …and the same question about a section's BODY.
+     *
+     * Answered here, at the one choke point every gesture reaches, rather than
+     * in `runSelected`: F5, the panel's Run and a `runRows` carrying `lines`
+     * all arrive with the body lines still in `lines`, and a narrowing done in
+     * one of them would be missing from the other two. `resolveRunSelection`
+     * has already dropped those lines from what EXECUTES — rung 2's
+     * double-run guard, which stays exactly as it was — and this reads them
+     * before they are forgotten, to narrow the body the call expands to.
+     */
+    this.sectionStepsOfRun = this.narrowSectionSteps(lines, selection.scope, classified);
     // The "your server is too old to number these rows" warning is a fact
     // about this run's server, said once (`rowForIteration`).
     this.oldServerNumberingWarned = false;
+    this.oldServerBodyStepsWarned = false;
 
     const wholeFileRun =
       options.rerun === undefined &&
@@ -3408,6 +3468,59 @@ export class RunController {
       this.postOutput(sectionRowsLogLine(name, rows, table.rows.length), 'info');
     }
     return Object.keys(out).length > 0 ? out : undefined;
+  }
+
+  /**
+   * The section-BODY narrowings this run can honour, and the lines that let it
+   * notice a server that ignored them.
+   *
+   * Only a MIXED selection narrows a body. A selection made of body lines
+   * alone resolves to `section-body` scope and runs those lines detached, at
+   * the root frame — the flow that has always existed and is not this one; and
+   * a selection with no body lines at all has nothing here to do. What is left
+   * is the reported gesture: some main-flow steps, one of them the call, plus
+   * some of the body it expands to. `resolveRunSelection` drops the body lines
+   * from what executes inline (the double-run guard), and this is what stops
+   * them from being dropped from the run's MEANING as well.
+   *
+   * Also records the body lines the run did NOT select, per narrowed section.
+   * A `step:start` on one of those is the only way the client can tell that a
+   * server ignored `runSteps` and ran the whole body — the run would otherwise
+   * look green and paint marks nobody asked for.
+   */
+  private narrowSectionSteps(
+    lines: number[],
+    scope: 'main-flow' | 'section-body',
+    classified: ClassifiedStep[],
+  ): Record<string, number[]> | undefined {
+    this.unselectedBodyLines = new Map();
+    if (scope !== 'main-flow' || lines.length === 0) return undefined;
+    const text = this.document.getText();
+    const { narrowed, ignored } = splitBodySteps(
+      text,
+      lines,
+      classified
+        .filter((c): c is Extract<ClassifiedStep, { kind: 'step' }> => c.kind === 'step')
+        .map((c) => c.instruction),
+    );
+    for (const pick of ignored) {
+      this.postOutput(sectionStepsIgnoredLogLine(pick.section, pick.ordinals), 'warn');
+    }
+    if (narrowed.length === 0) return undefined;
+    const bodies = new Map(extractSections(text).map((s) => [s.name, s.steps]));
+    const out: Record<string, number[]> = {};
+    for (const pick of narrowed) {
+      out[pick.section] = pick.indices;
+      this.postOutput(
+        sectionStepsLogLine(pick.section, pick.ordinals, pick.total),
+        'info',
+      );
+      const kept = new Set(pick.indices);
+      for (const [index, step] of (bodies.get(pick.section) ?? []).entries()) {
+        if (!kept.has(index)) this.unselectedBodyLines.set(step.line, pick.section);
+      }
+    }
+    return out;
   }
 
   // ---- which rows are red -------------------------------------------------
@@ -4199,7 +4312,11 @@ export class RunController {
     // continuation that omitted these would expand differently from the
     // batch before it and hash differently too. Same reason `fullSteps` is
     // re-sent, and same reason it reads the buffer rather than disk.
-    const sections = buildSectionsPayload(this.document.getText(), this.sectionRowsOfRun);
+    const sections = buildSectionsPayload(
+      this.document.getText(),
+      this.sectionRowsOfRun,
+      this.sectionStepsOfRun,
+    );
 
     // Resolve the project's skills directory so the server can expand
     // `[skill: ...]` lines and emit `frame:push` / `frame:pop` events around

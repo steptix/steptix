@@ -653,3 +653,164 @@ describe('TestBench live — a section-level data table', function () {
     }
   });
 });
+
+// ===========================================================================
+// Narrowing a section's BODY: securebank-login-rows.md
+// ===========================================================================
+//
+// Lines of templates/init/tests/securebank-login-rows.md:
+//   34-36 the three main-flow steps (36 = `3. Log In`, the call)
+//   38 `### Log In`, 39 header, 40 delimiter, 41-42 the rows
+//   43-44 the two body steps
+const LOGIN_STEPS = [34, 35, 36];
+const LOGIN_ROWS = [41, 42];
+const LOGIN_BODY = [43, 44];
+
+/**
+ * The reported gesture, end to end: three main-flow steps, ONE body step, one
+ * table row, one F5.
+ *
+ * The fast suite already pins what the client sends — `runSteps: [1]` beside
+ * `rowNumbers: [2]`, and the two Output lines. What only a live run can add is
+ * that the field survives api-server's per-field allow-list and actually
+ * narrows the expansion: three steps execute, not four, and the body step the
+ * selection left out never runs at all.
+ */
+describe('TestBench live — a selection narrows a section\'s body', function () {
+  this.timeout(300_000);
+
+  let hooks;
+  let workspaceRoot;
+  let uri;
+
+  before(async function () {
+    this.timeout(60_000);
+    hooks = await activate();
+    workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    assert.ok(workspaceRoot, 'no workspace folder — the live runner must pass templates/');
+    uri = await openTestFile(hooks, workspaceRoot, 'securebank-login-rows.md');
+    await vscode.commands.executeCommand('testbench-native.clearStatuses');
+  });
+
+  it('runs the flow once, for row 2, entering only the password', async function () {
+    this.timeout(300_000);
+
+    const apiKey = apiKeyFrom(workspaceRoot);
+    const tap = startOutputTap(hooks);
+    const editor = vscode.window.activeTextEditor;
+    // Three ranges, the gesture the story describes: drag the main flow,
+    // Alt+click body step 2, Alt+click the table's second row. Each ends
+    // mid-line so the whole-line guard (decision 10) has nothing to trim.
+    editor.selections = [
+      new vscode.Selection(
+        new vscode.Position(LOGIN_STEPS[0] - 1, 0),
+        new vscode.Position(LOGIN_STEPS[2] - 1, 5),
+      ),
+      new vscode.Selection(
+        new vscode.Position(LOGIN_BODY[1] - 1, 0),
+        new vscode.Position(LOGIN_BODY[1] - 1, 5),
+      ),
+      new vscode.Selection(
+        new vscode.Position(LOGIN_ROWS[1] - 1, 0),
+        new vscode.Position(LOGIN_ROWS[1] - 1, 5),
+      ),
+    ];
+
+    say('Run Selected on securebank-login-rows.md — steps 1-3, body step 2, row 2');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('run started', () => hooks.isRunning(), 60_000);
+    await waitFor('run finished', () => hooks.isRunning() === false, 240_000);
+    tap.stop();
+
+    const stepMarks = statusesOn(hooks, uri, LOGIN_STEPS);
+    const bodyMarks = statusesOn(hooks, uri, LOGIN_BODY);
+    const rowMarks = statusesOn(hooks, uri, LOGIN_ROWS);
+    say(`main-flow marks: ${JSON.stringify(stepMarks)}`);
+    say(`body marks: ${JSON.stringify(bodyMarks)}`);
+    say(`section row marks: ${JSON.stringify(rowMarks)}`);
+    say(
+      `Log In lines:\n${tap.output.filter((l) => l.startsWith('Log In —')).join('\n')}`,
+    );
+
+    // The three main-flow steps ran, the call among them. `pass-cached` and
+    // `pass-code-behind` are how a step passed, not whether — the live suite
+    // shares one workspace and one cache dir with everything else in it.
+    for (const [i, mark] of stepMarks.entries()) {
+      assert.ok(
+        typeof mark === 'string' && mark.startsWith('pass'),
+        `main-flow step ${i + 1} (line ${LOGIN_STEPS[i]}) must pass; got ${mark}`,
+      );
+    }
+
+    // THE assertion. Body step 1 was not selected, so it has no mark at all —
+    // it did not run. Body step 2 did.
+    assert.equal(
+      bodyMarks[0],
+      null,
+      `body step 1 (line ${LOGIN_BODY[0]}) must not run — it was not in the selection`,
+    );
+    assert.ok(
+      typeof bodyMarks[1] === 'string' && bodyMarks[1].startsWith('pass'),
+      `body step 2 (line ${LOGIN_BODY[1]}) must pass; got ${bodyMarks[1]}`,
+    );
+    // And no server complaint about a whole body having run anyway.
+    assert.deepEqual(
+      tap.output.filter((l) => l.includes('the server ran the whole section body')),
+      [],
+      'the server honoured runSteps, so nothing should warn about it',
+    );
+
+    // The row axis narrowed independently: row 2 ran, row 1 was never in the
+    // plan and keeps the nothing it had.
+    assert.equal(rowMarks[0], null, 'row 1 was not selected, so it is untouched');
+    assert.equal(rowMarks[1], 'pass', 'row 2 is the iteration that ran');
+
+    // Both narrowings said out loud, in the same voice.
+    assert.ok(
+      tap.output.includes('Log In — running body steps 2 of 2'),
+      `expected the body narrowing line. Got:\n${tap.output
+        .filter((l) => l.startsWith('Log In —'))
+        .join('\n')}`,
+    );
+    assert.ok(
+      tap.output.some((l) => l.startsWith('Log In — running rows 2 of 2')),
+      `expected the row narrowing line. Got:\n${tap.output
+        .filter((l) => l.startsWith('Log In —'))
+        .join('\n')}`,
+    );
+
+    // The server's own count, which is the half no client-side assertion can
+    // reach: THREE steps executed, not four. A section call is REPLACED by its
+    // body rather than run alongside it, so the expansion is `Navigate`,
+    // `Reject`, and the one body step the selection kept. Without `runSteps`
+    // reaching the expander it would be four, and body step 1 would have a
+    // mark above.
+    // Case-insensitive: GET /sessions reports the Map's internal key, which
+    // session-manager.ts's sessionKey() lower-cases whole on win32 for any
+    // drive-letter/UNC path (so two spellings of one file are one session).
+    // uri.fsPath keeps whatever case VS Code opened the file with, so an
+    // exact === here is comparing a normalised key against an unnormalised
+    // one and can miss a real match on Windows.
+    const sessions = await listSessions(serverUrl(), apiKey);
+    say(`sessions at lookup (${serverUrl()}): ${JSON.stringify(sessions.map((s) => [s.sessionId, s.totalStepsExecuted]))}`);
+    const mine = sessions.find(
+      (s) => s.sessionId.toLowerCase() === uri.fsPath.toLowerCase(),
+    );
+    say(`session: ${JSON.stringify(mine && [mine.sessionId, mine.totalStepsExecuted])}`);
+    assert.ok(mine, `no server session for ${uri.fsPath}`);
+    assert.equal(
+      mine.totalStepsExecuted,
+      3,
+      'two main-flow steps plus the one body step the selection kept',
+    );
+  });
+
+  after(async () => {
+    try {
+      await vscode.commands.executeCommand('testbench-native.stop');
+      await vscode.commands.executeCommand('testbench-native.restartSession');
+    } catch {
+      /* teardown is best-effort */
+    }
+  });
+});

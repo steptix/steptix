@@ -825,10 +825,38 @@ const BAD_SECTION_FIXTURE = [
   '',
 ].join('\n');
 
+// The reported gesture's file: three main-flow steps, the third of which
+// calls a section whose table has two rows and whose body has two steps. Both
+// section axes are narrowable, and independently.
+//
+// line 7/8/9: the main flow; 11 the `### Log In` heading, 12 header, 13
+// delimiter, 14/15 the rows, 16/17 the body steps.
+const SECTION_BODY_FIXTURE = [
+  '# Section body',
+  '',
+  '## Config',
+  '- baseUrl: http://localhost:8787/',
+  '',
+  '## Steps',
+  '1. Navigate to the baseUrl',
+  '2. Reject non-essential cookies in the cookie banner',
+  '3. Log In',
+  '',
+  '### Log In',
+  '| email                 | password    |',
+  '|-----------------------|-------------|',
+  '| demo@securebank.com   | password123 |',
+  '| nobody@securebank.com | wrongpass   |',
+  '1. Enter the email {{email}}',
+  '2. Enter the password {{password}}',
+  '',
+].join('\n');
+
 const SELECTION_FIXTURES = {
   'data-rows-3.tmp.md': THREE_ROWS_FIXTURE,
   'data-rows-section.tmp.md': SECTION_ROWS_FIXTURE,
   'data-rows-bad-section.tmp.md': BAD_SECTION_FIXTURE,
+  'data-rows-body.tmp.md': SECTION_BODY_FIXTURE,
   // Its own copy: the two suites above delete their fixtures in `after`.
   'data-rows-none.tmp.md': PLAIN_FIXTURE,
 };
@@ -1396,6 +1424,143 @@ describe('TestBench data-row selection', function () {
     assert.equal(fake.requests.length, 1);
   });
 
+  // -------------------------------------------------------------------------
+  // The BODY axis: a selection narrows a section's steps as well as its rows
+  // -------------------------------------------------------------------------
+
+  /** Ranges over `data-rows-body.tmp.md`, by 1-based line, ending mid-line so
+   *  the whole-line guard (decision 10) has nothing to trim. */
+  const range = (line, endLine = line) =>
+    new vscode.Selection(
+      new vscode.Position(line - 1, 0),
+      new vscode.Position(endLine - 1, 5),
+    );
+
+  /** Set `selections`, run `runSelected`, and wait for one batch. */
+  async function runSelection(selections, script = (f) => f.end()) {
+    const editor = vscode.window.activeTextEditor;
+    editor.selections = selections;
+    const before = fake.requests.length;
+    queueScripts(script);
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('one more request', () => fake.requests.length >= before + 1);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+  }
+
+  it('narrows a section BODY and its rows from one selection', async () => {
+    // The reported bug: three main-flow steps, ONE body step, one table row.
+    // `resolveRunSelection` drops the body line from what executes inline —
+    // rung 2's double-run guard, unchanged — and the run now reads it before
+    // it is forgotten, to narrow the body the call expands to.
+    const uri = await open('data-rows-body.tmp.md');
+    const mark = hooks.hostMessageCount();
+    await runSelection([range(7, 9), range(17), range(15)]);
+
+    const request = fake.requests[0];
+    assert.deepEqual(request.sourceLines, [7, 8, 9], 'only main-flow lines execute inline');
+    const entry = request.sections['log in'];
+    assert.deepEqual(entry.runSteps, [1], 'body step 2, 0-based');
+    assert.deepEqual(
+      entry.steps,
+      ['Enter the email {{email}}', 'Enter the password {{password}}'],
+      'the body travels whole — runSteps indexes into it',
+    );
+    assert.deepEqual(entry.stepLines, [16, 17]);
+    assert.deepEqual(entry.rowNumbers, [2], 'the row axis narrows too, independently');
+    assert.equal(entry.rowCount, 2);
+    assert.deepEqual(entry.rows, [
+      { email: 'nobody@securebank.com', password: 'wrongpass' },
+    ]);
+
+    const output = outputSince(mark);
+    assert.ok(
+      output.includes('Log In — running body steps 2 of 2'),
+      `expected the body narrowing to be logged. Got ${JSON.stringify(output)}`,
+    );
+    assert.ok(
+      output.includes(
+        'Log In — running rows 2 of 2; steps after this call will see only those rows',
+      ),
+      `expected the row narrowing to be logged too. Got ${JSON.stringify(output)}`,
+    );
+    assert.ok(uri, 'the fixture opened');
+  });
+
+  it('ignores a body narrowing whose call is not among the selected steps', async () => {
+    // Steps 1-2 and a body step: the call never runs, so there is nothing to
+    // narrow. Logged rather than refused, exactly as the row equivalent is.
+    await open('data-rows-body.tmp.md');
+    const mark = hooks.hostMessageCount();
+    await runSelection([range(7, 8), range(17)]);
+
+    const entry = fake.requests[0].sections['log in'];
+    assert.equal(entry.runSteps, undefined, 'the body ships whole');
+    assert.deepEqual(fake.requests[0].sourceLines, [7, 8]);
+    assert.ok(
+      outputSince(mark).includes(
+        'Log In — body steps 2 ignored: ' +
+          'the step that calls this section is not in your selection',
+      ),
+      `expected the drop to be logged. Got ${JSON.stringify(outputSince(mark))}`,
+    );
+  });
+
+  it('leaves a body-ONLY selection running detached, as it always has', async () => {
+    // Rung 3: no main-flow step in the selection, so the body line runs at the
+    // root frame with no invocation. Narrowing a call that is not being made
+    // would be a different feature, and a regression in this one.
+    await open('data-rows-body.tmp.md');
+    const mark = hooks.hostMessageCount();
+    await runSelection([range(17)]);
+
+    const request = fake.requests[0];
+    assert.deepEqual(request.sourceLines, [17], 'the body step itself is the run');
+    assert.deepEqual(request.steps, ['Enter the password {{password}}']);
+    assert.equal(request.sections['log in'].runSteps, undefined);
+    assert.deepEqual(
+      outputSince(mark).filter((l) => l.startsWith('Log In — ')),
+      [],
+      'nothing was narrowed, so nothing is announced',
+    );
+  });
+
+  it('says so when the server runs the whole body anyway', async () => {
+    // A Sessions API older than `runSteps` drops the field and runs the body
+    // whole. Nothing on the wire admits that, so it is detected from the
+    // outside: a step event for a body line this run did not select. Said
+    // once, and nothing is painted differently — the step really did run.
+    const uri = await open('data-rows-body.tmp.md');
+    const mark = hooks.hostMessageCount();
+    await runSelection([range(7, 9), range(17)], (f) => {
+      // Line 16 is body step 1 — the one the selection left out.
+      f.push({ type: 'step:start', line: 16, frame: { id: 'f1', kind: 'section', uri: uri.fsPath, skillName: 'Log In' } });
+      f.push({ type: 'step:start', line: 17, frame: { id: 'f1', kind: 'section', uri: uri.fsPath, skillName: 'Log In' } });
+      f.end();
+    });
+
+    const warned = outputSince(mark).filter((l) =>
+      l.includes('the server ran the whole section body'),
+    );
+    assert.deepEqual(warned, [
+      'Log In — the server ran the whole section body; restart or update the ' +
+        'Sessions API server so a selection can narrow it',
+    ]);
+  });
+
+  it('says nothing about the server when it honours runSteps', async () => {
+    await open('data-rows-body.tmp.md');
+    const mark = hooks.hostMessageCount();
+    await runSelection([range(7, 9), range(17)], (f) => {
+      f.push({ type: 'step:start', line: 17, frame: { id: 'f1', kind: 'section', uri: fixtureUri('data-rows-body.tmp.md').fsPath, skillName: 'Log In' } });
+      f.end();
+    });
+
+    assert.deepEqual(
+      outputSince(mark).filter((l) => l.includes('the server ran the whole section body')),
+      [],
+    );
+  });
+
   it('an unnarrowed run still ships every section row and neither new field', async () => {
     // The regression guard: the wire is byte-identical for a run nobody
     // narrowed, which is every run that existed before this feature.
@@ -1409,5 +1574,6 @@ describe('TestBench data-row selection', function () {
     assert.equal(entry.rows.length, 3);
     assert.equal(entry.rowNumbers, undefined);
     assert.equal(entry.rowCount, undefined);
+    assert.equal(entry.runSteps, undefined, 'and the body ships whole');
   });
 });

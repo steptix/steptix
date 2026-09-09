@@ -149,6 +149,11 @@ Resolution order, and the reason each rung sits where it does:
    [runtime spec §1.1](./inline-sections-runtime.md)'s original bug wearing a
    selection as a disguise. This rung also makes every selection that works
    today keep working identically, Ctrl+A included.
+   Dropped from what *executes inline*, that is. Since
+   [data-row-progress-and-selection.md](../data-row-progress-and-selection.md)
+   the run controller reads those body lines before this rung forgets them and
+   narrows the **body the call expands to** — same guard, one less thing
+   silently discarded.
 3. Else, any requested line classifies `section-step` →
    `{ scope: 'section-body', lines: <those body lines> }`. This is the new
    capability, and it activates only when the selection is *entirely* inside
