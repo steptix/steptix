@@ -149,6 +149,28 @@ Resolution order, and the reason each rung sits where it does:
    [runtime spec §1.1](./inline-sections-runtime.md)'s original bug wearing a
    selection as a disguise. This rung also makes every selection that works
    today keep working identically, Ctrl+A included.
+   Dropped from what *executes inline*, that is. Since
+   [stories/data-row-progress-and-selection.md](../../../stories/data-row-progress-and-selection.md)
+   the run controller reads those body lines before this rung forgets them and
+   narrows the **body the call expands to** — same guard, one less thing
+   silently discarded. Three details of that narrowing belong here, because
+   they are all about which call is being made: the call may be the *tail* of a
+   control line (`If the user is signed out, then Log In`), it may be *nested*
+   (a called section's body calling another), and it may sit below a
+   breakpoint — a breakpoint trims what runs in this batch, not what the run
+   selected, so the narrowing is decided over the un-trimmed list and carried
+   across the Continue (with the section's row narrowing, which its lines could
+   not re-derive either). The narrowing also travels on the section
+   **definition**, so a flow that reaches one section more than once narrows
+   every frame of it; the run says `(applies to every call of this section)`
+   rather than leaving it to be noticed from the marks. Not a count: the text
+   can be counted for call *sites*, and a site inside a loop guard's tail or
+   inside a section that itself repeats is any number of frames — so the
+   qualifier is emitted unless the section is called exactly once from a plain
+   main-flow step, the one shape whose frame count is settled.
+   And a selected body step brings the rest of its `If … / Otherwise …` chain
+   with it: a chain lives on consecutive body lines, and shipping half of one
+   would be refused by the expander in a message that blames the file.
 3. Else, any requested line classifies `section-step` →
    `{ scope: 'section-body', lines: <those body lines> }`. This is the new
    capability, and it activates only when the selection is *entirely* inside

@@ -33,6 +33,22 @@ export interface SectionPayloadEntry {
    *  reads `(2/3)`. Sent with `rowNumbers` or not at all — the server refuses
    *  one without the other. */
   rowCount?: number;
+  /** 0-based indices into `steps`: run only these body steps, per iteration —
+   *  a selection narrows the body the way it narrows the rows
+   *  (stories/data-row-progress-and-selection.md, decision 3). Ascending and
+   *  unique; absent means the whole body. */
+  runSteps?: number[];
+}
+
+/**
+ * A body-step narrowing that no longer fits the body it names.
+ *
+ * Its own class so the one caller can tell "the author's selection has gone
+ * stale" from any other throw and refuse the block with the message rather
+ * than crashing the run.
+ */
+export class SectionNarrowingError extends Error {
+  override readonly name = 'SectionNarrowingError';
 }
 
 /**
@@ -65,6 +81,17 @@ export function buildSectionsPayload(
    * wrong row.
    */
   sectionRows?: Record<string, number[]>,
+  /**
+   * Narrow a `### Section`'s BODY to these 0-based step indices, keyed by the
+   * section name as authored. The sibling axis of `sectionRows`: a selection
+   * that names three main-flow steps, one body step and one table row narrows
+   * all three, and none of the three knows about the others (decision 3).
+   *
+   * A section not named here ships its whole body, which is every run that
+   * existed before this — and so does one whose whole body was selected: a
+   * narrowing that keeps everything has narrowed nothing.
+   */
+  sectionSteps?: Record<string, number[]>,
 ): Record<string, SectionPayloadEntry> | null {
   const sections = extractSections(text);
   if (sections.length === 0) return null;
@@ -98,11 +125,40 @@ export function buildSectionsPayload(
             .sort((a, b) => a - b)
             .filter((n) => n >= 1 && n <= allRows.length)
         : null;
+    // NOT sanitised the way the rows are, on purpose. A row number the table
+    // does not have is one row that will not run; a body-step index the body
+    // does not have means the positions no longer describe the body — the
+    // buffer was edited since the selection was made — and every SURVIVING
+    // index is then just as likely to name the wrong step. Worse, clipping can
+    // empty the list, and an empty list is "the whole body": the one outcome
+    // the author certainly did not ask for. So it is refused, loudly, and the
+    // caller turns the throw into a message and stops the run.
+    const chosenSteps = sectionSteps?.[section.name];
+    const runSteps =
+      chosenSteps === undefined
+        ? null
+        : (() => {
+            const bad = chosenSteps.filter(
+              (n) => !Number.isInteger(n) || n < 0 || n >= section.steps.length,
+            );
+            if (bad.length > 0) {
+              throw new SectionNarrowingError(
+                `Body step ${bad.map((n) => n + 1).join(', ')} of "${section.name}" ` +
+                  `no longer exists — the section now has ${section.steps.length} ` +
+                  `step${section.steps.length === 1 ? '' : 's'}.`,
+              );
+            }
+            const kept = [...new Set(chosenSteps)].sort((a, b) => a - b);
+            // A list that keeps every step is not a narrowing and is not sent —
+            // the wire stays byte-identical for it.
+            return kept.length === 0 || kept.length === section.steps.length ? null : kept;
+          })();
     payload[key] = {
       name: section.name,
       headingLine: section.headingLine,
       steps: section.steps.map((s) => s.instruction),
       stepLines: section.steps.map((s) => s.line),
+      ...(runSteps && { runSteps }),
       ...(allRows !== undefined &&
         (narrowed && narrowed.length > 0
           ? {

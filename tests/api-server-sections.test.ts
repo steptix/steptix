@@ -845,6 +845,106 @@ describe('a narrowed section loop keeps the table row numbers', () => {
   });
 });
 
+// ── Narrowed section bodies ──────────────────────────────────────────
+
+/**
+ * The sibling axis: a client may run only SOME of a section's body steps, and
+ * says which by 0-based index into the body it shipped whole
+ * (`runSteps` — stories/data-row-progress-and-selection.md, decision 3).
+ *
+ * The body travels complete on purpose. `runSteps` indexes into `steps`, and
+ * every kept step keeps the line and the code-behind slot it would have had in
+ * a full run — a narrowed run has to be a SUBSET of the run it narrows, not a
+ * differently-numbered run of its own.
+ */
+describe('a narrowed section body runs only the steps it names', () => {
+  /** A two-step body over a two-row table, as a narrowed client would send it. */
+  const body = (over: Record<string, unknown>) => ({
+    steps: ['Log In'],
+    sourceLines: [6],
+    testFilePath,
+    sections: {
+      'log in': {
+        name: 'Log In',
+        headingLine: 8,
+        steps: ['Enter the email {{email}}', 'Enter the password {{password}}'],
+        stepLines: [13, 14],
+        rows: [
+          { email: 'demo@securebank.com', password: 'password123' },
+          { email: 'nobody@securebank.com', password: 'wrongpass' },
+        ],
+        ...over,
+      },
+    },
+  });
+
+  async function collect(request: unknown) {
+    executedSteps.length = 0;
+    const starts: { line: number; iteration?: number }[] = [];
+    for await (const ev of sseEvents(request)) {
+      if (ev.type === 'step:start') {
+        starts.push({ line: ev.line, iteration: ev.frame?.iteration });
+      }
+      if (ev.type === 'done') break;
+    }
+    return starts;
+  }
+
+  it('runs only the second body step per iteration, on its own line', async () => {
+    const starts = await collect(body({ runSteps: [1] }));
+
+    // Two iterations, one step each — and each one is body step 2, on line
+    // 14. Numbering the kept step from the filtered list would have said 13.
+    expect(executedSteps).toEqual([
+      'Enter the password password123',
+      'Enter the password wrongpass',
+    ]);
+    expect(starts.map((s) => [s.line, s.iteration])).toEqual([
+      [14, 1],
+      [14, 2],
+    ]);
+  });
+
+  it('narrows the body and the rows at once, each keeping its numbering', async () => {
+    // The reported gesture: body step 2, table row 2. The two axes do not
+    // know about each other, and both survive.
+    const starts = await collect(
+      body({ runSteps: [1], rows: [{ email: 'nobody@securebank.com', password: 'wrongpass' }], rowNumbers: [2], rowCount: 2 }),
+    );
+    expect(executedSteps).toEqual(['Enter the password wrongpass']);
+    expect(starts.map((s) => [s.line, s.iteration])).toEqual([[14, 2]]);
+  });
+
+  it('runs the whole body when the field is absent', async () => {
+    // The CLI path and every client that predates this: unchanged.
+    const starts = await collect(body({}));
+    expect(executedSteps).toEqual([
+      'Enter the email demo@securebank.com',
+      'Enter the password password123',
+      'Enter the email nobody@securebank.com',
+      'Enter the password wrongpass',
+    ]);
+    expect(starts.map((s) => s.line)).toEqual([13, 14, 13, 14]);
+  });
+
+  it.each([
+    ['an empty list', { runSteps: [] }, /runSteps must be a non-empty array/i],
+    ['a descending list', { runSteps: [1, 0] }, /runSteps must be strictly ascending/i],
+    ['a duplicated index', { runSteps: [1, 1] }, /runSteps must be strictly ascending/i],
+    ['an index past the body', { runSteps: [0, 2] }, /runSteps must all be < .*steps\.length/is],
+    ['a negative index', { runSteps: [-1, 1] }, /runSteps must be a non-empty array/i],
+    ['a non-integer index', { runSteps: [0.5] }, /runSteps must be a non-empty array/i],
+    ['a non-array', { runSteps: 1 }, /runSteps must be a non-empty array/i],
+  ])('400 on %s', async (_label, over, pattern) => {
+    // Refused rather than repaired, for the reason `rows` is: a list the
+    // server quietly tidied would run a step the author excluded, or skip one
+    // they picked, and neither says anything at the time.
+    const res = await postSteps(body(over as Record<string, unknown>));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(pattern as RegExp);
+  });
+});
+
 // ── Reporting ────────────────────────────────────────────────────────
 
 describe('sourceSection attribution', () => {

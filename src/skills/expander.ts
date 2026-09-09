@@ -146,6 +146,140 @@ function checkedRowInterpolate(
 const MAX_DEPTH = 10;
 
 /**
+ * The body-step indices a `runSteps` narrowing keeps, or null for "all of
+ * them".
+ *
+ * Null rather than `[0..n-1]` on purpose: the caller uses it to decide whether
+ * to filter *anything*, and an unnarrowed body must go through the same code
+ * it always did — no re-derived arrays, no offsets on its origins.
+ *
+ * Sanitised here as well as at the wire, because `expandSkills` is also called
+ * in-process (the CLI, the tests) where nothing validated the list. An empty
+ * result is "all of them", the same reading every other unselected axis gets:
+ * a narrowing that names nothing has narrowed nothing.
+ */
+function keptBodySteps(
+  runSteps: number[] | undefined,
+  bodyLength: number,
+): number[] | null {
+  if (runSteps === undefined) return null;
+  const kept = [...new Set(runSteps)]
+    .filter((n) => Number.isInteger(n) && n >= 0 && n < bodyLength)
+    .sort((a, b) => a - b);
+  if (kept.length === 0 || kept.length === bodyLength) return null;
+  return kept;
+}
+
+/**
+ * How many same-text steps a narrowing dropped ahead of ONE kept body item —
+ * counted separately for each thing that item emits into its own frame.
+ *
+ * One authored body line is not one emitted step. A control line expands to
+ * TWO in the same frame (its guard row, then the step it names after `then`),
+ * and those two carry different texts, so they hold different slots and need
+ * different offsets. A body item that is a section or skill CALL emits nothing
+ * here at all — its steps land in a frame of their own, which counts from
+ * zero — so it contributes to nothing.
+ *
+ * A LIST rather than a `{ self, tail }` pair, because two is not the ceiling:
+ * a control line whose tail is itself a control line (`If a is shown, then
+ * While b is shown, Click Next`) emits three, and nothing on the TestBench
+ * path refuses that shape — the parser's nested-tail refusal lives in
+ * src/parser/markdown.ts (the CLI), and runner-core's `parseControlLine`
+ * deliberately does not mirror it. A pair silently gave the innermost step
+ * offset 0.
+ *
+ * Index 0 is the item as one step — a plain step, or a control line's guard
+ * row — and the rest belong to whatever its tail emits, consumed one level
+ * per recursion. Emission order, which is the order the frame's occurrence
+ * counter sees them in.
+ */
+type DroppedAhead = number[];
+
+/**
+ * The authored texts one body item contributes to ITS OWN frame's occurrence
+ * counts, in emission order.
+ *
+ * The mirror of the branch order in `expandRecursive`'s loop, and it has to
+ * stay one: this is what a dropped item would have added to the counts a kept
+ * one is measured against, and a disagreement puts a kept step on another
+ * step's code-behind entry — silently, because both entries exist and both
+ * run.
+ *
+ *  - a section call or a `[skill: …]` → `[]` (a new frame, counting afresh);
+ *  - a control line → its guard's text, then whatever its tail contributes,
+ *    which is that same question one level down;
+ *  - anything else → itself.
+ */
+function bodyFrameTexts(
+  ctx: ExpandContext,
+  steps: string[],
+  rawSteps: string[] | undefined,
+  i: number,
+  depth = 0,
+): string[] {
+  const step = steps[i] ?? '';
+  const matchSide = matchInput({ steps, rawSteps }, i);
+  const control = ctx.controlFlow ? parseControlLine(matchSide) : null;
+  let call: SkillCall | null = null;
+  try {
+    call = parseSkillCall(step);
+  } catch {
+    // A malformed `[skill: …]` throws when it is EXPANDED, and a dropped step
+    // is never expanded. Counting must not be the thing that raises it, so
+    // read the line as the plain step it will never get to become — the count
+    // is the only thing at stake, and the run's own error is unchanged.
+    call = null;
+  }
+  // Resolution order, verbatim from the loop: a bracket directive is claimed
+  // first unless the line is a control line; only then can a bare name be a
+  // section call.
+  if (call && !control) return [];
+  if (resolveSection({ ...ctx, rawSteps }, steps, i)) return [];
+  if (!control) return [matchSide];
+  // A tail that is itself a control line recurses — that shape reaches the
+  // expander on the wire path (only the CLI parser refuses it), and each
+  // level adds one more emission to this frame. The cap is what stops a
+  // pathological nest from overflowing the stack.
+  if (depth >= MAX_DEPTH) return [matchSide];
+  const tailText = parseControlLine(step)?.tail ?? control.tail;
+  return [matchSide, ...bodyFrameTexts(ctx, [tailText], [control.tail], 0, depth + 1)];
+}
+
+/**
+ * `DroppedAhead` per KEPT body item, in kept order — the array that rides the
+ * recursion as `occurrenceOffsets`.
+ *
+ * Counted over what each dropped item EXPANDS to rather than over the authored
+ * lines, which is the whole difference: a body of `If a banner is shown, then
+ * Click Next` followed by `Click Next` emits `Click Next` twice, so keeping
+ * only the second one has to bind the second entry.
+ */
+function droppedAheadOf(
+  ctx: ExpandContext,
+  bodySteps: string[],
+  rawSteps: string[] | undefined,
+  keep: number[],
+): DroppedAhead[] {
+  const kept = new Set(keep);
+  const droppedSoFar = new Map<string, number>();
+  const at = (text: string | undefined): number =>
+    text === undefined ? 0 : (droppedSoFar.get(text) ?? 0);
+  const out: DroppedAhead[] = [];
+  for (let k = 0; k < bodySteps.length; k++) {
+    const texts = bodyFrameTexts(ctx, bodySteps, rawSteps, k).map((t) => t.trim());
+    if (kept.has(k)) {
+      // One offset per emission, in emission order — a kept item adds nothing
+      // to the counts itself, so each is read against the same tally.
+      out.push(texts.map((text) => at(text)));
+      continue;
+    }
+    for (const text of texts) droppedSoFar.set(text, (droppedSoFar.get(text) ?? 0) + 1);
+  }
+  return out;
+}
+
+/**
  * `interpolate`, minus the warning on an unresolved placeholder.
  *
  * A looped section's body is interpolated with its row, and a body may
@@ -198,6 +332,18 @@ export type SectionDefs = Record<
     /** The authored table's total row count — the `of M` half of the pair
      *  above, so a one-row run still reads `iteration 2 of 3`. */
     rowCount?: number | undefined;
+    /**
+     * 0-based indices into `steps`: run only these body steps, per iteration
+     * (stories/data-row-progress-and-selection.md, decision 3 — "the selection
+     * narrows every axis"). Sent only by a client whose author selected some
+     * of the body; the CLI parser never sets it.
+     *
+     * Every kept step keeps the identity a full run would have given it — its
+     * `stepLines` entry, and its code-behind occurrence among body steps with
+     * the same authored text — so a narrowed run binds to the same entries and
+     * reports the same lines as the run it is a subset of.
+     */
+    runSteps?: number[] | undefined;
   }
 >;
 
@@ -296,12 +442,20 @@ export interface ExpandedFrame {
  *    steps (the test frame).
  *  - `skillFilePath` / `skillLine` — the per-step origin inside a skill
  *    body, when the entry came from a skill. Absent for inline entries.
+ *  - `occurrenceOffset` — how many emissions a narrowing DROPPED ahead of this
+ *    one would have carried the same authored text in the same frame. Added to
+ *    the live count in `buildCodeBehindRegistry`, so a step that is the second
+ *    `Click Next` of a body binds to the second entry even when the first
+ *    `Click Next` was not selected. Counted over emissions rather than authored
+ *    lines: a dropped control line contributes its guard AND its tail, and a
+ *    dropped call contributes nothing (its steps count in their own frame).
  */
 export interface ExpandedStepOrigin {
   inputIndex: number;
   frameId: string;
   skillFilePath?: string;
   skillLine?: number;
+  occurrenceOffset?: number;
 }
 
 /**
@@ -639,6 +793,14 @@ async function expandRecursive(
    *  test file's pre-expansion `stepLines`; recursive callers pass the
    *  skill's `stepLines`. */
   stepLines: number[] | null,
+  /**
+   * Parallel to `steps`: how many same-text steps a narrowing dropped ahead of
+   * each one, per thing that step emits into this frame. Non-null only for a
+   * section body a `runSteps` narrowed — it is what keeps a kept step's
+   * code-behind occurrence equal to the occurrence it would have had in a full
+   * run.
+   */
+  occurrenceOffsets: DroppedAhead[] | null = null,
 ): Promise<Omit<SkillExpansion, 'frames'>> {
   if (depth > MAX_DEPTH) {
     throw new Error(`Skill expansion exceeded max depth of ${MAX_DEPTH} (possible recursion)`);
@@ -782,6 +944,69 @@ async function expandRecursive(
             }),
           };
 
+          // An inner looped body sees its enclosing rows too, innermost
+          // winning: a section shares the caller's scope, and a nested loop
+          // that could not read the outer row would contradict that. An
+          // iteration with no row of its own inherits the caller's, which is
+          // what lets an unlooped inner section read the outer table.
+          const rowBindings = row
+            ? { ...(ctx.rowBindings ?? {}), ...row }
+            : ctx.rowBindings;
+          // Strip a leading `[no-hooks]` from each body step as it is inlined.
+          // The CLI parser already stripped these, but the wire shape carries
+          // markers verbatim (the client can't strip them — they are part of
+          // the match side), so without this the literal marker text would
+          // reach the AI on the server path only. A marker on a body step is
+          // stripped and ignored either way: it is the *invocation's* marker
+          // that opts the whole body out, via origin mapping.
+          let bodySteps = section.steps.map((s) => s.replace(NO_HOOKS_MARKER, ''));
+          if (rowBindings) {
+            // Interpolated BEFORE the recursion, so a `[skill: x arg="{{col}}"]`
+            // line inside the body reaches the skill-call parser with the value
+            // already in place — the same order `applySkillScope` uses for a
+            // skill's own args. `interpolateQuiet` leaves an unknown
+            // placeholder alone without warning: a body may legitimately
+            // reference a caller variable that only exists at run time.
+            bodySteps = bodySteps.map((s) =>
+              checkedRowInterpolate(s, rowBindings, section.name),
+            );
+          }
+
+          // The BODY-STEP narrowing, the sibling axis of the row one: a
+          // selection may name some of a section's body steps as well as some
+          // of its rows, and neither narrowing knows about the other
+          // (stories/data-row-progress-and-selection.md, decision 3). Absent —
+          // the CLI, and every client that predates it — means the whole body.
+          //
+          // Filtered here rather than by the caller so `stepLines`, `rawSteps`
+          // and the steps themselves can only ever be filtered together: they
+          // are parallel arrays, and a skew between them is a body step
+          // attributed to another one's line.
+          const keep = keptBodySteps(section.runSteps, section.steps.length);
+          let bodyLines = section.stepLines;
+          let bodyRaws = section.rawSteps;
+          let occurrenceOffsets: DroppedAhead[] | null = null;
+          if (keep) {
+            // What each kept body step BINDS as — the loader's occurrence key
+            // is (frame, section, this text), so dropping an earlier step that
+            // emits the same text would slide every later one down a slot. A
+            // body that says `Click Next` three times and runs only the third
+            // must still bind the third entry, so each kept step carries how
+            // many same-text emissions ahead of it were dropped. Counted over
+            // what each item EXPANDS to, because one authored line is not one
+            // step: a control line emits its guard AND its tail here, and a
+            // call emits nothing here at all.
+            occurrenceOffsets = droppedAheadOf(ctx, bodySteps, section.rawSteps, keep);
+            bodyLines = keep.map((k) => section.stepLines[k] ?? 0);
+            // The same fallback `matchInput` makes: a hole in `rawSteps` means
+            // the step text IS the match side, and freezing `''` into the
+            // filtered copy would make a narrowed run match on nothing.
+            bodyRaws = section.rawSteps
+              ? keep.map((k) => section.rawSteps![k] ?? bodySteps[k] ?? '')
+              : undefined;
+            bodySteps = keep.map((k) => bodySteps[k]!);
+          }
+
           // A section is a macro: it shares the caller's scope, so there is no
           // scope pass here and `ctx` carries through unchanged. The body may
           // call sibling sections, so the sections map stays put — only the
@@ -795,32 +1020,9 @@ async function expandRecursive(
           // server, binding entries on one path and not the other.
           const bodyCtx: ExpandContext = {
             ...ctx,
-            ...(section.rawSteps
-              ? { rawSteps: section.rawSteps }
-              : { rawSteps: undefined }),
-            // An inner looped body sees its enclosing rows too, innermost
-            // winning: a section shares the caller's scope, and a nested loop
-            // that could not read the outer row would contradict that.
-            ...(row && { rowBindings: { ...(ctx.rowBindings ?? {}), ...row } }),
+            ...(bodyRaws ? { rawSteps: bodyRaws } : { rawSteps: undefined }),
+            ...(rowBindings && { rowBindings }),
           };
-          // Strip a leading `[no-hooks]` from each body step as it is inlined.
-          // The CLI parser already stripped these, but the wire shape carries
-          // markers verbatim (the client can't strip them — they are part of
-          // the match side), so without this the literal marker text would
-          // reach the AI on the server path only. A marker on a body step is
-          // stripped and ignored either way: it is the *invocation's* marker
-          // that opts the whole body out, via origin mapping.
-          let bodySteps = section.steps.map((s) => s.replace(NO_HOOKS_MARKER, ''));
-          if (bodyCtx.rowBindings) {
-            // Interpolated BEFORE the recursion, so a `[skill: x arg="{{col}}"]`
-            // line inside the body reaches the skill-call parser with the value
-            // already in place — the same order `applySkillScope` uses for a
-            // skill's own args. `interpolateQuiet` leaves an unknown
-            // placeholder alone without warning: a body may legitimately
-            // reference a caller variable that only exists at run time.
-            const bindings = bodyCtx.rowBindings;
-            bodySteps = bodySteps.map((s) => checkedRowInterpolate(s, bindings, section.name));
-          }
 
           const recursed = await expandRecursive(
             bodySteps,
@@ -834,7 +1036,8 @@ async function expandRecursive(
             ctx.insideSkill ? sourceSection : (sourceSection ?? section.name),
             newFrameId,
             attribInputIndex ?? i,
-            section.stepLines,
+            bodyLines,
+            occurrenceOffsets,
           );
 
           const base = out.length;
@@ -892,7 +1095,8 @@ async function expandRecursive(
         sourceSecs.push(sourceSection);
         raws.push(matchSide);
         // Same origin an ordinary inline step gets: the guard IS an ordinary
-        // step as far as attribution, painting and breakpoints are concerned.
+        // step as far as attribution, painting and breakpoints are concerned —
+        // its code-behind slot among same-text guards included.
         origins.push({
           inputIndex: attribInputIndex ?? i,
           frameId: parentFrameId,
@@ -901,6 +1105,9 @@ async function expandRecursive(
           }),
           ...(stepLines?.[i] !== undefined && stepLines[i]! > 0 && {
             skillLine: stepLines[i]!,
+          }),
+          ...((occurrenceOffsets?.[i]?.[0] ?? 0) > 0 && {
+            occurrenceOffset: occurrenceOffsets![i]![0]!,
           }),
         });
         controls.push(null); // back-filled below, once the body's extent is known
@@ -922,6 +1129,13 @@ async function expandRecursive(
           parentFrameId,
           attribInputIndex ?? i,
           [stepLines?.[i] ?? 0],
+          // The tail is emitted in THIS frame, so a narrowing that dropped a
+          // same-text step ahead of it slides it exactly as it slides a plain
+          // step — and the text it holds a slot for is the tail's, not the
+          // guard's. The guard has consumed index 0; the REST rides down, so a
+          // tail that is itself a control line finds its own guard's offset at
+          // 0 and passes what is left on again. Any depth, one rule.
+          occurrenceOffsets ? [(occurrenceOffsets[i] ?? []).slice(1)] : null,
         );
         if (recursed.steps.length === 0) {
           throw new Error(
@@ -1055,6 +1269,12 @@ async function expandRecursive(
         }),
         ...(stepLines?.[i] !== undefined && stepLines![i]! > 0 && {
           skillLine: stepLines![i]!,
+        }),
+        // Only ever set inside a narrowed section body, and only when
+        // something with the same text was actually dropped ahead of this
+        // step — so an ordinary expansion's origins are byte-identical.
+        ...((occurrenceOffsets?.[i]?.[0] ?? 0) > 0 && {
+          occurrenceOffset: occurrenceOffsets![i]![0]!,
         }),
       });
       controls.push(null);

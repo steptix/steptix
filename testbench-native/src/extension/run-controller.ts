@@ -9,6 +9,7 @@ import {
   classifySelectedSteps,
   matchText,
   composeEnv,
+  extractSections,
   extractSteps,
   danglingChainMemberError,
   resolveRunSelection,
@@ -49,7 +50,12 @@ import type { CompileTail } from './compile-progress-core.js';
 import type { CompileTailSignals } from './compile-tail-signals.js';
 import { EnvSelector } from './env-selector.js';
 import { resolveProjectDirs } from './aiui-config.js';
-import { buildSectionsPayload, preflightSections, sectionedSkillRefusal } from './sections.js';
+import {
+  buildSectionsPayload,
+  preflightSections,
+  sectionedSkillRefusal,
+  SectionNarrowingError,
+} from './sections.js';
 import { decideViewportRecycle } from './viewport-recycle.js';
 import {
   rowFailureDetail,
@@ -64,12 +70,20 @@ import {
   type RowTableKind,
 } from './row-summary-core.js';
 import {
+  calledSectionNames,
+  chainMembersKeptLogLine,
   failedRowsFrom,
+  oldServerBodyStepsWarning,
   rowOutcomeLine,
   rowValuesText,
   rowsSummaryLine,
   sectionRowsIgnoredLogLine,
   sectionRowsLogLine,
+  sectionRowsResumedLogLine,
+  sectionStepsIgnoredLogLine,
+  sectionStepsLogLine,
+  sectionStepsResumedLogLine,
+  splitBodySteps,
   stepRangeText,
   stepsPerRowLogLine,
 } from './row-selection-core.js';
@@ -624,6 +638,61 @@ export class RunController {
    *  `buildSectionsPayload` on every block. Undefined outside a narrowed run,
    *  which is what makes the sections payload byte-identical to before. */
   private sectionRowsOfRun: Record<string, number[]> | undefined;
+
+  /** The section-BODY narrowings in force for the run in flight — section name
+   *  → 0-based body-step indices — handed to `buildSectionsPayload` as
+   *  `runSteps`. Undefined outside a narrowed run, which is what keeps the
+   *  sections payload byte-identical to before. */
+  private sectionStepsOfRun: Record<string, number[]> | undefined;
+
+  /** Body-step line → the narrowed section it belongs to, for every body line
+   *  this run did NOT select. A step event on one of these can only mean the
+   *  server ignored `runSteps` and ran the whole body. */
+  private unselectedBodyLines = new Map<number, string>();
+
+  /** Each narrowed section's body step texts as they were when the run
+   *  started, so a later block can tell that the indices it is about to ship
+   *  no longer mean what they meant — plus whether the narrowing covers every
+   *  call of that section, which is what the resumed log line has to repeat
+   *  and cannot re-derive (a Continue's lines hold no body lines).
+   *  Undefined outside a narrowed run. */
+  private narrowedBodySnapshot:
+    | Record<string, { steps: string[]; everyCall: boolean }>
+    | undefined;
+
+  /** Each narrowed section LOOP's authored table size, for the resumed line's
+   *  `rows 2 of 3`. The chosen rows live in `sectionRowsOfRun`; this is the
+   *  denominator, which nothing else on the run carries. */
+  private sectionRowTotalsOfRun: Record<string, number> | undefined;
+
+  /** The one refusal a stale narrowing produces, remembered so it is said once
+   *  and so the row loop can tell this failure from an ordinary one: a fact
+   *  about the file refuses identically for every row after it. */
+  private narrowingRefusal: string | null = null;
+
+  /**
+   * The section narrowings a PAUSED run parked, for its Continue to pick up.
+   *
+   * A continuation rebuilds `lines` as "every main-flow step at or below the
+   * pause", which contains no body lines at all — so recomputing the narrowing
+   * from it would come back empty, run the whole body, paint the marks the
+   * selection excluded, and disarm the old-server detector on the way past.
+   * Carried instead, the way `compileModeOfRun` and `parkedRowState` are, and
+   * dropped by anything that is not a resume.
+   */
+  private parkedNarrowing:
+    | {
+        rows: Record<string, number[]> | undefined;
+        rowTotals: Record<string, number> | undefined;
+        steps: Record<string, number[]> | undefined;
+        unselectedBodyLines: Map<number, string>;
+        bodySnapshot: Record<string, { steps: string[]; everyCall: boolean }> | undefined;
+      }
+    | null = null;
+
+  /** One warning per run about a server that ignored `runSteps`, not one per
+   *  body step: like the `rowNumbers` warning, the fact is about the server. */
+  private oldServerBodyStepsWarned = false;
 
   /** Line → the rows that failed on it, for the end-of-loop repaint. */
   private rowFailuresByLine = new Map<number, number[]>();
@@ -1589,6 +1658,10 @@ export class RunController {
     // Deliberately NOT done in `pause()`: that parks the run for a Resume,
     // which SHOULD inherit.
     this.compileModeOfRun = undefined;
+    // Same argument, same exception: a stopped run has no Continue, so the
+    // narrowing it parked is spent. Leaving it would narrow the next run that
+    // called itself a resume.
+    this.parkedNarrowing = null;
     // A Stop while the loop is PARKED has no run to abort — the parked run
     // returned long ago — so nothing else here reaches the row it left
     // `running`. It is the one row with no result and no explanation, and the
@@ -1627,6 +1700,57 @@ export class RunController {
    *  event listener. Used by every code path that emits step:start /
    *  step:pass / step:fail / output / capture / done. */
   private emitRunEvent(event: RunEvent): void {
+    // A body step this run did not select, executing anyway: the server is
+    // older than `runSteps` and dropped the field, so it ran the whole body.
+    // Detected from the outside because that is the only place it shows —
+    // a server that ignores a field it does not know says nothing about it,
+    // and the run otherwise reads as green. Nothing is painted differently:
+    // the step really did run, and pretending otherwise would be a second
+    // untruth on top of the server's.
+    //
+    // The evidence has to be a step that EXECUTED, which is why a skipped pass
+    // is exempt (stories/control-flow.md): a step the run decided against —
+    // the untaken half of a chain, a loop body never entered — arrives as a
+    // `step:pass` carrying `output: 'skipped'`, and a skipped placeholder is
+    // not evidence of execution whatever line it names.
+    //
+    // A current server cannot produce one for an UNSELECTED body line: it
+    // never expands that line, and every skipped-pass producer in
+    // session-manager.ts is indexed by expansion position, so there is no
+    // event to carry the line at all. This is defensive insurance rather than
+    // a case seen in the wild — the rule "a skip proves nothing ran" is worth
+    // holding on its own, and it costs one condition.
+    // `step:start` and `step:fail` stay triggers: neither has a skipped form.
+    if (
+      !this.oldServerBodyStepsWarned &&
+      this.unselectedBodyLines.size > 0 &&
+      (event.type === 'step:start' ||
+        (event.type === 'step:pass' && !isSkippedPass(event)) ||
+        event.type === 'step:fail')
+    ) {
+      // The line is a TEST-file line, so a step of the same number in a skill
+      // must not answer for it — the same fsPath check `sectionPauseAt` and
+      // `startSectionIteration` make.
+      //
+      // A MISSING `frame.uri` is read as the test file, which is safe because
+      // of two invariants rather than by luck. An event with no frame is a
+      // top-level step of the test, and a top-level step's line is never a
+      // body line — the map is keyed by body lines of a `### Section`, which
+      // classify as `section-step` and can only run inside a section frame or
+      // as a DETACHED body run. And a detached body run narrows nothing:
+      // `narrowSectionSteps` returns early unless the scope is `main-flow`,
+      // leaving the map empty, so there is nothing here for a frameless event
+      // to collide with.
+      const uri = event.frame?.uri;
+      const section =
+        uri === undefined || uri === this.document.uri.fsPath
+          ? this.unselectedBodyLines.get(event.line)
+          : undefined;
+      if (section !== undefined) {
+        this.oldServerBodyStepsWarned = true;
+        this.postOutput(oldServerBodyStepsWarning(section), 'warn');
+      }
+    }
     // Which rows failed on which line, gathered as the run goes so the gutter
     // can be repainted with the WORST status once the loop ends. Read off the
     // events rather than threaded through the loop because a step can fail in
@@ -2206,6 +2330,12 @@ export class RunController {
     // previous pause linger at that line while the new run boots, which
     // reads as "the arrow jumped straight to the breakpoint."
     this.post({ type: 'breakpointStop', line: null });
+    /** Was a Continue owed when this call started? Read BEFORE the flag is
+     *  cleared, because a run injected at a pause — the skill-step picker's
+     *  `runLines([callLine], { isContinuation: true })` — leaves the paused
+     *  run parked and its Continue still to come, and by the time the
+     *  narrowing is decided below there is no way left to tell. */
+    const injectedAtPause = this.parkedAtPause && options.isResume !== true;
     this.parkedAtPause = false;
 
     // A new run — including a Resume — supersedes any paused state, so the
@@ -2695,6 +2825,22 @@ export class RunController {
      * start it again from row 1.
      */
     /**
+     * A Continue is not a new selection. It rebuilds `lines` as "every
+     * main-flow step at or below the pause" — no body lines, no row lines — so
+     * recomputing either narrowing from it would answer "nothing was
+     * narrowed" and run the whole body. The run that parked already decided
+     * this; the continuation inherits it, as it inherits the compile mode.
+     */
+    const resumingNarrowing = options.isResume === true ? this.parkedNarrowing : null;
+    // Cleared unless a Continue is still owed. A run INJECTED at a pause — the
+    // skill-step picker's `runLines([callLine], { isContinuation: true })`,
+    // which is followed by a `isParkedAtPause` check precisely because the
+    // paused run is still there — is not a resume and carries no `isResume`,
+    // but the Continue after it is. Dropping the park here would run the rest
+    // of the narrowed body on that Continue, paint the marks the selection
+    // excluded, and disarm the old-server detector on the way past.
+    if (!injectedAtPause) this.parkedNarrowing = null;
+    /**
      * The section-loop narrowings that survive this run's step selection.
      *
      * A narrowing whose call line is not among the steps about to execute has
@@ -2703,11 +2849,81 @@ export class RunController {
      * selected means all of it, and a drag that stopped a line short of the
      * call has already said which steps it wants ("Open for review").
      */
-    const sectionRowsForRun = this.narrowSectionRows(options.sectionRows, classified);
+    // A Continue inherits the ROW narrowing for the reason it inherits the
+    // body one: its `lines` are rebuilt from the pause point and hold no row
+    // lines, so re-deriving would answer "nothing was narrowed" and loop the
+    // whole table for the rest of the run.
+    const sectionRowsForRun = resumingNarrowing
+      ? resumingNarrowing.rows
+      : this.narrowSectionRows(options.sectionRows, allClassified);
     this.sectionRowsOfRun = sectionRowsForRun;
+    if (resumingNarrowing) {
+      this.sectionRowTotalsOfRun = resumingNarrowing.rowTotals;
+      // Said again, beside the body line and for the same reason: a narrowing
+      // announced before the breakpoint and silent after it reads as one that
+      // expired there.
+      for (const [name, rows] of Object.entries(resumingNarrowing.rows ?? {})) {
+        this.postOutput(
+          sectionRowsResumedLogLine(
+            name,
+            rows,
+            resumingNarrowing.rowTotals?.[name] ?? rows.length,
+          ),
+          'info',
+        );
+      }
+    }
+    /**
+     * …and the same question about a section's BODY.
+     *
+     * Answered here, at the one choke point every gesture reaches, rather than
+     * in `runSelected`: F5, the panel's Run and a `runRows` carrying `lines`
+     * all arrive with the body lines still in `lines`, and a narrowing done in
+     * one of them would be missing from the other two. `resolveRunSelection`
+     * has already dropped those lines from what EXECUTES — rung 2's
+     * double-run guard, which stays exactly as it was — and this reads them
+     * before they are forgotten, to narrow the body the call expands to.
+     *
+     * `allClassified`, not `classified`: a breakpoint trims what runs in this
+     * BATCH, and the call it trimmed off still runs on Continue. Narrowing off
+     * the trimmed list made a breakpoint above the call report the narrowing
+     * as ignored, and then the continuation ran the whole body.
+     */
+    if (resumingNarrowing) {
+      this.sectionStepsOfRun = resumingNarrowing.steps;
+      this.unselectedBodyLines = resumingNarrowing.unselectedBodyLines;
+      this.narrowedBodySnapshot = resumingNarrowing.bodySnapshot;
+      // Said again on the continuation, because the Output is a log of what
+      // this call did and the author is reading it after a pause — and a
+      // narrowing that was announced before the breakpoint and silent after it
+      // reads as one that expired there.
+      for (const [name, indices] of Object.entries(resumingNarrowing.steps ?? {})) {
+        const snapshot = this.narrowedBodySnapshot?.[name];
+        this.postOutput(
+          sectionStepsResumedLogLine(
+            name,
+            indices.map((n) => n + 1),
+            snapshot?.steps.length ?? indices.length,
+            snapshot?.everyCall ?? false,
+          ),
+          'info',
+        );
+      }
+    } else {
+      this.sectionStepsOfRun = this.narrowSectionSteps(
+        lines,
+        selection.scope,
+        allClassified,
+      );
+    }
     // The "your server is too old to number these rows" warning is a fact
     // about this run's server, said once (`rowForIteration`).
     this.oldServerNumberingWarned = false;
+    this.oldServerBodyStepsWarned = false;
+    // …and so is a stale narrowing, which is a fact about the FILE: it refuses
+    // identically for every block and every row after the first, so it is said
+    // once and it ends the run.
+    this.narrowingRefusal = null;
 
     const wholeFileRun =
       options.rerun === undefined &&
@@ -3001,6 +3217,13 @@ export class RunController {
           pendingRerun = undefined;
           if (!ok) {
             anyFailed = true;
+            // A stale narrowing is not this row's failure — it is a fact about
+            // the file, and the next row would re-read the same buffer, refuse
+            // the same way and print the same line. Without ending the LOOP,
+            // a two-row table said it twice and a ten-row one said it ten
+            // times, each row painted ✗, and the run never reached a verdict
+            // the author could act on.
+            if (this.narrowingRefusal !== null) loopEnd = { kind: 'narrowing-stale' };
             break;
           }
           continue;
@@ -3307,10 +3530,35 @@ export class RunController {
           log,
         });
       }
-      // The narrowing belonged to this run. A Continue after a pause is its
-      // own `runLines` call and re-states what it wants; leaving it set would
-      // silently narrow a section the next run never asked to narrow.
+      // The narrowing belonged to this run, so all three fields are cleared
+      // together — leaving any of them set would silently narrow a section the
+      // NEXT run never asked to narrow, and `unselectedBodyLines` would arm
+      // the old-server warning against a run with nothing to warn about.
+      //
+      // Parked first when this run paused: its Continue rebuilds its lines
+      // from the pause point and cannot re-derive any of this, so the one
+      // thing that must survive is handed over explicitly.
+      //
+      // An injected run at a pause parks nothing of its own and takes nothing
+      // away: the paused run's Continue is still owed, and its narrowing is
+      // still the one that Continue must carry.
+      this.parkedNarrowing =
+        endReason.kind === 'paused' && this.parkedAtPause
+          ? {
+              rows: this.sectionRowsOfRun,
+              rowTotals: this.sectionRowTotalsOfRun,
+              steps: this.sectionStepsOfRun,
+              unselectedBodyLines: this.unselectedBodyLines,
+              bodySnapshot: this.narrowedBodySnapshot,
+            }
+          : injectedAtPause
+            ? this.parkedNarrowing
+            : null;
       this.sectionRowsOfRun = undefined;
+      this.sectionRowTotalsOfRun = undefined;
+      this.sectionStepsOfRun = undefined;
+      this.unselectedBodyLines = new Map();
+      this.narrowedBodySnapshot = undefined;
       // A stream that ended without a `compile:result` (a dropped connection,
       // a server error) must not leave a spinner running for the rest of the
       // session. On the ordinary path the result already took it down and this
@@ -3370,7 +3618,9 @@ export class RunController {
    * rather than a mystery.
    *
    * Matched on `matchText`, the same rule the server expands by, so the two
-   * cannot disagree about which step calls which section.
+   * cannot disagree about which step calls which section — `calledSectionNames`
+   * for the whole answer, tails and nested calls included, over the steps this
+   * RUN selected rather than the ones this batch stops at.
    */
   private narrowSectionRows(
     requested: Record<string, number[]> | undefined,
@@ -3387,12 +3637,9 @@ export class RunController {
     } catch {
       return undefined;
     }
-    const called = new Set(
-      classified
-        .filter((c): c is Extract<ClassifiedStep, { kind: 'step' }> => c.kind === 'step')
-        .map((c) => matchText(c.instruction)),
-    );
+    const called = calledSectionNames(text, instructionsOf(classified));
     const out: Record<string, number[]> = {};
+    const totals: Record<string, number> = {};
     for (const [name, requestedRows] of Object.entries(requested)) {
       const table = tables.get(name);
       if (!table) continue;
@@ -3405,9 +3652,162 @@ export class RunController {
         continue;
       }
       out[name] = rows;
+      // The denominator the resumed line needs. Kept beside the chosen rows
+      // rather than re-scanned on the Continue: that scan reads the LIVE
+      // buffer, and the number in `rows 2 of 3` should be the one this run
+      // decided with.
+      totals[name] = table.rows.length;
       this.postOutput(sectionRowsLogLine(name, rows, table.rows.length), 'info');
     }
-    return Object.keys(out).length > 0 ? out : undefined;
+    if (Object.keys(out).length === 0) return undefined;
+    this.sectionRowTotalsOfRun = totals;
+    return out;
+  }
+
+  /**
+   * The section-BODY narrowings this run can honour, and the lines that let it
+   * notice a server that ignored them.
+   *
+   * Only a MIXED selection narrows a body. A selection made of body lines
+   * alone resolves to `section-body` scope and runs those lines detached, at
+   * the root frame — the flow that has always existed and is not this one; and
+   * a selection with no body lines at all has nothing here to do. What is left
+   * is the reported gesture: some main-flow steps, one of them the call, plus
+   * some of the body it expands to. `resolveRunSelection` drops the body lines
+   * from what executes inline (the double-run guard), and this is what stops
+   * them from being dropped from the run's MEANING as well.
+   *
+   * Also records the body lines the run did NOT select, per narrowed section.
+   * A `step:start` on one of those is the only way the client can tell that a
+   * server ignored `runSteps` and ran the whole body — the run would otherwise
+   * look green and paint marks nobody asked for.
+   */
+  private narrowSectionSteps(
+    lines: number[],
+    scope: 'main-flow' | 'section-body',
+    classified: ClassifiedStep[],
+  ): Record<string, number[]> | undefined {
+    this.unselectedBodyLines = new Map();
+    this.narrowedBodySnapshot = undefined;
+    if (scope !== 'main-flow' || lines.length === 0) return undefined;
+    const text = this.document.getText();
+    const { narrowed, ignored } = splitBodySteps(text, lines, instructionsOf(classified));
+    for (const pick of ignored) {
+      // The steps the author actually picked, not the ones a chain would have
+      // brought along: this narrowing is being dropped, so naming a step
+      // nobody selected in the sentence that drops it explains nothing.
+      const picked = pick.ordinals.filter((n) => !pick.addedForChain.includes(n));
+      this.postOutput(sectionStepsIgnoredLogLine(pick.section, picked), 'warn');
+    }
+    if (narrowed.length === 0) return undefined;
+    const bodies = new Map(extractSections(text).map((s) => [s.name, s.steps]));
+    const out: Record<string, number[]> = {};
+    const snapshot: Record<string, { steps: string[]; everyCall: boolean }> = {};
+    for (const pick of narrowed) {
+      out[pick.section] = pick.indices;
+      const body = bodies.get(pick.section) ?? [];
+      // What the indices MEAN, frozen at run start. Every later block rebuilds
+      // the payload from the live buffer, so an edit to the body mid-run would
+      // silently re-point them — `readDataRows` snapshots the rows for the
+      // same reason, and this is the same hazard one level down.
+      snapshot[pick.section] = {
+        steps: body.map((s) => s.instruction),
+        everyCall: pick.everyCall,
+      };
+      // A chain kept whole. Said before the narrowing line, because it changes
+      // what that line is about to claim.
+      if (pick.addedForChain.length > 0 && pick.chainLink) {
+        this.postOutput(
+          chainMembersKeptLogLine(
+            pick.section,
+            pick.addedForChain,
+            pick.ordinals.filter((n) => !pick.addedForChain.includes(n)),
+            pick.chainLink,
+          ),
+          'warn',
+        );
+      }
+      this.postOutput(
+        sectionStepsLogLine(pick.section, pick.ordinals, pick.total, pick.everyCall),
+        'info',
+      );
+      const kept = new Set(pick.indices);
+      for (const [index, step] of body.entries()) {
+        if (!kept.has(index)) this.unselectedBodyLines.set(step.line, pick.section);
+      }
+    }
+    this.narrowedBodySnapshot = snapshot;
+    return out;
+  }
+
+  /**
+   * Refuse a block whose narrowing no longer describes the file, once.
+   *
+   * `sentence` is a whole sentence: the reasons compose badly under a shared
+   * tail, so each branch of `narrowedBodyDrift` (and `SectionNarrowingError`)
+   * finishes its own thought and this only frames it.
+   *
+   * Once, because the refusal is a fact about the FILE. Every later block of
+   * this run rebuilds the payload from the same buffer and refuses the same
+   * way — in a data-driven run, once per row — so the second copy of the line
+   * tells the reader nothing the first did not.
+   */
+  private refuseStaleNarrowing(
+    sentence: string,
+    log: (msg: string) => void,
+    logPrefix: string,
+  ): void {
+    log(`${logPrefix}: ${sentence}`);
+    if (this.narrowingRefusal !== null) return;
+    this.narrowingRefusal = sentence;
+    this.postOutput(`Run stopped: ${sentence} Re-run to pick again.`, 'error');
+  }
+
+  /**
+   * Has a narrowed section's body been edited since the run started?
+   *
+   * `runSteps` is a list of POSITIONS, and every block after the first rebuilds
+   * the sections payload from the live buffer — so an edit that adds, removes
+   * or rewrites a body step re-points them at whatever now sits there. The
+   * server would run it without complaint, and the Output would still name the
+   * steps the author picked.
+   *
+   * Refused rather than repaired, and named: there is no honest way to guess
+   * which steps the author meant after the text moved, and the run is a few
+   * seconds old.
+   */
+  private narrowedBodyDrift(text: string): string | null {
+    if (!this.narrowedBodySnapshot) return null;
+    const bodies = new Map(
+      extractSections(text).map((s) => [s.name, s.steps.map((step) => step.instruction)]),
+    );
+    // Each branch is a WHOLE sentence. They used to be fragments finished by
+    // one shared "… since this run narrowed it, so …" tail, which read as
+    // written only for the third: "the body of X now has 3 steps where it had
+    // 2 since this run narrowed it" says the count changed since the
+    // narrowing, which is a different claim, and the deleted-section branch
+    // ended up explaining that a section that is gone no longer names the same
+    // steps.
+    const stale = 'so the body steps it selected no longer name the same steps.';
+    for (const [name, snapshot] of Object.entries(this.narrowedBodySnapshot)) {
+      const before = snapshot.steps;
+      const now = bodies.get(name);
+      if (now === undefined) {
+        return `the section "${name}" is gone from the file, and this run had narrowed its body.`;
+      }
+      if (now.length !== before.length) {
+        return (
+          `the body of "${name}" now has ${now.length} step` +
+          `${now.length === 1 ? '' : 's'} where it had ${before.length} when this ` +
+          `run narrowed it, ${stale}`
+        );
+      }
+      const changed = now.findIndex((instruction, i) => instruction !== before[i]);
+      if (changed >= 0) {
+        return `body step ${changed + 1} of "${name}" has been edited since this run narrowed it, ${stale}`;
+      }
+    }
+    return null;
   }
 
   // ---- which rows are red -------------------------------------------------
@@ -4199,7 +4599,28 @@ export class RunController {
     // continuation that omitted these would expand differently from the
     // batch before it and hash differently too. Same reason `fullSteps` is
     // re-sent, and same reason it reads the buffer rather than disk.
-    const sections = buildSectionsPayload(this.document.getText(), this.sectionRowsOfRun);
+    // …which is exactly why a BODY narrowing has to be re-checked here.
+    // `runSteps` is a list of positions, and the buffer this rebuild reads may
+    // have been edited since the run decided them. Refused, not repaired:
+    // there is no honest guess at which steps the author meant once the text
+    // under those positions moved.
+    const drift = this.narrowedBodyDrift(this.document.getText());
+    if (drift !== null) {
+      this.refuseStaleNarrowing(drift, log, 'narrowed section body changed mid-run');
+      return false;
+    }
+    let sections: ReturnType<typeof buildSectionsPayload>;
+    try {
+      sections = buildSectionsPayload(
+        this.document.getText(),
+        this.sectionRowsOfRun,
+        this.sectionStepsOfRun,
+      );
+    } catch (err) {
+      if (!(err instanceof SectionNarrowingError)) throw err;
+      this.refuseStaleNarrowing(err.message, log, 'narrowed section body no longer fits');
+      return false;
+    }
 
     // Resolve the project's skills directory so the server can expand
     // `[skill: ...]` lines and emit `frame:push` / `frame:pop` events around
@@ -4652,6 +5073,14 @@ function trimAtBreakpoint(
     return { runnable: items.slice(0, i), pausedAt: item.line };
   }
   return { runnable: items, pausedAt: null };
+}
+
+/** The instruction text of the classified items that are STEPS — an
+ *  `[input:]` or `[interactive]` marker calls nothing and names nothing. */
+function instructionsOf(items: ClassifiedStep[]): string[] {
+  return items
+    .filter((c): c is Extract<ClassifiedStep, { kind: 'step' }> => c.kind === 'step')
+    .map((c) => c.instruction);
 }
 
 function listStepInstructions(text: string): string {

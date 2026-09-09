@@ -127,7 +127,20 @@ export type RowSkipReason =
    */
   | { kind: 'prompt-cancelled' }
   /** A section iteration failed, which ends the run (part B's rule). */
-  | { kind: 'iteration-failed'; iteration: number };
+  | { kind: 'iteration-failed'; iteration: number }
+  /**
+   * A narrowed section's body was edited after the run decided which of its
+   * steps to run, so the next block's indices no longer name the same steps
+   * and the run refuses to send them
+   * (stories/data-row-progress-and-selection.md, decision 3).
+   *
+   * Its own kind rather than `stopped`, and for the reason `prompt-cancelled`
+   * is: the row after it would otherwise say the run was stopped, and the
+   * reader would go looking for a Stop nobody pressed. It also has to END the
+   * loop — a refusal is a fact about the file, not about the row, so every
+   * later row would refuse identically and print the same line again.
+   */
+  | { kind: 'narrowing-stale' };
 
 /** The panel's short note — `not run (stopped)` — which is also the report's
  *  wording, so the two cannot describe the same row differently. */
@@ -138,6 +151,7 @@ export function rowSkipDetail(reason: RowSkipReason): string {
     case 'paused': return 'not run (paused)';
     case 'ended': return 'not run (run ended early)';
     case 'iteration-failed': return `not run (iteration ${reason.iteration} failed)`;
+    case 'narrowing-stale': return 'not run (a narrowed section was edited)';
   }
 }
 
@@ -161,7 +175,9 @@ export function rowStoppedHover(
       ? 'the run ended while this row was running'
       : reason.kind === 'prompt-cancelled'
         ? 'the prompt was cancelled'
-        : 'the run was stopped while this row was running';
+        : reason.kind === 'narrowing-stale'
+          ? 'a narrowed section was edited while the run was going'
+          : 'the run was stopped while this row was running';
   return `${capitalise(rowWord(kind))} ${row} stopped — ${what}`;
 }
 

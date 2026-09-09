@@ -360,6 +360,12 @@ export interface StepRequest {
       /** The authored table's total row count, so a narrowed loop still
        *  reads `iteration 2 of 3`. */
       rowCount?: number;
+      /** 0-based indices into `steps`: run only these body steps, per
+       *  iteration, keeping each one's `stepLines` entry and its binding
+       *  identity (stories/data-row-progress-and-selection.md, decision 3).
+       *  Absent means the whole body, which is every run that predates a
+       *  body-narrowing selection. */
+      runSteps?: number[];
     }
   >;
   /**
