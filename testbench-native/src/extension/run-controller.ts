@@ -1654,11 +1654,20 @@ export class RunController {
     // and the run otherwise reads as green. Nothing is painted differently:
     // the step really did run, and pretending otherwise would be a second
     // untruth on top of the server's.
+    //
+    // The evidence has to be a step that EXECUTED, which is why a skipped pass
+    // is exempt (stories/control-flow.md): a step the run decided against —
+    // the untaken half of a chain, a loop body never entered — arrives as a
+    // `step:pass` carrying `output: 'skipped'`, and a current server emits
+    // exactly that placeholder for a body line this run did not select. Taking
+    // it as proof the body ran would make the warning fire on every
+    // section-loop run against the very servers that honour `runSteps`.
+    // `step:start` and `step:fail` stay triggers: neither has a skipped form.
     if (
       !this.oldServerBodyStepsWarned &&
       this.unselectedBodyLines.size > 0 &&
       (event.type === 'step:start' ||
-        event.type === 'step:pass' ||
+        (event.type === 'step:pass' && !isSkippedPass(event)) ||
         event.type === 'step:fail')
     ) {
       // The line is a TEST-file line, so a step of the same number in a skill

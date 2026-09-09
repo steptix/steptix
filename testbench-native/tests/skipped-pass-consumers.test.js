@@ -34,7 +34,10 @@ const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src")
 /** The files that branch on the event today, with how many times each does. */
 const CONSUMERS = {
   "extension/extension.ts": 2, // the run gutter, and the compile gutter
-  "extension/run-controller.ts": 2, // the compile fold, and the run log
+  // the compile fold, the run log, and the old-server body-step detection
+  // (a skipped placeholder for an unselected body line is not evidence the
+  // server ran it)
+  "extension/run-controller.ts": 3,
   "extension/test-controller.ts": 1, // Test Explorer's streamed output
   "webview/testbench-runner.jsx": 1, // the panel's run log
 };

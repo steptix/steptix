@@ -1547,6 +1547,42 @@ describe('TestBench data-row selection', function () {
     ]);
   });
 
+  it('a skipped placeholder on an unselected body line is not that evidence', async () => {
+    // The wire has no third verdict, so a step the run decided against arrives
+    // as a PASS carrying `output: 'skipped'` (stories/control-flow.md) — and a
+    // server that HONOURS `runSteps` emits exactly that for the body steps the
+    // selection left out. Taking it as proof the body ran would fire this
+    // warning on the very servers the warning exists to distinguish from.
+    //
+    // Asserted as a PAIR, in one test: the same line, the same event type,
+    // once with the sentinel and once without. The negative alone would pass
+    // just as happily if `step:pass` had been dropped as a trigger outright.
+    const uri = await open('data-rows-body.tmp.md');
+    const frame = { id: 'f1', kind: 'section', uri: uri.fsPath, skillName: 'Log In' };
+    const saidIt = (lines) => lines.filter((l) => l.includes('the server ran the whole section body'));
+
+    const quiet = hooks.hostMessageCount();
+    await runSelection([range(7, 9), range(17)], (f) => {
+      // Line 16 is body step 1 — the one the selection left out.
+      f.push({ type: 'step:pass', line: 16, output: 'skipped', frame });
+      f.push({ type: 'step:pass', line: 17, frame });
+      f.end();
+    });
+    assert.deepEqual(saidIt(outputSince(quiet)), [], 'a skipped placeholder ran nothing');
+
+    const loud = hooks.hostMessageCount();
+    await runSelection([range(7, 9), range(17)], (f) => {
+      // The same line and the same event type, minus the sentinel: this one
+      // really did run, and that is what the warning is about.
+      f.push({ type: 'step:pass', line: 16, frame });
+      f.end();
+    });
+    assert.deepEqual(saidIt(outputSince(loud)), [
+      'Log In — the server ran the whole section body; restart or update the ' +
+        'Sessions API server so a selection can narrow it',
+    ]);
+  });
+
   it('says nothing about the server when it honours runSteps', async () => {
     await open('data-rows-body.tmp.md');
     const mark = hooks.hostMessageCount();
