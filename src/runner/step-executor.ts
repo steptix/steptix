@@ -13,6 +13,7 @@ import {
   buildAssertionCodePrompt,
   buildRetryContext,
   buildBranchedStepMessage,
+  buildConditionJudgeMessage,
   formatTestInfo,
 } from '../ai/prompts.js';
 import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome, ScrollPositionInfo } from '../ai/prompts.js';
@@ -1067,6 +1068,23 @@ function buildStepValues(authored: string, opts: StepExecutorOptions): StepValue
   };
 }
 
+/**
+ * The run's secret values, from the options every entry point in this file
+ * already carries. Read fresh at each use rather than once: `[as: …]`
+ * captures and `[input: …]` answers grow the parameter map while a step runs.
+ *
+ * One function, three call sites — the step prompt, the condition judge's and
+ * the watch group's. The step prompt had it and the other two did not, so a
+ * secret typed into a text field reached the model masked on one path and raw
+ * on the next turn (review 3, finding 2).
+ */
+function secretsFor(opts: StepExecutorOptions): string[] {
+  return runSecrets({
+    parameters: opts.resolvedParameters ?? {},
+    ...(opts.envData !== undefined && { envData: opts.envData }),
+  });
+}
+
 /** Every name the test's steps capture — `[store as: x]` and `store as {{x}}`.
  *  Used only to make a refusal say "captured later" instead of "unknown". */
 function namesDefinedIn(steps: readonly string[]): ReadonlySet<string> {
@@ -1110,11 +1128,7 @@ async function executeStepAttempt(
   const definedLater = namesDefinedIn(opts.testSteps ?? []);
   // The run's secret values, read fresh at each use: `[as: …]` captures and
   // `[input: …]` answers grow the parameter map as the step runs.
-  const secretsNow = (): string[] =>
-    runSecrets({
-      parameters: opts.resolvedParameters ?? {},
-      ...(opts.envData !== undefined && { envData: opts.envData }),
-    });
+  const secretsNow = (): string[] => secretsFor(opts);
   let page = pageTracker ? pageTracker.getActive() : opts.page;
   const maxTurns = config.execution.maxTurns;
 
@@ -2854,6 +2868,191 @@ function substituteBranchInstruction(instruction: string, opts: StepExecutorOpti
   });
 }
 
+/**
+ * How long the condition judge may keep re-asking while the model answers
+ * `waiting` (stories/control-flow.md, decision 4).
+ *
+ * A module constant rather than config, deliberately: the window exists for a
+ * page that is visibly mid-transition, not to wait for a state to arrive — the
+ * watch form (`If <cond>, <action>` with no `then`) is what waits, and it
+ * already honours `execution.timeout`. Making this configurable would invite
+ * authors to turn a decision into a slow watch.
+ */
+export const CONDITION_JUDGE_BUDGET_MS = 30_000;
+/** Gap between re-asks inside that budget — the branched step's poll interval. */
+const CONDITION_JUDGE_POLL_MS = 3_000;
+
+/** What one judge call returned. */
+export interface ConditionVerdict {
+  /** Index into the `conditions` array of the FIRST condition that held, or
+   *  null for "none of them". Never an index the caller did not supply. */
+  selected: number | null;
+  /** The model's own words, for the guard's report row. */
+  reasoning: string;
+  /** Every judge turn, so a guard's cost and its raw answers are as visible in
+   *  the report as an ordinary step's. */
+  aiInteractions: AiInteraction[];
+}
+
+/**
+ * Ask the model which of `conditions` holds on the page now
+ * (stories/control-flow.md §"Condition evaluation").
+ *
+ * One call for a whole chain, first-holds-wins (decision 5); one call per pass
+ * for a `While` / `Repeat`. It **never performs an action** — the selected
+ * tail's steps do that, through `executeStep`, which is why a plain-instruction
+ * tail costs two model turns where the watch form costs one.
+ *
+ * Settles the page first (the branched step's own 10 s / 1 s gate), then
+ * re-asks every 3 s while the answer is `waiting` or malformed, for
+ * {@link CONDITION_JUDGE_BUDGET_MS}. Still waiting at the end **throws**, and
+ * the caller turns that into a failed guard: a decision that cannot be made is
+ * not the same as a decision that came out false.
+ *
+ * `conditions` is the AUTHORED text, placeholders intact.
+ */
+export async function evaluateConditions(
+  conditions: string[],
+  opts: StepExecutorOptions,
+): Promise<ConditionVerdict> {
+  const { config, aiClient, contextContent, testName, baseUrl, conversationHistory, pageTracker } = opts;
+  const page = pageTracker ? pageTracker.getActive() : opts.page;
+  const startTime = Date.now();
+  const deadline = startTime + CONDITION_JUDGE_BUDGET_MS;
+  const aiInteractions: AiInteraction[] = [];
+
+  // The same gate the watch form opens with, and for the same reason: a page
+  // that is still painting answers a different question from the one asked.
+  await waitForPageStability(page, {
+    timeoutMs: Math.min(10_000, config.execution.timeout * 1000),
+    quiesceMs: 1000,
+  });
+
+  // Every `{{name}}` and `${…}` any condition references, with what it holds
+  // now — built off the joined authored text so one block covers the chain.
+  const values = buildStepValues(conditions.join('\n'), opts);
+
+  let poll = 0;
+  for (;;) {
+    poll++;
+    if (opts.signal?.aborted) {
+      throw new DOMException('Run aborted by client', 'AbortError');
+    }
+
+    const domSnapshot = await captureDomSnapshot(page, {
+      ...config.browser.domNoiseReduction,
+      maxIframeDepth: config.browser.maxIframeDepth,
+      domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+    });
+    const screenshot = config.ai.sendScreenshots
+      ? await captureScreenshot(page, config.browser.fullPageScreenshots)
+      : null;
+    const screenshotBase64 = screenshot?.base64 ?? null;
+
+    const openPages = pageTracker && pageTracker.count > 1
+      ? await pageTracker.getPageListWithTitles()
+      : undefined;
+
+    const userMessage = buildConditionJudgeMessage(
+      conditions,
+      // Masked for the MODEL only, the same one line the step prompt applies
+      // to the same string. The snapshot now carries LIVE form values, so a
+      // secret this run typed into an ordinary text field is in it — and the
+      // judge, one turn after a step that showed `••••`, would otherwise read
+      // it in full (review 3, finding 2). Nothing stored is redacted here:
+      // `redactReport` covers what is written.
+      redact(domSnapshot, secretsFor(opts)),
+      screenshotBase64,
+      conversationHistory,
+      openPages,
+      // No step numbers: a guard is not the Nth of N steps in any sense the
+      // model could use, and `formatTestInfo` omits the line when they are
+      // absent rather than printing "Step 0 of 0".
+      formatTestInfo(
+        testName,
+        baseUrl,
+        undefined,
+        undefined,
+        config.browser.headed ? config.browser.windowSize : config.browser.viewport,
+        buildActiveBrowserInfo(opts.browserTracker),
+      ),
+      values,
+    );
+    const messages: ChatMessage[] = [
+      {
+        role: 'system',
+        content: buildSystemPrompt(contextContent, undefined, {
+          dismissalGuidance: opts.dismissalGuidance ?? false,
+        }),
+      },
+      userMessage,
+    ];
+
+    let currentUrl = '';
+    try {
+      currentUrl = page.url();
+    } catch { /* a page mid-navigation still gets judged; the URL is a label */ }
+
+    const completion = await aiClient.complete(messages, opts.signal);
+    aiInteractions.push({
+      purpose: 'condition-judge',
+      requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+      response: completion.text,
+      ...(completion.model !== undefined && { model: completion.model }),
+      ...(screenshotBase64 !== null && { screenshotBase64 }),
+      pageUrl: currentUrl,
+      timestamp: new Date().toISOString(),
+    });
+
+    let verdict: BranchedAIResponse | undefined;
+    try {
+      // `actionsOptional`: the judge is told to return an empty array, and a
+      // model that simply omits the key has answered correctly. Counting that
+      // as malformed would spend the budget re-asking a question already
+      // answered.
+      verdict = parseBranchedResponse(completion.text, { actionsOptional: true });
+    } catch (err) {
+      logger.warn(
+        `Condition judge poll ${poll}: malformed AI response — ${(err as Error).message}. Retrying.`,
+      );
+    }
+
+    if (verdict) {
+      const answer = verdict.matched.trim().toUpperCase();
+      if (answer === 'NONE') {
+        logger.debug(`Condition judge: none held — ${verdict.reasoning}`);
+        return { selected: null, reasoning: verdict.reasoning, aiInteractions };
+      }
+      if (answer !== 'WAITING') {
+        const index = answer.length === 1 ? answer.charCodeAt(0) - 65 : -1;
+        if (index >= 0 && index < conditions.length) {
+          logger.debug(
+            `Condition judge: ${answer} ("${conditions[index]}") held — ${verdict.reasoning}`,
+          );
+          return { selected: index, reasoning: verdict.reasoning, aiInteractions };
+        }
+        // A label naming no condition is as unusable as no label at all, so it
+        // is a malformed answer and gets a re-ask rather than a guess.
+        logger.warn(
+          `Condition judge poll ${poll}: AI returned unknown outcome label "${verdict.matched}". Retrying.`,
+        );
+      }
+    }
+
+    if (Date.now() + CONDITION_JUDGE_POLL_MS >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, CONDITION_JUDGE_POLL_MS));
+    await waitForPageStability(page, {
+      timeoutMs: Math.max(0, Math.min(5000, deadline - Date.now())),
+      quiesceMs: 500,
+    });
+  }
+
+  throw new Error(
+    `could not decide: the page did not settle within ` +
+      `${Math.round(CONDITION_JUDGE_BUDGET_MS / 1000)}s while judging "${conditions[0] ?? ''}"`,
+  );
+}
+
 export async function executeBranchedStep(
   group: StepGroup,
   totalSteps: number,
@@ -2931,7 +3130,10 @@ export async function executeBranchedStep(
     );
     const userMessage = buildBranchedStepMessage(
       outcomes,
-      domSnapshot,
+      // Same masking as the step prompt and the condition judge — see
+      // `secretsFor`. This poller reads the page on every poll of a watch
+      // group, so it is the other prompt the live snapshot reaches.
+      redact(domSnapshot, secretsFor(opts)),
       screenshotForAi,
       conversationHistory,
       openPages,

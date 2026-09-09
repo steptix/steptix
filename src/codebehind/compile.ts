@@ -6,6 +6,7 @@ import type { StepResult, TestReport } from '../report/types.js';
 import type { TokenTracker } from '../utils/tokens.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import { loopCompileRefusal } from '../runner/control-flow.js';
 import { buildCodeBehindRegistry } from './loader.js';
 import {
   aiEntryFor,
@@ -319,6 +320,25 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // to compile is the most expensive way to learn that. Everything selection
   // needs — which steps have entries, and which a previous run flagged — is
   // already on disk in the file and the last-run sidecar.
+  // A loop is refused outright, before anything runs
+  // (stories/control-flow.md). A compile places an entry at
+  // `spans[occurrence]`, and occurrence is counted per step line — but a loop
+  // body runs the same lines a number of times only the page decides, so the
+  // Record produces N transcripts for one slot and the plan's "not attempted"
+  // arithmetic counts a step that ran three times as one. Refusing is honest
+  // and cheap; supporting it properly is its own story. A CHAIN compiles
+  // normally: its steps run at most once, and the untaken branch is simply not
+  // attempted, which the summary already has a word for.
+  const loopLine = firstLoopGuard(test);
+  if (loopLine !== undefined) {
+    // `aiui compile` compiles a whole FILE — there is no slice to scope this
+    // to, which is why the refusal stands here where the server's is now
+    // bounded to the batch's own range. The wording is shared so the two
+    // surfaces say the same thing about the same file.
+    const message = loopCompileRefusal(loopLine);
+    return finish('failed', { compiled: 0, kept: 0, keptAi: 0, written: [], error: message }, message);
+  }
+
   const steps = await describeSteps(test);
   const staleKeys = await collectStaleKeys(test, options.recorded, steps);
   let selection = selectSteps(steps, options.select ?? {}, staleKeys);
@@ -489,8 +509,21 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
           notAttempted,
           ...(stoppedAt && { stoppedAt }),
         },
-        `Nothing to compile: ${listSteps(notAttempted)} did not run on the recording run — a ` +
-          'return ended the flow before them. Run the test so they execute, then compile again.',
+        // The clause names the cause only when every skipped row agrees on
+        // one, because the message asserts it as fact. A chain's untaken half
+        // reaches here too, and "a return ended the flow before them" over it
+        // is simply false — no return happened.
+        //
+        // And only when the recording did not STOP: `notAttempted` was already
+        // populated above with the post-prefix steps of a stopped recording,
+        // which no skipped row says anything about, so a clause derived from
+        // `skippedInRecording` would be asserted over steps that were not
+        // attempted for an entirely different reason. Those runs carry
+        // `stoppedAt` in the summary, and the `record` phase line above has
+        // already said "stopped at step N — <error>".
+        `Nothing to compile: ${listSteps(notAttempted)} did not run on the recording run` +
+          `${stoppedAt ? '' : describeRecordingSkips(skippedInRecording.map((s) => record.steps[s.index]))}. ` +
+          'Run the test so they execute, then compile again.',
       );
     }
     selection = {
@@ -854,14 +887,21 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   }
   // Green means the whole test replayed as code. A prefix compile that went
   // green only proved the prefix; the rest of the test is still to do — and so
-  // does a compile that left steps unattempted because a return skipped them on
-  // the recording run, which is a `notAttempted` with no `stoppedAt` behind it
+  // does a compile that left steps unattempted because the recording never ran
+  // them, whether a return ended their flow or a decision took another branch.
+  // That is a `notAttempted` with no `stoppedAt` behind it
   // (stories/step-flow-control.md, decision 12).
   const status: CompileStatus =
     green && !stoppedAt && unreached.length === 0 && notAttempted.length === 0
       ? 'green'
       : 'partial';
   const keptAi = keptAiExisting + declined;
+  /** Why the recording did not attempt them, when every skipped row agrees on
+   *  one cause. Undefined when they disagree, which is what keeps the headline
+   *  from picking a winner among rows it would then be wrong about. */
+  const notAttemptedCause = recordingSkipCause(
+    skippedInRecording.map((s) => record.steps[s.index]),
+  );
   const tail = [
     writtenOffAi.length > 0 ? `${writtenOffAi.length} kept AI after replay failures` : '',
     unproven.length > 0 ? `${unproven.length} unproven (${listSteps(unproven)})` : '',
@@ -870,9 +910,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         `(${unreached[0]!.reason})`
       : '',
     // A stopped recording already says "stopped at step N" below, and the CLI
-    // prints the list either way; this is the case with no stop behind it.
+    // prints the list either way; this is the case with no stop behind it,
+    // which is exactly when `notAttempted` holds the recording's skipped rows
+    // and nothing else. The cause is READ OFF those rows rather than asserted:
+    // the ordinary chain compile reaches here with no return anywhere in the
+    // run, and "a return skipped them" over it is simply false — the same
+    // correction `notRunOnRecordingReason` and the "Nothing to compile"
+    // refusal already carry (stories/step-flow-control.md, decision 12).
     notAttempted.length > 0 && !stoppedAt
-      ? `${listSteps(notAttempted)} not attempted (a return skipped them on the recording run)`
+      ? `${listSteps(notAttempted)} not attempted on the recording run` +
+        (notAttemptedCause === undefined ? '' : ` (${notAttemptedCause})`)
       : '',
     // The compliance signal, in front of whoever ran the compile rather than
     // only in the summary object (stories/placeholder-preserving-actions.md §6).
@@ -966,18 +1013,68 @@ function usablePrefix(steps: (StepResult | undefined)[]): number {
  * Why a step the recording skipped was not attempted
  * (stories/step-flow-control.md, decision 12).
  *
- * The step number comes off the reason the runner already wrote — `Not run:
- * step 3 returned from "Sign in"`, one formatter for every loop — rather than
- * being recomputed here from the expansion, which the compile would have to
- * walk again and could disagree with. Anchored, so only that sentence is read;
- * a result skipped for some future reason falls back to the general phrasing
- * rather than quoting a number out of unrelated prose.
+ * TWO producers write a `skipped` row and they were not skipped for the same
+ * reason, so neither may be described in the other's words. Both already say
+ * their own cause in a sentence with a known prefix, and both are read off
+ * that sentence rather than recomputed from the expansion — which the compile
+ * would have to walk again and could disagree with:
+ *
+ *  - `Not run: step 3 returned from "Sign in"` — a return
+ *    (`skippedByReturnReason`, src/runner/flow-control.ts);
+ *  - `Skipped: another branch of this decision was taken`, `Skipped: the loop
+ *    ran no passes` — a decision (`skipReasonFor`,
+ *    src/runner/control-runtime.ts). A chain COMPILES (only loops are refused),
+ *    so this is reachable on the shape control flow is mostly about, and it
+ *    used to read "a return ended its flow" when no return had happened.
+ *
+ * Both prefixes are anchored, so only those sentences are read; a result
+ * skipped for some future reason falls back to a phrasing that asserts no
+ * cause at all rather than quoting one out of unrelated prose.
  */
 export function notRunOnRecordingReason(result: StepResult | undefined): string {
-  const at = /^Not run: step (\d+)\b/.exec(result?.aiExplanation ?? '')?.[1];
-  return at === undefined
-    ? 'not run on the recording run (a return ended its flow)'
-    : `not run on the recording run (step ${at} returned)`;
+  const explanation = result?.aiExplanation ?? '';
+  const at = /^Not run: step (\d+)\b/.exec(explanation)?.[1];
+  if (at !== undefined) return `not run on the recording run (step ${at} returned)`;
+  const decided = /^Skipped:\s*(\S.*)$/.exec(explanation)?.[1];
+  if (decided !== undefined) return `not run on the recording run (${decided})`;
+  return 'not run on the recording run';
+}
+
+/** Was this skipped row a `return`'s doing, rather than a decision's? Reads
+ *  the one formatter's prefix, exactly as {@link notRunOnRecordingReason}. */
+function skippedByAReturn(result: StepResult | undefined): boolean {
+  return /^Not run: step \d+\b/.test(result?.aiExplanation ?? '');
+}
+
+/**
+ * The one clause that describes a whole set of skipped rows, or nothing.
+ *
+ * Said only when every row agrees, because the sentence it joins asserts it as
+ * fact. A mixed set — a decision skipped some, a return skipped the rest —
+ * gets no clause: the per-step `select` lines above have already named each
+ * one individually, and a summary that picks a winner would be wrong about the
+ * others.
+ */
+function describeRecordingSkips(results: (StepResult | undefined)[]): string {
+  const cause = recordingSkipCause(results);
+  return cause === undefined ? '' : ` — ${cause}`;
+}
+
+/**
+ * The cause clause on its own, for the message that parenthesises it rather
+ * than joining it with a dash.
+ *
+ * Same rule, one implementation: the end-of-compile headline used to assert
+ * "a return skipped them on the recording run" unconditionally, which is false
+ * of the ordinary chain compile — an untaken branch is dropped from the
+ * selection and everything around it still compiles, so `notAttempted` is
+ * non-empty with no return anywhere in the run.
+ */
+function recordingSkipCause(results: (StepResult | undefined)[]): string | undefined {
+  if (results.length === 0) return undefined;
+  if (results.every((r) => skippedByAReturn(r))) return 'a return ended the flow before them';
+  if (results.every((r) => !skippedByAReturn(r))) return 'the run decided against them';
+  return undefined;
 }
 
 /** "steps 6–9", "step 4", "steps 2, 5" — for messages. */
@@ -995,6 +1092,26 @@ function listSteps(numbers: number[]): string {
 // Selection
 // ───────────────────────────────────────────────────────────────────────────
 
+/**
+ * The first `While` / `Repeat … until` / `For each` guard line in the test, or
+ * undefined when it has none (stories/control-flow.md, decision 12).
+ *
+ * Reads the expansion's control records rather than re-parsing: a loop can be
+ * written inside a section body or a skill, and only the expander knows the
+ * flat list those became.
+ */
+function firstLoopGuard(test: ParsedTest): string | undefined {
+  const controls = test.expansion?.controls ?? [];
+  for (let i = 0; i < controls.length; i++) {
+    const record = controls[i];
+    if (!record) continue;
+    if (record.kind === 'while' || record.kind === 'repeat' || record.kind === 'foreach') {
+      return test.expansion?.rawSteps[i] ?? test.steps[i] ?? record.label;
+    }
+  }
+  return undefined;
+}
+
 /** Every expanded step, with its binding and why it can or cannot be in S. */
 async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
   const registry = test.expansion
@@ -1009,18 +1126,32 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
       )
     : undefined;
 
+  const controls = test.expansion?.controls ?? [];
+
   return test.steps.map((step, i) => {
     const binding = registry?.bindingFor(i);
     const text = binding?.source ?? test.expansion?.rawSteps[i] ?? step;
     const isAiEntry = binding?.entry?.ai === true;
     // The UNCONDITIONAL `Return` / `Stop` only (`body === undefined`). The
-    // conditional form is the one thing this story adds to the compiler — it
-    // becomes `if (…) step.exit()` — while the unconditional one is dispatched
-    // by the loop with no model call at all, exactly as `Set` is, so there is
-    // nothing to record and nothing to make cheaper
+    // conditional form is the one thing step-flow-control adds to the compiler
+    // — it becomes `if (…) step.exit()` — while the unconditional one is
+    // dispatched by the loop with no model call at all, exactly as `Set` is,
+    // so there is nothing to record and nothing to make cheaper
     // (stories/step-flow-control.md, decisions 3 and 11).
+    //
+    // `If <condition>, then return` is a flow-control step and NOT a control
+    // line, so `controls[i]` is null on it and it takes the conditional branch
+    // above: the compiler writes it, rather than refusing it as a guard
+    // (stories/control-flow.md §"Composition with `If … then return`").
     const flowControl = parseFlowControlStep(text);
-    const ineligible = test.toolCalls[i]
+    const ineligible = controls[i]
+      ? // The guard is dispatched by the framework — it asks a model a
+        // question and performs nothing — so there is no transcript to
+        // generate from and nothing for an entry to replace. Its TAIL is an
+        // ordinary step and compiles normally (stories/control-flow.md,
+        // decision 12).
+        'a control line is dispatched, not compiled'
+      : test.toolCalls[i]
       ? 'a [tool:] step is dispatched, not compiled'
       // `text` can be a RAW authored line still carrying a `[no-hooks]`
       // prefix (`rawSteps` keeps it). No strip needed: `parseSetStep`

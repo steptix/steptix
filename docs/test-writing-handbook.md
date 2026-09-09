@@ -18,14 +18,19 @@ every TypeScript example is a tool the registry loads. Each is introduced by a
 ## 1. How a step is executed
 
 A test is a Markdown file. The numbered lines under `## Steps` are the
-instructions. Four kinds of line are handled by the framework itself and never
-reach an AI model:
+instructions. Five kinds of line are handled by the framework itself rather
+than performed by a model:
 
 - `Set {{name}} to "…"` assigns a variable.
 - `[skill: name …]` inlines a reusable step sequence from another file.
 - `[tool: name …]` runs a TypeScript function.
 - A line that is exactly the name of a `### Section` in the same file runs
   that section's steps.
+- A control line — `If …, then …`, `Else if …`, `Otherwise, …`, `While …`,
+  `Repeat … until …` or `For each {{x}} in {{list}}, …` — decides or repeats
+  one other step (§3.5). The framework dispatches the line; the *condition* on
+  it is the one thing on this list that does reach a model, as a question it
+  answers rather than acts on.
 
 Every other line is sent to the executing model together with:
 
@@ -322,10 +327,17 @@ steps, as steps 17 and 18 of the shipped `verify-assertions.md` do. A second
 step gets a fresh snapshot after the model's think time, whereas a single step
 would have to choose a polling assertion.
 
-### 3.4 Conditional steps
+### 3.4 Watching for a state
 
-A step that begins `If …`, `When prompted …` or `When asked …` is a branch.
-Consecutive branch steps are grouped and the next ordinary step is their
+A step that begins `When prompted …` or `When asked …`, or that begins `If …`
+without a `then`, is a watch: it waits for one of several page states to
+appear. (`then` changes the meaning of an `If` only; `When prompted …, then …`
+is still a watch — with one exception, the same one §3.5 names: a tail that is
+`return` or `stop` makes the line flow control, so `When prompted for a code,
+then return` leaves the flow rather than watching for anything. §3.6. Only
+`When prompted` and `When asked` open a watch at all — `When the banner
+appears, then …` is not one with any tail.)
+Consecutive watch steps are grouped and the next ordinary step is their
 continuation. The executor re-reads the page every three seconds until one
 branch matches, and fails the step if none does within the wait budget.
 Exactly one branch runs, the others are skipped, then the continuation runs.
@@ -353,36 +365,204 @@ File `tests/sign-in-with-prompt.md`:
 8. Verify the Dashboard heading is visible
 ```
 
-Keep branch bodies to ordinary page instructions. A `[tool:]` or `[skill:]`
-call inside an `If` clause is not conditional dispatch. A `Set` step, or a
-flow-control step (§3.6), directly after a branch is not a continuation and
-the branches then run as plain steps. For anything more than choosing between
-outcomes and leaving a flow early, write a tool.
+Consecutive watch steps are one group in which **exactly one runs**. They are
+alternatives, not independent checks — two conditions that can both be true is
+the case this shape gets wrong. If you meant alternatives, say so with
+`Else if …, then …` (§3.5); if you meant two independent checks, separate them
+with an ordinary step so they form two groups.
 
-### 3.5 What does not exist
+Keep watch bodies to ordinary page instructions. A `[tool:]`, `[skill:]` or
+section name inside a watch clause is not conditional dispatch: the whole line
+is prose, and the model performs what it can of it. Adding `then` is what turns
+the line into a decision the framework dispatches (§3.5). A `Set` step, any
+control line from §3.5, or a flow-control step from §3.6, directly after a
+watch is not a continuation: the watch steps then run as plain steps, one at a
+time and without the polling. Put an ordinary page step between them when you
+need the watch.
 
-- No selector language in prose beyond what the model infers. A test id can
-  be mentioned when you know it exists.
-- No arithmetic, string functions or loops inside step text. `Set`
-  concatenates text; tools do the rest.
-- No general branching. The two shapes that exist are choosing between
-  outcomes (§3.4) and leaving a flow early (§3.6). There is no way to break
-  out of a loop, to return from an outer flow by name, or to end the whole
-  test from inside a section — a return leaves the innermost flow, and that
-  is all it does.
-- No implicit variables. `baseUrl` from `## Config` is available to `[tool:]`
-  arguments as a convenience, but `{{baseUrl}}` in a prose step is just the
-  model reading the test information block.
-- No native OS dialogs, no drag-and-drop choreography, no file downloads, no
-  visual-regression comparison as built-in vocabulary. Use a tool.
-- JavaScript `alert`/`confirm` dialogs are answered automatically by the
-  framework (dismissed, and `beforeunload` accepted); you cannot script a
-  choice.
-- `Press Enter in the Search field` does not focus the field. Type into it in
-  the same step first.
-- A `prompt` for clarification is what the model does when a step is
-  underspecified. On the CLI a person answers; on TestBench, MCP and CI the
-  step is skipped or fails. Underspecified steps are therefore not portable.
+### 3.5 Deciding and looping
+
+An `If` with `then` is a **decision**; an `If` without one is the watch above.
+That word is the whole opt-in, so `If a Remember this device prompt appears,
+click Not now` still means exactly what it meant.
+
+Six line forms. Each is one numbered line whose last part — its **tail** — is
+one step to run:
+
+| Write | What happens |
+| --- | --- |
+| `If the Cash checkbox is ticked, then Pay with cash` | Asks once; runs the tail if the answer is yes. |
+| `Else if the Card checkbox is ticked, then Pay by card` | The next member of the same chain. `Otherwise if` also parses. |
+| `Otherwise, Verify the Pay now button is disabled` | The last member; runs when nothing above held. `Else,` also parses. |
+| `While the Next button is enabled, Go to the next page` | Ask, run the tail, ask again. Zero or more passes. |
+| `Repeat Click Load more until the Load more button is gone, up to 20 times` | Run the tail, then ask. One or more passes. |
+| `For each {{account}} in {{accounts}}, Check the account` | One pass per element of the list, with `{{account}}` bound to it. |
+
+The tail is one step **of any kind**: a `### Section` name, a `[skill: …]`, a
+`[tool: …]`, a `Set {{x}} to "…"`, or a plain page instruction. A body of more
+than one step is a section, exactly as it is for reuse (§5), and nesting a
+decision inside a branch means putting the inner decision in a section too.
+Nothing is indented; an indented sub-list is not a step anywhere in this
+format.
+
+Where each keyword splits its line is worth knowing before you fight it:
+
+- `If` and `Else if` end the condition at the **first** ` then `. A condition
+  containing the word "then" has to be reworded.
+- `While` ends the condition at the **first** comma. The tail may contain
+  commas; the condition may not.
+- `Repeat` ends the tail at the **first** ` until `. A tail containing the
+  word "until" goes in a section.
+- `For each` is a fixed shape: `{{item}}`, `in`, `{{list}}`, a comma, the tail.
+- `, up to N times` is read off the end of a `While` or a `Repeat` line.
+
+Conditions are written like `Verify` sentences and reach the model as you
+wrote them, placeholders intact: `the Cash checkbox is ticked`, `{{plan}} is
+"pro"`, `the Load more button is gone`, `the cart shows more than 3 items`.
+
+#### A chain decides
+
+An `If`, any number of `Else if` lines and at most one `Otherwise`, on
+consecutive step lines, are one chain. The page is allowed to settle, every
+condition in the chain goes to the model **in one call**, the first that holds
+wins, and its tail runs. Every other member — the other guard lines and every
+step of their tails — is marked skipped, which is what the report and the
+TestBench gutter then show you.
+
+File `tests/pay-invoice.md`:
+
+```markdown
+# Pay an invoice
+
+## Config
+- baseUrl: https://app.example.test
+
+## Parameters
+- card_number: $TEST_CARD_NUMBER
+
+## Steps
+1. Navigate to /invoices/4471
+2. If the Cash checkbox is ticked, then Pay with cash
+3. Else if the Card checkbox is ticked, then Pay by card
+4. Otherwise, Verify the Pay now button is disabled
+5. Verify the invoice status is Settled
+
+### Pay with cash
+1. Click Pay now
+2. Verify the receipt says "Paid in cash"
+
+### Pay by card
+1. Type "{{card_number}}" into the Card number field
+2. Click Pay now
+3. Verify the receipt says "Paid by card"
+```
+
+Step 4 shows a one-step branch, which needs no section. A decision is made
+**once**: a false answer is an answer, not something to wait for. When nothing
+holds and there is no `Otherwise`, the whole chain is skipped and the run
+carries on at the next step. When the page is visibly mid-transition the
+framework re-asks for up to thirty seconds and then fails the line rather than
+guessing.
+
+A chain is consecutive step lines, and an `[input:]` line is a step, so an
+`[input:]` between an `If` and its `Otherwise` breaks the chain. Any numbered
+step between two members does: the `Otherwise` is then refused as having *"no
+decision to be the alternative of"* — by the parser, by the server, and by
+TestBench before it runs, in that one wording and naming that one line. Put the
+input step before the `If`. Inside a tail's section body it is fine.
+
+#### `then return` is not a tail
+
+One `If … then …` line is **not** a decision: the one whose tail is `return` or
+`stop` — bare, or with one of the six endings §3.6 lists, so `then stop running
+the remaining steps` counts too. The same goes for a line opening `When`.
+`If the page title contains "Dashboard" then return`
+is a flow-control step and is read as one everywhere — by the parser, the
+runner, the compiler and the editor — because two grammars claiming one line
+and disagreeing is the one way this could quietly do the wrong thing.
+
+The anchor is exact, and it cuts both ways. `If x then return to the dashboard`
+has words after the tail, so it is not flow control: it is an ordinary
+decision whose tail is the prose "return to the dashboard", which is what you
+meant by it. And the rule is on the *head* only, so `Otherwise, return` and
+`While the banner is visible, return` are still a branch and a loop whose body
+happens to be a return.
+
+Because a flow-control step is not a chain member, an `Else if` or `Otherwise`
+directly under one is refused — and refused with its own sentence rather than
+the dangling one, since the line above plainly does open `If`. You do not need
+one: the steps after a `then return` already run only when the return did not
+fire, so the alternative is just the next step.
+
+```markdown
+1. If the page title contains "Dashboard" then return
+2. Enter the username {{username}}
+```
+
+A `return` inside a loop body ends that **pass**, not the loop — an iteration
+is a flow, and the loop asks its condition again. Inside a chain's tail it ends
+the tail, and the run carries on after the whole chain.
+
+#### A loop decides again
+
+`While` asks before each pass, `Repeat … until` asks after each one, and `For
+each` asks nothing at all — the list is its bound. Both asking loops stop at a
+**cap**: the line's own `, up to N times`, or `execution.maxLoopIterations`
+from `aiui.config.json`, which is 25. **Reaching the cap fails the loop line.**
+A cap is a bug net, not an exit; write the condition the page really reaches.
+
+`For each` needs a real list. Its second variable must hold a JSON array — what
+a plural read stores ("every", "all", "each", §3.2) or what an array-typed tool
+returns. `Set` builds text, and text is not a list: `For each` over
+`Savings, Everyday` fails the line and says so rather than guessing a delimiter.
+
+File `tests/statement-archive.md`:
+
+```markdown
+# Statement archive
+
+## Config
+- baseUrl: https://app.example.test
+
+## Steps
+1. Navigate to /statements
+2. While the Next button is enabled, Go to the next page
+3. Verify the Statements panel says "Page 4 of 4"
+4. Repeat Click Load more until the Load more button is gone, up to 20 times
+5. Verify the Alerts panel says "All alerts loaded"
+6. Read the name of every account in the Your accounts panel [store as: accounts]
+7. For each {{account}} in {{accounts}}, Check the account
+8. Verify there are exactly 3 accounts in the Your accounts panel
+
+### Go to the next page
+1. Click the Next button
+
+### Check the account
+1. Verify the Your accounts panel has a row for "{{account}}" showing a balance
+```
+
+Each pass paints the tail's lines again and gets its own band in the report,
+labelled `Go to the next page (3/?)` while the loop is still running and
+`(3/7)` once it has ended. A breakpoint on a section-body line fires on every
+pass; a breakpoint on the guard pauses before the decision. A loop whose tail
+is a plain instruction has no body line of its own, and a breakpoint on that
+main-flow line pauses once per run.
+
+What this costs: one model call per evaluation, so a chain costs one and a
+`While` that runs three passes costs four. A tail that is a plain instruction
+costs another call to perform it. That is why `If a cookie banner appears,
+reject it` is still better as a watch (§3.4) — one call, no `then`.
+
+**Hooks do not dispatch control lines.** A `## Hooks` entry — or an
+`execution.defaultHooks` entry in `aiui.config.json` — that reads like one is
+handed to the model as a single prose instruction, and the run warns that it
+did; put the decision in a numbered step under `## Steps`, or in a `### Section`
+the hook calls.
+
+Running versions of all of it are shipped:
+`templates/init/tests/control-flow.md` takes the `If` branch,
+`control-flow-otherwise.md` falls through to the `Otherwise`, and both drive
+`fixtures/test-app/control-flow.html`.
 
 ### 3.6 Leaving a flow early
 
@@ -443,7 +623,15 @@ The details:
 - `If the Save button is visible, click it and return` is one compound step:
   the model clicks Save and then returns.
 - `Return` inside a looped section ends that iteration; the next one starts.
-  There is no way to break out of a loop.
+  There is no way to break out of a loop. That holds for a `While`, a `Repeat`
+  and a `For each` from §3.5 too: the loop asks its condition again, or moves
+  to the next element.
+- Inside the tail of a decision (§3.5), a return ends that tail. The run
+  carries on after the whole chain — the branches that were not taken were
+  already skipped by the decision itself and are not skipped twice.
+- A flow-control line is never a chain member, so an `Else if` / `Otherwise`
+  directly under one is refused. Nothing is lost: the steps below already run
+  only when the return did not fire.
 - A skipped step runs no hooks and spends no tokens. The returning step runs
   its `afterEach` hooks like any passed step.
 - A hook may not return. There is no flow to leave from inside one, and the
@@ -455,9 +643,37 @@ The details:
 - Only a line that opens `If` or `When`, or a line that is nothing but the
   tail, is flow control. `Click the details link then return` is an ordinary
   step — after an action, "then return" reads as *navigate back*, and the
-  framework does not guess. For the same reason a typo (`then retun`) is
-  ordinary prose: the following steps then run and fail loudly, which is the
-  direction to be wrong in.
+  framework does not guess. A typo (`then retun`) is not flow control either,
+  but it does still have a ` then ` in it, so it is a decision (§3.5) whose
+  tail is the prose "retun" — the tail fails loudly rather than the return
+  quietly not happening, which is the direction to be wrong in.
+
+### 3.7 What does not exist
+
+- No selector language in prose beyond what the model infers. A test id can
+  be mentioned when you know it exists.
+- No arithmetic or string functions inside step text. `Set` concatenates text
+  and `For each` loops over a list a step already captured (§3.5); computing
+  anything from a value is a tool's job.
+- No `Break`, no `Continue`, no pass counter readable as a variable, and no
+  collecting captures across the passes of a loop. A body that must differ per
+  pass reads the difference off the page or takes it from `For each`.
+- No way to return from an outer flow by name, and no way to end the whole
+  test from inside a section — a `return` leaves the innermost flow it is in
+  (§3.6), and an iteration of a loop counts as one of those.
+- No implicit variables. `baseUrl` from `## Config` is available to `[tool:]`
+  arguments as a convenience, but `{{baseUrl}}` in a prose step is just the
+  model reading the test information block.
+- No native OS dialogs, no drag-and-drop choreography, no file downloads, no
+  visual-regression comparison as built-in vocabulary. Use a tool.
+- JavaScript `alert`/`confirm` dialogs are answered automatically by the
+  framework (dismissed, and `beforeunload` accepted); you cannot script a
+  choice.
+- `Press Enter in the Search field` does not focus the field. Type into it in
+  the same step first.
+- A `prompt` for clarification is what the model does when a step is
+  underspecified. On the CLI a person answers; on TestBench, MCP and CI the
+  step is skipped or fails. Underspecified steps are therefore not portable.
 
 ## 4. Variables and data
 
@@ -634,6 +850,9 @@ File `tests/search-products.md`:
   line is never a section call.
 - A table under a section heading loops the section body once per row in the
   same browser, page state preserved between rows.
+- A section may be the tail of a control line (§3.5) — `If the Cash checkbox
+  is ticked, then Pay with cash` — and that counts as a use, so a section only
+  ever named in tails is live, not dead.
 - Sections share the test's variables and have no parameters or outputs. A
   section may call other sections and skills. Cycles are refused.
 - Names may contain spaces. `Steps`, `Config`, `Parameters`, `Outputs` and
@@ -1168,6 +1387,9 @@ report's skipped steps and warnings, not just the summary.
 | `Note the order number` | `Read the order number [store as: order_id]` | Nothing is stored without a name. |
 | `Read the order number [as: order_id]` | `[store as: order_id]` | `[as:]` has no parser and is renamed wrongly inside skills. |
 | `Set {{total}} to "{{a}} + {{b}}"` | A `defineTool` with number parameters | `Set` is text only. |
+| `If the Cash checkbox is ticked, run the Pay with cash section` | `If the Cash checkbox is ticked, then Pay with cash` | Without `then` the line is a watch, and the section name in it is prose. |
+| `If the total is more than $100 then apply the discount, then Verify it` | Reword the condition | The **first** ` then ` ends the condition. |
+| `For each {{account}} in {{names}}` where `names` came from a `Set` | Capture it with a plural read | `For each` takes a JSON array, and no delimiter is guessed. |
 | `Press Enter in the Search field` | `Type "shoes" into the Search field and press Enter` | The key press targets nothing. |
 | `[skill: sign_in]` when the skill declares `email` | `[skill: sign_in email password]` | Every declared parameter is required. |
 | `[tool: slugify s="x"]` for a named export | `[tool: strings/slugify s="x"]` | Named exports need the file prefix. |
@@ -1179,7 +1401,7 @@ report's skipped steps and warnings, not just the summary.
 | `## Steps (login)` | `## Steps` | Any other heading yields no steps. |
 | `Wait for .spinner:hidden` | `Wait until the spinner disappears` | State belongs in words, not selectors. |
 | A section body's steps before the main flow ends | Main flow first, then `###` headings | Everything after the first `###` belongs to a section. |
-| `If we are signed in then skip ahead` | `If we are signed in then return` | Only `return` / `stop` (and their longer tails) end a flow; anything else is prose to a model. |
+| `If we are signed in then skip ahead` | `If we are signed in then return` | Only `return` / `stop` (and the six endings §3.6 lists) end a flow. Anything else after ` then ` is a decision, and a tail that names no `### Section` and no `[skill:]` is prose, so "skip ahead" is handed to a model as an instruction — the same way `then retun` is (§3.6). |
 | `beforeEach: If already signed in then return` | Put the line in `## Steps` | A hook has no flow to leave; the file is refused at parse. |
 
 ## 12. Checklist before handing a test over
@@ -1194,6 +1416,8 @@ report's skipped steps and warnings, not just the summary.
   declared outputs.
 - Every action has a named completion condition where the page is slow, and
   every business outcome has a `Verify` line that could fail.
+- Every `While` or `Repeat … until` has an exit the page actually reaches; any
+  `, up to N times` is a bug net you meant, not the way the loop ends.
 - No `[input:]`, `[interactive]`, or underspecified step in an unattended test.
 - Upload fixtures exist at the paths written, relative to the test file.
 - The report from a real run has no skipped steps and no warnings you have not
@@ -1208,8 +1432,8 @@ report's skipped steps and warnings, not just the summary.
 | Parameters, `$VAR`, `Set`, `${…}`, secrets | [parameters.ts](../src/parser/parameters.ts), [set-step.ts](../src/parser/set-step.ts), [interpolate-env-data.ts](../src/parser/interpolate-env-data.ts), [secrets.ts](../src/utils/secrets.ts) |
 | What the model sees and the action rules | [prompts.ts](../src/ai/prompts.ts), [types.ts](../src/ai/types.ts), [placeholder-substitution.ts](../src/runner/placeholder-substitution.ts) |
 | Action execution, waits, reads, uploads | [actions.ts](../src/browser/actions.ts), [step-executor.ts](../src/runner/step-executor.ts), [upload-paths.ts](../src/browser/upload-paths.ts) |
-| Conditionals and hooks | [step-grouper.ts](../src/runner/step-grouper.ts), [hooks.ts](../src/runner/hooks.ts), [test-runner.ts](../src/runner/test-runner.ts) |
-| `return` / `stop`, and which steps a return skips | [flow-control-step.ts](../src/parser/flow-control-step.ts), [flow-control.ts](../src/runner/flow-control.ts), [test-runner.ts](../src/runner/test-runner.ts) |
+| Watches, decisions, loops and hooks | [step-grouper.ts](../src/runner/step-grouper.ts), [control-line.ts](../src/parser/control-line.ts), [control-flow.ts](../src/runner/control-flow.ts), [hooks.ts](../src/runner/hooks.ts), [test-runner.ts](../src/runner/test-runner.ts) |
+| `return` / `stop`, and which steps a return skips | [flow-control-step.ts](../src/parser/flow-control-step.ts), [flow-control.ts](../src/runner/flow-control.ts), [control-flow.ts](../src/runner/control-flow.ts) (`returnExit`), [test-runner.ts](../src/runner/test-runner.ts) |
 | Skill files, calls, expansion | [expander.ts](../src/skills/expander.ts), [invocation-parser.ts](../src/parser/invocation-parser.ts) |
 | Tools | [types.ts](../src/tools/types.ts), [define-tool.ts](../src/tools/define-tool.ts), [tool-helper.ts](../src/tools/tool-helper.ts), [registry.ts](../src/tools/registry.ts), [executor.ts](../src/tools/executor.ts), working examples in [fixtures/tools/src](../fixtures/tools/src) |
 | Tab and browser tracking | [manager.ts](../src/browser/manager.ts), [step-executor.ts](../src/runner/step-executor.ts), [tabs.ts](../src/codebehind/tabs.ts) |

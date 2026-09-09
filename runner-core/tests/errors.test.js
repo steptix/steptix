@@ -28,6 +28,15 @@ const SAMPLE_CONTEXTS = {
   },
   TB030: {},
   TB031: {},
+  TB032: {
+    // Verbatim `danglingChainMemberError` output, which is verbatim the CLI
+    // parser's — see tests/control-line-parity.test.ts.
+    detail:
+      'Line 7 — "Otherwise, Pay by card" has no decision to be the alternative ' +
+      'of. An `Otherwise` line must follow an `If … then …` or another `Else if` ' +
+      'on the previous step line of the same flow (## Steps); a blank line or ' +
+      'prose between them is fine, another numbered step is not.',
+  },
 };
 
 test('every code in catalogue has a sample context (audit)', () => {

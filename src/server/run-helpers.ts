@@ -72,6 +72,18 @@ export function isSkippableStep(instruction: string): boolean {
 }
 
 /**
+ * What a step {@link isSkippableStep} declined reports about itself.
+ *
+ * One constant rather than the same sentence typed in the session manager and
+ * the errand runner, because it is now on the WIRE as well as in the report
+ * (`step:pass` + `output: 'skipped'` carries it as `reason`), and two copies
+ * of a sentence a client prints is exactly the drift
+ * `stories/control-flow.md` §"TestBench paints one skip" describes.
+ */
+export const UNATTENDED_SKIP_REASON =
+  'Skipped: [input] and [interactive] steps are not supported in API mode';
+
+/**
  * Build an AiConfig with optional env overrides applied over a base. Only
  * `apiKey`, `model` and `gatewayUrl` are honoured today — these are the env
  * knobs a `.env` shipped from a client realistically wants to override, and

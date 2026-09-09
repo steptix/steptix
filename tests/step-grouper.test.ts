@@ -159,3 +159,69 @@ describe('identifyStepGroups', () => {
     expect(group.continuationStep.index).toBe(1);
   });
 });
+
+/**
+ * Control lines and the watch grouper (stories/control-flow.md §Grouper).
+ *
+ * The two constructs share an opening word and mean opposite things: a watch
+ * `If` waits for a state to APPEAR and lets the model perform the line, a
+ * control `If … then` is a decision the framework makes once and dispatches
+ * itself. Letting one become the other is not a cosmetic mix-up — both loops
+ * advance past a group with `i = group.continuationStep.index`, so a control
+ * line swallowed as a continuation takes its whole tail out of the run with
+ * it. Exactly the `Set` precedent above, and the same fix: form no group.
+ */
+describe('control lines are neither watches nor continuations', () => {
+  it('an If with `then` is not a watch', () => {
+    expect(isConditionalStep('If the Cash checkbox is ticked, then Pay with cash')).toBe(false);
+    // …while the watch form is untouched.
+    expect(isConditionalStep('If a Remember this device prompt appears, click Not now')).toBe(true);
+  });
+
+  it('the other five forms are not watches either', () => {
+    for (const line of [
+      'Else if the Card checkbox is ticked, then Pay by card',
+      'Otherwise, Pay by card',
+      'While the Next button is enabled, Go to the next page',
+      'Repeat Click Load more until the Load more button is gone',
+      'For each {{account}} in {{accounts}}, Check the account',
+    ]) {
+      expect(isConditionalStep(line), line).toBe(false);
+    }
+  });
+
+  it('a claim that does not complete is still not a watch', () => {
+    // It is a parse error everywhere it can be validated; where it cannot be,
+    // it must at least not be polled for and performed as prose.
+    expect(isConditionalStep('While the Next button is enabled')).toBe(false);
+  });
+
+  it('a control line after a watch forms NO group, so nothing is skipped', () => {
+    const steps = [
+      'If prompted for MFA, enter the code',
+      'If the Cash checkbox is ticked, then Pay with cash',
+      'Click Pay now',
+    ];
+    const groups = identifyStepGroups(steps);
+    expect(groups.size).toBe(0);
+  });
+
+  it('a loop after a watch forms no group either', () => {
+    const steps = [
+      'If you see a cookie banner, dismiss it',
+      'While the Next button is enabled, Go to the next page',
+    ];
+    expect(identifyStepGroups(steps).size).toBe(0);
+  });
+
+  it('a watch group after a control line still forms', () => {
+    const steps = [
+      'Otherwise, Pay by card',
+      'If prompted for MFA, enter the code',
+      'Wait for the dashboard',
+    ];
+    const groups = identifyStepGroups(steps);
+    expect(groups.has(0)).toBe(false);
+    expect(groups.get(1)?.continuationStep.index).toBe(2);
+  });
+});

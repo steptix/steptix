@@ -7,6 +7,22 @@ import { matchInput, matchText, NO_HOOKS_MARKER } from '../parser/section-match.
 import { logger } from '../utils/logger.js';
 import { parseSkillCall as parseSkillCallSyntax } from './skill-call-parser.js';
 import { parseSetStep, substitutePreservingSet } from '../parser/set-step.js';
+import {
+  chainAfterFlowControlMessage,
+  chainMemberWord,
+  closedChainMemberMessage,
+  danglingChainMemberMessage,
+  isControlLineClaim,
+  parseControlLine,
+} from '../parser/control-line.js';
+import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import type { ControlRecord } from '../runner/control-flow.js';
+
+// Re-exported so a consumer of the expansion has one import for the whole
+// shape. The definition lives with the planner that reads it — the expander
+// only produces records, and a type-only import keeps this module free of any
+// runtime dependency on the runner.
+export type { ControlRecord };
 
 /**
  * Parse-time expansion of `[skill: name arg="value" out.x="alias"]` step
@@ -63,6 +79,43 @@ function checkedRowInterpolate(
   bindings: Record<string, string>,
   sectionName: string,
 ): string {
+  // `For each {{x}} in {{list}}` binds `x` per pass and reads `list` once, so
+  // a row value written over EITHER destroys the loop the same way it
+  // destroys a `Set` target. Over the item the line becomes
+  // `For each demo@x in {{list}}`, which claims the form and does not
+  // complete; over the list it becomes `For each {{x}} in Savings, Everyday`,
+  // which does not claim it at all. Both stop being control lines and run as
+  // one prose step. The parse-time guard in `markdown.ts` catches a column of
+  // the step's OWN section; this one catches the merged bindings an ENCLOSING
+  // looped section contributes, which only expansion knows about.
+  //
+  // A skill parameter as the list is untouched by this: an argument like
+  // `list="{{accounts}}"` leaves a placeholder, so the loop still reads a
+  // variable at run time.
+  const control = parseControlLine(step);
+  if (control?.kind === 'foreach') {
+    const bakedOver =
+      `it is a column of a table this section — or one enclosing it — loops ` +
+      `over, and a looped section's row values are written into its step text ` +
+      `rather than kept as variables.`;
+    if (Object.hasOwn(bindings, control.item)) {
+      throw new Error(
+        `Cannot loop over {{${control.item}}} in the body of section ` +
+          `"${sectionName}": ${bakedOver} The \`For each\` line would stop ` +
+          `being one. Loop over a different name.`,
+      );
+    }
+    if (Object.hasOwn(bindings, control.list)) {
+      throw new Error(
+        `Cannot loop over the items of {{${control.list}}} in the body of ` +
+          `section "${sectionName}": ${bakedOver} \`{{${control.list}}}\` ` +
+          `would be replaced by this row's value before the line was read, so ` +
+          `it would stop being a \`For each\` at all. Capture the list into a ` +
+          `differently-named variable and loop over that.`,
+      );
+    }
+  }
+
   const before = parseSetStep(step);
   if (!before) return interpolateQuiet(step, bindings);
 
@@ -288,6 +341,22 @@ export interface SkillExpansion {
   rawSteps: string[];
   origins: ExpandedStepOrigin[];
   frames: Record<string, ExpandedFrame>;
+  /**
+   * Parallel to `steps` — non-null on a control-flow GUARD (an `If … then`,
+   * an `Else if`, an `Otherwise`, a `While`, a `Repeat … until`, a
+   * `For each`), giving the index range of its body and, for a chain member,
+   * the end of its chain (stories/control-flow.md §Design).
+   *
+   * Indices are ABSOLUTE in this flat list. Nesting is by containment; a
+   * chain's members share a `chainId`. The runtime never grows or shrinks the
+   * list — it skips ranges and jumps back — so every consumer that indexes
+   * `steps` is untouched by the feature (decision 7).
+   *
+   * All-null for a list with no control lines, which is every list written
+   * before the feature, and for the four hook scopes, which opt out (see
+   * `opts.expandControlLines`).
+   */
+  controls: (ControlRecord | null)[];
 }
 
 /**
@@ -357,6 +426,19 @@ export async function expandSkills(
      * Affects the dead-section scan only; expansion still operates on `steps`.
      */
     livenessSteps?: string[] | undefined;
+    /**
+     * Recognise the six control-flow forms and expand their tails in place.
+     * Defaults to true.
+     *
+     * Passed `false` for the four `## Hooks` scopes, which are the one step
+     * list this feature deliberately does not reach — the same carve-out
+     * `setStepError` has (a hook entry's malformed claim goes to the model as
+     * prose). Without it a hook reading `If the cookie banner appears, then
+     * Dismiss cookies` would silently become TWO hook steps: a guard nobody
+     * evaluates, handed to the model as prose, and a tail that runs
+     * unconditionally.
+     */
+    expandControlLines?: boolean | undefined;
   },
 ): Promise<SkillExpansion> {
   const frames: Record<string, ExpandedFrame> = {};
@@ -364,13 +446,16 @@ export async function expandSkills(
   const ctx: ExpandContext = {
     skillsDir,
     seq: { n: 0 },
+    chainSeq: { n: 0 },
     frames,
     sections,
     sectionsFilePath: callerFilePath ?? '<inline>',
     warnDeadSections: opts?.warnDeadSections ?? true,
     onDeadSection: opts?.onDeadSection ?? ((message: string) => logger.warn(message)),
     deadScanned: new Set(),
+    controlNamedWarned: new Set(),
     insideSkill: false,
+    controlFlow: opts?.expandControlLines ?? true,
     ...(envCtx && { envCtx }),
     ...(callerFilePath && { callerFilePath }),
     ...(opts?.rawSteps && { rawSteps: opts.rawSteps }),
@@ -431,7 +516,16 @@ function reportDeadSections(
   const invoked = new Set<string>();
   const collect = (list: { steps: string[]; rawSteps?: string[] | undefined }): void => {
     for (let i = 0; i < list.steps.length; i++) {
-      invoked.add(matchText(matchInput(list, i)));
+      const text = matchInput(list, i);
+      invoked.add(matchText(text));
+      // A section named as the TAIL of a control line is invoked — the one
+      // clause stories/control-flow.md adds to contract §2.4. Without it,
+      // `If the Cash checkbox is ticked, then Pay with cash` would report
+      // `### Pay with cash` dead while running it every time the condition
+      // held. runner-core's `buildSectionIndex` learns the same clause, so
+      // the warning and the editor's "never used" diagnostic still agree.
+      const control = parseControlLine(text);
+      if (control) invoked.add(matchText(control.tail));
     }
   };
   collect(mainList);
@@ -472,6 +566,9 @@ interface ExpandContext {
   onDeadSection: (message: string) => void;
   /** Files already scanned for dead sections in this `expandSkills` call. */
   deadScanned: Set<string>;
+  /** Sections already warned about for being named like a control line, in
+   *  this `expandSkills` call. Keyed the way cycles are — file plus name. */
+  controlNamedWarned: Set<string>;
   /** True once the recursion is inside any skill frame. Gates the
    *  `sourceSections` rule: a skill's internal sections never become the tag. */
   insideSkill: boolean;
@@ -490,6 +587,15 @@ interface ExpandContext {
    * other's. The box makes every level share one counter, like `frames` below.
    */
   seq: { n: number };
+  /**
+   * Monotonic counter producing unique `chainId`s. Boxed for the same reason
+   * `seq` is, and SEPARATE from it because `seq` also mints frame ids and
+   * `__skill<N>_` namespaces: sharing it would renumber every frame in every
+   * file that gained a chain, for no gain here.
+   */
+  chainSeq: { n: number };
+  /** False for the four hook scopes. See `opts.expandControlLines`. */
+  controlFlow: boolean;
   /** Shared `frames` lookup populated as the recursion enters each skill
    *  body. The top-level call seeds this in `expandSkills` so every nested
    *  recursion writes to the same map. */
@@ -543,15 +649,79 @@ async function expandRecursive(
   const sourceSecs: (string | null)[] = [];
   const raws: string[] = [];
   const origins: ExpandedStepOrigin[] = [];
+  const controls: (ControlRecord | null)[] = [];
+
+  /**
+   * Chains being built in THIS step list, by `chainId`, with the output index
+   * of each member's guard.
+   *
+   * A chain is "consecutive step lines of the same flow" (§"A chain is a
+   * decision"), and one `expandRecursive` call IS one flow — the main list, a
+   * section body, a skill body — so `openChain` only has to survive from one
+   * iteration of the loop below to the next. `chainEnd` is back-filled once
+   * the list is finished, because it is the LAST member's `bodyEnd` and no
+   * member knows that when it is emitted.
+   */
+  const chains = new Map<string, number[]>();
+  let openChain: string | null = null;
+  /** Whether the chain the previous step line belonged to has already had its
+   *  `Otherwise`. Read and cleared exactly as `openChain` is. */
+  let chainClosed = false;
+  /** The previous step line when it was a FLOW-CONTROL step — the one kind of
+   *  `If` that is not a decision. Read and cleared exactly as `openChain` is,
+   *  and set from the ONE place a flow-control step can be recognised on this
+   *  path: rung 0 declines it as a control line, so it falls through to the
+   *  ordinary-step branch (stories/control-flow.md §"Composition with
+   *  `If … then return`"). */
+  let openFlowControl: string | null = null;
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]!;
+    // A chain runs across CONSECUTIVE step lines, so the previous line's
+    // membership is read here and cleared: every branch below that is not a
+    // chain member leaves it null, and only the control branch sets it again.
+    const previousChain: string | null = openChain;
+    const previousClosed = chainClosed;
+    const previousFlowControl = openFlowControl;
+    openChain = null;
+    chainClosed = false;
+    openFlowControl = null;
     const call = parseSkillCall(step);
+    const matchSide = matchInput({ steps, rawSteps: ctx.rawSteps }, i);
+    const control = ctx.controlFlow ? parseControlLine(matchSide) : null;
+    // Remembered for the NEXT line, which is the only one that can be wrong
+    // about it. `parseControlLine` has already declined this line at rung 0,
+    // so the two are mutually exclusive by construction.
+    if (ctx.controlFlow && parseFlowControlStep(matchSide)) openFlowControl = matchSide;
+    // A hook scope is the one step list control flow does not reach
+    // (`opts.expandControlLines`), and until now it said so to nobody: the
+    // line simply became prose, so an author who wrote a decision in
+    // `## Before Each` watched the model perform some approximation of it.
+    // One warning per entry that reaches for a form, naming the entry.
+    if (!ctx.controlFlow && isControlLineClaim(matchSide)) {
+      logger.warn(
+        `Hook step "${matchSide}" reads as a control line, but hooks do not ` +
+          `dispatch control lines — it runs as one prose instruction. Put the ` +
+          `decision in a numbered step under \`## Steps\`, or in a \`### Section\` ` +
+          `the hook calls.`,
+      );
+    }
 
     // Resolution order: a bracket token is claimed first and is never a
     // section call, however its text compares. Only plain-text steps reach
     // the bare-name test below.
-    if (!call) {
+    //
+    // `|| control` is the one exception, and it is about LABELS rather than
+    // about control flow. `parseInvocation` accepts any text before the token
+    // as a call's label, so `If {{plan}} is "pro", then [skill: enable_pro]`
+    // parses as a labelled skill call — and read that way the skill would run
+    // UNCONDITIONALLY with the decision as its label, which is the exact line
+    // the story uses as its worked example of a conditional skill. Decision 3
+    // says a step that OPENS with a bracket directive is a directive; this
+    // one does not, so the control form wins. A step that really does open
+    // with `[skill:` can never parse as a control line, so that rung is
+    // untouched.
+    if (!call || control) {
       const section = resolveSection(ctx, steps, i);
       if (section) {
         const cycleKey = sectionCycleKey(ctx.sectionsFilePath, section.name);
@@ -569,6 +739,7 @@ async function expandRecursive(
               `at line ${stepLines?.[i] ?? '?'} but has no steps.`,
           );
         }
+        warnControlNamedSection(ctx, section.name);
 
         // A table under the section's heading makes each call run the body
         // once per row (stories/data-driven-rows.md, part B). Without one this
@@ -666,11 +837,202 @@ async function expandRecursive(
             section.stepLines,
           );
 
+          const base = out.length;
           out.push(...recursed.steps);
           sources.push(...recursed.sourceSkills);
           sourceSecs.push(...recursed.sourceSections);
           raws.push(...recursed.rawSteps);
           origins.push(...recursed.origins);
+          controls.push(...shiftControls(recursed.controls, base));
+        }
+        continue;
+      }
+
+      // Control flow, AFTER the bare-name section match: a step that IS a
+      // section name is a call before it is anything else (decision 3), so a
+      // section unwisely named `While waiting` still resolves as a call.
+      //
+      // The DECISION was made above on the match side, the same authored text
+      // section resolution reads, so a caller's argument interpolated into a
+      // skill body cannot make a line start or stop being a control line. The
+      // executable tail comes from `step`, which is the interpolated and
+      // scoped text the runner must actually perform.
+      if (control) {
+        const executable = parseControlLine(step);
+        const tailText = executable?.tail ?? control.tail;
+        // The EXECUTABLE line, when interpolation left it the same form.
+        //
+        // The decision of whether this is a control line at all was made above
+        // on the match side, so a caller's argument cannot make a line start
+        // or stop being one. What is read off the line AFTER that decision is
+        // a different question, and the answer differs by field:
+        //
+        //  - the tail, the condition and the label are things the RUN uses, so
+        //    they come from `step` — the interpolated, skill-scoped text. A
+        //    looped section bakes its row values into the text, so an authored
+        //    condition `{{status}} is shown` is a question no `## Values` entry
+        //    can answer and every row would ask it identically;
+        //  - the authored text stays on `rawSteps`, which is what section
+        //    resolution, code-behind binding and the editor read.
+        //
+        // Null when interpolation left the line no longer parseable as the
+        // same form: then the authored names are the best available, and the
+        // parse-time refusals cover the shapes that can actually happen.
+        const live = executable && executable.kind === control.kind ? executable : null;
+        const conditionText =
+          live && 'condition' in live
+            ? live.condition
+            : 'condition' in control
+              ? control.condition
+              : undefined;
+
+        const guardIndex = out.length;
+        out.push(step);
+        sources.push(sourceSkill);
+        sourceSecs.push(sourceSection);
+        raws.push(matchSide);
+        // Same origin an ordinary inline step gets: the guard IS an ordinary
+        // step as far as attribution, painting and breakpoints are concerned.
+        origins.push({
+          inputIndex: attribInputIndex ?? i,
+          frameId: parentFrameId,
+          ...(ctx.currentSkillFilePath !== undefined && {
+            skillFilePath: ctx.currentSkillFilePath,
+          }),
+          ...(stepLines?.[i] !== undefined && stepLines[i]! > 0 && {
+            skillLine: stepLines[i]!,
+          }),
+        });
+        controls.push(null); // back-filled below, once the body's extent is known
+
+        // The tail is ONE step, expanded through the same recursion in the
+        // ENCLOSING frame — so a section tail becomes a section frame exactly
+        // as a bare-name call does, a `[skill:]` tail goes through
+        // `expandSkills`, and anything else is emitted as itself. Its match
+        // side is the AUTHORED tail, which is what keeps code-behind binding
+        // on a tail identical to binding on the same step written on its own.
+        const tailCtx: ExpandContext = { ...ctx, rawSteps: [control.tail] };
+        const recursed = await expandRecursive(
+          [tailText],
+          tailCtx,
+          visited,
+          depth + 1,
+          sourceSkill,
+          sourceSection,
+          parentFrameId,
+          attribInputIndex ?? i,
+          [stepLines?.[i] ?? 0],
+        );
+        if (recursed.steps.length === 0) {
+          throw new Error(
+            `The step "${step}" in ${ctx.sectionsFilePath} names "${control.tail}" ` +
+              `as the step to run, but it expands to nothing. A control line ` +
+              `must name one step that actually runs.`,
+          );
+        }
+
+        const bodyStart = out.length;
+        out.push(...recursed.steps);
+        sources.push(...recursed.sourceSkills);
+        sourceSecs.push(...recursed.sourceSections);
+        raws.push(...recursed.rawSteps);
+        origins.push(...recursed.origins);
+        controls.push(...shiftControls(recursed.controls, bodyStart));
+        const bodyEnd = out.length - 1;
+
+        switch (control.kind) {
+          case 'if':
+          case 'elseif':
+          case 'else': {
+            // `Else if` / `Otherwise` continue the chain the previous step
+            // opened. A dangling one is REFUSED here, in the parser's own
+            // wording — this is the wire path's only parser (TestBench never
+            // calls `parseTestContent`), and an `Otherwise` that opened a chain
+            // of its own would be selected by its own fallback and run its tail
+            // unconditionally. Refusing costs a failed run; not refusing runs
+            // the branch the author wrote as the alternative to something else.
+            // The dangling rule's first case, and the one an author actually
+            // writes: the line above IS an `If`, but a flow-control one, which
+            // ends the flow rather than choosing a branch. Its own sentence,
+            // or "no decision above you" reads as a parser bug to someone
+            // looking straight at an `If` (stories/control-flow.md
+            // §"Composition with `If … then return`").
+            if (control.kind !== 'if' && previousFlowControl !== null) {
+              throw new Error(
+                chainAfterFlowControlMessage({
+                  line: matchSide,
+                  word: chainMemberWord(control.kind),
+                  previous: previousFlowControl,
+                  where: `${ctx.sectionsFilePath}${stepLines?.[i] ? `:${stepLines[i]}` : ''}`,
+                }),
+              );
+            }
+            if (control.kind !== 'if' && previousChain === null) {
+              throw new Error(
+                danglingChainMemberMessage({
+                  line: matchSide,
+                  word: chainMemberWord(control.kind),
+                  flow: sourceSection ? `### ${sourceSection}` : '## Steps',
+                  where: `${ctx.sectionsFilePath}${stepLines?.[i] ? `:${stepLines[i]}` : ''}`,
+                }),
+              );
+            }
+            // …and the other half of the same rule. `fallbackOf` picks the
+            // FIRST condition-less member, so a second `Otherwise` below one
+            // is unreachable code that is always skipped and an `Else if`
+            // below one is still evaluated — neither of which the author can
+            // learn from watching the run. Refused by the CLI parser since
+            // stage 1; refused here (and in runner-core) so the three agree.
+            if (control.kind !== 'if' && previousClosed) {
+              throw new Error(
+                closedChainMemberMessage({
+                  line: matchSide,
+                  where: `${ctx.sectionsFilePath}${stepLines?.[i] ? `:${stepLines[i]}` : ''}`,
+                }),
+              );
+            }
+            const chainId: string =
+              control.kind !== 'if' ? (previousChain as string) : `ch${++ctx.chainSeq.n}`;
+            const members = chains.get(chainId) ?? [];
+            members.push(guardIndex);
+            chains.set(chainId, members);
+            openChain = chainId;
+            chainClosed = control.kind === 'else';
+            controls[guardIndex] = {
+              kind: control.kind,
+              chainId,
+              ...(control.kind !== 'else' &&
+                conditionText !== undefined && { condition: conditionText }),
+              bodyStart,
+              bodyEnd,
+              chainEnd: bodyEnd, // provisional; back-filled for every member
+            };
+            break;
+          }
+          case 'foreach':
+            controls[guardIndex] = {
+              kind: 'foreach',
+              // The SCOPED names: an item and a list are looked up in
+              // `resolvedParameters` at run time, and inside a skill body that
+              // map is keyed by the namespaced `__skillN_` form the expander
+              // rewrote the body's own `{{…}}` into.
+              item: live?.kind === 'foreach' ? live.item : control.item,
+              list: live?.kind === 'foreach' ? live.list : control.list,
+              bodyStart,
+              bodyEnd,
+              label: loopLabel(ctx, control.tail, tailText),
+            };
+            break;
+          default:
+            controls[guardIndex] = {
+              kind: control.kind,
+              condition: conditionText ?? control.condition,
+              bodyStart,
+              bodyEnd,
+              ...(control.cap !== undefined && { cap: control.cap }),
+              label: loopLabel(ctx, control.tail, tailText),
+            };
+            break;
         }
         continue;
       }
@@ -695,6 +1057,7 @@ async function expandRecursive(
           skillLine: stepLines![i]!,
         }),
       });
+      controls.push(null);
       continue;
     }
 
@@ -792,11 +1155,26 @@ async function expandRecursive(
       skill.stepLines,
     );
 
+    const base = out.length;
     out.push(...recursed.steps);
     sources.push(...recursed.sourceSkills);
     sourceSecs.push(...recursed.sourceSections);
     raws.push(...recursed.rawSteps);
     origins.push(...recursed.origins);
+    controls.push(...shiftControls(recursed.controls, base));
+  }
+
+  // A chain's `chainEnd` is its LAST member's `bodyEnd`, shared by every
+  // member so the runtime can jump past the whole decision from whichever one
+  // it took. Only knowable now.
+  for (const members of chains.values()) {
+    const last = members[members.length - 1];
+    if (last === undefined) continue;
+    const chainEnd = (controls[last] as ControlRecord).bodyEnd;
+    for (const member of members) {
+      const record = controls[member] as Extract<ControlRecord, { chainId: string }>;
+      record.chainEnd = chainEnd;
+    }
   }
 
   return {
@@ -805,7 +1183,85 @@ async function expandRecursive(
     sourceSections: sourceSecs,
     rawSteps: raws,
     origins,
+    controls,
   };
+}
+
+/**
+ * Re-base a nested expansion's control records onto the parent's flat list.
+ *
+ * Every index in a `ControlRecord` is absolute, and `expandRecursive` builds
+ * its own list from zero — so the one place the two meet is here, at each
+ * concatenation site. Missing one would not fail loudly: the records would
+ * simply point at the wrong steps, and the runtime would skip somebody else's.
+ */
+function shiftControls(
+  records: readonly (ControlRecord | null)[],
+  offset: number,
+): (ControlRecord | null)[] {
+  if (offset === 0) return [...records];
+  return records.map((record) => {
+    if (!record) return null;
+    const moved = {
+      ...record,
+      bodyStart: record.bodyStart + offset,
+      bodyEnd: record.bodyEnd + offset,
+    };
+    return 'chainId' in record ? { ...moved, chainEnd: record.chainEnd + offset } : moved;
+  });
+}
+
+/**
+ * A loop band's label: the section's name for a section tail, the tail's own
+ * text otherwise (§"Painting, frames and the report").
+ *
+ * Two tails, because the two halves of that sentence read different text.
+ * Resolution happens on the AUTHORED tail — the same map and the same match
+ * side `resolveSection` uses, so what the label names and what the run enters
+ * cannot disagree. The label itself, when nothing resolves, is the EXECUTABLE
+ * tail: inside a looped section every other piece of rendered text shows the
+ * row's value, and a band reading `Click {{status}}` beside rows reading
+ * `Click Pending` is the label describing a step that never ran.
+ */
+function loopLabel(ctx: ExpandContext, authoredTail: string, executableTail: string): string {
+  const key = matchText(authoredTail);
+  if (Object.prototype.hasOwnProperty.call(ctx.sections, key)) {
+    return ctx.sections[key]?.name ?? authoredTail;
+  }
+  return executableTail;
+}
+
+/**
+ * A section whose NAME parses as a control line, resolved by bare name.
+ *
+ * `### Else if b, then S2` is a heading, and a step reading exactly that text
+ * resolves to it at rung 2 of the order above — deliberately beating the
+ * control split, so the step becomes an unconditional call and the condition
+ * in the name is never asked. Resolution is left exactly as it is; this is the
+ * only thing that says so out loud.
+ *
+ * The parser warns too (`src/parser/markdown.ts`, `scanStepSpans`), but that
+ * scan runs only on `aiui run` and on a server compile: an ordinary
+ * `/sessions/:id/steps` run arrives with `steps` and `sections` already parsed
+ * by runner-core in the extension, so on the TestBench and MCP paths — the
+ * surfaces where sections are actually authored — the parser's warning is
+ * never reached (review 4, finding 10). Here it is, at the moment the call
+ * resolves, on every path.
+ *
+ * Deduped per `expandSkills` call, like `reportDeadSections`: a section called
+ * from inside a three-pass loop is one thing to tell the author, not three.
+ */
+function warnControlNamedSection(ctx: ExpandContext, name: string): void {
+  if (!parseControlLine(name)) return;
+  const key = sectionCycleKey(ctx.sectionsFilePath, name);
+  if (ctx.controlNamedWarned.has(key)) return;
+  ctx.controlNamedWarned.add(key);
+  logger.warn(
+    `Section "${name}" in ${ctx.sectionsFilePath} is named like a control ` +
+      `line. A step whose text is exactly this heading calls the section — ` +
+      `the condition is part of the name, not a decision the run makes. ` +
+      `Rename the section if you meant it to be one.`,
+  );
 }
 
 /** Cycle key for a section. Namespaced by file so two files' same-named

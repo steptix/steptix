@@ -535,11 +535,18 @@ describe('the HTML report of a run that returned', () => {
     // contradicted it. Pinned here because it is the kind of change a later
     // reader would otherwise "fix" back.
     respond({});
+    // 0-BASED, which is what the real `executeBranchedStep` emits: its indices
+    // come straight off `identifyStepGroups`, whose `index` is an offset into
+    // the step array. The runner converts once, on entry to the branched
+    // block, and everything downstream of that is the display number
+    // (stories/control-flow.md, review round 3 finding 6 — before the
+    // conversion the block's own rows read `1, 1, 2, 4`). This mock used to
+    // send 1-based indices and pass only because nothing converted them.
     executeBranchedStepMock.mockImplementation(async () => [
-      // The conditional the model matched…
-      { index: 2, instruction: 'If a cookie banner is shown, dismiss it', status: 'passed', turns: [], durationMs: 1, retried: false },
-      // …and the continuation it therefore did not take.
-      { index: 3, instruction: 'Click "Sign in"', status: 'skipped', turns: [], durationMs: 0, retried: false, aiExplanation: 'Conditional branch not taken' },
+      // The conditional the model matched — step 2, index 1…
+      { index: 1, instruction: 'If a cookie banner is shown, dismiss it', status: 'passed', turns: [], durationMs: 1, retried: false },
+      // …and the continuation it therefore did not take — step 3, index 2.
+      { index: 2, instruction: 'Click "Sign in"', status: 'skipped', turns: [], durationMs: 0, retried: false, aiExplanation: 'Conditional branch not taken' },
     ]);
 
     const report = await runTest(

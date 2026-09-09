@@ -1,5 +1,6 @@
 import React, { useReducer, createContext, useContext, useEffect } from 'react';
 import type { RunState, StepOutput, SubActionResult, AiInteraction } from '../ipc-types';
+import { skipLogLine } from '../step-skip';
 import { Toolbar } from './components/Toolbar';
 import { Explorer } from './components/Explorer';
 import { EditorTabs } from './components/EditorTabs';
@@ -161,9 +162,31 @@ function appReducer(state: AppState, action: AppAction): AppState {
     case 'UPDATE_STEP_OUTPUT': {
       const stepOutputs = new Map(state.stepOutputs);
       const existing = stepOutputs.get(action.stepIndex);
-      if (existing) {
-        stepOutputs.set(action.stepIndex, { ...existing, ...action.patch });
-      }
+      // An UPSERT, not a patch-if-present. A skipped step never STARTS —
+      // `runner:step-start` is what created the entry, and a step the run
+      // decided against or a `return` left behind emits only the completion —
+      // so patching only what exists dropped every skipped step on the floor
+      // and the editor's `SkippedMarker` never rendered once. The seeded
+      // fields match what a start would have written.
+      stepOutputs.set(
+        action.stepIndex,
+        existing
+          ? { ...existing, ...action.patch }
+          : {
+              stepIndex: action.stepIndex,
+              // No `runner:step-start` ran, so nothing sent the text. The
+              // gutter paints by index and the Output panel falls back to the
+              // step line in the editor, so an empty instruction costs
+              // nothing a skipped step had to say.
+              instruction: '',
+              status: 'skipped',
+              aiReasoning: '',
+              aiInteractions: [],
+              subActions: [],
+              screenshots: [],
+              ...action.patch,
+            },
+      );
       return { ...state, stepOutputs };
     }
     case 'TOGGLE_BREAKPOINT': {
@@ -294,12 +317,19 @@ export function App() {
         if (data.status === 'passed') {
           dispatch({ type: 'ADD_LOG', level: 'success', message: `✓ Step ${data.stepIndex} passed (${dur}s)` });
         } else if (data.status === 'skipped') {
-          // A step a `return` left behind (stories/step-flow-control.md). Not
-          // a failure and not a pass: it never ran, and the reason says why.
+          // A decision the run made, or a step a `return` left behind — not a
+          // problem either way: the untaken branch of a chain, a loop body
+          // that never ran, an unattended `[input:]`, or everything after a
+          // `return` in this flow. The reason says which.
+          //
+          // Built rather than written here, so this line wears the same glyph
+          // and the same sentence the other six skip surfaces do
+          // (src/ui/step-skip.ts, mirroring step-skip-core.ts). Hand-rolled it
+          // read `— Step 5 skipped: Skipped: another branch…`.
           dispatch({
             type: 'ADD_LOG',
             level: 'info',
-            message: `— Step ${data.stepIndex} skipped${data.reason ? `: ${data.reason}` : ''}`,
+            message: skipLogLine(data.stepIndex, data.reason),
           });
         } else {
           const errPart = data.error ? `: ${data.error}` : '';

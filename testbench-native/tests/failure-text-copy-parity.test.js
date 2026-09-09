@@ -16,8 +16,21 @@
 
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { describeStepFailure as inlineDescribe, formatStepFailure } from "../src/webview/lib/failure-text-inline.js";
-import { describeStepFailure as coreDescribe } from "../src/../../runner-core/src/protocol.ts";
+import {
+  describeStepFailure as inlineDescribe,
+  formatStepFailure,
+  isSkippedPass as inlineSkipped,
+  skipPanelLine as inlinePanelLine,
+  SKIP_GLYPH as inlineGlyph,
+} from "../src/webview/lib/failure-text-inline.js";
+import {
+  describeStepFailure as coreDescribe,
+  isSkippedPass as coreSkipped,
+} from "../src/../../runner-core/src/protocol.ts";
+import {
+  skipPanelLine as corePanelLine,
+  SKIP_GLYPH as coreGlyph,
+} from "../src/extension/step-skip-core.ts";
 
 const CB = { file: "/p/tests/booking.steps.ts", error: "locator resolved to 2 elements" };
 
@@ -77,3 +90,72 @@ test("a ✗ row after a failed heal shows both errors on their own lines", () =>
 test("a plain ✗ row shows the error alone", () => {
   assert.equal(formatStepFailure({ error: "no such button" }, false), "no such button");
 });
+
+// ── isSkippedPass: the second mirrored predicate ───────────────────────────
+//
+// A step the run decided against rides the PASS event with `output: 'skipped'`
+// (stories/control-flow.md). The extension host asks runner-core; the panel
+// cannot import it, so it asks its own copy. A copy that drifts paints the
+// untaken branch of a chain green in one surface and grey in the other, which
+// is exactly the divergence this file exists to prevent.
+
+for (const [i, event] of [
+  { type: "step:pass", line: 1, output: "skipped" },
+  { type: "step:pass", line: 1 },
+  { type: "step:pass", line: 1, output: "" },
+  { type: "step:pass", line: 1, output: "Skipped" },
+  { type: "step:pass", line: 1, output: "the Cash checkbox is ticked" },
+  {},
+].entries()) {
+  test(`webview isSkippedPass matches runner-core for case ${i}`, () => {
+    assert.equal(
+      inlineSkipped(event),
+      coreSkipped(event),
+      `divergent verdict for ${JSON.stringify(event)}`,
+    );
+  });
+}
+
+test("only the exact sentinel counts as a step that did not run", () => {
+  assert.equal(coreSkipped({ output: "skipped" }), true);
+  assert.equal(coreSkipped({ output: "skipped: no branch held" }), false);
+  assert.equal(coreSkipped({}), false);
+});
+
+// ── skipPanelLine + SKIP_GLYPH: the third mirrored pair ────────────────────
+//
+// `step-skip-core.ts` and `failure-text-inline.js` BOTH said this file pinned
+// them. It did not — it covered `describeStepFailure`, `formatStepFailure` and
+// `isSkippedPass` and nothing else — so the two copies of the sentence agreed
+// only by luck, and a reword of one would have merged cleanly and shipped two
+// vocabularies for one event. That is the exact drift the consolidation was
+// for, so the claim is made true here rather than deleted from the docstrings.
+
+test("the skip glyph is one codepoint on both sides", () => {
+  assert.equal(inlineGlyph, coreGlyph);
+  assert.equal(coreGlyph.codePointAt(0), 0x25cc, "U+25CC DOTTED CIRCLE");
+});
+
+for (const [i, args] of [
+  [12],
+  [12, 'Not run: step 3 returned from "Sign in"'],
+  // The report-cell sentence, whose leading "Skipped:" both copies strip —
+  // `◌ Step on line 5 skipped — Skipped: …` stutters.
+  [5, "Skipped: another branch of this decision was taken"],
+  [5, "skipped:   the list was empty"],
+  // Degenerate reasons: absent, empty, whitespace, and a reason that is
+  // nothing BUT the prefix. None may leave a dangling dash.
+  [5, ""],
+  [5, "   "],
+  [5, "Skipped:"],
+  [5, undefined],
+].entries()) {
+  test(`webview skipPanelLine matches step-skip-core for case ${i}`, () => {
+    assert.equal(
+      inlinePanelLine(...args),
+      corePanelLine(...args),
+      `divergent skip sentence for ${JSON.stringify(args)}`,
+    );
+    assert.doesNotMatch(corePanelLine(...args), /—\s*$/, "no dangling em dash");
+  });
+}

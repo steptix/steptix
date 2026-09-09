@@ -49,9 +49,28 @@ describe('isConditionalStep', () => {
   it('still says yes to an ordinary conditional', () => {
     expect(isConditionalStep('If prompted for MFA, enter the code')).toBe(true);
     expect(isConditionalStep('When prompted, click Not now')).toBe(true);
-    // Near misses stay ordinary conditionals: the return was never claimed.
-    expect(isConditionalStep('If the page shows X then return to the dashboard')).toBe(true);
-    expect(isConditionalStep('If the title is Dashboard then retun')).toBe(true);
+  });
+
+  it('says no to a near miss, because ` then ` makes it a CONTROL line', () => {
+    // These two rows used to assert `true`, and the change is the composition
+    // with stories/control-flow.md rather than a regression in either feature.
+    //
+    // `then return to the dashboard` is still not flow control — the grammar
+    // is `$`-anchored, and the trailing words leave it unmatched — so it falls
+    // through to the OTHER grammar, where ` then ` is the opt-in that turns an
+    // `If` into a decision the framework dispatches. The line is a chain whose
+    // tail is the prose "return to the dashboard", which is what an author
+    // means by it; what it is not, either way, is a watch. A typo (`retun`) is
+    // the same story: no return was claimed, but the `then` was.
+    //
+    // The direction of the change is the safe one. A watch polls for the
+    // condition and performs the whole line as prose; a chain judges the
+    // condition once and dispatches the tail. Nothing green is claimed for
+    // work not done in either reading.
+    expect(isConditionalStep('If the page shows X then return to the dashboard')).toBe(false);
+    expect(isConditionalStep('If the title is Dashboard then retun')).toBe(false);
+    // Without the ` then ` it is a watch again, and always was.
+    expect(isConditionalStep('If the page shows X, go back to the dashboard')).toBe(true);
   });
 });
 
@@ -116,11 +135,24 @@ describe('grouping is otherwise unchanged', () => {
     expect(groups.get(1)!.continuationStep.instruction).toContain('no continuation');
   });
 
-  it('groups a near-miss line, because it is not flow control', () => {
-    // `then return to the dashboard` reads as navigate-back and stays an
-    // ordinary conditional — so it DOES take a continuation, and must.
+  it('forms no group for a near-miss line: it is a control line, not a watch', () => {
+    // `then return to the dashboard` reads as navigate-back and is NOT flow
+    // control — but the ` then ` makes it a control line, and a control line
+    // is excluded from grouping for the same reason a flow-control step is:
+    // `executeBranchedStep` would perform the whole line as the model's
+    // fallback and the framework would never dispatch the tail
+    // (stories/control-flow.md §Grouper).
     const groups = identifyStepGroups([
       'If the page shows the old layout then return to the dashboard',
+      'Click Save',
+    ]);
+    expect(groups.size).toBe(0);
+  });
+
+  it('still groups the same line written as a watch', () => {
+    // The comma-and-no-`then` form, which is what a watch has always been.
+    const groups = identifyStepGroups([
+      'If the page shows the old layout, go back to the dashboard',
       'Click Save',
     ]);
     expect(groups.get(0)!.continuationStep.instruction).toBe('Click Save');

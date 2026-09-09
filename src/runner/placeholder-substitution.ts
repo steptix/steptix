@@ -69,6 +69,16 @@ const NAME_LIKE_FIELDS: ReadonlySet<string> = new Set([
  * where a literal `***` means the model copied the mask out of the values block
  * instead of naming the placeholder. `expected` and `condition` are excluded on
  * purpose: "the password field shows ***" is a legitimate thing to assert.
+ *
+ * Re-argued in review 5 (finding 6) now that the DOM snapshot writes `***` over
+ * a secret field's value: a model that has just read `value="***"` could assert
+ * on the mask rather than on the page. The exclusion still stands, because the
+ * counter-case above is real and a refusal here would forbid it outright — and
+ * an assertion is not a keystroke. The exposure is narrowed at the other end
+ * instead: the field rule no longer masks ordinary names (`passenger1_name`),
+ * and rule 8a of the step prompt (src/ai/prompts.ts) already teaches what `***`
+ * means. If a real run is seen asserting on the mask, the fix is a second,
+ * assert-only set with a softer message, not adding these two here.
  */
 const TYPED_FIELDS: ReadonlySet<string> = new Set([
   'value',

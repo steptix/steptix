@@ -30,7 +30,8 @@ export type ErrorCode =
   | 'TB027'
   | 'TB028'
   | 'TB030'
-  | 'TB031';
+  | 'TB031'
+  | 'TB032';
 
 /** A button shown beneath the inline banner — `command` is a VS Code command id. */
 export interface ErrorAction {
@@ -82,6 +83,13 @@ export interface ErrorContextMap {
   TB028: { serverUrl: string; reason: string; logPath?: string; logTail?: string };
   TB030: Record<string, never>;
   TB031: Record<string, never>;
+  /** A chain member the chain cannot reach: an `Else if` / `Otherwise` that
+   *  follows no decision — most often because an `[input:]` step sits between
+   *  it and the `If` it belongs to — or one written BELOW the `Otherwise` that
+   *  ended the chain. `detail` is `danglingChainMemberError`'s message, which
+   *  is the CLI parser's own wording, naming the line and what is wrong with
+   *  where it sits (stories/control-flow.md). */
+  TB032: { detail: string };
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +213,18 @@ const CATALOGUE: { [C in ErrorCode]: Builder<C> } = {
       { label: 'Stop Anyway', command: 'testbench.stop' },
       { label: 'Cancel', command: 'testbench.dismissError' },
     ],
+  }),
+  // Its own code rather than TB024's: that one's wording is section-specific
+  // ("This test's inline sections can't be run as written"), and this refusal
+  // has nothing to do with sections — it is about a chain the run cannot make
+  // sense of. The `detail` is `danglingChainMemberError`'s message
+  // (runner-core/src/step-lines.ts), which is the CLI parser's own wording and
+  // already names the line and what it must follow — so the fix here says only
+  // why the refusal comes before the run rather than during it, and does not
+  // repeat advice the diagnosis has given.
+  TB032: (ctx) => ({
+    diagnosis: `This test can't be run as written — ${ctx.detail}`,
+    fix: 'Edit the line and run again. TestBench refuses up front because a decision cannot be split across two requests: a member with nothing to be the alternative of would perform its branch unconditionally, and one written below the `Otherwise` that ended the chain is never the branch the decision picks.',
   }),
 };
 

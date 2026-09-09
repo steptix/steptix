@@ -8,6 +8,7 @@ import {
 } from '../parser/interpolate-env-data.js';
 import { isCodeStep } from '../parser/invocation-parser.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import { parseControlLine } from '../parser/control-line.js';
 import { logger } from '../utils/logger.js';
 import {
   actionsOf,
@@ -147,8 +148,25 @@ export interface PlanEntry {
   /** Whether this compile means to write an entry for it (the whole-test
    *  prompt's scope marking). */
   inScope: boolean;
+  /**
+   * The framework performs this step itself, so it is not a step a compile
+   * could ever write — a control line's guard, which is dispatched rather than
+   * executed (stories/control-flow.md, decision 12).
+   *
+   * Separate from `inScope: false`, which a step that already HAS an entry
+   * also carries: that step is one this compile could write and is choosing
+   * not to, and the summary's denominator has always counted it. A dispatched
+   * step is not in the denominator at all, or a two-branch chain reports
+   * "2 of 4" for a test with two compilable steps in it.
+   */
+  dispatched?: boolean | undefined;
   /** 1-based source line, for the gutter and the run log. */
   line?: number | undefined;
+}
+
+/** How many of these steps a compile counts — everything it did not dispatch. */
+function countable(entries: readonly PlanEntry[]): number {
+  return entries.reduce((n, entry) => n + (entry.dispatched === true ? 0 : 1), 0);
 }
 
 /** One finished step, offered to the compiler as the run moves on. */
@@ -234,9 +252,23 @@ export function generationRefusal(input: {
   if (isCodeStep(input.text.trim())) {
     return 'a [skill:] or [tool:] step is expanded or dispatched, never generated';
   }
+  // Flow control is asked BEFORE the control line, because the two grammars
+  // overlap on `If <condition>, then return` and flow control owns that line
+  // (stories/control-flow.md §"Composition with `If … then return`"). Only
+  // the UNCONDITIONAL form is refused: the conditional one compiles, into
+  // `if (…) step.exit()`.
   const flowControl = parseFlowControlStep(input.text.trim());
   if (flowControl && flowControl.body === undefined) {
     return 'a Return/Stop step is dispatched, not compiled';
+  }
+  // A control line, for the same reason: the framework asks a model whether a
+  // condition holds and performs nothing, so there is no transcript to
+  // generate an entry from (stories/control-flow.md, decision 12). Belt and
+  // braces — the run loops never offer a guard — but `offer` is public and a
+  // generated entry for an `If` line would replace the decision with code that
+  // acts.
+  if (parseControlLine(input.text.trim())) {
+    return 'a control line is dispatched, never generated';
   }
   if (!input.binding) return 'the step has no code-behind file to bind into';
   if (input.status === 'skipped') return SKIPPED_BY_RETURN_REFUSAL;
@@ -330,14 +362,14 @@ export class LiveCompiler {
   private lastRun: Promise<LastRunStep[]> | undefined;
 
   /** How many steps this compile is FOR, blocks included — the summary's
-   *  `totalSteps`. Starts as the plan's length and shrinks when a block is
-   *  bounded to a slice (`setSlice`): a single-step compile of a six-step
-   *  skill is "1 of 1", not "1 of 6". */
+   *  `totalSteps`. Starts as the plan's countable length and shrinks when a
+   *  block is bounded to a slice (`setSlice`): a single-step compile of a
+   *  six-step skill is "1 of 1", not "1 of 6". */
   private scopedTotal: number;
 
   constructor(private readonly options: LiveCompileOptions) {
     this.plan = [...options.plan];
-    this.scopedTotal = this.plan.length;
+    this.scopedTotal = countable(this.plan);
     this.signal = options.signal;
     this.emit = options.emit;
     this.note = options.note;
@@ -358,7 +390,7 @@ export class LiveCompiler {
   ): void {
     this.offset = this.plan.length;
     this.plan.push(...plan);
-    this.scopedTotal += plan.length;
+    this.scopedTotal += countable(plan);
     this.signal = signal;
     if (stream) {
       this.emit = stream.emit;
@@ -385,8 +417,8 @@ export class LiveCompiler {
     for (let i = 0; i < blockLen; i++) {
       if (i < start || i > end) this.plan[this.offset + i]!.inScope = false;
     }
-    const size = Math.max(0, end - start + 1);
-    this.scopedTotal += size - blockLen;
+    const block = this.plan.slice(this.offset);
+    this.scopedTotal += countable(block.slice(start, end + 1)) - countable(block);
   }
 
   /** How many steps of this run the compiler has seen, blocks included. Used

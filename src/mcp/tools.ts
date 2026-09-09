@@ -772,25 +772,28 @@ async function withProject(
  * supplies `in "<tab>"`. It is dropped once the tally spells the statuses out,
  * because `… of 7 passed` would say "passed" twice.
  *
- * Two different things reach the fold as `skipped` and the clause names
- * whichever actually happened, counted apart. A return is the test doing what
- * it was told and needs nothing from the reader; an `[input:]` /
- * `[interactive]` step the server declined to run unattended needs a human
- * before it can ever pass, and the fold already warns about it in those words.
- * One clause for both would send the agent after the wrong thing half the time,
- * so a run that managed both says both.
+ * Three different things reach the fold as `skipped` and the clause names
+ * whichever actually happened, counted apart. A return, and a branch a
+ * decision did not choose, are both the test doing what it was told and need
+ * nothing from the reader; an `[input:]` / `[interactive]` step the server
+ * declined to run unattended needs a human before it can ever pass, and the
+ * fold already warns about it in those words. One clause for all three would
+ * send the agent after the wrong thing most of the time, so a run that managed
+ * several says several.
  */
 function stepTally(steps: readonly Pick<FoldedStep, 'status' | 'skipCause'>[], verb: string): string {
   const passed = steps.filter((s) => s.status === 'passed').length;
   const skipped = steps.filter((s) => s.status === 'skipped');
   if (skipped.length === 0) return `${passed}/${steps.length} steps${verb ? ` ${verb}` : ''}`;
-  // An older server sends no `step:skip`, so a row can be `skipped` with no
-  // cause recorded. It came from `output: 'skipped'` — the only other source —
-  // which is the unattended one.
+  // An older server sends no `step:skip` and no `skipKind`, so a row can be
+  // `skipped` with no cause recorded. It came from `output: 'skipped'` — the
+  // only other source — which on such a server is the unattended one.
   const returned = skipped.filter((s) => s.skipCause === 'returned').length;
-  const unattended = skipped.length - returned;
+  const notTaken = skipped.filter((s) => s.skipCause === 'not-taken').length;
+  const unattended = skipped.length - returned - notTaken;
   const clauses = [
     returned > 0 ? `${returned} skipped (a step returned early)` : '',
+    notTaken > 0 ? `${notTaken} skipped (a branch that was not taken)` : '',
     unattended > 0 ? `${unattended} skipped (need a human)` : '',
   ].filter((c) => c !== '');
   return `${passed} passed, ${clauses.join(', ')} of ${steps.length}`;

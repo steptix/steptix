@@ -270,6 +270,17 @@ export interface ExecutionConfig {
   promptOnAmbiguity: boolean;
   /** Maximum number of AI turns per step for multi-turn execution (default: 15) */
   maxTurns: number;
+  /**
+   * Cap on the passes a single `While` or `Repeat … until` loop line may make
+   * before the framework gives up (default: 25). A per-line `, up to N times`
+   * suffix overrides it for that line; `For each` ignores it, since the list is
+   * its bound.
+   *
+   * Reaching the cap with the exit condition still unmet **fails the loop line**
+   * rather than exiting quietly — a loop that hit its cap has not done what the
+   * author asked (stories/control-flow.md, decision 9).
+   */
+  maxLoopIterations: number;
   /** Drop into a REPL when a step fails after retries (headed + TTY only). */
   interactiveOnFailure: boolean;
   /** Default `## Hooks` entries merged into every test unless the test sets

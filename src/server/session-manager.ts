@@ -9,6 +9,7 @@ import {
   isBrowserClosed,
   isSkippableStep,
   parseOutputPrefixes,
+  UNATTENDED_SKIP_REASON,
 } from './run-helpers.js';
 import type { Config, EffectiveSettings, RunSettings } from '../config/types.js';
 import { mergeRunSettings, resolveRunSettings } from '../config/run-settings.js';
@@ -36,6 +37,31 @@ import {
 } from '../browser/manager.js';
 import { executeStep, executeBranchedStep } from '../runner/step-executor.js';
 import { identifyStepGroups } from '../runner/step-grouper.js';
+import {
+  createControlState,
+  firstLoopInRange,
+  guardVisitEvaluates,
+  loopCompileRefusal,
+  planAfterStep,
+  planForStart,
+  returnExit,
+  snapEndAt,
+  type ControlRecord,
+} from '../runner/control-flow.js';
+import {
+  evaluateGuard,
+  guardHistoryLines,
+  guardResult,
+  guardRows,
+  eachSkipped,
+  isLoopRecord,
+  LoopRuntime,
+  skipReasonFor,
+  skippedResult,
+  SkipQueue,
+  type LoopRecord,
+} from '../runner/control-runtime.js';
+import { parseControlLine } from '../parser/control-line.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
@@ -553,6 +579,21 @@ export type RunEvent =
       type: 'step:pass';
       line: number;
       output?: string;
+      /**
+       * Why the step never ran — sent only with `output: 'skipped'`, and the
+       * same sentence the report row carries. Mirrors `StepPassEvent.reason`
+       * in runner-core/src/protocol.ts, where the compatibility rule lives.
+       */
+      reason?: string;
+      /**
+       * Which kind of skip — sent only with `output: 'skipped'`.
+       * `'unattended'` is an `[input:]` / `[interactive]` step this server
+       * would not run with nobody watching; `'not-taken'` is a branch the
+       * decision did not choose or a loop body that ran no passes. Absent
+       * means `'unattended'`, which is what an older server meant by saying
+       * nothing (runner-core/src/protocol.ts, `StepPassEvent.skipKind`).
+       */
+      skipKind?: 'unattended' | 'not-taken';
       screenshot?: string;
       frame?: FrameInfo;
       fromCache?: boolean;
@@ -1206,12 +1247,17 @@ function loopMarkerFor(
   let current: FrameInfo | undefined = frames[frameId];
   while (current && !seen.has(current.id)) {
     seen.add(current.id);
-    if (current.iteration !== undefined && current.iterationCount !== undefined) {
+    // `iterationCount` is deliberately NOT required: a runtime loop
+    // (`While …`, `Repeat … until …`) pushes its frames mid-loop with no total
+    // to give, and the count is back-filled when the loop ends
+    // (stories/control-flow.md). Requiring it here would have made every such
+    // frame read as unlooped and dropped the band from the report entirely.
+    if (current.iteration !== undefined) {
       return {
         kind: 'iteration',
         ...(current.skillName && { label: current.skillName }),
         index: current.iteration,
-        count: current.iterationCount,
+        ...(current.iterationCount !== undefined && { count: current.iterationCount }),
         values: { ...(inputsByFrame[current.id] ?? {}) },
       };
     }
@@ -2536,6 +2582,18 @@ export class SessionManager {
     /** Parallel to `effectiveSteps` — each step's authored match-side text.
      *  Absent expansion, the request's steps are already that (contract §2.1). */
     let expansionRawSteps: string[] = request.steps;
+    /**
+     * Parallel to `effectiveSteps` — non-null on a control-flow guard, with the
+     * index range of its body and the end of its chain
+     * (stories/control-flow.md §Design).
+     *
+     * Obtained from the server's OWN `expandSkills` call rather than from the
+     * wire: a control line is `kind: 'step'` like any other, and the client
+     * neither knows nor needs to know which lines are guards. All-null for
+     * every batch with no control lines, which is every batch written before
+     * this feature.
+     */
+    let expansionControls: (ControlRecord | null)[] = request.steps.map(() => null);
     let codeBehind: CodeBehindRegistry = CodeBehindRegistry.empty();
     // Per-skill-frame snapshot of the caller-supplied parameter values
     // recorded by the expander. Merged into `frame:scope` on entry so
@@ -2991,7 +3049,14 @@ export class SessionManager {
     // the per-step origin so step-into-aware clients see `frame:push` /
     // `frame:pop` events around each skill body. Without `skillsDir` the
     // existing flow is preserved verbatim (raw steps shipped to the runner).
-    if (request.skillsDir || hasSections(request)) {
+    // …and when any step is a control line, for the same reason the CLI's
+    // parser widened its own gate: the tail is a step the expander has to
+    // place, and skipping expansion would ship `While the Next button is
+    // enabled, Go to the next page` to the model as one prose instruction
+    // (stories/control-flow.md). A file with a chain but no sections and no
+    // skills reaches the server exactly like that.
+    const hasControlLines = request.steps.some((step) => parseControlLine(step) !== null);
+    if (request.skillsDir || hasSections(request) || hasControlLines) {
       try {
         const expansion = await expandSkills(
           request.steps,
@@ -3036,6 +3101,7 @@ export class SessionManager {
         expansionOrigins = expansion.origins;
         expandedFrames = expansion.frames;
         expansionRawSteps = expansion.rawSteps;
+        expansionControls = expansion.controls;
         // Translate ExpandedFrame (parser shape) into FrameInfo (wire shape):
         // the parser uses `invocationLine | null`, the wire carries a non-null
         // line. We pin the test-frame line to 0 when absent; consumers treat
@@ -3238,6 +3304,11 @@ export class SessionManager {
      * serialized in step order, and the run never waits on it.
      */
     let liveCompile: LiveCompiler | undefined;
+    // A compile that reaches into a loop is refused — but the check needs the
+    // batch's `[startIndex, endIndex]`, which is not computed until well below
+    // this point, so it lives there rather than here (search
+    // `firstLoopInRange`). A chain is fine either way: its steps run at most
+    // once, and an untaken branch is simply not attempted.
     if (request.compile !== undefined && request.testFilePath) {
       const testFilePath = request.testFilePath;
       const plan = effectiveSteps.map((step, i) => {
@@ -3250,7 +3321,19 @@ export class SessionManager {
           // step is. The whole-test block has to read the same for step 1 as
           // for step 9, and what step 9 will need is not knowable when step 1
           // is generated.
-          inScope: request.compile === 'steps' || binding?.entry === undefined,
+          //
+          // A control line is never in scope, whatever the mode: the framework
+          // dispatches it and it performs nothing, so there is no transcript to
+          // write from — and a model told an `If …, then …` line was in scope
+          // would offer code that makes the decision itself
+          // (stories/control-flow.md, decision 12).
+          inScope:
+            expansionControls[i] === null &&
+            (request.compile === 'steps' || binding?.entry === undefined),
+          // …and out of the denominator entirely, which `inScope: false` alone
+          // does not say: a step that already has an entry is also out of
+          // scope, and it IS one of the steps this compile is about.
+          ...(expansionControls[i] !== null && { dispatched: true }),
           ...(line > 0 && { line }),
         };
       });
@@ -3495,6 +3578,28 @@ export class SessionManager {
       : effectiveSteps;
     const stepGroups = identifyStepGroups(interpolatedSteps);
 
+    // ── Control flow (stories/control-flow.md) ───────────────────────────
+    //
+    // Three hooks, the same three the CLI and the Runner UI have: `planForStart`
+    // once, `planAtGuard` → gather → `planAfterGuard` before a guard, and
+    // `planAfterStep` after every step. The decisions live in the shared
+    // planner; what is local here is the event stream — frame clones per pass,
+    // `step:pass output:'skipped'` for an untaken branch.
+    const controls = expansionControls;
+    const hasControls = controls.some((record) => record !== null);
+    const controlState = createControlState(runConfig.execution.maxLoopIterations);
+    const loops = new LoopRuntime();
+    const skipQueue = new SkipQueue();
+    const skipReasons = new Map<number, string>();
+    /** Steps inside a loop body opt out of the per-step action cache: the
+     *  cache rewrites one value per line and a pass is a different value
+     *  (stories/control-flow.md, decision 12 — the rows story's reason). */
+    const loopBodySteps = new Set<number>();
+    for (const record of controls) {
+      if (!record || !isLoopRecord(record)) continue;
+      for (let k = record.bodyStart; k <= record.bodyEnd; k++) loopBodySteps.add(k);
+    }
+
     // ─── Frame stack ────────────────────────────────────────────────────────
     //
     // For step-into-aware clients: maintain a stack of currently-pushed
@@ -3553,6 +3658,19 @@ export class SessionManager {
         });
       }
     };
+    /**
+     * The frame id to EMIT for expanded step `i`.
+     *
+     * Normally the one the expander minted. Inside a loop pass it is that
+     * frame's per-pass clone: the flat step list does not grow when a loop
+     * runs again, so the same indices are re-executed under a fresh frame id
+     * and every consumer that reads a frame id from an event sees a frame it
+     * has not seen before — which is what a fresh expansion already looks
+     * like (stories/control-flow.md, decision 8).
+     */
+    const emittedFrameId = (i: number): string =>
+      loops.frameFor(expansionOrigins?.[i]?.frameId ?? '');
+
     const frameInfoFor = (i: number): FrameInfo | undefined => {
       if (!expansionOrigins || !expansionFrames) return undefined;
       const origin = expansionOrigins[i];
@@ -3564,7 +3682,7 @@ export class SessionManager {
           ? { id: '', parentId: null, kind: 'test', uri: request.testFilePath, line: 0 }
           : undefined;
       }
-      return expansionFrames[origin.frameId];
+      return expansionFrames[loops.frameFor(origin.frameId)];
     };
 
     /**
@@ -3947,6 +4065,12 @@ export class SessionManager {
           endGroup.conditionalSteps[endGroup.conditionalSteps.length - 1]!.index;
         if (lastInGroup > endIndex) endIndex = lastInGroup;
       }
+      // The same snap for a control structure: an `endAt` landing on a guard
+      // runs to the end of what that guard opens — a chain's `chainEnd`, a
+      // loop's `bodyEnd` — because a guard evaluated with its body sliced away
+      // is a decision with no consequence (stories/control-flow.md §"Runs that
+      // start or end mid-structure"). Idempotent on every ordinary step.
+      if (hasControls) endIndex = snapEndAt(controls, endIndex);
       logger.info(
         `Session "${sessionId}": bounded re-run to step ${endIndex + 1}/${stepsTotal} (${endUri}:${endLine})`,
       );
@@ -4029,10 +4153,253 @@ export class SessionManager {
       }
     }
 
+    // ── A compile that reaches into a loop ────────────────────────────────
+    //
+    // Refused before anything runs (stories/control-flow.md, decision 12): an
+    // entry is placed at `spans[occurrence]`, occurrence is counted per step
+    // line, and a loop body runs the same lines a number of times only the page
+    // decides — so the run would offer several transcripts for one slot and the
+    // plan's "not attempted" arithmetic would count a step that ran three times
+    // as one.
+    //
+    // Scoped to THIS batch's `[startIndex, endIndex]`, which is why it sits
+    // here rather than beside the plan: the first version tested the whole
+    // file, so a bounded Compile This Step on a step nowhere near the loop was
+    // refused — and told to compile the section the loop runs, which the same
+    // check would have refused as well. A section compile arrives as the
+    // section's own steps (`compileScope`), detached from the guard, and now
+    // passes for the same reason a step outside the loop does: no loop
+    // structure overlaps the slice.
+    if (request.compile !== undefined) {
+      const loopIndex = firstLoopInRange(expansionControls, startIndex, endIndex);
+      if (loopIndex !== undefined) {
+        const message = loopCompileRefusal(
+          expansionRawSteps[loopIndex] ?? effectiveSteps[loopIndex] ?? '',
+        );
+        logger.error(`Session "${sessionId}": ${message}`);
+        emit({ type: 'output', msg: message, kind: 'error' });
+        await refuseOpenCompile(message);
+        emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
+        return {
+          sessionId,
+          status: 'error',
+          stepsCompleted: 0,
+          stepsTotal,
+          results: [],
+          outputs: session.outputs,
+          outputSources: { ...session.outputSources },
+          error: { step: loopIndex + 1, message },
+          pageTitle: '',
+        };
+      }
+    }
+
     // Step indexes that have already had their breakpoint pause consumed
     // in this batch. Without this, the loop would re-pause forever on
     // the same step after a Continue.
+    //
+    // Keyed by flat step INDEX, which is the same integer on every pass of a
+    // loop — only the frame id changes. So the set has to be re-armed when a
+    // loop starts a new pass, or one pause disables that breakpoint for the
+    // rest of the run: `rearmLoopBreakpoints` below, and the reason it
+    // exists.
     const consumedBreakpoints = new Set<number>();
+
+    /**
+     * A new pass of a loop re-arms every breakpoint inside it.
+     *
+     * `stories/control-flow.md` §"Painting, frames and the report" says "A
+     * breakpoint on a body line fires on every pass". It fired once. Measured
+     * live (scratchpad/liverun-2.md §2): a `While` took three passes with a
+     * breakpoint on its body line and the run log holds exactly one
+     * `step:awaiting` for that line — the other two passes ran straight
+     * through, silently, and the author's breakpoint was gone for the rest of
+     * the run.
+     *
+     * Narrow on purpose, so the reason the set exists survives: only this
+     * loop's own range is dropped, and only where a pass is actually
+     * starting. The resume batch after a pause is unaffected — the index it
+     * resumed at is the guard's, cleared here before its body runs and after
+     * that visit's own pause has already been taken.
+     *
+     * The guard's own index goes too, so a breakpoint on a `While` line
+     * pauses before each evaluating visit rather than only the first. The
+     * whole `[bodyStart, bodyEnd]` range goes, which takes nested guards and
+     * their bodies with it — a new outer pass re-arms everything inside it.
+     */
+    const rearmLoopBreakpoints = (guard: number, record: ControlRecord): void => {
+      if (consumedBreakpoints.size === 0) return;
+      consumedBreakpoints.delete(guard);
+      for (let k = record.bodyStart; k <= record.bodyEnd; k++) consumedBreakpoints.delete(k);
+    };
+
+    /**
+     * Record one step the run decided not to take.
+     *
+     * The convention the branched path already set: `step:pass` with
+     * `output: 'skipped'` on the step's own line. It stays because the
+     * extension is an HTTP client of whichever server the workspace points at,
+     * and a client that stopped reading it would repaint the untaken branch
+     * green against a server nobody had restarted.
+     *
+     * What rides with it now is `reason` and `skipKind` — additive fields an
+     * older server simply omits. `reason` is the sentence the report row
+     * already carried, so the hover and the log lines can say WHY rather than
+     * only that something was skipped; `skipKind: 'not-taken'` is how a
+     * consumer tells this apart from the `[input:]` skip that used to be the
+     * only producer of this event (see `src/mcp/run-fold.ts`, which warned
+     * that an untaken `Otherwise` "needs a human" until it could).
+     *
+     * The `results` entry is `'skipped'`, not `'passed'`: that union gained a
+     * third value with `stories/step-flow-control.md` decision 9, and the
+     * docstring on `StepResultResponse` says exactly why — "reporting it
+     * `passed` would be a green row for work that never happened".
+     * `fullStepResults` has always carried the real status, which is what the
+     * report renders as `—`.
+     *
+     * The frame stack is deliberately NOT transitioned: nothing ran in that
+     * frame, and pushing it would report the run as having entered a section
+     * it never entered. The event carries the frame explicitly, which is what
+     * clients scope the line with.
+     */
+    const emitSkippedStep = (k: number): void => {
+      // Never outside this batch's slice: a bounded run reports on the steps it
+      // was asked about, and a chain's untaken half can sit past `endAt`.
+      if (k < startIndex || k > endIndex) return;
+      const instruction = effectiveSteps[k] ?? '';
+      const frame = frameInfoFor(k);
+      const reason = skipReasons.get(k) ?? 'Skipped';
+      results.push({
+        step: instruction,
+        status: 'skipped',
+        actions: [],
+        screenshot: '',
+        reasoning: reason,
+        outputs: {},
+      });
+      const row = skippedResult({
+        index: k + 1,
+        instruction,
+        reason,
+        loop: loops.markerFor(k),
+      });
+      // The untaken tail's rows show under their section badge, which is what
+      // makes a skipped block readable as "the branch that was not taken"
+      // rather than as eight loose grey lines.
+      const skill = outermostSkillName(expansionOrigins?.[k]?.frameId, expansionFrames);
+      const section = outermostSectionName(expansionOrigins?.[k]?.frameId, expansionFrames);
+      if (skill) row.sourceSkill = skill;
+      if (section) row.sourceSection = section;
+      fullStepResults.push(row);
+      emit({
+        type: 'step:pass',
+        line: sourceLineFor(k),
+        output: 'skipped',
+        reason,
+        skipKind: 'not-taken',
+        ...(frame && { frame }),
+      });
+      // Counted, unlike a return's skips, which are deliberately not
+      // (decision 9, "it counts steps that EXECUTED"). The two producers
+      // disagree here and the divergence is documented rather than hidden —
+      // stories/control-flow.md §"What `stepsCompleted` counts". The
+      // `[input:]` skip path has incremented it since long before either
+      // feature, and `stepsCompleted` is what a client's progress bar counts
+      // against `stepsTotal`: a chain whose untaken half stopped counting
+      // would leave every branching run's bar short of the end.
+      stepsCompleted++;
+      session.totalStepsExecuted++;
+    };
+
+    /** Release every queued skipped step the run has now moved past, so the
+     *  report and the event stream both read in file order (see `SkipQueue`). */
+    const flushSkips = (before: number | 'all'): void => {
+      for (const k of before === 'all' ? skipQueue.takeAll() : skipQueue.take(before)) {
+        emitSkippedStep(k);
+      }
+    };
+
+    /** Where the run goes after step `i`: the next line, or back to a loop's
+     *  guard when `i` closed its body. The third of the planner's three hooks,
+     *  applied at every point the loop advances. */
+    const advanceAfter = (i: number): number => {
+      if (!hasControls) return i + 1;
+      const after = planAfterStep(controls, i, controlState);
+      return after ? after.next : i + 1;
+    };
+
+    /**
+     * Clone the tail's frames for a loop pass, and stamp the iteration.
+     *
+     * The flat list does not grow when a loop runs again — the runtime jumps
+     * back to the guard and re-runs the same indices — so the pass needs its
+     * own frame ids or every pass would paint into the previous one's frame.
+     * `iteration` goes on the OUTERMOST clone only (the tail's own frame): a
+     * skill invoked from inside the body is not itself an iteration of
+     * anything. `iterationCount` is omitted while a `While` / `Repeat` runs,
+     * which is the case runner-core's `FrameInfo` doc now names.
+     */
+    const cloneFramesForPass = (
+      guardIndex: number,
+      record: LoopRecord,
+      pass: { iteration: number; count?: number; bindings?: Record<string, string> },
+    ): void => {
+      if (!expansionFrames || !expansionOrigins) return;
+      const guardFrame = expansionOrigins[guardIndex]?.frameId ?? '';
+      // Monotonic per guard, so a loop nested inside another loop's body — whose
+      // `iteration` restarts at 1 on every entry — cannot re-mint an id it
+      // already used and overwrite that pass's frame in `expansionFrames`.
+      const ordinal = loops.currentPassOrdinal;
+      for (let k = record.bodyStart; k <= record.bodyEnd; k++) {
+        // Walk out from the step's own frame to the guard's, cloning each
+        // level THIS pass has not cloned yet. The test is the current pass's
+        // own alias map rather than `frameFor`: an alias an enclosing loop
+        // installed is not this pass's clone, and reading it as one gave every
+        // inner pass the outer pass's frame (see `clonedInCurrentPass`).
+        const chain: string[] = [];
+        let cur: string | undefined = expansionOrigins[k]?.frameId;
+        while (cur && cur !== '' && cur !== guardFrame && !loops.clonedInCurrentPass(cur)) {
+          chain.push(cur);
+          cur = expansionFrames[cur]?.parentId ?? undefined;
+        }
+        for (const original of chain.reverse()) {
+          const source = expansionFrames[original];
+          if (!source) continue;
+          const cloneId = `${original}~g${guardIndex}i${ordinal}`;
+          const parent = source.parentId ? loops.frameFor(source.parentId) : source.parentId;
+          const outermost = (source.parentId ?? '') === guardFrame;
+          expansionFrames[cloneId] = {
+            ...source,
+            id: cloneId,
+            parentId: parent,
+            ...(outermost && {
+              iteration: pass.iteration,
+              ...(pass.count !== undefined && { iterationCount: pass.count }),
+            }),
+          };
+          // The bound item, so the Variables view shows what this pass is
+          // working on — the frame-scoped twin of writing it into
+          // `resolvedParameters`, which is what makes `{{account}}` resolve.
+          frameInputs[cloneId] = {
+            ...(frameInputs[original] ?? {}),
+            ...(outermost ? (pass.bindings ?? {}) : {}),
+          };
+          loops.aliasFrame(original, cloneId);
+        }
+      }
+    };
+
+    // A run that starts INSIDE a tail treats that tail's guard as taken: the
+    // chain's other members and their tails are skipped, a partial loop pass
+    // counts as pass 1, and a `For each` resumes at the list's second element.
+    // Seeds `controlState`, so it runs before the first guard is visited.
+    if (hasControls) {
+      const startPlan = planForStart(controls, startIndex, controlState);
+      for (const k of eachSkipped(startPlan.skip)) {
+        skipReasons.set(k, 'Skipped: the run started inside another branch of this decision');
+        skipQueue.add([k]);
+      }
+    }
 
     try {
       for (let i = startIndex; i <= endIndex; i++) {
@@ -4073,6 +4440,10 @@ export class SessionManager {
         /** Set when this step ended its flow: the last index the return skips,
          *  which the loop tail resumes after (stories/step-flow-control.md). */
         let flowControlJumpTo: number | null = null;
+        /** …and whether that flow sat inside a control body, which is what
+         *  lets a loop re-evaluate after a return ends one of its passes
+         *  (`returnExit`, src/runner/control-flow.ts). */
+        let flowControlEnclosed = false;
         // Baseline for this step's token attribution, read back below if the
         // step turns out to have healed a broken code-behind entry.
         tokensAtStepStart = session.tokenTracker.runTotal;
@@ -4084,11 +4455,25 @@ export class SessionManager {
         // value on a re-run (stories/variable-assignment.md §Locked). Its
         // template is resolved inside the branch, below.
         const setStep = parseSetStep(originalStep);
-        // `If … then return` / `… then stop`, read off the AUTHORED line, before
-        // interpolation (stories/step-flow-control.md, decision 2). The claim is
-        // textual and must be the same answer in every runner whatever a `{{…}}`
-        // in the body holds; the model only judges the CONDITION, and only on
-        // the conditional form.
+        // `If … then return` / `… then stop`, read off `originalStep` — before
+        // the runtime `{{…}}` and `${…}` substitution two lines down
+        // (stories/step-flow-control.md, decision 2). The claim is textual and
+        // must be the same answer in every runner whatever a `{{…}}` in the
+        // body holds; the model only judges the CONDITION, and only on the
+        // conditional form.
+        //
+        // "Before interpolation" means that substitution and no other. This is
+        // the EXPANDER's output, so a skill call's arguments and a looped
+        // section's row values are already in it, and the same is true of the
+        // CLI (`test.steps[i]`, whose own comment names it "the same form the
+        // server has always held as `originalStep`") and the Runner UI. Three
+        // runners, one text, one answer — which is the property decision 2 is
+        // actually about. The narrower "the line exactly as typed" is
+        // `expansionRawSteps[i]`, used further down for the REASON strings and
+        // not for the claim, because the server's wire shape carries no
+        // `rawSteps` for a looped section body (contract §3.2) and reading the
+        // claim there would make the server disagree with the CLI for exactly
+        // that shape.
         const flowControlClaim = setStep ? null : parseFlowControlStep(originalStep);
         // The unconditional form — a step whose WHOLE text is the tail, so
         // `Stop running the remaining steps` as much as `Return` — has no
@@ -4165,6 +4550,16 @@ export class SessionManager {
         if (group && i === group.conditionalSteps[0]!.index) {
           logger.info(`Session "${sessionId}": conditional group at step ${i + 1}`);
 
+          // Anything an earlier decision skipped, before this group says
+          // anything — every other result-producing path in this loop flushes
+          // first, so a chain's untaken half stays in file order on the wire.
+          //
+          // No loop marker is stamped here, unlike the CLI's twin of this
+          // block: the server records no `fullStepResults` row for a branched
+          // step at all (only an MCP-facing `results` entry, which has no
+          // `loop` field), so there is nothing here to band.
+          if (hasControls) flushSkips(i);
+
           let branchedResults: StepResult[];
           try {
             branchedResults = await executeBranchedStep(group, stepsTotal, {
@@ -4183,6 +4578,15 @@ export class SessionManager {
               resolvedParameters,
               pageTracker: session.browserSession.pageTracker,
               browserTracker: session.browserTracker,
+              // The poller reads the page on every poll and sends the snapshot
+              // to the model, so it needs the same secret set the step prompt
+              // and the guard get — `secretsFor` consults `envData` only when
+              // it is there, so without this a `${env.PASSWORD}` typed into a
+              // text-typed field went to the model in full on this path while
+              // every ordinary step showed `***` (review 4, finding 3). Same
+              // spread as the `evaluateGuard` call below.
+              ...(envDataCtx && { envData: envDataCtx }),
+              ...(unmaskNames.size > 0 && { unmask: unmaskNames }),
               ...(signal && { signal }),
             });
           } catch (err) {
@@ -4218,8 +4622,13 @@ export class SessionManager {
             const screenshotValue = result.screenshotBase64
               ? `data:image/png;base64,${result.screenshotBase64}`
               : '';
-            const resultStatus: 'passed' | 'failed' | 'error' =
-              result.status === 'skipped' ? 'passed' : result.status;
+            // Reported as recorded. The narrowing that used to sit here —
+            // `'skipped' ? 'passed'` — predates `StepResultResponse` gaining
+            // `'skipped'` (decision 9), and it greened the branched path's own
+            // untaken members: a conditional group records every unmatched
+            // outcome `skipped` ("outcome N matched instead"), which is the
+            // same shape a chain's untaken half has and must read the same way.
+            const resultStatus: StepResultResponse['status'] = result.status;
 
             results.push({
               step: effectiveSteps[result.index] ?? result.instruction,
@@ -4255,8 +4664,9 @@ export class SessionManager {
             }
           }
 
-          // Skip past all steps in this group
-          i = group.continuationStep.index;
+          // Skip past all steps in this group, then let control flow have its
+          // say: the continuation step can be a loop body's last step.
+          i = advanceAfter(group.continuationStep.index) - 1;
 
           if (branchFailed) break;
           continue;
@@ -4272,7 +4682,10 @@ export class SessionManager {
         // frame:push to scope the line to a file. `frameForStep` is spread
         // into each step event below so step-into-aware clients can attach
         // origin metadata without legacy clients seeing a new mandatory field.
-        const stepFrameId = expansionOrigins?.[i]?.frameId ?? '';
+        // The EMITTED id, so a loop pass transitions into its own clone of the
+        // tail's frames and out of the previous pass's — one `frame:pop` /
+        // `frame:push` pair per pass, from the machinery that already does it.
+        const stepFrameId = emittedFrameId(i);
         transitionToFrame(stepFrameId);
         const frameForStep = frameInfoFor(i);
         const frameSpread: { frame?: FrameInfo } = frameForStep ? { frame: frameForStep } : {};
@@ -4354,6 +4767,214 @@ export class SessionManager {
           }
         }
 
+        // ── Control flow: the guard decides, the planner says what follows ──
+        //
+        // After the breakpoint check, so a breakpoint on a guard line pauses
+        // BEFORE the decision. Before everything else: a guard is not a page
+        // step — no cache, no code-behind, no compile, no `executeStep`
+        // (stories/control-flow.md §"What is deliberately unchanged").
+        //
+        // A breakpoint pauses on the guard's first visit whatever that visit
+        // asks (`consumedBreakpoints` allows one pause per step index per
+        // pass — `rearmLoopBreakpoints` is what makes it per pass), so a
+        // `Repeat` — whose first visit asks nobody, its body running before
+        // there is anything to decide — pauses on a visit that emits no
+        // `step:start`. That is fine and deliberate: `step:awaiting` is its own
+        // paint, cleared by the next `step:start` from anywhere, and the next
+        // one comes from the body's first step. Nothing is left stuck.
+        const controlRecord = hasControls ? (controls[i] ?? null) : null;
+        if (controlRecord) {
+          // Anything an earlier decision skipped, before this line starts.
+          flushSkips(i);
+          // Only a visit that will produce a guard row opens one. A visit that
+          // asks nobody records nothing and so emits no `step:pass` / `step:fail`
+          // either, and a `step:start` with nothing to close it left the line
+          // painted `running` for the rest of the run — a `For each`'s revisits
+          // are all of that shape, the exhausted-list one included
+          // (stories/control-flow.md §"What the live run found").
+          const evaluates = guardVisitEvaluates(controls, i, controlState);
+          if (evaluates) {
+            emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread });
+            logger.step(
+              session.totalStepsExecuted + 1,
+              session.totalStepsExecuted + stepsTotal - i,
+              redact(originalStep, secretsNow()),
+            );
+          }
+
+          let evaluation;
+          try {
+            evaluation = await evaluateGuard({
+              controls,
+              index: i,
+              state: controlState,
+              resolvedParameters,
+              executorOptions: {
+                page: session.browserSession.pageTracker.getActive(),
+                config: runConfig,
+                aiClient: session.aiClient,
+                contextContent: session.contextContent,
+                testName: `session:${sessionId}`,
+                ...(session.sessionConfig.baseUrl !== undefined && {
+                  baseUrl: session.sessionConfig.baseUrl,
+                }),
+                conversationHistory: [...session.conversationHistory],
+                apiResponseStore: session.apiResponseStore,
+                csrfTokens: session.csrfTokens,
+                resolvedParameters,
+                pageTracker: session.browserSession.pageTracker,
+                browserTracker: session.browserTracker,
+                // The condition reaches the model AUTHORED, beside a `## Values`
+                // block, so the judge needs the same env context a step gets.
+                ...(envDataCtx && { envData: envDataCtx }),
+                ...(unmaskNames.size > 0 && { unmask: unmaskNames }),
+                nonInteractive: true,
+                ...(signal && { signal }),
+              },
+            });
+          } catch (err) {
+            // An aborted judge throws, exactly as an aborted branched step
+            // does. A stop is a stop, not a server error (issues/020).
+            if (signal?.aborted) {
+              overallStatus = 'aborted';
+              logger.info(
+                `Session "${sessionId}": run aborted by client during guard ${i + 1}/${stepsTotal}`,
+              );
+              recordInterruptedStep(i + 1, originalStep);
+              break;
+            }
+            throw err;
+          }
+          const { plan } = evaluation;
+
+          // A pass is starting: clone its frames, bind its item, open its band.
+          let marker;
+          if (plan.pass && isLoopRecord(controlRecord)) {
+            marker = loops.beginPass(i, controlRecord, plan.pass);
+            // ...and re-arm the breakpoints the last pass consumed, so a body
+            // line's breakpoint fires on this pass too.
+            rearmLoopBreakpoints(i, controlRecord);
+            cloneFramesForPass(i, controlRecord, plan.pass);
+            if (plan.pass.bindings) {
+              // Into the live map, which is what makes `{{account}}` resolve in
+              // the body. It keeps its last value after the loop — there is one
+              // map, and the story says so rather than pretending otherwise.
+              Object.assign(resolvedParameters, plan.pass.bindings);
+            }
+          }
+          // The loop ended: every `(n/?)` marker it issued becomes `(n/count)`,
+          // in place, while the results are still in memory.
+          if (plan.loopEnded) loops.endLoop(plan.loopEnded);
+
+          const rows = guardRows(controlRecord, i, evaluation);
+          const reason = skipReasonFor(controlRecord, plan);
+          for (const k of rows.skip) skipReasons.set(k, reason);
+          skipQueue.add(rows.skip);
+
+          if (rows.guard) {
+            flushSkips(rows.guard.index);
+            const guardLine = sourceLineFor(rows.guard.index);
+            const guardFrame = frameInfoFor(rows.guard.index);
+            const guardText = effectiveSteps[rows.guard.index] ?? originalStep;
+            const result = guardResult({
+              index: rows.guard.index + 1,
+              instruction: redact(guardText, secretsNow()),
+              status: rows.guard.status,
+              durationMs: evaluation.durationMs,
+              reasoning: evaluation.reasoning,
+              error: evaluation.error,
+              aiInteractions: evaluation.aiInteractions,
+              loop: marker,
+            });
+            const guardSkill = outermostSkillName(
+              expansionOrigins?.[rows.guard.index]?.frameId,
+              expansionFrames,
+            );
+            const guardSection = outermostSectionName(
+              expansionOrigins?.[rows.guard.index]?.frameId,
+              expansionFrames,
+            );
+            if (guardSkill) result.sourceSkill = guardSkill;
+            if (guardSection) result.sourceSection = guardSection;
+            fullStepResults.push(result);
+            results.push({
+              step: guardText,
+              // Reported as recorded — `'skipped'` included. `StepResultResponse`
+              // gained that value with `stories/step-flow-control.md` decision 9,
+              // and this row is exactly what it is for: an `If` chain in which
+              // nothing held and there is no `Otherwise` records the guard that
+              // was ASKED as skipped, and reporting it `passed` here would put a
+              // green row in the response body beside the `—` the report renders
+              // for the same guard.
+              status: rows.guard.status,
+              actions: [],
+              screenshot: '',
+              reasoning: evaluation.reasoning ?? evaluation.error ?? '',
+              outputs: {},
+            });
+            if (rows.guard.status === 'failed') {
+              emit({
+                type: 'step:fail',
+                line: guardLine,
+                error: evaluation.error ?? 'The decision could not be made',
+                ...(guardFrame && { frame: guardFrame }),
+              });
+            } else {
+              // The FOURTH producer of `step:pass` + `output: 'skipped'`, and
+              // the commonest conditional shape there is: `If X, then Y` with
+              // no `Otherwise` and a condition that did not hold. It carries
+              // the same two additive fields `emitSkippedStep` does, for the
+              // same reason — without `skipKind` the MCP fold reads the absent
+              // field as `'unattended'` (the compatibility default) and ends
+              // the run telling an agent that steps "need a human", which
+              // nothing on this page does. `reason` is the sentence the report
+              // row already carries, so the ◌ hover and the log lines can say
+              // why rather than only that something was skipped.
+              const guardSkipped = rows.guard.status === 'skipped';
+              emit({
+                type: 'step:pass',
+                line: guardLine,
+                output: guardSkipped ? 'skipped' : (evaluation.reasoning ?? 'decided'),
+                ...(guardSkipped && { reason, skipKind: 'not-taken' as const }),
+                ...(guardFrame && { frame: guardFrame }),
+              });
+              stepsCompleted++;
+            }
+            // The SELECTED member's line, plus a `did not hold` line for each
+            // alternative the judge ruled out. `originalStep` is the head of
+            // the chain — the line the question was asked from, not
+            // necessarily the one that held.
+            session.conversationHistory.push(
+              ...guardHistoryLines({
+                controls,
+                index: i,
+                rows,
+                plan,
+                text: (k) => redact(effectiveSteps[k] ?? originalStep, secretsNow()),
+              }),
+            );
+            session.totalStepsExecuted++;
+          }
+
+          session.tokenTracker.resetStep();
+
+          if (evaluation.error) {
+            overallStatus = 'failed';
+            errorInfo = { step: i, message: evaluation.error };
+            logger.error(`Session "${sessionId}" step ${i + 1} FAILED: ${evaluation.error}`);
+            // The band reports the passes the loop actually made rather than
+            // staying open at `?`.
+            if (isLoopRecord(controlRecord)) {
+              loops.abandon(i, controlState.passes.get(i) ?? 0);
+            }
+            break;
+          }
+
+          // `i++` is about to run, so aim one short of where the plan points.
+          i = plan.next - 1;
+          continue;
+        }
+
         // Check for skippable steps ([input:] and [interactive])
         if (isSkippableStep(interpolated)) {
           logger.info(`Session "${sessionId}": skipping step ${i + 1} (input/interactive not supported in API mode)`);
@@ -4381,12 +5002,24 @@ export class SessionManager {
             status: 'passed',
             actions: [],
             screenshot: '',
-            reasoning: 'Skipped: [input] and [interactive] steps are not supported in API mode',
+            reasoning: UNATTENDED_SKIP_REASON,
             outputs: {},
           });
-          emit({ type: 'step:pass', line: sourceLineFor(i), output: 'skipped', ...frameSpread });
+          // `skipKind: 'unattended'` is what makes this the skip that NEEDS a
+          // human, told apart from an untaken branch that needs nobody
+          // (runner-core/src/protocol.ts). It is also what an older server
+          // means when it sends neither field, so the default matches.
+          emit({
+            type: 'step:pass',
+            line: sourceLineFor(i),
+            output: 'skipped',
+            reason: UNATTENDED_SKIP_REASON,
+            skipKind: 'unattended',
+            ...frameSpread,
+          });
           stepsCompleted++;
           session.totalStepsExecuted++;
+          i = advanceAfter(i) - 1;
           continue;
         }
 
@@ -4409,6 +5042,10 @@ export class SessionManager {
           session.totalStepsExecuted + stepsTotal - i,
           redact(stepInstruction, secretsNow()),
         );
+
+        // Untaken branches recorded before this step starts, so the report and
+        // the event stream both read in the order the file is written in.
+        if (hasControls) flushSkips(i);
 
         emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread, ...(await tabSpread()) });
 
@@ -4653,7 +5290,11 @@ export class SessionManager {
                   !!stepCache &&
                   // See `isSubsetBatch`: a non-root frame's key is not stable
                   // across batches, so neither read nor write is safe here.
-                  !(isSubsetBatch && (expansionOrigins?.[i]?.frameId ?? '') !== ''),
+                  !(isSubsetBatch && (expansionOrigins?.[i]?.frameId ?? '') !== '') &&
+                  // A step inside a loop body runs several times with several
+                  // values, and the cache holds one plan per line
+                  // (stories/control-flow.md, decision 12).
+                  !loopBodySteps.has(i),
                 cacheKey: stepCacheKey,
                 ...(codeBehind.bindingFor(i) && { codeBehind: codeBehind.bindingFor(i)! }),
                 ...(codeBehindPause && { codeBehindPauseBeforeRun: true }),
@@ -4819,9 +5460,10 @@ export class SessionManager {
           ? `data:image/png;base64,${stepResult.screenshotBase64}`
           : '';
 
-        // Map internal StepResult to API response format
-        const resultStatus: 'passed' | 'failed' | 'error' =
-          stepResult.status === 'skipped' ? 'passed' : stepResult.status;
+        // Map internal StepResult to API response format. `'skipped'` travels
+        // as itself — see the branched path above for why the old narrowing to
+        // `'passed'` was a false green rather than a compatibility shim.
+        const resultStatus: StepResultResponse['status'] = stepResult.status;
 
         results.push({
           step: originalStep,
@@ -4874,11 +5516,14 @@ export class SessionManager {
         // from its frame rather than tracked alongside it — the frame is the
         // iteration's identity, and a parallel array would be one more thing
         // to keep aligned through expansion.
-        const loop = loopMarkerFor(
-          expansionOrigins?.[i]?.frameId,
-          expansionFrames,
-          frameInputs,
-        );
+        // A runtime loop's own tracker answers first: a control line's tail may
+        // be a plain instruction, which produces no frame at all, so there
+        // would be nothing for the frame walk below to derive a marker from
+        // (stories/control-flow.md). A section tail has both answers and they
+        // agree; a table-driven section loop has only the frame's.
+        const loop =
+          loops.markerFor(i) ??
+          loopMarkerFor(emittedFrameId(i), expansionFrames, frameInputs);
 
         const fullResult: StepResult = {
           ...stepResult,
@@ -5059,7 +5704,12 @@ export class SessionManager {
             const reason = skippedByReturnReason(i, label, returningText);
             // `endIndex` still bounds the run. A bounded re-run must not report
             // steps it was never going to reach in this batch as skipped.
-            const exit = Math.min(
+            //
+            // `returnExit` then clamps the frame's answer to the innermost
+            // control body containing the returning step, because an iteration
+            // is a flow too — see its doc comment. It also says whether the
+            // planner may have a say at the loop tail below.
+            const frameExit = Math.min(
               frameExitIndex(
                 expansionOrigins ?? undefined,
                 expandedFrames,
@@ -5068,6 +5718,9 @@ export class SessionManager {
               ),
               endIndex,
             );
+            const bounded = returnExit(controls, i, frameExit);
+            const exit = bounded.exit;
+            flowControlEnclosed = bounded.enclosed;
             // Call lines already reported, keyed by the DOCUMENT ADDRESS the
             // client acts on — the parent frame's file and the line in it —
             // rather than by frame id or by parent frame id.
@@ -5081,6 +5734,26 @@ export class SessionManager {
             // `[skill: …]` line they all point at is one line in one file.
             // Only the address the client paints is the same in both cases.
             const callLinesEmitted = new Set<string>();
+            /**
+             * The returning step's frame in the ORIGINAL id space — not
+             * `stepFrameId`, which is `emittedFrameId(i)` and is a per-pass
+             * CLONE inside a loop body.
+             *
+             * Both this comparison and the walk below run over `origins` and
+             * `expandedFrames`, and neither of those ever holds a clone: the
+             * origins are static, and the clones live only in the wire
+             * `FrameInfo` table (`cloneFramesForPass`). Comparing a clone id
+             * against an original never matched, so every step of a returning
+             * loop pass looked like it belonged to a DIFFERENT frame and the
+             * loop's own guard line was announced skipped — while the loop was
+             * still running (stories/control-flow.md §"Composition with
+             * `If … then return`").
+             */
+            const returningFrameId = expansionOrigins?.[i]?.frameId ?? '';
+            /** The address a client paints: the file a line lives in, and the
+             *  line. One key space for call lines and step lines alike. */
+            const addressOf = (uri: string | undefined, line: number): string =>
+              `${uri ?? request.testFilePath ?? ''}#${line}`;
             const emitCallLineFor = (frameId: string): void => {
               // Walk out to the returning step's own frame, then report inwards,
               // so a section called from a section names the outer call first
@@ -5088,7 +5761,7 @@ export class SessionManager {
               const chain: string[] = [];
               let cur: string | null = frameId;
               const seen = new Set<string>();
-              while (cur && cur !== '' && cur !== stepFrameId && !seen.has(cur)) {
+              while (cur && cur !== '' && cur !== returningFrameId && !seen.has(cur)) {
                 seen.add(cur);
                 chain.unshift(cur);
                 cur = expandedFrames[cur]?.parentId ?? null;
@@ -5115,7 +5788,7 @@ export class SessionManager {
                 // The parent frame's own file, which is where this call line
                 // lives. Falls back to the parent's id only when no frame
                 // answers for it, which leaves the key no worse than it was.
-                const address = `${parentFrame?.uri ?? parentId}#${f.invocationLine}`;
+                const address = addressOf(parentFrame?.uri ?? parentId, f.invocationLine);
                 if (callLinesEmitted.has(address)) continue;
                 callLinesEmitted.add(address);
                 emit({
@@ -5128,8 +5801,16 @@ export class SessionManager {
             };
             for (let j = i + 1; j <= exit; j++) {
               const skippedFrameId = expansionOrigins?.[j]?.frameId ?? '';
-              if (skippedFrameId !== stepFrameId) emitCallLineFor(skippedFrameId);
+              if (skippedFrameId !== returningFrameId) emitCallLineFor(skippedFrameId);
               const skippedFrame = frameInfoFor(j);
+              // A step line and a call line can be the SAME line, and with
+              // control flow they routinely are: a section used as a control
+              // line's tail is invoked from the guard's own line, so the
+              // guard's `invocationLine` is a numbered step in the expanded
+              // list. Recording the step's address in the same set the call
+              // lines use is what stops one line being announced skipped
+              // twice — once as itself and once as the call it also is.
+              callLinesEmitted.add(addressOf(skippedFrame?.uri, sourceLineFor(j)));
               emit({
                 type: 'step:skip',
                 line: sourceLineFor(j),
@@ -5151,7 +5832,18 @@ export class SessionManager {
               const skippedResult = skippedByReturn(j, skippedInstruction, i, label, returningText);
               const skippedSkill = outermostSkillName(skippedFrameId, expansionFrames);
               const skippedSection = outermostSectionName(skippedFrameId, expansionFrames);
-              const skippedLoop = loopMarkerFor(skippedFrameId, expansionFrames, frameInputs);
+              // The same two-answer expression an executed step's marker uses,
+              // and for the same two reasons. `loops.markerFor` answers first
+              // because a control line's tail may be a plain instruction,
+              // which produces no frame at all; the frame walk needs the
+              // CLONE id, because `iteration` lives only on the per-pass clone
+              // `cloneFramesForPass` writes — `skippedFrameId` is the ORIGINAL
+              // (the id space the call-line walk above deliberately runs in)
+              // and answered `undefined` for every row, breaking the report's
+              // iteration band at exactly the rows a return produced.
+              const skippedLoop =
+                loops.markerFor(j) ??
+                loopMarkerFor(emittedFrameId(j), expansionFrames, frameInputs);
               const fullSkipped: StepResult = {
                 ...skippedResult,
                 ...(skippedSkill && { sourceSkill: skippedSkill }),
@@ -5197,7 +5889,29 @@ export class SessionManager {
           // step that will actually run next is the one after the flow that
           // ended, and pausing on `i + 1` would park the yellow ▶ on a line
           // this run has already declared skipped.
-          const nextI = (flowControlJumpTo ?? i) + 1;
+          //
+          // The three ways the run leaves step `i`, and the three answers,
+          // which must be the SAME expression the loop tail below resumes on
+          // or the ▶ lands where the run is not going:
+          //
+          //  - a return inside a control body → `advanceAfter(exit)`, which is
+          //    the loop's guard (backwards!) or the line past the chain. `exit
+          //    + 1` said "the line after the body", which for a chain member
+          //    is the next member's tail — a line the decision has already
+          //    declared skipped, which is the exact failure this comment says
+          //    it is avoiding;
+          //  - a return in the main flow → `exit + 1`, the run ending;
+          //  - no return at all → `advanceAfter(i)`, because an ordinary step
+          //    that closes a loop body sends the run back to the guard too.
+          //
+          // `advanceAfter` is pure (`planAfterStep` takes its state read-only),
+          // so asking it here and again at the tail cannot double-count a pass.
+          const nextI =
+            flowControlJumpTo !== null
+              ? flowControlEnclosed
+                ? advanceAfter(flowControlJumpTo)
+                : flowControlJumpTo + 1
+              : advanceAfter(i);
           if (currentMode !== 'continue' && nextI <= endIndex) {
             const curDepth = depthOf(i);
             const nextDepth = depthOf(nextI);
@@ -5301,12 +6015,32 @@ export class SessionManager {
           break;
         }
 
-        // Resume after the flow that ended. Last thing in the body so every
-        // per-step tail above (the browser refresh included) still ran for the
-        // returning step, which is an ordinary passed step
-        // (stories/step-flow-control.md, decision 4).
-        if (flowControlJumpTo !== null) i = flowControlJumpTo;
+        // Where the run goes next, with both features' rules applied in the
+        // one place they meet.
+        //
+        // Ordinarily: a step that closes a loop body sends the run back to its
+        // guard rather than to the next line — the jump-back the flat step
+        // list never grows to accommodate. `i++` follows, so aim one short; a
+        // no-op for every step that closes nothing.
+        //
+        // After a `return`: resume after the flow that ended. Last thing in
+        // the body so every per-step tail above (the browser refresh included)
+        // still ran for the returning step, which is an ordinary passed step
+        // (stories/step-flow-control.md, decision 4). `flowControlEnclosed`
+        // is what decides whether the planner gets a say: a return that ended
+        // an ITERATION must let the loop re-evaluate, while one that ended the
+        // MAIN FLOW must not be walked anywhere — see `returnExit`.
+        if (flowControlJumpTo !== null) {
+          i = flowControlEnclosed ? advanceAfter(flowControlJumpTo) - 1 : flowControlJumpTo;
+        } else {
+          i = advanceAfter(i) - 1;
+        }
       }
+      // Whatever the last decision skipped and nothing moved past — an
+      // `Otherwise` whose body was the end of the batch, most often. Not on an
+      // abort: the run stopped before it got there, and reporting those lines
+      // as decided-against would put words in the decision's mouth.
+      if (hasControls && overallStatus !== 'aborted') flushSkips('all');
     } finally {
       // The run's steps are done; everything from here is tail
       // (stories/compile-tail-progress.md). Said HERE — the first statement

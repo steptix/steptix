@@ -15,6 +15,14 @@
 
 import { classifyLines, extractSections, stepWrapsAt } from './step-lines.js';
 import { matchText, NO_HOOKS_MARKER } from './section-match.js';
+import { parseControlLine } from './control-line.js';
+
+/** One entry of {@link SectionIndex.sections}. */
+interface DefinedSection {
+  name: string;
+  headingLine: number;
+  stepCount: number;
+}
 
 export interface SectionIndex {
   /**
@@ -22,7 +30,7 @@ export interface SectionIndex {
    * Empty-name headings NEVER enter this map — they are unaddressable, so
    * indexing them would invent a section nothing can call.
    */
-  sections: Map<string, { name: string; headingLine: number; stepCount: number }>;
+  sections: Map<string, DefinedSection>;
   /**
    * Every step line resolving to a section — main-flow **and** body lines, so
    * a section calling another section is a call site like any other.
@@ -65,7 +73,7 @@ export interface SectionIndex {
 const DIRECTIVE_STEP_RE = /^\[/;
 
 export function buildSectionIndex(text: string): SectionIndex {
-  const sections = new Map<string, { name: string; headingLine: number; stepCount: number }>();
+  const sections = new Map<string, DefinedSection>();
   const duplicates: { name: string; headingLine: number }[] = [];
 
   for (const section of extractSections(text)) {
@@ -98,21 +106,51 @@ export function buildSectionIndex(text: string): SectionIndex {
     if (!located) continue;
     if (DIRECTIVE_STEP_RE.test(located.text)) continue;
 
-    const key = matchText(located.text);
     // A wrapped list item is one step whose text spans several lines, and the
     // CLI matches on the WHOLE item — which can never equal a single-line
     // heading name. Reading only the first physical line here would draw a
     // link the runtime never follows, with go-to-definition working and the
     // "never used" diagnostic staying quiet while the section never ran.
     const wrapped = stepWrapsAt(lines, classified, entry.line - 1);
-    const defined = wrapped ? undefined : sections.get(key);
+    const lookup = (candidateText: string): DefinedSection | undefined =>
+      wrapped ? undefined : sections.get(matchText(candidateText));
+
+    // Resolution order (stories/control-flow.md, decision 3): the WHOLE line is
+    // tested against the section names FIRST, because a step that IS a section
+    // name is a call before it is anything else. A section unwisely named
+    // `While waiting, keep the page open` is still called by a step spelling
+    // it out, and the CLI expands it that way — so reading the tail first
+    // reported both the section and its call site as something they are not.
+    let candidate = located;
+    let defined = lookup(located.text);
+
+    if (!defined) {
+      // Only now is the line allowed to be a control line, and then its TAIL
+      // is the call site — the one clause stories/control-flow.md adds to
+      // contract §2.4. `nameStart` moves to the tail's first character so a
+      // resolved tail underlines the section name and not the keyword, and a
+      // NEAR MISS is reported at the same column, where the author has to fix
+      // it.
+      //
+      // A bracket-directive tail (`[skill:]`, `[tool:]`) drops out entirely,
+      // for the reason a bracket-directive step does: its own grammar claims
+      // it, and a section name may not begin with `[`.
+      const control = parseControlLine(located.text);
+      if (control) {
+        if (DIRECTIVE_STEP_RE.test(control.tail)) continue;
+        candidate = { text: control.tail, start: located.start + control.tailStart };
+        defined = lookup(control.tail);
+      }
+    }
+
+    const key = matchText(candidate.text);
     if (defined) {
       // `defined.name` rather than the call site's own casing: consumers use
       // this to look the section back up and to label it, and the definition
       // is what the author named it.
-      calls.push({ line: entry.line, name: defined.name, nameStart: located.start });
+      calls.push({ line: entry.line, name: defined.name, nameStart: candidate.start });
     } else {
-      nonCallSteps.push({ line: entry.line, matchText: key, nameStart: located.start });
+      nonCallSteps.push({ line: entry.line, matchText: key, nameStart: candidate.start });
     }
   }
 

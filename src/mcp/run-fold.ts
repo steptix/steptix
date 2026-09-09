@@ -31,16 +31,18 @@ export interface FoldedStep {
   /**
    * Why a `skipped` row was skipped — absent on every other status.
    *
-   * Two different things arrive as `skipped` and they want opposite reactions.
-   * `'returned'` is an `If … then return` doing exactly what the test asked
-   * (stories/step-flow-control.md); `'unattended'` is an `[input:]` /
-   * `[interactive]` step the server declined to run with nobody watching, which
-   * needs a human before it can ever pass. A summary that says "a step returned
-   * early" over the second sends an agent looking for a return that is not
-   * there; one that says "needs a human" over the first sends it looking for an
-   * intervention that was never needed.
+   * Three different things arrive as `skipped` and they want different
+   * reactions. `'returned'` is an `If … then return` doing exactly what the
+   * test asked (stories/step-flow-control.md); `'not-taken'` is the untaken
+   * half of a decision or a loop body that ran no passes
+   * (stories/control-flow.md); `'unattended'` is an `[input:]` /
+   * `[interactive]` step the server declined to run with nobody watching,
+   * which needs a human before it can ever pass. Only the last of the three
+   * wants anything from the reader — a summary that says "needs a human" over
+   * either of the others sends an agent looking for an intervention that was
+   * never needed.
    */
-  skipCause?: 'returned' | 'unattended';
+  skipCause?: 'returned' | 'not-taken' | 'unattended';
   output: string | null;
   error: string | null;
   fromCache: boolean;
@@ -369,12 +371,32 @@ export function foldRun(input: FoldInput): FoldedRun {
         open.row.fromCache = event.fromCache ?? false;
         open.row.tab = event.tab ?? open.row.tab;
         if (event.screenshot) lastScreenshot = event.screenshot;
-        // `output: 'skipped'` is how the server reports an `[input:]` or
-        // `[interactive]` step it declined to run unattended. Calling that
-        // "passed" is a false green on work that never happened.
+        // `output: 'skipped'` is how the server reports a step that never ran
+        // on the older of the two conventions. Calling that "passed" is a
+        // false green on work that never happened.
+        //
+        // TWO producers ride it, and they want opposite reactions. `skipKind`
+        // is how they are told apart — machine-readable on purpose, because
+        // deriving it from the reason's prose would break the moment either
+        // sentence was reworded:
+        //
+        //  - `'unattended'` — an `[input:]` / `[interactive]` step the server
+        //    declined to run with nobody watching. It needs a person, which is
+        //    what `sawSkipped` goes on to warn about.
+        //  - `'not-taken'` — the untaken half of a decision, or a loop body
+        //    that ran no passes. The test did what it was told; warning here
+        //    sends an agent looking for an intervention nothing asked for.
+        //
+        // Absent means `'unattended'`: until the field existed that was the
+        // only producer of this event, so that is what an older server means
+        // by saying nothing.
         const status: StepStatus = event.output === 'skipped' ? 'skipped' : 'passed';
-        if (status === 'skipped') sawSkipped = true;
-        closeRow(status, at, status === 'skipped' ? 'unattended' : undefined);
+        const skipCause = event.skipKind === 'not-taken' ? 'not-taken' : 'unattended';
+        if (status === 'skipped') {
+          if (event.reason) open.row.output = event.reason;
+          if (skipCause === 'unattended') sawSkipped = true;
+        }
+        closeRow(status, at, status === 'skipped' ? skipCause : undefined);
         break;
       }
 

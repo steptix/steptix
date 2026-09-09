@@ -1,6 +1,7 @@
 export * from './errors.js';
 export * from './env-file.js';
 export * from './user-root.js';
+export * from './control-line.js';
 export * from './step-lines.js';
 export * from './data-rows.js';
 export * from './section-match.js';

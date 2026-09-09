@@ -366,3 +366,191 @@ test('sectionNameError: null for a legal name', () => {
   assert.equal(sectionNameError('İşlem'), null);
   assert.equal(sectionNameError('**Login**'), null);
 });
+
+// ---------------------------------------------------------------------------
+// Control lines: the tail is the call site
+// ---------------------------------------------------------------------------
+
+/**
+ * Contract §2.4 gains one clause with stories/control-flow.md: a section named
+ * as the TAIL of a control line is invoked. Both consumers of the liveness
+ * rule learn it — the expander's dead-section warning and this index, which
+ * feeds go-to-definition, document links and the "never used" diagnostic — or
+ * the editor would underline nothing, report the section dead, and watch the
+ * runtime call it on every pass.
+ *
+ * `nameStart` points at the TAIL's first character, so a link underlines the
+ * section name rather than the `If` that introduced it.
+ */
+
+const controlDoc = (step) =>
+  ['# T', '', '## Steps', '', `1. ${step}`, '', '### Pay with cash', '', '1. Click Pay now'].join(
+    '\n',
+  );
+
+test('control-line tail: a resolved tail is a call, underlined at the tail', () => {
+  const step = 'If the Cash checkbox is ticked, then Pay with cash';
+  const index = buildSectionIndex(controlDoc(step));
+  assert.equal(index.calls.length, 1);
+  assert.deepEqual(index.calls[0], {
+    line: 5,
+    name: 'Pay with cash',
+    nameStart: '1. '.length + 'If the Cash checkbox is ticked, then '.length,
+  });
+  // Only the section's own body step is a non-call; the guard line is not.
+  assert.deepEqual(index.nonCallSteps.map((s) => s.line), [9]);
+});
+
+test('control-line tail: every form is a call site', () => {
+  for (const step of [
+    'If a, then Pay with cash',
+    'Else if a, then Pay with cash',
+    'Otherwise, Pay with cash',
+    'While a, Pay with cash',
+    'Repeat Pay with cash until a',
+    'For each {{x}} in {{y}}, Pay with cash',
+  ]) {
+    const index = buildSectionIndex(controlDoc(step));
+    assert.equal(index.calls.length, 1, step);
+    assert.equal(index.calls[0].name, 'Pay with cash', step);
+    // The tail, wherever it sits in the line.
+    const raw = `1. ${step}`;
+    assert.equal(
+      raw.slice(index.calls[0].nameStart, index.calls[0].nameStart + 'Pay with cash'.length),
+      'Pay with cash',
+      step,
+    );
+  }
+});
+
+test('control-line tail: a near miss is a non-call at the tail`s column', () => {
+  const step = 'If the Cash checkbox is ticked, then Pay with cache';
+  const index = buildSectionIndex(controlDoc(step));
+  assert.equal(index.calls.length, 0);
+  assert.deepEqual(index.nonCallSteps[0], {
+    line: 5,
+    matchText: 'pay with cache',
+    nameStart: '1. '.length + 'If the Cash checkbox is ticked, then '.length,
+  });
+});
+
+test('a section named after the WHOLE guard line wins over the tail (rung 2)', () => {
+  // Resolution order, decision 3: a step that IS a section name is a call
+  // before it is anything else. Reading the tail first here reported both the
+  // section and its call site as something they are not — the section as never
+  // used, the line as a near miss for a section that does not exist — while
+  // the CLI expanded the line as a plain call on every run.
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. If a, then Click Pay now',
+    '',
+    '### If a, then Click Pay now',
+    '',
+    '1. Nope',
+  ].join('\n');
+  const index = buildSectionIndex(text);
+  assert.deepEqual(index.calls, [
+    { line: 5, name: 'If a, then Click Pay now', nameStart: '1. '.length },
+  ]);
+  assert.deepEqual(
+    index.nonCallSteps.map((s) => s.matchText),
+    ['nope'],
+  );
+});
+
+test('a section named after a whole WHILE line wins over the tail too', () => {
+  // The story's own example of a bad-but-legal name (§"What claims", note 2).
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. While waiting, keep the page open',
+    '',
+    '### While waiting, keep the page open',
+    '',
+    '1. Click A',
+  ].join('\n');
+  const index = buildSectionIndex(text);
+  assert.deepEqual(index.calls, [
+    { line: 5, name: 'While waiting, keep the page open', nameStart: '1. '.length },
+  ]);
+});
+
+test('the tail is only read when the whole line names no section', () => {
+  // Both readings resolve here: the whole line names one section and the tail
+  // names another. Rung 2 says the whole line wins.
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. If a, then Pay with cash',
+    '',
+    '### If a, then Pay with cash',
+    '',
+    '1. Click the whole-line section',
+    '',
+    '### Pay with cash',
+    '',
+    '1. Click Pay now',
+  ].join('\n');
+  const index = buildSectionIndex(text);
+  assert.deepEqual(index.calls, [
+    { line: 5, name: 'If a, then Pay with cash', nameStart: '1. '.length },
+  ]);
+});
+
+test('control-line tail: a bracket-directive tail is neither a call nor a near miss', () => {
+  const index = buildSectionIndex(controlDoc('If a, then [skill: login]'));
+  assert.equal(index.calls.length, 0);
+  // Line 5 is the guard; line 9 is the section's own body step.
+  assert.deepEqual(index.nonCallSteps.map((s) => s.line), [9]);
+});
+
+test('control-line tail: [no-hooks] shifts the column with the text', () => {
+  const step = '[no-hooks] If a, then Pay with cash';
+  const index = buildSectionIndex(controlDoc(step));
+  const raw = `1. ${step}`;
+  assert.equal(index.calls.length, 1);
+  assert.equal(raw.slice(index.calls[0].nameStart), 'Pay with cash');
+});
+
+test('control-line tail: a body line`s tail is a call too', () => {
+  const text = [
+    '# T',
+    '',
+    '## Steps',
+    '',
+    '1. Outer',
+    '',
+    '### Outer',
+    '',
+    '1. If a, then Inner',
+    '',
+    '### Inner',
+    '',
+    '1. Click',
+  ].join('\n');
+  const index = buildSectionIndex(text);
+  assert.deepEqual(
+    index.calls.map((c) => c.name),
+    ['Outer', 'Inner'],
+  );
+});
+
+test('control-line tail: a line that only CLAIMS a form falls back to the whole line', () => {
+  // `While waiting` has no comma, so it is not a control line at all — and
+  // the bare-name rule then resolves it as an ordinary section call, which is
+  // what the CLI does too (decision 3).
+  const text = ['# T', '', '## Steps', '', '1. While waiting', '', '### While waiting', '', '1. Wait'].join(
+    '\n',
+  );
+  const index = buildSectionIndex(text);
+  assert.equal(index.calls.length, 1);
+  assert.equal(index.calls[0].name, 'While waiting');
+  assert.equal(index.calls[0].nameStart, '1. '.length);
+});

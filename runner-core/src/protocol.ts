@@ -33,6 +33,13 @@ export type StepStatus = 'passed' | 'failed' | 'error' | 'skipped';
  * skills, when a section calls a section, and in either combination. `id` is
  * unique per run and stable for the lifetime of the frame; `parentId` is null
  * for the test frame and the parent's id otherwise.
+ *
+ * A runtime loop's tail (`While …`, `Repeat … until …`, `For each …`) gets a
+ * FRESH id on every pass — the frame's lifetime is the pass — so a client that
+ * keys on `id` sees one frame per pass, not one per loop. The shape of the id
+ * is the server's business and must not be parsed; `iteration` is what says
+ * which pass this is (stories/control-flow.md §"Painting, frames and the
+ * report").
  */
 export interface FrameInfo {
   id: string;
@@ -74,8 +81,17 @@ export interface FrameInfo {
    * same row (stories/data-row-progress-and-selection.md, decision 1).
    */
   iteration?: number;
-  /** How many rows the section's table has. Sent alongside `iteration` and
-   *  never on its own — the `(2/3)` badge's denominator. */
+  /**
+   * How many iterations there are in total — the `(2/3)` badge's denominator.
+   *
+   * Sent alongside `iteration`, never on its own, and **not always sent with
+   * it**: a table's rows are counted before the first one runs, but a runtime
+   * loop (`While …`, `Repeat … until …`) stops when the page says so, and its
+   * frames are pushed mid-loop with no total to give
+   * (stories/control-flow.md §"Painting, frames and the report"). Render `?`
+   * for the denominator when it is absent — `Go to the next page (3/?)` —
+   * rather than treating the frame as unlooped.
+   */
   iterationCount?: number;
 }
 
@@ -92,6 +108,40 @@ export interface StepPassEvent {
   line: number;
   /** Optional captured output (e.g. AI explanation). */
   output?: string;
+  /**
+   * Why this step never ran — present only alongside `output: 'skipped'`.
+   *
+   * The same sentence the step's report row carries (`skipReasonFor`,
+   * src/runner/control-runtime.ts): "Skipped: another branch of this decision
+   * was taken", "Skipped: the list was empty". Additive and optional, so a
+   * server that predates it is not broken by its absence — a client with no
+   * reason prints the bare sentence, which is what every client did before.
+   *
+   * `step:skip` has carried a reason since it existed; this is the older
+   * convention catching up, so the untaken half of a chain hovers with its
+   * cause rather than with nothing.
+   */
+  reason?: string;
+  /**
+   * Which KIND of skip this is — present only alongside `output: 'skipped'`.
+   *
+   * Two unrelated things ride this one event and they want opposite reactions
+   * from a reader:
+   *
+   *  - `'unattended'` — an `[input:]` / `[interactive]` step the server
+   *    declined to run with nobody watching. It needs a person before it can
+   *    ever pass.
+   *  - `'not-taken'` — a branch the decision did not choose, or a loop body
+   *    that ran no passes. The test did exactly what it was told and nothing
+   *    is wanted from anyone.
+   *
+   * Machine-readable rather than derived from `reason`, because the consumers
+   * that must tell them apart (`src/mcp/run-fold.ts`) must not depend on
+   * prose. **Absent means `'unattended'`**: until this field existed the
+   * unattended skip was the only producer of `output: 'skipped'`, so that is
+   * what an older server means when it says nothing.
+   */
+  skipKind?: 'unattended' | 'not-taken';
   /** data:image/png;base64 URI, may be empty. */
   screenshot?: string;
   frame?: FrameInfo;
@@ -632,6 +682,24 @@ export function describeStepFailure(failure: StepFailureDetail): string {
   }
   if (failure.fromCodeBehind) return `${error} (in its code-behind)`;
   return error;
+}
+
+/**
+ * Did this `step:pass` report a step that never ran?
+ *
+ * The wire has no third verdict, so a step the run decided against — the
+ * untaken half of a chain, the body of a `While` that never entered, an
+ * `[input:]` the server cannot prompt for inside a section body — arrives as a
+ * PASS carrying `output: 'skipped'` (stories/control-flow.md). Every surface
+ * that derives a glyph or a log line from `step:pass` has to ask this first,
+ * and three of the six used not to: the compile gutter painted the untaken
+ * branch green, and two log lines claimed a ✓ for a step that did nothing.
+ *
+ * One predicate rather than six copies of `ev.output === 'skipped'`, so a
+ * seventh consumer is a grep away from the rule instead of from the string.
+ */
+export function isSkippedPass(event: { output?: string }): boolean {
+  return event.output === 'skipped';
 }
 
 /** How much of one error string a `StepFailureDetail` keeps. Comfortably more

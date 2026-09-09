@@ -75,7 +75,10 @@ is honest: nothing that did not run is counted as passed.
 **You write:** `Return` as a whole step, inside a looped section.
 **You get:** that iteration ends and the next iteration starts. A return
 never breaks out of a loop; it leaves the flow it is in, and an iteration is
-a flow.
+a flow. (How that rule and the `While` / `Repeat` / `For each` loops of
+stories/control-flow.md compose — and which grammar owns
+`If <condition>, then return` — is settled in that story's §"Composition with
+`If … then return`".)
 
 **You write:** `If the Save button is visible, click it and return`.
 **You get:** a compound step. The model clicks Save and then returns; the
@@ -250,13 +253,23 @@ ignored:
    carries skipped steps with `status: 'skipped'`, an additive widening of
    the `passed | failed | error` union in runner-core, the server response
    type and SPEC-SESSIONS-API; every consumer that switches on the status is
-   found by the compiler. `stepsCompleted` counts executed steps only. The
+   found by the compiler. `stepsCompleted` does not count the steps a return
+   skips — it counts steps that EXECUTED. (The chain and loop skips that
+   arrived with `stories/control-flow.md` DO count it, for the progress-bar
+   reason set out there under "What `stepsCompleted` counts"; the two producers
+   differ on that number, and on `session.totalStepsExecuted` — the session
+   counter the MCP `list_sessions` tool reports — which the chain skips
+   increment and a return's do not, for the same reason.) The
    MCP fold maps `step:skip` to its existing `skipped` status **without** the
-   "needs a human" warning, which stays tied to `output: 'skipped'` on a
-   `step:pass`. Both arrive as `skipped`, so the fold records WHICH on the row
-   (`skipCause: 'returned' | 'unattended'`) and the one-line summary words them
-   apart — `2 passed, 1 skipped (a step returned early), 1 skipped (need a
-   human) of 4` — rather than naming one cause over both. The MCP client's own
+   "needs a human" warning. That warning was tied to `output: 'skipped'` on a
+   `step:pass` while that event had exactly one producer; `stories/control-flow.md`
+   added a second, so the event now carries `skipKind`
+   (`'unattended' | 'not-taken'`, absent ⇒ `'unattended'`) and the warning is
+   tied to that instead. Three causes arrive as `skipped`, so the fold records
+   WHICH on the row (`skipCause: 'returned' | 'not-taken' | 'unattended'`) and
+   the one-line summary words them apart — `2 passed, 1 skipped (a step
+   returned early), 1 skipped (need a human) of 4` — rather than naming one
+   cause over all of them. The MCP client's own
    event whitelist (`KNOWN_EVENTS`, api-client.ts) must list `step:skip`: an
    unlisted type is dropped into `dropped[]`, which becomes a run warning, and
    the fold's branch is then unreachable from the real transport.

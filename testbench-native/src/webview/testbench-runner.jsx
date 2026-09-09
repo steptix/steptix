@@ -24,7 +24,7 @@ import {
   setStrip,
   stripFor,
 } from "./lib/panel-scope-inline.js";
-import { describeStepFailure, formatStepFailure } from "./lib/failure-text-inline.js";
+import { describeStepFailure, formatStepFailure, isSkippedPass, skipPanelLine } from "./lib/failure-text-inline.js";
 import {
   applyRowClick,
   buildRunRowsPayload,
@@ -615,6 +615,17 @@ function TestBenchRunner() {
         setRunning(true);
         break;
       case "step:pass":
+        // A step the run decided against rides the pass event — the older of
+        // the two skip conventions — but it did not run, so it gets a `◌`
+        // (`SKIP_GLYPH`) and not a ✓. Without this the panel printed "✓ Step
+        // on line N passed" and then "skipped" for the same event, one line
+        // apart (stories/control-flow.md). `event.reason` is what a current
+        // server sends alongside; an older one sends none and the sentence
+        // reads without it.
+        if (isSkippedPass(event)) {
+          log(skipPanelLine(event.line, event.reason), "info", uri);
+          break;
+        }
         if (event.codeBehindStale) {
           log(
             `⚠ Step on line ${event.line} passed under AI — code-behind failed: ${event.codeBehindStale.error}`,
@@ -639,7 +650,7 @@ function TestBenchRunner() {
         // A line an `If … then return` left behind. Logged "info", not "fail":
         // nothing went wrong, the flow ended early on purpose, and the reason
         // the server sends says which step ended it.
-        log(`◌ Step on line ${event.line} skipped — ${event.reason}`, "info", uri);
+        log(skipPanelLine(event.line, event.reason), "info", uri);
         break;
       case "output":
         log(event.msg, event.kind, uri);

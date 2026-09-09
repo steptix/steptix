@@ -37,6 +37,7 @@ import {
   isBrowserClosed,
   isSkippableStep,
   parseOutputPrefixes,
+  UNATTENDED_SKIP_REASON,
 } from './run-helpers.js';
 import type {
   ErrandSummary,
@@ -709,10 +710,20 @@ export class ErrandRunner {
           status: 'passed',
           actions: [],
           screenshot: '',
-          reasoning: 'Skipped: [input] and [interactive] steps are not supported in API mode',
+          reasoning: UNATTENDED_SKIP_REASON,
           outputs: {},
         });
-        emit({ type: 'step:pass', line, output: 'skipped' });
+        // `skipKind: 'unattended'` is the machine-readable half of that
+        // sentence, and it is what tells the MCP fold this is the skip that
+        // needs a human rather than a branch a decision did not choose
+        // (runner-core/src/protocol.ts, `StepPassEvent.skipKind`).
+        emit({
+          type: 'step:pass',
+          line,
+          output: 'skipped',
+          reason: UNATTENDED_SKIP_REASON,
+          skipKind: 'unattended',
+        });
         outcome.stepsCompleted++;
         continue;
       }
@@ -879,7 +890,10 @@ export class ErrandRunner {
         : '';
       results.push({
         step: originalStep,
-        status: stepResult.status === 'skipped' ? 'passed' : stepResult.status,
+        // As recorded, `'skipped'` included: `StepResultResponse` gained that
+        // value with decision 9, and the narrowing to `'passed'` that used to
+        // sit here greened a conditional group's unmatched outcomes.
+        status: stepResult.status,
         actions: stepResult.turns.flatMap((t) => t.subActions).map((sa) => sa.action),
         screenshot: screenshotValue,
         reasoning: stepResult.aiExplanation ?? '',

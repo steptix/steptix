@@ -132,6 +132,31 @@ describe('SseParser', () => {
     expect(badFrame.dropped[0]).toContain('frame is malformed');
   });
 
+  it('checks a step:pass reason the same way, and lets an absent one through', () => {
+    // `reason` rides a `step:pass` carrying `output: 'skipped'` now, and the
+    // fold assigns it straight into `row.output` — a field the tool schema
+    // declares `z.string().nullable()`, so a non-string would fail
+    // `validated()` at the very end and degrade the whole result. It is
+    // OPTIONAL here, unlike on `step:skip`: a server older than the field
+    // sends none, and that has to keep working.
+    const bad = new SseParser().push(
+      'data: {"type":"step:pass","line":4,"output":"skipped","reason":7}\n\n',
+    );
+    expect(bad.events).toEqual([]);
+    expect(bad.dropped[0]).toContain('reason is not a string');
+
+    const absent = new SseParser().push('data: {"type":"step:pass","line":4}\n\n');
+    expect(absent.dropped).toEqual([]);
+    expect(absent.events).toEqual([{ type: 'step:pass', line: 4 }]);
+
+    const good = new SseParser().push(
+      'data: {"type":"step:pass","line":4,"output":"skipped",' +
+        '"reason":"Skipped: no condition in this decision held","skipKind":"not-taken"}\n\n',
+    );
+    expect(good.dropped).toEqual([]);
+    expect(good.events[0]).toMatchObject({ skipKind: 'not-taken' });
+  });
+
   it('accepts a step:skip carrying a well-formed frame', () => {
     // `frame` is optional on the wire (the server omits it when nothing
     // expanded) and every skipped step inside a section carries one, so both

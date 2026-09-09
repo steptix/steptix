@@ -101,3 +101,46 @@ export function stepsSummaryText(counts: StepsSummaryCounts): string {
       : `${counts.passed}/${counts.total} passed`;
   return counts.skipped > 0 ? `${head}, ${counts.skipped} skipped` : head;
 }
+
+/** What the interactive run log's closing tally counts. */
+export interface RunLogTallyCounts {
+  /** Steps that EXECUTED and passed — never a skip. */
+  passed: number;
+  /**
+   * Steps that never ran, from BOTH producers: `step:skip`, and `step:pass`
+   * carrying `output: 'skipped'`.
+   *
+   * One accounting rule across every surface. The run log used to fold this
+   * into `passed` — the panel header beside it said `✓ 9 passed  ◌ 3 skipped`
+   * for the same run while the log said `✓ 12 passed`, and a green tally that
+   * includes steps that never ran is the failure direction this codebase
+   * names as worst.
+   */
+  skipped: number;
+  cached: number;
+  codeBehind: number;
+  stale: number;
+}
+
+/**
+ * The interactive run log's closing line — `✓ 9 passed (2 code-behind), 3
+ * skipped`.
+ *
+ * Its own function so `node --test` can pin it: the loop that builds it lives
+ * inside `run-controller.ts`, which imports `vscode` and is unreachable from
+ * this suite. Shaped deliberately like {@link stepsSummaryText}, minus the
+ * denominator the log has no snapshot to supply — the parenthesis breaks down
+ * the PASSES, and a skip is not one, so it is its own clause after it and
+ * appears only when something was actually skipped. A run that skipped nothing
+ * renders the byte-identical string it always did.
+ */
+export function runLogTallyLine(counts: RunLogTallyCounts): string {
+  const notes = [
+    counts.codeBehind > 0 ? `${counts.codeBehind} code-behind` : '',
+    counts.stale > 0 ? `${counts.stale} stale` : '',
+    counts.cached > 0 ? `${counts.cached} cached` : '',
+  ].filter((n) => n !== '');
+  const suffix = notes.length > 0 ? ` (${notes.join(', ')})` : '';
+  const skipped = counts.skipped > 0 ? `, ${counts.skipped} skipped` : '';
+  return `✓ ${counts.passed} passed${suffix}${skipped}`;
+}

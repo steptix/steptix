@@ -17,10 +17,14 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
   SKIP_GLYPH,
+  skipCompileLogLine,
+  skipHoverMessage,
   skipPaintsOver,
+  skipPanelLine,
   skipRunLogLine,
   skipTestOutputLine,
 } from '../src/extension/step-skip-core.ts';
+import { runLogTallyLine } from '../src/extension/steps-summary-core.ts';
 
 // ---------------------------------------------------------------------------
 // Precedence
@@ -92,7 +96,171 @@ test('both single-line surfaces carry the same glyph and the same separator', ()
 });
 
 test('a reason with no text still reads as a sentence, not a dangling dash', () => {
-  // Defensive: an older or hand-rolled server could send an empty reason. The
-  // line must still identify the line that did not run.
-  assert.equal(skipRunLogLine(12, ''), '◌ step 12 skipped — ');
+  // Defensive, and now literally what the title says. Two ways to arrive with
+  // no reason: an older or hand-rolled server sending an empty string, and the
+  // OTHER producer of a skipped step — `step:pass` carrying
+  // `output: 'skipped'`, whose event shape has no reason field at all
+  // (stories/control-flow.md). Both print the same sentence, and neither
+  // trails an em dash with nothing after it.
+  //
+  // This row used to assert the dangling dash it is named after, which is the
+  // shape of a test written from the implementation rather than from the
+  // sentence the reader gets.
+  assert.equal(skipRunLogLine(12, ''), '◌ step 12 skipped');
+  assert.equal(skipRunLogLine(12, '   '), '◌ step 12 skipped');
+  assert.equal(skipRunLogLine(12), '◌ step 12 skipped');
+  assert.equal(skipTestOutputLine(9, ' of login.md'), '◌ step on line 9 of login.md skipped');
+});
+
+// ---------------------------------------------------------------------------
+// The reason the OTHER producer now sends
+// ---------------------------------------------------------------------------
+//
+// `step:pass` + `output: 'skipped'` grew a `reason` (runner-core's
+// `StepPassEvent`), so the untaken half of a decision explains itself the way
+// a `return`'s skips always did. The two producers' reasons are worded for
+// different places, though: `skippedByReturnReason` writes "Not run: step 3
+// returned from …", while `skipReasonFor` writes "Skipped: another branch of
+// this decision was taken" — a standalone sentence, because what holds it is a
+// REPORT CELL with no glyph beside it. Pasted into this line it stutters.
+
+test('a report-cell reason does not repeat the word this line already says', () => {
+  assert.equal(
+    skipRunLogLine(7, 'Skipped: another branch of this decision was taken'),
+    '◌ step 7 skipped — another branch of this decision was taken',
+  );
+  assert.equal(
+    skipCompileLogLine(7, 'Skipped: the loop ran no passes'),
+    '◌ step on line 7 skipped — the loop ran no passes',
+  );
+  assert.equal(
+    skipPanelLine(7, 'Skipped: the list was empty'),
+    '◌ Step on line 7 skipped — the list was empty',
+  );
+  assert.equal(
+    skipTestOutputLine(7, ' of login.md', 'Skipped: no condition in this decision held'),
+    '◌ step on line 7 of login.md skipped — no condition in this decision held',
+  );
+});
+
+test('the strip is case- and space-tolerant, and only ever at the start', () => {
+  assert.equal(skipRunLogLine(7, 'skipped:   the list was empty'), '◌ step 7 skipped — the list was empty');
+  assert.equal(skipRunLogLine(7, 'SKIPPED: the list was empty'), '◌ step 7 skipped — the list was empty');
+  // A reason that only MENTIONS the word keeps it: the strip is anchored.
+  assert.equal(
+    skipRunLogLine(7, 'The loop was skipped: it ran no passes'),
+    '◌ step 7 skipped — The loop was skipped: it ran no passes',
+  );
+  // A return's reason leads with its own label and is untouched.
+  assert.equal(
+    skipRunLogLine(7, 'Not run: step 3 returned from "Sign in"'),
+    '◌ step 7 skipped — Not run: step 3 returned from "Sign in"',
+  );
+});
+
+test('a reason that is nothing but the prefix leaves no dangling dash', () => {
+  // The composition, not just the shape: the strip runs BEFORE the emptiness
+  // check, so a server sending the bare label cannot produce `skipped — `.
+  assert.equal(skipRunLogLine(7, 'Skipped:'), '◌ step 7 skipped');
+  assert.equal(skipRunLogLine(7, 'Skipped:   '), '◌ step 7 skipped');
+  // The colon-less form too. Every runner falls back to a bare `'Skipped'`
+  // when it has no sentence for a queued row (`skipReasons.get(k) ??
+  // 'Skipped'`), and that used to render `◌ step 7 skipped — Skipped`.
+  assert.equal(skipRunLogLine(7, 'Skipped'), '◌ step 7 skipped');
+  assert.equal(skipRunLogLine(7, 'skipped '), '◌ step 7 skipped');
+});
+
+test('the optional colon cannot eat the front of an unrelated word', () => {
+  // The composition the colon-less strip must not break: the anchor carries a
+  // word boundary, so only the LABEL goes.
+  assert.equal(
+    skipRunLogLine(7, 'Skippedy the section was disabled'),
+    '◌ step 7 skipped — Skippedy the section was disabled',
+  );
+  // And a label written without a colon but with a sentence after it is
+  // treated as the label it is.
+  assert.equal(
+    skipRunLogLine(7, 'Skipped because the list was empty'),
+    '◌ step 7 skipped — because the list was empty',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The gutter ◌'s hover
+// ---------------------------------------------------------------------------
+
+test('the hover keeps the standalone sentence the log line strips', () => {
+  // Deliberate, and decided in ONE place so it cannot drift by accident: a log
+  // line has already said `◌ step 5 skipped` before the reason reaches it, so
+  // repeating the word stutters; a hover is a box of its own with only the
+  // gutter glyph beside it, and reads as prose — the same shape `rowSkipHover`
+  // gives a data row.
+  assert.equal(
+    skipHoverMessage('Skipped: another branch of this decision was taken'),
+    'Skipped: another branch of this decision was taken',
+  );
+  assert.equal(
+    skipRunLogLine(5, 'Skipped: another branch of this decision was taken'),
+    '◌ step 5 skipped — another branch of this decision was taken',
+  );
+  // A return's sentence is standalone on both surfaces already.
+  assert.equal(
+    skipHoverMessage('Not run: step 3 returned from "Sign in"'),
+    'Not run: step 3 returned from "Sign in"',
+  );
+});
+
+test('a blank reason opens no hover box at all', () => {
+  // What the decoration spreads on: `undefined` means the key is omitted, and
+  // an empty hover box on a ◌ is worse than none.
+  for (const reason of [undefined, '', '   ', '\n']) {
+    assert.equal(skipHoverMessage(reason), undefined);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The run log's closing tally
+// ---------------------------------------------------------------------------
+//
+// `run-controller.ts` counted a skipped step as a PASS here — `✓ 12 passed`
+// for a run whose panel header, three inches away, said `✓ 9 passed  ◌ 3
+// skipped` — because both parents' rules survived verbatim in adjacent
+// branches of one `if` and contradicted each other in their own comments. One
+// rule now: skipped is skipped, on every surface.
+
+test('the run log tally counts a skipped step as skipped, not as a pass', () => {
+  assert.equal(
+    runLogTallyLine({ passed: 9, skipped: 3, cached: 0, codeBehind: 0, stale: 0 }),
+    '✓ 9 passed, 3 skipped',
+  );
+});
+
+test('a run that skipped nothing renders the string it always did', () => {
+  assert.equal(
+    runLogTallyLine({ passed: 12, skipped: 0, cached: 0, codeBehind: 0, stale: 0 }),
+    '✓ 12 passed',
+  );
+  assert.equal(
+    runLogTallyLine({ passed: 12, skipped: 0, cached: 2, codeBehind: 7, stale: 1 }),
+    '✓ 12 passed (7 code-behind, 1 stale, 2 cached)',
+  );
+});
+
+test('the parenthesis breaks down the PASSES; the skip clause sits after it', () => {
+  // A skip is not a kind of pass, so it never joins the breakdown — the same
+  // rule `stepsSummaryText` follows for the `## Steps` heading.
+  assert.equal(
+    runLogTallyLine({ passed: 9, skipped: 3, cached: 0, codeBehind: 4, stale: 0 }),
+    '✓ 9 passed (4 code-behind), 3 skipped',
+  );
+});
+
+test('a run that ONLY skipped still says so', () => {
+  // Reachable: an unconditional `Return` as step 1, or a chain whose taken
+  // branch is empty. The caller guards on `passed > 0 || skipped > 0`, so this
+  // line is what such a run prints.
+  assert.equal(
+    runLogTallyLine({ passed: 0, skipped: 5, cached: 0, codeBehind: 0, stale: 0 }),
+    '✓ 0 passed, 5 skipped',
+  );
 });

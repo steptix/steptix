@@ -325,6 +325,91 @@ describe('step outcomes', () => {
     expect(result.warnings.join(' ')).toContain('need a human');
   });
 
+  it('does NOT warn about a human for a branch the decision did not take', () => {
+    // The composition defect the two control-flow features made between them.
+    // `output: 'skipped'` had exactly one producer — an `[input:]` /
+    // `[interactive]` step the server would not run unattended — so the fold
+    // inferred "needs a human" from it. `stories/control-flow.md` added a
+    // second, and every plain `If … / Otherwise …` then streamed an agent a
+    // warning telling it to find a person for a branch that simply was not
+    // chosen. `skipKind` is what tells them apart, and it is read rather than
+    // the reason's prose so a reword cannot reintroduce this.
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 10 },
+        { type: 'step:pass', line: 10 },
+        {
+          type: 'step:pass',
+          line: 11,
+          output: 'skipped',
+          reason: 'Skipped: another branch of this decision was taken',
+          skipKind: 'not-taken',
+        },
+        { type: 'step:start', line: 12 },
+        { type: 'step:pass', line: 12 },
+        { type: 'done', status: 'passed' },
+      ],
+    });
+
+    expect(result.steps.map((s) => s.status)).toEqual(['passed', 'skipped', 'passed']);
+    expect(result.steps[1]?.skipCause).toBe('not-taken');
+    // The reason is what the agent reads to know WHY, exactly as a
+    // `step:skip`'s is.
+    expect(result.steps[1]?.output).toBe('Skipped: another branch of this decision was taken');
+    expect(result.warnings.join(' ')).not.toContain('need a human');
+  });
+
+  it('still warns for an unattended skip in a run that ALSO had an untaken branch', () => {
+    // The composition, not just the shape: a fold that stopped setting
+    // `sawSkipped` for `output: 'skipped'` altogether would pass the test above
+    // and lose the real warning here.
+    const result = fold({
+      events: [
+        {
+          type: 'step:pass',
+          line: 10,
+          output: 'skipped',
+          reason: 'Skipped: the loop ran no passes',
+          skipKind: 'not-taken',
+        },
+        {
+          type: 'step:pass',
+          line: 11,
+          output: 'skipped',
+          reason: 'Skipped: [input] and [interactive] steps are not supported in API mode',
+          skipKind: 'unattended',
+        },
+        { type: 'step:start', line: 12 },
+        { type: 'step:pass', line: 12 },
+        { type: 'done', status: 'passed' },
+      ],
+    });
+
+    expect(result.steps.map((s) => s.skipCause)).toEqual([
+      'not-taken',
+      'unattended',
+      // A passed row carries none at all — the field is about skips only.
+      undefined,
+    ]);
+    expect(result.warnings.join(' ')).toContain('need a human');
+  });
+
+  it('reads a skip with no skipKind as unattended, which is what an older server meant', () => {
+    // Backward compatibility, stated as a test rather than as a comment: until
+    // `skipKind` existed the unattended skip was this event's only producer,
+    // so absence must keep meaning exactly what it used to.
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 10 },
+        { type: 'step:pass', line: 10, output: 'skipped' },
+        { type: 'done', status: 'passed' },
+      ],
+    });
+
+    expect(result.steps[0]?.skipCause).toBe('unattended');
+    expect(result.warnings.join(' ')).toContain('need a human');
+  });
+
   it('records WHICH kind of skip each row was', () => {
     // `status: 'skipped'` alone cannot be worded: the summary line has to say
     // "a step returned early" over one and "need a human" over the other, and

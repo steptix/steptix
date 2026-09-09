@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Payments</title>
+  <!--
+    Fixture page for stories/control-flow.md.
+
+    Four panels, one per control form, all client-side so every shard can share
+    one server and every run starts from the same state:
+
+      Payment method  → If / Else if / Otherwise. "Cash" is ticked on load, so a
+                        chain that asks about Cash first takes its If branch; a
+                        test that unticks it first falls through to Otherwise.
+      Statements      → While the Next button is enabled, … . Four pages of
+                        three, Next disabled on page 4, so the loop runs exactly
+                        three times and then stops on its own.
+      Alerts          → Repeat … until the Load more button is gone. The button
+                        is REMOVED from the DOM on its third click, not hidden,
+                        because "gone" should be gone.
+      Your accounts   → a plural capture, then For each {{account}} in
+                        {{accounts}}, … . Three names, each in its own
+                        .account-name element, each with a visible balance.
+
+    No cookie banner on purpose: it is fixed to the bottom of the viewport on
+    the other pages, and the loop panels here are the things it would sit on
+    top of. No login either, as on the Documents page.
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar (same shell as dashboard.html / transactions.html / documents.html) */
+    .sidebar {
+      width: 240px;
+      background: #1f2937;
+      color: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      min-height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      margin-bottom: 32px;
+    }
+
+    .sidebar-logo-icon {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .sidebar-logo-name {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    nav { flex: 1; }
+
+    nav ul { list-style: none; padding: 0; }
+
+    nav ul li a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 24px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav ul li a:hover { background: #374151; color: #f9fafb; }
+
+    nav ul li a.active {
+      background: #374151;
+      color: #f9fafb;
+      border-left-color: #1a56db;
+    }
+
+    nav ul li a .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+    .sidebar-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #374151;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .user-name { font-size: 13px; font-weight: 500; color: #f9fafb; }
+    .user-email { font-size: 12px; color: #6b7280; }
+
+    .logout-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover { background: #374151; color: #f9fafb; }
+
+    /* Main content */
+    .main-content {
+      margin-left: 240px;
+      flex: 1;
+      padding: 32px;
+    }
+
+    .page-header { margin-bottom: 28px; }
+
+    .page-header h1 {
+      font-size: 26px;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .page-header p {
+      font-size: 14px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+
+    .panel-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(320px, 1fr));
+      gap: 24px;
+      align-items: start;
+    }
+
+    .section-card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .section-hint {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 16px;
+    }
+
+    .btn {
+      padding: 9px 16px;
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn:hover { background: #1648c0; }
+
+    .btn:disabled {
+      background: #9ca3af;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: #1a56db;
+      border: 1px solid #1a56db;
+    }
+
+    .btn-secondary:hover { background: #eff4ff; }
+
+    .btn-secondary:disabled {
+      color: #9ca3af;
+      border-color: #d1d5db;
+      background: transparent;
+      cursor: not-allowed;
+    }
+
+    /* Payment method */
+    fieldset {
+      border: none;
+      margin-bottom: 16px;
+    }
+
+    legend {
+      font-size: 13px;
+      font-weight: 500;
+      color: #374151;
+      margin-bottom: 8px;
+    }
+
+    .choice {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      color: #111827;
+      padding: 6px 0;
+      cursor: pointer;
+    }
+
+    .choice input { width: 16px; height: 16px; accent-color: #1a56db; }
+
+    .card-details {
+      border-top: 1px solid #f3f4f6;
+      padding-top: 14px;
+      margin-bottom: 16px;
+    }
+
+    label.field-label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: #374151;
+      margin-bottom: 6px;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 14px;
+      color: #111827;
+      outline: none;
+    }
+
+    input[type="text"]:focus {
+      border-color: #1a56db;
+      box-shadow: 0 0 0 3px rgba(26,86,219,0.12);
+    }
+
+    .receipt {
+      margin-top: 16px;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 14px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      color: #6b7280;
+    }
+
+    .receipt[data-state="cash"],
+    .receipt[data-state="card"] {
+      background: #ecfdf5;
+      border-color: #a7f3d0;
+      color: #047857;
+      font-weight: 600;
+    }
+
+    .receipt[data-state="error"] {
+      background: #fef2f2;
+      border-color: #fecaca;
+      color: #b91c1c;
+    }
+
+    /* Lists */
+    ul.plain { list-style: none; padding: 0; margin: 0 0 16px; }
+
+    ul.plain li {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid #f3f4f6;
+      font-size: 14px;
+      color: #111827;
+    }
+
+    ul.plain li:last-child { border-bottom: none; }
+
+    .muted { color: #6b7280; font-size: 13px; }
+
+    .amount { font-variant-numeric: tabular-nums; color: #111827; font-weight: 600; }
+
+    .pager {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .pager-label { font-size: 13px; font-weight: 600; color: #374151; }
+
+    .list-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .account-name { font-weight: 600; }
+    .account-number { color: #6b7280; font-size: 12px; margin-left: 8px; font-weight: 400; }
+    .account-balance { font-variant-numeric: tabular-nums; font-weight: 600; color: #047857; }
+  </style>
+</head>
+<body>
+  <!-- Sidebar navigation -->
+  <aside class="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">S</div>
+      <span class="sidebar-logo-name">SecureBank</span>
+    </div>
+
+    <nav>
+      <ul>
+        <li>
+          <a href="dashboard.html">
+            <span class="nav-icon">🏠</span>
+            Dashboard
+          </a>
+        </li>
+        <li>
+          <a href="transactions.html">
+            <span class="nav-icon">💳</span>
+            Transactions
+          </a>
+        </li>
+        <li>
+          <a href="documents.html">
+            <span class="nav-icon">📄</span>
+            Documents
+          </a>
+        </li>
+        <li>
+          <a href="control-flow.html" class="active" aria-current="page">
+            <span class="nav-icon">💸</span>
+            Payments
+          </a>
+        </li>
+        <li>
+          <a href="#settings">
+            <span class="nav-icon">⚙️</span>
+            Settings
+          </a>
+        </li>
+        <li>
+          <a href="#profile">
+            <span class="nav-icon">👤</span>
+            Profile
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <div>
+          <div class="user-name">Demo User</div>
+          <div class="user-email" id="user-email">demo@securebank.com</div>
+        </div>
+      </div>
+      <button class="logout-btn" id="logout-btn" type="button">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <div class="page-header">
+      <h1>Payments</h1>
+      <p>Pay an invoice, page through your statements, and check your accounts.</p>
+    </div>
+
+    <div class="panel-grid">
+
+      <!-- ── Payment method: the If / Else if / Otherwise panel ────────────── -->
+      <section class="section-card" id="payment-card" aria-labelledby="payment-title">
+        <div class="section-header">
+          <h2 class="section-title" id="payment-title">Payment method</h2>
+        </div>
+        <p class="section-hint">Invoice INV-4471 — $86.40 due today.</p>
+
+        <fieldset>
+          <legend>How would you like to pay?</legend>
+          <label class="choice" for="pay-cash">
+            <input type="checkbox" id="pay-cash" name="cash" checked>
+            <span>Cash</span>
+          </label>
+          <label class="choice" for="pay-card">
+            <input type="checkbox" id="pay-card" name="card">
+            <span>Card</span>
+          </label>
+        </fieldset>
+
+        <div class="card-details" id="card-details" hidden>
+          <label class="field-label" for="card-number">Card number</label>
+          <input type="text" id="card-number" name="card-number" placeholder="4111 1111 1111 1111" autocomplete="off">
+        </div>
+
+        <button type="button" class="btn" id="pay-now">Pay now</button>
+
+        <div class="receipt" id="payment-status" role="status" aria-live="polite" data-state="none">
+          No payment made yet.
+        </div>
+      </section>
+
+      <!-- ── Statements: the While panel ───────────────────────────────────── -->
+      <section class="section-card" id="statements-card" aria-labelledby="statements-title">
+        <div class="section-header">
+          <h2 class="section-title" id="statements-title">Statements</h2>
+          <span class="pager-label" id="page-indicator">Page 1 of 4</span>
+        </div>
+        <p class="section-hint">Three per page. Next is disabled on the last page.</p>
+
+        <ul class="plain" id="statement-list"></ul>
+
+        <div class="pager">
+          <button type="button" class="btn btn-secondary" id="prev-page" disabled>Previous</button>
+          <button type="button" class="btn" id="next-page">Next</button>
+        </div>
+      </section>
+
+      <!-- ── Alerts: the Repeat … until panel ──────────────────────────────── -->
+      <section class="section-card" id="alerts-card" aria-labelledby="alerts-title">
+        <div class="section-header">
+          <h2 class="section-title" id="alerts-title">Alerts</h2>
+        </div>
+        <p class="section-hint">Two more each time. The Load more button is removed once every alert is shown.</p>
+
+        <ul class="plain" id="alert-list"></ul>
+
+        <div class="list-footer">
+          <span class="muted" id="alerts-status">Showing 2 of 8 alerts</span>
+          <button type="button" class="btn btn-secondary" id="load-more">Load more</button>
+        </div>
+      </section>
+
+      <!-- ── Accounts: the capture + For each panel ────────────────────────── -->
+      <section class="section-card" id="accounts-card" aria-labelledby="accounts-title">
+        <div class="section-header">
+          <h2 class="section-title" id="accounts-title">Your accounts</h2>
+          <span class="muted" id="account-count">3 accounts</span>
+        </div>
+        <p class="section-hint">Every account shows its current balance.</p>
+
+        <ul class="plain" id="account-list">
+          <li class="account-row" data-testid="account-row" data-account="Everyday">
+            <span>
+              <span class="account-name">Everyday</span>
+              <span class="account-number">•••• 4417</span>
+            </span>
+            <span class="account-balance" data-account="Everyday">$1,234.56</span>
+          </li>
+          <li class="account-row" data-testid="account-row" data-account="Savings">
+            <span>
+              <span class="account-name">Savings</span>
+              <span class="account-number">•••• 9082</span>
+            </span>
+            <span class="account-balance" data-account="Savings">$8,410.00</span>
+          </li>
+          <li class="account-row" data-testid="account-row" data-account="Travel">
+            <span>
+              <span class="account-name">Travel</span>
+              <span class="account-number">•••• 3355</span>
+            </span>
+            <span class="account-balance" data-account="Travel">$372.19</span>
+          </li>
+        </ul>
+      </section>
+
+    </div>
+  </main>
+
+  <script>
+    // ── Shell: user info and sign out (same as the other pages) ──────────────
+    const email = sessionStorage.getItem('user-email');
+    if (email) {
+      document.getElementById('user-email').textContent = email;
+      document.getElementById('user-avatar').textContent = email.charAt(0).toUpperCase();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.removeItem('logged-in');
+      sessionStorage.removeItem('user-email');
+      window.location.href = 'index.html';
+    });
+
+    // ── Payment method ───────────────────────────────────────────────────────
+    // Cash wins when both are ticked, which is the order a chain asks in:
+    // `If the Cash checkbox is ticked … / Else if the Card checkbox is ticked …`.
+    const cashBox = document.getElementById('pay-cash');
+    const cardBox = document.getElementById('pay-card');
+    const cardDetails = document.getElementById('card-details');
+    const cardNumber = document.getElementById('card-number');
+    const payNow = document.getElementById('pay-now');
+    const paymentStatus = document.getElementById('payment-status');
+
+    function setReceipt(state, message) {
+      paymentStatus.dataset.state = state;
+      paymentStatus.textContent = message;
+    }
+
+    // Pay now is disabled while neither method is chosen — the state the
+    // three-way chain's `Otherwise` branch verifies.
+    function syncPaymentControls() {
+      cardDetails.hidden = !cardBox.checked;
+      payNow.disabled = !cashBox.checked && !cardBox.checked;
+    }
+
+    cashBox.addEventListener('change', syncPaymentControls);
+    cardBox.addEventListener('change', syncPaymentControls);
+
+    payNow.addEventListener('click', function () {
+      if (cashBox.checked) {
+        setReceipt('cash', 'Paid in cash');
+      } else if (cardBox.checked) {
+        if (cardNumber.value.trim() === '') {
+          setReceipt('error', 'Enter a card number to pay by card');
+        } else {
+          setReceipt('card', 'Paid by card');
+        }
+      } else {
+        setReceipt('error', 'Choose a payment method first');
+      }
+    });
+
+    syncPaymentControls();
+
+    // ── Statements: four pages of three ──────────────────────────────────────
+    const STATEMENTS = [
+      { name: 'Statement 001', period: 'January 2026', amount: '$120.00' },
+      { name: 'Statement 002', period: 'January 2026', amount: '$84.15' },
+      { name: 'Statement 003', period: 'February 2026', amount: '$212.90' },
+      { name: 'Statement 004', period: 'February 2026', amount: '$46.00' },
+      { name: 'Statement 005', period: 'March 2026', amount: '$318.75' },
+      { name: 'Statement 006', period: 'March 2026', amount: '$91.40' },
+      { name: 'Statement 007', period: 'April 2026', amount: '$155.20' },
+      { name: 'Statement 008', period: 'April 2026', amount: '$63.05' },
+      { name: 'Statement 009', period: 'May 2026', amount: '$278.60' },
+      { name: 'Statement 010', period: 'May 2026', amount: '$39.99' },
+      { name: 'Statement 011', period: 'June 2026', amount: '$402.10' },
+      { name: 'Statement 012', period: 'June 2026', amount: '$17.45' },
+    ];
+    const PAGE_SIZE = 3;
+    const PAGE_COUNT = STATEMENTS.length / PAGE_SIZE;
+
+    const statementList = document.getElementById('statement-list');
+    const pageIndicator = document.getElementById('page-indicator');
+    const prevPage = document.getElementById('prev-page');
+    const nextPage = document.getElementById('next-page');
+    let page = 1;
+
+    function renderStatements() {
+      statementList.innerHTML = '';
+      const start = (page - 1) * PAGE_SIZE;
+      for (const s of STATEMENTS.slice(start, start + PAGE_SIZE)) {
+        const li = document.createElement('li');
+        li.className = 'statement-item';
+        li.dataset.testid = 'statement-item';
+        li.innerHTML =
+          '<span><span class="statement-name">' + s.name + '</span>' +
+          '<span class="account-number">' + s.period + '</span></span>' +
+          '<span class="amount">' + s.amount + '</span>';
+        statementList.appendChild(li);
+      }
+      pageIndicator.textContent = 'Page ' + page + ' of ' + PAGE_COUNT;
+      prevPage.disabled = page === 1;
+      nextPage.disabled = page === PAGE_COUNT;
+    }
+
+    prevPage.addEventListener('click', function () {
+      if (page > 1) { page -= 1; renderStatements(); }
+    });
+
+    nextPage.addEventListener('click', function () {
+      if (page < PAGE_COUNT) { page += 1; renderStatements(); }
+    });
+
+    renderStatements();
+
+    // ── Alerts: two shown, two more per click, button removed on the third ───
+    const ALERTS = [
+      'Card ending 4417 used at Woolworths Supermarkets',
+      'Direct debit scheduled for 3 April',
+      'New device signed in from Sydney',
+      'Statement 011 is ready to download',
+      'Travel account balance below $500',
+      'Payee "Jane Doe" added',
+      'Password changed successfully',
+      'Monthly account fee waived',
+    ];
+    const ALERT_STEP = 2;
+
+    const alertList = document.getElementById('alert-list');
+    const alertsStatus = document.getElementById('alerts-status');
+    let alertsShown = 2;
+
+    function renderAlerts() {
+      alertList.innerHTML = '';
+      for (const text of ALERTS.slice(0, alertsShown)) {
+        const li = document.createElement('li');
+        li.className = 'alert-item';
+        li.dataset.testid = 'alert-item';
+        li.textContent = text;
+        alertList.appendChild(li);
+      }
+      if (alertsShown >= ALERTS.length) {
+        alertsStatus.textContent = 'All alerts loaded';
+        // Removed, not hidden: `until the Load more button is gone` should be
+        // asking about a button that is really gone.
+        const btn = document.getElementById('load-more');
+        if (btn) btn.remove();
+      } else {
+        alertsStatus.textContent = 'Showing ' + alertsShown + ' of ' + ALERTS.length + ' alerts';
+      }
+    }
+
+    document.getElementById('load-more').addEventListener('click', function () {
+      alertsShown = Math.min(alertsShown + ALERT_STEP, ALERTS.length);
+      renderAlerts();
+    });
+
+    renderAlerts();
+  </script>
+</body>
+</html>

@@ -1154,11 +1154,13 @@ const foldedStep = z.object({
   // anyway, just undocumented. Optional and not nullable: it is meaningless on
   // any status but `skipped`, and absent is the honest way to say so.
   skipCause: z
-    .enum(['returned', 'unattended'])
+    .enum(['returned', 'not-taken', 'unattended'])
     .optional()
     .describe(
       'Why a skipped step was skipped. "returned" — an `If … then return` ' +
         'step ended the flow, which is the test doing what it was told. ' +
+        '"not-taken" — the untaken half of an `If` / `Otherwise` decision, or ' +
+        'a loop body that ran no passes; also the test doing what it was told. ' +
         '"unattended" — an `[input:]` / `[interactive]` step the server would ' +
         'not run with nobody watching; it needs a person before it can pass.',
     ),

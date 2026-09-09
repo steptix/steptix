@@ -21,6 +21,7 @@ import { RangeSet } from '@codemirror/state';
 import type { TabInfo } from '../App';
 import { useAppState, useAppDispatch } from '../App';
 import { useIpcInvoke } from '../hooks/useIpc';
+import { SKIP_GLYPH } from '../../step-skip';
 
 // ---------------------------------------------------------------------------
 // Step line detection
@@ -98,10 +99,28 @@ class FailedMarker extends GutterMarker {
   }
 }
 
+/** A step the run decided against: the untaken half of a chain, a loop body
+ *  that never ran, an `[input:]` in an unattended run, or a step a `return`
+ *  left behind. Reading which way a decision went off the editor is the point
+ *  of painting it at all.
+ *
+ *  `SKIP_GLYPH` (src/ui/step-skip.ts), the same hollow circle every other
+ *  surface paints — the TestBench gutter, its run log, its panel and the log
+ *  line beside this editor. It was a `−` here alone. */
+class SkippedMarker extends GutterMarker {
+  toDOM() {
+    const el = document.createElement('span');
+    el.className = 'gutter-marker-skipped';
+    el.textContent = SKIP_GLYPH;
+    return el;
+  }
+}
+
 const breakpointMarker = new BreakpointMarker();
 const pointerMarker = new PointerMarker();
 const passedMarker = new PassedMarker();
 const failedMarker = new FailedMarker();
+const skippedMarker = new SkippedMarker();
 
 // ---------------------------------------------------------------------------
 // State effects for updating markers
@@ -109,7 +128,7 @@ const failedMarker = new FailedMarker();
 interface MarkerState {
   breakpoints: Set<number>; // step indices
   pointer: number | null; // step index
-  results: Map<number, 'passed' | 'failed'>; // step index → status
+  results: Map<number, 'passed' | 'failed' | 'skipped'>; // step index → status
   stepLines: Map<number, number>; // lineNumber → stepIndex
 }
 
@@ -163,6 +182,8 @@ function createBreakpointGutter(
           markers.push({ from: lineInfo.from, marker: passedMarker });
         } else if (result === 'failed') {
           markers.push({ from: lineInfo.from, marker: failedMarker });
+        } else if (result === 'skipped') {
+          markers.push({ from: lineInfo.from, marker: skippedMarker });
         }
       }
 
@@ -205,9 +226,9 @@ export function Editor({ tab, tabIndex }: EditorProps) {
 
   // Compute results map from step outputs
   const resultMap = useMemo(() => {
-    const map = new Map<number, 'passed' | 'failed'>();
+    const map = new Map<number, 'passed' | 'failed' | 'skipped'>();
     for (const [idx, output] of state.stepOutputs) {
-      if (output.status === 'passed' || output.status === 'failed') {
+      if (output.status === 'passed' || output.status === 'failed' || output.status === 'skipped') {
         map.set(idx, output.status);
       }
     }

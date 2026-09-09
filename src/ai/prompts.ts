@@ -916,6 +916,99 @@ If matched is "waiting", return an empty actions array. Do NOT guess — if the 
 }
 
 /**
+ * The **judge** message: which of these conditions holds on the page right now
+ * (stories/control-flow.md §"Condition evaluation").
+ *
+ * A variant of {@link buildBranchedStepMessage} with three differences, each of
+ * which is the whole point of the form:
+ *
+ *  - **`none` is an outcome.** The watch form has no way to say "neither" —
+ *    it waits for one of its outcomes to appear. A decision needs a false
+ *    answer to be an answer (§"A chain is a decision", decision 4).
+ *  - **Actions are forbidden.** The selected tail's steps do the acting,
+ *    through `executeStep`. A judge that clicked would act twice, and would
+ *    act even on the branch the run then skipped.
+ *  - **`waiting` is narrowed** to "the page is visibly mid-transition". Left
+ *    as the watch form words it, a model reads a merely-false condition as
+ *    "not visible yet" and spends the whole 30 s budget saying so.
+ *
+ * The conditions arrive as AUTHORED — `{{plan}}` intact — with the same
+ * `## Values` block an ordinary step prompt carries, so the placeholder-
+ * preserving rule (stories/placeholder-preserving-actions.md) applies to a
+ * condition exactly as it does to a step, secret masking included.
+ */
+export function buildConditionJudgeMessage(
+  /** Authored condition text, in chain order. Labelled A, B, C… here. */
+  conditions: string[],
+  domSnapshot: string,
+  screenshotBase64: string | null,
+  conversationHistory: string[],
+  openPages?: PageInfo[],
+  testInfoSection?: string,
+  values?: StepValues,
+): ChatMessage {
+  const historySection =
+    conversationHistory.length > 0
+      ? `## Prior Steps\n${conversationHistory.join('\n')}\n\n`
+      : '';
+
+  const openPagesSection = formatOpenPagesSection(openPages);
+  const testInfoBlock = testInfoSection ? `${testInfoSection}\n\n` : '';
+
+  const labels = conditions.map((_, i) => String.fromCharCode(65 + i));
+  const conditionLines = conditions
+    .map((condition, i) => `${labels[i]}) ${condition}`)
+    .join('\n');
+
+  // Absent, not empty, when no condition references anything — same rule as
+  // the step prompt, so a plain condition's message stays minimal.
+  const valuesText = formatValuesBlock(values);
+  const valuesBlock = valuesText ? `\n## Values\n${valuesText}\n` : '';
+
+  const textContent = `${testInfoBlock}${historySection}${openPagesSection}## Decision — Which Condition Holds?
+
+Judge the CURRENT page state. You are NOT performing a step: perform no actions and return an empty \`actions\` array.
+
+Read the conditions in order and answer with the label of the FIRST one that is true of the page right now. Do not pick the one that seems most likely, most helpful, or most likely to be intended — pick the first one that is actually true now.
+
+${conditionLines}
+
+**Instructions:**
+- Answer with a single label (${labels.join(', ')}) when that condition is true now.
+- Answer "none" when none of them is true. A condition that is simply false is "none" — that is a real answer, not a problem.
+- Answer "waiting" ONLY when the page is visibly mid-transition (loading, navigating, animating, a spinner) so that you cannot yet tell whether a condition is true. Never use "waiting" for a condition you can see is false.
+${valuesBlock}
+## DOM Snapshot
+\`\`\`html
+${domSnapshot}
+\`\`\`${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
+
+## Response Format
+{
+  "matched": "<label, 'none' or 'waiting'>",
+  "actions": [],
+  "reasoning": "Brief explanation of which condition you judged true, and why"
+}
+
+\`actions\` is always empty here, whatever you answer — this decision performs nothing.`;
+
+  if (screenshotBase64) {
+    return {
+      role: 'user',
+      content: [
+        { type: 'text', text: textContent },
+        {
+          type: 'image_url',
+          image_url: { url: `data:image/png;base64,${screenshotBase64}` },
+        },
+      ],
+    };
+  }
+
+  return { role: 'user', content: textContent };
+}
+
+/**
  * Format a completed step as a conversation history entry.
  *
  * `instruction` MUST be the MASKED substituted text — `redact(interpolated,

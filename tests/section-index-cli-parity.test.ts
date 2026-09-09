@@ -3,6 +3,7 @@ import { parseTestContent } from '../src/parser/markdown.js';
 import { buildSectionIndex } from '../runner-core/dist/section-index.js';
 import { extractSections, findWrappedStepLines } from '../runner-core/dist/step-lines.js';
 import { matchText } from '../src/parser/section-match.js';
+import { expandSkills } from '../src/skills/expander.js';
 
 /**
  * The editor's view of "what is a call" vs the runtime's.
@@ -374,5 +375,203 @@ describe('wrapped body steps are detected, not silently truncated', () => {
     // And the detector flags the line, which is what lets the pre-flight
     // refuse the file instead.
     expect(findWrappedStepLines(text)).toContain(body.steps[0]!.line);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Control lines — the same question, one rung further down
+// ---------------------------------------------------------------------------
+
+/**
+ * Which section a CONTROL line calls, taken from the expander itself.
+ *
+ * The set above (`allCliCalls`) reads only the parse, which is enough while
+ * every call site is the whole step — but a control line's call site is its
+ * TAIL, and that resolution happens during expansion. So this side is derived
+ * from the frames `expandSkills` really builds: a `section` frame's
+ * `invocationLine` is the line that called it, tail or not. Nothing here
+ * restates the rule under test; it reports what ran.
+ */
+async function expandedSectionCalls(text: string): Promise<Set<string>> {
+  const parsed = parseTestContent(text, 'parity.md');
+  const expansion = await expandSkills(
+    parsed.steps,
+    undefined,
+    undefined,
+    'parity.md',
+    parsed.stepLines,
+    { sections: parsed.sections, rawSteps: parsed.rawSteps, warnDeadSections: false },
+  );
+  const out = new Set<string>();
+  for (const frame of Object.values(expansion.frames)) {
+    if (frame.kind !== 'section' || frame.invocationLine === null) continue;
+    out.add(`${frame.invocationLine}:${matchText(frame.skillName ?? '')}`);
+  }
+  return out;
+}
+
+/**
+ * A control line's call site is its TAIL — unless the whole line names a
+ * section, in which case rung 2 makes it an ordinary call (decision 3 of
+ * stories/control-flow.md).
+ *
+ * That order is the whole of this block. The index applied the control split
+ * FIRST, so a section named `While waiting, keep the page open` was reported
+ * never used while the runtime called it on every run, and the call site got a
+ * "did you mean" squiggle naming a section that does not exist. Exactly the
+ * divergence class this file exists for, and the hand-written table above
+ * could not see it: it never writes a control line.
+ */
+const CONTROL_CASES: { name: string; lines: string[] }[] = [
+  {
+    name: 'a resolved tail is the call site',
+    lines: [
+      '## Steps',
+      '',
+      '1. If the Cash checkbox is ticked, then Pay with cash',
+      '',
+      '### Pay with cash',
+      '',
+      '1. Click Pay now',
+    ],
+  },
+  {
+    name: 'a section named after the whole While line is a call, tail or no tail',
+    lines: [
+      '## Steps',
+      '',
+      '1. While waiting, keep the page open',
+      '',
+      '### While waiting, keep the page open',
+      '',
+      '1. Click A',
+    ],
+  },
+  {
+    name: 'a section named after a whole Otherwise line',
+    lines: [
+      '## Steps',
+      '',
+      '1. Otherwise, Pay by card',
+      '',
+      '### Otherwise, Pay by card',
+      '',
+      '1. Click B',
+    ],
+  },
+  {
+    name: 'both readings resolve: the whole line wins',
+    lines: [
+      '## Steps',
+      '',
+      '1. If a, then Pay with cash',
+      '',
+      '### If a, then Pay with cash',
+      '',
+      '1. Click the whole-line section',
+      '',
+      '### Pay with cash',
+      '',
+      '1. Click Pay now',
+    ],
+  },
+  {
+    name: 'a claim that does not complete falls back to the whole line',
+    lines: ['## Steps', '', '1. While waiting', '', '### While waiting', '', '1. Wait'],
+  },
+  {
+    name: 'every chain form, tail resolved',
+    lines: [
+      '## Steps',
+      '',
+      '1. If a, then Pay with cash',
+      '2. Else if b, then Pay with cash',
+      '3. Otherwise, Pay with cash',
+      '',
+      '### Pay with cash',
+      '',
+      '1. Click Pay now',
+    ],
+  },
+  {
+    name: 'every loop form, tail resolved',
+    lines: [
+      '## Steps',
+      '',
+      '1. While a, Pay with cash',
+      '2. Repeat Pay with cash until b',
+      '3. For each {{x}} in {{y}}, Pay with cash',
+      '',
+      '### Pay with cash',
+      '',
+      '1. Click Pay now',
+    ],
+  },
+  {
+    name: 'a tail in a section body',
+    lines: [
+      '## Steps',
+      '',
+      '1. Outer',
+      '',
+      '### Outer',
+      '',
+      '1. If a, then Inner',
+      '',
+      '### Inner',
+      '',
+      '1. Click',
+    ],
+  },
+  {
+    name: 'a near-miss tail is a call on neither side',
+    lines: [
+      '## Steps',
+      '',
+      '1. If a, then Pay with cache',
+      '',
+      '### Pay with cash',
+      '',
+      '1. Click Pay now',
+    ],
+  },
+  {
+    name: 'a bracket-directive tail is a call on neither side',
+    lines: [
+      '## Steps',
+      '',
+      '1. If a, then [tool: pay_now]',
+      '',
+      '### Pay with cash',
+      '',
+      '1. Click Pay now',
+    ],
+  },
+];
+
+describe('buildSectionIndex vs the CLI expander (control lines)', () => {
+  for (const testCase of CONTROL_CASES) {
+    it(testCase.name, async () => {
+      const text = testCase.lines.join('\n');
+      const ran = await expandedSectionCalls(text);
+      // Exact equality, not just the safe direction: every one of these is a
+      // single-line step, so the wrapped-item allowance that makes the table
+      // above one-directional does not apply.
+      expect([...allIndexCalls(text)].sort()).toEqual([...ran].sort());
+    });
+  }
+
+  it('the whole-line cases really do resolve as calls (not vacuously equal)', async () => {
+    const text = CONTROL_CASES[1]!.lines.join('\n');
+    expect([...(await expandedSectionCalls(text))]).toEqual([
+      '3:while waiting, keep the page open',
+    ]);
+    expect([...allIndexCalls(text)]).toEqual(['3:while waiting, keep the page open']);
+  });
+
+  it('and a resolved TAIL really does call, at the guard`s line', async () => {
+    const text = CONTROL_CASES[0]!.lines.join('\n');
+    expect([...(await expandedSectionCalls(text))]).toEqual(['3:pay with cash']);
+    expect([...allIndexCalls(text)]).toEqual(['3:pay with cash']);
   });
 });

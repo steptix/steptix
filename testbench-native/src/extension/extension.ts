@@ -4,6 +4,7 @@ import {
   type HostToWebviewMsg,
   type StepFailureDetail,
   type WebviewToHostMsg,
+  isSkippedPass,
   stepFailureDetail,
 } from 'ai-ui-automation-runner-core';
 import { ActiveFileTracker } from './active-file-tracker.js';
@@ -769,28 +770,53 @@ class RunControllerRegistry implements vscode.Disposable {
         }
         case 'step:pass': {
           const target = this.targetUriFor(uri, ev.frame);
-          // How the step passed decides the glyph. `codeBehindStale` outranks
-          // everything: the step DID pass, but its compiled entry threw and the
-          // AI covered for it, and ⚠ is the only mark that asks for a recompile.
-          // Then the code mark (ran as code), then ⚡ (every AI turn served from StepCache),
-          // then the plain ✓.
-          const status = ev.codeBehindStale
+          // How the step passed decides the glyph. `output: 'skipped'` outranks
+          // even the code-behind marks, because the step did not run at all:
+          // the untaken half of a decision, or the whole body of a `While` that
+          // never entered (stories/control-flow.md — "the other line and its
+          // section paint as skipped, so you can read which way it went off the
+          // editor"). It rides the PASS event because a branch that was not
+          // taken is not a failure and the wire has no third verdict; painting
+          // it ✓ would claim work that was never done.
+          //
+          // Then `codeBehindStale`: the step DID pass, but its compiled entry
+          // threw and the AI covered for it, and ⚠ is the only mark that asks
+          // for a recompile. Then the code mark (ran as code), then ⚡ (every AI
+          // turn served from StepCache), then the plain ✓.
+          const status = isSkippedPass(ev)
+            ? 'skip'
+            : ev.codeBehindStale
             ? 'pass-stale'
             : ev.fromCodeBehind
               ? 'pass-code-behind'
               : ev.fromCache
                 ? 'pass-cached'
                 : 'pass';
+          // The same precedence a `step:skip` gets, and for the same reason:
+          // a ✗ is the one status a run must not lose, and the two producers
+          // of a skipped step must not disagree about that
+          // (`skipPaintsOver`, step-skip-core.ts).
+          if (status === 'skip' && !skipPaintsOver(this.tracker.state(target).statuses.get(ev.line))) {
+            break;
+          }
           // A ⚠ pins the code-behind crash to the line, so the hover and the
           // panel row can say WHAT threw, not just that something did. No
           // `error`: the STEP passed, it is the entry that failed.
+          //
+          // A ◌ pins its reason the same way a `step:skip` does, which is what
+          // gives the untaken branch a hover at all — it had none, so the
+          // commonest skip in the codebase explained itself least. `reason` is
+          // absent on an older server, and an absent detail is exactly the
+          // hoverless ◌ that used to be the only outcome.
           this.tracker.setStatus(
             target,
             ev.line,
             status,
             ev.codeBehindStale
               ? stepFailureDetail({ codeBehindStale: ev.codeBehindStale })
-              : undefined,
+              : status === 'skip' && ev.reason
+                ? stepFailureDetail({ error: ev.reason })
+                : undefined,
           );
           break;
         }
@@ -994,22 +1020,36 @@ class RunControllerRegistry implements vscode.Disposable {
         case 'step:start':
           this.tracker.setStatus(uri, ev.line, 'running');
           break;
-        case 'step:pass':
-          this.tracker.setStatus(
-            uri,
-            ev.line,
-            ev.codeBehindStale
+        case 'step:pass': {
+          // A compile of a file with a chain is allowed — its steps run at
+          // most once — and the Record run emits `step:pass output:'skipped'`
+          // for the untaken branch. Same rule as the run gutter above: the
+          // step did not run, so it is not a ✓, and like a `step:skip` it
+          // never paints over a ✗.
+          const status = isSkippedPass(ev)
+            ? 'skip'
+            : ev.codeBehindStale
               ? 'pass-stale'
               : ev.fromCodeBehind
                 ? 'pass-code-behind'
                 : ev.fromCache
                   ? 'pass-cached'
-                  : 'pass',
+                  : 'pass';
+          if (status === 'skip' && !skipPaintsOver(this.tracker.state(uri).statuses.get(ev.line))) {
+            break;
+          }
+          this.tracker.setStatus(
+            uri,
+            ev.line,
+            status,
             ev.codeBehindStale
               ? stepFailureDetail({ codeBehindStale: ev.codeBehindStale })
-              : undefined,
+              : status === 'skip' && ev.reason
+                ? stepFailureDetail({ error: ev.reason })
+                : undefined,
           );
           break;
+        }
         case 'step:fail':
           // A Replay's red step is the compile's whole point (strict mode:
           // broken code fails instead of healing) — pin the error so the ✗
