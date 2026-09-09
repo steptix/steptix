@@ -113,32 +113,81 @@ test("nobody compares output to the sentinel by hand any more", () => {
  * and `◌ step 12 skipped — …` on the other, in adjacent branches of the same
  * `if` — which is exactly what a merge of two features that never met produces
  * and exactly what nobody notices in review.
+ *
+ * Counted per CALL SITE, not per file. The first version of this test asked
+ * only "does this file mention a shared builder at all", which three of four
+ * skip lines using one and a fourth hand-rolling its own would have passed.
+ * The counts are exact for the same reason `branchRe` above is exact: a number
+ * changing is a prompt to look, and a fifth skip line added without the shared
+ * wording changes one.
  */
+const LINE_BUILDER_SITES = {
+  // the compile fold's two (one per producer), and the run log's two
+  "extension/run-controller.ts": 4,
+  // Test Explorer's two, one per producer
+  "extension/test-controller.ts": 2,
+  // the panel's two, one per producer
+  "webview/testbench-runner.jsx": 2,
+  // paints a status, logs nothing
+  "extension/extension.ts": 0,
+};
+
 test("both producers of a skipped step print the one wording", () => {
   const LINE_BUILDERS = /\b(skipRunLogLine|skipCompileLogLine|skipTestOutputLine|skipPanelLine)\s*\(/g;
-  for (const rel of Object.keys(CONSUMERS)) {
+  for (const [rel, expected] of Object.entries(LINE_BUILDER_SITES)) {
     const text = fs.readFileSync(path.join(SRC, rel), "utf-8");
-    // Each of these files logs or paints; the gutter files paint, so a file
-    // with no line builder must be one that only sets a status.
     const builds = countOf(text, LINE_BUILDERS);
-    const paints = /skipPaintsOver\s*\(/.test(text);
+    assert.equal(
+      builds,
+      expected,
+      `${rel} calls a shared skip-line builder ${builds}× where ${expected} were expected — a ` +
+        `skip line added without one, or removed, is how the two producers drifted last time`,
+    );
+    // A file that reports a skipped step does so through the shared wording or
+    // the shared paint rule. Never neither.
     assert.ok(
-      builds > 0 || paints,
+      builds > 0 || /skipPaintsOver\s*\(/.test(text),
       `${rel} reports a skipped step without using the shared wording or the shared paint rule`,
     );
   }
+  assert.deepEqual(
+    Object.keys(LINE_BUILDER_SITES).sort(),
+    Object.keys(CONSUMERS).sort(),
+    "the two tables cover the same files",
+  );
 });
 
 test("no source file hand-rolls a skipped-step sentence", () => {
-  // The glyph, or the word, written next to a line number by hand. The two
-  // modules that OWN the sentence are the exception.
+  // The glyph, or the word, written next to a line or step number by hand.
+  // The two modules that OWN the sentence are the exception.
+  //
+  // The first version of this scan looked for `${….line}` inside a template
+  // literal ending in "skipped", which catches one drift shape in eight: it
+  // missed a destructured `line`, string concatenation, "skipped step N" word
+  // order, and — measured — the Runner UI's own `— Step ${data.stepIndex}
+  // skipped`, which was live at the time. So the shape asked for now is the
+  // loose one: the word "skipped" and an interpolation, on one line, in a
+  // template literal or a concatenation. False positives are cheap (add the
+  // file to OWNERS with a reason); a miss is what this test exists to prevent.
   const OWNERS = ["extension/step-skip-core.ts", "webview/lib/failure-text-inline.js"];
+  /** A quoted or backticked run of text on this line. */
+  const HAS_LITERAL = /[`'"]/;
+  /** A value dropped into it — `${…}`, or string concatenation. */
+  const HAS_VALUE = [/\$\{/, /['"`]\s*\+/, /\+\s*['"`]/];
   const offenders = sourceFiles().filter((rel) => {
     if (OWNERS.includes(rel)) return false;
     const text = fs.readFileSync(path.join(SRC, rel), "utf-8");
-    // A template literal that puts `skipped` after an interpolated line
-    // number is the shape both drifted copies had.
-    return /`[^`]*\$\{[^}]*\.line\}[^`]*skipped/i.test(text);
+    return text.split(/\r?\n/).some(
+      (line) =>
+        HAS_LITERAL.test(line) &&
+        /\bskipped\b/i.test(line) &&
+        // A TALLY says "3 skipped" and names no step — `stepsSummaryText` and
+        // the batch summary are allowed to, and are not what drifted. What
+        // drifted was the per-step SENTENCE, which always addresses one step
+        // or one line by number.
+        /\b(step|line)\b/i.test(line) &&
+        HAS_VALUE.some((re) => re.test(line)),
+    );
   });
   assert.deepEqual(offenders, []);
 });
@@ -149,12 +198,21 @@ test("the paint rule is asked by every path that can write a skip status", () =>
   // `step:pass` go through it — the second did not, until the two features
   // were merged, so a chain's untaken half could overwrite a red step from an
   // earlier pass through the same body.
+  //
+  // An EQUALITY against the paths that can write one, not a floor: `>= 4`
+  // passed just as happily with a fifth `setStatus(…, 'skip', …)` added and
+  // left unguarded. A skip-bearing path is an `isSkippedPass` branch or a
+  // `step:skip` case; each must ask the paint rule exactly once.
   const text = fs.readFileSync(path.join(SRC, "extension/extension.ts"), "utf-8");
   const guards = countOf(text, /skipPaintsOver\s*\(/g);
-  const writes = countOf(text, /['"]skip['"]/g);
-  assert.ok(
-    guards >= 4,
-    `extension.ts guards ${guards} skip paints; both gutters have a step:skip AND a ` +
-      `step:pass path, so all four must ask (found ${writes} mentions of the status)`,
+  const paths =
+    countOf(text, /isSkippedPass\s*\(/g) + countOf(text, /case ['"]step:skip['"]/g);
+  assert.equal(
+    guards,
+    paths,
+    `extension.ts has ${paths} paths that can write a skip status but guards ${guards} of ` +
+      `them with skipPaintsOver — an unguarded one can overwrite a ✗, the single status a ` +
+      `run must not lose`,
   );
+  assert.equal(paths, 4, "both gutters have a step:skip AND a step:pass path");
 });

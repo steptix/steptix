@@ -675,6 +675,11 @@ export class UIRunnerAdapter {
         const returningText = parsedTest.expansion?.rawSteps[i] ?? rawInstruction;
         for (let j = i + 1; j <= exit; j++) {
           const skipped = skippedByReturn(j, parsedTest.steps[j] ?? '', i, label, returningText);
+          // The pass these rows belong to, stamped as `flushSkips` and the
+          // ordinary step path both stamp it — without it the report's
+          // iteration band broke at exactly the rows a return produced.
+          const skippedLoop = loops.markerFor(j);
+          if (skippedLoop) skipped.loop = skippedLoop;
           this.stepResults.push(skipped);
           this.emit('runner:step-complete', {
             stepIndex: j + 1,

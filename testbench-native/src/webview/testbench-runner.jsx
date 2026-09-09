@@ -615,13 +615,15 @@ function TestBenchRunner() {
         setRunning(true);
         break;
       case "step:pass":
-        // A step the run decided against rides the pass event — the wire has
-        // no third verdict — but it did not run, so it gets a `−` and not a
-        // ✓. Without this the panel printed "✓ Step on line N passed" and then
-        // "skipped" for the same event, one line apart
-        // (stories/control-flow.md).
+        // A step the run decided against rides the pass event — the older of
+        // the two skip conventions — but it did not run, so it gets a `◌`
+        // (`SKIP_GLYPH`) and not a ✓. Without this the panel printed "✓ Step
+        // on line N passed" and then "skipped" for the same event, one line
+        // apart (stories/control-flow.md). `event.reason` is what a current
+        // server sends alongside; an older one sends none and the sentence
+        // reads without it.
         if (isSkippedPass(event)) {
-          log(skipPanelLine(event.line), "info", uri);
+          log(skipPanelLine(event.line, event.reason), "info", uri);
           break;
         }
         if (event.codeBehindStale) {

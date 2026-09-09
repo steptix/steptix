@@ -332,7 +332,9 @@ would have to choose a polling assertion.
 A step that begins `When prompted …` or `When asked …`, or that begins `If …`
 without a `then`, is a watch: it waits for one of several page states to
 appear. (`then` changes the meaning of an `If` only; `When prompted …, then …`
-is still a watch.)
+is still a watch — with one exception, the same one §3.5 names: a tail that is
+`return` or `stop` makes the line flow control, so `When the banner appears,
+then return` leaves the flow rather than watching for anything. §3.6.)
 Consecutive watch steps are grouped and the next ordinary step is their
 continuation. The executor re-reads the page every three seconds until one
 branch matches, and fails the step if none does within the wait budget.
@@ -469,8 +471,10 @@ input step before the `If`. Inside a tail's section body it is fine.
 
 #### `then return` is not a tail
 
-One `If … then …` line is **not** a decision: the one whose tail is exactly
-`return` or `stop` (§3.6). `If the page title contains "Dashboard" then return`
+One `If … then …` line is **not** a decision: the one whose tail is `return` or
+`stop` — bare, or with one of the six endings §3.6 lists, so `then stop running
+the remaining steps` counts too. The same goes for a line opening `When`.
+`If the page title contains "Dashboard" then return`
 is a flow-control step and is read as one everywhere — by the parser, the
 runner, the compiler and the editor — because two grammars claiming one line
 and disagreeing is the one way this could quietly do the wrong thing.
@@ -1395,7 +1399,7 @@ report's skipped steps and warnings, not just the summary.
 | `## Steps (login)` | `## Steps` | Any other heading yields no steps. |
 | `Wait for .spinner:hidden` | `Wait until the spinner disappears` | State belongs in words, not selectors. |
 | A section body's steps before the main flow ends | Main flow first, then `###` headings | Everything after the first `###` belongs to a section. |
-| `If we are signed in then skip ahead` | `If we are signed in then return` | Only `return` / `stop` (and their longer tails) end a flow; anything else is prose to a model. |
+| `If we are signed in then skip ahead` | `If we are signed in then return` | Only `return` / `stop` (and the six endings §3.6 lists) end a flow. Anything else after ` then ` is a decision whose tail is prose, so "skip ahead" is handed to a model as an instruction — the same way `then retun` is (§3.6). |
 | `beforeEach: If already signed in then return` | Put the line in `## Steps` | A hook has no flow to leave; the file is refused at parse. |
 
 ## 12. Checklist before handing a test over

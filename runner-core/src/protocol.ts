@@ -108,6 +108,40 @@ export interface StepPassEvent {
   line: number;
   /** Optional captured output (e.g. AI explanation). */
   output?: string;
+  /**
+   * Why this step never ran — present only alongside `output: 'skipped'`.
+   *
+   * The same sentence the step's report row carries (`skipReasonFor`,
+   * src/runner/control-runtime.ts): "Skipped: another branch of this decision
+   * was taken", "Skipped: the list was empty". Additive and optional, so a
+   * server that predates it is not broken by its absence — a client with no
+   * reason prints the bare sentence, which is what every client did before.
+   *
+   * `step:skip` has carried a reason since it existed; this is the older
+   * convention catching up, so the untaken half of a chain hovers with its
+   * cause rather than with nothing.
+   */
+  reason?: string;
+  /**
+   * Which KIND of skip this is — present only alongside `output: 'skipped'`.
+   *
+   * Two unrelated things ride this one event and they want opposite reactions
+   * from a reader:
+   *
+   *  - `'unattended'` — an `[input:]` / `[interactive]` step the server
+   *    declined to run with nobody watching. It needs a person before it can
+   *    ever pass.
+   *  - `'not-taken'` — a branch the decision did not choose, or a loop body
+   *    that ran no passes. The test did exactly what it was told and nothing
+   *    is wanted from anyone.
+   *
+   * Machine-readable rather than derived from `reason`, because the consumers
+   * that must tell them apart (`src/mcp/run-fold.ts`) must not depend on
+   * prose. **Absent means `'unattended'`**: until this field existed the
+   * unattended skip was the only producer of `output: 'skipped'`, so that is
+   * what an older server means when it says nothing.
+   */
+  skipKind?: 'unattended' | 'not-taken';
   /** data:image/png;base64 URI, may be empty. */
   screenshot?: string;
   frame?: FrameInfo;

@@ -21,6 +21,7 @@ import { RangeSet } from '@codemirror/state';
 import type { TabInfo } from '../App';
 import { useAppState, useAppDispatch } from '../App';
 import { useIpcInvoke } from '../hooks/useIpc';
+import { SKIP_GLYPH } from '../../step-skip';
 
 // ---------------------------------------------------------------------------
 // Step line detection
@@ -99,13 +100,18 @@ class FailedMarker extends GutterMarker {
 }
 
 /** A step the run decided against: the untaken half of a chain, a loop body
- *  that never ran, an `[input:]` in an unattended run. Reading which way a
- *  decision went off the editor is the point of painting it at all. */
+ *  that never ran, an `[input:]` in an unattended run, or a step a `return`
+ *  left behind. Reading which way a decision went off the editor is the point
+ *  of painting it at all.
+ *
+ *  `SKIP_GLYPH` (src/ui/step-skip.ts), the same hollow circle every other
+ *  surface paints — the TestBench gutter, its run log, its panel and the log
+ *  line beside this editor. It was a `−` here alone. */
 class SkippedMarker extends GutterMarker {
   toDOM() {
     const el = document.createElement('span');
     el.className = 'gutter-marker-skipped';
-    el.textContent = '−'; // −
+    el.textContent = SKIP_GLYPH;
     return el;
   }
 }

@@ -1363,3 +1363,229 @@ describe('a main-flow return walks past a guard without evaluating it', () => {
     expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
   });
 });
+
+// ── One accounting, one vocabulary, for both skip producers ──────────
+//
+// The merge left each surface reporting whichever parent had written it, so
+// the two producers of a skipped step agreed on the glyph and the sentence and
+// disagreed on every number and every cause derived from them. These pin the
+// server's half of the reconciliation.
+
+describe('what a decision-skipped step says about itself', () => {
+  it('carries a reason and a skipKind on the wire, so a client can say WHY', async () => {
+    judgeScript = [0];
+    const events = await collect(chainBody());
+    const skipped = events.filter((e) => e.type === 'step:pass' && e.output === 'skipped');
+    expect(skipped.map((e) => e.line)).toEqual([5, 13, 14]);
+    for (const ev of skipped) {
+      // The same sentence the report row carries. Without it the gutter's ◌
+      // had no hover at all, while an identical-looking ◌ from the OTHER
+      // producer hovered with its reason.
+      expect(ev.reason).toBe('Skipped: another branch of this decision was taken');
+      // Machine-readable, and what stops the MCP fold telling an agent that an
+      // untaken `Otherwise` "needs a human".
+      expect(ev.skipKind).toBe('not-taken');
+    }
+  });
+
+  it('says the loop ran no passes when that is what happened', async () => {
+    judgeScript = [null];
+    const events = await collect(whileBody());
+    const skipped = events.filter((e) => e.type === 'step:pass' && e.output === 'skipped');
+    expect(skipped.map((e) => [e.line, e.reason, e.skipKind])).toEqual([
+      [8, 'Skipped: the loop ran no passes', 'not-taken'],
+    ]);
+  });
+
+  it('reports it skipped in results[], the same word the report row uses', async () => {
+    // The `StepResultResponse` docstring three hundred lines above
+    // `emitSkippedStep` argues this in so many words — "`'skipped'` is
+    // additive … Reporting it `passed` would be a green row for work that
+    // never happened" — and the file used to hold both the rule and its
+    // violation: a return's skips were `'skipped'` and a decision's `'passed'`,
+    // for the same situation.
+    judgeScript = [0];
+    const body = await post(chainBody());
+    expect(
+      (body.results as { step: string; status: string }[]).map((r) => [r.step, r.status]),
+    ).toEqual([
+      ['Open the payments page', 'passed'],
+      ['If the Cash checkbox is ticked, then Pay with cash', 'passed'],
+      ['Click Pay now', 'passed'],
+      ['Verify the receipt says Paid in cash', 'passed'],
+      ['Otherwise, Pay by card', 'skipped'],
+      ['Enter the card details', 'skipped'],
+      ['Submit the card form', 'skipped'],
+      ['Verify the order confirmation is shown', 'passed'],
+    ]);
+  });
+
+  it('an [input:] skip still means "unattended", which is the compatible default', async () => {
+    // The OTHER producer of this event, and the one the field's absence has to
+    // keep meaning. `[input:]` in a SECTION body is the reachable shape — the
+    // client splits the batch before a main-flow one.
+    const events = await collect({
+      steps: ['Open the payments page', 'Sign in'],
+      sourceLines: [3, 4],
+      testFilePath,
+      sections: {
+        'sign in': {
+          name: 'Sign in',
+          headingLine: 6,
+          steps: ['[input: password] Type the password'],
+          stepLines: [7],
+        },
+      },
+    });
+    const skipped = events.filter((e) => e.type === 'step:pass' && e.output === 'skipped');
+    expect(skipped.map((e) => [e.line, e.skipKind])).toEqual([[7, 'unattended']]);
+    expect(skipped[0]!.reason).toContain('[input] and [interactive] steps are not supported');
+  });
+});
+
+describe('the loop band survives the rows a return produced', () => {
+  /**
+   * A `While` whose body section returns in the MIDDLE, so each pass leaves a
+   * skipped row behind inside the band.
+   *
+   *     3. Open the statements page
+   *     4. While the Next button is enabled, Go to the next page
+   *     5. Verify the last page is shown
+   *     ### Go to the next page   (heading 7)
+   *     8. Click Next
+   *     9. Return
+   *     10. Record the page
+   */
+  const returnMidBody = () => ({
+    steps: [
+      'Open the statements page',
+      'While the Next button is enabled, Go to the next page',
+      'Verify the last page is shown',
+    ],
+    sourceLines: [3, 4, 5],
+    testFilePath,
+    sections: {
+      'go to the next page': {
+        name: 'Go to the next page',
+        headingLine: 7,
+        steps: ['Click Next', 'Return', 'Record the page'],
+        stepLines: [8, 9, 10],
+      },
+    },
+  });
+
+  it('stamps the iteration on a skipped-by-return row, as it does on a passed one', async () => {
+    judgeScript = [0, 0, null];
+    await collect(returnMidBody());
+    const steps: StepResult[] = generatedReports.at(-1)!.steps;
+    const rows = steps
+      .filter((s) => s.instruction === 'Record the page')
+      .map((s) => [s.status, s.loop?.index]);
+    // Two passes, two skipped rows, and each inside ITS OWN pass's band. The
+    // marker came from the ORIGINAL frame id, where `iteration` never lives —
+    // `iteration` is written onto the per-pass CLONE — so both rows had no
+    // band at all and sat outside the iteration their pass drew, next to a
+    // `Click Next` row that had one.
+    expect(rows).toEqual([
+      ['skipped', 1],
+      ['skipped', 2],
+    ]);
+    // And the executed row beside it agrees, which is the point: one band per
+    // pass, containing everything that pass touched.
+    const clicks = steps
+      .filter((s) => s.instruction === 'Click Next')
+      .map((s) => [s.status, s.loop?.index]);
+    expect(clicks).toEqual([
+      ['passed', 1],
+      ['passed', 2],
+    ]);
+  });
+});
+
+describe('step mode after a return that ended a PASS', () => {
+  /**
+   * The `whileBody` shape with a body that returns before its last step.
+   *
+   *     3. Open the statements page
+   *     4. While the Next button is enabled, Go to the next page
+   *     5. Verify the last page is shown
+   *     ### Go to the next page   (heading 7)
+   *     8. Return
+   *     9. Click Next
+   */
+  const returnInLoopBody = (extra: Record<string, unknown> = {}) => ({
+    steps: [
+      'Open the statements page',
+      'While the Next button is enabled, Go to the next page',
+      'Verify the last page is shown',
+    ],
+    sourceLines: [3, 4, 5],
+    testFilePath,
+    sections: {
+      'go to the next page': {
+        name: 'Go to the next page',
+        headingLine: 7,
+        steps: ['Return', 'Click Next'],
+        stepLines: [8, 9],
+      },
+    },
+    ...extra,
+  });
+
+  it('parks the ▶ on the guard the run is going back to, not on the skipped line', async () => {
+    // Decision 10 says the pause decision uses the step that will ACTUALLY run
+    // next. That was written when a return always resumed at `exit + 1`; a
+    // return inside a loop body resumes at the GUARD, backwards, and `exit + 1`
+    // then named line 9 — the body line this very return had just declared
+    // skipped, which is the exact failure the rule exists to prevent.
+    judgeScript = [0, null];
+    const sessionId = nextSession();
+    const events: Array<{ type: string; [k: string]: any }> = [];
+    let awaiting = 0;
+
+    for await (const ev of sseEvents(returnInLoopBody({ stepMode: 'into' }), undefined, sessionId)) {
+      events.push(ev);
+      if (ev.type === 'step:awaiting') {
+        awaiting++;
+        if (awaiting > 8) throw new Error('the server kept pausing');
+        expect(await runControl(sessionId, 'into')).toBe(200);
+      }
+      if (ev.type === 'done') break;
+    }
+
+    const awaitingLines = events.filter((e) => e.type === 'step:awaiting').map((e) => e.line);
+    // Line 4 is the guard: the run goes back to it after the pass ends, so
+    // that is where the ▶ belongs.
+    expect(awaitingLines).toContain(4);
+    // Line 9 is the body's second step. This run reported it skipped and is
+    // never going to run it.
+    expect(awaitingLines).not.toContain(9);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+
+  it('an ordinary step that closes a loop body parks on the guard too', async () => {
+    // The half that is ours rather than main's, and the same mismatch: without
+    // the planner the pause decision read `i + 1` for every step, so the last
+    // line of a loop body named the step AFTER the loop while the run went
+    // back to the guard.
+    judgeScript = [0, null];
+    const sessionId = nextSession();
+    const events: Array<{ type: string; [k: string]: any }> = [];
+    let awaiting = 0;
+
+    for await (const ev of sseEvents(whileBody({ stepMode: 'into' }), undefined, sessionId)) {
+      events.push(ev);
+      if (ev.type === 'step:awaiting') {
+        awaiting++;
+        if (awaiting > 8) throw new Error('the server kept pausing');
+        expect(await runControl(sessionId, 'into')).toBe(200);
+      }
+      if (ev.type === 'done') break;
+    }
+
+    const awaitingLines = events.filter((e) => e.type === 'step:awaiting').map((e) => e.line);
+    // After line 8 (`Click Next`, the whole body) the run re-evaluates line 4.
+    expect(awaitingLines.slice(awaitingLines.indexOf(8))).toContain(4);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+});

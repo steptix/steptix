@@ -9,6 +9,7 @@ import {
   isBrowserClosed,
   isSkippableStep,
   parseOutputPrefixes,
+  UNATTENDED_SKIP_REASON,
 } from './run-helpers.js';
 import type { Config, EffectiveSettings, RunSettings } from '../config/types.js';
 import { mergeRunSettings, resolveRunSettings } from '../config/run-settings.js';
@@ -578,6 +579,21 @@ export type RunEvent =
       type: 'step:pass';
       line: number;
       output?: string;
+      /**
+       * Why the step never ran — sent only with `output: 'skipped'`, and the
+       * same sentence the report row carries. Mirrors `StepPassEvent.reason`
+       * in runner-core/src/protocol.ts, where the compatibility rule lives.
+       */
+      reason?: string;
+      /**
+       * Which kind of skip — sent only with `output: 'skipped'`.
+       * `'unattended'` is an `[input:]` / `[interactive]` step this server
+       * would not run with nobody watching; `'not-taken'` is a branch the
+       * decision did not choose or a loop body that ran no passes. Absent
+       * means `'unattended'`, which is what an older server meant by saying
+       * nothing (runner-core/src/protocol.ts, `StepPassEvent.skipKind`).
+       */
+      skipKind?: 'unattended' | 'not-taken';
       screenshot?: string;
       frame?: FrameInfo;
       fromCache?: boolean;
@@ -4221,10 +4237,25 @@ export class SessionManager {
      * Record one step the run decided not to take.
      *
      * The convention the branched path already set: `step:pass` with
-     * `output: 'skipped'` on the step's own line, and a `results` entry whose
-     * status is `passed` — the MCP-facing array has no third value, and a
-     * branch that was not taken is not a failure. `fullStepResults` keeps the
-     * real `skipped` status, which is what the report renders as `—`.
+     * `output: 'skipped'` on the step's own line. It stays because the
+     * extension is an HTTP client of whichever server the workspace points at,
+     * and a client that stopped reading it would repaint the untaken branch
+     * green against a server nobody had restarted.
+     *
+     * What rides with it now is `reason` and `skipKind` — additive fields an
+     * older server simply omits. `reason` is the sentence the report row
+     * already carried, so the hover and the log lines can say WHY rather than
+     * only that something was skipped; `skipKind: 'not-taken'` is how a
+     * consumer tells this apart from the `[input:]` skip that used to be the
+     * only producer of this event (see `src/mcp/run-fold.ts`, which warned
+     * that an untaken `Otherwise` "needs a human" until it could).
+     *
+     * The `results` entry is `'skipped'`, not `'passed'`: that union gained a
+     * third value with `stories/step-flow-control.md` decision 9, and the
+     * docstring on `StepResultResponse` says exactly why — "reporting it
+     * `passed` would be a green row for work that never happened".
+     * `fullStepResults` has always carried the real status, which is what the
+     * report renders as `—`.
      *
      * The frame stack is deliberately NOT transitioned: nothing ran in that
      * frame, and pushing it would report the run as having entered a section
@@ -4240,7 +4271,7 @@ export class SessionManager {
       const reason = skipReasons.get(k) ?? 'Skipped';
       results.push({
         step: instruction,
-        status: 'passed',
+        status: 'skipped',
         actions: [],
         screenshot: '',
         reasoning: reason,
@@ -4264,8 +4295,18 @@ export class SessionManager {
         type: 'step:pass',
         line: sourceLineFor(k),
         output: 'skipped',
+        reason,
+        skipKind: 'not-taken',
         ...(frame && { frame }),
       });
+      // Counted, unlike a return's skips, which are deliberately not
+      // (decision 9, "it counts steps that EXECUTED"). The two producers
+      // disagree here and the divergence is documented rather than hidden —
+      // stories/control-flow.md §"What `stepsCompleted` counts". The
+      // `[input:]` skip path has incremented it since long before either
+      // feature, and `stepsCompleted` is what a client's progress bar counts
+      // against `stepsTotal`: a chain whose untaken half stopped counting
+      // would leave every branching run's bar short of the end.
       stepsCompleted++;
       session.totalStepsExecuted++;
     };
@@ -4414,11 +4455,25 @@ export class SessionManager {
         // value on a re-run (stories/variable-assignment.md §Locked). Its
         // template is resolved inside the branch, below.
         const setStep = parseSetStep(originalStep);
-        // `If … then return` / `… then stop`, read off the AUTHORED line, before
-        // interpolation (stories/step-flow-control.md, decision 2). The claim is
-        // textual and must be the same answer in every runner whatever a `{{…}}`
-        // in the body holds; the model only judges the CONDITION, and only on
-        // the conditional form.
+        // `If … then return` / `… then stop`, read off `originalStep` — before
+        // the runtime `{{…}}` and `${…}` substitution two lines down
+        // (stories/step-flow-control.md, decision 2). The claim is textual and
+        // must be the same answer in every runner whatever a `{{…}}` in the
+        // body holds; the model only judges the CONDITION, and only on the
+        // conditional form.
+        //
+        // "Before interpolation" means that substitution and no other. This is
+        // the EXPANDER's output, so a skill call's arguments and a looped
+        // section's row values are already in it, and the same is true of the
+        // CLI (`test.steps[i]`, whose own comment names it "the same form the
+        // server has always held as `originalStep`") and the Runner UI. Three
+        // runners, one text, one answer — which is the property decision 2 is
+        // actually about. The narrower "the line exactly as typed" is
+        // `expansionRawSteps[i]`, used further down for the REASON strings and
+        // not for the claim, because the server's wire shape carries no
+        // `rawSteps` for a looped section body (contract §3.2) and reading the
+        // claim there would make the server disagree with the CLI for exactly
+        // that shape.
         const flowControlClaim = setStep ? null : parseFlowControlStep(originalStep);
         // The unconditional form — a step whose WHOLE text is the tail, so
         // `Stop running the remaining steps` as much as `Return` — has no
@@ -4928,10 +4983,21 @@ export class SessionManager {
             status: 'passed',
             actions: [],
             screenshot: '',
-            reasoning: 'Skipped: [input] and [interactive] steps are not supported in API mode',
+            reasoning: UNATTENDED_SKIP_REASON,
             outputs: {},
           });
-          emit({ type: 'step:pass', line: sourceLineFor(i), output: 'skipped', ...frameSpread });
+          // `skipKind: 'unattended'` is what makes this the skip that NEEDS a
+          // human, told apart from an untaken branch that needs nobody
+          // (runner-core/src/protocol.ts). It is also what an older server
+          // means when it sends neither field, so the default matches.
+          emit({
+            type: 'step:pass',
+            line: sourceLineFor(i),
+            output: 'skipped',
+            reason: UNATTENDED_SKIP_REASON,
+            skipKind: 'unattended',
+            ...frameSpread,
+          });
           stepsCompleted++;
           session.totalStepsExecuted++;
           i = advanceAfter(i) - 1;
@@ -5746,7 +5812,18 @@ export class SessionManager {
               const skippedResult = skippedByReturn(j, skippedInstruction, i, label, returningText);
               const skippedSkill = outermostSkillName(skippedFrameId, expansionFrames);
               const skippedSection = outermostSectionName(skippedFrameId, expansionFrames);
-              const skippedLoop = loopMarkerFor(skippedFrameId, expansionFrames, frameInputs);
+              // The same two-answer expression an executed step's marker uses,
+              // and for the same two reasons. `loops.markerFor` answers first
+              // because a control line's tail may be a plain instruction,
+              // which produces no frame at all; the frame walk needs the
+              // CLONE id, because `iteration` lives only on the per-pass clone
+              // `cloneFramesForPass` writes — `skippedFrameId` is the ORIGINAL
+              // (the id space the call-line walk above deliberately runs in)
+              // and answered `undefined` for every row, breaking the report's
+              // iteration band at exactly the rows a return produced.
+              const skippedLoop =
+                loops.markerFor(j) ??
+                loopMarkerFor(emittedFrameId(j), expansionFrames, frameInputs);
               const fullSkipped: StepResult = {
                 ...skippedResult,
                 ...(skippedSkill && { sourceSkill: skippedSkill }),
@@ -5792,7 +5869,29 @@ export class SessionManager {
           // step that will actually run next is the one after the flow that
           // ended, and pausing on `i + 1` would park the yellow ▶ on a line
           // this run has already declared skipped.
-          const nextI = (flowControlJumpTo ?? i) + 1;
+          //
+          // The three ways the run leaves step `i`, and the three answers,
+          // which must be the SAME expression the loop tail below resumes on
+          // or the ▶ lands where the run is not going:
+          //
+          //  - a return inside a control body → `advanceAfter(exit)`, which is
+          //    the loop's guard (backwards!) or the line past the chain. `exit
+          //    + 1` said "the line after the body", which for a chain member
+          //    is the next member's tail — a line the decision has already
+          //    declared skipped, which is the exact failure this comment says
+          //    it is avoiding;
+          //  - a return in the main flow → `exit + 1`, the run ending;
+          //  - no return at all → `advanceAfter(i)`, because an ordinary step
+          //    that closes a loop body sends the run back to the guard too.
+          //
+          // `advanceAfter` is pure (`planAfterStep` takes its state read-only),
+          // so asking it here and again at the tail cannot double-count a pass.
+          const nextI =
+            flowControlJumpTo !== null
+              ? flowControlEnclosed
+                ? advanceAfter(flowControlJumpTo)
+                : flowControlJumpTo + 1
+              : advanceAfter(i);
           if (currentMode !== 'continue' && nextI <= endIndex) {
             const curDepth = depthOf(i);
             const nextDepth = depthOf(nextI);

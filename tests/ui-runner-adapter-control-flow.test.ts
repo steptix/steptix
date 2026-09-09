@@ -605,3 +605,64 @@ describe('a debugger jump into a structure the run has already been through', ()
     ]);
   });
 });
+
+describe('the Runner UI reports both kinds of skip the same way', () => {
+  const RETURN_MID_BODY = `
+# Return mid-body
+
+## Steps
+1. Open the statements page
+2. While the Next button is enabled, Go to the next page
+3. Verify the last page is shown
+
+### Go to the next page
+1. Click Next
+2. Return
+3. Record the page
+`;
+
+  it('stamps the loop band on a skipped-by-return row, as it does on a passed one', async () => {
+    // The third copy of the same defect: `flushSkips` stamped the marker and
+    // the return path did not, so a report drawn from this runner showed one
+    // kind of skip inside the iteration band and the other outside it.
+    judgeHoldsThenStops(2);
+    await runAdapter(writeTest(root, RETURN_MID_BODY));
+    const steps = generatedReports.at(-1)!.steps;
+
+    expect(
+      steps
+        .filter((s) => s.instruction === 'Record the page')
+        .map((s) => [s.status, s.loop?.index]),
+    ).toEqual([
+      ['skipped', 1],
+      ['skipped', 2],
+    ]);
+    expect(
+      steps.filter((s) => s.instruction === 'Click Next').map((s) => [s.status, s.loop?.index]),
+    ).toEqual([
+      ['passed', 1],
+      ['passed', 2],
+    ]);
+  });
+
+  it('sends a reason with a decision skip, which the renderer turns into one sentence', async () => {
+    // `runner:step-complete` carries `reason` for both producers now. The
+    // renderer builds its log line from `skipLogLine` (src/ui/step-skip.ts),
+    // which strips the leading `Skipped:` this sentence carries for the
+    // report cell — pinned in tests/ui-skip-line-parity.test.ts.
+    evaluateConditionsMock.mockResolvedValue({
+      selected: 0,
+      reasoning: 'ticked',
+      aiInteractions: [],
+    });
+    const events = await runAdapter(writeTest(root, CHAIN));
+    const skips = events
+      .filter((e) => e.channel === 'runner:step-complete' && e.data['status'] === 'skipped')
+      .map((e) => e.data['reason']);
+    expect(skips).toEqual([
+      'Skipped: another branch of this decision was taken',
+      'Skipped: another branch of this decision was taken',
+      'Skipped: another branch of this decision was taken',
+    ]);
+  });
+});

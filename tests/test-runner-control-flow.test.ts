@@ -1187,3 +1187,136 @@ describe('a return meets a loop, a chain and a guard', () => {
     expect(report.status).toBe('passed');
   });
 });
+
+describe('a return written as a one-line loop body', () => {
+  /**
+   * The shape `stories/control-flow.md` used to document as the one thing that
+   * does not compose — "a loop whose tail is a plain instruction has no frame
+   * of its own, so a `return` written as that tail has nothing to clamp to and
+   * ends the whole run".
+   *
+   * It composes. `returnExit` clamps to a control RECORD, not to a frame, and
+   * the expander gives a one-line tail one: `bodyStart` is set before it
+   * recurses into the tail and `bodyEnd` after, so the tail's own index is
+   * inside the record and the clamp fires. The story now says so; this is what
+   * holds it to it.
+   */
+  const RETURN_AS_TAIL = [
+    '# One-line loop body',
+    '',
+    '## Steps',
+    '1. Open the statements page',
+    '2. While the banner is shown, If the retry count is 3 then return',
+    '3. Verify the banner is gone',
+    '',
+  ].join('\n');
+
+  it('ends the PASS and lets the loop re-evaluate, exactly as a section body does', async () => {
+    // A CONDITIONAL flow-control step is executed, not dispatched: the model
+    // reads the condition and answers with `flowControl` when it holds. So the
+    // guard's answers come from the judge and the tail's from the step
+    // executor, and only the second visit returns.
+    judgeAnswers(0, 0, null);
+    let visits = 0;
+    executeStepMock.mockImplementation(
+      async (index: number, _total: number, instruction: string) => ({
+        index,
+        instruction,
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+        ...(instruction.startsWith('If the retry count is 3') && ++visits === 2
+          ? { flowControl: { kind: 'return' as const, verb: 'return' } }
+          : {}),
+      }),
+    );
+
+    const report = await runTest(await instance(RETURN_AS_TAIL), makeConfig());
+
+    // Three judge calls means the loop asked three times — it kept going after
+    // the return. Had the return ended the RUN there would have been two.
+    expect(evaluateConditionsMock).toHaveBeenCalledTimes(3);
+    // The step AFTER the loop ran. This is the whole claim: if `enclosed` had
+    // been false, `exit` would be the test's last index, every remaining step
+    // would be reported skipped, and the run would have ended here.
+    expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual([
+      'Open the statements page',
+      'If the retry count is 3 then return',
+      'If the retry count is 3 then return',
+      'Verify the banner is gone',
+    ]);
+    expect(rows(report.steps).at(-1)).toEqual(['Verify the banner is gone', 'passed']);
+    // Nothing is reported skipped: the return ends a pass whose body is one
+    // line, and that line is the return itself.
+    expect(report.steps.filter((s) => s.status === 'skipped')).toEqual([]);
+    expect(report.status).toBe('passed');
+  });
+
+  it('behaves the same when the tail is an UNCONDITIONAL return', async () => {
+    // `While x, Return` — one pass, then the guard again. No model call for
+    // the tail at all, so every judge answer belongs to the guard.
+    judgeAnswers(0, 0, null);
+    const report = await runTest(
+      await instance(
+        [
+          '# Unconditional one-line body',
+          '',
+          '## Steps',
+          '1. Open the statements page',
+          '2. While the banner is shown, Return',
+          '3. Verify the banner is gone',
+          '',
+        ].join('\n'),
+      ),
+      makeConfig(),
+    );
+
+    expect(evaluateConditionsMock).toHaveBeenCalledTimes(3);
+    expect(rows(report.steps).at(-1)).toEqual(['Verify the banner is gone', 'passed']);
+    expect(report.status).toBe('passed');
+  });
+});
+
+describe('the loop band survives the rows a return produced (CLI)', () => {
+  const RETURN_MID_BODY = [
+    '# Return mid-body',
+    '',
+    '## Steps',
+    '1. Open the statements page',
+    '2. While the Next button is enabled, Go to the next page',
+    '3. Verify the last page is shown',
+    '',
+    '### Go to the next page',
+    '1. Click Next',
+    '2. Return',
+    '3. Record the page',
+    '',
+  ].join('\n');
+
+  it('stamps the iteration on a skipped-by-return row, as it does on a passed one', async () => {
+    judgeAnswers(0, 0, null);
+    const report = await runTest(await instance(RETURN_MID_BODY), makeConfig());
+
+    // Two passes, two skipped rows, each inside its own pass's band. Without
+    // the marker the report showed one kind of skip inside the band (the
+    // queue's, which always stamped it) and the other outside it, and the two
+    // `Record the page` rows were indistinguishable.
+    expect(
+      report.steps
+        .filter((s) => s.instruction === 'Record the page')
+        .map((s) => [s.status, s.loop?.index]),
+    ).toEqual([
+      ['skipped', 1],
+      ['skipped', 2],
+    ]);
+    expect(
+      report.steps
+        .filter((s) => s.instruction === 'Click Next')
+        .map((s) => [s.status, s.loop?.index]),
+    ).toEqual([
+      ['passed', 1],
+      ['passed', 2],
+    ]);
+  });
+});

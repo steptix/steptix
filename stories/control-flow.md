@@ -1036,20 +1036,73 @@ the interaction tests rather than by reading the code:
   skipped twice: once as itself, once as the call. The call-line dedupe set is
   now keyed by document address for both.
 
-**One thing does not compose, and it is narrow.** A loop whose tail is a plain
-instruction has no frame of its own, so a `return` written as that tail —
-`While x, If y then return` — has nothing to clamp to and ends the whole run.
-Writing the body as a `### Section` gives it a frame and the iteration
-semantics. Not worth a special case: a one-line loop body that is nothing but a
-conditional return is a `Repeat … until` written the hard way.
+**A one-line loop body composes too**, which is worth saying because the first
+draft of this section said it did not. `While the banner is shown, If the retry
+count is 3 then return` was written up as the one shape that ends the whole
+run, on the reasoning that a plain-instruction tail has no frame of its own and
+so nothing to clamp to. Measured on the server and on the CLI, the pass ends,
+the loop re-evaluates, and the step after the loop runs — three guard visits and
+nothing reported skipped.
+
+The reasoning was wrong about which thing does the clamping. `returnExit` needs
+a control RECORD, not a frame, and the expander gives a one-line tail one
+anyway: `bodyStart` is set before it recurses into the tail and `bodyEnd` after,
+so the tail's own index satisfies `record.bodyStart <= i && i <= record.bodyEnd`
+and the clamp fires. A frame is what `frameExitIndex` wants, and its answer is
+the one being clamped.
+
+The shape that really does not clamp is a return in the MAIN FLOW, outside every
+control record — `inner` is null, `enclosed` is false, and the planner must not
+be consulted, which is the third bullet above.
 
 **TestBench paints one skip.** A step that never ran reaches the client two
-ways — `step:skip` with a reason, and `step:pass` carrying `output: 'skipped'`
-— and both stay, because the extension is an HTTP client of whichever server
-the workspace points at and dropping the older convention would repaint the
-untaken branch green against a server nobody had restarted. What is single is
-the presentation: one glyph, one paint precedence (a ✗ is never overwritten,
-which the `step:pass` path did not honour), one sentence. They had already
-drifted into `— step 12 skipped` and `◌ step 12 skipped — …` in adjacent
-branches of the same `if`, which is what a merge of two features that never met
-produces and what nobody notices in review.
+ways — `step:skip`, and `step:pass` carrying `output: 'skipped'` — and both
+stay, because the extension is an HTTP client of whichever server the workspace
+points at and dropping the older convention would repaint the untaken branch
+green against a server nobody had restarted. What is single is the
+presentation: one glyph, one paint precedence (a ✗ is never overwritten, which
+the `step:pass` path did not honour), one sentence. They had already drifted
+into `— step 12 skipped` and `◌ step 12 skipped — …` in adjacent branches of
+the same `if`, which is what a merge of two features that never met produces
+and what nobody notices in review.
+
+The older event was also the poorer one, and the first review of the merge is
+what made that visible rather than merely true: `step:skip` carried a reason
+and `step:pass` did not, so the commonest skip in the language — an untaken
+branch — was the one that explained itself least. Its gutter `◌` had no hover
+at all while an identical-looking `◌` a line above hovered with its cause. It
+now carries two additive fields, `reason` and `skipKind`, both absent on an
+older server and both optional at every reader:
+
+- `reason` is the sentence the report row already held, so the hover, the run
+  log, the compile log, the panel and Test Explorer all say WHY. The shared
+  builders strip its leading `Skipped:` — a report cell has no glyph beside it
+  and needs the word; `◌ step 5 skipped — Skipped: …` stutters.
+- `skipKind` is `'unattended'` or `'not-taken'`, and it exists because one
+  consumer must not read prose. The MCP fold turns a run into what an agent
+  reads, and it inferred "this step needs a human (`[input:]` /
+  `[interactive]`)" from `output: 'skipped'` alone — safe while that was the
+  only producer, false for every `Otherwise` the moment this feature added a
+  second. Absent means `'unattended'`, which is what an older server meant by
+  saying nothing.
+
+**What `stepsCompleted` counts** is the one number the two features do not
+agree on, and the disagreement is deliberate rather than unreconciled. A skip
+this feature records increments it; a skip a `return` leaves behind does not
+(`stories/step-flow-control.md`, decision 9 — "it counts steps that EXECUTED").
+A seven-step run with two chain skips and one return skip reports
+`stepsCompleted: 6` of `stepsTotal: 7`.
+
+Both are defensible because the field is doing two jobs. It is a progress
+denominator — a client's bar walks it against `stepsTotal` — and a chain whose
+untaken half stopped counting would leave every branching run's bar short of
+the end, since the untaken half is never coming. It is also a claim about work
+done, and by that reading a return's skips are right to be excluded. The
+`[input:]` skip path has incremented it since long before either feature, which
+is the convention this one follows.
+
+What is NOT ambiguous is `✓ N passed`. That sentence claims steps passed, and a
+skipped step did not: every surface counts it as a skip and says so separately
+— the panel header, the `## Steps` decoration, the run log, and the MCP tally,
+which words the three causes apart because "needs a human" over an untaken
+branch sends an agent after an intervention nothing asked for.

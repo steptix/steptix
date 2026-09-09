@@ -747,6 +747,35 @@ export default defineSteps([
     expect(result.files).toEqual({});
   });
 
+  it('the summary asserts a return only when one actually happened', async () => {
+    // The message says its cause as FACT — "a return ended the flow before
+    // them" — so it may only say it when every skipped row agrees. A chain's
+    // untaken half reaches this same branch and no return happened.
+    const md = await write('booking.md', THREE_STEP_MD);
+    const test = await parseTestFile(md);
+    const decided = (index: number): StepResult => ({
+      ...skipped(index, 1),
+      aiExplanation: 'Skipped: another branch of this decision was taken',
+    });
+    const record: CompileRunOutcome = {
+      status: 'passed',
+      steps: [decided(1), decided(2), decided(3)],
+      resolvedParameters: {},
+      tokensUsed: 0,
+    };
+    const { client } = scriptedClient([]);
+    const { events, onEvent } = collect();
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client,
+      runner: async () => record, onEvent,
+    });
+
+    expect(result.status).toBe('partial');
+    const done = events.find((e) => e.kind === 'done') as { message: string };
+    expect(done.message).toContain('did not run on the recording run — the run decided against them');
+    expect(done.message).not.toContain('a return ended the flow');
+  });
+
   it('builds the not-attempted reason from the runner\'s own sentence', () => {
     expect(notRunOnRecordingReason(skipped(5, 3))).toBe(
       'not run on the recording run (step 3 returned)',
@@ -755,11 +784,40 @@ export default defineSteps([
       notRunOnRecordingReason({ ...skipped(5, 3), aiExplanation: 'Not run: step 2 returned from "Sign in"' }),
     ).toBe('not run on the recording run (step 2 returned)');
     // A recording that carries no reason still reads — and does not quote a
-    // number out of unrelated prose.
+    // number, or a CAUSE, out of unrelated prose. The fallback used to assert
+    // "a return ended its flow", which was the wrong sentence for every skip
+    // that no return produced.
     expect(notRunOnRecordingReason({ ...skipped(5, 3), aiExplanation: undefined })).toBe(
-      'not run on the recording run (a return ended its flow)',
+      'not run on the recording run',
     );
-    expect(notRunOnRecordingReason(undefined)).toContain('a return ended its flow');
+    expect(notRunOnRecordingReason(undefined)).toBe('not run on the recording run');
+  });
+
+  it('does not tell a chain author that a return ended their flow', () => {
+    // The OTHER producer of a skipped row (stories/control-flow.md). A chain
+    // compiles — only loops are refused — so this is reachable on the shape
+    // control flow is mostly about, and it read "not run on the recording run
+    // (a return ended its flow)" when no return had happened anywhere.
+    const decided = (index: number, reason: string): StepResult => ({
+      ...skipped(index, 1),
+      aiExplanation: reason,
+    });
+    expect(
+      notRunOnRecordingReason(decided(5, 'Skipped: another branch of this decision was taken')),
+    ).toBe('not run on the recording run (another branch of this decision was taken)');
+    expect(notRunOnRecordingReason(decided(5, 'Skipped: the loop ran no passes'))).toBe(
+      'not run on the recording run (the loop ran no passes)',
+    );
+    expect(notRunOnRecordingReason(decided(5, 'Skipped: the list was empty'))).toBe(
+      'not run on the recording run (the list was empty)',
+    );
+    // Anchored, like the return prefix beside it: a reason that merely
+    // mentions the word is quoted whole rather than cut at the colon.
+    expect(notRunOnRecordingReason(decided(5, 'The loop was skipped: no passes'))).toBe(
+      'not run on the recording run',
+    );
+    // And a bare label says nothing rather than opening an empty parenthesis.
+    expect(notRunOnRecordingReason(decided(5, 'Skipped:'))).toBe('not run on the recording run');
   });
 });
 

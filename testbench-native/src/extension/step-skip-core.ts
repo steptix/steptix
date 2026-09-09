@@ -17,8 +17,9 @@
  *  - `step:pass` carrying `output: 'skipped'`, read by `isSkippedPass` — the
  *    older convention, which the untaken half of a chain, a loop body that
  *    never ran and an unattended `[input:]` inside a section body still
- *    arrive on. It carries no reason, because that event shape has no field
- *    for one.
+ *    arrive on. It now carries a `reason` too, on a server new enough to send
+ *    one; every builder below takes it as optional, which is what keeps an
+ *    older server's bare sentence readable.
  *
  * They are not merged into one event, and the reason is the deployment shape
  * rather than taste: the extension is an HTTP client of whichever server the
@@ -60,13 +61,23 @@ export function skipPaintsOver(current: string | undefined): boolean {
 /**
  * The reason clause, or nothing.
  *
- * `step:pass` + `output: 'skipped'` has no reason field, so the sentence has
- * to read without one — and it does, because the glyph and the word already
- * say what happened. Blank and whitespace-only are treated as absent so a
- * server that sends an empty string cannot produce a trailing dash.
+ * A server older than `StepPassEvent.reason` sends none on a `step:pass` skip,
+ * so the sentence has to read without one — and it does, because the glyph and
+ * the word already say what happened. Blank and whitespace-only are treated as
+ * absent so a server that sends an empty string cannot produce a trailing
+ * dash.
+ *
+ * The leading `Skipped:` goes. `skipReasonFor` (src/runner/control-runtime.ts)
+ * writes a standalone sentence — "Skipped: another branch of this decision was
+ * taken" — because that is what a report CELL holds, and a cell has no glyph
+ * beside it. Pasted into this line it stutters: `◌ step 5 skipped — Skipped:
+ * another branch…`. Stripped once, here, rather than at each of the four call
+ * sites or by rewording the report rows every suite asserts on. A reason that
+ * leads with anything else (`Not run: step 3 returned from "Sign in"`) is left
+ * exactly as the server wrote it.
  */
 function because(reason?: string): string {
-  const trimmed = reason?.trim();
+  const trimmed = reason?.trim().replace(/^skipped\s*:\s*/i, '');
   return trimmed ? ` — ${trimmed}` : '';
 }
 

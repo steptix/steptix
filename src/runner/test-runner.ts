@@ -1801,6 +1801,15 @@ export async function runTest(
           if (skippedSkill) skipped.sourceSkill = skippedSkill;
           const skippedSection = test.sourceSections[j] ?? null;
           if (skippedSection) skipped.sourceSection = skippedSection;
+          // Which pass these rows belong to, stamped exactly as an executed
+          // step's is above. Without it the report's iteration band broke at
+          // precisely the rows a return produced: `Click Next` and the guard
+          // inside the band, the step after the return outside it and
+          // indistinguishable from the same row on the next pass. The other
+          // skip producer (`flushSkips`) has always stamped it, so a report
+          // showed one kind of skip inside the band and the other outside.
+          const skippedLoop = loops.markerFor(j);
+          if (skippedLoop) skipped.loop = skippedLoop;
           // Deliberately NOT through `recordLastRun`: the sidecar answers
           // "which entries does the next compile need to regenerate", and a
           // step that never ran is no evidence either way (decision 12).

@@ -509,8 +509,13 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
           notAttempted,
           ...(stoppedAt && { stoppedAt }),
         },
-        `Nothing to compile: ${listSteps(notAttempted)} did not run on the recording run — a ` +
-          'return ended the flow before them. Run the test so they execute, then compile again.',
+        // The clause names the cause only when every skipped row agrees on
+        // one, because the message asserts it as fact. A chain's untaken half
+        // reaches here too, and "a return ended the flow before them" over it
+        // is simply false — no return happened.
+        `Nothing to compile: ${listSteps(notAttempted)} did not run on the recording run` +
+          `${describeRecordingSkips(skippedInRecording.map((s) => record.steps[s.index]))}. ` +
+          'Run the test so they execute, then compile again.',
       );
     }
     selection = {
@@ -986,18 +991,53 @@ function usablePrefix(steps: (StepResult | undefined)[]): number {
  * Why a step the recording skipped was not attempted
  * (stories/step-flow-control.md, decision 12).
  *
- * The step number comes off the reason the runner already wrote — `Not run:
- * step 3 returned from "Sign in"`, one formatter for every loop — rather than
- * being recomputed here from the expansion, which the compile would have to
- * walk again and could disagree with. Anchored, so only that sentence is read;
- * a result skipped for some future reason falls back to the general phrasing
- * rather than quoting a number out of unrelated prose.
+ * TWO producers write a `skipped` row and they were not skipped for the same
+ * reason, so neither may be described in the other's words. Both already say
+ * their own cause in a sentence with a known prefix, and both are read off
+ * that sentence rather than recomputed from the expansion — which the compile
+ * would have to walk again and could disagree with:
+ *
+ *  - `Not run: step 3 returned from "Sign in"` — a return
+ *    (`skippedByReturnReason`, src/runner/flow-control.ts);
+ *  - `Skipped: another branch of this decision was taken`, `Skipped: the loop
+ *    ran no passes` — a decision (`skipReasonFor`,
+ *    src/runner/control-runtime.ts). A chain COMPILES (only loops are refused),
+ *    so this is reachable on the shape control flow is mostly about, and it
+ *    used to read "a return ended its flow" when no return had happened.
+ *
+ * Both prefixes are anchored, so only those sentences are read; a result
+ * skipped for some future reason falls back to a phrasing that asserts no
+ * cause at all rather than quoting one out of unrelated prose.
  */
 export function notRunOnRecordingReason(result: StepResult | undefined): string {
-  const at = /^Not run: step (\d+)\b/.exec(result?.aiExplanation ?? '')?.[1];
-  return at === undefined
-    ? 'not run on the recording run (a return ended its flow)'
-    : `not run on the recording run (step ${at} returned)`;
+  const explanation = result?.aiExplanation ?? '';
+  const at = /^Not run: step (\d+)\b/.exec(explanation)?.[1];
+  if (at !== undefined) return `not run on the recording run (step ${at} returned)`;
+  const decided = /^Skipped:\s*(\S.*)$/.exec(explanation)?.[1];
+  if (decided !== undefined) return `not run on the recording run (${decided})`;
+  return 'not run on the recording run';
+}
+
+/** Was this skipped row a `return`'s doing, rather than a decision's? Reads
+ *  the one formatter's prefix, exactly as {@link notRunOnRecordingReason}. */
+function skippedByAReturn(result: StepResult | undefined): boolean {
+  return /^Not run: step \d+\b/.test(result?.aiExplanation ?? '');
+}
+
+/**
+ * The one clause that describes a whole set of skipped rows, or nothing.
+ *
+ * Said only when every row agrees, because the sentence it joins asserts it as
+ * fact. A mixed set — a decision skipped some, a return skipped the rest —
+ * gets no clause: the per-step `select` lines above have already named each
+ * one individually, and a summary that picks a winner would be wrong about the
+ * others.
+ */
+function describeRecordingSkips(results: (StepResult | undefined)[]): string {
+  if (results.length === 0) return '';
+  if (results.every((r) => skippedByAReturn(r))) return ' — a return ended the flow before them';
+  if (results.every((r) => !skippedByAReturn(r))) return ' — the run decided against them';
+  return '';
 }
 
 /** "steps 6–9", "step 4", "steps 2, 5" — for messages. */

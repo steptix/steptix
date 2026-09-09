@@ -189,6 +189,29 @@ returned.
 Clients that do not know `step:skip` drop it, which is the safe direction —
 the line keeps whatever it was showing rather than the run failing.
 
+#### The other skipped-step event
+
+A step that never ran for a reason other than a `return` — the untaken half of
+an `If` / `Otherwise` decision, a loop body that ran no passes, or an
+`[input:]` / `[interactive]` step this endpoint will not run unattended —
+arrives on an older convention: a `step:pass` carrying `output: "skipped"`.
+
+```
+event: step:pass
+data: {"type":"step:pass","line":5,"output":"skipped","reason":"Skipped: another branch of this decision was taken","skipKind":"not-taken"}
+```
+
+| Field      | Description |
+|------------|-------------|
+| `output`   | The literal `"skipped"`. Every client that derives a glyph or a log line from `step:pass` must check this before reporting the step as passed. |
+| `reason`   | The same sentence the step's `results[]` row carries. **Optional** — a server older than this field sends none, and the sentence reads without it. |
+| `skipKind` | `"unattended"` (an `[input:]` / `[interactive]` step: it needs a person before it can ever pass) or `"not-taken"` (a branch or loop body the run decided against: nothing is wanted from anyone). **Optional, and absent means `"unattended"`** — until the field existed that was this event's only producer. A consumer that must tell the two apart reads this rather than the prose in `reason`. |
+
+Both events stay. `step:skip` is the better shape, but the extension is an HTTP
+client of whichever server its workspace points at, and a client that stopped
+reading the older convention would repaint the untaken branch **green** against
+a server nobody had restarted.
+
 #### Response Body
 
 ```json
@@ -263,11 +286,11 @@ the line keeps whatever it was showing rather than the run failing.
 |------------------|-------------|
 | `sessionId`      | The session ID from the request. |
 | `status`         | `"passed"` if all steps succeeded, `"failed"` if an assertion failed, `"error"` if a step encountered an unexpected error. |
-| `stepsCompleted` | Number of steps that executed successfully. Steps skipped by a `return`/`stop` are not counted — they did not execute. |
+| `stepsCompleted` | Number of steps that executed successfully. Steps skipped by a `return`/`stop` are not counted — they did not execute. Steps a **decision** skipped (the untaken half of an `If` / `Otherwise`, or a loop body that ran no passes) ARE counted, as an `[input:]` skip always has been: this number is a progress denominator against `stepsTotal`, and an untaken branch is never coming, so a run whose chain skipped three steps would otherwise stop three short of the end forever. See `stories/control-flow.md` §"What `stepsCompleted` counts". |
 | `stepsTotal`     | Total number of steps in the request. |
 | `results`        | Array of per-step results, in execution order. Includes all attempted steps (up to and including the failed step, if any). |
 | `results[].step` | The original step text as provided. |
-| `results[].status` | `"passed"`, `"failed"`, `"error"`, or `"skipped"` for this individual step. `"skipped"` means an earlier step ended the flow this one was in (see *Leaving a flow early*); it did not run. |
+| `results[].status` | `"passed"`, `"failed"`, `"error"`, or `"skipped"` for this individual step. `"skipped"` means the step did not run: an earlier step ended the flow it was in (see *Leaving a flow early*), a decision took another branch, or a loop ran no passes. `reasoning` says which. One exception, kept for compatibility: an `[input:]` / `[interactive]` step this endpoint will not run unattended is still reported `"passed"` with a `reasoning` that says it was skipped. On the SSE stream all three arrive as skips. |
 | `results[].actions` | Array of structured actions the AI determined and executed for this step. |
 | `results[].screenshot` | Base64-encoded screenshot taken after the step completed. |
 | `results[].reasoning` | The AI's reasoning for how it interpreted and executed the step. On a `"skipped"` step, why it did not run — e.g. `Not run: step 3 returned from "Sign in" — If the page title contains "Dashboard" then return`. |

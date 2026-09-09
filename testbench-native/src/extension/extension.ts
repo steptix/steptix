@@ -802,13 +802,21 @@ class RunControllerRegistry implements vscode.Disposable {
           // A ⚠ pins the code-behind crash to the line, so the hover and the
           // panel row can say WHAT threw, not just that something did. No
           // `error`: the STEP passed, it is the entry that failed.
+          //
+          // A ◌ pins its reason the same way a `step:skip` does, which is what
+          // gives the untaken branch a hover at all — it had none, so the
+          // commonest skip in the codebase explained itself least. `reason` is
+          // absent on an older server, and an absent detail is exactly the
+          // hoverless ◌ that used to be the only outcome.
           this.tracker.setStatus(
             target,
             ev.line,
             status,
             ev.codeBehindStale
               ? stepFailureDetail({ codeBehindStale: ev.codeBehindStale })
-              : undefined,
+              : status === 'skip' && ev.reason
+                ? stepFailureDetail({ error: ev.reason })
+                : undefined,
           );
           break;
         }
@@ -1036,7 +1044,9 @@ class RunControllerRegistry implements vscode.Disposable {
             status,
             ev.codeBehindStale
               ? stepFailureDetail({ codeBehindStale: ev.codeBehindStale })
-              : undefined,
+              : status === 'skip' && ev.reason
+                ? stepFailureDetail({ error: ev.reason })
+                : undefined,
           );
           break;
         }

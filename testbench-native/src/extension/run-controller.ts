@@ -44,6 +44,7 @@ import {
 } from 'ai-ui-automation-runner-core';
 import { getOutputChannel } from './output-channel.js';
 import { skipCompileLogLine, skipRunLogLine } from './step-skip-core.js';
+import { runLogTallyLine } from './steps-summary-core.js';
 import type { CompileTail } from './compile-progress-core.js';
 import type { CompileTailSignals } from './compile-tail-signals.js';
 import { EnvSelector } from './env-selector.js';
@@ -241,9 +242,10 @@ export function compileLogLine(event: CompileEvent): string | null {
       if (inner.type === 'step:pass') {
         // A step the compile's run decided against — the untaken branch of a
         // chain, which a compile is allowed to contain — did not run, so it
-        // gets the same `—` the interactive run log gives it rather than a ✓.
+        // gets the same `◌` (`SKIP_GLYPH`) the interactive run log gives it
+        // rather than a ✓, with the reason a current server sends alongside.
         if (isSkippedPass(inner)) {
-          return `  ${' '.repeat(11)} ${skipCompileLogLine(inner.line)}`;
+          return `  ${' '.repeat(11)} ${skipCompileLogLine(inner.line, inner.reason)}`;
         }
         const how = inner.codeBehindStale
           ? ` ⚠ under AI — code-behind failed: ${inner.codeBehindStale.error}`
@@ -4279,6 +4281,22 @@ export class RunController {
     /** Server-attributed cost of the steps that healed; 0 when unattributed. */
     let healedTokens = 0;
     let passCount = 0;
+    /**
+     * Steps this run did not take — BOTH producers, counted the same way
+     * (`step:skip`, and `step:pass` carrying `output: 'skipped'`).
+     *
+     * Its own counter and never folded into `passCount`, which is the whole
+     * point: a skipped step is neither a pass nor a failure, and a run that
+     * skipped three of twelve reported `✓ 12 passed` while the panel header
+     * beside it said `9 passed, 3 skipped`. Same rule as `stepsSummaryText`
+     * (steps-summary-core.ts) and the panel (testbench-runner.jsx).
+     *
+     * The population differs from the panel's by construction and always has:
+     * this counts EVENTS, so a skill body's steps each count, while the panel
+     * counts numbered lines in the open document. It is the rule that has to
+     * agree, not the totals.
+     */
+    let skipCount = 0;
     for await (const event of events) {
       // The first event proves the server accepted the request and now holds a
       // session for it — created with this request's `config` when this was the
@@ -4329,26 +4347,40 @@ export class RunController {
       // ⚡ replayed a recorded transcript, </> ran compiled code, ⚠ healed under
       // AI because the compiled entry threw.
       if (event.type === 'step:pass') {
-        passCount += 1;
-        // A step the run decided not to take rides the pass event (the wire has
-        // no third verdict) but did not run, so the log says so rather than
-        // claiming a ✓ (stories/control-flow.md). `passCount` is deliberately
-        // still incremented: it mirrors the server's own `stepsCompleted`,
-        // which counts a skipped step for the same reason the `[input:]` skip
-        // path always has.
+        // A step the run decided not to take rides the pass event (the older
+        // of the two skip conventions) but did not run, so the log says so
+        // rather than claiming a ✓ (stories/control-flow.md).
+        //
+        // Counted as a SKIP, not as a pass. One accounting rule, on every
+        // surface, for both producers: `passCount` is what EXECUTED. The panel
+        // header and the `## Steps` decoration have always said `9 passed,
+        // 3 skipped` for such a run; this line used to say `✓ 12 passed`
+        // beside them, and a green tally that includes steps that never ran is
+        // the failure direction this codebase names as worst. The server's own
+        // `stepsCompleted` does count one of the two producers — that
+        // divergence is real and documented (stories/control-flow.md §"What
+        // `stepsCompleted` counts"), but it is a progress-bar denominator, not
+        // a claim that N steps passed.
+        //
+        // `event.reason` is present on a current server and absent on an older
+        // one; `skipRunLogLine` reads without it either way.
         if (isSkippedPass(event)) {
-          log(skipRunLogLine(event.line));
-        } else if (event.codeBehindStale) {
-          staleCount += 1;
-          log(`⚠ step ${event.line} passed under AI — code-behind failed: ${event.codeBehindStale.error}`);
-        } else if (event.fromCodeBehind) {
-          codeBehindCount += 1;
-          log(`✓ step ${event.line} passed (code-behind)`);
-        } else if (event.fromCache) {
-          cachedCount += 1;
-          log(`✓ step ${event.line} passed (cached)`);
+          skipCount += 1;
+          log(skipRunLogLine(event.line, event.reason));
         } else {
-          log(`✓ step ${event.line} passed`);
+          passCount += 1;
+          if (event.codeBehindStale) {
+            staleCount += 1;
+            log(`⚠ step ${event.line} passed under AI — code-behind failed: ${event.codeBehindStale.error}`);
+          } else if (event.fromCodeBehind) {
+            codeBehindCount += 1;
+            log(`✓ step ${event.line} passed (code-behind)`);
+          } else if (event.fromCache) {
+            cachedCount += 1;
+            log(`✓ step ${event.line} passed (cached)`);
+          } else {
+            log(`✓ step ${event.line} passed`);
+          }
         }
       } else if (event.type === 'step:fail') {
         // The error, in the run log — with the code-behind crash when the
@@ -4360,8 +4392,10 @@ export class RunController {
         // A line an `If … then return` left behind. It carries its own reason
         // — `Not run: step 3 returned from "Sign in"` — built server-side by
         // the one formatter the report also uses, so the log and the report
-        // cannot describe the same skip in two different ways. Not counted:
-        // `passCount` is what EXECUTED, and a skipped step spent nothing.
+        // cannot describe the same skip in two different ways. Counted as a
+        // skip, exactly as the other producer above is: `passCount` is what
+        // EXECUTED, and a skipped step spent nothing.
+        skipCount += 1;
         log(skipRunLogLine(event.line, event.reason));
       } else if (event.type === 'output') {
         // The compile's own prose — the run-end forecast, and the warning a
@@ -4398,14 +4432,20 @@ export class RunController {
       }
       this.emitRunEvent(event);
     }
-    if (passCount > 0) {
-      const notes = [
-        codeBehindCount > 0 ? `${codeBehindCount} code-behind` : '',
-        staleCount > 0 ? `${staleCount} stale` : '',
-        cachedCount > 0 ? `${cachedCount} cached` : '',
-      ].filter((n) => n !== '');
-      const suffix = notes.length > 0 ? ` (${notes.join(', ')})` : '';
-      log(`✓ ${passCount} passed${suffix}`);
+    if (passCount > 0 || skipCount > 0) {
+      // Built by `runLogTallyLine` rather than here, so `node --test` can pin
+      // the sentence: this method imports `vscode` and is unreachable from
+      // that suite, which is how `✓ 12 passed` for a run with three skips
+      // survived beside a panel header that said `9 passed, 3 skipped`.
+      log(
+        runLogTallyLine({
+          passed: passCount,
+          skipped: skipCount,
+          cached: cachedCount,
+          codeBehind: codeBehindCount,
+          stale: staleCount,
+        }),
+      );
       if (staleCount > 0) {
         // Naming the price is the point of the line, not decoration: the
         // count alone reads as a one-off, and it is not — the entry is still

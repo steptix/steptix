@@ -85,10 +85,15 @@ export function isSkippedPass(event) {
  * for the same interop reason, and are pinned to it by
  * `tests/failure-text-copy-parity.test.js`.
  *
- * A skipped step reaches the panel two ways — `step:skip` with a reason, and
- * `step:pass` carrying `output: 'skipped'` without one — and both print this
- * sentence. One glyph and one wording, or the panel says two different things
- * about the same event, which is what it did before these were merged.
+ * A skipped step reaches the panel two ways — `step:skip`, and `step:pass`
+ * carrying `output: 'skipped'` — and both print this sentence, with the reason
+ * when the server sent one. One glyph and one wording, or the panel says two
+ * different things about the same event, which is what it did before these
+ * were merged.
+ *
+ * The leading `Skipped:` is stripped for the reason `because()` in
+ * step-skip-core.ts gives: the server writes a standalone sentence for a
+ * report cell, and pasted after "skipped" it stutters.
  *
  * @param {number} line
  * @param {string} [reason]
@@ -97,6 +102,6 @@ export function isSkippedPass(event) {
 export const SKIP_GLYPH = "◌";
 
 export function skipPanelLine(line, reason) {
-  const trimmed = reason?.trim();
+  const trimmed = reason?.trim().replace(/^skipped\s*:\s*/i, "");
   return `${SKIP_GLYPH} Step on line ${line} skipped${trimmed ? ` — ${trimmed}` : ""}`;
 }
