@@ -130,11 +130,10 @@ export function OutputPanel() {
                     <details key={i} className="output-ai-interaction" style={{ marginBottom: 6 }}>
                       <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 500, padding: '4px 0', userSelect: 'none' }}>
                         <span className="output-interaction-purpose">{interaction.purpose}</span>
-                        {interaction.turnNumber !== undefined && (
-                          <span className="step-status-badge step-status-skipped" style={{ marginLeft: 6, fontSize: 10 }}>
-                            Turn {interaction.turnNumber}
-                          </span>
-                        )}
+                        {/* `AiInteraction` (src/report/types.ts) carries no turn number — turns
+                            are grouped on `StepResult.turns`, and each interaction is already
+                            listed in turn order here — so there is no "Turn N" badge; the
+                            attempt badge below is the one field the shape does carry. */}
                         {interaction.attemptNumber && interaction.attemptNumber > 1 && (
                           <span className="step-status-badge step-status-skipped" style={{ marginLeft: 6, fontSize: 10 }}>
                             Attempt {interaction.attemptNumber}

@@ -30,6 +30,7 @@ export function useRunnerState(): UseRunnerStateReturn {
         instruction: data.instruction,
         status: 'running',
         aiReasoning: '',
+        aiInteractions: [],
         subActions: [],
         screenshots: [],
       });
