@@ -1094,10 +1094,12 @@ feature records increments it; a skip a `return` leaves behind does not
 A seven-step run with two chain skips and one return skip reports
 `stepsCompleted: 6` of `stepsTotal: 7`.
 
-`session.totalStepsExecuted` follows it exactly — incremented beside it on the
-chain path and left alone on the return path — so it is a second number the two
-producers differ on, not a counter-example. It is the one `list_sessions`
-reports to an agent, so the two move together on purpose.
+`session.totalStepsExecuted` makes the same distinction — incremented beside
+`stepsCompleted` on the chain path and left alone on the return path — so it
+is a second number the two producers differ on, not a counter-example. The two
+are not identical otherwise: `totalStepsExecuted` also counts a failed guard
+and every failed step, which `stepsCompleted` does not. It is the one
+`list_sessions` reports to an agent.
 
 Both are defensible because the field is doing two jobs. It is a progress
 denominator — a client's bar walks it against `stepsTotal` — and a chain whose

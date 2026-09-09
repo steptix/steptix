@@ -4296,12 +4296,13 @@ export class RunController {
      * document, so the two disagree wherever one line produces more or fewer
      * than one event. Three ways that happens, all of them normal:
      *
-     *  - a skill or section body's steps each send an event, and none of them
-     *    is a line of the open document;
+     *  - a skill body's steps each send an event, and none of them is a line
+     *    of the open document (a `### Section` body's steps ARE lines of it —
+     *    `classifyLines` marks them `section-step` — so a section tail counts
+     *    the same on both surfaces);
      *  - a chain member whose tail is a plain instruction expands to TWO steps
      *    on one source line — the guard row and the tail — so that line is
-     *    counted twice here and once there. (With a `### Section` tail the two
-     *    agree exactly: the body's lines are events and lines alike.)
+     *    counted twice here and once there;
      *  - a loop body's line sends one event per pass.
      *
      * Deduping by `event.line` would fix the first two and break the third,
