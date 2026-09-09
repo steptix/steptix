@@ -214,11 +214,25 @@ test("payload: rows and body steps are independent axes on one section", () => {
   assert.deepEqual(entry.runSteps, [1]);
 });
 
-test("payload: a body filter is sorted, de-duped and clipped to the body", () => {
+test("payload: a body filter is sorted and de-duped", () => {
   const entry = buildSectionsPayload(ROWS_DOC, undefined, {
-    "Upload each statement": [1, 1, 7, -1],
+    "Upload each statement": [1, 1],
   })["upload each statement"];
   assert.deepEqual(entry.runSteps, [1]);
+});
+
+test("payload: an index the body does not have is REFUSED, never clipped", () => {
+  // Clipping is what makes this dangerous: the survivors are just as likely to
+  // name the wrong step now that the text has moved, and a clip to nothing is
+  // read as "the whole body" — the one outcome the author did not ask for.
+  assert.throws(
+    () =>
+      buildSectionsPayload(ROWS_DOC, undefined, { "Upload each statement": [1, 7] }),
+    (err) =>
+      err.name === "SectionNarrowingError" &&
+      /Body step 8 of "Upload each statement" no longer exists/.test(err.message) &&
+      /now has 2 steps/.test(err.message),
+  );
 });
 
 test("payload: a filter that keeps the WHOLE body is not a narrowing", () => {

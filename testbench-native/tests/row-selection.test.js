@@ -15,6 +15,7 @@ import {
   allRowsOfTable,
   bodyStepsText,
   buildRowPickEntries,
+  chainMembersKeptLogLine,
   buildRowsMessage,
   dataRowLinesOf,
   failedRowsFrom,
@@ -28,6 +29,7 @@ import {
   sectionRowsLogLine,
   sectionStepsIgnoredLogLine,
   sectionStepsLogLine,
+  sectionStepsResumedLogLine,
   splitBodySteps,
   splitRowSelection,
   stepRangeText,
@@ -195,7 +197,14 @@ test('body split: the reported gesture — three steps, one body step, one row',
   const { narrowed, ignored } = splitBodySteps(LOGIN, [4, 5, 6, 12, 14], MAIN_FLOW);
   assert.deepEqual(ignored, []);
   assert.deepEqual(narrowed, [
-    { section: 'Log In', indices: [1], ordinals: [2], total: 2 },
+    {
+      section: 'Log In',
+      indices: [1],
+      ordinals: [2],
+      total: 2,
+      addedForChain: [],
+      callCount: 1,
+    },
   ]);
 });
 
@@ -206,7 +215,14 @@ test('body split: the call has to be among the steps that will run', () => {
   const { narrowed, ignored } = splitBodySteps(LOGIN, [4, 5, 14], MAIN_FLOW.slice(0, 2));
   assert.deepEqual(narrowed, []);
   assert.deepEqual(ignored, [
-    { section: 'Log In', indices: [1], ordinals: [2], total: 2 },
+    {
+      section: 'Log In',
+      indices: [1],
+      ordinals: [2],
+      total: 2,
+      addedForChain: [],
+      callCount: 0,
+    },
   ]);
 });
 
@@ -258,10 +274,169 @@ test('body split: two sections are two independent answers', () => {
   const { narrowed, ignored } = splitBodySteps(two, [4, 8, 12], ['Alpha']);
   // Alpha's call runs, Beta's does not — so one narrows and one is dropped.
   assert.deepEqual(narrowed, [
-    { section: 'Alpha', indices: [0], ordinals: [1], total: 2 },
+    {
+      section: 'Alpha',
+      indices: [0],
+      ordinals: [1],
+      total: 2,
+      addedForChain: [],
+      callCount: 1,
+    },
   ]);
   assert.deepEqual(ignored, [
-    { section: 'Beta', indices: [0], ordinals: [1], total: 2 },
+    {
+      section: 'Beta',
+      indices: [0],
+      ordinals: [1],
+      total: 2,
+      addedForChain: [],
+      callCount: 0,
+    },
+  ]);
+});
+
+// ---------------------------------------------------------------------------
+// Which sections a run actually ENTERS — the three calls the naive test misses
+// ---------------------------------------------------------------------------
+
+test('body split: a call in a control line TAIL is still a call', () => {
+  // `If the user is signed out, then Log In` — the whole line is not the
+  // section's name, the tail is, and the server resolves the tail as a call.
+  // Reading only the whole line told the author their narrowing was ignored
+  // while the server honoured it.
+  const { narrowed, ignored } = splitBodySteps(LOGIN, [6, 14], [
+    'If the user is signed out, then Log In',
+  ]);
+  assert.deepEqual(ignored, []);
+  assert.deepEqual(narrowed.map((p) => [p.section, p.indices]), [['Log In', [1]]]);
+});
+
+test('body split: a NESTED call is reached through the section that makes it', () => {
+  //  4 1. Outer | 6 ### Outer  7 1. Inner | 9 ### Inner  10 1. i1  11 2. i2
+  const nested = doc(
+    '# Nested',
+    '',
+    '## Steps',
+    '1. Outer',
+    '',
+    '### Outer',
+    '1. Inner',
+    '',
+    '### Inner',
+    '1. i1',
+    '2. i2',
+  );
+  // Only `Outer` is a main-flow step, but `Inner`'s frame is entered all the
+  // same — so narrowing its body is something this run can honour.
+  const { narrowed, ignored } = splitBodySteps(nested, [4, 11], ['Outer']);
+  assert.deepEqual(ignored, []);
+  assert.deepEqual(narrowed.map((p) => [p.section, p.indices]), [['Inner', [1]]]);
+});
+
+test('body split: one section called twice says so, once', () => {
+  //  4 1. Log In  5 2. Something else  6 3. Log In
+  const twice = doc(
+    '# Twice',
+    '',
+    '## Steps',
+    '1. Log In',
+    '2. Something else',
+    '3. Log In',
+    '',
+    '### Log In',
+    '1. Enter the email',
+    '2. Enter the password',
+  );
+  // `runSteps` rides the section DEFINITION, so the narrowing cannot be
+  // aimed at one of the two calls. The count is what lets the log say so.
+  const { narrowed } = splitBodySteps(twice, [4, 5, 6, 10], [
+    'Log In',
+    'Something else',
+    'Log In',
+  ]);
+  assert.deepEqual(narrowed.map((p) => [p.section, p.indices, p.callCount]), [
+    ['Log In', [1], 2],
+  ]);
+});
+
+// ---------------------------------------------------------------------------
+// A chain is one decision: half of it is not a smaller version of it
+// ---------------------------------------------------------------------------
+
+//  4 1. Log In | 6 ### Log In  7 If …  8 Otherwise …  9 Type …  10 Submit
+const CHAIN = doc(
+  '# Chain',
+  '',
+  '## Steps',
+  '1. Log In',
+  '',
+  '### Log In',
+  '1. If a banner is shown, then Dismiss the banner',
+  '2. Otherwise, Click Sign in',
+  '3. Type the password',
+  '4. Submit the form',
+);
+
+test('body split: an Otherwise brings its If with it', () => {
+  // Selecting lines 8 and 9 alone would ship `runSteps: [1, 2]`, and the
+  // server's expander refuses that body — `"Otherwise, Click Sign in" has no
+  // decision to be the alternative of` — blaming a file that is fine.
+  const { narrowed } = splitBodySteps(CHAIN, [4, 8, 9], ['Log In']);
+  assert.deepEqual(narrowed, [
+    {
+      section: 'Log In',
+      indices: [0, 1, 2],
+      ordinals: [1, 2, 3],
+      total: 4,
+      addedForChain: [1],
+      callCount: 1,
+    },
+  ]);
+});
+
+test('body split: growing a chain can stop the selection being a narrowing', () => {
+  // Steps 2 and 3 of three, plus the `If` step 2 needs, is the whole body —
+  // and a narrowing to everything is not one.
+  const twoMember = doc(
+    '# Chain',
+    '',
+    '## Steps',
+    '1. Log In',
+    '',
+    '### Log In',
+    '1. If a banner is shown, then Dismiss the banner',
+    '2. Otherwise, Click Sign in',
+  );
+  assert.deepEqual(splitBodySteps(twoMember, [4, 8], ['Log In']), {
+    narrowed: [],
+    ignored: [],
+  });
+});
+
+test('body split: an If selected without its Otherwise stays as picked', () => {
+  // The rule is one-directional: a decision with no alternative is a legal
+  // chain of one, so nothing is added and step 2 really does not run.
+  const { narrowed } = splitBodySteps(CHAIN, [4, 7], ['Log In']);
+  assert.deepEqual(narrowed.map((p) => [p.indices, p.addedForChain]), [[[0], []]]);
+});
+
+test('body split: a whole chain of three unwinds in one pass', () => {
+  //  7 If … 8 Else if … 9 Otherwise … 10 Type
+  const long = doc(
+    '# Chain',
+    '',
+    '## Steps',
+    '1. Log In',
+    '',
+    '### Log In',
+    '1. If a banner is shown, then Dismiss the banner',
+    '2. Else if a dialog is shown, then Close the dialog',
+    '3. Otherwise, Click Sign in',
+    '4. Type the password',
+  );
+  const { narrowed } = splitBodySteps(long, [4, 9], ['Log In']);
+  assert.deepEqual(narrowed.map((p) => [p.indices, p.addedForChain]), [
+    [[0, 1, 2], [1, 2]],
   ]);
 });
 
@@ -523,6 +698,38 @@ test('narrowed body: a call outside the selected steps is logged, not refused', 
     sectionStepsIgnoredLogLine('Log In', [2]),
     'Log In — body steps 2 ignored: ' +
       'the step that calls this section is not in your selection',
+  );
+});
+
+test('narrowed body: a section called twice says the narrowing hits both', () => {
+  // The wire cannot express "this call only" — `runSteps` rides the section
+  // definition — so the line says what it actually does.
+  assert.equal(
+    sectionStepsLogLine('Log In', [2], 2, 2),
+    'Log In — running body steps 2 of 2 (applies to all 2 calls)',
+  );
+  // One call is the ordinary case and gets no parenthesis.
+  assert.equal(sectionStepsLogLine('Log In', [2], 2, 1), 'Log In — running body steps 2 of 2');
+});
+
+test('narrowed body: a chain kept whole names the steps it added', () => {
+  assert.equal(
+    chainMembersKeptLogLine('Log In', [1], [2]),
+    'Log In — body step 1 kept with 2: an Otherwise needs its If',
+  );
+  assert.equal(
+    chainMembersKeptLogLine('Log In', [1, 2], [3]),
+    'Log In — body steps 1, 2 kept with 3: an Otherwise needs its If',
+  );
+});
+
+test('narrowed body: a continuation says the narrowing still applies', () => {
+  // A Continue is its own run with its own log, and it rebuilds its lines from
+  // the pause point — so without this the narrowing is invisible after a
+  // breakpoint and reads as one that expired there.
+  assert.equal(
+    sectionStepsResumedLogLine('Log In', [2], 2),
+    'Log In — the narrowing still applies: body steps 2 of 2',
   );
 });
 

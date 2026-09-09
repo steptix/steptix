@@ -13,6 +13,7 @@ import {
   extractSections,
   maskIfSecret,
   matchText,
+  parseControlLine,
   parseDataRows,
   scanSectionDataTables,
   type DataTableScan,
@@ -128,6 +129,75 @@ export interface BodyStepPick {
   ordinals: number[];
   /** How many body steps the section has. */
   total: number;
+  /** Ordinals the selection did NOT name, kept anyway because dropping them
+   *  would split an `If … / Otherwise …` chain. Empty for almost every pick,
+   *  and said out loud when it is not. */
+  addedForChain: number[];
+  /** How many steps of the flow this run executes call this section. More
+   *  than one and the narrowing applies to every one of them: `runSteps`
+   *  travels on the section DEFINITION, and the wire cannot say "this call
+   *  only". */
+  callCount: number;
+}
+
+/**
+ * Every section this run will actually enter, and how many call sites reach
+ * each one — keyed by `matchText`, the rule the server expands by.
+ *
+ * Three kinds of call the naive "is the step's own text a section name?" test
+ * misses, and all three end with the author being told their narrowing was
+ * ignored while the server honours it:
+ *
+ *  - a call in a control line's TAIL (`If the user is signed out, then Log
+ *    In`). The whole line is not the section's name; the tail is, and the
+ *    expander resolves it as a call exactly as it resolves a bare one.
+ *  - a NESTED call — a called section's body calling another section. The
+ *    frame is entered, so its body can be narrowed.
+ *  - and the reason this takes the un-trimmed step list: a breakpoint trims
+ *    what runs in THIS batch, not what the run selected. The steps below it
+ *    run on Continue, and the narrowing has to survive to meet them.
+ */
+export function calledSectionNames(
+  text: string,
+  runningInstructions: string[],
+): Map<string, number> {
+  const bodies = new Map(
+    extractSections(text).map((s) => [
+      matchText(s.name),
+      s.steps.map((step) => step.instruction),
+    ]),
+  );
+  /** Section name → call sites reaching it. */
+  const counts = new Map<string, number>();
+  const pending: string[] = [];
+  const note = (instruction: string): void => {
+    // Resolution order: a bare name is a call, and so is the tail of a
+    // control line. Both are tried, because a section may legitimately be
+    // NAMED like a control line and then the whole line is the call.
+    for (const candidate of [instruction, parseControlLine(instruction)?.tail]) {
+      if (candidate === undefined) continue;
+      const key = matchText(candidate);
+      if (!bodies.has(key)) continue;
+      const seen = counts.get(key) ?? 0;
+      counts.set(key, seen + 1);
+      // Walk each section's body once, however many times it is called: the
+      // set of sections entered is what the closure is for, and a cycle
+      // (which the server refuses anyway) must not spin here.
+      //
+      // The WHOLE body, including steps another narrowing may drop. Each
+      // section is narrowed independently and in no defined order, so
+      // subtracting one narrowing from another's reachability would make the
+      // answer depend on that order. The cost of being generous is a
+      // `runSteps` shipped for a section that turns out not to run, which
+      // executes nothing either way.
+      if (seen === 0) pending.push(key);
+    }
+  };
+  for (const instruction of runningInstructions) note(instruction);
+  while (pending.length > 0) {
+    for (const instruction of bodies.get(pending.pop()!) ?? []) note(instruction);
+  }
+  return counts;
 }
 
 /**
@@ -146,9 +216,19 @@ export interface BodyStepPick {
  * `runSteps` for it would put a line in the log saying the run was narrowed to
  * everything.
  *
- * `runningInstructions` is the instruction text of the main-flow steps this
- * run will execute, matched with `matchText`: the same rule the server expands
- * by, so the two cannot disagree about which step calls which section.
+ * A selected step that is the `Otherwise` half of a decision brings its `If`
+ * with it. A chain lives on consecutive body lines, and a narrowing that kept
+ * only the second half would ship a body the server's own parser refuses —
+ * `"Otherwise, …" has no decision to be the alternative of` — blaming a file
+ * that is perfectly well formed, and which the client's pre-flight (which
+ * validates the whole DOCUMENT) has just passed. So the kept set grows
+ * BACKWARDS over chain members until the chain is whole, and the additions are
+ * said out loud rather than made quietly.
+ *
+ * `runningInstructions` is the instruction text of the steps this run will
+ * execute — un-trimmed by any breakpoint, since a breakpoint decides what runs
+ * in this batch and not what the run selected. Which sections those reach is
+ * `calledSectionNames`'s question, tails and nested calls included.
  */
 export function splitBodySteps(
   text: string,
@@ -159,20 +239,45 @@ export function splitBodySteps(
   const ignored: BodyStepPick[] = [];
   if (lines.length === 0) return { narrowed, ignored };
   const selected = new Set(lines);
-  const called = new Set(runningInstructions.map((s) => matchText(s)));
-  for (const section of extractSections(text)) {
-    const indices = section.steps
+  const sections = extractSections(text);
+  const called = calledSectionNames(text, runningInstructions);
+  const sectionNames = new Set(sections.map((s) => matchText(s.name)));
+  /** Is this body step the `Else if` / `Otherwise` half of a decision — the
+   *  one shape that cannot stand without the step above it? A step whose text
+   *  names a section is a CALL first (resolution order), the same rung
+   *  `danglingChainMemberError` reads before anything else. */
+  const needsPredecessor = (instruction: string): boolean => {
+    if (sectionNames.has(matchText(instruction))) return false;
+    const kind = parseControlLine(instruction)?.kind;
+    return kind === 'elseif' || kind === 'else';
+  };
+  for (const section of sections) {
+    const picked = section.steps
       .map((step, index) => ({ line: step.line, index }))
       .filter((s) => selected.has(s.line))
       .map((s) => s.index);
-    if (indices.length === 0 || indices.length === section.steps.length) continue;
+    if (picked.length === 0) continue;
+    // One descending pass is enough: a member added at k-1 is visited after
+    // k, so a chain of any length unwinds in the one sweep.
+    const kept = new Set(picked);
+    for (let k = section.steps.length - 1; k > 0; k--) {
+      if (kept.has(k) && needsPredecessor(section.steps[k]!.instruction)) kept.add(k - 1);
+    }
+    // Growing the set can make it the WHOLE body, and then it has stopped
+    // being a narrowing — checked here rather than on `picked` for exactly
+    // that reason.
+    if (kept.size === section.steps.length) continue;
+    const indices = [...kept].sort((a, b) => a - b);
+    const wanted = new Set(picked);
     const pick: BodyStepPick = {
       section: section.name,
       indices,
       ordinals: indices.map((n) => n + 1),
       total: section.steps.length,
+      addedForChain: indices.filter((n) => !wanted.has(n)).map((n) => n + 1),
+      callCount: called.get(matchText(section.name)) ?? 0,
     };
-    (called.has(matchText(section.name)) ? narrowed : ignored).push(pick);
+    (pick.callCount > 0 ? narrowed : ignored).push(pick);
   }
   return { narrowed, ignored };
 }
@@ -514,8 +619,62 @@ export function sectionStepsLogLine(
   name: string,
   ordinals: number[],
   total: number,
+  callCount = 1,
 ): string {
-  return `${name} — running body ${bodyStepsText(ordinals)} of ${total}`;
+  // `runSteps` rides the section DEFINITION, so a flow that calls the same
+  // section twice narrows both frames — the wire cannot express "this call
+  // only". Not a refusal (the author asked for the body, and got it), but it
+  // must not be discovered from the marks: a second call quietly running the
+  // same one step is the shape of a bug.
+  const scope = callCount > 1 ? ` (applies to all ${callCount} calls)` : '';
+  return `${name} — running body ${bodyStepsText(ordinals)} of ${total}${scope}`;
+}
+
+/**
+ * …and the line the CONTINUATION of a paused run prints:
+ *
+ *     Log In — the narrowing still applies: body steps 2 of 2
+ *
+ * A Continue is a separate run with its own log, and it rebuilds its lines
+ * from the pause point — so the narrowing it inherits is invisible in
+ * everything the author can see. A narrowing announced before a breakpoint and
+ * silent after it reads as one that expired there.
+ */
+export function sectionStepsResumedLogLine(
+  name: string,
+  ordinals: number[],
+  total: number,
+): string {
+  return `${name} — the narrowing still applies: body ${bodyStepsText(ordinals)} of ${total}`;
+}
+
+/** `step 1` / `steps 1, 2` — the additions, counted as things rather than
+ *  as positions in a range, so the singular is right. */
+function bodyStepWord(ordinals: number[]): string {
+  const sorted = [...new Set(ordinals)].sort((a, b) => a - b);
+  return `${sorted.length === 1 ? 'step' : 'steps'} ${sorted.join(', ')}`;
+}
+
+/**
+ * The line a narrowing prints when it kept a body step nobody selected:
+ *
+ *     Log In — body step 1 kept with 2: an Otherwise needs its If
+ *
+ * A chain is one decision written across consecutive lines, so half of it is
+ * not a smaller version of it — it is a body the parser refuses, in a message
+ * that blames the file. The selection is grown instead, and this is what stops
+ * that from being a silent difference between what was picked and what ran.
+ */
+export function chainMembersKeptLogLine(
+  name: string,
+  added: number[],
+  selected: number[],
+): string {
+  return (
+    `${name} — body ${bodyStepWord(added)} kept with ` +
+    `${[...new Set(selected)].sort((a, b) => a - b).join(', ')}: ` +
+    'an Otherwise needs its If'
+  );
 }
 
 /**

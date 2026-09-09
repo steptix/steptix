@@ -150,10 +150,21 @@ Resolution order, and the reason each rung sits where it does:
    selection as a disguise. This rung also makes every selection that works
    today keep working identically, Ctrl+A included.
    Dropped from what *executes inline*, that is. Since
-   [data-row-progress-and-selection.md](../data-row-progress-and-selection.md)
+   [stories/data-row-progress-and-selection.md](../../../stories/data-row-progress-and-selection.md)
    the run controller reads those body lines before this rung forgets them and
    narrows the **body the call expands to** — same guard, one less thing
-   silently discarded.
+   silently discarded. Three details of that narrowing belong here, because
+   they are all about which call is being made: the call may be the *tail* of a
+   control line (`If the user is signed out, then Log In`), it may be *nested*
+   (a called section's body calling another), and it may sit below a
+   breakpoint — a breakpoint trims what runs in this batch, not what the run
+   selected, so the narrowing is decided over the un-trimmed list and carried
+   across the Continue. The narrowing also travels on the section
+   **definition**, so a flow that calls one section twice narrows both frames;
+   the run says so rather than leaving it to be noticed from the marks.
+   And a selected body step brings the rest of its `If … / Otherwise …` chain
+   with it: a chain lives on consecutive body lines, and shipping half of one
+   would be refused by the expander in a message that blames the file.
 3. Else, any requested line classifies `section-step` →
    `{ scope: 'section-body', lines: <those body lines> }`. This is the new
    capability, and it activates only when the selection is *entirely* inside

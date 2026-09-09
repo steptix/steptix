@@ -657,6 +657,16 @@ describe('runSteps narrows a section body', () => {
       warnDeadSections: false,
     });
 
+  /** The code-behind slot every emitted step landed in — the thing a
+   *  narrowing must leave exactly as a full run would have set it. */
+  const occurrencesOf = async (exp: Awaited<ReturnType<typeof expandWith>>) => {
+    const registry = await buildCodeBehindRegistry(
+      { steps: exp.steps, rawSteps: exp.rawSteps, origins: exp.origins, frames: exp.frames },
+      { testFilePath: '/t/n.md', onWarn: () => {} },
+    );
+    return exp.steps.map((_, i) => registry.bindingFor(i)?.occurrence);
+  };
+
   const LOG_IN = {
     name: 'Log In',
     headingLine: 6,
@@ -700,19 +710,99 @@ describe('runSteps narrows a section body', () => {
       steps: ['Click Next', 'Enter the email', 'Click Next', 'Click Next'],
       stepLines: [11, 12, 13, 14],
     };
-    const full = await expandWith(['Log In'], wizard);
-    const narrow = await expandWith(['Log In'], { ...wizard, runSteps: [3] });
-
-    const occurrences = async (exp: Awaited<ReturnType<typeof expandWith>>) => {
-      const registry = await buildCodeBehindRegistry(
-        { steps: exp.steps, rawSteps: exp.rawSteps, origins: exp.origins, frames: exp.frames },
-        { testFilePath: '/t/n.md', onWarn: () => {} },
-      );
-      return exp.steps.map((_, i) => registry.bindingFor(i)?.occurrence);
-    };
-
-    expect(await occurrences(full)).toEqual([0, 0, 1, 2]);
+    expect(await occurrencesOf(await expandWith(['Log In'], wizard))).toEqual([0, 0, 1, 2]);
     // The fourth body step alone, and it still binds the THIRD `Click Next`.
-    expect(await occurrences(narrow)).toEqual([2]);
+    expect(
+      await occurrencesOf(await expandWith(['Log In'], { ...wizard, runSteps: [3] })),
+    ).toEqual([2]);
+    // TWO kept steps of the same text, which is the case a single-index
+    // narrowing cannot see: the live count starts at 0 for the first of them,
+    // so an offset that were merely "how many I dropped in total" would put
+    // them on entries 1 and 1 rather than 1 and 2.
+    expect(
+      await occurrencesOf(await expandWith(['Log In'], { ...wizard, runSteps: [2, 3] })),
+    ).toEqual([1, 2]);
+  });
+
+  /**
+   * A control line is TWO steps in one frame — the guard row, then the step it
+   * names after `then` — carrying two different texts. Both hold code-behind
+   * slots, so both need an offset of their own, and a count made over authored
+   * body lines has neither.
+   */
+  describe('a control line in a narrowed body', () => {
+    const body = (steps: string[], runSteps?: number[]) => ({
+      name: 'Log In',
+      headingLine: 6,
+      steps,
+      stepLines: steps.map((_, i) => 11 + i),
+      ...(runSteps && { runSteps }),
+    });
+
+    it('counts a dropped guard and its dropped tail separately', async () => {
+      // The tail `Click Next` is emitted in the same frame as the plain
+      // `Click Next` below it, so the full run's second one is occurrence 1 —
+      // and keeping only that one has to stay occurrence 1.
+      const steps = ['If a banner is shown, then Click Next', 'Click Next'];
+      expect(await occurrencesOf(await expandWith(['Log In'], body(steps)))).toEqual([
+        0, 0, 1,
+      ]);
+      expect(
+        await occurrencesOf(await expandWith(['Log In'], body(steps, [1]))),
+      ).toEqual([1]);
+    });
+
+    it('gives the guard and the tail different offsets', async () => {
+      // Here the dropped step shares its text with the TAIL and not with the
+      // guard, so one offset for the pair would be wrong whichever it took.
+      const steps = ['Click Next', 'If a banner is shown, then Click Next'];
+      expect(await occurrencesOf(await expandWith(['Log In'], body(steps)))).toEqual([
+        0, 0, 1,
+      ]);
+      expect(
+        await occurrencesOf(await expandWith(['Log In'], body(steps, [1]))),
+      ).toEqual([0, 1]);
+    });
+
+    it('keeps a control line that follows an identical dropped one', async () => {
+      const steps = [
+        'If a banner is shown, then Dismiss it',
+        'Enter the email',
+        'If a banner is shown, then Dismiss it',
+      ];
+      expect(await occurrencesOf(await expandWith(['Log In'], body(steps)))).toEqual([
+        0, 0, 0, 1, 1,
+      ]);
+      expect(
+        await occurrencesOf(await expandWith(['Log In'], body(steps, [2]))),
+      ).toEqual([1, 1]);
+    });
+
+    it('counts a dropped CALL as nothing — its steps are another frame', async () => {
+      // `Greet` expands into a frame of its own, which counts from zero, so
+      // dropping it moves no slot in this body however its steps read.
+      const exp = await expandSkills(['Log In'], undefined, undefined, '/t/n.md', [4], {
+        sections: {
+          'log in': body(['Greet', 'Click Next'], [1]),
+          greet: { name: 'Greet', headingLine: 20, steps: ['Click Next'], stepLines: [21] },
+        } as never,
+        warnDeadSections: false,
+      });
+      expect(exp.steps).toEqual(['Click Next']);
+      expect(await occurrencesOf(exp)).toEqual([0]);
+    });
+
+    it('restarts the offsets for every iteration of a looped body', async () => {
+      // Occurrence counting is per FRAME instance, and a looped body is one
+      // frame per row — so both iterations of the kept step bind the same
+      // entry, not entries 1 and 2.
+      const looped = {
+        ...body(['Click Next', 'Click Next'], [1]),
+        rows: [{ email: 'a@b.c' }, { email: 'd@e.f' }],
+      };
+      const exp = await expandWith(['Log In'], looped);
+      expect(exp.steps).toEqual(['Click Next', 'Click Next']);
+      expect(await occurrencesOf(exp)).toEqual([1, 1]);
+    });
   });
 });

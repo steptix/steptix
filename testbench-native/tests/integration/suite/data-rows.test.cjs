@@ -852,11 +852,35 @@ const SECTION_BODY_FIXTURE = [
   '',
 ].join('\n');
 
+// A section body carrying a DECISION, for the one narrowing that cannot be
+// taken literally: an `Otherwise` shipped without its `If` is a body the
+// server's own parser refuses, in a message that blames the file.
+//
+// line 7/8: the main flow; 10 the heading; 11-14 the body, 11+12 one chain.
+const CHAIN_BODY_FIXTURE = [
+  '# Chain body',
+  '',
+  '## Config',
+  '- baseUrl: http://localhost:8787/',
+  '',
+  '## Steps',
+  '1. Navigate to the baseUrl',
+  '2. Log In',
+  '',
+  '### Log In',
+  '1. If a banner is shown, then Dismiss the banner',
+  '2. Otherwise, Click Sign in',
+  '3. Type the password',
+  '4. Submit the form',
+  '',
+].join('\n');
+
 const SELECTION_FIXTURES = {
   'data-rows-3.tmp.md': THREE_ROWS_FIXTURE,
   'data-rows-section.tmp.md': SECTION_ROWS_FIXTURE,
   'data-rows-bad-section.tmp.md': BAD_SECTION_FIXTURE,
   'data-rows-body.tmp.md': SECTION_BODY_FIXTURE,
+  'data-rows-chain.tmp.md': CHAIN_BODY_FIXTURE,
   // Its own copy: the two suites above delete their fixtures in `after`.
   'data-rows-none.tmp.md': PLAIN_FIXTURE,
 };
@@ -1547,12 +1571,15 @@ describe('TestBench data-row selection', function () {
     ]);
   });
 
-  it('a skipped placeholder on an unselected body line is not that evidence', async () => {
+  it('a skipped placeholder is not evidence of execution, whatever line it names', async () => {
     // The wire has no third verdict, so a step the run decided against arrives
-    // as a PASS carrying `output: 'skipped'` (stories/control-flow.md) — and a
-    // server that HONOURS `runSteps` emits exactly that for the body steps the
-    // selection left out. Taking it as proof the body ran would fire this
-    // warning on the very servers the warning exists to distinguish from.
+    // as a PASS carrying `output: 'skipped'` (stories/control-flow.md). The
+    // warning is about a body step that RAN, and a skip is the opposite claim.
+    //
+    // No current server can produce this event for an unselected body line —
+    // it never expands that line, and every skipped-pass producer is indexed
+    // by expansion position — so this pins a rule rather than a sighting:
+    // defensive insurance, worth one condition.
     //
     // Asserted as a PAIR, in one test: the same line, the same event type,
     // once with the sentinel and once without. The negative alone would pass
@@ -1581,6 +1608,78 @@ describe('TestBench data-row selection', function () {
       'Log In — the server ran the whole section body; restart or update the ' +
         'Sessions API server so a selection can narrow it',
     ]);
+  });
+
+  it('keeps an If/Otherwise chain whole, and says which step it added', async () => {
+    // Half a decision is not a smaller decision: `runSteps: [1, 2]` here is a
+    // body the server's expander refuses — `"Otherwise, Click Sign in" has no
+    // decision to be the alternative of` — naming a file that is perfectly
+    // well formed, and which the client's own pre-flight has just passed.
+    await open('data-rows-chain.tmp.md');
+    const mark = hooks.hostMessageCount();
+    await runSelection([range(7, 8), range(12), range(13)]);
+
+    const entry = fake.requests[0].sections['log in'];
+    assert.deepEqual(entry.runSteps, [0, 1, 2], 'the If comes with its Otherwise');
+    const output = outputSince(mark);
+    assert.ok(
+      output.includes('Log In — body step 1 kept with 2, 3: an Otherwise needs its If'),
+      `the addition must not be silent. Got ${JSON.stringify(output)}`,
+    );
+    assert.ok(
+      output.includes('Log In — running body steps 1–3 of 4'),
+      `and the narrowing line says what actually runs. Got ${JSON.stringify(output)}`,
+    );
+  });
+
+  it('narrows a body whose call sits below the breakpoint, and keeps it on Continue', async () => {
+    // Two bugs in one shape. The narrowing was decided off the BREAKPOINT-
+    // trimmed step list, so a breakpoint above the call made `Log In` look
+    // uncalled and the narrowing was reported ignored. And the Continue
+    // rebuilds `lines` from the pause point — main-flow lines only — so
+    // recomputing from them would answer "nothing was narrowed" and run the
+    // whole body, painting marks the selection excluded.
+    const uri = await open('data-rows-body.tmp.md');
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(7, 0)), true),
+    ]);
+    const mark = hooks.hostMessageCount();
+    await runSelection([range(7, 9), range(17)]);
+
+    assert.deepEqual(fake.requests[0].sourceLines, [7], 'the batch stops at the breakpoint');
+    assert.deepEqual(
+      fake.requests[0].sections['log in'].runSteps,
+      [1],
+      'the call below the breakpoint still runs on Continue, so it is still narrowed',
+    );
+    const first = outputSince(mark);
+    assert.ok(
+      first.includes('Log In — running body steps 2 of 2'),
+      `Got ${JSON.stringify(first)}`,
+    );
+    assert.deepEqual(
+      first.filter((l) => l.includes('ignored')),
+      [],
+      'nothing was ignored — the call is in the selection, just not in this batch',
+    );
+
+    const resumeMark = hooks.hostMessageCount();
+    queueScripts((f) => f.end());
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('a second request', () => fake.requests.length >= 2);
+    await waitFor('idle after the continue', () => hooks.isRunning() === false);
+
+    assert.deepEqual(
+      fake.requests[1].sections['log in'].runSteps,
+      [1],
+      'the continuation carries the narrowing it inherited',
+    );
+    assert.ok(
+      outputSince(resumeMark).includes(
+        'Log In — the narrowing still applies: body steps 2 of 2',
+      ),
+      `Got ${JSON.stringify(outputSince(resumeMark))}`,
+    );
   });
 
   it('says nothing about the server when it honours runSteps', async () => {

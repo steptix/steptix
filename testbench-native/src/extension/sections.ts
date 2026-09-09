@@ -41,6 +41,17 @@ export interface SectionPayloadEntry {
 }
 
 /**
+ * A body-step narrowing that no longer fits the body it names.
+ *
+ * Its own class so the one caller can tell "the author's selection has gone
+ * stale" from any other throw and refuse the block with the message rather
+ * than crashing the run.
+ */
+export class SectionNarrowingError extends Error {
+  override readonly name = 'SectionNarrowingError';
+}
+
+/**
  * The `sections` request payload for `text`, or null when it defines none.
  *
  * Null rather than `{}` on purpose. The wire contract treats an empty map as
@@ -114,19 +125,32 @@ export function buildSectionsPayload(
             .sort((a, b) => a - b)
             .filter((n) => n >= 1 && n <= allRows.length)
         : null;
-    // Sanitised the way the rows are, and for the same reason: the numbers
-    // came from a selection made against a buffer the caller has since let go
-    // of, so an index the body does not have is dropped rather than shipped
-    // for the server to refuse. A list that survives as "every step" is not a
-    // narrowing and is not sent — the wire stays byte-identical for it.
+    // NOT sanitised the way the rows are, on purpose. A row number the table
+    // does not have is one row that will not run; a body-step index the body
+    // does not have means the positions no longer describe the body — the
+    // buffer was edited since the selection was made — and every SURVIVING
+    // index is then just as likely to name the wrong step. Worse, clipping can
+    // empty the list, and an empty list is "the whole body": the one outcome
+    // the author certainly did not ask for. So it is refused, loudly, and the
+    // caller turns the throw into a message and stops the run.
     const chosenSteps = sectionSteps?.[section.name];
     const runSteps =
       chosenSteps === undefined
         ? null
         : (() => {
-            const kept = [...new Set(chosenSteps)]
-              .filter((n) => Number.isInteger(n) && n >= 0 && n < section.steps.length)
-              .sort((a, b) => a - b);
+            const bad = chosenSteps.filter(
+              (n) => !Number.isInteger(n) || n < 0 || n >= section.steps.length,
+            );
+            if (bad.length > 0) {
+              throw new SectionNarrowingError(
+                `Body step ${bad.map((n) => n + 1).join(', ')} of "${section.name}" ` +
+                  `no longer exists — the section now has ${section.steps.length} ` +
+                  `step${section.steps.length === 1 ? '' : 's'}.`,
+              );
+            }
+            const kept = [...new Set(chosenSteps)].sort((a, b) => a - b);
+            // A list that keeps every step is not a narrowing and is not sent —
+            // the wire stays byte-identical for it.
             return kept.length === 0 || kept.length === section.steps.length ? null : kept;
           })();
     payload[key] = {
