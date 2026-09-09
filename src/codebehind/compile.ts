@@ -513,8 +513,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         // one, because the message asserts it as fact. A chain's untaken half
         // reaches here too, and "a return ended the flow before them" over it
         // is simply false — no return happened.
+        //
+        // And only when the recording did not STOP: `notAttempted` was already
+        // populated above with the post-prefix steps of a stopped recording,
+        // which no skipped row says anything about, so a clause derived from
+        // `skippedInRecording` would be asserted over steps that were not
+        // attempted for an entirely different reason. Those runs carry
+        // `stoppedAt` in the summary, and the `record` phase line above has
+        // already said "stopped at step N — <error>".
         `Nothing to compile: ${listSteps(notAttempted)} did not run on the recording run` +
-          `${describeRecordingSkips(skippedInRecording.map((s) => record.steps[s.index]))}. ` +
+          `${stoppedAt ? '' : describeRecordingSkips(skippedInRecording.map((s) => record.steps[s.index]))}. ` +
           'Run the test so they execute, then compile again.',
       );
     }
@@ -879,14 +887,21 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   }
   // Green means the whole test replayed as code. A prefix compile that went
   // green only proved the prefix; the rest of the test is still to do — and so
-  // does a compile that left steps unattempted because a return skipped them on
-  // the recording run, which is a `notAttempted` with no `stoppedAt` behind it
+  // does a compile that left steps unattempted because the recording never ran
+  // them, whether a return ended their flow or a decision took another branch.
+  // That is a `notAttempted` with no `stoppedAt` behind it
   // (stories/step-flow-control.md, decision 12).
   const status: CompileStatus =
     green && !stoppedAt && unreached.length === 0 && notAttempted.length === 0
       ? 'green'
       : 'partial';
   const keptAi = keptAiExisting + declined;
+  /** Why the recording did not attempt them, when every skipped row agrees on
+   *  one cause. Undefined when they disagree, which is what keeps the headline
+   *  from picking a winner among rows it would then be wrong about. */
+  const notAttemptedCause = recordingSkipCause(
+    skippedInRecording.map((s) => record.steps[s.index]),
+  );
   const tail = [
     writtenOffAi.length > 0 ? `${writtenOffAi.length} kept AI after replay failures` : '',
     unproven.length > 0 ? `${unproven.length} unproven (${listSteps(unproven)})` : '',
@@ -895,9 +910,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         `(${unreached[0]!.reason})`
       : '',
     // A stopped recording already says "stopped at step N" below, and the CLI
-    // prints the list either way; this is the case with no stop behind it.
+    // prints the list either way; this is the case with no stop behind it,
+    // which is exactly when `notAttempted` holds the recording's skipped rows
+    // and nothing else. The cause is READ OFF those rows rather than asserted:
+    // the ordinary chain compile reaches here with no return anywhere in the
+    // run, and "a return skipped them" over it is simply false — the same
+    // correction `notRunOnRecordingReason` and the "Nothing to compile"
+    // refusal already carry (stories/step-flow-control.md, decision 12).
     notAttempted.length > 0 && !stoppedAt
-      ? `${listSteps(notAttempted)} not attempted (a return skipped them on the recording run)`
+      ? `${listSteps(notAttempted)} not attempted on the recording run` +
+        (notAttemptedCause === undefined ? '' : ` (${notAttemptedCause})`)
       : '',
     // The compliance signal, in front of whoever ran the compile rather than
     // only in the summary object (stories/placeholder-preserving-actions.md §6).
@@ -1034,10 +1056,25 @@ function skippedByAReturn(result: StepResult | undefined): boolean {
  * others.
  */
 function describeRecordingSkips(results: (StepResult | undefined)[]): string {
-  if (results.length === 0) return '';
-  if (results.every((r) => skippedByAReturn(r))) return ' — a return ended the flow before them';
-  if (results.every((r) => !skippedByAReturn(r))) return ' — the run decided against them';
-  return '';
+  const cause = recordingSkipCause(results);
+  return cause === undefined ? '' : ` — ${cause}`;
+}
+
+/**
+ * The cause clause on its own, for the message that parenthesises it rather
+ * than joining it with a dash.
+ *
+ * Same rule, one implementation: the end-of-compile headline used to assert
+ * "a return skipped them on the recording run" unconditionally, which is false
+ * of the ordinary chain compile — an untaken branch is dropped from the
+ * selection and everything around it still compiles, so `notAttempted` is
+ * non-empty with no return anywhere in the run.
+ */
+function recordingSkipCause(results: (StepResult | undefined)[]): string | undefined {
+  if (results.length === 0) return undefined;
+  if (results.every((r) => skippedByAReturn(r))) return 'a return ended the flow before them';
+  if (results.every((r) => !skippedByAReturn(r))) return 'the run decided against them';
+  return undefined;
 }
 
 /** "steps 6–9", "step 4", "steps 2, 5" — for messages. */

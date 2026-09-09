@@ -159,9 +159,15 @@ passed. See `stories/step-flow-control.md`.
   the row values are already interpolated into the only text the server has —
   and that one reason quotes the interpolated line. Skipped steps take no
   screenshot and capture no outputs.
-- `stepsCompleted` counts steps that **executed**. Skipped steps are not
-  counted, so a run that returned from the main flow reports fewer completed
-  steps than `stepsTotal` and still has `"status": "passed"`.
+- `stepsCompleted` does not count the steps a `return`/`stop` skipped, so a run
+  that returned from the main flow reports fewer completed steps than
+  `stepsTotal` and still has `"status": "passed"`. That is the rule for THIS
+  producer only: a step a **decision** skipped — the untaken half of an
+  `If` / `Otherwise`, a loop body that ran no passes — is counted, as an
+  `[input:]` / `[interactive]` step skipped unattended always has been, because
+  none of those is ever coming and the number is a progress denominator. The
+  `stepsCompleted` row under *Response Body* states the whole rule in one
+  place.
 
 On the SSE stream (`?stream=1`) each skipped step is announced by its own event:
 
@@ -192,9 +198,10 @@ the line keeps whatever it was showing rather than the run failing.
 #### The other skipped-step event
 
 A step that never ran for a reason other than a `return` — the untaken half of
-an `If` / `Otherwise` decision, a loop body that ran no passes, or an
-`[input:]` / `[interactive]` step this endpoint will not run unattended —
-arrives on an older convention: a `step:pass` carrying `output: "skipped"`.
+an `If` / `Otherwise` decision, the guard line of a chain in which nothing held
+and there was no `Otherwise`, a loop body that ran no passes, or an `[input:]` /
+`[interactive]` step this endpoint will not run unattended — arrives on an older
+convention: a `step:pass` carrying `output: "skipped"`.
 
 ```
 event: step:pass

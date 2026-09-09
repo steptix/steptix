@@ -257,7 +257,9 @@ ignored:
    skips — it counts steps that EXECUTED. (The chain and loop skips that
    arrived with `stories/control-flow.md` DO count it, for the progress-bar
    reason set out there under "What `stepsCompleted` counts"; the two producers
-   differ on this one number and only on it.) The
+   differ on that number, and on `session.totalStepsExecuted` — the session
+   counter the MCP `list_sessions` tool reports — which the chain skips
+   increment and a return's do not, for the same reason.) The
    MCP fold maps `step:skip` to its existing `skipped` status **without** the
    "needs a human" warning. That warning was tied to `output: 'skipped'` on a
    `step:pass` while that event had exactly one producer; `stories/control-flow.md`

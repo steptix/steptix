@@ -4622,8 +4622,13 @@ export class SessionManager {
             const screenshotValue = result.screenshotBase64
               ? `data:image/png;base64,${result.screenshotBase64}`
               : '';
-            const resultStatus: 'passed' | 'failed' | 'error' =
-              result.status === 'skipped' ? 'passed' : result.status;
+            // Reported as recorded. The narrowing that used to sit here —
+            // `'skipped' ? 'passed'` — predates `StepResultResponse` gaining
+            // `'skipped'` (decision 9), and it greened the branched path's own
+            // untaken members: a conditional group records every unmatched
+            // outcome `skipped` ("outcome N matched instead"), which is the
+            // same shape a chain's untaken half has and must read the same way.
+            const resultStatus: StepResultResponse['status'] = result.status;
 
             results.push({
               step: effectiveSteps[result.index] ?? result.instruction,
@@ -4894,9 +4899,14 @@ export class SessionManager {
             fullStepResults.push(result);
             results.push({
               step: guardText,
-              // `skipped` has no wire value here either — an untaken chain
-              // member is not a failure.
-              status: rows.guard.status === 'failed' ? 'failed' : 'passed',
+              // Reported as recorded — `'skipped'` included. `StepResultResponse`
+              // gained that value with `stories/step-flow-control.md` decision 9,
+              // and this row is exactly what it is for: an `If` chain in which
+              // nothing held and there is no `Otherwise` records the guard that
+              // was ASKED as skipped, and reporting it `passed` here would put a
+              // green row in the response body beside the `—` the report renders
+              // for the same guard.
+              status: rows.guard.status,
               actions: [],
               screenshot: '',
               reasoning: evaluation.reasoning ?? evaluation.error ?? '',
@@ -4910,13 +4920,22 @@ export class SessionManager {
                 ...(guardFrame && { frame: guardFrame }),
               });
             } else {
+              // The FOURTH producer of `step:pass` + `output: 'skipped'`, and
+              // the commonest conditional shape there is: `If X, then Y` with
+              // no `Otherwise` and a condition that did not hold. It carries
+              // the same two additive fields `emitSkippedStep` does, for the
+              // same reason — without `skipKind` the MCP fold reads the absent
+              // field as `'unattended'` (the compatibility default) and ends
+              // the run telling an agent that steps "need a human", which
+              // nothing on this page does. `reason` is the sentence the report
+              // row already carries, so the ◌ hover and the log lines can say
+              // why rather than only that something was skipped.
+              const guardSkipped = rows.guard.status === 'skipped';
               emit({
                 type: 'step:pass',
                 line: guardLine,
-                output:
-                  rows.guard.status === 'skipped'
-                    ? 'skipped'
-                    : (evaluation.reasoning ?? 'decided'),
+                output: guardSkipped ? 'skipped' : (evaluation.reasoning ?? 'decided'),
+                ...(guardSkipped && { reason, skipKind: 'not-taken' as const }),
                 ...(guardFrame && { frame: guardFrame }),
               });
               stepsCompleted++;
@@ -5441,9 +5460,10 @@ export class SessionManager {
           ? `data:image/png;base64,${stepResult.screenshotBase64}`
           : '';
 
-        // Map internal StepResult to API response format
-        const resultStatus: 'passed' | 'failed' | 'error' =
-          stepResult.status === 'skipped' ? 'passed' : stepResult.status;
+        // Map internal StepResult to API response format. `'skipped'` travels
+        // as itself — see the branched path above for why the old narrowing to
+        // `'passed'` was a false green rather than a compatibility shim.
+        const resultStatus: StepResultResponse['status'] = stepResult.status;
 
         results.push({
           step: originalStep,

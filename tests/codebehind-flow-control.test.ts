@@ -776,6 +776,102 @@ export default defineSteps([
     expect(done.message).not.toContain('a return ended the flow');
   });
 
+  it('does not claim a return in the end-of-compile HEADLINE either', async () => {
+    // The third place the sentence is written, and the most reachable of the
+    // three: the "Nothing to compile" refusal above needs EVERY selected step
+    // to have been skipped, while this fires whenever anything was — which is
+    // the ordinary chain compile, since the untaken branch is dropped from the
+    // selection and everything around it still compiles. It read "a return
+    // skipped them on the recording run" over a run in which no return
+    // happened, in the same breath as the per-step line said otherwise.
+    const md = await write('booking.md', THREE_STEP_MD);
+    const test = await parseTestFile(md);
+    const decided = (index: number): StepResult => ({
+      ...skipped(index, 1),
+      aiExplanation: 'Skipped: another branch of this decision was taken',
+    });
+    const record: CompileRunOutcome = {
+      status: 'passed',
+      steps: [passed(1), decided(2), passed(3)],
+      resolvedParameters: {},
+      tokensUsed: 500,
+    };
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope('Confirm the booking'),
+      REVIEW_NOOP,
+    ]);
+    const { events, onEvent } = collect();
+    const runner: CompileRunner = async (request) =>
+      request.purpose === 'record'
+        ? record
+        : {
+            status: 'passed',
+            steps: [
+              passed(1, { fromCodeBehind: true }),
+              decided(2),
+              passed(3, { fromCodeBehind: true }),
+            ],
+            resolvedParameters: {},
+            tokensUsed: 0,
+          };
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
+    });
+
+    expect(result.summary.notAttempted).toEqual([2]);
+    const done = events.find((e) => e.kind === 'done') as { message: string };
+    expect(done.message).toContain(
+      'step 2 not attempted on the recording run (the run decided against them)',
+    );
+    expect(done.message).not.toContain('a return');
+    // And the per-step line, which was already right, still agrees with it.
+    expect(
+      events.some(
+        (e) =>
+          e.kind === 'step'
+          && e.step === 2
+          && e.message === 'not run on the recording run (another branch of this decision was taken)',
+      ),
+    ).toBe(true);
+  });
+
+  it('names a return in the headline when one actually happened', async () => {
+    // The other side: the clause is read off the rows, so a genuine return
+    // still gets the sentence it always had.
+    const md = await write('booking.md', THREE_STEP_MD);
+    const test = await parseTestFile(md);
+    const record: CompileRunOutcome = {
+      status: 'passed',
+      steps: [passed(1), returned(2), skipped(3, 2)],
+      resolvedParameters: {},
+      tokensUsed: 500,
+    };
+    const { client } = scriptedClient([
+      entryEnvelope('Enter the booking code'),
+      entryEnvelope(RETURN_STEP, `if ((await page.title()).includes('Dashboard')) step.exit();`),
+      REVIEW_NOOP,
+    ]);
+    const { events, onEvent } = collect();
+    const runner: CompileRunner = async (request) =>
+      request.purpose === 'record'
+        ? record
+        : {
+            status: 'passed',
+            steps: [passed(1, { fromCodeBehind: true }), returned(2), skipped(3, 2)],
+            resolvedParameters: {},
+            tokensUsed: 0,
+          };
+
+    await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent });
+
+    const done = events.find((e) => e.kind === 'done') as { message: string };
+    expect(done.message).toContain(
+      'step 3 not attempted on the recording run (a return ended the flow before them)',
+    );
+  });
+
   it('builds the not-attempted reason from the runner\'s own sentence', () => {
     expect(notRunOnRecordingReason(skipped(5, 3))).toBe(
       'not run on the recording run (step 3 returned)',

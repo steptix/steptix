@@ -80,10 +80,21 @@ describe('the sentence itself', () => {
     );
   });
 
+  it('leaves a word that merely begins with the label alone', () => {
+    // The anchor carries a word boundary, so the colon being optional cannot
+    // eat the front of an unrelated word.
+    expect(skipLogLine(5, 'Skippedy the section was disabled')).toBe(
+      '◌ Step 5 skipped — Skippedy the section was disabled',
+    );
+  });
+
   it('never trails a dash with nothing after it', () => {
-    // Four ways to arrive with nothing to say, including a reason that is
-    // only the label the strip removes.
-    for (const reason of [undefined, '', '   ', 'Skipped:', 'Skipped:  ']) {
+    // Every way to arrive with nothing to say, including the two shapes of
+    // the label the strip removes: the report cell's `Skipped:` and the bare
+    // `'Skipped'` every runner falls back to when it has no sentence
+    // (`skipReasons.get(k) ?? 'Skipped'`), which used to render
+    // `◌ Step 5 skipped — Skipped`.
+    for (const reason of [undefined, '', '   ', 'Skipped:', 'Skipped:  ', 'Skipped', 'skipped ']) {
       expect(skipLogLine(5, reason)).toBe('◌ Step 5 skipped');
     }
   });
@@ -97,7 +108,7 @@ describe('parity with the module it mirrors', () => {
     const core = read('testbench-native/src/extension/step-skip-core.ts');
     const ui = read('src/ui/step-skip.ts');
     const inline = read('testbench-native/src/webview/lib/failure-text-inline.js');
-    const strip = /replace\(\s*\/\^skipped\\s\*:\\s\*\/i\s*,\s*['"]{2}\s*\)/;
+    const strip = /replace\(\s*\/\^skipped\\b\\s\*:\?\\s\*\/i\s*,\s*['"]{2}\s*\)/;
     for (const [name, text] of [
       ['step-skip-core.ts', core],
       ['src/ui/step-skip.ts', ui],

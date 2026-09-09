@@ -18,6 +18,7 @@ import { strict as assert } from 'node:assert';
 import {
   SKIP_GLYPH,
   skipCompileLogLine,
+  skipHoverMessage,
   skipPaintsOver,
   skipPanelLine,
   skipRunLogLine,
@@ -162,6 +163,59 @@ test('a reason that is nothing but the prefix leaves no dangling dash', () => {
   // check, so a server sending the bare label cannot produce `skipped — `.
   assert.equal(skipRunLogLine(7, 'Skipped:'), '◌ step 7 skipped');
   assert.equal(skipRunLogLine(7, 'Skipped:   '), '◌ step 7 skipped');
+  // The colon-less form too. Every runner falls back to a bare `'Skipped'`
+  // when it has no sentence for a queued row (`skipReasons.get(k) ??
+  // 'Skipped'`), and that used to render `◌ step 7 skipped — Skipped`.
+  assert.equal(skipRunLogLine(7, 'Skipped'), '◌ step 7 skipped');
+  assert.equal(skipRunLogLine(7, 'skipped '), '◌ step 7 skipped');
+});
+
+test('the optional colon cannot eat the front of an unrelated word', () => {
+  // The composition the colon-less strip must not break: the anchor carries a
+  // word boundary, so only the LABEL goes.
+  assert.equal(
+    skipRunLogLine(7, 'Skippedy the section was disabled'),
+    '◌ step 7 skipped — Skippedy the section was disabled',
+  );
+  // And a label written without a colon but with a sentence after it is
+  // treated as the label it is.
+  assert.equal(
+    skipRunLogLine(7, 'Skipped because the list was empty'),
+    '◌ step 7 skipped — because the list was empty',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The gutter ◌'s hover
+// ---------------------------------------------------------------------------
+
+test('the hover keeps the standalone sentence the log line strips', () => {
+  // Deliberate, and decided in ONE place so it cannot drift by accident: a log
+  // line has already said `◌ step 5 skipped` before the reason reaches it, so
+  // repeating the word stutters; a hover is a box of its own with only the
+  // gutter glyph beside it, and reads as prose — the same shape `rowSkipHover`
+  // gives a data row.
+  assert.equal(
+    skipHoverMessage('Skipped: another branch of this decision was taken'),
+    'Skipped: another branch of this decision was taken',
+  );
+  assert.equal(
+    skipRunLogLine(5, 'Skipped: another branch of this decision was taken'),
+    '◌ step 5 skipped — another branch of this decision was taken',
+  );
+  // A return's sentence is standalone on both surfaces already.
+  assert.equal(
+    skipHoverMessage('Not run: step 3 returned from "Sign in"'),
+    'Not run: step 3 returned from "Sign in"',
+  );
+});
+
+test('a blank reason opens no hover box at all', () => {
+  // What the decoration spreads on: `undefined` means the key is omitted, and
+  // an empty hover box on a ◌ is worse than none.
+  for (const reason of [undefined, '', '   ', '\n']) {
+    assert.equal(skipHoverMessage(reason), undefined);
+  }
 });
 
 // ---------------------------------------------------------------------------

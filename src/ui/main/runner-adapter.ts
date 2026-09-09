@@ -781,9 +781,14 @@ export class UIRunnerAdapter {
           this.emit('runner:step-complete', {
             stepIndex: rows.guard.index + 1,
             // A guard reports what it recorded, `skipped` included: a chain
-            // that decided nothing held is the row that says so.
+            // that decided nothing held is the row that says so — and it says
+            // WHY, on the same field `flushSkips` uses for the rows beside it.
+            // Without the reason the renderer printed `◌ Step 5 skipped` for
+            // the guard and `◌ Step 6 skipped — no condition in this decision
+            // held` for the row immediately under it, from one decision.
             status: rows.guard.status,
             durationMs: evaluation.durationMs,
+            ...(rows.guard.status === 'skipped' && { reason }),
             ...(evaluation.error !== undefined && { error: evaluation.error }),
           });
           // The SELECTED member's line, plus a `did not hold` line for each

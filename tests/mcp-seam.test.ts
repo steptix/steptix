@@ -596,6 +596,73 @@ describe('run_steps', () => {
     expect(first?.text).not.toContain('need a human');
   });
 
+  it('says nothing about a human when a chain with no Otherwise found nothing to do', async () => {
+    // The GUARD row, which is the shape `If the cookie banner is shown,
+    // dismiss it` produces when the banner is not shown — a decision with no
+    // `Otherwise`, and the commonest conditional anyone writes. The server
+    // emits it from its own site rather than through `emitSkippedStep`, and it
+    // sent neither field until the round that added this test: the fold read
+    // the absent `skipKind` as the compatibility default `'unattended'` and
+    // ended the run telling the agent that steps needed a person, one row
+    // above two rows from the same decision that said otherwise.
+    //
+    // These frames are the ones a real server produces for that shape: the
+    // guard's own line, then the tail it did not take.
+    const client = await connectOverSse(
+      sseFrames(
+        { type: 'step:start', line: 1 },
+        { type: 'step:pass', line: 1 },
+        {
+          type: 'step:pass',
+          line: 2,
+          output: 'skipped',
+          reason: 'Skipped: no condition in this decision held',
+          skipKind: 'not-taken',
+        },
+        {
+          type: 'step:pass',
+          line: 4,
+          output: 'skipped',
+          reason: 'Skipped: no condition in this decision held',
+          skipKind: 'not-taken',
+        },
+        { type: 'step:start', line: 3 },
+        { type: 'step:pass', line: 3 },
+        { type: 'done', status: 'passed' },
+      ),
+    );
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: {
+        steps: ['open it', 'If the Cash checkbox is ticked, then Pay with cash', 'Verify the total'],
+        project_root: PROJECT_ROOT,
+      },
+    });
+
+    const structured = res.structuredContent as {
+      warnings: string[];
+      steps: { status: string; skipCause?: string; output?: string | null }[];
+    };
+    expect(structured.warnings).toEqual([]);
+    // Both rows carry the cause, the guard included.
+    expect(structured.steps.filter((s) => s.status === 'skipped')).toEqual([
+      expect.objectContaining({
+        skipCause: 'not-taken',
+        output: 'Skipped: no condition in this decision held',
+      }),
+      expect.objectContaining({
+        skipCause: 'not-taken',
+        output: 'Skipped: no condition in this decision held',
+      }),
+    ]);
+    const first = (res.content as { type: string; text?: string }[])[0];
+    expect(first?.text).toContain(
+      'PASSED — 2 passed, 2 skipped (a branch that was not taken) of 4',
+    );
+    expect(first?.text).not.toContain('need a human');
+  });
+
   it('reports a run that skipped only unattended steps in those words', async () => {
     const client = await connectOverSse(
       sseFrames(

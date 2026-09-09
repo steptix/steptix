@@ -4292,9 +4292,21 @@ export class RunController {
      * (steps-summary-core.ts) and the panel (testbench-runner.jsx).
      *
      * The population differs from the panel's by construction and always has:
-     * this counts EVENTS, so a skill body's steps each count, while the panel
-     * counts numbered lines in the open document. It is the rule that has to
-     * agree, not the totals.
+     * this counts EVENTS and the panel counts numbered LINES in the open
+     * document, so the two disagree wherever one line produces more or fewer
+     * than one event. Three ways that happens, all of them normal:
+     *
+     *  - a skill or section body's steps each send an event, and none of them
+     *    is a line of the open document;
+     *  - a chain member whose tail is a plain instruction expands to TWO steps
+     *    on one source line — the guard row and the tail — so that line is
+     *    counted twice here and once there. (With a `### Section` tail the two
+     *    agree exactly: the body's lines are events and lines alike.)
+     *  - a loop body's line sends one event per pass.
+     *
+     * Deduping by `event.line` would fix the first two and break the third,
+     * which is the one that matters most. It is the RULE that has to agree —
+     * a skipped step is never a pass on any surface — not the totals.
      */
     let skipCount = 0;
     for await (const event of events) {

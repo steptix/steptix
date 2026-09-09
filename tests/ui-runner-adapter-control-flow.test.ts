@@ -665,4 +665,35 @@ describe('the Runner UI reports both kinds of skip the same way', () => {
       'Skipped: another branch of this decision was taken',
     ]);
   });
+
+  it('sends one with the GUARD row too, when nothing in the chain held', async () => {
+    // The guard's `runner:step-complete` is emitted from its own site, not
+    // through `flushSkips`, and it sent no reason — so the renderer printed
+    // `◌ Step 1 skipped` for the guard and `◌ Step 2 skipped — no condition in
+    // this decision held` for the row under it, from one decision. The
+    // sentence was already in scope on the line above.
+    const noElse = `
+# Pay
+
+## Steps
+1. If the Cash checkbox is ticked, then Pay with cash
+2. Verify the receipt
+
+### Pay with cash
+1. Click Pay now
+`;
+    evaluateConditionsMock.mockResolvedValue({
+      selected: null,
+      reasoning: 'not ticked',
+      aiInteractions: [],
+    });
+    const events = await runAdapter(writeTest(root, noElse));
+    const skips = events
+      .filter((e) => e.channel === 'runner:step-complete' && e.data['status'] === 'skipped')
+      .map((e) => [e.data['stepIndex'], e.data['reason']]);
+    expect(skips).toEqual([
+      [1, 'Skipped: no condition in this decision held'],
+      [2, 'Skipped: no condition in this decision held'],
+    ]);
+  });
 });

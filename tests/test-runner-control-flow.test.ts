@@ -1196,10 +1196,11 @@ describe('a return written as a one-line loop body', () => {
    * ends the whole run".
    *
    * It composes. `returnExit` clamps to a control RECORD, not to a frame, and
-   * the expander gives a one-line tail one: `bodyStart` is set before it
-   * recurses into the tail and `bodyEnd` after, so the tail's own index is
-   * inside the record and the clamp fires. The story now says so; this is what
-   * holds it to it.
+   * the expander gives a one-line tail one: `bodyStart` is the index the
+   * tail's first emitted step lands at and `bodyEnd` its last, so a one-step
+   * tail has `bodyStart === bodyEnd === i` — the tail's own index is inside
+   * the record and the clamp fires. The story now says so; this is what holds
+   * it to it.
    */
   const RETURN_AS_TAIL = [
     '# One-line loop body',

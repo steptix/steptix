@@ -71,6 +71,12 @@ const judgeCalls: string[][] = [];
 /** What `executeBranchedStep` hands back — a watch group's rows, when a test
  *  wants one. Rows carry the group's own **0-based** step indices. */
 let branchedRows: (group: any) => StepResult[] = () => [];
+/**
+ * Which executed step, if any, answers with `flowControl` — a CONDITIONAL
+ * `… then return`, which the model decides rather than the parser. Called once
+ * per `executeStep`, so a test can return on the Nth visit to the same line.
+ */
+let flowControlFor: (instruction: string) => StepResult['flowControl'] = () => undefined;
 /** Set when a test wants the judge to park until the run is aborted. */
 let judgeParksUntilAbort = false;
 /** Resolves when the judge has been entered — the abort test's cue. */
@@ -86,6 +92,7 @@ vi.mock('../src/runner/step-executor.js', () => ({
     executedSteps.push(instruction);
     cacheFlags.push([instruction, opts?.cacheEnabled === true]);
     historyPerStep.push([...(opts?.conversationHistory ?? [])]);
+    const flowControl = flowControlFor(instruction);
     return {
       index: 1,
       instruction,
@@ -94,6 +101,7 @@ vi.mock('../src/runner/step-executor.js', () => ({
       durationMs: 5,
       retried: false,
       aiExplanation: 'ok',
+      ...(flowControl && { flowControl }),
     };
   }),
   executeBranchedStep: vi.fn(async (group: unknown) => branchedRows(group)),
@@ -211,6 +219,7 @@ beforeEach(() => {
   generatedReports.length = 0;
   judgeScript = [];
   branchedRows = () => [];
+  flowControlFor = () => undefined;
   judgeParksUntilAbort = false;
   judgeEntered = undefined;
 });
@@ -305,6 +314,39 @@ const chainBody = (extra: Record<string, unknown> = {}) => ({
       headingLine: 12,
       steps: ['Enter the card details', 'Submit the card form'],
       stepLines: [13, 14],
+    },
+  },
+  ...extra,
+});
+
+/**
+ * A chain with NO `Otherwise` — `If X, then Y` and nothing else, which is the
+ * commonest conditional anyone writes and the one shape whose GUARD row is
+ * recorded skipped when the condition does not hold (`guardRows`,
+ * src/runner/control-runtime.ts: "a chain where nothing held and there is no
+ * `Otherwise` has no passed member at all").
+ *
+ *     3. Open the payments page
+ *     4. If the Cash checkbox is ticked, then Pay with cash
+ *     5. Verify the order confirmation is shown
+ *     ### Pay with cash   (heading 7)
+ *     8. Click Pay now
+ *     9. Verify the receipt says Paid in cash
+ */
+const noOtherwiseBody = (extra: Record<string, unknown> = {}) => ({
+  steps: [
+    'Open the payments page',
+    'If the Cash checkbox is ticked, then Pay with cash',
+    'Verify the order confirmation is shown',
+  ],
+  sourceLines: [3, 4, 5],
+  testFilePath,
+  sections: {
+    'pay with cash': {
+      name: 'Pay with cash',
+      headingLine: 7,
+      steps: ['Click Pay now', 'Verify the receipt says Paid in cash'],
+      stepLines: [8, 9],
     },
   },
   ...extra,
@@ -865,6 +907,14 @@ describe('a watch group after a chain', () => {
       'Click Continue',
       'Sign out',
     ]);
+    // And the watch group's own unmatched row keeps its status. The branched
+    // path narrowed `'skipped'` to `'passed'` on its way into `results[]` — a
+    // narrowing that predates the union gaining `'skipped'` and greened a row
+    // for a branch the group did not match, which is the same false green a
+    // chain's untaken half used to get.
+    expect(
+      body.results.map((r: { step: string; status: string }) => [r.step, r.status]),
+    ).toContainEqual(['If a cookie banner appears, click Reject all', 'skipped']);
   });
 });
 
@@ -1275,6 +1325,69 @@ describe('a return inside a loop body ends the PASS, not the run', () => {
     expect(skipped).toEqual([5]);
     expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
   });
+
+  /**
+   * A ONE-LINE loop body, on the server.
+   *
+   *     3. Open the statements page
+   *     4. While the banner is shown, If the retry count is 3 then return
+   *     5. Verify the banner is gone
+   *
+   * `stories/control-flow.md` says this shape was "measured on the server and
+   * on the CLI", and until now only the CLI had a test
+   * (`tests/test-runner-control-flow.test.ts`). It is a claim that has already
+   * been got wrong once — the story documented the opposite as a limitation —
+   * so it is pinned on the runner the extension and the MCP tools actually
+   * drive, not only on the one the CLI does.
+   */
+  const oneLineLoopBody = (tail: string) => ({
+    steps: ['Open the statements page', `While the banner is shown, ${tail}`, 'Verify the banner is gone'],
+    sourceLines: [3, 4, 5],
+    testFilePath,
+  });
+
+  it('a conditional return written as the whole loop body ends the PASS', async () => {
+    // The tail is a plain instruction, so it has no frame of its own — the
+    // reasoning that made the story call this the shape that cannot compose.
+    // `returnExit` clamps to a control RECORD, and the expander gives a
+    // one-step tail one (`bodyStart === bodyEnd === i`).
+    judgeScript = [0, 0, null];
+    let visits = 0;
+    flowControlFor = (instruction) =>
+      instruction.startsWith('If the retry count is 3') && ++visits === 2
+        ? { kind: 'return', verb: 'return' }
+        : undefined;
+    const events = await collect(oneLineLoopBody('If the retry count is 3 then return'));
+
+    // Three guard visits: the return ended a pass, not the run.
+    expect(judgeCalls).toEqual([
+      ['the banner is shown'],
+      ['the banner is shown'],
+      ['the banner is shown'],
+    ]);
+    expect(executedSteps).toEqual([
+      'Open the statements page',
+      'If the retry count is 3 then return',
+      'If the retry count is 3 then return',
+      'Verify the banner is gone',
+    ]);
+    // Nothing is reported skipped by either producer: the pass's body is the
+    // returning line itself, and the step after the loop ran.
+    expect(events.filter((e) => e.type === 'step:skip')).toEqual([]);
+    expect(events.filter((e) => e.type === 'step:pass' && e.output === 'skipped')).toEqual([]);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+
+  it('an UNCONDITIONAL return as the whole loop body behaves the same', async () => {
+    // `While x, Return` — dispatched by the parser, so no model call for the
+    // tail at all and every judge answer belongs to the guard.
+    judgeScript = [0, 0, null];
+    const events = await collect(oneLineLoopBody('Return'));
+    expect(judgeCalls).toHaveLength(3);
+    expect(executedSteps).toEqual(['Open the statements page', 'Verify the banner is gone']);
+    expect(events.filter((e) => e.type === 'step:skip')).toEqual([]);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
 });
 
 describe('a return inside a chain tail ends the tail, not the chain', () => {
@@ -1386,6 +1499,58 @@ describe('what a decision-skipped step says about itself', () => {
       // untaken `Otherwise` "needs a human".
       expect(ev.skipKind).toBe('not-taken');
     }
+  });
+
+  it('carries both fields on the GUARD row too, when nothing in the chain held', async () => {
+    // The fourth producer of `step:pass` + `output: 'skipped'`, and the one a
+    // grep for the bare literal missed: it hides behind a ternary in the
+    // guard's own emit. Every chain fixture above has an `Otherwise`, so the
+    // guard is always `passed` there and no test met this row — while
+    // `If the cookie banner is shown, dismiss it` is the commonest conditional
+    // anyone writes, and it ended an MCP run saying steps "need a human".
+    judgeScript = [null];
+    const events = await collect(noOtherwiseBody());
+    const skipped = events.filter((e) => e.type === 'step:pass' && e.output === 'skipped');
+    expect(skipped.map((e) => [e.line, e.reason, e.skipKind])).toEqual([
+      // The guard's own line first — the decision the run made — then the tail
+      // it did not take.
+      [4, 'Skipped: no condition in this decision held', 'not-taken'],
+      [8, 'Skipped: no condition in this decision held', 'not-taken'],
+      [9, 'Skipped: no condition in this decision held', 'not-taken'],
+    ]);
+    // Nothing on this page wanted a person, and nothing but the step after the
+    // chain ran.
+    expect(executedSteps).toEqual([
+      'Open the payments page',
+      'Verify the order confirmation is shown',
+    ]);
+  });
+
+  it('reports the unheld guard skipped in results[], not passed', async () => {
+    // The other half of the same row. The response body used to say `passed`
+    // for the guard while the report row for the SAME guard said `skipped`,
+    // under a comment claiming `'skipped'` had no wire value here — which it
+    // has had since decision 9 widened the union.
+    judgeScript = [null];
+    const body = await post(noOtherwiseBody());
+    expect(
+      (body.results as { step: string; status: string }[]).map((r) => [r.step, r.status]),
+    ).toEqual([
+      ['Open the payments page', 'passed'],
+      ['If the Cash checkbox is ticked, then Pay with cash', 'skipped'],
+      ['Click Pay now', 'skipped'],
+      ['Verify the receipt says Paid in cash', 'skipped'],
+      ['Verify the order confirmation is shown', 'passed'],
+    ]);
+    // And the report row agrees with it, which is the whole point.
+    const steps: StepResult[] = generatedReports.at(-1)!.steps;
+    expect(steps.map((s) => [s.instruction, s.status])).toEqual([
+      ['Open the payments page', 'passed'],
+      ['If the Cash checkbox is ticked, then Pay with cash', 'skipped'],
+      ['Click Pay now', 'skipped'],
+      ['Verify the receipt says Paid in cash', 'skipped'],
+      ['Verify the order confirmation is shown', 'passed'],
+    ]);
   });
 
   it('says the loop ran no passes when that is what happened', async () => {

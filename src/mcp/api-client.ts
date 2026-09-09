@@ -166,6 +166,15 @@ function shapeProblem(type: string, event: Record<string, unknown>): string | nu
       if (type === 'step:fail' && typeof event['error'] !== 'string') {
         return 'error is not a string';
       }
+      // `reason` rides a `step:pass` that carries `output: 'skipped'`, and the
+      // fold assigns it straight into `row.output` — a field `schemas.ts`
+      // declares `z.string().nullable()`, so a non-string here fails
+      // `validated()` at the end and degrades the whole tool result. Optional,
+      // unlike `step:skip`'s: an older server sends none. Checked in the same
+      // place and for the same reason as that one.
+      if (event['reason'] !== undefined && typeof event['reason'] !== 'string') {
+        return 'reason is not a string';
+      }
       return null;
     case 'step:skip':
       // The fold reads all three: `line` to open the row, `frame` to attribute

@@ -91,7 +91,8 @@ export function isSkippedPass(event) {
  * different things about the same event, which is what it did before these
  * were merged.
  *
- * The leading `Skipped:` is stripped for the reason `because()` in
+ * The leading `Skipped:` is stripped — colon or no colon, since the runners'
+ * no-sentence fallback is a bare `'Skipped'` — for the reason `because()` in
  * step-skip-core.ts gives: the server writes a standalone sentence for a
  * report cell, and pasted after "skipped" it stutters.
  *
@@ -102,6 +103,6 @@ export function isSkippedPass(event) {
 export const SKIP_GLYPH = "◌";
 
 export function skipPanelLine(line, reason) {
-  const trimmed = reason?.trim().replace(/^skipped\s*:\s*/i, "");
+  const trimmed = reason?.trim().replace(/^skipped\b\s*:?\s*/i, "");
   return `${SKIP_GLYPH} Step on line ${line} skipped${trimmed ? ` — ${trimmed}` : ""}`;
 }

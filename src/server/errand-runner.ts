@@ -890,7 +890,10 @@ export class ErrandRunner {
         : '';
       results.push({
         step: originalStep,
-        status: stepResult.status === 'skipped' ? 'passed' : stepResult.status,
+        // As recorded, `'skipped'` included: `StepResultResponse` gained that
+        // value with decision 9, and the narrowing to `'passed'` that used to
+        // sit here greened a conditional group's unmatched outcomes.
+        status: stepResult.status,
         actions: stepResult.turns.flatMap((t) => t.subActions).map((sa) => sa.action),
         screenshot: screenshotValue,
         reasoning: stepResult.aiExplanation ?? '',

@@ -28,13 +28,15 @@ export const SKIP_GLYPH = '◌';
  * The reason clause, or nothing.
  *
  * Blank and whitespace-only are treated as absent so a runner that reports an
- * empty reason cannot produce a trailing dash. The leading `Skipped:` goes:
- * `skipReasonFor` (src/runner/control-runtime.ts) writes a standalone sentence
- * because that is what a report CELL holds, and pasted into this line it
- * stutters.
+ * empty reason cannot produce a trailing dash. The leading `Skipped:` goes,
+ * with or without its colon: `skipReasonFor` (src/runner/control-runtime.ts)
+ * writes a standalone sentence because that is what a report CELL holds, and
+ * the runners fall back to a bare `'Skipped'` when they have no sentence at
+ * all — pasted into this line either one stutters. Anchored on a word
+ * boundary, so a mid-sentence mention is left alone.
  */
 function because(reason?: string): string {
-  const trimmed = reason?.trim().replace(/^skipped\s*:\s*/i, '');
+  const trimmed = reason?.trim().replace(/^skipped\b\s*:?\s*/i, '');
   return trimmed ? ` — ${trimmed}` : '';
 }
 

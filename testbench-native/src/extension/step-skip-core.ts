@@ -75,10 +75,38 @@ export function skipPaintsOver(current: string | undefined): boolean {
  * sites or by rewording the report rows every suite asserts on. A reason that
  * leads with anything else (`Not run: step 3 returned from "Sign in"`) is left
  * exactly as the server wrote it.
+ *
+ * The colon is optional in the strip because the label arrives without one
+ * too: every runner falls back to a bare `'Skipped'` when it has no sentence
+ * for a queued row (`skipReasons.get(k) ?? 'Skipped'`), which produced `◌ step
+ * 7 skipped — Skipped`. Anchored on a word boundary, so a reason that merely
+ * BEGINS with the letters (`Skippedy…`) is not touched, and `The loop was
+ * skipped: …` — where the word is mid-sentence — is not either.
  */
 function because(reason?: string): string {
-  const trimmed = reason?.trim().replace(/^skipped\s*:\s*/i, '');
+  const trimmed = reason?.trim().replace(/^skipped\b\s*:?\s*/i, '');
   return trimmed ? ` — ${trimmed}` : '';
+}
+
+/**
+ * The gutter ◌'s hover, or nothing.
+ *
+ * The one place the hover's wording is decided, so the difference from the log
+ * lines is deliberate rather than incidental. It KEEPS the leading `Skipped:`
+ * that {@link because} strips, because the two surfaces are not the same
+ * sentence: a log line already says `◌ step 5 skipped` before the reason
+ * reaches it, so repeating the word stutters, while a hover is standalone
+ * prose in a box of its own with the glyph in the gutter beside it — the same
+ * shape `rowSkipHover` (row-summary-core.ts) gives a data row, which likewise
+ * leads with a capitalised clause naming what did not happen.
+ *
+ * What it does share with the log lines is the blank rule: `undefined`, an
+ * empty string and whitespace all mean "no hover", so a server that sends an
+ * empty `reason` cannot open an empty hover box on the line.
+ */
+export function skipHoverMessage(reason: string | undefined): string | undefined {
+  const trimmed = reason?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 /**

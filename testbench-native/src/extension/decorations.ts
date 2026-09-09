@@ -4,6 +4,7 @@ import { classifyLines, extractSteps } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds, findStepsHeadingLine } from './step-lines.js';
 import { failHoverMessage, staleHoverMessage, STALE_HOVER_MESSAGE } from './failure-hover-core.js';
 import { rowHeaderSummary } from './row-summary-core.js';
+import { skipHoverMessage } from './step-skip-core.js';
 import { alignmentLinesOf, dataTablesOf, type DataTableLines } from './data-tables-core.js';
 import {
   countMainFlowStatuses,
@@ -321,19 +322,27 @@ export class DecorationManager implements vscode.Disposable {
           runningRanges.push(r);
           runningLines.add(line);
           break;
-        case 'skip':
+        case 'skip': {
+          const hover = skipHoverMessage(failure?.error);
           skipRanges.push({
             range: r,
-            // Verbatim, and for both kinds of skipped line. A ROW's hover is
-            // authored by `rowSkipHover`; a STEP's is the `reason` off the
-            // wire — `Not run: step 3 returned from "Sign in"`. Both are prose
-            // written to be read, so neither goes through `failHoverMessage`,
-            // which would put "This step failed:" over a line that did not
-            // fail and fence a sentence as if it were a stack trace. No
-            // detail (an older build's persisted state) still means no hover.
-            ...(failure?.error !== undefined && { hoverMessage: failure.error }),
+            // For both kinds of skipped line. A ROW's hover is authored by
+            // `rowSkipHover`; a STEP's is the `reason` off the wire — `Not
+            // run: step 3 returned from "Sign in"`, or `Skipped: another
+            // branch of this decision was taken`. Both are prose written to be
+            // read, so neither goes through `failHoverMessage`, which would
+            // put "This step failed:" over a line that did not fail and fence
+            // a sentence as if it were a stack trace.
+            //
+            // `skipHoverMessage` is where the one difference from the run
+            // log's wording is decided and explained — the hover keeps the
+            // `Skipped:` the log line strips — and it is what turns a blank
+            // reason into no hover rather than an empty box. No detail at all
+            // (an older build's persisted state) still means no hover.
+            ...(hover !== undefined && { hoverMessage: hover }),
           });
           break;
+        }
         case 'stopped':
           stoppedRanges.push({
             range: r,

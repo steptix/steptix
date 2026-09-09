@@ -1046,14 +1046,15 @@ nothing reported skipped.
 
 The reasoning was wrong about which thing does the clamping. `returnExit` needs
 a control RECORD, not a frame, and the expander gives a one-line tail one
-anyway: `bodyStart` is set before it recurses into the tail and `bodyEnd` after,
-so the tail's own index satisfies `record.bodyStart <= i && i <= record.bodyEnd`
-and the clamp fires. A frame is what `frameExitIndex` wants, and its answer is
-the one being clamped.
+anyway: `bodyStart` is the index the tail's first emitted step lands at and
+`bodyEnd` its last, so a one-step tail has `bodyStart === bodyEnd === i` — the
+tail's own index satisfies `record.bodyStart <= i && i <= record.bodyEnd`, and
+the clamp fires. A frame is what `frameExitIndex` wants, and its answer is the
+one being clamped.
 
 The shape that really does not clamp is a return in the MAIN FLOW, outside every
 control record — `inner` is null, `enclosed` is false, and the planner must not
-be consulted, which is the third bullet above.
+be consulted, which is the third bullet under **Where a return lands**.
 
 **TestBench paints one skip.** A step that never ran reaches the client two
 ways — `step:skip`, and `step:pass` carrying `output: 'skipped'` — and both
@@ -1086,12 +1087,17 @@ older server and both optional at every reader:
   second. Absent means `'unattended'`, which is what an older server meant by
   saying nothing.
 
-**What `stepsCompleted` counts** is the one number the two features do not
-agree on, and the disagreement is deliberate rather than unreconciled. A skip
-this feature records increments it; a skip a `return` leaves behind does not
+**What `stepsCompleted` counts** is the number the two features do not agree
+on, and the disagreement is deliberate rather than unreconciled. A skip this
+feature records increments it; a skip a `return` leaves behind does not
 (`stories/step-flow-control.md`, decision 9 — "it counts steps that EXECUTED").
 A seven-step run with two chain skips and one return skip reports
 `stepsCompleted: 6` of `stepsTotal: 7`.
+
+`session.totalStepsExecuted` follows it exactly — incremented beside it on the
+chain path and left alone on the return path — so it is a second number the two
+producers differ on, not a counter-example. It is the one `list_sessions`
+reports to an agent, so the two move together on purpose.
 
 Both are defensible because the field is doing two jobs. It is a progress
 denominator — a client's bar walks it against `stepsTotal` — and a chain whose
