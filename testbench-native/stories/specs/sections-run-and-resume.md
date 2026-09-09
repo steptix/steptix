@@ -159,9 +159,15 @@ Resolution order, and the reason each rung sits where it does:
    (a called section's body calling another), and it may sit below a
    breakpoint — a breakpoint trims what runs in this batch, not what the run
    selected, so the narrowing is decided over the un-trimmed list and carried
-   across the Continue. The narrowing also travels on the section
-   **definition**, so a flow that calls one section twice narrows both frames;
-   the run says so rather than leaving it to be noticed from the marks.
+   across the Continue (with the section's row narrowing, which its lines could
+   not re-derive either). The narrowing also travels on the section
+   **definition**, so a flow that reaches one section more than once narrows
+   every frame of it; the run says `(applies to every call of this section)`
+   rather than leaving it to be noticed from the marks. Not a count: the text
+   can be counted for call *sites*, and a site inside a loop guard's tail or
+   inside a section that itself repeats is any number of frames — so the
+   qualifier is emitted unless the section is called exactly once from a plain
+   main-flow step, the one shape whose frame count is settled.
    And a selected body step brings the rest of its `If … / Otherwise …` chain
    with it: a chain lives on consecutive body lines, and shipping half of one
    would be refused by the expander in a message that blames the file.

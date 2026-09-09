@@ -271,6 +271,13 @@ calling another section, whose frame is entered just the same — and it can sit
 below a breakpoint, which trims what runs in this batch and not what the run
 selected. All three count as called.
 
+The tail is read *only* when the whole line is not itself a section name, which
+is the expander's own order. A file may define `### While waiting, click Next`
+and `### click Next` at once, and `While waiting, click Next` in the main flow
+then calls the first — the second is never entered. Reading both marked it
+called too: its narrowing was reported as applied, `runSteps` shipped for it,
+and the old-server warning was armed against body lines that cannot fire.
+
 Two things a narrowing does that the selection did not literally ask for, both
 said out loud rather than done quietly:
 
@@ -282,15 +289,24 @@ said out loud rather than done quietly:
   step 1 kept with 2: an Otherwise needs its If`.
 - **One narrowing covers every call of that section.** `runSteps` rides the
   section *definition*, and the wire has no way to say "this call only", so a
-  flow that calls `Log In` at steps 1 and 3 narrows both. The line says so:
-  `Log In — running body steps 2 of 2 (applies to all 2 calls)`.
+  flow that reaches `Log In` more than once narrows every one of them. The line
+  says so: `Log In — running body steps 2 of 2 (applies to every call of this
+  section)`. Deliberately not a number. What the file can be counted for is
+  call *sites*, and sites are not frames — a section called from a looped
+  section, from a `While … , Log In` guard tail, or from an `Outer` that is
+  itself called twice has one site and any number of entries. So the qualifier
+  is emitted whenever the section is not called exactly once from a plain
+  main-flow step, which is the only shape whose frame count the text settles,
+  and it says the thing that is true in all the others.
 
-A **Continue** after a breakpoint keeps the narrowing. It is a separate run
-that rebuilds its lines from the pause point — main-flow lines only, no body
-lines to read — so it inherits what the paused run decided rather than
-recomputing it, and says so once: `Log In — the narrowing still applies: body
-steps 2 of 2`. Without that inheritance the rest of the body would run and
-paint marks the selection excluded, and the old-server warning would be
+A **Continue** after a breakpoint keeps the narrowing — the rows and the body
+steps both. It is a separate run that rebuilds its lines from the pause point —
+main-flow lines only, no body lines and no row lines to read — so it inherits
+what the paused run decided rather than recomputing it, and says so once per
+axis: `Log In — the narrowing still applies: body steps 2 of 2` and `Log In —
+the narrowing still applies: rows 2 of 3`. Without that inheritance the rest of
+the body would run and paint marks the selection excluded, the section's other
+rows would loop for the rest of the flow, and the old-server warning would be
 disarmed on the way past.
 
 The indices are decided once, when Run is pressed, and every later batch
@@ -299,9 +315,18 @@ narrowed body mid-run** would silently re-point them at whatever now sits in
 those positions. The body's step texts are snapshotted at run start (the way
 the data table's rows are) and a batch that finds them changed is refused, in a
 line that names the edit: `Run stopped: body step 2 of "Log In" has been
-edited since this run narrowed it…`. Never clipped: dropping the indices that
+edited since this run narrowed it, so the body steps it selected no longer name
+the same steps. Re-run to pick again.` Never clipped: dropping the indices that
 no longer fit leaves the survivors just as likely to name the wrong step, and
 clipping to nothing reads as "the whole body".
+
+That refusal **ends the run**, rather than failing one block of it. It is a
+fact about the file, so every later batch reads the same buffer and refuses
+identically — in a data-driven run, once per row, painting each row as it goes
+and never reaching a verdict. The line is said once, the row it happened in is
+marked ■ (`Row 2 stopped — a narrowed section was edited while the run was
+going`), the rows after it read `not run (a narrowed section was edited)`, and
+the run ends failed.
 
 ### Selecting rows and steps that are not next to each other
 
@@ -521,13 +546,24 @@ tables' data-row lines to the paintable set"; selecting run rows is
   quietly tidied would run a step the author excluded, and say nothing.
   A selection that keeps the WHOLE body is not a narrowing and ships no field,
   so a drag over the file is byte-identical on the wire to what it always was.
-  The CLI does not send it and is unchanged. Neither does a COMPILE:
-  `parseCompileRequest` copies only `name`, `headingLine`, `steps` and
-  `stepLines` off a section entry, so `runSteps` — like `rows` and
-  `rowNumbers` — never reaches one. A decision rather than an oversight, and
-  the same one `resolveCompileTarget` makes when it refuses a selection
-  spanning the main flow and a body: an entry is generated for a step as
-  authored, and a narrowing is about a single run.
+  The CLI does not send it and is unchanged.
+- **A compile never carries a narrowing, by construction.** Not because the
+  wire drops it: `parseCompileRequest`'s four-field copy governs `POST
+  /codebehind/compile` only, and TestBench does not compile through that route
+  — it compiles through the ordinary step route, one request carrying both
+  `sections` and `compile`, so `runSteps` would ride a compile-mode run
+  perfectly happily. What makes a narrowed *Run & Compile* unreachable is the
+  command: it always runs the whole test (`lines: []`), so there is no
+  selection for the narrowing to be read from. The one compile that does take
+  lines — *Compile This Step* — cannot mix the two either, because
+  `resolveCompileTarget` refuses a selection spanning the main flow and a body,
+  and a body-only pick resolves to `section-body` scope, which narrows nothing.
+  The same reasoning underlies both: an entry is generated for a step as
+  authored, and a narrowing is about a single run. And if a narrowed compile
+  ever did become reachable, the writer is the backstop: placing an entry for
+  an occurrence past the end of the file's spans is refused outright
+  (`Compile the earlier occurrence(s) too`) rather than appended where it would
+  serve a different step.
 - **The client will not ship an index the body does not have.** The numbers
   are decided when Run is pressed, and every later batch rebuilds the payload
   from the live buffer, so an edit in between can leave them describing
@@ -929,15 +965,21 @@ drag over the heading depends on.
   whose call is not among the running steps comes back `ignored`; a whole-body
   selection is neither; the call matched by `matchText`; two sections answered
   independently. The three call shapes that are easy to miss — a call in a
-  control line's tail, a nested call, and one section called twice (which
-  reports `callCount: 2`). And the chain rule: an `Otherwise` pulls its `If`
-  in and names it in `addedForChain`; growing the set to the whole body stops
-  it being a narrowing; an `If` selected without its `Otherwise` is left as
-  picked; a three-member chain unwinds in one pass. Plus the strings — the
-  `running body steps 2 of 2` line with and without `(applies to all 2
-  calls)`, its list and range forms, the `ignored` line, the
-  `kept with … an Otherwise needs its If` line, the resumed line and the
-  old-server warning.
+  control line's tail, a nested call, and one section called twice — and, for
+  each, that `everyCall` is true: a tail, a nested call and a second site are
+  all "more than once, or an unknown number of times". Plus the resolution
+  order the qualifier hangs off: with `### While waiting, click Next` and
+  `### click Next` both defined, the whole line wins and the tail is NOT also
+  counted, so `click Next` comes back `ignored`; with only `### click Next`
+  defined, the tail is the call. And the chain rule: an `Otherwise` pulls its
+  `If` in and names it in `addedForChain`; growing the set to the whole body
+  stops it being a narrowing; an `If` selected without its `Otherwise` is left
+  as picked; a three-member chain unwinds in one pass and reports the link it
+  broke (`{ member: 'Otherwise', needs: 'Else if' }`). Plus the strings — the
+  `running body steps 2 of 2` line with and without `(applies to every call of
+  this section)`, its list and range forms, the `ignored` line, the
+  `kept with …` line in each of its three member pairings, both resumed lines
+  (body and rows) and the old-server warning.
 - Server (`api-server` suites): a section payload with `rowNumbers`
   stamps `iteration` from it and refuses a mismatched, unsorted or
   out-of-range list. `runSteps: [1]` on a two-step body runs only the second
@@ -947,28 +989,44 @@ drag over the heading depends on.
   400s.
 - Expander (`skill-expander-sections`): a narrowed body emits only the named
   steps with their own `stepLines`, and a kept step keeps the code-behind
-  occurrence a full run would have given it — a body with three `Click Next`
-  steps, narrowed to the third, still binds occurrence 2, and narrowed to the
-  third and fourth binds 1 and 2 (a single kept step cannot see that bug: its
-  live count is always 0). Then the case a per-line count gets wrong: a
-  control line emits TWO steps into the frame, so a dropped `If a banner is
-  shown, then Click Next` moves the plain `Click Next` below it, a dropped
-  plain step moves the next control line's TAIL but not its guard, and a
-  dropped call moves neither (its steps count in a frame of their own). Each
-  asserted against the same body's full expansion, and offsets restart per
-  iteration of a looped body.
+  occurrence a full run would have given it — a four-step body whose steps 1, 3
+  and 4 all read `Click Next`, narrowed to body step 4, still binds occurrence
+  2, and narrowed to body steps 3 and 4 binds 1 and 2 (a single kept step
+  cannot see that bug: its live count is always 0). Then the case a per-line
+  count gets wrong: a control line emits TWO steps into the frame, so a dropped
+  `If a banner is shown, then Click Next` moves the plain `Click Next` below
+  it, a dropped plain step moves the next control line's TAIL but not its
+  guard, and a dropped call — a section call or a `[skill: …]` — moves neither
+  (its steps count in a frame of their own). And two is not the ceiling: a tail
+  that is itself a control line emits three, so the offsets are a LIST consumed
+  one per level, asserted at depth two and depth three. Each asserted against
+  the same body's full expansion, and offsets restart per iteration of a looped
+  body.
 - Fast suite (`suite/data-rows.test.cjs`): the reported gesture through
   `runSelected` — three main-flow ranges, one body line, one row line — ships
   `runSteps: [1]` beside `rowNumbers: [2]`/`rowCount: 2`, logs both lines, and
   leaves only main-flow lines in the request's `sourceLines`; a body selection
   whose call is not selected is ignored and logged; a body-ONLY selection still
-  runs detached; a fake server that emits a step for an unselected body line
-  gets the old-server warning exactly once, and one that does not gets none.
-  Plus the two shapes a selection does not literally describe: a selected
-  `Otherwise` ships `runSteps: [0, 1, 2]` and logs the step it added, and a
-  breakpoint above the call still narrows (the call runs on Continue, so it
-  was never uncalled) with the continuation's payload carrying the same
-  `runSteps` and saying the narrowing still applies.
+  runs detached; a fake server that emits TWO events for one unselected body
+  line gets the old-server warning exactly once (one event cannot tell a
+  once-per-run flag from no flag), and one that emits none gets none; a
+  detached body run cannot trip it at all, through its first batch and its
+  `callLine == null` resume. Plus the two shapes a selection does not literally
+  describe: a selected `Otherwise` ships `runSteps: [0, 1, 2]` and logs the step
+  it added, and a breakpoint above the call still narrows (the call runs on
+  Continue, so it was never uncalled) with the continuation's payload carrying
+  the same `runSteps` AND the same `rowNumbers`/`rowCount`, and saying both.
+  Every `sections` entry any of these record is fed back through the SERVER's
+  own `validateSectionEntry`, so a payload the real server would 400 on fails
+  here instead of minutes later.
+  Then the stale narrowing, one test per branch of the drift check — a body
+  step edited, the section deleted, a step added — driven through a three-row
+  loop, which is the shape in which a second block genuinely meets an edited
+  buffer (an edit changes the run signature, so a *Continue* is not reachable
+  after one). Each asserts the run sends nothing further, ends `failed`, and
+  names the edit exactly once; the loop test adds that row 3 is `not run`
+  rather than attempted. And *Run & Compile* on a mixed selection ships no
+  `runSteps`, because it runs the whole file.
 - Extension frame handling: `frame:push` with `iteration: 2` paints the
   section table's row 2 running; the matching pop paints pass; a
   `step:fail` inside the frame paints fail and the later rows skip on

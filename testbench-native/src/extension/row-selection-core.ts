@@ -133,11 +133,32 @@ export interface BodyStepPick {
    *  would split an `If … / Otherwise …` chain. Empty for almost every pick,
    *  and said out loud when it is not. */
   addedForChain: number[];
-  /** How many steps of the flow this run executes call this section. More
-   *  than one and the narrowing applies to every one of them: `runSteps`
-   *  travels on the section DEFINITION, and the wire cannot say "this call
-   *  only". */
-  callCount: number;
+  /** Does this narrowing cover more than one entry of the section — or a
+   *  number of entries the text cannot pin down? `runSteps` travels on the
+   *  section DEFINITION and the wire cannot say "this call only", so the
+   *  answer decides whether the log line carries its qualifier.
+   *
+   *  True unless the section is called exactly once, from a plain main-flow
+   *  step. Everything else — two call sites, a call in a loop guard's tail, a
+   *  call nested inside a section that may itself run repeatedly — enters its
+   *  frame an unknown number of times, and a counted claim there would be a
+   *  number the reader could check and find wrong. */
+  everyCall: boolean;
+  /** The link the chain growth started at, when `addedForChain` is not empty:
+   *  the selected member, and the kind of the step above it that came along.
+   *  Absent exactly when nothing was added. */
+  chainLink?: ChainLink;
+}
+
+/** One section a run reaches, and what the text can say about how often. */
+export interface SectionCallSites {
+  /** Call SITES that reach it — steps of the flow, not frames entered. A site
+   *  inside a looped or repeatedly-called body is still one site. */
+  count: number;
+  /** The one shape whose frame count is knowable from the text: a single call
+   *  site, which is a plain main-flow step (not a control line's tail, not a
+   *  call made from inside another section's body). */
+  onceFromMainFlow: boolean;
 }
 
 /**
@@ -160,44 +181,59 @@ export interface BodyStepPick {
 export function calledSectionNames(
   text: string,
   runningInstructions: string[],
-): Map<string, number> {
+): Map<string, SectionCallSites> {
   const bodies = new Map(
     extractSections(text).map((s) => [
       matchText(s.name),
       s.steps.map((step) => step.instruction),
     ]),
   );
-  /** Section name → call sites reaching it. */
-  const counts = new Map<string, number>();
+  /** Section name → the call sites reaching it. */
+  const sites = new Map<string, SectionCallSites>();
   const pending: string[] = [];
-  const note = (instruction: string): void => {
-    // Resolution order: a bare name is a call, and so is the tail of a
-    // control line. Both are tried, because a section may legitimately be
-    // NAMED like a control line and then the whole line is the call.
-    for (const candidate of [instruction, parseControlLine(instruction)?.tail]) {
-      if (candidate === undefined) continue;
-      const key = matchText(candidate);
-      if (!bodies.has(key)) continue;
-      const seen = counts.get(key) ?? 0;
-      counts.set(key, seen + 1);
-      // Walk each section's body once, however many times it is called: the
-      // set of sections entered is what the closure is for, and a cycle
-      // (which the server refuses anyway) must not spin here.
-      //
-      // The WHOLE body, including steps another narrowing may drop. Each
-      // section is narrowed independently and in no defined order, so
-      // subtracting one narrowing from another's reachability would make the
-      // answer depend on that order. The cost of being generous is a
-      // `runSteps` shipped for a section that turns out not to run, which
-      // executes nothing either way.
-      if (seen === 0) pending.push(key);
+  const note = (instruction: string, fromMainFlow: boolean): void => {
+    // Resolution order, the expander's own: the WHOLE line is resolved as a
+    // section first (a section may legitimately be named like a control line),
+    // and only a line that is not itself a section name has its tail read.
+    // Stopping at the first hit is what makes the two readings alternatives
+    // rather than both: with `### While waiting, click Next` and `### click
+    // Next` both defined, trying both marked the second as called by a step
+    // that never enters it — and then reported its narrowing as applied,
+    // shipped `runSteps` for it, and armed the old-server warning against body
+    // lines that never fire.
+    const whole = matchText(instruction);
+    const plain = bodies.has(whole);
+    const tail = parseControlLine(instruction)?.tail;
+    const key = plain ? whole : tail === undefined ? '' : matchText(tail);
+    if (key === '' || !bodies.has(key)) return;
+    const seen = sites.get(key);
+    if (seen) {
+      seen.count += 1;
+      seen.onceFromMainFlow = false;
+      return;
     }
+    // A call is countable only when it is a plain main-flow step. A tail runs
+    // under its guard's condition — `While … , Log In` enters the section as
+    // many times as the loop turns — and a call from inside a body runs once
+    // per entry of THAT body, which is the same question one level up.
+    sites.set(key, { count: 1, onceFromMainFlow: plain && fromMainFlow });
+    // Walk each section's body once, however many times it is called: the
+    // set of sections entered is what the closure is for, and a cycle
+    // (which the server refuses anyway) must not spin here.
+    //
+    // The WHOLE body, including steps another narrowing may drop. Each
+    // section is narrowed independently and in no defined order, so
+    // subtracting one narrowing from another's reachability would make the
+    // answer depend on that order. The cost of being generous is a
+    // `runSteps` shipped for a section that turns out not to run, which
+    // executes nothing either way.
+    pending.push(key);
   };
-  for (const instruction of runningInstructions) note(instruction);
+  for (const instruction of runningInstructions) note(instruction, true);
   while (pending.length > 0) {
-    for (const instruction of bodies.get(pending.pop()!) ?? []) note(instruction);
+    for (const instruction of bodies.get(pending.pop()!) ?? []) note(instruction, false);
   }
-  return counts;
+  return sites;
 }
 
 /**
@@ -251,6 +287,16 @@ export function splitBodySteps(
     const kind = parseControlLine(instruction)?.kind;
     return kind === 'elseif' || kind === 'else';
   };
+  /** How a body line reads as a chain member, for the sentence that explains
+   *  the growth. A step that is neither is the head the chain hangs off — a
+   *  file where it is not an `If` is one the server refuses on its own terms,
+   *  and this sentence is not the place to argue about it. */
+  const memberWord = (instruction: string): ChainMemberWord => {
+    const kind = sectionNames.has(matchText(instruction))
+      ? undefined
+      : parseControlLine(instruction)?.kind;
+    return kind === 'else' ? 'Otherwise' : kind === 'elseif' ? 'Else if' : 'If';
+  };
   for (const section of sections) {
     const picked = section.steps
       .map((step, index) => ({ line: step.line, index }))
@@ -269,15 +315,26 @@ export function splitBodySteps(
     if (kept.size === section.steps.length) continue;
     const indices = [...kept].sort((a, b) => a - b);
     const wanted = new Set(picked);
+    const sites = called.get(matchText(section.name));
+    // Where the growth STARTED: the selected member whose predecessor had to
+    // be brought in. A three-member chain grows twice, and this is the link the
+    // author can see for themselves — the one their own selection broke.
+    const linkAt = indices.find((n) => wanted.has(n) && n > 0 && kept.has(n - 1) && !wanted.has(n - 1));
     const pick: BodyStepPick = {
       section: section.name,
       indices,
       ordinals: indices.map((n) => n + 1),
       total: section.steps.length,
       addedForChain: indices.filter((n) => !wanted.has(n)).map((n) => n + 1),
-      callCount: called.get(matchText(section.name)) ?? 0,
+      everyCall: sites !== undefined && !sites.onceFromMainFlow,
+      ...(linkAt !== undefined && {
+        chainLink: {
+          member: memberWord(section.steps[linkAt]!.instruction),
+          needs: memberWord(section.steps[linkAt - 1]!.instruction),
+        },
+      }),
     };
-    (pick.callCount > 0 ? narrowed : ignored).push(pick);
+    (sites !== undefined ? narrowed : ignored).push(pick);
   }
   return { narrowed, ignored };
 }
@@ -619,15 +676,30 @@ export function sectionStepsLogLine(
   name: string,
   ordinals: number[],
   total: number,
-  callCount = 1,
+  everyCall = false,
 ): string {
-  // `runSteps` rides the section DEFINITION, so a flow that calls the same
-  // section twice narrows both frames — the wire cannot express "this call
-  // only". Not a refusal (the author asked for the body, and got it), but it
-  // must not be discovered from the marks: a second call quietly running the
-  // same one step is the shape of a bug.
-  const scope = callCount > 1 ? ` (applies to all ${callCount} calls)` : '';
-  return `${name} — running body ${bodyStepsText(ordinals)} of ${total}${scope}`;
+  return `${name} — running body ${bodyStepsText(ordinals)} of ${total}${everyCallText(everyCall)}`;
+}
+
+/**
+ * ` (applies to every call of this section)`, or nothing.
+ *
+ * `runSteps` rides the section DEFINITION, so a flow that reaches the same
+ * section twice narrows both frames — the wire cannot express "this call
+ * only". Not a refusal (the author asked for the body, and got it), but it
+ * must not be discovered from the marks: a second call quietly running the
+ * same one step is the shape of a bug.
+ *
+ * Deliberately not a NUMBER. The count that was here counted call SITES, and
+ * sites are not frames: a section called from a looped section, from a `While
+ * … , Log In` guard tail, or from an `Outer` that is itself called twice all
+ * reported one site, dropped the qualifier, and left the reader with a
+ * narrowing that quietly applied everywhere. A number the reader can check and
+ * find wrong is worse than no number, and "every call" is true in every case
+ * the qualifier is emitted for.
+ */
+function everyCallText(everyCall: boolean): string {
+  return everyCall ? ' (applies to every call of this section)' : '';
 }
 
 /**
@@ -644,8 +716,33 @@ export function sectionStepsResumedLogLine(
   name: string,
   ordinals: number[],
   total: number,
+  everyCall = false,
 ): string {
-  return `${name} — the narrowing still applies: body ${bodyStepsText(ordinals)} of ${total}`;
+  return (
+    `${name} — the narrowing still applies: body ${bodyStepsText(ordinals)} of ${total}` +
+    everyCallText(everyCall)
+  );
+}
+
+/**
+ * …and the same for a narrowed section LOOP:
+ *
+ *     Log In — the narrowing still applies: rows 2 of 3
+ *
+ * A Continue inherits the row narrowing as well as the body one, and for the
+ * same reason — its lines are rebuilt from the pause point and contain no row
+ * lines to re-derive it from. Said for the same reason too: a narrowing
+ * announced before the breakpoint and silent after it reads as one that
+ * expired there. Shorter than `sectionRowsLogLine`, whose second half warns
+ * about what later steps will see; by the time this prints, those steps have
+ * been running under the narrowing for a while.
+ */
+export function sectionRowsResumedLogLine(
+  name: string,
+  rows: number[],
+  total: number,
+): string {
+  return `${name} — the narrowing still applies: rows ${rows.join(', ')} of ${total}`;
 }
 
 /** `step 1` / `steps 1, 2` — the additions, counted as things rather than
@@ -655,25 +752,43 @@ function bodyStepWord(ordinals: number[]): string {
   return `${sorted.length === 1 ? 'step' : 'steps'} ${sorted.join(', ')}`;
 }
 
+/** How a chain member is written, for a sentence that quotes the file. */
+export type ChainMemberWord = 'If' | 'Else if' | 'Otherwise';
+
+/** The two members whose link the growth started from: the selected one, and
+ *  the one above it that had to come along. */
+export interface ChainLink {
+  member: ChainMemberWord;
+  needs: ChainMemberWord;
+}
+
 /**
  * The line a narrowing prints when it kept a body step nobody selected:
  *
  *     Log In — body step 1 kept with 2: an Otherwise needs its If
+ *     Log In — body step 1 kept with 2: an Else if needs its If
+ *     Log In — body steps 1, 2 kept with 3: an Otherwise needs its Else if
  *
  * A chain is one decision written across consecutive lines, so half of it is
  * not a smaller version of it — it is a body the parser refuses, in a message
  * that blames the file. The selection is grown instead, and this is what stops
  * that from being a silent difference between what was picked and what ran.
+ *
+ * The reason quotes the actual pair. A fixed "an Otherwise needs its If"
+ * described a line the author had not written whenever the chain was an `Else
+ * if`, or three members long — and a reader checking the claim against their
+ * own file finds neither of the words the sentence used.
  */
 export function chainMembersKeptLogLine(
   name: string,
   added: number[],
   selected: number[],
+  link: ChainLink,
 ): string {
   return (
     `${name} — body ${bodyStepWord(added)} kept with ` +
     `${[...new Set(selected)].sort((a, b) => a - b).join(', ')}: ` +
-    'an Otherwise needs its If'
+    `an ${link.member} needs its ${link.needs}`
   );
 }
 

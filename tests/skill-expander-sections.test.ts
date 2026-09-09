@@ -778,6 +778,39 @@ describe('runSteps narrows a section body', () => {
       ).toEqual([1, 1]);
     });
 
+    it('gives every emission of a NESTED tail its own offset', async () => {
+      // `If … then While … , Click Next` is THREE emissions in one frame: the
+      // `If` guard, the `While` guard, and the step the inner tail names. Only
+      // the CLI parser refuses a nested tail; the wire path expands it — so an
+      // offset pair (guard, tail) ran out of slots at the third and gave the
+      // innermost `Click Next` offset 0, binding it to the entry compiled for
+      // the plain `Click Next` above it.
+      const steps = ['Click Next', 'If a is shown, then While b is shown, Click Next'];
+      expect(await occurrencesOf(await expandWith(['Log In'], body(steps)))).toEqual([
+        0, 0, 0, 1,
+      ]);
+      expect(
+        await occurrencesOf(await expandWith(['Log In'], body(steps, [1]))),
+      ).toEqual([0, 0, 1]);
+    });
+
+    it('goes on counting at depth three', async () => {
+      // One level further down, to prove the rule is "consume one per level"
+      // rather than "handle the case we found". Two plain `Click Next` steps
+      // are dropped ahead of it, so the innermost tail is occurrence 2.
+      const steps = [
+        'Click Next',
+        'Click Next',
+        'If a is shown, then While b is shown, While c is shown, Click Next',
+      ];
+      expect(await occurrencesOf(await expandWith(['Log In'], body(steps)))).toEqual([
+        0, 1, 0, 0, 0, 2,
+      ]);
+      expect(
+        await occurrencesOf(await expandWith(['Log In'], body(steps, [2]))),
+      ).toEqual([0, 0, 0, 2]);
+    });
+
     it('counts a dropped CALL as nothing — its steps are another frame', async () => {
       // `Greet` expands into a frame of its own, which counts from zero, so
       // dropping it moves no slot in this body however its steps read.
@@ -786,6 +819,24 @@ describe('runSteps narrows a section body', () => {
           'log in': body(['Greet', 'Click Next'], [1]),
           greet: { name: 'Greet', headingLine: 20, steps: ['Click Next'], stepLines: [21] },
         } as never,
+        warnDeadSections: false,
+      });
+      expect(exp.steps).toEqual(['Click Next']);
+      expect(await occurrencesOf(exp)).toEqual([0]);
+    });
+
+    it('counts a dropped [skill: …] as nothing either', async () => {
+      // The other half of the "a call emits nothing here" rule, and the branch
+      // `bodyFrameTexts` reaches through `parseSkillCall` rather than through
+      // `resolveSection`. The skill's own `Click Next` runs in a SKILL frame,
+      // which counts from zero, so dropping the invocation must not move the
+      // body's plain `Click Next` off entry 0.
+      await writeSkill(
+        'greet',
+        ['---', 'type: skill', '---', '# greet', '## Steps', '1. Click Next'].join('\n'),
+      );
+      const exp = await expandSkills(['Log In'], tmpDir, undefined, '/t/n.md', [4], {
+        sections: { 'log in': body(['[skill: greet]', 'Click Next'], [1]) } as never,
         warnDeadSections: false,
       });
       expect(exp.steps).toEqual(['Click Next']);

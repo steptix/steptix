@@ -179,16 +179,22 @@ function keptBodySteps(
  * and those two carry different texts, so they hold different slots and need
  * different offsets. A body item that is a section or skill CALL emits nothing
  * here at all — its steps land in a frame of their own, which counts from
- * zero — so it contributes to neither.
+ * zero — so it contributes to nothing.
+ *
+ * A LIST rather than a `{ self, tail }` pair, because two is not the ceiling:
+ * a control line whose tail is itself a control line (`If a is shown, then
+ * While b is shown, Click Next`) emits three, and nothing on the TestBench
+ * path refuses that shape — the parser's nested-tail refusal lives in
+ * src/parser/markdown.ts (the CLI), and runner-core's `parseControlLine`
+ * deliberately does not mirror it. A pair silently gave the innermost step
+ * offset 0.
+ *
+ * Index 0 is the item as one step — a plain step, or a control line's guard
+ * row — and the rest belong to whatever its tail emits, consumed one level
+ * per recursion. Emission order, which is the order the frame's occurrence
+ * counter sees them in.
  */
-interface DroppedAhead {
-  /** The item as one step: a plain step, or a control line's guard row. */
-  self: number;
-  /** The step a control line names after `then`, when that step is emitted
-   *  in this same frame (a tail that is itself a call is not). Zero for
-   *  everything else, and never read for it. */
-  tail: number;
-}
+type DroppedAhead = number[];
 
 /**
  * The authored texts one body item contributes to ITS OWN frame's occurrence
@@ -231,8 +237,10 @@ function bodyFrameTexts(
   if (call && !control) return [];
   if (resolveSection({ ...ctx, rawSteps }, steps, i)) return [];
   if (!control) return [matchSide];
-  // A control line whose tail is another control line is refused elsewhere,
-  // and a cap costs nothing next to a stack overflow if that ever changes.
+  // A tail that is itself a control line recurses — that shape reaches the
+  // expander on the wire path (only the CLI parser refuses it), and each
+  // level adds one more emission to this frame. The cap is what stops a
+  // pathological nest from overflowing the stack.
   if (depth >= MAX_DEPTH) return [matchSide];
   const tailText = parseControlLine(step)?.tail ?? control.tail;
   return [matchSide, ...bodyFrameTexts(ctx, [tailText], [control.tail], 0, depth + 1)];
@@ -261,7 +269,9 @@ function droppedAheadOf(
   for (let k = 0; k < bodySteps.length; k++) {
     const texts = bodyFrameTexts(ctx, bodySteps, rawSteps, k).map((t) => t.trim());
     if (kept.has(k)) {
-      out.push({ self: at(texts[0]), tail: at(texts[1]) });
+      // One offset per emission, in emission order — a kept item adds nothing
+      // to the counts itself, so each is read against the same tally.
+      out.push(texts.map((text) => at(text)));
       continue;
     }
     for (const text of texts) droppedSoFar.set(text, (droppedSoFar.get(text) ?? 0) + 1);
@@ -1096,8 +1106,8 @@ async function expandRecursive(
           ...(stepLines?.[i] !== undefined && stepLines[i]! > 0 && {
             skillLine: stepLines[i]!,
           }),
-          ...((occurrenceOffsets?.[i]?.self ?? 0) > 0 && {
-            occurrenceOffset: occurrenceOffsets![i]!.self,
+          ...((occurrenceOffsets?.[i]?.[0] ?? 0) > 0 && {
+            occurrenceOffset: occurrenceOffsets![i]![0]!,
           }),
         });
         controls.push(null); // back-filled below, once the body's extent is known
@@ -1122,9 +1132,10 @@ async function expandRecursive(
           // The tail is emitted in THIS frame, so a narrowing that dropped a
           // same-text step ahead of it slides it exactly as it slides a plain
           // step — and the text it holds a slot for is the tail's, not the
-          // guard's. Its own offset, or the tail would inherit the count of a
-          // line it only shares a source line with.
-          occurrenceOffsets ? [{ self: occurrenceOffsets[i]?.tail ?? 0, tail: 0 }] : null,
+          // guard's. The guard has consumed index 0; the REST rides down, so a
+          // tail that is itself a control line finds its own guard's offset at
+          // 0 and passes what is left on again. Any depth, one rule.
+          occurrenceOffsets ? [(occurrenceOffsets[i] ?? []).slice(1)] : null,
         );
         if (recursed.steps.length === 0) {
           throw new Error(
@@ -1262,8 +1273,8 @@ async function expandRecursive(
         // Only ever set inside a narrowed section body, and only when
         // something with the same text was actually dropped ahead of this
         // step — so an ordinary expansion's origins are byte-identical.
-        ...((occurrenceOffsets?.[i]?.self ?? 0) > 0 && {
-          occurrenceOffset: occurrenceOffsets![i]!.self,
+        ...((occurrenceOffsets?.[i]?.[0] ?? 0) > 0 && {
+          occurrenceOffset: occurrenceOffsets![i]![0]!,
         }),
       });
       controls.push(null);

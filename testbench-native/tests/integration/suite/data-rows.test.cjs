@@ -10,8 +10,13 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const url = require('node:url');
 const vscode = require('vscode');
 const { FakeApiClient } = require('../fakes/fake-api-client.cjs');
+
+/** The server's own `sections` entry validator, loaded from the repo's built
+ *  `dist/` in the selection suite's `before`. See `assertSectionsValid`. */
+let validateSectionEntry;
 
 const EXT_ID = 'pkent.testbench-native';
 const FIXTURES_DIR =
@@ -875,12 +880,46 @@ const CHAIN_BODY_FIXTURE = [
   '',
 ].join('\n');
 
+// A RUN table (so the flow loops) plus a section whose body can be narrowed —
+// the shape a stale narrowing has to end rather than repeat. The refusal is a
+// fact about the file, so row 2 would read the same edited buffer, refuse the
+// same way and print the same line.
+//
+// THREE rows, not two: with two, the row that refuses is also the last, and a
+// loop that failed to end would look identical. The third row is the one that
+// says whether the loop stopped or ground on.
+//
+// line 7 header, 8 delimiter, 9/10/11 the rows; 13/14 the main flow; 16 the
+// `### Log In` heading, 17/18 its body.
+const ROWS_AND_BODY_FIXTURE = [
+  '# Rows and a body',
+  '',
+  '## Config',
+  '- baseUrl: http://localhost:8787/',
+  '',
+  '## Steps',
+  '| email                 | password    |',
+  '|-----------------------|-------------|',
+  '| demo@securebank.com   | password123 |',
+  '| nobody@securebank.com | wrongpass   |',
+  '| third@securebank.com  | pw3         |',
+  '',
+  '1. Navigate to the baseUrl',
+  '2. Log In',
+  '',
+  '### Log In',
+  '1. Enter the email {{email}}',
+  '2. Enter the password {{password}}',
+  '',
+].join('\n');
+
 const SELECTION_FIXTURES = {
   'data-rows-3.tmp.md': THREE_ROWS_FIXTURE,
   'data-rows-section.tmp.md': SECTION_ROWS_FIXTURE,
   'data-rows-bad-section.tmp.md': BAD_SECTION_FIXTURE,
   'data-rows-body.tmp.md': SECTION_BODY_FIXTURE,
   'data-rows-chain.tmp.md': CHAIN_BODY_FIXTURE,
+  'data-rows-body-loop.tmp.md': ROWS_AND_BODY_FIXTURE,
   // Its own copy: the two suites above delete their fixtures in `after`.
   'data-rows-none.tmp.md': PLAIN_FIXTURE,
 };
@@ -910,6 +949,16 @@ describe('TestBench data-row selection', function () {
     for (const [name, content] of Object.entries(SELECTION_FIXTURES)) {
       fs.writeFileSync(path.resolve(FIXTURES_DIR, name), content);
     }
+    const validatorPath = path.resolve(
+      __dirname, '..', '..', '..', '..', 'dist', 'server', 'section-entry.js',
+    );
+    if (!fs.existsSync(validatorPath)) {
+      throw new Error(
+        `the server's section validator is not built at ${validatorPath} — ` +
+          'run `npm run build` at the repo root first',
+      );
+    }
+    ({ validateSectionEntry } = await import(url.pathToFileURL(validatorPath).href));
     const ext = vscode.extensions.getExtension(EXT_ID);
     assert.ok(ext, `${EXT_ID} not loaded`);
     if (!ext.isActive) await ext.activate();
@@ -1460,6 +1509,30 @@ describe('TestBench data-row selection', function () {
       new vscode.Position(endLine - 1, 5),
     );
 
+  /**
+   * Every `sections` entry of `request`, through the SERVER's own validator.
+   *
+   * The fast suite records what the client shipped; on its own it cannot tell
+   * a payload the server accepts from one it answers with a 400, and a
+   * hand-written mirror of §3.2's table here would be the drift this contract
+   * exists to prevent. `src/server/section-entry.ts` is that table, pure and
+   * in its own module so this can import the real thing.
+   *
+   * Loaded from the repo's built `dist/`, so `npm run build` at the repo root
+   * is a prerequisite of this suite — which the verify loop already runs, and
+   * which the message below says out loud if it has not.
+   */
+  const assertSectionsValid = (request, note = '') => {
+    for (const [key, entry] of Object.entries(request.sections ?? {})) {
+      const invalid = validateSectionEntry(key, entry);
+      assert.equal(
+        invalid,
+        null,
+        `the server would refuse this payload${note ? ` (${note})` : ''}: ${invalid}`,
+      );
+    }
+  };
+
   /** Set `selections`, run `runSelected`, and wait for one batch. */
   async function runSelection(selections, script = (f) => f.end()) {
     const editor = vscode.window.activeTextEditor;
@@ -1481,6 +1554,7 @@ describe('TestBench data-row selection', function () {
     await runSelection([range(7, 9), range(17), range(15)]);
 
     const request = fake.requests[0];
+    assertSectionsValid(request, 'both axes narrowed');
     assert.deepEqual(request.sourceLines, [7, 8, 9], 'only main-flow lines execute inline');
     const entry = request.sections['log in'];
     assert.deepEqual(entry.runSteps, [1], 'body step 2, 0-based');
@@ -1548,17 +1622,24 @@ describe('TestBench data-row selection', function () {
     );
   });
 
-  it('says so when the server runs the whole body anyway', async () => {
+  it('says so when the server runs the whole body anyway, exactly once', async () => {
     // A Sessions API older than `runSteps` drops the field and runs the body
     // whole. Nothing on the wire admits that, so it is detected from the
     // outside: a step event for a body line this run did not select. Said
     // once, and nothing is painted differently — the step really did run.
+    //
+    // TWO triggering events for the SAME unselected line, which is what makes
+    // the once-per-run flag load-bearing: with one event, deleting the flag
+    // left the suite green. A whole body running produces a start and a pass
+    // for every step of it, so this is also the shape the real case has.
     const uri = await open('data-rows-body.tmp.md');
+    const frame = { id: 'f1', kind: 'section', uri: uri.fsPath, skillName: 'Log In' };
     const mark = hooks.hostMessageCount();
     await runSelection([range(7, 9), range(17)], (f) => {
       // Line 16 is body step 1 — the one the selection left out.
-      f.push({ type: 'step:start', line: 16, frame: { id: 'f1', kind: 'section', uri: uri.fsPath, skillName: 'Log In' } });
-      f.push({ type: 'step:start', line: 17, frame: { id: 'f1', kind: 'section', uri: uri.fsPath, skillName: 'Log In' } });
+      f.push({ type: 'step:start', line: 16, frame });
+      f.push({ type: 'step:pass', line: 16, frame });
+      f.push({ type: 'step:start', line: 17, frame });
       f.end();
     });
 
@@ -1569,6 +1650,48 @@ describe('TestBench data-row selection', function () {
       'Log In — the server ran the whole section body; restart or update the ' +
         'Sessions API server so a selection can narrow it',
     ]);
+  });
+
+  it('a detached body run cannot trip the old-server warning', async () => {
+    // The detector reads a MISSING `frame.uri` as the test file, which is safe
+    // only because of the pair of invariants beside it: a frameless event is a
+    // top-level step, whose line is never a body line, and a detached body run
+    // — the one thing that DOES execute body lines at the root frame —
+    // narrows nothing, so the map it would be looked up in is empty.
+    //
+    // Driven through the detached RESUME, where `sectionResumePlan` runs with
+    // `callLine == null`, so both the first batch and its continuation are
+    // covered.
+    const uri = await open('data-rows-body.tmp.md');
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(16, 0)), true),
+    ]);
+    const mark = hooks.hostMessageCount();
+    // Both body lines, nothing from the main flow: rung 3, a detached run.
+    await runSelection([range(16, 17)], (f) => {
+      f.push({ type: 'step:start', line: 16 });
+      f.push({ type: 'step:pass', line: 16 });
+      f.end();
+    });
+    assert.deepEqual(fake.requests[0].sourceLines, [16], 'the batch stops at the breakpoint');
+    assert.equal(fake.requests[0].sections['log in'].runSteps, undefined);
+
+    queueScripts((f) => {
+      f.push({ type: 'step:start', line: 17 });
+      f.push({ type: 'step:pass', line: 17 });
+      f.end();
+    });
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('a second request', () => fake.requests.length >= 2);
+    await waitFor('idle after the continue', () => hooks.isRunning() === false);
+
+    assert.deepEqual(fake.requests[1].sourceLines, [17], 'the rest of the body, detached');
+    assert.equal(fake.requests[1].sections['log in'].runSteps, undefined);
+    assert.deepEqual(
+      outputSince(mark).filter((l) => l.includes('the server ran the whole section body')),
+      [],
+      'nothing was narrowed, so there is nothing to warn about',
+    );
   });
 
   it('a skipped placeholder is not evidence of execution, whatever line it names', async () => {
@@ -1619,6 +1742,7 @@ describe('TestBench data-row selection', function () {
     const mark = hooks.hostMessageCount();
     await runSelection([range(7, 8), range(12), range(13)]);
 
+    assertSectionsValid(fake.requests[0], 'a chain kept whole');
     const entry = fake.requests[0].sections['log in'];
     assert.deepEqual(entry.runSteps, [0, 1, 2], 'the If comes with its Otherwise');
     const output = outputSince(mark);
@@ -1639,19 +1763,26 @@ describe('TestBench data-row selection', function () {
     // rebuilds `lines` from the pause point — main-flow lines only — so
     // recomputing from them would answer "nothing was narrowed" and run the
     // whole body, painting marks the selection excluded.
+    // The ROW axis rides along, and for the same reason: a Continue's lines
+    // hold no row lines either, so before this it ran every row of the section
+    // for the rest of the flow. Asserted here rather than in a test of its
+    // own, because it is the same inheritance and the same pause.
     const uri = await open('data-rows-body.tmp.md');
     vscode.debug.addBreakpoints([
       new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(7, 0)), true),
     ]);
     const mark = hooks.hostMessageCount();
-    await runSelection([range(7, 9), range(17)]);
+    await runSelection([range(7, 9), range(15), range(17)]);
 
     assert.deepEqual(fake.requests[0].sourceLines, [7], 'the batch stops at the breakpoint');
+    assertSectionsValid(fake.requests[0], 'narrowed, below a breakpoint');
     assert.deepEqual(
       fake.requests[0].sections['log in'].runSteps,
       [1],
       'the call below the breakpoint still runs on Continue, so it is still narrowed',
     );
+    assert.deepEqual(fake.requests[0].sections['log in'].rowNumbers, [2]);
+    assert.equal(fake.requests[0].sections['log in'].rowCount, 2);
     const first = outputSince(mark);
     assert.ok(
       first.includes('Log In — running body steps 2 of 2'),
@@ -1669,16 +1800,26 @@ describe('TestBench data-row selection', function () {
     await waitFor('a second request', () => fake.requests.length >= 2);
     await waitFor('idle after the continue', () => hooks.isRunning() === false);
 
+    assertSectionsValid(fake.requests[1], 'the continuation');
     assert.deepEqual(
       fake.requests[1].sections['log in'].runSteps,
       [1],
       'the continuation carries the narrowing it inherited',
     );
+    assert.deepEqual(
+      fake.requests[1].sections['log in'].rowNumbers,
+      [2],
+      'and the row narrowing, which its own lines could never re-derive',
+    );
+    assert.equal(fake.requests[1].sections['log in'].rowCount, 2);
+    const resumed = outputSince(resumeMark);
     assert.ok(
-      outputSince(resumeMark).includes(
-        'Log In — the narrowing still applies: body steps 2 of 2',
-      ),
-      `Got ${JSON.stringify(outputSince(resumeMark))}`,
+      resumed.includes('Log In — the narrowing still applies: body steps 2 of 2'),
+      `Got ${JSON.stringify(resumed)}`,
+    );
+    assert.ok(
+      resumed.includes('Log In — the narrowing still applies: rows 2 of 2'),
+      `the row half must say so too. Got ${JSON.stringify(resumed)}`,
     );
   });
 
@@ -1693,6 +1834,180 @@ describe('TestBench data-row selection', function () {
     assert.deepEqual(
       outputSince(mark).filter((l) => l.includes('the server ran the whole section body')),
       [],
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // A narrowing that no longer describes the file
+  // -------------------------------------------------------------------------
+
+  /** Replace the whole active document, in the buffer only. */
+  async function rewrite(uri, lines) {
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(
+      uri,
+      new vscode.Range(new vscode.Position(0, 0), doc.lineAt(doc.lineCount - 1).range.end),
+      lines.join('\n'),
+    );
+    assert.ok(await vscode.workspace.applyEdit(edit), 'the edit must apply');
+  }
+
+  /** Every `done` status posted since `mark`. */
+  const doneStatusesSince = (mark) =>
+    hooks
+      .hostMessagesSince(mark)
+      .filter((m) => m.type === 'runEvent' && m.event.type === 'done')
+      .map((m) => m.event.status);
+
+  /** `data-rows-body-loop.tmp.md` as authored, for the edits below to vary. */
+  const LOOP_LINES = ROWS_AND_BODY_FIXTURE.split('\n');
+
+  /**
+   * Run the two-row fixture with its body narrowed, edit the buffer to
+   * `mutated` from inside row 1's stream, and let the loop reach row 2 — the
+   * two-block shape in which a mid-run edit re-points `runSteps` at whatever
+   * now sits in those positions.
+   *
+   * The row loop rather than a breakpoint, because a Continue is not reachable
+   * after an edit at all: changing a step's text changes the run signature, the
+   * tracker drops the pause marker, and Continue has nothing to continue. A
+   * data-driven run is where a second block genuinely meets an edited buffer.
+   */
+  async function driftDuringLoop(mutated) {
+    const uri = await open('data-rows-body-loop.tmp.md');
+    const mark = hooks.hostMessageCount();
+    queueScripts(
+      async (f) => {
+        await rewrite(uri, mutated);
+        f.end();
+      },
+      (f) => f.end(),
+    );
+    const editor = vscode.window.activeTextEditor;
+    editor.selections = [range(13, 14), range(18)];
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('one request', () => fake.requests.length >= 1);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+    assert.deepEqual(
+      fake.requests[0].sections['log in'].runSteps,
+      [1],
+      'row 1 went out narrowed, before the edit landed',
+    );
+    return {
+      uri,
+      stopped: outputSince(mark).filter((l) => l.startsWith('Run stopped: ')),
+      statuses: doneStatusesSince(mark),
+      requests: fake.requests.length,
+    };
+  }
+
+  it('refuses the next block when a narrowed body step was edited', async () => {
+    try {
+      const edited = [...LOOP_LINES];
+      edited[16] = '1. Enter the username {{email}}'; // body step 1, line 17
+      const { stopped, statuses, requests } = await driftDuringLoop(edited);
+      assert.deepEqual(stopped, [
+        'Run stopped: body step 1 of "Log In" has been edited since this run ' +
+          'narrowed it, so the body steps it selected no longer name the same ' +
+          'steps. Re-run to pick again.',
+      ]);
+      assert.equal(requests, 1, 'nothing was sent — the refusal is before the request');
+      assert.deepEqual(statuses, ['failed']);
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
+  it('refuses when the narrowed section is gone from the file', async () => {
+    try {
+      // Everything above the `### Log In` heading on line 16, and nothing after.
+      const { stopped, statuses, requests } = await driftDuringLoop(LOOP_LINES.slice(0, 15));
+      assert.deepEqual(stopped, [
+        'Run stopped: the section "Log In" is gone from the file, and this run ' +
+          'had narrowed its body. Re-run to pick again.',
+      ]);
+      assert.equal(requests, 1);
+      assert.deepEqual(statuses, ['failed']);
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
+  it('refuses when a step was ADDED to the narrowed body', async () => {
+    try {
+      const grown = [...LOOP_LINES];
+      grown.splice(18, 0, '3. Click Sign in');
+      const { stopped, statuses, requests } = await driftDuringLoop(grown);
+      assert.deepEqual(stopped, [
+        'Run stopped: the body of "Log In" now has 3 steps where it had 2 when ' +
+          'this run narrowed it, so the body steps it selected no longer name ' +
+          'the same steps. Re-run to pick again.',
+      ]);
+      assert.equal(requests, 1);
+      assert.deepEqual(statuses, ['failed']);
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
+  it('a stale narrowing ends the ROW loop instead of refusing once per row', async () => {
+    // The refusal is a fact about the FILE: the next row re-reads the same
+    // edited buffer and refuses identically. Without ending the loop, a
+    // two-row table said it twice and a ten-row one ten times, every row ✗,
+    // and the run never reached a verdict the author could act on.
+    try {
+      const edited = [...LOOP_LINES];
+      edited[16] = '1. Enter the username {{email}}';
+      const { uri, stopped } = await driftDuringLoop(edited);
+      assert.equal(stopped.length, 1, 'said once, not once per row');
+      // Row 1 finished before the edit landed; row 2 is the one the refusal cut
+      // off; row 3 is the one that proves the LOOP ended rather than grinding
+      // on — without that, it too was attempted and closed out ■. Each says
+      // why in its own words rather than claiming a Stop nobody pressed.
+      const snap = hooks.tracker.snapshotFor(uri);
+      const byLine = new Map(snap.statuses);
+      assert.deepEqual(
+        [byLine.get(9), byLine.get(10), byLine.get(11)],
+        ['pass', 'stopped', 'skip'],
+      );
+      const failures = new Map(snap.failures);
+      assert.equal(
+        failures.get(10).error,
+        'Row 2 stopped — a narrowed section was edited while the run was going',
+      );
+      assert.equal(
+        failures.get(11).error,
+        'Row 3 not run (a narrowed section was edited)',
+      );
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
+  it('Run & Compile never carries a narrowing — it runs the whole file', async () => {
+    // The spec's claim, pinned. A compile does NOT reach the server through
+    // `POST /codebehind/compile` (TestBench compiles through the ordinary step
+    // route, so `runSteps` would ride a compile-mode run happily). What makes
+    // a narrowed Run & Compile unreachable is this: the command passes no
+    // lines at all, so there is no selection to narrow from.
+    await open('data-rows-body.tmp.md');
+    const editor = vscode.window.activeTextEditor;
+    editor.selections = [range(7, 9), range(17)];
+    const mark = hooks.hostMessageCount();
+    queueScripts((f) => f.end());
+    void vscode.commands.executeCommand('testbench-native.runAndCompile');
+    await waitFor('one request', () => fake.requests.length >= 1);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+
+    const request = fake.requests[0];
+    assert.equal(request.compile, 'run');
+    assert.deepEqual(request.sourceLines, [7, 8, 9], 'the whole flow, not the selection');
+    assert.equal(request.sections['log in'].runSteps, undefined, 'and no narrowing');
+    assert.deepEqual(
+      outputSince(mark).filter((l) => l.startsWith('Log In — running body')),
+      [],
+      'nothing was narrowed, so nothing is announced',
     );
   });
 
