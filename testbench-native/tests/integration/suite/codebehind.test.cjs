@@ -409,6 +409,241 @@ describe('TestBench code-behind compile', function () {
     });
   });
 
+  /**
+   * A data-driven Run & Compile (stories/data-driven-rows.md, decision 11).
+   *
+   * Every row runs; only the first row's batches carry `compile`. An entry is
+   * keyed by (file, section, authored step text, occurrence) and its code reads
+   * the row through `step.getVar`, so one entry serves every row — and a
+   * second row asking for one is not a continuation of the first: the loop
+   * closes the session between rows, which makes the server discard the
+   * retained compiler. Before this, three rows meant three separate full
+   * compiles of the same two steps, three proposals, and a recording on disk of
+   * the LAST row while the log said "compile records row 1".
+   *
+   * Asserted on the requests the client sent, because that is the only place
+   * the difference exists: the log reads the same either way.
+   */
+  describe('a data-driven Run & Compile', () => {
+    const ROWS_MD = `---
+tags: [codebehind]
+---
+
+# Compile Rows
+
+## Steps
+| email |
+|-------|
+| a@b.c |
+| d@e.f |
+| g@h.i |
+
+1. Enter {{email}}
+2. Submit the form
+`;
+
+    /**
+     * The same table, with a step that splits each row's run into two blocks.
+     *
+     * The composition the row gate must not break: within row 1 the second
+     * block still continues the compiler the first block opened, exactly as an
+     * unlooped split run does. Testing the gate alone would pass with
+     * `compileContinues` dropped from row 1's later blocks too — the run's
+     * second half would then silently compile into its own candidate.
+     *
+     * `[interactive]` rather than `[input:]` for the reason `SPLIT_MD` gives:
+     * the harness can answer the webview composer, not the native InputBox.
+     * Two rows rather than three — four blocks is enough to show the shape and
+     * halves the prompts the test has to answer.
+     */
+    const ROWS_SPLIT_MD = `---
+tags: [codebehind]
+---
+
+# Compile Rows Split
+
+## Steps
+| email |
+|-------|
+| a@b.c |
+| d@e.f |
+
+1. Enter {{email}}
+2. [interactive] Look around before submitting
+3. Submit the form
+`;
+
+    /**
+     * A data-driven file whose steps live in a `### Section` body, so a
+     * Compile This Step on one of them carries a `compileScope` — the field
+     * whose row gate has no other way to be reached.
+     *
+     * Line 18 is the body's first step, line 19 its second.
+     */
+    const ROWS_SECTION_MD = `---
+tags: [codebehind]
+---
+
+# Compile Rows Step
+
+## Steps
+| email |
+|-------|
+| a@b.c |
+| d@e.f |
+| g@h.i |
+
+1. Sign in
+2. Submit the form
+
+### Sign in
+1. Enter {{email}}
+2. Press Enter
+`;
+
+    let rowsPath;
+
+    afterEach(() => {
+      if (rowsPath) fs.rmSync(rowsPath, { force: true });
+      rowsPath = undefined;
+    });
+
+    async function openRows(name, md) {
+      rowsPath = path.resolve(FIXTURES_DIR, name);
+      fs.writeFileSync(rowsPath, md, 'utf-8');
+      await openFixture(rowsPath);
+    }
+
+    it('puts compile on the first row only; later rows run plain', async () => {
+      await openRows('compile-rows.tmp.md', ROWS_MD);
+      fake.streamScripts = Array.from({ length: 3 }, () => (f) => f.end());
+
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
+      await waitFor('three row batches', () => fake.requests.length >= 3, 20_000);
+      await waitFor('idle', () => !hooks.isRunning(), 10_000);
+
+      assert.equal(fake.requests.length, 3, 'one batch per row');
+      // Every row still runs, still knows which row it is, and still carries
+      // its values — the loop is untouched.
+      assert.deepEqual(
+        fake.requests.map((r) => [r.dataRow, r.dataRowCount]),
+        [[1, 3], [2, 3], [3, 3]],
+      );
+      assert.deepEqual(fake.requests[2].dataRowValues, { email: 'g@h.i' });
+
+      assert.equal(fake.requests[0].compile, 'run', 'row 1 opens the compile');
+      assert.equal(fake.requests[0].compileContinues, undefined, 'and starts it');
+      assert.equal(
+        fake.requests[0].withinCompileRun,
+        undefined,
+        'the row that DOES compile never says it does not',
+      );
+      for (const index of [1, 2]) {
+        assert.equal(
+          fake.requests[index].compile,
+          undefined,
+          `row ${index + 1} must not ask for a compile of its own`,
+        );
+        assert.equal(
+          fake.requests[index].compileContinues,
+          undefined,
+          `row ${index + 1} has no compiler to continue — the session was closed`,
+        );
+        // …and still says which run it belongs to, and of what KIND. The
+        // server decides two things per batch from the mode: the AI switch's
+        // carve-out (without it, a row with no compile field is refused AI on
+        // an `ai.allowInRuns: false` project — row 1 with a diff, rows 2..N
+        // red, for one gesture) and whether code-behind executes. `'run'` here,
+        // so these rows still run their entries as code, exactly as row 1 does.
+        assert.equal(
+          fake.requests[index].withinCompileRun,
+          'run',
+          `row ${index + 1} must still be part of the Run & Compile`,
+        );
+      }
+    });
+
+    it('still continues the compile across a split INSIDE the first row', async () => {
+      await openRows('compile-rows-split.tmp.md', ROWS_SPLIT_MD);
+      fake.streamScripts = Array.from({ length: 4 }, () => (f) => f.end());
+
+      void vscode.commands.executeCommand('testbench-native.runAndCompile');
+      // The interactive step blocks on the composer, and there is no hook for
+      // "the prompt is open" — so keep answering until the run moves on, as
+      // the split-run test does.
+      await waitFor(
+        'four blocks (two rows, split in two)',
+        async () => {
+          if (fake.requests.length >= 4) return true;
+          await hooks.dispatchWebviewMessage({ type: 'promptResponse', text: '/continue' });
+          return fake.requests.length >= 4;
+        },
+        30_000,
+      );
+      await waitFor('idle', () => !hooks.isRunning(), 15_000);
+
+      assert.deepEqual(
+        fake.requests.map((r) => [r.dataRow, r.compile, r.compileContinues, r.withinCompileRun]),
+        [
+          [1, 'run', undefined, undefined],
+          [1, 'run', true, undefined],
+          [2, undefined, undefined, 'run'],
+          [2, undefined, undefined, 'run'],
+        ],
+      );
+    });
+
+    /**
+     * Compile This Step in a data-driven file — the only shape that reaches
+     * the `rowCompile && options.compileScope` gate, since `compileScope` is
+     * set only for a `### Section` body step and a whole-test Run & Compile
+     * never carries one.
+     *
+     * The row loop is not the whole-file one here: a step selection does not
+     * restart the browser between rows (`freshBrowserPerRow` is false), so the
+     * session is KEPT — and the old N compiles came from the server clearing
+     * `session.liveCompile` after every `'steps'` compile rather than from the
+     * client closing the session.
+     */
+    it('puts compile:"steps" and its scope on the first row only', async () => {
+      await openRows('compile-rows-step.tmp.md', ROWS_SECTION_MD);
+      fake.streamScripts = Array.from({ length: 3 }, () => (f) => f.end());
+
+      // Line 18 is the first body step of `### Sign in`.
+      void vscode.commands.executeCommand('testbench-native.compileStepCodeBehind', {
+        lineNumber: 18,
+      });
+      await waitFor('three row batches', () => fake.requests.length >= 3, 20_000);
+      await waitFor('idle', () => !hooks.isRunning(), 10_000);
+
+      assert.equal(fake.requests.length, 3, 'the selected step still runs once per row');
+      assert.deepEqual(
+        fake.requests.map((r) => [
+          r.dataRow,
+          r.compile,
+          r.compileScope?.section,
+          r.withinCompileRun,
+        ]),
+        [
+          [1, 'steps', 'Sign in', undefined],
+          [2, undefined, undefined, 'steps'],
+          [3, undefined, undefined, 'steps'],
+        ],
+      );
+      // `'steps'`, not `'run'`: the mode is what tells the server to keep
+      // code-behind execution OFF for these rows too. With a bare `true` they
+      // built the execution registry and ran the entry row 1 is repairing — it
+      // threw, healed under AI, and painted ⚠ on that very step.
+      // The scope travels with the compile and never without it: a batch that
+      // compiles nothing has nothing to scope, and the server refuses a
+      // `compileScope` on anything but a `'steps'` compile.
+      assert.deepEqual(
+        fake.requests.map((r) => r.steps),
+        [['Enter {{email}}'], ['Enter {{email}}'], ['Enter {{email}}']],
+      );
+    });
+  });
+
   it('a second compile while one is running does not wipe the first\'s proposal', async () => {
     // The reset used to happen before the `isRunning` guard, so the call that
     // got turned away cleared the proposal of the run that turned it away.

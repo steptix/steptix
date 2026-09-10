@@ -153,12 +153,12 @@ passed. See `stories/step-flow-control.md`.
   line>` (or `Not run: step 3 ended the run — …`), the appended line clipped to
   80 characters with `…`. The number is the **expanded** step index, matching
   the `results[]` order and the run log; the text is the step as AUTHORED,
-  never interpolated, so a resolved secret cannot ride out on it. One exception:
-  a step in the body of a **looped section** has no authored form on this side
-  of the wire — the request's `sections` carry no `rawSteps` parallel (§3.2), so
-  the row values are already interpolated into the only text the server has —
-  and that one reason quotes the interpolated line. Skipped steps take no
-  screenshot and capture no outputs.
+  never interpolated, so a resolved secret cannot ride out on it. That holds for
+  a step in the body of a **looped section** too, even though the request's
+  `sections` carry no `rawSteps` parallel (§3.2): the server pins that body's
+  match side to the section's own `steps`, which §3.2 defines as the raw body
+  line, before it interpolates a row into the text it executes. Skipped steps
+  take no screenshot and capture no outputs.
 - `stepsCompleted` does not count the steps a `return`/`stop` skipped, so a run
   that returned from the main flow reports fewer completed steps than
   `stepsTotal` and still has `"status": "passed"`. That is the rule for THIS

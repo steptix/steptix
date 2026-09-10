@@ -2278,11 +2278,22 @@ export class RunController {
       };
       /**
        * Compile the steps this run executes, as it executes them
-       * (stories/compile-as-you-go.md). `'run'` is Run & Compile — the whole
-       * test, Review at the end; `'steps'` is Compile This Step — the sent
-       * steps only, code-behind execution off, no Review. The proposal comes
-       * back on `RunOutcome.compile`; nothing is written until the caller
-       * opens the diff and the author applies it.
+       * (stories/compile-as-you-go.md). `'run'` is Run & Compile — Review at
+       * the end, code-behind execution on; `'steps'` is Compile This Step —
+       * code-behind execution off, no Review. The proposal comes back on
+       * `RunOutcome.compile`; nothing is written until the caller opens the
+       * diff and the author applies it.
+       *
+       * The mode does NOT say how much is compiled: in a data-driven file
+       * every row runs and only the first one's batches carry this, because
+       * one entry serves every row (rows story, decision 11). So a `'run'`
+       * compile of a three-row test is the whole test compiled once, not three
+       * times — and the rows that follow carry `withinCompileRun: <this mode>`
+       * instead, which asks for no compile and keeps the two things the server
+       * decides per batch from the mode: the AI switch's carve-out, and
+       * whether code-behind executes. Which is why the mode travels: `'steps'`
+       * means execution off for EVERY row of the run, not just the one that
+       * compiles — otherwise rows 2..N run the broken entry row 1 is repairing.
        */
       compile?: 'run' | 'steps';
       /**
@@ -3092,11 +3103,35 @@ export class RunController {
     // references a column the first selected row leaves empty is a surprise
     // unless the log says whose values it recorded. "First SELECTED": with a
     // narrowed run that is the first row of the selection, not of the table.
+    //
+    // Said as a fact, and now true: the compile fields ride the first planned
+    // row's batches only (`rowCompile` below). They used to ride every row's,
+    // and every shape of row loop paid for it, by its own route:
+    //
+    //  - **whole-file run** (`freshBrowserPerRow`) — `recycleSessionForRow`
+    //    closes the session before each row, the server discards the retained
+    //    compiler with it, and each row opened a fresh full compile of the
+    //    same entries: three rows, three generations per step, three
+    //    proposals, and the recording on disk was the LAST row's while this
+    //    line said row 1.
+    //  - **a step selection** (Compile This Step in a table file; the session
+    //    is kept) — the server clears `session.liveCompile` after every
+    //    `'steps'` compile, so each row opened a fresh one there too.
+    //  - **a kept-session `'run'` compile** — one compiler across the rows,
+    //    which is worse in a quieter way: the same steps accumulate into it N
+    //    times, so the recording it writes holds every row's actions. The
+    //    server can be driven this way and tests/api-server-rows-compile.test.ts
+    //    covers it; THIS client cannot get there. `runAndCompile` passes no
+    //    lines for a `'run'` compile, so `freshBrowserPerRow` is always true
+    //    and the session is always recycled — the first bullet is the shape a
+    //    `'run'` compile of a table file actually took.
     if (compileMode && dataRows !== null && dataRows.length > 0) {
       this.postOutput(`compile records row ${dataRows[0]!.row}`, 'info');
     }
     /** Step-blocks already sent in THIS call — the second onwards continues
-     *  the compiler the first opened. */
+     *  the compiler the first opened. Counts every row's blocks, which costs
+     *  nothing: only row 0 sends compile fields, and its blocks are the first
+     *  ones counted. */
     let compileBlocksSent = 0;
     let anyFailed = false;
     const batchMode = options.batchMode === true;
@@ -3128,6 +3163,38 @@ export class RunController {
       for (const [rowIndex, planned] of rowPlan.entries()) {
       const row = planned?.values ?? null;
       const rowNumber = planned?.row ?? 0;
+      /**
+       * The compile mode THIS row's batches carry — the first planned row's,
+       * and nothing else (rows story, decision 11).
+       *
+       * An entry is keyed by (file, section, authored step text, occurrence),
+       * so one entry serves every row: row 2 has nothing new to generate, and
+       * asking for it costs a model call per step per row.
+       *
+       * Worse than the cost, and differently per shape. Where the loop
+       * restarts the browser (`freshBrowserPerRow`, a whole-file run) the
+       * session is closed between rows and the server discards the retained
+       * compiler with it, so each row proposed its own whole-file diff; a
+       * `'steps'` compile of a selection keeps the session but the server
+       * clears `session.liveCompile` after every `'steps'` compile, so it
+       * came out the same way — and those two are the shapes this client
+       * sends. A kept-session `'run'` compile would continue ONE compiler and
+       * accumulate the same steps into it once per row, leaving a recording N
+       * rows deep: the server can be driven that way
+       * (tests/api-server-rows-compile.test.ts covers it), TestBench cannot.
+       * `runAndCompile` passes no lines for a `'run'` compile, so
+       * `freshBrowserPerRow` is always true and the session is always
+       * recycled.
+       *
+       * `rowIndex === 0` and not `planned !== null`: an ordinary run has the
+       * single-`null` plan and is row 0, so it keeps compiling exactly as
+       * before. Within row 0 the run may still be SPLIT — an `[input:]` or
+       * `[interactive]` step, or a breakpoint — and those later blocks carry
+       * `compileContinues` as they always did, from `compileBlocksSent`. A
+       * resume is never a row loop (`wholeFileRun` is false, so `dataRows` is
+       * null) and so is always row 0.
+       */
+      const rowCompile = rowIndex === 0 ? compileMode : undefined;
       if (planned !== null && row !== null) {
         // A pause ends the loop after the current row (decision 6), and it is
         // decided at the END of that row's block (`loopEnd`), not here:
@@ -3201,16 +3268,40 @@ export class RunController {
             ...(options.pauseAtNextTool && { pauseAtNextTool: true }),
             ...(options.pauseAtNextCodeBehind && { pauseAtNextCodeBehind: true }),
             ...(pendingRerun && { rerun: pendingRerun }),
-            ...(compileMode && { compile: compileMode }),
+            ...(rowCompile && { compile: rowCompile }),
             // Blocks 2..n of this call, and every block of a true RESUME: the
             // compiler for this run is already open on the session. Never an
             // injected run's first block — its `isContinuation` preserves
             // marks, not the previous run's compiler, and the server must
             // supersede whatever a completed or abandoned compile left open.
-            ...(compileMode && (compileBlocksSent > 0 || options.isResume === true) && {
+            ...(rowCompile && (compileBlocksSent > 0 || options.isResume === true) && {
               compileContinues: true,
             }),
-            ...(options.compileScope && { compileScope: options.compileScope }),
+            // Travels with `compile`, never without it — it names the section
+            // a Compile This Step's entries belong to, and a batch with no
+            // compile has nothing to scope. (`runStepBlock` narrows it again
+            // to `'steps'`; this gate is about the ROW, not the mode.)
+            ...(rowCompile && options.compileScope && { compileScope: options.compileScope }),
+            // The rows that do NOT compile, saying which run they belong to —
+            // and, because it is the same field, which KIND of run.
+            //
+            // The server decides two things per batch from `compile`, and
+            // dropping it from rows 2..N dropped both:
+            //
+            //  - the AI switch's carve-out (stories/run-settings.md §9). On a
+            //    project with `ai.allowInRuns: false`, row 1 came back with a
+            //    diff and every later row failed with "this run forbids AI" —
+            //    and the proposal is not applied until the loop ends, so there
+            //    was no compiled entry for them to run either. One gesture,
+            //    half carved out.
+            //  - whether code-behind EXECUTES, which only `'steps'` turns off.
+            //    Compile This Step runs its step under AI so a broken entry
+            //    re-records; rows 2..N ran the existing entry instead, which
+            //    threw, healed under AI, and painted ⚠ on the very step whose
+            //    repair was in flight. Hence the mode travels, not a `true`.
+            ...(compileMode !== undefined && rowCompile === undefined && {
+              withinCompileRun: compileMode,
+            }),
             ...(options.suppressServerBreakpoints && { suppressServerBreakpoints: true }),
           });
           compileBlocksSent++;
@@ -4575,11 +4666,18 @@ export class RunController {
     compileContinues?: boolean;
     /** Section attribution for the entries this block compiles. */
     compileScope?: { section: string };
+    /** This block belongs to a compile of this MODE but compiles nothing of
+     *  its own — rows 2..N of a data-driven one. Keeps the two things the
+     *  server decides per batch from the mode: the AI switch's compile
+     *  carve-out (stories/run-settings.md §9), and code-behind execution off
+     *  for `'steps'`. Asks for no compile. Never sent with `compile`, which the
+     *  server refuses. */
+    withinCompileRun?: 'run' | 'steps';
     /** Omit the per-URI breakpoint map from the request — a single-step
      *  slice pausing at its own breakpoint runs nothing. */
     suppressServerBreakpoints?: boolean;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, suppressServerBreakpoints } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, withinCompileRun, suppressServerBreakpoints } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -4691,6 +4789,11 @@ export class RunController {
         ...(compile && { compile }),
         ...(compile && compileContinues && { compileContinues: true }),
         ...(compile === 'steps' && compileScope && { compileScope }),
+        // Never alongside `compile` — the server refuses that pair, and the
+        // caller already gates on `rowCompile === undefined`. Narrowed again
+        // here for the same reason `compileScope` is: this is the one place
+        // that knows what actually goes on the wire.
+        ...(compile === undefined && withinCompileRun !== undefined && { withinCompileRun }),
       },
       signal,
     );

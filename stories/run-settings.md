@@ -400,10 +400,30 @@ retained per session), so a session whose retained `ai` is `off` would gate
 its own repairs — and the obvious patch, compile sending
 `runSettings: {ai: "on"}`, is wrong, because `mergeRunSettings` would retain
 it and silently clobber the user's standing `off` for every later run. The
-carve-out is an internal, non-retained per-request flag set by the
-compile-runner and errand-runner call sites and never accepted from the wire
-(the api-server allowlist does not know it), which `resolveRunSettings`
-honours by skipping the `ai` slice for that request only. An `ai: off` run
+carve-out is therefore a non-retained PER-REQUEST decision, which
+`resolveRunSettings` honours by skipping the `ai` slice for that request only.
+Three things reach it, and two are on the wire — the sentence that used to
+stand here ("never accepted from the wire, the api-server allowlist does not
+know it") stopped being true the moment Compile This Step shipped as
+`compile: 'steps'` on the step route rather than as its own endpoint:
+
+- the internal flag (`internal.bypassAiPolicy`), set by the compile-runner and
+  errand-runner call sites and unreachable from a request;
+- `compile` on the wire, which is how Compile This Step and Repair This Step
+  actually arrive. The validator makes it carry `?stream=1` and a
+  `testFilePath`, and it always leaves a trace the author sees: a proposal on
+  the stream, a recording beside the test;
+- `withinCompileRun` on the wire — the rest of a logical run that compiles
+  once (rows 2..N of a data-driven compile,
+  [data-driven-rows.md](data-driven-rows.md) decision 11). It opens no
+  compiler and leaves no proposal, so it is the quietest of the three; what
+  gates it is that it must be exactly `'run'` or `'steps'`, is refused
+  alongside `compile`, and is refused without a `testFilePath` — the field
+  that makes it a statement about one test rather than a traceless AI budget.
+
+What the wire cannot do is retain the carve-out or turn it into a setting:
+both fields are per-request, `mergeRunSettings` never sees them, and the next
+plain batch on the same session is gated again. An `ai: off` run
 that meets an uncompiled step still fails that step the way keyless does —
 "this step needs AI and this run forbids it" — actionable, and marked for
 repair.

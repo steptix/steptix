@@ -716,6 +716,11 @@ export async function runTest(
         // rewritten wholesale, so omitting it here would make every row unfiled
         // after a CLI run and silently restore the conflation.
         ...(binding?.file !== undefined && { file: binding.file }),
+        // Which of the identically-worded steps of this frame instance it is,
+        // so a repair finds its row without counting — a looped body's rows
+        // are iteration-major. Both writers or neither, for the reason the
+        // `file` above gives: the sidecar is rewritten wholesale.
+        ...(binding?.occurrence !== undefined && { occurrence: binding.occurrence }),
         status: result.status,
         fromCodeBehind: result.fromCodeBehind === true,
         stale: failure !== undefined,

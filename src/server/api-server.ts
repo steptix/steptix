@@ -893,6 +893,52 @@ export function createApiServer(
         }
         request.compileScope = { section: scope.section };
       }
+      // Rows 2..N of a data-driven compile: part of a compile-mode logical
+      // run, asking for no compile of its own (rows story, decision 11). It is
+      // refused ALONGSIDE `compile` rather than ignored: a client sending both
+      // is confused about which batch it is on, and the two answers ("open a
+      // compiler" and "do not") are not composable.
+      //
+      // The MODE, not a boolean, for the reason `compile` carries one — the
+      // server behaves differently per mode, and both of those differences are
+      // decided per batch, not per run: the AI switch's carve-out (which both
+      // modes get) and whether code-behind executes (which only `'steps'`
+      // turns off). A bare `true` bought the carve-out and silently left
+      // execution ON, so rows 2..N of a Compile This Step ran the broken entry
+      // the author is repairing, healed it under AI, and painted ⚠ on that
+      // step.
+      //
+      // On the allow-list because a field the list does not name is dropped,
+      // silently — the seam that lost `envName`. Nothing else about the request
+      // changes, so there is no second symptom to notice it by: the run would
+      // simply fail every AI step on an `ai: off` project, exactly as it did
+      // before this field existed.
+      if (body.withinCompileRun !== undefined) {
+        if (body.withinCompileRun !== 'run' && body.withinCompileRun !== 'steps') {
+          res.status(400).json({ error: '"withinCompileRun" must be "run" or "steps"' });
+          return;
+        }
+        if (request.compile !== undefined) {
+          res.status(400).json({
+            error: '"withinCompileRun" is for a batch that does NOT compile — do not send it with "compile"',
+          });
+          return;
+        }
+        // The same demand `compile` makes, for a stronger reason. Both lift
+        // `ai.allowInRuns: false` for the batch, but a `compile` also has to
+        // carry `?stream=1` and always leaves a trace the author can see (a
+        // proposal on the stream, a recording beside the test). This one has
+        // neither, so a `testFilePath` is the whole of what makes it a
+        // statement about a specific test rather than a quiet, traceless way
+        // to spend AI on a project that turned it off.
+        if (typeof body.testFilePath !== 'string') {
+          res.status(400).json({
+            error: '"withinCompileRun" requires "testFilePath" — it names the compile this batch belongs to',
+          });
+          return;
+        }
+        request.withinCompileRun = body.withinCompileRun;
+      }
       // Re-run-with-variables fields (testbench "re-run a skill step"):
       // `seedScope` injects captured/runtime vars before the run; `startAt`
       // starts execution partway into the expanded skill body. Both optional.

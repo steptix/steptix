@@ -19,6 +19,11 @@ import { fileURLToPath } from 'node:url';
 import { assembleSteps, assembleTestFile } from '../src/mcp/assemble.js';
 import { resolveProject } from '../src/mcp/project.js';
 import { PreflightFailure } from '../src/mcp/types.js';
+// The other side of the wire, for the section-payload parity test: what the
+// CLI parser reads from the same file, and what the server does with what
+// this module sends.
+import { parseTestFile } from '../src/parser/markdown.js';
+import { expandSkills } from '../src/skills/expander.js';
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mcp');
 
@@ -146,6 +151,56 @@ describe('assembleTestFile — goldens', () => {
     expect(Object.getPrototypeOf(sections)).toBeNull();
     // A section invoked twice stays two sent steps and one definition.
     expect(run.request.steps).toEqual(['Open the home page', 'Sign in', 'Sign out', 'Sign in']);
+  });
+
+  /**
+   * The field is dropped; its CONTENT is not.
+   *
+   * `sections.md` above cannot see this: its body is a tight list of plain
+   * text, so the parser's two readings are the same string and a producer
+   * reading either one passes. This fixture uses the two shapes where they
+   * differ — a `[no-hooks]` marker and inline markdown in a LOOSE list
+   * (contract §2.3) — and the wire is defined as the raw one (§3.2: the line
+   * minus `N. `, trimmed, markers verbatim), which is `ParsedSection.rawSteps`.
+   *
+   * It matters because the server has nothing to fall back past: with no
+   * `rawSteps` on the wire, `steps[i]` IS the match side and the code-behind
+   * binding's `source`. Sending the marked reading bound a looped body's
+   * entries to text that no other producer writes — every iteration ran under
+   * AI and the run warned that the entry matched no step — while TestBench,
+   * whose `extractSections` sends the raw line, bound them fine.
+   */
+  it('sends the raw body line as `steps`, byte-identical to the CLI parser', async () => {
+    const file = testFile('section-raw-steps.md');
+    const run = await assemble('section-raw-steps.md');
+    const parsed = await parseTestFile(file, {});
+    const wire = run.request.sections!['upload each file']!;
+
+    expect(wire.steps).toEqual(parsed.sections['upload each file']!.rawSteps);
+    expect(wire.steps).toEqual(['Click **Save** for {{file}}', '[no-hooks] Type `hello`']);
+    // Not the parser's marked reading, which is what used to be sent.
+    expect(wire.steps).not.toEqual(parsed.sections['upload each file']!.steps);
+
+    // And through the expander, which is where the divergence used to show
+    // up: the same payload the server would be handed produces the same match
+    // sides the CLI parse of the same file does, for every iteration of the
+    // loop.
+    const expanded = await expandSkills(
+      run.request.steps,
+      undefined,
+      undefined,
+      file,
+      run.request.sourceLines,
+      { sections: run.request.sections as never, warnDeadSections: false },
+    );
+    expect(expanded.rawSteps).toEqual(parsed.expansion!.rawSteps);
+    expect(expanded.rawSteps).toEqual([
+      'Open the documents page',
+      'Click **Save** for {{file}}',
+      '[no-hooks] Type `hello`',
+      'Click **Save** for {{file}}',
+      '[no-hooks] Type `hello`',
+    ]);
   });
 
   it('projects `cdp` into the wire shape and refuses a non-port value', async () => {
