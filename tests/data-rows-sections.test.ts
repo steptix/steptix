@@ -255,6 +255,47 @@ describe('rows under a ### Section', () => {
     ]);
   });
 
+  it('pins the match side of a NARROWED looped body too, offsets included', async () => {
+    // The body-step narrowing (`runSteps`) filters the match side; it must not
+    // be the thing that decides what the match side IS. Both halves of the
+    // narrowing path read it, and they fail differently:
+    //
+    //  - the filtered `rawSteps` become the kept steps' binding `source`, so a
+    //    row-interpolated one binds per row exactly as the unnarrowed path did;
+    //  - `droppedAheadOf` counts a dropped item's emissions by TEXT, so two
+    //    body lines that are distinct as authored (`{{first}}`, `{{second}}`)
+    //    and identical once a row is in them (`x.png` twice) get an occurrence
+    //    offset the CLI never gives them — the kept step silently lands on the
+    //    dropped step's code-behind entry.
+    const wireSections = {
+      'upload each': {
+        name: 'Upload each',
+        headingLine: 6,
+        steps: ['Upload {{first}}', 'Upload {{second}}'],
+        stepLines: [7, 8],
+        rows: [{ first: 'x.png', second: 'x.png' }],
+        // The second body step only.
+        runSteps: [1],
+      },
+    };
+    const expanded = await expandSkills(
+      ['Upload each'],
+      undefined,
+      undefined,
+      '/t/narrow.md',
+      [4],
+      { sections: wireSections as never, warnDeadSections: false },
+    );
+
+    expect(expanded.steps).toEqual(['Upload x.png']);
+    // Authored, so the entry is the one the CLI would bind.
+    expect(expanded.rawSteps).toEqual(['Upload {{second}}']);
+    // Nothing was dropped AHEAD of this text — `Upload {{first}}` is a
+    // different line. Counted over the interpolated body it would be 1, and
+    // the kept step would bind `Upload x.png` occurrence 1.
+    expect(expanded.origins.map((o) => o.occurrenceOffset)).toEqual([undefined]);
+  });
+
   /**
    * The parity the test above hand-asserts, measured against the real
    * producer instead of a literal.
@@ -333,7 +374,7 @@ describe('rows under a ### Section', () => {
     // its markdown syntax intact where the CLI's `extractPlainText` had
     // removed it. Measured, so the difference is on the record rather than
     // discovered again; it is the same divergence as the MAIN flow's, tracked
-    // as issues/053. The `[no-hooks]` marker is NOT part of it — the expander
+    // as issues/054. The `[no-hooks]` marker is NOT part of it — the expander
     // strips that as it inlines the body, which is why only the backticks and
     // asterisks survive here.
     expect(expanded.steps).toEqual([

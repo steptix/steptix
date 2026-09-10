@@ -1,10 +1,10 @@
-# 054 — `aiui compile` drops an entry whose FIRST inlining a return skipped
+# 055 — `aiui compile` drops an entry whose FIRST inlining a return skipped
 
 **Status:** open / correctness — pre-existing in
 [#140](https://github.com/pkent/ai-ui-automation/pull/140), not introduced by
 the row-compile work.
 **Area:** [src/codebehind/compile.ts](../src/codebehind/compile.ts) — the
-`skippedInRecording` filter (~line 451) applied to a `selection.order` that
+`skippedInRecording` filter (~line 484) applied to a `selection.order` that
 [`selectSteps`](../src/codebehind/compile.ts) has already deduped to the first
 inlining per entry key.
 **Deliberate counterpart:**

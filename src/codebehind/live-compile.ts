@@ -304,6 +304,18 @@ export class LiveCompiler {
    * for. `finish` drops the pairs whose key ended up WRITTEN (`writtenKeys`)
    * — not merely queued — the same rule the `kept` getter applies, for the
    * same reason.
+   *
+   * Named for the producer that fills it, not for a rule that is about the
+   * producer. `generationRefusal` answers `SKIPPED_BY_RETURN_REFUSAL` for ANY
+   * `status: 'skipped'` offer, so the netting is producer-agnostic and the
+   * second skip producer would land here unchanged if it ever offered. It does
+   * not: control flow's untaken branch (`skipKind: 'not-taken'`) is emitted
+   * without an `offer` and so reaches neither this list nor
+   * `final.notAttempted`, which only names steps that produced no result row
+   * at all. That divergence is the live path's, is main's, and is untouched
+   * here — the boxed pipeline is where the two producers were unified, by
+   * reading the cause off the recording's skipped rows
+   * (`recordingSkipCause`, src/codebehind/compile.ts).
    */
   private readonly skippedByReturn: { number: number; key: string }[] = [];
   /**

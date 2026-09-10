@@ -574,6 +574,6 @@ lines.
   recording whose first call to a section returned before a body line drops that
   line and reports it not attempted even though a later call ran it. The live
   compiler nets at `finish` and gets both orders right.
-  [Issue 054](../issues/054-boxed-compile-drops-an-entry-whose-first-inlining-was-skipped.md).
+  [Issue 055](../issues/055-boxed-compile-drops-an-entry-whose-first-inlining-was-skipped.md).
 - No first-party client sends `## Hooks` to the Sessions API, so the runtime
   hook backstop is exercised only by a `[skill:]` used as a default hook.

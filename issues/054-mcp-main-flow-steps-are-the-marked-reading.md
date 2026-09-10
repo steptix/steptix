@@ -1,4 +1,4 @@
-# 053 — The MCP producer sends a different step string than every other client
+# 054 — The MCP producer sends a different step string than every other client
 
 **Status:** open / correctness — pre-existing, and only half of it was fixed.
 **Area:** [src/mcp/assemble.ts](../src/mcp/assemble.ts) — `assembleTestFile`

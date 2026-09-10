@@ -1660,7 +1660,7 @@ with part A, since it is currently mentioned only in the pipeline diagram.
   attempted even though a later call has a full transcript. The live compile
   answers it either way round (it nets at `finish`); the parity claimed here
   is for the forward order — first call runs, later call returns.
-  [Issue 054](../issues/054-boxed-compile-drops-an-entry-whose-first-inlining-was-skipped.md).
+  [Issue 055](../issues/055-boxed-compile-drops-an-entry-whose-first-inlining-was-skipped.md).
 - Rows from `${data.*}` arrays or a named data source. The external form
   is `dataFile:`; making the JSON data tree a row source is a separate
   story with its own shape questions.
