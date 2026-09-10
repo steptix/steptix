@@ -1054,6 +1054,118 @@ describe('what a repeated entry counts as', () => {
     expect(outcome.summary.compiled).toBe(0);
     expect(outcome.summary.kept).toBe(2);
   });
+
+  it('is kept when the iteration that took its key generated NOTHING', async () => {
+    // Queued is not written. The stale iteration took the key and the model
+    // answered nothing usable, so the entry stands exactly as the author wrote
+    // it — which is what "kept" means. Netting against the dedupe set instead
+    // reported `compiled 0, kept 0` for an entry that is still in the file.
+    const { client } = fakeClient({ generate: () => 'not json and not a fence' });
+    const compiler = compilerFor(['Upload {{file}}', 'Upload {{file}}'], { client });
+    compiler.offer(healedStale(0, 'Upload a.png'));
+    compiler.offer(ranAsCode(1, 'Upload b.png'));
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(outcome.summary.compiled).toBe(0);
+    expect(outcome.summary.kept).toBe(1);
+    expect(outcome.summary.error).toMatch(/could not be generated/);
+  });
+});
+
+/**
+ * The other half of "one entry, several inlinings": what a return-skipped
+ * inlining owes when the inlining that DID run produced nothing.
+ *
+ * `finish` nets the return-skipped steps against the keys this compile wrote
+ * (stories/step-flow-control.md, decision 12) so a body an earlier or later
+ * call already compiled is not reported as having no entry. The set it nets
+ * against has to be what was WRITTEN, not what was queued: the key is taken at
+ * `offer` time, before the model call, and a generation that errors leaves the
+ * candidate untouched. Netting a real debt off against that key told the author
+ * nothing whatever about a line the proposal has no entry for.
+ */
+describe('a return-skipped sibling of an entry nothing wrote', () => {
+  const body = 'Enter the username';
+
+  it('is still named in notAttempted when the only generation for its key errored', async () => {
+    const { client } = fakeClient({ generate: () => 'not json and not a fence' });
+    const compiler = compilerFor([body, body], { client });
+    // Call 1 reached the body line and ran it, so it takes the key — and its
+    // generation fails, so nothing is spliced into the candidate.
+    compiler.offer({
+      index: 0,
+      binding: binding(body),
+      result: result(1, body),
+      resolvedParameters: {},
+    });
+    // Call 2 returned before the same authored line. Same file, same section,
+    // same source, same occurrence — one entry key.
+    compiler.offer({
+      index: 1,
+      binding: binding(body),
+      result: result(2, body, { status: 'skipped' }),
+      resolvedParameters: {},
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(outcome.summary.compiled).toBe(0);
+    expect(outcome.summary.notAttempted).toEqual([2]);
+    expect(outcome.summary.error).toMatch(/could not be generated/);
+    // And nothing was written for the line, which is the fact the number is
+    // reporting.
+    expect(outcome.files[stepsFile] ?? '').not.toContain(`source: '${body}'`);
+    expect(outcome.status).toBe('partial');
+  });
+
+  it('owes nothing when that generation SUCCEEDED — the narrowness check', async () => {
+    // The same two offers with a working model. The entry is in the proposal,
+    // so naming call 2's step would warn the author about a step whose code is
+    // in the diff in front of them.
+    const compiler = compilerFor([body, body]);
+    compiler.offer({
+      index: 0,
+      binding: binding(body),
+      result: result(1, body),
+      resolvedParameters: {},
+    });
+    compiler.offer({
+      index: 1,
+      binding: binding(body),
+      result: result(2, body, { status: 'skipped' }),
+      resolvedParameters: {},
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(outcome.summary.compiled).toBe(1);
+    expect(outcome.summary.notAttempted).toEqual([]);
+    expect(outcome.files[stepsFile]).toContain(`source: '${body}'`);
+  });
+
+  it('a DECLINE clears the debt too — an `ai: true` entry is an entry', async () => {
+    // The third written outcome: no code, but the slot is answered and carries
+    // the reason, so the author is not left wondering about the line.
+    const { client } = fakeClient({
+      generate: () => JSON.stringify({ entry: null, reason: 'needs a human to read the screen' }),
+    });
+    const compiler = compilerFor([body, body], { client });
+    compiler.offer({
+      index: 0,
+      binding: binding(body),
+      result: result(1, body),
+      resolvedParameters: {},
+    });
+    compiler.offer({
+      index: 1,
+      binding: binding(body),
+      result: result(2, body, { status: 'skipped' }),
+      resolvedParameters: {},
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(outcome.summary.keptAi).toBe(1);
+    expect(outcome.summary.notAttempted).toEqual([]);
+    expect(outcome.files[stepsFile]).toContain('ai: true');
+  });
 });
 
 /**

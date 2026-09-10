@@ -202,6 +202,59 @@ describe('rows under a ### Section', () => {
     ]);
   });
 
+  it('does not dispatch a body step to a section its ROW VALUE happens to name', async () => {
+    // The other thing pinning the match side changes, stated on purpose rather
+    // than left for a bug report. The match side is what `resolveSection`
+    // reads, so while a looped body's match side was the interpolated text a
+    // row could turn an ordinary step into a section call: `{{action}}` with a
+    // row of `Sign in`, beside a `### Sign in`, inlined that section's body on
+    // the server where the CLI emitted one plain step.
+    //
+    // The direction is the safe one, which is why this is a behaviour change
+    // and not a regression: interpolation only ever replaces `{{x}}`, and no
+    // section can be NAMED `{{x}}`, so pinning the match side can remove an
+    // accidental dispatch and can never create one.
+    const wireSections = {
+      'do each thing': {
+        name: 'Do each thing',
+        headingLine: 6,
+        steps: ['{{action}}'],
+        stepLines: [7],
+        rows: [{ action: 'Sign in' }],
+      },
+      'sign in': {
+        name: 'Sign in',
+        headingLine: 12,
+        steps: ['Type the username', 'Press submit'],
+        stepLines: [13, 14],
+      },
+    };
+    const expanded = await expandSkills(
+      ['Do each thing', 'Sign in', 'Done'],
+      undefined,
+      undefined,
+      '/t/loop.md',
+      [1, 2, 3],
+      { sections: wireSections, warnDeadSections: false },
+    );
+
+    // The row's value is a STEP, not a call. The `### Sign in` body appears
+    // once — from the main flow's own line 2, which really is a call.
+    expect(expanded.steps).toEqual([
+      'Sign in',
+      'Type the username',
+      'Press submit',
+      'Done',
+    ]);
+    // And the match side says why: `{{action}}` matches no section.
+    expect(expanded.rawSteps).toEqual([
+      '{{action}}',
+      'Type the username',
+      'Press submit',
+      'Done',
+    ]);
+  });
+
   /**
    * The parity the test above hand-asserts, measured against the real
    * producer instead of a literal.

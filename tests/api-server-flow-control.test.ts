@@ -760,6 +760,110 @@ describe('a return inside a skill body', () => {
   });
 });
 
+/**
+ * A return inside a LOOPED SECTION body, where the row column is a secret.
+ *
+ * The sibling of the skill-argument test above, and until recently the one
+ * shape that answered differently. The reason string is built from the match
+ * side (`expansionRawSteps`), and a looped body's match side used to be the
+ * row-INTERPOLATED text: the wire carries no `rawSteps` (contract §3.2), the
+ * server interpolates each row into `steps` before recursing, and `matchInput`
+ * fell back to that. So a body line reading `If {{password}} is already
+ * remembered then return` published the row's password on all four surfaces —
+ * wire event, run log, report cell, TestBench hover — and the flow-control
+ * story carved it out as a documented leak.
+ *
+ * The expander now pins a looped body's match side to the section's own
+ * authored lines, which closed the carve-out as a side effect of fixing what it
+ * was there for: a divergent match side bound one code-behind entry per row.
+ * That fix has a test (tests/data-rows-sections.test.ts, the expander half) and
+ * this composition did not — and the composition is the only thing that can see
+ * a reason string. It belongs here rather than beside the rows tests for the
+ * same reason the skill-argument test does: the surfaces are the server's, and
+ * this harness is the one that has all three of them.
+ */
+describe('a return inside a looped section body', () => {
+  const RAW_RETURN = 'If {{password}} is already remembered then return';
+
+  /**
+   *      1. Open the shop                     <- main
+   *      2. Sign in each account              <- main, calls the looped section
+   *      3. Done                              <- main
+   *      ### Sign in each account              (heading, line 6; two rows)
+   *      7.  If {{password}} … then return
+   *      8.  Type the username {{user}}
+   *      9.  Press submit
+   *
+   * Expanded, eight steps: 1 main, the body twice, 1 main. Both rows return at
+   * their first body line, so lines 8 and 9 are skipped in each iteration —
+   * which is what puts TWO different row secrets behind one authored reason.
+   */
+  const loopedBody = () => ({
+    steps: ['Open the shop', 'Sign in each account', 'Done'],
+    sourceLines: [1, 2, 3],
+    testFilePath,
+    sections: {
+      'sign in each account': {
+        name: 'Sign in each account',
+        headingLine: 6,
+        steps: [RAW_RETURN, 'Type the username {{user}}', 'Press submit'],
+        stepLines: [7, 8, 9],
+        rows: [
+          { user: 'ada', password: 'hunter2' },
+          { user: 'bob', password: 'letmein' },
+        ],
+      },
+    },
+  });
+
+  it('quotes the AUTHORED body line in every reason, never the row value', async () => {
+    // Keyed on the interpolated text, which is what the executor is handed —
+    // one entry per row, because each row's return line reads differently.
+    conditionHolds.add('If hunter2 is already remembered then return');
+    conditionHolds.add('If letmein is already remembered then return');
+    const events = await collect(loopedBody());
+    const body = await postSteps(loopedBody());
+
+    // The run half: each iteration returns at its own first body line, so the
+    // two lines after it are skipped and the next row still starts.
+    const skips = events.filter((e) => e.type === 'step:skip');
+    expect(skips.map((e) => e.line)).toEqual([8, 9, /* row 2 */ 8, 9]);
+
+    // Row 1's return is expanded step 2, row 2's is step 5 — so the two reasons
+    // differ in that number and in nothing else. The quoted line is the
+    // section's own authored text, placeholder intact, for both rows.
+    const expected = [
+      `Not run: step 2 returned from "Sign in each account" — ${RAW_RETURN}`,
+      `Not run: step 5 returned from "Sign in each account" — ${RAW_RETURN}`,
+    ];
+    expect(skips.map((e) => e.reason)).toEqual([expected[0], expected[0], expected[1], expected[1]]);
+
+    // The HTTP response's own list, which is a different surface.
+    const reasons = body.results
+      .filter((r: any) => r.status === 'skipped')
+      .map((r: any) => r.reasoning);
+    expect(reasons).toEqual([expected[0], expected[0], expected[1], expected[1]]);
+
+    // And the report rows, which is a third.
+    const rows = generatedReports.at(-1).steps as any[];
+    expect(rows.filter((r) => r.status === 'skipped').map((r) => r.aiExplanation)).toEqual([
+      expected[0],
+      expected[0],
+      expected[1],
+      expected[1],
+    ]);
+
+    // The thing that must never be true, over the raw JSON so a field added
+    // later is covered without this test being updated. Both rows' values: the
+    // interpolated reading leaked whichever row the iteration was on, so
+    // checking one would pass against a version that leaked the other.
+    for (const surface of [JSON.stringify(skips), JSON.stringify(reasons)]) {
+      expect(surface).not.toContain('hunter2');
+      expect(surface).not.toContain('letmein');
+    }
+  });
+});
+
 describe('the claim the server hands the executor', () => {
   it('is set on a step that claims the form, and absent on every other step', async () => {
     await postSteps({

@@ -241,6 +241,8 @@ vi.mock('../src/utils/logger.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
+// The mocked one above — this is how the carve-out's log line is read back.
+import { logger } from '../src/utils/logger.js';
 import { SKIPPED_BY_RETURN_REFUSAL } from '../src/codebehind/live-compile.js';
 import { readRecording, recordingDirFor } from '../src/codebehind/recording.js';
 import { compileLock, compileLockKey } from '../src/server/compile-lock.js';
@@ -294,6 +296,7 @@ beforeEach(async () => {
   aiCalls.length = 0;
   returnsOnCall.clear();
   claimsSeen.clear();
+  (logger.info as unknown as { mockClear: () => void }).mockClear();
   await fs.rm(stepsFilePath, { force: true });
   await fs.rm(path.join(tmpDir, '.aiui-codebehind-cache'), { recursive: true, force: true });
 });
@@ -432,6 +435,13 @@ describe('compile on a session that forbids AI', () => {
     const row1 = await postTo(session, { ...requestBody({ compile: 'run' }), env, runSettings: { ai: 'off' } });
     expect(row1.at(-1)!.effectiveSettings.ai).toBe('on');
     const promptsAfterRow1 = aiPrompts.length;
+    const carveOutLines = (): string[] =>
+      (logger.info as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .map((c) => String(c[0]))
+        .filter((line) => /withinCompileRun/.test(line));
+    // Row 1's own carve-out is the `compile` field's, which announces itself
+    // with a proposal — no line, and none wanted.
+    expect(carveOutLines()).toEqual([]);
 
     const row2 = await postTo(session, {
       steps: STEPS,
@@ -442,6 +452,15 @@ describe('compile on a session that forbids AI', () => {
     });
     // The carve-out: this batch is not gated, though it asked for no compile.
     expect(row2.at(-1)!.effectiveSettings.ai).toBe('on');
+    // And it says so in the log, once, naming the test and the mode. This batch
+    // opens no compiler and returns no proposal, so on a project that set
+    // `ai.allowInRuns: false` the line is the only place its AI calls are
+    // accounted for (stories/run-settings.md §9).
+    const afterRow2 = carveOutLines();
+    expect(afterRow2).toHaveLength(1);
+    expect(afterRow2[0]).toContain('withinCompileRun: run');
+    expect(afterRow2[0]).toContain('checkout.md');
+    expect(afterRow2[0]).toMatch(/AI allowed for this batch/);
     expect(row2.filter((f) => f.type === 'step:pass')).toHaveLength(2);
     // And that is ALL it does. No compiler was opened, so no proposal came
     // back and no model call was made for an entry.
@@ -453,6 +472,8 @@ describe('compile on a session that forbids AI', () => {
     const plain = await postTo(session, { steps: STEPS, sourceLines: [4, 5], env });
     expect(plain.at(-1)!.effectiveSettings.ai).toBe('off');
     expect(plain.at(-1)!.effectiveSettings.aiOffReason).toBe('policy');
+    // No second line: an ordinary run carries no carve-out, so it claims none.
+    expect(carveOutLines()).toHaveLength(1);
   });
 
   it('runs rows 2..N of a Compile This Step under AI, entry and all', async () => {

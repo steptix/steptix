@@ -301,8 +301,9 @@ export class LiveCompiler {
    * generates from it, iteration 2 returns before reaching it. The entry then
    * exists, and naming iteration 2's expanded number as not-attempted would
    * tell the author a step has no entry when it has the one they just paid
-   * for. `finish` drops the pairs whose key was taken — the same rule the
-   * `kept` getter applies, for the same reason.
+   * for. `finish` drops the pairs whose key ended up WRITTEN (`writtenKeys`)
+   * — not merely queued — the same rule the `kept` getter applies, for the
+   * same reason.
    */
   private readonly skippedByReturn: { number: number; key: string }[] = [];
   /**
@@ -344,6 +345,28 @@ export class LiveCompiler {
    * TestBench does not).
    */
   private readonly takenKeys = new Set<string>();
+  /**
+   * Entry keys this compile actually PUT SOMETHING in the candidate for — a
+   * generated entry or an `ai: true` decline, both of which `applyGenerated`
+   * splices into the file.
+   *
+   * A second set rather than a reuse of `takenKeys`, because the two answer
+   * different questions and only one of them is about the author's file.
+   * `takenKeys` is the dedupe gate: it is added to at `offer` time, BEFORE the
+   * model call, and its job is that nobody pays twice for one entry. Whether
+   * that one payment produced anything is settled a model call later, and it
+   * need not have: `applyGenerated` can come back `kind: 'error'` (the model
+   * answered nothing usable, or the splice threw), and then the key is taken
+   * and the file is unchanged.
+   *
+   * Everything that reconciles two iterations of one entry has to net against
+   * THIS set. A looped body called twice, where call 1 ran the body and its
+   * generation errored and call 2 returned before reaching it, is one entry
+   * with no code: netting against `takenKeys` dropped call 2 from
+   * `notAttempted` and the summary said nothing at all about a line that ends
+   * the compile with no entry. Netting against what was written names it.
+   */
+  private readonly writtenKeys = new Set<string>();
   /**
    * Offered steps that ran as code, per entry key — the raw material for
    * `kept`, which is a count of STEPS (the boxed `keptExistingFor` counts them
@@ -507,17 +530,21 @@ export class LiveCompiler {
   }
 
   /**
-   * Steps that ran as code and whose entry this compile did NOT take.
+   * Steps that ran as code and whose entry this compile did not rewrite.
    *
    * "kept" means the entry stands as it is, so a key that ends up generated —
    * whichever iteration asked for it, and whichever order the two arrived in
    * — is not kept at all. Parity with the boxed pipeline's `keptExistingFor`,
    * which drops every step whose key is in the selection.
+   *
+   * Against `writtenKeys` rather than `takenKeys`: an entry whose one
+   * generation errored was queued but never rewritten, so it does still stand
+   * as it is and the iterations that ran it as code are kept.
    */
   private get kept(): number {
     let total = 0;
     for (const [key, count] of this.keptByKey) {
-      if (!this.takenKeys.has(key)) total += count;
+      if (!this.writtenKeys.has(key)) total += count;
     }
     return total;
   }
@@ -991,6 +1018,13 @@ export class LiveCompiler {
         );
       }
     }
+    // Written, not merely queued: both of these spliced something into the
+    // candidate (an entry, or an `ai: true` decline carrying the reason), so
+    // this entry's slot is answered and the reconciliations in `finish` and in
+    // `kept` may net an iteration off against it. The `error` branch below
+    // deliberately does NOT record the key — see `writtenKeys`.
+    const wrote = applied.kind === 'entry' || applied.kind === 'declined';
+    if (wrote && step.key !== undefined) this.writtenKeys.add(step.key);
     if (applied.kind === 'entry') this.compiled.push(step.number);
     else if (applied.kind === 'declined') this.declined.push(step.number);
     else {
@@ -1086,8 +1120,13 @@ export class LiveCompiler {
     // entry when the entry is in the very proposal being handed back. Same rule
     // as the `kept` getter's, decided here rather than at `offer` time because
     // the two answers about one key arrive in either order.
+    //
+    // WRITTEN, not merely queued (`writtenKeys`, not `takenKeys`): the debt is
+    // "this line ends the compile with no entry", and an iteration whose
+    // generation errored produced none. Netting it off would leave the author
+    // with a proposal silently missing that line.
     const skippedByReturnOwed = this.skippedByReturn
-      .filter((s) => !this.takenKeys.has(s.key))
+      .filter((s) => !this.writtenKeys.has(s.key))
       .map((s) => s.number);
     const notAttempted = [
       ...new Set([...(final.notAttempted ?? []), ...this.skippedByStop, ...skippedByReturnOwed]),

@@ -2884,6 +2884,32 @@ export class SessionManager {
       internal?.bypassAiPolicy === true ||
       request.compile !== undefined ||
       request.withinCompileRun !== undefined;
+    // The third way in is the quiet one, and this is what stops it being
+    // invisible (stories/run-settings.md §9). The other two leave a trace the
+    // author already sees: the internal flag belongs to a compile-runner or
+    // errand-runner call that announces itself, and a `compile` on the wire puts
+    // a proposal on the stream and a recording beside the test. A
+    // `withinCompileRun` batch opens no compiler and proposes nothing, so on a
+    // project that set `ai.allowInRuns: false` its AI calls would otherwise be
+    // the one thing in the log with no reason next to it.
+    //
+    // The test's NAME and the mode, and nothing else: the mode is what decides
+    // whether code-behind also executes, so the two questions a reader has are
+    // answered by the one line. No step text, no parameters, no row — a row
+    // cell can be a password, and this line is written whatever the policy is.
+    // One line per batch, beside the decision it explains, so a 100-row
+    // compile's log reads one line per row rather than one per step.
+    //
+    // `testFilePath` is required alongside this field (api-server rejects it
+    // without one), so the fallback is a type guard, not a case.
+    if (request.withinCompileRun !== undefined) {
+      const named = request.testFilePath ? basename(request.testFilePath) : 'this test';
+      logger.info(
+        `Session "${sessionId}": AI allowed for this batch — it is part of a compile of ` +
+          `${named} (withinCompileRun: ${request.withinCompileRun}). ` +
+          'A compile is a request for AI, so the run AI switch does not gate it.',
+      );
+    }
     const resolvedSettings = resolveRunSettings(
       this.config,
       projectConfig,

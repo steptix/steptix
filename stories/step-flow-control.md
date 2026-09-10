@@ -309,11 +309,13 @@ ignored:
     a line another call already ran and compiled owes nothing, and naming it
     would hand the author a warning about a step whose entry is in the diff in
     front of them. The compiler nets the skipped steps against the entry keys it
-    generated, at `finish` rather than as each step is offered, because the two
-    answers about one key arrive in either order: the earlier call may be the
-    one that returned (stories/data-driven-rows.md, `takenKeys`). A step whose
-    entry NOTHING generated is still named, which is the case decision 12 was
-    written for.
+    actually WROTE something for — a generated entry or an `ai: true` decline,
+    not merely a key it queued and then failed to generate (`writtenKeys`, not
+    the `takenKeys` dedupe) — at `finish` rather than as each step is offered,
+    because the two answers about one key arrive in either order: the earlier
+    call may be the one that returned (stories/data-driven-rows.md, the entry-key
+    dedupe). A step whose entry NOTHING wrote is still named, which is the case
+    decision 12 was written for.
 
 13. **Loops.** In a run-level data table (rows under `## Steps`) a main-flow
     return ends that row's run and the next row starts. In a looped section
@@ -567,5 +569,11 @@ lines.
 - The boxed `/codebehind/compile` route reports section-body events on the
   invocation line rather than the body line. Pre-existing for every event on
   that route, pinned as a fact in its test, not changed here.
+- `aiui compile` answers decision 12's per-entry rule for the forward order
+  only. `selectSteps` keeps the FIRST inlining of an authored line, so a
+  recording whose first call to a section returned before a body line drops that
+  line and reports it not attempted even though a later call ran it. The live
+  compiler nets at `finish` and gets both orders right.
+  [Issue 054](../issues/054-boxed-compile-drops-an-entry-whose-first-inlining-was-skipped.md).
 - No first-party client sends `## Hooks` to the Sessions API, so the runtime
   hook backstop is exercised only by a `[skill:]` used as a default hook.

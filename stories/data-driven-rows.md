@@ -1219,6 +1219,18 @@ before the call line is parsed, so `[skill: x email="{{email}}"]` works.
   logs `Unresolved placeholder` for every `{{outer}}` it leaves for
   runtime, once per iteration. `{{outer}}` references that are not columns
   are left for runtime, as now.
+- The snapshot changes one thing besides the binding, and it is intended:
+  the match side is also what SECTION RESOLUTION reads. A body step
+  written `{{action}}` whose row value happens to equal a sibling
+  section's name used to be dispatched to that section on the server —
+  measured, with a row of `action = Sign in` beside a `### Sign in`, the
+  wire path inlined that section's body where the CLI emitted one plain
+  step — and now is not. That is CLI parity and the documented rule, and
+  the direction is safe on its own: interpolation only replaces `{{x}}`
+  and no section can be named `{{x}}`, so the snapshot can remove an
+  accidental dispatch and can never create one. Dead-section liveness is
+  unaffected — the scan runs once over the section definitions before any
+  recursion, so it never read an interpolated line.
 - The frame's `inputs` snapshot already reaches the `frame:scope` payload
   on `frame:push` (the server merges `frameInputs[id]` for any frame that
   has them), so the Variables view shows the iteration's row at a pause.
@@ -1411,7 +1423,11 @@ the first break only.
 per key — a step whose key the compile generated is not "kept", whichever
 iteration asked for it and whichever order the two arrived in, which is
 what the boxed `keptExistingFor` says by dropping every step whose key is
-in the selection.
+in the selection. "Generated" there means WROTE something, not merely
+queued: a key whose one generation errored left the entry exactly as it
+was, so the iterations that ran it as code are still kept, and the same
+distinction decides what a return-skipped sibling owes
+(stories/step-flow-control.md, decision 12).
 
 All of that is the in-band half — the failure the run itself watched
 happen. The cross-RUN half is the sidecar, which is the
@@ -1638,6 +1654,13 @@ with part A, since it is currently mentioned only in the pipeline diagram.
   (src/codebehind/compile.ts) matches a stale row to `steps[row.index - 1]`,
   which is the selection behind `--only-stale`; the live compile's repair
   path is the one fixed here. Or the empty-value replay pass.
+- The boxed pipeline's other disagreement about which inlining holds a key:
+  `selectSteps` takes the FIRST one, so a recording whose first call to a
+  section returned before a body line drops that line and reports it not
+  attempted even though a later call has a full transcript. The live compile
+  answers it either way round (it nets at `finish`); the parity claimed here
+  is for the forward order — first call runs, later call returns.
+  [Issue 054](../issues/054-boxed-compile-drops-an-entry-whose-first-inlining-was-skipped.md).
 - Rows from `${data.*}` arrays or a named data source. The external form
   is `dataFile:`; making the JSON data tree a row source is a separate
   story with its own shape questions.

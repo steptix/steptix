@@ -416,10 +416,15 @@ know it") stopped being true the moment Compile This Step shipped as
 - `withinCompileRun` on the wire — the rest of a logical run that compiles
   once (rows 2..N of a data-driven compile,
   [data-driven-rows.md](data-driven-rows.md) decision 11). It opens no
-  compiler and leaves no proposal, so it is the quietest of the three; what
-  gates it is that it must be exactly `'run'` or `'steps'`, is refused
+  compiler and leaves no proposal, so it would be the quietest of the three;
+  what gates it is that it must be exactly `'run'` or `'steps'`, is refused
   alongside `compile`, and is refused without a `testFilePath` — the field
   that makes it a statement about one test rather than a traceless AI budget.
+  And because that statement is the only trace it has, the server writes it
+  down: one `logger.info` per carve-out batch, naming the test file and the
+  mode, so a project with `ai.allowInRuns: false` can account for every AI call
+  in its log. The file name and the mode and nothing else — a row cell can be a
+  password, and this line is written whatever the policy is.
 
 What the wire cannot do is retain the carve-out or turn it into a setting:
 both fields are per-request, `mergeRunSettings` never sees them, and the next
