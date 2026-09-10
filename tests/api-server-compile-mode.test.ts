@@ -241,6 +241,8 @@ vi.mock('../src/utils/logger.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
+// The mocked one above — this is how the carve-out's log line is read back.
+import { logger } from '../src/utils/logger.js';
 import { SKIPPED_BY_RETURN_REFUSAL } from '../src/codebehind/live-compile.js';
 import { readRecording, recordingDirFor } from '../src/codebehind/recording.js';
 import { compileLock, compileLockKey } from '../src/server/compile-lock.js';
@@ -294,6 +296,7 @@ beforeEach(async () => {
   aiCalls.length = 0;
   returnsOnCall.clear();
   claimsSeen.clear();
+  (logger.info as unknown as { mockClear: () => void }).mockClear();
   await fs.rm(stepsFilePath, { force: true });
   await fs.rm(path.join(tmpDir, '.aiui-codebehind-cache'), { recursive: true, force: true });
 });
@@ -413,6 +416,126 @@ describe('compile on a session that forbids AI', () => {
     // after it is off again.
     const after = await postTo(session, { steps: STEPS, sourceLines: [4, 5], env });
     expect(after.at(-1)!.effectiveSettings.ai).toBe('off');
+  });
+
+  it('carves out the rest of a Run & Compile, and compiles nothing extra', async () => {
+    // Rows 2..N of a data-driven Run & Compile (stories/data-driven-rows.md,
+    // decision 11). One entry serves every row, so only row 1 carries
+    // `compile` — and the AI switch is resolved per BATCH, so on a project with
+    // AI off in runs the author's one gesture used to come back as row 1 with a
+    // diff and rows 2..N failing "this run forbids AI", for a policy that
+    // explicitly carves out the thing they asked for.
+    //
+    // POSTed through the real entry because `StepRequest` is an explicit
+    // per-field allow-list: the bypass computation could be right and the field
+    // never reach it. That is how `envName` was lost.
+    const session = 'within-compile-run';
+    const env = { AI_API_KEY: 'from-dot-env' };
+
+    const row1 = await postTo(session, { ...requestBody({ compile: 'run' }), env, runSettings: { ai: 'off' } });
+    expect(row1.at(-1)!.effectiveSettings.ai).toBe('on');
+    const promptsAfterRow1 = aiPrompts.length;
+    const carveOutLines = (): string[] =>
+      (logger.info as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .map((c) => String(c[0]))
+        .filter((line) => /withinCompileRun/.test(line));
+    // Row 1's own carve-out is the `compile` field's, which announces itself
+    // with a proposal — no line, and none wanted.
+    expect(carveOutLines()).toEqual([]);
+
+    const row2 = await postTo(session, {
+      steps: STEPS,
+      sourceLines: [4, 5],
+      testFilePath,
+      env,
+      withinCompileRun: 'run',
+    });
+    // The carve-out: this batch is not gated, though it asked for no compile.
+    expect(row2.at(-1)!.effectiveSettings.ai).toBe('on');
+    // And it says so in the log, once, naming the test and the mode. This batch
+    // opens no compiler and returns no proposal, so on a project that set
+    // `ai.allowInRuns: false` the line is the only place its AI calls are
+    // accounted for (stories/run-settings.md §9).
+    const afterRow2 = carveOutLines();
+    expect(afterRow2).toHaveLength(1);
+    expect(afterRow2[0]).toContain('withinCompileRun: run');
+    expect(afterRow2[0]).toContain('checkout.md');
+    expect(afterRow2[0]).toMatch(/AI allowed for this batch/);
+    expect(row2.filter((f) => f.type === 'step:pass')).toHaveLength(2);
+    // And that is ALL it does. No compiler was opened, so no proposal came
+    // back and no model call was made for an entry.
+    expect(row2.find((f) => f.type === 'compile:result')).toBeUndefined();
+    expect(aiPrompts.length).toBe(promptsAfterRow1);
+
+    // The session's retained `off` is untouched — a plain batch after it is
+    // gated again, which is what makes this per-request rather than a setting.
+    const plain = await postTo(session, { steps: STEPS, sourceLines: [4, 5], env });
+    expect(plain.at(-1)!.effectiveSettings.ai).toBe('off');
+    expect(plain.at(-1)!.effectiveSettings.aiOffReason).toBe('policy');
+    // No second line: an ordinary run carries no carve-out, so it claims none.
+    expect(carveOutLines()).toHaveLength(1);
+  });
+
+  it('runs rows 2..N of a Compile This Step under AI, entry and all', async () => {
+    // `withinCompileRun` carries the MODE, and `'steps'` is the mode that
+    // disables code-behind EXECUTION so a broken entry re-records under AI.
+    // Rows 2..N have to run the same way: the entry on disk is the one row 1 is
+    // repairing, the proposal is not applied until the loop ends, and a row
+    // that ran it would throw, heal under AI, and paint ⚠ on the very step
+    // whose repair is in flight. A boolean field bought the AI carve-out and
+    // silently left execution on.
+    await fs.writeFile(
+      stepsFilePath,
+      [
+        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        'export default defineSteps([',
+        "  { source: 'Open the dashboard', async run() {} },",
+        ']);',
+        '',
+      ].join('\n'),
+    );
+    const env = { AI_API_KEY: 'from-dot-env' };
+
+    // `'run'` is the other mode, and it must NOT disable execution: a Run &
+    // Compile serves a working entry as code on every row.
+    await runSteps({ ...requestBody(), env, withinCompileRun: 'run' });
+    expect(
+      (stepCalls[0]!.opts['codeBehind'] as { entry?: unknown } | undefined)?.entry,
+      'a row of a Run & Compile still runs its entry as code',
+    ).toBeDefined();
+
+    stepCalls.length = 0;
+    await runSteps({ ...requestBody(), env, withinCompileRun: 'steps' });
+    expect(
+      stepCalls[0]!.opts['codeBehind'],
+      'a row of a Compile This Step must run under AI, like the row that compiles',
+    ).toBeUndefined();
+
+    await fs.rm(stepsFilePath, { force: true });
+  });
+
+  it('refuses "withinCompileRun" alongside a compile, and refuses a bad one', async () => {
+    // The pair is not composable — one says "open a compiler", the other says
+    // "this batch does not" — and a client sending both has lost track of which
+    // row it is on. Refused rather than ranked, for the reason `compile` itself
+    // refuses an unknown value: a client that asked for one thing and quietly
+    // got another has no way to notice.
+    const both = await runSteps(requestBody({ compile: 'run', withinCompileRun: 'run' }));
+    expect(both.status).toBe(400);
+    expect(both.frames[0]!.error).toMatch(/does NOT compile/);
+
+    // A boolean is what this field used to be, and it is exactly the value that
+    // must not be guessed at: `true` cannot say which mode the run is.
+    const legacy = await runSteps(requestBody({ withinCompileRun: true }));
+    expect(legacy.status).toBe(400);
+    expect(legacy.frames[0]!.error).toMatch(/must be "run" or "steps"/);
+
+    // The same demand `compile` makes. This field lifts `ai.allowInRuns: false`
+    // for the batch with no stream requirement and no proposal to show for it,
+    // so the test file it names is the whole of what ties it to a compile.
+    const rootless = await runSteps({ steps: STEPS, sourceLines: [4, 5], withinCompileRun: 'run' });
+    expect(rootless.status).toBe(400);
+    expect(rootless.frames[0]!.error).toMatch(/requires "testFilePath"/);
   });
 });
 
@@ -1181,10 +1304,18 @@ describe('compile a run whose section returns', () => {
     expect(frames.filter((f) => f.type === 'step:skip').map((f) => f.line)).toEqual([12, 13]);
 
     const result = frames.find((f) => f.type === 'compile:result')!;
-    // THE finding. Expanded step numbers, as every number in this summary is:
-    // steps 6 and 7 are the second call's body, which no transcript covers.
-    expect(result.summary.notAttempted).toEqual([6, 7]);
-    // …with the reason on the stream, per step, rather than only a count.
+    // Empty, and that is the composition with the entry-key dedupe
+    // (stories/data-driven-rows.md, live-compile.ts `takenKeys`). Steps 6 and 7
+    // are the SECOND call's body — the same two authored lines the FIRST call
+    // already ran and compiled, binding to the same two entries. So they are in
+    // the proposal below, and naming them not-attempted would tell the author
+    // two steps have no entry while handing them the entry. `notAttempted` is
+    // owed per ENTRY, not per inlining of one.
+    expect(result.summary.notAttempted).toEqual([]);
+    // The per-step reason is still on the stream, because it is a statement
+    // about the RUN — these two lines did not execute — which is true either
+    // way and is the only place the author can see WHICH lines the return left
+    // behind.
     const declined = frames.filter(
       (f) => f.type === 'compile:step' && f.message === SKIPPED_BY_RETURN_REFUSAL,
     );
@@ -1194,7 +1325,12 @@ describe('compile a run whose section returns', () => {
     // recording. The returning step compiles (the conditional form is exactly
     // what this story adds to the compiler), and so does the main-flow step
     // AFTER the flow that ended.
-    expect(result.summary.compiled).toBe(6);
+    //
+    // FIVE entries, not one per expanded step: the two main-flow steps plus the
+    // body's three authored lines, generated from the first call and deduped on
+    // the second. The section is called twice, and `entryKeyOf`'s occurrence
+    // restarts per frame instance, so both calls' lines share one key each.
+    expect(result.summary.compiled).toBe(5);
     const proposed = result.files[stepsFilePath] as string;
     expect(proposed).toContain(`source: 'If the page title contains "Dashboard" then return'`);
     expect(proposed).toContain("source: 'Search for the order'");
@@ -1223,6 +1359,32 @@ describe('compile a run whose section returns', () => {
     expect(proposed).toContain(`source: 'If the page title contains "Dashboard" then return'`);
   });
 
+  it('a LATER call compiling what an earlier one skipped clears the debt', async () => {
+    // The other order, and the one that decides where the two answers meet.
+    // The FIRST call returns, so steps 3 and 4 are recorded as skipped before
+    // anything has generated their entries; the SECOND call runs the same two
+    // lines and generates them. An offer-time check could not see that — the
+    // key is taken after the skip is recorded — so `finish` is where the debt is
+    // netted off, exactly as the `kept` getter nets a key that ended up
+    // generated.
+    returnsOnCall.set(RETURN_STEP, 1);
+    const { frames } = await runSteps(returningBody({ compile: 'run' }));
+
+    // The run half: it was the first call's body that got skipped.
+    expect(frames.filter((f) => f.type === 'step:skip').map((f) => f.line)).toEqual([12, 13]);
+    const declined = frames.filter(
+      (f) => f.type === 'compile:step' && f.message === SKIPPED_BY_RETURN_REFUSAL,
+    );
+    expect(declined.map((f) => f.step)).toEqual([3, 4]);
+
+    const result = frames.find((f) => f.type === 'compile:result')!;
+    // Nothing owed: both lines are in the proposal, written from call 2.
+    expect(result.summary.notAttempted).toEqual([]);
+    const proposed = result.files[stepsFilePath] as string;
+    expect(proposed).toContain("source: 'Enter the username'");
+    expect(proposed).toContain("source: 'Click Sign in'");
+  });
+
   it('leaves a run that returned nowhere alone — no notAttempted, byte for byte as before', async () => {
     // The narrowness check: the same test, same shape, condition never holds.
     // Every step runs, every step compiles, and the summary says nothing about
@@ -1232,6 +1394,12 @@ describe('compile a run whose section returns', () => {
     expect(frames.some((f) => f.type === 'step:skip')).toBe(false);
     const result = frames.find((f) => f.type === 'compile:result')!;
     expect(result.summary.notAttempted).toEqual([]);
-    expect(result.summary.compiled).toBe(8);
+    // Eight steps ran; five ENTRIES came out, because the section is called
+    // twice and one entry serves both calls — the same count the boxed
+    // pipeline's `selectSteps` reaches, and the same number the test above
+    // reports for the returning variant. `totalSteps` is what counts expanded
+    // steps.
+    expect(result.summary.compiled).toBe(5);
+    expect(result.summary.totalSteps).toBe(8);
   });
 });

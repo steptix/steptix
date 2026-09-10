@@ -344,9 +344,16 @@ arrangement:
   does hold one piece of per-run state: the `/api/documents` list behind the
   Documents page. Tests that assert on it clear it first
   (`DELETE /api/documents`), but two runs uploading at the same moment can
-  still see each other's rows — a `securebank-upload.md` row-count failure
-  during a concurrent run is that, not a regression. No live suite in
-  `tests/integration/live/` drives it today.
+  still see each other's rows, and one run's "Clear all" wipes the other's rows
+  mid-loop. `data-rows.test.cjs` drives it (`securebank-upload-rows.md`: three
+  uploads, then a count of 3), so a count of 5, 4 or 2 during a concurrent run
+  is that, not a regression. The report says which: the fixture server's
+  `doc-NNN` ids never reset across `DELETE`, so a table whose ids do not start
+  at `doc-001` had another run's uploads in it. Before a gate run, check who
+  owns 8787 (`Get-NetTCPConnection -LocalPort 8787 -State Listen`) and whether
+  a `Code.exe` under another worktree's `.vscode-test` is alive — measured
+  2026-09-11: a gate failed twice on exactly this while another session's
+  live run was adopting the app.
 
 There used to be an exception here: `templates/init/tests/github.md` drove a
 real github.com login, so two worktrees ran it with the same credentials from

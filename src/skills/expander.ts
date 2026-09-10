@@ -952,6 +952,53 @@ async function expandRecursive(
           const rowBindings = row
             ? { ...(ctx.rowBindings ?? {}), ...row }
             : ctx.rowBindings;
+
+          // The body's MATCH SIDE, and it has to be SET — never left to
+          // `matchInput`'s fallback — because the fallback would answer with
+          // the interpolated text below.
+          //
+          // The wire carries no `rawSteps` for a section (contract §3.2), so on
+          // that path `matchInput` falls back to `steps[i]`, which by the
+          // interpolation a few statements down is `Upload a.png` rather than
+          // `Upload {{file}}`: the match side and the code-behind binding
+          // `source` would then differ between the CLI and the server, and a
+          // three-row loop would bind three entries on the server where the CLI
+          // binds one. Measured, before this line existed: a proposal with one
+          // entry per row.
+          //
+          // `section.steps` is what the CLI puts in `ParsedSection.rawSteps` —
+          // the raw body line with the list marker stripped and trimmed,
+          // `[no-hooks]` included (parser `scan.entries[i].raw`) — for both
+          // producers that exist: runner-core's `extractSections`, which is
+          // what TestBench ships, and `sectionsPayload` in src/mcp/assemble.ts,
+          // which used to ship the parser's marked reading instead and so bound
+          // a looped body's entries to text nothing else writes. Those two are
+          // byte-identical to `rawSteps`; the one shape where no wire producer
+          // can be is a WRAPPED body item, where the CLI folds the whole
+          // multi-line item and every scanner sees its first physical line —
+          // unrepresentable on the wire, which contract §3.2 answers with a
+          // detect-and-refuse gate (`findWrappedStepLines`) rather than a
+          // second reading.
+          //
+          // Deliberately NOT the marker-stripped `bodySteps` below: the CLI's
+          // match side keeps the marker, and stripping it here would trade one
+          // divergence for another.
+          //
+          // It changes one more thing than the binding, and deliberately: the
+          // match side is also what SECTION RESOLUTION reads (`resolveSection`
+          // → `matchInput`), and what the occurrence counter reads
+          // (`bodyFrameTexts`). So a looped body step written `{{action}}` whose
+          // row value happens to equal a sibling section's name used to be
+          // dispatched to that section on the server — measured: with a row of
+          // `action = Sign in` and a `### Sign in` beside it, the wire path
+          // inlined that section's body where the CLI emitted one plain step.
+          // It no longer is. The direction is safe as well as CLI-correct:
+          // interpolation only ever replaces `{{x}}`, and no section can be
+          // named `{{x}}`, so pinning the match side can remove an accidental
+          // dispatch and can never create one. Dead-section liveness is
+          // untouched — `reportDeadSections` scans the section DEFINITIONS once
+          // before the recursion, so it never saw an interpolated line.
+          const authoredRaws = section.rawSteps ?? section.steps;
           // Strip a leading `[no-hooks]` from each body step as it is inlined.
           // The CLI parser already stripped these, but the wire shape carries
           // markers verbatim (the client can't strip them — they are part of
@@ -984,7 +1031,10 @@ async function expandRecursive(
           // attributed to another one's line.
           const keep = keptBodySteps(section.runSteps, section.steps.length);
           let bodyLines = section.stepLines;
-          let bodyRaws = section.rawSteps;
+          // `authoredRaws`, never `section.rawSteps` — see it above. The
+          // narrowing filters the match side, it does not decide what the match
+          // side IS.
+          let bodyRaws = authoredRaws;
           let occurrenceOffsets: DroppedAhead[] | null = null;
           if (keep) {
             // What each kept body step BINDS as — the loader's occurrence key
@@ -996,14 +1046,17 @@ async function expandRecursive(
             // what each item EXPANDS to, because one authored line is not one
             // step: a control line emits its guard AND its tail here, and a
             // call emits nothing here at all.
-            occurrenceOffsets = droppedAheadOf(ctx, bodySteps, section.rawSteps, keep);
+            occurrenceOffsets = droppedAheadOf(ctx, bodySteps, authoredRaws, keep);
             bodyLines = keep.map((k) => section.stepLines[k] ?? 0);
-            // The same fallback `matchInput` makes: a hole in `rawSteps` means
-            // the step text IS the match side, and freezing `''` into the
-            // filtered copy would make a narrowed run match on nothing.
-            bodyRaws = section.rawSteps
-              ? keep.map((k) => section.rawSteps![k] ?? bodySteps[k] ?? '')
-              : undefined;
+            // The same fallback `matchInput` makes: a hole in the match side
+            // means the step text IS the match side, and freezing `''` into the
+            // filtered copy would make a narrowed run match on nothing. The
+            // stand-in is `section.steps[k]` — the AUTHORED body line — and not
+            // `bodySteps[k]`, which by here is marker-stripped and has this
+            // iteration's row in it. `authoredRaws` falls back to
+            // `section.steps` wholesale, so a hole needs a sparse `rawSteps`
+            // from a producer to happen at all.
+            bodyRaws = keep.map((k) => authoredRaws[k] ?? section.steps[k] ?? '');
             bodySteps = keep.map((k) => bodySteps[k]!);
           }
 
@@ -1012,15 +1065,14 @@ async function expandRecursive(
           // call sibling sections, so the sections map stays put — only the
           // match-side array swaps to this body's own.
           //
-          // `rawSteps` stays the AUTHORED text even when a row is interpolated
-          // into the body below. The wire carries no `rawSteps` (contract
-          // §3.2), so `matchInput` falls back to `steps[i]` on the server —
-          // and if that were the interpolated text, the match side and the
-          // code-behind binding `source` would differ between the CLI and the
-          // server, binding entries on one path and not the other.
+          // Always SET, never handed back to the fallback: `bodyRaws` descends
+          // from `authoredRaws`, which is `section.rawSteps ?? section.steps`,
+          // so it is the authored body text on the CLI path and on the wire
+          // path alike. See `authoredRaws` above for why the fallback is the
+          // wrong answer here.
           const bodyCtx: ExpandContext = {
             ...ctx,
-            ...(bodyRaws ? { rawSteps: bodyRaws } : { rawSteps: undefined }),
+            rawSteps: bodyRaws,
             ...(rowBindings && { rowBindings }),
           };
 

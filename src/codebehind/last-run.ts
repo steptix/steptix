@@ -32,6 +32,23 @@ export interface LastRunStep {
    * Optional so sidecars written before the field still read back.
    */
   file?: string;
+  /**
+   * The binding's `occurrence` — which of the identically-worded steps of one
+   * frame instance this row is. Counted per frame instance, so it restarts at
+   * 0 for every iteration of a looped body.
+   *
+   * Written so `priorFailure` can find the failure without counting rows. Its
+   * rows are execution-ordered and a looped body writes one per ITERATION, so
+   * the Nth row of an identity is iteration-major — while the compile that
+   * reads it is offered one iteration only (an entry serves every row) and
+   * asks for occurrence N. Positionally those two agree for iteration 1 and
+   * nothing else: a body that failed on row 3 read back clean and regenerated
+   * from scratch instead of going through the repair prompt.
+   *
+   * Optional so sidecars written before the field still read back, and the
+   * reader falls back to the positional match for them.
+   */
+  occurrence?: number;
   status: StepStatus;
   /** True when the step ran its code-behind entry rather than calling the AI. */
   fromCodeBehind: boolean;

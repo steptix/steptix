@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { parseTestContent } from '../src/parser/markdown.js';
-import { buildSectionIndex } from '../runner-core/dist/section-index.js';
-import { extractSections, findWrappedStepLines } from '../runner-core/dist/step-lines.js';
+// runner-core from `src/`, not `dist/`: the root build compiles neither, so a
+// guard reading `dist/` can be asserting against bytes older than the source
+// the extension bundles. Same reasoning as tests/data-rows-sections.test.ts.
+import { buildSectionIndex } from '../runner-core/src/section-index.ts';
+import { extractSections, findWrappedStepLines } from '../runner-core/src/step-lines.ts';
 import { matchText } from '../src/parser/section-match.js';
 import { expandSkills } from '../src/skills/expander.js';
 

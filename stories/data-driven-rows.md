@@ -677,10 +677,36 @@ is a new branch in the walk, not a new parser. No test or skill file under
     reason that says so (§"Code-behind"). On the TestBench path only the
     first selected run row's batch carries `compile`; the remaining rows
     run plain, so a matrix Run & Compile produces one recording and one
-    generation rather than five that overwrite each other. A section loop
-    is inside one run and records every iteration; the generator binds
-    them all to the same entries and generates from the first, which is
-    what it does for a section called twice today.
+    generation rather than five that overwrite each other. They are still
+    the same logical run, and they say so: a row that does not compile
+    sends `withinCompileRun: <the run's compile mode>`, which asks for no
+    compile and keeps the two things the server decides per BATCH from the
+    mode — the AI switch's compile carve-out (run-settings §9), and
+    code-behind execution off for `'steps'`. Without the carve-out, a
+    project with `ai.allowInRuns: false` answered one gesture with a diff
+    for row 1 and "this run forbids AI" for every row after it. Without the
+    mode, rows 2..N of a Compile This Step ran the existing entry — the
+    broken one row 1 is repairing — which threw, healed under AI, and
+    painted ⚠ on the very step being repaired.
+
+    The carve-out has a cost worth naming, and it is new: on an
+    `ai.allowInRuns: false` project a five-row Run & Compile now spends AI
+    on every step of all five rows. The proposal is not applied during the
+    run, so rows 2..N have no compiled entry to replay and each step runs
+    the AI way. Before, that run spent row 1 and failed rows 2..N fast on
+    the policy. The trade is deliberate: the author asked for a compile of a
+    five-row test, and a run that refuses four fifths of itself is not one.
+
+    One thing rides on `compile` and not on `withinCompileRun`, and it is
+    the "one compile per test file at a time" lock: it is acquired for the
+    batch that asks for a compile, so rows 2..N hold none and another
+    client's compile of the same file can start mid-loop — TestBench's own
+    `isRunning` covers the same-client case, and the pre-rows code left the
+    same gap between rows. Not closed here.
+
+    A section loop is inside one run and records every iteration; the
+    generator binds them all to the same entries and generates from the
+    first, which is what it does for a section called twice today.
 
 12. **One run, one report. Both loops, every path.** A five-row run writes
     one HTML file, not five; `buildReportBaseName` loses its `-rowN`
@@ -1015,9 +1041,36 @@ recording on disk, which is row 1's.
 
 Rows 2–N replay: a `getVar` entry reads the row; an `ai: true` entry
 spends its turn; a broken entry heals as today and marks the step stale.
-The last-run sidecar is last-writer-wins today; with rows it is written
-by row 1 only (decision 11), so `--only-stale` and the ⚠ hover describe
-row 1's replay. A worst-of-rows merge is a follow-on.
+The last-run sidecar stays last-writer-wins, and every row of a Run &
+Compile writes it. The server's gate is "this batch describes the whole
+test, and it was not a compile's own Record or Replay"
+(`!isSubsetBatch && startAt === undefined && !codeBehindOff &&
+!candidateFiles`). `codeBehindOff` is the part that reads on `compile` —
+it is true for `compile: 'steps'` (and now for `withinCompileRun:
+'steps'`), so a Compile This Step writes no sidecar at all, on any row.
+A `'run'` compile does not turn execution off, so every row writes:
+`--only-stale` and the repair prompt therefore describe the LAST row's
+replay, while the recording beside the test is row 1's (decision 11) —
+they can disagree, and last-writer-wins is not worse than row-1-only for
+the question the sidecar's readers ask ("does this entry still work?").
+The ⚠ hover is not one of those readers: TestBench paints it from the
+live step event's `codeBehindStale` and reads no sidecar. A worst-of-rows
+merge is a follow-on.
+
+Reading it back is not positional. A repair asks "what did occurrence *N*
+of this step do last run", and the sidecar's rows for one identity are
+iteration-major — so the *N*th of them is iteration 1's, and an entry that
+broke on row 3 read back clean. Each row carries its binding's
+`occurrence`, and the reader takes the first FAILED row of that
+occurrence, whichever iteration wrote it: right for a loop, and still
+unable to repair a body's first *"Click Save"* from its second one's
+failure. The positional read survives for one case only — a sidecar whose
+rows carry no `occurrence` at all, written before the field existed. When
+the rows do carry it and none is the asked-for occurrence there is no
+prior failure, rather than a positional guess: a body that gained a
+duplicate line and was compiled but not re-run has an entry at occurrence
+1 and no row for it, and `same[1]` would have handed that entry another
+iteration's occurrence-0 error to repair from.
 
 ### Reports
 
@@ -1166,6 +1219,18 @@ before the call line is parsed, so `[skill: x email="{{email}}"]` works.
   logs `Unresolved placeholder` for every `{{outer}}` it leaves for
   runtime, once per iteration. `{{outer}}` references that are not columns
   are left for runtime, as now.
+- The snapshot changes one thing besides the binding, and it is intended:
+  the match side is also what SECTION RESOLUTION reads. A body step
+  written `{{action}}` whose row value happens to equal a sibling
+  section's name used to be dispatched to that section on the server —
+  measured, with a row of `action = Sign in` beside a `### Sign in`, the
+  wire path inlined that section's body where the CLI emitted one plain
+  step — and now is not. That is CLI parity and the documented rule, and
+  the direction is safe on its own: interpolation only replaces `{{x}}`
+  and no section can be named `{{x}}`, so the snapshot can remove an
+  accidental dispatch and can never create one. Dead-section liveness is
+  unaffected — the scan runs once over the section definitions before any
+  recursion, so it never read an interpolated line.
 - The frame's `inputs` snapshot already reaches the `frame:scope` payload
   on `frame:push` (the server merges `frameInputs[id]` for any frame that
   has them), so the Variables view shows the iteration's row at a pause.
@@ -1332,15 +1397,53 @@ value in row 1 declines with the "populated row first" reason, and
 `getVar` reads the current iteration's row at replay.
 
 Generation is once per section body, frame-aware, as for a section
-called twice today: the compile records every iteration, `selectSteps`
-generates from the first expanded step with a given entry key, and
-occurrence counting restarts per frame instance. Two mismatches to state:
-the last-run sidecar counts occurrences run-globally while the live
-compiler picks by binding occurrence, so after a heal on iteration 3 the
-⚠ hover describes iteration 1; and the replay rounds run every iteration
-against code generated from iteration 1, so a value that vouches on row
-1 and is empty on row 2 replays as `fill('')` and passes silently. Both
-are noted, neither is fixed here.
+called twice today: the compile records every iteration, the boxed
+`selectSteps` generates from the first expanded step with a given entry
+key, the live compiler's `takenKeys` does the same as the iterations
+arrive, and occurrence counting restarts per frame instance.
+
+No exception, and the rule is worth stating from the other end: which
+iteration holds the key is not "whichever arrived first" but "whichever
+first had something to say". A clean code run takes no key — it is refused
+as "ran as code" before the dedupe — so the holder is the first iteration
+whose entry BROKE (`codeBehindStale` on its result), or the first one with
+no entry at all. That is what makes a repair fully paired: the code it
+reads, the error it is handed and the page it is shown all belong to one
+iteration, for one model call. Offering the later breaks too would ask for
+a second repair over the entry the first one just wrote — code that never
+ran, paired with the error the OLD entry threw — and the last and
+least-informed answer would win, at one model call per row for the common
+shape, an entry that is broken identically on every row.
+
+The cost is the narrow case, and it is real: an iteration that breaks
+DIFFERENTLY later in the loop is skipped, so the entry is repaired from
+the first break only.
+
+`kept` is the one count the loop still makes ambiguous, and it is answered
+per key — a step whose key the compile generated is not "kept", whichever
+iteration asked for it and whichever order the two arrived in, which is
+what the boxed `keptExistingFor` says by dropping every step whose key is
+in the selection. "Generated" there means WROTE something, not merely
+queued: a key whose one generation errored left the entry exactly as it
+was, so the iterations that ran it as code are still kept, and the same
+distinction decides what a return-skipped sibling owes
+(stories/step-flow-control.md, decision 12).
+
+All of that is the in-band half — the failure the run itself watched
+happen. The cross-RUN half is the sidecar, which is the
+only thing a Compile This Step has to go on — code-behind execution is off
+for that request, so nothing throws in band. Its rows are
+iteration-major while the compile picks by binding occurrence, so a heal on
+iteration 3 sat at a position nothing asked about and the repair prompt
+never saw it — fixed by writing each row's `occurrence` and matching on it
+(see §"Code-behind" above). What that repair cannot fix is the page: the
+error is the failing iteration's and the DOM is the offered iteration's,
+normally the first. Two remainders: the boxed pipeline's own positional
+read of the sidecar (`collectStaleKeys` in src/codebehind/compile.ts,
+behind `--only-stale`), and the replay rounds running every iteration
+against code generated from iteration 1, so a value that vouches on row 1
+and is empty on row 2 replays as `fill('')` and passes silently. Both
+noted, neither fixed.
 
 ### Report
 
@@ -1547,8 +1650,17 @@ with part A, since it is currently mentioned only in the pipeline diagram.
 - A table under a skill file's own `## Steps`.
 - Grouping body-step results under a synthetic call-site result.
 - Painting inner call sites of nested loops.
-- Fixing the sidecar-versus-live-compiler occurrence mismatch, or the
-  empty-value replay pass.
+- The boxed pipeline's positional read of the sidecar — `collectStaleKeys`
+  (src/codebehind/compile.ts) matches a stale row to `steps[row.index - 1]`,
+  which is the selection behind `--only-stale`; the live compile's repair
+  path is the one fixed here. Or the empty-value replay pass.
+- The boxed pipeline's other disagreement about which inlining holds a key:
+  `selectSteps` takes the FIRST one, so a recording whose first call to a
+  section returned before a body line drops that line and reports it not
+  attempted even though a later call has a full transcript. The live compile
+  answers it either way round (it nets at `finish`); the parity claimed here
+  is for the forward order — first call runs, later call returns.
+  [Issue 055](../issues/055-boxed-compile-drops-an-entry-whose-first-inlining-was-skipped.md).
 - Rows from `${data.*}` arrays or a named data source. The external form
   is `dataFile:`; making the JSON data tree a row source is a separate
   story with its own shape questions.

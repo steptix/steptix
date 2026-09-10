@@ -498,11 +498,27 @@ function usableSourceLines(
 }
 
 /**
- * `ParsedSection` minus `rawSteps`.
+ * `ParsedSection` minus `rawSteps` — with `rawSteps`' CONTENT under `steps`.
  *
- * The extra key is not an error — `validateSectionEntry` does not reject
- * unknown ones — but it is the match side for nested bare-name calls, which
- * the server re-derives itself, so it is pure payload weight.
+ * Dropping the field is right: it is the match side for nested bare-name
+ * calls, which the server re-derives from `steps` itself (contract §2.1's
+ * fallback), so shipping both would be pure payload weight.
+ *
+ * But the wire's `steps` is defined as the raw body line — `/^\s*\d+\.\s+/`
+ * removed, trimmed, `[no-hooks]` verbatim (contract §3.2) — and that is
+ * `ParsedSection.rawSteps`, not `ParsedSection.steps`. The latter is the
+ * parser's MARKED reading: `extractPlainText` has stripped inline markdown
+ * (in a loose list) and the `[no-hooks]` marker is gone. Measured on a loose
+ * body carrying both, `steps` is `["Click Save for {{file}}", "Type hello"]`
+ * where `rawSteps` — and runner-core's `extractSections`, which is what
+ * TestBench ships — is `["Click **Save** for {{file}}", "[no-hooks] Type
+ * \`hello\`"]`.
+ *
+ * That difference is not cosmetic once a body loops: the server has no
+ * `rawSteps` to fall back past, so `steps[i]` becomes the match side AND the
+ * code-behind binding's `source`. Sending the marked reading bound entries to
+ * text no other producer ever writes — nothing matched, every iteration ran
+ * under AI, and the run warned that the entry matches no step.
  *
  * The map is null-prototype for the same reason the parser's and the server's
  * are: a section may legally be named `__proto__`, and on a normal object
@@ -520,7 +536,7 @@ function sectionsPayload(
     out[key] = {
       name: section.name,
       headingLine: section.headingLine,
-      steps: section.steps,
+      steps: section.rawSteps,
       stepLines: section.stepLines,
       ...(section.rows && { rows: section.rows }),
     };

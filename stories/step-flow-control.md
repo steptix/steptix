@@ -193,10 +193,13 @@ ignored:
    number by, and the text is what a reader with only the editor can find. It
    is the AUTHORED line, never the interpolated one, so a resolved
    `{{password}}` or skill argument cannot ride out on a log line, a wire event
-   or a report cell. The one exception is a looped section body on the SERVER,
-   whose authored text the wire shape does not carry (`matchInput` falls back to
-   the interpolated step when `rawSteps` is absent), so that one reason quotes
-   the line with the row values already in it. Skipped
+   or a report cell. This was written with one exception — a looped section body
+   on the SERVER, whose authored text the wire shape does not carry, leaving
+   `matchInput` to fall back to the row-interpolated step — and that exception
+   is gone: the expander pins a looped body's match side to the section's own
+   `steps`, which the wire defines as the raw body line, before interpolating a
+   row into the text it executes (stories/data-driven-rows.md, the same fix that
+   stopped a three-row loop binding three code-behind entries). Skipped
    steps run no hooks, spend no tokens, take no screenshot, and are not added
    to the model's conversation history; the returning step's history line
    says it returned, so a later step knows why the gap is there. The
@@ -299,6 +302,20 @@ ignored:
     still compiled. On a proving replay a skipped step is neither proven nor
     failed; the compile is `partial` and says which steps the replay never
     reached and why.
+
+    "Not attempted" is owed per ENTRY, not per inlining of one. A section
+    called twice, or a looped body, inlines one authored line many times and
+    binds every copy to the same entry — so a call that returns before reaching
+    a line another call already ran and compiled owes nothing, and naming it
+    would hand the author a warning about a step whose entry is in the diff in
+    front of them. The compiler nets the skipped steps against the entry keys it
+    actually WROTE something for — a generated entry or an `ai: true` decline,
+    not merely a key it queued and then failed to generate (`writtenKeys`, not
+    the `takenKeys` dedupe) — at `finish` rather than as each step is offered,
+    because the two answers about one key arrive in either order: the earlier
+    call may be the one that returned (stories/data-driven-rows.md, the entry-key
+    dedupe). A step whose entry NOTHING wrote is still named, which is the case
+    decision 12 was written for.
 
 13. **Loops.** In a run-level data table (rows under `## Steps`) a main-flow
     return ends that row's run and the next row starts. In a looped section
@@ -543,15 +560,20 @@ the server run log but not the editor, where the hover on line 30 said "step
 now rides along, clipped at 80 characters. And the server and Electron loops
 built that text from the **interpolated** step, so a skill argument's literal
 value could reach the wire and the report; they use the authored line now.
-The one case that cannot is a looped section body on the server, whose
-authored form never travels on the wire.
+This shipped with one case it could not cover — a looped section body on the
+server, whose authored form never travels on the wire — which the row-compile
+work then closed by pinning that body's match side to the section's own raw
+lines.
 
 ### Still open
-
-- A looped section body on the Sessions API path has no authored text on the
-  wire, so its skip reason stays interpolated (documented in the SPEC).
 - The boxed `/codebehind/compile` route reports section-body events on the
   invocation line rather than the body line. Pre-existing for every event on
   that route, pinned as a fact in its test, not changed here.
+- `aiui compile` answers decision 12's per-entry rule for the forward order
+  only. `selectSteps` keeps the FIRST inlining of an authored line, so a
+  recording whose first call to a section returned before a body line drops that
+  line and reports it not attempted even though a later call ran it. The live
+  compiler nets at `finish` and gets both orders right.
+  [Issue 055](../issues/055-boxed-compile-drops-an-entry-whose-first-inlining-was-skipped.md).
 - No first-party client sends `## Hooks` to the Sessions API, so the runtime
   hook backstop is exercised only by a `[skill:]` used as a default hook.

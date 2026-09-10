@@ -127,6 +127,29 @@ export interface StreamStepsRequest {
    */
   compileScope?: { section: string };
   /**
+   * This batch belongs to a compile of MODE `x`, but asks for no compile of
+   * its own.
+   *
+   * Rows 2..N of a data-driven Run & Compile, or of a Compile This Step in a
+   * table file. One entry serves every row, so only the first row carries
+   * `compile` — but every row is part of the run the author asked to compile,
+   * and the server decides two things per BATCH from that field:
+   *
+   * - the AI switch (`ai.allowInRuns`, `runSettings.ai`), which carves out a
+   *   compile. Without this field a project with AI off in runs gives row 1 a
+   *   diff and fails rows 2..N with "this run forbids AI".
+   * - whether code-behind EXECUTES. A `'steps'` compile runs its steps under
+   *   AI so a broken entry re-records, and rows 2..N of one have to run the
+   *   same way: a row that ran the existing (broken) entry would throw, heal,
+   *   and paint ⚠ on the very step being repaired.
+   *
+   * Hence the mode rather than `true`: it is the same two answers as
+   * `compile`, minus the compile. It opens no compiler, proposes no file, and
+   * cannot turn a plain run into a compile — and the server refuses it
+   * alongside `compile`, and without a `testFilePath`.
+   */
+  withinCompileRun?: 'run' | 'steps';
+  /**
    * Absolute path of the file each step in `steps` was authored in. Parallel
    * to `steps`; defaults to the test file when omitted per-step. Used by the
    * server to attribute frame origins when a request is sent already-expanded

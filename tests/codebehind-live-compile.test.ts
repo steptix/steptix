@@ -774,11 +774,572 @@ describe('the tail reports its progress', () => {
     const events: LiveCompileEvent[] = [];
     const compiler = compilerFor(['Sign in'], { events });
     compiler.offer({ index: 0, binding: binding('Sign in'), result: result(1, 'Sign in'), resolvedParameters: {} });
-    // Generation frames land before the run ends on a real run; here the drain
-    // is forced first, which is the same ordering from the frames' point of view.
-    await compiler.finish({ tokensUsed: 0 });
+    // In the run's own order. It used to force the drain first and call that
+    // "the same ordering from the frames' point of view"; it is not, now that
+    // the forecast asks whether a Review is still owed — after `finish` it
+    // never is, so the frame this test is about would not be emitted at all.
     expect(progress(events).filter((e) => e.runEnded === true)).toEqual([]);
     compiler.runStepsEnded();
     expect(progress(events).filter((e) => e.runEnded === true)).toHaveLength(1);
+
+    const atRunEnd = progress(events).length;
+    await compiler.finish({ tokensUsed: 0 });
+    // The drain's own frames — generation, then review — are frames, and none
+    // of them is a run-end frame.
+    expect(progress(events).length).toBeGreaterThan(atRunEnd);
+    expect(progress(events).filter((e) => e.runEnded === true)).toHaveLength(1);
+  });
+
+  it('forecasts nothing for a block whose steps were all entries it already wrote', async () => {
+    // Row 2 of a data-driven Run & Compile from a client that keeps one
+    // session across the rows and sends the later ones with
+    // `compileContinues`. tests/api-server-rows-compile.test.ts drives that
+    // shape; no shipped client does — TestBench puts the compile fields on the
+    // first planned row's batches only and recycles the session between rows,
+    // and the server clears a `'steps'` compile off the session after every
+    // request, so neither route can continue one compiler across rows. Every
+    // step of the block dedupes against an entry block 1 wrote, so the queue
+    // is empty AND the candidate is unchanged — `finish` will review nothing.
+    // Forecasting "then a review pass" off the instance's `enqueued` announced
+    // a pass that never ran.
+    const events: LiveCompileEvent[] = [];
+    const notes: string[] = [];
+    /** The run-end forecast only — `finish` says other things (the
+     *  placeholder-compliance line) that are not what this is about. */
+    const forecasts = (): string[] => notes.filter((n) => /^Run (finished|stopped)/.test(n));
+    const compiler = compilerFor(['Enter {{email}}', 'Submit'], { events, notes });
+    for (const [i, text] of ['Enter {{email}}', 'Submit'].entries()) {
+      compiler.offer({ index: i, binding: binding(text), result: result(i + 1, text), resolvedParameters: {} });
+    }
+    compiler.runStepsEnded();
+    await compiler.finish({ tokensUsed: 0 });
+    expect(forecasts()).toEqual(['Run finished — 2 entries still to generate, then a review pass']);
+
+    const beforeRow2 = events.length;
+    notes.length = 0;
+    compiler.beginBlock([
+      { text: 'Enter {{email}}', inScope: true, line: 10 },
+      { text: 'Submit', inScope: true, line: 11 },
+    ]);
+    for (const [i, text] of ['Enter {{email}}', 'Submit'].entries()) {
+      compiler.offer({ index: i, binding: binding(text), result: result(i + 1, text), resolvedParameters: {} });
+    }
+    compiler.runStepsEnded();
+    const second = await compiler.finish({ tokensUsed: 0 });
+
+    expect(forecasts()).toEqual([]);
+    expect(progress(events.slice(beforeRow2))).toEqual([]);
+    // And the claim the silence rests on: row 2 wrote nothing new.
+    expect(second.summary.compiled).toBe(2);
+  });
+});
+
+/**
+ * Finding the failure a repeated entry left behind.
+ *
+ * The sidecar holds a row per EXECUTED step, so a looped body writes one per
+ * iteration; the compile is offered one iteration (an entry serves every row)
+ * and asks about occurrence N. Positionally those agree for iteration 1 and
+ * nothing else, which is why the rows carry their `occurrence` and the reader
+ * matches on it.
+ *
+ * `'steps'` mode throughout: it is the mode where nothing throws in band, so
+ * the sidecar is the only thing that can route a generation through the repair
+ * prompt (`priorFailure`).
+ */
+describe('a looped entry that failed on a later row', () => {
+  const BROKEN = [
+    "import { defineSteps } from 'ai-ui-automation/codebehind';",
+    'export default defineSteps([',
+    "  { source: 'Upload {{file}}', async run(ctx) { await ctx.page.click('a[href=\"/x\"]'); } },",
+    ']);',
+    '',
+  ].join('\n');
+
+  /** Rows for ONE identity, in execution order — iteration-major, which is how
+   *  a run writes them. */
+  async function writeSidecar(
+    rows: Array<{ occurrence?: number; stale: boolean; error?: string }>,
+  ): Promise<void> {
+    await fs.mkdir(path.join(dir, '.aiui-codebehind-cache'), { recursive: true });
+    await fs.writeFile(
+      path.join(dir, '.aiui-codebehind-cache', 'checkout.last-run.json'),
+      JSON.stringify({
+        test: testFile,
+        ranAt: new Date().toISOString(),
+        steps: rows.map((row, i) => ({
+          index: i + 1,
+          source: 'Upload {{file}}',
+          file: stepsFile,
+          status: 'passed',
+          fromCodeBehind: !row.stale,
+          ...(row.occurrence !== undefined && { occurrence: row.occurrence }),
+          stale: row.stale,
+          ...(row.error && { error: row.error }),
+        })),
+      }),
+      'utf-8',
+    );
+  }
+
+  async function compileFirstIteration(): Promise<string[]> {
+    await fs.writeFile(stepsFile, BROKEN, 'utf-8');
+    const { client, prompts } = fakeClient();
+    const compiler = compilerFor(['Upload {{file}}'], { mode: 'steps', client });
+    compiler.offer({
+      index: 0,
+      binding: binding('Upload {{file}}', { entry: { source: 'Upload {{file}}', run: async () => {} } }),
+      result: result(1, 'Upload a.png'),
+      resolvedParameters: {},
+    });
+    await compiler.finish({ tokensUsed: 0 });
+    return prompts.filter((p) => !/Review a generated/.test(p));
+  }
+
+  it('repairs from row 3, which is the only row that failed', async () => {
+    // The dedupe means only iteration 1 is offered, and iteration 1 passed.
+    // Read positionally, that row says "clean" and the step regenerates from
+    // scratch — handing the model the same page that produced the selector
+    // that broke, with nothing to say it broke.
+    await writeSidecar([
+      { occurrence: 0, stale: false },
+      { occurrence: 0, stale: false },
+      { occurrence: 0, stale: true, error: 'strict mode violation: resolved to 2 elements' },
+    ]);
+    const asked = await compileFirstIteration();
+
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('A generated code-behind entry was replayed and it failed');
+    expect(asked[0]).toContain('strict mode violation: resolved to 2 elements');
+    expect(asked[0]).toContain("ctx.page.click('a[href=\"/x\"]')");
+  });
+
+  it('does not repair occurrence 0 from occurrence 1\'s failure', async () => {
+    // A body that says the same thing twice. Both occurrences exist in every
+    // iteration, and only the second one broke — so occurrence 0 has nothing
+    // to repair, and "any stale row of this identity" would put the wrong
+    // step's error in front of the model.
+    await writeSidecar([
+      { occurrence: 0, stale: false },
+      { occurrence: 1, stale: true, error: 'the OTHER step broke' },
+      { occurrence: 0, stale: false },
+      { occurrence: 1, stale: true, error: 'the OTHER step broke' },
+    ]);
+    const asked = await compileFirstIteration();
+
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).not.toContain('A generated code-behind entry was replayed');
+    expect(asked[0]).not.toContain('the OTHER step broke');
+  });
+
+  it('reads a sidecar written before the field the way it always did', async () => {
+    // No `occurrence` anywhere: the positional match, which is right for
+    // iteration 1 — every non-looped test, and every sidecar on disk today.
+    await writeSidecar([{ stale: true, error: 'the first row broke' }, { stale: false }]);
+    const asked = await compileFirstIteration();
+
+    expect(asked[0]).toContain('A generated code-behind entry was replayed and it failed');
+    expect(asked[0]).toContain('the first row broke');
+  });
+
+  it('does not fall back positionally when the rows DO carry occurrences', async () => {
+    // The narrow case the pre-`occurrence` fallback also caught, wrongly: the
+    // body gained a second identically-worded line and was COMPILED (a compile
+    // writes entries and no sidecar) without being re-run since. Occurrence 1
+    // therefore has an entry in the file and no row in the sidecar — and the
+    // positional read `same[1]` is the second ITERATION's occurrence-0 row, so
+    // the second line would be repaired from the first line's failure.
+    await fs.writeFile(
+      stepsFile,
+      [
+        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        'export default defineSteps([',
+        "  { source: 'Upload {{file}}', async run(ctx) { await ctx.page.click('#first'); } },",
+        "  { source: 'Upload {{file}}', async run(ctx) { await ctx.page.click('#second'); } },",
+        ']);',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+    await writeSidecar([
+      { occurrence: 0, stale: true, error: 'the FIRST line broke' },
+      { occurrence: 0, stale: true, error: 'the FIRST line broke' },
+    ]);
+    const { client, prompts } = fakeClient();
+    const compiler = compilerFor(['Upload {{file}}', 'Upload {{file}}'], { mode: 'steps', client });
+    compiler.offer({
+      index: 1,
+      binding: binding('Upload {{file}}', {
+        occurrence: 1,
+        entry: { source: 'Upload {{file}}', run: async () => {} },
+      }),
+      result: result(2, 'Upload b.png'),
+      resolvedParameters: {},
+    });
+    await compiler.finish({ tokensUsed: 0 });
+
+    const asked = prompts.filter((p) => !/Review a generated/.test(p));
+    expect(asked).toHaveLength(1);
+    // No row for this occurrence means no prior failure — generate from
+    // scratch, rather than repair the second line from the first's error.
+    expect(asked[0]).not.toContain('A generated code-behind entry was replayed');
+    expect(asked[0]).not.toContain('the FIRST line broke');
+  });
+});
+
+/**
+ * "Kept" means the entry stands as it is (stories/compile-as-you-go.md's
+ * summary line, and the boxed pipeline's `keptExistingFor`).
+ *
+ * A looped body makes the question ambiguous for the first time: one entry,
+ * offered once per iteration, and the iterations need not agree about it. The
+ * rule is the boxed one — a key the compile generates is not kept, whatever
+ * any other iteration of it did — and the two facts arrive in either order.
+ */
+describe('what a repeated entry counts as', () => {
+  const withEntry = (source: string): CodeBehindBinding =>
+    binding(source, { entry: { source, run: async () => {} } });
+
+  const ranAsCode = (index: number, instruction: string): Parameters<LiveCompiler['offer']>[0] => ({
+    index,
+    binding: withEntry('Upload {{file}}'),
+    result: result(index + 1, instruction, { fromCodeBehind: true }),
+    resolvedParameters: {},
+  });
+
+  const healedStale = (index: number, instruction: string): Parameters<LiveCompiler['offer']>[0] => ({
+    index,
+    binding: withEntry('Upload {{file}}'),
+    result: result(index + 1, instruction, {
+      fromCodeBehind: false,
+      codeBehindStale: { file: stepsFile, source: 'Upload {{file}}', error: 'locator timeout' },
+    }),
+    resolvedParameters: {},
+  });
+
+  it('is not kept when a LATER iteration generated it', async () => {
+    // Iteration 1 ran the entry cleanly, iteration 2 hit the row that breaks
+    // it. `compiled 1, kept 1` for a single entry counted it twice — the boxed
+    // pipeline excludes every step whose key is in the selection and says 0.
+    const compiler = compilerFor(['Upload {{file}}', 'Upload {{file}}']);
+    compiler.offer(ranAsCode(0, 'Upload a.png'));
+    compiler.offer(healedStale(1, 'Upload b.png'));
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(outcome.summary.compiled).toBe(1);
+    expect(outcome.summary.kept).toBe(0);
+  });
+
+  it('is not kept when an EARLIER iteration generated it either', async () => {
+    // The other order, which is the one a Set could not fix by itself: the key
+    // is already taken when the "ran as code" refusal arrives.
+    const compiler = compilerFor(['Upload {{file}}', 'Upload {{file}}']);
+    compiler.offer(healedStale(0, 'Upload a.png'));
+    compiler.offer(ranAsCode(1, 'Upload b.png'));
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(outcome.summary.compiled).toBe(1);
+    expect(outcome.summary.kept).toBe(0);
+  });
+
+  it('counts every iteration when NO iteration generated it', async () => {
+    // Parity in the other direction, and the reason `kept` counts steps rather
+    // than keys: the boxed pipeline's `keptExistingFor` filters `steps`, so a
+    // body run twice with a clean entry is 2 there and must be 2 here.
+    const compiler = compilerFor(['Upload {{file}}', 'Upload {{file}}']);
+    compiler.offer(ranAsCode(0, 'Upload a.png'));
+    compiler.offer(ranAsCode(1, 'Upload b.png'));
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(outcome.summary.compiled).toBe(0);
+    expect(outcome.summary.kept).toBe(2);
+  });
+
+  it('is kept when the iteration that took its key generated NOTHING', async () => {
+    // Queued is not written. The stale iteration took the key and the model
+    // answered nothing usable, so the entry stands exactly as the author wrote
+    // it — which is what "kept" means. Netting against the dedupe set instead
+    // reported `compiled 0, kept 0` for an entry that is still in the file.
+    const { client } = fakeClient({ generate: () => 'not json and not a fence' });
+    const compiler = compilerFor(['Upload {{file}}', 'Upload {{file}}'], { client });
+    compiler.offer(healedStale(0, 'Upload a.png'));
+    compiler.offer(ranAsCode(1, 'Upload b.png'));
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(outcome.summary.compiled).toBe(0);
+    expect(outcome.summary.kept).toBe(1);
+    expect(outcome.summary.error).toMatch(/could not be generated/);
+  });
+});
+
+/**
+ * The other half of "one entry, several inlinings": what a return-skipped
+ * inlining owes when the inlining that DID run produced nothing.
+ *
+ * `finish` nets the return-skipped steps against the keys this compile wrote
+ * (stories/step-flow-control.md, decision 12) so a body an earlier or later
+ * call already compiled is not reported as having no entry. The set it nets
+ * against has to be what was WRITTEN, not what was queued: the key is taken at
+ * `offer` time, before the model call, and a generation that errors leaves the
+ * candidate untouched. Netting a real debt off against that key told the author
+ * nothing whatever about a line the proposal has no entry for.
+ */
+describe('a return-skipped sibling of an entry nothing wrote', () => {
+  const body = 'Enter the username';
+
+  it('is still named in notAttempted when the only generation for its key errored', async () => {
+    const { client } = fakeClient({ generate: () => 'not json and not a fence' });
+    const compiler = compilerFor([body, body], { client });
+    // Call 1 reached the body line and ran it, so it takes the key — and its
+    // generation fails, so nothing is spliced into the candidate.
+    compiler.offer({
+      index: 0,
+      binding: binding(body),
+      result: result(1, body),
+      resolvedParameters: {},
+    });
+    // Call 2 returned before the same authored line. Same file, same section,
+    // same source, same occurrence — one entry key.
+    compiler.offer({
+      index: 1,
+      binding: binding(body),
+      result: result(2, body, { status: 'skipped' }),
+      resolvedParameters: {},
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(outcome.summary.compiled).toBe(0);
+    expect(outcome.summary.notAttempted).toEqual([2]);
+    expect(outcome.summary.error).toMatch(/could not be generated/);
+    // And nothing was written for the line, which is the fact the number is
+    // reporting.
+    expect(outcome.files[stepsFile] ?? '').not.toContain(`source: '${body}'`);
+    expect(outcome.status).toBe('partial');
+  });
+
+  it('owes nothing when that generation SUCCEEDED — the narrowness check', async () => {
+    // The same two offers with a working model. The entry is in the proposal,
+    // so naming call 2's step would warn the author about a step whose code is
+    // in the diff in front of them.
+    const compiler = compilerFor([body, body]);
+    compiler.offer({
+      index: 0,
+      binding: binding(body),
+      result: result(1, body),
+      resolvedParameters: {},
+    });
+    compiler.offer({
+      index: 1,
+      binding: binding(body),
+      result: result(2, body, { status: 'skipped' }),
+      resolvedParameters: {},
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(outcome.summary.compiled).toBe(1);
+    expect(outcome.summary.notAttempted).toEqual([]);
+    expect(outcome.files[stepsFile]).toContain(`source: '${body}'`);
+  });
+
+  it('a DECLINE clears the debt too — an `ai: true` entry is an entry', async () => {
+    // The third written outcome: no code, but the slot is answered and carries
+    // the reason, so the author is not left wondering about the line.
+    const { client } = fakeClient({
+      generate: () => JSON.stringify({ entry: null, reason: 'needs a human to read the screen' }),
+    });
+    const compiler = compilerFor([body, body], { client });
+    compiler.offer({
+      index: 0,
+      binding: binding(body),
+      result: result(1, body),
+      resolvedParameters: {},
+    });
+    compiler.offer({
+      index: 1,
+      binding: binding(body),
+      result: result(2, body, { status: 'skipped' }),
+      resolvedParameters: {},
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(outcome.summary.keptAi).toBe(1);
+    expect(outcome.summary.notAttempted).toEqual([]);
+    expect(outcome.files[stepsFile]).toContain('ai: true');
+  });
+});
+
+/**
+ * Which iteration of a repeated entry repairs it.
+ *
+ * The dedupe (`takenKeys`) exists because one entry serves every iteration of a
+ * looped body, so the second inlining is the same entry arriving again. Which
+ * iteration takes the key is settled by the refusals ABOVE the dedupe rather
+ * than by arrival order: a clean code run is refused as "ran as code" and takes
+ * none, so the holder is the first iteration whose entry BROKE. Its repair
+ * therefore reads that iteration's code, its error and its page together, for
+ * one model call.
+ *
+ * Offering the later breaks as well looks like a way to keep more of the run's
+ * evidence and is not: by then the first repair has rewritten the entry, so
+ * `askForRepair` would read the NEW code and pair it with what the OLD one
+ * threw, and the last and least-informed answer would win — at one model call
+ * per row for the common shape, an entry broken identically on every row. The
+ * cost of skipping is the narrow case: an iteration that breaks DIFFERENTLY
+ * later in the loop contributes nothing.
+ *
+ * `'run'` mode throughout: it is the only mode where an entry runs at all.
+ */
+describe('a repeated entry, and which iteration repairs it', () => {
+  const BROKEN_FILE = [
+    "import { defineSteps } from 'ai-ui-automation/codebehind';",
+    'export default defineSteps([',
+    "  { source: 'Upload {{file}}', async run(ctx) { await ctx.page.click('a[href=\"/x\"]'); } },",
+    ']);',
+    '',
+  ].join('\n');
+
+  /**
+   * A model that always answers with an entry bound to the AUTHORED text.
+   *
+   * The default fake reads the source out of the prompt's `source: "…"` line,
+   * which a REPAIR prompt does not have (it embeds the entry as code, single
+   * quotes and all) — so a repair's answer would come back bound to the
+   * fallback text `step`, and the file assertions below would be describing a
+   * quirk of the fake rather than the splice.
+   */
+  const entryEcho = (): { client: AiClient; prompts: string[] } =>
+    fakeClient({
+      generate: () =>
+        JSON.stringify({
+          entry:
+            "{ source: 'Upload {{file}}', async run(ctx) { " +
+            "await ctx.page.getByRole('button', { name: 'Save' }).click(); } }",
+        }),
+    });
+
+  /** One iteration of a looped body whose entry threw and healed under AI. */
+  const staleIteration = (
+    index: number,
+    over: { instruction: string; error: string; dom: string },
+  ): Parameters<LiveCompiler['offer']>[0] => ({
+    index,
+    binding: binding('Upload {{file}}', {
+      entry: { source: 'Upload {{file}}', run: async () => {} },
+    }),
+    result: result(index + 1, over.instruction, {
+      fromCodeBehind: false,
+      codeBehindStale: { file: stepsFile, source: 'Upload {{file}}', error: over.error },
+      stepContext: { domBefore: over.dom, domAfter: '<b>after</b>' },
+    }),
+    resolvedParameters: {},
+  });
+
+  it('asks ONCE, and repairs from the first iteration that broke', async () => {
+    // The common shape — an ambiguous selector, so the entry breaks the same
+    // way on every row. Iteration 1 holds the key and its repair is the
+    // well-founded one: the code that ran, the error it threw and the page it
+    // threw on, all iteration 1's, for one model call. Asking again for
+    // iteration 3 would read the entry iteration 1's repair just WROTE and
+    // hand the model the error the old one threw — the least-informed answer
+    // winning, at one call per row.
+    await fs.writeFile(stepsFile, BROKEN_FILE, 'utf-8');
+    const { client, prompts } = entryEcho();
+    const compiler = compilerFor(['Upload {{file}}', 'Upload {{file}}'], { client });
+
+    compiler.offer(
+      staleIteration(0, {
+        instruction: 'Upload a.png',
+        error: 'strict mode violation: resolved to 2 elements',
+        dom: '<b>row 1 page</b>',
+      }),
+    );
+    compiler.offer(
+      staleIteration(1, {
+        instruction: 'Upload c.png',
+        error: 'strict mode violation: resolved to 2 elements',
+        dom: '<b>row 3 page</b>',
+      }),
+    );
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    const asked = prompts.filter((p) => !/Review a generated/.test(p));
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('A generated code-behind entry was replayed and it failed');
+    expect(asked[0]).toContain('strict mode violation: resolved to 2 elements');
+    // The pairing: iteration 1's page, and the entry exactly as it stood on
+    // disk — which is the code that actually threw.
+    expect(asked[0]).toContain('row 1 page');
+    expect(asked[0]).not.toContain('row 3 page');
+    expect(asked[0]).toContain("ctx.page.click('a[href=\"/x\"]')");
+
+    const file = outcome.files[stepsFile]!;
+    expect([...file.matchAll(/\bsource:/g)]).toHaveLength(1);
+    expect(file).toContain("source: 'Upload {{file}}'");
+    expect(outcome.summary.compiled).toBe(1);
+    expect(outcome.summary.unproven).toEqual([1]);
+    expect(outcome.summary.kept).toBe(0);
+    expect(outcome.summary.keptAi).toBe(0);
+  });
+
+  it('repairs from a LATER iteration when the earlier one ran clean', async () => {
+    // The key was free. Iteration 1 ran the entry successfully and is refused
+    // as "ran as code" WITHOUT taking it, so the holder is iteration 3 — the
+    // first that broke — and the repair is again fully paired, this time with
+    // row 3's error and row 3's page.
+    await fs.writeFile(stepsFile, BROKEN_FILE, 'utf-8');
+    const { client, prompts } = entryEcho();
+    const compiler = compilerFor(['Upload {{file}}', 'Upload {{file}}'], { client });
+
+    compiler.offer({
+      index: 0,
+      binding: binding('Upload {{file}}', {
+        entry: { source: 'Upload {{file}}', run: async () => {} },
+      }),
+      result: result(1, 'Upload a.png', {
+        fromCodeBehind: true,
+        stepContext: { domBefore: '<b>row 1 page</b>', domAfter: '<b>after</b>' },
+      }),
+      resolvedParameters: {},
+    });
+    compiler.offer(
+      staleIteration(1, {
+        instruction: 'Upload c.png',
+        error: 'locator.click: no element matches',
+        dom: '<b>row 3 page</b>',
+      }),
+    );
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    const asked = prompts.filter((p) => !/Review a generated/.test(p));
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain('A generated code-behind entry was replayed and it failed');
+    expect(asked[0]).toContain('locator.click: no element matches');
+    expect(asked[0]).toContain('row 3 page');
+    expect(asked[0]).not.toContain('row 1 page');
+    expect(outcome.summary.compiled).toBe(1);
+    expect(outcome.summary.unproven).toEqual([2]);
+    // And the clean iteration is not `kept`: the compile took its key.
+    expect(outcome.summary.kept).toBe(0);
+  });
+
+  it('skips a repeat that did NOT break — the entry is the same one again', async () => {
+    // The same rule at the same seam, with no entry in play at all: an
+    // iteration that ran under AI has nothing the first one did not, and
+    // paying for it is one model call per row.
+    const { client, prompts } = fakeClient();
+    const compiler = compilerFor(['Upload {{file}}', 'Upload {{file}}'], { client });
+    for (const [i, instruction] of ['Upload a.png', 'Upload c.png'].entries()) {
+      compiler.offer({
+        index: i,
+        binding: binding('Upload {{file}}'),
+        result: result(i + 1, instruction),
+        resolvedParameters: {},
+      });
+    }
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(prompts.filter((p) => !/Review a generated/.test(p))).toHaveLength(1);
+    expect(outcome.summary.compiled).toBe(1);
+    expect(outcome.summary.unproven).toEqual([1]);
   });
 });

@@ -309,6 +309,30 @@ export interface StepRequest {
    */
   compileScope?: { section: string };
   /**
+   * This batch belongs to a compile of this MODE, but asks for no compile of
+   * its own (stories/data-driven-rows.md, decision 11).
+   *
+   * Rows 2..N of a data-driven compile. An entry serves every row, so only the
+   * first row carries `compile` — but all of them are one logical run, and the
+   * two things the server decides from `compile` are decided per BATCH:
+   *
+   * - **the AI switch** (stories/run-settings.md §9), which carves out a
+   *   compile. Without this, a project with `ai.allowInRuns: false` gave row 1
+   *   a diff and failed every later row with "this run forbids AI" — a failure
+   *   about the policy, in the middle of the one gesture the policy carves out.
+   * - **whether code-behind executes** (`codeBehindOff`), which `'steps'`
+   *   turns off so a broken entry re-records under AI. A boolean field bought
+   *   the first and lost the second: rows 2..N of a Compile This Step built
+   *   the execution registry and ran the very entry row 1 is repairing, which
+   *   threw, healed under AI, and painted ⚠ on that step.
+   *
+   * Opens no compiler, touches no candidate, does not force
+   * `captureStepContext`, and writes no proposal. It cannot be retained (it is
+   * a per-request field, like `compile`) and it cannot turn a plain run into a
+   * compile.
+   */
+  withinCompileRun?: 'run' | 'steps';
+  /**
    * Absolute path to the project's skills directory. When supplied, the
    * server runs `expandSkills` over `steps`, flattens `[skill: ...]`
    * invocations, and emits `frame:push` / `frame:pop` events around each
@@ -2843,14 +2867,49 @@ export class SessionManager {
     // "the agent asked for this", which is the provenance the whole
     // first-class-field decision exists to keep.
     //
-    // Compile is a request FOR AI, so the switch does not gate it. Two ways in,
-    // both per-request and neither retained: the in-process flag the
-    // compile-runner sets, and a `compile` on the wire — which is how "Compile
+    // Compile is a request FOR AI, so the switch does not gate it. Three ways
+    // in, all per-request and none retained: the in-process flag the
+    // compile-runner sets; a `compile` on the wire — which is how "Compile
     // This Step" and "Repair this step" actually arrive (they ride
     // `compile: 'steps'` on the step route, not `POST /codebehind/compile`), so
     // the in-process flag alone would leave the commands §9 names as carve-outs
-    // gated on an `ai: off` session.
-    const bypassAiPolicy = internal?.bypassAiPolicy === true || request.compile !== undefined;
+    // gated on an `ai: off` session; and `withinCompileRun`, which is the same
+    // carve-out for the rest of a logical run that only compiles once. A
+    // data-driven compile puts `compile` on row 1 alone (an entry serves every
+    // row), and the switch is resolved per batch — so without the third way the
+    // author's ONE gesture is half carved out and half refused. Both of its
+    // values buy the carve-out; which one it is decides `codeBehindOff`
+    // instead.
+    const bypassAiPolicy =
+      internal?.bypassAiPolicy === true ||
+      request.compile !== undefined ||
+      request.withinCompileRun !== undefined;
+    // The third way in is the quiet one, and this is what stops it being
+    // invisible (stories/run-settings.md §9). The other two leave a trace the
+    // author already sees: the internal flag belongs to a compile-runner or
+    // errand-runner call that announces itself, and a `compile` on the wire puts
+    // a proposal on the stream and a recording beside the test. A
+    // `withinCompileRun` batch opens no compiler and proposes nothing, so on a
+    // project that set `ai.allowInRuns: false` its AI calls would otherwise be
+    // the one thing in the log with no reason next to it.
+    //
+    // The test's NAME and the mode, and nothing else: the mode is what decides
+    // whether code-behind also executes, so the two questions a reader has are
+    // answered by the one line. No step text, no parameters, no row — a row
+    // cell can be a password, and this line is written whatever the policy is.
+    // One line per batch, beside the decision it explains, so a 100-row
+    // compile's log reads one line per row rather than one per step.
+    //
+    // `testFilePath` is required alongside this field (api-server rejects it
+    // without one), so the fallback is a type guard, not a case.
+    if (request.withinCompileRun !== undefined) {
+      const named = request.testFilePath ? basename(request.testFilePath) : 'this test';
+      logger.info(
+        `Session "${sessionId}": AI allowed for this batch — it is part of a compile of ` +
+          `${named} (withinCompileRun: ${request.withinCompileRun}). ` +
+          'A compile is a request for AI, so the run AI switch does not gate it.',
+      );
+    }
     const resolvedSettings = resolveRunSettings(
       this.config,
       projectConfig,
@@ -3281,7 +3340,16 @@ export class SessionManager {
     // whose entry is broken has to run under AI to leave a transcript — but
     // it still needs the bindings, which is what the separate generation
     // registry below is for.
-    const codeBehindOff = cb?.disabled === true || request.compile === 'steps';
+    //
+    // `withinCompileRun: 'steps'` is the rest of that logical run: rows 2..N of
+    // a Compile This Step in a data-driven file, which compile nothing (row 1
+    // does) and must still run under AI. Left executing, they ran the entry the
+    // author is repairing — it threw, healed, and marked ⚠ the step whose
+    // repair was in flight — and none of that is visible in row 1's proposal.
+    const codeBehindOff =
+      cb?.disabled === true ||
+      request.compile === 'steps' ||
+      request.withinCompileRun === 'steps';
     if (request.testFilePath && !codeBehindOff) {
       codeBehind = await buildCodeBehindRegistry(expansionForBinding(), {
         testFilePath: request.testFilePath,
@@ -5700,12 +5768,17 @@ export class SessionManager {
             // password on the wire, in the run log, in the report and on a
             // TestBench hover. `rawSteps` is the match side — deliberately
             // never interpolated (expander.ts, `applySkillScope`) — so it is
-            // the line as authored. It falls back to `originalStep` for the
-            // one case with no authored form on this side of the wire: a
-            // LOOPED SECTION body, whose `rawSteps` the wire shape does not
-            // carry (contract §3.2), leaving `matchInput` to fall back to the
-            // row-interpolated text. Skill bodies and unlooped sections are
-            // authored either way.
+            // the line as authored, on every shape the wire can describe. A
+            // LOOPED SECTION body used to be the exception: the wire shape
+            // carries no `rawSteps` (contract §3.2), so `matchInput` fell back
+            // to `steps[i]`, which for a looped body is the row-interpolated
+            // text. It no longer does — the expander pins that body's match
+            // side to the section's own authored lines (`section.rawSteps ??
+            // section.steps`, stories/data-driven-rows.md), because a divergent
+            // match side was binding one code-behind entry per row. So the
+            // `?? originalStep` is only the shape backstop it reads as:
+            // `expansionRawSteps` starts as `request.steps` and is index-parallel
+            // to `effectiveSteps` on every path.
             const returningText = expansionRawSteps[i] ?? originalStep;
             const reason = skippedByReturnReason(i, label, returningText);
             // `endIndex` still bounds the run. A bounded re-run must not report
@@ -6209,8 +6282,13 @@ export class SessionManager {
 
     // The code-behind last-run sidecar (stories/codebehind-compile.md §The
     // runtime stops generating). The CLI runner writes its own; without this
-    // one a TestBench run — the way most people run a test — leaves
-    // `--only-stale` and the gutter nothing to read.
+    // one a TestBench run — the way most people run a test — leaves the
+    // sidecar's two readers nothing: `collectStaleKeys`
+    // (src/codebehind/compile.ts), the selection behind `--only-stale`, and
+    // `LiveCompiler.priorFailure`, which is what routes a Compile This Step
+    // through the repair prompt instead of generating from scratch. NOT the ⚠
+    // gutter — nothing in testbench-native reads this file; the mark and its
+    // hover come off the live step event's `codeBehindStale`.
     //
     // Only for a run that describes the whole test as it stands: a subset batch
     // (breakpoint continuation, `[input:]` split, partial re-run) knows about
@@ -6257,6 +6335,10 @@ export class SessionManager {
           // The entry's target file, so a repair looking this row up cannot
           // conflate a skill-body step with an identically-worded test step.
           ...(binding?.file !== undefined && { file: binding.file }),
+          // Which of the identically-worded steps of this frame instance it
+          // is. Without it a repair has to find its row by counting, and a
+          // looped body's rows are iteration-major — see `LastRunStep`.
+          ...(binding?.occurrence !== undefined && { occurrence: binding.occurrence }),
           status: result.status,
           fromCodeBehind: result.fromCodeBehind === true,
           stale: failure !== undefined,

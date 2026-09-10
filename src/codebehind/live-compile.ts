@@ -295,9 +295,104 @@ export class LiveCompiler {
    * author is left with a step that quietly has no entry and no explanation.
    * The difference is where the skip came from — a stop is the client's, a
    * return is the test's own — and both end with a step nobody recorded.
+   *
+   * Held as (step number, entry key) pairs rather than bare numbers because a
+   * loop can answer both ways about ONE entry: iteration 1 runs the step and
+   * generates from it, iteration 2 returns before reaching it. The entry then
+   * exists, and naming iteration 2's expanded number as not-attempted would
+   * tell the author a step has no entry when it has the one they just paid
+   * for. `finish` drops the pairs whose key ended up WRITTEN (`writtenKeys`)
+   * — not merely queued — the same rule the `kept` getter applies, for the
+   * same reason.
+   *
+   * Named for the producer that fills it, not for a rule that is about the
+   * producer. `generationRefusal` answers `SKIPPED_BY_RETURN_REFUSAL` for ANY
+   * `status: 'skipped'` offer, so the netting is producer-agnostic and the
+   * second skip producer would land here unchanged if it ever offered. It does
+   * not: control flow's untaken branch (`skipKind: 'not-taken'`) is emitted
+   * without an `offer` and so reaches neither this list nor
+   * `final.notAttempted`, which only names steps that produced no result row
+   * at all. That divergence is the live path's, is main's, and is untouched
+   * here — the boxed pipeline is where the two producers were unified, by
+   * reading the cause off the recording's skipped rows
+   * (`recordingSkipCause`, src/codebehind/compile.ts).
    */
-  private readonly skippedByReturn: number[] = [];
-  private kept = 0;
+  private readonly skippedByReturn: { number: number; key: string }[] = [];
+  /**
+   * Entry keys this compile has already queued — the per-key dedupe the boxed
+   * pipeline gets from `selectSteps` (compile.ts), which keeps a `keys` Set
+   * and takes the first step per key.
+   *
+   * An entry is defined once and inlined many times: a looped `### Section`
+   * runs its body once per row, and a data-driven run replays the whole flow
+   * once per row. Every one of those expanded steps binds to the SAME entry —
+   * `entryKeyOf` is (file, section, authored text, occurrence), and occurrence
+   * restarts per frame instance — so generating from each of them would pay
+   * for one model call per row and splice the same slot over and over. The
+   * first occurrence to reach here generates (or declines, or repairs); every
+   * later one is the same entry arriving again, and is skipped.
+   *
+   * WHICH iteration that is falls out of the refusals above the check rather
+   * than out of arrival order: a clean code run is refused as "ran as code"
+   * and takes no key at all, so the holder is the first iteration whose entry
+   * BROKE (`codeBehindStale`) — or, when there is no entry yet, simply the
+   * first. That is what keeps a repair fully paired: the code it reads, the
+   * error it is given and the page it is shown all belong to one iteration,
+   * for one model call.
+   *
+   * It is also the rule's one cost, and it is deliberate: an iteration that
+   * breaks DIFFERENTLY later in the loop is skipped, so the entry is repaired
+   * from the first break only.
+   *
+   * That is the in-band half. The cross-RUN half is the last-run sidecar: its
+   * rows carry their binding's `occurrence` so a repair on the `'steps'` path
+   * can find the failure a previous run's iteration 3 left behind
+   * (`priorFailure`).
+   *
+   * On the instance, not per block, so the dedupe holds across a row loop that
+   * arrives as several requests on one kept session as well as within a single
+   * batch. That is what makes "the compile records row 1" true of the server
+   * rather than of any one client — a client that drives the server this way
+   * gets the same answer (tests/api-server-rows-compile.test.ts does;
+   * TestBench does not).
+   */
+  private readonly takenKeys = new Set<string>();
+  /**
+   * Entry keys this compile actually PUT SOMETHING in the candidate for — a
+   * generated entry or an `ai: true` decline, both of which `applyGenerated`
+   * splices into the file.
+   *
+   * A second set rather than a reuse of `takenKeys`, because the two answer
+   * different questions and only one of them is about the author's file.
+   * `takenKeys` is the dedupe gate: it is added to at `offer` time, BEFORE the
+   * model call, and its job is that nobody pays twice for one entry. Whether
+   * that one payment produced anything is settled a model call later, and it
+   * need not have: `applyGenerated` can come back `kind: 'error'` (the model
+   * answered nothing usable, or the splice threw), and then the key is taken
+   * and the file is unchanged.
+   *
+   * Everything that reconciles two iterations of one entry has to net against
+   * THIS set. A looped body called twice, where call 1 ran the body and its
+   * generation errored and call 2 returned before reaching it, is one entry
+   * with no code: netting against `takenKeys` dropped call 2 from
+   * `notAttempted` and the summary said nothing at all about a line that ends
+   * the compile with no entry. Netting against what was written names it.
+   */
+  private readonly writtenKeys = new Set<string>();
+  /**
+   * Offered steps that ran as code, per entry key — the raw material for
+   * `kept`, which is a count of STEPS (the boxed `keptExistingFor` counts them
+   * that way too, so a body called three times whose entry is clean is 3).
+   *
+   * Kept per key rather than as a running total because the two answers about
+   * one key are decided at different times and in either order. A looped body
+   * whose entry is clean on iteration 1 and stale on iteration 2 refuses
+   * iteration 1 as "ran as code" (a kept step) and then generates from
+   * iteration 2 (a taken key) — and `compiled 1, kept 1` for a single entry is
+   * one entry counted twice, where the boxed pipeline's `keptExistingFor`
+   * excludes every step whose key is in the selection and says `kept 0`.
+   */
+  private readonly keptByKey = new Map<string, number>();
   private keptAiExisting = 0;
   private errors = 0;
   /**
@@ -446,6 +541,26 @@ export class LiveCompiler {
     await this.tail.catch(() => {});
   }
 
+  /**
+   * Steps that ran as code and whose entry this compile did not rewrite.
+   *
+   * "kept" means the entry stands as it is, so a key that ends up generated —
+   * whichever iteration asked for it, and whichever order the two arrived in
+   * — is not kept at all. Parity with the boxed pipeline's `keptExistingFor`,
+   * which drops every step whose key is in the selection.
+   *
+   * Against `writtenKeys` rather than `takenKeys`: an entry whose one
+   * generation errored was queued but never rewritten, so it does still stand
+   * as it is and the iterations that ran it as code are kept.
+   */
+  private get kept(): number {
+    let total = 0;
+    for (const [key, count] of this.keptByKey) {
+      if (!this.writtenKeys.has(key)) total += count;
+    }
+    return total;
+  }
+
   /** True when at least one step is queued or already generated. */
   get attempted(): number {
     return this.compiled.length + this.declined.length + this.errors;
@@ -457,7 +572,9 @@ export class LiveCompiler {
    * `attempted` plus what a stop skipped. Those two are the same number on
    * every path but a stop, which is the one case where an entry ends without
    * an outcome; counting it keeps the progress bar from freezing part-way
-   * while the run winds down.
+   * while the run winds down. One enqueued entry is one generation — the
+   * dedupe (`takenKeys`) queues each key at most once — so units and outcomes
+   * cannot drift.
    */
   private get settled(): number {
     return this.attempted + this.skippedByStop.length;
@@ -509,7 +626,28 @@ export class LiveCompiler {
   runStepsEnded(): void {
     const stopped = this.disposed || this.signal?.aborted === true;
     const outstanding = this.enqueued - this.settled;
-    const reviewOwed = this.options.mode === 'run' && this.enqueued > 0 && !stopped;
+    // Owed by what `finish` will actually do, not by "this compiler has ever
+    // enqueued anything". `finish` reviews the files whose content has changed
+    // since the reviewer last saw them, so a block that queued nothing and
+    // changed nothing owes no Review — and `this.enqueued > 0` (an INSTANCE
+    // counter) said one was coming anyway. The shape that reaches: a client
+    // that drives the server this way — one kept session, row 2's steps sent
+    // with `compileContinues`, all of them the same entries again
+    // (`takenKeys`). tests/api-server-rows-compile.test.ts drives it;
+    // TestBench does not — run-controller.ts sends the compile fields on the
+    // first planned row's batches only, and recycles the session between rows.
+    // Row 2 announced "Run finished — 0 entries still to generate, then a
+    // review pass" and then reviewed nothing, which is a forecast of something
+    // that cannot happen — the thing this method's own stopped-run branch
+    // refuses to do.
+    //
+    // Queued work counts as owing one because it is about to change a file;
+    // that a generation may decline is the same forecast the old code made and
+    // is not worth being exact about.
+    const reviewOwed =
+      this.options.mode === 'run' &&
+      !stopped &&
+      (outstanding > 0 || this.unreviewedFiles().length > 0);
     if (outstanding === 0 && !reviewOwed) return;
     this.emitProgress('generate', undefined, true);
     const plural = outstanding === 1 ? 'entry' : 'entries';
@@ -534,7 +672,9 @@ export class LiveCompiler {
   /**
    * Offer a finished step. Returns immediately — the browser never waits on
    * generation. Called for EVERY step, eligible or not, so the summary can
-   * say how many were kept as code and how many were already AI.
+   * say how many were kept as code and how many were already AI — and at most
+   * once per ENTRY, because the second inlining of a body is the same entry
+   * arriving again (`takenKeys`).
    */
   offer(input: LiveStepInput): void {
     // Merged across EVERY offered step, eligible or not, and before the
@@ -560,25 +700,64 @@ export class LiveCompiler {
       codeBehindStale: input.result.codeBehindStale,
     });
     if (refusal !== undefined) {
-      if (refusal === 'the step ran as code') this.kept++;
+      if (refusal === 'the step ran as code') {
+        // The binding is there: every refusal that could reach here without
+        // one (`[skill:]`/`[tool:]`, no binding at all) is decided above this.
+        const keptKey = entryKeyOf(input.binding!);
+        this.keptByKey.set(keptKey, (this.keptByKey.get(keptKey) ?? 0) + 1);
+      }
       if (refusal === 'the entry is marked `ai: true`') this.keptAiExisting++;
       // Named in the summary rather than only counted, exactly as a
       // stop-skipped entry is: "3 step(s) not attempted" does not tell the
       // author WHICH of their steps still has no entry
       // (stories/step-flow-control.md, decision 12).
       if (refusal === SKIPPED_BY_RETURN_REFUSAL) {
-        this.skippedByReturn.push(at + 1);
+        // With the key, so `finish` can tell "this step has no entry" from
+        // "another iteration of this step already generated its entry" — see
+        // the field. The binding is there for the same reason the kept branch
+        // above can assert it: `generationRefusal` decides `!input.binding`
+        // before it decides `skipped`.
+        this.skippedByReturn.push({ number: at + 1, key: entryKeyOf(input.binding!) });
         this.stepEvent('generate', { index: at, number: at + 1, text, hasEntry: false, isAiEntry: false }, refusal);
       }
       logger.debug(`Compile-as-you-go skipped step ${input.index + 1}: ${refusal}`);
       return;
     }
+    const key = entryKeyOf(input.binding!);
+    // The dedupe, and it is deliberately BEFORE `enqueued++`: a skipped repeat
+    // is not work the tail owes, so counting it would leave the progress bar's
+    // `total` promising generations that will never happen and `done` never
+    // reaching it. Nothing else counts it either — not `kept` (that means "ran
+    // as code"), not `keptAi`, not `notAttempted` — which is exactly the
+    // boxed pipeline's arithmetic for a body called twice: `totalSteps` counts
+    // every expanded step, `compiled` counts entries.
+    //
+    // Unconditional, an iteration whose own entry threw in this run included.
+    // The key holder is ALREADY the first iteration that broke — a clean code
+    // run is refused as "ran as code" above and never gets here — so the
+    // repair that key queued is the well-founded one: the failing iteration's
+    // code, its error and its page, together. Letting a later break re-open
+    // the key would ask for a second repair over the entry the first one just
+    // wrote, pairing code that never ran with the error the OLD entry threw,
+    // and the last and least-informed answer would win — at one model call per
+    // row for the common shape, an entry that breaks identically on every row.
+    // The cost of skipping is the narrow case instead: an iteration that
+    // breaks DIFFERENTLY later in the loop contributes nothing, and the entry
+    // is repaired from the first break only.
+    if (this.takenKeys.has(key)) {
+      logger.debug(
+        `Compile-as-you-go skipped step ${input.index + 1}: an earlier ` +
+          `iteration of this step already produced its entry`,
+      );
+      return;
+    }
+    this.takenKeys.add(key);
     const step: CompileStep = {
       index: at,
       number: at + 1,
       text,
       binding: input.binding,
-      key: entryKeyOf(input.binding!),
+      key,
       hasEntry: input.binding!.entry !== undefined,
       isAiEntry: false,
     };
@@ -631,6 +810,18 @@ export class LiveCompiler {
    *   only record of what broke.
    *
    * Neither means no prior failure: generate normally.
+   *
+   * The two are not equally well informed, and the difference shows in a loop.
+   * An in-band failure is fully paired: it arrives on the step being offered,
+   * and the step being offered is the first iteration that BROKE (`takenKeys`
+   * — a clean code run takes no key), so the code the repair reads, the error
+   * it is given and the page it is shown all belong to that one iteration. A
+   * sidecar failure belongs to some iteration of a PREVIOUS run — possibly
+   * iteration 3 — while the DOM and URL in the prompt come from the iteration
+   * this compile was offered, normally the first. That mismatch is the price
+   * of repairing at all on the `'steps'` path (nothing else knows what broke)
+   * and it is bounded: the code and the error are the failing iteration's,
+   * only the page is not.
    */
   private async priorFailure(
     binding: CodeBehindBinding,
@@ -652,7 +843,37 @@ export class LiveCompiler {
         r.source === binding.source &&
         (r.file === undefined || fileKey(r.file) === want),
     );
-    const row = same[binding.occurrence];
+    // One entry serves every iteration of a looped body, and this compile is
+    // offered ONE of them (`takenKeys`) — but the sidecar holds a row per
+    // iteration, in execution order. So `same[occurrence]` is iteration 1's
+    // row and only iteration 1's: an entry that threw on row 3 read back
+    // clean, and the step generated from scratch instead of going through the
+    // repair prompt that would have been shown the code and its error.
+    //
+    // With `occurrence` on the rows the question is answerable directly —
+    // every row that IS this occurrence, whichever iteration wrote it, and the
+    // first of them that failed. Not "any stale row of this identity": a body
+    // saying the same thing twice has occurrence 0 and 1 per iteration, and
+    // repairing 0 from 1's failure is a misattribution the old code did not
+    // make.
+    const byOccurrence = same.filter((r) => r.occurrence === binding.occurrence);
+    // Nothing matched. The positional read is the pre-`occurrence` sidecar's
+    // only answer, so it stands in for exactly that — rows that carry no
+    // `occurrence` AT ALL, which is right for iteration 1 and so for every
+    // non-looped test. It must not stand in when the rows do carry the field
+    // and none of them is this occurrence: a body that gained a second
+    // identically-worded line, was compiled (a compile writes entries and no
+    // sidecar) and not re-run has an entry at occurrence 1 and no row for it,
+    // and `same[1]` would hand that entry another iteration's occurrence-0
+    // failure to repair from. No row for this occurrence means no prior
+    // failure; the step generates from scratch.
+    const positional = same.every((r) => r.occurrence === undefined);
+    const row =
+      byOccurrence.length > 0
+        ? (byOccurrence.find((r) => r.stale) ?? byOccurrence[0])
+        : positional
+          ? same[binding.occurrence]
+          : undefined;
     return row?.stale ? (row.error ?? 'the entry failed on the last run') : undefined;
   }
 
@@ -676,8 +897,10 @@ export class LiveCompiler {
    * broken selector again — which is exactly what happened live: a recorded
    * `a[href="/login"]` click compiled to a strict locator that resolved to 2
    * elements, healed under AI, and regenerated identically. The repair prompt
-   * shows it the code that failed and what it threw. Where the failure comes
-   * from depends on the mode — see `priorFailure`.
+   * shows it the code that failed and what it threw — the entry as it stands
+   * in the candidate, which IS the code that failed, because a key is queued
+   * at most once (`takenKeys`) and so nothing has rewritten it first. Where
+   * the failure comes from depends on the mode — see `priorFailure`.
    */
   private async askModel(step: CompileStep, input: LiveStepInput): Promise<GeneratedEntry> {
     const binding = step.binding!;
@@ -807,6 +1030,13 @@ export class LiveCompiler {
         );
       }
     }
+    // Written, not merely queued: both of these spliced something into the
+    // candidate (an entry, or an `ai: true` decline carrying the reason), so
+    // this entry's slot is answered and the reconciliations in `finish` and in
+    // `kept` may net an iteration off against it. The `error` branch below
+    // deliberately does NOT record the key — see `writtenKeys`.
+    const wrote = applied.kind === 'entry' || applied.kind === 'declined';
+    if (wrote && step.key !== undefined) this.writtenKeys.add(step.key);
     if (applied.kind === 'entry') this.compiled.push(step.number);
     else if (applied.kind === 'declined') this.declined.push(step.number);
     else {
@@ -827,6 +1057,20 @@ export class LiveCompiler {
   }
 
   /**
+   * Candidate files the reviewer has not seen in their current state.
+   *
+   * A split run finishes once per block, so the reviewer would otherwise be
+   * asked to re-read a file it has already passed. It only sees a file whose
+   * content has actually changed since it last saw it — which is also what
+   * `runStepsEnded` forecasts on, so the note and the pass agree.
+   */
+  private unreviewedFiles(): string[] {
+    return this.candidate
+      .touchedFiles()
+      .filter((f) => this.reviewed.get(f) !== this.candidate.contentOf(f));
+  }
+
+  /**
    * Drain the queue, run Review (on the Run & Compile path only), and hand
    * back the proposal. The server never writes under the project on this
    * path: the files ride the wire and TestBench applies them through the diff.
@@ -836,12 +1080,7 @@ export class LiveCompiler {
       logger.warn(`Code-behind generation queue failed: ${String(err)}`);
     });
 
-    // A split run finishes once per block, so the reviewer would otherwise be
-    // asked to re-read a file it has already passed. It only sees a file whose
-    // content has actually changed since it last saw it.
-    const unreviewed = this.candidate
-      .touchedFiles()
-      .filter((f) => this.reviewed.get(f) !== this.candidate.contentOf(f));
+    const unreviewed = this.unreviewedFiles();
     if (this.options.mode === 'run' && !final.aborted && unreviewed.length > 0) {
       this.emitProgress('review');
       await reviewCandidate(
@@ -886,8 +1125,23 @@ export class LiveCompiler {
     }
 
     const files = this.candidate.changedFiles();
+    // A step a return left unrun owes an entry — unless ANOTHER inlining of the
+    // same entry ran and generated it. A looped body is one entry per authored
+    // line and one skip per iteration, so an iteration that returns early after
+    // an earlier one compiled the body would otherwise name steps as having no
+    // entry when the entry is in the very proposal being handed back. Same rule
+    // as the `kept` getter's, decided here rather than at `offer` time because
+    // the two answers about one key arrive in either order.
+    //
+    // WRITTEN, not merely queued (`writtenKeys`, not `takenKeys`): the debt is
+    // "this line ends the compile with no entry", and an iteration whose
+    // generation errored produced none. Netting it off would leave the author
+    // with a proposal silently missing that line.
+    const skippedByReturnOwed = this.skippedByReturn
+      .filter((s) => !this.writtenKeys.has(s.key))
+      .map((s) => s.number);
     const notAttempted = [
-      ...new Set([...(final.notAttempted ?? []), ...this.skippedByStop, ...this.skippedByReturn]),
+      ...new Set([...(final.notAttempted ?? []), ...this.skippedByStop, ...skippedByReturnOwed]),
     ].sort((a, b) => a - b);
     // A step a return left unrun is work still owed, so a compile that
     // attempted nothing BECAUSE of a return is not "already compiled"
@@ -897,10 +1151,13 @@ export class LiveCompiler {
       this.attempted === 0
       && final.stoppedAt === undefined
       && !final.aborted
-      && this.skippedByReturn.length === 0;
+      && skippedByReturnOwed.length === 0;
     const summary: CompileSummary = {
       test: this.options.testFilePath,
       totalSteps: this.scopedTotal,
+      // ENTRIES, and generations are the same thing here: the dedupe queues
+      // each entry key at most once, so this counts the proposal's entries the
+      // way the boxed pipeline counts `selection.order.length`.
       compiled: this.compiled.length,
       kept: this.kept,
       keptAi: this.keptAiExisting + this.declined.length,
@@ -908,7 +1165,9 @@ export class LiveCompiler {
       tokensUsed: final.tokensUsed,
       written: [],
       // Every entry this path produces is born unproven: there is no Replay,
-      // and the author's next ordinary run is the proof.
+      // and the author's next ordinary run is the proof. One number per entry
+      // — the iteration that generated it, for an entry a loop inlines many
+      // times.
       unproven: [...this.compiled].sort((a, b) => a - b),
       writtenOffAi: [],
       notAttempted,

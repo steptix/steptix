@@ -67,9 +67,9 @@ The step side is the **raw** line minus the `N. ` prefix — *not*
 `extractPlainText` output, which strips inline markdown in some list layouts
 (§2.3) and would make the CLI disagree with every other path.
 
-But `rawSteps` only exists on the CLI parse path. The server receives steps
-already in raw/instruction form and has no parallel array. So the rule is
-stated once, for every step list, at every level:
+But `rawSteps` only exists on the CLI parse path: what the server *receives*
+is already in raw/instruction form, so there is no second array to send. So the
+rule is stated once, for every step list, at every level:
 
 ```ts
 /** The match-side input for step i of ANY step list — main flow or section
@@ -85,6 +85,20 @@ where the two happen to be equal.
 *Supersedes:* [test-script-sections.md](test-script-sections.md) scopes its
 "falling back to the step string itself on the server path" clause to the
 top-level array only. The fallback applies at every level.
+
+**But the fallback is only as good as the `steps` it falls back to,** and the
+caller owes it authored text. "Received in raw form" is a fact about the request
+and stops being one the moment the server rewrites `steps` itself: a looped
+`### Section` interpolates the iteration's row into the body's steps *before* it
+recurses, so `steps[i]` there reads `Upload a.png` where the author wrote
+`Upload {{file}}`. So the recursion **sets** the body context's `rawSteps` from
+the section definition's own lines (`section.rawSteps ?? section.steps`) instead
+of letting the fallback answer. Leaving it to the fallback was measured twice
+over: the server bound one code-behind entry per row where the CLI binds one
+(stories/data-driven-rows.md), and a skip reason built from the match side
+quoted a secret row value on four surfaces. The formula above is unchanged —
+whoever supplies the list is responsible for its match side being the line as
+authored.
 
 ### 2.2 Resolution order and the two carve-outs
 
@@ -276,9 +290,15 @@ sections?: Record<string, {
 ```
 
 Note the deliberate asymmetry with `ParsedSection`: the wire shape has **no
-`rawSteps`**. The server's incoming steps are already the raw/instruction
-form, so the parallel isn't needed — the §2.1 fallback covers it. Do not add
-it to the wire.
+`rawSteps`**. The incoming `steps` are already the raw/instruction form, so
+there is nothing a second array would say. Do not add it to the wire.
+
+That still holds for a LOOPED body, where §2.1's fallback does **not** cover the
+match side — but the missing piece is server-side, not a field. The server
+interpolates each row into the body's steps before recursing, so it sets the
+body context's `rawSteps` from *this* array, read before any row went into it.
+The authored text was on the wire all along; the fix is to keep hold of it
+rather than to send it twice.
 
 `steps` carries `[no-hooks]` markers **verbatim**. The expander strips them
 when inlining a body — the CLI parser strips at parse time, so without the
