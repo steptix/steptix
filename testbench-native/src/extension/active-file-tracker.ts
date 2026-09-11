@@ -19,6 +19,11 @@ import { dataTablesOf } from './data-tables-core.js';
  * succeeded either way (stories/codebehind-compile.md §What the author sees).
  * They differ in what ran: compiled TypeScript, or the AI after the compiled
  * entry threw. The second is the one that wants a recompile.
+ *
+ * `fail-tolerated` is a FAILURE the run carried on past — an `otherwise continue`
+ * tail (stories/step-failure-outcomes.md, decision 6). An amber ✗: the step did
+ * not do what it said, so never a pass, and the run is not red for it, so never a
+ * red one either.
  */
 export type LineStatus =
   | 'running'
@@ -27,6 +32,7 @@ export type LineStatus =
   | 'pass-code-behind'
   | 'pass-stale'
   | 'fail'
+  | 'fail-tolerated'
   | 'skip'
   | 'stopped';
 
@@ -796,6 +802,11 @@ export class ActiveFileTracker {
       if (!parsed || typeof parsed.files !== 'object') continue;
       for (const [rel, persisted] of Object.entries(parsed.files)) {
         const key = vscode.Uri.joinPath(folder.uri, rel).toString();
+        // The status strings are taken as written rather than checked against
+        // `LineStatus`, which is what makes the union safe to widen: a file written
+        // before `fail-tolerated` has no entry carrying it, and one written after is
+        // readable by an older build too (which paints nothing for a status it does
+        // not know). Only `running` is dropped — no run is in flight after a reload.
         const statuses = new Map<number, LineStatus>(
           persisted.statuses.filter(([, s]) => s !== 'running'),
         );

@@ -21,6 +21,15 @@ import {
 } from './generate.js';
 import { buildRepairPrompt } from './repair.js';
 import { reviewCandidate } from './review.js';
+// The two refusals both compilers say; they live beside `generationRefusal`.
+// Safe in this direction because live-compile.ts's only reference back here is
+// an `import type` (stories/step-failure-outcomes.md, decisions 10 and 11).
+import {
+  clipLine,
+  DISPATCHED_NOT_COMPILED,
+  endedAsWrittenReason,
+  TOLERATED_FAILURE_REFUSAL,
+} from './live-compile.js';
 import { clearStale, readLastRun } from './last-run.js';
 import { writeCodeBehindFile } from './writer.js';
 import {
@@ -116,6 +125,20 @@ export interface CompileSummary {
   /** Where the recording stopped, when it did not reach the end of the test.
    *  The compile was then a prefix compile of the steps before it. */
   stoppedAt?: { step: number; error: string } | undefined;
+  /**
+   * Where the recording ENDED because a step's own text said to — the `fail`
+   * verb (stories/step-failure-outcomes.md, decisions 1–3).
+   *
+   * Beside {@link stoppedAt} rather than inside it, and never both: every reader
+   * of `stoppedAt` words itself "failed under AI — fix it, run, and compile
+   * again", which is right for a recording that broke and wrong for one that
+   * finished where the test says it finishes. A reader that knows only
+   * `stoppedAt` therefore says nothing rather than the wrong thing.
+   *
+   * `line` is the ending step's authored text, for the parenthetical every
+   * surface puts after the sentence.
+   */
+  endedAsWritten?: { step: number; error: string; line: string } | undefined;
   /** Selected steps the prefix never reached, so nothing was generated for
    *  them. They have no entry, and the next compile's default selection takes
    *  them. */
@@ -421,26 +444,97 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     keptExisting = keptExistingFor(selection);
   }
 
-  // Where the recording stopped. A run that failed or was stopped at step k is
-  // a recording of steps 1..k-1, and the compile is a prefix compile: what
-  // those steps produced is worth keeping, and the rest has no transcript at
-  // all (stories/codebehind-compile-as-a-run.md §Write what passed).
+  // Where the recording stopped — or ENDED, which is a different thing. A run
+  // that failed or was stopped at step k is a recording of steps 1..k-1, so the
+  // compile is a prefix compile (stories/codebehind-compile-as-a-run.md §Write
+  // what passed); a run a step's own text ended is a recording of 1..k
+  // INCLUSIVE, because that step worked (stories/step-failure-outcomes.md,
+  // decisions 1–3). Told apart here, once, because everything downstream words
+  // itself off which happened.
   const prefixEnd = usablePrefix(record.steps);
   let stoppedAt: CompileSummary['stoppedAt'];
+  /**
+   * The step whose own text ended the recording, when one did
+   * (stories/step-failure-outcomes.md, decisions 1–3).
+   *
+   * A field of its own rather than a `stoppedAt` with different words, because
+   * every reader of `stoppedAt` says "failed under AI — fix that step, run, and
+   * compile again" (src/cli/commands/compile.ts), and there is nothing to fix
+   * here.
+   *
+   * Set ONLY when steps remain after the ending one — the whole branch below is
+   * inside `prefixEnd < test.steps.length` — because that is the question the
+   * field answers ("why has step 10 no entry"). The live compiler now narrows to
+   * the same rule (`finish`, src/codebehind/live-compile.ts): setting it
+   * whenever the loop reported one is how a `green` summary came to carry an
+   * `error` on one path and nothing on the other.
+   */
+  let endedAsWritten: { step: number; error: string; line: string } | undefined;
   let notAttempted: number[] = [];
   /** How many steps a replay runs — the prefix, or the whole test. */
   let throughStep: number | undefined;
   if (prefixEnd < test.steps.length) {
+    // `usablePrefix` counts a deliberate failure IN, so when one ended the
+    // recording it is the last step of the prefix rather than the first one past
+    // it — which is why one branch below names the step that broke and the other
+    // names the step that finished.
+    const endedIndex =
+      prefixEnd > 0 && deliberateFailure(record.steps[prefixEnd - 1]) ? prefixEnd - 1 : -1;
     const stoppedStep = record.steps[prefixEnd];
     const error =
-      stoppedStep?.error ??
-      (record.status === 'passed'
-        ? 'the run stopped before this step'
-        : 'the run failed before this step');
-    stoppedAt = { step: prefixEnd + 1, error };
+      endedIndex >= 0
+        ? record.steps[endedIndex]?.error ?? 'the step failed as its text says'
+        : stoppedStep?.error ??
+          (record.status === 'passed'
+            ? 'the run stopped before this step'
+            : 'the run failed before this step');
+    if (endedIndex >= 0) {
+      endedAsWritten = {
+        step: endedIndex + 1,
+        error,
+        line: steps[endedIndex]?.text ?? test.steps[endedIndex] ?? '',
+      };
+    } else {
+      stoppedAt = { step: prefixEnd + 1, error };
+    }
     const inPrefix = selection.order.filter((s) => s.number <= prefixEnd);
     notAttempted = selection.order.filter((s) => s.number > prefixEnd).map((s) => s.number);
+    // Named one by one, not only counted: this is the author's answer to "why has
+    // step 10 no entry" (stories/step-flow-control.md, decision 12, applied to
+    // the other way a run can end early).
+    if (endedAsWritten) {
+      for (const step of selection.order.filter((s) => s.number > prefixEnd)) {
+        stepEvent(
+          'select',
+          step,
+          `not attempted: ${endedAsWrittenReason('run', endedAsWritten.step)} ` +
+            `(${clipLine(endedAsWritten.line)})`,
+        );
+      }
+    }
     if (inPrefix.length === 0) {
+      if (endedAsWritten) {
+        // `partial`, not `failed`: nothing went wrong — the recording ran to the
+        // end the test declares, and the steps past it are work a later run has
+        // to reach.
+        return finish(
+          'partial',
+          {
+            compiled: 0,
+            kept: keptExisting,
+            keptAi: keptAiExisting,
+            written: [],
+            notAttempted,
+            endedAsWritten,
+            error:
+              `${endedAsWrittenReason('run', endedAsWritten.step)} ` +
+              `(${clipLine(endedAsWritten.line)}) and no step up to it needs compiling`,
+          },
+          `Record ended at step ${endedAsWritten.step} as its text says — ${error}. ` +
+            'Nothing up to it needs compiling' +
+            (notAttempted.length > 0 ? `; ${listSteps(notAttempted)} did not run.` : '.'),
+        );
+      }
       return finish(
         'failed',
         {
@@ -448,11 +542,11 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
           kept: keptExisting,
           keptAi: keptAiExisting,
           written: [],
-          stoppedAt,
+          stoppedAt: stoppedAt!,
           notAttempted,
-          error: `the recording stopped at step ${stoppedAt.step} (${error}) and no step before it needs compiling`,
+          error: `the recording stopped at step ${stoppedAt!.step} (${error}) and no step before it needs compiling`,
         },
-        `Record stopped at step ${stoppedAt.step} — ${error}. Nothing before it needs compiling; ` +
+        `Record stopped at step ${stoppedAt!.step} — ${error}. Nothing before it needs compiling; ` +
           'fix that step, run, and compile again.',
       );
     }
@@ -460,7 +554,10 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       kind: 'phase',
       phase: 'record',
       message:
-        `stopped at step ${stoppedAt.step} — ${error}; compiling ${inPrefix.length} step(s) before it` +
+        (endedAsWritten
+          ? `ended at step ${endedAsWritten.step} as its text says — ${error}; ` +
+            `compiling ${inPrefix.length} step(s) up to it`
+          : `stopped at step ${stoppedAt!.step} — ${error}; compiling ${inPrefix.length} step(s) before it`) +
         (notAttempted.length > 0 ? ` (${listSteps(notAttempted)} not attempted)` : ''),
     });
     selection = { keys: new Set(inPrefix.map((s) => s.key!)), order: inPrefix, errors: [] };
@@ -481,24 +578,57 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // past the end of a stopped recording is. It does NOT end the prefix
   // (`usablePrefix` steps over it), so the steps after the returned flow — the
   // ones that did run — still compile.
+  //
+  // A step that FAILED and was TOLERATED is the same case with the opposite
+  // history (stories/step-failure-outcomes.md, decision 11): it ran, and left a
+  // transcript of the failure, so it is no evidence either and is dropped on the
+  // same terms — `usablePrefix` steps over it, so the steps AFTER it compile.
   const skippedInRecording = selection.order.filter(
     (s) => record.steps[s.index]?.status === 'skipped',
   );
-  if (skippedInRecording.length > 0) {
+  const toleratedInRecording = selection.order.filter((s) => toleratedFailure(record.steps[s.index]));
+  const noEvidence = new Set([...skippedInRecording, ...toleratedInRecording]);
+  if (noEvidence.size > 0) {
     for (const step of skippedInRecording) {
       stepEvent('select', step, notRunOnRecordingReason(record.steps[step.index]));
     }
+    for (const step of toleratedInRecording) {
+      stepEvent('select', step, TOLERATED_FAILURE_REFUSAL);
+    }
     notAttempted = [
-      ...new Set([...notAttempted, ...skippedInRecording.map((s) => s.number)]),
+      ...new Set([...notAttempted, ...[...noEvidence].map((s) => s.number)]),
     ].sort((a, b) => a - b);
-    const attemptable = selection.order.filter(
-      (s) => record.steps[s.index]?.status !== 'skipped',
-    );
+    const attemptable = selection.order.filter((s) => !noEvidence.has(s));
     if (attemptable.length === 0) {
-      // Every selected step was behind the return. Nothing to generate, nothing
-      // to replay, and `partial` rather than `green` because the steps are
-      // still uncompiled — a green here would say "already compiled" about work
-      // that has not started.
+      // Every selected step was behind the return, or failed and was tolerated:
+      // nothing to generate, and `partial` rather than `green`, which would say
+      // "already compiled" about work that has not started.
+      //
+      // A clause per cause, each over ITS OWN steps, because the two are opposite
+      // facts: a step behind a return never ran, a tolerated one ran and failed.
+      // Told in one list, an author sent to "run the test so they execute" over a
+      // step that DID execute looks for the wrong thing.
+      const toleratedNumbers = toleratedInRecording.map((s) => s.number);
+      // Everything else in `notAttempted`: the skipped rows, plus the post-prefix
+      // steps of a recording that stopped — neither ran, so one sentence covers
+      // both.
+      const didNotRun = notAttempted.filter((n) => !toleratedNumbers.includes(n));
+      const cause = [
+        didNotRun.length > 0
+          ? `${listSteps(didNotRun)} did not run on the recording run` +
+            `${stoppedAt || endedAsWritten ? '' : describeRecordingSkips(skippedInRecording.map((s) => record.steps[s.index]))}`
+          : '',
+        toleratedNumbers.length > 0
+          ? `${listSteps(toleratedNumbers)} failed on the recording run and was tolerated ` +
+            '(otherwise continue)'
+          : '',
+      ]
+        .filter((c) => c !== '')
+        .join(', and ');
+      const next =
+        didNotRun.length > 0
+          ? 'Run the test so they execute, then compile again.'
+          : 'Make it pass, then compile again.';
       return finish(
         'partial',
         {
@@ -521,9 +651,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         // attempted for an entirely different reason. Those runs carry
         // `stoppedAt` in the summary, and the `record` phase line above has
         // already said "stopped at step N — <error>".
-        `Nothing to compile: ${listSteps(notAttempted)} did not run on the recording run` +
-          `${stoppedAt ? '' : describeRecordingSkips(skippedInRecording.map((s) => record.steps[s.index]))}. ` +
-          'Run the test so they execute, then compile again.',
+        `Nothing to compile: ${cause}. ${next}`,
       );
     }
     selection = {
@@ -652,12 +780,58 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
    * changes which steps the next round reaches.
    */
   let unreached: Array<{ step: number; reason: string }> = [];
+  /**
+   * Selected steps the LAST replay ran, failed, and TOLERATED
+   * (stories/step-failure-outcomes.md, decision 11).
+   *
+   * Neither proven nor failed, and the second half is the load-bearing one: the
+   * entry did not do what the step says, so it cannot be proven, but the run
+   * carried on exactly as the author asked, so no repair round is owed. What it
+   * costs the compile is `green` — the entry is proposed, unproven, and named.
+   *
+   * Recomputed per round beside `unreached`: the round that decides is the last.
+   */
+  let toleratedInReplay: Array<{ step: number; reason: string }> = [];
+  /**
+   * Where the LAST replay ended because a step's own text said to — a
+   * deliberate failure at a step the RECORDING failed deliberately at too
+   * (stories/step-failure-outcomes.md, decisions 1–3 and 10).
+   *
+   * Both halves are the rule: the entry reproduced the recording's outcome
+   * exactly, which is all a proving replay is asked to do, so the round is as
+   * complete as a passing one and the step is PROVEN. A deliberate failure where
+   * the recording had none means the condition flipped between the two runs, and
+   * stays an ordinary replay failure.
+   */
+  let endedInReplay: { step: number } | undefined;
+  /** The recording's rows, for the comparison above. A const because
+   *  `markRound` is a closure and `record` is a `let`. */
+  const recordedSteps = record.steps;
   const stepsInS = (): CompileStep[] => steps.filter((s) => s.key && selection.keys.has(s.key));
   const markRound = (outcome: CompileRunOutcome): void => {
     unreached = [];
+    toleratedInReplay = [];
+    endedInReplay = undefined;
+    const endedAt = outcome.steps.findIndex(
+      (s, i) => deliberateFailure(s) && deliberateFailure(recordedSteps[i]),
+    );
+    if (endedAt >= 0) endedInReplay = { step: endedAt + 1 };
     for (const step of stepsInS()) {
       const result = outcome.steps[step.index];
       if (result?.status === 'passed') proven.add(step.key!);
+      // The entry failed the run in the author's words where the recording's AI
+      // turn did the same: the entry working, not breaking.
+      if (deliberateFailure(result) && deliberateFailure(recordedSteps[step.index])) {
+        proven.add(step.key!);
+      }
+      if (toleratedFailure(result)) {
+        toleratedInReplay.push({
+          step: step.number,
+          // The step's own error, so the compile's summary and the run's
+          // report say the same thing about the same step.
+          reason: result?.error?.trim() || 'the step failed and the run continued',
+        });
+      }
       if (result?.status === 'skipped') {
         unreached.push({
           step: step.number,
@@ -698,7 +872,19 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   const failureOf = (
     outcome: CompileRunOutcome,
   ): { step: CompileStep | undefined; result: StepResult | undefined; error: string } => {
-    const failedAt = outcome.steps.findIndex((s) => s?.status === 'failed');
+    // `!tolerated`: a tolerated failure carries `status: 'failed'` and the run
+    // went past it (stories/step-failure-outcomes.md, decision 6), so taking it
+    // as THE failure would repair — and eventually write off as `ai: true` — a
+    // step whose own text says it may fail. And not a DELIBERATE failure the
+    // recording made too (decisions 1–3): repairing that would ask the model to
+    // stop a step from failing when failing is what its text says to do, and the
+    // write-off after `maxRounds` would bury the author's own line.
+    const failedAt = outcome.steps.findIndex(
+      (s, i) =>
+        s?.status === 'failed'
+        && !s.tolerated
+        && !(deliberateFailure(s) && deliberateFailure(recordedSteps[i])),
+    );
     const result = failedAt >= 0 ? outcome.steps[failedAt] : undefined;
     return {
       step: failedAt >= 0 ? steps[failedAt] : undefined,
@@ -717,24 +903,34 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
 
   for (let round = 1; round <= maxRounds; round++) {
     const outcome = await replay(round);
-    if (outcome.status === 'passed') {
+    const failed = failureOf(outcome);
+    // The run is red and nothing broke: a step failed the run in the author's
+    // words, exactly where the recording did (stories/step-failure-outcomes.md,
+    // decisions 1–3). `outcome.status` cannot say that, so the round's
+    // completeness is read off the rows instead.
+    const endedAsAsked = endedInReplay !== undefined && failed.result === undefined;
+    if (outcome.status === 'passed' || endedAsAsked) {
       emit({
         kind: 'phase',
         phase: 'replay',
         round,
         // A run that returned executed fewer steps than it has, and saying
-        // "N/N passed as code" for it would count entries nothing ran.
+        // "N/N passed as code" for it would count entries nothing ran. A
+        // tolerated failure is the other way round — the entry ran and did not
+        // work (decision 11) — and a run that ended as written is a third shape:
+        // every step ran and the last failed on purpose, so "passed as code" is
+        // the one word that cannot be used.
         message:
-          unreached.length > 0
-            ? `replayed as code — ${listSteps(unreached.map((u) => u.step))} not reached ` +
-              `(${unreached[0]!.reason})`
-            : `${replayTotal}/${replayTotal} passed as code`,
+          describeReplayGaps(unreached, toleratedInReplay)
+          ?? (endedAsAsked
+            ? `${replayTotal}/${replayTotal} replayed as code — ` +
+              `${endedAsWrittenReason('run', endedInReplay!.step)}`
+            : `${replayTotal}/${replayTotal} passed as code`),
       });
       green = true;
       break;
     }
 
-    const failed = failureOf(outcome);
     emit({
       kind: 'phase',
       phase: 'replay',
@@ -814,19 +1010,31 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     const { step, error } = lastFailure;
     await writeOff(step, error, `after ${maxRounds} round(s)`);
     const outcome = await replay(rounds + 1);
-    green = outcome.status === 'passed';
+    const failed = failureOf(outcome);
+    // The same two ways a round can be complete as the loop above: a test can
+    // hold both a written-off step and a step whose text ends the run.
+    const endedAsAsked = endedInReplay !== undefined && failed.result === undefined;
+    green = outcome.status === 'passed' || endedAsAsked;
     if (green) {
+      const gaps = describeReplayGaps(unreached, toleratedInReplay);
       emit({
         kind: 'phase',
         phase: 'replay',
         round: rounds,
-        message: `${replayTotal}/${replayTotal} passed (step ${step.number} under AI)`,
+        // Same honesty as the first round's line: the confirming round can also
+        // leave steps unreached or tolerated, and "N/N passed" over either is a
+        // claim nothing made.
+        message: gaps
+          ? `${gaps}; step ${step.number} under AI`
+          : endedAsAsked
+            ? `${replayTotal}/${replayTotal} replayed as code — ` +
+              `${endedAsWrittenReason('run', endedInReplay!.step)} (step ${step.number} under AI)`
+            : `${replayTotal}/${replayTotal} passed (step ${step.number} under AI)`,
       });
     } else {
       // The confirming round failed somewhere else. No further rounds — the
       // budget is spent — but the step it failed on gets the same answer the
       // first one did, and everything proven stays proven.
-      const failed = failureOf(outcome);
       emit({
         kind: 'phase',
         phase: 'replay',
@@ -885,29 +1093,76 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       `the replay never reached ${listSteps(unreached.map((u) => u.step))} — ` +
       `${unreached[0]!.reason}; those entries are proposed but unproven`;
   }
+  // The same accounting for a step the replay TOLERATED (decision 11): the entry
+  // ran and did not do what the step says, so nothing proved it — but the run is
+  // not failed by it, so this is a `partial` with a name in it.
+  if (toleratedInReplay.length > 0 && failure === undefined) {
+    failure =
+      `the replay's ${listSteps(toleratedInReplay.map((t) => t.step))} failed and was tolerated ` +
+      `(otherwise continue) — ${toleratedInReplay[0]!.reason}; ` +
+      'that entry is proposed but unproven';
+  }
+  // The recording ended where the test says it ends, and the steps past that
+  // point are still to compile (decisions 1–3). Said in the summary's own words
+  // because on the CLI this is the `Reason:` line, the only place a partial
+  // compile explains itself.
+  if (endedAsWritten !== undefined && failure === undefined) {
+    failure =
+      `${endedAsWrittenReason('run', endedAsWritten.step)} (${clipLine(endedAsWritten.line)})` +
+      (notAttempted.length > 0 ? `; not attempted: ${listSteps(notAttempted)}` : '');
+  }
   // Green means the whole test replayed as code. A prefix compile that went
   // green only proved the prefix; the rest of the test is still to do — and so
   // does a compile that left steps unattempted because the recording never ran
   // them, whether a return ended their flow or a decision took another branch.
   // That is a `notAttempted` with no `stoppedAt` behind it
   // (stories/step-flow-control.md, decision 12).
+  //
+  // A recording that ended AS WRITTEN is the same arithmetic for a different
+  // reason: nothing is broken, but the steps after the ending step never ran, so
+  // the test does not replay as code end to end. When the ending step is the LAST
+  // one there is no gap, `endedAsWritten` is never set, and green is honest.
   const status: CompileStatus =
-    green && !stoppedAt && unreached.length === 0 && notAttempted.length === 0
+    green
+    && !stoppedAt
+    && endedAsWritten === undefined
+    && unreached.length === 0
+    && toleratedInReplay.length === 0
+    && notAttempted.length === 0
       ? 'green'
       : 'partial';
   const keptAi = keptAiExisting + declined;
   /** Why the recording did not attempt them, when every skipped row agrees on
    *  one cause. Undefined when they disagree, which is what keeps the headline
    *  from picking a winner among rows it would then be wrong about. */
-  const notAttemptedCause = recordingSkipCause(
-    skippedInRecording.map((s) => record.steps[s.index]),
-  );
+  //
+  // A tolerated failure is a THIRD cause and a run that ended as written a FOURTH
+  // (decisions 1–3 and 11), each asserted only when it is the only one present: a
+  // mixed set gets no clause, the rule `recordingSkipCause` already applies to
+  // its own producers, because the sentence states its cause as fact.
+  const causesPresent = [
+    endedAsWritten !== undefined,
+    toleratedInRecording.length > 0,
+    skippedInRecording.length > 0,
+  ].filter(Boolean).length;
+  const notAttemptedCause =
+    causesPresent !== 1
+      ? undefined
+      : endedAsWritten !== undefined
+        ? endedAsWrittenReason('run', endedAsWritten.step)
+        : toleratedInRecording.length > 0
+          ? 'they failed on the recording run and were tolerated'
+          : recordingSkipCause(skippedInRecording.map((s) => record.steps[s.index]));
   const tail = [
     writtenOffAi.length > 0 ? `${writtenOffAi.length} kept AI after replay failures` : '',
     unproven.length > 0 ? `${unproven.length} unproven (${listSteps(unproven)})` : '',
     unreached.length > 0
       ? `${listSteps(unreached.map((u) => u.step))} not reached by the replay ` +
         `(${unreached[0]!.reason})`
+      : '',
+    toleratedInReplay.length > 0
+      ? `${listSteps(toleratedInReplay.map((t) => t.step))} failed and was tolerated by the replay ` +
+        `(${toleratedInReplay[0]!.reason})`
       : '',
     // A stopped recording already says "stopped at step N" below, and the CLI
     // prints the list either way; this is the case with no stop behind it,
@@ -936,6 +1191,10 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     unproven,
     writtenOffAi,
     ...(stoppedAt && { stoppedAt }),
+    // The fact, not only its wording: `error` and the per-step `select` lines are
+    // all the CLI needs, but the field is what a CLIENT reads. Set here so the
+    // two compilers hand back the same shape for the same recording.
+    ...(endedAsWritten && { endedAsWritten }),
     notAttempted,
     ...(failure !== undefined && { error: failure }),
   };
@@ -997,16 +1256,53 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
  * returned. Only a failure, an error, or a step with no result at all — a run
  * that stopped — ends it.
  *
- * The skipped steps themselves are dropped from the selection separately, with
- * a reason: inside the prefix, but no evidence.
+ * A TOLERATED failure is neutral for the same reason
+ * (stories/step-failure-outcomes.md, decision 11): the run carried on past it, so
+ * the steps after it ran in a browser that kept going and their transcripts are
+ * as usable as any other's. Ending the prefix there would throw away the rest of
+ * the test over a failure the author declared harmless.
+ *
+ * A DELIBERATE failure is the third case, and the only one that ends the prefix
+ * AFTER itself rather than before it (decisions 1–3): the step did exactly what
+ * its text says, so its transcript is evidence and it belongs INSIDE the prefix,
+ * while nothing after it ran.
+ *
+ * The skipped and tolerated steps themselves are dropped from the selection
+ * separately, with a reason: inside the prefix, but no evidence. The deliberate
+ * one is not dropped — it compiles.
  */
 function usablePrefix(steps: (StepResult | undefined)[]): number {
   let n = 0;
   for (const step of steps) {
-    if (step?.status !== 'passed' && step?.status !== 'skipped') break;
+    if (step?.status !== 'passed' && step?.status !== 'skipped' && !toleratedFailure(step)) {
+      if (deliberateFailure(step)) n++;
+      break;
+    }
     n++;
   }
   return n;
+}
+
+/**
+ * A failure the step's own text asked for — `If … then fail the test with error
+ * "…"`, judged true on this run (stories/step-failure-outcomes.md, decisions
+ * 1–3). `status` is a plain `'failed'`, so the flag is what separates "the run
+ * ended where the test says it ends" from "something broke", and the compile has
+ * to ask or it reports a step that worked as one the author must go and fix.
+ */
+function deliberateFailure(result: StepResult | undefined): boolean {
+  return result?.status === 'failed' && result.deliberate === true;
+}
+
+/**
+ * A failure the step's own `otherwise continue` tail let the run past
+ * (stories/step-failure-outcomes.md, decision 6). `status` is a plain `'failed'`
+ * — nothing that did not do its work is painted green — so every site meaning
+ * "a failure the compile must stop at" has to ask for the flag too, or a run the
+ * author declared survivable reads here as a run that died.
+ */
+function toleratedFailure(result: StepResult | undefined): boolean {
+  return result?.status === 'failed' && result.tolerated === true;
 }
 
 /**
@@ -1077,6 +1373,31 @@ function recordingSkipCause(results: (StepResult | undefined)[]): string | undef
   return undefined;
 }
 
+/**
+ * What a replay round did NOT prove, as one clause, or null when it proved
+ * everything it ran.
+ *
+ * Two producers with opposite histories — a step the run never reached, and one
+ * it ran and tolerated (stories/step-flow-control.md decision 12;
+ * stories/step-failure-outcomes.md decision 11) — both sayable in one line,
+ * because a round can do both and "N/N passed as code" would be false twice over.
+ */
+function describeReplayGaps(
+  unreached: Array<{ step: number; reason: string }>,
+  tolerated: Array<{ step: number; reason: string }>,
+): string | null {
+  const clauses = [
+    unreached.length > 0
+      ? `${listSteps(unreached.map((u) => u.step))} not reached (${unreached[0]!.reason})`
+      : '',
+    tolerated.length > 0
+      ? `${listSteps(tolerated.map((t) => t.step))} failed and was tolerated ` +
+        `(${tolerated[0]!.reason})`
+      : '',
+  ].filter((c) => c !== '');
+  return clauses.length === 0 ? null : `replayed as code — ${clauses.join(', ')}`;
+}
+
 /** "steps 6–9", "step 4", "steps 2, 5" — for messages. */
 function listSteps(numbers: number[]): string {
   if (numbers.length === 0) return 'no steps';
@@ -1132,11 +1453,11 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
     const binding = registry?.bindingFor(i);
     const text = binding?.source ?? test.expansion?.rawSteps[i] ?? step;
     const isAiEntry = binding?.entry?.ai === true;
-    // The UNCONDITIONAL `Return` / `Stop` only (`body === undefined`). The
-    // conditional form is the one thing step-flow-control adds to the compiler
-    // — it becomes `if (…) step.exit()` — while the unconditional one is
-    // dispatched by the loop with no model call at all, exactly as `Set` is,
-    // so there is nothing to record and nothing to make cheaper
+    // The UNCONDITIONAL `Return` / `Stop` / `Fail` only (`body === undefined`).
+    // The conditional form compiles — `if (…) step.exit()`, or `if (…)
+    // step.fail('…')` for the `fail` verb (stories/step-failure-outcomes.md,
+    // decision 10) — while the unconditional one is dispatched by the loop with
+    // no model call, exactly as `Set` is, so there is nothing to record
     // (stories/step-flow-control.md, decisions 3 and 11).
     //
     // `If <condition>, then return` is a flow-control step and NOT a control
@@ -1165,7 +1486,7 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
       : parseSetStep(text)
       ? 'a Set step is dispatched, not compiled'
       : flowControl && flowControl.body === undefined
-      ? 'a Return/Stop step is dispatched, not compiled'
+      ? DISPATCHED_NOT_COMPILED
       : !binding
         ? 'the step has no code-behind file to bind into'
         : undefined;
@@ -1299,7 +1620,15 @@ async function repairStep(
     options.aiClient,
     options.contextContent,
     prompt,
-    guardedValues(parameters, envRefs),
+    // The authored line, exactly as generation passes it: a value the author
+    // QUOTED in the step is the author's, so an entry echoing it is repeating the
+    // step rather than inlining a resolved value (`guardedValues` /
+    // `authorQuotedLiterals`, generate.ts). Without it, `If {{a}} is "peanuts"
+    // then fail …` with `{{a}}` = `peanuts` cannot be repaired at all — every
+    // candidate contains `peanuts`, so each was discarded as a leak and the step
+    // was written off `ai: true` after `maxRounds`
+    // (stories/step-failure-outcomes.md, decisions 3 and 10).
+    guardedValues(parameters, envRefs, step.text),
     options.signal,
   );
 }

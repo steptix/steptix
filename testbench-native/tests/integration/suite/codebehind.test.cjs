@@ -906,6 +906,58 @@ tags: [codebehind]
     assert.match(log, /Compiled compile-me\.md: 2 step\(s\) as code \(unproven/);
   });
 
+  it('a run its own text ended is logged as ended, not as a step to fix', async () => {
+    // stories/step-failure-outcomes.md §"What the compile showed": a summary
+    // carrying `endedAsWritten` and NO `stoppedAt`, where the live compiler used to
+    // put the fact in the field whose every reader says "failed under AI — fix it".
+    // Sliced from `logBefore` because the negative assertions below would
+    // otherwise read an earlier test's lines out of the shared channel.
+    const logBefore = readLiveLog()?.length ?? 0;
+    const error = 'The variable value was peanuts. Expected apples';
+    fake.streamScripts = [
+      (f) => {
+        f.push({ type: 'step:start', line: 8 });
+        f.push({ type: 'step:pass', line: 8 });
+        f.push({ type: 'compile:step', phase: 'generate', step: 1, line: 8, message: 'generated' });
+        f.push({ type: 'step:start', line: 9 });
+        f.push({ type: 'step:fail', line: 9, error, deliberate: true });
+        f.push({
+          type: 'compile:result',
+          status: 'partial',
+          files: { [stepsPath]: 'export default defineSteps([]);\n' },
+          summary: summaryFor({
+            compiled: 2,
+            unproven: [1, 2],
+            endedAsWritten: {
+              step: 2,
+              error,
+              line: 'If {{a}} is "peanuts" then fail the test with error "…"',
+            },
+          }),
+        });
+        f.push({ type: 'done', status: 'failed' });
+        f.end();
+      },
+    ];
+
+    void vscode.commands.executeCommand('testbench-native.runAndCompile');
+    await waitFor('proposal pending', () => hooks.pendingCodeBehind() !== null);
+
+    const log = readLiveLog();
+    if (log === null) return; // TESTBENCH_LIVE_LOG not set — nothing to read.
+    const thisRun = log.slice(logBefore);
+    assert.match(
+      thisRun,
+      /ended at step 2 as its text says — The variable value was peanuts\. Expected apples/,
+      `the compile line must say the run ENDED; got:\n${thisRun}`,
+    );
+    // The two phrases that sent an author to repair a working step.
+    assert.doesNotMatch(thisRun, /failed under AI/);
+    assert.doesNotMatch(thisRun, /stopped at step/);
+    // And the step itself is logged as written, not as a malfunction.
+    assert.match(thisRun, /✗ step 9 failed as written: The variable value was peanuts/);
+  });
+
   it('paints </> for a step that passed as code and ⚠ for a stale one', async () => {
     void vscode.commands.executeCommand('testbench-native.runAll');
     await waitFor('stream active', () => fake.hasActiveStream);

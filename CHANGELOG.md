@@ -6,6 +6,99 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — a step can fail in the author's words, and fail without stopping the run
+
+A step failed when the model or the code-behind could not do what the line said,
+the message on it was whatever the framework produced, and every failure took
+the run down. So there was no way to say *if this value is wrong, fail, and put
+my sentence in the report*, no way to make a red `Verify` say what the author
+meant rather than what the model compared, and a step that may legitimately
+fail — a banner that is sometimes there, an informational check — had to be
+rewritten as a conditional or it ended the run.
+
+Three forms now. A step ending `then fail the test with error "…"` is the third
+verb of the `return` / `stop` grammar: the model judges the condition against
+the live page and, when it holds, the step fails with that message and the run
+stops. A step ending `otherwise fail the test with message "…"` is an ordinary
+step whose final failure is renamed. A step ending `otherwise continue` — or
+`otherwise continue with warning "…"` — is an ordinary step whose failure the
+run survives. A line that is nothing but `Fail the test with error "…"` fails
+the run with no model call at all, which is what makes it the natural tail of an
+`Otherwise` at the end of a decision.
+
+```markdown
+6. Verify the page title contains "Dashboard" otherwise fail the test with message "Sign in did not reach the dashboard"
+7. Verify the footer shows the build number otherwise continue with warning "Build number missing"
+9. If {{a}} is "peanuts" then fail the test with error "The variable value was peanuts. Expected apples"
+```
+
+A deliberate failure is not retried: the author asked for it, and a retry would
+hand the model *this failed, try something else*, which is the one nudge that
+could turn it into a false pass. The AI failure diagnosis is skipped for the
+same reason — the cause is already written. The message is interpolated like any
+other step text — in a `fail` condition's `with error "…"` and in an `otherwise`
+tail's message alike — and masked on its way out, so a `{{password}}` inside one
+cannot leak through the report, the wire or the log. A tolerated failure keeps
+`status: failed` — it did not do what it said — paints amber rather than red,
+and is counted apart: *7 passed, 1 tolerated*. The run's status excludes it, so
+a run whose only failures were tolerated passes, and neither the pass count nor
+the fail count absorbs it. Inside a `While`, a `Repeat`, a `For each` or a
+looped section the loop keeps looping, because the pass did not end.
+
+The model never sees an `otherwise` tail. It is handed the body alone —
+otherwise a model told "otherwise continue" reasons that the step is optional
+and does nothing, and one told "otherwise fail with message" judges the check
+itself — while the report's instruction line, the console line and the run log
+all keep the line as written. A `fail` condition is different: the model reads
+that whole line, because judging the condition is the job.
+
+Code-behind gains `step.fail(message)`, which throws what a failed
+`step.expect` throws, so the existing rule applies unchanged — a real failure,
+never healed under AI. A conditional `fail` compiles into an entry that reads
+its condition and calls `step.fail` with the authored message, and a step with
+an `otherwise fail … with message` tail compiles with that message as its
+`step.expect` message, so a replay fails in the author's words for no tokens:
+
+```ts
+{
+  source: 'If {{a}} is "peanuts" then fail the test with error "The variable value was peanuts. Expected apples"',
+  async run({ step }) {
+    if (step.getVar('a') === 'peanuts') step.fail('The variable value was peanuts. Expected apples');
+  },
+}
+```
+
+On the wire, `step:fail` gains `deliberate`, `tolerated` and `warning`, all
+optional: a client that does not know them paints the ✗ it always did, which is
+the safe direction for all three. `results[]` rows carry `tolerated` — and
+`warning` beside it — with `status` staying `"failed"`, the shape a user-stopped
+step already had. A warning you wrote leads every surface that shows the
+failure: the first line of the TestBench hover, the run log's `⚠ step 7 failed —
+continuing: Build number missing (the footer had no build number)`, the Electron
+panel's amber line, and an MCP agent's row and summary. What actually went wrong
+is never dropped — it keeps its place underneath.
+
+A tail is read on prose steps only, and each line that does not take one says so
+in its own way. A `[tool:]` or `[skill:]` step carrying a tail is refused by
+name at parse time — both have a grammar of their own the tail is not threaded
+through, and a tail parsed and then ignored is worse than a refusal — and a
+`Set` is refused by the `Set` parser, as a malformed `Set` whose message names
+what is wrong with the line. A `### Section` call is the one to watch: a section
+is matched by the exact text of the calling line, so `Sign in otherwise continue`
+no longer calls `### Sign in` at all — it becomes an ordinary prose step with a
+tail on it. Write the tail on a step inside the section instead — which is also
+why a tool call has no wrapper to hide behind, and why its refusal points at a
+step after the call instead. A line that asks for two endings at once, `If x then
+return otherwise continue`, is refused by name rather than resolved.
+
+Two smaller things a client gets right that it did not have to think about
+before. Stepping (F10 / F11) pauses after a tolerated step, as it does after a
+pass — both are outcomes the run continues past, and only a stopping failure
+skips the pause. And a *compiled* deliberate failure is reported in the author's
+words rather than as broken code: `step.fail()` throws what a failed
+`step.expect` throws, so it arrives flagged as coming from the code-behind, and
+every surface used to frame the author's own sentence as an entry defect.
+
 ### Added — a step can leave the flow it is in
 
 A test ran top to bottom and the only way out early was to fail. There was no

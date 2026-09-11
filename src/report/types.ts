@@ -344,6 +344,40 @@ export interface StepResult {
    *  failure — and it's excluded from the failed-step count. `status` stays a
    *  valid `StepStatus` ('failed') for back-compat with older report readers. */
   interrupted?: boolean;
+  /**
+   * True when the step's own text asked for this failure — the `fail` verb
+   * (stories/step-failure-outcomes.md, decision 2).
+   *
+   * `status` is a plain `'failed'` and it counts as one: the run stopped, as on
+   * any failure. What the flag changes is what the framework does ABOUT it — no
+   * retry (the author asked for it, and "this failed, try something else" is the
+   * one nudge that could turn a deliberate failure into a false pass), and no
+   * `ai.diagnoseFailures` pass, whose guess would sit above the author's own
+   * sentence in the report.
+   */
+  deliberate?: boolean;
+  /**
+   * True when the step failed and the run continued past it — the `otherwise
+   * continue` tail (stories/step-failure-outcomes.md, decision 6).
+   *
+   * The `interrupted` shape above, deliberately: `status` stays `'failed'` because
+   * the step did not do what it said. What changes is the accounting — excluded
+   * from `failedSteps` exactly the way `interrupted` is (the same
+   * `status === 'failed' && !interrupted` filter, widened), excluded from
+   * `passedSteps`, counted in `stepsCompleted` because it executed, and counted
+   * separately in {@link TestReport.toleratedSteps}.
+   */
+  tolerated?: boolean;
+  /**
+   * The author's own words for a tolerated failure — the quoted text of
+   * `… otherwise continue with warning "…"` (or `… otherwise warn "…"`),
+   * interpolated and secret-masked, present only with `tolerated`.
+   *
+   * Structural rather than folded into `aiExplanation` alone, because the
+   * explanation does not travel on the `step:fail` wire event and the warning has
+   * to: it is the first line of the TestBench hover and the MCP row's reason.
+   */
+  warning?: string;
 }
 
 /** AI-generated root-cause analysis for a failed test run */
@@ -415,6 +449,16 @@ export interface TestReport {
    * writes the report it always did.
    */
   skippedSteps?: number;
+  /**
+   * Steps that failed and were tolerated — `StepResult.tolerated`, the
+   * `otherwise continue` tail (stories/step-failure-outcomes.md, decision 6).
+   *
+   * Counted beside `skippedSteps` and for the same reason: a tolerated failure is
+   * not a pass and did not stop the run, so the only truthful header is one that
+   * names it — *7 passed, 1 tolerated*. Omitted (not `0`) when nothing was
+   * tolerated, so a run with no tails writes the report it always did.
+   */
+  toleratedSteps?: number;
   totalSubActions: number;
   durationMs: number;
   tokensUsed: number;

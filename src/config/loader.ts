@@ -8,6 +8,7 @@ import { parseBoolEnv } from '../env/loader.js';
 import {
   parseFlowControlStep,
   flowControlInHookError,
+  isReturnClaim,
 } from '../parser/flow-control-step.js';
 import { readUserRootEnv } from '../env/user-root.js';
 import { logger } from '../utils/logger.js';
@@ -364,7 +365,11 @@ function assertNoFlowControlInDefaultHooks(config: Config, configPath: string): 
   if (!defaults) return;
   for (const scope of ['before', 'beforeEach', 'afterEach', 'after'] as const) {
     for (const instruction of defaults[scope] ?? []) {
-      if (parseFlowControlStep(instruction)) {
+      // `return` / `stop` only (stories/step-failure-outcomes.md, decision 7): a
+      // default hook that FAILS the run in the author's words is legal to want on
+      // every test of a project — the verb adds a message, not a power.
+      const claim = parseFlowControlStep(instruction);
+      if (claim && isReturnClaim(claim)) {
         throw new Error(
           flowControlInHookError(
             instruction,

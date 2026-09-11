@@ -1,5 +1,7 @@
 /**
- * Hooks may not return (stories/step-flow-control.md, decision 8).
+ * Hooks may not return (stories/step-flow-control.md, decision 8) — but they
+ * MAY fail (stories/step-failure-outcomes.md, decision 7): both halves share a
+ * gate, because the refusal sites read the VERB (`isReturnClaim`), not the parse.
  *
  * There is no flow to leave from inside a hook, and inventing one would mean
  * deciding whether it ends the hook scope, the step it wraps, or the run —
@@ -63,6 +65,19 @@ describe('`## Hooks`', () => {
     );
     expect(parsed.hooks.beforeEach).toHaveLength(1);
   });
+
+  // Decision 7: `fail` adds a message to a power the hook already had.
+  for (const [scope, line] of [
+    ['beforeEach', 'If the session has expired then fail the test with error "Session expired"'],
+    ['before', 'Fail the test with error "unconfigured"'],
+    ['afterEach', 'When the page shows an error banner, fail'],
+    ['after', 'Fail'],
+  ] as const) {
+    it(`accepts ${JSON.stringify(`${scope}: ${line}`)} — a hook may fail`, () => {
+      const parsed = parseTestContent(withHook(`${scope}: ${line}`), '/t/hooks.md');
+      expect(parsed.hooks[scope]).toEqual([line]);
+    });
+  }
 });
 
 describe('`## Steps`', () => {
@@ -119,6 +134,16 @@ describe('project `defaultHooks`', () => {
   it('loads ordinary default hooks unchanged', async () => {
     await expect(
       loadWith({ beforeEach: ['dismiss any cookie banner'], after: ['log out'] }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('loads a `fail` default hook — decision 7 allows it in every scope', async () => {
+    // The load-time refusal is the one place that would silently delete it.
+    await expect(
+      loadWith({
+        before: ['If the environment banner says "maintenance" then fail the test with error "env down"'],
+        after: ['Fail the run with message "unreachable"'],
+      }),
     ).resolves.toBeUndefined();
   });
 });

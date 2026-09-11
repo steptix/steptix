@@ -8,6 +8,7 @@
  */
 import { parseSetStep } from '../parser/set-step.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import { parseFailureTail } from '../parser/failure-tail.js';
 import { isControlLineClaim } from '../parser/control-line.js';
 
 /** A single step reference within a group */
@@ -65,6 +66,12 @@ export function isConditionalStep(instruction: string): boolean {
   // else should treat that as the bug.
   if (parseFlowControlStep(stripped)) return false;
   if (isControlLineClaim(stripped)) return false;
+  // A step carrying an `… otherwise fail …` / `… otherwise continue` tail takes the
+  // same exemption and for the same reason (stories/step-failure-outcomes.md,
+  // decision 4): `executeBranchedStep` runs the matched conditional AND the
+  // continuation in one call and knows nothing of the tail, so the line would be
+  // performed as prose, tail included, and its failure would stop the run.
+  if (parseFailureTail(stripped)) return false;
   return /^(if\s|when\s(prompted|asked))/i.test(stripped);
 }
 
@@ -141,6 +148,12 @@ export function identifyStepGroups(steps: string[]): Map<number, StepGroup> {
     // three: the fix is to form no group, so nothing jumps.
     if (i < steps.length && parseSetStep(steps[i]!)) continue;
     if (i < steps.length && parseFlowControlStep(steps[i]!)) continue;
+    // The fourth member of the same exemption, and the quietest: swallowed as the
+    // continuation, a tail step is performed by `executeBranchedStep` with the tail
+    // in its prose and its own `failureTail` never computed — so an `otherwise
+    // continue` would stop the run and an `otherwise fail … with message` would
+    // report the framework's error instead of the author's (decision 4).
+    if (i < steps.length && parseFailureTail(steps[i]!)) continue;
     if (i < steps.length && isControlLineClaim(steps[i]!.replace(/^\[.*?\]\s*/gi, ''))) {
       continue;
     }

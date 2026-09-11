@@ -315,8 +315,11 @@ function printSummary(summary: RunSummary): void {
     console.log(chalk.red('  FAILED TESTS:'));
     for (const report of summary.reports) {
       if (report.status === 'failed') {
+        // `!s.tolerated`: this list answers "what went wrong in this test", and a
+        // step the author said to carry past stopped nothing (decision 6). Naming it
+        // would put it under FAILED TESTS beside the failure that ended the run.
         const failedSteps = report.steps
-          .filter((s) => s.status === 'failed')
+          .filter((s) => s.status === 'failed' && !s.tolerated)
           .map((s) => `Step ${s.index}: ${s.instruction}`)
           .join(', ');
         console.log(chalk.red(`  ✗ ${report.testName}`));

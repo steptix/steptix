@@ -37,6 +37,17 @@ export interface StepOutput {
    *  a pass: painting it as either loses the one thing a decision leaves
    *  behind, which is which way it went. */
   status: 'pending' | 'running' | 'passed' | 'failed' | 'skipped';
+  /** The failure was tolerated and the run went on — `otherwise continue`
+   *  (stories/step-failure-outcomes.md, decision 6). A property of a `'failed'`
+   *  step rather than a status of its own, so readers that switch on `status`
+   *  keep working. */
+  tolerated?: boolean;
+  /** The author's words for a tolerated failure — `otherwise continue with
+   *  warning "…"`. Shown ahead of `error`, which stays the framework's account
+   *  of what actually went wrong. */
+  warning?: string;
+  /** The author wrote this failure, in their own words (decision 2). */
+  deliberate?: boolean;
   aiReasoning: string;
   aiInteractions: AiInteraction[];
   subActions: SubActionResult[];
@@ -77,6 +88,21 @@ export interface MainToRendererEvents {
      *  "Sign in"`, or `Step 4 chose another branch`. Set only with
      *  `status: 'skipped'`. */
     reason?: string;
+    /** The step failed and the run CARRIED ON past it — the `otherwise continue`
+     *  tail (stories/step-failure-outcomes.md, decisions 6 and 9). `status` stays
+     *  `'failed'`, so every existing reader keeps working; the panel paints this
+     *  one amber. */
+    tolerated?: boolean;
+    /** The author's own words for a tolerated failure — the quoted text of
+     *  `… otherwise continue with warning "…"`, interpolated and masked, sent only
+     *  with `tolerated`. Beside `error` rather than instead of it: `error` stays
+     *  the framework's account of what went wrong, this says why the author
+     *  decided it was survivable. The panel's amber log line leads with it. */
+    warning?: string;
+    /** The author wrote this failure — the `fail` verb (decision 2). `error` is
+     *  their sentence, so the log line says "failed as written" rather than
+     *  reporting a malfunction. */
+    deliberate?: boolean;
   };
   'runner:subaction': {
     stepIndex: number;

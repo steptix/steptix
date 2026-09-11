@@ -13,7 +13,17 @@ import {
 import { expandSkills } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { parseSetStep, setStepError, substitutePreservingSet } from './set-step.js';
-import { parseFlowControlStep, flowControlInHookError } from './flow-control-step.js';
+import {
+  parseFlowControlStep,
+  flowControlInHookError,
+  isReturnClaim,
+} from './flow-control-step.js';
+import {
+  failureTailContradictionError,
+  isFailureTailContradiction,
+  failureTailDirective,
+  directiveFailureTailError,
+} from './failure-tail.js';
 import {
   chainAfterFlowControlMessage,
   chainMemberWord,
@@ -762,6 +772,19 @@ function parseSections(rawContent: string, filePath: string): {
     const setError = setStepError(steps[i]!, where);
     if (setError) throw new Error(setError);
 
+    // `[tool: foo] otherwise continue` and `[skill: foo] otherwise continue`
+    // (stories/step-failure-outcomes.md, decision 12). Both are out of the tail's
+    // scope, and until this refusal existed the line parsed, ran the call, and
+    // dropped the tail without a word. ONE refusal for both, naming whichever
+    // directive it found: the skill half was missing for exactly as long as the two
+    // halves were separate. Refused in THIS loop rather than beside decision 8's
+    // contradiction below, because such a call is as legal in a skill file and a
+    // section body as in `## Steps`, and this is the loop that sees all three.
+    const tailDirective = failureTailDirective(steps[i]!);
+    if (tailDirective) {
+      throw new Error(directiveFailureTailError(steps[i]!, tailDirective, where));
+    }
+
     // A section that loops over a table has its row values interpolated into
     // the body text at EXPANSION time (`interpolateQuiet`, expander.ts), so a
     // Set target sharing a column name would arrive at the runner already
@@ -966,6 +989,15 @@ function validateControlFlow(
 
     const error = controlLineError(raw, at);
     if (error) throw new Error(error);
+
+    // Decision 8 of stories/step-failure-outcomes.md, refused beside the malformed
+    // control lines because it is the same kind of fault: a line whose two halves
+    // contradict each other, where resolving it either way silently picks a meaning
+    // the author did not write. `If x then return otherwise continue` parses cleanly
+    // as a chain, so nothing above catches it.
+    if (isFailureTailContradiction(raw)) {
+      throw new Error(failureTailContradictionError(raw, at));
+    }
 
     const control = parseControlLine(raw);
     if (!control) {
@@ -1416,7 +1448,12 @@ function extractHooks(listToken: Tokens.List, hooks: TestHooks, filePath: string
     // rather than warned: an unknown scope degrades to "this hook does not
     // run", which is visible, whereas a silently-ignored return would leave
     // the author believing a flow ends where it never does.
-    if (parseFlowControlStep(instruction)) {
+    //
+    // `return` / `stop` only, since stories/step-failure-outcomes.md decision
+    // 7: a hook can already fail the run, so a hook that says `fail the test
+    // with error "…"` is asking for a MESSAGE, not for a power it lacks.
+    const hookClaim = parseFlowControlStep(instruction);
+    if (hookClaim && isReturnClaim(hookClaim)) {
       throw new Error(flowControlInHookError(instruction, ` in ${filePath}`));
     }
     if (scope === 'before') hooks.before.push(instruction);

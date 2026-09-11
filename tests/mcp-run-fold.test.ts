@@ -874,3 +874,135 @@ describe('effectiveSettings on the done event', () => {
     expect(result.effectiveSettings?.sources).toBeNull();
   });
 });
+
+// The two failure outcomes (stories/step-failure-outcomes.md, decision 9): both
+// ride the one `step:fail` event as additive booleans. A tolerated failure that
+// became the run's `error` would hand an agent "this is why the run is not
+// green" for a run that IS green.
+
+/** A `step:fail` carrying the additive fields the `RunEvent` type does not name. */
+function failEvent(line: number, error: string, extra: Record<string, unknown> = {}): RunEvent {
+  return { type: 'step:fail', line, error, ...extra } as unknown as RunEvent;
+}
+
+describe('a tolerated failure', () => {
+  const events: RunEvent[] = [
+    { type: 'step:start', line: 10 },
+    { type: 'step:pass', line: 10 },
+    { type: 'step:start', line: 11 },
+    failEvent(11, 'No build number in the footer', { tolerated: true }),
+    // The run CONTINUED — the whole observable difference on the wire.
+    { type: 'step:start', line: 12 },
+    { type: 'step:pass', line: 12 },
+    { type: 'done', status: 'passed' },
+  ];
+
+  it('records it on the row as failed AND tolerated', () => {
+    const result = fold({ events });
+    expect(result.steps[1]).toMatchObject({
+      status: 'failed',
+      tolerated: true,
+      error: 'No build number in the footer',
+    });
+  });
+
+  it('leaves the run passed, with no error', () => {
+    // `done.status` already excludes a tolerated failure (decision 6): the fold
+    // must not second-guess it, nor promote the row's error to the run's.
+    const result = fold({ events });
+    expect(result.status).toBe('passed');
+    expect(result.error).toBeNull();
+  });
+
+  it('sets neither flag on a row that did not carry one', () => {
+    // `tolerated` and `warning` are only readable as flags if absent elsewhere.
+    const result = fold({ events });
+    expect(result.steps[0]).not.toHaveProperty('tolerated');
+    expect(result.steps[2]).not.toHaveProperty('tolerated');
+    expect(result.steps[1]).not.toHaveProperty('warning');
+  });
+
+  it('records the author`s warning beside the error, when the tail carried one', () => {
+    // The warning travels on the event and nowhere else, so a fold that drops it
+    // loses the one sentence saying the failure was anticipated (decision 6).
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 11 },
+        failEvent(11, 'No build number in the footer',
+          { tolerated: true, warning: 'Footer build number missing' }),
+        { type: 'done', status: 'passed' },
+      ],
+    });
+    expect(result.steps[1]).toMatchObject({
+      status: 'failed',
+      tolerated: true,
+      warning: 'Footer build number missing',
+      // `error` stays the framework's account: an agent wants both.
+      error: 'No build number in the footer',
+    });
+  });
+
+  it('still reports a run that ALSO failed for real as failed, with that error', () => {
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 10 },
+        failEvent(10, 'the banner was not there', { tolerated: true }),
+        { type: 'step:start', line: 11 },
+        { type: 'step:fail', line: 11, error: 'Sign in never loaded' },
+        { type: 'done', status: 'failed' },
+      ],
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toBe('Sign in never loaded');
+  });
+
+  it('keeps the real error when a tolerated failure follows it', () => {
+    // The ordering that hides the bug: `lastFailError` is last-write-wins, so a
+    // tolerated failure setting it is only visible AFTER a real one.
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 10 },
+        { type: 'step:fail', line: 10, error: 'Sign in never loaded' },
+        { type: 'step:start', line: 11 },
+        failEvent(11, 'the banner was not there', { tolerated: true }),
+        { type: 'done', status: 'failed' },
+      ],
+    });
+
+    expect(result.error).toBe('Sign in never loaded');
+  });
+});
+
+describe('a deliberate failure', () => {
+  it('carries the author sentence verbatim, code-behind or not', () => {
+    // `step.fail()` throws the class a failed `step.expect` throws, so a compiled
+    // entry's deliberate failure arrives with `fromCodeBehind` set — and the
+    // ordinary fold would prefix it "Code-behind failed:" (decision 2).
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 10 },
+        failEvent(10, 'The variable value was peanuts. Expected apples',
+          { fromCodeBehind: true, deliberate: true }),
+        { type: 'done', status: 'failed' },
+      ],
+    });
+
+    expect(result.steps[0]?.error).toBe('The variable value was peanuts. Expected apples');
+    expect(result.error).toBe('The variable value was peanuts. Expected apples');
+    expect(result.steps[0]).not.toHaveProperty('tolerated');
+  });
+
+  it('still says "Code-behind failed" for an ORDINARY entry failure', () => {
+    // The guard above must not swallow the case it sits next to.
+    const result = fold({
+      events: [
+        { type: 'step:start', line: 10 },
+        failEvent(10, 'expected "Dashboard"', { fromCodeBehind: true }),
+        { type: 'done', status: 'failed' },
+      ],
+    });
+
+    expect(result.steps[0]?.error).toBe('Code-behind failed: expected "Dashboard"');
+  });
+});

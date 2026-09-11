@@ -13,6 +13,7 @@ import { DecorationManager, computeStepsSummary, dataTablesOf } from './decorati
 // what actually renders.
 import { staleHoverMessage } from './failure-hover-core.js';
 import { skipPaintsOver } from './step-skip-core.js';
+import { passPaintsOver, toleratedPaintsOver } from './failure-outcome-core.js';
 import { lineStatusFromRowStatus, rowHeaderSummary } from './row-summary-core.js';
 import { allRowsOfTable, buildRowsMessage, rowSelectionRefusal } from './row-selection-core.js';
 import { TestBenchRunnerView } from './runner-view.js';
@@ -110,6 +111,22 @@ class RunControllerRegistry implements vscode.Disposable {
     string,
     { uri: vscode.Uri; line: number }
   >();
+  /**
+   * Lines a tolerated failure has painted amber this run, keyed by the URI the
+   * mark landed on (stories/step-failure-outcomes.md, decision 6).
+   *
+   * Remembered rather than read back off the line, because the line does not keep
+   * it: a second trip through the same step emits `step:start` first, which paints
+   * `running` over the amber ✗ and drops its failure detail. And a second trip is
+   * the NORMAL shape here — the run carrying on is the point of `otherwise
+   * continue` — so without this the mark disappears on exactly the runs it exists
+   * for.
+   *
+   * Worst-of, like the data-row repaint one rung up. The detail is kept with the
+   * line so the repaint restores the hover too, and both are cleared with the
+   * statuses at run start, so a mark is always THIS run's.
+   */
+  private readonly toleratedLines = new Map<string, Map<number, StepFailureDetail>>();
 
   /** Test-only readback of the `testbench-native.running` context key. */
   get runningContextValue(): boolean {
@@ -402,7 +419,7 @@ class RunControllerRegistry implements vscode.Disposable {
       // goes, and lines/files the new run doesn't touch correctly stay
       // blank instead of showing stale ✓s from the prior run.
       (uris) => {
-        for (const uri of uris) this.tracker.clearStatuses(uri);
+        for (const uri of uris) this.clearStatusesFor(uri);
       },
       // Fresh-run hook: a full run from the top drops this test's skill-debug
       // context (the banner + "run on stopped session" affordance go stale).
@@ -683,11 +700,56 @@ class RunControllerRegistry implements vscode.Disposable {
     };
   }
 
+  /**
+   * Wipe one file's run marks — the statuses AND the amber-line memory that
+   * outlives an individual status write.
+   *
+   * One method so the two cannot drift: a clear that left `toleratedLines` behind
+   * would make the NEXT run refuse to paint a green ✓ on a line this one
+   * tolerated — a stale mark no event will ever correct.
+   */
+  private clearStatusesFor(uri: vscode.Uri): void {
+    this.tracker.clearStatuses(uri);
+    this.toleratedLines.delete(uri.toString());
+  }
+
+  /** Remember an amber line and what it said, so a later trip through the
+   *  same line can be put back the way it was. */
+  private rememberTolerated(
+    uri: vscode.Uri,
+    line: number,
+    failure: StepFailureDetail,
+  ): void {
+    const key = uri.toString();
+    const lines = this.toleratedLines.get(key);
+    if (lines) lines.set(line, failure);
+    else this.toleratedLines.set(key, new Map([[line, failure]]));
+  }
+
+  /** The detail of a tolerated failure this run already painted on the line,
+   *  or undefined (`passPaintsOver`, failure-outcome-core.ts). */
+  private toleratedEarlierThisRun(
+    uri: vscode.Uri,
+    line: number,
+  ): StepFailureDetail | undefined {
+    return this.toleratedLines.get(uri.toString())?.get(line);
+  }
+
   private applyToTracker(uri: vscode.Uri, msg: HostToWebviewMsg): void {
     // The worst status each line reached across a data-driven run's rows,
     // applied once when the loop ends. Every row repaints the same lines, so
     // without this the last clean row would erase a failure three rows back
     // and the gutter would go green on a run that had red in it.
+    //
+    // KNOWN LIMITATION — an amber ✗ does not survive a row boundary
+    // (stories/step-failure-outcomes.md §Known limitations). The boundary clears
+    // the file's statuses AND `toleratedLines`, so a step tolerated on row 1 has
+    // no amber memory left by the time row 2 paints it, and this summary has only
+    // `fail` to put back: `rowSummary.failures` carries no `tolerated` flag and
+    // `lineStatusFromRowStatus` has no tolerated member, because a row whose only
+    // failures were tolerated is a PASSED row. Until a flag on this message and a
+    // third summary status exist, the amber mark is per-row and the run log is
+    // where an earlier row's tolerated failure stays visible.
     if (msg.type === 'rowSummary') {
       const target = vscode.Uri.parse(msg.uri);
       for (const failure of msg.failures) {
@@ -796,7 +858,20 @@ class RunControllerRegistry implements vscode.Disposable {
           // a ✗ is the one status a run must not lose, and the two producers
           // of a skipped step must not disagree about that
           // (`skipPaintsOver`, step-skip-core.ts).
-          if (status === 'skip' && !skipPaintsOver(this.tracker.state(target).statuses.get(ev.line))) {
+          const current = this.tracker.state(target).statuses.get(ev.line);
+          if (status === 'skip' && !skipPaintsOver(current)) {
+            break;
+          }
+          // …and the amber ✗ survives a later PASS on the same line
+          // (`passPaintsOver`, failure-outcome-core.ts). Tolerating a failure is
+          // precisely the case where the same line runs again and passes — a loop's
+          // next trip, a section called twice. Asked of the run's MEMORY as well as
+          // the line, because the second trip's `step:start` painted `running` over
+          // the amber ✗ before this pass arrived; put back rather than skipped,
+          // since skipping leaves that `step:start`'s ▶ spinning on a finished step.
+          const tolerated = this.toleratedEarlierThisRun(target, ev.line);
+          if (!passPaintsOver(current) || tolerated) {
+            this.tracker.setStatus(target, ev.line, 'fail-tolerated', tolerated);
             break;
           }
           // A ⚠ pins the code-behind crash to the line, so the hover and the
@@ -848,6 +923,23 @@ class RunControllerRegistry implements vscode.Disposable {
           // of the step's code-behind (strict replay, `step.expect`, or a
           // heal whose AI attempt failed too) the detail says so.
           const failureDetail = stepFailureDetail(ev);
+          // A TOLERATED failure paints amber and stops there
+          // (stories/step-failure-outcomes.md, decision 6). Each omission below is
+          // load-bearing: the frame did NOT fail, so the `[skill:]` invocation line
+          // must not go red and `frame:pop` must still paint it ✓; the Variables
+          // panel must not offer "re-run from the failed step", there being no
+          // parked failure; and nothing may park a breakpoint stop, because a
+          // yellow ▶ on a step the run is past offers a Continue that re-runs it.
+          if (ev.tolerated) {
+            // Never over a real ✗, the one status a run must not lose
+            // (`toleratedPaintsOver`, failure-outcome-core.ts) — reachable
+            // whenever one source line runs twice, as a loop body does.
+            if (toleratedPaintsOver(this.tracker.state(target).statuses.get(ev.line))) {
+              this.rememberTolerated(target, ev.line, failureDetail);
+              this.tracker.setStatus(target, ev.line, 'fail-tolerated', failureDetail);
+            }
+            break;
+          }
           this.tracker.setStatus(target, ev.line, 'fail', failureDetail);
           // Propagate the failure to the originating test-file `[skill:]` line
           // so the user sees the red icon on the line they actually authored,
@@ -922,7 +1014,7 @@ class RunControllerRegistry implements vscode.Disposable {
             frameUri.toString() !== uri.toString() &&
             controller.shouldClearDescentStatuses(frameUri.toString())
           ) {
-            this.tracker.clearStatuses(frameUri);
+            this.clearStatusesFor(frameUri);
           }
           // Aggregate test-file status: a top-level skill (parentId === null)
           // is the one anchored on the test's `[skill:]` line. Mark it
@@ -1035,9 +1127,14 @@ class RunControllerRegistry implements vscode.Disposable {
                 : ev.fromCache
                   ? 'pass-cached'
                   : 'pass';
-          if (status === 'skip' && !skipPaintsOver(this.tracker.state(uri).statuses.get(ev.line))) {
+          const current = this.tracker.state(uri).statuses.get(ev.line);
+          if (status === 'skip' && !skipPaintsOver(current)) {
             break;
           }
+          // Same amber-survives-a-pass rule as the run gutter above: a Record and
+          // each Replay round repaint the same lines, so without this the round
+          // after a tolerated failure would erase it.
+          if (!passPaintsOver(current)) break;
           this.tracker.setStatus(
             uri,
             ev.line,
@@ -1054,6 +1151,16 @@ class RunControllerRegistry implements vscode.Disposable {
           // A Replay's red step is the compile's whole point (strict mode:
           // broken code fails instead of healing) — pin the error so the ✗
           // says what the code did wrong.
+          //
+          // A TOLERATED one is amber here too: on a proving replay it is neither
+          // proven nor failed (decision 11), and red would say the entry is broken
+          // when the tail is doing exactly what it says.
+          if (ev.tolerated) {
+            if (toleratedPaintsOver(this.tracker.state(uri).statuses.get(ev.line))) {
+              this.tracker.setStatus(uri, ev.line, 'fail-tolerated', stepFailureDetail(ev));
+            }
+            break;
+          }
           this.tracker.setStatus(uri, ev.line, 'fail', stepFailureDetail(ev));
           break;
         case 'step:skip':

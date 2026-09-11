@@ -241,7 +241,9 @@ export async function generateStepEntry(
     ...(options.domAfter !== undefined && { domAfter: options.domAfter }),
     ...(options.urlAfter !== undefined && { urlAfter: options.urlAfter }),
   };
-  const guarded = guardedValues(parameters, envRefs.resolved);
+  // The authored line goes in so a value the author quoted in it is not read
+  // as a leak: see `guardedValues` / `authorQuotedLiterals`.
+  const guarded = guardedValues(parameters, envRefs.resolved, binding.source);
   // Every value this step's references resolved to, keyed by the name the
   // MODEL would have written in an action: the authored name, the run-time
   // name a skill rename gave it, and each `${…}` reference. Used to read a
@@ -731,10 +733,24 @@ export function unresolvedRefsReason(refs: string[], envData: EnvDataContext | u
  * Every value the generated code must not contain as a literal: the step's
  * parameters under their `{{name}}` and its environment references under
  * their `${ref}`, so the rejection message can name either as written.
+ *
+ * `authoredSource` is the step's own line with its `{{name}}` placeholders intact,
+ * and passing it exempts any value the AUTHOR quoted there verbatim — see
+ * `authorQuotedLiterals`. EVERY caller asking a model for one step's entry passes
+ * it: generation here, the boxed pipeline's repair round (`repairStep`,
+ * compile.ts) and the live compiler's repair (`askForRepair`, live-compile.ts).
+ * The two repair sites that once omitted it could not repair the one step shape
+ * that needs the exemption — `If {{a}} is "peanuts" then fail …`, where every
+ * candidate must contain `peanuts` and each was discarded as a leak until the
+ * rounds ran out and the step was written off `ai: true`.
+ *
+ * Optional only for a caller guarding something WIDER than one step — a
+ * whole-file review has no single authored line to read.
  */
 export function guardedValues(
   parameters: Array<{ name: string; value: string }>,
   envRefs: Array<{ ref: string; value: string }>,
+  authoredSource?: string,
 ): Array<{ name: string; value: string }> {
   const base = [
     ...parameters,
@@ -750,7 +766,44 @@ export function guardedValues(
   const normalised = base
     .map((g) => ({ name: g.name, value: normaliseUploadPath(g.value) }))
     .filter((g, i) => g.value !== base[i]!.value && g.value.includes('/'));
-  return [...base, ...normalised];
+  const all = [...base, ...normalised];
+  if (authoredSource === undefined) return all;
+  // Uniformly BY VALUE, which is what keeps the normalised entries honest:
+  // `attachments/march.pdf` stays guarded unless the author quoted that
+  // spelling too, even when its raw `\attachments\march.pdf` sibling is exempt.
+  const quoted = authorQuotedLiterals(authoredSource);
+  return all.filter((g) => !quoted.has(g.value.trim()));
+}
+
+/** One `"…"` or `'…'` of the authored line. The single-quoted alternative is
+ *  fenced off from word characters so the apostrophe in `the user's password`
+ *  opens no quote. */
+const AUTHOR_QUOTED = /"([^"\n]*)"|(?<!\w)'([^'\n]*)'(?!\w)/g;
+
+/**
+ * The strings the author QUOTED in the step's own line — `"…"` or `'…'`, read
+ * off the authored text with its `{{name}}` placeholders still in place.
+ *
+ * A value that matches one of these is exempt from the leak guard, because a
+ * literal the author wrote is the author's: an entry echoing it is repeating the
+ * step, not inlining the value the step resolved to. `If {{a}} is "peanuts" then
+ * fail the test with error "The variable value was peanuts. Expected apples"` is
+ * the measured case (stories/step-failure-outcomes.md, decisions 3 and 10) — the
+ * correct entry HAS to contain `peanuts`. The secret direction is untouched: an
+ * author using `{{password}}` does not also write the password into the line as a
+ * quoted literal, and a value appearing only unquoted, or only as `{{name}}` /
+ * `${ref}`, is not exempted.
+ *
+ * Exact and case-sensitive, against the WHOLE quoted content: `"Peanuts"` and
+ * `"peanuts and more"` leave `peanuts` guarded.
+ */
+function authorQuotedLiterals(source: string): Set<string> {
+  const out = new Set<string>();
+  for (const match of source.matchAll(AUTHOR_QUOTED)) {
+    const content = match[1] ?? match[2];
+    if (content !== undefined && content.length > 0) out.add(content);
+  }
+  return out;
 }
 
 /** `{{username}}` for a parameter, `${data.url}` for an environment reference. */

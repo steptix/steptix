@@ -10,7 +10,7 @@ import {
   isNonRetryable,
   type UploadPathContext,
 } from '../browser/upload-paths.js';
-import type { ParsedFlowControlStep } from '../parser/flow-control-step.js';
+import { isReturnClaim, type ParsedFlowControlStep } from '../parser/flow-control-step.js';
 import type {
   CodeBehindBrowserApi,
   CodeBehindContext,
@@ -35,6 +35,29 @@ export class CodeBehindExpectationError extends Error {
     this.name = 'CodeBehindExpectationError';
   }
 }
+
+/**
+ * What `step.fail(message)` throws (stories/step-failure-outcomes.md,
+ * decision 10).
+ *
+ * A SUBCLASS of {@link CodeBehindExpectationError} rather than a class beside it,
+ * because every existing reading of "the entry's assertion failed" —
+ * `expectationFailed`, the runner's do-not-heal rule, an author's own `catch (e)
+ * { if (e instanceof CodeBehindExpectationError) … }` — has to stay true for it.
+ * The extra fact it carries is only about WORDING: the runner says the step failed
+ * as its text says, rather than that an expectation was not met.
+ */
+export class CodeBehindDeliberateFailure extends CodeBehindExpectationError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CodeBehindDeliberateFailure';
+  }
+}
+
+/** `step.fail()` with nothing to say. Still a failure — the call is the author
+ *  asking for one, and swallowing it because the message was missing would turn a
+ *  red step green — with a sentence in place of an empty error cell. */
+export const FAIL_WITHOUT_MESSAGE = 'step.fail() was called with no message';
 
 /**
  * What `step.exit()` throws (stories/step-flow-control.md, decision 11).
@@ -150,16 +173,20 @@ export interface RunCodeBehindOptions {
    * form — `parseFlowControlStep(<authored line>)`, computed by the run loop
    * (stories/step-flow-control.md, decision 11).
    *
-   * It is the only thing that lets `step.exit()` through. Present, an exit
-   * ends the step passed with `flowControl` on the outcome and the loop skips
-   * the rest of the flow; absent, the call fails the step non-retryably with
+   * A RETURN claim — `return` or `stop` — is the only thing that lets
+   * `step.exit()` through. Present, an exit ends the step passed with
+   * `flowControl` on the outcome and the loop skips the rest of the flow;
+   * absent, the call fails the step non-retryably with
    * {@link EXIT_NOT_CLAIMED}. Same guard the AI path puts on the `return`
    * action, for the same reason: the markdown has to say the step returns, or
    * a reader of the test has no way to know that it does.
    *
-   * The verb is not read here — the runner stamps it onto the StepResult from
-   * the same claim — so a caller with nothing but a boolean answer can pass
-   * `{ verb: 'return' }`.
+   * So the verb IS read here, through `isReturnClaim`, and only for that gate
+   * (stories/step-failure-outcomes.md, decision 1): a `fail` claim says the step
+   * ends the RUN in the author's words, the opposite of ending the flow as a pass,
+   * so an entry calling `step.exit()` on such a line is refused exactly as an
+   * unclaimed exit is. Nothing else reads the verb, so a caller with nothing but a
+   * boolean answer can still pass `{ verb: 'return' }`.
    */
   flowControlClaim?: ParsedFlowControlStep | undefined;
 }
@@ -169,6 +196,11 @@ export interface CodeBehindOutcome {
   /** True when the failure came from `step.expect` — fail the step, do not
    *  fall through to AI. */
   expectationFailed: boolean;
+  /** True when the failure came from `step.fail(message)` — the code form of
+   *  `If … then fail the test with error "…"` (stories/step-failure-outcomes.md,
+   *  decision 10). Always paired with `expectationFailed: true`: a real failure,
+   *  never healed under AI, worded as deliberate rather than as an expectation. */
+  deliberate?: boolean;
   durationMs: number;
   logs: CapturedLog[];
   /** Values the entry wrote, under their effective (post-rename) names. */
@@ -233,7 +265,7 @@ export async function runCodeBehindEntry(
       outputs,
       options.envData,
       options.uploadPaths,
-      options.flowControlClaim !== undefined,
+      options.flowControlClaim !== undefined && isReturnClaim(options.flowControlClaim),
     ),
     log: createCapturingLog(options.label, logs),
     tabs: options.tabs ?? unavailableTabApi(),
@@ -277,7 +309,10 @@ export async function runCodeBehindEntry(
     }
     return {
       status: 'failed',
+      // True for a deliberate failure too — `CodeBehindDeliberateFailure` extends
+      // this class so the do-not-heal rule needs no second condition (decision 10).
       expectationFailed: err instanceof CodeBehindExpectationError,
+      ...(err instanceof CodeBehindDeliberateFailure && { deliberate: true }),
       durationMs: Date.now() - start,
       logs,
       outputs,
@@ -324,9 +359,10 @@ function makeStepApi(
   outputs: Record<string, string>,
   envData?: EnvDataContext | undefined,
   uploadPaths?: UploadPathContext | undefined,
-  /** Whether the step's authored text claims the flow-control form — what
-   *  `step.exit()` is allowed on (stories/step-flow-control.md, decision 11). */
-  claimsFlowControl = false,
+  /** Whether the step's authored text claims a RETURN — `return` or `stop`,
+   *  not `fail` — which is what `step.exit()` is allowed on
+   *  (stories/step-flow-control.md, decision 11). */
+  claimsReturn = false,
 ): CodeBehindStepApi {
   return {
     getVar(name) {
@@ -370,13 +406,27 @@ function makeStepApi(
         throw new CodeBehindExpectationError(message ?? 'Code-behind expectation failed');
       }
     },
+    fail(message) {
+      // No claim guard, the mirror of `exit`'s (decision 10): the unsafe direction
+      // for an exit is passing work that did not happen, and there is no unsafe
+      // direction for failing. A missing or empty message still fails, with a
+      // sentence of our own in place of an empty error cell.
+      throw new CodeBehindDeliberateFailure(
+        typeof message === 'string' && message.trim() !== '' ? message : FAIL_WITHOUT_MESSAGE,
+      );
+    },
     exit() {
       // The claim guard (stories/step-flow-control.md, decision 11). Refused
       // here rather than at generation time because a `.steps.ts` is a
       // hand-editable file: an author can write `step.exit()` into any entry,
       // and the rule that the markdown must say what the code does has to hold
       // for hand-written entries too.
-      if (!claimsFlowControl) throw exitNotClaimed();
+      //
+      // A `fail` claim is not a claim to return (decision 1) and is refused here
+      // with every other unclaimed line: that markdown says the step ends the RUN
+      // in the author's words, and an exit would end the flow as a PASS instead —
+      // the exact "green for work not done" the guard exists to prevent.
+      if (!claimsReturn) throw exitNotClaimed();
       throw new CodeBehindExitSignal();
     },
     filePath(relative) {

@@ -433,6 +433,16 @@ body {
   line-height: 1;
 }
 
+/* A step that failed and that the run carried on past — `otherwise continue`
+   (stories/step-failure-outcomes.md, decision 6). The same ✗ as a failure,
+   in the amber the pointer already uses: the step did not do its work, and
+   nothing stopped because of it. */
+.gutter-marker-tolerated {
+  color: var(--pointer-yellow);
+  font-size: 11px;
+  line-height: 1;
+}
+
 /* Step line overlays */
 .cm-step-passed .cm-line {
   background: rgba(78, 201, 78, 0.08);

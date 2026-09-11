@@ -130,5 +130,8 @@ test("countStepLineStatuses: no statuses at all → all zero", () => {
     stale: 0,
     fail: 0,
     skip: 0,
+    // Decision 6 — a step that failed and the run carried on. Deep-equal pins the
+    // SHAPE, so a seventh counter the panel header cannot render fails here.
+    tolerated: 0,
   });
 });

@@ -16,6 +16,9 @@ const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   // Valid vocabulary everywhere; the CLAIM guard lives in the step executor,
   // which is the only place that knows the step's authored text.
   'return',
+  // stories/step-failure-outcomes.md, decision 1 — the same answer for the
+  // `fail` verb, and under the same claim guard for the same reason.
+  'fail',
 ]);
 
 /**

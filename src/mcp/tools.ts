@@ -780,11 +780,22 @@ async function withProject(
  * fold already warns about it in those words. One clause for all three would
  * send the agent after the wrong thing most of the time, so a run that managed
  * several says several.
+ *
+ * A TOLERATED failure earns a clause of its own for the same reason
+ * (stories/step-failure-outcomes.md, decision 9): it is `failed` and it is not why
+ * the run is not green, so both halves have to be said — `7 passed, 1 failed
+ * (tolerated) of 8`. Counted as neither a pass nor a plain failure.
  */
-function stepTally(steps: readonly Pick<FoldedStep, 'status' | 'skipCause'>[], verb: string): string {
+function stepTally(
+  steps: readonly Pick<FoldedStep, 'status' | 'skipCause' | 'tolerated'>[],
+  verb: string,
+): string {
   const passed = steps.filter((s) => s.status === 'passed').length;
   const skipped = steps.filter((s) => s.status === 'skipped');
-  if (skipped.length === 0) return `${passed}/${steps.length} steps${verb ? ` ${verb}` : ''}`;
+  const tolerated = steps.filter((s) => s.status === 'failed' && s.tolerated === true).length;
+  if (skipped.length === 0 && tolerated === 0) {
+    return `${passed}/${steps.length} steps${verb ? ` ${verb}` : ''}`;
+  }
   // An older server sends no `step:skip` and no `skipKind`, so a row can be
   // `skipped` with no cause recorded. It came from `output: 'skipped'` — the
   // only other source — which on such a server is the unattended one.
@@ -795,8 +806,26 @@ function stepTally(steps: readonly Pick<FoldedStep, 'status' | 'skipCause'>[], v
     returned > 0 ? `${returned} skipped (a step returned early)` : '',
     notTaken > 0 ? `${notTaken} skipped (a branch that was not taken)` : '',
     unattended > 0 ? `${unattended} skipped (need a human)` : '',
+    tolerated > 0 ? `${tolerated} failed (tolerated)` : '',
   ].filter((c) => c !== '');
   return `${passed} passed, ${clauses.join(', ')} of ${steps.length}`;
+}
+
+/**
+ * The author's own sentence for each tolerated failure, one line apiece
+ * (stories/step-failure-outcomes.md, decision 6).
+ *
+ * The tally above says a step failed and was tolerated; only this says WHY the
+ * author expected it. On the content lines rather than the row alone, because a
+ * host that renders only content blocks sees nothing of `structuredContent` — and
+ * the warning is the one thing on a tolerated row an agent should read instead of
+ * the error. Rows with no warning are silent: the tally has counted them, and
+ * `error` is the framework's account, which is not what to act on here.
+ */
+function toleratedWarningLines(steps: readonly FoldedStep[]): string[] {
+  return steps
+    .filter((s) => s.status === 'failed' && s.tolerated === true && s.warning !== undefined)
+    .map((s) => `Tolerated on line ${s.line}: ${s.warning ?? ''}`);
 }
 
 /** One-line headline plus the first failure — what a host that ignores
@@ -815,6 +844,7 @@ function summarize(outcome: RunOutcome): string {
     lines.push(`Ran project-less against the user root (${outcome.projectRoot}).`);
   }
   if (outcome.error) lines.push(`Error: ${outcome.error}`);
+  lines.push(...toleratedWarningLines(outcome.steps));
   if (outcome.reportPath) lines.push(`Report: ${outcome.reportPath}`);
   if (outcome.warnings.length > 0) lines.push(`Warnings: ${outcome.warnings.length}`);
   const settings = settingsLine(outcome.effectiveSettings);
@@ -1698,6 +1728,9 @@ function summarizeErrand(
     lines.push(`Ran project-less against the user root (${receipt.root}).`);
   }
   if (receipt.error) lines.push(`Error: ${receipt.error}`);
+  // The same sentences a run's summary carries: an errand's steps take the
+  // `otherwise continue` tail too, and its receipt is the only place they land.
+  lines.push(...toleratedWarningLines(receipt.steps));
   // Skipped rather than printed empty when the detach never reported one —
   // "Tab left at: (untitled) — " states nothing and looks like a lost value.
   if (receipt.finalUrl !== '' || receipt.finalTitle !== '') {

@@ -87,6 +87,10 @@ const STATUS = {
   // Passed under AI because the compiled entry threw. ⚠ — recompile.
   PASS_STALE: "pass-stale",
   FAIL: "fail",
+  // Failed, and the run went on past it — an `otherwise continue` tail
+  // (stories/step-failure-outcomes.md, decision 6). The same ✗, in amber: never
+  // green, the step did not do its work; never red, the run is not red for it.
+  FAIL_TOLERATED: "fail-tolerated",
   SKIP: "skip",
   STOPPED: "stopped",
 };
@@ -644,7 +648,23 @@ function TestBenchRunner() {
       case "step:fail":
         // A heal whose AI attempt failed too carries both errors — say so,
         // or the code-behind crash that started it would be invisible here.
-        log(`✗ Step on line ${event.line} failed: ${describeStepFailure(event)}`, "fail", uri);
+        //
+        // The two outcome flags change the sentence and its level (decisions 2 and
+        // 6). A tolerated failure is logged "warn", not "fail": the run carried on,
+        // and a red line in a log that ends green is what this state exists to
+        // avoid. A deliberate one is still red — it stopped the run — and says the
+        // message below is the author's, not the framework's.
+        if (event.tolerated) {
+          log(`⚠ Step on line ${event.line} failed — continuing: ${describeStepFailure(event)}`, "warn", uri);
+          break;
+        }
+        log(
+          event.deliberate
+            ? `✗ Step on line ${event.line} failed as written: ${describeStepFailure(event)}`
+            : `✗ Step on line ${event.line} failed: ${describeStepFailure(event)}`,
+          "fail",
+          uri,
+        );
         break;
       case "step:skip":
         // A line an `If … then return` left behind. Logged "info", not "fail":
@@ -788,6 +808,7 @@ function TestBenchRunner() {
   const staleCount = runCounts.stale;
   const failCount = runCounts.fail;
   const skipCount = runCounts.skip;
+  const toleratedCount = runCounts.tolerated;
 
   const stepRows = useMemo(() => {
     if (!snapshot?.text) return [];
@@ -1112,6 +1133,11 @@ function TestBenchRunner() {
         .tb-step--selected { background: var(--vscode-list-inactiveSelectionBackground); }
         .tb-step--pass { color: var(--vscode-testing-iconPassed, #22c55e); }
         .tb-step--fail { color: var(--vscode-testing-iconFailed, #f87171); }
+        /* A step that failed and the run carried on past it
+           (stories/step-failure-outcomes.md, decision 6). The editor's warning
+           colour — the same amber status-fail-tolerated.svg draws its ✗ in,
+           so the gutter and the panel read as one state. */
+        .tb-step--tolerated { color: var(--vscode-editorWarning-foreground, #f59e0b); }
         .tb-step--running { color: var(--vscode-testing-iconQueued, #60a5fa); }
         .tb-section-header {
           padding: 6px 10px;
@@ -1221,12 +1247,17 @@ function TestBenchRunner() {
             {"Run & Compile"}
           </button>
         </div>
-        {(passCount > 0 || failCount > 0 || skipCount > 0) && (
+        {(passCount > 0 || failCount > 0 || skipCount > 0 || toleratedCount > 0) && (
           <div style={{ display: "flex", gap: 12, fontSize: "0.85em" }}>
             {passCount > 0 && <span style={{ color: "var(--vscode-testing-iconPassed, #22c55e)" }}>✓ {passCount} passed</span>}
             {codeBehindCount > 0 && <span style={{ opacity: 0.75 }}><CodeBehindIcon size={12} style={{ marginRight: 3 }} /> {codeBehindCount} code-behind</span>}
             {staleCount > 0 && <span style={{ color: "var(--vscode-editorWarning-foreground, #f59e0b)" }}>⚠ {staleCount} stale</span>}
             {failCount > 0 && <span style={{ color: "var(--vscode-testing-iconFailed, #f87171)" }}>✗ {failCount} failed</span>}
+            {/* Its own clause, in the warning colour, for the reason the
+                `## Steps` decoration gives: a tolerated failure counted with
+                the passes is a green count over work that did not happen, and
+                counted with the failures makes a green run read as broken. */}
+            {toleratedCount > 0 && <span style={{ color: "var(--vscode-editorWarning-foreground, #f59e0b)" }}>✗ {toleratedCount} tolerated</span>}
             {skipCount > 0 && <span style={{ opacity: 0.75 }}>◌ {skipCount} skipped</span>}
           </div>
         )}
@@ -1461,7 +1492,10 @@ function TestBenchRunner() {
             const hasBreakpoint = (snapshot?.breakpoints ?? []).includes(lineNumber);
             const stepError = errorMap[lineNumber];
             const stepFailure =
-              failureMap[lineNumber] && (status === STATUS.FAIL || status === STATUS.PASS_STALE)
+              failureMap[lineNumber] &&
+              (status === STATUS.FAIL ||
+                status === STATUS.FAIL_TOLERATED ||
+                status === STATUS.PASS_STALE)
                 ? // After a row loop, say WHICH rows this line failed on —
                   // the same cross-reference the gutter hover carries. While
                   // the loop is still running the painting is the current
@@ -1483,6 +1517,10 @@ function TestBenchRunner() {
               status === STATUS.PASS_CODE_BEHIND ? "tb-step--pass" : "",
               status === STATUS.PASS_STALE ? "tb-step--pass" : "",
               status === STATUS.FAIL ? "tb-step--fail" : "",
+              // Amber, not red: the run went on past it (decision 6). Shares the
+              // stale mark's warning slate, the panel's existing "look, but the run
+              // is not red for this" colour.
+              status === STATUS.FAIL_TOLERATED ? "tb-step--tolerated" : "",
               status === STATUS.RUNNING ? "tb-step--running" : "",
               // A step an `If … then return` left behind. Same slate as a row
               // the loop never reached — "planned, not run" is one idea.
@@ -1524,7 +1562,10 @@ function TestBenchRunner() {
                     onMouseLeave={(e) => { if (!hasBreakpoint) e.currentTarget.style.opacity = 0.25; }}
                   >●</span>
                   <span style={{ width: 14, textAlign: "center" }}>
-                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.PASS_CACHED ? "⚡︎" : status === STATUS.PASS_CODE_BEHIND ? <CodeBehindIcon /> : status === STATUS.PASS_STALE ? "⚠" : status === STATUS.FAIL ? "✗" : status === STATUS.RUNNING ? "…" : status === STATUS.SKIP ? "◌" : status === STATUS.STOPPED ? "■" : ""}
+                    {/* A tolerated failure keeps the ✗ — the step failed —
+                        and says so in amber via `tb-step--tolerated`. A
+                        different glyph would read as a pass with a caveat. */}
+                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.PASS_CACHED ? "⚡︎" : status === STATUS.PASS_CODE_BEHIND ? <CodeBehindIcon /> : status === STATUS.PASS_STALE ? "⚠" : status === STATUS.FAIL || status === STATUS.FAIL_TOLERATED ? "✗" : status === STATUS.RUNNING ? "…" : status === STATUS.SKIP ? "◌" : status === STATUS.STOPPED ? "■" : ""}
                   </span>
                   <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
                   <span style={{ opacity: 0.5, fontSize: "0.85em" }}>{lineNumber}</span>

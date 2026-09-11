@@ -60,6 +60,11 @@ export function mergeRowReports(rows: RowReport[], unrun: UnrunRow[] = []): Test
    *  (stories/step-flow-control.md). A row that returned early is a normal
    *  outcome, so the merged header has to be able to say so too. */
   let skippedSteps = 0;
+  /** Steps that failed and were tolerated, summed across rows
+   *  (stories/step-failure-outcomes.md, decision 6). NOT folded into `failedSteps`
+   *  or `anyFailed`: a row whose only failures were tolerated passed, which each
+   *  row's own loop already decided when it computed `r.status`. */
+  let toleratedSteps = 0;
   let totalSubActions = 0;
   let durationMs = 0;
   let tokensUsed = 0;
@@ -94,6 +99,7 @@ export function mergeRowReports(rows: RowReport[], unrun: UnrunRow[] = []): Test
     passedSteps += r.passedSteps;
     failedSteps += r.failedSteps;
     skippedSteps += r.skippedSteps ?? 0;
+    toleratedSteps += r.toleratedSteps ?? 0;
     totalSubActions += r.totalSubActions;
     durationMs += r.durationMs;
     tokensUsed += r.tokensUsed;
@@ -135,6 +141,9 @@ export function mergeRowReports(rows: RowReport[], unrun: UnrunRow[] = []): Test
     // Omitted (not 0) when no row returned, so a merged report of ordinary
     // rows is byte-identical to one from before this feature.
     ...(skippedSteps > 0 && { skippedSteps }),
+    // Omitted (not 0) for the same reason: a merged report of rows with no
+    // `otherwise continue` tail is byte-identical to a pre-feature one.
+    ...(toleratedSteps > 0 && { toleratedSteps }),
     totalSubActions,
     durationMs,
     tokensUsed,

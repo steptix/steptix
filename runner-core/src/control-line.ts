@@ -55,7 +55,8 @@ function normalise(instruction: string): string {
  * `tests/control-line-parity.test.ts` is what keeps the two agreeing — the
  * corpus carries `If X, then return`, `then stop here`, `then stop running the
  * remaining steps`, `then Return` and the near miss `then return to the
- * dashboard`, which the `$` anchor leaves as an ordinary chain.
+ * dashboard`, which the `$` anchor leaves as an ordinary chain. The third
+ * verb, `fail`, is {@link FAIL_RE} below.
  *
  * Only the *whole-line* claim matters to this file, so the captures are
  * dropped: what a caller here needs to know is that the line is not a control
@@ -64,11 +65,65 @@ function normalise(instruction: string): string {
 const FLOW_CONTROL_RE =
   /^(?:(?:if|when)\s+(?:.+?)(?:\s*,\s*(?:then\s+|and\s+)?|\s+then\s+|\s+and\s+))?(?:return|stop)(?:\s+here|\s+running\s+the(?:\s+(?:rest\s+of\s+the|remaining|below|following))?\s+steps)?$/i;
 
+/**
+ * The grammar's third verb — a hand copy of `FAIL_RE` in
+ * `src/parser/flow-control-step.ts` (stories/step-failure-outcomes.md,
+ * decision 1), separate here because it is separate there: its joiner set has one
+ * more member, and that is why it cannot fold into the expression above. A bare
+ * SPACE joins a body to a `fail` tail carrying a noun or a message (`If {{a}} is
+ * "peanuts" fail the test with error "…"`) and never joins one to a `return`, so
+ * `If x fail the test` is flow control and `If x return here` is an ordinary
+ * chain — `tests/control-line-parity.test.ts` carries both.
+ *
+ * The message capture is dropped, as above. The BODY and the JOINER are kept,
+ * because the original refuses an empty or joiner-only body and a bare-space
+ * joiner in front of a bare `fail`, and this copy has to refuse the same lines.
+ *
+ * Groups: 1 = body, 2 = joiner.
+ */
+const FAIL_RE =
+  /^(?:(?:if|when)\s+(.+?)(\s*,\s*(?:then\s+|and\s+)?|\s+then\s+|\s+and\s+|\s+))?fail(?:\s+(?:the|this))?(?:\s+(?:test|run))?(?:\s+with(?:\s+the)?(?:\s+(?:error|message|reason))?\s+(?:"(?:[^"]*)"|'(?:[^']*)'))?$/i;
+
+/** A `fail` body that is nothing but a joiner word — the hole the bare-space
+ *  joiner opens, refused identically in `parseFlowControlStep`. */
+const JOINER_ONLY_BODY_RE = /^(?:then|and)$/i;
+
+/** A joiner that is nothing but whitespace — every other alternative of
+ *  {@link FAIL_RE}'s joiner group carries a comma, `then` or `and`. */
+const BARE_SPACE_JOINER_RE = /^\s+$/;
+
+/** A line whose `fail` tail carries NEITHER the noun (`the test` / `the run`) nor
+ *  a message — the hole that claimed ordinary prose: `When I submit with bad
+ *  data, the save should fail` is an expectation, not a step that ends the run.
+ *  Refused identically in `parseFlowControlStep`, where the reasoning is written
+ *  out. */
+const PLAIN_FAIL_TAIL_RE = /\sfail(?:\s+(?:the|this))?$/i;
+
+/** A `fail` body that ends where an `otherwise` tail's head begins — `If the
+ *  banner is visible, dismiss it, otherwise fail the test with message "…"` is a
+ *  step with a failure tail, not a conditional `fail`. Refused identically in
+ *  `parseFlowControlStep`, where the reasoning is written out. */
+const TAIL_HEAD_AT_BODY_END_RE =
+  /\b(?:otherwise|or\s+else|if\s+(?:it|that|this)\s+fails)\s*,?$/i;
+
 /** True when the flow-control grammar claims the whole line. The trailing
  *  full stop comes off here, matching `normalise` in `flow-control-step.ts`;
  *  exactly one, so `Return...` stays prose. */
 export function isFlowControlLine(instruction: string): boolean {
-  return FLOW_CONTROL_RE.test(normalise(instruction).replace(/\.$/, '').trim());
+  const s = normalise(instruction).replace(/\.$/, '').trim();
+  if (FLOW_CONTROL_RE.test(s)) return true;
+  const fail = FAIL_RE.exec(s);
+  if (!fail) return false;
+  // `If then fail` matched and left no condition, so the original answers null and
+  // this has to as well — otherwise the editor stops underlining a diagnostic the
+  // CLI still throws.
+  const body = fail[1]?.trim();
+  if (fail[1] !== undefined && (body === '' || JOINER_ONLY_BODY_RE.test(body!))) return false;
+  if (body && TAIL_HEAD_AT_BODY_END_RE.test(body)) return false;
+  if (fail[2] !== undefined && BARE_SPACE_JOINER_RE.test(fail[2]) && PLAIN_FAIL_TAIL_RE.test(s)) {
+    return false;
+  }
+  return true;
 }
 
 /** `Else if` / `Otherwise if`, with NO comma between the two words — the comma

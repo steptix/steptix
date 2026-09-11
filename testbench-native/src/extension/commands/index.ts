@@ -23,6 +23,7 @@ import {
 import type { CompileOutcome, RunController, SkillDebugContext } from '../run-controller.js';
 import { codeBehindPathFor, findEntryLine, type CodeBehindDiffs } from '../codebehind-diff.js';
 import { getOutputChannel } from '../output-channel.js';
+import { partialNotes } from '../compile-summary-core.js';
 import { cacheDirsForTestAllEnvs } from '../cache-paths.js';
 import { sectionedSkillRefusal } from '../sections.js';
 import { resolveProjectDirs } from '../aiui-config.js';
@@ -1990,41 +1991,10 @@ async function revealRecording(dir: string): Promise<void> {
 }
 
 /**
- * The sentence a partial compile adds to its notification: where the run
- * stopped, what was written off, what is unproven. Each part only when it
- * applies, so a plain prefix compile reads as one short instruction.
+ * The partial-compile notification's tail, re-exported so this module stays the one
+ * place the notification is assembled while the WORDING lives in a vscode-free core
+ * the fast `node --test` suite can pin (`compile-summary-core.ts`). It sat here,
+ * behind a `vscode` import, which is why the sentence telling an author to fix a
+ * working step was never pinned by anything.
  */
-export function partialNotes(summary: {
-  stoppedAt?: { step: number; error: string };
-  notAttempted: number[];
-  writtenOffAi: number[];
-  unproven: number[];
-}): string {
-  const parts: string[] = [];
-  if (summary.stoppedAt) {
-    parts.push(
-      ` Step ${summary.stoppedAt.step} failed under AI — ${summary.stoppedAt.error}.` +
-        (summary.notAttempted.length > 0 ? ` ${listSteps(summary.notAttempted)} not attempted.` : '') +
-        ' Fix it, run, and compile again for the rest.',
-    );
-  }
-  if (summary.writtenOffAi.length > 0) {
-    parts.push(
-      ` ${listSteps(summary.writtenOffAi)} kept AI after replay failures — fix the cause, then Compile This Step.`,
-    );
-  }
-  if (summary.unproven.length > 0) {
-    parts.push(` ${listSteps(summary.unproven)} unproven — the next run proves or flags them.`);
-  }
-  return parts.join('');
-}
-
-/** "Steps 6–9", "Step 4", "Steps 2, 5". */
-function listSteps(numbers: number[]): string {
-  if (numbers.length === 1) return `Step ${numbers[0]}`;
-  const sorted = [...numbers].sort((a, b) => a - b);
-  const contiguous = sorted.every((n, i) => i === 0 || n === sorted[i - 1]! + 1);
-  return contiguous
-    ? `Steps ${sorted[0]}–${sorted[sorted.length - 1]}`
-    : `Steps ${sorted.join(', ')}`;
-}
+export { partialNotes };

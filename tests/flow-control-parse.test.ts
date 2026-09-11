@@ -1,6 +1,7 @@
 /**
  * The frozen grammar table for `If … then return` / `… then stop`
- * (stories/step-flow-control.md §Tests, "Grammar table").
+ * (stories/step-flow-control.md §Tests, "Grammar table") and for the third
+ * verb, `If … then fail …` (stories/step-failure-outcomes.md §Tests).
  *
  * This file is the contract, not a sample of it. Every runner decides whether
  * a step is flow control by calling `parseFlowControlStep` on the authored
@@ -12,6 +13,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  isReturnClaim,
   parseFlowControlStep,
   type ParsedFlowControlStep,
 } from '../src/parser/flow-control-step.js';
@@ -97,6 +99,71 @@ const ACCEPT: Array<[string, ParsedFlowControlStep]> = [
   ],
   ['[no-hooks] If we are done then stop.', { verb: 'stop', body: 'we are done' }],
   ['IF WE ARE DONE THEN RETURN', { verb: 'return', body: 'WE ARE DONE' }],
+
+  // ── The third verb: `fail` (stories/step-failure-outcomes.md) ───────────
+  //
+  // The tail's four optional pieces — `the`/`this`, `test`/`run`, `with the`,
+  // and the `error`/`message`/`reason` noun — are listed present AND absent
+  // rather than sampled, or the prose and the grammar would drift.
+  ['Fail', { verb: 'fail' }],
+  ['fail', { verb: 'fail' }],
+  ['FAIL', { verb: 'fail' }],
+  ['Fail the test', { verb: 'fail' }],
+  ['Fail this test', { verb: 'fail' }],
+  ['Fail the run', { verb: 'fail' }],
+  ['Fail this run', { verb: 'fail' }],
+  ['Fail with "boom"', { verb: 'fail', message: 'boom' }],
+  ['Fail with the message "boom"', { verb: 'fail', message: 'boom' }],
+  ['Fail the test with error "boom"', { verb: 'fail', message: 'boom' }],
+  ['Fail the test with message "boom"', { verb: 'fail', message: 'boom' }],
+  ['Fail the test with reason "boom"', { verb: 'fail', message: 'boom' }],
+  ['Fail the run with the error "boom"', { verb: 'fail', message: 'boom' }],
+  // Both quote styles: a message may hold the OTHER quote, never its own.
+  ["Fail the test with error 'boom'", { verb: 'fail', message: 'boom' }],
+  ['Fail the test with error "the page did not say Don\'t panic"',
+    { verb: 'fail', message: "the page did not say Don't panic" }],
+  ['Fail the test with error \'the title was not "Dashboard"\'',
+    { verb: 'fail', message: 'the title was not "Dashboard"' }],
+  // One trailing full stop comes off the LINE; one inside the message stays.
+  ['Fail the test.', { verb: 'fail' }],
+  ['Fail the test with error "Sign in did not reach the dashboard."',
+    { verb: 'fail', message: 'Sign in did not reach the dashboard.' }],
+  ['[no-hooks] Fail the test with message "boom"', { verb: 'fail', message: 'boom' }],
+  ['  Fail the test with message "boom".  ', { verb: 'fail', message: 'boom' }],
+
+  // The conditional form, one row per joiner.
+  ['If the balance is zero then fail', { verb: 'fail', body: 'the balance is zero' }],
+  ['When the balance is zero then fail', { verb: 'fail', body: 'the balance is zero' }],
+  ['If the balance is zero, fail', { verb: 'fail', body: 'the balance is zero' }],
+  ['If the balance is zero, then fail', { verb: 'fail', body: 'the balance is zero' }],
+  ['If the balance is zero, and fail', { verb: 'fail', body: 'the balance is zero' }],
+  ['If the balance is zero and fail', { verb: 'fail', body: 'the balance is zero' }],
+  // The bare-whitespace joiner, `fail`-only (see the refused table) — and this
+  // is the line the feature was asked for.
+  ['If {{a}} is "peanuts" fail the test with error "The variable value was peanuts. Expected apples"',
+    { verb: 'fail', body: '{{a}} is "peanuts"',
+      message: 'The variable value was peanuts. Expected apples' }],
+  // …and its exact reach, one row per way a tail earns it: the NOUN, the
+  // MESSAGE, or both. A tail with neither is in the refused table.
+  ['If the balance is zero fail the test', { verb: 'fail', body: 'the balance is zero' }],
+  ['If the balance is zero fail this run', { verb: 'fail', body: 'the balance is zero' }],
+  ['If the balance is zero fail with error "No balance"',
+    { verb: 'fail', body: 'the balance is zero', message: 'No balance' }],
+  ['When the balance is zero fail the run with the message "No balance"',
+    { verb: 'fail', body: 'the balance is zero', message: 'No balance' }],
+  // A `{{placeholder}}` in the MESSAGE: the loops interpolate before the
+  // executor sees the line, so it is captured un-substituted here.
+  ['If {{total}} is wrong then fail the test with error "Expected 10, got {{total}}"',
+    { verb: 'fail', body: '{{total}} is wrong', message: 'Expected 10, got {{total}}' }],
+  // The compound body: an explicit joiner beats the bare space, so the trailing
+  // `and` is the joiner and not the last word of the body.
+  ['If the Save button is visible, click it and fail',
+    { verb: 'fail', body: 'the Save button is visible, click it' }],
+  ['If the Save button is visible, click it, then fail the test with message "Save was still there"',
+    { verb: 'fail', body: 'the Save button is visible, click it',
+      message: 'Save was still there' }],
+  ['[no-hooks] If we are done then fail.', { verb: 'fail', body: 'we are done' }],
+  ['IF WE ARE DONE THEN FAIL', { verb: 'fail', body: 'WE ARE DONE' }],
 ];
 
 /**
@@ -140,6 +207,60 @@ const REFUSE: Array<[string, string]> = [
   ['Set {{done}} to "yes"', 'a different step form entirely'],
   ['', 'the empty line'],
   ['Return.....', 'only ONE trailing full stop is dropped — an ellipsis is prose'],
+
+  // ── `fail` (stories/step-failure-outcomes.md) ───────────────────────────
+  ['Fail loudly', 'the tail must end the line'],
+  ['Fail the tests with error "x"', '"tests" is not "test" — the grammar is exact'],
+  ['Fail the tests', 'same, without a message'],
+  ['Failed to load', 'the verb is a whole word, and the tail must end the line'],
+  ['Fail the test with error "x',
+    'the message has no closing quote, so the whole `with …` part is unmatched and the line is prose'],
+  ["Fail the test with error 'x\"", 'the closing quote must be the same kind as the opening one'],
+  ['Fail the test with error x', 'the message must be quoted'],
+  ['Fail the test because the balance was wrong', '`because` is not `with`'],
+  ['Verify the total then fail the test',
+    'only a line that opens If/When, or is nothing but the tail, is flow control'],
+  ['Click Save and fail over to the backup', 'no head, and the tail does not end the line'],
+  ['If then fail',
+    'the body is only the joiner word — the condition was never written, and the ' +
+      'bare-space joiner is the one thing that could have read `then` as a condition'],
+  ['If and fail the test with error "x"', 'the same, with the other joiner word'],
+  ['If  fail', 'a head with nothing between it and the tail is not UNCONDITIONAL either'],
+  ['If the upload fails', 'the tail must be the verb, not a word ending in it'],
+
+  // A bare `fail` behind the bare-space joiner claimed ordinary prose in the
+  // worst direction: a BDD-style expectation became a flow-control step whose
+  // "condition" was the front half of the sentence, so the run went red
+  // precisely when the expectation was MET.
+  ['When I submit with bad data, the save should fail',
+    'the reviewer`s line: an expectation about the page, not an instruction to ' +
+      'end the run — read as a claim its condition was "I submit with bad data, the save should"'],
+  ['When the customer submits the checkout form with an expired card, the payment should fail',
+    'the same sentence at length — nothing about the shape gets less prose-like as it grows'],
+  ['If the upload does not fail', 'the condition is ABOUT failing; the line asks for nothing'],
+  ['If the login attempts fail', 'the shortest form of the same sentence'],
+  ['If the balance is zero fail', 'a bare `fail` needs a real joiner, exactly as `return` does'],
+  ['If the balance is zero fail the', 'the article alone is not the noun — `the test` is'],
+  // …while the explicit joiners still take a bare `fail` (the accepted table
+  // has them), which makes the rule about the JOINER, not about the verb.
+
+  // The other hole the bare space opens: a body ending in an `otherwise` tail's
+  // head. Read as a claim the body never runs, the step is exempted from
+  // grouping and a model judges a half-sentence — these are steps with a
+  // failure tail, and `failure-tail-parse.test.ts` has them from that side.
+  ['If the banner is visible, dismiss it, otherwise fail the test with message "No banner"',
+    'the body ends in the head of an `otherwise` tail — this is a tail, not a claim'],
+  ['If x then fail the test with error "M" otherwise fail',
+    'the same shape hiding decision 8`s contradiction: claimed, the executor ' +
+      'would never ask whether the line contradicts itself'],
+  ['If the banner is visible, dismiss it, or else fail the test',
+    'the same, for the second spelling of the head'],
+  ['If the upload works, check the total, if it fails fail the test',
+    'and the third — `if it fails` is a head wherever it ends a body'],
+
+  ['If we are signed in return', 'no bare-space joiner for `return` — unchanged behaviour, pinned'],
+  ['If we are signed in stop', 'no bare-space joiner for `stop` — unchanged behaviour, pinned'],
+  ['If we are signed in return here', 'the same, with the longer tail'],
 ];
 
 describe('parseFlowControlStep — the accepted table', () => {
@@ -189,5 +310,52 @@ describe('the shape a runner branches on', () => {
   it('normalises the verb to lower case whatever was written', () => {
     expect(parseFlowControlStep('STOP HERE')?.verb).toBe('stop');
     expect(parseFlowControlStep('If x then RETURN')?.verb).toBe('return');
+    expect(parseFlowControlStep('FAIL THE TEST')?.verb).toBe('fail');
+  });
+});
+
+describe('the `fail` verb (stories/step-failure-outcomes.md, decision 1)', () => {
+  it('reports an absent message as ABSENT, not as an empty string', () => {
+    // The seam that composes the error branches on this: with no message it
+    // reads `Failed by the step, as written` (decision 3).
+    const parsed = parseFlowControlStep('Fail the test');
+    expect(parsed).toEqual({ verb: 'fail' });
+    expect(Object.hasOwn(parsed!, 'message')).toBe(false);
+  });
+
+  it('keeps an empty message as WRITTEN, which a consumer reads as none', () => {
+    // `with error ""` is degenerate rather than illegal — the field is present,
+    // and a falsy message is worded like an absent one, so the check above is
+    // not a rule that empties get dropped.
+    expect(parseFlowControlStep('Fail the test with error ""')).toEqual({
+      verb: 'fail',
+      message: '',
+    });
+  });
+
+  it('marks the unconditional form the same way the other two verbs do', () => {
+    // The loops dispatch it with NO model call, on `body === undefined`.
+    const parsed = parseFlowControlStep('Fail the test with error "No balance was shown"');
+    expect(Object.hasOwn(parsed!, 'body')).toBe(false);
+    expect(parseFlowControlStep('If x then fail')!.body).toBe('x');
+  });
+});
+
+describe('isReturnClaim — the hook gate (decision 7)', () => {
+  it('is true for the two verbs that leave a flow and false for `fail`', () => {
+    for (const line of ['Return', 'Stop here', 'If x then return', 'If x, then stop']) {
+      expect(isReturnClaim(parseFlowControlStep(line)!), line).toBe(true);
+    }
+    for (const line of ['Fail', 'Fail the test with error "x"', 'If x then fail']) {
+      expect(isReturnClaim(parseFlowControlStep(line)!), line).toBe(false);
+    }
+  });
+
+  it('narrows the union, so a caller can read the message after the check', () => {
+    // Not style: the three refusal sites gate on it, and a predicate that did
+    // not narrow would leave each of them casting.
+    const claim = parseFlowControlStep('Fail the test with error "x"')!;
+    expect(isReturnClaim(claim)).toBe(false);
+    if (!isReturnClaim(claim)) expect(claim.message).toBe('x');
   });
 });

@@ -110,7 +110,24 @@ Steps are natural language instructions, identical to the format used in markdow
 - **Parameter interpolation**: `"Enter \"{{email}}\" in the email field"` — resolved from `parameters` in the request body, or from previously captured output variables.
 - **Output capture**: `"[output: variable_name] Get the displayed username"` — captures a DOM value into a named variable. Multiple outputs per step are supported: `"[output: plan_name] [output: plan_price] Get the plan details"`.
 - **Variable assignment**: `"Set {{summary}} to \"{{username}} had {{balance}}\""` — stores a value built from the session's existing variables under a new name, with no AI call. The template resolves `{{name}}` and `${env.X}` / `${data.x}` against the session as it stands; a reference it cannot resolve fails the step rather than storing the literal. Note that a **malformed** `Set {{name}} to …` is *not* rejected here: this endpoint receives step strings and never parses markdown, so a line that does not match the form is sent to the AI as ordinary prose. The parse-time refusal applies to files read by the CLI and by the MCP tools, not to steps posted here.
+- **Deliberate failure**: `"If {{a}} is \"peanuts\" then fail the test with error \"The variable value was peanuts\""` — the AI judges the condition against the live page, exactly as it does for `then return`, and when it holds the step fails with that message and the run stops. The failure is **not retried** — the step asked for it, and a retry prompt would invite the model to try something else — so it is attempted exactly once and `deliberate: true` rides on the event. A step whose *whole text* is the tail — `"Fail the test with error \"…\""` — fails the run with no AI call at all. The message is interpolated from the session's variables and secret-masked before it reaches the response, the event or the log; written without one, the framework words the error.
+- **Renaming a failure**: `"Verify the title contains \"Account details\" otherwise fail the test with message \"Page did not contain account details\""` — an ordinary step with the ordinary retry policy. The tail is stripped from what the AI is shown, so the model does the same check it would have done; only if the step has finally failed is `error` replaced by the message, with the framework's original moved into `reasoning`.
+- **Tolerating a failure**: `"Dismiss the promo banner otherwise continue"`, or `"… otherwise continue with warning \"Footer build number missing\""` — the step runs as itself with its usual retries, and a failure does **not** stop execution: the row keeps `status: "failed"` with `tolerated: true`, the next step runs, and the response's `status` does not count it. A warning, when written, rides the event and the row as `warning` — beside `error`, not instead of it. `or else` and `if it fails` are accepted for `otherwise`; `carry on`, `keep going` and `warn "…"` for `continue`.
 - **Ignored prefixes**: `[input: variable_name]` and `[interactive]` are silently skipped, as they are interactive/terminal concepts that do not apply to the API.
+
+As with `Set`, a **malformed** tail is not rejected here: this endpoint receives
+step strings and never parses markdown, so a line that does not match one of the
+forms above is handed on with the tail still in it — as ordinary prose to the AI
+in the usual case. The exception is a `[tool: …]` step: `"[tool: fetch_orders]
+otherwise continue"` is not prose on this path, because the tool branch is
+dispatched off the raw line — so the tool runs and the tail is read by nothing.
+The CLI and the MCP file paths refuse that line by name at parse time; this one
+does not. The one shape that is refused rather than performed is the
+contradiction — `If x then return otherwise continue`, a step that asks both to
+end the flow and to tolerate its own failure. On this path the refusal comes
+from the server's own step loop, which reads the line before it dispatches
+anything: the step reaches neither the AI nor the executor, it costs no model
+call, and it fails in the same sentence the CLI's parse-time validator uses.
 
 A step may also name a file to upload — `Upload file attachments/logo.png`, or
 with Windows-style backslashes, which are normalised. The path is resolved
@@ -131,7 +148,7 @@ no folder to resolve a relative path against, so it can only use absolute paths.
 #### Execution Behavior
 
 - Steps execute **synchronously** — the HTTP response is returned only after all steps have completed or one has failed.
-- If a step fails, execution **stops immediately**. Remaining steps are not executed.
+- If a step fails, execution **stops immediately**. Remaining steps are not executed. The one exception is a step written `… otherwise continue`: its failure is tolerated and the run carries on (see *Deliberate and tolerated failures*).
 - The response includes results for all steps that were attempted (including the failed one).
 
 #### Leaving a flow early
@@ -219,6 +236,45 @@ client of whichever server its workspace points at, and a client that stopped
 reading the older convention would repaint the untaken branch **green** against
 a server nobody had restarted.
 
+#### Deliberate and tolerated failures
+
+A failure the step's own text asked for, and a failure the step's own text said
+to survive, are still failures on the wire — no new event and no new status.
+`step:fail` carries two optional booleans that say which kind it was, and one
+optional string that carries the author's words for a tolerated one. See
+`stories/step-failure-outcomes.md`.
+
+```
+event: step:fail
+data: {"type":"step:fail","line":7,"error":"the footer had no build number","tolerated":true,"warning":"Footer build number missing","screenshot":"data:image/png;base64,…"}
+```
+
+| Field        | Description |
+|--------------|-------------|
+| `deliberate` | The step asked to fail — `If … then fail the test with error "…"`, or a line that is nothing but that tail. `error` is the author's message, interpolated and secret-masked. Such a failure is **not retried** — the step is attempted once — so a consumer should not report it as flaky. **Optional**; absent means an ordinary failure. |
+| `tolerated`  | The step failed and the run **continued** — it carried an `… otherwise continue` tail. A `step:start` for the next step follows. **Optional**; absent means the failure ended the run. |
+| `warning`    | The author's own words for a tolerated failure — what they wrote in `… otherwise continue with warning "…"`, interpolated and secret-masked. Sent only with `tolerated`, and only when a warning was written. `error` beside it is unchanged: it stays the framework's account of what actually went wrong, while this says why the author decided that was survivable. A client should lead with `warning` and keep `error` under it. **Optional**. |
+
+A `tolerated` failure is excluded from the run's status: the response's
+`status` — and the `done` event's, on the stream — is `"passed"` for a run
+whose only failures were tolerated, and `error` stays `null`. It is not counted
+as a pass either; nothing that did not do its work is reported green.
+`stepsCompleted` does count it, as it counts any step that executed.
+
+The corresponding `results[]` row carries `tolerated: true` with its `status`
+staying `"failed"`, which is the same shape a step the user stopped on has
+(`status: "failed"` with `interrupted: true`) and is honoured the same way by
+the two places that compute a run's status. It carries `warning` beside it when
+one was written, so a reader of the row gets the author's sentence without
+parsing it back out of `reasoning`. `deliberate` does not appear on the row:
+the message is already in `error`, and there is nothing a reader of the row
+would do differently.
+
+Clients that do not know either field paint a plain ✗ and, for a tolerated
+failure, report a run that the server called passed as having a failed step in
+it. That is the safe direction for both — the surprise is visible and errs
+towards showing a problem, where the reverse would hide one.
+
 #### Response Body
 
 ```json
@@ -292,12 +348,14 @@ a server nobody had restarted.
 | Field            | Description |
 |------------------|-------------|
 | `sessionId`      | The session ID from the request. |
-| `status`         | `"passed"` if all steps succeeded, `"failed"` if an assertion failed, `"error"` if a step encountered an unexpected error. |
+| `status`         | `"passed"` if all steps succeeded, `"failed"` if an assertion failed, `"error"` if a step encountered an unexpected error. A step that failed and was tolerated (`… otherwise continue`) does not make the run `"failed"` — see *Deliberate and tolerated failures*. |
 | `stepsCompleted` | Number of steps that executed successfully. Steps skipped by a `return`/`stop` are not counted — they did not execute. Steps a **decision** skipped (the untaken half of an `If` / `Otherwise`, or a loop body that ran no passes) ARE counted, as an `[input:]` skip always has been: this number is a progress denominator against `stepsTotal`, and an untaken branch is never coming, so a run whose chain skipped three steps would otherwise stop three short of the end forever. See `stories/control-flow.md` §"What `stepsCompleted` counts". |
 | `stepsTotal`     | Total number of steps in the request. |
 | `results`        | Array of per-step results, in execution order. Includes all attempted steps (up to and including the failed step, if any). |
 | `results[].step` | The original step text as provided. |
 | `results[].status` | `"passed"`, `"failed"`, `"error"`, or `"skipped"` for this individual step. `"skipped"` means the step did not run: an earlier step ended the flow it was in (see *Leaving a flow early*), a decision took another branch, or a loop ran no passes. `reasoning` says which. One exception, kept for compatibility: an `[input:]` / `[interactive]` step this endpoint will not run unattended is still reported `"passed"` with a `reasoning` that says it was skipped. On the SSE stream all three arrive as skips. |
+| `results[].tolerated` | `true` when this step failed and the run continued past it, because the step was written `… otherwise continue`. `status` stays `"failed"`. **Optional** — absent on every other row, and on every server older than the field. See *Deliberate and tolerated failures*. |
+| `results[].warning` | The author's own words for a tolerated failure — what they wrote in `… otherwise continue with warning "…"`, interpolated and secret-masked. Present only beside `tolerated`, and only when a warning was written. `reasoning` holds the same sentence folded into the step's explanation; this is it on its own. **Optional**. |
 | `results[].actions` | Array of structured actions the AI determined and executed for this step. |
 | `results[].screenshot` | Base64-encoded screenshot taken after the step completed. |
 | `results[].reasoning` | The AI's reasoning for how it interpreted and executed the step. On a `"skipped"` step, why it did not run — e.g. `Not run: step 3 returned from "Sign in" — If the page title contains "Dashboard" then return`. |

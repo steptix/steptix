@@ -79,6 +79,21 @@ const stepCalls: { instruction: string; opts: Record<string, unknown> }[] = [];
 const returnsOnCall = new Map<string, number>();
 const claimsSeen = new Map<string, number>();
 
+/** Instruction → the message a `fail`-claiming step ends the run with
+ *  (decisions 1–3). The executor answers `status: 'failed'` + `deliberate` and a
+ *  `fail` sub-action: the status is the whole trap, since the step WORKED and a
+ *  compiler reading `failed` as "the run broke here" drops it. */
+const deliberateFailures = new Map<string, string>();
+
+/** The DOM either side the mock reports when capture was asked for — what
+ *  generation reads. Shared by the pass and deliberate-failure shapes. */
+const capturedContext = {
+  domBefore: '<html><body><button id="go">Go</button></body></html>',
+  urlBefore: 'https://example.com/',
+  domAfter: '<html><body><h1>Dashboard</h1></body></html>',
+  urlAfter: 'https://example.com/dashboard',
+};
+
 vi.mock('../src/runner/step-executor.js', () => ({
   executeStep: vi.fn(async (
     stepIndex: number,
@@ -87,12 +102,37 @@ vi.mock('../src/runner/step-executor.js', () => ({
     opts: Record<string, unknown>,
   ): Promise<StepResult> => {
     stepCalls.push({ instruction, opts });
-    const claim = opts['flowControlClaim'] as { verb: 'return' | 'stop' } | undefined;
+    const claim = opts['flowControlClaim'] as { verb: 'return' | 'stop' | 'fail' } | undefined;
+    const deliberateMessage = deliberateFailures.get(instruction);
+    if (deliberateMessage !== undefined) {
+      return {
+        index: stepIndex, instruction, status: 'failed', deliberate: true,
+        error: deliberateMessage,
+        aiExplanation: "The step's condition held and the step says to fail the test.",
+        // The `fail` sub-action's `error` IS the product — the transcript the
+        // compiler generates from.
+        turns: [{
+          turnNumber: 1, attemptNumber: 1, timestamp: new Date().toISOString(), aiInteractions: [],
+          subActions: [{
+            index: 1,
+            action: { action: 'fail', description: 'the cart shows no items' },
+            error: deliberateMessage,
+            durationMs: 2,
+          }],
+        }],
+        durationMs: 5, retried: false, pageUrl: 'https://example.com/dashboard',
+        ...(opts['captureStepContext'] === true && { stepContext: capturedContext }),
+      } as StepResult;
+    }
     let flowControl: { kind: 'return'; verb: 'return' | 'stop' } | undefined;
     if (claim) {
       const nth = (claimsSeen.get(instruction) ?? 0) + 1;
       claimsSeen.set(instruction, nth);
-      if (returnsOnCall.get(instruction) === nth) flowControl = { kind: 'return', verb: claim.verb };
+      // `fail` claims the same option and never answers `return`; its outcome
+      // is the map above.
+      if (returnsOnCall.get(instruction) === nth && claim.verb !== 'fail') {
+        flowControl = { kind: 'return', verb: claim.verb };
+      }
     }
     return {
       index: stepIndex,
@@ -125,14 +165,7 @@ vi.mock('../src/runner/step-executor.js', () => ({
       aiExplanation: 'ok',
       pageUrl: 'https://example.com/dashboard',
       // What `captureStepContext` retains, and what generation reads.
-      ...(opts['captureStepContext'] === true && {
-        stepContext: {
-          domBefore: '<html><body><button id="go">Go</button></body></html>',
-          urlBefore: 'https://example.com/',
-          domAfter: '<html><body><h1>Dashboard</h1></body></html>',
-          urlAfter: 'https://example.com/dashboard',
-        },
-      }),
+      ...(opts['captureStepContext'] === true && { stepContext: capturedContext }),
     } as StepResult;
   }),
   executeBranchedStep: vi.fn(async () => []),
@@ -296,6 +329,7 @@ beforeEach(async () => {
   aiCalls.length = 0;
   returnsOnCall.clear();
   claimsSeen.clear();
+  deliberateFailures.clear();
   (logger.info as unknown as { mockClear: () => void }).mockClear();
   await fs.rm(stepsFilePath, { force: true });
   await fs.rm(path.join(tmpDir, '.aiui-codebehind-cache'), { recursive: true, force: true });
@@ -1401,5 +1435,110 @@ describe('compile a run whose section returns', () => {
     // steps.
     expect(result.summary.compiled).toBe(5);
     expect(result.summary.totalSteps).toBe(8);
+  });
+});
+
+/**
+ * The `fail` verb through a Run & Compile (stories/step-failure-outcomes.md
+ * §"What the compile showed"). Taught twice — the boxed pipeline reads the
+ * recording on disk, this one the run it rides — because a deliberate failure
+ * arriving in `stoppedAt` made a Run & Compile answer "Step 9 failed under AI …
+ * Fix it, run, and compile again" over a step that did what its line says.
+ */
+describe('compile a run a step\'s own text ended', () => {
+  const FAIL_STEP = 'If the cart is empty then fail the test with error "Nothing to check out"';
+  const MESSAGE = 'Nothing to check out';
+
+  // Row 1 ends the run mid-list, row 2 on its last step. Every field below is
+  // asserted for both rows; only the table's values differ.
+  it.each([
+    ['reports where the run ENDED, never where it stopped, and compiles the ending step',
+      ['Open the dashboard', FAIL_STEP, 'Search for the order'],
+      { step: 2, error: MESSAGE, line: FAIL_STEP }, [3],
+      `the run ended at step 2 as its text says (${FAIL_STEP})`],
+    ['leaves nothing unattempted when the ending step is the last one',
+      ['Open the dashboard', FAIL_STEP], undefined, [], undefined],
+  ] as const)('%s', async (_label, steps, endedAsWritten, notAttempted, error) => {
+    deliberateFailures.set(FAIL_STEP, MESSAGE);
+    const { frames } = await runSteps(requestBody({
+      steps: [...steps], sourceLines: steps.map((_, i) => 4 + i), compile: 'run',
+    }));
+
+    // The run half first, so the compile half is read off a real run: step 2
+    // failed as written, flag and all, and nothing after it started.
+    expect(
+      frames.filter((f) => f.type === 'step:fail').map((f) => [f.line, f.deliberate, f.error]),
+    ).toEqual([[5, true, MESSAGE]]);
+    expect(frames.filter((f) => f.type === 'step:start')).toHaveLength(2);
+
+    const result = frames.find((f) => f.type === 'compile:result')!;
+    // The whole finding: the field meaning "the run broke here" is empty, and
+    // "the run ended here" carries the step, the message and the authored line —
+    // but only while steps remain after the ending one, which is the BOXED
+    // compiler's rule, the field being the answer to "why has step N no entry".
+    // This path used to set it on every ending, so a summary carried the field
+    // and an `error` `aiui compile` never wrote — and a `green` carrying an
+    // `error` is what made `compileResultLine` say "◐ Compiled nothing…".
+    expect(result.summary.stoppedAt).toBeUndefined();
+    expect(result.summary.endedAsWritten).toEqual(endedAsWritten);
+    expect(result.summary.notAttempted).toEqual(notAttempted);
+    // The reason line a client with no headline of its own reads, in the boxed
+    // compiler's words.
+    expect(result.summary.error).toEqual(error);
+    // The ending step is IN the proposal — it did its work, so there is a
+    // transcript — and any step past it is named, not silently missing.
+    expect(result.summary.compiled).toBe(2);
+    expect(result.files[stepsFilePath]).toContain(FAIL_STEP);
+    // `partial` either way, and not because of the ending: every entry this path
+    // writes is unproven, so a pass that produced entries is never green.
+    expect(result.status).toBe('partial');
+  });
+
+  describe('with the ending step already opted out as `ai: true`', () => {
+    // Nothing to generate for it, so `attempted` is 0 and the "nothing to do"
+    // arithmetic is under test — where dropping `stoppedAt` could turn a partial
+    // into a green.
+    const optedOut = [
+      "import { defineSteps } from 'ai-ui-automation/codebehind';",
+      'export default defineSteps([',
+      `  { source: ${JSON.stringify(FAIL_STEP)}, ai: true },`,
+      ']);',
+      '',
+    ].join('\n');
+
+    beforeEach(async () => {
+      await fs.writeFile(stepsFilePath, optedOut, 'utf-8');
+      deliberateFailures.set(FAIL_STEP, MESSAGE);
+    });
+    afterEach(async () => {
+      await fs.rm(stepsFilePath, { force: true });
+    });
+
+    // Row 1 is green and clean with it: no gap after the ending step, so the
+    // field does not travel and nothing contradicts the status the way a `green`
+    // carrying an `error` did. Row 2 is the trap the review named — with
+    // `stoppedAt` gone and nothing attempted, a compile whose FIRST step ends
+    // the run would answer `green` ("already compiled") over two steps that have
+    // no entry and no transcript.
+    it.each([
+      ['is green when the ending step was the last one — nothing is owed',
+        [FAIL_STEP], undefined, [], undefined, 'green'],
+      ['is NOT green when steps after it never ran, though nothing was attempted',
+        [FAIL_STEP, 'Open the dashboard', 'Search for the order'],
+        { step: 1, error: MESSAGE, line: FAIL_STEP }, [2, 3],
+        `the run ended at step 1 as its text says (${FAIL_STEP})`, 'partial'],
+    ] as const)('%s', async (_label, steps, endedAsWritten, notAttempted, error, status) => {
+      const { frames } = await runSteps(requestBody({
+        steps: [...steps], sourceLines: steps.map((_, i) => 4 + i), compile: 'run',
+      }));
+
+      const result = frames.find((f) => f.type === 'compile:result')!;
+      expect(result.summary.stoppedAt).toBeUndefined();
+      expect(result.summary.endedAsWritten).toEqual(endedAsWritten);
+      expect(result.summary.notAttempted).toEqual(notAttempted);
+      expect(result.summary.error).toEqual(error);
+      expect(result.summary.compiled).toBe(0);
+      expect(result.status).toBe(status);
+    });
   });
 });

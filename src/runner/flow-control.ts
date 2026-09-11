@@ -19,6 +19,10 @@
  */
 import type { ExpandedFrame, ExpandedStepOrigin } from '../skills/expander.js';
 import type { StepResult } from '../report/types.js';
+import {
+  parseFlowControlStep,
+  type ParsedFlowControlStep,
+} from '../parser/flow-control-step.js';
 
 /** The frame table as the helpers read it — the shape `ParsedTest.expansion`
  *  and the server's session state both hold. */
@@ -214,4 +218,99 @@ export function skippedByReturnReason(
       : `Not run: step ${i + 1} returned from "${label}"`;
   const text = clip(returningStepText);
   return text ? `${lead} — ${text}` : lead;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// The deliberate `Fail` and the tolerated failure
+// (stories/step-failure-outcomes.md, decisions 1, 3 and 6)
+//
+// Four loops again, and the same argument as above: the wording of what a run
+// says about a deliberate failure — and of the history line a later step reads to
+// make sense of the red entry above it — has to be ONE sentence.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** The error on an unconditional `Fail the test` that named no message
+ *  (decision 3). "as written" rather than "on purpose": the reader of a red report
+ *  needs to know the failure came from the TEST FILE rather than the page. */
+export const DELIBERATE_FAIL_FALLBACK = 'Failed by the step, as written';
+
+/** The explanation beside it. It says what the row's absent turns already imply —
+ *  no model was asked — because a reader looking at a failed step with no AI
+ *  reasoning would otherwise wonder what went wrong with the run. */
+export const DELIBERATE_FAIL_EXPLANATION =
+  'Failed by the step, as written — no model call.';
+
+/**
+ * The error an unconditional `Fail …` carries, with `{{…}}` resolved
+ * (decision 3) — UNMASKED. Every caller redacts it immediately, at the one
+ * seam where the author's words first become the thing the wire, the report
+ * and the log carry.
+ *
+ * The claim was read off the AUTHORED line, because a claim has to be the same
+ * answer on every run and in every runner (stories/step-flow-control.md, decision
+ * 2) — so `claim.message` still holds the author's tokens. The loops interpolate
+ * the whole line before they dispatch it, so the RESOLVED message is in that text:
+ * one parser read twice, rather than a second substitution pass with its own idea
+ * of what `${env.X}` means.
+ *
+ * Two fallbacks, both towards saying something: the authored message when the
+ * interpolated line no longer parses as a `fail` (which a value can only cause by
+ * carrying the quote character that ends the message), and the framework's wording
+ * when no message was written at all.
+ */
+export function deliberateFailError(
+  claim: ParsedFlowControlStep,
+  interpolatedLine: string,
+): string {
+  const authored = claim.verb === 'fail' ? claim.message : undefined;
+  const reparsed = parseFlowControlStep(interpolatedLine);
+  const resolved = reparsed?.verb === 'fail' ? reparsed.message : undefined;
+  return resolved ?? authored ?? DELIBERATE_FAIL_FALLBACK;
+}
+
+/**
+ * The `StepResult` an unconditional `Fail …` produces, with no model call and
+ * no page read (decisions 1 and 3).
+ *
+ * `error` arrives already masked: the loops hold the secret list, and decision 3
+ * says the author's message is redacted once, where it first becomes the thing the
+ * wire, the report and the log carry. A caller that captures a failure screenshot
+ * spreads it in — the loops differ on whether they have a page to capture from.
+ */
+export function deliberateFailResult(
+  index: number,
+  instruction: string,
+  error: string,
+): StepResult {
+  return {
+    index,
+    instruction,
+    status: 'failed',
+    turns: [],
+    durationMs: 0,
+    retried: false,
+    error,
+    // The flag clients read to tell "the author asked for this" from "the framework
+    // could not do it", and the CLI's diagnosis pass reads to stay away (decision 2).
+    deliberate: true,
+    aiExplanation: DELIBERATE_FAIL_EXPLANATION,
+  };
+}
+
+/** The log line a tolerated failure gets, at WARN rather than error: the run is
+ *  still going, and a red line for a step the author said to carry past trains a
+ *  reader to ignore red lines (decision 6). */
+export function toleratedLogLine(stepNumber: number, error: string | undefined): string {
+  return `Step ${stepNumber} failed — continuing (otherwise continue): ${error ?? 'unknown error'}`;
+}
+
+/**
+ * The extra conversation-history line a tolerated failure leaves behind
+ * (decision 6). The ordinary failed entry is pushed as well, and on its own it is
+ * a trap: a later step's `## Prior Steps` would show a step that failed and then
+ * more steps running anyway, which reads as a framework that ignored a failure.
+ * Same shape as the `[flow]` line a return leaves — the model is the reader.
+ */
+export function toleratedHistoryLine(stepNumber: number): string {
+  return `[flow] step ${stepNumber} failed and the run continued (otherwise continue)`;
 }

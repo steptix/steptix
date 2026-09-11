@@ -413,6 +413,8 @@ Implementation caveat: older hook documentation mentions `hooks: replace` and `-
 
 Conditional language comes in two forms, and one word tells them apart: an `If` line containing `then` is a **decision** the framework dispatches; an `If` line without `then` is a **watch** that waits for a page state to appear. Neither makes the file a general programming language.
 
+Two further step forms sit outside both and are documented in §3.6 and §3.7 of [test-writing-handbook.md](test-writing-handbook.md): an `If … then` line whose tail is `return`, `stop` or `fail the test with error "…"` is a flow-control step rather than a decision, and any ordinary step may end `otherwise fail the test with message "…"` (rename its failure) or `otherwise continue` (fail without stopping the run).
+
 The watch form is unchanged. Steps beginning with `If ...` and containing no `then`, plus every step beginning with `When prompted ...` or `When asked ...` — `then` changes the meaning of an `If` only, so `When prompted for MFA, then enter the code` is still a watch — are grouped as alternative outcomes with the next nonconditional step as continuation. The executor re-reads the page until one alternative matches, one is selected, the rest are skipped, then the continuation runs. Do not write consecutive watch steps expecting every matching condition to execute independently — they are alternatives, and exactly one of them runs.
 
 For example, after submitting a sign-in form:

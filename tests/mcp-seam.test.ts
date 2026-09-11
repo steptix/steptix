@@ -737,6 +737,82 @@ describe('run_steps', () => {
     expect(first?.text).not.toContain('skipped');
   });
 
+  it('words a tolerated failure apart from a failure that stopped the run', async () => {
+    // `otherwise continue` (stories/step-failure-outcomes.md, decision 9): both
+    // halves have to reach the one line a host that ignores structured output
+    // shows — "3/3 steps passed" is a green claim over a step that did not do its
+    // work, and a plain failure makes a passing run read as broken.
+    const client = await connectOverSse(
+      sseFrames(
+        { type: 'step:start', line: 1 },
+        { type: 'step:pass', line: 1 },
+        { type: 'step:start', line: 2 },
+        { type: 'step:fail', line: 2, error: 'No peanuts on the dashboard', tolerated: true },
+        { type: 'step:start', line: 3 },
+        { type: 'step:pass', line: 3 },
+        { type: 'done', status: 'passed' },
+      ),
+    );
+
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: {
+        steps: ['open it', 'Verify the title contains "Peanuts" otherwise continue', 'click sign out'],
+        project_root: PROJECT_ROOT,
+      },
+    });
+
+    const structured = res.structuredContent as { status: string; error: string | null;
+      steps: { status: string; tolerated?: boolean; error?: string | null }[] };
+    expect(structured.status).toBe('passed');
+    // Not promoted to the run's error: the agent must not be pointed at a step
+    // the author said to carry on from.
+    expect(structured.error).toBeNull();
+    expect(structured.steps[1]).toMatchObject({
+      status: 'failed',
+      tolerated: true,
+      error: 'No peanuts on the dashboard',
+    });
+
+    const first = (res.content as { type: string; text?: string }[])[0];
+    expect(first?.text).toContain('PASSED — 2 passed, 1 failed (tolerated) of 3');
+    // No warning was written, so nothing is added to the content lines.
+    expect(first?.text).not.toContain('Tolerated on line');
+  });
+
+  it('shows the author`s warning on the row and on the content line', async () => {
+    // The warning is a field of the event now, and a host that renders only
+    // content blocks sees nothing of `structuredContent` — so the sentence has to
+    // be on the text lines too (decision 6).
+    const client = await connectOverSse(
+      sseFrames(
+        { type: 'step:start', line: 1 },
+        { type: 'step:fail', line: 1, error: 'the title did not contain "Peanuts"',
+          tolerated: true, warning: 'No peanuts on the dashboard' },
+        { type: 'done', status: 'passed' },
+      ),
+    );
+
+    const step =
+      'Verify the title contains "Peanuts" otherwise continue with warning "No peanuts on the dashboard"';
+    const res = await client.callTool({
+      name: 'run_steps',
+      arguments: { steps: [step], project_root: PROJECT_ROOT },
+    });
+
+    const structured = res.structuredContent as {
+      steps: { tolerated?: boolean; warning?: string; error?: string | null }[] };
+    expect(structured.steps[0]).toMatchObject({
+      tolerated: true,
+      warning: 'No peanuts on the dashboard',
+      // The framework's account keeps its place beside the author's.
+      error: 'the title did not contain "Peanuts"',
+    });
+
+    const first = (res.content as { type: string; text?: string }[])[0];
+    expect(first?.text).toContain('Tolerated on line 1: No peanuts on the dashboard');
+  });
+
   it('reuses one session id across calls in a process', async () => {
     const harness = await connect({
       script: [

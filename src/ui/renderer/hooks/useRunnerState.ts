@@ -47,6 +47,11 @@ export function useRunnerState(): UseRunnerStateReturn {
           ...existing,
           status: data.status,
           durationMs: data.durationMs,
+          // The amber state: a failure the author said to carry past (decision 6).
+          ...(data.tolerated && { tolerated: true }),
+          // The author's words for it, beside the framework's `error`.
+          ...(data.warning !== undefined && { warning: data.warning }),
+          ...(data.deliberate && { deliberate: true }),
         });
       }
       return next;

@@ -117,6 +117,10 @@ export function countStepLineStatuses(statuses, stepLineIds) {
     stale: count("pass-stale"),
     fail: count("fail"),
     skip: count("skip"),
+    // A step that failed and the run carried on past it — an `otherwise continue`
+    // tail (stories/step-failure-outcomes.md, decision 6). Counted apart from BOTH
+    // `pass` and `fail`: it did not do its work, and the run is not red for it.
+    tolerated: count("fail-tolerated"),
   };
 }
 

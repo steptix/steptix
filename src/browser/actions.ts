@@ -475,6 +475,14 @@ export async function executeAction(
         logger.debug(`return action: ${eff.description}`);
         break;
 
+      // Also a no-op on the PAGE (stories/step-failure-outcomes.md, decision 1):
+      // the step executor composes the author's error and throws, and in practice
+      // it intercepts `fail` before the action loop hands it over. Listed for the
+      // reason `return` is — so a known action never trips the unknown-action warning.
+      case 'fail':
+        logger.debug(`fail action: ${eff.description}`);
+        break;
+
       default:
         logger.warn(`Unknown action type: ${(eff as AIAction).action}`);
     }

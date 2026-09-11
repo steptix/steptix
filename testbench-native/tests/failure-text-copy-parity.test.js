@@ -46,6 +46,13 @@ const CASES = [
   { fromCodeBehind: true },
   { codeBehindStale: CB },
   { error: "" },
+  // Decision 2: a DELIBERATE failure is exempt from the embellishment above and
+  // carries the author's sentence verbatim, the compiled case included (it
+  // arrives `fromCodeBehind`, because `step.fail()` throws what `step.expect` does).
+  { error: "The variable value was peanuts", deliberate: true },
+  { error: "The variable value was peanuts", deliberate: true, fromCodeBehind: true },
+  { error: "boom", deliberate: true, codeBehindStale: CB },
+  { deliberate: true },
 ];
 
 for (const [i, failure] of CASES.entries()) {
@@ -89,6 +96,22 @@ test("a ✗ row after a failed heal shows both errors on their own lines", () =>
 
 test("a plain ✗ row shows the error alone", () => {
   assert.equal(formatStepFailure({ error: "no such button" }, false), "no such button");
+});
+
+test("an amber ✗ row leads with the author's warning, then what failed", () => {
+  const amber = { error: 'the title did not contain "Peanuts"', warning: "No peanuts on the dashboard" };
+  const [first, second] = formatStepFailure(amber, false).split("\n");
+  assert.equal(first, "No peanuts on the dashboard");
+  assert.match(second, /the title did not contain "Peanuts"/);
+});
+
+test("a deliberate ✗ row is not framed as a code defect", () => {
+  // Decision 2: a compiled `step.fail()` arrives `fromCodeBehind`, and
+  // "code-behind failed: <the author's sentence>" accuses a working entry.
+  const deliberate = { error: "The variable value was peanuts", deliberate: true, fromCodeBehind: true };
+  assert.equal(formatStepFailure(deliberate, false), "The variable value was peanuts");
+  // Unchanged without the flag.
+  assert.equal(formatStepFailure({ error: "boom", fromCodeBehind: true }, false), "code-behind failed: boom");
 });
 
 // ── isSkippedPass: the second mirrored predicate ───────────────────────────

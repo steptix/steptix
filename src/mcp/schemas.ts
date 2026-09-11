@@ -1164,6 +1164,27 @@ const foldedStep = z.object({
         '"unattended" — an `[input:]` / `[interactive]` step the server would ' +
         'not run with nobody watching; it needs a person before it can pass.',
     ),
+  // Same reasoning as `skipCause`: the fold records it on the row, so declare it or
+  // the agent reads an undocumented key. Optional and not nullable — it means
+  // nothing on any status but `failed` (stories/step-failure-outcomes.md, decision 6).
+  tolerated: z
+    .boolean()
+    .optional()
+    .describe(
+      'True on a failed step whose text ended `otherwise continue`: the step ' +
+        'did not do what it said, but the author chose not to stop the run on ' +
+        'it. The run status does not count it as a failure.',
+    ),
+  // Beside `tolerated` and on the same terms: optional, absent everywhere else,
+  // declared rather than stripped because `validated()` hands back the original.
+  warning: z
+    .string()
+    .optional()
+    .describe(
+      "The author's own words for a tolerated failure — what they wrote in " +
+        '`otherwise continue with warning "…"`. Says why the failure was ' +
+        'expected; `error` beside it still says what actually went wrong.',
+    ),
   output: z.string().nullable(),
   error: z.string().nullable(),
   fromCache: z.boolean(),
