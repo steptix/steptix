@@ -7,6 +7,10 @@ import type { TestDiscovery, DiscoveredTest, DiscoveryEvent } from './test-disco
 import type { RunController } from './run-controller.js';
 import { getOutputChannel } from './output-channel.js';
 import { skipTestOutputLine } from './step-skip-core.js';
+import {
+  deliberateTestOutputLine,
+  toleratedTestOutputLine,
+} from './failure-outcome-core.js';
 import { EnvSelector } from './env-selector.js';
 
 /** Subset of RunControllerRegistry that the test controller needs. Batch
@@ -534,7 +538,20 @@ export class TestBenchTestController implements vscode.Disposable {
           // Explorer's failure peek there is no line prefix to attach it to.
           const detail = row === null ? described : `(row ${row}) ${described}`;
           const where = row === null ? whereOf(event) : `${whereOf(event)} (row ${row})`;
-          emit(`✗ step on line ${event.line}${where} failed — ${described}`);
+          // A TOLERATED failure is streamed and NOT collected
+          // (stories/step-failure-outcomes.md, decision 6): `failures` is what
+          // becomes TestMessages and puts the red X on the item, and a run whose only
+          // failures were tolerated passes. The line is still emitted, because the
+          // output log is where a reader finds out it happened at all.
+          if (event.tolerated) {
+            emit(toleratedTestOutputLine(event.line, where, described));
+            break;
+          }
+          emit(
+            event.deliberate
+              ? deliberateTestOutputLine(event.line, where, described)
+              : `✗ step on line ${event.line}${where} failed — ${described}`,
+          );
           failures.push({ uri: fileOf(event), line: event.line, error: detail });
           break;
         }

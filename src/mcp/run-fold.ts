@@ -43,6 +43,28 @@ export interface FoldedStep {
    * never needed.
    */
   skipCause?: 'returned' | 'not-taken' | 'unattended';
+  /**
+   * This `failed` row did not stop the run — an `otherwise continue` tail
+   * (stories/step-failure-outcomes.md, decision 9).
+   *
+   * `status` stays `'failed'`, because the step did not do what it said. What the
+   * flag buys an agent is the ability to stop treating it as the thing to fix: the
+   * run went on, `done.status` already excludes it, and the error on the row is
+   * information rather than the cause of a red run.
+   *
+   * Optional and absent on every other row, the shape `skipCause` uses.
+   */
+  tolerated?: boolean;
+  /**
+   * The author's own words for a tolerated failure — the quoted text of
+   * `… otherwise continue with warning "…"`, interpolated and masked. Present only
+   * beside {@link tolerated}, and only when a warning was written.
+   *
+   * Beside `error` rather than replacing it, because the two answer different
+   * questions: `error` is what went wrong, this is why the author decided it was
+   * survivable — the only thing on the row saying the failure was anticipated.
+   */
+  warning?: string;
   output: string | null;
   error: string | null;
   fromCache: boolean;
@@ -425,19 +447,49 @@ export function foldRun(input: FoldInput): FoldedRun {
 
       case 'step:fail': {
         if (!open) open = beginRow(event.line, event.frame, at);
+        // The two outcome booleans, read off the FRAME rather than the type. Wire
+        // data, both additive (stories/step-failure-outcomes.md, decision 9): a
+        // server that predates them sends neither and the fold keeps working —
+        // the posture `readEffectiveSettings` takes below.
+        const outcome = event as {
+          deliberate?: boolean;
+          tolerated?: boolean;
+          warning?: string;
+        };
         // Fold the code-behind story into the one error string the summary
         // carries: the entry failing itself, or — codeBehindStale — the entry
         // throwing and the AI attempt failing too, where `event.error` alone
         // would silently drop the crash that started it.
-        const error = event.codeBehindStale
+        //
+        // A DELIBERATE failure is exempt from all of that and carries the author's
+        // sentence verbatim (decision 2). `step.fail()` throws the class a failed
+        // `step.expect` throws, so a compiled one arrives with `fromCodeBehind`
+        // set — and "Code-behind failed: The variable value was peanuts" reads as
+        // a broken entry over a message working exactly as written.
+        const error = outcome.deliberate === true
+          ? event.error
+          : event.codeBehindStale
           ? `${event.error} (its code-behind threw first: ${event.codeBehindStale.error})`
           : event.fromCodeBehind
             ? `Code-behind failed: ${event.error}`
             : event.error;
         open.row.error = error;
         open.row.tab = event.tab ?? open.row.tab;
-        lastFailError = error;
-        sawFailure = true;
+        // A TOLERATED failure is recorded on the row and stops there (decision 9).
+        // It must not become `lastFailError` — the run's `error` field, the one
+        // sentence an agent reads as "this is why the run is not green" — nor set
+        // `sawFailure`, which the missing-screenshot advice keys on: naming it as
+        // the run's error sends an agent to fix a step the author said to carry on
+        // from.
+        if (outcome.tolerated === true) {
+          open.row.tolerated = true;
+          // The author's sentence, when they wrote one. It travels on the event and
+          // nowhere else, so a fold that drops it loses it for good.
+          if (outcome.warning !== undefined) open.row.warning = outcome.warning;
+        } else {
+          lastFailError = error;
+          sawFailure = true;
+        }
         if (event.screenshot) {
           lastFailScreenshot = event.screenshot;
           lastScreenshot = event.screenshot;

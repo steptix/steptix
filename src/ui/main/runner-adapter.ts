@@ -22,16 +22,25 @@ import { clearSkillCache } from '../../skills/expander.js';
 import { expandTestInstances, parseTimeoutMs } from '../../runner/test-runner.js';
 import { executeStep } from '../../runner/step-executor.js';
 import { launchBrowser, closeBrowser } from '../../browser/manager.js';
+import { captureScreenshot } from '../../browser/screenshot.js';
 import { loadContextFiles } from '../../context/loader.js';
 import { interpolate } from '../../parser/parameters.js';
 import { interpolateEnvData, type EnvDataContext } from '../../parser/interpolate-env-data.js';
 import { parseSetStep } from '../../parser/set-step.js';
-import { parseFlowControlStep } from '../../parser/flow-control-step.js';
+import { isReturnClaim, parseFlowControlStep } from '../../parser/flow-control-step.js';
 import {
+  failureTailContradictionError,
+  isFailureTailContradiction,
+  parseFailureTail,
+} from '../../parser/failure-tail.js';
+import {
+  deliberateFailError,
+  deliberateFailResult,
   flowControlExplanation,
   frameExitIndex,
   frameLabel,
   skippedByReturn,
+  toleratedHistoryLine,
 } from '../../runner/flow-control.js';
 import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 import { runSetStep } from '../../runner/set-step-runner.js';
@@ -55,7 +64,7 @@ import {
   skippedResult,
   SkipQueue,
 } from '../../runner/control-runtime.js';
-import { redactReport, runSecrets } from '../../utils/secrets.js';
+import { redact, redactReport, runSecrets } from '../../utils/secrets.js';
 import { AiClient } from '../../ai/client.js';
 import { formatStepHistoryEntry } from '../../ai/prompts.js';
 import { TokenTracker } from '../../utils/tokens.js';
@@ -625,6 +634,17 @@ export class UIRunnerAdapter {
       // The flow-control claim, read off the AUTHORED line like `Set`
       // (stories/step-flow-control.md, decision 2).
       const flowControlClaim = setStep ? null : parseFlowControlStep(rawInstruction);
+      // The `… otherwise fail …` / `… otherwise continue` tail, off the same
+      // AUTHORED line and with the exclusions the other three loops apply
+      // (stories/step-failure-outcomes.md, decision 12). `[input:]` and
+      // `[interactive]` are matched further down, off the interpolated text, and
+      // both take their own branch before the executor is reached.
+      const failureTail = setStep || flowControlClaim ? null : parseFailureTail(rawInstruction);
+      // Decision 8's backstop: the Runner UI parses the file for real, so the
+      // validator normally catches this first — but a `[skill: …]` body read at
+      // run time never passed it.
+      const failureTailContradiction =
+        setStep || flowControlClaim ? false : isFailureTailContradiction(rawInstruction);
       const instruction = setStep ? rawInstruction : this.resolveStepText(rawInstruction);
 
       // ── Flow control, in two halves (stories/step-flow-control.md) ───────
@@ -859,6 +879,80 @@ export class UIRunnerAdapter {
         continue;
       }
 
+      // --- The contradiction of decision 8 ---
+      // Refused rather than resolved, with no model call: the line asks to both
+      // end the flow and to tolerate its own failure. The same sentence the
+      // validator and the other three loops use.
+      if (failureTailContradiction) {
+        flushSkips(i);
+        this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
+        const error = failureTailContradictionError(rawInstruction);
+        const stepResult: StepResult = {
+          index: stepIndex,
+          instruction,
+          status: 'failed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          error,
+          aiExplanation: error,
+        };
+        this.stepResults.push(stepResult);
+        this.emit('runner:step-complete', { stepIndex, status: 'failed', durationMs: 0, error });
+        this.emit('runner:error', { message: error });
+        this.conversationHistory.push(
+          formatStepHistoryEntry(stepIndex, instruction, false, this.page?.url()),
+        );
+        break;
+      }
+
+      // --- Handle a bare `Fail the test with error "…"` step ---
+      // No condition to judge, so no model call and no page snapshot — the
+      // same dispatch `Return` gets, one branch up
+      // (stories/step-failure-outcomes.md, decisions 1 and 3).
+      if (flowControlClaim && flowControlClaim.body === undefined && flowControlClaim.verb === 'fail') {
+        flushSkips(i);
+        this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
+        // Masked here, where the message first becomes the thing the IPC
+        // event, the report and the log carry — the same seam the CLI, the
+        // Sessions API and the errand runner mask at. The message is the
+        // author's and is interpolated with the rest of the line, so a
+        // `{{password}}` written into one reaches this point resolved.
+        const stepResult = deliberateFailResult(
+          stepIndex,
+          instruction,
+          redact(
+            deliberateFailError(flowControlClaim, instruction),
+            runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData }),
+          ),
+        );
+        if (this.config?.execution.screenshotOnFailure && this.page) {
+          try {
+            const shot = await captureScreenshot(this.page, this.config.browser.fullPageScreenshots);
+            if (shot?.base64) stepResult.screenshotBase64 = shot.base64;
+          } catch {
+            // A missing screenshot must not turn the author's failure into a
+            // runner error.
+          }
+        }
+        const stepLoopMarker = loops.markerFor(i);
+        if (stepLoopMarker) stepResult.loop = stepLoopMarker;
+        this.stepResults.push(stepResult);
+        this.emitStepDetails(stepIndex, stepResult);
+        this.emit('runner:step-complete', {
+          stepIndex,
+          status: 'failed',
+          durationMs: 0,
+          ...(stepResult.error !== undefined && { error: stepResult.error }),
+          deliberate: true,
+        });
+        this.conversationHistory.push(
+          formatStepHistoryEntry(stepIndex, instruction, false, this.page?.url()),
+        );
+        bail = true;
+        continue;
+      }
+
       // --- Handle a bare `Return` / `Stop` step ---
       // No condition to judge, so no model call, no page snapshot
       // (stories/step-flow-control.md, decision 3).
@@ -876,7 +970,12 @@ export class UIRunnerAdapter {
           turns: [],
           durationMs: 0,
           retried: false,
-          flowControl: { kind: 'return', verb: flowControlClaim.verb },
+          // `isReturnClaim` narrows the union: a `flowControl` record means the
+          // step ended the flow as a PASS, which a `fail` claim never does — it
+          // took the branch above (stories/step-failure-outcomes.md, decision 1).
+          ...(isReturnClaim(flowControlClaim) && {
+            flowControl: { kind: 'return' as const, verb: flowControlClaim.verb },
+          }),
         };
         const label = flowFrame();
         nameFlow(stepResult, label);
@@ -1015,8 +1114,13 @@ export class UIRunnerAdapter {
         ...(runIsKeyless(this.config) && { keyless: true }),
         ...(this.config.ai.allowInRuns === false && { keylessReason: 'policy' as const }),
         // What lets the model's `return` action end the step. Only the
-        // conditional form reaches here (stories/step-flow-control.md).
+        // conditional form reaches here (stories/step-flow-control.md), and
+        // since stories/step-failure-outcomes.md decision 1 the same field
+        // carries a conditional `fail` claim.
         ...(flowControlClaim && { flowControlClaim }),
+        // This step's `… otherwise …` tail, applied at one seam over a step
+        // that has finally failed (decision 4).
+        ...(failureTail && { failureTail }),
       },
       // The step as AUTHORED, tokens intact: what the model reads, beside a
       // `## Values` block in which a secret is masked. Without it the executor
@@ -1054,12 +1158,21 @@ export class UIRunnerAdapter {
         this.emit('runner:ai-reasoning', { stepIndex, text: result.aiExplanation });
       }
 
-      // Emit step-complete
+      // Emit step-complete. `status` stays `'failed'` for a tolerated step —
+      // it did not do what it said — and the two flags beside it are what let
+      // the panel paint amber and word the log line
+      // (stories/step-failure-outcomes.md, decisions 6 and 9).
       this.emit('runner:step-complete', {
         stepIndex,
         status: result.status === 'passed' ? 'passed' : 'failed',
         durationMs: result.durationMs,
         ...(result.error !== undefined && { error: result.error }),
+        ...(result.tolerated && { tolerated: true }),
+        // The author's sentence. `error` reaches the panel already; the
+        // warning only does if it is carried explicitly, because the row's
+        // explanation that also holds it never crosses the IPC boundary.
+        ...(result.warning !== undefined && { warning: result.warning }),
+        ...(result.deliberate && { deliberate: true }),
       });
 
       // The skipped steps come after the returning step's own completion.
@@ -1080,7 +1193,17 @@ export class UIRunnerAdapter {
         );
       }
 
-      if (result.status === 'failed') {
+      // The step failed and the run carries on past it — the entry above says
+      // it failed, so without this line the model's `## Prior Steps` reads a
+      // framework that ignored a failure (decision 6).
+      if (result.tolerated) {
+        this.conversationHistory.push(toleratedHistoryLine(stepIndex));
+      }
+
+      // `!result.tolerated`: the author said to carry on, so no bail
+      // (stories/step-failure-outcomes.md, decision 6). The row stays a
+      // failure and `toleratedSteps` below counts it.
+      if (result.status === 'failed' && !result.tolerated) {
         bail = true;
       }
 
@@ -1091,7 +1214,15 @@ export class UIRunnerAdapter {
     if (hasControls) flushSkips('all');
 
     // 10. Emit completion
-    const failedSteps = this.stepResults.filter((s) => s.status === 'failed').length;
+    // `!s.tolerated`: a failure the author said to carry past is not what makes
+    // a run red (stories/step-failure-outcomes.md, decision 6). Counted
+    // separately below rather than dropped — the row still says `failed`.
+    const failedSteps = this.stepResults.filter(
+      (s) => s.status === 'failed' && !s.tolerated,
+    ).length;
+    const toleratedSteps = this.stepResults.filter(
+      (s) => s.status === 'failed' && s.tolerated,
+    ).length;
     const overallStatus: 'passed' | 'failed' =
       failedSteps > 0 || this.stopped ? 'failed' : 'passed';
 
@@ -1114,6 +1245,10 @@ export class UIRunnerAdapter {
           ...(this.stepResults.some((s) => s.status === 'skipped') && {
             skippedSteps: this.stepResults.filter((s) => s.status === 'skipped').length,
           }),
+          // Omitted (not 0) when nothing was tolerated, the rule
+          // `skippedSteps` sets one line up
+          // (stories/step-failure-outcomes.md, decision 6).
+          ...(toleratedSteps > 0 && { toleratedSteps }),
           totalSubActions: this.stepResults.reduce((sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0), 0),
           durationMs,
           tokensUsed: this.tokenTracker.total,

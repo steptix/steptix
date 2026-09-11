@@ -22,6 +22,7 @@ export type StepLineStatus =
   | 'pass-code-behind'
   | 'pass-stale'
   | 'fail'
+  | 'fail-tolerated'
   | 'skip'
   | 'stopped';
 
@@ -44,6 +45,17 @@ export interface StepsSummaryCounts {
    * same reason the report does.
    */
   skipped: number;
+  /**
+   * Steps that failed and the run carried on past — an `otherwise continue`
+   * tail (stories/step-failure-outcomes.md, decision 6).
+   *
+   * Counted apart from BOTH neighbours, which is the point. Not a pass: the step
+   * did not do what it said, and folding it into the numerator would put a green
+   * count over work that did not happen. Not a failure either, as far as this line
+   * goes: the run went on and is not red for it. Said out loud for the reason
+   * `skipped` is — the denominator would otherwise account for it silently.
+   */
+  tolerated: number;
   total: number;
 }
 
@@ -74,6 +86,7 @@ export function countMainFlowStatuses(
     passedCodeBehind: count('pass-code-behind'),
     stale: count('pass-stale'),
     skipped: count('skip'),
+    tolerated: count('fail-tolerated'),
     total: mainFlowLines.length,
   };
 }
@@ -88,6 +101,11 @@ export function countMainFlowStatuses(
  * only when a step was actually skipped. Every run that skipped nothing —
  * which is every run this feature did not touch — renders the byte-identical
  * string it always did.
+ *
+ * `, 1 tolerated` is a second such clause, on the same terms
+ * (stories/step-failure-outcomes.md, decision 6): outside the parenthesis
+ * because a tolerated failure is not a pass, and present only when there was
+ * one, so nothing else's rendering moves.
  */
 export function stepsSummaryText(counts: StepsSummaryCounts): string {
   const notes = [
@@ -99,7 +117,11 @@ export function stepsSummaryText(counts: StepsSummaryCounts): string {
     notes.length > 0
       ? `${counts.passed}/${counts.total} passed (${notes.join(', ')})`
       : `${counts.passed}/${counts.total} passed`;
-  return counts.skipped > 0 ? `${head}, ${counts.skipped} skipped` : head;
+  const clauses = [
+    counts.skipped > 0 ? `${counts.skipped} skipped` : '',
+    counts.tolerated > 0 ? `${counts.tolerated} tolerated` : '',
+  ].filter((c) => c !== '');
+  return clauses.length > 0 ? `${head}, ${clauses.join(', ')}` : head;
 }
 
 /** What the interactive run log's closing tally counts. */
@@ -117,6 +139,13 @@ export interface RunLogTallyCounts {
    * names as worst.
    */
   skipped: number;
+  /**
+   * Steps that failed and the run carried on (`otherwise continue`). Neither a pass
+   * nor a failure here, exactly as in {@link StepsSummaryCounts}: a run whose only
+   * failures were tolerated ends green, and the tally is the only place the log says
+   * so once the per-step lines have scrolled.
+   */
+  tolerated: number;
   cached: number;
   codeBehind: number;
   stale: number;
@@ -141,6 +170,10 @@ export function runLogTallyLine(counts: RunLogTallyCounts): string {
     counts.cached > 0 ? `${counts.cached} cached` : '',
   ].filter((n) => n !== '');
   const suffix = notes.length > 0 ? ` (${notes.join(', ')})` : '';
-  const skipped = counts.skipped > 0 ? `, ${counts.skipped} skipped` : '';
-  return `✓ ${counts.passed} passed${suffix}${skipped}`;
+  const clauses = [
+    counts.skipped > 0 ? `${counts.skipped} skipped` : '',
+    counts.tolerated > 0 ? `${counts.tolerated} tolerated` : '',
+  ].filter((c) => c !== '');
+  const tail = clauses.length > 0 ? `, ${clauses.join(', ')}` : '';
+  return `✓ ${counts.passed} passed${suffix}${tail}`;
 }

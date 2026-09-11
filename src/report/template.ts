@@ -55,6 +55,11 @@ export function getReportTemplate(): string {
     .badge-fail { background: #fee2e2; color: var(--fail); }
     .badge-skip { background: #fef9c3; color: var(--warn); }
     .badge-aborted { background: #ffedd5; color: #c2410c; }
+    /* A step that failed and the run carried on (stories/step-failure-outcomes.md,
+       decision 6). Amber, beside the aborted badge: both are display states the
+       step's own status cannot express, and both mean "look, but the run is not
+       red for this". */
+    .badge-tolerated { background: #ffedd5; color: #c2410c; }
     .badge-tag { background: #ede9fe; color: #7c3aed; font-size: 0.72rem; }
 
     /* Summary bar */
@@ -65,6 +70,7 @@ export function getReportTemplate(): string {
     .stat-pass { color: var(--pass); }
     .stat-fail { color: var(--fail); }
     .stat-skip { color: var(--warn); }
+    .stat-tolerated { color: #c2410c; }
 
     /* Steps */
     .steps-section h2 { font-size: 1.1rem; font-weight: 700; margin-bottom: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
@@ -175,6 +181,15 @@ export function getReportTemplate(): string {
     .aborted-block { margin-top: 14px; padding: 14px; border-radius: 6px; background: #fff7ed; border: 1px solid #fed7aa; }
     .aborted-title { font-weight: 700; color: #c2410c; margin-bottom: 6px; }
     .aborted-message { font-size: 0.875rem; color: #9a3412; font-family: monospace; }
+
+    /* Tolerated block — the step failed and the run went on past it
+       (stories/step-failure-outcomes.md, decision 6). The aborted block's
+       amber, because the reader's question is the same one: why is this ✗ in a
+       report that is not red? The message keeps the failure-message monospace
+       so the error reads identically wherever it lands, recoloured to match. */
+    .tolerated-block { margin-top: 14px; padding: 14px; border-radius: 6px; background: #fff7ed; border: 1px solid #fed7aa; }
+    .tolerated-title { font-weight: 700; color: #c2410c; margin-bottom: 6px; }
+    .tolerated-block .failure-message { color: #9a3412; }
 
     /* Captures block — variables this step extracted (issue 042) */
     .captures-block { margin-top: 14px; padding: 10px 14px; border-radius: 6px; background: #f0fdf4; border: 1px solid #bbf7d0; }
@@ -386,6 +401,12 @@ export function getReportTemplate(): string {
       <span class="label">Skipped</span>
     </div>
     {{/if}}
+    {{#if toleratedSteps}}
+    <div class="summary-stat">
+      <span class="number stat-tolerated">{{toleratedSteps}}</span>
+      <span class="label">Tolerated</span>
+    </div>
+    {{/if}}
     <div class="summary-stat">
       <span class="number">{{totalSubActions}}</span>
       <span class="label">Sub-actions</span>
@@ -526,8 +547,10 @@ export function getReportTemplate(): string {
   });
 
   // Auto-open the first failed OR aborted step (issue 021) so a stopped run's
-  // interrupted step expands too.
-  var firstNotable = document.querySelector('.step .badge-fail, .step .badge-aborted');
+  // interrupted step expands too — and a tolerated one, the only evidence in a GREEN
+  // report that something did not do its work (stories/step-failure-outcomes.md,
+  // decision 6). Left collapsed it is a badge and nothing else.
+  var firstNotable = document.querySelector('.step .badge-fail, .step .badge-aborted, .step .badge-tolerated');
   if (firstNotable) {
     firstNotable.closest('.step').classList.add('open');
   }

@@ -43,7 +43,12 @@
  *
  * **Flow control wins the overlap.** `If the page title contains "Dashboard"
  * then return` is claimed by BOTH grammars — it is an `If … then <tail>` here,
- * and a conditional `return` in `flow-control-step.ts`. It is flow control, in
+ * and a conditional `return` in `flow-control-step.ts`. Since
+ * stories/step-failure-outcomes.md that grammar has a third verb, so
+ * `If the balance is zero then fail the test with error "…"` joins the overlap and
+ * goes the same way — nothing below changed to make it, because rung 0 asks
+ * `parseFlowControlStep` rather than carrying a list of verbs. It is flow
+ * control, in
  * every reader, and this module is where that is decided: rung 0 of the
  * resolution order, ahead of everything above. The alternative — resolving it
  * per caller — is a rule that has to be right in eight places and reads

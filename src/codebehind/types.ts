@@ -66,6 +66,28 @@ export interface CodeBehindStepApi {
    * markdown is what a reader sees, so it has to say what the code does.
    */
   exit(): never;
+  /**
+   * Fail the run deliberately, in the author's words — the code form of
+   * `If … then fail the test with error "…"`
+   * (stories/step-failure-outcomes.md, decision 10).
+   *
+   * It throws, like {@link exit}, so nothing after it in the entry runs:
+   *
+   * ```ts
+   * if (step.getVar('a') === 'peanuts') step.fail('The variable value was peanuts. Expected apples');
+   * ```
+   *
+   * The throw is the same class a failed {@link expect} throws, so the runner's
+   * existing rule applies unchanged: a real failure, never healed under AI. What
+   * the marker adds is the wording — the row says the step failed as written
+   * rather than that an expectation was not met.
+   *
+   * Unlike {@link exit} there is NO claim guard, the mirror of exit's reason: the
+   * unsafe direction for an exit is passing work that did not happen, and there
+   * is no unsafe direction for failing. An author who writes `step.fail` into an
+   * ordinary step's entry has written a failing step.
+   */
+  fail(message: string): never;
 }
 
 /** One tab, as `tabs.list()` reports it. */

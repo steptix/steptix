@@ -992,7 +992,7 @@ describe('compile — the unconditional form', () => {
 
     expect(result.status).toBe('failed');
     expect(result.summary.error).toBe(
-      'step 2 cannot be compiled: a Return/Stop step is dispatched, not compiled',
+      'step 2 cannot be compiled: a Return/Stop/Fail step is dispatched, not compiled',
     );
     expect(prompts).toEqual([]);
   });
@@ -1056,10 +1056,10 @@ describe('generationRefusal', () => {
 
   it('refuses the unconditional form, and only that one', () => {
     expect(generationRefusal({ binding: binding(), text: 'Return', status: 'passed' })).toBe(
-      'a Return/Stop step is dispatched, not compiled',
+      'a Return/Stop/Fail step is dispatched, not compiled',
     );
     expect(generationRefusal({ binding: binding(), text: 'Stop here.', status: 'passed' })).toBe(
-      'a Return/Stop step is dispatched, not compiled',
+      'a Return/Stop/Fail step is dispatched, not compiled',
     );
     // The conditional form is the one thing this story ADDS to the compiler.
     expect(generationRefusal({ binding: binding(), text: RETURN_STEP, status: 'passed' })).toBeUndefined();

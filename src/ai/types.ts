@@ -39,7 +39,14 @@ export type ActionType =
   // (stories/step-flow-control.md). Honoured only on a step whose text claims
   // that form; on any other step the executor refuses it and tells the model
   // why. It performs nothing on the page: it is a signal to the run loop.
-  | 'return';
+  | 'return'
+  // Fail the run on purpose, in the author's own words — the model's answer when
+  // an `If … then fail the test with error "…"` step's condition HOLDS
+  // (stories/step-failure-outcomes.md, decision 1). The sibling of `return`, gated
+  // the same way: honoured only on a step whose text claims the `fail` verb,
+  // refused on every other, including one claiming `return` / `stop`. Performs
+  // nothing on the page.
+  | 'fail';
 
 /** A single action returned by the AI */
 export interface AIAction {

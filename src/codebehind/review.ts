@@ -6,7 +6,8 @@ import {
   extractJson,
   findInlinedParameterValue,
 } from '../ai/action-parser.js';
-import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
+import { parseFailureTail } from '../parser/failure-tail.js';
 import type { Candidate } from './candidate.js';
 import { describeGuardedName } from './generate.js';
 import { listEntries, validateCodeBehindSource } from './writer.js';
@@ -35,17 +36,54 @@ export function buildFileReviewPrompt(input: FileReviewInput): ChatMessage {
     : input.steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
 
   // The post-condition rule's one exception (stories/step-flow-control.md,
-  // decision 11). Emitted only when a step in this test actually claims the
-  // form, so a test with no flow-control step is reviewed against the checklist
-  // exactly as it was before — and, more to the point, so a reviewer that has
-  // never seen a `step.exit()` is not invited to add post-conditions to
-  // entries that must not have one.
-  const flowControlException = input.steps.some((s) => parseFlowControlStep(s) !== null)
+  // decision 11; stories/step-failure-outcomes.md, decision 10). Emitted only when a
+  // step in this test actually claims the form, so a reviewer that has never seen a
+  // `step.exit()` is not invited to add post-conditions to entries that must not
+  // have one.
+  const claims = input.steps
+    .map((s) => parseFlowControlStep(s))
+    .filter((c): c is NonNullable<typeof c> => c !== null);
+  // The `fail` half is named only when a `fail` step is in the test, for the reason
+  // the whole block is gated: a reviewer told about `step.fail` over a test that has
+  // none is invited to invent one.
+  const failException = claims.some((c) => !isReturnClaim(c))
+    ? " The same holds for a step that ends `then fail the test with error \"…\"`: its entry is\n" +
+      "   an `if (…) step.fail('…');`, `step.fail` throws too, and an entry that is that and\n" +
+      '   nothing else is complete.'
+    : '';
+  const flowControlException = claims.length > 0
     ? ' The one exception is a **flow-control step** — one whose text ends `then return` or\n' +
       '   `then stop`. Its entry evaluates the condition and calls `step.exit()` when it holds;\n' +
       '   `step.exit()` throws, so there is nothing after it to assert on. An entry that is an\n' +
-      "   `if (…) step.exit();` and nothing else is complete: leave it alone."
+      `   \`if (…) step.exit();\` and nothing else is complete: leave it alone.${failException}`
     : '';
+
+  // The `otherwise …` tails (stories/step-failure-outcomes.md, decisions 5 and 6).
+  // Gated per form, and numbered from 10 so the checklist reads as one list: a test
+  // with no tail is reviewed against exactly the nine items it was before.
+  const tails = input.steps
+    .map((s) => parseFailureTail(s))
+    .filter((t): t is NonNullable<typeof t> => t !== null);
+  const tailRules: string[] = [];
+  if (tails.some((t) => t.outcome === 'fail' && t.message !== undefined)) {
+    tailRules.push(
+      '**A step that ends `otherwise fail … with message "M"` keeps M, verbatim.** The\n' +
+        "   author's sentence is what the report, the hover and the run summary lead with, so\n" +
+        '   it is the message of that entry\'s `step.expect(…)`. Do not reword it, shorten it or\n' +
+        '   "improve" it into a description of what the code compares — the comparison is\n' +
+        '   already visible in the code.',
+    );
+  }
+  if (tails.some((t) => t.outcome === 'continue')) {
+    tailRules.push(
+      '**A step that ends `otherwise continue` is reviewed as its body alone.** The tail\n' +
+        '   decides what the RUNNER does once the step has failed; it says nothing about what\n' +
+        '   the entry should do. Review the body as an ordinary step, and do not soften its\n' +
+        '   assertions because the failure is tolerated.',
+    );
+  }
+  const tailBlock =
+    tailRules.length === 0 ? '' : `\n${tailRules.map((r, i) => `${10 + i}. ${r}`).join('\n')}`;
 
   return {
     role: 'user',
@@ -92,7 +130,7 @@ ${input.file}
    \`step.filePath\` resolves it that way at replay time.
 9. An \`ai: true\` entry is a decision, not an omission: leave it alone,
    comment included. Do not turn one into a \`run\` entry, however obvious the
-   code looks — something already established that this step needs the model.
+   code looks — something already established that this step needs the model.${tailBlock}
 
 ## What to return
 

@@ -116,11 +116,25 @@ class SkippedMarker extends GutterMarker {
   }
 }
 
+/** A step that failed and that the run carried on past — the `otherwise continue`
+ *  tail (stories/step-failure-outcomes.md, decision 6). The same ✗ as a failure,
+ *  because that is what it is; amber rather than red, because nothing stopped. A
+ *  step that did not do its work must never look like one that did. */
+class ToleratedMarker extends GutterMarker {
+  toDOM() {
+    const el = document.createElement('span');
+    el.className = 'gutter-marker-tolerated';
+    el.textContent = '✗'; // ✗
+    return el;
+  }
+}
+
 const breakpointMarker = new BreakpointMarker();
 const pointerMarker = new PointerMarker();
 const passedMarker = new PassedMarker();
 const failedMarker = new FailedMarker();
 const skippedMarker = new SkippedMarker();
+const toleratedMarker = new ToleratedMarker();
 
 // ---------------------------------------------------------------------------
 // State effects for updating markers
@@ -128,7 +142,10 @@ const skippedMarker = new SkippedMarker();
 interface MarkerState {
   breakpoints: Set<number>; // step indices
   pointer: number | null; // step index
-  results: Map<number, 'passed' | 'failed' | 'skipped'>; // step index → status
+  /** 'tolerated' is a FAILED step the run carried on past — the amber ✗
+   *  (stories/step-failure-outcomes.md, decision 6). Its own value rather than
+   *  a flag beside 'failed', because this map exists to pick a marker. */
+  results: Map<number, 'passed' | 'failed' | 'skipped' | 'tolerated'>; // step index → status
   stepLines: Map<number, number>; // lineNumber → stepIndex
 }
 
@@ -184,6 +201,8 @@ function createBreakpointGutter(
           markers.push({ from: lineInfo.from, marker: failedMarker });
         } else if (result === 'skipped') {
           markers.push({ from: lineInfo.from, marker: skippedMarker });
+        } else if (result === 'tolerated') {
+          markers.push({ from: lineInfo.from, marker: toleratedMarker });
         }
       }
 
@@ -226,9 +245,14 @@ export function Editor({ tab, tabIndex }: EditorProps) {
 
   // Compute results map from step outputs
   const resultMap = useMemo(() => {
-    const map = new Map<number, 'passed' | 'failed' | 'skipped'>();
+    const map = new Map<number, 'passed' | 'failed' | 'skipped' | 'tolerated'>();
     for (const [idx, output] of state.stepOutputs) {
-      if (output.status === 'passed' || output.status === 'failed' || output.status === 'skipped') {
+      // A tolerated failure is a 'failed' step with a flag beside it on the
+      // wire, and a marker of its own here: same ✗, amber rather than red
+      // (stories/step-failure-outcomes.md, decision 6).
+      if (output.status === 'failed' && output.tolerated) {
+        map.set(idx, 'tolerated');
+      } else if (output.status === 'passed' || output.status === 'failed' || output.status === 'skipped') {
         map.set(idx, output.status);
       }
     }

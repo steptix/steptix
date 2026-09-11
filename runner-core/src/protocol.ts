@@ -186,6 +186,39 @@ export interface StepFailEvent {
    * could only report the second failure of the two.
    */
   codeBehindStale?: { file: string; error: string };
+  /**
+   * True when the step's own text asked for this failure — the `fail` verb
+   * (stories/step-failure-outcomes.md, decision 9). `error` is then the
+   * author's sentence, not the framework's account of what went wrong.
+   *
+   * Additive: a client that does not know the field paints ✗ with the author's
+   * message, which is right. Knowing it only buys a better log line and the
+   * right to skip a "what went wrong" affordance the author has pre-empted.
+   */
+  deliberate?: boolean;
+  /**
+   * True when the step failed and the run CONTINUED past it — the `otherwise
+   * continue` tail (decision 9).
+   *
+   * Additive with the same safe direction: an older client paints a red ✗ and
+   * counts a failure, which over-reports rather than under-reports. A client that
+   * knows the field paints an amber ✗, exempts the step from its `N/M passed`
+   * line, and does not turn `done` red for it — `done.status` already excludes a
+   * tolerated failure (decision 6).
+   */
+  tolerated?: boolean;
+  /**
+   * The author's own words for a tolerated failure — the quoted text of
+   * `… otherwise continue with warning "…"`, interpolated and secret-masked.
+   * Sent only with {@link tolerated}, and absent when no warning was written.
+   *
+   * Beside `tolerated` rather than folded into `error`, because the two say
+   * different things: `error` stays the framework's account of what went wrong,
+   * this is why the author decided that was survivable. Clients lead with this
+   * and keep `error` underneath. It is the ONLY way the sentence reaches a
+   * client — the row's explanation does not travel on this event.
+   */
+  warning?: string;
 }
 
 /**
@@ -561,6 +594,16 @@ export interface CompileSummary {
   /** Where the recording stopped, when it did not reach the end of the test —
    *  the compile was then a prefix compile of the steps before it. */
   stoppedAt?: { step: number; error: string };
+  /**
+   * Where the recording ENDED because a step's own text said to — the `fail`
+   * verb (stories/step-failure-outcomes.md, decisions 1–3).
+   *
+   * Never set together with `stoppedAt`, and additive: an older client that knows
+   * only `stoppedAt` says nothing about this run rather than telling the author to
+   * fix a step that did exactly what they wrote. `line` is the ending step's
+   * authored text, for the parenthetical the renderers append.
+   */
+  endedAsWritten?: { step: number; error: string; line: string };
   /** Selected steps the prefix never reached; nothing was generated for them. */
   notAttempted: number[];
   /** Where the recording, the candidate and any replay failure were written —
@@ -660,6 +703,13 @@ export interface StepFailureDetail {
    *  to AI: the whole story of a ⚠, the first half of a ✗ whose AI attempt
    *  then failed too. */
   codeBehindStale?: { file: string; error: string };
+  /** The author's warning on a tolerated failure (`StepFailEvent.warning`),
+   *  clipped like the errors are. Leads the amber ✗'s hover, `error` underneath. */
+  warning?: string;
+  /** The author asked for this failure (`StepFailEvent.deliberate`). Changes the
+   *  WORDING of every surface that renders this detail — the sentence is the
+   *  author's, so nothing may present it as a malfunction. */
+  deliberate?: boolean;
 }
 
 /**
@@ -675,6 +725,13 @@ export interface StepFailureDetail {
  */
 export function describeStepFailure(failure: StepFailureDetail): string {
   const error = failure.error ?? 'Step failed';
+  // A DELIBERATE failure is exempt from every embellishment below and carries the
+  // author's sentence verbatim (stories/step-failure-outcomes.md, decision 2),
+  // the same exemption the MCP fold makes. `step.fail()` throws the class a failed
+  // `step.expect` throws, so a COMPILED one arrives with `fromCodeBehind` set —
+  // and "The variable value was peanuts (in its code-behind)" frames a working
+  // entry as a defect.
+  if (failure.deliberate) return error;
   // The stale case names BOTH: `error` is the AI failure that followed, and
   // dropping the crash would hide the reason the step ran under AI at all.
   if (failure.codeBehindStale) {
@@ -722,6 +779,8 @@ export function stepFailureDetail(event: {
   error?: string;
   fromCodeBehind?: boolean;
   codeBehindStale?: { file: string; error: string };
+  warning?: string;
+  deliberate?: boolean;
 }): StepFailureDetail {
   return {
     ...(event.error !== undefined && { error: clipFailureText(event.error) }),
@@ -732,6 +791,10 @@ export function stepFailureDetail(event: {
         error: clipFailureText(event.codeBehindStale.error),
       },
     }),
+    // Clipped on the same terms as the errors: this detail is persisted per line
+    // and re-posted on every snapshot, and a warning is free text like any other.
+    ...(event.warning !== undefined && { warning: clipFailureText(event.warning) }),
+    ...(event.deliberate && { deliberate: true }),
   };
 }
 
@@ -757,6 +820,9 @@ export interface FileStateSnapshot {
       /** Passed under AI after its entry threw — ⚠, recompile. */
       | 'pass-stale'
       | 'fail'
+      /** Failed, and the run continued past it — `… otherwise continue`
+       *  (stories/step-failure-outcomes.md, decision 6). Amber ✗. */
+      | 'fail-tolerated'
       | 'skip'
       | 'stopped',
     ]

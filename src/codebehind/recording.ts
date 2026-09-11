@@ -114,6 +114,33 @@ export interface RecordedStep {
    * than as some different kind of step.
    */
   skipReason?: string;
+  /**
+   * The step failed and the run continued past it — its own `otherwise
+   * continue` tail (stories/step-failure-outcomes.md, decision 6).
+   *
+   * Recorded beside `status: 'failed'` rather than instead of it, the shape the
+   * wire and the report use. What the flag buys a reader of this file is the
+   * roll-up below — a recording whose only failure was tolerated is a PASSED
+   * recording — and the compile's "no evidence" rule.
+   *
+   * Absent on every other step, and on a recording written before the field
+   * existed, which reads as "not tolerated" and is right.
+   */
+  tolerated?: boolean;
+  /**
+   * The step failed because its own text says to — `If … then fail the test with
+   * error "…"`, with the condition true on this run
+   * (stories/step-failure-outcomes.md, decisions 1–3).
+   *
+   * Beside `status: 'failed'` for the reason `tolerated` is, though the run it
+   * ended IS red and the manifest says so. What the flag buys a reader is the
+   * difference between a recording that broke and one that finished where the
+   * test says it finishes — the second has a compilable step AT the end.
+   *
+   * Absent on every other step, and on a recording written before the field
+   * existed, which reads as "not deliberate" and is right.
+   */
+  deliberate?: boolean;
   fromCodeBehind?: boolean;
   codeBehindStale?: { file: string; source: string; error: string };
   urlBefore?: string;
@@ -283,6 +310,14 @@ async function writeRecordedStep(
     ...(result.status === 'skipped'
       && result.aiExplanation !== undefined
       && { skipReason: redact(result.aiExplanation, secrets) }),
+    // Carried so the splice roll-up below can tell a failure the author declared
+    // survivable from one that took the run down (decision 6).
+    ...(result.tolerated === true && { tolerated: true }),
+    // And a failure the step's own text asked for, which the roll-up does NOT
+    // excuse — a deliberate failure ends the run red (decision 2). Recorded
+    // because the step is still COMPILABLE: the compile reads it to tell a
+    // recording that ended as written from one that broke.
+    ...(result.deliberate === true && { deliberate: true }),
     ...(result.fromCodeBehind && { fromCodeBehind: true }),
     ...(result.codeBehindStale && { codeBehindStale: result.codeBehindStale }),
     ...(ctx?.urlBefore !== undefined && { urlBefore: ctx.urlBefore }),
@@ -448,7 +483,17 @@ export async function spliceRecording(
       // (stories/step-flow-control.md, decision 4). Asking whether any step
       // FAILED, rather than whether every step passed, is what keeps a spliced
       // recording that holds one honest.
-      status: all.some((s) => s.status === 'failed') ? 'failed' : 'passed',
+      //
+      // Nor does a TOLERATED failure: a run whose only failures were tolerated
+      // passes (stories/step-failure-outcomes.md, decision 6). The wholesale path
+      // above takes `input.status`, which the loops computed with that rule
+      // applied; this one recomputes from rows of mixed provenance, so it has to
+      // ask here too or the same run's recording reads red after a splice and
+      // green before it.
+      //
+      // A DELIBERATE failure is not excused and must not be: the author wrote a
+      // step that fails the run, it did, and the run is red (decision 2).
+      status: all.some((s) => s.status === 'failed' && s.tolerated !== true) ? 'failed' : 'passed',
       steps: all.length,
       parameters: [...new Set([...(existing.manifest?.parameters ?? []), ...Object.keys(input.parameters)])],
       source: input.source,
@@ -597,15 +642,25 @@ export async function readRecording(testFilePath: string): Promise<Recording | n
  * that did not happen, so a timed-out wait — the case where the measurement is
  * absent by design — never reaches generation either way.
  *
+ * The one exception is the `fail` sub-action of a DELIBERATE failure
+ * (stories/step-failure-outcomes.md, decisions 1–3 and 10): it carries an `error`
+ * because the error is its PRODUCT — the author's message — not because it failed
+ * to happen. Dropped, it leaves the step with an empty transcript, `refuseReason`
+ * answers "the recorded run performed no page actions for this step", and the one
+ * step the feature exists for is written off `ai: true`. Kept only for a step the
+ * runtime marked `deliberate`, so an UNCLAIMED `fail` the model tried and was
+ * refused — which also carries an `error` — stays dropped.
+ *
  * Lives in this module rather than in `candidate.ts`, which re-exports it,
  * only because every ordinary run already loads this file while `candidate.ts`
  * pulls in prettier and esbuild through the writer. One implementation, in the
  * cheaper of the two places.
  */
 export function actionsOf(result: StepResult | undefined): RecordedAction[] {
+  const keepFail = result?.deliberate === true;
   return (result?.turns ?? [])
     .flatMap((t) => t.subActions)
-    .filter((sa) => !sa.error)
+    .filter((sa) => !sa.error || (keepFail && sa.action.action === 'fail'))
     .map((sa) => {
       if (sa.targeting === undefined && sa.upload === undefined) return sa.action;
       return {

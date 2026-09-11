@@ -331,14 +331,42 @@ export function App() {
             level: 'info',
             message: skipLogLine(data.stepIndex, data.reason),
           });
+        } else if (data.tolerated) {
+          // The step failed and the run went on — `otherwise continue`
+          // (stories/step-failure-outcomes.md, decision 6). Amber, not red: a red
+          // line for a failure the author asked to carry past trains a reader to
+          // ignore red lines. The ✗ stays. The author's warning leads when they
+          // wrote one, with the framework's error bracketed after it — the warning
+          // answers the reader's actual question, the error says what went wrong.
+          const errPart = data.error ? `: ${data.error}` : '';
+          const said = data.warning
+            ? `: ${data.warning}${data.error ? ` (${data.error})` : ''}`
+            : errPart;
+          dispatch({
+            type: 'ADD_LOG',
+            level: 'warn',
+            message: `✗ Step ${data.stepIndex} failed — continuing (otherwise continue)${said} (${dur}s)`,
+          });
         } else {
           const errPart = data.error ? `: ${data.error}` : '';
-          dispatch({ type: 'ADD_LOG', level: 'error', message: `✗ Step ${data.stepIndex} failed${errPart} (${dur}s)` });
+          // The author wrote this failure and its message (decision 2), so the
+          // line says so rather than reporting a malfunction.
+          const lead = data.deliberate
+            ? `✗ Step ${data.stepIndex} failed as written`
+            : `✗ Step ${data.stepIndex} failed`;
+          dispatch({ type: 'ADD_LOG', level: 'error', message: `${lead}${errPart} (${dur}s)` });
         }
         dispatch({
           type: 'UPDATE_STEP_OUTPUT',
           stepIndex: data.stepIndex,
-          patch: { status: data.status, durationMs: data.durationMs, error: data.error },
+          patch: {
+            status: data.status,
+            durationMs: data.durationMs,
+            error: data.error,
+            ...(data.tolerated && { tolerated: true }),
+            ...(data.warning !== undefined && { warning: data.warning }),
+            ...(data.deliberate && { deliberate: true }),
+          },
         });
       }),
     );

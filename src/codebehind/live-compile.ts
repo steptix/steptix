@@ -194,6 +194,17 @@ export interface LiveCompileFinish {
   tokensUsed: number;
   /** Where the run stopped, when it did not reach the end of the request. */
   stoppedAt?: { step: number; error: string } | undefined;
+  /**
+   * Where the run ENDED because a step's own text said to — the `fail` verb
+   * (stories/step-failure-outcomes.md, decisions 1–3).
+   *
+   * The loop passes this INSTEAD of `stoppedAt`, never as well: every renderer
+   * downstream words itself off which one arrived, and a deliberate failure in
+   * `stoppedAt` is how a Run & Compile came to tell an author to fix a step that
+   * did exactly what its line says. No `line`, because the compiler reads the
+   * authored text off the plan and cannot then be handed a line that disagrees.
+   */
+  endedAsWritten?: { step: number; error: string } | undefined;
   /** 1-based expanded steps the run never reached. */
   notAttempted?: number[] | undefined;
   /** The run was stopped by the client. */
@@ -211,6 +222,71 @@ export interface LiveCompileFinish {
 export const SKIPPED_BY_RETURN_REFUSAL = 'the step did not run — a return ended its flow';
 
 /**
+ * A step that failed and whose own `otherwise continue` tail let the run past it
+ * (stories/step-failure-outcomes.md, decision 11).
+ *
+ * Its own reason, on the fact opposite {@link SKIPPED_BY_RETURN_REFUSAL}'s: this
+ * step DID run, and what it produced is a recording of a failure, so it is no
+ * evidence either. Shared with the boxed pipeline so the two compilers say one
+ * sentence about one situation.
+ */
+export const TOLERATED_FAILURE_REFUSAL =
+  'the step failed on the recording run and was tolerated (otherwise continue)';
+
+/**
+ * The same tolerated failure, on a step whose OWN entry ran it
+ * (stories/step-failure-outcomes.md, decision 11).
+ *
+ * The fact the sentence above cannot carry: this step HAS an entry, and the failure
+ * the run tolerated is the one that entry reported. Nothing to generate and nothing
+ * missing, so it counts `kept` rather than landing in `notAttempted` — "not
+ * attempted" over a line whose code sits in the author's file is the complaint this
+ * reason answers. An entry that BROKE instead of asserting is unchanged: flagged
+ * stale, it falls to {@link TOLERATED_FAILURE_REFUSAL} and is still owed one.
+ */
+export const TOLERATED_CODE_BEHIND_REFUSAL =
+  'the step ran as code and its failure was tolerated (otherwise continue) — the entry stands';
+
+/**
+ * The unconditional `Return` / `Stop` / `Fail` — a line the run loops dispatch
+ * with no model call at all, as they dispatch `Set`
+ * (stories/step-flow-control.md, decision 3; stories/step-failure-outcomes.md,
+ * decision 10). No transcript to generate from, so both compilers refuse it and
+ * both say this, from here, so an author meeting the refusal in `aiui compile`
+ * and again in a Run & Compile reads one rule about one line.
+ */
+export const DISPATCHED_NOT_COMPILED = 'a Return/Stop/Fail step is dispatched, not compiled';
+
+/** How much of the ending step's own line rides along on a reason string —
+ *  `RETURNING_TEXT_LIMIT` in src/runner/flow-control.ts, to the same ceiling:
+ *  long enough for a realistic `If … then fail the test with error "…"`, short
+ *  enough that a log line stays one line. */
+export const ENDING_TEXT_LIMIT = 80;
+
+/** The ending step's authored line, clipped to {@link ENDING_TEXT_LIMIT}
+ *  characters INCLUDING the ellipsis. */
+export function clipLine(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length > ENDING_TEXT_LIMIT
+    ? `${trimmed.slice(0, ENDING_TEXT_LIMIT - 1)}…`
+    : trimmed;
+}
+
+/**
+ * The one sentence for a run that ended because a step's own text said to
+ * (stories/step-failure-outcomes.md, decisions 1–3).
+ *
+ * Used by the record phase, the per-step lines, the headline and the summary's
+ * reason, so a second spelling cannot drift — a private copy per compiler is how it
+ * came to be missing from Run & Compile entirely. Deliberately NOT the vocabulary
+ * of a stopped recording ("stopped at step 9", "fix that step"), which would send
+ * an author to repair a step that did precisely what they wrote.
+ */
+export function endedAsWrittenReason(subject: 'run' | 'replay', step: number): string {
+  return `the ${subject} ended at step ${step} as its text says`;
+}
+
+/**
  * Why a step is not generated from, or undefined when it is.
  *
  * Mirrors `compileTest`'s selection rules, decided per step from what the run
@@ -218,14 +294,25 @@ export const SKIPPED_BY_RETURN_REFUSAL = 'the step did not run — a return ende
  *
  * - **no binding** — nothing to write into; `[tool:]` and `[skill:]` markers
  *   are expanded or dispatched before the AI loop and are never generated.
- * - **an unconditional `Return` / `Stop`** — dispatched by the loop with no
- *   model call, as `Set` is, so there is nothing to record and nothing to make
- *   cheaper (stories/step-flow-control.md, decisions 3 and 11). The CONDITIONAL
- *   form is not refused: it compiles to `if (…) step.exit()`.
+ * - **an unconditional `Return` / `Stop` / `Fail`** — dispatched by the loop
+ *   with no model call, as `Set` is, so there is nothing to record and nothing
+ *   to make cheaper (stories/step-flow-control.md, decisions 3 and 11;
+ *   stories/step-failure-outcomes.md, decision 10). The CONDITIONAL form of
+ *   either is not refused: it compiles to `if (…) step.exit()` or
+ *   `if (…) step.fail('…')`.
  * - **skipped** — a return ended its flow before it ran, so there is no
  *   transcript to generate from.
+ * - **tolerated** — it failed and its `otherwise continue` tail let the run
+ *   carry on, so it has a transcript of the failure and no evidence of the step
+ *   working (decision 11). Asked BEFORE "did not pass", because the status of a
+ *   tolerated failure is `failed` and the general reason would send the author
+ *   hunting a bug in a step whose text says it may fail.
  * - **did not pass** — a failed step's transcript is a recording of the
- *   failure; the boxed pipeline stops at the same place.
+ *   failure; the boxed pipeline stops at the same place. One exception, the
+ *   opposite of the tolerated case: a DELIBERATE failure is a step that did
+ *   exactly what its text says (decisions 1–3), and its transcript holds the
+ *   model's `fail` action the way a return's holds `return`, so refusing it
+ *   would leave the one step this feature exists for permanently uncompiled.
  * - **ran as code** — it needs no transcript, because its code already is the
  *   answer. This is the default selection ("no entry, or flagged stale")
  *   falling out of run behaviour for free.
@@ -235,6 +322,12 @@ export function generationRefusal(input: {
   binding?: CodeBehindBinding | undefined;
   text: string;
   status: StepStatus;
+  /** `StepResult.tolerated` — the step failed and the run continued past it
+   *  (stories/step-failure-outcomes.md, decision 6). */
+  tolerated?: boolean | undefined;
+  /** `StepResult.deliberate` — the step failed because its own text says to
+   *  (stories/step-failure-outcomes.md, decisions 1–3). */
+  deliberate?: boolean | undefined;
   fromCodeBehind?: boolean | undefined;
   codeBehindStale?: unknown;
 }): string | undefined {
@@ -256,10 +349,11 @@ export function generationRefusal(input: {
   // overlap on `If <condition>, then return` and flow control owns that line
   // (stories/control-flow.md §"Composition with `If … then return`"). Only
   // the UNCONDITIONAL form is refused: the conditional one compiles, into
-  // `if (…) step.exit()`.
+  // `if (…) step.exit()` — or, for the `fail` verb, `if (…) step.fail('…')`
+  // (stories/step-failure-outcomes.md, decision 10).
   const flowControl = parseFlowControlStep(input.text.trim());
   if (flowControl && flowControl.body === undefined) {
-    return 'a Return/Stop step is dispatched, not compiled';
+    return DISPATCHED_NOT_COMPILED;
   }
   // A control line, for the same reason: the framework asks a model whether a
   // condition holds and performs nothing, so there is no transcript to
@@ -272,7 +366,21 @@ export function generationRefusal(input: {
   }
   if (!input.binding) return 'the step has no code-behind file to bind into';
   if (input.status === 'skipped') return SKIPPED_BY_RETURN_REFUSAL;
-  if (input.status !== 'passed') return 'the step did not pass';
+  // Which of the two tolerated reasons depends on what ran it. An entry that ran
+  // and reported the failure leaves nothing owed, so it answers AHEAD of the
+  // "ran as code" rule below: behind it the step landed in `notAttempted` — the
+  // list of lines with no entry — while its entry sat in the author's file. A
+  // stale entry (it threw, and AI healed the step) is still owed one.
+  if (input.tolerated === true) {
+    return input.fromCodeBehind === true && !input.codeBehindStale
+      ? TOLERATED_CODE_BEHIND_REFUSAL
+      : TOLERATED_FAILURE_REFUSAL;
+  }
+  // A deliberate failure is a `failed` status that means the step WORKED, so it
+  // is excused from the general rule rather than caught by it (decisions 1–3).
+  // Everything below still applies to it.
+  const asWritten = input.status === 'failed' && input.deliberate === true;
+  if (input.status !== 'passed' && !asWritten) return 'the step did not pass';
   if (input.binding.entry?.ai === true) return 'the entry is marked `ai: true`';
   // An entry that threw and healed under AI produced a transcript and is
   // flagged stale — exactly the case a recompile exists for.
@@ -318,6 +426,18 @@ export class LiveCompiler {
    * (`recordingSkipCause`, src/codebehind/compile.ts).
    */
   private readonly skippedByReturn: { number: number; key: string }[] = [];
+  /**
+   * Steps that failed and were tolerated (stories/step-failure-outcomes.md,
+   * decision 11).
+   *
+   * The same (number, key) pairs and the same netting as `skippedByReturn`
+   * above, for the same reason: a looped body is ONE entry and one row per
+   * iteration, so an iteration tolerated after another compiled the body owes
+   * nothing. Kept separate from `skippedByReturn` because the two are different
+   * facts — one never ran, the other ran and failed — and the per-step line the
+   * author reads has to say which.
+   */
+  private readonly toleratedFailures: { number: number; key: string }[] = [];
   /**
    * Entry keys this compile has already queued — the per-key dedupe the boxed
    * pipeline gets from `selectSteps` (compile.ts), which keeps a `keys` Set
@@ -696,11 +816,17 @@ export class LiveCompiler {
       binding: input.binding,
       text,
       status: input.result.status,
+      tolerated: input.result.tolerated,
+      deliberate: input.result.deliberate,
       fromCodeBehind: input.result.fromCodeBehind,
       codeBehindStale: input.result.codeBehindStale,
     });
     if (refusal !== undefined) {
-      if (refusal === 'the step ran as code') {
+      // Both "ran as code" reasons: the entry ran, so the step is one this
+      // compile kept rather than one it owes. The tolerated variant is counted
+      // here rather than in the `notAttempted` branch below because the entry
+      // the author would be told is missing is in their file.
+      if (refusal === 'the step ran as code' || refusal === TOLERATED_CODE_BEHIND_REFUSAL) {
         // The binding is there: every refusal that could reach here without
         // one (`[skill:]`/`[tool:]`, no binding at all) is decided above this.
         const keptKey = entryKeyOf(input.binding!);
@@ -718,6 +844,14 @@ export class LiveCompiler {
         // above can assert it: `generationRefusal` decides `!input.binding`
         // before it decides `skipped`.
         this.skippedByReturn.push({ number: at + 1, key: entryKeyOf(input.binding!) });
+        this.stepEvent('generate', { index: at, number: at + 1, text, hasEntry: false, isAiEntry: false }, refusal);
+      }
+      // Named and netted exactly as the skipped case above, and for the same
+      // reason (decision 11): a step this compile could not generate from has to
+      // be named by number, not left to discover as a gap in the file. The
+      // binding is there — `generationRefusal` decides `!input.binding` first.
+      if (refusal === TOLERATED_FAILURE_REFUSAL) {
+        this.toleratedFailures.push({ number: at + 1, key: entryKeyOf(input.binding!) });
         this.stepEvent('generate', { index: at, number: at + 1, text, hasEntry: false, isAiEntry: false }, refusal);
       }
       logger.debug(`Compile-as-you-go skipped step ${input.index + 1}: ${refusal}`);
@@ -981,7 +1115,14 @@ export class LiveCompiler {
       this.options.aiClient,
       this.options.contextContent,
       prompt,
-      guardedValues(parameters, envRefs.resolved),
+      // The authored line, exactly as generation passes it (`askModel` below,
+      // and `guardedValues` / `authorQuotedLiterals` in generate.ts): a value the
+      // AUTHOR quoted in the step is the author's, so an entry echoing it is
+      // repeating the step rather than inlining a resolved value. Without it a
+      // stale `If {{a}} is "peanuts" then fail …` could not be repaired at all —
+      // every candidate contains `peanuts`, so every one was discarded as a leak
+      // (stories/step-failure-outcomes.md, decisions 3 and 10).
+      guardedValues(parameters, envRefs.resolved, binding.source),
       this.signal,
     );
   }
@@ -1140,18 +1281,64 @@ export class LiveCompiler {
     const skippedByReturnOwed = this.skippedByReturn
       .filter((s) => !this.writtenKeys.has(s.key))
       .map((s) => s.number);
+    // A tolerated failure owes an entry on exactly the same terms
+    // (stories/step-failure-outcomes.md, decision 11): it produced no evidence
+    // of the step working, unless another inlining of the same entry did.
+    const toleratedOwed = this.toleratedFailures
+      .filter((s) => !this.writtenKeys.has(s.key))
+      .map((s) => s.number);
     const notAttempted = [
-      ...new Set([...(final.notAttempted ?? []), ...this.skippedByStop, ...skippedByReturnOwed]),
+      ...new Set([
+        ...(final.notAttempted ?? []),
+        ...this.skippedByStop,
+        ...skippedByReturnOwed,
+        ...toleratedOwed,
+      ]),
     ].sort((a, b) => a - b);
+    /**
+     * The ending step's own line, and the one sentence both compilers say about
+     * it (stories/step-failure-outcomes.md, decisions 1–3). Read off the plan
+     * rather than taken from the loop, for the reason
+     * {@link LiveCompileFinish.endedAsWritten} gives.
+     *
+     * It travels only when the ending step left steps BEHIND it, which is the
+     * boxed pipeline's rule: the field answers "why has step 10 no entry", so
+     * with no gap there is no question — and carrying it anyway put an `error`
+     * and an "ended at…" clause on a `green` summary, which is how
+     * `compileResultLine` came to print "◐ Compiled nothing…" over a green
+     * status. `final.notAttempted` is the gap as the LOOP sees it, rather than
+     * the union below, which also holds steps that ran and were tolerated.
+     */
+    const endedFact = final.endedAsWritten;
+    const endedAsWritten =
+      endedFact === undefined || (final.notAttempted ?? []).length === 0
+        ? undefined
+        : {
+            step: endedFact.step,
+            error: endedFact.error,
+            line: this.plan[endedFact.step - 1]?.text ?? '',
+          };
     // A step a return left unrun is work still owed, so a compile that
     // attempted nothing BECAUSE of a return is not "already compiled"
     // (stories/step-flow-control.md, decision 12) — the same reason a stopped
-    // run is not.
+    // run is not, and the same reason a tolerated failure is owed
+    // (stories/step-failure-outcomes.md, decision 11).
+    //
+    // A run that ENDED as written has to enter this expression too, and only
+    // through `notAttempted`. Dropping `stoppedAt` for it without this clause is
+    // how a fully-compiled test whose FIRST step fails deliberately came back
+    // `green` with every later step named "not attempted". When the ending step
+    // was the LAST one there is no such gap and `green` is honest, which is why
+    // the clause asks about the gap rather than about the ending. Off the FACT,
+    // not the field: the field is narrowed to the boxed rule above.
+    const endedWithStepsLeft = endedFact !== undefined && notAttempted.length > 0;
     const nothingToDo =
       this.attempted === 0
       && final.stoppedAt === undefined
+      && !endedWithStepsLeft
       && !final.aborted
-      && skippedByReturnOwed.length === 0;
+      && skippedByReturnOwed.length === 0
+      && toleratedOwed.length === 0;
     const summary: CompileSummary = {
       test: this.options.testFilePath,
       totalSteps: this.scopedTotal,
@@ -1175,9 +1362,21 @@ export class LiveCompiler {
       recoveredByValue: [...this.recoveredByValue],
       ...(candidatePath !== undefined && { candidatePath }),
       ...(final.stoppedAt && { stoppedAt: final.stoppedAt }),
-      ...(this.errors > 0 && {
-        error: `${this.errors} step(s) could not be generated; they stay AI`,
-      }),
+      ...(endedAsWritten && { endedAsWritten }),
+      // Why this compile is not green, in the boxed pipeline's own words and its
+      // own order: a generation error is the actionable one and keeps the slot,
+      // and the run ending as written takes it only when nothing went wrong.
+      // Said here at all because a client with no headline of its own reads
+      // `error` as the reason line.
+      ...(this.errors > 0
+        ? { error: `${this.errors} step(s) could not be generated; they stay AI` }
+        : endedAsWritten
+          ? {
+              error:
+                `${endedAsWrittenReason('run', endedAsWritten.step)}` +
+                (endedAsWritten.line === '' ? '' : ` (${clipLine(endedAsWritten.line)})`),
+            }
+          : {}),
     };
     return {
       // `green` would claim the test compiles and replays as code, which

@@ -2,7 +2,8 @@ import type { AIAction, ChatMessage, MessageContentBlock } from './types.js';
 import type { ActionTargeting } from '../browser/actions.js';
 import type { PageInfo } from '../browser/manager.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
-import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
+import { parseFailureTail, type ParsedFailureTail } from '../parser/failure-tail.js';
 import { isSecretName, isSecretRef, MASK } from '../utils/secrets.js';
 
 /**
@@ -267,7 +268,8 @@ Plan your next action based on the observed result — do not batch multiple act
        { "action": "wait", "waitType": "url", "condition": "**/otp", "description": "Wait for OTP page" }
      ], "reasoning": "...", "needs_reeval": false }
    When the instruction does NOT name a completion condition (e.g. just "click Login"), return only the triggering action — do not invent speculative waits
-23. LEAVING A FLOW EARLY. Some steps are written as flow control: "If <condition> then return", "When <condition> then stop", "If <condition> then stop running the remaining steps", and the compound form "If the Save button is visible, click it and return". On such a step, judge the condition against the page. If it HOLDS, return { "action": "return", "description": "<why the condition holds>", "needs_reeval": false } — after any action the step also asks for, in the same response. If it does NOT hold, return { "action": "noop", "description": "<why the condition does not hold>", "needs_reeval": false } and the next step will run. NEVER return "return" on a step that does not say to return or stop: the framework rejects it and the step fails. A step that merely mentions going back ("Click the details link then return", "Navigate back") is an ordinary browser step, not flow control`, true),
+23. LEAVING A FLOW EARLY. Some steps are written as flow control: "If <condition> then return", "When <condition> then stop", "If <condition> then stop running the remaining steps", and the compound form "If the Save button is visible, click it and return". On such a step, judge the condition against the page. If it HOLDS, return { "action": "return", "description": "<why the condition holds>", "needs_reeval": false } — after any action the step also asks for, in the same response. If it does NOT hold, return { "action": "noop", "description": "<why the condition does not hold>", "needs_reeval": false } and the next step will run. NEVER return "return" on a step that does not say to return or stop: the framework rejects it and the step fails. A step that merely mentions going back ("Click the details link then return", "Navigate back") is an ordinary browser step, not flow control
+   The same rule has a third verb: FAILING ON PURPOSE. Some steps are written as "If <condition> then fail the test with error '<message>'", "When <condition> then fail the test", or just "If <condition> fail the test with message '<message>'". Judge the condition exactly the same way. If it HOLDS, return { "action": "fail", "description": "<why the condition holds>", "needs_reeval": false }. If it does NOT hold, return { "action": "noop", "description": "<why the condition does not hold>", "needs_reeval": false } and the next step will run. The message in the step is the author's — you do not write it, repeat it, or judge whether it is accurate; your description says only what you found on the page. NEVER return "fail" on a step that does not say to fail the test, including one that says to return or stop: the framework rejects it and the step fails`, true),
   ];
 
   if (contextContent) {
@@ -799,7 +801,7 @@ ${domSnapshot}
 \`\`\`${screenshotBase64 ? '\n\n[Screenshot is attached as an image — use it to understand the current visual state of the page]' : ''}
 
 What is the next action needed to complete the original instruction: "${instructionText}"?
-Return ONE action. Set needs_reeval: false if this instruction is now fully satisfied — do NOT continue into actions that belong to subsequent steps. If the instruction is already satisfied and no further action is required, return { "action": "noop", "description": "<why nothing is needed>", "needs_reeval": false }. If the instruction says to return or stop and its condition holds, return { "action": "return", "description": "<why the condition holds>", "needs_reeval": false } instead; if it does not hold, "noop". Never "return" on an instruction that does not say to.`;
+Return ONE action. Set needs_reeval: false if this instruction is now fully satisfied — do NOT continue into actions that belong to subsequent steps. If the instruction is already satisfied and no further action is required, return { "action": "noop", "description": "<why nothing is needed>", "needs_reeval": false }. If the instruction says to return or stop and its condition holds, return { "action": "return", "description": "<why the condition holds>", "needs_reeval": false } instead; if it does not hold, "noop". Never "return" on an instruction that does not say to. If the instruction says to FAIL the test and its condition holds, return { "action": "fail", "description": "<why the condition holds>", "needs_reeval": false }; if it does not hold, "noop". Never "fail" on an instruction that does not say to fail the test.`;
 
   if (screenshotBase64) {
     return {
@@ -1365,6 +1367,16 @@ const FLOW_CONTROL_API =
   '\n- `step.exit()` — end the flow this step is in, as a pass. It throws, so nothing after it runs.';
 
 /**
+ * The `step.fail()` bullet, for a step that claims the `fail` verb
+ * (stories/step-failure-outcomes.md, decision 10). Gated the way
+ * {@link FLOW_CONTROL_API} is and swapped WITH it rather than added beside it: the
+ * two verbs are opposite outcomes and a step's line claims exactly one, so
+ * offering both to either step is offering the wrong one to somebody.
+ */
+const FAIL_API =
+  '\n- `step.fail(message)` — fail this step, and the run, with exactly this message. It throws, so nothing after it runs.';
+
+/**
  * The one rule a flow-control step adds (stories/step-flow-control.md,
  * decision 11).
  *
@@ -1392,6 +1404,69 @@ function flowControlRule(number: number): string {
     `unconditionally, or one that never exits, is right on this run and wrong on the next. ` +
     `This step needs NO post-condition: \`step.exit()\` throws, so there is nothing after it to assert on, and when ` +
     `the condition does not hold the step is meant to leave the page exactly as it found it.`
+  );
+}
+
+/**
+ * The one rule a `fail`-claiming step adds (stories/step-failure-outcomes.md,
+ * decision 10, rule a). Numbered `Na` like {@link flowControlRule} and never
+ * emitted beside it: a line claims one verb.
+ *
+ * The message is the half that goes wrong — it is the AUTHOR's sentence, the thing
+ * the row, the run log and an agent's summary lead with, so a model that
+ * paraphrases it replaces the one part of the failure the author wrote.
+ */
+function failRule(number: number): string {
+  return (
+    `\n\n${number}a. **This step is a deliberate-failure step: evaluate its condition and call \`step.fail(...)\` when it holds.** ` +
+    `Its text says to fail the test under a condition, so the entry reads that condition — off the page, or off a ` +
+    `variable — and fails only if it is true, doing nothing at all if it is not:\n` +
+    '```ts\nif (step.getVar(\'a\') === \'peanuts\') step.fail(\'The variable value was peanuts. Expected apples\');\n```\n' +
+    `Pass the author's message VERBATIM: the words between the quotes in the step, not a summary of them and not ` +
+    `your own account of what you found. A \`{{name}}\` inside the message is read like any other variable, in a ` +
+    "template literal: step.fail(`Expected apples, got ${step.getVar('a')}`). " +
+    `If the step names no message, call \`step.fail()\` with a short sentence in the step's own words.\n` +
+    `Write BOTH branches from the step's own words, never from what this run happened to do: a \`fail\` action in the ` +
+    `transcript means the condition HELD on the recording run and a \`noop\` means it did NOT, and the entry you write ` +
+    `is the same \`if\` either way. An entry that fails unconditionally is right on this run and wrong on the next. ` +
+    `This step needs NO post-condition: \`step.fail\` throws, so there is nothing after it to assert on, and when the ` +
+    `condition does not hold the step is meant to leave the page exactly as it found it.`
+  );
+}
+
+/**
+ * The one rule an `… otherwise …` step adds
+ * (stories/step-failure-outcomes.md, decision 10, rules b and c).
+ *
+ * The tail is the RUNNER's, not the entry's, and the natural mistakes are
+ * opposite. On a `fail` tail a model asked to "use the message" writes its own
+ * comparison text into `step.expect` and the author's sentence is lost; on a
+ * `continue` tail it swallows the failure in a `try`/`catch` so the entry
+ * "handles" it, producing a green step for work that did not happen.
+ */
+function failureTailRule(number: number, tail: ParsedFailureTail): string {
+  const head =
+    `\n\n${number}a. **This step carries an \`otherwise …\` tail: compile its BODY.** The step the entry has to ` +
+    `reproduce is \`${tail.body}\`. Everything from \`otherwise\` onwards decides what the RUNNER does once this ` +
+    `step has failed, and the entry neither reads it nor implements it. Keep \`source\` exactly as shown above — ` +
+    `the whole line, tail included — because that is what the runner matches the entry by.`;
+
+  if (tail.outcome === 'fail') {
+    return (
+      head +
+      (tail.message
+        ? ` The tail names the message this step's failure will be reported with, so use it verbatim as the ` +
+          `\`step.expect\` message: \`step.expect(<condition>, ${JSON.stringify(tail.message)})\`. Do not write ` +
+          `your own wording beside it or in place of it.`
+        : ` The tail names no message, so write the \`step.expect\` message the usual way.`)
+    );
+  }
+
+  return (
+    head +
+    ` The tail says the run carries on when this step fails. That is the runner's doing, not the entry's: do NOT ` +
+    `wrap the body in \`try\`/\`catch\`, and do not turn a check into something that cannot fail. An entry that ` +
+    `swallows its own failure reports a step that did not do its work as a pass.`
   );
 }
 
@@ -1471,7 +1546,14 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
   // Does this step CLAIM the `If … then return` form? The same textual test
   // every runner applies to the authored line (stories/step-flow-control.md,
   // decision 2), on the same text — `rawStepText` is the step as authored.
-  const claimsFlowControl = parseFlowControlStep(input.rawStepText) !== null;
+  //
+  // Three answers now, not two, and at most ONE is ever true (decisions 8 and 10):
+  // `return`/`stop`, `fail`, or an `otherwise` tail — a tail whose body is itself a
+  // claim is a contradiction the parser refuses, so all three can be numbered `Na`.
+  const claim = parseFlowControlStep(input.rawStepText);
+  const claimsFlowControl = claim !== null && isReturnClaim(claim);
+  const claimsFail = claim?.verb === 'fail';
+  const failureTail = parseFailureTail(input.rawStepText);
 
   // The one re-ask the static backstop buys. The refused entry goes back with
   // the complaint, because a model shown only "do it again" tends to return
@@ -1480,7 +1562,18 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
     ? `\n\n## Your previous answer was refused\n${input.retry.complaint}\n\nThat answer was:\n\n\`\`\`ts\n${input.retry.previousEntry}\n\`\`\`\n\nFix exactly that, keep the rest of the entry, and return it in the same envelope.`
     : '';
 
-  const textContent = `${testInfoBlock}A natural-language test step just passed under AI control. Write the Playwright TypeScript that reproduces it deterministically, so future runs need no model call.
+  // The opening sentence has to agree with the transcript under it: a
+  // `fail`-claiming step whose condition HELD did not pass (decisions 1–3), and
+  // telling the model it passed while showing it a `fail` action invites the one
+  // answer this compile cannot use — "the step failed, so there is nothing to
+  // compile". Read off the TRANSCRIPT, not the claim: the same claimed line answers
+  // `noop` on a run where the condition did not hold, and that run did pass.
+  const endedAsWritten = input.actions.some((a) => a.action === 'fail');
+  const opening = endedAsWritten
+    ? `A natural-language test step just ended the run under AI control — its own text says to fail the test when a condition holds, and it held. Write the Playwright TypeScript that reproduces that judgement deterministically, so future runs need no model call.`
+    : `A natural-language test step just passed under AI control. Write the Playwright TypeScript that reproduces it deterministically, so future runs need no model call.`;
+
+  const textContent = `${testInfoBlock}${opening}
 
 ## The step, exactly as authored
 ${input.rawStepText}
@@ -1520,7 +1613,7 @@ The "entry" string holds one TypeScript object literal with exactly this shape:
 - \`page\`, \`context\`, \`browser\` — the live Playwright instances the run is driving.
 - \`step.getVar(name)\` / \`step.setVar(name, value)\` — the test's variable scope, by the name as written in the markdown: \`{{username}}\` is \`step.getVar('username')\`. An environment placeholder is read by the name inside its braces: \`\${data.url}\` is \`step.getVar('data.url')\`, \`\${env.BASE_URL}\` is \`step.getVar('env.BASE_URL')\`. It returns a string (or undefined).
 - \`step.expect(condition, message)\` — a failed expectation fails the step.
-- \`step.filePath(relative)\` — turns a path written in a step (relative to the test file's folder) into the absolute path Playwright needs. Synchronous; throws if the file is missing.${claimsFlowControl ? FLOW_CONTROL_API : ''}
+- \`step.filePath(relative)\` — turns a path written in a step (relative to the test file's folder) into the absolute path Playwright needs. Synchronous; throws if the file is missing.${claimsFlowControl ? FLOW_CONTROL_API : ''}${claimsFail ? FAIL_API : ''}
 - \`log.info(...)\` / \`log.warn(...)\` / \`log.error(...)\` — recorded into the report.
 - \`baseUrl\` — the test's configured base URL, when it has one.
 - \`tabs\` — tab control, the code equivalent of the \`openPage\` / \`switchPage\` / \`closePage\` actions:
@@ -1559,7 +1652,7 @@ ${postConditionNumber}. **End with a post-condition, and make it wait.** The las
 
    Wait on the state itself. \`await page.locator('#upload-status', { hasText: 'Uploaded logo.png' }).waitFor()\` — or \`.filter({ hasText: '…' })\` on a locator you already hold — does not resolve until that text is there, so the wait IS the assertion. \`await page.waitForFunction(...)\` covers what a text filter cannot: a count that has to change, an attribute that has to flip, a value computed from the page. Reading a value into \`step.expect\` is right once something has proved the page moved — wait first, then read. (Rule 6 rules out Playwright's \`expect(locator).toHaveText(...)\`; the forms above are the waiting ones you have.)
 
-   **And it has to be able to FAIL.** A post-condition that cannot go red proves nothing at all — it is the same as having none, only harder to notice. Never compare a value to itself, or to a variable you just assigned from the same read: \`step.expect((await rows.count()) === rowCount)\` re-reads what it has already stored, so it passes just as happily on an empty page. When the step states an expectation, assert THAT — the literal it names, the count it names. When it states none, which is the usual shape of a capture step ("Count the rows [as: n]", "Read the balance [as: b]"), assert what makes the capture worth trusting instead: that the thing you read from was really there and really populated, e.g. \`await page.locator('#documents-body > tr').first().waitFor()\` before reading the count. Never that the number equals itself.${trackerPostCondition(input.actions)}${claimsFlowControl ? flowControlRule(postConditionNumber) : ''}
+   **And it has to be able to FAIL.** A post-condition that cannot go red proves nothing at all — it is the same as having none, only harder to notice. Never compare a value to itself, or to a variable you just assigned from the same read: \`step.expect((await rows.count()) === rowCount)\` re-reads what it has already stored, so it passes just as happily on an empty page. When the step states an expectation, assert THAT — the literal it names, the count it names. When it states none, which is the usual shape of a capture step ("Count the rows [as: n]", "Read the balance [as: b]"), assert what makes the capture worth trusting instead: that the thing you read from was really there and really populated, e.g. \`await page.locator('#documents-body > tr').first().waitFor()\` before reading the count. Never that the number equals itself.${trackerPostCondition(input.actions)}${claimsFlowControl ? flowControlRule(postConditionNumber) : ''}${claimsFail ? failRule(postConditionNumber) : ''}${failureTail ? failureTailRule(postConditionNumber, failureTail) : ''}
 
 Respond with ONLY the JSON object — no prose around it.`;
 

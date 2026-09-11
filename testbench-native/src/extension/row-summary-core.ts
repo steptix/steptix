@@ -41,6 +41,12 @@ export function rowStatusFromLineStatus(status: string | undefined): DataRowStat
   switch (status) {
     case 'running': return 'running';
     case 'fail': return 'failed';
+    // A row never wears this — a row whose only failures were tolerated is a PASSED
+    // row (stories/step-failure-outcomes.md, decision 6). Named anyway, because the
+    // fall-through below answers `'passed'` for anything it does not recognise, and
+    // a step status leaking in here would become a green row for work that did not
+    // happen.
+    case 'fail-tolerated': return 'failed';
     case 'skip': return 'skipped';
     case 'stopped': return 'stopped';
     case undefined: return 'pending';

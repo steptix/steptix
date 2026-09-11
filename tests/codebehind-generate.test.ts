@@ -1046,6 +1046,106 @@ describe('generateStepEntry — a flow-control step that names a placeholder', (
 });
 
 /**
+ * The leak guard against a literal the AUTHOR quoted (decisions 3 and 10): a
+ * literal the author wrote is theirs, so an entry echoing it is not freezing a
+ * resolved value into a file — the guard is for the value the author never wrote
+ * into the line, a password. Measured on `failure-outcomes-live.md`, where step
+ * 9's only possible entry was discarded and the compile died with `Rounds: 0`.
+ */
+describe('generateStepEntry — a value the author quoted in the step', () => {
+  const FAIL_ACTIONS = [{ action: 'fail' as const, description: 'the variable holds peanuts' }];
+
+  /** The entry the live compile produced, by line and by the literal it inlines. */
+  const entryFor = (source: string, literal: string) =>
+    JSON.stringify({
+      entry:
+        `{\n  source: ${JSON.stringify(source)},\n  async run({ step }) {\n` +
+        `    if (step.getVar('a') === ${JSON.stringify(literal)}) `
+        + `step.fail('The variable value was peanuts. Expected apples');\n  },\n}`,
+    });
+
+  /** One generation for `source`, answered by `client`. */
+  const generate = (
+    source: string,
+    client: AiClient,
+    resolvedParameters: Record<string, string>,
+    over: Partial<Parameters<typeof generateStepEntry>[0]> = {},
+  ) =>
+    generateStepEntry({
+      binding: bindingFor(source),
+      actions: FAIL_ACTIONS,
+      resolvedParameters,
+      recordingCarriesPlaceholders: true,
+      aiClient: client,
+      contextContent: '',
+      testName: 'demo',
+      ...over,
+    });
+
+  it('accepts the entry that echoes it', async () => {
+    const source =
+      `If {{a}} is "peanuts" then fail the test with error ` +
+      `"The variable value was peanuts. Expected apples"`;
+    const { client, calls } = stubClient(entryFor(source, 'peanuts'));
+    const result = await generate(source, client, { a: 'peanuts' });
+    // Before the exemption this was `{ kind: 'error', message: '… contains the
+    // resolved value of {{a}} …' }`, which `compileTest` treats as fatal.
+    expect(result).toMatchObject({ kind: 'entry' });
+    expect(result.kind === 'entry' && result.code).toContain(`step.getVar('a')`);
+    expect(result.kind === 'entry' && result.code).toContain('peanuts');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('still rejects a password the author did not quote', async () => {
+    // The case the guard exists for: nobody quotes the password in the line too.
+    const source = 'Enter the password {{password}}';
+    const { client } = stubClient(JSON.stringify({
+      entry: `{ source: ${JSON.stringify(source)}, async run({ page }) { `
+        + `await page.fill('#password', 'hunter2-correct-horse'); } }`,
+    }));
+    const result = await generate(source, client, { password: 'hunter2-correct-horse' }, {
+      actions: PASSING_ACTIONS,
+      recordingCarriesPlaceholders: false,
+    });
+    expect(result).toEqual({
+      kind: 'error',
+      message:
+        'the generated code contains the resolved value of {{password}} as a literal, ' +
+        'so it was discarded',
+    });
+  });
+
+  /** Exact and case-sensitive, against the WHOLE quoted content: a value that
+   *  merely resembles what the author quoted is one they never wrote. */
+  for (const quoted of ['Peanuts', 'peanuts and more']) {
+    it(`still rejects it when the line quotes "${quoted}"`, async () => {
+      const source = `If {{a}} is "${quoted}" then fail the test with error "Not the right value"`;
+      const { client } = stubClient(entryFor(source, 'peanuts'));
+      const result = await generate(source, client, { a: 'peanuts' });
+      expect(result.kind).toBe('error');
+      expect(result.kind === 'error' && result.message).toContain('{{a}}');
+    });
+  }
+
+  it('rejects a second parameter the line does not quote, in the same entry', async () => {
+    // The composition that proves the exemption is per VALUE, not a switch on the
+    // step: `{{a}}` is exempt, `{{username}}` is not, and the entry inlining both
+    // is refused — naming the one that leaked.
+    const source =
+      `If {{a}} is "peanuts" then fail the test with error "Wrong value for {{username}}"`;
+    const { client } = stubClient(JSON.stringify({
+      entry: `{ source: ${JSON.stringify(source)}, async run({ step }) { `
+        + `if (step.getVar('a') === 'peanuts') `
+        + `step.fail('Wrong value for octocat-the-cat'); } }`,
+    }));
+    const result = await generate(source, client, { a: 'peanuts', username: 'octocat-the-cat' });
+    expect(result.kind).toBe('error');
+    expect(result.kind === 'error' && result.message).toContain('{{username}}');
+    expect(result.kind === 'error' && result.message).not.toContain('{{a}}');
+  });
+});
+
+/**
  * The backstop as generation drives it: one re-ask, never two, and never worse
  * than the answer it already had
  * (stories/codebehind-selector-ambiguity.md, "The static backstop").

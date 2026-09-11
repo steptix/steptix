@@ -327,6 +327,10 @@ steps, as steps 17 and 18 of the shipped `verify-assertions.md` do. A second
 step gets a fresh snapshot after the model's think time, whereas a single step
 would have to choose a polling assertion.
 
+A check that should report in your words rather than the framework's takes the
+`otherwise fail the test with message "…"` tail from §3.7. The model still does
+the same comparison; only the sentence on the failure changes.
+
 ### 3.4 Watching for a state
 
 A step that begins `When prompted …` or `When asked …`, or that begins `If …`
@@ -473,9 +477,10 @@ input step before the `If`. Inside a tail's section body it is fine.
 
 #### `then return` is not a tail
 
-One `If … then …` line is **not** a decision: the one whose tail is `return` or
-`stop` — bare, or with one of the six endings §3.6 lists, so `then stop running
-the remaining steps` counts too. The same goes for a line opening `When`.
+Some `If … then …` lines are **not** decisions: the ones whose tail is `return`
+or `stop` — bare, or with one of the six endings §3.6 lists, so `then stop
+running the remaining steps` counts too — and the one whose tail is `fail the
+test with error "…"` (§3.7). The same goes for a line opening `When`.
 `If the page title contains "Dashboard" then return`
 is a flow-control step and is read as one everywhere — by the parser, the
 runner, the compiler and the editor — because two grammars claiming one line
@@ -648,7 +653,182 @@ The details:
   tail is the prose "retun" — the tail fails loudly rather than the return
   quietly not happening, which is the direction to be wrong in.
 
-### 3.7 What does not exist
+### 3.7 Failing in your own words, and failing without stopping
+
+A failure normally says what the framework found, and it always stops the run.
+Three forms change that: two put your sentence on the failure, and the third
+lets a failure pass through.
+
+**Fail on a condition.** `fail` is the third verb of §3.6's grammar. The model
+judges the condition against the live page the way it judges an `If … then
+return`, and when it holds the step fails with your words.
+
+```markdown
+3. If {{a}} is "peanuts" then fail the test with error "The variable value was peanuts. Expected apples"
+```
+
+When the condition does not hold, nothing happens and the next step runs. When
+it does, the run stops as it does on any failure, and the error on the row, in
+the run log, in the TestBench hover and in the MCP summary is *The variable
+value was peanuts. Expected apples* — not the framework's account of what it
+compared.
+
+**Rename a failure.** Any ordinary step takes an `otherwise fail … with message
+"…"` tail, which renames the failure that step would have reported anyway.
+
+```markdown
+4. Verify the title contains "Account details" otherwise fail the test with message "Page did not contain account details"
+```
+
+That is an ordinary `Verify` with the ordinary retry policy. If it still fails,
+the error becomes *Page did not contain account details* and what the model
+actually compared moves into the row's explanation and the run log, where a
+reader debugging the page can still find it. If the step passes, the tail did
+nothing.
+
+**Let a failure through.** `otherwise continue` tolerates a failure and the run
+carries on with the next step.
+
+```markdown
+5. Dismiss the promo banner otherwise continue
+6. Verify the footer shows the build number otherwise continue with warning "Footer build number missing"
+```
+
+The step runs as itself, with its usual retries. If it fails, the row says so —
+amber rather than red — and the next step runs. A warning you wrote leads: it is
+the first line of the TestBench hover, it opens the run log's `⚠ step 6 failed —
+continuing:` line with the framework's own error bracketed after it, and it
+reaches an MCP agent on the step's row. What actually went wrong is never
+dropped; your sentence just goes first, because it is the one that says the
+failure was expected. The run's status is not affected by it: a run whose only
+failures were tolerated passes, and the header counts them apart, *7 passed, 1
+tolerated*. Nothing that did not do its work is painted green; the row is a
+failure you chose not to stop on.
+
+**Fail with no condition at all.** A line that is nothing but the tail fails the
+run where it stands, and costs no model call — the same exemption `Return` has.
+It reads best as the last member of a decision (§3.5), and works on its own
+inside a section body:
+
+```markdown
+5. If the balance is shown, then Check the balance
+6. Otherwise fail the test with error "No balance was shown"
+```
+
+The grammar, reduced to what you have to know to write it:
+
+- The optional words are `the` / `this` and `test` / `run`, so `fail`, `fail the
+  test` and `fail this run` are one instruction written three ways. The message
+  is introduced by `with error`, `with message`, `with reason` or a bare `with`,
+  and either `"…"` or `'…'` quotes it. A message may hold the other kind of
+  quote, never its own, and an unclosed quote makes the whole line prose.
+- The condition is joined to `fail` by a comma, by `then`, or by `and`. It may
+  also be joined by nothing but a space, and then the tail has to say more than
+  the bare verb — `fail the test`, or `fail with error "…"`, or both: `If {{a}}
+  is "peanuts" fail the test with error "…"` parses, `If {{a}} is "peanuts"
+  fail` does not. That bare space is accepted for `fail` only, and only in
+  front of such a tail, because a tail that long is not something a condition
+  says by accident — where `If the page shows Save return` is, and so is `When
+  I submit with bad data, the save should fail`, which is an expectation about
+  the page rather than an instruction to end the run. Write the joiner and it
+  is an instruction: `When I submit with bad data, then fail the test`.
+- `otherwise` has to sit **between a body and an outcome** on one line. `or
+  else` and `if it fails` are the same word; `carry on` and `keep going` are
+  `continue`; `warn "…"` is `continue with warning "…"`. A message-less
+  `otherwise fail` is legal and changes nothing — it is accepted so that
+  `otherwise fail` and `otherwise fail the test with message "…"` are one
+  grammar rather than two.
+- `Otherwise …` at the **start** of a line is the decision's else from §3.5, not
+  this. The two never collide: a tail needs a body in front of it on the same
+  line, and a chain member has none.
+- A tail followed by more prose is not a tail. `Verify the total otherwise
+  continue to the next page` stays one ordinary step, and `Verify the total then
+  fail the test` is prose — only a line opening `If` or `When`, or a line that is
+  nothing but the tail, fails on a condition.
+
+The details:
+
+- A deliberate failure is not retried. You asked for it, and a retry would hand
+  the model *this failed, try something else*, which is the one nudge that could
+  turn a deliberate failure into a false pass. The CLI's AI failure diagnosis is
+  skipped for the same reason: you have already written the cause, and a
+  guessed paragraph above your sentence would only argue with it. Nothing
+  presents it as a malfunction either — including a *compiled* one, which
+  reaches the client out of the entry that `aiui compile` wrote and would
+  otherwise be reported as broken code rather than as the line doing what it
+  says.
+- The model never sees an `otherwise` tail. It is handed the body and nothing
+  else, so a model cannot reason "this step is optional" and answer *nothing to
+  do*, or judge the check itself and fail it early. Everything else — the
+  report's instruction line, the console line, the run log — shows the line you
+  wrote. A `fail` **condition** is different: the model reads that whole line,
+  because judging the condition is the job.
+- The message is interpolated and masked. A `{{name}}` inside a message gets the
+  same substitution every other part of the line gets — in a `fail` condition's
+  `with error "…"` and in an `otherwise` tail's message alike — and a
+  secret-looking value is masked on its way to the report, the wire and the log,
+  so a `{{password}}` in a message cannot leak through it. Write no message and
+  the framework words the error itself. (One corner: a value that itself
+  contains the `"` that closes your message leaves a line that no longer parses,
+  and the message then arrives as you typed it, placeholder and all.)
+- A tolerated step is amber, never green, and counted on its own. It keeps
+  `status: failed` in the report and on the wire — it did not do what it said —
+  with a flag beside it saying the run continued, and the pass and fail counts
+  both leave it out. Your warning travels beside that flag as a field of its
+  own, so every client can lead with it; the framework's error stays where it
+  was, under it.
+- A tolerated step inside a loop keeps looping. `While`, `Repeat … until`, `For
+  each` and a looped section all ask their next question as if the pass had
+  finished, because it did. (This is not a `Continue` statement: it tolerates
+  *this step's* failure, it does not skip to the next pass — §3.8.)
+- A hook may `fail`, though it still may not `return`. A hook can already fail
+  the run, so the verb adds a message and not a power; there is still no flow
+  inside a hook to leave. A tolerated failure in a hook step does not abort the
+  run either.
+- A tail is read on prose steps only, and the four lines that do not take one
+  each say so differently:
+  - A `[tool: …]` or `[skill: …]` step is **refused by name** when you write a
+    tail on it — *a [tool:] step does not take an "otherwise" tail* — because
+    both have a grammar of their own that the tail is not threaded through, and
+    a tail that was parsed and then ignored is worse than a refusal. For a
+    skill, put the tail on a step inside the skill. For a tool there is nowhere
+    to put it — wrapping the call in a section does not help, because the
+    wrapper is matched by the exact text of the calling line and a tail on that
+    line stops it calling the section (the `### Section` bullet below) — so write
+    the check as a step after the call, or make the tool tolerate the failure
+    itself.
+  - A `Set {{name}} to "…"` step is refused too, and by the `Set` parser rather
+    than by anything to do with tails: the line is a malformed `Set`, and the
+    message names what is wrong with it — which of the parser's sentences you
+    get depends on the tail you wrote. On the raw Sessions API path, where no
+    parse-time validator runs, the line is simply not a `Set` — it is handed to
+    a model as prose, with the tail applied to whatever the model makes of it,
+    exactly as any other malformed `Set` is.
+  - A `### Section` call is not refused, and this is the one to watch: writing
+    `Sign in otherwise continue` under a `### Sign in` heading no longer matches
+    that section at all, because a section call is matched by the **exact text**
+    of the line. So the step stops calling the section and becomes an ordinary
+    prose step — with a tail on it — handed to a model. Write the tail on a step
+    *inside* the section instead.
+- A line that asks for two endings at once — `If x then return otherwise
+  continue` — is refused by name rather than resolved, at parse and again at
+  run time on the raw API path.
+- Both forms compile. `aiui compile` writes `step.fail('The variable value was
+  peanuts. Expected apples')` for the conditional `fail`, and passes your
+  message straight into the entry's `step.expect(…, 'Page did not contain
+  account details')` for an `otherwise fail … with message` tail, so a replay
+  fails in your words for no tokens. An `otherwise continue` tail compiles as
+  its body; tolerating the failure is the runner's business, not the code's.
+  The unconditional `Fail …` is never compiled, as `Return` is not — it already
+  costs nothing.
+
+`otherwise continue` is for a step that may legitimately fail. It is not the
+way to express a step that should only sometimes run: for that, ask the
+question — `If the promo banner is visible, then Dismiss the promo banner`
+(§3.5), or the watch form of §3.4 — so the report says the step did not apply
+rather than that it failed and was forgiven.
+
+### 3.8 What does not exist
 
 - No selector language in prose beyond what the model infers. A test id can
   be mentioned when you know it exists.
@@ -657,10 +837,18 @@ The details:
   anything from a value is a tool's job.
 - No `Break`, no `Continue`, no pass counter readable as a variable, and no
   collecting captures across the passes of a loop. A body that must differ per
-  pass reads the difference off the page or takes it from `For each`.
+  pass reads the difference off the page or takes it from `For each`. (The
+  `otherwise continue` of §3.7 is not a loop `Continue`: it tolerates one
+  step's failure, and the pass it is in runs on to its end.)
 - No way to return from an outer flow by name, and no way to end the whole
-  test from inside a section — a `return` leaves the innermost flow it is in
-  (§3.6), and an iteration of a loop counts as one of those.
+  test from inside a section **as a pass** — a `return` leaves the innermost
+  flow it is in (§3.6), and an iteration of a loop counts as one of those. A
+  `fail` (§3.7) does end the run from wherever it is written, but as a failure,
+  which is the asymmetry: stopping early because the work is done is a local
+  decision, and stopping early because the work is wrong is not.
+- No run-level "keep going after every failure" mode. `otherwise continue`
+  tolerates the one step it is written on, and says so on that line; there is
+  no switch that turns the whole run into a survey of everything that broke.
 - No implicit variables. `baseUrl` from `## Config` is available to `[tool:]`
   arguments as a convenience, but `{{baseUrl}}` in a prose step is just the
   model reading the test information block.
@@ -1401,7 +1589,7 @@ report's skipped steps and warnings, not just the summary.
 | `## Steps (login)` | `## Steps` | Any other heading yields no steps. |
 | `Wait for .spinner:hidden` | `Wait until the spinner disappears` | State belongs in words, not selectors. |
 | A section body's steps before the main flow ends | Main flow first, then `###` headings | Everything after the first `###` belongs to a section. |
-| `If we are signed in then skip ahead` | `If we are signed in then return` | Only `return` / `stop` (and the six endings §3.6 lists) end a flow. Anything else after ` then ` is a decision, and a tail that names no `### Section` and no `[skill:]` is prose, so "skip ahead" is handed to a model as an instruction — the same way `then retun` is (§3.6). |
+| `If we are signed in then skip ahead` | `If we are signed in then return` | Only `return` / `stop` (and the six endings §3.6 lists) end a flow, and only `fail …` (§3.7) ends the run in your own words. Anything else after ` then ` is a decision, and a tail that names no `### Section` and no `[skill:]` is prose, so "skip ahead" is handed to a model as an instruction — the same way `then retun` is (§3.6). |
 | `beforeEach: If already signed in then return` | Put the line in `## Steps` | A hook has no flow to leave; the file is refused at parse. |
 
 ## 12. Checklist before handing a test over
@@ -1434,6 +1622,7 @@ report's skipped steps and warnings, not just the summary.
 | Action execution, waits, reads, uploads | [actions.ts](../src/browser/actions.ts), [step-executor.ts](../src/runner/step-executor.ts), [upload-paths.ts](../src/browser/upload-paths.ts) |
 | Watches, decisions, loops and hooks | [step-grouper.ts](../src/runner/step-grouper.ts), [control-line.ts](../src/parser/control-line.ts), [control-flow.ts](../src/runner/control-flow.ts), [hooks.ts](../src/runner/hooks.ts), [test-runner.ts](../src/runner/test-runner.ts) |
 | `return` / `stop`, and which steps a return skips | [flow-control-step.ts](../src/parser/flow-control-step.ts), [flow-control.ts](../src/runner/flow-control.ts), [control-flow.ts](../src/runner/control-flow.ts) (`returnExit`), [test-runner.ts](../src/runner/test-runner.ts) |
+| `fail`, and the `otherwise` tails | [flow-control-step.ts](../src/parser/flow-control-step.ts) (the `fail` verb and its message), [failure-tail.ts](../src/parser/failure-tail.ts), [step-executor.ts](../src/runner/step-executor.ts) |
 | Skill files, calls, expansion | [expander.ts](../src/skills/expander.ts), [invocation-parser.ts](../src/parser/invocation-parser.ts) |
 | Tools | [types.ts](../src/tools/types.ts), [define-tool.ts](../src/tools/define-tool.ts), [tool-helper.ts](../src/tools/tool-helper.ts), [registry.ts](../src/tools/registry.ts), [executor.ts](../src/tools/executor.ts), working examples in [fixtures/tools/src](../fixtures/tools/src) |
 | Tab and browser tracking | [manager.ts](../src/browser/manager.ts), [step-executor.ts](../src/runner/step-executor.ts), [tabs.ts](../src/codebehind/tabs.ts) |

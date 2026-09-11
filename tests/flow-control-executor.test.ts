@@ -1,6 +1,8 @@
 /**
  * The executor half of `If … then return` (stories/step-flow-control.md,
- * decisions 2 and 6).
+ * decisions 2 and 6) — and of its third verb, `If … then fail the test with
+ * error "…"` (stories/step-failure-outcomes.md, decisions 1–3), which rides
+ * the same claim through the same seam and ends the run instead of the flow.
  *
  * Two claims, and the second is the one the whole design rests on: a `return`
  * action is honoured ONLY on a step whose authored text claims the form. On any
@@ -86,7 +88,13 @@ vi.mock('../src/browser/page-state.js', () => ({
   },
 }));
 
-import { executeBranchedStep, executeStep, RETURN_NOT_CLAIMED } from '../src/runner/step-executor.js';
+import {
+  executeBranchedStep,
+  executeStep,
+  FAIL_NOT_CLAIMED,
+  RETURN_NOT_CLAIMED,
+} from '../src/runner/step-executor.js';
+import { buildStepCodePrompt, contentBlocksToText } from '../src/ai/prompts.js';
 
 function fakePage(): Page {
   return {
@@ -139,10 +147,18 @@ async function runStep(
     stepCache?: StepCache;
     cacheEnabled?: boolean;
     adHocResults?: StepResult[];
+    /** The run's parameter map — `runSecrets` reads the SECRET-NAMED values out
+     *  of it, and those are what a composed error must come back without. */
+    parameters?: Record<string, string>;
+    /** The line as WRITTEN when it differs from the interpolated `instruction`,
+     *  as every loop hands it over for a `{{placeholder}}` step. The claim is
+     *  computed from THIS, as the loops compute it. Defaults to `instruction`. */
+    authored?: string;
   } = {},
 ) {
   const client = scriptedClient(responses);
-  const claim = opts.claim ? parseFlowControlStep(instruction) : null;
+  const authored = opts.authored ?? instruction;
+  const claim = opts.claim ? parseFlowControlStep(authored) : null;
   const result = await executeStep(
     1,
     3,
@@ -155,13 +171,13 @@ async function runStep(
       testName: 'flow control',
       conversationHistory: [],
       csrfTokens: {},
-      resolvedParameters: {},
+      resolvedParameters: opts.parameters ?? {},
       testSteps: [instruction],
       ...(claim && { flowControlClaim: claim }),
       ...(opts.stepCache && { stepCache: opts.stepCache }),
       ...(opts.cacheEnabled !== undefined && { cacheEnabled: opts.cacheEnabled }),
     },
-    instruction,
+    authored,
   ).catch((err: unknown) => err as Error);
   return { result, client };
 }
@@ -604,5 +620,227 @@ describe('the claim belongs to one line and does not travel', () => {
     expect(continuation.flowControl).toBeUndefined();
     expect(continuation.status).not.toBe('passed');
     expect(String(continuation.error ?? '')).toContain(RETURN_NOT_CLAIMED);
+  });
+});
+
+// ── The `fail` verb ─────────────────────────────────────────────────────────
+
+/** Retries ON, which for a deliberate failure is the interesting setting. */
+const RETRY_CONFIG: Config = { ...CONFIG, execution: { ...CONFIG.execution, retries: 1 } };
+
+/** The `fail` sub-action's own copy of the composed error. */
+function failSubError(result: StepResult): string | undefined {
+  return result.turns.flatMap((t) => t.subActions).find((s) => s.action.action === 'fail')?.error;
+}
+
+const FAIL_LINE =
+  'If {{a}} is "peanuts" then fail the test with error ' +
+  '"The variable value was peanuts. Expected apples"';
+
+describe('a step that claims the `fail` verb', () => {
+  const line = FAIL_LINE;
+
+  it('fails with the author\'s message, marks it deliberate, and spends ONE attempt', async () => {
+    // Retries are ALLOWED here and none is spent (decision 2): a retry would
+    // hand the model "this failed, try something else".
+    const { result, client } = await runStep(
+      line,
+      [
+        plan([{ action: 'fail', description: 'the value reads peanuts' }]),
+        plan([{ action: 'noop', description: 'a second attempt that must not happen' }]),
+      ],
+      { claim: true, config: RETRY_CONFIG },
+    );
+
+    const failed = result as StepResult;
+    expect(failed.status).toBe('failed');
+    expect(failed.error).toBe('The variable value was peanuts. Expected apples');
+    expect(failed.deliberate).toBe(true);
+    // The explanation is about the CONDITION, not a framework diagnostic.
+    expect(failed.aiExplanation).toContain('the value reads peanuts');
+    expect(failed.aiExplanation).not.toContain('Failed to execute step');
+    expect(client.requests).toHaveLength(1);
+    expect(failed.retried).toBe(false);
+    // A `fail` reaches the page with nothing, exactly as a `return` does.
+    expect(actions.received).toHaveLength(0);
+    // ONE recorded turn: `withRetry` hands a failure it declines to retry to
+    // `onFailure` as well as throwing it, and the catch used to merge that
+    // attempt's turns a second time, so the report showed the whole turn twice.
+    expect(failed.turns).toHaveLength(1);
+    const subs = failed.turns.flatMap((t) => t.subActions);
+    expect(subs.some((s) => s.action.action === 'fail')).toBe(true);
+    expect(failSubError(failed)).toBe('The variable value was peanuts. Expected apples');
+  });
+
+  // How the error is WORDED, for every shape of message (decisions 2 and 3).
+  // The claim is read off the AUTHORED line — it must answer the same on every
+  // run — so the message has to be re-read off the INTERPOLATED one, which is
+  // where the values are, and masked at that same one seam.
+  it.each<[string, { instruction: string; description: string; authored?: string;
+    parameters?: Record<string, string>; explanation?: string; explanationExcludes?: string }, string]>([
+    [
+      'no message named: the model`s description words it',
+      { instruction: 'If {{a}} is "peanuts" then fail the test', description: 'the value reads peanuts' },
+      'Failed by the step: the value reads peanuts',
+    ],
+    [
+      'no message and no description: a fixed phrase, and an explanation without an empty parenthesis',
+      { instruction: 'If {{a}} is "peanuts" then fail the test', description: '',
+        explanation: 'The step\'s condition held and the step says to fail the test.' },
+      'Failed by the step: the condition held',
+    ],
+    [
+      '`{{placeholder}}` in the message: resolved off the interpolated line, not off the claim',
+      { instruction: 'If 7 is wrong then fail the test with error "Expected 10, got 7"',
+        description: 'the total reads 7',
+        authored: 'If {{total}} is wrong then fail the test with error "Expected 10, got {{total}}"' },
+      'Expected 10, got 7',
+    ],
+    [
+      'a resolved value that turned out to be a secret: masked',
+      { instruction: 'If the sign-in failed then fail the test with error "Sign-in refused hunter2"',
+        description: 'the form still shows an error',
+        parameters: { password: 'hunter2' },
+        authored: 'If the sign-in failed then fail the test with error "Sign-in refused {{password}}"' },
+      'Sign-in refused ***',
+    ],
+    [
+      // A value carrying the quote that ends the message leaves the interpolated
+      // line no longer a `fail` at all; the authored words beat none.
+      'a value that broke the re-parse: back to the authored message',
+      { instruction: 'If a "quoted" value is wrong then fail the test with error '
+          + '"Expected 10, got a "quoted" value"',
+        description: 'the total is quoted',
+        authored: 'If {{total}} is wrong then fail the test with error "Expected 10, got {{total}}"' },
+      'Expected 10, got {{total}}',
+    ],
+    [
+      'a secret the author put in the message: masked once, where the error is composed',
+      { instruction: 'If the sign-in failed then fail the test with error '
+          + '"Sign-in refused hunter2 for the demo account"',
+        description: 'the form still shows an error',
+        parameters: { password: 'hunter2' } },
+      'Sign-in refused *** for the demo account',
+    ],
+    [
+      // The explanation is built from the description, so masking the message
+      // alone would leave the hole open one field along.
+      'a secret the MODEL echoed into its description: masked there too',
+      { instruction: 'If the sign-in failed then fail the test',
+        description: 'the field still holds hunter2',
+        parameters: { password: 'hunter2' }, explanationExcludes: 'hunter2' },
+      'Failed by the step: the field still holds ***',
+    ],
+  ])('composes the error — %s', async (_label, spec, expected) => {
+    const { result } = await runStep(
+      spec.instruction,
+      [plan([{ action: 'fail', description: spec.description }])],
+      {
+        claim: true,
+        ...(spec.authored && { authored: spec.authored }),
+        ...(spec.parameters && { parameters: spec.parameters }),
+      },
+    );
+    const failed = result as StepResult;
+    expect(failed.error).toBe(expected);
+    expect(failed.deliberate).toBe(true);
+    // The sub-action carries the same composed string into the report's
+    // execution-order list.
+    expect(failSubError(failed)).toBe(expected);
+    if (spec.explanation) expect(failed.aiExplanation).toBe(spec.explanation);
+    if (spec.explanationExcludes) {
+      expect(failed.aiExplanation ?? '').not.toContain(spec.explanationExcludes);
+    }
+  });
+
+  it('does nothing at all when the condition does not hold', async () => {
+    const { result } = await runStep(
+      line,
+      [plan([{ action: 'noop', description: 'the value reads apples' }])],
+      { claim: true },
+    );
+    expect((result as StepResult).status).toBe('passed');
+    expect((result as StepResult).deliberate).toBeUndefined();
+  });
+
+  it('pays the settle gate before judging, exactly as a return does', async () => {
+    await runStep(line, [plan([{ action: 'noop', description: 'not yet' }])], { claim: true });
+    expect(settles.calls).toEqual([{ timeoutMs: 10_000, quiesceMs: 1000 }]);
+  });
+});
+
+// ── The guard, for the third verb ───────────────────────────────────────────
+
+describe('a `fail` action on a step that did not ask for one', () => {
+  it('is refused on an ordinary step, and the model is told why on the next attempt', async () => {
+    const { result, client } = await runStep(
+      'Click the details link',
+      [
+        plan([{ action: 'fail', description: 'I do not like this page' }]),
+        plan([{ action: 'click', selector: '#details', description: 'Click details' }]),
+      ],
+      { config: RETRY_CONFIG },
+    );
+
+    // Retryable, so the step recovers — and the refusal reached the model.
+    expect((result as StepResult).status).toBe('passed');
+    expect((result as StepResult).deliberate).toBeUndefined();
+    expect(actions.received.map((a) => a.selector)).toEqual(['#details']);
+    const secondAttempt = client.requests[1]!
+      .map((m) => (typeof m.content === 'string' ? m.content : m.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n')))
+      .join('\n');
+    expect(secondAttempt).toContain('this step does not say to fail');
+  });
+
+  // The verbs are not interchangeable, which a bare truth test on the claim
+  // would let through: `return` ends the flow as a pass, `fail` ends the run as
+  // a failure, so a swap could fail a run the author only asked to leave early.
+  it.each([
+    ['a `fail` on a step claiming RETURN', 'If the page title contains "Dashboard" then return',
+      'fail' as const, FAIL_NOT_CLAIMED],
+    ['a `return` on a step claiming FAIL',
+      'If {{a}} is "peanuts" then fail the test with error "not apples"',
+      'return' as const, RETURN_NOT_CLAIMED],
+  ])('refuses %s', async (_label, line, action, refusal) => {
+    const { result } = await runStep(line, [plan([{ action, description: 'the claim held' }])], {
+      claim: true,
+    });
+    const failed = result as StepResult;
+    expect(failed.status).toBe('failed');
+    expect(failed.deliberate).toBeUndefined();
+    expect(failed.flowControl).toBeUndefined();
+    expect(String(failed.error)).toContain(refusal);
+  });
+});
+
+// ── The generator prompt, for the third verb ────────────────────────────────
+
+describe('the generation prompt for a `fail`-claiming step', () => {
+  const promptText = (rawStepText: string, actions: AIAction[]) =>
+    contentBlocksToText(buildStepCodePrompt({ rawStepText, parameters: [], actions }).content);
+
+  it('offers `step.fail` and states the rule — and offers `step.exit` to nobody here', () => {
+    // The two verbs are swapped, not stacked (decision 10).
+    const text = promptText(FAIL_LINE, [{ action: 'fail', description: 'the value reads peanuts' }]);
+    expect(text).toContain('`step.fail(message)`');
+    expect(text).toContain('deliberate-failure step');
+    // The message is the author's, and paraphrasing it is the failure mode.
+    expect(text).toContain('VERBATIM');
+    expect(text).toContain("step.getVar('name')");
+    // Same trap as the return rule: a recording shows one branch, the entry
+    // has to carry both.
+    expect(text).toContain('a `noop` means it did NOT');
+    expect(text).toContain('needs NO post-condition');
+    expect(text).not.toContain('step.exit');
+    expect(text).not.toContain('flow-control step');
+  });
+
+  it('leaves an ordinary step`s prompt with neither verb in it', () => {
+    const text = promptText('Check that the balance is not peanuts', [
+      { action: 'read', selector: '#balance' },
+    ]);
+    expect(text).not.toContain('step.fail');
+    expect(text).not.toContain('deliberate-failure step');
+    expect(text).toContain('End with a post-condition');
   });
 });

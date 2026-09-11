@@ -20,10 +20,18 @@ import { captureScreenshot } from '../browser/screenshot.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
-import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
 import {
+  failureTailContradictionError,
+  isFailureTailContradiction,
+  parseFailureTail,
+} from '../parser/failure-tail.js';
+import {
+  deliberateFailError,
+  deliberateFailResult,
   flowControlExplanation,
   skippedByReturnReason,
+  toleratedLogLine,
 } from '../runner/flow-control.js';
 import { runSetStep } from '../runner/set-step-runner.js';
 import { redact, runSecrets } from '../utils/secrets.js';
@@ -685,6 +693,15 @@ export class ErrandRunner {
       const flowControlClaim = setStep ? null : parseFlowControlStep(originalStep);
       const unconditionalFlowControl =
         flowControlClaim && flowControlClaim.body === undefined ? flowControlClaim : null;
+      // The `… otherwise fail …` / `… otherwise continue` tail, off the same
+      // AUTHORED step (stories/step-failure-outcomes.md, decision 12). An errand is
+      // a flat list of prose steps, so the only exclusions here are a `Set` and a
+      // claim, both of which have grammars of their own.
+      const failureTail = setStep || flowControlClaim ? null : parseFailureTail(originalStep);
+      // Decision 8's backstop on the third path with no parse-time validator
+      // in front of it: an errand's steps come straight off an MCP call.
+      const failureTailContradiction =
+        setStep || flowControlClaim ? false : isFailureTailContradiction(originalStep);
       let interpolated: string;
       try {
         // Not evaluated for a Set step — `interpolateEnvData` throws on an
@@ -748,7 +765,44 @@ export class ErrandRunner {
       // it reports a capture. Emitted here rather than there so the `source`
       // can say `assignment`.
       let setAssigned: { name: string; value: string } | undefined;
-      if (unconditionalFlowControl) {
+      if (failureTailContradiction) {
+        // Decision 8, refused rather than resolved and with no model call: the
+        // line asks to both end the flow and to tolerate its own failure. The
+        // same sentence the validator and the session manager use.
+        const error = failureTailContradictionError(originalStep);
+        logger.error(`Errand ${errandId} step ${line}: ${error}`);
+        stepResult = {
+          index: line,
+          instruction,
+          status: 'failed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          error,
+          aiExplanation: error,
+        };
+      } else if (unconditionalFlowControl && unconditionalFlowControl.verb === 'fail') {
+        // `Fail the test with error "…"` as a whole step: no condition, so no model
+        // call and no page read — which is why, like `Set` and `Return`, it sits
+        // outside the try/finally (decisions 1 and 3).
+        stepResult = deliberateFailResult(
+          line,
+          instruction,
+          redact(
+            deliberateFailError(unconditionalFlowControl, interpolated),
+            runSecrets({ parameters: scope, envData: args.envDataCtx }),
+          ),
+        );
+        if (args.runConfig.execution.screenshotOnFailure) {
+          try {
+            const shot = await captureScreenshot(active.pageTracker.getActive());
+            if (shot?.base64) stepResult.screenshotBase64 = shot.base64;
+          } catch {
+            // A missing screenshot must not turn the author's failure into an
+            // errand error.
+          }
+        }
+      } else if (unconditionalFlowControl) {
         // `Return` / `Stop` as a whole step: no condition, so no model call, no
         // page read, nothing to reclaim — which is why, like `Set`, it sits
         // outside the try/finally (decision 3). The label is null because an
@@ -761,7 +815,11 @@ export class ErrandRunner {
           durationMs: 0,
           retried: false,
           aiExplanation: flowControlExplanation(null),
-          flowControl: { kind: 'return', verb: unconditionalFlowControl.verb },
+          // `isReturnClaim` narrows the union: a `flowControl` record means the step
+          // ended the flow as a PASS, which a `fail` claim never does (decision 1).
+          ...(isReturnClaim(unconditionalFlowControl) && {
+            flowControl: { kind: 'return' as const, verb: unconditionalFlowControl.verb },
+          }),
         };
       } else if (setStep) {
         // Assignment: no model, no page, no tabs to reclaim — which is why
@@ -807,7 +865,12 @@ export class ErrandRunner {
             // The CONDITIONAL form only — the unconditional one took its own
             // branch above. Present, the model's `return` action ends the step;
             // absent, it is refused and the model is told why (decision 2).
+            // Since stories/step-failure-outcomes.md decision 1 the same field
+            // carries a conditional `fail` claim.
             ...(flowControlClaim && { flowControlClaim }),
+            // This step's `… otherwise …` tail, applied at one seam over a step
+            // that has finally failed (decision 4).
+            ...(failureTail && { failureTail }),
             ...(signal && { signal }),
           },
           // The step as the caller wrote it, `{{}}` and `${}` intact — the model
@@ -898,6 +961,12 @@ export class ErrandRunner {
         screenshot: screenshotValue,
         reasoning: stepResult.aiExplanation ?? '',
         outputs: stepOutputs,
+        // `status` stays `'failed'` — the step did not do what it said — so this flag
+        // is how a receipt reader tells a failure the author chose not to stop on
+        // from one that ended the errand (decision 9).
+        ...(stepResult.tolerated && { tolerated: true }),
+        // The author's own words beside the framework's, on the same terms.
+        ...(stepResult.warning !== undefined && { warning: stepResult.warning }),
       });
 
       let currentUrl = '';
@@ -956,6 +1025,29 @@ export class ErrandRunner {
           }
           break;
         }
+      } else if (stepResult.tolerated) {
+        // `otherwise continue` (stories/step-failure-outcomes.md, decision 6). No
+        // `outcome.status`, no `outcome.error`, and above all no `break`. Still a
+        // `step:fail` with the flag beside it, so a client that does not know the
+        // flag paints ✗ as it always did (decision 9).
+        logger.warn(toleratedLogLine(line, stepResult.error));
+        emit({
+          type: 'step:fail',
+          line,
+          error: stepResult.error ?? 'Step failed',
+          tolerated: true,
+          // The flags compose: a `step.fail()` inside the entry of a step carrying
+          // `otherwise continue` is deliberate AND tolerated, and a client told only
+          // the second word frames the author's sentence as a code-behind defect.
+          ...(stepResult.deliberate && { deliberate: true }),
+          // The author's sentence: the explanation does not travel on this event.
+          ...(stepResult.warning !== undefined && { warning: stepResult.warning }),
+          ...(screenshotValue && { screenshot: screenshotValue }),
+          ...tabAfterStep,
+        });
+        // It executed, so it counts — the same rule the session manager's
+        // `stepsCompleted` follows.
+        outcome.stepsCompleted++;
       } else {
         outcome.status = 'failed';
         outcome.error = { step: line, message: stepResult.error ?? 'Step failed' };
@@ -964,6 +1056,9 @@ export class ErrandRunner {
           type: 'step:fail',
           line,
           error: stepResult.error ?? 'Step failed',
+          // The author wrote this failure and its message (decision 2), so the
+          // client words it as "failed as written".
+          ...(stepResult.deliberate && { deliberate: true }),
           ...(screenshotValue && { screenshot: screenshotValue }),
           ...tabAfterStep,
         });

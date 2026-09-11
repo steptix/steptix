@@ -38,10 +38,15 @@ export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
   // A repair must not "fix" a flow-control entry by giving it the
   // post-condition rule 5 asks for (stories/step-flow-control.md, decision 11).
   // Gated on the claim, so an ordinary step's repair prompt is unchanged.
+  //
+  // The `fail` verb takes the same carve-out (stories/step-failure-outcomes.md,
+  // decision 10): `step.fail` throws exactly as `step.exit` does, so a
+  // post-condition bolted on would assert over a line that never runs.
   const flowControl = parseFlowControlStep(input.rawStepText);
+  const call = flowControl?.verb === 'fail' ? 'step.fail(<the authored message>)' : 'step.exit()';
   const postConditionRule = flowControl
-    ? '5. This step is a flow-control step: it evaluates its condition and calls `step.exit()` when ' +
-      'it holds, and does nothing when it does not. It needs NO post-condition — `step.exit()` throws, ' +
+    ? `5. This step is a flow-control step: it evaluates its condition and calls \`${call}\` when ` +
+      'it holds, and does nothing when it does not. It needs NO post-condition — that call throws, ' +
       'so there is nothing after it to assert on. Do not add one; fix the condition or the read it is ' +
       'built from.'
     : '5. End with a post-condition — a `locator.waitFor()` on what the step produced, or a `step.expect(...)` over a value read back from the page.';

@@ -66,13 +66,22 @@ import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { runSetStep } from '../runner/set-step-runner.js';
-import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
 import {
+  failureTailContradictionError,
+  isFailureTailContradiction,
+  parseFailureTail,
+} from '../parser/failure-tail.js';
+import {
+  deliberateFailError,
+  deliberateFailResult,
   flowControlExplanation,
   frameExitIndex,
   frameLabel,
   skippedByReturn,
   skippedByReturnReason,
+  toleratedHistoryLine,
+  toleratedLogLine,
 } from '../runner/flow-control.js';
 import {
   envDataSecretValues,
@@ -642,6 +651,33 @@ export type RunEvent =
       screenshot?: string;
       frame?: FrameInfo;
       tab?: TabInfo;
+      /**
+       * The step failed and the run CARRIED ON past it — the `otherwise
+       * continue` tail (stories/step-failure-outcomes.md, decisions 6 and 9).
+       *
+       * Additive, and the safe direction for a client that does not know it: it
+       * paints ✗ as it always did, while one that does knows not to count this
+       * one, not to stop reading, and to paint it amber. Mirrors
+       * `StepFailEvent.tolerated` in runner-core/src/protocol.ts.
+       */
+      tolerated?: boolean;
+      /**
+       * The author's own words for a tolerated failure — the quoted text of
+       * `… otherwise continue with warning "…"`, interpolated and masked. Sent
+       * only with `tolerated`.
+       *
+       * `error` stays the framework's account of what went wrong; this is the
+       * only way the author's sentence reaches a client, since the row's
+       * explanation does not travel on this event. Mirrors
+       * `StepFailEvent.warning`.
+       */
+      warning?: string;
+      /**
+       * The author wrote this failure — the `fail` verb (decision 2). `error`
+       * is their sentence, so the client says "failed as written" rather than
+       * reporting a malfunction, and nothing tries to diagnose it.
+       */
+      deliberate?: boolean;
       /** `error` is the step's own code-behind failing (a `step.expect`, or
        *  the entry throwing under strict replay) — not an AI-run failure. */
       fromCodeBehind?: boolean;
@@ -838,6 +874,28 @@ export interface StepResultResponse {
   screenshot: string;
   reasoning: string;
   outputs: Record<string, string>;
+  /**
+   * True when this row failed and the run continued past it — the `otherwise
+   * continue` tail (stories/step-failure-outcomes.md, decision 9).
+   *
+   * `status` deliberately stays `'failed'`: the step did not do what it said,
+   * and widening the status union would change the meaning of a value every
+   * existing reader already switches on. This flag is how an API reader tells the
+   * two apart; `done.status` already excludes a tolerated failure (decision 6).
+   *
+   * Additive — omitted for every other row.
+   */
+  tolerated?: boolean;
+  /**
+   * The author's warning on a tolerated row — the quoted text of
+   * `… otherwise continue with warning "…"`, interpolated and masked.
+   *
+   * `reasoning` holds the same sentence folded into the step's explanation, but a
+   * reader that wants only the author's words should not have to parse prose to
+   * find them, and every other surface carries the warning as its own field.
+   * Additive, and absent whenever no warning was written.
+   */
+  warning?: string;
 }
 
 export interface StepResponse {
@@ -4556,6 +4614,21 @@ export class SessionManager {
         // absent `body`, never the length of the line.
         const unconditionalFlowControl =
           flowControlClaim && flowControlClaim.body === undefined ? flowControlClaim : null;
+        // The `… otherwise fail …` / `… otherwise continue` tail, off the same
+        // AUTHORED text and for the same reason the claim is
+        // (stories/step-failure-outcomes.md, decision 12). Leaf PROSE steps only:
+        // a `Set` and a flow-control claim have grammars of their own, a `[tool:]`
+        // step takes its own branch below, and a `### Section` / `[skill:]` call
+        // line has already been replaced by its body steps. `originalStep` may
+        // still carry a `[no-hooks]` prefix, which the parser normalises.
+        const failureTail =
+          setStep || flowControlClaim ? null : parseFailureTail(originalStep);
+        // Decision 8's backstop. Steps POSTed straight to the Sessions API pass
+        // no parse-time validator, so this is the only thing standing between
+        // `If x then return otherwise continue` and a line that quietly gets
+        // one of its two halves.
+        const failureTailContradiction =
+          setStep || flowControlClaim ? false : isFailureTailContradiction(originalStep);
         // NOT evaluated for a Set step. `interpolateEnvData` THROWS on an
         // unknown `${…}`, and this loop is `try { … } finally` with no catch,
         // so a bad reference inside a Set template escaped `executeRun`
@@ -4617,6 +4690,60 @@ export class SessionManager {
             error: { step: i + 1, message },
             pageTitle: '',
           };
+        }
+
+        // ── Decision 8's backstop ────────────────────────────────────
+        //
+        // `If x then return otherwise continue` asks to both end the flow and to
+        // tolerate its own failure. Refused rather than resolved, with no model
+        // call: there is nothing to judge about a line that means two things.
+        //
+        // HERE rather than beside the dispatch below, and the position is the
+        // point: the `If …` shape of this contradiction is claimed by the
+        // CONTROL-LINE grammar, so by the loop's dispatch the line has already
+        // been sent to the judge as a decision and its tail queued as a body
+        // step. A backstop downstream would refuse the tail — after spending the
+        // model call the refusal exists to avoid, and naming a fragment.
+        //
+        // A file never gets this far: `validateControlFlow` (parser/markdown.ts)
+        // refuses the same line by name with the same sentence. This is for the
+        // path with no validator — steps POSTed straight to the Sessions API.
+        if (failureTailContradiction) {
+          const error = failureTailContradictionError(originalStep);
+          const frame = frameInfoFor(i);
+          logger.error(`Session "${sessionId}" step ${i + 1}: ${error}`);
+          emit({
+            type: 'step:start',
+            line: sourceLineFor(i),
+            ...(frame && { frame }),
+          });
+          emit({
+            type: 'step:fail',
+            line: sourceLineFor(i),
+            error,
+            ...(frame && { frame }),
+          });
+          results.push({
+            step: originalStep,
+            status: 'failed',
+            actions: [],
+            screenshot: '',
+            reasoning: error,
+            outputs: {},
+          });
+          fullStepResults.push({
+            index: i + 1,
+            instruction: originalStep,
+            status: 'failed',
+            turns: [],
+            durationMs: 0,
+            retried: false,
+            error,
+            aiExplanation: error,
+          });
+          overallStatus = 'failed';
+          errorInfo = { step: i, message: error };
+          break;
         }
 
         // Check if this step is part of a conditional group
@@ -5143,7 +5270,36 @@ export class SessionManager {
               : null;
         let stepResult: StepResult;
         try {
-          if (unconditionalFlowControl) {
+          if (unconditionalFlowControl && unconditionalFlowControl.verb === 'fail') {
+            // `Fail the test with error "…"` as a whole step: no condition, so no
+            // model call and no page snapshot — dispatched beside `Return` and
+            // `Set` (stories/step-failure-outcomes.md, decisions 1 and 3). The
+            // message rode through the interpolation above and is masked here,
+            // where it first becomes what the wire, report and log carry.
+            stepResult = deliberateFailResult(
+              i + 1,
+              interpolated,
+              redact(
+                deliberateFailError(unconditionalFlowControl, interpolated),
+                secretsNow(),
+              ),
+            );
+            // The shot a step that failed under the executor gets, on the same
+            // config switch: a deliberate failure with no screenshot where every
+            // other failure has one reads as a missing capture.
+            if (runConfig.execution.screenshotOnFailure) {
+              try {
+                const shot = await captureScreenshot(
+                  session.browserSession.pageTracker.getActive(),
+                  runConfig.browser.fullPageScreenshots,
+                );
+                if (shot?.base64) stepResult.screenshotBase64 = shot.base64;
+              } catch {
+                // A missing screenshot must not turn the author's failure into
+                // a server error.
+              }
+            }
+          } else if (unconditionalFlowControl) {
             // `Return` / `Stop` as a whole step: nothing to judge, so nothing
             // to ask the model (stories/step-flow-control.md, decision 3). Its
             // explanation is the bare phrase — `Returned from "Sign in"` or
@@ -5158,7 +5314,12 @@ export class SessionManager {
               aiExplanation: flowControlExplanation(
                 frameLabel(expansionOrigins ?? undefined, expandedFrames, i),
               ),
-              flowControl: { kind: 'return', verb: unconditionalFlowControl.verb },
+              // `isReturnClaim` narrows the union: a `flowControl` record means
+              // "ended the flow as a PASS", so a `fail` claim must never produce
+              // one — it took the branch above (decision 1).
+              ...(isReturnClaim(unconditionalFlowControl) && {
+                flowControl: { kind: 'return' as const, verb: unconditionalFlowControl.verb },
+              }),
             };
           } else if (setStep) {
             // Assignment: no model, no page, no cache. The capture event is
@@ -5401,7 +5562,14 @@ export class SessionManager {
                 // the action is refused with RETURN_NOT_CLAIMED and the model
                 // is told why on its next turn (decision 2). It also turns on
                 // the executor's settle gate before the judgement (decision 6).
+                // Since stories/step-failure-outcomes.md decision 1 the same
+                // field carries a conditional `fail` claim, which is what lets
+                // a `fail` action through.
                 ...(flowControlClaim && { flowControlClaim }),
+                // This step's `… otherwise …` tail, read at one seam over a
+                // step that has finally failed (decision 4). Never both: the
+                // tail is null whenever a claim was read off the line.
+                ...(failureTail && { failureTail }),
                 // Run abort signal — cancels in-flight AI calls and stops the
                 // step's turn loop the instant the client stops. See issues/020.
                 ...(signal && { signal }),
@@ -5546,6 +5714,13 @@ export class SessionManager {
           screenshot: screenshotValue,
           reasoning: stepResult.aiExplanation ?? '',
           outputs: stepOutputs,
+          // `status` stays `'failed'` — the step did not do what it said — so this
+          // is how an API reader tells a failure the author chose not to stop on
+          // from one that ended the run (stories/step-failure-outcomes.md,
+          // decision 9). Omitted on every other row.
+          ...(stepResult.tolerated && { tolerated: true }),
+          // The author's own words beside the framework's, on the same terms.
+          ...(stepResult.warning !== undefined && { warning: stepResult.warning }),
         });
         // Report parity with the CLI runner. The CLI tags each step
         // with two things the server must mirror here so the HTML
@@ -5674,6 +5849,15 @@ export class SessionManager {
             `[flow] step ${session.totalStepsExecuted + 1} ` +
               `${stepResult.aiExplanation ?? 'returned'} — ` +
               'the rest of that flow was skipped',
+          );
+        }
+        // The same problem one step on: the entry above says this step failed and
+        // the next says the run carried on regardless, so without this line the
+        // model reads a framework that ignored a failure (decision 6). Numbered
+        // off `totalStepsExecuted` like the entry it explains.
+        if (stepResult.tolerated) {
+          session.conversationHistory.push(
+            toleratedHistoryLine(session.totalStepsExecuted + 1),
           );
         }
 
@@ -5954,85 +6138,54 @@ export class SessionManager {
             // purpose: it counts steps that EXECUTED (decision 9).
             flowControlJumpTo = exit;
           }
-
-          // ── Step-mode pause decision ────────────────────────────────
+        } else if (stepResult.tolerated) {
+          // `otherwise continue` (stories/step-failure-outcomes.md, decision 6).
+          // Everything the failed branch below does must NOT happen here: no
+          // `overallStatus`, no `errorInfo`, and above all no `break` — the next
+          // step runs in the same frame, with the frame still open and
+          // `loops.abandon` uncalled, so a loop body keeps looping.
           //
-          // When the client started this batch with `stepMode !== 'continue'`,
-          // we pause after each step depending on the depth relationship
-          // between the just-executed step and the next one. The yellow ▶
-          // moves to the next step's frame/line on the client; the loop
-          // blocks on `pendingRunControl` until the client sends a new
-          // mode via the `run-control` endpoint.
-          //
-          // `nextI` is the POST-JUMP index (decision 10). After a return the
-          // step that will actually run next is the one after the flow that
-          // ended, and pausing on `i + 1` would park the yellow ▶ on a line
-          // this run has already declared skipped.
-          //
-          // The three ways the run leaves step `i`, and the three answers,
-          // which must be the SAME expression the loop tail below resumes on
-          // or the ▶ lands where the run is not going:
-          //
-          //  - a return inside a control body → `advanceAfter(exit)`, which is
-          //    the loop's guard (backwards!) or the line past the chain. `exit
-          //    + 1` said "the line after the body", which for a chain member
-          //    is the next member's tail — a line the decision has already
-          //    declared skipped, which is the exact failure this comment says
-          //    it is avoiding;
-          //  - a return in the main flow → `exit + 1`, the run ending;
-          //  - no return at all → `advanceAfter(i)`, because an ordinary step
-          //    that closes a loop body sends the run back to the guard too.
-          //
-          // `advanceAfter` is pure (`planAfterStep` takes its state read-only),
-          // so asking it here and again at the tail cannot double-count a pass.
-          const nextI =
-            flowControlJumpTo !== null
-              ? flowControlEnclosed
-                ? advanceAfter(flowControlJumpTo)
-                : flowControlJumpTo + 1
-              : advanceAfter(i);
-          if (currentMode !== 'continue' && nextI <= endIndex) {
-            const curDepth = depthOf(i);
-            const nextDepth = depthOf(nextI);
-            const shouldPause =
-              currentMode === 'into' ||
-              (currentMode === 'over' && nextDepth <= curDepth) ||
-              (currentMode === 'out' && nextDepth < curDepth);
-            if (shouldPause) {
-              // Pre-transition the frame stack to the next step's frame so
-              // step:awaiting carries the right frame payload (the call
-              // stack view + yellow ▶ both need the destination, not the
-              // origin).
-              const nextFrameId = expansionOrigins?.[nextI]?.frameId ?? '';
-              transitionToFrame(nextFrameId);
-              const nextFrame = frameInfoFor(nextI);
-              const nextLine = sourceLineFor(nextI);
-              emit({
-                type: 'step:awaiting',
-                line: nextLine,
-                ...(nextFrame && { frame: nextFrame }),
-              });
-              // Block until the client sends the next mode (or the run
-              // gets aborted). On abort we resolve with 'continue' to
-              // unblock cleanly — the abort check at the top of the next
-              // iteration catches the actual abort.
-              const newMode = await new Promise<'continue' | 'into' | 'over' | 'out'>((resolve) => {
-                session.pendingRunControl = { resolve };
-                if (signal?.aborted) {
-                  session.pendingRunControl = null;
-                  resolve('continue');
-                  return;
-                }
-                signal?.addEventListener('abort', () => {
-                  if (session.pendingRunControl?.resolve === resolve) {
-                    session.pendingRunControl = null;
-                    resolve('continue');
-                  }
-                }, { once: true });
-              });
-              currentMode = newMode;
-            }
-          }
+          // It is still a `step:fail`, with the flag beside it: the step did
+          // not do what it said, and a client that does not know the flag
+          // paints ✗ as it always did, which is the safe direction (decision 9).
+          logger.warn(toleratedLogLine(i + 1, stepResult.error));
+          emit({
+            type: 'step:fail',
+            line: sourceLineFor(i),
+            error: stepResult.error ?? 'Step failed',
+            tolerated: true,
+            // The two flags compose, and the runtime already produces the
+            // combination: a hand-written `step.fail()` inside the entry of a step
+            // carrying `otherwise continue` is deliberate AND tolerated. Dropped
+            // here, the amber hover opened "Its code-behind failed:" over the
+            // author's own sentence (decisions 2 and 6).
+            ...(stepResult.deliberate && { deliberate: true }),
+            // The author's sentence: the explanation does not travel on this
+            // event, so without this field the warning reaches no client at all.
+            ...(stepResult.warning !== undefined && { warning: stepResult.warning }),
+            ...(screenshotValue && { screenshot: screenshotValue }),
+            ...frameSpread,
+            ...(stepResult.fromCodeBehind && { fromCodeBehind: true }),
+            ...(stepResult.codeBehindStale && {
+              codeBehindStale: {
+                file: stepResult.codeBehindStale.file,
+                error: stepResult.codeBehindStale.error,
+              },
+            }),
+            ...tabAfterStep,
+          });
+          // The same scope snapshot the two other outcomes emit: a step that
+          // failed and was carried past is when the Variables panel matters most.
+          emit({
+            type: 'frame:scope',
+            frameId: stepFrameId,
+            scope: { ...resolvedParameters, ...(frameInputs[stepFrameId] ?? {}) },
+          });
+          // It EXECUTED (decision 6). `session.totalStepsExecuted` already counted
+          // it above, before the pass/fail split; this is the other half of the
+          // pair, and a progress bar that stalled here would not be counting
+          // progress.
+          stepsCompleted++;
         } else {
           // Step failed
           overallStatus = 'failed';
@@ -6047,6 +6200,10 @@ export class SessionManager {
             type: 'step:fail',
             line: sourceLineFor(i),
             error: stepResult.error ?? 'Step failed',
+            // The author wrote this failure and its message
+            // (stories/step-failure-outcomes.md, decision 2). The client words
+            // it as "failed as written" rather than as a malfunction.
+            ...(stepResult.deliberate && { deliberate: true }),
             ...(screenshotValue && { screenshot: screenshotValue }),
             ...frameSpread,
             // Where the failure came from, so the client can say "the
@@ -6074,6 +6231,94 @@ export class SessionManager {
             scope: { ...resolvedParameters, ...(frameInputs[stepFrameId] ?? {}) },
           });
           break;
+        }
+
+        // ── Step-mode pause decision ──────────────────────────────────
+        //
+        // AFTER the outcome chain rather than inside its `passed` branch,
+        // because it must apply to every outcome the run CONTINUES past — a pass
+        // and a tolerated failure alike (stories/step-failure-outcomes.md,
+        // decision 6). Inside the `passed` branch it silently did not, so F10
+        // onto `Dismiss the banner otherwise continue` ran two steps for one
+        // keypress. The plain-failure branch above `break`s.
+        //
+        // When the client started this batch with `stepMode !== 'continue'`,
+        // we pause after each step depending on the depth relationship
+        // between the just-executed step and the next one. The yellow ▶
+        // moves to the next step's frame/line on the client; the loop
+        // blocks on `pendingRunControl` until the client sends a new
+        // mode via the `run-control` endpoint.
+        //
+        // `nextI` is the POST-JUMP index (decision 10). After a return the
+        // step that will actually run next is the one after the flow that
+        // ended, and pausing on `i + 1` would park the yellow ▶ on a line
+        // this run has already declared skipped.
+        //
+        // The three ways the run leaves step `i`, and the three answers,
+        // which must be the SAME expression the loop tail below resumes on
+        // or the ▶ lands where the run is not going:
+        //
+        //  - a return inside a control body → `advanceAfter(exit)`, which is
+        //    the loop's guard (backwards!) or the line past the chain. `exit
+        //    + 1` said "the line after the body", which for a chain member
+        //    is the next member's tail — a line the decision has already
+        //    declared skipped, which is the exact failure this comment says
+        //    it is avoiding;
+        //  - a return in the main flow → `exit + 1`, the run ending;
+        //  - no return at all → `advanceAfter(i)`, because an ordinary step
+        //    that closes a loop body sends the run back to the guard too.
+        //
+        // `advanceAfter` is pure (`planAfterStep` takes its state read-only),
+        // so asking it here and again at the tail cannot double-count a pass.
+        // `flowControlJumpTo` is only set on the passed path, so a tolerated step
+        // always takes the third answer.
+        const nextI =
+          flowControlJumpTo !== null
+            ? flowControlEnclosed
+              ? advanceAfter(flowControlJumpTo)
+              : flowControlJumpTo + 1
+            : advanceAfter(i);
+        if (currentMode !== 'continue' && nextI <= endIndex) {
+          const curDepth = depthOf(i);
+          const nextDepth = depthOf(nextI);
+          const shouldPause =
+            currentMode === 'into' ||
+            (currentMode === 'over' && nextDepth <= curDepth) ||
+            (currentMode === 'out' && nextDepth < curDepth);
+          if (shouldPause) {
+            // Pre-transition the frame stack to the next step's frame so
+            // step:awaiting carries the right frame payload (the call
+            // stack view + yellow ▶ both need the destination, not the
+            // origin).
+            const nextFrameId = expansionOrigins?.[nextI]?.frameId ?? '';
+            transitionToFrame(nextFrameId);
+            const nextFrame = frameInfoFor(nextI);
+            const nextLine = sourceLineFor(nextI);
+            emit({
+              type: 'step:awaiting',
+              line: nextLine,
+              ...(nextFrame && { frame: nextFrame }),
+            });
+            // Block until the client sends the next mode (or the run
+            // gets aborted). On abort we resolve with 'continue' to
+            // unblock cleanly — the abort check at the top of the next
+            // iteration catches the actual abort.
+            const newMode = await new Promise<'continue' | 'into' | 'over' | 'out'>((resolve) => {
+              session.pendingRunControl = { resolve };
+              if (signal?.aborted) {
+                session.pendingRunControl = null;
+                resolve('continue');
+                return;
+              }
+              signal?.addEventListener('abort', () => {
+                if (session.pendingRunControl?.resolve === resolve) {
+                  session.pendingRunControl = null;
+                  resolve('continue');
+                }
+              }, { once: true });
+            });
+            currentMode = newMode;
+          }
         }
 
         // Refresh active browser from the tracker — openBrowser /
@@ -6178,7 +6423,16 @@ export class SessionManager {
         const passedSteps = fullStepResults.filter((s) => s.status === 'passed').length;
         // Exclude the interrupted (stopped) step from the failed count — it's
         // rendered as its own "aborted" state, not a failure (issue 021).
-        const failedSteps = fullStepResults.filter((s) => s.status === 'failed' && !s.interrupted).length;
+        // `&& !s.tolerated` widens that same filter a second time and for the same
+        // reason: a step the author said to carry past is a failure nobody stopped
+        // on, so it is not what makes a run red (decision 6). Counted separately
+        // below rather than dropped — the row still says `failed`.
+        const failedSteps = fullStepResults.filter(
+          (s) => s.status === 'failed' && !s.interrupted && !s.tolerated,
+        ).length;
+        const toleratedSteps = fullStepResults.filter(
+          (s) => s.status === 'failed' && s.tolerated,
+        ).length;
         // The steps a return left behind (stories/step-flow-control.md,
         // decision 15). The CLI and the Electron runner have always set this;
         // the server did not, so a TestBench run — the way most people run a
@@ -6211,6 +6465,9 @@ export class SessionManager {
           // Omitted (not 0) on a run that skipped nothing, so a run that never
           // returns writes the report it always did — the CLI's rule.
           ...(skippedSteps > 0 && { skippedSteps }),
+          // The header reads "7 passed, 1 tolerated" only when there is something
+          // to say (decision 6).
+          ...(toleratedSteps > 0 && { toleratedSteps }),
           totalSubActions,
           durationMs: Date.now() - runStartTime,
           tokensUsed: runTokens.total,
@@ -6456,7 +6713,23 @@ export class SessionManager {
       for (let n = offset + startIndex + 1; n <= offset + endIndex + 1; n++) {
         if (!recorded.has(n)) notAttempted.push(n);
       }
-      const failed = fullStepResults.find((r) => r.status === 'failed' && !r.interrupted);
+      // `&& !r.tolerated`: this is "where did the run stop", and a tolerated
+      // failure stopped nothing (decision 6). Named as the stopping point it would
+      // have captioned the whole compile `stopped at step N` for a run that went
+      // on to finish.
+      const firstFailed = fullStepResults.find(
+        (r) => r.status === 'failed' && !r.interrupted && !r.tolerated,
+      );
+      // A DELIBERATE failure did not stop the run either — it ENDED it, where the
+      // test says it ends (decisions 1–3), so there is nothing to fix. Told apart
+      // HERE, once, because everything downstream words itself off which of the
+      // two fields arrived: `stoppedAt` carrying this failure is how a Run &
+      // Compile came to say "Step 9 failed under AI … Fix it, run, and compile
+      // again" over a step that had done exactly what its line says. The boxed
+      // pipeline (`compileTest`, src/codebehind/compile.ts) makes the same split
+      // off the recording — one recording fact, two places it has to be true.
+      const endedAsWritten = firstFailed?.deliberate === true ? firstFailed : undefined;
+      const failed = endedAsWritten ? undefined : firstFailed;
       const outcome = await liveCompile.finish({
         // After the drain, so generation's own tokens are in the total —
         // `runTokens` above was frozen before the queue had finished.
@@ -6464,6 +6737,12 @@ export class SessionManager {
         notAttempted,
         ...(failed && {
           stoppedAt: { step: offset + failed.index, error: failed.error ?? 'the step failed' },
+        }),
+        ...(endedAsWritten && {
+          endedAsWritten: {
+            step: offset + endedAsWritten.index,
+            error: endedAsWritten.error ?? 'the step failed as its text says',
+          },
         }),
         ...(overallStatus === 'aborted' && { aborted: true }),
       });

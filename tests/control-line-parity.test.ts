@@ -7,6 +7,7 @@ import {
   danglingChainMemberMessage as cliDangling,
   chainMemberWord as cliWord,
   chainAfterFlowControlMessage as cliAfterFlow,
+  isFlowControlLine as cliFlowLine,
 } from '../src/parser/control-line.js';
 import { parseFlowControlStep } from '../src/parser/flow-control-step.js';
 import {
@@ -17,6 +18,7 @@ import {
   danglingChainMemberMessage as coreDangling,
   chainMemberWord as coreWord,
   chainAfterFlowControlMessage as coreAfterFlow,
+  isFlowControlLine as coreFlowLine,
 } from '../runner-core/dist/control-line.js';
 
 /**
@@ -129,16 +131,58 @@ const CORPUS = [
   'If X, then return to the dashboard',
   'If X, then stop the upload',
   'If X, then retun',
+  // ── the same overlap for the third verb, `fail` (decision 1) ──────────
+  // The mirror carries a SECOND hand copy, and `fail` has a joiner the other
+  // two verbs do not — a bare space — the easiest asymmetry to mirror wrongly.
+  'If the balance is zero, then fail',
+  'If the balance is zero then fail the test with error "No balance was shown"',
+  'When the list is empty, then fail the run with message "empty"',
+  "If X, then fail with reason 'boom'",
+  'IF X, THEN FAIL THE TEST',
+  '[no-hooks] If X, then fail',
+  'If X, then fail.',
+  // The bare-space joiner, which needs a tail that earns it — the noun, the
+  // message, or both, so all three shapes are here.
+  'If {{a}} is "peanuts" fail the test with error "Expected apples"',
+  'If X fail the test',
+  'If X fail with error "boom"',
+  // …and the near misses: `fail the order` is prose after a `then` so the line
+  // stays a chain, while `If X return` has no ` then ` and neither claims it.
+  'If X, then fail the order',
+  'If X, then fail the tests',
+  'If X return',
+  'If X stop here',
+  // A BARE `fail` behind a bare space claimed prose ending in the word, turning
+  // a BDD expectation into a step that ends the run when it is MET.
+  'If X fail',
+  'When I submit with bad data, the save should fail',
+  'If the upload does not fail',
+  'If the login attempts fail',
+  // The joiner-only body: a malformed `If` in BOTH, so the mirror has to copy a
+  // guard and not just a regex.
+  'If then fail',
+  'If and fail the test with error "x"',
+  // …and the second such guard: a body ending in the head of an `otherwise`
+  // tail, which is a step with a failure TAIL and no claim at all.
+  'If the banner is visible, dismiss it, otherwise fail the test with message "No banner"',
+  'If x then fail the test with error "M" otherwise fail',
+  'If the banner is visible, dismiss it, or else fail the test',
   // A bare return is claimed by neither: no control-line head matches it.
   'Return',
   'Stop here',
   'Stop running the remaining steps',
+  'Fail',
+  'Fail the test with error "boom"',
   // …but a bare return as somebody else's TAIL is a control line, because the
   // guard is on the HEAD. The body is then an unconditional flow-control step,
   // which is a sentence with one meaning.
   'Otherwise, return',
   'While the banner is visible, return',
   'For each {{a}} in {{b}}, return',
+  // The same for `fail` — the story's own example: a chain's else whose tail is
+  // the unconditional `Fail … with error "…"`.
+  'Otherwise fail the test with error "No balance was shown"',
+  'Otherwise, fail',
 
   // ── prose, which must stay prose in both ──────────────────────────────
   'If a Remember this device prompt appears, click Not now',
@@ -301,6 +345,26 @@ describe('flow control wins the overlap, identically on both sides', () => {
     'IF X, THEN STOP HERE',
     '[no-hooks] If X, then return',
     'If X, then return.',
+    // The third verb (decision 1), with the bare-space joiner only it has.
+    'If the balance is zero, then fail',
+    'If the balance is zero then fail the test with error "No balance was shown"',
+    "If X, then fail with reason 'boom'",
+    'IF X, THEN FAIL THE TEST',
+    '[no-hooks] If X, then fail',
+    'If X, then fail.',
+    'If {{a}} is "peanuts" fail the test with error "Expected apples"',
+    'If X fail the test',
+    'If X fail with error "boom"',
+  ];
+  // Claimed by NEITHER grammar, so both implementations answer "prose". Read as
+  // a claim, the reviewer's line had the condition `I submit with bad data, the
+  // save should` — the run went red exactly when the expectation was met.
+  const PROSE_IN_BOTH = [
+    'If X fail',
+    'If X fail the',
+    'When I submit with bad data, the save should fail',
+    'If the upload does not fail',
+    'If the login attempts fail',
   ];
   const STILL_CONTROL_LINES = [
     // `$`-anchored, so the trailing words leave the flow-control grammar
@@ -308,6 +372,9 @@ describe('flow control wins the overlap, identically on both sides', () => {
     'If X, then return to the dashboard',
     'If X, then stop the upload',
     'If X, then retun',
+    'If X, then fail the order',
+    'If X, then fail the tests',
+    'Otherwise fail the test with error "No balance was shown"',
     // The guard is on the HEAD, so a bare return as a BODY is untouched.
     'Otherwise, return',
     'While the banner is visible, return',
@@ -324,6 +391,23 @@ describe('flow control wins the overlap, identically on both sides', () => {
       // …and it really is claimed by the other grammar, or this suite would
       // pass just as well on a typo nobody claims.
       expect(parseFlowControlStep(line.replace(/^\[no-hooks\]\s*/i, '')), line).not.toBeNull();
+      // …in BOTH implementations of it, the half the corpus cannot see: a
+      // mirror that declined for the wrong reason still agrees with the CLI.
+      expect(cliFlowLine(line), line).toBe(true);
+      expect(coreFlowLine(line), line).toBe(true);
+    }
+  });
+
+  it('a bare `fail` behind a bare space is prose in both', () => {
+    for (const line of PROSE_IN_BOTH) {
+      expect(cliFlowLine(line), line).toBe(false);
+      expect(coreFlowLine(line), line).toBe(false);
+      expect(parseFlowControlStep(line), line).toBeNull();
+      // …and no control line picks them up on the rebound.
+      expect(cliParse(line), line).toBeNull();
+      expect(coreParse(line), line).toBeNull();
+      expect(cliClaims(line), line).toBe(false);
+      expect(coreClaims(line), line).toBe(false);
     }
   });
 
@@ -343,10 +427,28 @@ describe('flow control wins the overlap, identically on both sides', () => {
   });
 
   it('a bare Return is neither: no control-line head matches it', () => {
-    for (const line of ['Return', 'Stop here', 'Stop running the remaining steps']) {
+    for (const line of ['Return', 'Stop here', 'Stop running the remaining steps', 'Fail',
+      'Fail the test with error "boom"']) {
       expect(cliClaims(line), line).toBe(false);
       expect(coreClaims(line), line).toBe(false);
       expect(parseFlowControlStep(line), line).not.toBeNull();
+    }
+  });
+
+  it('the bare-space joiner is `fail`-only, on both sides', () => {
+    // Pinned as an answer rather than as agreement: `\s+` grown into the
+    // return/stop expression would keep the corpus passing, both sides wrong
+    // together. Both halves, since the mirror copies both.
+    expect(parseFlowControlStep('If X fail the test')).toEqual({ verb: 'fail', body: 'X' });
+    expect(coreFlowLine('If X fail the test')).toBe(true);
+    expect(parseFlowControlStep('If X fail')).toBeNull();
+    expect(coreFlowLine('If X fail')).toBe(false);
+    expect(parseFlowControlStep('If X return')).toBeNull();
+    expect(parseFlowControlStep('If X stop here')).toBeNull();
+    // …so the last two stay ordinary prose: no ` then `, so no chain either.
+    for (const line of ['If X return', 'If X stop here']) {
+      expect(cliClaims(line), line).toBe(false);
+      expect(coreClaims(line), line).toBe(false);
     }
   });
 });

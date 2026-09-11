@@ -8,6 +8,8 @@ import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import {
   generationRefusal,
   LiveCompiler,
+  TOLERATED_CODE_BEHIND_REFUSAL,
+  TOLERATED_FAILURE_REFUSAL,
   type LiveCompileEvent,
   type LiveCompileProgressEvent,
   type LiveCompileStepEvent,
@@ -1341,5 +1343,306 @@ describe('a repeated entry, and which iteration repairs it', () => {
     expect(prompts.filter((p) => !/Review a generated/.test(p))).toHaveLength(1);
     expect(outcome.summary.compiled).toBe(1);
     expect(outcome.summary.unproven).toEqual([1]);
+  });
+});
+
+/** The `compile:step` frame messages for one step, in order. */
+const framesFor = (events: LiveCompileEvent[], step: number): string[] =>
+  events
+    .filter((e): e is LiveCompileStepEvent => e.type === 'compile:step' && e.step === step)
+    .map((f) => f.message);
+
+/** A binding whose entry already exists — the `ran as code` and ⚠ shapes. */
+const withEntry = (source: string): Partial<CodeBehindBinding> => ({
+  entry: { source, run: async () => {} },
+});
+
+/** What the run loop offers for one step: passed under AI with a binding and no
+ *  entry, unless `over` / `bindingOver` say otherwise. */
+const offerFor = (
+  index: number,
+  text: string,
+  over: Partial<StepResult> = {},
+  bindingOver: Partial<CodeBehindBinding> = {},
+): Parameters<LiveCompiler['offer']>[0] => ({
+  index,
+  binding: binding(text, bindingOver),
+  result: result(index + 1, text, over),
+  resolvedParameters: {},
+});
+
+/** One compile: the plan, the offers the run loop makes, and what `finish` is
+ *  handed (default: just the tokens). */
+const compileWith = async (
+  steps: string[],
+  offers: Parameters<LiveCompiler['offer']>[0][],
+  { finish = { tokensUsed: 0 }, ...options }: NonNullable<Parameters<typeof compilerFor>[1]> & {
+    finish?: Parameters<LiveCompiler['finish']>[0];
+  } = {},
+) => {
+  const compiler = compilerFor(steps, options);
+  for (const offer of offers) compiler.offer(offer);
+  return compiler.finish(finish);
+};
+
+/** A tolerated failure: `status` stays `failed` (the step did not do what it
+ *  said) with the flag beside it (decision 11). */
+const TOLERATED: Partial<StepResult> = { status: 'failed', tolerated: true, error: 'no banner' };
+
+/** A tolerated failure is no evidence, so the compiler refuses it and has to
+ *  NAME it or the line quietly has no entry (decision 11) — but one entry serves
+ *  every inlining of a looped body, so a later iteration owes nothing. */
+describe('a step the run tolerated', () => {
+  const body = 'Dismiss the promo banner otherwise continue';
+
+  it('is named in notAttempted, with its own reason on the step frame', async () => {
+    const events: LiveCompileEvent[] = [];
+    const offers = [offerFor(0, 'Sign in'), offerFor(1, body, TOLERATED)];
+    const outcome = await compileWith(['Sign in', body], offers, { events });
+
+    expect(outcome.summary.notAttempted).toEqual([2]);
+    expect(outcome.summary.compiled).toBe(1);
+    expect(outcome.status).toBe('partial');
+    // By number and by reason, and nothing was written for it: a real gap.
+    expect(framesFor(events, 2)).toContain(TOLERATED_FAILURE_REFUSAL);
+    expect(outcome.files[stepsFile] ?? '').not.toContain(`source: '${body}'`);
+  });
+
+  it('owes nothing when another inlining of the same entry compiled it', async () => {
+    // Naming iteration 2 would warn about a line whose code is in the diff.
+    const outcome = await compileWith([body, body], [offerFor(0, body), offerFor(1, body, TOLERATED)]);
+
+    expect(outcome.summary.compiled).toBe(1);
+    expect(outcome.summary.notAttempted).toEqual([]);
+    expect(outcome.files[stepsFile]).toContain(`source: '${body}'`);
+  });
+
+  it('is still owed when the only generation for its key errored', async () => {
+    // WRITTEN, not merely queued: an erroring generation leaves no candidate.
+    const { client } = fakeClient({ generate: () => 'not json and not a fence' });
+    const offers = [offerFor(0, body), offerFor(1, body, TOLERATED)];
+    const outcome = await compileWith([body, body], offers, { client });
+
+    expect(outcome.summary.compiled).toBe(0);
+    expect(outcome.summary.notAttempted).toEqual([2]);
+    expect(outcome.status).toBe('partial');
+  });
+
+  it('is not "already compiled" when it is the only thing the run produced', async () => {
+    // `nothingToDo` decides green vs partial, and this is work still owed.
+    const outcome = await compileWith([body], [offerFor(0, body, TOLERATED)]);
+
+    expect(outcome.status).toBe('partial');
+    expect(outcome.summary.notAttempted).toEqual([1]);
+  });
+});
+
+/** A step that failed because its own text says to (decisions 1–3 and 10): a
+ *  `failed` status that means the step WORKED, whose `fail` action is the
+ *  evidence to write from — refused as "did not pass", the one step the feature
+ *  exists for could never compile. */
+describe('a step the run failed deliberately', () => {
+  const line = 'If the cart is empty then fail the test with error "Nothing to check out"';
+  const message = 'Nothing to check out';
+
+  /** The model's `fail` sub-action, which is the evidence to write from. */
+  const FAIL_SUB = { index: 1, action: { action: 'fail' as const, description: 'no items' }, error: message, durationMs: 2 };
+
+  /** `status` stays `failed`, `deliberate` beside it, `fail` in the turn. */
+  const deliberateOffer = (index: number, over: Partial<StepResult> = {}) =>
+    offerFor(
+      index,
+      line,
+      {
+        status: 'failed',
+        deliberate: true,
+        error: message,
+        turns: [{ ...result(index + 1, line).turns[0]!, subActions: [FAIL_SUB] }],
+        ...over,
+      },
+      over.fromCodeBehind ? withEntry(line) : {},
+    );
+
+  it('is offered and compiled, not refused as a step that did not pass', async () => {
+    const events: LiveCompileEvent[] = [];
+    const { client, prompts } = fakeClient();
+    const offers = [offerFor(0, 'Sign in'), deliberateOffer(1)];
+    const outcome = await compileWith(['Sign in', line], offers, { events, client });
+
+    expect(outcome.summary.compiled).toBe(2);
+    expect(outcome.summary.notAttempted).toEqual([]);
+    expect(outcome.files[stepsFile]).toContain('If the cart is empty then fail the test with error');
+    // No refusal frame of any kind for it.
+    expect(framesFor(events, 2)).toEqual(['generating…', 'generated']);
+    // The model was handed the `fail` action; without it the prompt would say
+    // "(no actions recorded)".
+    const generation = prompts.find((p) => p.includes(`## The step, exactly as authored\n${line}`))!;
+    expect(generation).toContain('"action": "fail"');
+  });
+
+  it('names the steps the ended run never reached, the way a return\'s are', async () => {
+    // `endedAsWritten`, not `stoppedAt`: every renderer of `stoppedAt` says
+    // "failed under AI — fix it and run again", and this run did not break.
+    const outcome = await compileWith(
+      ['Sign in', line, 'Check out'],
+      [offerFor(0, 'Sign in'), deliberateOffer(1)],
+      { finish: { tokensUsed: 0, notAttempted: [3], endedAsWritten: { step: 2, error: message } } },
+    );
+
+    expect(outcome.summary.compiled).toBe(2);
+    expect(outcome.summary.notAttempted).toEqual([3]);
+    expect(outcome.status).toBe('partial');
+    expect(outcome.summary.stoppedAt).toBeUndefined();
+    // The line comes off the compiler's own plan, so it cannot disagree with it.
+    expect(outcome.summary.endedAsWritten).toEqual({ step: 2, error: message, line });
+    expect(outcome.summary.error).toBe(`the run ended at step 2 as its text says (${line})`);
+  });
+
+  // Nothing attempted either way (`ai: true`) and nothing stopped, so
+  // `endedAsWritten` is the only thing that tells "steps still owe an entry"
+  // from "the run ended where the test ends". The FIELD is bounded the same way
+  // (`compile.ts` sets it only inside `prefixEnd < test.steps.length`): it used
+  // to travel on the green, where `compileResultLine` printed over it.
+  it.each([
+    { label: 'is not "already compiled" when the ending step left later steps unrun', steps: [line, 'Check out', 'Confirm'], notAttempted: [2, 3], status: 'partial', owed: true },
+    { label: 'is green when the ending step was the LAST one and nothing was owed', steps: [line], notAttempted: [], status: 'green', owed: false },
+  ])('$label', async ({ steps, notAttempted, status, owed }) => {
+    const outcome = await compileWith(steps, [deliberateOffer(0, { fromCodeBehind: true })], {
+      finish: { tokensUsed: 0, notAttempted, endedAsWritten: { step: 1, error: message } },
+    });
+
+    expect(outcome.status).toBe(status);
+    expect(outcome.summary.notAttempted).toEqual(notAttempted);
+    expect(outcome.summary.stoppedAt).toBeUndefined();
+    if (owed) {
+      expect(outcome.summary.endedAsWritten).toEqual({ step: 1, error: message, line });
+      expect(outcome.summary.error).toBe(`the run ended at step 1 as its text says (${line})`);
+    } else {
+      expect(outcome.summary.endedAsWritten).toBeUndefined();
+      expect(outcome.summary.error).toBeUndefined();
+    }
+  });
+
+  it('keeps an entry that already fails the run as written — it ran as code', async () => {
+    // Regenerating would pay a model call to rewrite working code.
+    const outcome = await compileWith([line], [deliberateOffer(0, { fromCodeBehind: true })]);
+
+    expect(outcome.summary.kept).toBe(1);
+    expect(outcome.summary.compiled).toBe(0);
+    expect(outcome.status).toBe('green');
+    expect(outcome.files).toEqual({});
+  });
+});
+
+/** The author-quoted-literal exemption at the LIVE repair site (decisions 3 and
+ *  10), mirroring the boxed pins in `codebehind-failure-outcomes.test.ts`: only
+ *  generation was passed the authored line, so every candidate for
+ *  `If {{a}} is "peanuts" then fail …` was discarded as a leak. */
+describe('a repair of a step that quotes one of its own values', () => {
+  const line =
+    'If {{a}} is "peanuts" then fail the test with error ' +
+    '"The variable value was peanuts. Expected apples"';
+  const message = 'The variable value was peanuts. Expected apples';
+
+  /** One entry for `source`, the `.steps.ts` the writer emits around it, and the
+   *  envelope the model answers a repair with. */
+  const entryFor = (source: string, body: string): string =>
+    `{ source: '${source}', async run({ page, step }) { ${body} } }`;
+  const fileWith = (source: string, body: string): string =>
+    "import { defineSteps } from 'ai-ui-automation/codebehind';\nexport default defineSteps([\n" +
+    `  ${entryFor(source, body)},\n]);\n`;
+  const answerFor = (source: string, body: string): string =>
+    JSON.stringify({ entry: entryFor(source, body) });
+
+  /** An entry that ran, threw and healed under AI — the ⚠ that routes a
+   *  generation through the repair prompt. */
+  const staleOffer = (source: string, resolvedParameters: Record<string, string>) => ({
+    ...offerFor(0, source, {
+      codeBehindStale: { file: stepsFile, source, error: "TypeError: null has no 'isVisible'" },
+    }, withEntry(source)),
+    resolvedParameters,
+  });
+
+  it('accepts a candidate carrying the literal the author quoted', async () => {
+    await fs.writeFile(
+      stepsFile,
+      fileWith(line, `if (step.getVar('a') === 'peanuts') step.fail('${message}');`),
+      'utf-8',
+    );
+    const answer = answerFor(line, `if (String(step.getVar('a')) === 'peanuts') step.fail('${message}');`);
+    const { client, prompts } = fakeClient({ generate: () => answer });
+    const outcome = await compileWith([line], [staleOffer(line, { a: 'peanuts' })], { client });
+
+    // It really went through the repair prompt, not plain generation; before the
+    // authored line reached this guard it came back "contains the resolved value
+    // of {{a}}" with nothing written.
+    expect(
+      prompts.some((p) => p.includes('A generated code-behind entry was replayed and it failed')),
+    ).toBe(true);
+    expect(outcome.summary.compiled).toBe(1);
+    expect(outcome.files[stepsFile]).toContain("String(step.getVar('a'))");
+    expect(outcome.files[stepsFile]).toContain('peanuts');
+  });
+
+  it('still rejects a candidate inlining a value the author did not quote', async () => {
+    // Per VALUE and read off the authored line, which never holds a password.
+    const source = 'Enter the password {{password}}';
+    await fs.writeFile(
+      stepsFile,
+      fileWith(source, `await page.locator('#pw').fill(String(step.getVar('password')));`),
+      'utf-8',
+    );
+    const answer = answerFor(source, `await page.locator('#password').fill('hunter2-correct-horse');`);
+    const events: LiveCompileEvent[] = [];
+    const notes: string[] = [];
+    const { client } = fakeClient({ generate: () => answer });
+    const offers = [staleOffer(source, { password: 'hunter2-correct-horse' })];
+    const outcome = await compileWith([source], offers, { client, events, notes });
+
+    expect(outcome.summary.compiled).toBe(0);
+    expect(outcome.files[stepsFile] ?? '').not.toContain('hunter2-correct-horse');
+    expect(framesFor(events, 1).some((m) => m.includes('the resolved value of {{password}}'))).toBe(
+      true,
+    );
+    expect(notes.some((n) => n.includes('The step stays AI'))).toBe(true);
+  });
+});
+
+/** A tolerated failure on a step whose OWN entry ran it (decision 11): the
+ *  tolerated reason used to answer before the "ran as code" one, so the step
+ *  landed in `notAttempted` while its entry sat in the author's file. */
+describe('a tolerated failure the entry itself reported', () => {
+  const body = 'Check the balance reads 120 otherwise continue';
+
+  it('is kept, not named as a step with no entry', async () => {
+    const events: LiveCompileEvent[] = [];
+    // The entry ran and ASSERTED — its job — and the tail let the run past it.
+    const ran = { ...TOLERATED, fromCodeBehind: true, error: 'expected 120, read 0' };
+    const outcome = await compileWith([body], [offerFor(0, body, ran, withEntry(body))], { events });
+
+    expect(outcome.summary.kept).toBe(1);
+    expect(outcome.summary.notAttempted).toEqual([]);
+    expect(outcome.summary.compiled).toBe(0);
+    expect(outcome.status).toBe('green');
+    expect(TOLERATED_CODE_BEHIND_REFUSAL).toContain('the entry stands');
+    // No frame claiming the line has no entry.
+    expect(framesFor(events, 1)).not.toContain(TOLERATED_FAILURE_REFUSAL);
+  });
+
+  it('is still owed an entry when the one it has went STALE', async () => {
+    // The entry threw instead, AI healed the step and the tail tolerated the
+    // failure: no evidence to repair from, so the work is still owed.
+    const events: LiveCompileEvent[] = [];
+    const threw = {
+      ...TOLERATED,
+      fromCodeBehind: false,
+      codeBehindStale: { file: stepsFile, source: body, error: 'locator timeout' },
+      error: 'the balance never appeared',
+    };
+    const outcome = await compileWith([body], [offerFor(0, body, threw, withEntry(body))], { events });
+
+    expect(outcome.summary.notAttempted).toEqual([1]);
+    expect(outcome.summary.kept).toBe(0);
+    expect(framesFor(events, 1)).toContain(TOLERATED_FAILURE_REFUSAL);
   });
 });

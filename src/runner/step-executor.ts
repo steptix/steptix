@@ -44,7 +44,16 @@ import {
   type PlaceholderValues,
 } from './placeholder-substitution.js';
 import { referencedVariableNames } from '../skills/expander.js';
-import type { ParsedFlowControlStep } from '../parser/flow-control-step.js';
+import {
+  isReturnClaim,
+  parseFlowControlStep,
+  type ParsedFlowControlStep,
+} from '../parser/flow-control-step.js';
+import {
+  parseFailureTail,
+  stripFailureTail,
+  type ParsedFailureTail,
+} from '../parser/failure-tail.js';
 import { envDataRefsIn, resolveEnvDataRef } from '../parser/interpolate-env-data.js';
 import { parseOutputPrefixes, buildEnrichedInstruction } from '../server/run-helpers.js';
 import { redact, runSecrets } from '../utils/secrets.js';
@@ -272,6 +281,29 @@ export interface StepExecutorOptions {
    * step, and the clear is the whole guard for it.
    */
   flowControlClaim?: ParsedFlowControlStep | undefined;
+  /**
+   * This step's text carries an `… otherwise fail with message "…"` /
+   * `… otherwise continue` tail — `parseFailureTail(<authored line>)`, computed
+   * by the run loop (stories/step-failure-outcomes.md, decision 4).
+   *
+   * Unlike {@link flowControlClaim} this is NOT a permission: it gates nothing
+   * the model may do and changes nothing about turns, caching or attempts. It is
+   * read at exactly one seam — {@link applyFailureTail}, over a step that has
+   * finally FAILED — and decides what that failure is called (`fail` with a
+   * message) or whether the run carries on past it (`continue`).
+   *
+   * Its OUTCOME is the author's and travels from here; its MESSAGE is only the
+   * fallback, because the authored line still holds the author's `{{name}}`
+   * tokens — see {@link resolvedTailMessage}.
+   *
+   * The tail is hidden from the model regardless of this field: the prompt texts
+   * are stripped by {@link stripFailureTail} off the line itself.
+   *
+   * `| undefined` explicitly, and cleared at every site that clears
+   * {@link flowControlClaim}: both are facts about ONE authored line, and a step
+   * that is not that line must not inherit either.
+   */
+  failureTail?: ParsedFailureTail | undefined;
 }
 
 /**
@@ -285,6 +317,22 @@ export const RETURN_NOT_CLAIMED =
   'this step does not say to return — only a step written as ' +
   '"If <condition> then return" (or "… then stop"), or a step that is just ' +
   '"Return"/"Stop", may end the flow. Do what this step asks instead.';
+
+/**
+ * What a `fail` action is refused with on a step that did not ask for one
+ * (stories/step-failure-outcomes.md, decision 1). The shape of
+ * {@link RETURN_NOT_CLAIMED}, and retryable for the same reason: the model reads
+ * it back as prior-failure context and learns the rule inside the step.
+ *
+ * A step claiming `return` / `stop` is refused by this too — the two verbs are
+ * opposite outcomes, so a model allowed to swap them could paint a deliberate
+ * failure green, or fail a run the author only asked to leave early.
+ */
+export const FAIL_NOT_CLAIMED =
+  'this step does not say to fail — only a step written as ' +
+  '"If <condition> then fail the test with error \'…\'", or a step that is ' +
+  'just "Fail the test with error \'…\'", may fail the run on purpose. Do what ' +
+  'this step asks instead.';
 
 /** Extract text-only content from a ChatMessage (strips base64 image blocks) */
 function extractTextFromMessage(msg: ChatMessage): string {
@@ -301,17 +349,28 @@ class StepFailureError extends Error {
   turns: TurnResult[];
   /** `false` when re-running cannot change the outcome — see `withRetry`. */
   retryable: boolean;
+  /**
+   * Set when the step's own text asked for this failure — the `fail` verb
+   * (stories/step-failure-outcomes.md, decision 2). The marker the outer catch in
+   * `executeStep` reads to turn an ordinary red step into `deliberate: true` with
+   * an explanation written in terms of the condition. `why` is the model's
+   * ALREADY-MASKED account of why the condition held: the seam that composes the
+   * error is the one place the run's secrets are applied (decision 3).
+   */
+  deliberate?: { why: string };
   constructor(
     message: string,
     failures: PriorFailureContext[],
     turns: TurnResult[] = [],
     retryable = true,
+    deliberate?: { why: string },
   ) {
     super(message);
     this.name = 'StepFailureError';
     this.failures = failures;
     this.turns = turns;
     this.retryable = retryable;
+    if (deliberate) this.deliberate = deliberate;
   }
 }
 
@@ -493,6 +552,100 @@ function cacheEnabledFor(opts: StepExecutorOptions): boolean {
 }
 
 /**
+ * The tail's message with its `{{name}}` and `${env.X}` tokens RESOLVED
+ * (decision 3), or undefined when the tail named none.
+ *
+ * The tail was parsed off the AUTHORED line, because a tail — like a flow-control
+ * claim — has to be the same answer on every run and in every runner. So
+ * `opts.failureTail.message` still holds the author's tokens, and a warning
+ * written `Missing {{name}}` would reach the row, the hover, the MCP tally and
+ * the run log with the braces in it.
+ *
+ * `result.instruction` IS the interpolated line on every path through the one
+ * seam below — the AI flow's outer catch, the cached-fatal throw it shares, the
+ * code-behind replay, and the unanswerable-clarification return — enrichment
+ * included, since the grammar already holds a trailing run of markers back. So
+ * the resolved message is in that text and reading the same grammar off it is
+ * how to get it out: one parser read twice, exactly as `deliberateFailError`
+ * (src/runner/flow-control.ts) does it for the `fail` verb.
+ *
+ * `outcome` is compared as well as the parse, so a value that changed which
+ * branch the line takes cannot put one tail's message on the other's seam. The
+ * fallback to the authored text is reachable: a value carrying the quote
+ * character that ENDS the message leaves a line the `$`-anchored grammar no
+ * longer matches, and then the author's words are better than none.
+ */
+function resolvedTailMessage(
+  result: StepResult,
+  tail: ParsedFailureTail,
+): string | undefined {
+  const reparsed = parseFailureTail(result.instruction);
+  const resolved = reparsed?.outcome === tail.outcome ? reparsed.message : undefined;
+  return resolved ?? tail.message;
+}
+
+/**
+ * The `otherwise …` tail, applied to a step that has finally failed
+ * (stories/step-failure-outcomes.md, decisions 5 and 6).
+ *
+ * ONE seam, deliberately: every failed `StepResult` leaving `executeStep` passes
+ * through here — the AI flow's outer catch, the cached-fatal path it shares, and
+ * the code-behind path, whose replay failure has to be renamed and tolerated
+ * exactly as the AI one is. A forgotten `tolerated` is a run that stops when the
+ * author said to carry on.
+ *
+ * What it does NOT touch, and why:
+ *
+ * - a PASSED step. The tail describes a failure; there isn't one.
+ * - an INTERRUPTED one. The user ended the run, and painting their Stop as "the
+ *   run continued past this step" would be a lie in both directions.
+ * - the ERROR of a `continue` tail. It stays the framework's: the row still has
+ *   to say what went wrong, and the author's warning explains why nobody
+ *   stopped rather than replacing the diagnosis.
+ * - a message-less `otherwise fail`. Legal, and it changes nothing.
+ *
+ * The original failure is never lost: a renamed one keeps it in the explanation,
+ * and the log line at failure time printed it before this ran (decision 5).
+ */
+function applyFailureTail(result: StepResult, opts: StepExecutorOptions): StepResult {
+  const tail = opts.failureTail;
+  if (!tail) return result;
+  if (result.status !== 'failed' || result.interrupted) return result;
+
+  const original = result.error ?? 'the step failed';
+  // Interpolated, not authored — see {@link resolvedTailMessage}. Read once for
+  // both outcomes so neither branch can be the one that forgets.
+  const message = resolvedTailMessage(result, tail);
+
+  if (tail.outcome === 'fail') {
+    if (!message) return result;
+    return {
+      ...result,
+      // The author's words, masked here because this is where they first become
+      // the thing the wire, the report and the log carry (decision 3) — which is
+      // why resolution happens BEFORE the redact: a `{{password}}` still in
+      // braces would be masked as the token, not as the secret it resolves to.
+      error: redact(message, secretsFor(opts)),
+      aiExplanation: `Failed as the step says. What failed: ${original}`,
+    };
+  }
+
+  const warning = message ? redact(message, secretsFor(opts)) : undefined;
+  return {
+    ...result,
+    tolerated: true,
+    // Structural as well as folded into the explanation, for the reason the
+    // docblock on `StepResult.warning` gives: the explanation does not travel on
+    // the `step:fail` wire event and the warning has to — it is the first line of
+    // the TestBench hover and the MCP row's reason.
+    ...(warning !== undefined && { warning }),
+    aiExplanation: warning
+      ? `${warning}. The run continued past this step (otherwise continue). What failed: ${original}`
+      : `The run continued past this step (otherwise continue). What failed: ${original}`,
+  };
+}
+
+/**
  * Execute a single test step with retry logic.
  * Returns a StepResult regardless of pass/fail.
  *
@@ -522,6 +675,17 @@ export async function executeStep(
    *  from the first attempt so the shared failure handler builds the result. */
   let cachedFatal: StepFailureError | undefined;
   let priorAttemptTurns: TurnResult[] = [];
+  /**
+   * The failure whose turns `onFailure` has already merged.
+   *
+   * `withRetry` hands the FINAL attempt to `onFailure` as well when it declines
+   * to retry — every deliberate `fail` (stories/step-failure-outcomes.md,
+   * decision 2), every cached upload whose file is missing — and the catch below
+   * would then add that attempt's turns a second time, rendering one turn twice
+   * in the report. A retryable failure that exhausts its attempts does NOT come
+   * through `onFailure`, so the catch is still where those turns arrive.
+   */
+  let mergedFailure: unknown;
   // Cache files are named by the frame-scoped key when the server supplies one
   // (skill-body steps, repeated invocations); otherwise by stepIndex (CLI path).
   const cacheKey: StepCacheKey = opts.cacheKey ?? stepIndex;
@@ -537,7 +701,10 @@ export async function executeStep(
   let staleAfterHeal: StepResult['codeBehindStale'] | undefined;
   if (binding?.entry && binding.entry.ai !== true) {
     const codeResult = await runCodeBehindStep(stepIndex, instruction, binding, opts, startTime);
-    if (codeResult.result) return codeResult.result;
+    // The tail applies to a replay failure exactly as to an AI one (decision 5).
+    // Applied at the CALL rather than inside, so all six of that function's
+    // failing branches are covered by one line.
+    if (codeResult.result) return applyFailureTail(codeResult.result, opts);
     staleAfterHeal = codeResult.stale;
     // Fell through: the entry threw and has been discarded for this run. The
     // page is already in the right state, so the AI flow below starts clean —
@@ -634,6 +801,7 @@ export async function executeStep(
         if (err instanceof StepFailureError) {
           priorFailures = [...priorFailures, ...err.failures];
           priorAttemptTurns = [...priorAttemptTurns, ...err.turns];
+          mergedFailure = err;
         }
       },
     });
@@ -703,16 +871,25 @@ export async function executeStep(
       failureScreenshot = shot?.base64;
     }
 
-    // Collect turns from the final failed attempt too
-    if (err instanceof StepFailureError) {
+    // Collect turns from the final failed attempt too — unless `onFailure`
+    // already took them, which it does for a failure `withRetry` declined to
+    // retry. See `mergedFailure`.
+    if (err instanceof StepFailureError && err !== mergedFailure) {
       priorAttemptTurns = [...priorAttemptTurns, ...err.turns];
     }
+
+    // The step's own text asked for this failure (decision 2). `error` is already
+    // the author's message, masked where it was composed; the flag changes what
+    // the framework does ABOUT the failure — no retry (already spent: the throw
+    // was non-retryable), and no `ai.diagnoseFailures` paragraph guessing at a
+    // root cause the author wrote out in full.
+    const deliberate = err instanceof StepFailureError ? err.deliberate : undefined;
 
     // `withStale` here too: when the AI attempt was only happening because the
     // step's entry threw, dropping the flag on failure would erase the
     // code-behind error entirely — the client would see the AI failure and
     // nothing about the crash that caused the fall-through.
-    return withStale({
+    return applyFailureTail(withStale({
       index: stepIndex,
       instruction,
       status: 'failed',
@@ -722,11 +899,15 @@ export async function executeStep(
       ...(failureScreenshot !== undefined && { screenshotBase64: failureScreenshot }),
       pageUrl: opts.page.url(),
       error: errorMessage,
-      aiExplanation:
-        attemptsMade <= 1
+      ...(deliberate && { deliberate: true }),
+      aiExplanation: deliberate
+        ? deliberate.why
+          ? `The step's condition held (${deliberate.why}) and the step says to fail the test.`
+          : 'The step\'s condition held and the step says to fail the test.'
+        : attemptsMade <= 1
           ? `Failed to execute step. Last error: ${errorMessage}`
           : `Failed to execute step after ${attemptsMade} attempts. Last error: ${errorMessage}`,
-    });
+    }), opts);
   }
 }
 
@@ -888,7 +1069,14 @@ async function runCodeBehindStep(
     // cannot know whether this was "Sign in" or the whole test. So this reads
     // out as `Returned from "Sign in": via code-behind`.
     const claim = opts.flowControlClaim;
-    if (outcome.flowControl && claim) {
+    // `isReturnClaim` and not a bare truth test: `flowControl` on the result means
+    // "the flow ended as a PASS", and only `return` / `stop` mean that
+    // (stories/step-failure-outcomes.md, decision 1). For a `fail` claim the guard
+    // cannot fire at all — `step.exit()` refuses any non-return claim upstream
+    // (`exitNotClaimed`, src/codebehind/execute.ts) — but the predicate stays so
+    // the two files say the same thing and the compiler finds this site when the
+    // union widens again.
+    if (outcome.flowControl && claim && isReturnClaim(claim)) {
       logger.success(`Step ${stepIndex} returned (code-behind)`);
       return {
         result: {
@@ -993,11 +1181,40 @@ async function runCodeBehindStep(
     };
   }
 
-  logger.error(`Step ${stepIndex} FAILED (code-behind assertion): ${outcome.error ?? ''}`);
+  // An expectation message is a STRING THE TEST WROTE, and this is the seam where
+  // it becomes what the wire, the report and the log carry — so it is masked here,
+  // as at the `fail` verb's site and in `applyFailureTail` above (decision 3).
+  // Both branches below: a `step.fail` message built from
+  // `step.getVar('password')` is the case that made it necessary, and a
+  // `step.expect` message interpolates a captured value just as readily.
+  const expectationError =
+    outcome.error === undefined ? undefined : redact(outcome.error, secretsFor(opts));
+
+  // `step.fail(message)` — the code form of `If … then fail the test with error
+  // "…"` (stories/step-failure-outcomes.md, decision 10). It throws the class
+  // `step.expect` throws, so it arrives under the same rule (a real failure,
+  // never healed under AI) and only needs its own sentence: sending this reader
+  // after a `step.expect` that does not exist is the defect the unclaimed-exit
+  // branch above was written to fix.
+  if (outcome.expectationFailed && outcome.deliberate) {
+    logger.error(`Step ${stepIndex} FAILED (code-behind, as written): ${expectationError ?? ''}`);
+    return {
+      result: {
+        ...base,
+        error: expectationError ?? 'Failed by the step, as written',
+        deliberate: true,
+        aiExplanation:
+          'This step\'s code-behind called `step.fail(...)`: a deliberate ' +
+          'failure, not broken code, so the step was not re-run under AI.',
+      },
+    };
+  }
+
+  logger.error(`Step ${stepIndex} FAILED (code-behind assertion): ${expectationError ?? ''}`);
   return {
     result: {
       ...base,
-      error: outcome.error ?? 'Code-behind expectation failed',
+      error: expectationError ?? 'Code-behind expectation failed',
       aiExplanation:
         'A `step.expect` in this step\'s code-behind failed. That is a real ' +
         'assertion failure, not broken code, so the step was not re-run under AI.',
@@ -1116,7 +1333,19 @@ async function executeStepAttempt(
   // substituted text, or the model is shown a raw `[output: x]` prefix and no
   // `[store as: x]` telling it to capture (stories/placeholder-preserving-actions.md
   // §Executor).
-  const authored = enrichAuthored(authoredInstruction ?? instruction);
+  //
+  // And the `otherwise …` tail comes OFF, here and nowhere else
+  // (stories/step-failure-outcomes.md, decision 4). Everything else keeps the
+  // line the author wrote — `instruction`, the console line, the cache key, the
+  // run log — because hiding the tail is about what the model is asked to decide,
+  // not about what a reader is shown.
+  //
+  // Stripped BEFORE the enrichment: `enrichAuthored` appends `[store as: …]` to
+  // the END of the line and the tail grammar is `$`-anchored, so a tail with a
+  // marker behind it would no longer parse.
+  const promptAuthored = enrichAuthored(stripFailureTail(authoredInstruction ?? instruction));
+  /** The SUBSTITUTED text a continuation turn quotes back, same treatment. */
+  const promptInstruction = stripFailureTail(instruction);
   /** What the model may name: this run's parameters and the environment. */
   const placeholderValues: PlaceholderValues = {
     parameters: opts.resolvedParameters ?? {},
@@ -1190,6 +1419,16 @@ async function executeStepAttempt(
   /** The model's own words for WHY it returned — the tail of the returning
    *  step's explanation, which the loop prefixes with the flow's name. */
   let flowControlDetail: string | undefined;
+  /**
+   * Set when the model answered a step claiming the `fail` verb with the
+   * `fail` action (stories/step-failure-outcomes.md, decision 2).
+   *
+   * It rides on the turn's throw rather than on the StepResult, because a
+   * deliberate failure IS a failure: it unwinds through `withRetry` — which ends
+   * after this one attempt, the throw being non-retryable — and the outer catch
+   * turns it into the red step. `why` is already masked.
+   */
+  let deliberateFailure: { why: string } | undefined;
 
   try {
   for (let currentTurn = 1; currentTurn <= maxTurns; currentTurn++) {
@@ -1371,7 +1610,7 @@ async function executeStepAttempt(
     const screenshotForAi = config.ai.sendScreenshots ? (screenshotBase64 ?? null) : null;
     // What this step's placeholders hold right now, masked by name/path. Built
     // per turn because a `read` in turn 1 can define a name turn 2 references.
-    const stepValues = buildStepValues(authored, opts);
+    const stepValues = buildStepValues(promptAuthored, opts);
     // A controlled input that mirrors what was typed into its `value=`
     // attribute puts the password in the snapshot. `capture-dom.js` serialises
     // attributes rather than the `.value` property Playwright's `fill` sets, so
@@ -1393,7 +1632,7 @@ async function executeStepAttempt(
       const retryHint = retryInput ? buildRetryContext(retryInput) : '';
       // The AUTHORED step, not the substituted one — decision 1. The retry
       // hint is appended to it exactly as it was to the substituted form.
-      const enrichedInstruction = retryHint ? `${authored}${retryHint}` : authored;
+      const enrichedInstruction = retryHint ? `${promptAuthored}${retryHint}` : promptAuthored;
       userMessage = buildStepMessage(
         enrichedInstruction,
         domForAi,
@@ -1406,7 +1645,7 @@ async function executeStepAttempt(
       );
     } else {
       userMessage = buildContinuationMessage(
-        instruction,
+        promptInstruction,
         allCompletedActions,
         opts.resolvedParameters ?? {},
         currentUrl,
@@ -1421,7 +1660,7 @@ async function executeStepAttempt(
         // back to rendering the WHOLE resolved parameter map unmasked, which
         // was the widest surface a secret reached (decision 2).
         stepValues ?? { parameters: [] },
-        authored,
+        promptAuthored,
       );
     }
 
@@ -1511,8 +1750,10 @@ async function executeStepAttempt(
         // types at the REPL run through `executeStep` with these options, so
         // handing `opts` over whole let a `return` action end the flow from a
         // line the framework never read the form off — the exact hole the
-        // claim exists to close.
-        executorOptions: { ...opts, flowControlClaim: undefined },
+        // claim exists to close. `failureTail` goes with it for the same reason
+        // (decision 4): a typed line that failed must not be renamed — or
+        // tolerated — by a tail belonging to the step that asked the question.
+        executorOptions: { ...opts, flowControlClaim: undefined, failureTail: undefined },
         adHocResults: clarificationAdHoc,
       });
 
@@ -1611,9 +1852,14 @@ async function executeStepAttempt(
           pageUrl: page.url(),
           timestamp: new Date().toISOString(),
         };
-        if (opts.flowControlClaim) {
+        const returnClaim = opts.flowControlClaim;
+        // `isReturnClaim`, so a step claiming the `fail` verb refuses a `return`
+        // exactly as an unclaimed step does (decision 1): the verbs are opposite
+        // outcomes, and swapping them could paint a failure the author asked for
+        // green.
+        if (returnClaim && isReturnClaim(returnClaim)) {
           turnSubActions.push(returnSub);
-          flowControlSignal = { kind: 'return', verb: opts.flowControlClaim.verb };
+          flowControlSignal = { kind: 'return', verb: returnClaim.verb };
           flowControlDetail = action.description;
           logger.info(
             `Step ${stepIndex} returned: ${action.description || 'condition holds'}`,
@@ -1630,6 +1876,72 @@ async function executeStepAttempt(
           selector: '',
           error: RETURN_NOT_CLAIMED,
           actionType: 'return',
+          startUrl: attemptStartUrl,
+          failureUrl: page.url(),
+          navigated: page.url() !== attemptStartUrl,
+        });
+        break;
+      }
+
+      // ── fail action: end the RUN, in the author's words ──────────────────
+      // The sibling of `return` and gated identically
+      // (stories/step-failure-outcomes.md, decisions 1–3): the line claims the
+      // verb, the model judges the condition.
+      if (action.action === 'fail') {
+        const failSub: SubActionResult = {
+          index: ++globalSubActionIndex,
+          action: emitted,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          durationMs: Date.now() - subStartTime,
+          pageUrl: page.url(),
+          timestamp: new Date().toISOString(),
+        };
+        const failClaim = opts.flowControlClaim;
+        if (failClaim && failClaim.verb === 'fail') {
+          // The one seam the run's secrets are applied at (decision 3): the
+          // author's message and the model's account of the condition both become
+          // wire, report and log text from here on, so a `{{password}}` in either
+          // is masked once, here, and never re-derived.
+          const secrets = secretsNow();
+          // May be empty — a model that described nothing still ends the step.
+          const why = redact(action.description?.trim() ?? '', secrets);
+          // The message comes off the INTERPOLATED line, not off the claim: the
+          // claim was read from the AUTHORED text — it has to be the same answer
+          // on every run and in every runner — so `failClaim.message` still holds
+          // the author's `{{tokens}}`, and `Expected 10, got {{total}}` would
+          // reach the report with the braces in it. One parser read twice, exactly
+          // as `deliberateFailError` does it for the unconditional form
+          // (src/runner/flow-control.ts), fallback included: a value carrying the
+          // quote character that ends the message makes the re-parse miss.
+          const reparsed = parseFlowControlStep(instruction);
+          const resolved = reparsed?.verb === 'fail' ? reparsed.message : undefined;
+          const authoredMessage = resolved ?? failClaim.message;
+          // A message-less `fail` is legal and the framework words it (decision 3).
+          // Read for TRUTH rather than presence: the parser keeps `with error ""`
+          // as an empty string, and an empty error is no error to put on the row.
+          const composed = authoredMessage
+            ? redact(authoredMessage, secrets)
+            : `Failed by the step: ${why || 'the condition held'}`;
+          turnSubActions.push({ ...failSub, error: composed });
+          turnFailed = true;
+          // Never retried: a retry hands the model "this failed, try something
+          // else" — the one nudge that could turn a deliberate failure into a
+          // false pass (decision 2).
+          turnNonRetryable = true;
+          turnError = composed;
+          deliberateFailure = { why };
+          logger.error(`Step ${stepIndex} failed as written: ${composed}`);
+          // Nothing after it runs, for the reason nothing after a `return` does.
+          break;
+        }
+        turnSubActions.push({ ...failSub, error: FAIL_NOT_CLAIMED });
+        turnFailed = true;
+        turnError = FAIL_NOT_CLAIMED;
+        logger.warn(`Step ${stepIndex}: ${FAIL_NOT_CLAIMED}`);
+        collectedFailures.push({
+          selector: '',
+          error: FAIL_NOT_CLAIMED,
+          actionType: 'fail',
           startUrl: attemptStartUrl,
           failureUrl: page.url(),
           navigated: page.url() !== attemptStartUrl,
@@ -2334,11 +2646,14 @@ async function executeStepAttempt(
     });
 
     if (turnFailed) {
+      // The turn is finalised above before this throws, so a deliberate failure's
+      // `fail` sub-action is in the report like any other.
       throw new StepFailureError(
         turnError ?? 'Step failed',
         collectedFailures,
         allTurns,
         !turnNonRetryable,
+        deliberateFailure,
       );
     }
 
@@ -2384,7 +2699,14 @@ async function executeStepAttempt(
     // Server-driven run with no interactive console: the AI asked a
     // question we can't answer here. Fail the step with the question as the
     // error rather than blocking on stdin. See issues/014.
-    return {
+    //
+    // Through the tail seam as well (decisions 5 and 6): it is the one failure
+    // that RETURNS rather than throws, so the outer catch never sees it, and a
+    // step the author wrote `otherwise continue` on that stops the run because
+    // the model asked a question is exactly the stop the tail prevents. The
+    // REPL's own `/exit` result below is deliberately NOT routed through it —
+    // that is the user ending the run, not the step failing.
+    return applyFailureTail({
       index: stepIndex,
       instruction,
       status: 'failed',
@@ -2397,7 +2719,7 @@ async function executeStepAttempt(
       error:
         `AI needs clarification, but this run has no interactive prompt ` +
         `to answer it: ${controlSignal.question}`,
-    };
+    }, opts);
   }
 
   if (controlSignal) {
@@ -3259,8 +3581,14 @@ export async function executeBranchedStep(
       // seam: a claim is read off ONE authored line, and the line running here
       // is a group member, not the line the claim was parsed from. The grouper
       // never puts a flow-control step in a group (decision 7), so a claim
-      // reaching this call is already a claim about a different step.
-      { ...opts, cacheKey: matchedOutcome.index + 1, flowControlClaim: undefined },
+      // reaching this call is already a claim about a different step. Same for
+      // `failureTail` (stories/step-failure-outcomes.md, decision 4).
+      {
+        ...opts,
+        cacheKey: matchedOutcome.index + 1,
+        flowControlClaim: undefined,
+        failureTail: undefined,
+      },
       matchedOutcome.instruction,
     );
   } else {
@@ -3303,8 +3631,13 @@ export async function executeBranchedStep(
       totalSteps,
       substituteBranchInstruction(group.continuationStep.instruction, opts),
       // 1-based cache identity, matching the normal step loop (issue 017).
-      // No claim: see the matched-step call above.
-      { ...opts, cacheKey: group.continuationStep.index + 1, flowControlClaim: undefined },
+      // No claim and no tail: see the matched-step call above.
+      {
+        ...opts,
+        cacheKey: group.continuationStep.index + 1,
+        flowControlClaim: undefined,
+        failureTail: undefined,
+      },
       group.continuationStep.instruction,
     );
     results.push(contResult);

@@ -73,6 +73,37 @@ function passed(index: number, instruction: string): StepResult {
   return { index, instruction, status: 'passed', turns: [], durationMs: 1, retried: false };
 }
 
+/** Stub the executor: `override` wins where it returns something, else a pass. */
+function stubExecutor(
+  override: (
+    index: number,
+    instruction: string,
+    opts: StepExecutorOptions,
+  ) => StepResult | undefined = () => undefined,
+): void {
+  executeStepMock.mockImplementation(
+    async (index: number, _total: number, instruction: string, opts: StepExecutorOptions) =>
+      override(index, instruction, opts) ?? passed(index, instruction),
+  );
+}
+
+/** Write a numbered `## Steps` test (`head` adds sections above it) and run it. */
+async function runSteps(name: string, steps: string[], head = ''): Promise<Emitted[]> {
+  const body = `# t\n${head}\n## Steps\n${steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n`;
+  return runAdapter(writeTest(root, name, body));
+}
+
+/** The data of the one `runner:step-complete` carrying `status: 'failed'`. */
+function failedEvent(events: Emitted[]): Record<string, unknown> {
+  return events.find(
+    (e) => e.channel === 'runner:step-complete' && e.data['status'] === 'failed',
+  )!.data;
+}
+
+function runStatus(events: Emitted[]): unknown {
+  return events.find((e) => e.channel === 'runner:complete')?.data['status'];
+}
+
 const originalEnv = { ...process.env };
 const originalCwd = process.cwd();
 let root: string;
@@ -236,5 +267,142 @@ type: skill
         (e) => e.channel === 'runner:step-complete' && e.data['status'] === 'skipped',
       )?.data['reason'],
     ).toBe('Not run: step 2 ended the run — Stop');
+  });
+});
+
+// The two failure outcomes (stories/step-failure-outcomes.md).
+
+/** What the executor returns once an `otherwise continue` tail has been
+ *  applied: still `failed`, with the flag beside it (decision 6). */
+function toleratedResult(index: number, instruction: string): StepResult {
+  return {
+    ...passed(index, instruction),
+    status: 'failed',
+    error: 'no build number in the footer',
+    tolerated: true,
+  };
+}
+
+describe('the Electron loop and a tolerated failure', () => {
+  const line = 'Verify the footer shows the build number otherwise continue';
+
+  it('runs the next step, completes passed, and tails only that step', async () => {
+    stubExecutor((index, instruction) =>
+      instruction === line ? toleratedResult(index, instruction) : undefined,
+    );
+    const events = await runSteps('tolerated.md', ['Navigate to /', line, 'Click "Sign out"']);
+
+    // `status` stays `'failed'` on the wire — the step did not do what it
+    // said — and the flag beside it is what paints amber (decision 9).
+    expect(completions(events)).toEqual([
+      [1, 'passed'],
+      [2, 'failed'],
+      [3, 'passed'],
+    ]);
+    expect(failedEvent(events)['tolerated']).toBe(true);
+    expect(failedEvent(events)['error']).toBe('no build number in the footer');
+    // Step 3 really ran: no bail.
+    expect(executeStepMock.mock.calls.map((c) => c[0])).toEqual([1, 2, 3]);
+    expect(runStatus(events)).toBe('passed');
+    // The tail reached the executor for step 2 and for no other step.
+    expect(
+      executeStepMock.mock.calls.map((c) => (c[3] as StepExecutorOptions).failureTail),
+    ).toEqual([
+      undefined,
+      { body: 'Verify the footer shows the build number', outcome: 'continue' },
+      undefined,
+    ]);
+  });
+
+  it('carries the author`s warning to the panel', async () => {
+    // The warning lived only in the row's explanation, which never crosses IPC,
+    // so the panel's amber line never said the author expected it (decision 6).
+    const warned = 'Verify the footer shows the build number otherwise continue with warning "Footer build number missing"';
+    stubExecutor((index, instruction) =>
+      instruction === warned
+        ? { ...toleratedResult(index, instruction), warning: 'Footer build number missing' }
+        : undefined,
+    );
+    const events = await runSteps('warned.md', ['Navigate to /', warned]);
+
+    expect(failedEvent(events)['warning']).toBe('Footer build number missing');
+    // `error` stays the framework's account of what went wrong.
+    expect(failedEvent(events)['error']).toBe('no build number in the footer');
+  });
+
+  it('an ordinary failure still stops the run — the control for the row above', async () => {
+    stubExecutor((index, instruction) =>
+      index === 2
+        ? { ...passed(2, instruction), status: 'failed' as const, error: 'boom' }
+        : undefined,
+    );
+    const events = await runSteps('stops.md', [
+      'Navigate to /',
+      'Click the export button',
+      'Click "Sign out"',
+    ]);
+
+    expect(completions(events)).toEqual([[1, 'passed'], [2, 'failed']]);
+    expect(runStatus(events)).toBe('failed');
+  });
+});
+
+describe('the Electron loop and a deliberate failure', () => {
+  it('dispatches a bare `Fail …` with no model call and stops there', async () => {
+    stubExecutor();
+    const events = await runSteps('bare-fail.md', [
+      'Navigate to /',
+      'Fail the test with error "No balance was shown"',
+      'Click "Sign out"',
+    ]);
+
+    // Step 2 never reached the executor (decision 3), and step 3 never ran.
+    expect(executeStepMock.mock.calls.map((c) => c[0])).toEqual([1]);
+    expect(completions(events)).toEqual([[1, 'passed'], [2, 'failed']]);
+    expect(failedEvent(events)['error']).toBe('No balance was shown');
+    expect(failedEvent(events)['deliberate']).toBe(true);
+    expect(runStatus(events)).toBe('failed');
+  });
+
+  it('masks a secret the author interpolated into the message', async () => {
+    // The bare `Fail …` dispatch composed its message unredacted here, unlike
+    // every other loop, and this event is what the panel logs and the report is
+    // built from (decision 3).
+    stubExecutor();
+    const events = await runSteps(
+      'masked-fail.md',
+      ['Navigate to /', 'Fail the test with error "Sign-in with {{password}} was rejected"'],
+      '\n## Parameters\n- password: hunter2\n',
+    );
+
+    expect(failedEvent(events)['error']).toBe('Sign-in with *** was rejected');
+    expect(String(failedEvent(events)['error'])).not.toContain('hunter2');
+    // Scoped to the completion event on purpose: `runner:step-start` carries the
+    // interpolated INSTRUCTION unmasked on every step, which predates this story.
+  });
+
+  it('passes a conditional `fail` claim to the executor, and flags the result', async () => {
+    const line = 'If the balance is zero then fail the test with error "No balance was shown"';
+    stubExecutor((index, instruction, opts) =>
+      opts.flowControlClaim
+        ? {
+            ...passed(index, instruction),
+            status: 'failed' as const,
+            error: 'No balance was shown',
+            deliberate: true,
+          }
+        : undefined,
+    );
+    const events = await runSteps('cond-fail.md', ['Navigate to /', line, 'Click "Sign out"']);
+
+    const opts = executeStepMock.mock.calls[1]![3] as StepExecutorOptions;
+    expect(opts.flowControlClaim).toEqual({
+      verb: 'fail',
+      body: 'the balance is zero',
+      message: 'No balance was shown',
+    });
+    expect(opts.failureTail).toBeUndefined();
+    expect(failedEvent(events)['deliberate']).toBe(true);
+    expect(runStatus(events)).toBe('failed');
   });
 });

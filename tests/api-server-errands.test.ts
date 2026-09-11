@@ -808,6 +808,150 @@ describe('POST /errands', () => {
     expect(body.stepsTotal).toBe(3);
   });
 
+  // ── The two failure outcomes (stories/step-failure-outcomes.md) ──────────
+
+  /** Shape the executor's answer per instruction — `answers[instruction]` is
+   *  spread over a passing row — and record what each step was handed. */
+  function executorAnswers(answers: Record<string, Partial<StepResult>>) {
+    const calls: { instruction: string; opts: any }[] = [];
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _total, instruction, opts) => {
+      calls.push({ instruction: instruction as string, opts });
+      return {
+        index: idx as number, instruction: instruction as string, status: 'passed',
+        turns: [], durationMs: 1, retried: false,
+        ...answers[instruction as string],
+      } as StepResult;
+    });
+    return calls;
+  }
+
+  /** POST an errand over SSE and read its frames. */
+  async function streamErrand(steps: string[]): Promise<{ event: string; data: any }[]> {
+    const res = await fetch(`${baseUrl}/errands?stream=1`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify(errandBody({ steps })),
+    });
+    return readSse(res);
+  }
+
+  const TOLERATED = 'Dismiss the promo banner otherwise continue';
+  const toleratedRow: Partial<StepResult> = {
+    status: 'failed', error: 'no promo banner', tolerated: true,
+    aiExplanation: 'The run continued past this step (otherwise continue).',
+  };
+
+  it('carries on past a TOLERATED failure, and the errand still passes', async () => {
+    // `otherwise continue` over the errand loop (decision 6). The row stays a
+    // failure — the step did not do what it said — but nothing breaks: the next
+    // step runs and the errand reports `passed`.
+    const calls = executorAnswers({ [TOLERATED]: toleratedRow });
+    const events = await streamErrand(['open the page', TOLERATED, 'click Export']);
+
+    // The tail reached the executor for that step and no other.
+    expect(calls.map((c) => c.opts.failureTail ?? null)).toEqual([
+      null, { body: 'Dismiss the promo banner', outcome: 'continue' }, null,
+    ]);
+    // A `step:fail` with the flag, and then the NEXT step starting — the claim.
+    const types = events.map((e) => e.data?.type);
+    const failAt = types.indexOf('step:fail');
+    expect(events[failAt]!.data).toMatchObject({ type: 'step:fail', line: 2, error: 'no promo banner', tolerated: true });
+    expect(types.slice(failAt).filter((t) => t === 'step:start')).toHaveLength(1);
+    expect(calls.map((c) => c.instruction)).toEqual(['open the page', TOLERATED, 'click Export']);
+    expect(events.at(-1)!.data).toMatchObject({ type: 'done', status: 'passed' });
+  });
+
+  it('records a tolerated row as `failed` + `tolerated`, and counts it as done', async () => {
+    executorAnswers({ [TOLERATED]: toleratedRow });
+    const { body } = await api(
+      'POST', '/errands', errandBody({ steps: ['open the page', TOLERATED, 'click Export'] }),
+    );
+
+    expect(body.status).toBe('passed');
+    expect(body.error).toBeNull();
+    expect(body.results.map((r: any) => r.status)).toEqual(['passed', 'failed', 'passed']);
+    expect(body.results[1].tolerated).toBe(true);
+    expect(body.results[0].tolerated).toBeUndefined();
+    // It executed, so it counts.
+    expect(body.stepsCompleted).toBe(3);
+  });
+
+  it('carries the author`s warning on the event and on the row', async () => {
+    // Decision 6: the warning travelled only in the row's explanation, which no
+    // wire event carries — so an errand's receipt reader saw the framework's
+    // error and nothing saying the failure was expected.
+    const line = 'Check the footer build number otherwise continue with warning "No build number"';
+    executorAnswers({
+      [line]: {
+        status: 'failed', error: 'the footer had no build number',
+        tolerated: true, warning: 'No build number',
+      },
+    });
+
+    const events = await streamErrand(['open the page', line]);
+    // `error` stays the framework's account of what went wrong.
+    expect(events.find((e) => e.data?.type === 'step:fail')!.data).toMatchObject({
+      tolerated: true, warning: 'No build number', error: 'the footer had no build number',
+    });
+
+    const { body } = await api('POST', '/errands', errandBody({ steps: ['open the page', line] }));
+    expect(body.results[1].warning).toBe('No build number');
+    expect(body.results[0].warning).toBeUndefined();
+  });
+
+  it('stops on a DELIBERATE failure and reports the author`s message', async () => {
+    const line = 'If the balance is zero then fail the test with error "No balance was shown"';
+    const calls = executorAnswers({
+      [line]: { status: 'failed', error: 'No balance was shown', deliberate: true },
+    });
+    const events = await streamErrand(['open the page', line, 'never reached']);
+
+    // The claim is what lets a `fail` action through, and only the claiming line
+    // gets one.
+    expect(calls.map((c) => c.opts.flowControlClaim ?? null)).toEqual([
+      null, { verb: 'fail', body: 'the balance is zero', message: 'No balance was shown' },
+    ]);
+    const fail = events.find((e) => e.data?.type === 'step:fail')!.data;
+    expect(fail).toMatchObject({ line: 2, error: 'No balance was shown', deliberate: true });
+    expect(fail.tolerated).toBeUndefined();
+    expect(events.at(-1)!.data).toMatchObject({ type: 'done', status: 'failed' });
+  });
+
+  it('dispatches an unconditional `Fail …` with no model call', async () => {
+    const seen = recordInstructions();
+    const { body } = await api('POST', '/errands', errandBody({
+      steps: ['open the page', 'Fail the test with error "the export is missing"', 'never reached'],
+    }));
+
+    // Neither the `Fail` line nor the step after it reached the executor (decision 3).
+    expect(seen).toEqual(['open the page']);
+    expect(body.status).toBe('failed');
+    expect(body.error).toMatchObject({ step: 2, message: 'the export is missing' });
+    expect(body.results.map((r: any) => r.status)).toEqual(['passed', 'failed']);
+    expect(body.results[1].reasoning).toBe('Failed by the step, as written — no model call.');
+  });
+
+  it('refuses a line that both ends the flow and tolerates its own failure', async () => {
+    // Decision 8, on a path with no parse-time validator in front of it: an
+    // errand's steps come straight off an MCP call.
+    const seen = recordInstructions();
+    const line = 'If the page is ready then return otherwise continue';
+    const { body } = await api(
+      'POST', '/errands', errandBody({ steps: ['open the page', line, 'never reached'] }),
+    );
+
+    expect(body.status).toBe('failed');
+    expect(body.error.message).toContain('a step cannot both end the flow and tolerate its own failure');
+    // The line is named back, so the caller can find it.
+    expect(body.error.message).toContain(line);
+    // Nothing was judged.
+    expect(seen).toEqual(['open the page']);
+  });
+
   it('a conditional return gets a claim, and streams step:skip for the rest', async () => {
     const line = 'If the page title contains "Dashboard" then stop';
     const claims: unknown[] = [];

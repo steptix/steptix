@@ -2,7 +2,12 @@ import * as vscode from 'vscode';
 import type { ActiveFileTracker, FileStateSnapshot } from './active-file-tracker.js';
 import { classifyLines, extractSteps } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds, findStepsHeadingLine } from './step-lines.js';
-import { failHoverMessage, staleHoverMessage, STALE_HOVER_MESSAGE } from './failure-hover-core.js';
+import {
+  failHoverMessage,
+  staleHoverMessage,
+  toleratedHoverMessage,
+  STALE_HOVER_MESSAGE,
+} from './failure-hover-core.js';
 import { rowHeaderSummary } from './row-summary-core.js';
 import { skipHoverMessage } from './step-skip-core.js';
 import { alignmentLinesOf, dataTablesOf, type DataTableLines } from './data-tables-core.js';
@@ -61,6 +66,9 @@ export class DecorationManager implements vscode.Disposable {
   private readonly statusCodeBehind: vscode.TextEditorDecorationType;
   private readonly statusStale: vscode.TextEditorDecorationType;
   private readonly statusFail: vscode.TextEditorDecorationType;
+  /** An `otherwise continue` failure — the same ✗, in the ⚠'s amber
+   *  (stories/step-failure-outcomes.md, decision 6). */
+  private readonly statusFailTolerated: vscode.TextEditorDecorationType;
   private readonly statusRunning: vscode.TextEditorDecorationType;
   private readonly statusSkip: vscode.TextEditorDecorationType;
   private readonly statusStopped: vscode.TextEditorDecorationType;
@@ -102,6 +110,13 @@ export class DecorationManager implements vscode.Disposable {
     );
     this.statusFail = vscode.window.createTextEditorDecorationType(
       statusIcon('status-fail.svg'),
+    );
+    // The SAME cross as `status-fail.svg`, in `status-code-behind-stale.svg`'s
+    // amber. Deliberately not a different SHAPE: a glyph that stopped looking like
+    // a failure would read as a pass with a caveat. The colour is the whole
+    // message — the run went on past it.
+    this.statusFailTolerated = vscode.window.createTextEditorDecorationType(
+      statusIcon('status-fail-tolerated.svg'),
     );
     this.statusRunning = vscode.window.createTextEditorDecorationType(
       statusIcon('status-running.svg'),
@@ -177,6 +192,7 @@ export class DecorationManager implements vscode.Disposable {
     this.statusCodeBehind.dispose();
     this.statusStale.dispose();
     this.statusFail.dispose();
+    this.statusFailTolerated.dispose();
     this.statusRunning.dispose();
     this.statusSkip.dispose();
     this.statusStopped.dispose();
@@ -229,6 +245,7 @@ export class DecorationManager implements vscode.Disposable {
     editor.setDecorations(this.statusCodeBehind, []);
     editor.setDecorations(this.statusStale, []);
     editor.setDecorations(this.statusFail, []);
+    editor.setDecorations(this.statusFailTolerated, []);
     editor.setDecorations(this.statusRunning, []);
     editor.setDecorations(this.statusSkip, []);
     editor.setDecorations(this.statusStopped, []);
@@ -275,6 +292,10 @@ export class DecorationManager implements vscode.Disposable {
     // (failure-hover-core.ts).
     const staleRanges: vscode.DecorationOptions[] = [];
     const failRanges: vscode.DecorationOptions[] = [];
+    // The amber ✗ carries a hover too, and needs one more than the red ✗ does:
+    // an amber mark on a green run is unreadable until something says the tail
+    // asked for it (stories/step-failure-outcomes.md, decision 6).
+    const failToleratedRanges: vscode.DecorationOptions[] = [];
     const runningRanges: vscode.Range[] = [];
     // Options, not bare Ranges: a skipped or interrupted DATA ROW says why it
     // never ran or never finished ("not run (stopped)", "not run (iteration 2
@@ -316,6 +337,17 @@ export class DecorationManager implements vscode.Disposable {
             ...(failure?.error !== undefined &&
               rowLineSet.has(line) && { hoverMessage: failure.error }),
             ...(!rowLineSet.has(line) && failure && { hoverMessage: failHoverMessage(failure) }),
+          });
+          break;
+        case 'fail-tolerated':
+          failToleratedRanges.push({
+            range: r,
+            // Only a STEP ever wears this: a data row's vocabulary comes from
+            // `lineStatusFromRowStatus`, which has no tolerated member — a row whose
+            // only failures were tolerated is a PASSED row (decision 6). So no row
+            // branch, and no hover for a line with no detail, which is what an older
+            // build's persisted state looks like.
+            ...(failure && { hoverMessage: toleratedHoverMessage(failure) }),
           });
           break;
         case 'running':
@@ -435,6 +467,7 @@ export class DecorationManager implements vscode.Disposable {
     editor.setDecorations(this.statusCodeBehind, codeBehindRanges);
     editor.setDecorations(this.statusStale, staleRanges);
     editor.setDecorations(this.statusFail, failRanges);
+    editor.setDecorations(this.statusFailTolerated, failToleratedRanges);
     editor.setDecorations(this.statusRunning, runningRanges);
     editor.setDecorations(this.statusSkip, skipRanges);
     editor.setDecorations(this.statusStopped, stoppedRanges);

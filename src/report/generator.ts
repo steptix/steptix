@@ -148,6 +148,10 @@ export function renderReport(report: TestReport): string {
     // returned would read as "8 steps, 4 passed, 0 failed" and leave the
     // reader to work out where the other four went.
     skippedSteps: report.skippedSteps ?? 0,
+    // Beside `skippedSteps` and for the same reason (stories/step-failure-outcomes.md,
+    // decision 6): a header counting only passed and failed would silently lose it —
+    // "8 steps, 7 passed, 0 failed" with nothing saying where the eighth went.
+    toleratedSteps: report.toleratedSteps ?? 0,
     totalSubActions: report.totalSubActions,
     tokensUsed,
     inputTokens,
@@ -564,13 +568,23 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   // The interrupted step (run stopped here — issue 021) is its own state, not a
   // failure: amber "ABORTED" badge, no red failure block. Checked first so it
   // overrides the underlying 'failed' status it carries for back-compat.
+  //
+  // A TOLERATED failure (`otherwise continue`, stories/step-failure-outcomes.md
+  // decision 6) borrows the same shape one rung down: `status` is a plain 'failed'
+  // for back-compat, the badge is amber, and the ✗ stays. Checked after
+  // `interrupted`, the stronger statement about what happened to the step.
+  const tolerated = step.tolerated === true && !step.interrupted;
   const statusClass = step.interrupted
     ? 'badge-aborted'
+    : tolerated ? 'badge-tolerated'
     : step.status === 'passed' ? 'badge-pass' : step.status === 'failed' ? 'badge-fail' : 'badge-skip';
   const statusIcon = step.interrupted
     ? '■'
     : step.status === 'passed' ? '✓' : step.status === 'failed' ? '✗' : '—';
-  const statusLabel = step.interrupted ? 'ABORTED' : step.status.toUpperCase();
+  const statusLabel = step.interrupted
+    ? 'ABORTED'
+    : tolerated ? 'TOLERATED'
+    : step.status.toUpperCase();
   const duration = formatDuration(step.durationMs);
   const retryBadge = step.retried ? '<span class="badge badge-skip">Retried</span>' : '';
 
@@ -586,14 +600,26 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
 
   // Interrupted step: an amber "stopped here" note instead of the red failure
   // block (issue 021).
+  // The three failure blocks, most specific first. A tolerated failure gets an amber
+  // block whose title says what happened to the RUN — the error alone reads as a red
+  // step and leaves the reader wondering why the report is green. A deliberate one
+  // (decision 2) keeps the red block but is titled for it: the message below is the
+  // author's sentence, and "Step Failed" over it invites a hunt for a root cause
+  // they already wrote.
   const failureHtml = step.interrupted
     ? `<div class="aborted-block">
         <div class="aborted-title">■ Run stopped here</div>
         <div class="aborted-message">${escapeHtml(step.aiExplanation ?? 'Stopped by user (run aborted).')}</div>
        </div>`
+    : tolerated
+    ? `<div class="tolerated-block">
+        <div class="tolerated-title">✗ Step failed — the run continued</div>
+        <div class="failure-message">${escapeHtml(step.error ?? 'Unknown error')}</div>
+        ${step.aiExplanation ? `<div class="reasoning-block">${escapeHtml(step.aiExplanation)}</div>` : ''}
+       </div>`
     : step.status === 'failed'
     ? `<div class="failure-block">
-        <div class="failure-title">✗ Step Failed</div>
+        <div class="failure-title">${step.deliberate ? '✗ Failed by the step' : '✗ Step Failed'}</div>
         <div class="failure-message">${escapeHtml(step.error ?? 'Unknown error')}</div>
         ${step.aiExplanation ? `<div class="reasoning-block">${escapeHtml(step.aiExplanation)}</div>` : ''}
        </div>`

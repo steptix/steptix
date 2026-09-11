@@ -44,12 +44,23 @@ import { parseSetStep } from '../parser/set-step.js';
 import {
   parseFlowControlStep,
   flowControlInHookError,
+  isReturnClaim,
 } from '../parser/flow-control-step.js';
 import {
+  failureTailContradictionError,
+  isFailureTailContradiction,
+  parseFailureTail,
+} from '../parser/failure-tail.js';
+import {
+  deliberateFailError,
+  deliberateFailResult,
+  DELIBERATE_FAIL_FALLBACK,
   flowControlExplanation,
   frameExitIndex,
   frameLabel,
   skippedByReturn,
+  toleratedHistoryLine,
+  toleratedLogLine,
 } from './flow-control.js';
 import { runSetStep } from './set-step-runner.js';
 import { generateReport, getPrimaryModel, videoBaseNameFor, countStepOrigins } from '../report/generator.js';
@@ -69,6 +80,7 @@ import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loade
 import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import { writeRecording } from '../codebehind/recording.js';
 import { envDataSecretValues, interpolateEnvData } from '../parser/interpolate-env-data.js';
+import { captureScreenshot } from '../browser/screenshot.js';
 import { redact, redactDeep, redactReport, runSecrets } from '../utils/secrets.js';
 
 /**
@@ -804,8 +816,22 @@ export async function runTest(
         const hookSetStep = parseSetStep(raw);
         const hookInstruction = hookSetStep ? raw : interpolate(raw, resolvedParameters);
 
+        // A hook line's claim, read off the same text the refusal names. Split out
+        // of the `if` below because three things read it: the refusal, the
+        // unconditional `Fail` dispatch, and the CONDITIONAL `fail` hook's claim.
+        const hookClaim = parseFlowControlStep(hookInstruction);
+        // A hook's own `… otherwise …` tail. A hook step is a prose step like
+        // any other (stories/step-failure-outcomes.md, decision 7), so it takes
+        // one — except where the line is a claim or an assignment, which have
+        // grammars of their own (decision 12).
+        const hookFailureTail =
+          hookSetStep || hookClaim || toolCall ? null : parseFailureTail(hookInstruction);
         let result: StepResult;
-        // A hook may not return (stories/step-flow-control.md, decision 8).
+        // A hook may not RETURN (stories/step-flow-control.md, decision 8), and
+        // since stories/step-failure-outcomes.md decision 7 it may `fail`: a hook
+        // can already fail the run, so the verb adds a message, not a power.
+        // `isReturnClaim` is the one predicate the three refusal sites share.
+        //
         // `## Hooks` and project `defaultHooks` are both refused earlier, at
         // parse and at config load — this is the backstop for the third way a
         // hook line arrives, which neither of those sees: a `[skill: …]` named
@@ -813,7 +839,7 @@ export async function runTest(
         // flow-control line the config check never looked at. There is no flow
         // to leave from inside a hook, so the hook fails rather than guessing
         // whether it meant the hook scope, the step, or the run.
-        if (parseFlowControlStep(hookInstruction)) {
+        if (hookClaim && isReturnClaim(hookClaim)) {
           const error = flowControlInHookError(hookInstruction, ` (${scope} hook)`);
           logger.error(error);
           result = {
@@ -826,6 +852,36 @@ export async function runTest(
             error,
             aiExplanation: error,
           };
+        } else if (!hookSetStep && isFailureTailContradiction(hookInstruction)) {
+          // Decision 8, on the one hook path with no parse-time validator in
+          // front of it. Refused rather than resolved: the line asks to both
+          // end the flow and to tolerate its own failure.
+          const error = failureTailContradictionError(hookInstruction, ` (${scope} hook)`);
+          logger.error(error);
+          result = {
+            index: hookIndex,
+            instruction: hookInstruction,
+            status: 'failed',
+            turns: [],
+            durationMs: 0,
+            retried: false,
+            error,
+            aiExplanation: error,
+          };
+        } else if (hookClaim && hookClaim.verb === 'fail' && hookClaim.body === undefined) {
+          // An unconditional `Fail the test with error "…"` as a hook line: no
+          // condition to judge, so no model call (decision 3). It fails the hook,
+          // which aborts the run, as any failed hook does.
+          //
+          // No `deliberateFailError` here, unlike the main loop: `hookClaim` was
+          // read off the already-interpolated `hookInstruction`, so its message
+          // holds resolved text rather than the author's tokens.
+          result = deliberateFailResult(
+            hookIndex,
+            hookInstruction,
+            redact(hookClaim.message ?? DELIBERATE_FAIL_FALLBACK, secretsNow()),
+          );
+          logger.error(`${scope} hook: ${result.error}`);
         } else if (hookSetStep) {
           logger.info(`Running ${scope} hook: ${hookInstruction}`);
           const outcome = runSetStep(
@@ -862,6 +918,15 @@ export async function runTest(
             browserTracker,
             dismissalGuidance: hooks.hasAny,
             ...placeholderOpts,
+            // A CONDITIONAL `fail` hook. The claim is what lets the model's `fail`
+            // action through (decision 7); a `return`/`stop` claim never reaches
+            // here, having been refused above.
+            ...(hookClaim && { flowControlClaim: hookClaim }),
+            // A hook step's tail, applied by the same one seam a step's is
+            // (decision 7). An `otherwise continue` hook that fails does not
+            // fail the hook scope, so it does not abort the run — see the
+            // `!result.tolerated` on the scope's own failure check below.
+            ...(hookFailureTail && { failureTail: hookFailureTail }),
             // No stepCache — hook results are usually page-state-dependent
             // (e.g., "accept cookie banner if visible") and shouldn't be replayed blindly.
           },
@@ -891,11 +956,17 @@ export async function runTest(
           );
         }
 
-        if (result.status === 'failed') {
+        // `!result.tolerated`: an `otherwise continue` on a hook line composes the
+        // obvious way (decision 7). The row still says `failed`, but the SCOPE did
+        // not fail, so the run is not aborted and this scope's remaining hooks run.
+        if (result.status === 'failed' && !result.tolerated) {
           return {
             failed: true,
             error: result.error ?? `${scope} hook failed`,
           };
+        }
+        if (result.tolerated) {
+          logger.warn(toleratedLogLine(hookIndex, result.error));
         }
       }
       return { failed: false };
@@ -1356,10 +1427,57 @@ export async function runTest(
         !inputStep && !interactiveStep && !setStep && !unconditionalFlowControl
           ? parseOutputStep(instruction)
           : null;
+      // The `… otherwise fail …` / `… otherwise continue` tail, computed beside the
+      // claim and off the same AUTHORED line (stories/step-failure-outcomes.md,
+      // decision 12). Leaf PROSE steps only: a `Set`, a `[tool:]`, an `[input:]`
+      // and an `[interactive]` step each have a grammar of their own, and a
+      // flow-control claim is a different form entirely. (A `### Section` or
+      // `[skill:]` call never reaches this loop — the expander replaced it.)
+      const failureTail =
+        setStep || flowControlClaim || inputStep || interactiveStep || test.toolCalls[i]
+          ? null
+          : parseFailureTail(rawInstruction);
+      // Decision 8's backstop. The parse-time validator refuses this for a
+      // file; this catches the line that reaches the loop without one — a
+      // `[skill: …]` body read at run time, most of all. No model call: the
+      // line asks for two endings at once and there is nothing to judge.
+      const tailContradiction =
+        setStep || flowControlClaim ? false : isFailureTailContradiction(rawInstruction);
       let stepResult: StepResult;
       let interactiveResults: StepResult[] = [];
 
-      if (unconditionalFlowControl) {
+      if (tailContradiction) {
+        const error = failureTailContradictionError(rawInstruction);
+        logger.error(error);
+        stepResult = {
+          index: i + 1,
+          instruction,
+          status: 'failed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          error,
+          aiExplanation: error,
+        };
+      } else if (unconditionalFlowControl && unconditionalFlowControl.verb === 'fail') {
+        // `Fail the test with error "…"` as a whole step: no condition to judge, so
+        // no model call and no page snapshot — dispatched here beside `Return` and
+        // `Set` (decisions 1 and 3). The author's message was interpolated above
+        // and is masked here, where it first becomes what the report, the log and
+        // the wire carry.
+        stepResult = deliberateFailResult(
+          i + 1,
+          instruction,
+          redact(deliberateFailError(unconditionalFlowControl, instruction), secretsNow()),
+        );
+        // The same shot a step that failed under the executor gets, on the same
+        // config switch: no screenshot where every other failure has one would read
+        // as a missing capture.
+        if (config.execution.screenshotOnFailure) {
+          const shot = await captureScreenshot(session.page, config.browser.fullPageScreenshots);
+          if (shot?.base64) stepResult.screenshotBase64 = shot.base64;
+        }
+      } else if (unconditionalFlowControl) {
         stepResult = {
           index: i + 1,
           instruction,
@@ -1370,7 +1488,12 @@ export async function runTest(
           aiExplanation: flowControlExplanation(
             frameLabel(test.expansion?.origins, test.expansion?.frames, i),
           ),
-          flowControl: { kind: 'return', verb: unconditionalFlowControl.verb },
+          // `isReturnClaim` narrows the union: this record means "the step ended the
+          // flow as a PASS", so a `fail` claim must never produce one — it took the
+          // branch above (decision 1).
+          ...(isReturnClaim(unconditionalFlowControl) && {
+            flowControl: { kind: 'return' as const, verb: unconditionalFlowControl.verb },
+          }),
         };
       } else if (setStep) {
         const setOutcome = runSetStep(
@@ -1534,6 +1657,9 @@ export async function runTest(
           testSteps: test.steps,
           ...placeholderOpts,
           ...codeBehindOptionsFor(i),
+          // This step's own tail, read at one seam over a step that has finally
+          // failed (stories/step-failure-outcomes.md, decision 4).
+          ...(failureTail && { failureTail }),
         },
         // Authored: the executor applies the `[output:]` enrichment to it too,
         // so the model reads `… [store as: total]` rather than a raw
@@ -1570,8 +1696,13 @@ export async function runTest(
           // The conditional form only — the unconditional one never reaches
           // here. Present, this is what lets the model's `return` action end
           // the step (stories/step-flow-control.md, decision 2); absent, the
-          // action is refused and the model is told why.
+          // action is refused and the model is told why. Since
+          // stories/step-failure-outcomes.md decision 1 the same field carries a
+          // conditional `fail` claim, which is what lets a `fail` action through.
           ...(flowControlClaim && { flowControlClaim }),
+          // This step's own tail (decision 4). Never both: `failureTail` is
+          // null whenever a claim was read off the line.
+          ...(failureTail && { failureTail }),
         },
         rawInstruction);
       }
@@ -1631,6 +1762,12 @@ export async function runTest(
           `[flow] step ${i + 1} ${stepResult.aiExplanation ?? 'returned'} — the rest of that flow was skipped`,
         );
       }
+      // The same problem one step on: the entry above says this step failed and the
+      // next says the run carried on regardless, so without this line the model
+      // reads a framework that ignored a failure (decision 6).
+      if (stepResult.tolerated) {
+        conversationHistory.push(toleratedHistoryLine(i + 1));
+      }
 
       // ── runnerControl from the AI clarification REPL ───────────────────────
       // The user took control inside the clarification prompt (typed /repl,
@@ -1669,7 +1806,14 @@ export async function runTest(
         continue;
       }
 
-      if (stepResult.status === 'failed') {
+      if (stepResult.status === 'failed' && stepResult.tolerated) {
+        // `otherwise continue` (stories/step-failure-outcomes.md, decision 6). The
+        // row stays a failure but nothing else happens: no `bail`, no failure REPL,
+        // no `overallStatus` change, and the `afterEach` hooks below run as for any
+        // completed step. WARN rather than error, because a red line for a failure
+        // the author asked to carry past trains a reader to ignore red lines.
+        logger.warn(toleratedLogLine(i + 1, stepResult.error));
+      } else if (stepResult.status === 'failed') {
         logger.error(`Step ${i + 1} FAILED: ${stepResult.error ?? 'unknown error'}`);
 
         const canEnterRepl =
@@ -1879,7 +2023,14 @@ export async function runTest(
     // `failedSteps: 1, status: 'failed'` where the same stop on the server
     // wrote `failedSteps: 0` and issue 021's amber `aborted` state (review 3,
     // finding 11).
-    const failedSteps = stepResults.filter((s) => s.status === 'failed' && !s.interrupted).length;
+    // `&& !s.tolerated` widens that same filter a second time and for the same
+    // reason: a step the author said to carry past is a failure nobody stopped on,
+    // so it is not what makes a run red (decision 6). Not silently dropped either
+    // — `toleratedSteps` below counts it, and the row still says `failed`.
+    const failedSteps = stepResults.filter(
+      (s) => s.status === 'failed' && !s.interrupted && !s.tolerated,
+    ).length;
+    const toleratedSteps = stepResults.filter((s) => s.status === 'failed' && s.tolerated).length;
     const totalSubActions = stepResults.reduce((sum, s) => sum + s.turns.reduce((tSum, t) => tSum + t.subActions.length, 0), 0);
     const skippedSteps = stepResults.filter((s) => s.status === 'skipped').length;
     overallStatus = failedSteps > 0 || timedOut || strictLoadError !== undefined ? 'failed' : 'passed';
@@ -1931,6 +2082,10 @@ export async function runTest(
       // the rows a return produced, would print "4/5 passed" over a report
       // whose fifth row already said SKIPPED.
       ...(skippedSteps > 0 && { skippedSteps }),
+      // Omitted (not 0) on a run that tolerated nothing, the rule `skippedSteps`
+      // sets: an unchanged run writes an unchanged report. The header reads "7
+      // passed, 1 tolerated" when it is there (decision 6).
+      ...(toleratedSteps > 0 && { toleratedSteps }),
       totalSubActions,
       durationMs,
       tokensUsed: tokenTracker.total,
@@ -1954,9 +2109,26 @@ export async function runTest(
       ...(strictLoadError !== undefined && { error: strictLoadError }),
     }, secretsNow());
 
+    // The author already wrote the root cause (stories/step-failure-outcomes.md,
+    // decision 2), so an AI paragraph guessing at it would sit ABOVE their sentence
+    // in the report. Read off the failing steps rather than a run-level flag,
+    // because a run can fail for more than one reason and only an all-deliberate
+    // one has nothing to diagnose.
+    const failuresToDiagnose = stepResults.filter(
+      (s) => s.status === 'failed' && !s.interrupted && !s.tolerated,
+    );
+    const deliberateFailure =
+      failuresToDiagnose.length > 0 && failuresToDiagnose.every((s) => s.deliberate === true);
+
     // Never on a run the user stopped: a diagnosis of "why did this fail"
     // spends tokens answering a question nobody asked.
-    if (overallStatus === 'failed' && !aborted && config.ai.diagnoseFailures && !keyless) {
+    if (
+      overallStatus === 'failed' &&
+      !aborted &&
+      !deliberateFailure &&
+      config.ai.diagnoseFailures &&
+      !keyless
+    ) {
       logger.info('Running failure diagnosis…');
       const diagnosis = await diagnoseFailure(report, session.page, aiClient, contextContent, {
         ...config.browser.domNoiseReduction,
@@ -1972,7 +2144,12 @@ export async function runTest(
         report.outputTokens = tokenTracker.outputTotal;
         logger.info(`Likely cause (${diagnosis.faultCategory}, ${diagnosis.confidence} confidence): ${diagnosis.rootCause}`);
       }
-    } else if (overallStatus === 'failed' && !aborted && config.ai.diagnoseFailures) {
+    } else if (
+      overallStatus === 'failed' &&
+      !aborted &&
+      !deliberateFailure &&
+      config.ai.diagnoseFailures
+    ) {
       // Keyless. `diagnoseFailures` stays default-true — keyless is a runtime
       // condition, not a config edit the user should have to know to make — so
       // the run says why it skipped rather than silently producing a report

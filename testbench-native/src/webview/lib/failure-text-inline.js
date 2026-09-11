@@ -19,12 +19,17 @@
  * A step's failure with its code-behind context folded in — the one sentence
  * every single-line surface prints.
  *
- * @param {{error?: string, fromCodeBehind?: boolean,
+ * @param {{error?: string, fromCodeBehind?: boolean, deliberate?: boolean,
  *          codeBehindStale?: {file: string, error: string}}} failure
  * @returns {string}
  */
 export function describeStepFailure(failure) {
   const error = failure.error ?? "Step failed";
+  // A DELIBERATE failure is exempt from every embellishment below and carries the
+  // author's sentence verbatim (stories/step-failure-outcomes.md, decision 2).
+  // `step.fail()` throws the class a failed `step.expect` throws, so a COMPILED one
+  // arrives `fromCodeBehind` — and "(in its code-behind)" frames it as a defect.
+  if (failure.deliberate) return error;
   // The stale case names BOTH: `error` is the AI failure that followed, and
   // dropping the crash would hide the reason the step ran under AI at all.
   if (failure.codeBehindStale) {
@@ -43,7 +48,12 @@ export function describeStepFailure(failure) {
  *
  * Returns null when there is nothing to say, so the caller renders no block.
  *
- * @param {{error?: string, fromCodeBehind?: boolean,
+ * A tolerated row leads with the author's warning when they wrote one, and a
+ * deliberate one is never framed as a code defect — the same two rules the
+ * editor hovers follow, for the same reason.
+ *
+ * @param {{error?: string, fromCodeBehind?: boolean, deliberate?: boolean,
+ *          warning?: string,
  *          codeBehindStale?: {file: string, error: string}}} failure
  * @param {boolean} isStale True for a ⚠ row, false for a ✗ row.
  * @returns {string | null}
@@ -54,6 +64,16 @@ export function formatStepFailure(failure, isStale) {
       ? `code-behind failed: ${failure.codeBehindStale.error}`
       : null;
   }
+  // The author's sentence, first — it says why the failure was survivable, which is
+  // what a reader of an amber row wants; the framework's error keeps its place under.
+  if (failure.warning) {
+    const { warning, ...rest } = failure;
+    const under = formatStepFailure(rest, false);
+    return under === null ? warning : `${warning}\n${under}`;
+  }
+  // Their own words, not a malfunction — and not an accusation against an
+  // entry that did exactly what it was compiled to do.
+  if (failure.deliberate) return failure.error ?? null;
   if (failure.codeBehindStale) {
     return (
       `code-behind threw: ${failure.codeBehindStale.error}\n` +

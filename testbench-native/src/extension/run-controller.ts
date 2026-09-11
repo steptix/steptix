@@ -33,7 +33,6 @@ import {
   type ClassifiedStep,
   type CompileEvent,
   type CompileProgressEvent,
-  type CompileResultEvent,
   type CompileSummary,
   type DataRowStatus,
   type ErrorPayload,
@@ -46,6 +45,8 @@ import {
 import { getOutputChannel } from './output-channel.js';
 import { skipCompileLogLine, skipRunLogLine } from './step-skip-core.js';
 import { runLogTallyLine } from './steps-summary-core.js';
+import { deliberateRunLogLine, toleratedRunLogLine } from './failure-outcome-core.js';
+import { compileResultLine } from './compile-summary-core.js';
 import type { CompileTail } from './compile-progress-core.js';
 import type { CompileTailSignals } from './compile-tail-signals.js';
 import { EnvSelector } from './env-selector.js';
@@ -274,6 +275,13 @@ export function compileLogLine(event: CompileEvent): string | null {
         // Replay runs strict, so a red step here IS the code-behind failing —
         // but say so only when the event does, in the same words every other
         // single-line surface uses.
+        //
+        // Unless the step tolerated it, in which case the round carried on and
+        // the entry proved nothing either way (decision 11). ⚠, so the compile
+        // log reads the way the gutter beside it paints.
+        if (inner.tolerated) {
+          return `  ${' '.repeat(11)} ⚠ step on line ${inner.line} failed — continuing: ${describeStepFailure(inner)}`;
+        }
         return `  ${' '.repeat(11)} ✗ step on line ${inner.line} — ${describeStepFailure(inner)}`;
       }
       // A round that returned never reached the rest of that flow. Said out
@@ -305,42 +313,12 @@ export function compileLogLine(event: CompileEvent): string | null {
 }
 
 /**
- * The one line a compile-mode run leaves in the log when its result arrives
- * (stories/compile-as-you-go.md). It stands in for the `compile:done`
- * narrative the boxed pipeline sends, which this path has no phase to hang
- * off — and it says "unproven" out loud, because that is the trade this
- * feature makes: no Replay rounds, and the author's next ordinary run is the
- * proof.
+ * The one line a compile-mode run leaves in the log when its result arrives —
+ * re-exported so this module stays the run stream's renderer while the
+ * WORDING lives in a vscode-free core the fast suite can pin
+ * (`compile-summary-core.ts`).
  */
-export function compileResultLine(event: CompileResultEvent): string {
-  const summary = event.summary;
-  const name = path.basename(summary.test);
-  const nothingHappened =
-    summary.compiled === 0 && summary.keptAi === 0 && !summary.stoppedAt;
-  // "Every step already has code-behind" is only true when the run reached
-  // every step. Stopped with nothing generated, it is a lie — and the one the
-  // author most needs not to be told, because it says the opposite of what
-  // happened.
-  if (nothingHappened && summary.notAttempted.length === 0) {
-    return `✓ Nothing to compile in ${name} — every step already has code-behind.`;
-  }
-  if (nothingHappened) {
-    return (
-      `✗ Compiled nothing in ${name}: the run stopped before any step produced an entry ` +
-      `(${summary.notAttempted.length} step(s) not attempted).`
-    );
-  }
-  const parts = [`${summary.compiled} step(s) as code (unproven — the next run proves them)`];
-  if (summary.keptAi > 0) parts.push(`${summary.keptAi} kept AI`);
-  if (summary.stoppedAt) {
-    parts.push(`stopped at step ${summary.stoppedAt.step} — ${summary.stoppedAt.error}`);
-  }
-  if (summary.notAttempted.length > 0) {
-    parts.push(`${summary.notAttempted.length} step(s) not attempted`);
-  }
-  const glyph = event.status === 'green' ? '✓' : event.status === 'partial' ? '◐' : '✗';
-  return `${glyph} Compiled ${name}: ${parts.join('; ')}.`;
-}
+export { compileResultLine };
 
 /** Everything the "re-run this skill step with its variables" action needs,
  *  captured when a step inside a TOP-LEVEL skill fails. */
@@ -1751,17 +1729,23 @@ export class RunController {
         this.postOutput(oldServerBodyStepsWarning(section), 'warn');
       }
     }
+    // A failure the author told the run to carry on past is not a row failure, a
+    // frame failure or a parked failure (stories/step-failure-outcomes.md, decision
+    // 6). Asked once, here, because the three collectors below all key on the same
+    // event and would otherwise turn an amber step into a red row, a red `[skill:]`
+    // line, or a "re-run from the failed step" offer for a step already past.
+    const failure = event.type === 'step:fail' && !event.tolerated ? event : null;
     // Which rows failed on which line, gathered as the run goes so the gutter
     // can be repainted with the WORST status once the loop ends. Read off the
     // events rather than threaded through the loop because a step can fail in
     // several places (a block, a batch auto-fail, an error payload) and one
     // collection point cannot miss one of them.
-    if (this.currentRowNumber !== null && event.type === 'step:fail') {
-      const at = this.rowFailuresByLine.get(event.line);
+    if (this.currentRowNumber !== null && failure) {
+      const at = this.rowFailuresByLine.get(failure.line);
       if (at) {
         if (!at.includes(this.currentRowNumber)) at.push(this.currentRowNumber);
       } else {
-        this.rowFailuresByLine.set(event.line, [this.currentRowNumber]);
+        this.rowFailuresByLine.set(failure.line, [this.currentRowNumber]);
       }
     }
     // The run row's own ✗ hover names the step it died at, so the row and the
@@ -1770,22 +1754,22 @@ export class RunController {
     // that row ends up ✓ or ✗ — `currentRowNumber` is null there, because the
     // continuation is not itself a loop.
     if (
-      event.type === 'step:fail' &&
+      failure &&
       (this.currentRowNumber !== null || this.parkedRowState?.row != null)
     ) {
-      this.lastFailureThisRow ??= this.rowFailureOf(event);
+      this.lastFailureThisRow ??= this.rowFailureOf(failure);
     }
     // The same question, one level down: which section ITERATION died, and at
     // which body step. Attributed by walking the frame's ancestry, because
     // the failing step can be several frames below the iteration's own —
     // a skill called from a looped body still fails that iteration.
-    if (event.type === 'step:fail' && event.frame) {
-      let cur: string | null = event.frame.id;
+    if (failure && failure.frame) {
+      let cur: string | null = failure.frame.id;
       const seen = new Set<string>();
       while (cur && !seen.has(cur)) {
         seen.add(cur);
         if (this.sectionIterationFrames.has(cur) && !this.frameFailures.has(cur)) {
-          this.frameFailures.set(cur, this.rowFailureOf(event));
+          this.frameFailures.set(cur, this.rowFailureOf(failure));
         }
         cur = this.frameParents.get(cur) ?? null;
       }
@@ -4834,6 +4818,16 @@ export class RunController {
      * a skipped step is never a pass on any surface — not the totals.
      */
     let skipCount = 0;
+    /**
+     * Steps that failed and the run carried on past — an `otherwise continue`
+     * tail (stories/step-failure-outcomes.md, decision 6).
+     *
+     * Its own counter for the reason `skipCount` is: `passCount` is what did its
+     * work, and a tolerated failure did not. Named in the closing tally because the
+     * run ends green and the per-step ⚠ has scrolled by then — `✓ 7 passed` with no
+     * mention of the eighth step is what this counter prevents.
+     */
+    let toleratedCount = 0;
     for await (const event of events) {
       // The first event proves the server accepted the request and now holds a
       // session for it — created with this request's `config` when this was the
@@ -4924,7 +4918,20 @@ export class RunController {
         // failure has one behind it (the entry itself failing, or a heal
         // whose AI attempt failed too). Same vocabulary as every other
         // single-line surface.
-        log(`✗ step ${event.line} failed: ${describeStepFailure(event)}`);
+        //
+        // The two outcome flags change the SENTENCE and nothing else about this
+        // branch (decisions 2 and 6). A tolerated failure is counted apart, below,
+        // because the tally must not call it a pass; a deliberate one is an ordinary
+        // failure that stopped the run and only says so differently.
+        const described = describeStepFailure(event);
+        if (event.tolerated) {
+          toleratedCount += 1;
+          log(toleratedRunLogLine(event.line, described, event.warning));
+        } else if (event.deliberate) {
+          log(deliberateRunLogLine(event.line, described));
+        } else {
+          log(`✗ step ${event.line} failed: ${described}`);
+        }
       } else if (event.type === 'step:skip') {
         // A line an `If … then return` left behind. It carries its own reason
         // — `Not run: step 3 returned from "Sign in"` — built server-side by
@@ -4946,7 +4953,12 @@ export class RunController {
       // Track the step that's currently executing — used as the resume
       // point if the user pauses mid-step.
       if (event.type === 'step:start') this.lastStepStartLine = event.line;
-      if (event.type === 'step:fail') sawFail = true;
+      // A TOLERATED failure is exempt (decision 6). `sawFail` is this block's whole
+      // verdict — it becomes the `ok` the row loop reads as `anyFailed`, deciding
+      // the row's mark, the Test Explorer item and whether the batch goes red — and
+      // the run continued past this step by the author's own instruction.
+      // `done.status` already excludes it, so the two agree.
+      if (event.type === 'step:fail' && !event.tolerated) sawFail = true;
       if (event.type === 'done') {
         // Capture the report path so the "Open Last Report" surface can
         // resolve it later. Older servers omit this field — we leave
@@ -4969,7 +4981,7 @@ export class RunController {
       }
       this.emitRunEvent(event);
     }
-    if (passCount > 0 || skipCount > 0) {
+    if (passCount > 0 || skipCount > 0 || toleratedCount > 0) {
       // Built by `runLogTallyLine` rather than here, so `node --test` can pin
       // the sentence: this method imports `vscode` and is unreachable from
       // that suite, which is how `✓ 12 passed` for a run with three skips
@@ -4978,6 +4990,7 @@ export class RunController {
         runLogTallyLine({
           passed: passCount,
           skipped: skipCount,
+          tolerated: toleratedCount,
           cached: cachedCount,
           codeBehind: codeBehindCount,
           stale: staleCount,
