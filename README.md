@@ -532,7 +532,7 @@ Steps 1 and 4 both call `### Login`; step 3 calls `### Checkout`. Each expands i
 - **Matching** is the step's raw text, trimmed and case-insensitive (`Login` = `login` = `LOGIN`). `1. **Login**` is an ordinary AI step, not a call; a typo or trailing period is a near-miss. A `[skill:]`/`[tool:]`/`[input:]`/`[interactive]` step is never a section call.
 - **Names** may contain spaces. Reserved H2 keywords, names starting with `[` or containing `{{`, empty names, and duplicates are rejected.
 
-TestBench (Native) gives sectioned files full debug support — status on body lines, breakpoints, step-into, go-to-definition, completion, and "did you mean?" diagnostics. TestBench (Monaco), the legacy variant, refuses to run a sectioned file rather than mis-run it; use TestBench (Native) or the CLI. See [SPEC.md](SPEC.md#inline-sections) for the full grammar and semantics.
+TestBench (Native) gives sectioned files full debug support — status on body lines, breakpoints, step-into, go-to-definition, completion, and "did you mean?" diagnostics. TestBench (Monaco), the legacy variant, refuses to run a sectioned file rather than mis-run it; use TestBench (Native) or the CLI. See [SPEC.md](docs/specs/SPEC.md#inline-sections) for the full grammar and semantics.
 
 ## Tools
 

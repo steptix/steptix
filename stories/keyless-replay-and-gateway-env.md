@@ -54,7 +54,7 @@ AI_GATEWAY_URL=https://llm.corp.example
 ```
 
 `aibroker/` already means "OpenAI-compatible endpoint at `gatewayUrl`"
-([SPEC-aibroker-routing.md](../SPEC-aibroker-routing.md)); today the URL can
+([SPEC-aibroker-routing.md](../docs/specs/SPEC-aibroker-routing.md)); today the URL can
 only come from `defaults.ts` or the tracked `aiui.config.json`. This story
 adds the env var; it changes **no** routing semantics.
 

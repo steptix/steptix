@@ -10,7 +10,7 @@ Touches: ai-ui-automation only — `@pkent/aigateway` and aiapi are NOT modified
 ## 1. Goal
 
 Replace the bespoke `/v2/vision` + `/v2/stream` fetch client in
-[src/ai/client.ts](src/ai/client.ts) with the standard **`openai` SDK** pointed
+[src/ai/client.ts](../../src/ai/client.ts) with the standard **`openai` SDK** pointed
 at the gateway's new `/v1` surface — while preserving the `AiClient` public
 interface so **no call site changes**.
 
@@ -34,13 +34,13 @@ This is deliberately split so the transport swap ships small and low-risk; BYOK
 - `complete(messages: ChatMessage[], signal?: AbortSignal): Promise<CompleteResult>` where `CompleteResult = { text, model }`
 - `syncAuth(model: string, apiKey: string | undefined): string | null`
 
-The 4 construction sites ([test-runner.ts:174](src/runner/test-runner.ts#L174),
-[session-manager.ts:1166](src/server/session-manager.ts#L1166),
-[runner-adapter.ts:303](src/ui/main/runner-adapter.ts#L303),
-[scripts/diag-wait-ai.ts:62](scripts/diag-wait-ai.ts#L62)), the `complete()`
-callers ([step-executor.ts:615](src/runner/step-executor.ts#L615) etc.,
-[diagnose.ts:64](src/ai/diagnose.ts#L64)), and the single `syncAuth` caller
-([session-manager.ts:1243](src/server/session-manager.ts#L1243)) all stay as-is.
+The 4 construction sites ([test-runner.ts:174](../../src/runner/test-runner.ts#L174),
+[session-manager.ts:1166](../../src/server/session-manager.ts#L1166),
+[runner-adapter.ts:303](../../src/ui/main/runner-adapter.ts#L303),
+[scripts/diag-wait-ai.ts:62](../../scripts/diag-wait-ai.ts#L62)), the `complete()`
+callers ([step-executor.ts:615](../../src/runner/step-executor.ts#L615) etc.,
+[diagnose.ts:64](../../src/ai/diagnose.ts#L64)), and the single `syncAuth` caller
+([session-manager.ts:1243](../../src/server/session-manager.ts#L1243)) all stay as-is.
 **Do not change the constructor signature** (this rules out adding an injected
 client as a constructor param — see §7 for the test seam).
 
@@ -124,7 +124,7 @@ return { text, model };
 ### 3.6 Helpers
 
 **`buildSignal(runSignal?)`** — preserve the exact cancellation + 120s timeout
-semantics from the current [client.ts:359-362](src/ai/client.ts#L359-L362):
+semantics from the current [client.ts:359-362](../../src/ai/client.ts#L359-L362):
 ```ts
 private buildSignal(runSignal?: AbortSignal): AbortSignal {
   const timeout = AbortSignal.timeout(120_000);
@@ -152,24 +152,24 @@ Same contract (returns a key-safe change description or `null`). Internally:
 - `apiKey` change → update `this.config.apiKey` and **rebuild the `openai`
   client** (the key is bound at construction). Mirror the existing
   delete-vs-assign handling for `exactOptionalPropertyTypes`
-  ([client.ts:69-84](src/ai/client.ts#L69-L84)).
+  ([client.ts:69-84](../../src/ai/client.ts#L69-L84)).
 - Never include the key value in the returned string.
 
 ### 3.8 `response_format` note
 Always sending `{ type: 'json_object' }` matches today's behavior
-([client.ts:111](src/ai/client.ts#L111)). The gateway forwards it to
+([client.ts:111](../../src/ai/client.ts#L111)). The gateway forwards it to
 OpenAI-compatible providers; for a direct `anthropic/*` model the library ignores
 it (the prompt already instructs JSON). No behavior change vs today.
 
 ### 3.9 Logging — preserve the AI request/response traces (do NOT drop)
 The current client emits `logger.debug('POST <url> …')` and two structured traces
 per call — `logger.trace('ai.request#N', {…})` and `logger.trace('ai.response#N', {…})`
-([client.ts:114-122,151-158](src/ai/client.ts#L114-L158)) — using
-`summarizeMessagesForTrace` ([client.ts:24-38](src/ai/client.ts#L24-L38)) to strip
+([client.ts:114-122,151-158](../../src/ai/client.ts#L114-L158)) — using
+`summarizeMessagesForTrace` ([client.ts:24-38](../../src/ai/client.ts#L24-L38)) to strip
 image base64 from the dump. **These are load-bearing:** `run-log.ts` subscribes via
 `addTraceCallback` and writes each `ai.request`/`ai.response` trace into the per-run
 log file — this IS the `serverFileLogLevel: 'full'` feature
-([config/types.ts:230-232](src/config/types.ts#L230-L232)). Dropping them silently
+([config/types.ts:230-232](../../src/config/types.ts#L230-L232)). Dropping them silently
 regresses `full`-mode run logs.
 
 Port them into the new methods (both modes): keep `summarizeMessagesForTrace`;
@@ -197,14 +197,14 @@ does not affect extension size. It is pulled into the CLI/server and the Tauri
 
 ## 5. Dead-code removal
 
-In [src/ai/types.ts](src/ai/types.ts), the `/v2` wire types become unused once
+In [src/ai/types.ts](../../src/ai/types.ts), the `/v2` wire types become unused once
 the fetch client is gone. **Remove only after a grep confirms each is unreferenced:**
 `VisionRequest`, `VisionResponse`, `LegacyVisionResponse`, `StreamEvent`,
 `StreamResponseEnvelope`, `LegacyStreamChunk`, `ResponseContentBlock`. **Keep**
 `ChatMessage`, `MessageContentBlock`, and the `AIAction`/`AIResponse` domain types.
-Notes: `CompleteResult` lives in `client.ts` ([client.ts:41](src/ai/client.ts#L41)),
+Notes: `CompleteResult` lives in `client.ts` ([client.ts:41](../../src/ai/client.ts#L41)),
 not `types.ts` — it stays as the rewritten client's export. `TokenUsage`
-([types.ts:240](src/ai/types.ts#L240)) is referenced ONLY by the `/v2` response
+([types.ts:240](../../src/ai/types.ts#L240)) is referenced ONLY by the `/v2` response
 types being removed, so it becomes removable too — drop it once those are gone.
 Do not remove anything still imported elsewhere.
 
@@ -212,7 +212,7 @@ Do not remove anything still imported elsewhere.
 
 ## 6. Tests (vitest)
 
-Rewrite [tests/ai-client.test.ts](tests/ai-client.test.ts) — today it mocks
+Rewrite [tests/ai-client.test.ts](../../tests/ai-client.test.ts) — today it mocks
 `global.fetch` and asserts `/v2/vision`/`/v2/stream` URLs, which no longer exist.
 
 - **Mock the `openai` module** with `vi.mock('openai', …)` returning a fake whose

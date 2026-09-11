@@ -73,7 +73,7 @@ export default {
 
 Why this works with **zero** other library changes:
 - `AIGateway`'s constructor already destructures `options.baseURL` and passes it
-  to `entry.create({ apiKey, baseURL, … })` ([AIGateway.js:30,38](../aigateway/src/AIGateway.js#L30)).
+  to `entry.create({ apiKey, baseURL, … })` ([AIGateway.js:30,38](../../../aigateway/src/AIGateway.js#L30)).
 - `createOpenAICompatibleProvider` already builds an OpenAI client at `baseURL`
   and **strips the first segment** via `stripProviderPrefix` before the upstream
   call — which produces exactly the forwarded id we want:
@@ -121,7 +121,7 @@ Follow the existing `test/aigateway.test.js` pattern (`fakeOpenAIClient({ captur
 
 ## PART B — ai-ui-automation: `AiClient` rework
 
-Rework `AiClient` ([src/ai/client.ts](src/ai/client.ts)) to route **all** calls
+Rework `AiClient` ([src/ai/client.ts](../../src/ai/client.ts)) to route **all** calls
 through `@pkent/aigateway` instead of the direct `openai` SDK. The public
 interface is unchanged (`constructor(config.ai, tokenTracker)`,
 `complete(messages, signal?)`, `syncAuth(model, apiKey)`) → no call-site changes.

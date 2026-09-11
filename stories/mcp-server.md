@@ -46,7 +46,7 @@ Target hosts, all stdio, all on the same machine as the browser:
 | Codex CLI + Codex VS Code ext | `~/.codex/config.toml` | machine-global |
 | Copilot CLI | `~/.copilot/mcp-config.json` | machine-global |
 
-(Note: [SPEC.md](../SPEC.md) §"Direct Playwright over Chrome MCP" is the
+(Note: [SPEC.md](../docs/specs/SPEC.md) §"Direct Playwright over Chrome MCP" is the
 reverse direction — *consuming* an MCP browser backend — and is
 unrelated.)
 
