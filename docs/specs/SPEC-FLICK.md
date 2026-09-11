@@ -2,9 +2,9 @@
 
 > **Status (2026-08-19):** the Tauri desktop implementation this document was
 > written for has been removed — see
-> [issue 049](issues/resolved/049-remove-flick-tauri.md). The surviving
+> [issue 049](../../issues/resolved/049-remove-flick-tauri.md). The surviving
 > Flick client is the VS Code extension at
-> [flick-vscode/](flick-vscode/), which still follows this spec for chat
+> [flick-vscode/](../../flick-vscode/), which still follows this spec for chat
 > behaviour, session/tab lifecycle, step parsing, result cards, screenshots,
 > connection status and stale-session handling.
 >

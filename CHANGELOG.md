@@ -527,7 +527,7 @@ Sections work everywhere a test runs:
   **refuses** to run a sectioned file (error `TB026`) rather than mis-run it —
   use TestBench (Native) or the CLI.
 
-Documented in [SPEC.md](SPEC.md#inline-sections) and the README; a runnable
+Documented in [SPEC.md](docs/specs/SPEC.md#inline-sections) and the README; a runnable
 example ships in new projects at `tests/sections-demo.md` (`aiui init`).
 
 ### Changed — `[no-hooks]` on a skill invocation now covers the whole body

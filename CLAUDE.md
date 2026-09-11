@@ -6,7 +6,7 @@
 the Sessions API with natural-language steps. Extension ID `pkent.flick-vscode`.
 
 There used to be a second client, `flick/`, a standalone Tauri desktop app
-(Svelte front end, Rust backend) built to [SPEC-FLICK.md](SPEC-FLICK.md). It was
+(Svelte front end, Rust backend) built to [SPEC-FLICK.md](docs/specs/SPEC-FLICK.md). It was
 removed in favour of the VS Code extension — see
 [issue 049](issues/resolved/049-remove-flick-tauri.md). With it went the only
 reason this repo needed a Rust/MSVC toolchain.

@@ -2,7 +2,7 @@
 
 A chat-style panel inside VS Code for driving the **ai-ui-automation Sessions
 API** with natural-language steps. It is a fresh, independent reimplementation
-of the desktop **Flick** app described in [`SPEC-FLICK.md`](../SPEC-FLICK.md) —
+of the desktop **Flick** app described in [`SPEC-FLICK.md`](../docs/specs/SPEC-FLICK.md) —
 it shared no code with the Tauri `flick/` project, which was removed in favour
 of this extension ([issue 049](../issues/resolved/049-remove-flick-tauri.md)).
 This is now the only Flick client.

@@ -95,9 +95,9 @@ Most of the plumbing exists and has for a while:
 | [actions.ts:532](../src/browser/actions.ts) | `executeUpload` — `locator(selector).locator('visible=true').first().setInputFiles(filePath)` with a 10 s budget |
 | [step-executor.ts:53](../src/runner/step-executor.ts) | `upload` is in `MUTATING_ACTIONS`, so cache replay treats it correctly |
 | [template.ts:326](../src/report/template.ts) | the report already renders a `filePath` row with a copy button |
-| [SPEC.md §6.1](../SPEC.md) | documents `upload` with `selector`, `filePath`, `description` |
+| [SPEC.md §6.1](../docs/specs/SPEC.md) | documents `upload` with `selector`, `filePath`, `description` |
 | [prompts.ts](../src/ai/prompts.ts) | **Never mentions upload as an action.** Rules 9–12 cover navigate, type, select, wait; the only "upload" in the prompt is an example of a slow wait |
-| [SPEC-SESSIONS-API.md](../SPEC-SESSIONS-API.md) | lists "File uploads" under *Out of Scope (v1)* |
+| [SPEC-SESSIONS-API.md](../docs/specs/SPEC-SESSIONS-API.md) | lists "File uploads" under *Out of Scope (v1)* |
 
 So the situation is the one the scroll story found: the model's action
 vocabulary is whatever the prompt says it is, and the prompt does not say

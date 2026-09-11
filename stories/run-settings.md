@@ -128,7 +128,7 @@ allow-list and merged at use. This is the same shape, with retention added.
 Two knobs that look relevant are not: `reports.includeScreenshots` and
 `reports.embedScreenshots` are declared in
 [types.ts](../src/config/types.ts), defaulted, present in the JSON schema and
-documented in [SPEC.md](../SPEC.md) — and read by no runtime code anywhere.
+documented in [SPEC.md](../docs/specs/SPEC.md) — and read by no runtime code anywhere.
 They are dead, and exposing them would be shipping a lie.
 
 ## Locked decisions

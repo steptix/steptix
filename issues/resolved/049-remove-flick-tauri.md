@@ -1,7 +1,7 @@
 # 049 — Retire the Tauri `flick/` desktop app; `flick-vscode/` is the surviving Flick client
 
 **Status:** resolved — tree deleted 2026-08-19
-**Area:** `flick/` (whole tree, 58 tracked files); [SPEC-FLICK.md](../../SPEC-FLICK.md); [CLAUDE.md](../../CLAUDE.md) §"Running Flick in dev mode (Windows)"
+**Area:** `flick/` (whole tree, 58 tracked files); [SPEC-FLICK.md](../../docs/specs/SPEC-FLICK.md); [CLAUDE.md](../../CLAUDE.md) §"Running Flick in dev mode (Windows)"
 **Related:** [048 — retire testbench-monaco](048-remove-testbench-monaco.md) (same shape, one tree earlier); [041 — `classifyEngine` misreads modern Edge](../041-flick-classifies-modern-edge-as-unknown.md) (about **flick-vscode**, not this tree — stays open)
 **Opened:** 2026-08-19
 
@@ -9,7 +9,7 @@
 
 We are keeping one Flick client, and it is [flick-vscode/](../../flick-vscode/) —
 the chat panel that lives inside VS Code. `flick/`, the standalone Tauri
-desktop app described by [SPEC-FLICK.md](../../SPEC-FLICK.md), is to be deleted
+desktop app described by [SPEC-FLICK.md](../../docs/specs/SPEC-FLICK.md), is to be deleted
 from `main`.
 
 The two have been carried side by side since flick-vscode was written. That was
@@ -82,7 +82,7 @@ Beyond `git rm -r flick/`:
 - [scripts/init-worktree.ps1:9,60-61,89](../../scripts/init-worktree.ps1#L60) — two
   `$dirs` entries, the "~5 GB" comment, and the `-SkipBuilds` message's "rebuild
   Tauri as needed".
-- [SPEC-FLICK.md](../../SPEC-FLICK.md) — **kept**, with a status note at the top.
+- [SPEC-FLICK.md](../../docs/specs/SPEC-FLICK.md) — **kept**, with a status note at the top.
   flick-vscode's README links it as the behavioural spec it still follows;
   deleting it would orphan that link and throw away the spec of the surviving
   client. The Tauri-specific §Window Behavior and §Technology stay as written,
@@ -97,7 +97,7 @@ references the tree, and there is no CI to update.
 ## What stays as written
 
 - **"Flick step" terminology** — [src/runner/interactive-repl.ts](../../src/runner/interactive-repl.ts),
-  [runner-core/src/repl.ts](../../runner-core/src/repl.ts), [SPEC.md:191](../../SPEC.md#L191),
+  [runner-core/src/repl.ts](../../runner-core/src/repl.ts), [SPEC.md:191](../../docs/specs/SPEC.md#L191),
   `stories/full-self-driving-supervised.md`. That is the REPL's name for an
   ad-hoc natural-language step typed against a live page. It names a concept,
   not either client, and survives the deletion untouched.

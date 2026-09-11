@@ -66,7 +66,7 @@ strings, which has known failure modes:
 - Derived values (dates, computed codes, anything the AI worked out) are
   frozen at record time with no marker that they were ever dynamic.
 
-[assertion-code-cache.md](assertion-code-cache.md) already landed the fix one
+The assertion code cache already landed the fix one
 level down, and its core insight generalises verbatim:
 
 > The "result" worth caching isn't a pass/fail outcome — that changes per

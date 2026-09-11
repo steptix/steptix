@@ -285,9 +285,9 @@ Testbench's [`run-controller.ts`](../testbench/src/extension/run-controller.ts) 
 
 ## Docs to update
 
-- [SPEC.md](../SPEC.md) — `[interactive]` section (new commands, drop `done`/blank semantics).
-- [SPEC-UI.md](../SPEC-UI.md) — interactive step description.
-- [SPEC-SESSIONS-API.md](../SPEC-SESSIONS-API.md) — still skipped server-side, no change.
+- [SPEC.md](../docs/specs/SPEC.md) — `[interactive]` section (new commands, drop `done`/blank semantics).
+- [SPEC-UI.md](../docs/specs/SPEC-UI.md) — interactive step description.
+- [SPEC-SESSIONS-API.md](../docs/specs/SPEC-SESSIONS-API.md) — still skipped server-side, no change.
 - [README.md](../README.md) — `[interactive]` cheat-sheet.
 - [stories/full-self-driving-supervised.md](full-self-driving-supervised.md) — mark superseded by this story.
 - [testbench/stories/interactive-input-and-fsd.md](../testbench/stories/interactive-input-and-fsd.md) — REPL command list.

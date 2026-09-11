@@ -3,7 +3,7 @@
 Status: BUILT and merged-pending — implemented, reviewed twice, live-verified
 (the live check against a real AWS account is still outstanding)
 Builds on: the model-prefix routing
-([SPEC-aibroker-routing.md](../SPEC-aibroker-routing.md) plus the `gateway/`
+([SPEC-aibroker-routing.md](../docs/specs/SPEC-aibroker-routing.md) plus the `gateway/`
 alias from [copilot-lm-bridge.md](copilot-lm-bridge.md) Part B), keyless replay
 ([keyless-replay-and-gateway-env.md](keyless-replay-and-gateway-env.md),
 PR #111), and the AI run switch ([run-settings.md](run-settings.md) §9).
