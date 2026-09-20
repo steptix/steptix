@@ -1,0 +1,946 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Orders</title>
+  <!--
+    Fixture page for the structured table read (readTable) spec, §5.1 and §5.2.
+
+    Three orders in a native <table> whose FIRST column is a select-all
+    checkbox, so the column a reader wants is never the first one and header
+    mapping is the only safe way in. Everything here is client-side, so every
+    shard can share one server and every run starts from the same state — no
+    login, no cookie banner, no persistence.
+
+    The controls exist to move the table under a read that must survive it:
+
+      Status filter   → hides rows with display:none WITHOUT removing them.
+                        A read excludes hidden rows (§7.4), so filtering to
+                        Pending makes the same step return one record.
+      Sortable header → physically reorders the <tr>s. Records come back in
+                        DOM order, so the order changes and the values do not.
+      Review          → inserts a full-width single-cell detail row, which the
+                        spec calls a placeholder row and a read skips (§4.8).
+      Approve selected→ rewrites Status badges in place, so a second read of
+                        the same page returns different values.
+      Swap columns    → the §5.2 case: Order ID and Status change places and a
+                        header-mapped read must still return the same records.
+
+    Every one of those appends a line to the event log under the table, so a
+    test can prove which of them actually happened.
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar (same shell as dashboard.html / transactions.html / control-flow.html) */
+    .sidebar {
+      width: 240px;
+      background: #1f2937;
+      color: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      min-height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      margin-bottom: 32px;
+    }
+
+    .sidebar-logo-icon {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .sidebar-logo-name {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    nav { flex: 1; }
+
+    nav ul { list-style: none; padding: 0; }
+
+    nav ul li a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 24px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav ul li a:hover { background: #374151; color: #f9fafb; }
+
+    nav ul li a.active {
+      background: #374151;
+      color: #f9fafb;
+      border-left-color: #1a56db;
+    }
+
+    nav ul li a .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+    .sidebar-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #374151;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .user-name { font-size: 13px; font-weight: 500; color: #f9fafb; }
+    .user-email { font-size: 12px; color: #6b7280; }
+
+    .logout-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover { background: #374151; color: #f9fafb; }
+
+    /* Main content */
+    .main-content {
+      margin-left: 240px;
+      flex: 1;
+      padding: 32px;
+    }
+
+    .page-header { margin-bottom: 28px; }
+
+    .page-header h1 {
+      font-size: 26px;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .page-header p {
+      font-size: 14px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+
+    .section-card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .section-hint {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 16px;
+    }
+
+    .muted { color: #6b7280; font-size: 13px; }
+
+    .btn {
+      padding: 9px 16px;
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn:hover { background: #1648c0; }
+
+    .btn:disabled { background: #9ca3af; cursor: not-allowed; }
+
+    .btn-secondary {
+      background: transparent;
+      color: #1a56db;
+      border: 1px solid #1a56db;
+    }
+
+    .btn-secondary:hover { background: #eff4ff; }
+
+    /* Toolbar above the table */
+    .table-toolbar {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 18px;
+    }
+
+    .toolbar-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .field-label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 6px;
+    }
+
+    select {
+      padding: 8px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 14px;
+      color: #111827;
+      background: #fff;
+      cursor: pointer;
+    }
+
+    select:focus { outline: none; border-color: #1a56db; }
+
+    /* Orders table */
+    .table-wrap { overflow-x: auto; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    thead { background: #f9fafb; }
+
+    /* Headers are upper-cased for looks only. text-transform shows up in
+       innerText, but §7.3 case-folds before matching, so "Order ID" still
+       matches "ORDER ID". */
+    th {
+      text-align: left;
+      padding: 12px 16px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      border-bottom: 1px solid #e5e7eb;
+      white-space: nowrap;
+    }
+
+    /* The sort indicator is generated content, NOT text inside the <th>:
+       innerText ignores ::after, so sorting cannot change the header text a
+       structured read matches on. */
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover { color: #1a56db; }
+    th.sortable::after { content: '↕'; margin-left: 6px; opacity: 0.35; }
+    th.sortable[aria-sort="ascending"]::after { content: '▲'; opacity: 1; color: #1a56db; }
+    th.sortable[aria-sort="descending"]::after { content: '▼'; opacity: 1; color: #1a56db; }
+    th.sortable:focus-visible { outline: 2px solid #1a56db; outline-offset: -2px; }
+
+    tbody tr { border-bottom: 1px solid #f3f4f6; }
+    tbody tr:hover { background: #f9fafb; }
+
+    td {
+      padding: 14px 16px;
+      font-size: 14px;
+      color: #111827;
+      vertical-align: middle;
+    }
+
+    td input[type="checkbox"],
+    th input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      accent-color: #1a56db;
+      cursor: pointer;
+      vertical-align: middle;
+    }
+
+    .order-link { color: #1a56db; font-weight: 600; text-decoration: none; }
+    .order-link:hover { text-decoration: underline; }
+
+    .order-total { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+    .status {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    .status-complete { background: #d1fae5; color: #065f46; }
+    .status-pending  { background: #fef3c7; color: #92400e; }
+    .status-ready    { background: #dbeafe; color: #1e40af; }
+    .status-approved { background: #ede9fe; color: #5b21b6; }
+
+    .review-btn {
+      padding: 6px 14px;
+      background: transparent;
+      color: #1a56db;
+      border: 1px solid #1a56db;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .review-btn:hover { background: #eff4ff; }
+
+    /* Detail row: one cell spanning the whole table. A structured read treats
+       this as a placeholder row and skips it. */
+    tr.order-details { background: #f9fafb; }
+    tr.order-details:hover { background: #f9fafb; }
+    tr.order-details td { padding: 16px 20px; border-top: 1px solid #e5e7eb; }
+
+    .detail-grid { display: grid; gap: 8px; }
+
+    .detail-line { display: flex; gap: 12px; font-size: 13px; color: #374151; }
+
+    .detail-label {
+      min-width: 82px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      padding-top: 1px;
+    }
+
+    tfoot td {
+      border-top: 2px solid #e5e7eb;
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+      background: #f9fafb;
+    }
+
+    tfoot .order-total { color: #111827; }
+
+    /* Event log */
+    .log-card { margin-top: 24px; }
+
+    ol.log-list, ul.log-list { list-style: none; padding: 0; margin: 0; }
+
+    .log-list li {
+      padding: 8px 0;
+      border-bottom: 1px solid #f3f4f6;
+      font-size: 13px;
+      color: #374151;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .log-list li:last-child { border-bottom: none; }
+
+    .log-index { color: #9ca3af; margin-right: 10px; }
+  </style>
+</head>
+<body>
+  <!-- Sidebar navigation -->
+  <aside class="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">S</div>
+      <span class="sidebar-logo-name">SecureBank</span>
+    </div>
+
+    <nav>
+      <ul>
+        <li>
+          <a href="dashboard.html">
+            <span class="nav-icon">🏠</span>
+            Dashboard
+          </a>
+        </li>
+        <li>
+          <a href="transactions.html">
+            <span class="nav-icon">💳</span>
+            Transactions
+          </a>
+        </li>
+        <li>
+          <a href="documents.html">
+            <span class="nav-icon">📄</span>
+            Documents
+          </a>
+        </li>
+        <li>
+          <a href="control-flow.html">
+            <span class="nav-icon">💸</span>
+            Payments
+          </a>
+        </li>
+        <li>
+          <a href="tables.html">
+            <span class="nav-icon">📋</span>
+            Tables
+          </a>
+        </li>
+        <li>
+          <a href="#settings">
+            <span class="nav-icon">⚙️</span>
+            Settings
+          </a>
+        </li>
+        <li>
+          <a href="#profile">
+            <span class="nav-icon">👤</span>
+            Profile
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <div>
+          <div class="user-name">Demo User</div>
+          <div class="user-email" id="user-email">demo@securebank.com</div>
+        </div>
+      </div>
+      <button class="logout-btn" id="logout-btn" type="button">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <div class="page-header">
+      <h1>Orders</h1>
+      <p>Card, cheque book and merchant equipment orders placed on your business accounts.</p>
+    </div>
+
+    <section class="section-card" id="orders-card" aria-labelledby="orders-title">
+      <div class="section-header">
+        <h2 class="section-title" id="orders-title">Open orders</h2>
+        <span class="muted" id="orders-row-count">3 orders</span>
+      </div>
+      <p class="section-hint">
+        Filter, sort, open an order for detail, or approve several at once. The status filter
+        applies when you change it, so orders you approve stay where they are.
+      </p>
+
+      <div class="table-toolbar">
+        <div>
+          <label class="field-label" for="orders-filter-status">Status</label>
+          <select id="orders-filter-status" aria-label="Filter by status">
+            <option value="all">All statuses</option>
+            <option value="Completed">Completed</option>
+            <option value="Pending">Pending</option>
+            <option value="Ready">Ready</option>
+          </select>
+        </div>
+        <div class="toolbar-group">
+          <span class="muted" id="orders-selected-count">0 selected</span>
+          <button type="button" class="btn" id="orders-approve-selected">Approve selected</button>
+          <button type="button" class="btn btn-secondary" id="orders-reorder-columns"
+                  title="Preview the new column order: Status moves to the front and Order ID takes its place.">
+            Swap the Order ID and Status columns
+          </button>
+        </div>
+      </div>
+
+      <!--
+        The readTable fixture table, spec §5.1.
+
+        The first <th> holds only the select-all checkbox, so its header text is
+        blank: the columns an author asks for are never the first column, and
+        header text is the only safe way to find them. No row carries a
+        data-order-id, on purpose.
+
+        "Review" inserts a detail row directly after its order row:
+
+            <tr class="order-details" data-order="ORD-1001"><td colspan="6"> … </td></tr>
+
+        That is a full-width single-cell row, which §4.8 / §7.4 call a
+        PLACEHOLDER row. A structured read skips it: it is not data, it consumes
+        no _row number, and opening every order must not change what a read
+        returns. The <tfoot> total row is excluded by §7.4 as well. So a read of
+        this table returns three records no matter what is open on screen.
+      -->
+      <div class="table-wrap">
+        <table id="orders" aria-label="Orders" data-testid="orders-table">
+          <thead>
+            <tr>
+              <th scope="col">
+                <input type="checkbox" id="orders-select-all" aria-label="Select all orders">
+              </th>
+              <th scope="col" class="sortable" tabindex="0" aria-sort="none" title="Sort by Order ID">Order ID</th>
+              <th scope="col" class="sortable" tabindex="0" aria-sort="none" title="Sort by Customer">Customer</th>
+              <th scope="col" class="sortable" tabindex="0" aria-sort="none" title="Sort by Total">Total</th>
+              <th scope="col" class="sortable" tabindex="0" aria-sort="none" title="Sort by Status">Status</th>
+              <th scope="col">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="orders-body">
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-1001"></td>
+              <td><a class="order-link" href="/orders/ORD-1001">ORD-1001</a></td>
+              <td>Alice Smith</td>
+              <td class="order-total">$125.00</td>
+              <td><span class="status status-complete">Completed</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-1002"></td>
+              <td><a class="order-link" href="/orders/ORD-1002">ORD-1002</a></td>
+              <td>Bob Jones</td>
+              <td class="order-total">$89.50</td>
+              <td><span class="status status-pending">Pending</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-1003"></td>
+              <td><a class="order-link" href="/orders/ORD-1003">ORD-1003</a></td>
+              <td>Carol Diaz</td>
+              <td class="order-total">$310.00</td>
+              <td><span class="status status-ready">Ready</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+          </tbody>
+          <tfoot>
+            <tr id="orders-total-row">
+              <td></td>
+              <td></td>
+              <td id="orders-total-label">Total (3 orders)</td>
+              <td class="order-total" id="orders-total-amount">$524.50</td>
+              <td></td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </section>
+
+    <section class="section-card log-card" id="orders-log-card" aria-labelledby="orders-log-title">
+      <div class="section-header">
+        <h2 class="section-title" id="orders-log-title">Event log</h2>
+        <span class="muted" id="orders-log-count">0 events</span>
+      </div>
+      <p class="section-hint">Everything you do to the table above, oldest first.</p>
+      <p class="muted" id="orders-log-empty">Nothing yet — filter, sort, review, approve or swap the columns.</p>
+      <ul class="log-list" id="orders-log" aria-label="Order activity log"></ul>
+    </section>
+  </main>
+
+  <script>
+    // ── Shell: user info and sign out (same as the other pages) ──────────────
+    var sessionEmail = sessionStorage.getItem('user-email');
+    if (sessionEmail) {
+      document.getElementById('user-email').textContent = sessionEmail;
+      document.getElementById('user-avatar').textContent = sessionEmail.charAt(0).toUpperCase();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.removeItem('logged-in');
+      sessionStorage.removeItem('user-email');
+      window.location.href = 'index.html';
+    });
+
+    // ── Column bookkeeping ───────────────────────────────────────────────────
+    // The table carries no data-* attributes naming its columns — that is the
+    // whole point of the fixture — so the page tracks its own logical order in
+    // this array and keeps it in step with the DOM whenever the columns swap.
+    var COLUMN_ORDER = ['select', 'id', 'customer', 'total', 'status', 'actions'];
+    var COLUMN_LABELS = {
+      select: 'selection',
+      id: 'Order ID',
+      customer: 'Customer',
+      total: 'Total',
+      status: 'Status',
+      actions: 'Actions'
+    };
+
+    var table = document.getElementById('orders');
+    var tbody = document.getElementById('orders-body');
+    var headRow = table.tHead.rows[0];
+
+    function columnIndex(name) { return COLUMN_ORDER.indexOf(name); }
+
+    function cellOf(row, name) {
+      var i = columnIndex(name);
+      return i >= 0 && row.cells.length > i ? row.cells[i] : null;
+    }
+
+    function orderRows() {
+      return Array.prototype.slice.call(tbody.querySelectorAll('tr.order-row'));
+    }
+
+    function visibleOrderRows() {
+      return orderRows().filter(function (row) { return row.style.display !== 'none'; });
+    }
+
+    function orderIdOf(row) {
+      var cell = cellOf(row, 'id');
+      return cell ? cell.textContent.trim() : '';
+    }
+
+    function statusOf(row) {
+      var cell = cellOf(row, 'status');
+      return cell ? cell.textContent.trim() : '';
+    }
+
+    function detailRowFor(id) {
+      return tbody.querySelector('tr.order-details[data-order="' + id + '"]');
+    }
+
+    function parseMoney(text) {
+      var n = Number(String(text).replace(/[^0-9.-]/g, ''));
+      return isNaN(n) ? 0 : n;
+    }
+
+    function formatMoney(value) {
+      return '$' + value.toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      });
+    }
+
+    // ── Event log ────────────────────────────────────────────────────────────
+    var logList = document.getElementById('orders-log');
+    var logEmpty = document.getElementById('orders-log-empty');
+    var logCount = document.getElementById('orders-log-count');
+
+    function logEvent(message) {
+      var li = document.createElement('li');
+      li.dataset.testid = 'orders-log-entry';
+      var index = document.createElement('span');
+      index.className = 'log-index';
+      index.textContent = String(logList.children.length + 1) + '.';
+      li.appendChild(index);
+      li.appendChild(document.createTextNode(' ' + message));
+      logList.appendChild(li);
+      logEmpty.hidden = true;
+      logCount.textContent = logList.children.length +
+        (logList.children.length === 1 ? ' event' : ' events');
+    }
+
+    // ── Footer total: sums the Total column over the VISIBLE rows ────────────
+    // The <tfoot> is excluded from a structured read (§7.4), so this number is
+    // page furniture — it is here to prove the read leaves it alone.
+    var totalLabel = document.getElementById('orders-total-label');
+    var totalAmount = document.getElementById('orders-total-amount');
+    var rowCountLabel = document.getElementById('orders-row-count');
+
+    function updateFooterTotal() {
+      var rows = visibleOrderRows();
+      var sum = rows.reduce(function (acc, row) {
+        var cell = cellOf(row, 'total');
+        return acc + (cell ? parseMoney(cell.textContent) : 0);
+      }, 0);
+      totalLabel.textContent = 'Total (' + rows.length + (rows.length === 1 ? ' order)' : ' orders)');
+      totalAmount.textContent = formatMoney(sum);
+      rowCountLabel.textContent = rows.length + (rows.length === 1 ? ' order' : ' orders');
+    }
+
+    // ── Selection ────────────────────────────────────────────────────────────
+    var selectAll = document.getElementById('orders-select-all');
+    var selectedCount = document.getElementById('orders-selected-count');
+
+    function tickedRows() {
+      return visibleOrderRows().filter(function (row) {
+        var box = row.querySelector('input.order-select');
+        return box && box.checked;
+      });
+    }
+
+    function updateSelectedCount() {
+      selectedCount.textContent = tickedRows().length + ' selected';
+      var visible = visibleOrderRows();
+      var allTicked = visible.length > 0 && tickedRows().length === visible.length;
+      selectAll.checked = allTicked;
+      selectAll.indeterminate = !allTicked && tickedRows().length > 0;
+    }
+
+    tbody.addEventListener('change', function (event) {
+      if (event.target.classList.contains('order-select')) updateSelectedCount();
+    });
+
+    selectAll.addEventListener('change', function () {
+      // Ticks the VISIBLE rows only: a filtered-out row is not on screen, so
+      // "select all" cannot mean it.
+      var on = selectAll.checked;
+      visibleOrderRows().forEach(function (row) {
+        var box = row.querySelector('input.order-select');
+        if (box) box.checked = on;
+      });
+      updateSelectedCount();
+    });
+
+    // ── Status filter: hide, never remove ────────────────────────────────────
+    var filter = document.getElementById('orders-filter-status');
+
+    function applyFilter() {
+      var wanted = filter.value;
+      orderRows().forEach(function (row) {
+        var match = wanted === 'all' || statusOf(row) === wanted;
+        row.style.display = match ? '' : 'none';
+        var detail = detailRowFor(orderIdOf(row));
+        if (detail) detail.style.display = match && detail.dataset.open === 'true' ? '' : 'none';
+        if (!match) {
+          var box = row.querySelector('input.order-select');
+          if (box) box.checked = false;
+        }
+      });
+      updateSelectedCount();
+      updateFooterTotal();
+    }
+
+    filter.addEventListener('change', function () {
+      applyFilter();
+      logEvent('Filtered by status: ' + (filter.value === 'all' ? 'All statuses' : filter.value));
+    });
+
+    // ── Sorting ──────────────────────────────────────────────────────────────
+    // Physically reorders the <tr>s, carrying each open detail row with its
+    // order row so the pairing survives.
+    var sortColumn = null;
+    var sortAscending = true;
+
+    function sortValue(row, column) {
+      var cell = cellOf(row, column);
+      var text = cell ? cell.textContent.trim() : '';
+      return column === 'total' ? parseMoney(text) : text.toLowerCase();
+    }
+
+    function sortBy(column) {
+      if (sortColumn === column) {
+        sortAscending = !sortAscending;
+      } else {
+        sortColumn = column;
+        sortAscending = true;
+      }
+
+      var rows = orderRows();
+      rows.sort(function (a, b) {
+        var va = sortValue(a, column);
+        var vb = sortValue(b, column);
+        if (va < vb) return sortAscending ? -1 : 1;
+        if (va > vb) return sortAscending ? 1 : -1;
+        return 0;
+      });
+
+      rows.forEach(function (row) {
+        tbody.appendChild(row);
+        var detail = detailRowFor(orderIdOf(row));
+        if (detail) tbody.appendChild(detail);
+      });
+
+      Array.prototype.forEach.call(headRow.cells, function (th, i) {
+        if (!th.classList.contains('sortable')) return;
+        th.setAttribute('aria-sort',
+          COLUMN_ORDER[i] === column ? (sortAscending ? 'ascending' : 'descending') : 'none');
+      });
+
+      logEvent('Sorted by ' + COLUMN_LABELS[column] +
+        ' (' + (sortAscending ? 'ascending' : 'descending') + ')');
+    }
+
+    function headerActivated(event) {
+      var th = event.target.closest('th');
+      if (!th || !th.classList.contains('sortable')) return;
+      sortBy(COLUMN_ORDER[th.cellIndex]);
+    }
+
+    headRow.addEventListener('click', headerActivated);
+    headRow.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      headerActivated(event);
+    });
+
+    // ── Expandable detail rows ───────────────────────────────────────────────
+    var ORDER_DETAILS = {
+      'ORD-1001': {
+        items: '1 × Replacement Visa Debit card, 1 × card sleeve',
+        shipping: 'Express Post — 12 Bank Street, Sydney NSW 2000',
+        notes: 'Delivered 18 Mar 2026, signed for by A. Smith.'
+      },
+      'ORD-1002': {
+        items: '1 × Cheque book (50 leaves)',
+        shipping: 'Standard Post — 8 Harbour Road, Melbourne VIC 3000',
+        notes: 'Awaiting despatch from the Melbourne print centre.'
+      },
+      'ORD-1003': {
+        items: '1 × Merchant card reader, 2 × receipt roll packs',
+        shipping: 'Courier — 220 Queen Street, Brisbane QLD 4000',
+        notes: 'Packed and ready. Ships the next business day.'
+      }
+    };
+
+    function detailLine(label, value) {
+      return '<div class="detail-line"><span class="detail-label">' + label +
+        '</span><span>' + value + '</span></div>';
+    }
+
+    function buildDetailRow(id) {
+      var detail = ORDER_DETAILS[id] || { items: '—', shipping: '—', notes: '—' };
+      var tr = document.createElement('tr');
+      tr.className = 'order-details';
+      tr.dataset.order = id;
+      tr.dataset.testid = 'order-details';
+      var td = document.createElement('td');
+      // colspan spans the whole table: a full-width single-cell row is a
+      // placeholder row, and a structured read skips it (§4.8 / §7.4).
+      td.colSpan = COLUMN_ORDER.length;
+      td.innerHTML = '<div class="detail-grid">' +
+        detailLine('Items', detail.items) +
+        detailLine('Shipping', detail.shipping) +
+        detailLine('Notes', detail.notes) +
+        '</div>';
+      tr.appendChild(td);
+      return tr;
+    }
+
+    function toggleDetails(row) {
+      var id = orderIdOf(row);
+      if (!id) return;
+      var button = row.querySelector('.review-btn');
+      var existing = detailRowFor(id);
+
+      if (existing) {
+        existing.remove();
+        if (button) button.textContent = 'Review';
+        logEvent('Closed details for ' + id);
+        return;
+      }
+
+      var detailRow = buildDetailRow(id);
+      detailRow.dataset.open = 'true';
+      row.insertAdjacentElement('afterend', detailRow);
+      if (button) button.textContent = 'Close';
+      logEvent('Opened details for ' + id);
+    }
+
+    tbody.addEventListener('click', function (event) {
+      var reviewButton = event.target.closest('.review-btn');
+      if (reviewButton) {
+        toggleDetails(reviewButton.closest('tr.order-row'));
+        return;
+      }
+      // The order-ID hrefs are the spec's /orders/<id> links, which this static
+      // fixture has nothing to serve. Opening the detail row is the useful
+      // thing to do with the click, so the link never navigates.
+      var link = event.target.closest('a.order-link');
+      if (link) {
+        event.preventDefault();
+        toggleDetails(link.closest('tr.order-row'));
+      }
+    });
+
+    // ── Approve selected ─────────────────────────────────────────────────────
+    document.getElementById('orders-approve-selected').addEventListener('click', function () {
+      var rows = tickedRows();
+      if (rows.length === 0) {
+        logEvent('Approve selected: no orders ticked');
+        return;
+      }
+      var ids = rows.map(function (row) {
+        var badge = cellOf(row, 'status').querySelector('.status');
+        badge.className = 'status status-approved';
+        badge.textContent = 'Approved';
+        var box = row.querySelector('input.order-select');
+        if (box) box.checked = false;
+        return orderIdOf(row);
+      });
+      updateSelectedCount();
+      logEvent('Approved ' + ids.length + (ids.length === 1 ? ' order: ' : ' orders: ') + ids.join(', '));
+    });
+
+    // ── Swap the Order ID and Status columns (spec §5.2) ─────────────────────
+    // Moves the header cell and every body and footer cell, so a read that maps
+    // by header text returns the same records and a read that counted columns
+    // does not. Detail rows have one full-width cell and are left alone.
+    var columnsSwapped = false;
+
+    function swapCells(row, i, j) {
+      var cells = Array.prototype.slice.call(row.cells);
+      if (cells.length <= Math.max(i, j)) return;
+      var tmp = cells[i];
+      cells[i] = cells[j];
+      cells[j] = tmp;
+      cells.forEach(function (cell) { row.appendChild(cell); });
+    }
+
+    document.getElementById('orders-reorder-columns').addEventListener('click', function () {
+      var i = columnIndex('id');
+      var j = columnIndex('status');
+
+      swapCells(headRow, i, j);
+      orderRows().forEach(function (row) { swapCells(row, i, j); });
+      Array.prototype.forEach.call(table.tFoot.rows, function (row) { swapCells(row, i, j); });
+
+      var tmp = COLUMN_ORDER[i];
+      COLUMN_ORDER[i] = COLUMN_ORDER[j];
+      COLUMN_ORDER[j] = tmp;
+
+      columnsSwapped = !columnsSwapped;
+      logEvent(columnsSwapped
+        ? 'Swapped the Order ID and Status columns'
+        : 'Restored the original column order');
+    });
+
+    // ── Initial state ────────────────────────────────────────────────────────
+    updateSelectedCount();
+    updateFooterTotal();
+  </script>
+</body>
+</html>

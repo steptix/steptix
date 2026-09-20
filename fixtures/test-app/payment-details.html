@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Payment details</title>
+  <!--
+    Details page for scheduled-payments.html, reached by that table's View
+    button as payment-details.html?id=<data-id>.
+
+    It exists so the §12 end-to-end test can prove that the two Origin Energy
+    rows open DIFFERENT pages: both show the payee, and each shows ITS OWN
+    amount ($140.00 for id 1, $86.10 for id 3) plus a different payment
+    history. A run that opens the first Origin Energy row twice is exactly the
+    failure this page is here to catch.
+
+    The five-payment array is a copy of the one in scheduled-payments.html —
+    the fixture server only serves *.html, so there is no shared module to
+    import. Statuses are read back from the same sessionStorage key when it is
+    there, so Approve → View shows "Approved" rather than contradicting the
+    table you just came from; the pristine array is the fallback.
+
+    Unknown or missing id → "Payment not found". The Back link is outside the
+    card, so it is present in both cases.
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar (same shell as dashboard.html / transactions.html / control-flow.html) */
+    .sidebar {
+      width: 240px;
+      background: #1f2937;
+      color: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      min-height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      margin-bottom: 32px;
+    }
+
+    .sidebar-logo-icon {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .sidebar-logo-name {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    nav { flex: 1; }
+
+    nav ul { list-style: none; padding: 0; }
+
+    nav ul li a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 24px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav ul li a:hover { background: #374151; color: #f9fafb; }
+
+    nav ul li a.active {
+      background: #374151;
+      color: #f9fafb;
+      border-left-color: #1a56db;
+    }
+
+    nav ul li a .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+    .sidebar-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #374151;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .user-name { font-size: 13px; font-weight: 500; color: #f9fafb; }
+    .user-email { font-size: 12px; color: #6b7280; }
+
+    .logout-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover { background: #374151; color: #f9fafb; }
+
+    /* Main content */
+    .main-content {
+      margin-left: 240px;
+      flex: 1;
+      padding: 32px;
+      max-width: 900px;
+    }
+
+    .page-header { margin-bottom: 20px; }
+
+    .page-header h1 {
+      font-size: 26px;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .page-header p {
+      font-size: 14px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 20px;
+      padding: 9px 16px;
+      background: transparent;
+      color: #1a56db;
+      border: 1px solid #1a56db;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      text-decoration: none;
+      transition: background 0.15s;
+    }
+
+    .back-link:hover { background: #eff4ff; }
+
+    .section-card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+    }
+
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+      margin-bottom: 16px;
+    }
+
+    .details-summary {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      padding-bottom: 16px;
+      margin-bottom: 8px;
+      border-bottom: 1px solid #f3f4f6;
+    }
+
+    .details-payee-big {
+      font-size: 22px;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .details-amount-big {
+      font-size: 22px;
+      font-weight: 700;
+      color: #111827;
+      font-variant-numeric: tabular-nums;
+    }
+
+    dl.details-list { margin: 0; }
+
+    .details-row {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 12px 0;
+      border-bottom: 1px solid #f3f4f6;
+      font-size: 14px;
+    }
+
+    .details-row:last-child { border-bottom: none; }
+
+    .details-row dt {
+      width: 160px;
+      flex-shrink: 0;
+      color: #6b7280;
+      font-weight: 500;
+    }
+
+    .details-row dd { color: #111827; font-weight: 500; }
+
+    .pay-status {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .pay-status.scheduled { background: #dbeafe; color: #1e40af; }
+    .pay-status.paused    { background: #f3f4f6; color: #4b5563; }
+    .pay-status.overdue   { background: #fee2e2; color: #b91c1c; }
+    .pay-status.approved  { background: #d1fae5; color: #065f46; }
+    .pay-status.skipped   { background: #fef3c7; color: #92400e; }
+
+    ul.history-list { list-style: none; padding: 0; margin: 0; }
+
+    ul.history-list li {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid #f3f4f6;
+      font-size: 14px;
+      color: #111827;
+    }
+
+    ul.history-list li:last-child { border-bottom: none; }
+
+    .history-date { color: #6b7280; white-space: nowrap; }
+    .history-amount { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+    .muted { color: #6b7280; font-size: 13px; }
+
+    .not-found-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: #b91c1c;
+      margin-bottom: 8px;
+    }
+  </style>
+</head>
+<body>
+  <!-- Sidebar navigation -->
+  <aside class="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">S</div>
+      <span class="sidebar-logo-name">SecureBank</span>
+    </div>
+
+    <nav>
+      <ul>
+        <li>
+          <a href="dashboard.html">
+            <span class="nav-icon">🏠</span>
+            Dashboard
+          </a>
+        </li>
+        <li>
+          <a href="transactions.html">
+            <span class="nav-icon">💳</span>
+            Transactions
+          </a>
+        </li>
+        <li>
+          <a href="documents.html">
+            <span class="nav-icon">📄</span>
+            Documents
+          </a>
+        </li>
+        <li>
+          <a href="control-flow.html">
+            <span class="nav-icon">💸</span>
+            Payments
+          </a>
+        </li>
+        <li>
+          <a href="tables.html">
+            <span class="nav-icon">📋</span>
+            Tables
+          </a>
+        </li>
+        <li>
+          <a href="#settings">
+            <span class="nav-icon">⚙️</span>
+            Settings
+          </a>
+        </li>
+        <li>
+          <a href="#profile">
+            <span class="nav-icon">👤</span>
+            Profile
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <div>
+          <div class="user-name">Demo User</div>
+          <div class="user-email" id="user-email">demo@securebank.com</div>
+        </div>
+      </div>
+      <button class="logout-btn" id="logout-btn" type="button">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <a class="back-link" id="details-back" href="scheduled-payments.html">
+      <span aria-hidden="true">←</span>
+      Back to scheduled payments
+    </a>
+
+    <div class="page-header">
+      <h1>Payment details</h1>
+      <p id="details-subtitle">Scheduled payment</p>
+    </div>
+
+    <section class="section-card" id="details-card" aria-labelledby="details-card-title">
+      <h2 class="section-title" id="details-card-title">Payment</h2>
+      <div id="details-body"></div>
+    </section>
+
+    <section class="section-card" id="details-history-card" aria-labelledby="details-history-title" hidden>
+      <h2 class="section-title" id="details-history-title">Payment history</h2>
+      <ul class="history-list" id="details-history"></ul>
+    </section>
+  </main>
+
+  <script>
+    // ── Shell: user info and sign out (same as the other pages) ──────────────
+    var email = sessionStorage.getItem('user-email');
+    if (email) {
+      document.getElementById('user-email').textContent = email;
+      document.getElementById('user-avatar').textContent = email.charAt(0).toUpperCase();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.removeItem('logged-in');
+      sessionStorage.removeItem('user-email');
+      window.location.href = 'index.html';
+    });
+
+    // ── The same five payments as scheduled-payments.html ────────────────────
+    var STORAGE_KEY = 'securebank-scheduled-payments';
+
+    function initialPayments() {
+      return [
+        { id: '1', payee: 'Origin Energy',     reference: 'INV-2291', amount: 140.00, next: '3 Oct 2026',  status: 'Scheduled', autopay: true  },
+        { id: '2', payee: 'Netflix Australia', reference: '',         amount: 22.99,  next: '1 Oct 2026',  status: 'Scheduled', autopay: true  },
+        { id: '3', payee: 'Origin Energy',     reference: '',         amount: 86.10,  next: '',            status: 'Paused',    autopay: false },
+        { id: '4', payee: 'Sydney Water',      reference: 'INV-8804', amount: 210.45, next: '28 Sep 2026', status: 'Overdue',   autopay: false },
+        { id: '5', payee: 'Woolworths',        reference: 'INV-0117', amount: 87.40,  next: '30 Sep 2026', status: 'Scheduled', autopay: true  }
+      ];
+    }
+
+    // Per-payment extras that never change, so the two Origin Energy payments
+    // read as two genuinely different bills rather than the same one twice.
+    var DETAILS = {
+      '1': {
+        account: 'Everyday •••• 4417',
+        plan: 'Electricity — 14 Bligh Street',
+        history: [
+          { date: '3 Sep 2026', text: 'Paid from Everyday •••• 4417', amount: 140.00 },
+          { date: '3 Aug 2026', text: 'Paid from Everyday •••• 4417', amount: 132.85 },
+          { date: '3 Jul 2026', text: 'Paid from Everyday •••• 4417', amount: 128.40 }
+        ]
+      },
+      '2': {
+        account: 'Everyday •••• 4417',
+        plan: 'Streaming subscription — Standard plan',
+        history: [
+          { date: '1 Sep 2026', text: 'Paid from Everyday •••• 4417', amount: 22.99 },
+          { date: '1 Aug 2026', text: 'Paid from Everyday •••• 4417', amount: 22.99 }
+        ]
+      },
+      '3': {
+        account: 'Travel •••• 3355',
+        plan: 'Electricity — 9 Wentworth Avenue (holiday flat)',
+        history: [
+          { date: '12 Sep 2026', text: 'Paused by you — no payment taken', amount: 0 },
+          { date: '12 Aug 2026', text: 'Paid from Travel •••• 3355', amount: 91.75 },
+          { date: '12 Jul 2026', text: 'Paid from Travel •••• 3355', amount: 78.20 }
+        ]
+      },
+      '4': {
+        account: 'Everyday •••• 4417',
+        plan: 'Water and sewerage — quarterly',
+        history: [
+          { date: '28 Sep 2026', text: 'Payment not received — account overdue', amount: 210.45 },
+          { date: '28 Jun 2026', text: 'Paid from Everyday •••• 4417', amount: 198.30 },
+          { date: '28 Mar 2026', text: 'Paid from Everyday •••• 4417', amount: 204.15 }
+        ]
+      },
+      '5': {
+        account: 'Everyday •••• 4417',
+        plan: 'Groceries — weekly delivery',
+        history: [
+          { date: '23 Sep 2026', text: 'Paid from Everyday •••• 4417', amount: 87.40 },
+          { date: '16 Sep 2026', text: 'Paid from Everyday •••• 4417', amount: 104.15 }
+        ]
+      }
+    };
+
+    function formatAmount(value) {
+      var fixed = value.toFixed(2);
+      var parts = fixed.split('.');
+      var whole = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      return '$' + whole + '.' + parts[1];
+    }
+
+    function esc(text) {
+      return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function queryParam(name) {
+      var match = new RegExp('[?&]' + name + '=([^&]*)').exec(window.location.search);
+      return match ? decodeURIComponent(match[1].replace(/\+/g, ' ')) : null;
+    }
+
+    // Prefer the live table state when it is there — Approve then View should
+    // not show "Scheduled" — and fall back to the pristine array otherwise,
+    // including for a row that "Pay now" removed from the table.
+    function findPayment(id) {
+      if (id === null || id === '') return null;
+      var candidates = [];
+      try {
+        var raw = sessionStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          var saved = JSON.parse(raw);
+          if (saved && Array.isArray(saved.rows)) candidates = saved.rows;
+        }
+      } catch (e) { candidates = []; }
+
+      var i;
+      for (i = 0; i < candidates.length; i++) {
+        if (String(candidates[i].id) === id) return candidates[i];
+      }
+      var pristine = initialPayments();
+      for (i = 0; i < pristine.length; i++) {
+        if (pristine[i].id === id) return pristine[i];
+      }
+      return null;
+    }
+
+    // ── Render ───────────────────────────────────────────────────────────────
+    var body = document.getElementById('details-body');
+    var subtitle = document.getElementById('details-subtitle');
+    var cardTitle = document.getElementById('details-card-title');
+    var historyCard = document.getElementById('details-history-card');
+    var historyList = document.getElementById('details-history');
+
+    var requestedId = queryParam('id');
+    var payment = findPayment(requestedId);
+
+    if (!payment) {
+      document.title = 'SecureBank — Payment not found';
+      cardTitle.textContent = 'Payment';
+      subtitle.textContent = 'No such scheduled payment';
+      body.innerHTML =
+        '<p class="not-found-title" id="details-not-found">Payment not found</p>' +
+        '<p class="muted">We could not find a scheduled payment with the reference ' +
+        '<strong id="details-missing-id">' + esc(requestedId === null ? '(none given)' : requestedId) + '</strong>. ' +
+        'Use Back to scheduled payments above to return to the list.</p>';
+    } else {
+      var extra = DETAILS[payment.id] || { account: 'Everyday •••• 4417', plan: 'Scheduled payment', history: [] };
+
+      cardTitle.textContent = 'Payment SP-000' + payment.id;
+      subtitle.textContent = 'Scheduled payment SP-000' + payment.id + ' — ' + extra.plan;
+
+      body.innerHTML =
+        '<div class="details-summary">' +
+          '<span class="details-payee-big" id="details-payee-heading">' + esc(payment.payee) + '</span>' +
+          '<span class="details-amount-big" id="details-amount-heading">' + formatAmount(payment.amount) + '</span>' +
+        '</div>' +
+        '<dl class="details-list">' +
+          '<div class="details-row"><dt>Payee</dt><dd id="details-payee">' + esc(payment.payee) + '</dd></div>' +
+          '<div class="details-row"><dt>Reference</dt><dd id="details-reference">' +
+            (payment.reference ? esc(payment.reference) : '—') + '</dd></div>' +
+          '<div class="details-row"><dt>Amount</dt><dd id="details-amount">' + formatAmount(payment.amount) + '</dd></div>' +
+          '<div class="details-row"><dt>Next payment</dt><dd id="details-next">' +
+            (payment.next ? esc(payment.next) : '—') + '</dd></div>' +
+          '<div class="details-row"><dt>Status</dt><dd id="details-status">' +
+            '<span class="pay-status ' + payment.status.toLowerCase() + '">' + esc(payment.status) + '</span></dd></div>' +
+          '<div class="details-row"><dt>Auto-pay</dt><dd id="details-autopay">' +
+            (payment.autopay ? 'On' : 'Off') + '</dd></div>' +
+          '<div class="details-row"><dt>Paid from</dt><dd id="details-account">' + esc(extra.account) + '</dd></div>' +
+        '</dl>';
+
+      var html = '';
+      for (var i = 0; i < extra.history.length; i++) {
+        var h = extra.history[i];
+        html +=
+          '<li data-testid="history-item">' +
+            '<span><span class="history-date">' + esc(h.date) + '</span> — ' + esc(h.text) + '</span>' +
+            '<span class="history-amount">' + (h.amount > 0 ? formatAmount(h.amount) : '—') + '</span>' +
+          '</li>';
+      }
+      historyList.innerHTML = html;
+      historyCard.hidden = extra.history.length === 0;
+    }
+  </script>
+</body>
+</html>

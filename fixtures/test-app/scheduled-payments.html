@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Scheduled payments</title>
+  <!--
+    Fixture page for SPEC-structured-table-reads.md §5.4.
+
+    The table is deliberately HEADERLESS: it has no THEAD element and no header
+    cell anywhere, and a served-HTML grep for either must come back empty.
+    That is the whole point of the page — columns can only be named by position
+    ("the 1st column as payee"), and a header-named read against it must fail
+    with the §5.4 diagnostic. Do not add a header row. The human-readable
+    column list lives above the card instead.
+
+    Also deliberate:
+      - Two rows for the SAME payee (Origin Energy, rows 1 and 3) with
+        different amounts, so "the row for Origin Energy" is ambiguous and
+        {{payment._row}} is the only way to open the right details page.
+      - Genuinely empty <td></td> cells (row 2 reference, row 3 reference and
+        next payment) — no dash, no nbsp — for the ""-preserving rule of §7.4.
+      - data-id on each <tr> which is NOT the row's position, so a test that
+        confuses identity with position is caught.
+      - Row 4 is Overdue and its "Pay now" button REMOVES the row, for
+        `Repeat … until no row shows "Overdue"`.
+      - An Auto-pay checkbox column (column 6) for the phase-2 `mode: 'checked'`
+        extraction. In phase 1 that cell reads as "".
+
+    Rows are rendered from a JS array and the mutated state is persisted in
+    sessionStorage, so View → Back shows what you left behind. "Reset" (or
+    ?reset=1) puts the five original rows back.
+
+    No login redirect and no cookie banner, as on control-flow.html.
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar (same shell as dashboard.html / transactions.html / control-flow.html) */
+    .sidebar {
+      width: 240px;
+      background: #1f2937;
+      color: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      min-height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      margin-bottom: 32px;
+    }
+
+    .sidebar-logo-icon {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .sidebar-logo-name {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    nav { flex: 1; }
+
+    nav ul { list-style: none; padding: 0; }
+
+    nav ul li a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 24px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav ul li a:hover { background: #374151; color: #f9fafb; }
+
+    nav ul li a.active {
+      background: #374151;
+      color: #f9fafb;
+      border-left-color: #1a56db;
+    }
+
+    nav ul li a .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+    .sidebar-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #374151;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .user-name { font-size: 13px; font-weight: 500; color: #f9fafb; }
+    .user-email { font-size: 12px; color: #6b7280; }
+
+    .logout-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover { background: #374151; color: #f9fafb; }
+
+    /* Main content */
+    .main-content {
+      margin-left: 240px;
+      flex: 1;
+      padding: 32px;
+    }
+
+    .page-header { margin-bottom: 20px; }
+
+    .page-header h1 {
+      font-size: 26px;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .page-header p {
+      font-size: 14px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+
+    .table-caption {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 10px;
+    }
+
+    .section-card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      overflow: hidden;
+      margin-bottom: 24px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 20px 24px 16px;
+    }
+
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .section-header-right {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .muted { color: #6b7280; font-size: 13px; }
+
+    .btn {
+      padding: 9px 16px;
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn:hover { background: #1648c0; }
+
+    .btn:disabled {
+      background: #9ca3af;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: #1a56db;
+      border: 1px solid #1a56db;
+    }
+
+    .btn-secondary:hover { background: #eff4ff; }
+
+    /* Table (same look as transactions.html, minus the header row it has) */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    tbody tr {
+      border-bottom: 1px solid #f3f4f6;
+      transition: background 0.1s;
+    }
+
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: #f9fafb; }
+
+    td {
+      padding: 14px 20px;
+      font-size: 14px;
+      color: #111827;
+      vertical-align: middle;
+    }
+
+    td:first-child { font-weight: 500; }
+
+    .pay-reference { color: #6b7280; font-variant-numeric: tabular-nums; }
+    .pay-amount { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .pay-date { color: #6b7280; white-space: nowrap; }
+
+    .pay-status {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    .pay-status.scheduled { background: #dbeafe; color: #1e40af; }
+    .pay-status.paused    { background: #f3f4f6; color: #4b5563; }
+    .pay-status.overdue   { background: #fee2e2; color: #b91c1c; }
+    .pay-status.approved  { background: #d1fae5; color: #065f46; }
+    .pay-status.skipped   { background: #fef3c7; color: #92400e; }
+
+    .pay-actions {
+      display: inline-flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .row-btn {
+      padding: 6px 12px;
+      background: transparent;
+      color: #1a56db;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+
+    .row-btn:hover { background: #eff4ff; border-color: #1a56db; }
+
+    .row-btn.danger { color: #b91c1c; }
+    .row-btn.danger:hover { background: #fef2f2; border-color: #b91c1c; }
+
+    .autopay-box { width: 16px; height: 16px; accent-color: #1a56db; cursor: pointer; }
+
+    .table-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 24px;
+      border-top: 1px solid #e5e7eb;
+      background: #f9fafb;
+    }
+
+    #payments-total {
+      font-size: 14px;
+      font-weight: 600;
+      color: #111827;
+      font-variant-numeric: tabular-nums;
+    }
+
+    ul.log-list { list-style: none; padding: 0; margin: 0; }
+
+    ul.log-list li {
+      padding: 8px 0;
+      border-bottom: 1px solid #f3f4f6;
+      font-size: 13px;
+      color: #374151;
+    }
+
+    ul.log-list li:last-child { border-bottom: none; }
+
+    .log-card-body { padding: 0 24px 20px; }
+  </style>
+</head>
+<body>
+  <!-- Sidebar navigation -->
+  <aside class="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">S</div>
+      <span class="sidebar-logo-name">SecureBank</span>
+    </div>
+
+    <nav>
+      <ul>
+        <li>
+          <a href="dashboard.html">
+            <span class="nav-icon">🏠</span>
+            Dashboard
+          </a>
+        </li>
+        <li>
+          <a href="transactions.html">
+            <span class="nav-icon">💳</span>
+            Transactions
+          </a>
+        </li>
+        <li>
+          <a href="documents.html">
+            <span class="nav-icon">📄</span>
+            Documents
+          </a>
+        </li>
+        <li>
+          <a href="control-flow.html">
+            <span class="nav-icon">💸</span>
+            Payments
+          </a>
+        </li>
+        <li>
+          <a href="tables.html">
+            <span class="nav-icon">📋</span>
+            Tables
+          </a>
+        </li>
+        <li>
+          <a href="#settings">
+            <span class="nav-icon">⚙️</span>
+            Settings
+          </a>
+        </li>
+        <li>
+          <a href="#profile">
+            <span class="nav-icon">👤</span>
+            Profile
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <div>
+          <div class="user-name">Demo User</div>
+          <div class="user-email" id="user-email">demo@securebank.com</div>
+        </div>
+      </div>
+      <button class="logout-btn" id="logout-btn" type="button">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <div class="page-header">
+      <h1>Scheduled payments</h1>
+      <p>Payments due from your Everyday account. Approve, skip or resume each one.</p>
+    </div>
+
+    <!-- The table has no header row, so the column order is spelled out here. -->
+    <p class="table-caption" id="payments-columns">
+      Columns, left to right: Payee, Reference, Amount, Next payment, Status, Auto-pay, Actions.
+    </p>
+
+    <section class="section-card" id="payments-card" aria-labelledby="payments-title">
+      <div class="section-header">
+        <h2 class="section-title" id="payments-title">Scheduled payments</h2>
+        <div class="section-header-right">
+          <span class="muted" id="payments-count">5 payments</span>
+          <button type="button" class="btn btn-secondary" id="payments-reset">Reset</button>
+        </div>
+      </div>
+
+      <table id="scheduled-payments" aria-label="Scheduled payments">
+        <tbody id="scheduled-payments-body"></tbody>
+      </table>
+
+      <div class="table-footer">
+        <p id="payments-total">Total scheduled: $0.00</p>
+      </div>
+    </section>
+
+    <section class="section-card" id="payments-log-card" aria-labelledby="payments-log-title">
+      <div class="section-header">
+        <h2 class="section-title" id="payments-log-title">Event log</h2>
+      </div>
+      <div class="log-card-body">
+        <p class="muted" id="payments-log-empty">No payment activity yet.</p>
+        <ul class="log-list" id="payments-log"></ul>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    // ── Shell: user info and sign out (same as the other pages) ──────────────
+    var email = sessionStorage.getItem('user-email');
+    if (email) {
+      document.getElementById('user-email').textContent = email;
+      document.getElementById('user-avatar').textContent = email.charAt(0).toUpperCase();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.removeItem('logged-in');
+      sessionStorage.removeItem('user-email');
+      window.location.href = 'index.html';
+    });
+
+    // ── The five payments ────────────────────────────────────────────────────
+    // `id` is a stable identity, deliberately NOT the row position: a test that
+    // treats data-id as _row (or the other way round) gets caught by the two
+    // Origin Energy rows. payment-details.html carries a copy of this array;
+    // the static server only serves *.html, so there is no shared module.
+    var STORAGE_KEY = 'securebank-scheduled-payments';
+
+    function initialPayments() {
+      return [
+        { id: '1', payee: 'Origin Energy',     reference: 'INV-2291', amount: 140.00, next: '3 Oct 2026',  status: 'Scheduled', autopay: true  },
+        { id: '2', payee: 'Netflix Australia', reference: '',         amount: 22.99,  next: '1 Oct 2026',  status: 'Scheduled', autopay: true  },
+        { id: '3', payee: 'Origin Energy',     reference: '',         amount: 86.10,  next: '',            status: 'Paused',    autopay: false },
+        { id: '4', payee: 'Sydney Water',      reference: 'INV-8804', amount: 210.45, next: '28 Sep 2026', status: 'Overdue',   autopay: false },
+        { id: '5', payee: 'Woolworths',        reference: 'INV-0117', amount: 87.40,  next: '30 Sep 2026', status: 'Scheduled', autopay: true  }
+      ];
+    }
+
+    // Which buttons a row offers is a pure function of its status, so Approve →
+    // "View only" and Resume → "View, Approve, Skip" need no extra bookkeeping.
+    var ACTIONS_BY_STATUS = {
+      'Scheduled': [ { action: 'approve', label: 'Approve' }, { action: 'skip', label: 'Skip' } ],
+      'Paused':    [ { action: 'resume',  label: 'Resume'  } ],
+      'Overdue':   [ { action: 'pay',     label: 'Pay now', danger: true } ],
+      'Approved':  [],
+      'Skipped':   []
+    };
+
+    var rows = [];
+    var log = [];
+
+    function loadState() {
+      var raw = null;
+      try { raw = sessionStorage.getItem(STORAGE_KEY); } catch (e) { raw = null; }
+      if (raw) {
+        try {
+          var saved = JSON.parse(raw);
+          if (saved && Array.isArray(saved.rows)) {
+            rows = saved.rows;
+            log = Array.isArray(saved.log) ? saved.log : [];
+            return;
+          }
+        } catch (e) { /* fall through to the pristine five rows */ }
+      }
+      rows = initialPayments();
+      log = [];
+    }
+
+    function saveState() {
+      try {
+        sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ rows: rows, log: log }));
+      } catch (e) { /* private mode: the page still works, it just forgets */ }
+    }
+
+    function resetState() {
+      try { sessionStorage.removeItem(STORAGE_KEY); } catch (e) { /* ignore */ }
+      rows = initialPayments();
+      log = [];
+      render();
+    }
+
+    // ── Formatting ───────────────────────────────────────────────────────────
+    function formatAmount(value) {
+      var fixed = value.toFixed(2);
+      var parts = fixed.split('.');
+      var whole = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      return '$' + whole + '.' + parts[1];
+    }
+
+    function esc(text) {
+      return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    // ── Rendering ────────────────────────────────────────────────────────────
+    var tbody = document.getElementById('scheduled-payments-body');
+    var countEl = document.getElementById('payments-count');
+    var totalEl = document.getElementById('payments-total');
+    var logEl = document.getElementById('payments-log');
+    var logEmptyEl = document.getElementById('payments-log-empty');
+
+    function rowHtml(p) {
+      var buttons = '<button type="button" class="row-btn" data-action="view" data-id="' + esc(p.id) + '">View</button>';
+      var extras = ACTIONS_BY_STATUS[p.status] || [];
+      for (var i = 0; i < extras.length; i++) {
+        buttons += '<button type="button" class="row-btn' + (extras[i].danger ? ' danger' : '') +
+          '" data-action="' + extras[i].action + '" data-id="' + esc(p.id) + '">' + esc(extras[i].label) + '</button>';
+      }
+
+      // Empty cells are written as <td></td> on purpose — no dash, no &nbsp;.
+      return '<tr data-id="' + esc(p.id) + '" data-testid="payment-row">' +
+        '<td>' + esc(p.payee) + '</td>' +
+        '<td class="pay-reference">' + esc(p.reference) + '</td>' +
+        '<td class="pay-amount">' + formatAmount(p.amount) + '</td>' +
+        '<td class="pay-date">' + esc(p.next) + '</td>' +
+        '<td><span class="pay-status ' + p.status.toLowerCase() + '">' + esc(p.status) + '</span></td>' +
+        '<td><input type="checkbox" class="autopay-box" data-testid="autopay" data-id="' + esc(p.id) + '"' +
+          ' aria-label="Auto-pay for ' + esc(p.payee) + '"' + (p.autopay ? ' checked' : '') + '></td>' +
+        '<td><span class="pay-actions">' + buttons + '</span></td>' +
+        '</tr>';
+    }
+
+    function renderLog() {
+      logEl.innerHTML = '';
+      for (var i = 0; i < log.length; i++) {
+        var li = document.createElement('li');
+        li.className = 'log-entry';
+        li.dataset.testid = 'log-entry';
+        li.textContent = log[i];
+        logEl.appendChild(li);
+      }
+      logEmptyEl.hidden = log.length > 0;
+    }
+
+    function render() {
+      var html = '';
+      for (var i = 0; i < rows.length; i++) html += rowHtml(rows[i]);
+      tbody.innerHTML = html;
+
+      var total = 0;
+      for (var j = 0; j < rows.length; j++) total += rows[j].amount;
+      totalEl.textContent = 'Total scheduled: ' + formatAmount(total);
+      countEl.textContent = rows.length + (rows.length === 1 ? ' payment' : ' payments');
+
+      renderLog();
+    }
+
+    function addLog(message) {
+      log.push(message);          // newest last
+    }
+
+    function findRow(id) {
+      for (var i = 0; i < rows.length; i++) if (rows[i].id === id) return rows[i];
+      return null;
+    }
+
+    // ── Row actions ──────────────────────────────────────────────────────────
+    tbody.addEventListener('click', function (event) {
+      var button = event.target.closest('button[data-action]');
+      if (!button) return;
+
+      var id = button.dataset.id;
+      var payment = findRow(id);
+      if (!payment) return;
+      var action = button.dataset.action;
+
+      if (action === 'view') {
+        saveState();
+        window.location.href = 'payment-details.html?id=' + encodeURIComponent(id);
+        return;
+      }
+
+      if (action === 'approve') {
+        payment.status = 'Approved';
+        addLog('Approved ' + payment.payee + ' — ' + formatAmount(payment.amount));
+      } else if (action === 'skip') {
+        payment.status = 'Skipped';
+        addLog('Skipped ' + payment.payee + ' — ' + formatAmount(payment.amount));
+      } else if (action === 'resume') {
+        payment.status = 'Scheduled';
+        payment.next = '15 Oct 2026';
+        addLog('Resumed ' + payment.payee + ' — next payment 15 Oct 2026');
+      } else if (action === 'pay') {
+        // Removed from the table, not just restyled: `Repeat … until no row
+        // shows "Overdue"` needs the row to actually go.
+        rows = rows.filter(function (r) { return r.id !== id; });
+        addLog('Paid ' + payment.payee + ' — ' + formatAmount(payment.amount));
+      }
+
+      saveState();
+      render();
+    });
+
+    tbody.addEventListener('change', function (event) {
+      var box = event.target.closest('input.autopay-box');
+      if (!box) return;
+      var payment = findRow(box.dataset.id);
+      if (!payment) return;
+      payment.autopay = box.checked;
+      addLog('Auto-pay turned ' + (box.checked ? 'on' : 'off') + ' for ' + payment.payee);
+      saveState();
+      renderLog();
+    });
+
+    document.getElementById('payments-reset').addEventListener('click', function () {
+      resetState();
+    });
+
+    // ── Boot ─────────────────────────────────────────────────────────────────
+    // A Back out of the details page must show the table you left, even when
+    // the URL you started from carried ?reset=1 — otherwise every View → Back
+    // in a test that opened the page with ?reset=1 silently throws away the
+    // row states the test just set. A history restore is not a fresh load.
+    function isHistoryRestore() {
+      try {
+        var entries = performance.getEntriesByType('navigation');
+        if (entries && entries.length) return entries[0].type === 'back_forward';
+      } catch (e) { /* older engines: treat it as a fresh load */ }
+      return false;
+    }
+
+    if (/[?&]reset=1(&|$)/.test(window.location.search) && !isHistoryRestore()) {
+      resetState();
+    } else {
+      loadState();
+      render();
+    }
+  </script>
+</body>
+</html>

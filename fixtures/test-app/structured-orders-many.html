@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Orders (all)</title>
+  <!--
+    Fixture page for the bounded structured read, spec §4.6 and §12.
+
+    The same Orders table as structured-orders.html — same id, same aria-label,
+    same six columns, same classes — but long enough that a read with
+    `limit: 10` means something, and with one hidden row planted where an
+    implementation that forgets §7.4's visibility rule will trip over it:
+
+      14 visible data rows, ORD-2001 … ORD-2014
+      + 1 hidden row, ORD-2099, as the 8th <tr> in the tbody
+
+    So the first ten VISIBLE rows are ORD-2001 … ORD-2010, and a read that
+    counted <tr>s instead of visible ones would return ORD-2099 as record 8 and
+    drop ORD-2010.
+
+    Every row is on the page at once: no pagination, no "Load more", no filter,
+    no sorting. The paginated case belongs to statements.html.
+
+    Clicking a row — anywhere on it, not just on a control — selects it and
+    appends its order ID to the Clicked panel, so a test can prove exactly which
+    rows a loop clicked and in what order. Nothing persists; reload resets.
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar (same shell as dashboard.html / transactions.html / control-flow.html) */
+    .sidebar {
+      width: 240px;
+      background: #1f2937;
+      color: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      min-height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      margin-bottom: 32px;
+    }
+
+    .sidebar-logo-icon {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .sidebar-logo-name {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    nav { flex: 1; }
+
+    nav ul { list-style: none; padding: 0; }
+
+    nav ul li a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 24px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav ul li a:hover { background: #374151; color: #f9fafb; }
+
+    nav ul li a.active {
+      background: #374151;
+      color: #f9fafb;
+      border-left-color: #1a56db;
+    }
+
+    nav ul li a .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+    .sidebar-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #374151;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .user-name { font-size: 13px; font-weight: 500; color: #f9fafb; }
+    .user-email { font-size: 12px; color: #6b7280; }
+
+    .logout-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover { background: #374151; color: #f9fafb; }
+
+    /* Main content */
+    .main-content {
+      margin-left: 240px;
+      flex: 1;
+      padding: 32px;
+    }
+
+    .page-header { margin-bottom: 28px; }
+
+    .page-header h1 {
+      font-size: 26px;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .page-header p {
+      font-size: 14px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+
+    .section-card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .section-hint {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 16px;
+    }
+
+    .muted { color: #6b7280; font-size: 13px; }
+
+    .btn {
+      padding: 9px 16px;
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn:hover { background: #1648c0; }
+
+    .btn-secondary {
+      background: transparent;
+      color: #1a56db;
+      border: 1px solid #1a56db;
+    }
+
+    .btn-secondary:hover { background: #eff4ff; }
+
+    /* Toolbar above the table */
+    .table-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 18px;
+    }
+
+    .toolbar-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* Orders table */
+    .table-wrap { overflow-x: auto; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    thead { background: #f9fafb; }
+
+    th {
+      text-align: left;
+      padding: 12px 16px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      border-bottom: 1px solid #e5e7eb;
+      white-space: nowrap;
+    }
+
+    tbody tr { border-bottom: 1px solid #f3f4f6; cursor: pointer; }
+    tbody tr:hover { background: #f9fafb; }
+
+    tbody tr.selected { background: #f5f3ff; }
+    tbody tr.selected:hover { background: #ede9fe; }
+    tbody tr.selected td:first-child { box-shadow: inset 3px 0 0 #1a56db; }
+
+    td {
+      padding: 14px 16px;
+      font-size: 14px;
+      color: #111827;
+      vertical-align: middle;
+    }
+
+    td input[type="checkbox"],
+    th input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      accent-color: #1a56db;
+      cursor: pointer;
+      vertical-align: middle;
+    }
+
+    .order-link { color: #1a56db; font-weight: 600; text-decoration: none; }
+    .order-link:hover { text-decoration: underline; }
+
+    .order-total { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+    .status {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    .status-complete  { background: #d1fae5; color: #065f46; }
+    .status-pending   { background: #fef3c7; color: #92400e; }
+    .status-ready     { background: #dbeafe; color: #1e40af; }
+    .status-cancelled { background: #f3f4f6; color: #4b5563; }
+
+    .review-btn {
+      padding: 6px 14px;
+      background: transparent;
+      color: #1a56db;
+      border: 1px solid #1a56db;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .review-btn:hover { background: #eff4ff; }
+
+    tfoot td {
+      border-top: 2px solid #e5e7eb;
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+      background: #f9fafb;
+    }
+
+    tfoot .order-total { color: #111827; }
+
+    /* Clicked / log panels */
+    .panel-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(320px, 1fr));
+      gap: 24px;
+      align-items: start;
+      margin-top: 24px;
+    }
+
+    ol.log-list, ul.log-list { margin: 0; padding: 0 0 0 0; list-style: none; }
+
+    .log-list li {
+      padding: 8px 0;
+      border-bottom: 1px solid #f3f4f6;
+      font-size: 13px;
+      color: #374151;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .log-list li:last-child { border-bottom: none; }
+
+    .log-index { color: #9ca3af; margin-right: 10px; }
+  </style>
+</head>
+<body>
+  <!-- Sidebar navigation -->
+  <aside class="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">S</div>
+      <span class="sidebar-logo-name">SecureBank</span>
+    </div>
+
+    <nav>
+      <ul>
+        <li>
+          <a href="dashboard.html">
+            <span class="nav-icon">🏠</span>
+            Dashboard
+          </a>
+        </li>
+        <li>
+          <a href="transactions.html">
+            <span class="nav-icon">💳</span>
+            Transactions
+          </a>
+        </li>
+        <li>
+          <a href="documents.html">
+            <span class="nav-icon">📄</span>
+            Documents
+          </a>
+        </li>
+        <li>
+          <a href="control-flow.html">
+            <span class="nav-icon">💸</span>
+            Payments
+          </a>
+        </li>
+        <li>
+          <a href="tables.html">
+            <span class="nav-icon">📋</span>
+            Tables
+          </a>
+        </li>
+        <li>
+          <a href="#settings">
+            <span class="nav-icon">⚙️</span>
+            Settings
+          </a>
+        </li>
+        <li>
+          <a href="#profile">
+            <span class="nav-icon">👤</span>
+            Profile
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <div>
+          <div class="user-name">Demo User</div>
+          <div class="user-email" id="user-email">demo@securebank.com</div>
+        </div>
+      </div>
+      <button class="logout-btn" id="logout-btn" type="button">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <div class="page-header">
+      <h1>Orders (all)</h1>
+      <p>Every order on your business accounts, on one page. Select a row to open it in the panel below.</p>
+    </div>
+
+    <section class="section-card" id="orders-card" aria-labelledby="orders-title">
+      <div class="section-header">
+        <h2 class="section-title" id="orders-title">All orders</h2>
+        <span class="muted" id="orders-row-count">14 orders</span>
+      </div>
+      <p class="section-hint">
+        Click anywhere on an order to select it. Nothing is paginated — scroll for the rest.
+      </p>
+
+      <div class="table-toolbar">
+        <span class="muted" id="orders-selected-count">0 selected</span>
+        <div class="toolbar-group">
+          <button type="button" class="btn btn-secondary" id="orders-clear-selection">Clear selection</button>
+        </div>
+      </div>
+
+      <!--
+        The same Orders table as structured-orders.html (spec §5.1): a blank
+        select-all header over a checkbox column, then Order ID, Customer,
+        Total, Status and Actions. No row carries a data-order-id, on purpose,
+        and the <tfoot> total row is excluded from a structured read (§7.4).
+      -->
+      <div class="table-wrap">
+        <table id="orders" aria-label="Orders" data-testid="orders-table">
+          <thead>
+            <tr>
+              <th scope="col">
+                <input type="checkbox" id="orders-select-all" aria-label="Select all orders">
+              </th>
+              <th scope="col">Order ID</th>
+              <th scope="col">Customer</th>
+              <th scope="col">Total</th>
+              <th scope="col">Status</th>
+              <th scope="col">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="orders-body">
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2001"></td>
+              <td><a class="order-link" href="/orders/ORD-2001">ORD-2001</a></td>
+              <td>Alice Smith</td>
+              <td class="order-total">$125.00</td>
+              <td><span class="status status-complete">Completed</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2002"></td>
+              <td><a class="order-link" href="/orders/ORD-2002">ORD-2002</a></td>
+              <td>Bob Jones</td>
+              <td class="order-total">$89.50</td>
+              <td><span class="status status-pending">Pending</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2003"></td>
+              <td><a class="order-link" href="/orders/ORD-2003">ORD-2003</a></td>
+              <td>Carol Diaz</td>
+              <td class="order-total">$310.00</td>
+              <td><span class="status status-ready">Ready</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2004"></td>
+              <td><a class="order-link" href="/orders/ORD-2004">ORD-2004</a></td>
+              <td>Daniel Okafor</td>
+              <td class="order-total">$47.25</td>
+              <td><span class="status status-complete">Completed</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2005"></td>
+              <td><a class="order-link" href="/orders/ORD-2005">ORD-2005</a></td>
+              <td>Elena Petrova</td>
+              <td class="order-total">$1,204.00</td>
+              <td><span class="status status-pending">Pending</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2006"></td>
+              <td><a class="order-link" href="/orders/ORD-2006">ORD-2006</a></td>
+              <td>Frank Müller</td>
+              <td class="order-total">$63.80</td>
+              <td><span class="status status-ready">Ready</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2007"></td>
+              <td><a class="order-link" href="/orders/ORD-2007">ORD-2007</a></td>
+              <td>Grace Hopper</td>
+              <td class="order-total">$218.40</td>
+              <td><span class="status status-complete">Completed</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <!--
+              Hidden on purpose, and placed on purpose. This is the 8th <tr> in
+              the tbody, so it sits between the 7th and 8th VISIBLE rows — ahead
+              of the tenth. Spec §7.4 excludes rows that are not visible at
+              capture time, and §12's bounded read (`limit: 10`) must return the
+              first ten visible rows, ORD-2001 … ORD-2010. An implementation
+              that counted <tr>s instead of visible rows would return this row
+              as record 8 and drop ORD-2010; that is the failure this row is
+              here to catch. Its $0.00 is not in the footer total either.
+            -->
+            <tr class="order-row" style="display:none">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2099"></td>
+              <td><a class="order-link" href="/orders/ORD-2099">ORD-2099</a></td>
+              <td>Hidden order</td>
+              <td class="order-total">$0.00</td>
+              <td><span class="status status-cancelled">Cancelled</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2008"></td>
+              <td><a class="order-link" href="/orders/ORD-2008">ORD-2008</a></td>
+              <td>Hiroshi Tanaka</td>
+              <td class="order-total">$95.00</td>
+              <td><span class="status status-pending">Pending</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2009"></td>
+              <td><a class="order-link" href="/orders/ORD-2009">ORD-2009</a></td>
+              <td>Isabel Moreno</td>
+              <td class="order-total">$412.60</td>
+              <td><span class="status status-complete">Completed</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2010"></td>
+              <td><a class="order-link" href="/orders/ORD-2010">ORD-2010</a></td>
+              <td>James Whitfield</td>
+              <td class="order-total">$28.99</td>
+              <td><span class="status status-ready">Ready</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2011"></td>
+              <td><a class="order-link" href="/orders/ORD-2011">ORD-2011</a></td>
+              <td>Kavita Nair</td>
+              <td class="order-total">$760.15</td>
+              <td><span class="status status-pending">Pending</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2012"></td>
+              <td><a class="order-link" href="/orders/ORD-2012">ORD-2012</a></td>
+              <td>Liam O'Brien</td>
+              <td class="order-total">$54.40</td>
+              <td><span class="status status-complete">Completed</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2013"></td>
+              <td><a class="order-link" href="/orders/ORD-2013">ORD-2013</a></td>
+              <td>Mei Chen</td>
+              <td class="order-total">$189.75</td>
+              <td><span class="status status-ready">Ready</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+            <tr class="order-row">
+              <td><input type="checkbox" class="order-select" aria-label="Select order ORD-2014"></td>
+              <td><a class="order-link" href="/orders/ORD-2014">ORD-2014</a></td>
+              <td>Nadia Haddad</td>
+              <td class="order-total">$332.10</td>
+              <td><span class="status status-complete">Completed</span></td>
+              <td><button type="button" class="review-btn">Review</button></td>
+            </tr>
+          </tbody>
+          <tfoot>
+            <tr id="orders-total-row">
+              <td></td>
+              <td></td>
+              <td id="orders-total-label">Total (14 orders)</td>
+              <td class="order-total" id="orders-total-amount">$3,930.94</td>
+              <td></td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </section>
+
+    <div class="panel-grid">
+      <section class="section-card" id="orders-clicked-card" aria-labelledby="orders-clicked-title">
+        <div class="section-header">
+          <h2 class="section-title" id="orders-clicked-title">Clicked</h2>
+          <span class="muted" id="orders-clicked-count">0 rows</span>
+        </div>
+        <p class="section-hint">Order IDs in the order you clicked them, one line per click.</p>
+        <p class="muted" id="orders-clicked-empty">No rows clicked yet.</p>
+        <ol class="log-list" id="orders-clicked" aria-label="Clicked orders"></ol>
+      </section>
+
+      <section class="section-card" id="orders-log-card" aria-labelledby="orders-log-title">
+        <div class="section-header">
+          <h2 class="section-title" id="orders-log-title">Event log</h2>
+          <span class="muted" id="orders-log-count">0 events</span>
+        </div>
+        <p class="section-hint">Review clicks and selection changes, oldest first.</p>
+        <p class="muted" id="orders-log-empty">Nothing yet — click Review on an order.</p>
+        <ul class="log-list" id="orders-log" aria-label="Order activity log"></ul>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    // ── Shell: user info and sign out (same as the other pages) ──────────────
+    var sessionEmail = sessionStorage.getItem('user-email');
+    if (sessionEmail) {
+      document.getElementById('user-email').textContent = sessionEmail;
+      document.getElementById('user-avatar').textContent = sessionEmail.charAt(0).toUpperCase();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.removeItem('logged-in');
+      sessionStorage.removeItem('user-email');
+      window.location.href = 'index.html';
+    });
+
+    // ── Column bookkeeping ───────────────────────────────────────────────────
+    // No data-* attributes name the columns — that is the point of the fixture —
+    // so the page keeps its own logical order here.
+    var COLUMN_ORDER = ['select', 'id', 'customer', 'total', 'status', 'actions'];
+
+    var tbody = document.getElementById('orders-body');
+
+    function cellOf(row, name) {
+      var i = COLUMN_ORDER.indexOf(name);
+      return i >= 0 && row.cells.length > i ? row.cells[i] : null;
+    }
+
+    function orderRows() {
+      return Array.prototype.slice.call(tbody.querySelectorAll('tr.order-row'));
+    }
+
+    function visibleOrderRows() {
+      return orderRows().filter(function (row) { return row.style.display !== 'none'; });
+    }
+
+    function orderIdOf(row) {
+      var cell = cellOf(row, 'id');
+      return cell ? cell.textContent.trim() : '';
+    }
+
+    // ── Clicked panel and event log ──────────────────────────────────────────
+    function appender(listId, emptyId, countId, noun) {
+      var list = document.getElementById(listId);
+      var empty = document.getElementById(emptyId);
+      var count = document.getElementById(countId);
+      return function (message, testid) {
+        var li = document.createElement('li');
+        li.dataset.testid = testid;
+        var index = document.createElement('span');
+        index.className = 'log-index';
+        index.textContent = String(list.children.length + 1) + '.';
+        li.appendChild(index);
+        li.appendChild(document.createTextNode(' ' + message));
+        list.appendChild(li);
+        empty.hidden = true;
+        count.textContent = list.children.length +
+          (list.children.length === 1 ? ' ' + noun : ' ' + noun + 's');
+      };
+    }
+
+    var addClicked = appender('orders-clicked', 'orders-clicked-empty', 'orders-clicked-count', 'row');
+    var addLogEntry = appender('orders-log', 'orders-log-empty', 'orders-log-count', 'event');
+
+    function logEvent(message) { addLogEntry(message, 'orders-log-entry'); }
+
+    // ── Row selection: a click anywhere on the row counts ────────────────────
+    // Every click appends a line, including repeats, so the Clicked panel is a
+    // faithful record of what a loop actually did and in what order.
+    tbody.addEventListener('click', function (event) {
+      var row = event.target.closest('tr.order-row');
+      if (!row) return;
+
+      // The order-ID hrefs are the spec's /orders/<id> links, which this static
+      // fixture has nothing to serve, so they never navigate.
+      var link = event.target.closest('a.order-link');
+      if (link) event.preventDefault();
+
+      var id = orderIdOf(row);
+      row.classList.add('selected');
+      row.setAttribute('aria-selected', 'true');
+      addClicked(id, 'orders-clicked-entry');
+
+      if (event.target.closest('.review-btn')) {
+        logEvent('Reviewed ' + id);
+      }
+    });
+
+    // ── Checkboxes ───────────────────────────────────────────────────────────
+    var selectAll = document.getElementById('orders-select-all');
+    var selectedCount = document.getElementById('orders-selected-count');
+
+    function tickedRows() {
+      return visibleOrderRows().filter(function (row) {
+        var box = row.querySelector('input.order-select');
+        return box && box.checked;
+      });
+    }
+
+    function updateSelectedCount() {
+      selectedCount.textContent = tickedRows().length + ' selected';
+      var visible = visibleOrderRows();
+      var allTicked = visible.length > 0 && tickedRows().length === visible.length;
+      selectAll.checked = allTicked;
+      selectAll.indeterminate = !allTicked && tickedRows().length > 0;
+    }
+
+    tbody.addEventListener('change', function (event) {
+      if (!event.target.classList.contains('order-select')) return;
+      updateSelectedCount();
+      logEvent((event.target.checked ? 'Ticked ' : 'Unticked ') +
+        orderIdOf(event.target.closest('tr.order-row')));
+    });
+
+    selectAll.addEventListener('change', function () {
+      // Ticks the VISIBLE rows only: the hidden order is not on screen, so
+      // "select all" cannot mean it.
+      var on = selectAll.checked;
+      visibleOrderRows().forEach(function (row) {
+        var box = row.querySelector('input.order-select');
+        if (box) box.checked = on;
+      });
+      updateSelectedCount();
+      logEvent(on ? 'Ticked every visible order' : 'Cleared every tick');
+    });
+
+    // ── Clear selection ──────────────────────────────────────────────────────
+    document.getElementById('orders-clear-selection').addEventListener('click', function () {
+      orderRows().forEach(function (row) {
+        row.classList.remove('selected');
+        row.removeAttribute('aria-selected');
+        var box = row.querySelector('input.order-select');
+        if (box) box.checked = false;
+      });
+      updateSelectedCount();
+      logEvent('Cleared the selection');
+    });
+
+    updateSelectedCount();
+  </script>
+</body>
+</html>
