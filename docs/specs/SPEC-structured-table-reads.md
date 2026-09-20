@@ -1,6 +1,6 @@
 # Structured table reads and object-aware `For each`
 
-**Status:** Proposed  
+**Status:** Proposed — amended 2026-09-20 after review (§14 lists what moved out)  
 **Date:** 2026-09-20  
 **Audience:** implementation agent working in this repository  
 **Depends on:** existing `read` actions, captured variables, sections, and the
@@ -26,11 +26,12 @@ for the common case where the first column is a selection checkbox.
 
 This feature adds two orthogonal capabilities:
 
-1. A deterministic `readTable` AI action that reads named columns from every
-   visible data row, the first N visible rows, or an explicitly bounded
-   contiguous window of visible rows, and stores one object per row.
+1. A deterministic `readTable` AI action that reads named columns — by header
+   text, or by position when the table has no header — from every visible data
+   row or the first N of them, and stores one object per row. Every object
+   carries the row's position as `_row`.
 2. Object-aware `For each`, so a row bound as `{{order}}` exposes direct
-   properties such as `{{order.id}}` and `{{order.status}}`.
+   properties such as `{{order.id}}`, `{{order.status}}` and `{{order._row}}`.
 
 There is deliberately no new “table loop” syntax. `For each` remains the one
 list loop, and structured records can later come from APIs or tools as well as
@@ -43,14 +44,15 @@ native HTML table
   -> readTable action
   -> JSON array of row records in the string-valued variable map
   -> existing For each planner
-  -> base binding {{order}} plus property bindings {{order.id}}, etc.
-  -> ordinary steps which re-find an interactive row by a stable value
+  -> base binding {{order}} plus property bindings {{order.id}}, {{order._row}}, etc.
+  -> ordinary steps which re-find an interactive row by a stable value or by
+     its row number
 ```
 
 The runtime must never keep a DOM element handle between steps or iterations.
 Modern applications rerender rows, which makes such handles stale. Extraction
 is a snapshot; later page actions locate the row again using a value such as an
-order ID.
+order ID, or the row number the snapshot recorded as `_row` (§4.5).
 
 ### 1.1 Current code facts the implementation starts from
 
@@ -80,6 +82,26 @@ headers while deterministic runtime code owns alignment. Object-aware
 `For each` is generic now; additional structured-data adapters can be added
 later without changing its contract.
 
+### 1.3 Phases
+
+The feature ships in three slices, each its own PR with its own live proof,
+and each useful on its own. §13 marks which phase each acceptance criterion
+belongs to.
+
+1. **Runtime.** `readTable` (header or positional columns, `_row`, the
+   placeholder-row rule, text values), records in the variable map, dotted
+   `{{item.property}}` bindings, the prompt rules, and a fixture page with a
+   template test and a live test. This alone makes a loop over a real table
+   work end to end, duplicate rows and empty cells included.
+2. **Reading more than text, and checking the whole table.** Per-column
+   extraction modes (`checked`, `value`, `attribute`; §7.4) and the
+   whole-table assertions of §4.9 / §7.7.
+3. **Code-behind and editor.** `tables.read` in generated code-behind (§9),
+   and TestBench completion, hover and go-to-definition for dotted bindings
+   (§8.4).
+
+Everything §14 lists is outside all three.
+
 ---
 
 ## 2. Goals
@@ -88,11 +110,19 @@ later without changing its contract.
   action while preserving row alignment.
 - Ignore unrelated columns, including checkbox/select columns, when the author
   did not request them.
-- Resolve columns by header text rather than by an AI-chosen `nth-child()`.
-- Return a JSON array of flat row objects whose values are strings.
+- Resolve columns by header text rather than by an AI-chosen `nth-child()`,
+  and by one-based position when the table has no header row.
+- Return a JSON array of flat row objects whose values are strings, each
+  carrying its row number as `_row` so a later step can point at the row
+  again after leaving the page.
+- Treat a placeholder row (“No results”, “Loading…”) as what it is: an empty
+  table stores `[]`, and a full-width row among data rows is skipped.
 - Allow an author to intentionally restrict extraction to the first N visible
-  data rows or an inclusive visible-row range without encoding row positions in
-  a CSS selector.
+  data rows without encoding row positions in a CSS selector.
+- Let an author check the whole table in one deterministic step — every row
+  matches, no duplicates, sorted, a column adds up — instead of a prose
+  assertion over a snapshot that collapses long tables, or a loop that asks
+  the model N times.
 - Iterate those objects with the existing `For each` grammar.
 - Resolve direct property placeholders such as `{{order.status}}` in step text,
   cached actions, generated code-behind, reports, and every run surface.
@@ -115,13 +145,19 @@ later without changing its contract.
 - Implicitly reading every column when the author names none.
 - Merged header/data grids using `rowspan` or `colspan` greater than 1. V1
   rejects them with a diagnostic; silently guessing a logical grid is unsafe.
+  The one exception is the placeholder row of §4.8: a single cell spanning
+  the whole width is a message, not a grid.
 - Array indexing or arbitrary expression evaluation in placeholders. V1 adds
   one direct property segment (`{{row.property}}`), not
   `{{rows[0].property}}`, functions, or arithmetic.
 - Recursively flattening nested objects. `readTable` emits flat objects.
-- Last-N selection, open-ended “row N onward,” disjoint ranges, sorting, or
-  random row sampling. V1 supports only all visible rows, the first N visible
-  rows, or one bounded contiguous window in visible DOM order.
+- Any row selection other than all visible rows or the first N of them. An
+  inclusive window (“rows 3 through 7”), last-N, “row N onward”, disjoint
+  ranges and sampling are deferred (§14); a test that needs one row by
+  position reads all rows and uses `_row`.
+- Cell values other than rendered text in phase 1. Control state (`checked`,
+  a select's chosen option, an input's value, an attribute) is phase 2
+  (§1.3), behind an explicit per-column mode, never guessed.
 
 ---
 
@@ -146,7 +182,7 @@ aliases:
 
 Aliases are the property names used after the read. They must match
 `^[A-Za-z_][A-Za-z0-9_]*$`, be unique within the action, and must not be
-`__proto__`, `prototype`, or `constructor`.
+`__proto__`, `prototype`, `constructor`, or the reserved `_row` (§4.5).
 
 ### 4.2 Shorthand aliases
 
@@ -189,7 +225,65 @@ the row again:
 The click/tick actions are normal AI actions. `readTable` does not smuggle a row
 locator into the variable map.
 
-### 4.4 Bounded visible-row windows
+### 4.4 Columns by position, for tables with no header
+
+Not every table has a header row, and a table with no `<th>` cells has nothing
+for a header name to match. A column can instead be named by its one-based
+position, and the alias is then the only name the column has:
+
+```markdown
+1. Read the 1st column as payee, the 3rd column as amount and the 5th column as status from every row in the Scheduled payments table [store as: payments]
+2. For each {{payment}} in {{payments}}, Review the payment
+
+### Review the payment
+1. If {{payment.status}} is "Paused", then return
+2. Verify the Scheduled payments table has a row for "{{payment.payee}}" with amount {{payment.amount}}
+```
+
+“1st”, “first”, “column 1” and “the second column” all mean position; the
+model emits `index` rather than `header` for that column (§6.1). Header and
+position may be mixed in one action, but each column is one or the other.
+
+When the table *has* a header, name columns by it: a header survives the
+columns being reordered, a position does not. Position is for tables that give
+you nothing else, and for the rare header text that cannot be matched
+reliably. An explicit alias is required for a positional column — there is
+no header to derive one from.
+
+### 4.5 Row numbers: `_row`
+
+Every record carries `_row`, the one-based position of its row among the
+table's data rows in DOM order at capture time (§7.4). It is the one property
+the author does not ask for, and `_row` is reserved: it cannot be an alias.
+
+Its job is to let a step point at the row again without depending on a
+value being unique. Two rows for the same payee are the ordinary case in a
+payments table, and “the row for Origin Energy” is ambiguous on both passes;
+“row 3” is not:
+
+```markdown
+### Review the payment
+1. Click View in row {{payment._row}} of the Scheduled payments table
+2. Verify the Payment details page shows "{{payment.payee}}" and {{payment.amount}}
+3. Click Back to scheduled payments
+```
+
+A row number survives leaving the page and coming back, which a DOM handle
+would not, and which is why this spec keeps no handles (§1). It is a
+position, not an identity: if the body deletes or moves rows, every row below
+the change has a different number from that pass on. For a table that changes
+as you act on it, re-find by a value, or use `Repeat … until` so each pass
+reads the page as it is now.
+
+The pass can also name other rows relative to its own — “the row below row
+{{payment._row}}” — and can compare its snapshot values with the page as it
+is now: `Read the status in row 5 of the Scheduled payments table [store as:
+row5_status]` then `Assert that {{row5_status}} equals {{payment.status}}`.
+Indexing into the captured list (`{{payments[5].status}}`) stays out of scope
+(§3): the page is the source of truth for “now”, and the snapshot is what it
+was when read.
+
+### 4.6 Bounded visible-row windows
 
 An author may intentionally capture only the first N visible data rows. The
 recommended form keeps extraction and interaction explicit:
@@ -218,33 +312,16 @@ separately:
 
 There is deliberately no DOM-bound `For the first 10 rows ...` control-line
 syntax. `For each` continues to iterate captured values, and each interaction
-re-finds its row from a stable captured column. If clicking the whole row is not
-the application behavior, the author should name the control instead, for
-example `Click Review in the ... row`.
+re-finds its row from a stable captured column or from `_row`. If clicking the
+whole row is not the application behavior, the author should name the control
+instead, for example `Click Review in the ... row`.
 
-An inclusive range uses the same capture-and-loop form:
+The case this exists for is the smoke test: “open the first three and check
+they load”. An inclusive window (“rows 3 through 7”) was in the first draft
+and is deferred (§14): nothing needs it yet, and a test that wants one row by
+position reads all rows and uses `_row`.
 
-```markdown
-## Steps
-1. Read the Order ID column as id from visible rows 3 through 7 in the Orders table [store as: orders]
-2. For each {{order}} in {{orders}}, Click the Orders table row whose Order ID is "{{order.id}}"
-```
-
-The read emits `startRow: 3` and `limit: 5`. Author-facing row numbers are
-one-based and both endpoints are inclusive. Hidden and non-data rows do not
-count, so “rows 3 through 7” means the third through seventh rows remaining
-after the exclusions in §7.4. If only five visible rows exist, the read captures
-rows 3 through 5. If fewer than three exist, it captures `[]`. An exact five-row
-requirement needs a separate assertion that at least seven visible data rows
-exist.
-
-The exact prose `Loop through row 3 to row 7 and click on each row` is not a new
-control line: the framework cannot safely retain five DOM row handles through a
-loop. Authors express it as the bounded read followed by the existing
-`For each`, naming at least one stable column that later actions can use to
-re-find each row.
-
-### 4.5 Pagination
+### 4.7 Pagination
 
 Only rows currently rendered and visible are read. Pagination remains explicit:
 
@@ -269,7 +346,7 @@ Only rows currently rendered and visible are read. Pagination remains explicit:
 This processes the initial page once, then each subsequent page after navigation.
 `readTable` must not infer or operate pagination controls.
 
-### 4.6 Empty tables
+### 4.8 Empty tables, placeholder rows and loading rows
 
 An empty `<tbody>` produces `[]`, and `For each` runs zero passes. If emptiness
 is a test failure, say so separately:
@@ -280,6 +357,56 @@ is a test failure, say so separately:
 ```
 
 This matches the existing empty-list behavior of plural reads and `For each`.
+
+Real empty tables are rarely empty. This repository's own fixtures put a
+message row in the body — `<td colspan="5">No documents uploaded yet.</td>`
+in `fixtures/test-app/documents.html`, and a `colspan="4"` “Loading…” row in
+`delegates.html` — and the first draft's merged-cell rule (§7.4) would have
+failed both reads with “merged cells are not supported”. The rule is:
+
+- A body row whose only cell spans the whole width of the table (its
+  `colspan` equals the header's column count, or the table has no header and
+  the row has exactly one cell) is a **placeholder row**, not data.
+- If every body row is a placeholder, the table is empty: store `[]`.
+- If placeholders sit among data rows, skip them. They do not get a `_row`
+  number; `_row` counts data rows only.
+- Any other merged cell is still an error.
+
+A loading row is a placeholder that will be replaced, so a read that lands on
+it stores `[]` truthfully and the test goes wrong later. `readTable` does not
+wait for data; the author does, with the wait forms that already exist:
+
+```markdown
+1. Navigate to delegates.html
+2. Wait until the Delegates table has finished loading
+3. Read the Name, Email and Status columns from every row in the Delegates table [store as: delegates]
+```
+
+### 4.9 Whole-table checks
+
+Most table tests are not loops. They are one question about every row: is
+every status one of three values, do two rows share a reference, is the table
+sorted by date, does the Amount column add up to the total under it, did the
+filter leave only matching rows. Today those are prose assertions, and on a
+long table they are quietly wrong: the DOM snapshot collapses repeated rows
+to a head and a tail (the `similar <tr> elements omitted` marker), so “verify
+every row is Completed” checks the rows the model can see. A loop that asserts
+per row is honest but asks the model N times for one comparison.
+
+With records in hand the check is deterministic. Phase 2 (§1.3) adds a small
+set of assertions over a captured list, written as ordinary steps:
+
+```markdown
+2. Read the Payee, Reference, Amount, Next payment and Status columns from every row in the Scheduled payments table [store as: payments]
+3. Verify every row in {{payments}} has a status of "Scheduled", "Paused" or "Overdue"
+4. Verify no two rows in {{payments}} share a reference
+5. Verify the rows in {{payments}} are sorted by next payment, earliest first
+6. Verify the amount values in {{payments}} add up to "$1,234.56"
+```
+
+Semantics are in §7.7. Until phase 2 lands, the same checks work today
+through a tool, since tool parameters already accept arrays:
+`[tool: sum_column rows="{{payments}}" column="amount" out.sum="amount_sum"]`.
 
 ---
 
@@ -336,13 +463,13 @@ Expected stored value:
 
 ```json
 [
-  { "id": "ORD-1001", "customer": "Alice Smith", "status": "Completed" },
-  { "id": "ORD-1002", "customer": "Bob Jones", "status": "Pending" }
+  { "_row": "1", "id": "ORD-1001", "customer": "Alice Smith", "status": "Completed" },
+  { "_row": "2", "id": "ORD-1002", "customer": "Bob Jones", "status": "Pending" }
 ]
 ```
 
 The checkbox, Total, and Actions columns are not present because the author did
-not request them.
+not request them. `_row` is present because every record carries it (§4.5).
 
 ### 5.2 Columns reordered
 
@@ -371,7 +498,7 @@ columns:
 The same action still yields:
 
 ```json
-[{ "id": "ORD-1001", "customer": "Alice Smith", "status": "Completed" }]
+[{ "_row": "1", "id": "ORD-1001", "customer": "Alice Smith", "status": "Completed" }]
 ```
 
 ### 5.3 Unsupported merged header
@@ -402,6 +529,69 @@ Required error shape:
 readTable cannot map table "Orders": merged headers or cells (rowspan/colspan > 1) are not supported
 ```
 
+### 5.4 No header row, and a duplicate payee
+
+The second fixture. No `<thead>`, no `<th>`, two rows for the same payee, and
+cells that are empty on some rows and not others:
+
+```html
+<table id="scheduled-payments" aria-label="Scheduled payments">
+  <tbody>
+    <tr>
+      <td>Origin Energy</td><td>INV-2291</td><td>$140.00</td><td>3 Oct 2026</td><td>Scheduled</td>
+      <td><button type="button">View</button> <button type="button">Approve</button></td>
+    </tr>
+    <tr>
+      <td>Netflix Australia</td><td></td><td>$22.99</td><td>1 Oct 2026</td><td>Scheduled</td>
+      <td><button type="button">View</button> <button type="button">Approve</button></td>
+    </tr>
+    <tr>
+      <td>Origin Energy</td><td></td><td>$86.10</td><td></td><td>Paused</td>
+      <td><button type="button">View</button> <button type="button">Resume</button></td>
+    </tr>
+  </tbody>
+</table>
+```
+
+The author step:
+
+```markdown
+1. Read the 1st column as payee, the 2nd column as reference, the 3rd column as amount and the 5th column as status from every row in the Scheduled payments table [store as: payments]
+```
+
+Expected stored value:
+
+```json
+[
+  { "_row": "1", "payee": "Origin Energy", "reference": "INV-2291", "amount": "$140.00", "status": "Scheduled" },
+  { "_row": "2", "payee": "Netflix Australia", "reference": "", "amount": "$22.99", "status": "Scheduled" },
+  { "_row": "3", "payee": "Origin Energy", "reference": "", "amount": "$86.10", "status": "Paused" }
+]
+```
+
+A header-named column against this table fails:
+
+```text
+readTable cannot map table "Scheduled payments": it has no header row, so "Payee" cannot be matched — name columns by position ("the 1st column as payee")
+```
+
+### 5.5 Placeholder row
+
+`fixtures/test-app/documents.html`, after “Clear all”:
+
+```html
+<table id="documents-table">
+  <thead><tr><th>Name</th><th>Size</th><th>Type</th><th>SHA-256</th><th>Uploaded</th></tr></thead>
+  <tbody>
+    <tr id="documents-empty"><td class="doc-empty" colspan="5">No documents uploaded yet.</td></tr>
+  </tbody>
+</table>
+```
+
+`Read the Name and Size columns from every row in the Uploaded documents table`
+stores `[]` (§4.8). The same row among real rows would be skipped, and a
+`colspan="3"` cell in a five-column table is still the §5.3 error.
+
 ---
 
 ## 6. AI action contract
@@ -412,10 +602,16 @@ Add `readTable` to `ActionType` and add a table-column type:
 
 ```ts
 export interface TableReadColumn {
-  /** Visible header text, matched after whitespace/case normalization. */
-  header: string;
-  /** Property written on every output row. */
+  /** Visible header text, matched after whitespace/case normalization.
+   *  Exactly one of `header` and `index` is present. */
+  header?: string;
+  /** One-based column position, for a table with no header row (§4.4). */
+  index?: number;
+  /** Property written on every output row. Never `_row` (§4.5). */
   key: string;
+  /** How the cell is read. Phase 1 accepts only 'text' (the default);
+   *  phase 2 adds 'checked' | 'value' | 'attribute' (§1.3, §7.4). */
+  mode?: 'text';
 }
 ```
 
@@ -429,12 +625,9 @@ columns?: TableReadColumn[];
  * absolute 500-row safety cap.
  */
 limit?: number;
-/**
- * readTable only: one-based position of the first visible data row to capture.
- * May appear only with limit; omission means 1.
- */
-startRow?: number;
 ```
+
+`_row` is not a column: the runtime writes it on every record (§7.4).
 
 `readTable` reuses these existing fields:
 
@@ -484,7 +677,7 @@ Another valid response using derived aliases:
 }
 ```
 
-Valid response for the bounded example in §4.4:
+Valid response for the bounded example in §4.6:
 
 ```json
 {
@@ -504,21 +697,22 @@ Valid response for the bounded example in §4.4:
 }
 ```
 
-Valid response for visible rows 3 through 7:
+Valid response for the headerless table in §5.4:
 
 ```json
 {
   "actions": [
     {
       "action": "readTable",
-      "selector": "table[aria-label=\"Orders\"]",
+      "selector": "#scheduled-payments",
       "columns": [
-        { "header": "Order ID", "key": "id" }
+        { "index": 1, "key": "payee" },
+        { "index": 2, "key": "reference" },
+        { "index": 3, "key": "amount" },
+        { "index": 5, "key": "status" }
       ],
-      "startRow": 3,
-      "limit": 5,
-      "as": "orders",
-      "description": "Read IDs from visible Orders table rows 3 through 7"
+      "as": "payments",
+      "description": "Read payee, reference, amount and status from every Scheduled payments row"
     }
   ],
   "needs_reeval": false
@@ -534,24 +728,23 @@ when any of these holds:
 - `as` is absent or not a valid variable name;
 - `columns` is absent, empty, or not an array;
 - a column is not an object;
-- `header` is absent/blank;
-- `key` is invalid, dangerous, or duplicated;
-- a `(header, key)` pair is duplicated;
+- a column has neither `header` nor `index`, or has both;
+- `header`, when present, is blank;
+- `index`, when present, is not an integer from 1 through 100 inclusive;
+- `key` is invalid, dangerous, duplicated, or is `_row`;
+- a `(header, key)` or `(index, key)` pair is duplicated;
+- `mode`, when present, is not `'text'` (phase 1);
 - more than 20 columns are requested;
-- `limit`, when present, is not a finite integer from 1 through 500 inclusive;
-- `startRow`, when present, is not a positive JavaScript safe integer;
-- `startRow` is present without `limit`;
-- `startRow + limit - 1`, when both are present, is not a JavaScript safe
-  integer.
+- `limit`, when present, is not a finite integer from 1 through 500 inclusive.
 
 Do not silently drop malformed columns and run a partial read. Partial
 structured data is more dangerous than a failed step.
 
-The parser must copy `columns`, a validated `limit`, and a validated `startRow`
-into the canonical action; today it only copies known scalar fields and would
-discard them. `limit` and `startRow` are `readTable` fields, not configurable
-replacements for the existing
-`READ_MULTIPLE_MAX` behavior of `read` with `multiple: true`.
+The parser must copy `columns` (with `index` and `mode` intact) and a validated
+`limit` into the canonical action; today it only copies known scalar fields and
+would discard them. `limit` is a `readTable` field, not a configurable
+replacement for the existing `READ_MULTIPLE_MAX` behavior of `read` with
+`multiple: true`.
 
 ### 6.3 Prompt rule
 
@@ -562,28 +755,30 @@ Teach the step-planning prompt:
 - Also use `readTable` when the author asks for the first/up to/at most N rows,
   even if only one named column is needed; emit that positive integer as
   `limit`.
-- For an inclusive range A through/to B, require positive integers with B >= A,
-  emit `startRow: A`, and emit `limit: B - A + 1`. For example, rows 3 through
-  7 become `startRow: 3, limit: 5`, not `limit: 7`.
 - Use existing `read` with `multiple: true` for one flat column unless the
   author explicitly requests records or a bounded table window.
 - Copy header names exactly as observed in the DOM snapshot.
+- When the author names a column by position (“the 1st column”, “column 3”,
+  “the second column as …”), or the table in the snapshot has no header row,
+  emit `index` (one-based) instead of `header`. Never emit both for one
+  column, and never turn a header name into an index or an index into a
+  header name: the runtime resolves each the way the author wrote it.
 - Copy explicit author aliases exactly; otherwise apply the normalization rule
-  in §4.2.
+  in §4.2. A positional column has no header to derive from, so it needs an
+  explicit alias; without one, return a `prompt` asking for it.
+- Never request `_row`: the runtime adds it to every record. A later step may
+  use `{{item._row}}` freely, as “row 3 of the … table”.
 - Request only author-named columns. Never add checkbox, action, or hidden
   columns “for context.”
-- Do not calculate `nth-child()` selectors for columns. The runtime maps headers.
+- Do not calculate `nth-child()` selectors for columns. The runtime maps
+  headers and positions.
 - Do not calculate `:nth-child(-n+N)` or similar selectors for a row bound. Use
-  `limit`/`startRow`, and emit them only when the author explicitly requested a
-  bound.
-- Omit `startRow` for first-N wording; its runtime default is 1. Never emit
-  `startRow` without `limit`.
-- The two fields address only a bounded contiguous window of visible rows on the
-  current rendered page. Do not use them to imply pagination, scrolling, last N,
-  an open-ended start row, disjoint ranges, sorting, or an exact-row-count
-  assertion. For unsupported row-selection semantics or a reversed range,
-  return a `prompt` explaining the v1 restriction rather than silently changing
-  the meaning.
+  `limit`, and emit it only when the author explicitly requested a bound.
+- `limit` addresses only the first N visible rows on the current rendered page.
+  Do not use it to imply pagination, scrolling, last N, a starting row, a
+  range, sorting, or an exact-row-count assertion. For any of those, return a
+  `prompt` explaining the v1 restriction rather than silently changing the
+  meaning.
 - If the author asks for all rows but names no columns, return a `prompt` asking
   which columns are required instead of guessing.
 - If the table is missing from the snapshot, use existing `find`/`expand`
@@ -627,13 +822,24 @@ session storage migration is required.
 
 ### 7.3 Header mapping
 
-V1 accepts exactly one direct header row belonging to the selected table:
+A header row is required only when some requested column names a header. V1
+accepts exactly one direct header row belonging to the selected table:
 
 - normally one `<thead><tr>…</tr></thead>`;
 - if there is no `<thead>`, the first direct table row containing `<th>` cells
   may be used;
 - nested-table rows/cells are excluded by requiring `closest('table')` to be
   the selected table.
+
+If no header row exists and a column names one, fail with the §5.4 message,
+which tells the author to name columns by position. If every requested column
+is positional, the header row (if any) is still identified so that it is
+excluded from the body and so the placeholder-row rule (§7.4) knows the
+table's width, but nothing is matched against it.
+
+A positional column (`index`) maps to the cell at that one-based position in
+each body row. It ignores the header entirely, so a reordered table changes
+what it reads; that is the documented trade-off of §4.4, not a bug.
 
 For each direct header cell:
 
@@ -657,48 +863,49 @@ Blank selection-column headers are valid and ignored unless somehow requested.
   `visibility:hidden`, hidden/collapsed ancestors, or no rendered client rect).
 - Exclude nested-table rows.
 - Preserve DOM order.
-- After all visibility/data-row exclusions, let `start = (startRow ?? 1) - 1`.
-  With `limit`, select the zero-based slice `[start, start + limit)` before cell
-  extraction. Without `limit`, `startRow` is forbidden and all visible rows are
-  selected.
-- Reject body cells with `rowspan` or `colspan` greater than 1.
+- Drop placeholder rows (§4.8): a row whose only cell spans the table's full
+  width (`colspan` equal to the header's column count, or exactly one cell in
+  a headerless table). If every body row was a placeholder, the result is
+  `[]`.
+- Number what is left: `_row` is the one-based position among the remaining
+  data rows, hidden rows and placeholders excluded. Write it on every record
+  before the requested columns, so the report and the Variables panel show it
+  first.
+- With `limit`, select the first `limit` of those rows before cell extraction.
+  Without `limit`, all of them.
+- Reject any other body cell with `rowspan` or `colspan` greater than 1.
 - A row missing any requested logical cell fails the whole action and names the
-  one-based visible row number and header. Never drop the row or shift values.
+  row's `_row` and the header or position. Never drop the row or shift values.
   Cell-shape validation applies to selected rows; an unselected row after the
   explicit limit cannot fail the bounded read.
-- A `rowspan` originating before `startRow` can affect logical positions inside
-  the selected window. Detect and reject any earlier body-cell `rowspan` whose
-  span intersects a selected row. A merge wholly outside the selected window
-  cannot fail the read.
 - Extra cells are harmless.
 
 Cell value v1 is rendered cell text: trimmed and with runs of whitespace
 collapsed to one space. Nested links/spans therefore read normally. An empty
 cell is stored as `""` and is not dropped.
 
-A requested cell containing only a form control or icon may therefore produce
-`""`. Reading control state (`checked`, selected option, input value) is a
-future extension with an explicit extraction mode; v1 must not guess that
-`<input value="on">` means checked.
+A requested cell containing only a form control or icon therefore produces
+`""` in phase 1. Reading control state — `mode: 'checked'` for a checkbox or
+toggle, `'value'` for an input or a select's chosen option, `'attribute'` with
+a name — is phase 2 (§1.3), behind that explicit per-column mode; phase 1 must
+not guess that `<input value="on">` means checked. The author-facing form is
+fixed now so phase 2 adds no syntax: “the Auto-pay checkbox as autopay” reads
+the checkbox's state as `"true"`/`"false"`, “the Amount input's value as
+amount” reads the field, and phase 1 refuses both with a message naming the
+phase rather than silently storing `""`.
 
 ### 7.5 Limits and atomicity
 
 - Maximum requested columns: 20.
 - Maximum output rows: 500. Consequently, `limit` must be between 1 and 500.
-- `startRow` is one-based, defaults to 1, and is legal only with `limit`. It has
-  no arbitrary 500-row ceiling; the safety cap applies to captured output size,
-  not to the requested starting position.
 - With no `limit`, if the table has more than 500 visible rows, fail. Unlike the
   existing flat plural read, do not silently truncate structured records: a
   partial business table can produce a convincingly wrong result.
 - With an explicit `limit`, a table may contain more than 500 visible rows. Read
-  only the requested window beginning at `startRow ?? 1`. This is intentional
-  author-requested selection, not a safety-cap truncation.
-- If fewer than `limit` visible rows remain at or after `startRow`, return that
-  existing suffix without error.
-- If `startRow` is beyond the last visible row, return `[]`. If the requested
-  window extends past the end, return only its existing suffix. Neither case is
-  an implicit cardinality assertion.
+  only the first `limit`. This is intentional author-requested selection, not a
+  safety-cap truncation.
+- If fewer than `limit` visible rows exist, return them all without error. That
+  is not an implicit cardinality assertion.
 - Extract headers and rows in one browser-context evaluation after locator
   uniqueness is established, so a rerender cannot put headers from one version
   beside rows from another.
@@ -720,10 +927,11 @@ without logging its contents:
 readTable captured 7 rows × 1 column as "{{orders}}" (limit 10)
 ```
 
-For a non-default start, log both fields:
+When placeholder rows were skipped, say so, so an unexpectedly short result
+can be explained from the log alone:
 
 ```text
-readTable captured 5 rows × 1 column as "{{orders}}" (start row 3, limit 5)
+readTable captured 0 rows × 2 columns as "{{docs}}" (1 placeholder row skipped)
 ```
 
 Do not write every captured cell to the normal console/run log. Existing
@@ -733,6 +941,43 @@ password/secret/token/key rule must be masked even though the root variable is
 named `orders`.
 
 The action is observational and must not trigger post-action page settling.
+
+### 7.7 Whole-table assertions (phase 2)
+
+The assertions of §4.9 are deterministic steps over a captured list. They are
+parsed from the step text the way `Set` and the control lines are — a fixed
+grammar, not the model's reading of it — and they never call the model; the
+list is the evidence, and the failure message shows the offending rows.
+
+Four forms cover the cases in §4.9:
+
+| Form | Passes when |
+| --- | --- |
+| `Verify every row in {{list}} has a <key> of "a", "b" or "c"` | Each record's `<key>` is one of the quoted values. Also `is "a"` / `is not empty` / `is empty` / `contains "x"`. |
+| `Verify no two rows in {{list}} share a <key>` | The `<key>` values are pairwise distinct, ignoring empty ones. |
+| `Verify the rows in {{list}} are sorted by <key>, earliest first` | The `<key>` values are non-decreasing (`latest first` / `largest first` for non-increasing) under the comparison below. |
+| `Verify the <key> values in {{list}} add up to "<total>"` | The numeric sum of `<key>` equals the numeric value of `<total>`. |
+
+`<key>` is matched case-insensitively against the record keys, with spaces
+allowed for underscores (“next payment” matches `next_payment`). A list of
+plain strings (a `read multiple`) is treated as records with one key, `value`,
+so `Verify every value in {{statuses}} is "Overdue"` works on a flat read.
+
+**Normalisation.** Cell text is what the page rendered, which is not what a
+comparison wants. The number and date parsing behind the last two forms — and
+the “add up to” total — must handle: currency symbols and thousands separators
+(`$1,234.56`); a leading `+`; the Unicode minus `−` (U+2212), which the
+transactions fixture uses and which `Number()` rejects; parentheses for
+negatives; and dates in `25 Mar 2026`, ISO, and `dd/mm/yyyy` forms, the last
+under the project's locale setting rather than a guess. A value that does not
+parse fails the assertion and names the row and the text, rather than sorting
+as a string. Tools that do their own arithmetic over records (the
+`[tool: sum_column …]` workaround) should be pointed at the same helper.
+
+Where the same assertion is written in prose without a `{{list}}` — “verify
+every row in the table shows Completed” — it remains a model assertion over
+the snapshot, with the collapse caveat of §4.9. The handbook should say which
+form is which.
 
 ---
 
@@ -760,17 +1005,22 @@ For each {{order}} in {{orders}}, Check the order
 and item:
 
 ```json
-{ "id": "ORD-1001", "customer": "Alice Smith", "status": "Completed" }
+{ "_row": "1", "id": "ORD-1001", "customer": "Alice Smith", "status": "Completed" }
 ```
 
 the pass binds:
 
 ```text
-order          = {"id":"ORD-1001","customer":"Alice Smith","status":"Completed"}
+order          = {"_row":"1","id":"ORD-1001","customer":"Alice Smith","status":"Completed"}
+order._row     = 1
 order.id       = ORD-1001
 order.customer = Alice Smith
 order.status   = Completed
 ```
+
+`_row` is an ordinary property here: a record from a tool or an API that has
+no `_row` simply has no `{{order._row}}` binding, and a step that uses one
+fails as any missing dotted binding does (§8.3).
 
 The base binding preserves current behavior for non-string array elements. Each
 direct property becomes a dotted binding. Property conversion is:
@@ -845,7 +1095,8 @@ compatibility is outside this feature and remains unchanged.
   value while running.
 - Property completion after `{{order.` is desirable but not required because
   the aliases originate in a natural-language read step. If implemented, it
-  must derive only explicit `as <key>` aliases and must not guess from prose.
+  must derive only explicit `as <key>` aliases plus `_row`, and must not guess
+  from prose.
 - Go-to-definition for `{{order.id}}`, if offered, should target the `For each`
   line; field-level definition navigation is not required.
 
@@ -857,7 +1108,7 @@ compatibility is outside this feature and remains unchanged.
 
 A cached `readTable` plan must execute against the current DOM and capture fresh
 records, exactly as a cached `read multiple` action does. Cache only the action
-shape (`selector`, headers, keys, optional `startRow`, and optional `limit`),
+shape (`selector`, headers or indexes, keys, modes, and optional `limit`),
 never captured row data.
 
 Placeholder substitution must walk header strings if an author parameterized a
@@ -879,10 +1130,9 @@ async run({ page, step, tables }) {
     columns: [
       { header: 'Order ID', key: 'id' },
       { header: 'Customer', key: 'customer' },
-      { header: 'Status', key: 'status' },
+      { index: 5, key: 'status' },
     ],
-    startRow: 3,
-    limit: 5,
+    limit: 10,
   });
   step.setVar('orders', JSON.stringify(rows));
 }
@@ -890,8 +1140,9 @@ async run({ page, step, tables }) {
 
 `tables.read` and the AI action must call the same underlying extraction helper.
 There must not be one header algorithm in generated code and another in
-`actions.ts`. The optional `startRow`/`limit` window must have identical
-validation and visible-row semantics in both paths.
+`actions.ts`. Positional columns, `_row`, the placeholder-row rule and the
+optional `limit` must have identical validation and visible-row semantics in
+both paths.
 
 Update the code-generation prompt, context types, undeclared-context static
 check, review prompt, and repair prompt for `tables`. A compile/replay test must
@@ -919,35 +1170,38 @@ root or a literal value that can be inlined into generated source.
 | Duplicate `Status` headers | Fail ambiguous header and list matching indexes. |
 | Empty checkbox header | Allowed and ignored. |
 | Empty requested cell | Preserve `""`; do not drop row or value. |
-| Row has too few cells | Fail the whole read with row/header detail. |
+| Row has too few cells | Fail the whole read, naming `_row` and the header or position. |
 | Hidden filtered row | Excluded before applying `limit`; it does not consume one of the N slots. |
 | Hidden requested column | Cells remain structurally aligned; rendered text is empty, so store `""` for that field. |
 | Nested table inside a cell | Nested rows/cells are excluded from both header and body scans. |
 | Multiple `<tbody>` elements | Include their visible direct rows in DOM order. |
 | `<tfoot>` totals row | Excluded. |
 | Row-header `<th scope="row">` in body | Counts as that row's cell at its logical position. |
-| `rowspan`/`colspan` > 1 in a selected row | Fail as unsupported in v1; also fail for an earlier `rowspan` that intersects the window. |
+| `rowspan`/`colspan` > 1 in a selected row | Fail as unsupported in v1, unless the row is a placeholder (below). |
+| Placeholder row: one cell spanning the full width | Not data. Alone in the body: store `[]`. Among data rows: skipped, no `_row` consumed. Logged as “N placeholder row(s) skipped”. |
+| “Loading…” row | A placeholder; the read stores `[]` truthfully. Waiting is the author's step, before the read. |
+| A `colspan` narrower than the table | Still the §5.3 error. |
+| No header row, columns named by header | Fail with the §5.4 message: name columns by position. |
+| No header row, columns named by position | Supported; every column needs an explicit alias. |
+| Header row present, columns named by position | Supported; the header is excluded from the body and otherwise ignored for those columns. Reordering breaks the read by design (§4.4). |
+| `index` past the row's last cell | Fail like a missing cell, naming `_row` and the position. |
+| `index` is zero, negative, fractional, a string, or above 100 | Parser rejection; never coerce. |
+| A column with both `header` and `index`, or neither | Parser rejection. |
+| Alias `_row` | Parser rejection; reserved. |
+| `_row` | On every record, first, one-based among data rows after hidden and placeholder rows are excluded. Records from tools/APIs have it only if they wrote it. |
+| Duplicate row identifiers | Extraction succeeds. A later action by value may be ambiguous; `{{item._row}}` names the row exactly (§4.5). `readTable` does not assume which field is a key. |
+| Body changes during the loop (rows removed/reordered) | `_row` values captured earlier are positions and go stale from that pass on; documented in §4.5. Re-find by value or use `Repeat … until`. |
 | More than 500 visible rows, no `limit` | Fail; never truncate implicitly. |
-| More than 500 visible rows, valid window | Capture at most `limit` rows beginning at `startRow ?? 1` and succeed. |
-| Fewer remaining visible rows than `limit` | Capture the existing suffix and succeed; exact cardinality requires a separate assertion. |
+| More than 500 visible rows, with `limit` | Capture the first `limit` and succeed. |
+| Fewer visible rows than `limit` | Capture them all and succeed; exact cardinality requires a separate assertion. |
 | `limit` is zero, negative, fractional, a string, or greater than 500 | Parser rejection; never coerce or clamp. |
-| `startRow` is zero, negative, fractional, a string, or exceeds JavaScript's safe-integer range | Parser rejection; never coerce or clamp. |
-| `startRow` without `limit` | Parser rejection; open-ended windows are unsupported in v1. |
-| `startRow + limit - 1` exceeds JavaScript's safe-integer range | Parser rejection; range arithmetic must remain exact. |
-| Rows 3 through 7 | Emit `startRow: 3, limit: 5`; capture visible rows 3, 4, 5, 6, and 7. |
-| Range begins past the last visible row | Store `[]`; `For each` runs zero passes. |
-| Range ends past the last visible row | Capture the existing suffix without error; exact cardinality requires a separate assertion. |
-| Reversed range such as rows 7 through 3 | Prompt as unsupported/invalid; do not swap endpoints. |
-| Hidden rows before/inside the requested positions | Ignore hidden rows, then apply the one-based window to visible data rows. |
-| Malformed row outside the selected window | Ignore it unless an earlier `rowspan` intersects the selected window. |
-| Author asks for last N, row N onward, or disjoint ranges | Unsupported in v1; do not reinterpret as a supported window. |
-| Pagination plus a bounded window | Apply `startRow`/`limit` independently to the currently rendered page on each invocation; never navigate automatically. |
+| Author asks for rows A through B, last N, row N onward, or disjoint ranges | Deferred (§14); prompt as unsupported, do not reinterpret. |
+| Pagination plus `limit` | Apply `limit` to the currently rendered page on each invocation; never navigate automatically. |
 | More than 20 requested columns | Parser rejection. |
 | Empty table | Store `[]`; `For each` runs zero passes. |
 | Virtualized table | Capture only currently rendered visible rows. No auto-scroll. |
 | Table rerenders after capture | Loop uses the captured snapshot; later actions re-find rows and may fail honestly if a row vanished. |
-| Duplicate row identifiers | Extraction succeeds; a later action using that identifier may fail as ambiguous. `readTable` does not assume which field is a key. |
-| Icon/control-only requested cell | V1 returns empty rendered text; explicit control-state extraction is future work. |
+| Icon/control-only requested cell | Phase 1 returns empty rendered text; “as checked” / “'s value” wording is refused naming phase 2 rather than storing `""`. |
 | Cell contains nested link/span | Return rendered text. |
 | Cell text contains commas/newlines | Preserve content after whitespace normalization; JSON keeps row boundaries. |
 | Unicode headers/values | Values supported. Explicit aliases required when automatic ASCII aliasing would become empty or collide. |
@@ -1006,8 +1260,12 @@ The implementing agent should inspect and update at least these areas:
 
 - `docs/test-writing-handbook.md` — structured table-read authoring and limits.
 - `README.md` — short example near captures/control flow.
-- A template fixture/test under `templates/init/tests/` and HTML under
-  `fixtures/test-app/`.
+- Template tests under `templates/init/tests/` and HTML under
+  `fixtures/test-app/`: the §5.1 orders table, and `scheduled-payments.html`
+  (§5.4 grown to five rows with View/Approve/Resume buttons and a details
+  page) for the headerless, duplicate-payee, empty-cell case.
+- (Phase 2) A parser for the §7.7 assertion forms beside `set-step.ts` and
+  `control-line.ts`, and the shared number/date normaliser it and tools use.
 - Because this changes `runner-core` and TestBench-visible behavior, bump the
   patch version in `testbench-native/package.json` as required by `CLAUDE.md`.
 
@@ -1017,11 +1275,11 @@ The implementing agent should inspect and update at least these areas:
 
 ### Unit/component tests
 
-1. Valid `readTable` JSON parses with ordered columns and optional
-   `startRow`/`limit` intact.
+1. Valid `readTable` JSON parses with ordered columns — header, positional and
+   mixed — and optional `limit` intact.
 2. Every malformed action case in §6.2, including invalid `limit`, invalid
-   `startRow`, `startRow` without `limit`, and unsafe range arithmetic, is
-   rejected without coercion or partial recovery.
+   `index`, a column with both or neither of `header`/`index`, and the alias
+   `_row`, is rejected without coercion or partial recovery.
 3. Checkbox-first HTML produces the exact records in §5.1.
 4. Reordered columns produce identical records.
 5. Nested markup in cells produces visible text.
@@ -1034,13 +1292,16 @@ The implementing agent should inspect and update at least these areas:
    hidden rows and ignoring malformed rows after the selected prefix.
 9. A bounded read returns fewer rows without error when fewer than the requested
    limit are visible, and succeeds on a table containing more than 500 rows.
-10. `startRow: 3, limit: 5` returns visible rows 3 through 7; hidden rows do not
-    count, a partial suffix is allowed, and a start beyond the end returns `[]`.
-11. A prior `rowspan` intersecting the selected window fails rather than
-    misaligning fields; malformed structure wholly outside the window is ignored.
-12. Empty table produces `[]`, with or without a bounded window.
+10. The §5.4 headerless table produces the exact records shown, `_row` first;
+    a header-named column against it fails with the §5.4 message; a positional
+    column against a table *with* a header reads the cell at that position.
+11. `_row` is one-based among data rows: a hidden row and a placeholder row
+    between rows 2 and 3 leave row 3 numbered `3`.
+12. Empty table produces `[]`, with or without `limit`; the §5.5 placeholder
+    body produces `[]` with the skip logged; a placeholder among data rows is
+    skipped; a `colspan` narrower than the table still fails.
 13. Step executor JSON-encodes records into the named variable.
-14. Cached and generated actions preserve `startRow`/`limit` and reread changed
+14. Cached and generated actions preserve `index` and `limit` and reread changed
     DOM data rather than replaying old records.
 15. Scalar `For each` regression suite stays green.
 16. Object `For each` binds the base JSON and all direct properties in order.
@@ -1051,6 +1312,12 @@ The implementing agent should inspect and update at least these areas:
 20. Secret-named record properties are masked on every presentation surface.
 21. Generated code uses the shared table helper, compiles, and replays against
     reordered columns with zero AI calls.
+22. (Phase 2) Each §7.7 form passes and fails on a fixed record list, the
+    failure names the offending rows, and the number parser accepts `$1,234.56`,
+    `+42`, `−$87.40` (U+2212) and `(87.40)` and rejects `n/a` by naming the row.
+23. (Phase 2) `mode: 'checked'` reads a ticked and an unticked checkbox as
+    `"true"`/`"false"`; `'value'` reads an input and a select's chosen option;
+    phase-1 code refuses both modes by name.
 
 ### End-to-end proof
 
@@ -1071,7 +1338,8 @@ The proving run must establish all of the following, not merely a green final
 status:
 
 - the recorded action is `readTable`, not three independent reads;
-- the stored value is an array of three objects in DOM row order;
+- the stored value is an array of three objects in DOM row order, each with
+  `_row` first;
 - the loop body runs exactly once per object;
 - each body instruction contains the correctly substituted property values;
 - the checkbox column never appears in any record;
@@ -1094,15 +1362,29 @@ tenth visible row. The proving run must show `limit: 10`, exactly ten captured
 records and loop passes in visible DOM order, no click for the hidden row or the
 eleventh/twelfth visible rows, and fresh row lookup by ID for every click.
 
-Add a range variant against the same fixture:
+Add a third end-to-end test on a headerless fixture with a duplicate payee —
+§5.4 grown to five rows, each with a View button that opens a details page:
 
 ```markdown
-1. Read the Order ID column as id from visible rows 3 through 7 in the Orders table [store as: orders]
-2. For each {{order}} in {{orders}}, Click the Orders table row whose Order ID is "{{order.id}}"
+## Steps
+1. Navigate to /scheduled-payments.html
+2. Read the 1st column as payee, the 3rd column as amount and the 5th column as status from every row in the Scheduled payments table [store as: payments]
+3. For each {{payment}} in {{payments}}, Review the payment
+4. Verify the Scheduled payments table still shows 5 rows
+
+### Review the payment
+1. If {{payment.status}} is "Paused", then return
+2. Click View in row {{payment._row}} of the Scheduled payments table
+3. Verify the Payment details page shows "{{payment.payee}}" and {{payment.amount}}
+4. Click Back to scheduled payments
 ```
 
-It must record `startRow: 3, limit: 5`, capture exactly the third through seventh
-visible IDs, and perform five row re-lookups/clicks in that order.
+The proving run must show `index` columns and no `header`, five records with
+`_row` 1 to 5, the Paused pass ending at its first step with a `not-taken`
+skip on the rest, and — the point of the fixture — both Origin Energy passes
+opening *different* details pages, with the amount on each matching that
+pass's `{{payment.amount}}`. A run that opens the first Origin Energy row
+twice is the failure this test exists to catch.
 
 ---
 
@@ -1110,21 +1392,74 @@ visible IDs, and perform five row re-lookups/clicks in that order.
 
 The feature is complete only when:
 
-1. The canonical test in §4.1 works through CLI and Sessions API.
-2. The TestBench live path in §12 works and paints/reports loops correctly.
-3. Header-based extraction survives column reordering and a checkbox first
-   column without changing the test.
-4. No supported structural error can silently misalign fields across rows.
-5. `{{item.property}}` works consistently in authored step text, cached actions,
-   generated code-behind, reports, and editor runtime scope.
-6. Existing flat plural reads and scalar `For each` tests remain unchanged and
-   green.
-7. Code-behind replay uses the same extractor as the AI action.
-8. Limits, unsupported structures, empty tables, pagination, virtualization,
-   and snapshot semantics are documented.
-9. Documentation and the TestBench patch version are updated in the same
-   change.
-10. An authored first-N read produces a validated `limit`; an authored inclusive
-    range produces validated `startRow` and `limit` values with correct inclusive
-    arithmetic. Both select visible data rows in DOM order and drive only those
-    object-loop passes without positional CSS selectors or retained DOM handles.
+1. (Phase 1) The canonical test in §4.1 works through CLI and Sessions API.
+2. (Phase 1) The TestBench live path in §12 works and paints/reports loops
+   correctly.
+3. (Phase 1) Header-based extraction survives column reordering and a checkbox
+   first column without changing the test.
+4. (Phase 1) No supported structural error can silently misalign fields across
+   rows.
+5. `{{item.property}}` works consistently in authored step text, cached
+   actions and reports (phase 1), and in generated code-behind and editor
+   runtime scope (phase 3).
+6. (Phase 1) Existing flat plural reads and scalar `For each` tests remain
+   unchanged and green.
+7. (Phase 3) Code-behind replay uses the same extractor as the AI action.
+8. (Phase 1) Limits, unsupported structures, empty tables, placeholder rows,
+   pagination, virtualization, and snapshot semantics are documented.
+9. (Every phase) Documentation and the TestBench patch version are updated in
+   the same change.
+10. (Phase 1) An authored first-N read produces a validated `limit`, selects
+    visible data rows in DOM order, and drives only those object-loop passes
+    without positional CSS selectors or retained DOM handles.
+11. (Phase 1) A table with no header row is read by position, with the §5.4
+    records and the §5.4 error for a header-named column.
+12. (Phase 1) Every record carries `_row`, and the §12 duplicate-payee run
+    opens two different details pages for the two Origin Energy rows.
+13. (Phase 1) The §5.5 placeholder body reads as `[]`, a loading row reads as
+    `[]`, and neither is reported as a merged-cell error.
+14. (Phase 2) Per-column modes read checkbox state and input/select values
+    through the wording §7.4 fixes, and phase-1 builds refuse that wording by
+    name.
+15. (Phase 2) The four §7.7 assertions run without a model call, and their
+    number parsing accepts the currency, sign and Unicode-minus forms listed
+    there.
+
+---
+
+## 14. Deferred, and open questions
+
+Moved out of v1 after review, each with why and what would bring it back:
+
+- **Inclusive row windows** (`startRow`; “rows 3 through 7”, last N, “row N
+  onward”, disjoint ranges). The first draft specified them in full. Nothing
+  needs them yet, `_row` covers “one row by position”, and `limit` covers the
+  smoke subset. The draft's validation rules are in this file's history if a
+  test turns up that needs them.
+- **Breaking out of a loop.** `return` ends the pass and `stop` ends the test;
+  there is nothing for “stop after the first Overdue”. The handbook lists “no
+  Break” as a known hole of the control-flow story, and the honest form today
+  is find-then-act with no loop (“Click Pay now in the first row whose Status
+  is Overdue”). A `then break` tail is the obvious shape; it belongs to the
+  control-flow story, not here.
+- **Per-row failure summary.** `otherwise continue` already lets a pass
+  survive a failing step, and the pass runs on to its end. What is missing is
+  the report line — “3 of 40 rows failed: rows 7, 19, 31” — and a collapsed
+  pass in the report and in TestBench when it passed cleanly. Forty passes of
+  four steps is 160 rows nobody reads.
+- **Grids that are not `<table>`.** `<div role="grid">` (ag-grid, MUI
+  DataGrid), card lists, and responsive tables that become card stacks at a
+  phone viewport (which the per-test `viewport:` config can now select). §1.2
+  says why v1 stops at native tables; a `readCollection` with an item selector
+  and per-field selectors is the follow-on, and the positional form of §4.4
+  is the same idea for a row whose cells are its direct children.
+- **Indexing the captured list** (`{{payments[5].status}}`). One index
+  segment, one-based to match `_row`, and stale by design. Page reads cover
+  the real cases so far (§4.5).
+- **Loop bodies are uncompiled and uncached.** Every step in a `For each` body
+  goes to the model on every pass, so a 40-row table with three steps per row
+  is 120 model calls a run. `readTable` compiles; the body does not. Once
+  tables loop properly this is the cost felt first, and it needs its own story
+  under the code-behind work rather than a note here.
+- **Per-row evidence.** A screenshot per pass, named by a record field, for
+  the audit trail a payments table wants. Report/evidence story.
