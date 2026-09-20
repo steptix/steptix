@@ -1,6 +1,6 @@
 # Structured table reads and object-aware `For each`
 
-**Status:** Proposed — amended 2026-09-20 after review (§14 lists what moved out)  
+**Status:** Proposed — amended 2026-09-20 after review (§14 lists what moved out), and again 2026-09-21 once the fixtures were built, the baselines run and the acceptance tests written (§11, §12)  
 **Date:** 2026-09-20  
 **Audience:** implementation agent working in this repository  
 **Depends on:** existing `read` actions, captured variables, sections, and the
@@ -273,7 +273,23 @@ would not, and which is why this spec keeps no handles (§1). It is a
 position, not an identity: if the body deletes or moves rows, every row below
 the change has a different number from that pass on. For a table that changes
 as you act on it, re-find by a value, or use `Repeat … until` so each pass
-reads the page as it is now.
+reads the page as it is now. Concretely, on the payments fixture Pay now
+removes the Overdue row 4, so a loop that pays it on pass 4 finds Woolworths
+at row 4 on pass 5 and nothing at row 5. The acceptance test
+`table-payments-approve.md` therefore approves the Scheduled rows and leaves
+Overdue to `table-baseline-pay-overdue.md`'s `Repeat`.
+
+Two counts, one word. `_row` counts **data rows** — hidden rows and
+placeholder rows excluded (§7.4) — while “row 3” in a prose step is whatever
+the model counts in the snapshot, usually every `<tr>`. On a plain table the
+two agree. On a table with group rows or a placeholder among the data they
+do not: the Accounts-by-group gallery table has a group row before each
+`<tbody>`'s data, so its data row 3 is the fifth `<tr>`. Where a table has
+such rows, a body should verify by value (“the row for {{account.account}}
+with balance {{account.balance}}”) rather than by `row {{account._row}}`;
+`table-structures.md` does. The prompt rule in §6.3 tells the model what
+`_row` counts, which is enough for the plain case and no substitute for
+this one.
 
 The pass can also name other rows relative to its own — “the row below row
 {{payment._row}}” — and can compare its snapshot values with the page as it
@@ -531,27 +547,38 @@ readTable cannot map table "Orders": merged headers or cells (rowspan/colspan > 
 
 ### 5.4 No header row, and a duplicate payee
 
-The second fixture. No `<thead>`, no `<th>`, two rows for the same payee, and
-cells that are empty on some rows and not others:
+The second fixture, built as `fixtures/test-app/scheduled-payments.html`
+(five rows there; the first three shown here). No `<thead>`, no `<th>`, two
+rows for the same payee, cells that are empty on some rows and not others,
+and — as built — seven columns: an Auto-pay checkbox is column 6 (for the
+phase-2 `checked` mode) and the buttons are column 7. Every step in this
+document reads columns 1 to 5, so the layout change touches none of them.
 
 ```html
 <table id="scheduled-payments" aria-label="Scheduled payments">
   <tbody>
-    <tr>
+    <tr data-id="1">
       <td>Origin Energy</td><td>INV-2291</td><td>$140.00</td><td>3 Oct 2026</td><td>Scheduled</td>
-      <td><button type="button">View</button> <button type="button">Approve</button></td>
+      <td><input type="checkbox" aria-label="Auto-pay for Origin Energy" checked></td>
+      <td><button type="button">View</button> <button type="button">Approve</button> <button type="button">Skip</button></td>
     </tr>
-    <tr>
+    <tr data-id="2">
       <td>Netflix Australia</td><td></td><td>$22.99</td><td>1 Oct 2026</td><td>Scheduled</td>
-      <td><button type="button">View</button> <button type="button">Approve</button></td>
+      <td><input type="checkbox" aria-label="Auto-pay for Netflix Australia" checked></td>
+      <td><button type="button">View</button> <button type="button">Approve</button> <button type="button">Skip</button></td>
     </tr>
-    <tr>
+    <tr data-id="3">
       <td>Origin Energy</td><td></td><td>$86.10</td><td></td><td>Paused</td>
+      <td><input type="checkbox" aria-label="Auto-pay for Origin Energy"></td>
       <td><button type="button">View</button> <button type="button">Resume</button></td>
     </tr>
   </tbody>
 </table>
 ```
+
+`data-id` is the page's own stable key and is not the row's position; a read
+never sees it, which is the point — `_row` is what the read gives a body to
+find the row by.
 
 The author step:
 
@@ -767,7 +794,10 @@ Teach the step-planning prompt:
   in §4.2. A positional column has no header to derive from, so it needs an
   explicit alias; without one, return a `prompt` asking for it.
 - Never request `_row`: the runtime adds it to every record. A later step may
-  use `{{item._row}}` freely, as “row 3 of the … table”.
+  use `{{item._row}}` freely, as “row 3 of the … table”. When a step names a
+  row by number, count **data rows**: `_row` skips hidden rows and full-width
+  placeholder or group rows, so on a table with those, row 3 is the third
+  row that holds data, not the third `<tr>`.
 - Request only author-named columns. Never add checkbox, action, or hidden
   columns “for context.”
 - Do not calculate `nth-child()` selectors for columns. The runtime maps
@@ -854,6 +884,12 @@ duplicate matching header fails the action and lists the available non-empty
 headers.
 
 Blank selection-column headers are valid and ignored unless somehow requested.
+
+Case-folding is load-bearing, not tidiness: the app's table style sets
+`text-transform: uppercase` on `<th>`, so `innerText` of the Orders header
+is `ORDER ID` while the author wrote `Order ID` and `textContent` says so
+too. Step 3's fold makes all three the same key. `tests/read-table.test.ts`
+must include a header styled that way.
 
 ### 7.4 Row mapping
 
@@ -1083,6 +1119,17 @@ AI call with an error such as:
 Do not pass the literal braces to the model. Existing unresolved flat-name
 compatibility is outside this feature and remains unchanged.
 
+**Empty values.** An empty cell is stored as `""` (§7.4), and a binding of
+`""` substitutes to nothing. In a condition that is invisible: `If
+{{payment.reference}} is empty, then …` reaches the judge as `If  is empty,
+then …`. Authors quote a placeholder that can be empty — `If
+"{{payment.reference}}" is empty` reads as `If "" is empty` — and the
+handbook says so beside the first dotted example. Whether the runtime should
+instead render an empty binding as `""` when the placeholder stands alone
+between spaces is an open question (§14); v1 does not, because a `Type
+{{payment.reference}} into the field` that typed two quote marks would be
+worse than a condition that reads oddly.
+
 ### 8.4 Loop reporting and TestBench
 
 - Loop markers and `frame:scope` must include the dotted property bindings so
@@ -1260,10 +1307,17 @@ The implementing agent should inspect and update at least these areas:
 
 - `docs/test-writing-handbook.md` — structured table-read authoring and limits.
 - `README.md` — short example near captures/control flow.
-- Template tests under `templates/init/tests/` and HTML under
-  `fixtures/test-app/`: the §5.1 orders table, and `scheduled-payments.html`
-  (§5.4 grown to five rows with View/Approve/Resume buttons and a details
-  page) for the headerless, duplicate-payee, empty-cell case.
+- Fixtures and template tests — **built**, on branch
+  `claude/loop-table-rows-56d19f` (fixtures in commit 75f0438, baselines in
+  a6ce4ce, acceptance tests in a667126). Under `fixtures/test-app/`:
+  `tables.html` (the index), `structured-orders.html` (§5.1, with filter,
+  sort, expandable rows, tfoot and a "Reorder columns" button),
+  `structured-orders-many.html` (14 visible rows + a hidden one for
+  `limit`), `scheduled-payments.html` + `payment-details.html` (§5.4),
+  `statements.html` (§4.7), `table-edge-cases.html` (sixteen structures).
+  Under `templates/init/tests/`: eight `table-*.md` acceptance tests tagged
+  `table-read` (listed in §12) and four `table-baseline-*.md` tests that
+  record what today's runtime does with the same table (§12).
 - (Phase 2) A parser for the §7.7 assertion forms beside `set-step.ts` and
   `control-line.ts`, and the shared number/date normaliser it and tools use.
 - Because this changes `runner-core` and TestBench-visible behavior, bump the
@@ -1320,6 +1374,37 @@ The implementing agent should inspect and update at least these areas:
     phase-1 code refuses both modes by name.
 
 ### End-to-end proof
+
+The fixtures exist (§11) and so do the tests: `aiui run -t table-read` from
+`templates/init` runs the eight acceptance files, and phase 1 is done when
+they are green through the CLI and through TestBench. The three proofs below
+are `table-orders.md`, `table-orders-limit.md` and
+`table-payments-review.md`; the other five are `table-payments-approve.md`
+and `table-payments-reference.md` (the "after" of two baselines),
+`table-statements.md` (§4.7), `table-documents-empty.md` (§4.8/§5.5) and
+`table-structures.md` (grouped `<tbody>`, header-in-tbody, `<tfoot>`, no
+header).
+
+**The baseline** (`table-baseline-view/approve/reference/pay-overdue.md`,
+run 2026-09-21 with today's runtime, one string per pass) is what phase 1
+has to beat, and it is more subtle than "by name fails":
+
+- *view* passed 5/5 and opened the right Origin Energy both times — because
+  the step prompt's Prior Steps history let the model reason "already
+  reviewed" and the two rows differ in status. Inference that happened to
+  have something to work with.
+- *approve* came back green with pass 3 having approved nothing: no Approve
+  button in "the row for Origin Energy" → the model emitted a `noop`, the
+  click step passed, `otherwise continue` never fired, and the verify passed
+  on the *other* Origin Energy row. Nothing approved, every step green.
+- *reference* failed on pass 1 both times: the judge read "the row for Origin
+  Energy" as row 3 (empty), the assertion in the branch it chose read it as
+  row 1 (INV-2291). Two model calls in one pass, two rows.
+- *pay-overdue* (`Repeat … until`) was clean in one pass.
+
+So the proving runs must show not only green, but that each pass acted on
+the row its record came from — which is why the tests below name
+`row {{payment._row}}` in both the click and the verify.
 
 Create a real fixture based on §5.1 and a test containing:
 
@@ -1431,6 +1516,17 @@ The feature is complete only when:
 
 Moved out of v1 after review, each with why and what would bring it back:
 
+- **Rendering an empty binding as `""`.** §8.3 makes authors quote a
+  placeholder that can be empty. The runtime could instead substitute `""`
+  when the placeholder stands alone between spaces in a *condition*, and
+  nothing elsewhere; that needs the judge prompt and the substituter to
+  agree on what "stands alone" means, so it waits for a second case.
+- **A `noop` that passes a click step.** Seen in the approve baseline (§12):
+  asked to click a button that is not there, the model emits a no-op and the
+  step passes, so `otherwise continue` never sees a failure. Not a table
+  problem — it is the step executor's treatment of an empty plan — but
+  tables are where it hides a wrong pass behind a green one. Belongs to the
+  step-failure-outcomes story.
 - **Inclusive row windows** (`startRow`; “rows 3 through 7”, last N, “row N
   onward”, disjoint ranges). The first draft specified them in full. Nothing
   needs them yet, `_row` covers “one row by position”, and `limit` covers the
