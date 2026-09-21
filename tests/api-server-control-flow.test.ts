@@ -705,11 +705,11 @@ describe('For each', () => {
  * A list of OBJECTS, over the same wire
  * (docs/specs/SPEC-structured-table-reads.md §8, §12 item 19).
  *
- * `readTable` is what will produce such a list, and it does not exist yet —
- * which is the point of seeding it as a `parameters` entry instead. The
- * planner's contract is with the JSON in the variable map, not with the action
- * that wrote it, so a tool returning an array or a pre-populated parameter is
- * the same input. The server's job here is to carry the dotted keys the
+ * `readTable` is what produces such a list in a real run, and it is seeded
+ * here as a `parameters` entry instead — not because it is missing, but
+ * because the planner's contract is with the JSON in the variable map and not
+ * with the action that wrote it. A tool returning an array, a `readTable` and
+ * a pre-populated parameter are the same input. The server's job here is to carry the dotted keys the
  * planner produced all the way to the step text and the `frame:scope` payload
  * without knowing anything about them, which is §1.1's last bullet: one
  * binding shape, applied generically by every run loop.
@@ -977,6 +977,197 @@ describe('For each over object rows', () => {
 
     expect(judgeCalls).toEqual([
       ['"{{line.debit}}" is empty', 'the Refunded badge is shown'],
+    ]);
+  });
+
+  /**
+   * The feature's OWN examples, which the grammar was rejecting.
+   *
+   * `If {{payment.status}} is "Paused"` substituted to `Overdue is "Paused"`
+   * under plain substitution — a bare word on the left, which `VALUE` refuses
+   * on purpose (`the Cash checkbox is ticked` has to keep going to the page).
+   * So the acceptance tests' guards went on costing a judge call per pass and
+   * kept exactly the wrong-answer risk this whole path exists to remove.
+   * Substituting each reference as a QUOTED literal gives
+   * `"Overdue" is "Paused"`, which is decided here.
+   */
+  it('decides an unquoted reference by quoting it, not by asking', async () => {
+    const events = await collect({
+      steps: [
+        'Open the payments page',
+        'For each {{payment}} in {{payments}}, Check the payment',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: {
+        payments: '[{"status":"Overdue"},{"status":"Paused"}]',
+      },
+      sections: {
+        'check the payment': {
+          name: 'Check the payment',
+          headingLine: 7,
+          steps: [
+            'If {{payment.status}} is "Paused", then Resume it',
+            'Otherwise, Chase it',
+          ],
+          stepLines: [8, 9],
+        },
+        'resume it': { name: 'Resume it', headingLine: 11, steps: ['Click Resume'], stepLines: [12] },
+        'chase it': { name: 'Chase it', headingLine: 14, steps: ['Click Chase'], stepLines: [15] },
+      },
+    });
+
+    expect(judgeCalls).toHaveLength(0);
+    expect(executedSteps).toEqual(['Open the payments page', 'Click Chase', 'Click Resume', 'Sign out']);
+
+    // The reasoning shows the QUOTED form it decided from — both sides
+    // delimited, which is what makes a value unable to read as syntax.
+    const steps: StepResult[] = generatedReports.at(-1)!.steps;
+    const guards = steps.filter(
+      (s) => s.instruction.startsWith('If {{') || s.instruction.startsWith('Otherwise,'),
+    );
+    expect(guards.filter((s) => s.status === 'passed').map((s) => s.aiExplanation)).toEqual([
+      'decided from the values: none held — "Overdue" is "Paused" → false',
+      'decided from the values: "Paused" is "Paused" → true',
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+
+  /**
+   * A condition whose AUTHORED text made no reference is a sentence about the
+   * PAGE that happens to be spelled with quotes.
+   *
+   * `If "Welcome back" is empty` parses perfectly and answers `false` from its
+   * own characters, with no page look at all; `Repeat … until "Load more" is
+   * empty` answers `false` on every pass and runs the loop to its cap. The
+   * grammar cannot tell those from a substituted value — only the presence of
+   * a `{{…}}` or `${…}` in what the author wrote can.
+   */
+  it('sends an all-literal AUTHORED condition to the judge, as before', async () => {
+    judgeScript = [0];
+    await collect({
+      steps: [
+        'Open the page',
+        'If "Welcome back" is empty, then Sign in again',
+        'Verify the dashboard is shown',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      sections: {
+        'sign in again': {
+          name: 'Sign in again',
+          headingLine: 7,
+          steps: ['Click Sign in'],
+          stepLines: [8],
+        },
+      },
+    });
+
+    expect(judgeCalls).toEqual([['"Welcome back" is empty']]);
+  });
+
+  it('does not run a Repeat to its cap on a literal it could not have answered', async () => {
+    // `until "Load more" is empty` is about the page. Answered locally it is
+    // false forever, so the loop would spend its whole cap and then fail the
+    // line. The judge ends it on the second pass.
+    judgeScript = [null, 0];
+    const events = await collect({
+      steps: [
+        'Open the results page',
+        'Repeat Load more until "Load more" is empty',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      sections: {
+        'load more': { name: 'Load more', headingLine: 7, steps: ['Click Load more'], stepLines: [8] },
+      },
+    });
+
+    expect(executedSteps).toEqual([
+      'Open the results page',
+      'Click Load more',
+      'Click Load more',
+      'Sign out',
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+
+  /**
+   * A locally decided condition's reasoning is built from the SUBSTITUTED
+   * text, which the judge's never was — so it is the one string in this path
+   * that can carry a secret, and it goes out on `step:pass` as `output` as
+   * well as into the run log.
+   */
+  it('masks a secret value out of the sentence it decided from', async () => {
+    const events = await collect({
+      steps: [
+        'Open the orders page',
+        'For each {{order}} in {{orders}}, Check the order',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: { orders: '[{"token":"s3cr3t-abc123"}]' },
+      sections: {
+        'check the order': {
+          name: 'Check the order',
+          headingLine: 7,
+          steps: ['If "{{order.token}}" is empty, then Reissue it', 'Otherwise, Ship it'],
+          stepLines: [8, 9],
+        },
+        'reissue it': { name: 'Reissue it', headingLine: 11, steps: ['Click Reissue'], stepLines: [12] },
+        'ship it': { name: 'Ship it', headingLine: 14, steps: ['Click Ship'], stepLines: [15] },
+      },
+    });
+
+    expect(judgeCalls).toHaveLength(0);
+    const passes = events.filter((e) => e.type === 'step:pass');
+    const sentences = passes.map((e) => String(e.output ?? ''));
+    expect(sentences).toContain('decided from the values: none held — "***" is empty → false');
+    expect(sentences.some((s) => s.includes('s3cr3t-abc123'))).toBe(false);
+
+    const steps: StepResult[] = generatedReports.at(-1)!.steps;
+    expect(
+      steps.some((s) => (s.aiExplanation ?? '').includes('s3cr3t-abc123')),
+    ).toBe(false);
+  });
+
+  /**
+   * A row that omits a property must not inherit the previous row's value
+   * (§8.2, §8.3). All three run loops wrote a pass's bindings with
+   * `Object.assign`, which cannot delete — so pass 2's `{{row.note}}`
+   * substituted pass 1's note, and the refusal below could not fire because
+   * the key was still there.
+   */
+  it('refuses the pass whose row lacks the property, rather than reusing the last one', async () => {
+    const events = await collect({
+      steps: [
+        'Open the orders page',
+        'For each {{row}} in {{rows}}, Check the row',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: { rows: '[{"_row":"1","id":"A","note":"first"},{"_row":"2","id":"B"}]' },
+      sections: {
+        'check the row': {
+          name: 'Check the row',
+          headingLine: 7,
+          steps: ['Verify the note says "{{row.note}}"'],
+          stepLines: [8],
+        },
+      },
+    });
+
+    const failure = events.find((e) => e.type === 'step:fail');
+    expect(failure!.error).toBe(
+      '{{row.note}} has no value in For each item 2; available properties are _row, id',
+    );
+    expect(executedSteps).toEqual([
+      'Open the orders page',
+      'Verify the note says "first"',
     ]);
   });
 

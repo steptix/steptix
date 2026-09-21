@@ -34,11 +34,13 @@ import {
   type GuardVerdict,
 } from './control-flow.js';
 import { parseLiteralCondition } from '../parser/literal-condition.js';
+import { placeholderRoot } from '../parser/parameters.js';
 import {
   dottedReferenceError,
-  substituteText,
+  substituteAsLiterals,
   type PlaceholderValues,
 } from './placeholder-substitution.js';
+import { redact, runSecrets } from '../utils/secrets.js';
 import { logger } from '../utils/logger.js';
 import { evaluateConditions } from './step-executor.js';
 import type { ConditionVerdict, StepExecutorOptions } from './step-executor.js';
@@ -49,6 +51,56 @@ export type LoopRecord = Extract<ControlRecord, { label: string }>;
 /** True for a `While` / `Repeat` / `For each` record. */
 export function isLoopRecord(record: ControlRecord): record is LoopRecord {
   return record.kind === 'while' || record.kind === 'repeat' || record.kind === 'foreach';
+}
+
+/**
+ * Write one loop pass's bindings into the live variable map, clearing the
+ * previous pass's dotted ones first
+ * (docs/specs/SPEC-structured-table-reads.md §8.2, §8.3).
+ *
+ * ## Why this is not `Object.assign`
+ *
+ * It was, in all three run loops, and rows are not all the same shape. Over
+ * `[{"_row":"1","id":"A","note":"first"},{"_row":"2","id":"B"}]`, pass 1
+ * writes `row`, `row._row`, `row.id`, `row.note`; pass 2 writes three of those
+ * four and leaves `row.note` where it was. So `{{row.note}}` on pass 2
+ * substituted `first` — the PREVIOUS row's note, printed, asserted on and
+ * typed into the page as if it belonged to row 2 — and §8.3's refusal, whose
+ * whole job is to say `{{row.note}} has no value in For each item 2`, could
+ * not fire, because the key was there.
+ *
+ * It needs no debugger and no odd row to reach. Two sequential `For each`
+ * loops sharing an item name do it, and so does a loop over a list of scalars
+ * after one over records: nothing about a scalar pass writes `{{row.id}}`, so
+ * `{{row.id}}` still holds the last record's id, for every pass of the second
+ * loop.
+ *
+ * ## What it clears, and what it deliberately does not
+ *
+ * For each ROOT the incoming bindings name — `row`, from `row` and `row.id`
+ * alike — every `row.<anything>` already in the map goes, and then the new
+ * bindings are assigned. Nothing else is touched: a different loop's `order.x`
+ * survives, and so does a flat `row` when a later pass happens not to rebind
+ * it (it always does, since a pass always binds its base name).
+ *
+ * §8.2's "the last pass's bindings remain after the loop" is unchanged. A loop
+ * that has ENDED binds nothing more, so nothing clears its keys; they are
+ * cleared when, and only when, the same root is bound again.
+ */
+export function applyPassBindings(
+  map: Record<string, string>,
+  bindings: Record<string, string>,
+): void {
+  const roots = new Set<string>();
+  for (const key of Object.keys(bindings)) roots.add(placeholderRoot(key));
+  for (const key of Object.keys(map)) {
+    // Flat names are not this rule's business: a pass rebinds its own base
+    // name, and clearing other flat variables would delete captures.
+    if (!key.includes('.')) continue;
+    if (!roots.has(placeholderRoot(key))) continue;
+    delete map[key];
+  }
+  Object.assign(map, bindings);
 }
 
 /** What one visit to a guard produced. */
@@ -91,8 +143,22 @@ export async function evaluateGuard(args: {
   resolvedParameters: Record<string, string>;
   /** Options for the judge's model call. */
   executorOptions: StepExecutorOptions;
+  /**
+   * This run's masker, for the one string this module writes that can carry a
+   * VALUE: a locally decided condition's reasoning.
+   *
+   * Each run loop has its own — the server's `secretsNow` counts frame inputs
+   * as well as the parameter map — so it is passed in rather than derived.
+   * Omitted, the fallback below is what the CLI and the Electron adapter build
+   * for themselves anyway, so a caller that forgets still masks.
+   */
+  redact?: ((text: string) => string) | undefined;
 }): Promise<GuardEvaluation> {
   const { controls, index, state, resolvedParameters, executorOptions } = args;
+  const redactText =
+    args.redact ??
+    ((text: string) =>
+      redact(text, runSecrets({ parameters: resolvedParameters, envData: executorOptions.envData })));
   const startedAt = Date.now();
   const request = planAtGuard(controls, index, state);
   /** What a condition's placeholders hold right now — the same two syntaxes
@@ -139,7 +205,7 @@ export async function evaluateGuard(args: {
     switch (request.ask) {
       case 'chain': {
         const conditions = request.conditions.map((c) => c.condition);
-        const local = decideLocally(conditions, values);
+        const local = decideLocally(conditions, values, redactText);
         const judged = local ?? (await evaluateConditions(conditions, executorOptions));
         reasoning = judged.reasoning;
         aiInteractions = judged.aiInteractions;
@@ -157,7 +223,7 @@ export async function evaluateGuard(args: {
       }
       case 'condition': {
         const conditions = [request.condition];
-        const local = decideLocally(conditions, values);
+        const local = decideLocally(conditions, values, redactText);
         const judged = local ?? (await evaluateConditions(conditions, executorOptions));
         reasoning = judged.reasoning;
         aiInteractions = judged.aiInteractions;
@@ -252,17 +318,44 @@ function conditionTexts(request: GuardRequest): readonly string[] {
  * empty because nothing was asked. That is what keeps the guard row, the loop
  * marker, the report and TestBench identical to a judged decision — the only
  * visible difference is whose words are in `aiExplanation`.
+ *
+ * ## Three rules about the text it decides from
+ *
+ * 1. Every reference is substituted as a QUOTED literal
+ *    ({@link substituteAsLiterals}), because the grammar reads values and not
+ *    bare words: `If {{payment.status}} is "Paused"` is the feature's OWN
+ *    example and, substituted plainly, produced `Overdue is "Paused"` — which
+ *    the grammar rejects, so the acceptance tests went on paying for a judge
+ *    call per pass and kept the wrong-answer risk this module exists to
+ *    remove.
+ * 2. A condition whose AUTHORED text made no reference at all is never decided
+ *    here. `If "Welcome back" is empty` and `Repeat … until "Load more" is
+ *    empty` are sentences about the PAGE that happen to be spelled with
+ *    quotes; answering them from their own characters would say "false"
+ *    without looking, and run a `Repeat` to its cap every time. The grammar
+ *    cannot tell the two apart — only the presence of a `{{…}}` or `${…}` can,
+ *    and that is a property of what the author wrote.
+ * 3. The reasoning carries VALUES, so it is redacted before it is written.
+ *    The judge path never had this problem: it was handed the unsubstituted
+ *    text. `If "{{order.token}}" is empty` decided here would otherwise print
+ *    the token into the run log and the server's `step:pass` output.
  */
 function decideLocally(
   conditions: readonly string[],
   values: PlaceholderValues,
+  redactText: (text: string) => string,
 ): ConditionVerdict | null {
   const decided: Array<{ text: string; holds: boolean }> = [];
   for (const condition of conditions) {
-    const text = substituteText(condition, values);
+    const { text, references, unspellable } = substituteAsLiterals(condition, values);
+    // Rule 2 above: no reference, no local decision.
+    if (references === 0) return null;
+    // A value with a quote in it cannot be spelled as a literal, and guessing
+    // would let a value be read as syntax. The judge gets it, as before.
+    if (unspellable) return null;
     const literal = parseLiteralCondition(text);
     if (!literal) return null;
-    decided.push({ text, holds: literal.holds });
+    decided.push({ text: redactText(text), holds: literal.holds });
   }
   if (decided.length === 0) return null;
 
@@ -272,7 +365,8 @@ function decideLocally(
     const reasoning = localReasoning(winner.text, true);
     // Mirrors `evaluateConditions`' own line, label and all, so anything
     // reading the run log for `Condition judge:` sees this decision too. The
-    // reasoning says who decided it.
+    // reasoning says who decided it. The AUTHORED condition is quoted here —
+    // it holds references, not values, so it needs no masking.
     logger.debug(
       `Condition judge: ${String.fromCharCode(65 + selected)} ("${conditions[selected]}") held — ${reasoning}`,
     );
@@ -282,7 +376,10 @@ function decideLocally(
   const reasoning = `decided from the values: none held — ${decided
     .map((d) => `${d.text} → false`)
     .join(', ')}`;
-  logger.debug(`Condition judge: none held — ${reasoning}`);
+  // The reasoning already opens with `none held`; the log line prefixes the
+  // label and nothing else, or it read `Condition judge: none held — decided
+  // from the values: none held — …`.
+  logger.debug(`Condition judge: ${reasoning}`);
   return { selected: null, reasoning, aiInteractions: [] };
 }
 

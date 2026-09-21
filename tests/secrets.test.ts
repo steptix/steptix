@@ -11,6 +11,8 @@ import {
   redactDeep,
   redactMap,
   redactReport,
+  recordSecretValues,
+  isRecordSecretKey,
   EMPTY,
   MASK,
 } from '../src/utils/secrets.js';
@@ -207,6 +209,89 @@ describe('secrets inside a record list (structured table reads)', () => {
     expect(secretValues({ nested: '[{"password":{"deep":"x"}}]' })).toEqual([]);
     // Empty values are still not secrets.
     expect(secretValues({ orders: '[{"password":""}]' })).toEqual([]);
+  });
+});
+
+/**
+ * The two limits review put on that reach-inside rule, and the memo (§7.6).
+ * Both limits exist because masking is NOT a free precaution: `redact`
+ * replaces the value everywhere, including in the DOM snapshot the model
+ * plans its next action from (step-executor.ts, `redact(domSnapshot, …)`).
+ */
+describe('record masking — the limits that keep it from masking the page', () => {
+  it('never masks a record value shorter than four characters', () => {
+    // Measured: a `token` column holding `-`, `-` and `7` put `-` and `7` in
+    // the mask set, and every dash and every seven in every output became
+    // `***` — including a report line that read
+    // `3 rows, total $1,742.70 for order ORD-1007`.
+    const rows = JSON.stringify([
+      { _row: '1', payee: 'Acme', token: '-' },
+      { _row: '2', payee: 'Globex', token: '-' },
+      { _row: '3', payee: 'Initech', token: '7' },
+    ]);
+    expect(secretValues({ payments: rows })).toEqual([]);
+    const line = 'Step 7 passed: 3 rows, total $1,742.70 for order ORD-1007';
+    expect(redact(line, secretValues({ payments: rows }))).toBe(line);
+    // Four characters and up is a credential again.
+    expect(secretValues({ p: JSON.stringify([{ token: 'abcd' }]) })).toEqual(['abcd']);
+    expect(secretValues({ p: JSON.stringify([{ token: 'abc' }]) })).toEqual([]);
+  });
+
+  it('matches a COLUMN name by whole words, so `keyword` and `sort_key` are not secrets', () => {
+    // A record's keys come off the PAGE, not from the author, and
+    // `isSecretName`'s substring rule — /password|secret|token|key/i — makes
+    // any column with `key` in its name mask its every value everywhere.
+    expect(isRecordSecretKey('api_key')).toBe(true);
+    expect(isRecordSecretKey('apiKey')).toBe(true);
+    expect(isRecordSecretKey('access_key')).toBe(true);
+    expect(isRecordSecretKey('private-key')).toBe(true);
+    expect(isRecordSecretKey('password')).toBe(true);
+    expect(isRecordSecretKey('user_password')).toBe(true);
+    expect(isRecordSecretKey('Token')).toBe(true);
+    expect(isRecordSecretKey('secret')).toBe(true);
+    expect(isRecordSecretKey('keyword')).toBe(false);
+    expect(isRecordSecretKey('sort_key')).toBe(false);
+    expect(isRecordSecretKey('sortKey')).toBe(false);
+    expect(isRecordSecretKey('key')).toBe(false);
+    expect(isRecordSecretKey('monkey')).toBe(false);
+    expect(isRecordSecretKey('customer')).toBe(false);
+
+    const rows = JSON.stringify([
+      { _row: '1', keyword: 'winter sale', sort_key: 'alpha-2026', api_key: 'ak-live-9f3c' },
+    ]);
+    expect(secretValues({ results: rows })).toEqual(['ak-live-9f3c']);
+    expect(redact('sorted by alpha-2026 for winter sale with ak-live-9f3c', secretValues({ results: rows })))
+      .toBe(`sorted by alpha-2026 for winter sale with ${MASK}`);
+    // The author-chosen name keeps the broad rule: a PARAMETER named
+    // `search_keyword` is still masked, as the first describe pins.
+    expect(secretValues({ search_keyword: 'winter sale' })).toEqual(['winter sale']);
+  });
+
+  it('finds the records however the list is spaced — `[ {`, or pretty-printed', () => {
+    // The sniff used to be `startsWith('[{')`, so a producer that pretty-
+    // printed the same capture masked nothing at all.
+    const records = [{ _row: '1', customer: 'Alice', password: 'row-1-hunter2' }];
+    expect(secretValues({ a: `[ ${JSON.stringify(records[0])} ]` })).toEqual(['row-1-hunter2']);
+    expect(secretValues({ b: JSON.stringify(records, null, 2) })).toEqual(['row-1-hunter2']);
+    expect(secretValues({ c: `\n  ${JSON.stringify(records)}` })).toEqual(['row-1-hunter2']);
+  });
+
+  it('parses one value once — `secretsNow()` asks many times per step', () => {
+    // Identity, not a stopwatch: the same string gets the same frozen array
+    // back, which it cannot do without the memo. Re-parsing a 500-row capture
+    // cost ~0.9 ms per call, and every surface that writes anything rebuilds
+    // the mask set.
+    const rows = JSON.stringify(
+      Array.from({ length: 200 }, (_, i) => ({ _row: String(i + 1), id: `ORD-${i}`, api_key: `ak-${i}-xxxx` })),
+    );
+    const first = recordSecretValues(rows);
+    expect(first).toHaveLength(200);
+    expect(recordSecretValues(rows)).toBe(first);
+    // A different string is parsed on its own.
+    expect(recordSecretValues(JSON.stringify([{ token: 'other-token' }]))).toEqual(['other-token']);
+    // A value that cannot hold records is answered without parsing at all.
+    expect(recordSecretValues('Alice Smith')).toEqual([]);
+    expect(recordSecretValues('Alice Smith')).toBe(recordSecretValues('[not, json'));
   });
 });
 

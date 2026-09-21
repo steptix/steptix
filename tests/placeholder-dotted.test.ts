@@ -134,19 +134,34 @@ describe('the grammar', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('every module that reads a reference reads the same one', () => {
-  /** The names each module finds in one string. */
-  const readers: Array<[string, (text: string, expected: string | null) => string[]]> = [
+  /**
+   * The names each module finds in one string.
+   *
+   * `token` is the corpus entry itself — `{{order.address.city}}` — which
+   * `interpolate` needs and the rest ignore. See its own comment for why.
+   */
+  const readers: Array<
+    [string, (text: string, expected: string | null, token: string) => string[]]
+  > = [
     // src/parser/parameters.ts — the step text every run loop resolves.
     // Probed by SUBSTITUTION rather than by matching, because substituting is
     // what it is for: a name it recognises is replaced, one it does not is
     // left as written.
+    //
+    // The map is POPULATED for the negatives too, keyed on the token's own
+    // inner text, and that is the only thing making the negative half of this
+    // corpus mean anything. With `expected === null` handed an EMPTY map,
+    // `interpolate` had nothing it could possibly substitute, so every
+    // rejection passed for the wrong reason: a grammar widened to admit
+    // `{{a.b.c}}` would have gone on passing this test, which is exactly the
+    // mutation the corpus exists to catch. Keyed here, a widened grammar
+    // substitutes `SUBSTITUTED` and the assertion fails.
     [
       'interpolate',
-      (text, expected) => {
-        const params = expected === null ? {} : { [expected]: 'SUBSTITUTED' };
-        return interpolate(text, params).includes('SUBSTITUTED') && expected !== null
-          ? [expected]
-          : [];
+      (text, expected, token) => {
+        const key = expected ?? token.replace(/^\{\{|\}\}$/g, '');
+        const params = { [key]: 'SUBSTITUTED' };
+        return interpolate(text, params).includes('SUBSTITUTED') ? [key] : [];
       },
     ],
     // src/runner/placeholder-substitution.ts — the checker's own reading.
@@ -162,7 +177,7 @@ describe('every module that reads a reference reads the same one', () => {
     for (const [text, expected] of CORPUS) {
       const wrapped = `Verify ${text} is shown`;
       for (const [label, read] of readers) {
-        expect(read(wrapped, expected), `${label} on ${text}`).toEqual(
+        expect(read(wrapped, expected, text), `${label} on ${text}`).toEqual(
           expected === null ? [] : [expected],
         );
       }
@@ -237,9 +252,15 @@ describe('the MCP pre-flight knows a dotted reference comes from a loop', () => 
  * Seen in a live TestBench run: the server logged
  * `[warn] Unresolved placeholder: {{payment}}` against the
  * `For each {{payment}} in {{payments}}` line, once per table loop, because
- * two of the four run loops resolve every step's text before the control
- * dispatch and the item is not bound until the first pass begins. It is noise
- * that reads like a diagnosis, on a line that is working correctly.
+ * the Sessions API and the Electron loop resolve every step's text before the
+ * control dispatch and the item is not bound until the first pass begins. It
+ * is noise that reads like a diagnosis, on a line that is working correctly.
+ *
+ * All three loops that dispatch guards pass the set now — the CLI got it last,
+ * and `tests/run-loop-contracts.test.ts` is what stops the next one shipping
+ * in two of three. The CLI's own reachable case is narrower and its suite
+ * spells it out: its guard branch `continue`s before the interpolation, so the
+ * line only goes through this path when the run has no expanded controls.
  */
 describe('a For each header does not warn about the item it is about to bind', () => {
   const warnings = (fn: () => void): string[] => {
@@ -513,5 +534,61 @@ describe('a missing dotted binding fails before the model is asked', () => {
     expect(dottedReferenceError('{{order.statuz}} and {{order.custmer}}', ROW, () => 1)).toBe(
       '{{order.statuz}} has no value in For each item 1; available properties are id, customer, status',
     );
+  });
+});
+
+/**
+ * `{{order.address.city}}` matches NEITHER grammar, so before this it was
+ * neither substituted nor warned about as unresolved — it simply stayed in the
+ * step text and reached the model as six literal braces.
+ *
+ * That is the quietest possible failure for what is obviously an attempt at a
+ * reference: the author reads a step that did not do what it says and nothing
+ * anywhere says why. One property segment is the v1 rule (§8.2), so the
+ * warning names the rule rather than guessing at a typo.
+ */
+describe('a brace token with more than one property segment says so', () => {
+  const warnings = (fn: () => void): string[] => {
+    const seen: string[] = [];
+    const spy = vi.spyOn(logger, 'warn').mockImplementation((message: string) => {
+      seen.push(message);
+    });
+    try {
+      fn();
+    } finally {
+      spy.mockRestore();
+    }
+    return seen;
+  };
+
+  it('warns once per name, and still leaves the text alone', () => {
+    expect(warnings(() => interpolate('Check {{a.b.c}}', {}))).toEqual([
+      '{{a.b.c}} is not a placeholder: only one property segment is supported',
+    ]);
+    expect(interpolate('Check {{a.b.c}}', {})).toBe('Check {{a.b.c}}');
+    // The same reference twice on one line is one mistake.
+    expect(warnings(() => interpolate('{{a.b.c}} then {{a.b.c}}', {}))).toEqual([
+      '{{a.b.c}} is not a placeholder: only one property segment is supported',
+    ]);
+    // Two different ones are two.
+    expect(warnings(() => interpolate('{{a.b.c}} and {{x.y.z.w}}', {}))).toEqual([
+      '{{a.b.c}} is not a placeholder: only one property segment is supported',
+      '{{x.y.z.w}} is not a placeholder: only one property segment is supported',
+    ]);
+  });
+
+  it('says nothing about the forms that ARE placeholders', () => {
+    expect(warnings(() => interpolate('Check {{a.b}}', { 'a.b': 'x' }))).toEqual([]);
+    expect(warnings(() => interpolate('Check {{a}}', { a: 'x' }))).toEqual([]);
+    // A one-segment name with no value keeps its own, older warning and gains
+    // no second one.
+    expect(warnings(() => interpolate('Check {{a.b}}', {}))).toEqual([
+      'Unresolved placeholder: {{a.b}}',
+    ]);
+  });
+
+  it('says nothing about braces that were never a reference', () => {
+    expect(warnings(() => interpolate('Verify the page shows {{ a b c }}', {}))).toEqual([]);
+    expect(warnings(() => interpolate('Verify the JSON {"a":{"b":1}}', {}))).toEqual([]);
   });
 });

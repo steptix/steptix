@@ -1171,11 +1171,16 @@ function renderAssertion(assertion: AssertionResult): string {
   const isPredicate = assertion.against === 'predicate';
   const conditionLabel = isPredicate ? 'Predicate:' : 'Condition:';
   const valueLabel = isPredicate ? 'Result:' : 'Actual:';
+  // An empty `expected` is a VALUE — `Verify the Reference cell is empty`
+  // asserts against `""` — and an empty span rendered it as if the field were
+  // absent, so a report could not tell "expected nothing" from "expected not
+  // recorded". Show the two quote marks.
+  const expectedShown = assertion.expected === '' ? '""' : (assertion.expected ?? '');
   const expectedRow = isPredicate
     ? ''
     : `<div class="assertion-row">
     <span class="assertion-key">Expected:</span>
-    <span>${escapeHtml(assertion.expected ?? '')}</span>
+    <span>${escapeHtml(expectedShown)}</span>
   </div>`;
 
   return `<div class="assertion-block ${cls}">

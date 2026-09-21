@@ -21,6 +21,15 @@ import type { StepGroup } from '../src/runner/step-grouper.js';
 
 const actions = vi.hoisted(() => ({ received: [] as AIAction[] }));
 
+/** What the mocked `readTable` captures — see the mock below. Hoisted with it,
+ *  because `vi.mock` factories run before the module body. */
+const { RECORDS } = vi.hoisted(() => ({
+  RECORDS: [
+    { _row: '1', id: 'ORD-1001', customer: 'Alice Smith' },
+    { _row: '2', id: 'ORD-1002', customer: 'Bob Jones' },
+  ] as Array<Record<string, string>>,
+}));
+
 vi.mock('../src/browser/actions.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/browser/actions.js')>();
   return {
@@ -31,6 +40,11 @@ vi.mock('../src/browser/actions.js', async (importOriginal) => {
       // is what makes the "captured later" and two-step cases exercisable.
       if (action.action === 'read' || action.action === 'count') {
         return { success: true, capturedValue: 'CAPTURED' };
+      }
+      // A structured capture, the shape `readTable` hands back (§7.1): one
+      // flat object per visible data row, `_row` first.
+      if (action.action === 'readTable') {
+        return { success: true, capturedRecords: RECORDS };
       }
       return { success: true };
     }),
@@ -72,6 +86,7 @@ vi.mock('../src/browser/page-state.js', () => ({
   },
 }));
 
+import { addLogCallback } from '../src/utils/logger.js';
 import { executeStep, executeBranchedStep } from '../src/runner/step-executor.js';
 import { runInteractiveRepl } from '../src/runner/interactive-repl.js';
 import {
@@ -341,6 +356,85 @@ describe('the model names the value, the executor puts it in', () => {
       { authored: 'Check the balance equals {{balance}}' },
     );
     expect(allRequestText(client)).toContain('- {{balance}} resolved to "(not yet captured)" on this run');
+  });
+});
+
+// ── The structured capture (SPEC-structured-table-reads.md §12, item 13) ────
+
+describe('a readTable capture is stored as JSON under its name', () => {
+  it('JSON-encodes the records, _row first, into the live parameter map', async () => {
+    const parameters: Record<string, string> = {};
+    const { result } = await runStep(
+      'Read the Order ID and Customer columns from every row in the Orders table',
+      [plan([{
+        action: 'readTable',
+        selector: '#orders',
+        columns: [{ header: 'Order ID', key: 'id' }, { header: 'Customer', key: 'customer' }],
+        as: 'orders',
+        description: 'Read the Orders table',
+      } as AIAction])],
+      { parameters },
+    );
+    expect(result.status).toBe('passed');
+    // The map stays Record<string, string>, so nothing about the protocol or
+    // the session storage has to change (§7.1) — and `For each` parses this
+    // string straight back. Byte-for-byte, because `_row` and the column
+    // order are the contract: a later pass finds its row BY `_row`, and a
+    // record without it can only be matched by its values, which is exactly
+    // what two rows sharing a payee make impossible.
+    expect(parameters['orders']).toBe(
+      '[{"_row":"1","id":"ORD-1001","customer":"Alice Smith"},'
+      + '{"_row":"2","id":"ORD-1002","customer":"Bob Jones"}]',
+    );
+    expect(JSON.parse(parameters['orders']!).map((r: Record<string, string>) => r['_row']))
+      .toEqual(['1', '2']);
+  });
+
+  it('logs the count under the variable name, not the rows', async () => {
+    const lines: string[] = [];
+    const stop = addLogCallback((_level, message) => { lines.push(message); });
+    try {
+      await runStep(
+        'Read the Orders table',
+        [plan([{
+          action: 'readTable',
+          selector: '#orders',
+          columns: [{ header: 'Order ID', key: 'id' }],
+          as: 'orders',
+          description: 'Read the Orders table',
+        } as AIAction])],
+        { parameters: {} },
+      );
+    } finally {
+      stop();
+    }
+    expect(lines).toContain('Stored 2 row records as "{{orders}}"');
+    // Counts, not contents (§7.6): the captured cells belong in the variable
+    // and the report, not in every console the run passes through.
+    expect(lines.join('\n')).not.toContain('Alice Smith');
+  });
+
+  it('stores [] for an empty table, so For each runs zero passes rather than failing', async () => {
+    const parameters: Record<string, string> = {};
+    const empty = vi.mocked(await import('../src/browser/actions.js')).executeAction;
+    empty.mockImplementationOnce(async (_page: unknown, action: AIAction) => {
+      actions.received.push(action);
+      return { success: true, capturedRecords: [] };
+    });
+    await runStep(
+      'Read the Orders table',
+      [plan([{
+        action: 'readTable',
+        selector: '#orders',
+        columns: [{ header: 'Order ID', key: 'id' }],
+        as: 'orders',
+        description: 'Read the Orders table',
+      } as AIAction])],
+      { parameters },
+    );
+    // `[]`, not undefined and not a missing entry: the reference resolves and
+    // the loop over it is empty (§4.8).
+    expect(parameters['orders']).toBe('[]');
   });
 });
 

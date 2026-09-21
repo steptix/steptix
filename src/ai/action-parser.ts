@@ -217,8 +217,13 @@ function applyTableReadFields(action: AIAction, obj: Record<string, unknown>, in
     }
     const col = rawColumn as Record<string, unknown>;
 
-    const hasHeader = col['header'] !== undefined && col['header'] !== null;
-    const hasIndex = col['index'] !== undefined && col['index'] !== null;
+    // PRESENT means present-and-not-undefined, and `null` is present. A model
+    // that emits `"index": null` beside a header has contradicted itself, and
+    // `{ "index": null }` alone is a column that names nothing; reading either
+    // as "absent" ran a read the author did not ask for. Same rule for
+    // "limit" and "mode" below, so all three refuse a null the same way.
+    const hasHeader = col['header'] !== undefined;
+    const hasIndex = col['index'] !== undefined;
     if (hasHeader && hasIndex) {
       throw new Error(
         `${at} has both "header" and "index" — a column is named by its header text OR by its position, never both`,
@@ -234,7 +239,9 @@ function applyTableReadFields(action: AIAction, obj: Record<string, unknown>, in
     let columnIndex: number | undefined;
     if (hasHeader) {
       if (typeof col['header'] !== 'string' || !col['header'].trim()) {
-        throw new Error(`${at} has a blank "header" — copy the header text exactly as the page renders it`);
+        throw new Error(
+          `${at} has a blank "header" ${JSON.stringify(col['header'])} — copy the header text exactly as the page renders it`,
+        );
       }
       header = col['header'];
     } else {
@@ -274,7 +281,7 @@ function applyTableReadFields(action: AIAction, obj: Record<string, unknown>, in
     seenKeys.add(key);
 
     const mode = col['mode'];
-    if (mode !== undefined && mode !== null && mode !== 'text') {
+    if (mode !== undefined && mode !== 'text') {
       throw new Error(
         `${at} uses mode ${JSON.stringify(mode)}, which is phase 2 — phase 1 reads rendered text only, so omit "mode" or set it to "text"`,
       );
@@ -291,7 +298,7 @@ function applyTableReadFields(action: AIAction, obj: Record<string, unknown>, in
   action.columns = columns;
 
   const rawLimit = obj['limit'];
-  if (rawLimit !== undefined && rawLimit !== null) {
+  if (rawLimit !== undefined) {
     if (
       typeof rawLimit !== 'number' ||
       !Number.isInteger(rawLimit) ||

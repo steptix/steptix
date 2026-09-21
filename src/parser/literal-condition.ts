@@ -38,11 +38,31 @@
  * ```
  *
  * Keywords are case-insensitive and tolerate any run of whitespace inside a
- * multi-word operator. Operands are compared exactly, after trimming; two
- * operands that both read as plain numbers are compared numerically, so
- * `"42" is 42` holds and `"$140.00" is at least 100` does not parse at all
- * (a currency normaliser is phase 2 — §7.7 — and guessing one here would be
- * the over-eager mistake above).
+ * multi-word operator.
+ *
+ * ## Text is text; only an ordering is a number
+ *
+ * The equality, substring and emptiness families compare the operands' TEXT,
+ * character for character. Only the five orderings are numeric, and only when
+ * both operands are plain numbers — otherwise the line goes to the judge
+ * rather than being sorted by character code (`"$140.00" is at least 100` does
+ * not parse at all; a currency normaliser is phase 2, §7.7, and guessing one
+ * here would be the over-eager mistake above).
+ *
+ * Equality used to coerce too, which read as a kindness — `"42" is 42` — and
+ * was a defect. A table read yields exactly the strings numeric coercion
+ * destroys: `"0012" is "12"` answered TRUE for two different order numbers,
+ * and so did `"1.0" is "1"`, `"+5" is "5"` and `"-0" is "0"`. Zero-padded ids,
+ * money strings and version numbers are the normal contents of a cell, so the
+ * rule is now the boring one: `is` means the same characters.
+ *
+ * `"42" is 42` still holds, because the two operands' text is the same four
+ * characters once the quotes are off — not because either was parsed.
+ *
+ * Nothing is trimmed INSIDE quotes: `" " is empty` is false and `"" is " "` is
+ * false, because an author who typed the space meant it and a cell that holds
+ * one is not the cell that holds nothing. A bare number carries no whitespace
+ * to begin with (the grammar matches the digits and nothing else).
  *
  * Deliberately a SIBLING of `set-step.ts` and `flow-control-step.ts` rather
  * than a private helper of the runtime: these are author-facing forms, a
@@ -74,15 +94,16 @@ export type LiteralComparison =
 
 /** One recognised condition: what it compares, how, and the answer. */
 export interface LiteralCondition {
-  /** The left operand's VALUE — a quoted string's content, or the number as
-   *  written — trimmed. */
+  /** The left operand's VALUE — a quoted string's content exactly as written,
+   *  or the number as written. */
   left: string;
   operator: LiteralComparison;
   /** The right operand's value. Absent for the four emptiness forms, which
    *  take one operand. */
   right?: string;
-  /** True when both operands read as plain numbers and were therefore
-   *  compared numerically rather than as text. */
+  /** True when this comparison was done on NUMBERS — which is the five
+   *  orderings and nothing else. Every other family compares text, so a
+   *  condition between two plain numbers still reports `false` here. */
   numeric: boolean;
   /** What the condition evaluates to. */
   holds: boolean;
@@ -169,12 +190,16 @@ export function parseLiteralCondition(text: string): LiteralCondition | null {
       };
     }
     const right = operandValue(m[3]!);
-    const numeric = PLAIN_NUMBER.test(left) && PLAIN_NUMBER.test(right);
-    // The orderings are the one place a non-numeric operand means "I cannot
-    // answer". Comparing `"$140.00"` with `100` as text would sort by
-    // character and be wrong quietly, and answering `false` would be a silent
-    // wrong turn — so the line goes to the judge, which at least has the page
-    // and the values block. A currency/date normaliser is phase 2 (§7.7).
+    // The orderings are the ONLY numeric family, and the one place a
+    // non-numeric operand means "I cannot answer". Comparing `"$140.00"` with
+    // `100` as text would sort by character and be wrong quietly, and
+    // answering `false` would be a silent wrong turn — so the line goes to the
+    // judge, which at least has the page and the values block. A currency/date
+    // normaliser is phase 2 (§7.7).
+    //
+    // Everything else is text: see the header on why `is` no longer coerces.
+    const numeric =
+      ORDERINGS.has(operator) && PLAIN_NUMBER.test(left) && PLAIN_NUMBER.test(right);
     if (ORDERINGS.has(operator) && !numeric) return null;
     return { left, operator, right, numeric, holds: compare(left, right, operator, numeric) };
   }
@@ -195,12 +220,18 @@ function normaliseOperator(raw: string): LiteralComparison {
   return raw.trim().toLowerCase().replace(/\s+/g, ' ') as LiteralComparison;
 }
 
-/** A quoted string's content, or a number as written. Trimmed either way —
- *  "exact after trimming" is the contract, and a cell's text arrives from a
- *  table read already trimmed, so the two agree. */
+/**
+ * A quoted string's content, or a number as written.
+ *
+ * NOT trimmed inside the quotes. Trimming there made `" " is empty` true and
+ * `"" is " "` true — two different values reported as one — and it is the
+ * quoted form a substituted `{{cell}}` arrives in, so the cell holding a
+ * single space became the cell holding nothing. A bare number is trimmed only
+ * because saying so costs a call: the grammar's `[-+]?\d+(\.\d+)?` captures
+ * the digits and no surrounding space.
+ */
 function operandValue(token: string): string {
-  const inner = token.startsWith('"') ? token.slice(1, -1) : token;
-  return inner.trim();
+  return token.startsWith('"') ? token.slice(1, -1) : token.trim();
 }
 
 function compare(
@@ -210,13 +241,19 @@ function compare(
   numeric: boolean,
 ): boolean {
   switch (operator) {
+    // Text, character for character. `numeric` is false for every operator in
+    // this half — see the header — and is not consulted here at all.
     case 'is':
     case 'equals':
-      return numeric ? Number(left) === Number(right) : left === right;
+      return left === right;
     case 'is not':
     case 'does not equal':
     case 'is different from':
-      return numeric ? Number(left) !== Number(right) : left !== right;
+      return left !== right;
+    // `contains ""` is trivially true, and deliberately left that way: it is
+    // what `String.prototype.includes` means, an author who writes it has
+    // written a tautology in any language, and a special case here would be a
+    // rule nothing else in the grammar has.
     case 'contains':
       return left.includes(right);
     case 'does not contain':

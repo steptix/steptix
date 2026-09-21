@@ -18,7 +18,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright';
-import { executeAction, readTableRecords } from '../src/browser/actions.js';
+import { executeAction, readTableRecords, formatTableReadSummary } from '../src/browser/actions.js';
 import { parseAIResponse } from '../src/ai/action-parser.js';
 import { StepCache } from '../src/cache/step-cache.js';
 import type { AIAction, TableReadColumn } from '../src/ai/types.js';
@@ -490,6 +490,46 @@ describe('readTable — empty tables and placeholder rows', () => {
     expect((await run({ selector: '#t', columns, limit: 10 })).capturedRecords).toEqual([]);
   });
 
+  it('accepts colspan="99" as the "span all" idiom it is (§4.8)', async () => {
+    // A wide round number is how a hand-written empty-state row spans the
+    // table. Tested for EQUALITY with the width, it was neither a placeholder
+    // nor a data row shape, so the read of an empty table failed with
+    // "merged headers or cells are not supported".
+    await load(`
+      <table id="t" aria-label="Uploaded documents">
+        <thead><tr><th>Name</th><th>Size</th><th>Type</th></tr></thead>
+        <tbody><tr><td colspan="99">No documents uploaded yet.</td></tr></tbody>
+      </table>`);
+    const outcome = await readTableRecords(page, {
+      selector: '#t',
+      columns: [{ header: 'Name', key: 'name' }],
+    });
+    expect(outcome.records).toEqual([]);
+    expect(outcome.placeholdersSkipped).toBe(1);
+  });
+
+  it('skips a <tr> with no cells at all rather than failing the whole read', async () => {
+    // A stray empty row renders as nothing and carries nothing: there is no
+    // cell to map and no value to number. Failing the read over it would
+    // contradict §4.8, which exists so that an empty-looking table answers
+    // `[]` rather than an error. The skip is counted, so the log still
+    // explains a short result (§7.6).
+    await load(`
+      <table id="t" aria-label="Orders">
+        <thead><tr><th>ID</th><th>Name</th></tr></thead>
+        <tbody><tr><td>1</td><td>Alice</td></tr><tr></tr><tr><td>2</td><td>Bob</td></tr></tbody>
+      </table>`);
+    const outcome = await readTableRecords(page, {
+      selector: '#t',
+      columns: [{ header: 'ID', key: 'id' }, { header: 'Name', key: 'name' }],
+    });
+    expect(outcome.records).toEqual([
+      { _row: '1', id: '1', name: 'Alice' },
+      { _row: '2', id: '2', name: 'Bob' },
+    ]);
+    expect(outcome.placeholdersSkipped).toBe(1);
+  });
+
   it('still fails a colspan narrower than the table (§10)', async () => {
     await load(`
       <table id="t" aria-label="Pending transfers">
@@ -499,6 +539,209 @@ describe('readTable — empty tables and placeholder rows', () => {
     // Narrower than the width, so it is a merged grid and not a message.
     expect(await refusal({ selector: '#t', columns: [{ header: 'To', key: 'to' }] }))
       .toBe('readTable cannot map table "Pending transfers": merged headers or cells (rowspan/colspan > 1) are not supported');
+  });
+});
+
+// ── the ways a table can read as [] and still succeed (§2, §13.4) ──────────
+//
+// Every case here used to return `[]` from a SUCCESSFUL action: the loop over
+// the capture ran zero passes and the step passed. That is the outcome this
+// whole action exists to prevent — worse than any refusal, because nothing in
+// the run says a thing.
+
+describe('readTable — tables that silently read as []', () => {
+  it('reads a ONE-COLUMN table with a header (§4.8)', async () => {
+    // The placeholder test was `cells.length === 1 && colSpan === width`, and
+    // in a one-column table `colSpan 1 === width 1` is true of every ordinary
+    // row — so all three rows were skipped as "placeholders".
+    await load(`
+      <table id="t" aria-label="Statuses">
+        <thead><tr><th>Status</th></tr></thead>
+        <tbody><tr><td>Completed</td></tr><tr><td>Overdue</td></tr><tr><td>Pending</td></tr></tbody>
+      </table>`);
+    const outcome = await readTableRecords(page, {
+      selector: '#t',
+      columns: [{ header: 'Status', key: 'status' }],
+    });
+    expect(outcome.records).toEqual([
+      { _row: '1', status: 'Completed' },
+      { _row: '2', status: 'Overdue' },
+      { _row: '3', status: 'Pending' },
+    ]);
+    expect(outcome.placeholdersSkipped).toBe(0);
+  });
+
+  it('reads a ONE-COLUMN table with no header', async () => {
+    // Headerless, the same test had no width to compare against and skipped
+    // every single-cell row unconditionally.
+    await load(`<table id="t" aria-label="Names"><tbody>
+      <tr><td>Alice</td></tr><tr><td>Bob</td></tr>
+    </tbody></table>`);
+    const result = await run({ selector: '#t', columns: [{ index: 1, key: 'name' }] });
+    expect(result.capturedRecords).toEqual([
+      { _row: '1', name: 'Alice' },
+      { _row: '2', name: 'Bob' },
+    ]);
+  });
+
+  it('accepts a header row that mixes <td> and <th> (§7.3)', async () => {
+    // A checkbox cell beside the headings — what every sortable table in this
+    // app looks like. Requiring EVERY cell to be a <th> missed it, and the
+    // read then failed "it has no header row".
+    await load(`
+      <table id="t" aria-label="Orders"><tbody>
+        <tr><td><input type="checkbox" aria-label="Select all"></td><th>Order ID</th><th>Status</th></tr>
+        <tr><td><input type="checkbox"></td><td>O-1</td><td>Paid</td></tr>
+        <tr><td><input type="checkbox"></td><td>O-2</td><td>Due</td></tr>
+      </tbody></table>`);
+    const result = await run({
+      selector: '#t',
+      columns: [{ header: 'Order ID', key: 'id' }, { header: 'Status', key: 'status' }],
+    });
+    expect(result.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1', status: 'Paid' },
+      { _row: '2', id: 'O-2', status: 'Due' },
+    ]);
+  });
+
+  it('keeps that header row out of the data, so no _row is off by one', async () => {
+    // The louder half of the same bug: with POSITIONAL columns the read did
+    // not need a header at all, so the heading text became record 1 and every
+    // row number after it was one too high — a pass then acted on the row
+    // above the one its record came from.
+    await load(`
+      <table id="t" aria-label="Orders"><tbody>
+        <tr><td></td><th>Order ID</th><th>Status</th></tr>
+        <tr><td></td><td>O-1</td><td>Paid</td></tr>
+        <tr><td></td><td>O-2</td><td>Due</td></tr>
+      </tbody></table>`);
+    const result = await run({ selector: '#t', columns: [{ index: 2, key: 'id' }] });
+    expect(result.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1' },
+      { _row: '2', id: 'O-2' },
+    ]);
+  });
+
+  it('takes a one-column <tr><th>Order ID</th></tr> as a header (§7.3)', async () => {
+    await load(`<table id="t" aria-label="Orders"><tbody>
+      <tr><th>Order ID</th></tr><tr><td>O-1</td></tr><tr><td>O-2</td></tr>
+    </tbody></table>`);
+    const result = await run({ selector: '#t', columns: [{ header: 'Order ID', key: 'id' }] });
+    expect(result.capturedRecords).toEqual([{ _row: '1', id: 'O-1' }, { _row: '2', id: 'O-2' }]);
+  });
+
+  it('does NOT take a <th scope="row"> first row as the header (§10)', async () => {
+    // That <th> is the row's own heading, not the table's headings — reading
+    // it as a header row would delete the first account from the read.
+    await load(`<table id="t" aria-label="Balances"><tbody>
+      <tr><th scope="row">Everyday</th><td>$1,234.56</td></tr>
+      <tr><th scope="row">Savings</th><td>$8,410.00</td></tr>
+    </tbody></table>`);
+    const result = await run({ selector: '#t', columns: [{ index: 1, key: 'account' }] });
+    expect(result.capturedRecords).toEqual([
+      { _row: '1', account: 'Everyday' },
+      { _row: '2', account: 'Savings' },
+    ]);
+    // And a header-named column against it still gets the §5.4 way out.
+    expect(await refusal({ selector: '#t', columns: [{ header: 'Account', key: 'a' }] }))
+      .toContain('it has no header row');
+  });
+
+  it('reads a CSS-grid table, where every <tr> has display: contents (§7.4)', async () => {
+    // `table{display:grid} thead,tbody,tr{display:contents}` is the standard
+    // idiom for laying a semantic table out with grid. A `<tr>` with
+    // `display: contents` generates no box, so a client-rect visibility test
+    // dropped every row of one — and the read stored [] and SUCCEEDED.
+    await load(`
+      <style>
+        table.grid { display: grid; grid-template-columns: repeat(2, auto); }
+        table.grid thead, table.grid tbody, table.grid tr { display: contents; }
+      </style>
+      <table id="t" class="grid" aria-label="Grid orders">
+        <thead><tr><th>Order ID</th><th>Status</th></tr></thead>
+        <tbody><tr><td>O-1</td><td>Paid</td></tr><tr><td>O-2</td><td>Due</td></tr></tbody>
+      </table>`);
+    // The row really has no box of its own — this is the condition, not a
+    // contrived fixture.
+    expect(await page.locator('#t tbody tr').first().evaluate(
+      (el: Element) => (el as HTMLElement).getClientRects().length,
+    )).toBe(0);
+    const result = await run({
+      selector: '#t',
+      columns: [{ header: 'Order ID', key: 'id' }, { header: 'Status', key: 'status' }],
+    });
+    expect(result.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1', status: 'Paid' },
+      { _row: '2', id: 'O-2', status: 'Due' },
+    ]);
+  });
+
+  it('reads a display: contents CELL as its text, not as ""', async () => {
+    // Same cause, one level down: the cell is rendered — its text is on the
+    // page — but it has no box, so it read as the empty string and a whole
+    // column of them was stored and passed on.
+    await load(`
+      <table id="t" aria-label="Contents">
+        <thead><tr><th>A</th><th>B</th></tr></thead>
+        <tbody><tr><td style="display:contents">x</td><td>y</td></tr></tbody>
+      </table>`);
+    const result = await run({
+      selector: '#t',
+      columns: [{ header: 'A', key: 'a' }, { header: 'B', key: 'b' }],
+    });
+    expect(result.capturedRecords).toEqual([{ _row: '1', a: 'x', b: 'y' }]);
+    // A genuinely hidden cell still reads as "" — the fallback is for
+    // `display: contents` only and must not resurrect a hidden column (§10).
+    await load(`
+      <table id="t" aria-label="Contents">
+        <thead><tr><th>A</th><th>B</th></tr></thead>
+        <tbody><tr><td class="col-hidden">secret</td><td>y</td></tr></tbody>
+      </table>`);
+    const hidden = await run({
+      selector: '#t',
+      columns: [{ header: 'A', key: 'a' }, { header: 'B', key: 'b' }],
+    });
+    expect(hidden.capturedRecords).toEqual([{ _row: '1', a: '', b: 'y' }]);
+  });
+
+  it('reads rows a script appended straight under <table>, with no <tbody> (§7.4)', async () => {
+    // HTML source always gets a <tbody> from the parser; `table.appendChild(tr)`
+    // does not. A scan of `tBodies` alone found no rows at all and read the
+    // table as [], green.
+    await page.setContent('<html><body><div id="host"></div></body></html>');
+    await page.evaluate(() => {
+      const table = document.createElement('table');
+      table.id = 'built';
+      table.setAttribute('aria-label', 'Built by script');
+      const head = document.createElement('thead');
+      const headRow = document.createElement('tr');
+      for (const name of ['Order ID', 'Status']) {
+        const th = document.createElement('th');
+        th.textContent = name;
+        headRow.appendChild(th);
+      }
+      head.appendChild(headRow);
+      table.appendChild(head);
+      for (const row of [['O-1', 'Paid'], ['O-2', 'Due']]) {
+        const tr = document.createElement('tr');
+        for (const value of row) {
+          const td = document.createElement('td');
+          td.textContent = value;
+          tr.appendChild(td);
+        }
+        table.appendChild(tr); // no <tbody> anywhere
+      }
+      document.getElementById('host')!.appendChild(table);
+    });
+    expect(await page.locator('#built tbody').count()).toBe(0);
+    const result = await run({
+      selector: '#built',
+      columns: [{ header: 'Order ID', key: 'id' }, { header: 'Status', key: 'status' }],
+    });
+    expect(result.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1', status: 'Paid' },
+      { _row: '2', id: 'O-2', status: 'Due' },
+    ]);
   });
 });
 
@@ -612,21 +855,28 @@ describe('readTable — structural refusals', () => {
 // ── columns by position (§4.4, §5.4) ────────────────────────────────────────
 
 describe('readTable — columns by position', () => {
-  /** §5.4: no `<thead>`, a duplicate payee, and cells empty on some rows. */
+  /**
+   * §5.4: no `<thead>`, a duplicate payee, and cells empty on some rows.
+   *
+   * The `data-id`s are 7, 8, 9 rather than the page's own 1, 2, 3 on purpose:
+   * those aliased `_row` exactly, so an implementation that read the row's
+   * `data-id` — the obvious wrong way to number rows, and the one the spec
+   * rules out in §4.5 — passed this test.
+   */
   const PAYMENTS_HTML = `
     <table id="scheduled-payments" aria-label="Scheduled payments">
       <tbody>
-        <tr data-id="1">
+        <tr data-id="7">
           <td>Origin Energy</td><td>INV-2291</td><td>$140.00</td><td>3 Oct 2026</td><td>Scheduled</td>
           <td><input type="checkbox" aria-label="Auto-pay for Origin Energy" checked></td>
           <td><button type="button">View</button> <button type="button">Approve</button></td>
         </tr>
-        <tr data-id="2">
+        <tr data-id="8">
           <td>Netflix Australia</td><td></td><td>$22.99</td><td>1 Oct 2026</td><td>Scheduled</td>
           <td><input type="checkbox" aria-label="Auto-pay for Netflix Australia" checked></td>
           <td><button type="button">View</button> <button type="button">Approve</button></td>
         </tr>
-        <tr data-id="3">
+        <tr data-id="9">
           <td>Origin Energy</td><td></td><td>$86.10</td><td></td><td>Paused</td>
           <td><input type="checkbox" aria-label="Auto-pay for Origin Energy"></td>
           <td><button type="button">View</button> <button type="button">Resume</button></td>
@@ -653,9 +903,12 @@ describe('readTable — columns by position', () => {
       { _row: '2', payee: 'Netflix Australia', reference: '', amount: '$22.99', status: 'Scheduled' },
       { _row: '3', payee: 'Origin Energy', reference: '', amount: '$86.10', status: 'Paused' },
     ]);
-    // `data-id` is the page's own key and is never read: `_row` is what the
-    // read gives a body to find the row by.
-    expect(JSON.stringify(result.capturedRecords)).not.toContain('data-id');
+    // `data-id` is the page's own key and is never read: `_row` counts the
+    // visible data rows, and is what the read gives a body to find the row by.
+    // Asserting on the attribute NAME could not fail — it is not a value —
+    // so assert on the numbers, which the fixture made deliberately different.
+    expect(result.capturedRecords?.map((r) => r['_row'])).toEqual(['1', '2', '3']);
+    expect(await page.locator('#scheduled-payments tbody tr').first().getAttribute('data-id')).toBe('7');
   });
 
   it('refuses a header-named column against it, with the §5.4 message', async () => {
@@ -770,6 +1023,122 @@ describe('readTable — limit and the 500-row cap', () => {
   }, 30_000);
 });
 
+// ── how the extractor reaches the page ──────────────────────────────────────
+
+describe('readTable — the page-side extractor is a file, not a TS callback', () => {
+  it('hands evaluateAll the compiled script, so esbuild never rewrites its helpers', async () => {
+    // Written inline as a TypeScript callback, `keepNames` turned every named
+    // helper into `__name(fn, "fn")` — and `__name` exists only in the bundle.
+    // Under `tsx` (`npm run dev`) the whole extraction died with
+    // `ReferenceError: __name is not defined`, while `dist/` (tsc, no such
+    // rewrite) was fine, so nothing in this suite or in a live run from
+    // `dist/` could see it. Phase 3's `tables.read` bundle meets the same
+    // wall. The remedy is the one `find-in-dom.js` and `capture-dom.js` use:
+    // keep the page source in a .js file the bundler never reads.
+    const source = await fs.readFile(new URL('../src/browser/actions.ts', import.meta.url), 'utf8');
+    const extractor = source.slice(source.indexOf('export async function readTableRecords'));
+    expect(extractor).toContain('.evaluateAll(readTableInPage,');
+    expect(extractor).not.toMatch(/evaluateAll\(\s*(\(|function|async)/);
+
+    // And the file really is the single expression `new Function` wraps.
+    const script = await fs.readFile(
+      new URL('../src/browser/scripts/read-table.js', import.meta.url),
+      'utf8',
+    );
+    const compiled = new Function('matches', 'args', `return (\n${script}\n)(matches, args);`);
+    expect(typeof compiled).toBe('function');
+    // Playwright ships `Function.prototype.toString`, so the .js file's own
+    // text is what the browser evaluates.
+    expect(compiled.toString()).toContain(script.trim());
+  });
+});
+
+// ── diagnostics and the column cap (§7.5, §9.2) ─────────────────────────────
+
+describe('readTable — how a refusal names the table', () => {
+  it('quotes a caption containing quote marks so the message stays readable', async () => {
+    await load(`
+      <table id="t"><caption>The "Orders" table</caption>
+        <thead><tr><th>A</th><th>B</th></tr></thead>
+        <tbody><tr><td>1</td></tr></tbody>
+      </table>`);
+    // Interpolated bare, this read `cannot map table "The "Orders" table":`,
+    // where the reader cannot tell the table's name from the message's own
+    // punctuation.
+    expect(await refusal({
+      selector: '#t',
+      columns: [{ header: 'A', key: 'a' }, { header: 'B', key: 'b' }],
+    })).toBe(
+      'readTable cannot map table "The \\"Orders\\" table": row 1 has 1 cell, so there is no cell '
+      + 'for the "B" column at position 2',
+    );
+  });
+
+  it('refuses more than 20 columns in the extractor as well as in the parser (§9.2)', async () => {
+    // §9.2: phase 3's generated `tables.read` calls the extractor directly and
+    // never passes through `action-parser.ts`, so the cap has to hold in both
+    // places — and hold at the SAME number.
+    await load(ORDERS_HTML);
+    const columns: TableReadColumn[] = Array.from({ length: 21 }, (_, i) => ({
+      index: i + 1,
+      key: `k${i}`,
+    }));
+    await expect(readTableRecords(page, { selector: '#orders', columns }))
+      .rejects.toThrow('readTable requests 21 columns — the maximum is 20');
+    expect(() => parseAIResponse(JSON.stringify({
+      actions: [{ action: 'readTable', selector: '#orders', columns, as: 'rows', description: 'd' }],
+      reasoning: '',
+    }))).toThrow(/requests 21 columns — the maximum is 20/);
+    // Twenty is still fine on both paths.
+    const twenty = await readTableRecords(page, { selector: '#orders', columns: columns.slice(0, 6) });
+    expect(twenty.records).toHaveLength(2);
+  });
+
+  it('refuses an empty column list', async () => {
+    await load(ORDERS_HTML);
+    await expect(readTableRecords(page, { selector: '#orders', columns: [] }))
+      .rejects.toThrow('readTable requires at least one column');
+  });
+});
+
+// ── the run-log summary line (§7.6) ─────────────────────────────────────────
+//
+// Counts, not contents: the captured cells belong in the variable and the
+// report, not in every console the run passes through. The bound and the
+// placeholder-skip count ride along because without them a short result has no
+// explanation in the log.
+
+describe('formatTableReadSummary', () => {
+  const result = (records: number, placeholdersSkipped = 0) => ({
+    records: Array.from({ length: records }, (_, i) => ({ _row: String(i + 1) })),
+    placeholdersSkipped,
+    dataRowCount: records,
+    label: 'Orders',
+  });
+
+  it('says how many rows by how many columns, under the variable name', () => {
+    expect(formatTableReadSummary(result(2), 3, 'orders', undefined))
+      .toBe('readTable captured 2 rows × 3 columns as "{{orders}}"');
+  });
+
+  it('includes the requested bound, so a short table is observable', () => {
+    expect(formatTableReadSummary(result(7), 1, 'orders', 10))
+      .toBe('readTable captured 7 rows × 1 column as "{{orders}}" (limit 10)');
+  });
+
+  it('says how many placeholder rows were skipped, so 0 rows explains itself', () => {
+    expect(formatTableReadSummary(result(0, 1), 2, 'docs', undefined))
+      .toBe('readTable captured 0 rows × 2 columns as "{{docs}}" (1 placeholder row skipped)');
+    expect(formatTableReadSummary(result(1, 3), 2, 'docs', undefined))
+      .toBe('readTable captured 1 row × 2 columns as "{{docs}}" (3 placeholder rows skipped)');
+  });
+
+  it('carries both notes at once, and names an unnamed capture', () => {
+    expect(formatTableReadSummary(result(1, 2), 1, undefined, 5))
+      .toBe('readTable captured 1 row × 1 column as "{{(unnamed)}}" (limit 5, 2 placeholder rows skipped)');
+  });
+});
+
 // ── cache replay (§9.1) ─────────────────────────────────────────────────────
 
 describe('readTable — cached actions replay against the current DOM (§9.1)', () => {
@@ -833,7 +1202,7 @@ describe('readTable — cached actions replay against the current DOM (§9.1)', 
       const action: AIAction = {
         action: 'readTable',
         selector: '#t',
-        columns: [{ header: '{{column_name}}', key: 'status' }],
+        columns: [{ header: '{{column_name}}', key: 'the_{{column_name}}_cell' }],
         as: 'rows',
         description: 'Read a column',
       };
@@ -841,8 +1210,10 @@ describe('readTable — cached actions replay against the current DOM (§9.1)', 
       const replayed = (await cache.read(1, { column_name: 'Status' }))![0]!.actions[0]!;
       expect(replayed.columns?.[0]?.header).toBe('Status');
       // `key` is a definition, not a reference — it names the property later
-      // steps read, and must survive interpolation untouched (§9.1).
-      expect(replayed.columns?.[0]?.key).toBe('status');
+      // steps read, and must survive interpolation untouched (§9.1). The key
+      // carries a placeholder of its own precisely so this cannot pass by
+      // identity: a substitution that walked it would make it `the_Status_cell`.
+      expect(replayed.columns?.[0]?.key).toBe('the_{{column_name}}_cell');
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }

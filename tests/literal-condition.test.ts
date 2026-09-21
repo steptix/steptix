@@ -12,6 +12,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { parseLiteralCondition } from '../src/parser/literal-condition.js';
+import { substituteAsLiterals } from '../src/runner/placeholder-substitution.js';
 
 /** The answer, or `null` for "not literal — ask the page". */
 const decide = (text: string): boolean | null => parseLiteralCondition(text)?.holds ?? null;
@@ -29,9 +30,19 @@ describe('the emptiness forms', () => {
     expect(decide('"INV-2291" is not blank')).toBe(true);
   });
 
-  it('treats whitespace-only as empty, because "exact after trimming" cuts both ways', () => {
-    expect(decide('"   " is empty')).toBe(true);
-    expect(decide('"   " is not empty')).toBe(false);
+  it('does not trim inside the quotes: a space is a value', () => {
+    // It used to trim, which made the cell holding a space and the cell
+    // holding nothing report as the same cell — and `"" is " "` true, which
+    // is two different values called equal.
+    expect(decide('"   " is empty')).toBe(false);
+    expect(decide('"   " is not empty')).toBe(true);
+    expect(decide('" " is empty')).toBe(false);
+    expect(decide('"" is " "')).toBe(false);
+    expect(decide('" " is ""')).toBe(false);
+    expect(decide('" " is " "')).toBe(true);
+    // `is blank` is a spelling of `is empty`, not a second rule: both mean
+    // "no characters at all".
+    expect(decide('" " is blank')).toBe(false);
   });
 
   it('is the shape the acceptance run got wrong', () => {
@@ -66,8 +77,15 @@ describe('the equality forms', () => {
     expect(decide('"a b" is "a  b"')).toBe(false);
   });
 
-  it('trims each operand before comparing', () => {
-    expect(decide('"  Completed  " is "Completed"')).toBe(true);
+  it('does NOT trim inside the quotes', () => {
+    // The old rule was "exact after trimming", which also made `" " is empty`
+    // true. Whitespace an author typed inside quotes is part of the value; a
+    // cell arrives from a table read already trimmed, so nothing that came
+    // off a page needs this.
+    expect(decide('"  Completed  " is "Completed"')).toBe(false);
+    expect(decide('"  Completed  " is "  Completed  "')).toBe(true);
+    // Whitespace OUTSIDE the operands is still just spacing in the sentence.
+    expect(decide('  "Completed"   is   "Completed"  ')).toBe(true);
   });
 
   it('holds for two empty strings', () => {
@@ -144,27 +162,58 @@ describe('the ordering forms', () => {
   });
 });
 
-describe('numeric versus string comparison', () => {
-  it('compares numerically when BOTH sides read as plain numbers', () => {
-    expect(parseLiteralCondition('"42" is 42')).toMatchObject({ numeric: true, holds: true });
-    expect(parseLiteralCondition('"007" is 7')).toMatchObject({ numeric: true, holds: true });
-    expect(parseLiteralCondition('2.50 equals 2.5')).toMatchObject({ numeric: true, holds: true });
+/**
+ * Equality is TEXT. Only the five orderings are numbers.
+ *
+ * The equality family used to coerce when both sides read as plain numbers,
+ * which looked like a kindness and was a defect: a table read yields exactly
+ * the strings that coercion destroys. `"0012" is "12"` said TRUE about two
+ * different order numbers, and so did `"1.0" is "1"` for two different
+ * quantities, `"+5" is "5"` and `"-0" is "0"`. Zero-padded ids, money strings
+ * and version numbers are the normal contents of a cell.
+ */
+describe('equality compares characters, never numbers', () => {
+  it('does not make unequal strings equal', () => {
+    expect(parseLiteralCondition('"0012" is "12"')).toMatchObject({
+      numeric: false,
+      holds: false,
+    });
+    expect(decide('"0012" is not "12"')).toBe(true);
+    expect(decide('"1.0" is "1"')).toBe(false);
+    expect(decide('"+5" is "5"')).toBe(false);
+    expect(decide('"-0" is "0"')).toBe(false);
+    expect(decide('2.50 equals 2.5')).toBe(false);
+    expect(decide('"007" is 7')).toBe(false);
+    expect(decide('"1e3" is "1000"')).toBe(false);
+    // Every spelling of the negative agrees with its positive.
+    expect(decide('"1.0" does not equal "1"')).toBe(true);
+    expect(decide('"1.0" is different from "1"')).toBe(true);
   });
 
-  it('compares as text the moment one side is not a plain number', () => {
-    expect(parseLiteralCondition('"007" is "7"')).toMatchObject({ numeric: true, holds: true });
-    expect(parseLiteralCondition('"$7" is "7"')).toMatchObject({ numeric: false, holds: false });
-    // The empty-string trap: `Number('')` is 0, so a `Number()`-based test
-    // would make this hold.
-    expect(parseLiteralCondition('"" is 0')).toMatchObject({ numeric: false, holds: false });
+  it('still holds when the characters really are the same', () => {
+    // Not because either side was parsed — the four characters match.
+    expect(parseLiteralCondition('"42" is 42')).toMatchObject({
+      numeric: false,
+      holds: true,
+    });
+    expect(decide('"$7" is "7"')).toBe(false);
+    expect(decide('"" is 0')).toBe(false);
   });
 
-  it('substring forms are always textual, even between numbers', () => {
+  it('reports `numeric` for the orderings and nothing else', () => {
+    expect(parseLiteralCondition('"10" is at least 2')).toMatchObject({ numeric: true });
     expect(parseLiteralCondition('1001 contains 100')).toMatchObject({
-      numeric: true,
+      numeric: false,
       holds: true,
     });
     expect(decide('100 contains 1001')).toBe(false);
+    expect(parseLiteralCondition('5 is 5')).toMatchObject({ numeric: false, holds: true });
+  });
+
+  it('leaves the orderings numeric, so 10 still sorts above 9', () => {
+    expect(decide('"10" is at least "9"')).toBe(true);
+    expect(decide('"0012" is more than 11')).toBe(true);
+    expect(decide('"1.0" is at most 1')).toBe(true);
   });
 });
 
@@ -235,5 +284,77 @@ describe('anything that is not all literals goes to the judge', () => {
     expect(parseLiteralCondition('')).toBeNull();
     expect(parseLiteralCondition('is empty')).toBeNull();
     expect(parseLiteralCondition('"a" is')).toBeNull();
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// The text the runtime actually parses
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * `substituteAsLiterals` is the other half of the decision: this grammar reads
+ * VALUES, so a reference has to arrive as one.
+ *
+ * Plain substitution gave `Overdue is "Paused"` for the feature's own
+ * `If {{payment.status}} is "Paused"` — a bare word, which the grammar refuses
+ * on purpose — so every acceptance guard went on paying for a judge call.
+ * Quoting the value gives `"Overdue" is "Paused"`, and the reasoning shows
+ * that form.
+ */
+describe('references are substituted as literals, not as bare text', () => {
+  const values = {
+    parameters: {
+      'payment.status': 'Overdue',
+      'line.debit': '',
+      'line.credit': '-$65.00',
+      'order.title': 'The 12" Monitor',
+    },
+    envData: { env: { PLAN: 'pro' }, data: {} } as never,
+  };
+  const sub = (text: string) => substituteAsLiterals(text, values);
+
+  it('quotes a reference the author left bare', () => {
+    expect(sub('{{payment.status}} is "Paused"').text).toBe('"Overdue" is "Paused"');
+    expect(decide(sub('{{payment.status}} is "Paused"').text)).toBe(false);
+    expect(decide(sub('{{payment.status}} is not "Scheduled"').text)).toBe(true);
+  });
+
+  it('leaves a reference the author already quoted alone', () => {
+    // `""" is empty` would be the alternative, which parses as nothing.
+    expect(sub('"{{line.debit}}" is empty').text).toBe('"" is empty');
+    expect(decide(sub('"{{line.debit}}" is empty').text)).toBe(true);
+    expect(sub('"{{line.credit}}" is not empty').text).toBe('"-$65.00" is not empty');
+    expect(decide(sub('"{{line.credit}}" is not empty').text)).toBe(true);
+  });
+
+  it('resolves a ${…} reference the same way', () => {
+    expect(sub('${env.PLAN} is "pro"').text).toBe('"pro" is "pro"');
+    expect(decide(sub('${env.PLAN} is "pro"').text)).toBe(true);
+    expect(sub('"${env.PLAN}" is empty').text).toBe('"pro" is empty');
+    // Unanswerable, so it stays as written and the grammar refuses it — the
+    // judge at least gets a page and a `## Values` block.
+    expect(sub('${data.missing} is "x"').text).toBe('${data.missing} is "x"');
+    expect(parseLiteralCondition(sub('${data.missing} is "x"').text)).toBeNull();
+  });
+
+  it('reports a value it cannot spell, rather than quoting it anyway', () => {
+    // The grammar has no escape for a quote, so a value holding one cannot be
+    // written as a literal. Reported, and the caller asks the judge.
+    const quoted = sub('{{order.title}} contains "Monitor"');
+    expect(quoted.unspellable).toBe(true);
+    // Belt to that braces: the text it would have produced does not parse
+    // either, so a value can never be read as syntax.
+    expect(parseLiteralCondition(quoted.text)).toBeNull();
+  });
+
+  it('counts the references the AUTHORED text made', () => {
+    // Zero is the signal that a condition is not about this run's values at
+    // all: `If "Welcome back" is empty` is a sentence about the page.
+    expect(sub('"Welcome back" is empty').references).toBe(0);
+    expect(sub('{{payment.status}} is "Paused"').references).toBe(1);
+    expect(sub('"{{line.debit}}" is "{{line.credit}}"').references).toBe(2);
+    // Counted even when nothing answers it — the author still wrote one.
+    expect(sub('{{nobody}} is "x"').references).toBe(1);
+    expect(sub('${data.missing} is "x"').references).toBe(1);
   });
 });

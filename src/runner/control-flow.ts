@@ -445,6 +445,12 @@ function planForEach(
  * Nothing is snapshotted or restored: the last pass's bindings, dotted ones
  * included, stay in the one live map after the loop, exactly as the scalar
  * binding always has (§8.2, last paragraph).
+ *
+ * What a pass does NOT write is the other half of the rule, and it lives at
+ * the other end: rows differ in shape, so `applyPassBindings`
+ * (control-runtime.ts) clears every `item.*` key before assigning these. Read
+ * the two together — this function says what a pass means, that one says what
+ * the map must therefore forget.
  */
 function passBindings(
   item: string,
@@ -743,9 +749,20 @@ export function planForStart(
       // it lets a capture made inside the body change the bound of the loop it
       // is inside, which is the thing `planAtGuard` refuses to do on an
       // ordinary pass.
+      //
+      // `properties` travels with `items`, and dropping it was a silent
+      // wrong-row bug rather than a missing feature: the Electron debugger's
+      // jump-to-step calls this against LIVE state, so a rebuild that kept the
+      // items and forgot their properties left every later pass binding the
+      // base name and no dotted key at all. With `applyPassBindings` clearing
+      // the stale ones, `{{order.id}}` after a jump is correctly refused; with
+      // a plain `Object.assign`, it silently read the pre-jump row. Either way
+      // the cursor is the only place that knowledge lives, so it is copied
+      // wherever a cursor is copied.
       const cursor = state.cursors.get(g);
       state.cursors.set(g, {
         items: cursor?.items ?? null,
+        ...(cursor?.properties && { properties: cursor.properties }),
         index: cursor?.index ?? 0,
         resumed: true,
       });

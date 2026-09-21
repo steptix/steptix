@@ -763,3 +763,82 @@ describe('a dotted reference inside a For each body', () => {
     ]);
   });
 });
+
+/**
+ * Rows differ in shape, and a pass must not answer from the last one
+ * (docs/specs/SPEC-structured-table-reads.md §8.2, §8.3).
+ *
+ * All three run loops wrote a pass's bindings with `Object.assign`, which
+ * cannot delete. This runner is where it is worst, because `movePointer` can
+ * rebuild a live `For each` cursor: the rebuild used to drop `properties`, so
+ * after a jump no pass bound `{{order.x}}` at all — and with a merging write
+ * that is not an error, it is the pre-jump row's value on every remaining
+ * pass, silently, with a confident green row.
+ */
+describe('a For each pass binds its own row and no other', () => {
+  it('refuses the pass whose row lacks the property, rather than reusing the last', async () => {
+    const md = `
+# Rows
+
+## Parameters
+- rows: [{"_row":"1","id":"A","note":"first"},{"_row":"2","id":"B"}]
+
+## Steps
+1. For each {{row}} in {{rows}}, Check the row
+2. Sign out
+
+### Check the row
+1. Verify the note says "{{row.note}}"
+`;
+    const events = await runAdapter(writeTest(root, md));
+
+    const failure = events.find(
+      (e) => e.channel === 'runner:step-complete' && e.data['status'] === 'failed',
+    );
+    expect(failure?.data['error']).toBe(
+      '{{row.note}} has no value in For each item 2; available properties are _row, id',
+    );
+    // Pass 1 ran on its own row; nothing leaked forward.
+    expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual([
+      'Verify the note says "first"',
+    ]);
+  });
+
+  it('keeps every row"s properties across a debugger jump into the body', async () => {
+    // `planForStart` rebuilds the cursor on every `movePointer`, and the
+    // rebuild wrote `{items, index, resumed}` — dropping `properties`, the
+    // only place the rows' dotted values live.
+    const md = `
+# Jump into a table loop
+
+## Parameters
+- orders: [{"id":"A"},{"id":"B"},{"id":"C"}]
+
+## Steps
+1. For each {{order}} in {{orders}}, Check the order
+2. Sign out
+
+### Check the order
+1. Verify the row for "{{order.id}}" is shown
+`;
+    let pauses = 0;
+    const adapter = new UIRunnerAdapter((channel) => {
+      if (channel !== 'runner:paused') return;
+      pauses += 1;
+      // Jump back to the body line on the first pause — the debugger's own
+      // move, against a loop that is already part-way through its list.
+      if (pauses === 1) adapter.movePointer(2);
+      adapter.resume();
+    });
+    await adapter.start(writeTest(root, md), [2]);
+
+    // Each pass on its OWN row. Dropping `properties` left `{{order.id}}`
+    // unbound after the jump, so every later pass re-read row A's id.
+    expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual([
+      'Verify the row for "A" is shown',
+      'Verify the row for "B" is shown',
+      'Verify the row for "C" is shown',
+      'Sign out',
+    ]);
+  });
+});

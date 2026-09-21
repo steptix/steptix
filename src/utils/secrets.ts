@@ -16,13 +16,18 @@ import { envDataSecretValues, type EnvDataContext } from '../parser/interpolate-
 import type { TestReport } from '../report/types.js';
 
 /**
- * Re-exported as the one rule. It matches on a SUBSTRING, which is what makes
- * a dotted loop binding work without a second rule: `{{order.password}}` is a
- * secret because `password` is in it, and so is the `order.password` entry of
- * the live variable map a pass leaves behind
+ * Re-exported as the one rule for names the AUTHOR chose — parameters,
+ * `[store as:]` captures, `${…}` references. It matches on a SUBSTRING, which
+ * is what makes a dotted loop binding work without a second rule:
+ * `{{order.password}}` is a secret because `password` is in it, and so is the
+ * `order.password` entry of the live variable map a pass leaves behind
  * (docs/specs/SPEC-structured-table-reads.md §8.4). The same breadth is why a
  * record stored under a variable literally named `token` is masked whole —
  * the name is the rule, and the name says secret.
+ *
+ * Column names inside a record are NOT author-chosen — they come off the page
+ * — so they go through {@link isRecordSecretKey} instead, which is narrower on
+ * purpose. See it for why.
  */
 export { isSecretName };
 
@@ -43,6 +48,105 @@ export function isSecretRef(ref: string): boolean {
   return ref.split('.').some((segment) => isSecretName(segment));
 }
 
+/**
+ * Is a RECORD COLUMN's name a secret? Whole words, not substrings.
+ *
+ * `isSecretName` is deliberately broad because the author picked the name. A
+ * record's keys are picked off the page — a `readTable` column alias, a header
+ * turned into a property — and there the same breadth masks the wrong things:
+ * `keyword` and `sort_key` both contain `key`. Masking is not a free
+ * precaution, because {@link redact} replaces that value EVERYWHERE, including
+ * in the DOM snapshot the model plans its next action from.
+ *
+ * So: `password` / `secret` / `token` as whole words anywhere in the name, and
+ * `key` only where something makes it a credential (`api_key`, `apiKey`,
+ * `access_key`, `private_key`). A column called plainly `key` is far more often
+ * a sort key or an id, and is not masked; a test that needs it hidden can name
+ * the column `api_key` or capture it into a secret-named variable, where the
+ * author-chosen rule applies.
+ */
+const RECORD_SECRET_WORD = /(^|_)(password|passwd|pwd|secret|token|otp|credential|credentials)(_|$)/;
+const RECORD_SECRET_KEY = /(^|_)(api|access|private|auth|signing|encryption)_keys?(_|$)/;
+export function isRecordSecretKey(key: string): boolean {
+  const words = key
+    // camelCase and PascalCase read as words too: apiKey → api_Key.
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^A-Za-z0-9]+/g, '_')
+    .toLowerCase();
+  return RECORD_SECRET_WORD.test(words) || RECORD_SECRET_KEY.test(words);
+}
+
+/**
+ * Shortest record-derived value that may join the mask set.
+ *
+ * Nothing this short is a credential, and masking it is actively harmful: a
+ * `token` column holding `-`, `-` and `7` put `-` and `7` in the mask set, and
+ * `redact` then replaced every dash and every seven in every output — the run
+ * log, the report, and the DOM snapshot the model plans from. A parameter the
+ * author named keeps no floor: that name is a deliberate instruction.
+ */
+const RECORD_SECRET_MIN_LENGTH = 4;
+
+/** The answer for a value that holds no records. One shared frozen array, so
+ *  the memoised path can return by identity. */
+const NO_RECORD_SECRETS: readonly string[] = Object.freeze([]);
+
+/** How many parsed values the memo holds. A capture is one entry, and a run
+ *  has a handful live at once; the bound is what stops a long run that
+ *  recaptures the same variable hundreds of times from retaining all of them. */
+const RECORD_SECRET_CACHE_MAX = 64;
+const recordSecretCache = new Map<string, readonly string[]>();
+
+/**
+ * The secret values inside ONE parameter value that holds a list of records.
+ *
+ * A `readTable` capture is a single string under a non-secret name
+ * ("orders"), so the rule has to reach inside it: a `password` column is a
+ * secret however the row it sits in is named (§7.6).
+ *
+ * Memoised on the value string, because it is not asked once. `secretsNow()`
+ * rebuilds the mask set at every surface that writes anything — the console
+ * line, the report, the log file — and re-parsing a 500-row capture each time
+ * cost ~0.9 ms a call for one variable. The same string always has the same
+ * answer, so the parse is done once.
+ *
+ * The sniff is on `[`, not on `[{`: a list may be pretty-printed or spaced by
+ * whatever produced it (`[ {`, or a newline), and those forms read as
+ * "not a record list" and masked nothing at all.
+ */
+export function recordSecretValues(value: string): readonly string[] {
+  if (!/^\s*\[/.test(value)) return NO_RECORD_SECRETS;
+  const cached = recordSecretCache.get(value);
+  if (cached) return cached;
+
+  const found: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+        for (const [k, v] of Object.entries(item as Record<string, unknown>)) {
+          if (typeof v === 'string' && v.length >= RECORD_SECRET_MIN_LENGTH && isRecordSecretKey(k)) {
+            found.push(v);
+          }
+        }
+      }
+    }
+  } catch {
+    /* not a record list */
+  }
+
+  const result: readonly string[] =
+    found.length === 0 ? NO_RECORD_SECRETS : Object.freeze([...new Set(found)]);
+  if (recordSecretCache.size >= RECORD_SECRET_CACHE_MAX) {
+    // Insertion order: drop the oldest entry.
+    const oldest = recordSecretCache.keys().next();
+    if (!oldest.done) recordSecretCache.delete(oldest.value);
+  }
+  recordSecretCache.set(value, result);
+  return result;
+}
+
 /** The values to mask: those of secret-named parameters, plus any the caller
  *  names (the environment's secrets). Empty values are never secrets — there
  *  is nothing to find, and `split('')` would shred the text. */
@@ -50,24 +154,9 @@ export function secretValues(parameters: Record<string, string>, extra: string[]
   const fromParameters = Object.entries(parameters)
     .filter(([name, value]) => isSecretName(name) && value.length > 0)
     .map(([, value]) => value);
-  // A readTable record is one string under a non-secret name ("orders"), so
-  // the rule has to reach INSIDE it: a `password` column is a secret however
-  // the row it sits in is named (SPEC-structured-table-reads.md §7.6).
   const fromRecords: string[] = [];
   for (const value of Object.values(parameters)) {
-    if (!value.startsWith('[{')) continue;
-    try {
-      const parsed: unknown = JSON.parse(value);
-      if (!Array.isArray(parsed)) continue;
-      for (const item of parsed) {
-        if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
-        for (const [k, v] of Object.entries(item as Record<string, unknown>)) {
-          if (typeof v === 'string' && v.length > 0 && isSecretName(k)) fromRecords.push(v);
-        }
-      }
-    } catch {
-      /* not a record list */
-    }
+    for (const secret of recordSecretValues(value)) fromRecords.push(secret);
   }
   return [...new Set([...fromParameters, ...fromRecords, ...extra.filter((v) => v.length > 0)])];
 }

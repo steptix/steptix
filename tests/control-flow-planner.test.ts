@@ -566,6 +566,37 @@ describe('runs that start mid-structure', () => {
     expect(planForStart(CHAIN, 0, createControlState())).toEqual({ skip: [], next: 0 });
     expect(planForStart(CHAIN, 9, createControlState())).toEqual({ skip: [], next: 9 });
   });
+
+  /**
+   * The Electron debugger's jump-to-step calls `planForStart` against LIVE
+   * state, and the rebuild it does there used to write `{items, index,
+   * resumed}` — dropping `properties`, which is the only place the row's
+   * dotted values live.
+   *
+   * Nothing failed at the jump. Every pass AFTER it bound the base name and no
+   * dotted key, so `{{order.id}}` in the body resolved to whatever the last
+   * pass before the jump had left in the map: the pre-jump row's id, on every
+   * remaining row, silently.
+   */
+  it('a jump into a For each body keeps the rows properties', () => {
+    const state = createControlState();
+    const parsed = parseListValue('accounts', '[{"id":"A"},{"id":"B"},{"id":"C"}]');
+    if ('error' in parsed) throw new Error(parsed.error);
+    planAfterGuard(
+      FOREACH_LOOP,
+      0,
+      { kind: 'list', items: parsed.items, properties: parsed.properties },
+      state,
+    );
+
+    // The debugger jumps back into the body.
+    planForStart(FOREACH_LOOP, 1, state);
+    expect(state.cursors.get(0)!.properties).toEqual([{ id: 'A' }, { id: 'B' }, { id: 'C' }]);
+
+    // …and the next pass binds its own row's property, not the previous one's.
+    const next = planAfterGuard(FOREACH_LOOP, 0, { kind: 'resume' }, state);
+    expect(next.pass!.bindings).toEqual({ account: '{"id":"B"}', 'account.id': 'B' });
+  });
 });
 
 describe('nested structures', () => {

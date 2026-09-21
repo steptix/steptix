@@ -320,6 +320,78 @@ export function substituteText(text: string, values: PlaceholderValues): string 
   });
 }
 
+/** What {@link substituteAsLiterals} produced. */
+export interface LiteralSubstitution {
+  /** The text with every resolvable reference replaced by a QUOTED literal. A
+   *  reference nothing answers is left exactly as written, braces included,
+   *  so the reader downstream can refuse it. */
+  text: string;
+  /** How many references the AUTHORED text made, in either syntax, answered
+   *  or not. Zero means the author wrote no reference at all — a condition
+   *  that is its own answer and was never about this run's values. */
+  references: number;
+  /** True when a value that was substituted cannot be spelled as a literal in
+   *  the condition grammar: it contains a `"` or a newline, and there is no
+   *  escape for either. The caller must NOT decide from `text` — the quoting
+   *  would be ambiguous, and `"a" is "b"` inside a value could read as a whole
+   *  condition. */
+  unspellable: boolean;
+}
+
+/** True when the character on each side of `[start, end)` is a double quote —
+ *  i.e. the author already wrote `"{{x}}"` and the value must go in bare. */
+function alreadyQuoted(text: string, start: number, end: number): boolean {
+  return text[start - 1] === '"' && text[end] === '"';
+}
+
+/**
+ * One string with every reference replaced by a LITERAL the condition grammar
+ * can read — the form a local decision is made from
+ * (src/parser/literal-condition.ts).
+ *
+ * The difference from {@link substituteText} is the quotes, and they are the
+ * whole point. `If {{payment.status}} is "Paused"` substitutes to
+ * `Overdue is "Paused"` under the ordinary rule — a bare word, which the
+ * grammar rejects on purpose, so the feature's own acceptance tests kept
+ * paying for a judge call per pass. Quoting the value gives
+ * `"Overdue" is "Paused"`, which is decided here and never asked.
+ *
+ * A reference the author ALREADY wrapped in quotes — `If "{{line.debit}}" is
+ * empty` — is substituted bare, or the result would be `""" is empty`. The
+ * test is textual and local: a quote immediately before and immediately after
+ * the reference.
+ *
+ * Quoting is what makes this safe rather than clever: a value is never read as
+ * syntax, because it arrives already delimited. The one thing that would break
+ * that is a value containing a quote of its own, and the grammar has no escape
+ * for one — so such a value is reported as {@link LiteralSubstitution.unspellable}
+ * and the condition goes to the judge with its braces intact, which is exactly
+ * the behaviour that existed before any of this.
+ */
+export function substituteAsLiterals(
+  text: string,
+  values: PlaceholderValues,
+): LiteralSubstitution {
+  if (!text.includes('{{') && !text.includes('${')) {
+    return { text, references: 0, unspellable: false };
+  }
+  let references = 0;
+  let unspellable = false;
+  const out = text.replace(
+    SUBSTITUTE_RE,
+    (match: string, name: string | undefined, ref: string | undefined, offset: number) => {
+      references++;
+      let value: string | undefined;
+      if (name !== undefined) value = values.parameters[name];
+      else if (ref !== undefined && values.envData) value = resolveEnvDataRef(ref, values.envData);
+      if (value === undefined) return match;
+      if (value.includes('"') || value.includes('\n')) unspellable = true;
+      return alreadyQuoted(text, offset, offset + match.length) ? value : `"${value}"`;
+    },
+  );
+  return { text: out, references, unspellable };
+}
+
 /**
  * The action to act with: a copy of what the model emitted, with every string
  * leaf substituted. Never mutates its input — the recording, the transcript and

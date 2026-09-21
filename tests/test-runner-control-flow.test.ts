@@ -775,6 +775,118 @@ describe('For each binds the list', () => {
       ['Sign out', 'passed'],
     ]);
   });
+
+  /**
+   * `controlLineDefines` shipped in the Sessions API and the Electron loop and
+   * not in this one.
+   *
+   * Through the GUARD path it makes no difference and cannot: a step with a
+   * control record is dispatched, reported and `continue`d before the loop
+   * reaches its `interpolate` call, so the header's text is never interpolated
+   * at all. The reachable case is a run whose steps were NOT expanded into
+   * controls — then the `For each` line is an ordinary step like any other,
+   * and `interpolate` warned `Unresolved placeholder: {{account}}` about the
+   * item the line is there to bind. Same line, same noise, same "reads like a
+   * diagnosis on something that is working"; the other two loops resolve every
+   * step's text before the control dispatch and so hit it on every table loop.
+   */
+  it('does not warn about the item a For each header is there to bind', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const inst = await instance(FOR_EACH, { accounts: '["Everyday"]' }, 'for-each-quiet.md');
+      await runTest(
+        // No `expansion`, so no controls: every line runs as an ordinary step.
+        { ...inst, test: { ...inst.test, expansion: undefined } },
+        makeConfig(),
+        '',
+      );
+      const warnings = warn.mock.calls.map((c) => String(c[0]));
+      expect(warnings).not.toContain('Unresolved placeholder: {{account}}');
+      // The control: the LIST is a genuine reference, and if it were missing
+      // it would still be warned about. Only the item is exempt.
+      expect(warnings).not.toContain('Unresolved placeholder: {{accounts}}');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+/**
+ * A row that omits a property must not inherit the previous row's value
+ * (docs/specs/SPEC-structured-table-reads.md §8.2, §8.3).
+ *
+ * All three run loops wrote a pass's bindings with `Object.assign`, which
+ * cannot delete. Over rows of different shapes that left the last row's
+ * `{{row.note}}` in the map, so pass 2 substituted pass 1's note — and §8.3's
+ * refusal, whose whole job is to say `{{row.note}} has no value in For each
+ * item 2`, could not fire, because the key was there.
+ */
+describe('a For each pass does not inherit the last row', () => {
+  const ROWS_BODY = [
+    '# Rows',
+    '',
+    '## Steps',
+    '1. Open the orders page',
+    '2. For each {{row}} in {{rows}}, Check the row',
+    '3. Sign out',
+    '',
+    '### Check the row',
+    '1. Verify the note says "{{row.note}}"',
+    '',
+  ].join('\n');
+
+  it('refuses the second pass when the row has no such property', async () => {
+    const inst = await instance(
+      ROWS_BODY,
+      { rows: '[{"_row":"1","id":"A","note":"first"},{"_row":"2","id":"B"}]' },
+      'rows-missing-property.md',
+    );
+    const report = await runTest(inst, makeConfig(), '');
+
+    expect(report.status).toBe('failed');
+    const failed = report.steps.find((s) => s.status === 'failed')!;
+    expect(failed.error).toBe(
+      '{{row.note}} has no value in For each item 2; available properties are _row, id',
+    );
+    // Pass 1 ran on its own row and nothing leaked forward into pass 2.
+    const executed = executeStepMock.mock.calls.map((c) => String(c[2]));
+    expect(executed).toContain('Verify the note says "first"');
+    expect(executed.filter((s) => s.includes('first'))).toHaveLength(1);
+  });
+
+  it('does not answer a second loop from the first loop"s last row', async () => {
+    // No debugger and no odd row needed: two `For each` loops sharing an item
+    // name, the second over a list of plain strings. Nothing a scalar pass
+    // writes is called `row.id`, so `{{row.id}}` held `A` for every pass of
+    // the second loop.
+    const TWO_LOOPS = [
+      '# Two loops',
+      '',
+      '## Steps',
+      '1. For each {{row}} in {{records}}, Check the record',
+      '2. For each {{row}} in {{names}}, Check the name',
+      '',
+      '### Check the record',
+      '1. Verify the id is "{{row.id}}"',
+      '',
+      '### Check the name',
+      '1. Verify the name is "{{row.id}}"',
+      '',
+    ].join('\n');
+
+    const inst = await instance(
+      TWO_LOOPS,
+      { records: '[{"id":"A"}]', names: '["Everyday"]' },
+      'two-loops-same-item.md',
+    );
+    const report = await runTest(inst, makeConfig(), '');
+
+    expect(report.status).toBe('failed');
+    const failed = report.steps.find((s) => s.status === 'failed')!;
+    expect(failed.error).toBe(
+      '{{row.id}} has no value in For each item 1; {{row}} holds no properties — it is not an object',
+    );
+  });
 });
 
 // ─── Aborts ─────────────────────────────────────────────────────────────────

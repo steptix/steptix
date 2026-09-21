@@ -56,6 +56,7 @@ import {
 } from '../../runner/control-flow.js';
 import { dottedReferenceError } from '../../runner/placeholder-substitution.js';
 import {
+  applyPassBindings,
   eachSkipped,
   evaluateGuard,
   guardHistoryLines,
@@ -762,6 +763,12 @@ export class UIRunnerAdapter {
           index: i,
           state: controlState,
           resolvedParameters: this.resolvedParameters,
+          // A locally decided condition's reasoning is built from the
+          // SUBSTITUTED text, so it can carry a secret the judge's reasoning
+          // never could. Masked on the same terms as every other string this
+          // runner emits.
+          redact: (text) =>
+            redact(text, runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData })),
           executorOptions: {
             page: this.page,
             config: this.config,
@@ -783,7 +790,10 @@ export class UIRunnerAdapter {
           plan.pass && isLoopRecord(controlRecord)
             ? loops.beginPass(i, controlRecord, plan.pass)
             : undefined;
-        if (plan.pass?.bindings) Object.assign(this.resolvedParameters, plan.pass.bindings);
+        // `applyPassBindings`, not `Object.assign`: a row that omits a property
+        // the last row had must not inherit its value, and this runner's
+        // jump-to-step can restart a body mid-loop (control-runtime.ts).
+        if (plan.pass?.bindings) applyPassBindings(this.resolvedParameters, plan.pass.bindings);
         if (plan.loopEnded) loops.endLoop(plan.loopEnded);
 
         const rows = guardRows(controlRecord, i, evaluation);

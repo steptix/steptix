@@ -199,6 +199,7 @@ export function interpolate(
   params: Record<string, string>,
   defines?: ReadonlySet<string> | undefined,
 ): string {
+  warnMultiSegment(text);
   return text.replace(placeholderRe(), (match, key: string) => {
     if (key in params) {
       return params[key] ?? match;
@@ -206,6 +207,36 @@ export function interpolate(
     if (!defines?.has(key)) logger.warn(`Unresolved placeholder: {{${key}}}`);
     return match;
   });
+}
+
+/** `{{a.b.c}}` — a root and TWO or more property segments, which is one more
+ *  than the grammar has. */
+const MULTI_SEGMENT_RE = /\{\{\s*(\w+(?:\.[A-Za-z_][A-Za-z0-9_]*){2,})\s*\}\}/g;
+
+/**
+ * Say something about `{{order.address.city}}`.
+ *
+ * It matches neither grammar, so it is neither substituted nor warned about as
+ * unresolved — it is simply left in the step text, and reaches the model as
+ * six literal braces. That is the quietest possible failure for what is
+ * obviously an attempt at a reference: the author reads a step that did not
+ * work and nothing anywhere says why.
+ *
+ * One property segment is the v1 rule
+ * (docs/specs/SPEC-structured-table-reads.md §8.2), so the warning names the
+ * rule rather than the typo. Once per distinct name per call: the same
+ * reference twice in one line is one mistake.
+ */
+function warnMultiSegment(text: string): void {
+  if (!text.includes('{{')) return;
+  let seen: Set<string> | undefined;
+  for (const m of text.matchAll(MULTI_SEGMENT_RE)) {
+    const name = m[1]!;
+    seen ??= new Set();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    logger.warn(`{{${name}}} is not a placeholder: only one property segment is supported`);
+  }
 }
 
 /** Load a data file and return an array of parameter rows */

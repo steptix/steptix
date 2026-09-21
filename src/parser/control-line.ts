@@ -396,6 +396,11 @@ export function parseControlLine(instruction: string): ControlLine | null {
  * A set rather than a string, because the answer is "which names", and the
  * next form that defines one (a `For each … with index {{n}}`, say) should
  * extend this rather than grow a second accessor.
+ *
+ * Every run loop that interpolates step text passes it — the CLI got it last,
+ * having shipped without it — and `tests/run-loop-contracts.test.ts` pins that
+ * they all do. A rule that lives in two loops out of three is the recurring
+ * defect in this area, not a hypothetical one.
  */
 export function controlLineDefines(instruction: string): ReadonlySet<string> | undefined {
   const line = parseControlLine(instruction);

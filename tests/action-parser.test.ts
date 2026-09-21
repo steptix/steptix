@@ -578,8 +578,28 @@ describe('parseAIResponse — readTable', () => {
   it('rejects every non-integer, out-of-range or coercible index', () => {
     for (const index of [0, -1, 1.5, '1', 101, null]) {
       expect(() => parseAIResponse(readTable({ columns: [{ index, key: 'x' }] })), String(index))
-        .toThrow(index === null ? /neither "header" nor "index"/ : /invalid "index"/);
+        .toThrow(/invalid "index"/);
     }
+  });
+
+  // "Present" means present-and-not-undefined: `null` is a value the model
+  // wrote, not a field it left out. Read as absent, `"limit": null` ran an
+  // unbounded read of a step that asked for a bounded one, `"mode": null` was
+  // a phase-2 request waved through, and `"index": null` was a column naming
+  // nothing — each of which produces a plausible wrong answer rather than a
+  // refusal. All three refuse the same way now.
+  it('rejects a null header, index, limit or mode rather than treating it as absent', () => {
+    expect(() => parseAIResponse(readTable({ columns: [{ index: null, key: 'x' }] })))
+      .toThrow(/column 1 has an invalid "index" null/);
+    expect(() => parseAIResponse(readTable({ columns: [{ header: null, key: 'x' }] })))
+      .toThrow(/column 1 has a blank "header" null/);
+    // A null beside a real one is still the self-contradiction of naming both.
+    expect(() => parseAIResponse(readTable({ columns: [{ header: 'Status', index: null, key: 's' }] })))
+      .toThrow(/column 1 has both "header" and "index"/);
+    expect(() => parseAIResponse(readTable({ limit: null })))
+      .toThrow(/has an invalid "limit" null/);
+    expect(() => parseAIResponse(readTable({ columns: [{ header: 'A', key: 'a', mode: null }] })))
+      .toThrow(/uses mode null/);
   });
 
   it('rejects an invalid, dangerous, duplicated or reserved key', () => {

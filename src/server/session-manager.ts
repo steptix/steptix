@@ -51,6 +51,7 @@ import {
 } from '../runner/control-flow.js';
 import { dottedReferenceError } from '../runner/placeholder-substitution.js';
 import {
+  applyPassBindings,
   evaluateGuard,
   guardHistoryLines,
   guardResult,
@@ -5079,6 +5080,12 @@ export class SessionManager {
               index: i,
               state: controlState,
               resolvedParameters,
+              // A locally decided condition's reasoning carries VALUES — it is
+              // built from the substituted text — and goes out on `step:pass`
+              // as `output` as well as into the run log. `secretsNow` rather
+              // than the parameter map alone, because a looped section's row
+              // arrives as frame inputs.
+              redact: (text) => redact(text, secretsNow()),
               executorOptions: {
                 page: session.browserSession.pageTracker.getActive(),
                 config: runConfig,
@@ -5129,7 +5136,10 @@ export class SessionManager {
               // Into the live map, which is what makes `{{account}}` resolve in
               // the body. It keeps its last value after the loop — there is one
               // map, and the story says so rather than pretending otherwise.
-              Object.assign(resolvedParameters, plan.pass.bindings);
+              // `applyPassBindings` clears the last pass's dotted keys first,
+              // so a row that omits a property does not inherit the previous
+              // row's (control-runtime.ts).
+              applyPassBindings(resolvedParameters, plan.pass.bindings);
             }
           }
           // The loop ended: every `(n/?)` marker it issued becomes `(n/count)`,

@@ -380,9 +380,15 @@ in `fixtures/test-app/documents.html`, and a `colspan="4"` “Loading…” row 
 `delegates.html` — and the first draft's merged-cell rule (§7.4) would have
 failed both reads with “merged cells are not supported”. The rule is:
 
-- A body row whose only cell spans the whole width of the table (its
-  `colspan` equals the header's column count, or the table has no header and
-  the row has exactly one cell) is a **placeholder row**, not data.
+- A body row whose only cell spans the whole width of a table that is
+  **more than one column wide** is a **placeholder row**, not data: one cell
+  with a `colspan` at least the table's width (`colspan="99"` on a
+  three-column table is the common "span all" idiom and counts). The width
+  is the header row's cell count, or, with no header, the widest body row's.
+  A one-column table therefore never has placeholder rows — review found
+  that the first wording ("colspan equals the header's column count") was
+  true of every ordinary cell in a one-column table, so such a table read
+  as `[]` and a loop over it ran zero passes, green.
 - If every body row is a placeholder, the table is empty: store `[]`.
 - If placeholders sit among data rows, skip them. They do not get a `_row`
   number; `_row` counts data rows only.
@@ -425,10 +431,12 @@ through a tool, since tool parameters already accept arrays:
 `[tool: sum_column rows="{{payments}}" column="amount" out.sum="amount_sum"]`.
 
 Do not reach for `Assert that {{accounts}} contains "Term Deposit"` in the
-meantime. It reads as deterministic and is not: the substituted step is a
-long JSON literal, the model must classify it as a self-contained predicate,
-and in the phase-1 acceptance runs gpt-5.6-luna did so about half the time
-and otherwise emitted a DOM assertion with no expectation, which fails. The
+meantime — nor `equals`, `does not contain`, or any other predicate over
+the captured JSON. It reads as deterministic and is not: the substituted
+step is a long JSON literal, the model must classify it as a self-contained
+predicate, and in the phase-1 acceptance runs gpt-5.6-luna did so about
+half the time and otherwise emitted a DOM assertion with no expectation,
+which fails. The
 acceptance tests prove the same facts by looping over the records and
 checking each against the page, and pin the exact record lists in
 `tests/read-table.test.ts`. A deterministic `contains` over a captured list
@@ -866,8 +874,18 @@ A header row is required only when some requested column names a header. V1
 accepts exactly one direct header row belonging to the selected table:
 
 - normally one `<thead><tr>…</tr></thead>`;
-- if there is no `<thead>`, the first direct table row containing `<th>` cells
-  may be used;
+- if there is no `<thead>`, the first body row that contains at least one
+  `<th>`, has no cell with `scope="row"`, and is not a single cell spanning
+  more than one column is the header row. That admits the common
+  `<tr><td></td><th>Order ID</th><th>Status</th></tr>` (a checkbox cell
+  beside headings) and a one-column `<tr><th>Order ID</th></tr>`, and keeps
+  out a `<th scope="row">` row (§10, that row's own heading) and a lone
+  full-width group `<th>` (§4.8). Review found the first wording ("the first
+  row containing `<th>` cells") could not be applied literally without
+  taking a row-header row as the header, and an implementation that
+  required *every* cell to be a `<th>` missed the checkbox case — with
+  positional columns the header text then became record 1 and every `_row`
+  was off by one;
 - nested-table rows/cells are excluded by requiring `closest('table')` to be
   the selected table.
 
@@ -889,9 +907,12 @@ For each direct header cell:
 3. normalize by trimming, collapsing whitespace, and case-folding;
 4. match each requested header by normalized exact equality, never substring.
 
-Every requested header must match exactly one column. A missing header or a
-duplicate matching header fails the action and lists the available non-empty
-headers.
+Every requested header must match exactly one column. A missing header fails
+the action and lists the available non-empty headers; a header that matches
+more than one column fails it and lists the matching positions, so the
+author can name the one they mean by position (§10 said this; an earlier
+sentence here said "lists the available headers" for both — the positions
+are what the author needs).
 
 Blank selection-column headers are valid and ignored unless somehow requested.
 
@@ -903,10 +924,18 @@ must include a header styled that way.
 
 ### 7.4 Row mapping
 
-- Read direct rows from all direct `<tbody>` elements belonging to the table.
+- Read direct rows from all direct `<tbody>` elements belonging to the
+  table, and rows placed directly under `<table>` — HTML source always gets a
+  `<tbody>` from the parser, but `table.appendChild(tr)` does not, and a
+  scan of `tBodies` alone read such a table as `[]`, green.
 - Exclude `<thead>` and `<tfoot>` rows.
 - Exclude rows which are not visible at capture time (`display:none`,
-  `visibility:hidden`, hidden/collapsed ancestors, or no rendered client rect).
+  `visibility:hidden`, hidden/collapsed ancestors, or no rendered client
+  rect) — with one exception: a row or cell whose computed `display` is
+  `contents` has no box of its own and is rendered if its content is. That
+  is the standard idiom for laying a semantic `<table>` out with CSS grid
+  (`tr { display: contents }`), and a client-rect test alone dropped every
+  row of one, so the read stored `[]` and succeeded.
 - Exclude nested-table rows.
 - Preserve DOM order.
 - Drop placeholder rows (§4.8): a row whose only cell spans the table's full
@@ -942,7 +971,8 @@ phase rather than silently storing `""`.
 
 ### 7.5 Limits and atomicity
 
-- Maximum requested columns: 20.
+- Maximum requested columns: 20 — enforced in the parser and again in the
+  shared extractor, since §9.2 needs both paths to validate identically.
 - Maximum output rows: 500. Consequently, `limit` must be between 1 and 500.
 - With no `limit`, if the table has more than 500 visible rows, fail. Unlike the
   existing flat plural read, do not silently truncate structured records: a
@@ -984,7 +1014,14 @@ Do not write every captured cell to the normal console/run log. Existing
 variable/report surfaces may show captured variables, but their secret masking
 must recursively inspect record keys: values under keys matching the existing
 password/secret/token/key rule must be masked even though the root variable is
-named `orders`.
+named `orders`. Two limits on that, both from review: a record value shorter
+than four characters is never added to the mask set — a `token` column
+holding `-` and `7` once turned every dash and seven in every output into
+`***`, including the DOM snapshot the model plans from — and for record
+columns the name rule matches whole words (`api_key`, `token`), not
+substrings (`keyword`, `sort_key`). The scan must not depend on the JSON's
+formatting (a tool may pretty-print), and its result is memoised per value
+so `secretsNow()` does not re-parse a 500-row capture on every call.
 
 The action is observational and must not trigger post-action page settling.
 
@@ -1087,6 +1124,19 @@ As with the current scalar item binding, values from the last completed pass
 remain in the one live variable map after the loop. This includes dotted
 bindings. Do not introduce snapshot/restore semantics only for objects.
 
+But a pass binds its root **fresh**: before a pass's bindings are applied,
+every existing `root.<property>` key for that root is removed, in all three
+run loops through one shared helper. Review found that without this a pass
+whose record lacked a property read the previous pass's value for it —
+`{{row.note}}` on row 2 said `first` — and the §8.3 refusal could never
+fire; the same leak crossed two loops that shared an item name, or a loop
+over records followed by one over strings. Lingering *after* a loop is
+licensed; one pass reading another's field is not. The `For each` cursor
+carries the records' properties through every rebuild, including the
+Electron debugger's jump-to-step (`planForStart`), which review found
+dropped them — after a jump no pass bound any property again and, with the
+leak above, every remaining pass ran on the pre-jump row.
+
 ### 8.3 Placeholder grammar
 
 Extend runtime references from:
@@ -1139,15 +1189,25 @@ Do not pass the literal braces to the model. Existing unresolved flat-name
 compatibility is outside this feature and remains unchanged.
 
 **Empty values.** An empty cell is stored as `""` (§7.4), and a binding of
-`""` substitutes to nothing. In a condition that is invisible: `If
-{{payment.reference}} is empty, then …` reaches the judge as `If  is empty,
-then …`. Authors quote a placeholder that can be empty — `If
-"{{payment.reference}}" is empty` reads as `If "" is empty` — and the
-handbook says so beside the first dotted example. Whether the runtime should
-instead render an empty binding as `""` when the placeholder stands alone
-between spaces is an open question (§14); v1 does not, because a `Type
-{{payment.reference}} into the field` that typed two quote marks would be
-worse than a condition that reads oddly.
+`""` substitutes to nothing. Where that matters is a *step* whose check is
+entirely between values: the model is shown the authored line with a values
+block, classifies it as a self-contained predicate, and copies the condition
+into the check *as written*, placeholders included; the framework then
+substitutes just before the check is generated, and `Verify that
+{{payment.reference}} is empty` becomes `is empty` — a comparison with
+nothing on its left, and not the question you asked. Authors quote a
+placeholder that can be empty in a `Verify` or `Assert` line — `Verify that
+"{{payment.reference}}" is empty` becomes `"" is empty` — and the handbook
+says so beside the first dotted example. A *condition* is different, and an earlier
+version of this paragraph got it wrong: the judge is never shown a
+substituted condition at all (it receives the authored line and a values
+block), and under §8.3a a condition on captured values is decided by the
+runtime, which quotes substituted values itself, so `If
+{{payment.reference}} is empty` is decided correctly quoted or not. Whether
+the runtime should also render an empty binding as `""` in a step is an
+open question (§14); v1 does not, because a `Type {{payment.reference}}
+into the field` that typed two quote marks would be worse than a check that
+reads oddly.
 
 Two things the acceptance runs found on the same theme, both fixed in
 phase 1. The assert parser rejected `"expected": ""` as a *missing* field,
@@ -1173,13 +1233,33 @@ empty"* — it went to the page for a fact that was in the text, found a
 different row, and sent the loop down the wrong branch. The same shape had
 been judged right fourteen times before that.
 
-So the runtime decides such conditions itself. After placeholder
-substitution, a condition whose whole text matches the literal grammar
-below is decided locally, with no model call, and its guard row carries the
-reasoning `decided from the values: "" is empty → true` in place of the
-judge's sentence; anything else goes to the judge exactly as before. A value
-is a double-quoted string or a bare number; comparisons are exact after
-trimming, and numeric when both sides are plain numbers.
+So the runtime decides such conditions itself. A condition is a candidate
+only if the **authored** line contains at least one `{{…}}` or `${…}`
+reference — a condition with no placeholder, `If "Welcome back" is empty`,
+is about the page however literal it looks, and goes to the judge (review
+found the first cut deciding it from its own text, so a `Repeat … until
+"Load more" is empty` ran to its cap). Each bound reference is substituted
+as a **quoted** literal unless the author already put it in quotes, so `If
+{{payment.status}} is "Paused"` becomes `"Overdue" is "Paused"` and `If
+"{{line.debit}}" is empty` becomes `"" is empty` — both decided locally
+(the first cut accepted only the quoted spelling, so the feature's own
+examples still paid a judge call per pass). A value that itself contains a
+double quote cannot be spelled as a literal — the grammar has no escape
+syntax, on purpose, so that nothing widens what an *authored* condition
+parses as — and a condition holding one goes to the judge as before. The
+bindings are applied by one shared helper in `control-runtime.ts`, the
+impure half the three loops already share.
+If the whole substituted text then matches the grammar below it is decided
+with no model call, and its guard row carries the reasoning `decided from
+the values: "Overdue" is "Paused" → false` in place of the judge's sentence,
+with secret values redacted before it reaches the log or the wire; anything
+else goes to the judge exactly as before. A value is a double-quoted string
+or a bare number. The equality family (`is`, `equals`, `is not`, `does not
+equal`, `is different from`) compares strings **exactly** — `"0012" is "12"`
+is false, because zero-padded ids and money strings are what a table read
+yields and review found numeric coercion calling them equal — and only the
+ordering family is numeric, and only when both sides are plain numbers;
+otherwise the ordering goes to the judge.
 
 ```text
 <v> is empty | is blank | is not empty | is not blank
@@ -1308,7 +1388,11 @@ root or a literal value that can be inlined into generated source.
 | `<tfoot>` totals row | Excluded. |
 | Row-header `<th scope="row">` in body | Counts as that row's cell at its logical position. |
 | `rowspan`/`colspan` > 1 in a selected row | Fail as unsupported in v1, unless the row is a placeholder (below). |
-| Placeholder row: one cell spanning the full width | Not data. Alone in the body: store `[]`. Among data rows: skipped, no `_row` consumed. Logged as “N placeholder row(s) skipped”. |
+| Placeholder row: one cell spanning the full width of a table wider than one column (`colspan` ≥ width) | Not data. Alone in the body: store `[]`. Among data rows: skipped, no `_row` consumed. Logged as “N placeholder row(s) skipped”. |
+| One-column table, with or without a header | Every body row is data; there are no placeholder rows. |
+| Header row mixing `<td>` and `<th>` (checkbox cell beside headings), no `<thead>` | The header row (§7.3); never record 1. |
+| CSS-grid table (`tr`/`td` with `display: contents`) | Reads normally: a `display:contents` row or cell is rendered if its content is. |
+| Rows appended directly under `<table>` (no `<tbody>`) | Read as body rows. |
 | “Loading…” row | A placeholder; the read stores `[]` truthfully. Waiting is the author's step, before the read. |
 | A `colspan` narrower than the table | Still the §5.3 error. |
 | No header row, columns named by header | Fail with the §5.4 message: name columns by position. |
@@ -1449,6 +1533,24 @@ The implementing agent should inspect and update at least these areas:
 20. Secret-named record properties are masked on every presentation surface.
 21. Generated code uses the shared table helper, compiles, and replays against
     reordered columns with zero AI calls.
+21a. From the first review round, each a mutation the suite did not catch:
+    a one-column table (with and without a header) reads all its rows; a
+    `<td>`+`<th>` header row is the header and never record 1; a
+    `display:contents` grid table and a `display:contents` cell read
+    normally; rows appended directly under `<table>` are read; a
+    `colspan="99"` message row is a placeholder; a `token` column holding
+    `-` and `7` adds nothing to the mask set, and `keyword`/`sort_key`
+    columns are not secret while `api_key` is; the step executor stores the
+    records under `as` and a mutation stripping `_row` fails; the §7.6
+    summary formatter's four shapes; `"0012" is "12"` is decided false and
+    `"5" is at least 10` numerically; `If {{x}} is "a"` is decided locally
+    and `If "Welcome back" is empty` is judged; a pass lacking a property
+    is refused rather than reading the previous pass's, in all three loops,
+    and across two loops sharing an item name; a jump-to-step keeps the
+    records' properties; the extractor's page callback runs under `tsx`
+    (esbuild `keepNames`) as well as `tsc`; the `For each` header warns as
+    unresolved in none of the loops; `{{a.b.c}}` warns instead of staying
+    silent.
 22. (Phase 2) Each §7.7 form passes and fails on a fixed record list, the
     failure names the offending rows, and the number parser accepts `$1,234.56`,
     `+42`, `−$87.40` (U+2212) and `(87.40)` and rejects `n/a` by naming the row.

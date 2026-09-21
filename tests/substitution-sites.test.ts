@@ -50,7 +50,7 @@ import path from 'node:path';
  * found).
  */
 const SUBSTITUTION_CALL =
-  /\b(interpolate|interpolateQuiet|interpolateEnvData|interpolateEnvDataDeep|substituteText|substituteAction|resolveStepText)\s*\(/g;
+  /\b(interpolate|interpolateQuiet|interpolateEnvData|interpolateEnvDataDeep|substituteText|substituteAsLiterals|substituteAction|resolveStepText)\s*\(/g;
 
 /**
  * Why each call site is safe. The classification is the load-bearing part —
@@ -86,8 +86,15 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   // splits the condition off the line and the TAIL is the step, so nothing
   // here is ever handed to `parseSetStep`. The substituted text is used twice
   // and neither is an instruction: to evaluate, and as the report sentence
-  // `decided from the values: "" is empty → true` (masked by `redactDeep`
-  // like every other report string).
+  // `decided from the values: "" is empty → true`.
+  //
+  // `substituteAsLiterals`, not `substituteText`: the grammar reads VALUES,
+  // so a reference the author did not already wrap in quotes is substituted
+  // as a quoted literal (`{{payment.status}} is "Paused"` →
+  // `"Overdue" is "Paused"`). That form is also what the report sentence
+  // shows, and it is masked HERE with the run's secrets before it is written,
+  // rather than relying on `redactReport` — the judge path never carried a
+  // value in its reasoning, so nothing downstream was built expecting one.
   'src/runner/control-runtime.ts': { why: 'not-step-text', calls: 1 },
   // Several, and deliberately one label: a validate-only main-flow pass, the
   // hook preserve, the guarded skill-body and skill-section passes, and value
@@ -95,7 +102,9 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   // makes adding an eighth trip this test.
   'src/parser/markdown.ts': { why: 'step-text/guarded', calls: 8 },
   'src/parser/parameters.ts': { why: 'definition', calls: 1 },
-  'src/runner/placeholder-substitution.ts': { why: 'definition', calls: 5 },
+  // Six: `substituteText`, `substituteAction` and `substituteAsLiterals`
+  // themselves, and the calls the last three make on the first two.
+  'src/runner/placeholder-substitution.ts': { why: 'definition', calls: 6 },
   'src/runner/step-executor.ts': { why: 'not-step-text', calls: 2 },
   'src/runner/test-runner.ts': { why: 'step-text/authored', calls: 3 },
   'src/server/errand-runner.ts': { why: 'step-text/authored', calls: 2 },

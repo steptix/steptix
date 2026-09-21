@@ -530,6 +530,14 @@ Respond with ONLY this JSON:
       ? 'The assertion may reference either the page DOM or prior API responses. If referencing API data, embed the relevant value as a literal in the code rather than fetching at runtime.'
       : 'The assertion is evaluated against the current page DOM.';
 
+  // An EMPTY expected is a value, not a missing field: `Verify the Reference
+  // cell is empty` sends `expected: ""`, and rendering it bare left
+  // `- Expected:` with nothing after it — indistinguishable from "(not
+  // provided)" to the model that has to write the comparison. Show the two
+  // quote marks (SPEC-structured-table-reads.md's emptiness findings).
+  const expectedLine =
+    assertExpected === undefined ? '(not provided)' : assertExpected === '' ? '""' : assertExpected;
+
   const textContent = `${testInfoBlock}Write a self-executing JavaScript function that evaluates the following assertion.
 
 ${contextNote}
@@ -537,7 +545,7 @@ ${contextNote}
 ## Assertion
 - Description: ${assertDescription}
 - Condition: ${assertCondition}
-- Expected: ${assertExpected ?? '(not provided)'}
+- Expected: ${expectedLine}
 ${domSection}${apiSection}
 
 Requirements for the code:

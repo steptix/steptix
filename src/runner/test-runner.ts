@@ -28,6 +28,7 @@ import {
 } from './control-flow.js';
 import { dottedReferenceError } from './placeholder-substitution.js';
 import {
+  applyPassBindings,
   evaluateGuard,
   guardHistoryLines,
   guardResult,
@@ -41,6 +42,7 @@ import {
 import { resolveHooks, type ResolvedHooks } from './hooks.js';
 import { runInteractiveRepl } from './interactive-repl.js';
 import { loadContextFiles } from '../context/loader.js';
+import { controlLineDefines } from '../parser/control-line.js';
 import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
 import {
@@ -1107,6 +1109,10 @@ export async function runTest(
           index: i,
           state: controlState,
           resolvedParameters,
+          // A locally decided condition's reasoning carries VALUES — the
+          // judge's never did — so it is masked with this run's secrets
+          // before it reaches the log or the report.
+          redact: (text) => redact(text, secretsNow()),
           executorOptions: {
             page: session.page,
             config,
@@ -1174,12 +1180,14 @@ export async function runTest(
         // A pass is starting: bind the item, open the band. Bindings go into
         // the live parameter map, so `{{account}}` in the body resolves — and
         // keeps its last value after the loop, which is the documented
-        // consequence of there being one map.
+        // consequence of there being one map. `applyPassBindings` rather than
+        // `Object.assign`, so a row missing a property the last row had does
+        // not silently inherit it (control-runtime.ts).
         const marker =
           plan.pass && isLoopRecord(controlRecord)
             ? loops.beginPass(i, controlRecord, plan.pass)
             : undefined;
-        if (plan.pass?.bindings) Object.assign(resolvedParameters, plan.pass.bindings);
+        if (plan.pass?.bindings) applyPassBindings(resolvedParameters, plan.pass.bindings);
         // The loop ended: every `(n/?)` marker it issued becomes `(n/count)`.
         if (plan.loopEnded) loops.endLoop(plan.loopEnded);
 
@@ -1396,11 +1404,18 @@ export async function runTest(
       const flowControlClaim = setStep ? null : parseFlowControlStep(rawInstruction);
       // Env/data first (parse-time semantics: fixed for the whole run), then
       // runtime `{{...}}` — the server's order, now the CLI's too.
+      // `controlLineDefines` is the third argument, and it is not optional in
+      // practice: a `For each {{payment}} in {{payments}}` header READS the
+      // list and WRITES the item, so without it `interpolate` logged
+      // `Unresolved placeholder: {{payment}}` on every visit to every correct
+      // table loop — noise in the one output that reads like a diagnosis.
+      // Every run loop passes it; that is the whole point of the helper.
       const instruction = setStep
         ? rawInstruction
         : interpolate(
             test.envData ? interpolateEnvData(rawInstruction, test.envData) : rawInstruction,
             resolvedParameters,
+            controlLineDefines(rawInstruction),
           );
 
       // The one log line that ignores the log level — so the one place the
