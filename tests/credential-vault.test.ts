@@ -271,12 +271,12 @@ describe('bwLaunch', () => {
   it('31. wraps a .cmd or .bat as cmd.exe /d /s /c ""<binary>" <args>", verbatim, honouring COMSPEC', () => {
     expect(bwLaunch(String.raw`C:\npm\bw.cmd`, ['status', '--raw'], env, 'win32')).toEqual({
       command: COMSPEC,
-      args: ['/d', '/s', '/c', String.raw`""C:\npm\bw.cmd" status --raw"`],
+      args: ['/d', '/v:off', '/s', '/c', String.raw`""C:\npm\bw.cmd" status --raw"`],
       verbatim: true,
     });
     expect(bwLaunch(String.raw`C:\npm\BW.BAT`, ['sync'], {}, 'win32')).toEqual({
       command: 'cmd.exe',
-      args: ['/d', '/s', '/c', String.raw`""C:\npm\BW.BAT" sync"`],
+      args: ['/d', '/v:off', '/s', '/c', String.raw`""C:\npm\BW.BAT" sync"`],
       verbatim: true,
     });
   });
@@ -285,7 +285,15 @@ describe('bwLaunch', () => {
     // %APPDATA%\npm under a profile like "C:\Users\First Last". With Node's own
     // quoting plus /s, cmd.exe stripped the quotes and split the path here.
     const spaced = String.raw`C:\Users\First Last\AppData\Roaming\npm\bw.cmd`;
-    expect(bwLaunch(spaced, ['login', '--raw'], env, 'win32').args[3]).toBe(`""${spaced}" login --raw"`);
+    expect(bwLaunch(spaced, ['login', '--raw'], env, 'win32').args[4]).toBe(`""${spaced}" login --raw"`);
+  });
+
+  it('31. refuses an argument that would stand unquoted in front of cmd.exe', () => {
+    // After /s strips the outer quotes the arguments are outside any quotes,
+    // where cmd.exe acts on & | < > ^ %. bwLaunch checks — not its callers.
+    for (const bad of ['a&b', 'x|y', '%PATH%', 'two words']) {
+      expect(() => bwLaunch(String.raw`C:\npm\bw.cmd`, ['list', bad], env, 'win32'), bad).toThrow(VaultError);
+    }
   });
 
   it('31. refuses a binary path cmd.exe would interpret even inside quotes', () => {

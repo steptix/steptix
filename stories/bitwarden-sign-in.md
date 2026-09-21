@@ -82,7 +82,11 @@ stream; the canary test could not tell an early stop from the refused
 connection (43); the recorded-PID cutoff keyed on `close`/`error`, never
 `exit`, while its comment and this story said "exit" (§4.4); a `QUIET_MS`
 comment contradicted §4.6; and §10.2 named a test file that did not exist. All
-fixed, each fix mutation-tested.
+fixed, each fix mutation-tested. CR2: **both reviewers 0 blocking —
+converged.** Taken afterwards from their notes, each with a test and a
+mutation: `/v:off` on the cmd.exe line (a `!` under registry-enabled delayed
+expansion); `bwLaunch` checking its own arguments; and a re-entry guard on
+stop(), whose `kill()` can emit `error` synchronously and so call stop again.
 
 ---
 
@@ -341,7 +345,12 @@ against a scripted fake child, with no `bw` and no dialog anywhere near it.
   `shell: true` line — `/d /s /c ""<binary>" <args>"`, passed with
   `windowsVerbatimArguments` — so `/s` strips only the outer pair and the path
   stays quoted. Inside those quotes `&|^<>` are literal; a path containing
-  `"`, `%` or a line break, which `cmd.exe` would still act on, is refused. The driver does **not** reuse `runBw` itself: `runBw` ends stdin at
+  `"`, `%` or a line break, which `cmd.exe` would still act on, is refused.
+  `/v:off` joins `/d`: delayed expansion can be switched on machine-wide in
+  the registry, `/d` does not undo it, and with it on a `!` in the path would
+  expand even inside quotes. The arguments stand OUTSIDE the quotes once `/s`
+  has stripped them, so `bwLaunch` itself refuses any argument that fails
+  `SAFE_ARG`, rather than trusting its callers to have checked. The driver does **not** reuse `runBw` itself: `runBw` ends stdin at
   once and kills after 30s (`vault.ts:163-168`, `198-199`), and fact 10 shows
   that ending stdin ends a login.
 - **Environment:** a copy of the vault's ambient environment with these names
@@ -441,6 +450,11 @@ If a stop comes before `bw` was ever identified — it hung before drawing its
 first prompt — the lookup runs then, BEFORE the spawned process is killed (a
 lookup finds children of a live parent), and the stop finishes in the
 background after the call has already settled.
+
+A stop cannot re-enter itself. When a signal fails, Node emits the child's
+`error` synchronously from inside `kill()`, and the driver's `error` handler
+calls stop — which, before the first stop had settled, would begin again, and
+again, until the stack overflowed.
 
 Accepted risk: a stop during the post-login sync (the `quiet` case below)
 interrupts `bw` while it writes its data file. If that ever left the file
@@ -712,7 +726,8 @@ character of the answer — immediately after the driver's write.
     has not settled), a stop does **not** call `killPid`. After an **`error`**
     from the child, it still does — an error is not an exit. And a stop before
     `bw` was ever identified runs the lookup first: `killPid(999)`, then the
-    spawned child.
+    spawned child. And a `kill()` that fails by emitting `error`
+    synchronously does not restart the stop: `kill()` once, `killPid` once.
 17. **No PID, no password:** `platform: 'win32'`, `findBwProcess` resolving
     `null`, then separately rejecting → each stopped at the email prompt,
     `failed`, **nothing written at all** — not the email, not the password. A
@@ -764,8 +779,9 @@ In `tests/credential-vault.test.ts` (the existing `BwRunner` seam):
     leaves B in place.
 31. `bwLaunch(binary, args, env, platform)`: on `win32` a `.cmd` or `.bat`
     binary is wrapped `cmd.exe /d /s /c ""<binary>" <args>"` with `verbatim`,
-    honouring `COMSPEC`; a path with a space stays whole inside that line; a
-    path with `%`, `"` or a line break is refused; an `.exe` is returned
+    honouring `COMSPEC`, with `/v:off`; a path with a space stays whole inside
+    that line; a path with `%`, `"` or a line break is refused, and so is an
+    argument that fails `SAFE_ARG` (`a&b`, `%PATH%`); an `.exe` is returned
     unwrapped; on `linux` nothing is wrapped. Path literals are `String.raw`:
     in a plain literal `'C:\npm\bw.cmd'` contains a newline, and a test
     comparing two equally mangled paths proves nothing.
@@ -853,15 +869,15 @@ re-ask (2); match renders across the whole buffer (2, 8); judge a trailing
 render before it is complete (3); drop the unknown-prompt stop (7); drop the
 quiet timer (10); write a late code (11); pass the email as argv (13); delete
 env names case-sensitively (14); put stderr in a result field (15); skip the
-recorded-PID kill (16, 41); kill the recorded PID after the child exited (16);
-write when no PID was found (17); drop the lookup timeout (17); treat a
+recorded-PID kill (16, 41); write when no PID was found (17); drop the lookup timeout (17); treat a
 wrapper's `'self'` as `bw` (18); kill the recorded PID after the spawned
 process's `exit` (16); treat a child `error` as an exit (16); skip the lookup
 when stopping an unidentified `bw` (16); drop the partial-escape rule (3); drop
 stdin's `'error'` listener (11); restore the old `cmd.exe` line (31, 44);
 refuse nothing in the binary path (31); make the driver stop at the email
 prompt, before the password is ever written (43 — whose `failed` alone would
-have passed); drop the
+have passed); drop stop()'s re-entry guard (16); let `bwLaunch` trust its
+callers' arguments (31); drop `/v:off` (31); drop the
 creation-time filter (33); run `vaultStatus` outside the flight (26); never
 release the flight (27); clear the key without comparing (30); retry
 `not-logged-in` without bound (24); map `quiet` straight to `unsupported-step`

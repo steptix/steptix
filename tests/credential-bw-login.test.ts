@@ -430,7 +430,7 @@ describe('what reaches the child', () => {
     const launch = h.launch();
     expect(launch).toEqual({
       command: COMSPEC,
-      args: ['/d', '/s', '/c', `""${BW_CMD}" login --raw"`],
+      args: ['/d', '/v:off', '/s', '/c', `""${BW_CMD}" login --raw"`],
       verbatim: true,
     });
     for (const part of [launch.command, ...launch.args]) {
@@ -481,7 +481,7 @@ describe('what reaches the child', () => {
     expect(JSON.stringify(h.events)).not.toContain(CANARY);
   });
 
-  it('refuses a binary path cmd.exe would interpret, before spawning anything', async () => {
+  it('13. refuses a binary path cmd.exe would interpret, before spawning anything', async () => {
     const h = drive({ binary: String.raw`C:\evil%PATH%\bw.cmd` });
     await expect(h.result).resolves.toEqual({ kind: 'failed' });
     expect(h.spawn).not.toHaveBeenCalled();
@@ -535,6 +535,27 @@ describe('stopping bw — story §4.4', () => {
     await expect(h.result).resolves.toEqual({ kind: 'timed-out' });
     await flush();
     expect(h.child.order).toEqual(['kill-pid-999', 'kill-spawned']);
+  });
+
+  it('16. a kill() that fails by emitting error SYNCHRONOUSLY does not restart the stop', async () => {
+    // Node emits the child's 'error' from inside kill() when the signal fails,
+    // and the driver's 'error' handler calls stop(). Without a re-entry guard
+    // that is stop -> kill -> error -> stop -> kill... until the stack overflows.
+    const child = new FakeChild();
+    child.kill = function (this: FakeChild): boolean {
+      this.kills += 1;
+      this.order.push('kill-spawned');
+      if (this.kills <= 50) this.emit('error', new Error('kill EPERM'));
+      return false;
+    };
+    const h = drive({}, child);
+    scriptEchoingBw(h.child);
+    h.child.prompt('Email address:');
+    await flush();
+    await vi.advanceTimersByTimeAsync(QUIET_MS);
+    await expect(h.result).resolves.toEqual({ kind: 'quiet' });
+    expect(h.child.kills).toBe(1);
+    expect(h.killPid).toHaveBeenCalledTimes(1);
   });
 
   it('17. with no PID for bw, stops at the email prompt having written NOTHING', async () => {

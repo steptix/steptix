@@ -124,9 +124,18 @@ export function bwLaunch(
   if (CMD_UNSAFE_IN_QUOTES.test(binary)) {
     throw new VaultError('unreadable', 'The Bitwarden CLI path contains characters cmd.exe would interpret.');
   }
+  // After `/s` strips the outer quotes the arguments stand outside any quotes,
+  // where cmd.exe acts on everything. Every caller passes SAFE_ARG-clean values
+  // today; this is where that stops being a promise and becomes a check.
+  if (!args.every((arg) => SAFE_ARG.test(arg))) {
+    throw new VaultError('unreadable', 'Refusing to run the vault CLI with an unexpected argument.');
+  }
   return {
     command: env['COMSPEC'] ?? 'cmd.exe',
-    args: ['/d', '/s', '/c', `""${binary}" ${args.join(' ')}"`],
+    // `/v:off`: delayed expansion can be switched on machine-wide in the
+    // registry, `/d` does not undo that, and with it on a `!` in the path
+    // would expand even inside quotes.
+    args: ['/d', '/v:off', '/s', '/c', `""${binary}" ${args.join(' ')}"`],
     verbatim: true,
   };
 }

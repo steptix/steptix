@@ -232,6 +232,8 @@ export function driveLogin(opts: DriveLoginOptions): Promise<DriverResult> {
     let identified = platform !== 'win32';
     /** Whether the PID lookup has run, so a stop does not run it a second time. */
     let lookupTried = false;
+    /** Set on entry to stop(), so a stop cannot re-enter itself. */
+    let stopping = false;
 
     let raw = ''; // all stderr so far, unprocessed escapes and all
     let consumed = 0; // index into the ANSI-stripped stderr already handled
@@ -293,7 +295,12 @@ export function driveLogin(opts: DriveLoginOptions): Promise<DriverResult> {
      * cannot. The call settles at once; the stop finishes in the background.
      */
     function stop(kind: DriverFailure): void {
-      if (settled) return;
+      // `stopping` as well as `settled`: `child.kill()` below can emit the
+      // child's 'error' SYNCHRONOUSLY when the signal fails, and the 'error'
+      // handler calls stop() — which, before `settle` has run, would start the
+      // whole stop over again, and again.
+      if (settled || stopping) return;
+      stopping = true;
       try {
         child.stdin?.end();
       } catch {
