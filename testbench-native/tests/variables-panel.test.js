@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { collectVariables, classifyCaptureSource } from "../src/webview/lib/variables-panel.js";
+import {
+  classifyCaptureSource,
+  collectVariables,
+  maskIfSecretInline,
+} from "../src/webview/lib/variables-panel.js";
 
 test("collectVariables: empty text + no values → empty list", () => {
   assert.deepEqual(collectVariables("", {}, {}), []);
@@ -262,4 +266,41 @@ test("collectVariables: a section heading does not truncate the scan", () => {
 
   const names = collectVariables(text, {}, {}).map((v) => v.name);
   assert.deepEqual(names, ["first", "second"]);
+});
+
+// ---------------------------------------------------------------------------
+// maskIfSecretInline — the panel's copy of runner-core's maskIfSecret
+// ---------------------------------------------------------------------------
+//
+// The panel and the Variables view render the same scope through two
+// implementations (the webview bundle imports nothing from runner-core), so
+// the cases below are the ones repl.test.js pins on the other side. One of
+// them showing a password the other masks is the whole bug.
+
+test("maskIfSecretInline: the secret words, as words", () => {
+  assert.equal(maskIfSecretInline("password", "hunter2"), "*******");
+  assert.equal(maskIfSecretInline("GITHUB_PASSWORD", "hunter2"), "*******");
+  assert.equal(maskIfSecretInline("api_key", "abc"), "***");
+  assert.equal(maskIfSecretInline("apiKey", "abc"), "***");
+  assert.equal(maskIfSecretInline("MACHINE_KEY", "abc"), "***");
+  assert.equal(maskIfSecretInline("privateKey", "abc"), "***");
+  assert.equal(maskIfSecretInline("payment.password", "abc"), "***");
+});
+
+test("maskIfSecretInline: the record-column words the server also masks", () => {
+  for (const name of ["passwd", "pwd", "user_otp", "credential", "api_credentials"]) {
+    assert.equal(maskIfSecretInline(name, "abc"), "***", name);
+  }
+});
+
+test("maskIfSecretInline: a word that merely contains one is not a secret", () => {
+  assert.equal(maskIfSecretInline("keyword", "search"), "search");
+  assert.equal(maskIfSecretInline("monkey", "george"), "george");
+  assert.equal(maskIfSecretInline("username", "alice"), "alice");
+  assert.equal(maskIfSecretInline("payment.payee", "Origin Energy"), "Origin Energy");
+});
+
+test("maskIfSecretInline: empty secret values say so, and long ones cap at 8", () => {
+  assert.equal(maskIfSecretInline("password", ""), "(empty)");
+  assert.equal(maskIfSecretInline("password", "a".repeat(50)), "*".repeat(8));
 });

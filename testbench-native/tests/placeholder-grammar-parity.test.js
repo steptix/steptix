@@ -58,10 +58,48 @@ function exportedStringLiteral(source, name) {
   return JSON.parse(`"${hit[1]}"`);
 }
 
+/**
+ * The value of an `export const <name> = \`…\`;` template literal, with the
+ * one interpolation the runtime uses — `${PLACEHOLDER_NAME_SOURCE}` — filled
+ * in from `names`.
+ *
+ * `PLACEHOLDER_SOURCE` is COMPOSED in parameters.ts, and recomposing it here
+ * instead of reading it would leave the composition itself unpinned: the file
+ * also exports `WIDE_PLACEHOLDER_SOURCE`, which wraps the same name source in
+ * `\\s*` on both sides, and a runtime switched to that (or to any other
+ * spelling of the braces) would still satisfy a check built from
+ * `PLACEHOLDER_NAME_SOURCE` alone. The extension would then read
+ * `{{ order.id }}` as a reference the runtime leaves literal. So the braces
+ * are read too, and a reformat that defeats this reader fails loudly.
+ */
+function exportedTemplateLiteral(source, name, names) {
+  const hit = new RegExp('export const ' + name + ' = `([^`]*)`;').exec(source);
+  assert.ok(
+    hit,
+    `could not read \`export const ${name} = \`…\`;\` out of src/parser/parameters.ts — ` +
+      'if that line was reformatted, update this reader; if the constant is no longer ' +
+      'composed from PLACEHOLDER_NAME_SOURCE, the extension mirror needs the same change',
+  );
+  // Unescape first (a template literal takes the same escapes a string does,
+  // and this one holds no `\``), then fill the interpolation.
+  const raw = JSON.parse(`"${hit[1]}"`);
+  const filled = raw.split('${PLACEHOLDER_NAME_SOURCE}').join(names);
+  assert.ok(
+    !filled.includes('${'),
+    `${name} interpolates something other than PLACEHOLDER_NAME_SOURCE (${hit[1]}) — ` +
+      'this reader only knows that one, and an unknown one could change the grammar',
+  );
+  return filled;
+}
+
 const runtimeSource = readFileSync(RUNTIME_SOURCE_FILE, 'utf8');
 const NAME_SOURCE = exportedStringLiteral(runtimeSource, 'PLACEHOLDER_NAME_SOURCE');
-/** `PLACEHOLDER_SOURCE`, composed the way parameters.ts composes it. */
-const PLACEHOLDER_SOURCE = `\\{\\{(${NAME_SOURCE})\\}\\}`;
+/** `PLACEHOLDER_SOURCE` as parameters.ts spells it — braces included. */
+const PLACEHOLDER_SOURCE = exportedTemplateLiteral(
+  runtimeSource,
+  'PLACEHOLDER_SOURCE',
+  NAME_SOURCE,
+);
 
 // ───────────────────────────────────────────────────────────────────────────
 // The literal
@@ -78,6 +116,26 @@ test('the runtime constant is still the string both suites pin', () => {
 test('the extension mirror is that literal, character for character', () => {
   assert.equal(PARAM_REF_RE.source, PLACEHOLDER_SOURCE);
   assert.equal(PARAM_REF_RE.flags, 'g');
+});
+
+test('the wide runtime source is a DIFFERENT string, and is not what is mirrored', () => {
+  // The reader above would happily compose the narrow grammar from the name
+  // source alone; this is the case that proves it is reading the braces.
+  const wide = exportedTemplateLiteral(runtimeSource, 'WIDE_PLACEHOLDER_SOURCE', NAME_SOURCE);
+  assert.notEqual(wide, PLACEHOLDER_SOURCE);
+  assert.notEqual(PARAM_REF_RE.source, wide, 'the editor must not read `{{ order.id }}`');
+});
+
+test('the exported matcher survives repeated use — matchAll leaves lastIndex alone', () => {
+  // It is a module-level `/g` regex, so `.test()`/`.exec()` on it would carry
+  // `lastIndex` between calls and answer about the previous line. Every
+  // reader goes through `matchAll`, which iterates its own clone; this is the
+  // test that says the shared object is still safe to hand round afterwards.
+  const line = '2. Verify {{order.id}} and {{order.status}}';
+  const first = paramRefAtPosition(line, line.indexOf('order.id'));
+  const second = paramRefAtPosition(line, line.indexOf('order.id'));
+  assert.deepEqual(first, second);
+  assert.equal(PARAM_REF_RE.lastIndex, 0);
 });
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -204,6 +262,54 @@ test('a line that only looks like a loop binds nothing', () => {
     '2. For each {{order}} in {{orders}}',
   ].join('\n');
   assert.deepEqual(findForEachBinding(notLoops, 'order'), []);
+});
+
+test('a loop under a #### heading is an inert step and binds nothing', () => {
+  // `classifyLines` calls it `inert-step`; TestBench's own diagnostic on that
+  // line reads "This step never runs: steps under a '####' heading are
+  // ignored". F12 landing there would be the editor contradicting itself.
+  const inert = [
+    '## Steps',
+    '1. Read the rows [store as: orders]',
+    '2. Check the order',
+    '',
+    '#### Superseded',
+    '1. For each {{order}} in {{orders}}, Check the order',
+    '',
+    '### Check the order',
+    '1. Verify {{order.id}} is shown',
+  ].join('\n');
+  assert.deepEqual(findForEachBinding(inert, 'order'), []);
+});
+
+test('a numbered line outside the Steps span is prose, and binds nothing', () => {
+  const outside = [
+    '# How this works',
+    '',
+    '1. For each {{order}} in {{orders}}, Check the order',
+    '',
+    '## Steps',
+    '1. Verify {{order.id}} is shown',
+  ].join('\n');
+  assert.deepEqual(findForEachBinding(outside, 'order'), []);
+});
+
+test('a loop in a section body still binds — that is the ordinary case', () => {
+  const nested = [
+    '## Steps',
+    '1. Read the rows [store as: orders]',
+    '2. Check them',
+    '',
+    '### Check them',
+    '1. For each {{order}} in {{orders}}, Check the order',
+    '',
+    '### Check the order',
+    '1. Verify {{order.id}} is shown',
+  ].join('\n');
+  assert.deepEqual(
+    findForEachBinding(nested, 'order').map((h) => h.line),
+    [5],
+  );
 });
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -13,9 +13,10 @@ import { maskIfSecret, type FrameInfo } from 'ai-ui-automation-runner-core';
  * runtime state, leaky abstractions and all, which is better than
  * mystery hiding.
  *
- * Secret-named entries (`password`, `token`, `apikey`, ...) are masked
- * via `maskIfSecret` from runner-core. Names that contain none of those
- * patterns show the raw value.
+ * Secret-named entries (`password`, `secret`, `token`, `key`, each as a
+ * WORD — so `api_key` and `payment.password` mask and `keyword` does not)
+ * are masked via `maskIfSecret` from runner-core, which carries the rule and
+ * the reason. Every other name shows the raw value.
  */
 export interface ScopeSource {
   /** Current scope to render, or empty when no run is in flight. */

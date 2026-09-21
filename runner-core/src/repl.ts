@@ -112,14 +112,74 @@ export function interpretReplCommand(
 }
 
 /**
+ * The words that make a variable name a secret, matched as WORDS rather than
+ * as substrings: `password`, `secret`, `token`, `key` (and `apikey`, which is
+ * one word however it is spelled), each optionally plural.
+ *
+ * The server's rule is `isSecretName` (src/parser/parameters.ts), and what it
+ * masks the client must mask too — a value the report redacts must not sit in
+ * plain sight in the Variables view or the Output banner. This used to be
+ * NARROWER than the server's in a way that leaked: bare `key` was missing, so
+ * `MACHINE_KEY` and `privateKey` rendered their values while every report
+ * redacted them.
+ *
+ * Word boundaries, not the server's plain substring, because that direction
+ * of the difference costs nothing real and over-masking is its own bug:
+ * `keyword` and `monkey` contain "key" and hold nothing secret, and a column
+ * called `keyword` rendered as `********` is a row nobody can read. The
+ * separator set is what a variable name actually uses — `_`, `-`, `.` and a
+ * camelCase hump — so `api_key`, `apiKey`, `APIKEY` and `payment.password`
+ * all mask.
+ */
+const SECRET_WORDS: ReadonlySet<string> = new Set([
+  'password',
+  'passwords',
+  'secret',
+  'secrets',
+  'token',
+  'tokens',
+  'apikey',
+  'apikeys',
+  'key',
+  'keys',
+  // The rest of the server's record-column list (`isRecordSecretKey`,
+  // src/utils/secrets.ts). A scope entry can be a record property — a
+  // `readTable` column arrives as `payment.<key>` — and the client's list must
+  // not be the shorter one: `frame:scope` carries raw values, so this render
+  // is the only thing between a column called `pwd` and the screen.
+  'passwd',
+  'pwd',
+  'otp',
+  'credential',
+  'credentials',
+]);
+
+/** The words in a variable name: split on every non-alphanumeric run and at
+ *  each camelCase hump, lower-cased. `payment.api_key` → payment, api, key. */
+function nameWords(varName: string): string[] {
+  return varName
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .filter((word) => word !== '')
+    .map((word) => word.toLowerCase());
+}
+
+/** Is `varName` a secret by {@link SECRET_WORDS}? Exported so the surfaces
+ *  that decide something other than a mask string — a hidden input, a redacted
+ *  copy — ask the one question rather than re-spelling the pattern. */
+export function isSecretVarName(varName: string): boolean {
+  return nameWords(varName).some((word) => SECRET_WORDS.has(word));
+}
+
+/**
  * Mask values stored under a "secret-looking" variable name so they don't
  * appear in the output log. Returns the original value otherwise.
  *
- * The pattern is intentionally narrow — names like `username` or `email`
- * are NOT masked because that hurts the common debugging case.
+ * Names like `username` or `email` are NOT masked: that hurts the common
+ * debugging case and neither name says secret.
  */
 export function maskIfSecret(varName: string, value: string): string {
-  if (!/password|secret|token|apikey|api_key/i.test(varName)) return value;
+  if (!isSecretVarName(varName)) return value;
   if (value.length === 0) return '(empty)';
   return '*'.repeat(Math.min(value.length, 8));
 }

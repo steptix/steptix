@@ -409,11 +409,18 @@ describe('TestBench live — table read: one pass per row, each on its own row',
     const before = new Set(reportsIn(workspaceRoot));
     const tap = startRunTap(hooks);
 
-    say('Run All on table-payments-review.md — readTable, then For each over the records');
-    void vscode.commands.executeCommand('testbench-native.runAll');
-    await waitFor('run started', () => hooks.isRunning(), 60_000);
-    await waitFor('run finished', () => hooks.isRunning() === false, 880_000);
-    tap.stop();
+    // `stop()` in a finally: a `waitFor` that times out throws, and an
+    // interval nobody cleared goes on polling `runningScope()` for the rest
+    // of the mocha process — through every later file's run, which is both
+    // noise and a hold on the extension host.
+    try {
+      say('Run All on table-payments-review.md — readTable, then For each over the records');
+      void vscode.commands.executeCommand('testbench-native.runAll');
+      await waitFor('run started', () => hooks.isRunning(), 60_000);
+      await waitFor('run finished', () => hooks.isRunning() === false, 880_000);
+    } finally {
+      tap.stop();
+    }
 
     // -------------------------------------------------------------------
     // 1. The run passed, and every main-flow line painted.
@@ -521,19 +528,45 @@ describe('TestBench live — table read: one pass per row, each on its own row',
       'payment.status',
     ];
     const scopeOrders = tap.passes.map((p) => p.keys);
-    const bandOrders = paymentBands
-      .sort((a, b) => a.index - b.index)
-      .map((b) => Object.keys(b.values).filter((k) => k.startsWith('payment.')));
+    // One entry per pass, in pass order — keyed by the band's own index so a
+    // repeated band cannot lengthen the list and change what is compared.
+    const bandOrders = bandIndices.map((index) =>
+      Object.keys(paymentBands.find((b) => b.index === index)?.values ?? {}).filter((k) =>
+        k.startsWith('payment.'),
+      ),
+    );
     say(`scope passes sampled: ${JSON.stringify(tap.passes.map((p) => ({ row: p.row, keys: p.keys })))}`);
     say(`band binding keys: ${JSON.stringify(bandOrders)}`);
 
-    const orders = scopeOrders.length > 0 ? scopeOrders : bandOrders;
-    assert.ok(
-      orders.length > 0,
-      `no surface carried the record's property bindings. Scope samples: ` +
-        `${JSON.stringify(tap.passes)}; bands: ${JSON.stringify(paymentBands.map((b) => b.values))}`,
+    // The two surfaces are asserted SEPARATELY, and neither may stand in for
+    // the other. Taking `scope || bands` let the report's own bands satisfy a
+    // check about the live scope, and every per-pass assertion below iterates
+    // `tap.passes` — so a `frame:scope` that carried no dotted binding at all
+    // sampled nothing, looped zero times, and passed.
+    assert.deepEqual(
+      bandOrders,
+      [EXPECTED_KEYS, EXPECTED_KEYS, EXPECTED_KEYS, EXPECTED_KEYS, EXPECTED_KEYS],
+      `every loop band must record the record's property bindings with _row first and the ` +
+        `columns in the order the read named them; got ${JSON.stringify(bandOrders)}`,
     );
-    for (const keys of orders) {
+
+    // The live scope, which is what the Variables view renders. Sampling is a
+    // 250 ms poll, so this asks for the four passes that RUN a body step —
+    // each of them several model calls against a real page, seconds long. The
+    // returning pass is exempt by construction: its `If … then return` is
+    // decided from the values with no model call (§8.3a), so the whole pass
+    // can open and close inside one poll interval. It is still asserted on
+    // below if it was caught.
+    const sampledRows = tap.passes.map((p) => Number(p.row));
+    const mustSample = ROWS.map((r) => r.row).filter((r) => r !== RETURNING_PASS);
+    assert.deepEqual(
+      sampledRows.filter((r) => r !== RETURNING_PASS),
+      mustSample,
+      `the Variables scope must show every pass that runs a body step ` +
+        `(${JSON.stringify(mustSample)}); sampled ${JSON.stringify(sampledRows)}. ` +
+        `An empty list means frame:scope carried no "payment._row" at all.`,
+    );
+    for (const keys of scopeOrders) {
       assert.deepEqual(
         keys,
         EXPECTED_KEYS,
@@ -543,7 +576,6 @@ describe('TestBench live — table read: one pass per row, each on its own row',
     }
     // The rows arrive in DOM order, and a poll can miss a pass but never
     // reorder one — so what was sampled must be an ascending subsequence.
-    const sampledRows = tap.passes.map((p) => Number(p.row));
     say(`rows seen in the Variables scope: ${JSON.stringify(sampledRows)}`);
     for (let i = 1; i < sampledRows.length; i++) {
       assert.ok(

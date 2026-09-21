@@ -3,6 +3,7 @@ import { strict as assert } from 'node:assert';
 import {
   INTERACTIVE_HELP,
   interpretReplCommand,
+  isSecretVarName,
   maskIfSecret,
 } from '../dist/repl.js';
 
@@ -160,4 +161,53 @@ test('maskIfSecret: passes through non-secret names', () => {
   assert.equal(maskIfSecret('username', 'alice'), 'alice');
   assert.equal(maskIfSecret('email', 'alice@example.com'), 'alice@example.com');
   assert.equal(maskIfSecret('id', '42'), '42');
+});
+
+// The client's rule and the server's `isSecretName` (src/parser/parameters.ts)
+// decide the same names: what a report redacts, the Variables view and the
+// Output banner must hide too. The regression this pins is a bare `key` — the
+// old pattern knew `apikey` and `api_key` and nothing else, so `MACHINE_KEY`
+// and `privateKey` rendered in full while every report masked them.
+test('maskIfSecret: masks a bare "key", however the name spells it', () => {
+  assert.equal(maskIfSecret('key', 'abc'), '***');
+  assert.equal(maskIfSecret('MACHINE_KEY', 'abc'), '***');
+  assert.equal(maskIfSecret('privateKey', 'abc'), '***');
+  assert.equal(maskIfSecret('keys', 'abc'), '***');
+  assert.equal(maskIfSecret('APIKEY', 'abc'), '***');
+});
+
+// …matched as WORDS, which is the one place the client is deliberately
+// tighter: over-masking is its own bug, and a column called `keyword`
+// rendered as `********` is a row nobody can read.
+test('maskIfSecret: a word that merely contains one is not a secret', () => {
+  assert.equal(maskIfSecret('keyword', 'search'), 'search');
+  assert.equal(maskIfSecret('monkey', 'george'), 'george');
+  assert.equal(maskIfSecret('tokenize', 'yes'), 'yes');
+  assert.equal(maskIfSecret('passwordless', 'yes'), 'yes');
+});
+
+// A dotted loop binding is one name with a property segment
+// (SPEC-structured-table-reads.md §8.4): the property decides, not the record
+// variable it arrived under.
+test('maskIfSecret: a dotted record property masks on its own segment', () => {
+  assert.equal(maskIfSecret('payment.password', 'hunter2'), '*******');
+  assert.equal(maskIfSecret('payment.api_key', 'abc'), '***');
+  assert.equal(maskIfSecret('payment.payee', 'Origin Energy'), 'Origin Energy');
+  assert.equal(maskIfSecret('payment._row', '3'), '3');
+});
+
+// The server masks a record COLUMN by a longer list than `isSecretName`
+// (`isRecordSecretKey`, src/utils/secrets.ts), and `frame:scope` carries raw
+// values — so the client's list must cover every word on it.
+test('maskIfSecret: the record-column words the server also treats as secret', () => {
+  for (const name of ['passwd', 'pwd', 'user_otp', 'credential', 'api_credentials']) {
+    assert.equal(maskIfSecret(name, 'abc'), '***', name);
+  }
+});
+
+test('isSecretVarName answers the same question without a mask string', () => {
+  assert.equal(isSecretVarName('api_key'), true);
+  assert.equal(isSecretVarName('payment.password'), true);
+  assert.equal(isSecretVarName('keyword'), false);
+  assert.equal(isSecretVarName('payee'), false);
 });

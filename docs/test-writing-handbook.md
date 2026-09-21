@@ -5,7 +5,7 @@ This file is meant to be pasted into the context of an AI that writes tests for
 MCP server all run the same test files). It explains how the framework reads a
 test, which phrasings map to real browser actions, and how to reuse work
 through skills and tools. Every statement was checked against the source on
-2026-09-06; the last section says where to look when the framework moves on.
+2026-09-21; the last section says where to look when the framework moves on.
 
 The companion [ai-test-authoring-guide.md](ai-test-authoring-guide.md) is the
 rule-by-rule reference with more caveats. This handbook is the mental model
@@ -423,9 +423,12 @@ Where each keyword splits its line is worth knowing before you fight it:
 - `For each` is a fixed shape: `{{item}}`, `in`, `{{list}}`, a comma, the tail.
 - `, up to N times` is read off the end of a `While` or a `Repeat` line.
 
-Conditions are written like `Verify` sentences and reach the model as you
-wrote them, placeholders intact: `the Cash checkbox is ticked`, `{{plan}} is
-"pro"`, `the Load more button is gone`, `the cart shows more than 3 items`.
+Conditions are written like `Verify` sentences: `the Cash checkbox is
+ticked`, `{{plan}} is "pro"`, `the Load more button is gone`, `the cart shows
+more than 3 items`. One that asks about the **page** reaches the model as you
+wrote it, placeholders intact, with the resolved values listed beside it. One
+that is a comparison of values a step already captured is answered by the
+framework from those values, with no model call at all (§3.8).
 
 #### A chain decides
 
@@ -862,20 +865,52 @@ the table changes nothing in the test, and a column the step did not name — th
 select-all checkbox in the first cell, the Actions button in the last — is not
 in the record at all.
 
-**Quote a placeholder that can be empty.** An empty cell is captured as an
-empty string, and an empty value substitutes to nothing, so `If
-{{payment.reference}} is empty, then …` reaches the model as `If  is empty,
-then …` — not the question you asked. Written `If "{{payment.reference}}" is
-empty` it reads as `If "" is empty`, which is. Quote it in `Verify` lines for
-the same reason.
+**Quote a placeholder that can be empty — in a step.** An empty cell is
+captured as the empty string, and the emptiness survives to somewhere it
+matters. A `Verify` or `Assert` whose comparison is entirely between values —
+nothing to read off the page — is checked as a **predicate**: the model
+copies your sentence into the check as you wrote it, placeholders included,
+and the framework substitutes them just before the check is generated. So
+`Verify that {{payment.reference}} is empty` becomes `is empty`, a comparison
+with nothing on its left, and the step fails on a check that was never the
+question you asked. Written `Verify that "{{payment.reference}}" is empty` it
+becomes `"" is empty`, which is. The two quote marks are what survive an
+empty value; they cost nothing when it is not empty, so put them round any
+captured value an assertion compares.
 
-**Aliases.** `… column as id` names the property. An alias must look like a
-variable (`[A-Za-z_][A-Za-z0-9_]*`), must be unique in the step, and cannot be
-`_row`. Omit them and the header is mechanically lowercased and
-punctuation-replaced instead — `Order ID` becomes `order_id`, `Last updated
-(UTC)` becomes `last_updated_utc` — which works and reads worse at every use.
-Name them whenever a later step uses the field. Two headers that normalise to
-the same key is a refusal, not a guess.
+A **condition** — the part of an `If`, `Else if`, `While` or `Repeat … until`
+line before its tail — usually needs no such care, because the model is not
+what answers it. A condition that carries a `{{…}}` or `${…}` reference and is
+otherwise a plain comparison (`is`, `equals`, `is not`, `is empty`, `is not
+empty`, `contains`, `starts with`, `ends with`, `is at least`, `is more
+than`…) is decided by the framework from the values: each reference is
+substituted as a quoted literal, so `If {{payment.status}} is "Overdue"` and
+`If {{payment.reference}} is empty` are answered as `"Overdue" is "Overdue"`
+and `"" is empty` — with no model call and no page involved, quoted or not.
+The guard's row in the report says `decided from the values: "" is empty →
+true` in place of a judge's sentence. Equality there compares strings
+exactly, which is what you want of the zero-padded ids and money strings a
+table read yields: `"0012" is "12"` is false. A condition with prose in it —
+`the Cash checkbox is ticked` — is about the page, and goes to the model **as
+you authored it**, placeholders intact, with the resolved values listed
+beside it (§1, §3.5).
+
+**Aliases.** `… column as id` names the property, and an alias you write is
+copied through exactly. It must look like a variable
+(`[A-Za-z_][A-Za-z0-9_]*`), must be unique in the step, and cannot be `_row`;
+the parser enforces all three and refuses the whole read otherwise.
+
+Omit the alias and the key is derived from the header instead — `Order ID`
+becomes `order_id`, `Last updated (UTC)` becomes `last_updated_utc`. That
+derivation is a rule the **model** follows (trim, lower-case, replace each run
+of non-letters/digits with `_`), not a function the framework runs over the
+header text, so treat it as a reliable convention rather than a guarantee:
+what the parser guarantees is that every column arrives with a key, that no
+two columns share one, and that a step whose two headers would collide is
+refused rather than resolved. Name the alias yourself whenever a later step
+uses the field — it is shorter, it reads better at every use, and it is the
+spelling you can be certain of. A positional column has no header to derive
+anything from, so there the alias is required.
 
 **Columns by position.** A table with no header row has nothing for a header
 name to match, so name the position and supply the alias yourself:
@@ -884,11 +919,13 @@ name to match, so name the position and supply the alias yourself:
 1. Read the 1st column as payee, the 3rd column as amount and the 5th column as status from every row in the Scheduled payments table [store as: payments]
 ```
 
-"1st", "first", "column 1" and "the second column" all mean position. Header
-and position can be mixed in one step, but each column is one or the other,
-and a header name against a headerless table fails with a message telling you
-to switch. Where a table *does* have a header, use it: a header survives a
-reordering and a position does not.
+"1st", "first", "column 1", "column 3" and "the second column" are the
+spellings the model is told to read as a position; any of them, plus your own
+alias, names a column without a header. Header and position can be mixed in
+one step, but each column is one or the other, and a header name against a
+headerless table fails with a message telling you to switch. Where a table
+*does* have a header, use it: a header survives a reordering and a position
+does not.
 
 **`{{item._row}}`, the row number.** Every record carries `_row` without being
 asked, the one-based position of its row among the table's data rows at the
@@ -923,13 +960,15 @@ deletes or moves rows, every row below the change has a different number from
 that pass on — so for a table you change as you go, re-find by a value, or use
 `Repeat … until` so each pass reads the page as it is now.
 
-One word, two counts, and they can differ. `_row` counts **data rows** — hidden
-rows and full-width message rows excluded — while "row 3" written in prose is
-whatever the model counts in the page, usually the third `<tr>`. On a plain
-table they agree. On a table with a group heading row before each block they do
-not, and a body there should verify by value (`the row for
-"{{account.account}}" with balance {{account.balance}}`) rather than by row
-number.
+`_row` counts **data rows**: hidden rows and full-width message or group rows
+are excluded and consume no number. The model is told to count the same way
+when a step says "row 3", so on most tables the two agree — but one is a
+number the framework computed at read time and the other is a model reading a
+page snapshot, and on a table whose blocks are separated by group heading rows
+that is a place for them to part company. Where the shape is awkward, verify
+by value (`the row for "{{account.account}}" with balance
+{{account.balance}}`) and keep the row number for pointing at a row whose
+values are not unique.
 
 **The first N rows.** For a smoke test that opens the first few and checks they
 load, say so and let the framework bound the read:
@@ -939,11 +978,16 @@ load, say so and let the framework bound the read:
 2. For each {{order}} in {{orders}}, Click the Orders table row whose Order ID is "{{order.id}}"
 ```
 
-The bound applies to the rows currently rendered and visible, after hidden rows
-are dropped, in page order. Fewer rows than you asked for is not an error and
-not an assertion about the count — if the test needs at least ten, verify that
-on its own line first. There is no "rows 3 through 7", no last N and no "row N
-onward"; a test that wants one row by position reads them all and uses `_row`.
+The bound takes the first N of the rows the read would otherwise have
+returned — page order, after hidden rows and message rows are dropped — so a
+bounded row's `_row` is the number it would have had on an unbounded read.
+Fewer rows than you asked for is not an error and not an assertion about the
+count — if the test needs at least ten, verify that on its own line first.
+There is no "rows 3 through 7", no last N and no "row N onward"; a test that
+wants one row by position reads them all and uses `_row`. A bound is also
+what makes a ONE-column read a record read: `Read the Order ID column as id
+from the first 10 visible rows` stores records with `id` and `_row`, not a
+flat list of ten strings.
 
 **Empty tables, "No results" and "Loading…".** A table with no data rows stores
 `[]` and the loop runs zero passes; if emptiness is the failure, verify the
@@ -954,17 +998,24 @@ has a trap in it — a "Loading…" row is such a message, so a read that lands 
 one truthfully stores `[]` and the test goes wrong later, somewhere else. The
 read does not wait; you do, on the line before it (§3.1).
 
-**What is refused, loudly.** Each of these fails the step with a message naming
-the table rather than returning plausible data:
+**What is refused, loudly.** Each of these fails the step rather than
+returning plausible data. Most of the messages name the table — by its
+`aria-label`, its `<caption>`, its id, or failing all three the selector that
+matched it — and the two that cannot say `readTable requires a native
+<table> element, but "…" matched a <div>` and `readTable action … requests 24
+columns — the maximum is 20`, which are about the selector and the step:
 
 | The table | Why it is refused |
 | --- | --- |
 | A merged header or cell (`rowspan`/`colspan` > 1) | The logical grid would have to be guessed. The full-width message row above is the one exception. |
-| Two columns with the same header, or a header you named that is not there | An ambiguous or missing match is never resolved by proximity. |
-| A row with fewer cells than the columns asked for | Dropping the row or shifting the values is how misalignment happens. |
+| A `<thead>` with more than one row | Same reason, and it is usually the merged case dressed differently. v1 maps exactly one header row. |
+| Two columns with the same header, or a header you named that is not there | An ambiguous or missing match is never resolved by proximity; the message lists the headers the table does have. |
+| A selector matching more than one visible table, or none | Picking one of several would be the misalignment the action exists to prevent. Scope the selector. |
+| No cell at a column's resolved position, in a row the read returned | Dropping the row or shifting the values is how misalignment happens. Checked on the rows the read returns, so a ragged row past your first-N bound is a row nobody asked for and does not fail anything. |
 | More than 500 visible rows with no first-N bound | A silently truncated business table reads as a complete one. |
 | More than 20 columns in one step | Read what the test checks. |
 | `<div role="grid">`, ag-grid, a card list, a table that becomes cards at a phone viewport | Native `<table>` elements only. |
+| A column read as a control's state (a checkbox's tick, an input's value) | Phase 2. Refused by name rather than storing the empty string such a cell renders as. |
 
 **Not yet.** Reading a cell's *control* rather than its text — a checkbox's
 ticked state, an input's value, a select's chosen option — is a later phase,
@@ -975,6 +1026,17 @@ to $1,234.56"); until they land, a tool that takes `rows="{{payments}}"` does
 the arithmetic, and a prose assertion over a long table is the thing to be
 careful of — the page snapshot the model sees collapses repeated rows, so
 "verify every row is Completed" checks the rows it can see.
+
+And do **not** substitute the captured list into an assertion in the
+meantime. `Assert that {{payments}} contains "Origin Energy"` — and `equals`,
+`does not contain`, or any other predicate over the captured JSON — is not
+the deterministic check it looks like. It is an ordinary AI step whose text
+has had a long JSON literal pasted into it, and the model has to recognise
+that as a self-contained predicate rather than something to go and check on
+the page; in the acceptance runs it did so about half the time and otherwise
+emitted a DOM assertion with no expectation, which fails. Until a real
+`contains` over a list exists, loop over the records and check each against
+the page — which is what the shipped acceptance tests do.
 
 **Only the reads are dotted.** A property is something a record *has*, never
 something a step *writes*: `[store as: orders]` and `Set {{summary}} to "…"`
@@ -1763,7 +1825,7 @@ report's skipped steps and warnings, not just the summary.
 | `For each {{account}} in {{names}}` where `names` came from a `Set` | Capture it with a plural read | `For each` takes a JSON array, and no delimiter is guessed. |
 | Three plural reads for the ID, customer and status columns | One table read (§3.8) | Three arrays lose their alignment on one hidden row or empty cell, and the test then passes against the wrong row. |
 | `Click Approve in the row for "{{payment.payee}}"` on a table with two rows for that payee | `Click Approve in row {{payment._row}}` | A value that is not unique names two rows; the row number names one. |
-| `If {{payment.reference}} is empty, then …` | `If "{{payment.reference}}" is empty, then …` | An empty value substitutes to nothing, so the unquoted condition reaches the model with a hole in it. |
+| `Verify that {{payment.reference}} is empty` | `Verify that "{{payment.reference}}" is empty` | A value-only assertion is checked as a predicate, substituted just before the check is generated — so an empty value leaves `is empty` with nothing on its left. Conditions are exempt: the framework decides those from the values, quotes or not (§3.8). |
 | `Press Enter in the Search field` | `Type "shoes" into the Search field and press Enter` | The key press targets nothing. |
 | `[skill: sign_in]` when the skill declares `email` | `[skill: sign_in email password]` | Every declared parameter is required. |
 | `[tool: slugify s="x"]` for a named export | `[tool: strings/slugify s="x"]` | Named exports need the file prefix. |

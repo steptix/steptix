@@ -11,9 +11,11 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { resolveValueFromEnv } from 'ai-ui-automation-runner-core';
 import {
+  bodyOwnerAt,
   captureNamesBefore,
   envVarCompletions,
   inFrontmatter,
+  loopItemsInScope,
   namespaceCompletions,
   paramCompletions,
   paramContextAt,
@@ -625,4 +627,123 @@ test('a name that is both a parameter and a capture lists once, as the parameter
       ['otp', 'capture', '[input:] on line 4'],
     ],
   );
+});
+
+// ---------------------------------------------------------------------------
+// loopItemsInScope — the `{{}}` name no step writes
+// ---------------------------------------------------------------------------
+
+/** A table read, a loop over it, and a body that uses the record — the shape
+ *  §3.8 of the handbook teaches, with line numbers commented 0-based. */
+const LOOP_SCOPE = [
+  '# Review payments', //                                                  0
+  '', //                                                                   1
+  '## Steps', //                                                           2
+  '1. Read the Payee column as payee from every row [store as: payments]', //  3
+  '2. For each {{payment}} in {{payments}}, Review the payment', //         4
+  '3. Verify the table still shows 5 payments', //                          5
+  '', //                                                                   6
+  '### Review the payment', //                                             7
+  '1. Click View in row {{', //                                            8
+  '2. For each {{line}} in {{lines}}, Check the line', //                   9
+  '', //                                                                  10
+  '### Check the line', //                                                11
+  '1. Verify {{', //                                                      12
+].join('\n');
+
+test('inside a loop body the item is in scope, though no step writes it', () => {
+  assert.deepEqual(
+    loopItemsInScope(LOOP_SCOPE, 8).map((l) => [l.name, l.list, l.line]),
+    [['payment', 'payments', 5]],
+  );
+});
+
+test('a nested body sees both loops, innermost first', () => {
+  assert.deepEqual(
+    loopItemsInScope(LOOP_SCOPE, 12).map((l) => l.name),
+    ['line', 'payment'],
+  );
+});
+
+test('the header line itself binds its item, for an inline tail', () => {
+  const inline = [
+    '## Steps',
+    '1. Read the rows [store as: payments]',
+    '2. For each {{payment}} in {{payments}}, Verify {{',
+  ].join('\n');
+  assert.deepEqual(
+    loopItemsInScope(inline, 2).map((l) => l.name),
+    ['payment'],
+  );
+});
+
+test('the main flow is in no loop, and neither is an uncalled section', () => {
+  assert.deepEqual(loopItemsInScope(LOOP_SCOPE, 5), []);
+  const uncalled = [
+    '## Steps',
+    '1. Read the rows [store as: payments]',
+    '2. For each {{payment}} in {{payments}}, Review the payment',
+    '',
+    '### Never called',
+    '1. Verify {{',
+    '',
+    '### Review the payment',
+    '1. Click View',
+  ].join('\n');
+  assert.deepEqual(loopItemsInScope(uncalled, 5), []);
+});
+
+test('a For each inside a fence or under a #### heading binds nothing', () => {
+  const inert = [
+    '## Steps',
+    '1. Read the rows [store as: payments]',
+    '2. Do the thing',
+    '',
+    '#### Rejected idea',
+    '1. For each {{ghost}} in {{ghosts}}, Review the payment',
+    '',
+    '### Review the payment',
+    '1. Verify {{',
+  ].join('\n');
+  assert.deepEqual(loopItemsInScope(inert, 8), []);
+});
+
+test('the dropdown offers loop items after parameters and captures', () => {
+  const items = paramCompletions(
+    { region: 'eu' },
+    [{ name: 'payments', marker: 'as', line: 4 }],
+    [{ name: 'payment', list: 'payments', line: 5 }],
+  );
+  assert.deepEqual(
+    items.map((i) => [i.label, i.kind, i.detail]),
+    [
+      ['region', 'parameter', 'eu'],
+      ['payments', 'capture', '[as:] on line 4'],
+      ['payment', 'loop-item', 'each {{payments}} on line 5'],
+    ],
+  );
+  // Sorted into its own group, below both others.
+  assert.ok(items[2].sortText > items[1].sortText);
+});
+
+test('a loop item that is also a parameter lists once, as the parameter', () => {
+  const items = paramCompletions(
+    { payment: 'fixed' },
+    [],
+    [{ name: 'payment', list: 'payments', line: 5 }],
+  );
+  assert.deepEqual(
+    items.map((i) => [i.label, i.kind]),
+    [['payment', 'parameter']],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// bodyOwnerAt — which `### Section` body a line is in
+// ---------------------------------------------------------------------------
+
+test('bodyOwnerAt names the enclosing body, and null for the main flow', () => {
+  assert.equal(bodyOwnerAt(LOOP_SCOPE, 4), null);
+  assert.equal(bodyOwnerAt(LOOP_SCOPE, 8), 'review the payment');
+  assert.equal(bodyOwnerAt(LOOP_SCOPE, 12), 'check the line');
 });

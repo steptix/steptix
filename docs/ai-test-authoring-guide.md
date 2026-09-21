@@ -1,6 +1,6 @@
 # AI guide to writing runnable natural-language tests
 
-Use this document as context for an AI that generates tests for **ai-ui-automation** (`aiui`, also used by TestBench). It describes the implementation in this repository, checked on 2026-09-06. If the framework changes, check the source references at the end before assuming the grammar is unchanged.
+Use this document as context for an AI that generates tests for **ai-ui-automation** (`aiui`, also used by TestBench). It describes the implementation in this repository, checked on 2026-09-21. If the framework changes, check the source references at the end before assuming the grammar is unchanged.
 
 This is the rule-by-rule reference. For the mental model of how a step is executed and the phrasing that is known to work, read [test-writing-handbook.md](test-writing-handbook.md) first.
 
@@ -181,6 +181,47 @@ Placeholders reach the model as tokens, not values: the step is shown as written
 Reading link text and reading its `href` are different operations. Say which one you need. List captures are stored as JSON-encoded arrays. A read can extract a substring with a regex; describe the desired substring precisely, or use a tool for deterministic parsing. Do not rely on the AI remembering a value that was never captured.
 
 `Set {{name}} to "template"` is a deterministic string assignment with no AI call. It resolves existing placeholders, fails for unresolved references, and can store an empty string. It performs no arithmetic or expression evaluation: `"{{count}} + 1"` stores text. The authored template must be double-quoted with no embedded double quotes or trailing instruction. Use a tool for calculations and transformations.
+
+### Reading a table into row records
+
+One step may capture several columns of one HTML table as **records** — one flat object per visible data row — instead of several parallel lists. Write it as a single read naming each column and the property it becomes:
+
+```markdown
+# Review scheduled payments
+
+## Config
+- baseUrl: https://app.example.test
+
+## Steps
+1. Navigate to /payments
+2. Read the Payee column as payee, Amount column as amount, and Status column as status from every row in the Scheduled payments table [store as: payments]
+3. For each {{payment}} in {{payments}}, Review the payment
+4. Verify the Scheduled payments table still shows 5 payments
+
+### Review the payment
+1. If {{payment.status}} is "Overdue", then return
+2. Click View in row {{payment._row}} of the Scheduled payments table
+3. Verify the Payment details page shows "{{payment.payee}}" and the amount {{payment.amount}}
+4. Click Back to scheduled payments
+```
+
+Prefer this to three plural reads of the same rows. Parallel arrays lose their alignment on one hidden row, one empty cell or one selector that matched something slightly different, and the test then checks one row's id against another row's status and passes. Records are built one row at a time, so alignment is the framework's problem rather than the author's.
+
+What the capture holds and how it is addressed:
+
+- `{{payments}}` is a JSON array of objects, so `For each` accepts it directly. Inside the loop, `{{payment}}` is the whole record as JSON and `{{payment.<alias>}}` is one field.
+- Exactly **one** property segment is a reference. `{{order.id}}` and `{{order._row}}` resolve; `{{order.address.city}}` and `{{orders[0].id}}` are not references at all and reach the model as the literal text you typed. A dotted reference whose property the record does not have fails the step before any model call and lists the properties it does have.
+- Every record carries `{{item._row}}` without being asked: the one-based position of its row among the table's **data rows** at the moment of the read, with hidden rows and full-width message or group rows excluded. Use it to point at a row whose values are not unique ("two rows for Origin Energy"). It is a position, not an identity — if the body changes as you go, re-find by value instead.
+- Columns are matched by header text, so reordering the table changes nothing. A table with no header row is addressed by position instead (`the 1st column as payee`, `column 3`, `the second column`), and a positional column needs an alias because there is no header to derive one from. Header and position can be mixed in one step; a column is one or the other.
+- `Read … from the first 10 visible rows` bounds the read. A bound makes even a one-column read a record read. There is no last N, no row range and no pagination in the bound; it addresses the currently rendered rows only.
+
+Aliases are copied exactly as written and must look like variables, be unique within the step, and not be `_row`. Omitted, the key is derived from the header by the model (`Order ID` → `order_id`); name the alias yourself whenever a later step uses the field.
+
+Do not assume a table read degrades gracefully. It **fails the step**, with a message naming the table, on: a merged header or cell (`rowspan`/`colspan` > 1); a `<thead>` with more than one row; a duplicate or missing header you named; a selector matching more than one visible table or none; no cell at a resolved column position in a row the read returned; more than 500 visible rows with no bound; more than 20 columns in one step; anything that is not a native `<table>` (`<div role="grid">`, ag-grid, a card list, a table that becomes cards at a phone viewport); and a column asked for as a control's state (a checkbox's tick, an input's value), which is a later phase. An empty table is not a failure: it stores `[]` and the loop runs zero passes, so if emptiness would be a bug, assert the row count on its own line. A "Loading…" row is a full-width message row, which means it is skipped — the read does not wait, so wait on the line before it.
+
+Conditions in the body are cheap. A condition that carries a captured reference and is otherwise a plain comparison (`If {{payment.status}} is "Overdue"`, `If {{payment.reference}} is empty`) is decided by the framework from the values, with no model call: each reference is substituted as a quoted literal and compared exactly, whether or not the author quoted it. A condition with prose in it is about the page and still goes to the model. An assertion is different. A `Verify`/`Assert` comparing only values is checked as a predicate whose text the model copies as written and the framework substitutes just before generating the check, so an unquoted empty value leaves `is empty` with no left operand. Quote any captured value an assertion compares: `Verify that "{{payment.reference}}" is empty`.
+
+Whole-table assertions are not available yet. Do not write `Assert that {{payments}} contains "Origin Energy"`, or `equals`, or any other predicate over the captured JSON: that is an ordinary AI step with a long JSON literal pasted into it, and the model classifies it as a self-contained predicate only about half the time, otherwise emitting a DOM assertion with no expectation, which fails. Loop over the records and check each against the page, or pass `rows="{{payments}}"` to a tool that does the arithmetic in code.
 
 ### Three different data mechanisms
 
@@ -461,7 +502,7 @@ Rules that decide whether a line parses and what it does:
 
 - An `If` opens a chain that any number of `Else if` lines and at most one final `Otherwise` (or `Else`) may continue, on consecutive step lines. Every condition in the chain is put to the model in one call after the page settles, the first that holds wins, and every other member and every step of its tail is marked skipped. A decision is made once — a false answer is an answer, not something to wait for. With nothing holding and no `Otherwise`, the chain is skipped and the run continues.
 - `While <condition>, <tail>` asks before each pass; `Repeat <tail> until <condition>` asks after each one. Both stop at a cap: the line's own `, up to N times`, or `execution.maxLoopIterations` from `aiui.config.json` (25 by default). Reaching the cap **fails the loop line**; a cap is a bug net, not the way a loop is meant to end.
-- `For each {{item}} in {{list}}, <tail>` needs `{{list}}` to hold a JSON array, which is what a plural capture ("every", "all", "each") stores or an array-typed tool returns. A `Set` produces text, and a comma-separated string fails the line rather than being split on a guessed delimiter.
+- `For each {{item}} in {{list}}, <tail>` needs `{{list}}` to hold a JSON array, which is what a plural capture ("every", "all", "each") stores, what a table read stores as row records, or what an array-typed tool returns. A `Set` produces text, and a comma-separated string fails the line rather than being split on a guessed delimiter. Over records, the tail's body also reads `{{item.<alias>}}` and `{{item._row}}` — see "Reading a table into row records" above.
 - Splitting is positional, so reword rather than fight it: the condition of an `If` or `Else if` ends at the first ` then `, a `While` condition ends at the first comma, and a `Repeat` tail ends at the first ` until `.
 - Each evaluation costs one model call, so a three-pass `While` costs four, and a plain-instruction tail costs a further call to perform it. `If a cookie banner appears, reject it` is cheaper as a watch.
 
@@ -513,7 +554,7 @@ CDP uses persistent browser state. Configure `cdp` and an appropriate `cdpTab` (
 - The file has a title, a `## Steps` block, and one instruction per physical line.
 - Main flow appears before section definitions, and every intended section is actually called.
 - Targets and expected outcomes come from the real application or supplied requirements.
-- Every placeholder has a parameter, fixture, capture, or declared output that supplies it before use.
+- Every placeholder has a parameter, fixture, capture, loop binding, or declared output that supplies it before use, and every dotted `{{item.property}}` names a column its table read actually asked for.
 - Every referenced skill/tool exists, all required inputs are passed, and output aliases name real outputs.
 - Environment selection, relative file paths, and fixture contents are correct for the execution project.
 - Waits name observable states; assertions can fail when the requirement is violated.
@@ -532,6 +573,7 @@ Use these when extending or checking this guide. Source and tests take precedenc
 | Skill scope and invocation grammar | [expander.ts](../src/skills/expander.ts), [invocation-parser.ts](../src/parser/invocation-parser.ts) |
 | Tool signatures, lookup, and execution | [types.ts](../src/tools/types.ts), [registry.ts](../src/tools/registry.ts), [executor.ts](../src/tools/executor.ts), [finalise.ts](../src/tools/finalise.ts) |
 | Supported AI actions and interpretation | [types.ts](../src/ai/types.ts), [prompts.ts](../src/ai/prompts.ts), [step-executor.ts](../src/runner/step-executor.ts) |
+| Table reads: action validation and extraction | [action-parser.ts](../src/ai/action-parser.ts), [actions.ts](../src/browser/actions.ts), [SPEC-structured-table-reads.md](specs/SPEC-structured-table-reads.md) |
 | Watches, decisions, loops, hooks, and test execution | [step-grouper.ts](../src/runner/step-grouper.ts), [control-line.ts](../src/parser/control-line.ts), [control-flow.ts](../src/runner/control-flow.ts), [hooks.ts](../src/runner/hooks.ts), [test-runner.ts](../src/runner/test-runner.ts) |
 | MCP inputs and limitations | [schemas.ts](../src/mcp/schemas.ts), [assemble.ts](../src/mcp/assemble.ts) |
 | Defaults and application context | [defaults.ts](../src/config/defaults.ts), [loader.ts](../src/context/loader.ts) |

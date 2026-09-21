@@ -343,17 +343,8 @@ export function captureNamesBefore(
   // Which section (if any) each step line belongs to, and the body of each —
   // keyed the way `buildSectionIndex` keys them, so a call resolves to the
   // same definition the expander would pick (first definition wins).
-  const sections = extractSections(text);
+  const { sections, bodyOf, ownerOf } = sectionBodies(text, isStep);
   const index = buildSectionIndex(text);
-  const bodyOf = new Map<string, number[]>();
-  const ownerOf = new Map<number, string>();
-  for (const section of sections) {
-    const key = matchText(section.name);
-    if (key === '') continue;
-    const body = section.steps.map((s) => s.line - 1).filter(isStep);
-    if (!bodyOf.has(key)) bodyOf.set(key, body);
-    for (const line of body) if (!ownerOf.has(line)) ownerOf.set(line, key);
-  }
   const callAt = new Map<number, string>();
   for (const call of index.calls) {
     const key = matchText(call.name);
@@ -494,6 +485,63 @@ function dedupeByName(writes: CaptureName[]): CaptureName[] {
 }
 
 /**
+ * Every `### Section` body, keyed as `buildSectionIndex` keys them: the step
+ * lines each body holds, and the owning key of each of those lines. One
+ * definition of "which body is this line in", shared by the scope walk and by
+ * {@link bodyOwnerAt}, because two readings of that would be two answers to
+ * the same question.
+ *
+ * `isStep` is the caller's line filter — classification plus the fence mask —
+ * so a body never claims a line no run would execute.
+ */
+function sectionBodies(
+  text: string,
+  isStep: (line: number) => boolean,
+): {
+  sections: ReturnType<typeof extractSections>;
+  bodyOf: Map<string, number[]>;
+  ownerOf: Map<number, string>;
+} {
+  const sections = extractSections(text);
+  const bodyOf = new Map<string, number[]>();
+  const ownerOf = new Map<number, string>();
+  for (const section of sections) {
+    const key = matchText(section.name);
+    if (key === '') continue;
+    const body = section.steps.map((s) => s.line - 1).filter(isStep);
+    if (!bodyOf.has(key)) bodyOf.set(key, body);
+    for (const line of body) if (!ownerOf.has(line)) ownerOf.set(line, key);
+  }
+  return { sections, bodyOf, ownerOf };
+}
+
+/**
+ * The `### Section` body 0-based `lineIdx` sits in, keyed as the section index
+ * keys it — or null for the main flow.
+ *
+ * The same reading `captureNamesBefore` makes of the cursor's own line,
+ * exported for the callers that have to compare two lines' bodies rather than
+ * walk one: `{{order.id}}` on a body's line 2 and a `For each {{order}}` on
+ * its line 5 are in one body, and the second runs after the first. Across
+ * bodies no such comparison is possible from the text alone, which is why
+ * `findForEachBinding` filters on neither.
+ */
+export function bodyOwnerAt(
+  text: string,
+  lineIdx: number,
+  classified: ClassifiedLines = classifyLines(text),
+): string | null {
+  const lines = text.split(/\r?\n/);
+  const fenced = fenceMask(lines);
+  const isStep = (i: number): boolean => {
+    const kind = classified[i]?.kind;
+    return !fenced[i] && (kind === 'step' || kind === 'section-step');
+  };
+  const { sections, ownerOf } = sectionBodies(text, isStep);
+  return ownerOf.get(lineIdx) ?? nearestSectionAbove(lineIdx, sections, classified, fenced);
+}
+
+/**
  * The section body containing `lineIdx` when the cursor is on a blank or
  * prose line inside one (a step being typed classifies as prose until it has
  * content, so the owner map alone would miss exactly the live case).
@@ -539,13 +587,36 @@ function nearestSectionAbove(
  * not required (§8.4).
  *
  * The header grammar is runner-core's `parseControlLine`, the same reading the
- * runtime makes, so a line this walks to is a line that really loops. Fenced
- * example blocks are excluded for the reason `captureNamesBefore` excludes
- * them: a run binds nothing there.
+ * runtime makes, so a line this walks to is a line that really loops. Two
+ * further gates decide whether a matching line is one a RUN would reach:
+ *
+ *  - `classifyLines`, exactly as `captureNamesBefore` uses it: only a `step`
+ *    or a `section-step` binds anything. A numbered line under a `####`
+ *    heading classifies as `inert-step` — TestBench's own diagnostic calls it
+ *    "This step never runs" — and one outside the `## Steps` span is prose.
+ *    Resolving to either would send F12 to a line the extension elsewhere
+ *    says is dead.
+ *  - Fenced example blocks, excluded for the reason `captureNamesBefore`
+ *    excludes them: a run binds nothing there, and `classifyLines` does not
+ *    track fences.
+ *
+ * WHAT THIS DOES NOT DO is scope. Every binding in the file is returned, in
+ * file order, with no filter on position and none on reachability: a `For
+ * each` three lines BELOW the reference is in this list, and so is one in a
+ * section that never calls the section the reference sits in. That is
+ * deliberate rather than pending — a section body is DEFINED out of order
+ * (bodies sit under the main flow that calls them), so "below the reference"
+ * does not mean "after it" in general, and a position filter here would drop
+ * the ordinary case: a loop on line 3 whose body is defined on line 20.
+ * `bodyOwnerAt` is what a caller uses to ask the one question that can be
+ * answered line-locally — is this binding in the SAME body as the reference,
+ * and below it? — which is the case the definition provider reports as
+ * "written on line N, which the run reaches after this point".
  */
 export function findForEachBinding(
   text: string,
   name: string,
+  classified: ClassifiedLines = classifyLines(text),
 ): Array<{ line: number; column: number; length: number }> {
   const item = name.split('.')[0]!;
   const lines = text.split(/\r?\n/);
@@ -554,6 +625,8 @@ export function findForEachBinding(
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i] ?? '';
     if (fenced[i]) continue;
+    const kind = classified[i]?.kind;
+    if (kind !== 'step' && kind !== 'section-step') continue;
     if (!STEP_PREFIX_RE.test(raw)) continue;
     const control = parseControlLine(raw.replace(STEP_PREFIX_RE, ''));
     if (control?.kind !== 'foreach' || control.item !== item) continue;
@@ -562,6 +635,100 @@ export function findForEachBinding(
     const column = raw.indexOf(`{{${item}}}`);
     if (column === -1) continue;
     out.push({ line: i, column: column + 2, length: item.length });
+  }
+  return out;
+}
+
+/** A `For each {{item}} in {{list}}` binding that is live at some point in the
+ *  run — what the `{{` dropdown offers beside parameters and captures. */
+export interface LoopItemBinding {
+  /** The item name the header binds (`payment`), which is the completion. */
+  name: string;
+  /** The list it iterates (`payments`), for the dropdown's detail. */
+  list: string;
+  /** 1-based line of the `For each` header. */
+  line: number;
+}
+
+/**
+ * The loop items in scope at 0-based `lineIdx`, innermost loop first.
+ *
+ * A loop item is bound by the planner for the length of a pass, so it is in
+ * scope in the BODY the `For each` tail calls — and, transitively, in every
+ * body that body calls, since the binding lives in the run's variable map
+ * rather than in a lexical block. It is also in scope on the header's own
+ * line, where an inline tail (`For each {{p}} in {{ps}}, Verify {{p.payee}}`)
+ * reads it.
+ *
+ * Spec §8.4 defers PROPERTY completion after `{{order.` — the aliases come
+ * from a natural-language read step and guessing them from prose is
+ * forbidden. The item name itself is not a guess: it is written verbatim on
+ * the header this walk found, and without it the dropdown inside a loop body
+ * silently omits the one variable the body is about.
+ *
+ * Where several call sites reach a body, every one of their items is offered.
+ * That is looser than `captureNamesBefore`'s earliest-call-site reading, and
+ * deliberately so in this direction only: completion offers, and an item
+ * bound on one of two call paths is a name the author may legitimately write
+ * (the run then decides). Nothing here widens what F12 or a diagnostic will
+ * claim.
+ */
+export function loopItemsInScope(
+  text: string,
+  lineIdx: number,
+  classified: ClassifiedLines = classifyLines(text),
+): LoopItemBinding[] {
+  const lines = text.split(/\r?\n/);
+  const fenced = fenceMask(lines);
+  const isStep = (i: number): boolean => {
+    const kind = classified[i]?.kind;
+    return !fenced[i] && (kind === 'step' || kind === 'section-step');
+  };
+  const { sections, ownerOf } = sectionBodies(text, isStep);
+  const index = buildSectionIndex(text);
+  const callAt = new Map<number, string>();
+  for (const call of index.calls) {
+    const key = matchText(call.name);
+    if (index.sections.has(key)) callAt.set(call.line - 1, key);
+  }
+
+  /** The `For each` a step line IS, or null — same gates as
+   *  `findForEachBinding`, so one reading decides what loops. */
+  const foreachAt = (line: number): { item: string; list: string } | null => {
+    if (!isStep(line)) return null;
+    const raw = lines[line] ?? '';
+    if (!STEP_PREFIX_RE.test(raw)) return null;
+    const control = parseControlLine(raw.replace(STEP_PREFIX_RE, ''));
+    return control?.kind === 'foreach' ? { item: control.item, list: control.list } : null;
+  };
+
+  const out: LoopItemBinding[] = [];
+  const seen = new Set<string>();
+  const add = (line: number, hit: { item: string; list: string }): void => {
+    if (seen.has(hit.item)) return;
+    seen.add(hit.item);
+    out.push({ name: hit.item, list: hit.list, line: line + 1 });
+  };
+
+  const own = foreachAt(lineIdx);
+  if (own) add(lineIdx, own);
+
+  let owner = ownerOf.get(lineIdx) ?? nearestSectionAbove(lineIdx, sections, classified, fenced);
+  const open = new Set<string>();
+  while (owner !== null && !open.has(owner)) {
+    open.add(owner);
+    const callers = [...callAt.entries()]
+      .filter(([, key]) => key === owner)
+      .map(([line]) => line)
+      .sort((a, b) => a - b);
+    for (const line of callers) {
+      const hit = foreachAt(line);
+      if (hit) add(line, hit);
+    }
+    // Keep climbing from the first call site: a body called from another
+    // body is inside that one's loops too.
+    const above = callers.length > 0 ? (ownerOf.get(callers[0]!) ?? null) : null;
+    owner = above;
   }
   return out;
 }
@@ -730,7 +897,15 @@ function maskIfSecretName(name: string, value: string): string {
 
 export interface PlainCompletion {
   label: string;
-  kind: 'namespace' | 'env-var' | 'branch' | 'leaf' | 'env-name' | 'parameter' | 'capture';
+  kind:
+    | 'namespace'
+    | 'env-var'
+    | 'branch'
+    | 'leaf'
+    | 'env-name'
+    | 'parameter'
+    | 'capture'
+    | 'loop-item';
   /** Short right-hand text: a masked value preview, the node shape, or where
    *  a capture is written. */
   detail?: string;
@@ -872,8 +1047,9 @@ export function namespaceCompletions(opts: NamespaceOptions): PlainCompletion[] 
 
 /**
  * The `{{` dropdown: declared parameters first, then the names earlier steps
- * capture. Deduped across both — a name that is both lists once, as the
- * parameter, which is what the run resolves it to until a step overwrites it.
+ * capture, then the items of the loops enclosing this line. Deduped across all
+ * three — a name that is more than one lists once, under the source the run
+ * resolves it from first.
  *
  * `params` values arrive already `$VAR`-resolved: the caller composes `.env`
  * with `.env.<envName>` and runs runner-core's `resolveValueFromEnv`, exactly
@@ -886,10 +1062,17 @@ export function namespaceCompletions(opts: NamespaceOptions): PlainCompletion[] 
  * names the marker form and the 1-based line that writes it, derived from the
  * `CaptureName` union rather than the spelling found in the source (`[as:]`
  * covers `[store as: x]` and the prose `store it as {{x}}` alike).
+ *
+ * Loop items last, for the same reason and with the same absence of a
+ * preview: `{{payment}}` holds one record per pass, so the only static fact
+ * about it is the header that binds it. They are offered as the flat item
+ * name alone — the properties after `{{payment.` are phase 3
+ * (SPEC-structured-table-reads.md §8.4).
  */
 export function paramCompletions(
   params: Record<string, string>,
   captures: CaptureName[],
+  loops: LoopItemBinding[] = [],
 ): PlainCompletion[] {
   const out: PlainCompletion[] = [];
   const seen = new Set<string>();
@@ -917,6 +1100,18 @@ export function paramCompletions(
       kind: 'capture',
       detail: `[${capture.marker}:] on line ${capture.line}`,
       sortText: `1_${String(out.length - paramCount).padStart(4, '0')}`,
+    });
+  }
+
+  const beforeLoops = out.length;
+  for (const loop of loops) {
+    if (seen.has(loop.name)) continue;
+    seen.add(loop.name);
+    out.push({
+      label: loop.name,
+      kind: 'loop-item',
+      detail: `each {{${loop.list}}} on line ${loop.line}`,
+      sortText: `2_${String(out.length - beforeLoops).padStart(4, '0')}`,
     });
   }
 

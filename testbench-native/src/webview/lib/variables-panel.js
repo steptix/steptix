@@ -204,9 +204,28 @@ export function parseParametersInline(text) {
   return out;
 }
 
-/** Mask password/secret/token-shaped variable names. Same shape as runner-core/repl.maskIfSecret. */
+/** The secret words of runner-core/repl.js `SECRET_WORDS`, hand-copied: this
+ *  module is bundled into the webview, which imports nothing from
+ *  runner-core. Keep the two lists identical — the panel and the Variables
+ *  view render the same scope, and one of them showing a password the other
+ *  masks is the whole bug. */
+const SECRET_WORDS = new Set([
+  "password", "passwords", "secret", "secrets", "token", "tokens",
+  "apikey", "apikeys", "key", "keys",
+  "passwd", "pwd", "otp", "credential", "credentials",
+]);
+
+/** Mask password/secret/token/key-shaped variable names. Same rule and same
+ *  shape as runner-core/repl.maskIfSecret: the words above, matched as words
+ *  (every non-alphanumeric run and every camelCase hump splits), so `api_key`
+ *  and `payment.password` mask while `keyword` does not. */
 export function maskIfSecretInline(varName, value) {
-  if (!/password|secret|token|apikey|api_key/i.test(varName)) return String(value);
+  const words = String(varName)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((w) => w.toLowerCase());
+  if (!words.some((w) => SECRET_WORDS.has(w))) return String(value);
   if (!value || value.length === 0) return "(empty)";
   return "*".repeat(Math.min(String(value).length, 8));
 }

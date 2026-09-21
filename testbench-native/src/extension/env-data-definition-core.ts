@@ -34,7 +34,19 @@
  * values their map-building siblings parse.
  */
 import { parseTree, type Node } from 'jsonc-parser';
-import { scanSectionItems, scanServerEnv } from 'ai-ui-automation-runner-core';
+import { classifyLines, scanSectionItems, scanServerEnv } from 'ai-ui-automation-runner-core';
+// `.ts` specifier for the reason the sibling core states: this module is
+// loaded directly by `node --test`, whose ESM resolver will not map a `.js`
+// specifier onto a `.ts` file. The dependency runs one way — the scope walk
+// lives next door and nothing there asks anything of this file.
+import {
+  POST_HOOK_SCOPES,
+  allCaptureWrites,
+  bodyOwnerAt,
+  captureNamesBefore,
+  findForEachBinding,
+  hookScopeAt,
+} from './env-data-completion-core.ts';
 
 // ---------------------------------------------------------------------------
 // Reference under the cursor
@@ -123,6 +135,17 @@ export function refAtPosition(line: string, character: number): RefAtPosition | 
  *
  * Finding one inside `${{name}}` is deliberate — the `${` parse above rejects
  * it while the runtime resolves the inner pair.
+ *
+ * USE IT WITH `matchAll` ONLY. This is a module-level `/g` regex, and `/g`
+ * carries `lastIndex` between calls: `.test()` and `.exec()` on it answer
+ * about wherever the previous call stopped, so the same line alternates
+ * between matching and not. `String.prototype.matchAll` is immune — it
+ * iterates over its own clone and leaves this object's `lastIndex` at 0 —
+ * which is why every reader here (and the parity test) goes through it, and
+ * why the runtime, whose readers DO call `.test()`, exports a
+ * `placeholderRe()` factory instead of the constant
+ * (src/parser/parameters.ts). Need a `.test()`, add a factory beside this;
+ * do not reach for this one.
  */
 export const PARAM_REF_RE = /\{\{(\w+(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\}\}/g;
 
@@ -138,6 +161,105 @@ export function paramRefAtPosition(line: string, character: number): { name: str
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Where a `{{name}}` comes from
+// ---------------------------------------------------------------------------
+
+/** A jump target inside this file: 0-based line, 0-based column, length. */
+export interface ParamHit {
+  line: number;
+  column: number;
+  length: number;
+}
+
+/**
+ * What defines a `{{name}}` at a point in a file — `found` with every target
+ * in the order the editor should list them, or the reason there is none.
+ *
+ * The `line` on a miss is 1-based, because it is spoken to a human in a
+ * toast; the `line` on a hit is 0-based, because it addresses an editor.
+ */
+export type ParamDefinition =
+  | { kind: 'found'; hits: ParamHit[] }
+  /** A step writes the name, further along the run than this line. */
+  | { kind: 'later-capture'; line: number }
+  /** A `For each` binds it, in this same body, below this line. */
+  | { kind: 'later-loop'; line: number }
+  /** Nothing in the file binds it at all. */
+  | { kind: 'none' };
+
+/**
+ * Everything that defines `{{name}}` at 0-based `lineIdx`, in the order the
+ * editor should offer them — or why nothing does.
+ *
+ * Three sources, and a dotted name reorders them. A `## Parameters` bullet
+ * holds a string and a `[store as:]` writes one; neither is ever where
+ * `{{order.id}}` came from, because only a record a `For each` bound has
+ * properties at all. So for a dotted name the loop header leads and the flat
+ * sources are the fallback; for a flat `{{order}}` it is the other way round
+ * — a `For each` binds for the length of its body, while a capture or a
+ * parameter is the value the author asked about everywhere else in the file.
+ * Everything is asked about the ROOT throughout (`order` for `order.id`):
+ * the planner binds a record and its properties together, once per pass, and
+ * field-level navigation is explicitly not required
+ * (docs/specs/SPEC-structured-table-reads.md §8.4).
+ *
+ * All the hits are returned rather than one, so a name written more than once
+ * peeks as a list: the run's LAST write is the live value while a reader
+ * looking for where a name comes from usually wants the first, and the editor
+ * should not have to guess which question is being asked.
+ *
+ * Reachability is asked only where the text can answer it. A `For each` in
+ * the SAME body, below this line, runs after this point — that is the
+ * `later-loop` miss. Across bodies nothing is claimed: a section body is
+ * defined below the main flow that calls it, so "below" and "after" are
+ * different questions there ({@link findForEachBinding} says the same).
+ */
+export function paramDefinition(
+  text: string,
+  lineIdx: number,
+  name: string,
+  classified: ReturnType<typeof classifyLines> = classifyLines(text),
+): ParamDefinition {
+  const root = name.split('.')[0]!;
+  const dotted = name !== root;
+
+  const flat: ParamHit[] = [];
+  const bullet = findParameterBullet(text, root);
+  if (bullet) flat.push(bullet);
+
+  // A post-hook reads after the whole flow; anything else reads where it
+  // sits. `mainFlowOnly` also keeps the hook line — which belongs to no
+  // section — from being attributed to whatever section encloses it.
+  const postHook = POST_HOOK_SCOPES.has(hookScopeAt(text, lineIdx) ?? '');
+  const writes = captureNamesBefore(text, postHook ? classified.length : lineIdx, classified, {
+    mainFlowOnly: postHook,
+    dedupe: false,
+  }).filter((c) => c.name === root);
+  for (const write of writes) flat.push({ ...write, line: write.line - 1 });
+
+  const headers = findForEachBinding(text, root, classified);
+  const owner = headers.length > 0 ? bodyOwnerAt(text, lineIdx, classified) : null;
+  // A header on this very line binds its own inline tail, so only a STRICTLY
+  // lower line in the same body is out of reach.
+  const reached = headers.filter(
+    (h) => h.line <= lineIdx || bodyOwnerAt(text, h.line, classified) !== owner,
+  );
+
+  const hits = dotted ? [...reached, ...flat] : [...flat, ...reached];
+  if (hits.length > 0) return { kind: 'found', hits };
+
+  // Nothing binds it here. Distinguish "later in the run" from "nowhere",
+  // which is a different question from the scope walk above: that walk
+  // resolves an owning section for its position, so a file ending inside a
+  // section body would drop the main-flow steps below its call site and
+  // misreport them as never written.
+  const later = allCaptureWrites(text, classified).find((c) => c.name === root);
+  if (later) return { kind: 'later-capture', line: later.line };
+  if (headers.length > 0) return { kind: 'later-loop', line: headers[0]!.line + 1 };
+  return { kind: 'none' };
 }
 
 // ---------------------------------------------------------------------------

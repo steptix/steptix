@@ -457,7 +457,9 @@ It costs nothing: no AI call, no page interaction, no action-cache entry. Notes:
 ### Reading a table into rows
 
 A read that names two or more columns of one table stores a **record per row**
-rather than a flat list, and `For each` binds the record's fields:
+rather than a flat list, and `For each` binds the record's fields. (So does a
+read of one column that bounds the rows — `from the first 10 visible rows` —
+since the bound and the row numbers are the record's own.)
 
 ```markdown
 ## Steps
@@ -476,9 +478,10 @@ for pointing at a row whose values are not unique. `Read … from the first 10
 visible rows` bounds the read without a positional selector.
 
 Full authoring rules — aliases, empty cells, placeholder and "Loading…" rows,
-what is refused — are in [§3.8 of the test-writing
-handbook](docs/test-writing-handbook.md), and the shipped `table-*.md` tests
-under `templates/init/tests/` are worked examples.
+what is refused — are under [Reading a table into
+rows](docs/test-writing-handbook.md#38-reading-a-table-into-rows) in the
+test-writing handbook, and the shipped `table-*.md` tests under
+`templates/init/tests/` are worked examples.
 
 ## Skills
 

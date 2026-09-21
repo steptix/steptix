@@ -868,10 +868,17 @@ describe('TestBench Variables panel (Phase 4)', function () {
     assert.equal(byName['payment.payee'], 'Origin Energy');
     // Masking reads the property segment, so a secret column is hidden even
     // though the variable it arrived under is called `payment` (§8.4).
-    assert.notEqual(
+    //
+    // The EXACT mask string, not `notEqual` against the raw value: a row the
+    // view dropped entirely — filtered out by its dotted name, say — has an
+    // `undefined` description, which is not equal to the password either and
+    // would pass an inequality while showing the user nothing. `maskIfSecret`
+    // renders a star per character, capped at eight.
+    assert.ok(names.includes('payment.password'), 'the secret column is still listed');
+    assert.equal(
       byName['payment.password'],
-      record.password,
-      'a secret-named property must not render its raw value',
+      '*'.repeat(8),
+      'a secret-named property must render as the mask, not as its value and not as nothing',
     );
 
     fake.end();
