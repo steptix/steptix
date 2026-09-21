@@ -9,6 +9,8 @@ import {
   formatTestInfo,
 } from '../src/ai/prompts.js';
 import type { ChatMessage } from '../src/ai/types.js';
+import { buildRepairPrompt } from '../src/codebehind/repair.js';
+import { markLoopBindings } from '../src/utils/secrets.js';
 
 /**
  * The prompt half of stories/placeholder-preserving-actions.md, phase 1: the
@@ -449,5 +451,87 @@ describe('code-generation prompt — a placeholder-bearing selector', () => {
     );
 
     expect(text).not.toContain('CARRIES A PLACEHOLDER');
+  });
+});
+
+/**
+ * Review 5, finding 5: `formatParameterBlock` judged a dotted name with no map
+ * to ask.
+ *
+ * With nothing to ask, `isSecretParameterName` answers with the BINDING rule —
+ * root, then the narrow whole-word record rule on the property — which is right
+ * for a `For each` pass's `row.keyword` and wrong for every dotted name a
+ * person typed. A data file's own `user.apikey` heading is merged into the
+ * variable map by `resolveParameters`, splits to `apikey`, matches neither
+ * half, and rendered its credential into the compile's generation and repair
+ * prompts in clear. The map is what says which is which (§7.6), and it has to
+ * be the LIVE object: the loop-binding registry is by identity.
+ */
+describe('formatParameterBlock — whose name is it', () => {
+  function liveMap(): Record<string, string> {
+    const map = { 'user.apikey': 'uk_live_1234', 'row.keyword': 'AU' };
+    markLoopBindings(map, ['row.keyword']);
+    return map;
+  }
+
+  const params = [
+    { name: 'user.apikey', value: 'uk_live_1234' },
+    { name: 'row.keyword', value: 'AU' },
+  ];
+
+  it('masks the heading nobody bound and leaves the column a pass did', () => {
+    const block = formatParameterBlock(params, [], new Set<string>(), [], liveMap());
+    expect(block).toContain('- {{user.apikey}} resolved to "***" on this run');
+    expect(block).toContain('- {{row.keyword}} resolved to "AU" on this run');
+    expect(block).not.toContain('uk_live_1234');
+  });
+
+  it('without a map both take the binding rule — the behaviour this replaces', () => {
+    // Kept as the statement of what the map buys: the same two names, asked
+    // with nothing to ask, and the credential is in the block.
+    const block = formatParameterBlock(params, []);
+    expect(block).toContain('uk_live_1234');
+  });
+
+  it('the repair prompt asks it', () => {
+    const text = textOf(
+      buildRepairPrompt({
+        rawStepText: 'Check the row for {{user.apikey}}',
+        stepIndex: 1,
+        entryCode: '{ source: "x", async run() {} }',
+        error: 'timed out',
+        parameters: params,
+        parameterMap: liveMap(),
+      }),
+    );
+    expect(text).toContain('- {{user.apikey}} resolved to "***" on this run');
+    expect(text).toContain('- {{row.keyword}} resolved to "AU" on this run');
+    expect(text).not.toContain('uk_live_1234');
+  });
+
+  it('the generation prompt asks it', () => {
+    const text = textOf(
+      buildStepCodePrompt({
+        rawStepText: 'Check the row for {{user.apikey}}',
+        parameters: params,
+        parameterMap: liveMap(),
+        actions: [],
+      }),
+    );
+    expect(text).toContain('- {{user.apikey}} resolved to "***" on this run');
+    expect(text).toContain('- {{row.keyword}} resolved to "AU" on this run');
+    expect(text).not.toContain('uk_live_1234');
+  });
+
+  it('and so does the step prompt’s ## Values block, through StepValues.map', () => {
+    const text = textOf(
+      buildStepMessage('Check the row for {{user.apikey}}', DOM, null, [], undefined, undefined, undefined, {
+        parameters: params,
+        map: liveMap(),
+      }),
+    );
+    expect(text).toContain('- {{user.apikey}} resolved to "***" on this run');
+    expect(text).toContain('- {{row.keyword}} resolved to "AU" on this run');
+    expect(text).not.toContain('uk_live_1234');
   });
 });

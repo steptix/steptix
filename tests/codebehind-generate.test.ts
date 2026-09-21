@@ -10,6 +10,8 @@ import {
   parseStepCodeOrDecline,
 } from '../src/ai/action-parser.js';
 import { buildStepCodePrompt, contentBlocksToText } from '../src/ai/prompts.js';
+import { markLoopBindings } from '../src/utils/secrets.js';
+import { readFileSync } from 'node:fs';
 import {
   aiEntryFor,
   ambiguousSelectorComplaint,
@@ -1300,6 +1302,67 @@ describe('aiEntryFor', () => {
     const entry = aiEntryFor('X', 'line one\nline two */ still the reason');
     expect(entry.split('\n').filter((l) => l.includes('line two'))).toHaveLength(1);
     expect(entry).not.toContain('*/');
+  });
+});
+
+describe('generateStepEntry — which dotted names the prompt masks (§7.6)', () => {
+  /** Every message of the one call the stub recorded, as text. */
+  const promptTextOf = (calls: ChatMessage[][]): string =>
+    calls[0]!
+      .map((m) => (typeof m.content === 'string' ? m.content : contentBlocksToText(m.content)))
+      .join('\n');
+
+  const source = 'Verify the row shows {{row.keyword}} for {{user.apikey}}';
+  /** A live map: `row.keyword` is a pass's binding, `user.apikey` is a data
+   *  file's heading merged in beside it. Same spelling, different owner. */
+  function liveMap(): Record<string, string> {
+    const map: Record<string, string> = { 'row.keyword': 'AU', 'user.apikey': 'uk_live_1234' };
+    markLoopBindings(map, ['row.keyword']);
+    return map;
+  }
+
+  it('tells a pass binding from an author heading by the map it is handed', async () => {
+    const { client, calls } = stubClient(JSON.stringify({ entry: null, reason: 'not needed' }));
+    const map = liveMap();
+    await generateStepEntry({
+      binding: bindingFor(source),
+      actions: PASSING_ACTIONS,
+      resolvedParameters: map,
+      parameterMap: map,
+      aiClient: client,
+      contextContent: '',
+      testName: 'demo',
+    });
+    const text = promptTextOf(calls);
+    expect(text).toContain('{{row.keyword}} resolved to "AU" on this run');
+    expect(text).toContain('{{user.apikey}} resolved to "***" on this run');
+    expect(text).not.toContain('uk_live_1234');
+  });
+
+  it('without the map reads every dotted name as a binding — which is what the map buys', async () => {
+    // The boxed compile passes no map on purpose: its parameters are an
+    // unmarked copy of the already-redacted report map, and handing that over
+    // would put `row.keyword` under the author rule. This twin states the
+    // cost of that choice so nobody mistakes it for the live path's answer.
+    const { client, calls } = stubClient(JSON.stringify({ entry: null, reason: 'not needed' }));
+    await generateStepEntry({
+      binding: bindingFor(source),
+      actions: PASSING_ACTIONS,
+      resolvedParameters: liveMap(),
+      aiClient: client,
+      contextContent: '',
+      testName: 'demo',
+    });
+    const text = promptTextOf(calls);
+    expect(text).toContain('{{row.keyword}} resolved to "AU" on this run');
+    expect(text).toContain('{{user.apikey}} resolved to "uk_live_1234" on this run');
+  });
+
+  it('is handed the marked snapshot by the live compiler, and nothing by the boxed one', () => {
+    const live = readFileSync(path.join(repoRoot, 'src', 'codebehind', 'live-compile.ts'), 'utf8');
+    const boxed = readFileSync(path.join(repoRoot, 'src', 'codebehind', 'compile.ts'), 'utf8');
+    expect(live).toContain('parameterMap: input.resolvedParameters');
+    expect(boxed).not.toContain('parameterMap');
   });
 });
 

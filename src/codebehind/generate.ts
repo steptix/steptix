@@ -126,6 +126,16 @@ export interface GenerateStepEntryOptions {
   /** Live parameter map from the recording, for resolving `{{param}}`. */
   resolvedParameters: Record<string, string>;
   /**
+   * The map whose loop-binding marks decide which dotted names in the
+   * prompt's parameter block are a pass's (`row.keyword`, record rule) and
+   * which are the author's (`user.apikey`, whole-key rule) — §7.6. The live
+   * compiler passes its snapshot, which `liveCompileSnapshot` marks. The
+   * boxed compile passes nothing: its `resolvedParameters` is
+   * `report.parameters`, an unmarked copy of the already-redacted map, and
+   * handing that over would put `row.keyword` under the author rule.
+   */
+  parameterMap?: Record<string, string> | undefined;
+  /**
    * The env/data context the test was parsed with, for resolving `${data.url}`
    * and kin (stories/codebehind-env-data.md). Absent when the compile ran
    * without an environment — a step making such a reference is then declined.
@@ -237,6 +247,7 @@ export async function generateStepEntry(
   const promptInput: StepCodePromptInput = {
     rawStepText: binding.source,
     parameters,
+    ...(options.parameterMap && { parameterMap: options.parameterMap }),
     ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
     actions: options.actions,
     ...(options.assertions && options.assertions.length > 0 && {
@@ -912,8 +923,16 @@ export function unresolvedInputRefs(
   const { placeholders } = referencedVariableNames(binding.source);
   const out: string[] = [];
   for (const name of placeholders) {
-    if (binding.scope.renames[name] !== undefined) continue;
-    const input = binding.scope.inputs[name];
+    // `boundValue` on both scope maps, for the reason `stepParameters` states
+    // above: `renames['constructor']` is the `Object` function on a scope that
+    // renames nothing, so `{{constructor}}` took the rename branch and this
+    // function returned before ever looking at the input. A skill called with
+    // `constructor="${data.username}"` in a run with no environment was then
+    // reported as having no unresolved reference at all — and `generateStepEntry`,
+    // which declines over exactly this list, compiled the step with the
+    // literal `${data.username}` text frozen into it.
+    if (boundValue(binding.scope.renames, name) !== undefined) continue;
+    const input = boundValue(binding.scope.inputs, name);
     if (input === undefined) continue;
     for (const ref of envDataRefsIn(resolveInputValue(input, resolvedParameters, envData))) {
       if (!out.includes(ref)) out.push(ref);
@@ -1184,11 +1203,18 @@ export function accountPlaceholders(options: {
   };
 
   for (const name of placeholderNamesIn(binding.source)) {
-    const renamed = binding.scope.renames[name];
+    // `boundValue` on all three maps, as `stepParameters` does. Bare, the
+    // rename map answered `{{constructor}}` with the `Object` FUNCTION, and
+    // the function then travelled the whole way through: as the TOKEN looked
+    // for in the recorded actions, which no recorded string can equal, so a
+    // step that names its value correctly declined with "appears in no
+    // recorded action"; and as the VALUE, where `value?.trim()` threw a
+    // TypeError out of the compile rather than declining at all.
+    const renamed = boundValue(binding.scope.renames, name);
     // Decision 6: the expander baked this one into the text, so no token can
     // exist. Today's behaviour, no warning, no decline.
-    if (renamed === undefined && binding.scope.inputs[name] !== undefined) continue;
-    judge(name, renamed ?? name, options.resolvedParameters[renamed ?? name]);
+    if (renamed === undefined && boundValue(binding.scope.inputs, name) !== undefined) continue;
+    judge(name, renamed ?? name, boundValue(options.resolvedParameters, renamed ?? name));
   }
   for (const ref of envDataRefsIn(binding.source)) {
     judge(

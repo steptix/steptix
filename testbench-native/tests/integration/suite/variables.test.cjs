@@ -913,4 +913,101 @@ describe('TestBench Variables panel (Phase 4)', function () {
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());
   });
+
+  it("the event's bindings and unmask decide the rows, not the name shapes", async () => {
+    // SPEC-structured-table-reads.md §7.6. A scope holds two kinds of dotted
+    // name and nothing about either says which it is: `payment.keyword` is a
+    // page's column, bound by a `For each` pass, and `user.apikey` is a data
+    // file's own heading, typed by the author. The server tells them apart
+    // with a registry keyed on its live map's object identity; `frame:scope`
+    // sends a COPY, so the view had to guess, guessed the narrow way for both,
+    // and printed `uk_live_1234` beside a report matrix that starred it.
+    //
+    // `bindings` is that registry as data and `unmask` is the test's
+    // `## Config: unmask:` list. This is the whole path from the wire to the
+    // rendered description: event → controller → ScopeSource → TreeItem.
+    // (The webview panel's copy of the same rule is covered by
+    // `tests/variables-panel.test.js` and the call-site scan in
+    // `tests/record-secret-parity.test.js`; `webviewRuntimeVariables()` reads
+    // back the RAW map, so masking is not assertable through it.)
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const APIKEY = 'uk_live_1234';
+    fake.push({
+      type: 'frame:scope',
+      frameId: '',
+      scope: {
+        'payment.keyword': 'AU',
+        'payment.password': 'hunter2-not-a-real-one',
+        'user.apikey': APIKEY,
+        keyword: 'search',
+        password: 'hunter2-not-a-real-one',
+      },
+      // Only the pass's own names. `user.apikey` is in the scope and not in
+      // here, which is the entire distinction being tested.
+      bindings: ['payment.keyword', 'payment.password'],
+      unmask: ['keyword'],
+    });
+    await waitFor('scope arrived', () => hooks.runningScope()['user.apikey'] === APIKEY);
+
+    const byName = Object.fromEntries(
+      hooks.variablesViewItems().map((i) => [i.name, i.description]),
+    );
+
+    // Unregistered: the author's own name end to end, so the FLAT rule reads
+    // the whole key and `key` is in it. The measured leak, now closed.
+    assert.ok(byName['user.apikey'] !== undefined, 'the row must still be listed');
+    assert.equal(
+      byName['user.apikey'],
+      '*'.repeat(8),
+      `an unregistered dotted name must mask, not render ${APIKEY}`,
+    );
+
+    // Registered: half the page's word, so the narrow record rule decides the
+    // property and `AU` stays readable — which is what the model needs to find
+    // the row and what the report prints beside this view.
+    assert.equal(byName['payment.keyword'], 'AU');
+    // …and the two-segment rule is still a rule: a real credential column is
+    // hidden whichever list it is on.
+    assert.equal(byName['payment.password'], '*'.repeat(8));
+
+    // The hatch, reaching the client for the first time. A flat `keyword`
+    // masks by default (the report masks it too, and the view must not
+    // disagree) — `unmask: ['keyword']` is the author saying otherwise.
+    assert.equal(byName.keyword, 'search');
+    // By the exact name: unmasking `keyword` says nothing about `password`.
+    assert.equal(byName.password, '*'.repeat(8));
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('an event carrying neither field renders exactly what it always did', async () => {
+    // Absence is not emptiness. An older server sends no `bindings`, which
+    // means "nothing known" — and the safe reading of a scope full of real
+    // loop bindings is the narrow one. Reading absent as `[]` would mask `AU`
+    // out of every row whose column is called `keyword`, against a server that
+    // never said the name was the author's.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const APIKEY = 'uk_live_1234';
+    fake.push({
+      type: 'frame:scope',
+      frameId: '',
+      scope: { 'payment.keyword': 'AU', 'user.apikey': APIKEY, keyword: 'search' },
+    });
+    await waitFor('scope arrived', () => hooks.runningScope()['user.apikey'] === APIKEY);
+
+    const byName = Object.fromEntries(
+      hooks.variablesViewItems().map((i) => [i.name, i.description]),
+    );
+    assert.equal(byName['payment.keyword'], 'AU', 'the pre-wire reading of a dotted name');
+    assert.equal(byName['user.apikey'], APIKEY, '…including the gap it leaves');
+    assert.equal(byName.keyword, '*'.repeat(6), 'and no hatch without an unmask list');
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
 });

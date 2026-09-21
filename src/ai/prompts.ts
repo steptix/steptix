@@ -39,6 +39,11 @@ export interface StepValues {
    *  hides three lines below this block. Without it the block is the one
    *  surface in the message that still printed them. */
   secrets?: string[];
+  /** The LIVE variable map the values above were read out of, so a dotted
+   *  name is decided by whose it is — a loop's `row.keyword` by its two
+   *  segments, a data file's `user.apikey` heading by the author rule (§7.6).
+   *  The live object, never a copy: the loop-binding registry is by identity. */
+  map?: Record<string, string>;
 }
 
 /** The `## Values` block, or '' when the step references nothing — absence is
@@ -53,6 +58,7 @@ function formatValuesBlock(values?: StepValues): string {
     envRefs,
     values.unmask ?? new Set<string>(),
     values.secrets ?? [],
+    values.map,
   );
 }
 
@@ -1109,6 +1115,10 @@ export interface StepCodePromptInput {
   /** Parameter names and their resolved values for this run, so the model can
    *  map literals it sees in the transcript back to `step.getVar` calls. */
   parameters: Array<{ name: string; value: string }>;
+  /** The LIVE variable map `parameters` was read out of, only so a dotted
+   *  name can be decided by whose it is (§7.6). Optional, and the live object
+   *  or nothing — see {@link formatParameterBlock}'s `map`. */
+  parameterMap?: Record<string, string>;
   /**
    * The environment references the step makes — `${data.url}`, `${env.X}`,
    * `${<source>.path}` — each with what it resolved to on this run. The name
@@ -1198,6 +1208,15 @@ export function formatParameterBlock(
   envRefs: Array<{ ref: string; value: string }>,
   unmask: ReadonlySet<string> = new Set<string>(),
   secrets: string[] = [],
+  // The LIVE variable map these values were read out of, so a dotted name can
+  // be asked whose it is. Without it every dotted name takes the binding rule
+  // — right for `row.keyword`, and the reason a data file's own `user.apikey`
+  // heading rendered `uk_live_1234` in clear into the generation and repair
+  // prompts (§7.6). Pass the live object or nothing: a COPY carries none of
+  // the marks, and an unmarked map is worse than none, because then
+  // `row.keyword` takes the author rule and `AU` is masked out of the block
+  // the model needs it from.
+  map?: Record<string, string>,
 ): string {
   if (parameters.length === 0 && envRefs.length === 0) return '(this step uses no parameters)';
   const show = (secret: boolean, name: string, value: string): string => {
@@ -1207,7 +1226,7 @@ export function formatParameterBlock(
   };
   return [
     ...parameters.map(
-      (p) => `- {{${p.name}}} resolved to ${show(isSecretParameterName(p.name), p.name, p.value)} on this run`,
+      (p) => `- {{${p.name}}} resolved to ${show(isSecretParameterName(p.name, map), p.name, p.value)} on this run`,
     ),
     ...envRefs.map(
       (r) =>
@@ -1537,7 +1556,13 @@ function failureTailRule(number: number, tail: ParsedFailureTail): string {
 export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
   const testInfoBlock = input.testInfoSection ? `${input.testInfoSection}\n\n` : '';
 
-  const paramBlock = formatParameterBlock(input.parameters, input.envRefs ?? []);
+  const paramBlock = formatParameterBlock(
+    input.parameters,
+    input.envRefs ?? [],
+    new Set<string>(),
+    [],
+    input.parameterMap,
+  );
 
   const actionBlock = input.actions.length === 0
     ? '(no actions recorded)'

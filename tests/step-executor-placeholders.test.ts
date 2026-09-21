@@ -998,3 +998,41 @@ describe('the walk and the copy', () => {
     ).toBeUndefined();
   });
 });
+
+/**
+ * Review 5, finding 4: the one "Stored …" line that prints the VALUE.
+ *
+ * Its two siblings print a count; this one printed the captured text raw. The
+ * logger does not redact — the run-log FILE does, on its way to disk, and the
+ * Sessions API's `output` bridge does not — so a `[store as: password]`
+ * capture reached the console and every client watching the stream in clear,
+ * while the report, the step line and the prompt's `## Values` block all said
+ * `***` for the same value (§7.6).
+ */
+describe('the "Stored captured value" line is masked like everything else', () => {
+  async function logsOf(as: string): Promise<string[]> {
+    const lines: string[] = [];
+    const stop = addLogCallback((_level, message) => { lines.push(message); });
+    try {
+      await runStep(
+        'Read the one-time code',
+        [plan([{ action: 'read', selector: '#code', as, description: 'Read it' }])],
+        { parameters: {} },
+      );
+    } finally {
+      stop();
+    }
+    return lines;
+  }
+
+  it('masks it when the author’s own name says secret', async () => {
+    const lines = await logsOf('password');
+    expect(lines).toContain('Stored captured value as "{{password}}": "***"');
+    expect(lines.join('\n')).not.toContain('CAPTURED');
+  });
+
+  it('and still prints a plain capture, which is what the line is for', async () => {
+    const lines = await logsOf('balance');
+    expect(lines).toContain('Stored captured value as "{{balance}}": "CAPTURED"');
+  });
+});

@@ -1,5 +1,10 @@
 import * as vscode from 'vscode';
-import { compareVariableNames, maskIfSecret, type FrameInfo } from 'ai-ui-automation-runner-core';
+import {
+  compareVariableNames,
+  maskIfSecret,
+  type FrameInfo,
+  type ScopeMasking,
+} from 'ai-ui-automation-runner-core';
 
 /**
  * Read-only TreeView contributed to the TestBench activity-bar container.
@@ -33,14 +38,40 @@ import { compareVariableNames, maskIfSecret, type FrameInfo } from 'ai-ui-automa
  * puts the whole key through the flat rule. This view is not one of those: a
  * scope holds a loop's bindings.
  *
- * `## Config`'s `unmask` hatch does not reach here. It is read on the server
- * and governs the report, the run log and the prompt; nothing on the wire
- * carries it, so a name an author has unmasked still renders starred in this
- * view (spec §7.6, §14).
+ * And it holds the author's own dotted names beside them, which is why the
+ * mask call takes the `frame:scope` event's `bindings` list: a dotted name a
+ * pass bound takes the two-segment rule, and one nobody bound — a data file's
+ * `user.apikey` heading — takes the flat author rule on the whole key, the
+ * same split `isSecretParameterName` makes server-side. Before that list was
+ * on the wire this view had to guess, guessed the narrow way, and printed
+ * `uk_live_1234` beside a report that starred it (§7.6).
+ *
+ * `## Config`'s `unmask` hatch reaches here too, on the same event: a name in
+ * it renders in full, exempt from every rule, exactly as the server's
+ * `formatParameterBlock` exempts it. That is deliberately a place where this
+ * view and the report differ — the hatch governs what is shown LIVE and never
+ * what is written to a file, so the report still stars an unmasked `keyword`
+ * and an `unmask` line cannot put a credential into an artefact. Nothing
+ * fires it from TestBench yet, mind: `RunController`'s per-session `config`
+ * carries `baseUrl`, `timeout` and `viewport` and never `unmask`, so a
+ * TestBench run declares none and the field never arrives (spec §14). This
+ * view is ready for the run that does. Both fields are optional and their
+ * absence — an older server, or a run with no hatch — leaves this view
+ * rendering what it always did.
  */
 export interface ScopeSource {
   /** Current scope to render, or empty when no run is in flight. */
   currentScope(): Record<string, string>;
+  /**
+   * How to READ that scope: the `bindings` and `unmask` the same
+   * `frame:scope` event carried. `{}` when no run is in flight, or when the
+   * server is an older one that sends neither — which the masker treats as
+   * "nothing known" and answers exactly as it did before the fields existed.
+   *
+   * Optional on the interface so a test double that only cares about names
+   * can keep supplying two methods.
+   */
+  currentMasking?(): ScopeMasking;
   /**
    * Identity of the frame whose scope is being rendered. Lets the view
    * distinguish the test (root) frame — where skill-internal `__skillN_x`
@@ -64,6 +95,18 @@ const SKILL_INTERNAL_PREFIX = /^__skill\d+_/;
 interface VariableNode {
   name: string;
   rawValue: string;
+  /**
+   * The masking rules that came with the scope this node was read out of,
+   * snapshotted at `getChildren` time rather than re-read in `getTreeItem`.
+   *
+   * VS Code calls the two separately, and a `frame:scope` landing between
+   * them would otherwise render this row's value under the NEXT pass's
+   * bindings — the one case where the two halves of one event come apart. The
+   * value is snapshotted for the same reason; this is the rest of the pair.
+   * A shared reference to the controller's own object, so the snapshot costs
+   * a pointer per row rather than a copy.
+   */
+  masking: ScopeMasking;
 }
 
 export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNode> {
@@ -100,7 +143,7 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
   }
 
   getTreeItem(node: VariableNode): vscode.TreeItem {
-    const display = maskIfSecret(node.name, node.rawValue);
+    const display = maskIfSecret(node.name, node.rawValue, node.masking);
     const item = new vscode.TreeItem(node.name, vscode.TreeItemCollapsibleState.None);
     item.description = display;
     item.iconPath = new vscode.ThemeIcon('symbol-variable');
@@ -131,7 +174,9 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
     const names = Object.keys(scope)
       .filter((name) => !isTestFrame || !SKILL_INTERNAL_PREFIX.test(name))
       .sort(compareVariableNames);
-    return names.map((name) => ({ name, rawValue: scope[name] ?? '' }));
+    // Read once for the whole render, beside the scope it describes.
+    const masking = this.source.currentMasking?.() ?? {};
+    return names.map((name) => ({ name, rawValue: scope[name] ?? '', masking }));
   }
 
   /** Test-only readback of the description the view would show. Keeps the

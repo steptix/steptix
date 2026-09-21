@@ -178,6 +178,49 @@ describe('the recording', () => {
     expect(raw).not.toContain('hunter2-horse');
   });
 
+  it('redacts the assertions, which were the one field written through untouched', async () => {
+    // `actual` and `expected` are page text: the value a step typed and read
+    // back, a balance, a message. Every sibling field on this record is
+    // redacted — `instruction`, `error`, `actions`, `outputs`, both DOM files
+    // — and this one was not, so the recording on disk held the credential in
+    // clear beside an `instruction` that said `***` (§7.6).
+    const test = path.join(dir, 'assert.md');
+    await writeRecording(test, {
+      steps: [
+        step(1, {
+          assertions: [
+            {
+              assertIndex: 0,
+              turnNumber: 1,
+              subActionIndex: 1,
+              description: 'the field kept what was typed',
+              condition: 'the password field reads hunter2-horse',
+              expected: 'hunter2-horse',
+              actual: 'hunter2-horse',
+              explanation: 'read back hunter2-horse',
+              pass: true,
+            },
+          ],
+        }),
+      ],
+      status: 'passed',
+      startedAt: 't',
+      parameters: { password: 'hunter2-horse' },
+      source: 'cli',
+    });
+
+    const recording = (await readRecording(test))!;
+    expect(recording.steps[0]!.assertions![0]).toMatchObject({
+      condition: 'the password field reads ***',
+      expected: '***',
+      actual: '***',
+      explanation: 'read back ***',
+      pass: true,
+    });
+    const raw = await fs.readFile(path.join(recordingDirFor(test), 'step-01.json'), 'utf-8');
+    expect(raw).not.toContain('hunter2-horse');
+  });
+
   it('masks a dotted output name by the AUTHOR rule, not the loop-binding one', async () => {
     // A step's `[store as:]` names are author-chosen end to end. The
     // two-segment rule structured table reads introduced is for a loop's

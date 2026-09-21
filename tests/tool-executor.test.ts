@@ -4,6 +4,7 @@ import { defineTool } from '../src/tools/define-tool.js';
 import { ToolCatalogue } from '../src/tools/registry.js';
 import { executeToolStep } from '../src/tools/executor.js';
 import type { ToolCall } from '../src/tools/types.js';
+import { isLoopBinding, isSecretParameterName, markLoopBindings } from '../src/utils/secrets.js';
 
 const fakePage = { __kind: 'page' } as unknown as Page;
 const fakeContext = { __kind: 'context' } as unknown as BrowserContext;
@@ -320,5 +321,129 @@ describe('executeToolStep — failure modes', () => {
     );
     expect(outcome.status).toBe('failed');
     expect(outcome.error).toMatch(/expected a number/);
+  });
+});
+
+/**
+ * What a tool's `step.getVar` may answer with.
+ *
+ * `resolvedParameters[name]` is a plain-object index, so `getVar('constructor')`
+ * handed a tool the `Object` FUNCTION from a map that binds nothing of the
+ * sort — through a signature that says `string | undefined`, into whatever the
+ * tool does next (`value.trim()`, a fetch body, a comparison that is never
+ * equal). A tool is ordinary TypeScript an author wrote, and it has no reason
+ * to guard against its own runtime.
+ */
+describe('executeToolStep — getVar and a name off Object.prototype', () => {
+  /** A map that really binds `name` — `defineProperty`, because assigning
+   *  `__proto__` on an object literal writes the prototype, not an entry. */
+  const bound = (name: string, value: string): Record<string, string> =>
+    Object.defineProperty({}, name, {
+      value, writable: true, enumerable: true, configurable: true,
+    }) as Record<string, string>;
+
+  /** A tool that reports what `getVar(name)` gave it: the value, or the
+   *  `typeof` when it is not a string. */
+  function registerProbe(name: string): void {
+    register(
+      defineTool({
+        name: 'probe',
+        parameters: {},
+        outputs: { seen: { type: 'string' } },
+        run(_args, { step }) {
+          const value = step.getVar(name);
+          step.setVar('seen', value === undefined ? '(undefined)' : `${typeof value}:${String(value).slice(0, 12)}`);
+        },
+      }),
+    );
+  }
+
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
+    'answers getVar(%o) with undefined when nothing binds it',
+    async (name) => {
+      registerProbe(name);
+      const outcome = await executeToolStep(
+        { name: 'probe', args: {}, outputAliases: {} },
+        { page: fakePage, context: fakeContext, browser: fakeBrowser, resolvedParameters, catalogue },
+      );
+      expect(outcome.status).toBe('passed');
+      expect(resolvedParameters['seen']).toBe('(undefined)');
+    },
+  );
+
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
+    'still reads a real %s binding out of the map',
+    async (name) => {
+      registerProbe(name);
+      const params = bound(name, 'ORD-1001');
+      const outcome = await executeToolStep(
+        { name: 'probe', args: {}, outputAliases: {} },
+        { page: fakePage, context: fakeContext, browser: fakeBrowser, resolvedParameters: params, catalogue },
+      );
+      expect(outcome.status).toBe('passed');
+      expect(params['seen']).toBe('string:ORD-1001');
+    },
+  );
+});
+
+/**
+ * A tool output ALIASED onto a dotted name (`out.sum="row.keyword"`).
+ *
+ * `bindVariable`'s docstring said nothing writes a dotted name today, and this
+ * is the writer that does: the caller picks the target, so the name is the
+ * AUTHOR's, not a loop's — and if a `For each` pass had bound `row.keyword`
+ * first, the registry still said "a loop bound this" about an entry the author
+ * has since overwritten. The masking rules read that registry (§7.6): the
+ * narrow record rule left `keyword` in clear, when the broad author rule the
+ * name has now earned would mask it.
+ */
+describe('a tool output aliased onto a dotted name', () => {
+  it('leaves the name under the AUTHOR rule, not the loop that used to own it', async () => {
+    register(
+      defineTool({
+        name: 'total',
+        parameters: {},
+        outputs: { sum: { type: 'string' } },
+        run(_args, { step }) { step.setVar('sum', 'AU'); },
+      }),
+    );
+    // One `For each {{row}} in {{rows}}` pass, as the loop leaves it.
+    markLoopBindings(resolvedParameters, ['row', 'row.keyword']);
+    resolvedParameters['row.keyword'] = 'from the page';
+    expect(isSecretParameterName('row.keyword', resolvedParameters)).toBe(false);
+
+    const outcome = await executeToolStep(
+      { name: 'total', args: {}, outputAliases: { sum: 'row.keyword' } },
+      { page: fakePage, context: fakeContext, browser: fakeBrowser, resolvedParameters, catalogue },
+    );
+    expect(outcome.status).toBe('passed');
+    expect(resolvedParameters['row.keyword']).toBe('AU');
+
+    // Whose name is it now? The author's — they wrote it in the step.
+    expect(isLoopBinding(resolvedParameters, 'row.keyword')).toBe(false);
+    expect(isSecretParameterName('row.keyword', resolvedParameters)).toBe(true);
+  });
+
+  it('does not touch the loop’s OTHER properties when it overwrites one', async () => {
+    register(
+      defineTool({
+        name: 'total',
+        parameters: {},
+        outputs: { sum: { type: 'string' } },
+        run(_args, { step }) { step.setVar('sum', 'AU'); },
+      }),
+    );
+    markLoopBindings(resolvedParameters, ['row', 'row.keyword', 'row.token']);
+    resolvedParameters['row.keyword'] = 'from the page';
+    resolvedParameters['row.token'] = 'also from the page';
+
+    await executeToolStep(
+      { name: 'total', args: {}, outputAliases: { sum: 'row.keyword' } },
+      { page: fakePage, context: fakeContext, browser: fakeBrowser, resolvedParameters, catalogue },
+    );
+    // A dotted write is a PROPERTY write, so its siblings survive it — and
+    // `row.token` is still the loop's, because the loop still wrote it.
+    expect(resolvedParameters['row.token']).toBe('also from the page');
+    expect(isLoopBinding(resolvedParameters, 'row.token')).toBe(true);
   });
 });

@@ -35,7 +35,9 @@
  *
  * The drift is silent in the worst direction. `frame:scope` carries RAW values
  * by design — the wire was left alone when redaction shipped, and the client
- * is what hides them — so a mirror that forgets a word shows a password the
+ * is what hides them; what the wire DOES now carry is the two things the rules
+ * cannot work out from a name alone, `bindings` and `unmask` (`SCOPE_CORPUS`
+ * below) — so a mirror that forgets a word shows a password the
  * report redacts, in a view sitting next to the report. A mirror that gains
  * one masks a column the report prints, and `********` is a row nobody can
  * read. Neither failure announces itself; this test does.
@@ -55,9 +57,18 @@ import {
   isRecordSecretKey,
   isSecretFlatName,
   isSecretVarName,
+  maskIfSecret,
   maskIfSecretAuthored,
   maskRecordSecrets,
-} from 'ai-ui-automation-runner-core';
+  // From runner-core's SOURCE, not from `ai-ui-automation-runner-core`. That
+  // specifier resolves to runner-core/dist, which `npm test` never builds — so
+  // every behavioural corpus below was answering about a compiled copy of
+  // whatever the rule used to be. Measured: deleting
+  // `|| wholeNameIsRecordSecret(varName)` from `isSecretVarName` in
+  // runner-core/src/repl.ts and running this file left it 12/12 green.
+  // Node (>= 22.18) strips the types on import, and repl.ts uses no TS-only
+  // runtime syntax, so the source loads as-is.
+} from '../../runner-core/src/repl.ts';
 import {
   RECORD_SECRET_PATTERNS as PANEL_PATTERNS,
   SECRET_NAME_PATTERN as PANEL_SECRET_NAME,
@@ -65,6 +76,7 @@ import {
   isSecretFlatNameInline,
   isSecretVarNameInline,
   maskIfSecretAuthoredInline,
+  maskIfSecretInline,
   maskRecordSecretsInline,
 } from '../src/webview/lib/variables-panel.js';
 
@@ -120,12 +132,12 @@ test('the flat, author-chosen name rule is the server\'s, character for characte
   assert.ok(literal.source.includes('password'), literal.source);
   assert.equal(literal.flags, 'i', 'case-insensitive, or MACHINE_KEY would not match');
 
-  // runner-core is read from its SOURCE, not from the object this file
-  // imported. That import resolves through `ai-ui-automation-runner-core` to
-  // runner-core/dist, which `npm test` never builds — so narrowing the literal
-  // in repl.ts and running the suite left this file green against a compiled
-  // copy of the OLD rule. The panel's module is its own source, so its import
-  // is the source.
+  // runner-core's literal is read out of its SOURCE TEXT as well as compared
+  // through the imported object. Both now come from the same file — the import
+  // at the top is `../../runner-core/src/repl.ts`, not the package specifier
+  // that resolves to an unbuilt `dist/` — so this is the belt to that braces:
+  // it names the file and the const in its failure message, and it fails
+  // loudly rather than silently if either is renamed or reformatted away.
   const core = regexLiteralSource(coreSource, 'SECRET_NAME', 'runner-core/src/repl.ts');
   assert.equal(core.source, literal.source, 'runner-core flat pattern (source)');
   assert.equal(core.flags, literal.flags, 'runner-core flat flags (source)');
@@ -181,8 +193,8 @@ test('the record-column patterns are the server\'s, character for character', ()
   assert.ok(word.includes('password'), word);
   assert.ok(key.includes('_keys?'), key);
 
-  // From runner-core's SOURCE as well, for the same reason the flat rule is:
-  // the imported objects come from a `dist/` that `npm test` does not build.
+  // From runner-core's SOURCE TEXT as well, for the same reason the flat rule
+  // is: a named reader that says which file and which const it could not find.
   for (const [name, expected] of [['RECORD_SECRET_WORD', word], ['RECORD_SECRET_KEY', key]]) {
     const literal = regexLiteralSource(coreSource, name, 'runner-core/src/repl.ts');
     assert.equal(literal.source, expected, `runner-core ${name} (source)`);
@@ -302,12 +314,14 @@ test('the whole-name clause is one implementation in three spellings', () => {
  *  ones it must keep its hands off. A two-arm mirror answers the first group
  *  `false` and agrees about the second.
  *
- *  The server's `isSecretParameterName` takes an optional map and, when given
- *  one, asks `isLoopBinding` whether a pass bound this name — a server-side
- *  registry keyed by object identity, which nothing on the wire carries. So
- *  the client mirrors the NO-MAP form, which is the three arms below; a dotted
- *  scope entry that no pass bound is masked more broadly on the server than
- *  here, and closing that needs the wire to say which entries a pass bound. */
+ *  This corpus is the NO-BINDINGS form — `isSecretVarName(name)` with nothing
+ *  said about whose the name is, which is what an older server's `frame:scope`
+ *  still produces and therefore what the client must keep answering. The
+ *  server's `isSecretParameterName` asks `isLoopBinding(map, name)` instead,
+ *  and that registry is keyed on the live map's object identity, so a copy
+ *  sent over HTTP arrives knowing nothing. `FrameScopeEvent.bindings` is that
+ *  registry as data; the corpus below this one is the same question ASKED WITH
+ *  it, and it is where `user.apikey` changes its answer. */
 const DOTTED_CORPUS = [
   ['api.key', true],
   ['private.key', true],
@@ -322,12 +336,155 @@ const DOTTED_CORPUS = [
   // Still decided by their own halves, clause or no clause.
   ['payment.password', true],
   ['token.payee', true],
+  // Asked with nothing said about whose the name is, all three arms answer
+  // no: `user` is not flat-secret, `apikey` is one word so it is not a secret
+  // COLUMN, and `user_apikey` is not one either. That was the whole answer
+  // until `bindings` reached the wire, and against an older server it still
+  // is — the server's own `isSecretParameterName(name, map)` falls back to
+  // the FLAT author rule for a dotted entry NO PASS BOUND, which sees `key`
+  // and stars it. Asked WITH the list, both mirrors now agree with it; see
+  // `SCOPE_CORPUS` below.
+  ['user.apikey', false],
 ];
 
 test('both mirrors answer the dotted corpus the way the server would', () => {
   for (const [name, expected] of DOTTED_CORPUS) {
     assert.equal(isSecretVarName(name), expected, `runner-core on ${name}`);
     assert.equal(isSecretVarNameInline(name), expected, `variables-panel on ${name}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The SCOPE rule, asked with what `frame:scope` now says about its own map
+// ---------------------------------------------------------------------------
+//
+// `FrameScopeEvent.bindings` names the dotted entries a `For each` pass bound
+// and `FrameScopeEvent.unmask` the names the test's `## Config: unmask:`
+// declares are not secrets. With them, `maskIfSecret` is the server's
+// `isSecretParameterName(name, map)` plus `formatParameterBlock`'s hatch,
+// rather than an approximation that answered every dotted name the narrow way
+// and starred every unmasked one.
+//
+// Two implementations again — runner-core for the Variables TreeView, the
+// panel's inline copy for the webview — so the corpus is asked of both. A body
+// comparison would not do it here: the panel's `maskIfSecretInline` carries a
+// falsy-value guard runner-core's `maskValue` handles inside itself, so the
+// two are deliberately not line for line and only the ANSWERS can be compared.
+
+/** `[what, name, opts, masked]` — `masked` is whether the entry must be
+ *  hidden. `opts` is exactly what the wire delivered, `undefined` standing for
+ *  an older server that delivered nothing. */
+const SCOPE_CORPUS = [
+  // The leak the wire closes. `[]` is a real answer, and the one a test with
+  // no `For each` in it sends.
+  ['a data-file heading, with the run saying it bound nothing', 'user.apikey', { bindings: [] }, true],
+  ['…and a passkey heading beside it', 'login.passkey', { bindings: [] }, true],
+  ['…the whole key goes to the flat rule, so `keyword` masks', 'payment.keyword', { bindings: [] }, true],
+  ['…and so does `sort_key`', 'payment.sort_key', { bindings: [] }, true],
+  // A name a pass DID bind keeps the two-segment rule, which is what keeps a
+  // page's `keyword` column readable in the view beside a report that prints it.
+  ['a bound column takes the record rule', 'payment.keyword', { bindings: ['payment.keyword'] }, false],
+  ['…and a bound `sort_key` too', 'payment.sort_key', { bindings: ['payment.sort_key'] }, false],
+  ['…while a bound credential column is still hidden', 'payment.password', { bindings: ['payment.password'] }, true],
+  // Both kinds in one map — the case no rule could answer from the names.
+  ['a binding and a heading, same event, decided apart (binding)', 'payment.keyword', { bindings: ['payment.keyword'] }, false],
+  ['a binding and a heading, same event, decided apart (heading)', 'user.apikey', { bindings: ['payment.keyword'] }, true],
+  // Absent is not empty: an older server said nothing, and the safe reading of
+  // a scope full of real bindings is the narrow one.
+  ['an older server: nothing known, so nothing changes', 'user.apikey', undefined, false],
+  ['…and a real binding is not masked on its say-so', 'payment.keyword', undefined, false],
+  ['an empty opts object means the same as no opts', 'user.apikey', {}, false],
+  // A flat name never consults the list, on either side.
+  ['a flat name ignores an empty list', 'keyword', { bindings: [] }, true],
+  ['…and ignores a list it is in', 'payee', { bindings: ['payee'] }, false],
+  // The hatch.
+  ['an unmasked flat name is shown', 'keyword', { unmask: ['keyword'] }, false],
+  ['…matched exactly, so it says nothing about another name', 'password', { unmask: ['keyword'] }, true],
+  ['an unmasked bound column is shown', 'payment.password', { bindings: ['payment.password'], unmask: ['payment.password'] }, false],
+  ['an unmasked heading is shown', 'user.apikey', { bindings: [], unmask: ['user.apikey'] }, false],
+  ['an empty unmask list changes nothing', 'keyword', { unmask: [] }, true],
+  // Both fields together, which is the payload of a real unmasking run.
+  ['bindings and unmask together, on a name in neither', 'payment.password', { bindings: ['payment.password'], unmask: ['keyword'] }, true],
+];
+
+test('both scope-rule mirrors answer the bindings/unmask corpus identically', () => {
+  const value = 'uk_live_1234';
+  const masked = '*'.repeat(8);
+  for (const [what, name, opts, expected] of SCOPE_CORPUS) {
+    const want = expected ? masked : value;
+    // `opts === undefined` is called with ONE argument short, not with
+    // `undefined` passed in: that is how an older server's event reaches a
+    // call site that has nothing to hand over, and a default parameter is
+    // what makes the two the same. Asserted both ways for that reason.
+    assert.equal(
+      opts === undefined ? maskIfSecret(name, value) : maskIfSecret(name, value, opts),
+      want,
+      `runner-core: ${what} (${name})`,
+    );
+    assert.equal(
+      opts === undefined ? maskIfSecretInline(name, value) : maskIfSecretInline(name, value, opts),
+      want,
+      `variables-panel: ${what} (${name})`,
+    );
+  }
+});
+
+test('both scope-rule mirrors exempt an unmasked name from the RECORD scan too', () => {
+  // The server's `formatParameterBlock` returns an unmasked entry verbatim —
+  // no record scan, no free-text masking — because masking a declared
+  // non-secret by its shape would take the hatch away through another door.
+  const capture = JSON.stringify([{ payee: 'Alinta', password: 'hunter2-not-real' }]);
+  assert.equal(maskIfSecret('payments', capture, { unmask: ['payments'] }), capture);
+  assert.equal(maskIfSecretInline('payments', capture, { unmask: ['payments'] }), capture);
+  // …and without the hatch both still lose the column, so the test above is
+  // about the hatch rather than about a value nothing would have masked.
+  for (const shown of [maskIfSecret('payments', capture), maskIfSecretInline('payments', capture)]) {
+    assert.ok(!shown.includes('hunter2-not-real'), shown);
+  }
+});
+
+test('both scope-rule mirrors take a Set as readily as an array', () => {
+  // The wire hands over arrays; a surface holding one for a whole run would
+  // rather hold a Set. Both spellings, both mirrors.
+  for (const make of [(xs) => xs, (xs) => new Set(xs)]) {
+    const opts = { bindings: make(['payment.keyword']), unmask: make(['keyword']) };
+    assert.equal(maskIfSecret('payment.keyword', 'AU', opts), 'AU');
+    assert.equal(maskIfSecretInline('payment.keyword', 'AU', opts), 'AU');
+    assert.equal(maskIfSecret('user.apikey', 'uk_live_1234', opts), '*'.repeat(8));
+    assert.equal(maskIfSecretInline('user.apikey', 'uk_live_1234', opts), '*'.repeat(8));
+    assert.equal(maskIfSecret('keyword', 'search', opts), 'search');
+    assert.equal(maskIfSecretInline('keyword', 'search', opts), 'search');
+  }
+});
+
+/** Every surface that renders a SCOPE entry, and the call that must carry the
+ *  run's `bindings` / `unmask` into it. A source scan, like
+ *  `AUTHORED_CALL_SITES` above and for the same reason: one is a React
+ *  closure and the other needs the extension host, so neither is reachable
+ *  from `node --test`. A surface that drops the third argument compiles, runs,
+ *  and quietly answers the pre-wire way — which is the whole failure this
+ *  change exists to end. */
+const SCOPE_CALL_SITES = [
+  [
+    resolve(here, '..', 'src', 'extension', 'variables-view.ts'),
+    /maskIfSecret\(node\.name, node\.rawValue, node\.masking\)/,
+    'the Variables TreeView row',
+  ],
+  [
+    resolve(here, '..', 'src', 'webview', 'testbench-runner.jsx'),
+    /maskIfSecretInline\(row\.name, row\.value, runtimeMasking\)/,
+    "the webview Variables panel's rows",
+  ],
+  [
+    resolve(here, '..', 'src', 'webview', 'testbench-runner.jsx'),
+    /maskIfSecretInline\(name, value, runtimeMasking\)/,
+    'the skill re-run panel, whose rows are scope entries too',
+  ],
+];
+
+test('the scope surfaces pass the run’s bindings and unmask to the masker', () => {
+  for (const [file, pattern, what] of SCOPE_CALL_SITES) {
+    assert.match(readFileSync(file, 'utf8'), pattern, `${what} (${file})`);
   }
 });
 
@@ -428,6 +585,18 @@ const AUTHORED_CALL_SITES = [
     resolve(here, '..', 'src', 'extension', 'row-selection-core.ts'),
     /maskIfSecretAuthored\(k, v\)/,
     'rowValuesText — the Run Rows pick, the gutter hover and the Output banner',
+  ],
+  [
+    // `[input: name]` is written in the test file, so the name is the
+    // author's the same way a `[store as:]` output or a column heading is.
+    // The two maskers cannot disagree about it TODAY — `INPUT_STEP_RE`
+    // (src/parser/markdown.ts) matches `\w*`, and they differ only on a
+    // dotted name — so this is the rule being stated where it is true rather
+    // than a bug being fixed. It is here because the day that grammar widens,
+    // nothing else would notice.
+    resolve(here, '..', 'src', 'extension', 'run-controller.ts'),
+    /maskIfSecretAuthored\(item\.varName, answer\)/,
+    'the `[input:]` echo (`✎ name ← value`)',
   ],
 ];
 

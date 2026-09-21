@@ -356,6 +356,56 @@ test("maskIfSecretInline: the ROOT is still the author's word", () => {
 });
 
 // ---------------------------------------------------------------------------
+// What the run says about its own map: `bindings` and `unmask`
+// ---------------------------------------------------------------------------
+//
+// The rule above is the reading for a name a `For each` pass bound, and the
+// panel applied it to every dotted name because nothing on the wire said which
+// ones a pass bound. So a data file's own `user.apikey` column heading —
+// author-chosen end to end, and starred by the report — rendered
+// `uk_live_1234` in the panel beside it. `frame:scope` now carries the list
+// (`FrameScopeEvent.bindings`), and the run's `## Config: unmask:` names with
+// it. The corpus that holds this mirror to runner-core's lives in
+// `record-secret-parity.test.js`; these are the panel's own edges.
+
+test("maskIfSecretInline: a dotted name nobody bound takes the flat author rule", () => {
+  assert.equal(maskIfSecretInline("user.apikey", "uk_live_1234", { bindings: [] }), "*".repeat(8));
+  assert.equal(maskIfSecretInline("payment.keyword", "search", { bindings: [] }), "******");
+});
+
+test("maskIfSecretInline: a dotted name a pass bound keeps the two-segment rule", () => {
+  const bindings = ["payment.keyword", "payment.password"];
+  assert.equal(maskIfSecretInline("payment.keyword", "AU", { bindings }), "AU");
+  assert.equal(maskIfSecretInline("payment.password", "hunter2", { bindings }), "*".repeat(7));
+  // The other name in the same map is still decided on its own terms.
+  assert.equal(maskIfSecretInline("user.apikey", "uk_live_1234", { bindings }), "*".repeat(8));
+});
+
+test("maskIfSecretInline: no opts at all is exactly what it was", () => {
+  // An older server sends neither field, and the panel's default `{}` has to
+  // be indistinguishable from the two-argument call it replaced.
+  assert.equal(maskIfSecretInline("user.apikey", "uk_live_1234"), "uk_live_1234");
+  assert.equal(maskIfSecretInline("user.apikey", "uk_live_1234", {}), "uk_live_1234");
+  assert.equal(maskIfSecretInline("payment.keyword", "search", {}), "search");
+});
+
+test("maskIfSecretInline: an unmasked name is shown, empty-value guard included", () => {
+  assert.equal(maskIfSecretInline("keyword", "search", { unmask: ["keyword"] }), "search");
+  // The hatch is read BEFORE the falsy guard, so an unmasked empty value is
+  // the empty string rather than the panel's `(empty)` marker — the author
+  // said this name is not a secret, and `(empty)` is a mask word.
+  assert.equal(maskIfSecretInline("keyword", "", { unmask: ["keyword"] }), "");
+  assert.equal(maskIfSecretInline("keyword", "", {}), "(empty)");
+});
+
+test("maskIfSecretInline: a non-string value survives both new paths", () => {
+  // The panel renders whatever React state holds, and `String(value)` on every
+  // path is what has always kept a number or an undefined from throwing here.
+  assert.equal(maskIfSecretInline("keyword", 42, { unmask: ["keyword"] }), "42");
+  assert.equal(maskIfSecretInline("user.apikey", 1234567890, { bindings: [] }), "*".repeat(8));
+});
+
+// ---------------------------------------------------------------------------
 // maskRecordSecretsInline
 // ---------------------------------------------------------------------------
 //

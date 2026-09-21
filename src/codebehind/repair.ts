@@ -26,6 +26,11 @@ export interface RepairPromptInput {
   screenshotBase64?: string | undefined;
   /** Parameter names and their resolved values, as for generation. */
   parameters: Array<{ name: string; value: string }>;
+  /** The LIVE variable map they were read out of, as for generation — only so
+   *  a dotted name is decided by whose it is (§7.6). Without it a data file's
+   *  `user.apikey` heading rendered its credential into this prompt in clear.
+   *  The live object or nothing; a copy carries none of the loop marks. */
+  parameterMap?: Record<string, string> | undefined;
   /** The step's environment references with their values, as for generation. */
   envRefs?: Array<{ ref: string; value: string }> | undefined;
   /** Which round this is, and how many there are. */
@@ -33,7 +38,13 @@ export interface RepairPromptInput {
 }
 
 export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
-  const paramBlock = formatParameterBlock(input.parameters, input.envRefs ?? []);
+  const paramBlock = formatParameterBlock(
+    input.parameters,
+    input.envRefs ?? [],
+    new Set<string>(),
+    [],
+    input.parameterMap,
+  );
 
   // A repair must not "fix" a flow-control entry by giving it the
   // post-condition rule 5 asks for (stories/step-flow-control.md, decision 11).

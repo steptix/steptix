@@ -23,7 +23,13 @@ import {
   EMPTY,
   MASK,
 } from '../src/utils/secrets.js';
-import type { TestReport } from '../src/report/types.js';
+// The two real writers of the live variable map, for the registry tests that
+// ask what a REBIND leaves behind rather than what a hand call does.
+import { bindVariable } from '../src/parser/parameters.js';
+import { applyPassBindings } from '../src/runner/control-runtime.js';
+import { readFileSync } from 'node:fs';
+import { renderReport } from '../src/report/generator.js';
+import type { StepResult, TestReport } from '../src/report/types.js';
 
 describe('secretValues / runSecrets — what counts', () => {
   it('takes the values of secret-named parameters and nothing else', () => {
@@ -764,6 +770,36 @@ describe('the loop-binding registry — which dotted names are page-derived', ()
     expect(redactMap(live, [])).toEqual({ 'row.keyword': MASK });
   });
 
+  it('the REBIND itself unmarks, through clearDottedKeys — not only a hand call', () => {
+    // The line above says "as a rebind does" and then does it by hand. This is
+    // the rebind: `clearDottedKeys` (src/parser/parameters.ts) is what drops
+    // the key, and the `unmarkLoopBindings` beside it is what drops the mark.
+    // Without that one line the registry keeps answering for a key the map no
+    // longer holds, and the NEXT entry of that name — a data file's own
+    // `row.keyword` column, merged in afterwards — inherits an answer that was
+    // about somebody else's value.
+    const live: Record<string, string> = {};
+    // One `For each {{row}} in {{rows}}` pass over a table with a `keyword`
+    // column: page-derived, so the narrow record rule applies and `AU` stays
+    // in clear for the model to find in the DOM.
+    applyPassBindings(live, { row: '{"keyword":"AU"}', 'row.keyword': 'AU' });
+    expect(isSecretParameterName('row.keyword', live)).toBe(false);
+
+    // `Set {{row}} to "none"` after the loop — a rebind of the root, which
+    // takes `row.keyword` with it.
+    bindVariable(live, 'row', 'none');
+    expect(live['row.keyword']).toBeUndefined();
+
+    // The data file's own dotted heading, merged into the live map under the
+    // row's heading — a plain write, which is how `resolveParameters` does it.
+    live['row.keyword'] = 'mortgage';
+    expect(isLoopBinding(live, 'row.keyword')).toBe(false);
+    // The author typed this name, so the broad rule applies: `keyword`
+    // contains `key`.
+    expect(isSecretParameterName('row.keyword', live)).toBe(true);
+    expect(redactMap(live, [])).toMatchObject({ 'row.keyword': MASK });
+  });
+
   it('asked with NO map, a dotted name is read as a binding — the caller has no map to ask', () => {
     // `formatParameterBlock` names one parameter at a time and holds no map.
     expect(isSecretParameterName('row.keyword')).toBe(false);
@@ -835,5 +871,189 @@ describe('record masking — the shapes the two halves must agree on', () => {
     // where the damage is.
     expect(redact('report', [''])).toBe('report');
     expect(redact('report on hunter2-long', ['', 'hunter2-long'])).toBe(`report on ${MASK}`);
+  });
+});
+
+/**
+ * Review 5, findings 1 and 2: the report's two per-step value maps.
+ *
+ * `redactReport` masked `parameters` by NAME and everything else by VALUE —
+ * which left the loop band and a step's captured outputs judged by value
+ * alone, and both of them hold values under their names. The free-text set has
+ * a length floor and a "did it parse" filter, so a three-character `password`
+ * cell and a single-record capture under a plain name both cleared it: the
+ * band read `payment.password=abc` beside a `report.parameters` that said
+ * `***` for the same binding (§7.6).
+ */
+describe('redactReport — the loop band is masked by NAME, as the parameters are', () => {
+  function reportWithLoop(values: Record<string, string>, over: Partial<StepResult> = {}): TestReport {
+    const step: StepResult = {
+      index: 1,
+      instruction: 'Pay the payee',
+      status: 'passed',
+      turns: [],
+      durationMs: 1,
+      retried: false,
+      loop: { kind: 'iteration', label: 'Pay one', index: 1, count: 1, values },
+      ...over,
+    };
+    return {
+      testName: 'payments',
+      filePath: '/p/payments.md',
+      tags: [],
+      status: 'passed',
+      steps: [step],
+      totalSteps: 1,
+      passedSteps: 1,
+      failedSteps: 0,
+      totalSubActions: 0,
+      durationMs: 1,
+      tokensUsed: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      date: 'd',
+    };
+  }
+
+  /** What a `For each {{payment}} in {{payments}}` pass writes into the band:
+   *  the row's compact JSON under the item's own name, plus one dotted key per
+   *  property — and the marks that say a PASS bound them (§8.2). */
+  function passValues(): Record<string, string> {
+    const values = {
+      payment: '{"payee":"Acme","password":"abc","keyword":"AU"}',
+      'payment.payee': 'Acme',
+      'payment.password': 'abc',
+      'payment.keyword': 'AU',
+    };
+    markLoopBindings(values, ['payment.payee', 'payment.password', 'payment.keyword']);
+    return values;
+  }
+
+  it('masks a short secret cell by its name, and the record beside it by its columns', () => {
+    const values = passValues();
+    // Nothing here is in the FREE-TEXT set and nothing should be: `abc` is
+    // under the floor, so masking it everywhere would replace every "abc" in
+    // the run log and in the DOM the model plans from.
+    expect(secretValues(values)).toEqual([]);
+
+    const out = redactReport(reportWithLoop(values), []);
+    expect(out.steps[0]!.loop!.values).toEqual({
+      payment: `{"payee":"Acme","password":"${MASK}","keyword":"AU"}`,
+      'payment.payee': 'Acme',
+      'payment.password': MASK,
+      // Whose name it is decides: a pass bound this one, so the property half
+      // takes the narrow record rule and `AU` survives for the reader.
+      'payment.keyword': 'AU',
+    });
+    // The run's own marker is untouched — masking is applied at the outputs.
+    expect(values['payment.password']).toBe('abc');
+    expect(values['payment.keyword']).toBe('AU');
+  });
+
+  it('a dotted name NO pass bound is the author’s, and is masked whole', () => {
+    // A data file's column headings, merged into the same map by
+    // `resolveParameters` and stamped on the band. Nothing marked them, so
+    // `user.apikey` is read as one author-chosen name — the rule all three of
+    // these had before the dotted split existed.
+    const values = { 'user.apikey': 'uk_live_1234', 'row.keyword': 'AU', payee: 'Acme' };
+    const out = redactReport(reportWithLoop(values), []);
+    expect(out.steps[0]!.loop!.values).toEqual({
+      'user.apikey': MASK,
+      'row.keyword': MASK,
+      payee: 'Acme',
+    });
+  });
+
+  it('the rendered band carries none of it either', () => {
+    const values = {
+      payment: '{"payee":"Acme","password":"pw-9f3a2b"}',
+      'payment.password': 'pw-9f3a2b',
+      'payment.keyword': 'AU',
+    };
+    markLoopBindings(values, ['payment.password', 'payment.keyword']);
+    const html = renderReport(redactReport(reportWithLoop(values), []));
+
+    expect(html).toContain('loop-band-values');
+    expect(html).not.toContain('pw-9f3a2b');
+    expect(html).toContain('payment.password=***');
+    // …and the column the record rule deliberately leaves alone is still
+    // readable, which is the other half of the bargain.
+    expect(html).toContain('payment.keyword=AU');
+  });
+
+  it('a step’s captured outputs are masked by SHAPE, under a name that says nothing', () => {
+    // `[store as: account]` on a one-row read stores a single record. The name
+    // says nothing, and a three-character cell never joins the free-text set,
+    // so the Captured block printed the credential in full while the client's
+    // Variables panel showed `***` for the same value.
+    const record = '{"user":"bob","password":"abc"}';
+    const out = redactReport(
+      reportWithLoop({}, { outputs: { account: record }, loop: undefined }),
+      [],
+    );
+    expect(out.steps[0]!.outputs).toEqual({ account: `{"user":"bob","password":"${MASK}"}` });
+
+    const tool = redactReport(
+      reportWithLoop({}, {
+        loop: undefined,
+        toolStep: { name: 'fetch-account', args: {}, outputs: { account: record }, logs: [] },
+      }),
+      [],
+    );
+    expect(tool.steps[0]!.toolStep!.outputs).toEqual({
+      account: `{"user":"bob","password":"${MASK}"}`,
+    });
+  });
+
+  it('is still the identity for a report with nothing to mask', () => {
+    const plain = reportWithLoop({}, { loop: undefined, outputs: { total: '37.76' } });
+    expect(redactReport(plain, [])).toBe(plain);
+  });
+
+  /**
+   * The server's marker is built from a COPY of the frame inputs, and the
+   * registry is by object identity — so without this line every `row.<column>`
+   * in a Sessions API band would fall back to the author rule and `AU` would
+   * be masked because a column is called `keyword` (the round-2 defect). The
+   * CLI/Electron twin is pinned behaviourally in
+   * tests/test-runner-control-flow.test.ts.
+   */
+  it('the server’s marker site carries the marks onto its copy', () => {
+    const src = readFileSync(new URL('../src/server/session-manager.ts', import.meta.url), 'utf-8');
+    const start = src.indexOf('function loopMarkerFor(');
+    expect(start).toBeGreaterThan(-1);
+    const end = src.indexOf('\nfunction ', start + 1);
+    expect(src.slice(start, end)).toContain('inheritLoopBindings(');
+  });
+});
+
+/**
+ * Review 5, finding 2: `maskMapBy` applied the name rule and then `redact`,
+ * and never the shape rule in between — so a single-record capture under a
+ * plain name printed in full wherever a map is rendered.
+ */
+describe('a map of values masks by shape as well as by name and by value', () => {
+  const record = '{"user":"bob","password":"abc"}';
+  const masked = `{"user":"bob","password":"${MASK}"}`;
+
+  it('redactMap masks a record-shaped value in place', () => {
+    expect(redactMap({ account: record }, [])).toEqual({ account: masked });
+  });
+
+  it('redactAuthoredMap does too — the unrun-row band, which has no run secrets at all', () => {
+    // A row the loop never reached is masked with `secrets: []`
+    // (src/report/merge-rows.ts), so the shape rule is the only one that can
+    // reach inside the cell.
+    expect(redactAuthoredMap({ account: record }, [])).toEqual({ account: masked });
+  });
+
+  it('leaves a value that holds no record byte for byte', () => {
+    expect(redactMap({ note: 'plain [text] {here}' }, [])).toEqual({ note: 'plain [text] {here}' });
+    expect(redactAuthoredMap({ note: '[1,2,3]' }, [])).toEqual({ note: '[1,2,3]' });
+  });
+
+  it('a secret NAME still wins outright, before the shape is looked at', () => {
+    expect(redactMap({ token: record }, [])).toEqual({ token: MASK });
+    expect(redactMap({ token: '' }, [])).toEqual({ token: EMPTY });
   });
 });

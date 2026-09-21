@@ -338,6 +338,128 @@ test('…and it is the RECORD rule doing that reading, so it stays whole-word', 
 });
 
 // ---------------------------------------------------------------------------
+// `bindings` — whose dotted name is it?
+// ---------------------------------------------------------------------------
+//
+// The three arms above are the reading for a name a `For each` pass bound.
+// They were applied to EVERY dotted name, because nothing on the wire said
+// which ones a pass bound — the server keeps that in a registry keyed on the
+// live map's object identity, and `frame:scope` sends a copy. So a data
+// file's own `user.apikey` column heading took the record rule (`apikey` is
+// one word, no boundary, not a secret COLUMN) and rendered `uk_live_1234` in
+// the Variables view beside a report that starred it: the server's
+// `isSecretParameterName` falls back to the FLAT author rule for a dotted name
+// no pass bound, and `key` is in it.
+//
+// `FrameScopeEvent.bindings` is that registry as data, and these are the tests
+// that the client now reads it the way the server reads the registry.
+
+test('bindings: a dotted name nobody bound takes the flat author rule', () => {
+  // The measured leak. `[]` is a real answer — "this run bound nothing" —
+  // and it is what a test with no `For each` in it sends.
+  assert.equal(isSecretVarName('user.apikey', []), true);
+  assert.equal(maskIfSecret('user.apikey', 'uk_live_1234', { bindings: [] }), '*'.repeat(8));
+  assert.equal(maskIfSecret('login.passkey', 'abc', { bindings: [] }), '***');
+  // …and it is the WHOLE key that goes to the flat rule, so a name whose
+  // halves each say nothing still masks when the join says `key`.
+  assert.equal(maskIfSecret('payment.keyword', 'search', { bindings: [] }), '******');
+  assert.equal(maskIfSecret('payment.sort_key', 'abc', { bindings: [] }), '***');
+});
+
+test('bindings: a dotted name a pass DID bind keeps the two-segment rule', () => {
+  const bindings = ['payment.keyword', 'payment.sort_key', 'payment.password', 'payment.payee'];
+  // The page named the column, so the narrow rule decides and `AU` stays
+  // readable — which is the reason the two-segment rule exists at all.
+  assert.equal(maskIfSecret('payment.keyword', 'AU', { bindings }), 'AU');
+  assert.equal(maskIfSecret('payment.sort_key', 'abc', { bindings }), 'abc');
+  assert.equal(maskIfSecret('payment.payee', 'Origin Energy', { bindings }), 'Origin Energy');
+  // …and a column that really is a credential is still hidden.
+  assert.equal(maskIfSecret('payment.password', 'hunter2', { bindings }), '*'.repeat(7));
+});
+
+test('bindings: one scope, both kinds of name, decided apart', () => {
+  // The case the wire exists for: a loop binding and a data-file heading in
+  // the SAME map, which no rule could tell apart from the names alone.
+  const bindings = ['payment.keyword'];
+  assert.equal(maskIfSecret('payment.keyword', 'AU', { bindings }), 'AU');
+  assert.equal(maskIfSecret('user.apikey', 'uk_live_1234', { bindings }), '*'.repeat(8));
+});
+
+test('bindings: absent is not empty — an older server keeps the old reading', () => {
+  // Nothing on the wire means nothing known, and the safe reading of a scope
+  // full of real `row.<column>` bindings is the narrow one: collapsing absent
+  // into `[]` would mask `AU` out of every row whose column is called
+  // `keyword`, against a server that never said so.
+  assert.equal(maskIfSecret('payment.keyword', 'AU'), 'AU');
+  assert.equal(maskIfSecret('payment.keyword', 'AU', {}), 'AU');
+  assert.equal(maskIfSecret('user.apikey', 'uk_live_1234'), 'uk_live_1234');
+  assert.equal(isSecretVarName('user.apikey'), false, 'the no-map form is unchanged');
+});
+
+test('bindings: a flat name never consults the list', () => {
+  // The registry is asked only about a dotted name, server-side too, so a
+  // list that happens to be empty must not change what `keyword` does.
+  assert.equal(maskIfSecret('keyword', 'search', { bindings: [] }), '******');
+  assert.equal(maskIfSecret('payee', 'Alinta', { bindings: [] }), 'Alinta');
+  assert.equal(maskIfSecret('payee', 'Alinta', { bindings: ['payee'] }), 'Alinta');
+});
+
+test('bindings: a Set and an array are the same answer', () => {
+  // The wire hands over an array; a surface holding one for a whole run would
+  // rather hold a Set, and `nameIn` probes for `.has` rather than assuming.
+  for (const bindings of [['payment.keyword'], new Set(['payment.keyword'])]) {
+    assert.equal(maskIfSecret('payment.keyword', 'AU', { bindings }), 'AU');
+    assert.equal(maskIfSecret('user.apikey', 'uk_live_1234', { bindings }), '*'.repeat(8));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// `unmask` — the author's hatch, reaching the client
+// ---------------------------------------------------------------------------
+//
+// `## Config: unmask: keyword` says a name the rule matches is not a secret
+// after all. It was read on the server only, so the value reached the model
+// and the prompt while every client surface starred it.
+
+test('unmask: a named entry is shown in full', () => {
+  assert.equal(maskIfSecret('keyword', 'search', { unmask: ['keyword'] }), 'search');
+  assert.equal(maskIfSecret('MACHINE_KEY', 'abc', { unmask: ['MACHINE_KEY'] }), 'abc');
+  // By the EXACT name, as the server matches it: an unmasked `keyword` says
+  // nothing about `password`.
+  assert.equal(maskIfSecret('password', 'hunter2', { unmask: ['keyword'] }), '*******');
+});
+
+test('unmask: the exemption is from ALL THREE rules, not just the name one', () => {
+  // The server's `formatParameterBlock` returns the value verbatim for an
+  // unmasked name — no record scan, no free-text masking — because masking a
+  // declared non-secret by its shape takes the hatch away through the other
+  // door. A `readTable` capture the author unmasked comes back byte for byte.
+  const capture = JSON.stringify([{ payee: 'Alinta', password: 'hunter2-not-real' }]);
+  assert.equal(maskIfSecret('payments', capture, { unmask: ['payments'] }), capture);
+  // …and without the hatch, the same value still loses its secret column.
+  assert.ok(!maskIfSecret('payments', capture).includes('hunter2-not-real'));
+});
+
+test('unmask: a dotted binding can be unmasked too, whichever rule caught it', () => {
+  const bindings = ['payment.password'];
+  assert.equal(maskIfSecret('payment.password', 'abc', { bindings }), '***');
+  assert.equal(
+    maskIfSecret('payment.password', 'abc', { bindings, unmask: ['payment.password'] }),
+    'abc',
+  );
+  // …and an unregistered one, which the flat rule would otherwise catch.
+  assert.equal(
+    maskIfSecret('user.apikey', 'uk_live_1234', { bindings: [], unmask: ['user.apikey'] }),
+    'uk_live_1234',
+  );
+});
+
+test('unmask: absent changes nothing', () => {
+  assert.equal(maskIfSecret('keyword', 'search', {}), '******');
+  assert.equal(maskIfSecret('keyword', 'search', { unmask: [] }), '******');
+});
+
+// ---------------------------------------------------------------------------
 // maskIfSecretAuthored — the author rule on the WHOLE key
 // ---------------------------------------------------------------------------
 //

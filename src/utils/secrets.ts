@@ -15,11 +15,12 @@ import { isSecretName } from '../parser/parameters.js';
 import {
   inheritLoopBindings,
   isLoopBinding,
+  loopBindingsOf,
   markLoopBindings,
   unmarkLoopBindings,
 } from './loop-bindings.js';
 import { envDataSecretValues, type EnvDataContext } from '../parser/interpolate-env-data.js';
-import type { TestReport } from '../report/types.js';
+import type { StepResult, TestReport } from '../report/types.js';
 
 /**
  * Re-exported as the one rule for names the AUTHOR chose — flat parameters,
@@ -104,8 +105,14 @@ const RECORD_SECRET_MIN_LENGTH = 4;
  * drops — can import it without importing this file, which imports
  * `isSecretName` from parameters.ts in turn. Re-exported here because the
  * rules that consult it are here, and that is where a reader looks.
+ *
+ * {@link loopBindingsOf} comes with them for the one consumer that is not a
+ * rule: `frame:scope` (src/server/session-manager.ts) puts the list on the
+ * wire so TestBench can apply {@link isSecretParameterName}'s two-segment
+ * rule to a pass binding and the author rule to everything else dotted,
+ * which without it the client could not tell apart (§7.6).
  */
-export { markLoopBindings, unmarkLoopBindings, isLoopBinding, inheritLoopBindings };
+export { markLoopBindings, unmarkLoopBindings, isLoopBinding, inheritLoopBindings, loopBindingsOf };
 
 
 /**
@@ -529,6 +536,19 @@ export function redactAuthoredMap(
   return maskMapBy(map, secrets, isSecretName);
 }
 
+/**
+ * All three rules over one map, in the §7.6 order: the NAME first, then the
+ * value's own SHAPE, then free text.
+ *
+ * `maskRecordSecrets` is the middle one and was missing. The name rule cannot
+ * see inside a value and `redact` only replaces what it was TOLD about — so a
+ * single-record capture under a plain name (`[store as: account]` holding
+ * `{"user":"bob","password":"abc"}`) cleared both: `account` says nothing, and
+ * a three-character cell is under {@link RECORD_SECRET_MIN_LENGTH} so it never
+ * joined the free-text set. The report's parameter block and the band printed
+ * it in full while the prompt's `## Values` block and the client's Variables
+ * panel — both of which do mask by shape — showed `***` for the same value.
+ */
 function maskMapBy(
   map: Record<string, string>,
   secrets: string[],
@@ -536,18 +556,93 @@ function maskMapBy(
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(map)) {
-    out[k] = isSecret(k) ? (v === '' ? EMPTY : MASK) : redact(v, secrets);
+    out[k] = isSecret(k) ? (v === '' ? EMPTY : MASK) : redact(maskRecordSecrets(v), secrets);
   }
   return out;
 }
 
+/** {@link maskRecordSecrets} over a map of captured values, returning the map
+ *  ITSELF when no cell was masked — the identity is what keeps a report with
+ *  no record-shaped capture byte-identical to the one written before this
+ *  pass existed. Only the value's shape decides; the key is the caller's
+ *  business (a `[store as:]` name is the author's, and `redactMap` /
+ *  `redactAuthoredMap` have already had their say about it). */
+function maskRecordsIn(map: Record<string, string>): Record<string, string> {
+  let changed = false;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(map)) {
+    const masked = maskRecordSecrets(v);
+    if (masked !== v) changed = true;
+    out[k] = masked;
+  }
+  return changed ? out : map;
+}
+
+/**
+ * The two per-step maps that hold values UNDER THEIR NAMES, masked as such —
+ * a loop band's `values`, and a step's captured `outputs`.
+ *
+ * `redactDeep` walks the report by VALUE, deliberately: it sees every object
+ * in it and `isSecretName` over-matches, so a `press` action's `key: "Enter"`
+ * must not become `***`. But that leaves the two maps here judged by value
+ * alone, and both of them are exactly the shape the name rule exists for. A
+ * three-character `password` cell or a boolean `token` is under the free-text
+ * floor, so the band read `payment.password=abc` beside a `report.parameters`
+ * that said `***` for the same binding (§7.6).
+ *
+ * The band's map is read from the ORIGINAL step, not from the deep copy:
+ * the loop-binding registry is by object identity, so `redactDeep`'s copy is
+ * nobody's binding and every `row.<column>` in it would fall back to the
+ * author rule — `AU` masked because a column is called `keyword`, the round-2
+ * defect through the last door left open (§7.6, `inheritLoopBindings`).
+ *
+ * Returns `steps` itself when nothing changed, so
+ * {@link redactReport}'s identity case survives.
+ */
+function maskStepValueMaps(
+  steps: StepResult[],
+  originals: StepResult[],
+  secrets: string[],
+): StepResult[] {
+  let changed = false;
+  const out = steps.map((step, i) => {
+    const original = originals[i] ?? step;
+    let next = step;
+    if (original.loop) {
+      next = {
+        ...next,
+        loop: { ...(next.loop ?? original.loop), values: redactMap(original.loop.values, secrets) },
+      };
+    }
+    if (next.outputs) {
+      const outputs = maskRecordsIn(next.outputs);
+      if (outputs !== next.outputs) next = { ...next, outputs };
+    }
+    if (next.toolStep) {
+      const outputs = maskRecordsIn(next.toolStep.outputs);
+      if (outputs !== next.toolStep.outputs) {
+        next = { ...next, toolStep: { ...next.toolStep, outputs } };
+      }
+    }
+    if (next !== step) changed = true;
+    return next;
+  });
+  return changed ? out : steps;
+}
+
 /**
  * The report as every consumer should see it: each string masked by value,
- * the resolved parameters masked by name as well. A copy; the run's own
- * objects are left alone.
+ * and the three maps that hold values under their names — the resolved
+ * parameters, each loop band's `values`, each step's captured `outputs` —
+ * masked by name and by record shape as well.
+ *
+ * A copy; the run's own objects are left alone. A report with nothing to mask
+ * comes back by identity.
  */
 export function redactReport(report: TestReport, secrets: string[]): TestReport {
-  if (secrets.length === 0 && !report.parameters) return report;
   const out = redactDeep(report, secrets);
-  return report.parameters ? { ...out, parameters: redactMap(report.parameters, secrets) } : out;
+  const steps = maskStepValueMaps(out.steps, report.steps, secrets);
+  const parameters = report.parameters ? redactMap(report.parameters, secrets) : undefined;
+  if (steps === out.steps && parameters === undefined) return out;
+  return { ...out, steps, ...(parameters !== undefined && { parameters }) };
 }

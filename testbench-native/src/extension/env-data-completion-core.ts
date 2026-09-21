@@ -45,6 +45,7 @@ import {
   classifyLines,
   extractSections,
   isSecretFlatName,
+  maskRecordSecrets,
   matchText,
   parseControlLine,
   resolveValueFromEnv,
@@ -893,6 +894,31 @@ function maskIfSecretName(name: string, value: string): string {
   return isSecretFlatName(name) ? maskValue(value) : value;
 }
 
+/**
+ * The `{{` dropdown's masker for a DECLARED PARAMETER: the author's own name
+ * first, and then the value's SHAPE.
+ *
+ * The name check alone is the whole rule everywhere else in this file, and it
+ * is enough there: a `${data.…}` leaf is one scalar and an env var is one
+ * string, so if the name does not say secret there is nothing inside to say
+ * it. A parameter is the one place a RECORD can arrive — a `## Parameters`
+ * entry may hold a captured table verbatim, `[{"payee":"Alinta",
+ * "password":"hunter2"}]` — and `readTable` made that ordinary. The report
+ * redacts it column by column (`maskRecordSecrets` is runner-core's mirror of
+ * the server's rule); without this the dropdown printed it in full, under a
+ * parameter name like `rows` that says nothing at all.
+ *
+ * Masked BEFORE previewing, not after: `previewValue` truncates at
+ * PREVIEW_MAX and a truncated record no longer parses as JSON, so a table long
+ * enough to be cut — which is most of them — would come back untouched.
+ * Star-masking a whole secret-NAMED value is unaffected either way, since
+ * `maskValue` caps at eight stars.
+ */
+function maskParamPreview(name: string, value: string): string {
+  if (isSecretFlatName(name)) return maskValue(previewValue(value));
+  return previewValue(maskRecordSecrets(value));
+}
+
 // ---------------------------------------------------------------------------
 // Plain completion descriptors (mapped to vscode.CompletionItem by the caller)
 // ---------------------------------------------------------------------------
@@ -1056,9 +1082,11 @@ export function namespaceCompletions(opts: NamespaceOptions): PlainCompletion[] 
  * `params` values arrive already `$VAR`-resolved: the caller composes `.env`
  * with `.env.<envName>` and runs runner-core's `resolveValueFromEnv`, exactly
  * as the run does, so the preview is what would be substituted. Masking is by
- * the parameter's own name under the runtime rule above, so the dropdown never
- * shows what a report would redact — and an unset `$VAR`, which previews as
- * its own literal, is masked all the same when the name is secret-shaped.
+ * the parameter's own name under the runtime rule above, and then by the
+ * VALUE's shape (`maskParamPreview`), so the dropdown never shows what a
+ * report would redact — not even a record-shaped value under a name that says
+ * nothing. An unset `$VAR`, which previews as its own literal, is masked all
+ * the same when the name is secret-shaped.
  *
  * Captures carry no preview: their values exist only mid-run. Their detail
  * names the marker form and the 1-based line that writes it, derived from the
@@ -1084,7 +1112,7 @@ export function paramCompletions(
     out.push({
       label: name,
       kind: 'parameter',
-      detail: maskIfSecretName(name, previewValue(value)),
+      detail: maskParamPreview(name, value),
       // Declared order inside the group; the group prefix keeps every
       // parameter above every capture.
       sortText: `0_${String(out.length).padStart(4, '0')}`,

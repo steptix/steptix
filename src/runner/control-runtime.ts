@@ -652,6 +652,18 @@ export class LoopRuntime {
       ...(pass.count !== undefined && { count: pass.count }),
       values: { ...(pass.bindings ?? {}) },
     };
+    // Whose names these are, recorded on the COPY — the registry is by object
+    // identity, so a `{ ...bindings }` arrives unmarked and `redactReport`
+    // would decide every dotted one by the author rule, masking `AU` because
+    // a column is called `keyword` (§7.6, the round-2 defect). Marked
+    // directly rather than inherited from the live map, because this map IS
+    // the pass's bindings and nothing else is in it: `applyPassBindings` is
+    // about to record exactly these names over there, from exactly this
+    // object, and it has not run yet on the first pass.
+    markLoopBindings(
+      marker.values,
+      Object.keys(marker.values).filter((key) => key.includes('.')),
+    );
     const ordinal = (this.ordinals.get(guard) ?? 0) + 1;
     this.ordinals.set(guard, ordinal);
     this.stack.push({ guard, record, marker, ordinal, frameAlias: new Map() });

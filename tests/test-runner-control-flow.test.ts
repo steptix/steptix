@@ -778,6 +778,40 @@ describe('For each binds the list', () => {
     expect(failed.error).toContain('capture it with a read of every matching element');
   });
 
+  /**
+   * Review 5, finding 1: the band is a map of values held under their names,
+   * and it was masked by VALUE only.
+   *
+   * `abc` is three characters, so it never joins the free-text set — masking
+   * it everywhere would replace every "abc" in the run log and in the DOM the
+   * model plans from. The name is what has to answer here, exactly as it does
+   * for `report.parameters`, and it can only answer correctly because the
+   * marker's own copy of the bindings remembers that a PASS wrote them: read
+   * as the author's, `account.keyword` matches on `key` and `AU` disappears
+   * from the band as well (§7.6, §8.4).
+   */
+  it('masks the band by name — and by whose name it is', async () => {
+    const inst = await instance(
+      FOR_EACH,
+      { accounts: '[{"payee":"Acme","password":"abc","keyword":"AU"}]' },
+      'for-each-secret.md',
+    );
+    const report = await runTest(inst, makeConfig(), '');
+
+    const body = report.steps.filter((s) => s.instruction === 'Click the account row');
+    expect(body).toHaveLength(1);
+    expect(body[0]!.loop!.values).toEqual({
+      account: '{"payee":"Acme","password":"***","keyword":"AU"}',
+      'account.payee': 'Acme',
+      'account.password': '***',
+      'account.keyword': 'AU',
+    });
+    // The same answer the parameter block gives for the same binding, which is
+    // the disagreement this fixes.
+    expect(report.parameters!['account.password']).toBe('***');
+    expect(report.parameters!['account.keyword']).toBe('AU');
+  });
+
   it('skips the body over an empty list, and the guard still passes', async () => {
     const inst = await instance(FOR_EACH, { accounts: '[]' }, 'for-each-empty.md');
     const report = await runTest(inst, makeConfig(), '');
@@ -1718,5 +1752,101 @@ describe('the loop band survives the rows a return produced (CLI)', () => {
       ['passed', 1],
       ['passed', 2],
     ]);
+  });
+});
+
+/**
+ * An `[output:]` step whose variable is a name off `Object.prototype`.
+ *
+ * Two bare indexes into the live parameter map sat on this one line of the
+ * CLI. `computeStepCaptures` asked `name in resolvedParameters`, so a step
+ * whose read found NOTHING still reported a capture — of the `Object`
+ * function, into a `Record<string, string>` that the report and the run
+ * history print. And the `[output:]` console line indexed the map directly,
+ * so it announced `= "function Object() { [native code] }"` about a value
+ * nothing had captured. `[store as: constructor]` on a page with an "Order
+ * constructor" column is all it takes, and both surfaces are ones an author
+ * reads to find out whether the capture worked.
+ */
+describe('an [output:] step naming a prototype key (CLI)', () => {
+  const OUTPUT_PROTO = [
+    '# Output',
+    '',
+    '## Steps',
+    '1. [output: constructor] Read the order id',
+    '',
+  ].join('\n');
+
+  /** The executor's answer: a `read` tagged `as: constructor`, which is what
+   *  the `[output:]` enrichment turns into, and which `computeStepCaptures`
+   *  auto-captures. `write` says whether it actually found a value. */
+  function readsInto(write: string | undefined): void {
+    executeStepMock.mockImplementation(async (
+      index: number,
+      _total: number,
+      instruction: string,
+      opts: { resolvedParameters: Record<string, string> },
+    ) => {
+      if (write !== undefined) {
+        // `defineProperty`, the way `bindVariable` writes it — a plain
+        // assignment to `__proto__` would write nothing at all.
+        Object.defineProperty(opts.resolvedParameters, 'constructor', {
+          value: write, writable: true, enumerable: true, configurable: true,
+        });
+      }
+      return {
+        index,
+        instruction,
+        status: 'passed',
+        turns: [{
+          turnNumber: 1,
+          attemptNumber: 1,
+          timestamp: new Date().toISOString(),
+          aiInteractions: [],
+          subActions: [
+            { index: 1, action: { action: 'read', description: 'read it', as: 'constructor' }, durationMs: 1 },
+          ],
+        }],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+  }
+
+  it('captures nothing, and says "(not captured)", when the read found nothing', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    try {
+      readsInto(undefined);
+      const report = await runTest(
+        await instance(OUTPUT_PROTO, {}, 'output-proto-empty.md'),
+        makeConfig(),
+        '',
+      );
+      expect(report.steps[0]!.status).toBe('passed');
+      expect(report.steps[0]!.outputs).toBeUndefined();
+
+      const lines = info.mock.calls.map((c) => String(c[0]));
+      expect(lines).toContain('[output: constructor] = "(not captured)"');
+      expect(lines.join('\n')).not.toContain('native code');
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('captures and prints the value when the read DID find one', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    try {
+      readsInto('ORD-1001');
+      const report = await runTest(
+        await instance(OUTPUT_PROTO, {}, 'output-proto-found.md'),
+        makeConfig(),
+        '',
+      );
+      expect(report.steps[0]!.outputs).toEqual({ constructor: 'ORD-1001' });
+      expect(info.mock.calls.map((c) => String(c[0])))
+        .toContain('[output: constructor] = "ORD-1001"');
+    } finally {
+      info.mockRestore();
+    }
   });
 });

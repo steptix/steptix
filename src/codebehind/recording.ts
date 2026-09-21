@@ -330,7 +330,12 @@ async function writeRecordedStep(
     ...(ctx?.urlAfter !== undefined && { urlAfter: ctx.urlAfter }),
     ...(result.pageUrl !== undefined && { pageUrl: result.pageUrl }),
     actions: actionsOf(result).map((a) => redactDeep(a, secrets)),
-    ...(result.assertions && { assertions: result.assertions }),
+    // Redacted like every sibling field on this record. An assertion's
+    // `actual` and `expected` are page text — a balance, a message, the value
+    // a `[store as: password]` step typed and read back — and this is the one
+    // field that was written through untouched, so the recording on disk held
+    // it in clear beside an `instruction` that said `***` (§7.6).
+    ...(result.assertions && { assertions: redactDeep(result.assertions, secrets) }),
     // By the AUTHOR rule on the whole name: a `[store as:]` output is named
     // end to end by the person who wrote the step, so there is no page-derived
     // half for the variable map's two-segment rule to protect. Asked that way,

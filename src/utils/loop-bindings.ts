@@ -56,6 +56,33 @@ export function isLoopBinding(map: object, name: string): boolean {
 }
 
 /**
+ * The registry's answer as DATA, for a reader that cannot hold the map.
+ *
+ * {@link isLoopBinding} asks about one name and needs the map object to ask
+ * with, which is exactly what a client does not have: `frame:scope` sends a
+ * COPY of the scope over HTTP, so every dotted entry arrived at TestBench as
+ * nobody's binding and the Variables view fell back to the two-segment rule
+ * for all of them — printing a data file's `user.apikey` heading beside a
+ * report that starred it (§7.6, §14). This is what the event carries so the
+ * client can apply the server's rule instead of a narrower one.
+ *
+ * DOTTED names only, sorted. Only a dotted name ever consults the registry —
+ * `isSecretParameterName` and `joinsMaskSet` both answer a flat one by the
+ * author rule before they look — so a flat mark has no reader here or on the
+ * client, and putting author-chosen names on the wire for nobody would
+ * invite a reader to invent a meaning for them. (Nothing marks a flat name
+ * today either: both `markLoopBindings` call sites filter on `includes('.')`.)
+ * Sorted because the list is asserted on and diffed, and a `Set`'s insertion
+ * order would make the same pass produce a different payload depending on the
+ * order a row's columns came off the page.
+ */
+export function loopBindingsOf(map: object): string[] {
+  const marked = loopBindings.get(map);
+  if (!marked) return [];
+  return [...marked].filter((name) => name.includes('.')).sort();
+}
+
+/**
  * Carry `from`'s marks onto `to` — for a map that is a COPY of the live one.
  *
  * The registry is by object identity, so `{ ...resolvedParameters, ...frameInputs }`

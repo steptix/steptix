@@ -1043,8 +1043,19 @@ class RunControllerRegistry implements vscode.Disposable {
           // Phase 4 — pipe the scope payload into the controller's
           // per-frame map. The Variables view subscribes via the
           // registry's onAnyScopeChange bridge.
+          //
+          // `bindings` and `unmask` travel with it, spread conditionally so a
+          // field the server did not send stays UNDEFINED rather than becoming
+          // an empty array. The difference is the whole contract: `[]` means
+          // "this run bound nothing", which makes a dotted name the author's
+          // and masks `user.apikey`, while absent means "an older server said
+          // nothing", which leaves the maskers on their pre-wire reading
+          // (docs/specs/SPEC-structured-table-reads.md §7.6).
           const controller = this.controllers.get(uri.toString());
-          controller?.handleFrameScope(ev.frameId, ev.scope);
+          controller?.handleFrameScope(ev.frameId, ev.scope, {
+            ...(ev.bindings !== undefined && { bindings: ev.bindings }),
+            ...(ev.unmask !== undefined && { unmask: ev.unmask }),
+          });
           break;
         }
         case 'tool:awaiting-debugger': {
@@ -1961,6 +1972,10 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
   // current-scope renderer; per-frame click-to-select is Phase 4.B.
   const variablesProvider = new VariablesTreeProvider({
     currentScope: () => registry.runningController()?.currentScope() ?? {},
+    // How to read that scope — the `bindings` / `unmask` that arrived on the
+    // same event. Read through the controller so it always describes the
+    // frame `currentScope` just returned.
+    currentMasking: () => registry.runningController()?.currentScopeMasking() ?? {},
     // The "current frame" the view is rendering is the controller's top
     // frame, or the test (root) frame when no skill is active. Used by
     // the view to (a) update its title to "Variables (skill: name)" /

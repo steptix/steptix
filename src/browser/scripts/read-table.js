@@ -198,8 +198,8 @@
   }
 
   /**
-   * The LAST body row that carries a `<th>` and is more than one cell wide,
-   * by index; -1 when there is none.
+   * The LAST body row that carries MORE THAN ONE `<th>`, by index; -1 when
+   * there is none.
    *
    * The one thing that tells a group heading apart from a genuine one-cell
    * header: a group heading has the row that names the columns BELOW it, and
@@ -208,11 +208,29 @@
    * a later one" for every i at once. Such a row is always one the search
    * would consider anyway — carrying a `<th>` satisfies the rendered-or-
    * heading filter on its own.
+   *
+   * MORE THAN ONE, not "any", because a row naming the columns names them
+   * ALL: `<td></td><th>Order ID</th><th>Status</th>` is a heading row beside a
+   * checkbox, whereas ONE `<th>` among `<td>`s is a ROW header —
+   * `<tr><th>O-1</th><td><button>Delete</button></td></tr>`, §7.3's realistic
+   * case. Counted as "any", such a data row answered "yes, a wider heading
+   * follows" for the genuine one-cell `<th>` header above it, which was then
+   * stepped over: the first data row became the header (`available headers
+   * are O-1, Delete`) and a positional read returned `Order ID` as record 1
+   * with the O-1 row gone from the middle — the §4.5 misalignment the
+   * step-over exists to prevent, produced by the step-over itself.
+   *
+   * The residual limit is the mirror image, and far rarer: a real heading row
+   * that carries a single `<th>` beside `<td>`s (`<tr><th>Name</th><td>
+   * Actions</td></tr>`) is not recognised here, so a group row sitting above
+   * IT is not stepped over. §7.3 states it.
    */
   let lastWideHeadingAt = -1;
   for (let i = 0; i < bodyRows.length; i++) {
     const cells = items(bodyRows[i].cells);
-    if (cells.length > 1 && cells.some((c) => c.tagName === 'TH')) lastWideHeadingAt = i;
+    if (cells.length > 1 && cells.filter((c) => c.tagName === 'TH').length > 1) {
+      lastWideHeadingAt = i;
+    }
   }
 
   // ── 3. the header row (§7.3) ─────────────────────────────────────────────

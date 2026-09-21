@@ -222,15 +222,64 @@ export const RECORD_SECRET_PATTERNS = {
  * it stays whole-word and `row.keyword` and `payment.sort_key` stay clear of
  * it. Without this clause `api.key` and `private.key` rendered in full in the
  * Variables view while the report beside them said `***`.
+ *
+ * And a dot does not by itself make a binding, which is what `bindings` is
+ * for: the dotted names the run's `frame:scope` says a pass actually bound
+ * (`FrameScopeEvent.bindings`). A dotted name that is NOT in that list is a
+ * name a person typed — a data file's `user.apikey` column heading, a
+ * `[store as: api.key]` output — and takes the flat author rule on the WHOLE
+ * key, exactly as the server's `isSecretParameterName(name, map)` does when
+ * its registry says no. Until the list was on the wire this function had no
+ * way to ask, answered every dotted name the narrow way, and showed
+ * `uk_live_1234` in a view sitting beside a report that starred it (§7.6).
+ *
+ * Omitting `bindings` keeps that older reading, because an older SERVER omits
+ * the field and "unknown" must not silently become "bound nothing" —
+ * a scope full of real `row.<column>` bindings would then mask `AU` out of
+ * every row whose column is called `keyword`. An EMPTY list is a different
+ * statement and is honoured: this run bound nothing, so every dotted name in
+ * it is the author's.
  */
-export function isSecretVarName(varName: string): boolean {
+export function isSecretVarName(
+  varName: string,
+  bindings?: ReadonlySet<string> | readonly string[],
+): boolean {
   const dot = varName.indexOf('.');
   if (dot < 0) return isSecretFlatName(varName);
+  if (bindings !== undefined && !nameIn(bindings, varName)) return isSecretFlatName(varName);
   return (
     isSecretFlatName(varName.slice(0, dot))
     || isRecordSecretKey(varName.slice(dot + 1))
     || wholeNameIsRecordSecret(varName)
   );
+}
+
+/**
+ * What a `frame:scope` event says about its own map, beside the values
+ * (`FrameScopeEvent.bindings` / `.unmask`, protocol.ts).
+ *
+ * Both are `ReadonlySet | array` because the wire hands over arrays and the
+ * surfaces that hold one for a whole run would rather hold a set. A missing
+ * field is an older server, and means "nothing known" rather than "none".
+ */
+export interface ScopeMasking {
+  /** Dotted names a `For each` pass bound. See {@link maskIfSecret}. */
+  bindings?: ReadonlySet<string> | readonly string[];
+  /** `## Config: unmask:` names — exempt from every rule. */
+  unmask?: ReadonlySet<string> | readonly string[];
+}
+
+/** Is `name` in a list that may be either spelling? A `.has` probe rather
+ *  than `Array.isArray`, so a `Set`, a `ReadonlySet` and a plain array all
+ *  answer without a cast that lies about which one arrived. */
+function nameIn(
+  list: ReadonlySet<string> | readonly string[] | undefined,
+  name: string,
+): boolean {
+  if (list === undefined) return false;
+  return typeof (list as ReadonlySet<string>).has === 'function'
+    ? (list as ReadonlySet<string>).has(name)
+    : (list as readonly string[]).includes(name);
 }
 
 /** The dotted name read as ONE record key: `api.key` → `api_key`. The record
@@ -341,9 +390,31 @@ export function maskRecordSecrets(value: string): string {
  * The name first, and outright: a secret-named value is hidden whole, columns
  * and all, because the name is the rule and it says secret. Only when the name
  * says nothing does the value get looked into.
+ *
+ * `opts` is what the run's `frame:scope` said about the map this entry came
+ * out of, and it is what makes this function the server's rule rather than an
+ * approximation of it:
+ *
+ * - `opts.unmask` — the test's `## Config: unmask:` names — is read FIRST and
+ *   returns the value untouched. That ordering is the hatch: the server's
+ *   `formatParameterBlock` exempts an unmasked name from all three rules, and
+ *   letting the record scan below run on it would star a `keyword` column the
+ *   author declared readable, which is the thing the hatch exists to stop.
+ * - `opts.bindings` decides whether a DOTTED name is read as `root.property`
+ *   or as one author-chosen key. See {@link isSecretVarName}.
+ *
+ * Both are optional and both default to the pre-wire behaviour, because an
+ * older server sends neither.
+ *
+ * A third argument rather than a second function, deliberately: every scope
+ * surface must ask the same question, and a `maskScopeEntry` beside a
+ * still-working `maskIfSecret` is a surface one refactor away from quietly
+ * keeping the old answer. The parity test scans the call sites, but only the
+ * ones it knows about.
  */
-export function maskIfSecret(varName: string, value: string): string {
-  if (!isSecretVarName(varName)) return maskRecordSecrets(value);
+export function maskIfSecret(varName: string, value: string, opts: ScopeMasking = {}): string {
+  if (nameIn(opts.unmask, varName)) return value;
+  if (!isSecretVarName(varName, opts.bindings)) return maskRecordSecrets(value);
   return maskValue(value);
 }
 

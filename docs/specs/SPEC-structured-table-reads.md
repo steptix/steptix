@@ -384,11 +384,9 @@ failed both reads with “merged cells are not supported”. The rule is:
   **placeholder row**, not data. "At least", because `colspan="99"` on a
   three-column table is the common "span all" idiom and has to count. The
   floor of 2 is the whole one-column story: an ordinary `colspan="1"` cell
-  never reaches it, so a one-column table's rows are data — the first wording
-  ("colspan equals the header's column count") was true of every one of them,
-  and such a table read as `[]` with a loop over it running zero passes,
-  green. A one-column table with a lone `colspan="2"` message row is still a
-  placeholder, though: a cell spanning more than its own column is a message,
+  never reaches it, so a one-column table's rows are data. A one-column table
+  with a lone `colspan="2"` message row is still a placeholder, though: a
+  cell spanning more than its own column is a message,
   and refusing that row as a merged cell would be the same bug in the other
   direction.
 - The width is the header row's cell count, or, with no header, the widest
@@ -581,9 +579,9 @@ readTable cannot map table "Orders": merged headers or cells (rowspan/colspan > 
 The second fixture, built as `fixtures/test-app/scheduled-payments.html`
 (five rows there; the first three shown here). No `<thead>`, no `<th>`, two
 rows for the same payee, cells that are empty on some rows and not others,
-and — as built — seven columns: an Auto-pay checkbox is column 6 (for the
-phase-2 `checked` mode) and the buttons are column 7. Every step in this
-document reads columns 1 to 5, so the layout change touches none of them.
+and seven columns: columns 1 to 5 are the data every step in this document
+reads, an Auto-pay checkbox is column 6 (there for the phase-2 `checked`
+mode) and the row's buttons are column 7.
 
 ```html
 <table id="scheduled-payments" aria-label="Scheduled payments">
@@ -842,6 +840,13 @@ Teach the step-planning prompt:
   meaning.
 - If the author asks for all rows but names no columns, return a `prompt` asking
   which columns are required instead of guessing.
+- Refuse the phase-2 wording **by name**: reading a checkbox's ticked state, an
+  input's value or an attribute is not supported yet, so a step asking for one
+  returns a `prompt` rather than requesting that column as text. Naming the
+  three is what stops the quiet failure — a column asked for as a tick that
+  comes back as the cell's text reads as a pass over the wrong thing. (Rule
+  13d "WHAT NOT TO GUESS" in `src/ai/prompts.ts`, pinned by
+  `tests/prompts-read-table.test.ts`.)
 - If the table is missing from the snapshot, use existing `find`/`expand`
   exploration and reevaluate rather than guessing a selector.
 - Set `needs_reeval: false`; the action is observational and completes the read.
@@ -894,16 +899,10 @@ accepts exactly one direct header row belonging to the selected table:
   `<tr><td></td><th>Order ID</th><th>Status</th></tr>` (a checkbox cell
   beside headings) and a one-column `<tr><th>Order ID</th></tr>`, and keeps
   out a `<th scope="row">` row (§10, that row's own heading) and a lone
-  full-width group `<th>` (§4.8). Review found the first wording ("the first
-  row containing `<th>` cells") could not be applied literally without
-  taking a row-header row as the header, and an implementation that
-  required *every* cell to be a `<th>` missed the checkbox case — with
-  positional columns the header text then became record 1 and every `_row`
-  was off by one. "Absent **or empty**" for the same reason: a framework
-  that renders `<thead></thead>` and puts the headings in the first `<tbody>`
-  row was read as headerless while the element was merely present, so a
-  positional read made the heading text record 1 and a header-named one
-  failed with the §5.4 message;
+  full-width group `<th>` (§4.8). Neither half of that is incidental: "at
+  least one `<th>`" rather than "all cells are `<th>`" is what admits the
+  checkbox case, and "absent **or empty**" is what reads a framework's
+  `<thead></thead>` with the headings in the first `<tbody>` row;
 - exactly **one** body row is considered for that, and it is the first that
   is rendered or carries a `<th>` — a `display:none` template row, the
   standard way to clone a row in plain JS, sits in front of the headings and
@@ -911,14 +910,10 @@ accepts exactly one direct header row belonging to the selected table:
   down (a row-header column with no `scope` attribute is the realistic case)
   must not be reachable, or the read would silently delete a data row from
   the middle of the table. One exception, as narrow as the rule that needs
-  it: a candidate that is a single `<th>` cell, in a table where a wider
-  heading row follows it, is a group heading (§4.8), not the header — a
+  it: a candidate that is a single `<th>` cell, in a table where a wider heading row — one carrying MORE THAN ONE `<th>` — follows it, is a group heading (§4.8), not the header — a
   header is never narrower than the grid it names — so it is stepped over
-  and the next rendered-or-`<th>` row is the one candidate instead. Review
-  found that without this a `<tr><th>Section A</th></tr>` group row was
-  accepted as the header of a headerless table, so the real heading row
-  became record 1 and a header-named read reported
-  `available headers are Section A`. The skip counts CELLS, not columns, so
+  and the next rendered-or-`<th>` row is the one candidate instead. The skip
+  counts CELLS, not columns, so
   `<tr><th colspan="3">Group A</th></tr>` is stepped over as well — it is
   one cell — and it is not limited to a candidate that would otherwise have
   been accepted, since that one is refused by the spanning-cell rule rather
@@ -926,8 +921,15 @@ accepts exactly one direct header row belonging to the selected table:
   one-cell `<td>` row still ends the search with no header, which is what
   keeps a row-header `<th>` further down unreachable. With no wider heading
   row below it, a one-cell `<th>` row IS the header, however wide the data
-  rows beneath it are (§7.4: extra cells are harmless) — review found the
-  first cut of this exception stepped over exactly that header. A
+  rows beneath it are (§7.4: extra cells are harmless). "More than one" is what tells a
+  heading row from a row header: a row naming the columns names them all,
+  whereas a single `<th>` beside `<td>`s (`<tr><th>O-1</th><td>Delete</td></tr>`,
+  the row-header column §10 names) is data, and must not make a one-cell
+  `<th>` above it look like a group heading — or the read steps over the
+  real header and deletes the `O-1` row from the middle of the table. The
+  residual limit is the mirror image: a genuine heading row with a single
+  `<th>` beside `<td>`s (`<tr><th>Name</th><td>Actions</td></tr>`) is not
+  recognised as one, so a group row above IT is not stepped over. A
   stepped-over row is not deleted: it stays in the body as an ordinary data
   row, because §4.8's floor makes a lone cell spanning one column data. So a
   read of one column makes it record 1, holding that cell's own text, and a
@@ -957,10 +959,9 @@ For each direct header cell:
 
 Every requested header must match exactly one column. A missing header fails
 the action and lists the available non-empty headers; a header that matches
-more than one column fails it and lists the matching positions, so the
-author can name the one they mean by position (§10 said this; an earlier
-sentence here said "lists the available headers" for both — the positions
-are what the author needs).
+more than one column fails it and lists the matching **positions**, so the
+author can name the one they mean by position (§10). Positions rather than
+headers there: the headers are what the author already typed.
 
 Blank selection-column headers are valid and ignored unless somehow requested.
 
@@ -1092,22 +1093,51 @@ the record `token`; `{{payment.password}}` because the page called the column
 `password`; `{{payment.sort_key}}` is not masked by either.
 
 **The four-character floor governs only the free-text mask set.** A record
-value shorter than four characters is never *added* to it — a `token` column
-holding `-` and `7` once turned every dash and seven in every output into
-`***`, the DOM snapshot included. An entry masked by its NAME has no such
-floor: it is replaced in place, under its own key, where it reaches nothing
-else, so a one-character `payment.password` still renders as the mask and a
+value shorter than four characters is never *added* to it: a `token` column
+holding `-` and `7` would otherwise turn every dash and every seven in every
+output into `***`, the DOM snapshot included. An entry masked by its NAME
+has no such floor: it is replaced in place, under its own key, where it
+reaches nothing else, so a one-character `payment.password` still renders as the mask and a
 `password` parameter is hidden whatever its length. The scan must not depend
 on the JSON's formatting (a tool may pretty-print), and its result is memoised
 per value so `secretsNow()` does not re-parse a 500-row capture on every call.
 
-**The client masks what the wire does not.** `frame:scope` carries raw values
-by design, so TestBench's Variables view and Variables panel apply the same
-two rules themselves — including inside a value that holds records, which is
-the one case no name rule can catch: `payments` is a whole table and
+**The client masks the values; the wire tells it how.** `frame:scope` carries
+raw values by design, so TestBench's Variables view and Variables panel apply
+the same two rules themselves — including inside a value that holds records,
+which is the one case no name rule can catch: `payments` is a whole table and
 `payment` one record of it, both under names the author chose and neither of
 which says secret. They render with each secret column replaced and the rest
 readable, which is what makes the view worth looking at mid-loop.
+
+What the rules cannot read off a name, the event says outright. A scope is a
+mixed map — `payment.keyword` is a page's column, bound by a pass, while
+`user.apikey` is a data file's own heading — and which is which lives in a
+registry keyed on the server's live map, an object the wire cannot send. So
+`frame:scope` carries two optional fields beside `scope`:
+
+- **`bindings: string[]`** — the dotted names a `For each` pass has bound into
+  that map, as of this event. A name in it takes the two-segment rule above; a
+  dotted name that is *not* in it is the author's end to end and takes the
+  flat author rule on the whole key, exactly as `isSecretParameterName(name,
+  map)` decides it server-side. Sent on every `frame:scope`, **empty list
+  included** — an absent field has to keep meaning "an older server said
+  nothing", because reading absence as "bound nothing" would mask `AU` out of
+  a real loop's `row.keyword` against a server that never claimed it was the
+  author's word. It is the empty list that makes a test with no loop in it
+  mask its `user.apikey`.
+- **`unmask: string[]`** — the run's `## Config: unmask:` names, sent only
+  when it has any. A name in it renders in full, exempt from all three rules,
+  the way `formatParameterBlock` exempts it: masking a declared non-secret by
+  its value or by its record shape would take the hatch away through the other
+  door.
+
+Both are read by one client entry point — `maskIfSecret(name, value, {
+bindings, unmask })` in `runner-core/src/repl.ts`, mirrored inline as
+`maskIfSecretInline` for the webview bundle — so the Variables view, the
+Variables panel and the skill re-run rows cannot answer differently. A third
+argument rather than a second function, because a surface that keeps calling
+the old one compiles, runs, and quietly answers the pre-wire way.
 
 The client's copies of both rules must be the server's, not merely close to
 them. Either direction of a difference is a defect, and the leaking one is
@@ -1122,26 +1152,44 @@ That copying includes WHICH rule each surface asks. The client has both map
 rules too: the two-segment one for a scope entry, which may be a loop binding,
 and the flat author rule on the whole key for a data row's cells and for a
 `[store as:]` capture — the surfaces the server gives `redactAuthoredMap`.
-Applying the scope rule to both is what printed `user.apikey = uk_live_1234`
-in the Run Rows pick, the gutter hover and the Output banner beside a report
-matrix that said `***`.
+Applying the scope rule to an author-chosen map prints `user.apikey =
+uk_live_1234` in the Run Rows pick, the gutter hover and the Output banner
+beside a report matrix that says `***`, so which rule a surface asks is part
+of the contract, not an implementation detail.
 
-**The `unmask` hatch does not reach the client.** `## Config`'s `unmask` is
-read on the server and governs the report, the run log and the prompt's
-`## Values` block. Nothing on the wire carries it, so after an author unmasks
-`keyword` the report prints it while TestBench's Variables view, its Variables
-panel, the `[input:]` echo and the gutter hover still show the mask. That is a
-known gap, not the design (§14): the two surfaces disagree about one row,
-which is the failure this section otherwise forbids, and it is the readable
-direction rather than the leaking one.
+**The `unmask` hatch reaches what is shown LIVE, and nothing that is written
+to a file.** It exists because `isSecretName` matches `keyword`, and a column
+the model has to find in the DOM arriving as `***` costs the model its eyes
+rather than merely its logs — so the hatch governs the prompt's `## Values`
+block, and now, over `frame:scope`, TestBench's Variables view, its Variables
+panel and the skill re-run rows. The report, the run log, the console step
+line and the compile recording are deliberately untouched by it
+(`src/parser/types.ts`): they are artefacts that leave the machine, and an
+`unmask` line in a test file must not be able to put a real credential in one.
+
+So a run that unmasks `keyword` shows it in the view and stars it in the
+report, and that is the one place those two are meant to differ. It is not the
+disagreement this section forbids — that one is about a rule the client got
+wrong, and this is the author's own declaration reaching the surfaces they are
+looking at while they debug. Two surfaces the hatch still does not reach are
+gaps rather than policy: the `[input:]` echo and the gutter hover render an
+author-chosen map through `maskIfSecretAuthored`, with no run attached to ask.
+
+The server can only forward a list it was given, and on the TestBench path it
+is not given one yet — `RunController`'s per-session `config` carries
+`baseUrl`, `timeout` and `viewport` and nothing else (§14), so `## Config:
+unmask:` is inert end to end for a TestBench run and `frame:scope` carries no
+`unmask` field on it. The CLI and MCP paths read the hatch straight off the
+parsed test, so it works there today, and the wire is ready for the day the
+extension sends it.
 
 **A leading byte-order mark is stripped before a value is sniffed for JSON.**
-U+FEFF is whitespace to a JavaScript regex, so `\uFEFF[{"password":…}]` passed
-a `/^\s*[[{]/` test and then threw in `JSON.parse`, and the catch handed the
-value back unmasked — the one input shaped exactly like the case record
-masking exists for. Every copy of that scan, server and client, strips it
-first; a value nothing was masked in is still returned exactly as it arrived,
-mark included.
+Every copy of that scan, server and client, strips it first; a value nothing
+was masked in is still returned exactly as it arrived, mark included. The
+strip is required rather than defensive: U+FEFF is whitespace to a JavaScript
+regex, so a marked value clears a `/^\s*[[{]/` sniff and then throws in
+`JSON.parse`, and the catch hands the value back untouched — which on a
+record-shaped value is the one outcome this masking exists to prevent.
 
 **A secret column masks at whatever JSON type the cell holds.** A `password`
 column holding `123` is the same credential as one holding `"123"`, so the
@@ -1188,7 +1236,8 @@ the rule was split; the accepted direction is that an unregistered
 and the way out is `## Config`'s `unmask`. A rebind that drops a dotted key
 drops its registration with it, so a `Set` or a capture after a loop leaves
 nobody's binding behind. Asked about a name with no map in hand, the rule
-reads it as a binding. A copy of the map (the server merges frame inputs
+reads it as a binding — which is why the registry travels on `frame:scope` as
+a list of names, so the client is not asking without one. A copy of the map (the server merges frame inputs
 into one before it takes the mask set) inherits the registration, or every
 binding in the copy would fall back to the author rule and `AU` would
 rejoin the mask set. A map whose keys are author-chosen end to end — a data
@@ -1211,6 +1260,14 @@ of asterisks, one per character of the value up to eight
 than a substring of free text, and a length hint helps an author tell an
 empty capture from a short one. The two never appear in one document, so
 nothing compares them.
+
+An **empty** value is the one place the client writes neither: it writes
+`(empty)`, the same word the server's `redactMap` writes (`EMPTY`,
+src/utils/secrets.ts), so the Output banner and the report say the same thing
+about the same cell. Saying a field was blank discloses nothing, and a row of
+stars over an empty cell leaves a report matrix unable to tell "wrong
+password" from "no password" — the two rows of a data table that most need
+telling apart.
 
 The action is observational and must not trigger post-action page settling.
 
@@ -1330,16 +1387,14 @@ bindings. Do not introduce snapshot/restore semantics only for objects.
 
 But a pass binds its root **fresh**: before a pass's bindings are applied,
 every existing `root.<property>` key for that root is removed, in all three
-run loops through one shared helper. Review found that without this a pass
-whose record lacked a property read the previous pass's value for it —
-`{{row.note}}` on row 2 said `first` — and the §8.3 refusal could never
-fire; the same leak crossed two loops that shared an item name, or a loop
-over records followed by one over strings. Lingering *after* a loop is
-licensed; one pass reading another's field is not. The `For each` cursor
-carries the records' properties through every rebuild, including the
-Electron debugger's jump-to-step (`planForStart`), which review found
-dropped them — after a jump no pass bound any property again and, with the
-leak above, every remaining pass ran on the pre-jump row.
+run loops through one shared helper. Without that removal a pass whose record
+lacks a property reads the previous pass's value for it — `{{row.note}}` on
+row 2 saying `first` — and the §8.3 refusal can never fire; the same leak
+crosses two loops that share an item name, and a loop over records followed
+by one over strings. Lingering *after* a loop is licensed; one pass reading
+another's field is not. The `For each` cursor carries the records' properties
+through every rebuild, the Electron debugger's jump-to-step (`planForStart`)
+included: a rebuild that drops them binds no property on any later pass.
 
 ### 8.3 Placeholder grammar
 
@@ -1414,26 +1469,24 @@ substitutes just before the check is generated, and `Verify that
 nothing on its left, and not the question you asked. Authors quote a
 placeholder that can be empty in a `Verify` or `Assert` line — `Verify that
 "{{payment.reference}}" is empty` becomes `"" is empty` — and the handbook
-says so beside the first dotted example. A *condition* is different, and an earlier
-version of this paragraph got it wrong: the judge is never shown a
-substituted condition at all (it receives the authored line and a values
-block), and under §8.3a a condition on captured values is decided by the
-runtime, which quotes substituted values itself, so `If
+says so beside the first dotted example. A *condition* is different: the
+judge is never shown a substituted condition at all (it receives the authored
+line and a values block), and under §8.3a a condition on captured values is
+decided by the runtime, which quotes substituted values itself, so `If
 {{payment.reference}} is empty` is decided correctly quoted or not. Whether
 the runtime should also render an empty binding as `""` in a step is an
 open question (§14); v1 does not, because a `Type {{payment.reference}}
 into the field` that typed two quote marks would be worse than a check that
 reads oddly.
 
-Two things the acceptance runs found on the same theme, both fixed in
-phase 1. The assert parser rejected `"expected": ""` as a *missing* field,
-so a DOM assertion whose right answer is an empty cell — `Verify the
-Reference cell in row 2 … is empty` — failed in the parser exactly when the
-model answered correctly; it now requires the field to be a string, not a
-non-empty one. And a predicate over an empty substituted value reads
-literally `"" is empty`; the model once emitted the condition with the
-operand dropped, and the prompt now tells it to keep the two quote marks as
-the left operand.
+Two rules on the same theme, both phase 1. The assert parser requires
+`expected` to be a **string**, not a non-empty one: `"expected": ""` is a
+DOM assertion whose right answer is an empty cell (`Verify the Reference cell
+in row 2 … is empty`), and reading it as a missing field fails the parse
+exactly when the model answered correctly. And the prompt tells the model to
+keep the two quote marks as the left operand when a predicate's substituted
+value is empty, so the check reads `"" is empty` rather than losing its
+operand.
 
 ### 8.3a Conditions on captured values are decided without the judge
 
@@ -1452,14 +1505,14 @@ been judged right fourteen times before that.
 So the runtime decides such conditions itself. A condition is a candidate
 only if the **authored** line contains at least one `{{…}}` or `${…}`
 reference — a condition with no placeholder, `If "Welcome back" is empty`,
-is about the page however literal it looks, and goes to the judge (review
-found the first cut deciding it from its own text, so a `Repeat … until
-"Load more" is empty` ran to its cap). Each bound reference is substituted
-as a **quoted** literal unless the author already put it in quotes, so `If
-{{payment.status}} is "Paused"` becomes `"Overdue" is "Paused"` and `If
-"{{line.debit}}" is empty` becomes `"" is empty` — both decided locally
-(the first cut accepted only the quoted spelling, so the feature's own
-examples still paid a judge call per pass). A value that itself contains a
+is about the page however literal it looks, and goes to the judge — a
+`Repeat … until "Load more" is empty` decided from its own text would run to
+its cap. Each bound reference is substituted as a **quoted** literal unless
+the author already put it in quotes, so `If {{payment.status}} is "Paused"`
+becomes `"Overdue" is "Paused"` and `If "{{line.debit}}" is empty` becomes
+`"" is empty` — **both** decided locally, since accepting only the quoted
+spelling would leave this feature's own examples paying a judge call per
+pass. A value that itself contains a
 double quote cannot be spelled as a literal — the grammar has no escape
 syntax, on purpose, so that nothing widens what an *authored* condition
 parses as — and a condition holding one goes to the judge as before. The
@@ -1474,8 +1527,12 @@ or a bare number. The equality family (`is`, `equals`, `is not`, `does not
 equal`, `is different from`) compares strings **exactly** — `"0012" is "12"`
 is false, because zero-padded ids and money strings are what a table read
 yields and review found numeric coercion calling them equal — and only the
-ordering family is numeric, and only when both sides are plain numbers;
-otherwise the ordering goes to the judge.
+ordering family is numeric, and only when both sides are plain numbers **once
+the quotes are off**: the test is applied to the operand's value, so `"5" is
+at least 10` is decided locally. Otherwise the ordering goes to the judge, and
+that is the quiet case an author meets — `"$140.00" is more than 100`, or any
+comparison of dates, is a model call nothing warns about (§7.7's normaliser is
+phase 2).
 
 ```text
 <v> is empty | is blank | is not empty | is not blank
@@ -1491,8 +1548,8 @@ and `Repeat … until` conditions get the same treatment on every evaluation,
 and so do the flow-control lines of the step-flow-control story — `If …,
 then return`, `then stop`, `then fail the test with error "…"` — which are
 claimed before the chain grammar and judged on their own path in the step
-executor; review found the first cut covered the chains and not these, so
-the very line this section opens with still paid a model call per pass.
+executor, so a rule written for the chains alone would miss them — and the
+very line this section opens with is one of them.
 `When prompted …, then return` is a watch, and stays with the judge.
 The grammar lives in one exported parser beside `set-step.ts` and
 `flow-control-step.ts` (`src/parser/literal-condition.ts`) so the handbook
@@ -1522,7 +1579,15 @@ root no loop binds, still warns.
 ### 8.4 Loop reporting and TestBench
 
 - Loop markers and `frame:scope` must include the dotted property bindings so
-  the TestBench Variables panel can show the current row fields.
+  the TestBench Variables panel can show the current row fields — and
+  `frame:scope` must say WHICH of its dotted names those are, in a
+  `bindings: string[]` beside the scope (§7.6). The scope is a copy, and whose
+  a dotted name is lives in a registry keyed on the server's live map, so
+  without that list the client cannot tell `payment.keyword` from a data
+  file's own `user.apikey` heading and masks one of them wrongly whichever
+  rule it picks. Every `frame:scope` carries it, empty list included; the
+  run's `## Config: unmask:` names ride the same event as `unmask: string[]`
+  when it has any.
 - Secret masking applies using the property segment, by the rules of §7.6:
   the property decides by the record-column rule, the root by the
   author-chosen one, and the whole name read as one credential key with the
@@ -1723,6 +1788,11 @@ The implementing agent should inspect and update at least these areas:
   for the panel — and a parity test reading the server's patterns out of
   `src/utils/secrets.ts`, since `frame:scope` carries raw values and neither
   copy can import the original.
+- `frame:scope`'s `bindings` and `unmask` (§7.6): `loopBindingsOf` in
+  `src/utils/loop-bindings.ts`, the five emit sites in
+  `src/server/session-manager.ts`, the protocol type, the `ScopeMasking`
+  argument on `maskIfSecret` / `maskIfSecretInline`, and the thread from the
+  event through `RunController` to the Variables view and the webview panel.
 - One live TestBench fixture proving extraction -> object loop -> row-scoped
   verification across the real extension/server/browser path.
 
@@ -1734,7 +1804,8 @@ The implementing agent should inspect and update at least these areas:
   `claude/loop-table-rows-56d19f` (fixtures in commit 75f0438, baselines in
   a6ce4ce, acceptance tests in a667126). Under `fixtures/test-app/`:
   `tables.html` (the index), `structured-orders.html` (§5.1, with filter,
-  sort, expandable rows, tfoot and a "Reorder columns" button),
+  sort, expandable rows, tfoot and a "Swap the Order ID and Status columns"
+  button),
   `structured-orders-many.html` (14 visible rows + a hidden one for
   `limit`), `scheduled-payments.html` + `payment-details.html` (§5.4),
   `statements.html` (§4.7), `table-edge-cases.html` (sixteen structures).
@@ -1745,6 +1816,70 @@ The implementing agent should inspect and update at least these areas:
   `control-line.ts`, and the shared number/date normaliser it and tools use.
 - Because this changes `runner-core` and TestBench-visible behavior, bump the
   patch version in `testbench-native/package.json` as required by `CLAUDE.md`.
+
+### What review found, by round
+
+Every defect below was once narrated inside the rule it produced, which made
+the rules read as an argument with an earlier draft rather than as
+instructions. The rules stay where they are; the story of how they got there
+is here. Each line is the round, what was wrong, and the section that now
+states the rule. Two entries predate the review rounds and say so.
+
+- **Building the fixtures** — `scheduled-payments.html` was built with two
+  more columns than the draft showed. §5.4 now describes the built page:
+  seven columns, the Auto-pay checkbox at 6 and the buttons at 7, with every
+  step in this document reading columns 1 to 5.
+- **Phase-1 acceptance runs** — a DOM assertion whose right answer was an
+  empty cell failed in the assert parser, which read `"expected": ""` as a
+  missing field; and a predicate over an empty substituted value was emitted
+  with its left operand dropped. §8.3 states both: `expected` must be a
+  string rather than a non-empty one, and the prompt keeps the quote marks.
+- **Round 1** — "the first row containing `<th>` cells" could not be applied
+  literally without taking a `<th scope="row">` row as the header, while an
+  implementation requiring *every* cell to be a `<th>` missed the checkbox
+  case; with positional columns the header text then became record 1 and
+  every `_row` was off by one. §7.3 states the three conditions.
+- **Round 1** — an ambiguous header listed the available headers, which the
+  author had already typed. §7.3 lists the matching **positions**.
+- **Round 1** — a `token` column holding `-` and `7` put every dash and every
+  seven in every output, DOM snapshot included, into the free-text mask set.
+  §7.6 states the four-character floor and that it governs that set only.
+- **Round 1** — a pass whose record lacked a property read the previous
+  pass's value (`{{row.note}}` on row 2 said `first`), so the §8.3 refusal
+  could never fire; the same leak crossed two loops sharing an item name, and
+  the Electron jump-to-step dropped the properties entirely. §8.2 requires a
+  fresh rebind through one shared helper, and the cursor to carry the
+  properties through every rebuild.
+- **Round 1** — an earlier §8.3 said the judge is shown a substituted
+  condition. It is not: it receives the authored line and a values block.
+- **Round 1** — the first local-decision cut decided a condition with no
+  placeholder from its own text, so `Repeat … until "Load more" is empty` ran
+  to its cap; and it accepted only the quoted spelling, so the feature's own
+  examples still paid a judge call per pass. §8.3a requires an authored
+  reference, and quotes the substituted value itself.
+- **Round 1** — the same cut covered the `If`/`Else if` chains but not the
+  flow-control lines, which are claimed before the chain grammar, so `If
+  {{payment.status}} is "Paused", then return` — the line §8.3a opens with —
+  still paid a model call per pass. §8.3a covers both paths.
+- **Round 2** — the placeholder-row rule read `colspan` against the header's
+  column count, which every cell of a one-column table meets, so such a table
+  read as `[]` and a loop over it ran zero passes, green. §4.8 states a floor
+  of 2.
+- **Round 2** — a framework rendering `<thead></thead>` with the headings in
+  the first `<tbody>` row was read as headerless, because the element was
+  present. §7.3 says absent **or empty**.
+- **Round 4** — a `<tr><th>Section A</th></tr>` group row was accepted as the
+  header of a headerless table, so the real heading row became record 1 and a
+  header-named read reported `available headers are Section A`; the first cut
+  of the fix then stepped over a one-cell `<th>` row that was genuinely the
+  header. §7.3 states the exception and its limit.
+- **Round 4** — the client applied the scope rule to an author-chosen map, so
+  `user.apikey = uk_live_1234` printed in the Run Rows pick, the gutter hover
+  and the Output banner beside a report matrix that said `***`. §7.6 says
+  which rule each surface asks.
+- **Round 4** — a leading U+FEFF cleared the `/^\s*[[{]/` sniff and then
+  threw in `JSON.parse`, and the catch handed the record back unmasked. §7.6
+  requires every copy of that scan to strip it first.
 
 ---
 
@@ -1778,8 +1913,9 @@ The implementing agent should inspect and update at least these areas:
     body produces `[]` with the skip logged; a placeholder among data rows is
     skipped; a `colspan` narrower than the table still fails.
 13. Step executor JSON-encodes records into the named variable.
-14. Cached and generated actions preserve `index` and `limit` and reread changed
-    DOM data rather than replaying old records.
+14. Cached actions preserve `index` and `limit` and reread changed DOM data
+    rather than replaying old records. (Phase 3) The same of a *generated*
+    action, which does not exist until `tables.read` is emitted.
 15. Scalar `For each` regression suite stays green.
 16. Object `For each` binds the base JSON and all direct properties in order.
 17. A missing object property fails before any model call; a key no
@@ -1789,8 +1925,8 @@ The implementing agent should inspect and update at least these areas:
     emitted action, but `columns[].key` is not substituted.
 19. Loop markers, reports, and TestBench scope carry the current properties.
 20. Secret-named record properties are masked on every presentation surface.
-21. Generated code uses the shared table helper, compiles, and replays against
-    reordered columns with zero AI calls.
+21. (Phase 3) Generated code uses the shared table helper, compiles, and
+    replays against reordered columns with zero AI calls.
 21a. From the first review round, each a mutation the suite did not catch:
     a one-column table (with and without a header) reads all its rows; a
     `<td>`+`<th>` header row is the header and never record 1; a
@@ -2018,11 +2154,30 @@ Moved out of v1 after review, each with why and what would bring it back:
   under the code-behind work rather than a note here.
 - **Per-row evidence.** A screenshot per pass, named by a record field, for
   the audit trail a payments table wants. Report/evidence story.
-- **Carry `unmask` to the client.** `## Config: unmask:` is parsed and applied
-  on the server only (§7.6), so an author who unmasks `keyword` sees it in the
-  report while TestBench's Variables view, its Variables panel, the `[input:]`
-  echo and the gutter hover keep starring it. The fix is a wire change — the
-  session's unmasked names have to reach the extension, which today receives
-  no configuration at all — plus a parameter through the three client maskers,
-  so it is a follow-up rather than part of this feature. Until then the hatch
-  is documented as governing the report, the log and the prompt.
+- **TestBench never sends `## Config: unmask:` to the server.**
+  `RunController`'s per-session `config` object is built from three keys —
+  `baseUrl`, `timeout`, `viewport` — so a test's `unmask` list reaches the
+  server only on the CLI and MCP paths, which read it straight off the parsed
+  test. The hatch is therefore inert end to end for a TestBench run: the model
+  sees `***` in the `## Values` block and the Variables surfaces star the name,
+  not because the client cannot read an `unmask` list (it can — `frame:scope`
+  carries one and `maskIfSecret` honours it, §7.6) but because the run never
+  declared one. The fix is one more key on that object, and it is listed here
+  rather than done with the wire because it changes what the MODEL is shown on
+  every test that declares `unmask` — a prompt change, not a masking one — and
+  because per-session `config` is write-once, so an edited `unmask:` line would
+  not take effect until the session recycles, which today only a `viewport`
+  edit triggers.
+- **The code-behind compile and repair prompts carry no free-text
+  mask set** (and no `unmask`). `buildStepCodePrompt` and `buildRepairPrompt`
+  both call `formatParameterBlock` with an empty `unmask` and an empty
+  `secrets` list, so a value is masked in the `## Parameters` block when its
+  own NAME says secret and when the record rule says a column does, but a
+  secret appearing in the step's prose, in a recorded action or in a captured
+  value under an innocent name is written into the prompt in clear. That is
+  today's behaviour and predates this feature; it is listed here because
+  `readTable` is what makes a page-derived record ordinary. The fix is the
+  run's mask set and its unmasked names reaching the compile path — the same
+  shape of plumbing `frame:scope` now does for the client (§7.6), one layer
+  in: the compile has the live map already and needs what the run knows about
+  it, rather than a wire field.

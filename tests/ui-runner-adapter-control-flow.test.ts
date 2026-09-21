@@ -14,7 +14,7 @@
  * the adapter's own loop are real.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
@@ -947,5 +947,75 @@ describe('a For each pass binds its own row and no other', () => {
       'Verify the row for "C" is shown',
       'Sign out',
     ]);
+  });
+});
+
+/**
+ * Review 5, finding 3: the fourth run loop showed the resolved line to
+ * everything, not just to the executor.
+ *
+ * `resolveStepText` is interpolation and nothing else, and its answer went
+ * three ways: to `executeStep` (right — it has to act on it), to the renderer
+ * as `runner:step-start`, and into `conversationHistory` via
+ * `formatStepHistoryEntry`, whose docstring asks for the MASKED text and
+ * whose output is the model's `## Prior Steps`. The CLI masks at its own seam
+ * (test-runner.ts) and the server at its (session-manager.ts); this loop did
+ * not, so `Type {{password}} into the field` put the password in the panel
+ * and then in every later step's prompt (§7.6).
+ */
+const SECRET_STEPS = `
+# Sign in
+
+## Parameters
+- username: octocat
+- password: hunter2-correct-horse
+
+## Steps
+1. Type {{password}} into the field
+2. Verify {{username}} is signed in
+`;
+
+describe('UIRunnerAdapter masks the line it shows, not the one it runs', () => {
+  it('the step-start event and the next step’s ## Prior Steps carry ***', async () => {
+    const events = await runAdapter(writeTest(root, SECRET_STEPS));
+
+    // What the renderer is told.
+    expect(
+      events
+        .filter((e) => e.channel === 'runner:step-start')
+        .map((e) => e.data['instruction']),
+    ).toEqual(['Type *** into the field', 'Verify octocat is signed in']);
+
+    // What the model is told about the step before it.
+    const second = executeStepMock.mock.calls[1]![3] as { conversationHistory: string[] };
+    const history = second.conversationHistory.join('\n');
+    expect(history).toContain('Type *** into the field');
+    expect(history).not.toContain('hunter2-correct-horse');
+
+    // And what actually ran, which is the whole reason the two differ.
+    expect(executeStepMock.mock.calls[0]![2]).toBe('Type hunter2-correct-horse into the field');
+    // A non-secret parameter is untouched — masking is by name, not by
+    // "anything interpolated".
+    expect(executeStepMock.mock.calls[1]![2]).toBe('Verify octocat is signed in');
+  });
+
+  /**
+   * The fourth history writer in this loop, and the one the finding did not
+   * name: `guardHistoryLines`. Its `text` callback is wrapped in the CLI
+   * (`redact(test.steps[k] …)`, test-runner.ts) and on the server
+   * (`redact(effectiveSteps[k] …)`, session-manager.ts), and here it was not —
+   * under a comment saying so deliberately, "matching every other history
+   * line this runner writes", which the fix above made untrue.
+   *
+   * Checked at the source, in the idiom tests/run-loop-contracts.test.ts uses
+   * for the same three-of-four shape: a guard row carries the AUTHORED line,
+   * so staging a value the mask set holds inside one takes a test that lies
+   * about how it got there.
+   */
+  it('masks the guard history lines too, as the other three loops do', () => {
+    const src = readFileSync(new URL('../src/ui/main/runner-adapter.ts', import.meta.url), 'utf-8');
+    const start = src.indexOf('guardHistoryLines({');
+    expect(start).toBeGreaterThan(-1);
+    expect(src.slice(start, src.indexOf('}),', start))).toMatch(/text: \(k\) => shown\(/);
   });
 });

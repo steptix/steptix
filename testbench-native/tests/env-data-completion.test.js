@@ -600,6 +600,51 @@ test('parameter previews are $VAR-resolved and masked by name', () => {
   assert.ok(!JSON.stringify(items).includes('sw0rdf1sh!'));
 });
 
+test('a record-shaped parameter value is masked column by column, not just by name', () => {
+  // The name says nothing — `rows` is not secret-shaped — and before this the
+  // whole table printed in the `{{` dropdown while the report beside it
+  // starred the column. A `## Parameters` entry can hold a captured table
+  // verbatim, which is what made this ordinary rather than exotic.
+  const rows = JSON.stringify([{ payee: 'Alinta', password: 'hunter2-not-real' }]);
+  const items = paramCompletions({ rows }, []);
+  assert.equal(items[0].detail, '[{"payee":"Alinta","password":"********"}]');
+  assert.ok(!JSON.stringify(items).includes('hunter2-not-real'));
+});
+
+test('…and masked BEFORE it is truncated to a preview', () => {
+  // Order of operations, pinned: that value is 50 characters, PREVIEW_MAX is
+  // 48, and the secret sits past the cut. Preview first and the record no
+  // longer parses as JSON, so the mask finds nothing and hands back
+  // `…"password":"hunter2-not-real"…` — the leak this pair of tests exists
+  // for. Masked first, it is 42 characters and never truncated at all.
+  const rows = JSON.stringify([{ payee: 'Alinta', password: 'hunter2-not-real' }]);
+  assert.equal(rows.length, 50);
+  const detail = paramCompletions({ rows }, [])[0].detail;
+  assert.ok(!detail.endsWith('…'), detail);
+  assert.ok(!detail.includes('hunter2'), detail);
+});
+
+test('a parameter whose value is not a record is left exactly as it was', () => {
+  // `maskRecordSecrets` is a no-op on anything that is not a list of records
+  // or one record, so the ordinary case keeps its bytes — including a value
+  // that merely looks bracketed.
+  const items = paramCompletions({ region: 'eu', note: '[not json', n: '42' }, []);
+  assert.deepEqual(
+    items.map((i) => i.detail),
+    ['eu', '[not json', '42'],
+  );
+});
+
+test('a secret NAME still stars the whole value, record or not', () => {
+  // The name check comes first and is unchanged: eight stars, never a
+  // column-by-column reading of whatever the value happens to be.
+  const items = paramCompletions(
+    { api_token: JSON.stringify([{ payee: 'Alinta', password: 'hunter2-not-real' }]) },
+    [],
+  );
+  assert.equal(items[0].detail, '********');
+});
+
 test('capture detail names the marker form and the line that writes it', () => {
   const items = paramCompletions({}, [
     { name: 'otp', marker: 'input', line: 4 },

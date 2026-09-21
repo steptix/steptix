@@ -59,7 +59,7 @@ import {
 } from '../parser/failure-tail.js';
 import { envDataRefsIn, resolveEnvDataRef } from '../parser/interpolate-env-data.js';
 import { parseOutputPrefixes, buildEnrichedInstruction } from '../server/run-helpers.js';
-import { redact, runSecrets } from '../utils/secrets.js';
+import { maskRecordSecrets, redact, runSecrets } from '../utils/secrets.js';
 import type { CodeBehindBinding } from '../codebehind/loader.js';
 import { entrySourceText, runCodeBehindEntry, EXIT_NOT_CLAIMED } from '../codebehind/execute.js';
 import { makeBrowserApi, makeTabApi } from '../codebehind/tabs.js';
@@ -1473,6 +1473,11 @@ function buildStepValues(authored: string, opts: StepExecutorOptions): StepValue
   const secrets = secretsFor(opts);
   return {
     parameters,
+    // The LIVE map, not a copy: it is what says which of its dotted names a
+    // `For each` pass bound, and the block masks `payment.password` by the
+    // record rule and a data file's `user.apikey` heading by the author's
+    // only because it can ask (§7.6).
+    map: params,
     ...(envRefs.length > 0 && { envRefs }),
     ...(opts.unmask !== undefined && { unmask: opts.unmask }),
     ...(secrets.length > 0 && { secrets }),
@@ -2729,7 +2734,20 @@ async function executeStepAttempt(
         );
       } else if (result.capturedValue !== undefined && action.as && opts.resolvedParameters) {
         bindVariable(opts.resolvedParameters, action.as, result.capturedValue);
-        logger.info(`Stored captured value as "{{${action.as}}}": "${result.capturedValue}"`);
+        // The only one of the three "Stored …" lines that prints the VALUE,
+        // and it printed it raw. `logger` does not redact — the run-log file
+        // does, on its way to disk, and the SSE `output` bridge does not — so
+        // a `[store as: password]` capture reached the console and every
+        // client watching the stream in clear (§7.6). Masked after the bind,
+        // so the name the author just chose is already in the map the set is
+        // built from; by shape as well as by value, because a one-row read
+        // stores a record under a name that says nothing.
+        logger.info(
+          `Stored captured value as "{{${action.as}}}": "${redact(
+            maskRecordSecrets(result.capturedValue),
+            secretsFor(opts),
+          )}"`,
+        );
       }
 
       // Capture state after action (full-page for report visibility).

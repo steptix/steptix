@@ -387,6 +387,70 @@ describe('a guard condition naming a prototype key', () => {
 });
 
 /**
+ * A `For each` whose LIST names a root the map does not own.
+ *
+ * The same door, one branch along: the `list` case reads the list's value out
+ * of the parameter map, and a bare index answered `For each {{row}} in
+ * {{constructor}}` with the `Object` FUNCTION. `parseListValue` then stopped
+ * at its "not a list" refusal, which interpolates the value — so the author
+ * was shown `` `{{constructor}}` holds `function Object() { [native code] }` ``
+ * and told to capture it "with a read of every matching element", about a name
+ * this run binds nothing to. The message they need is the other one:
+ * `{{constructor}}` has NO value.
+ *
+ * Every root here reaches it the same way and none of them is exotic enough to
+ * be somebody else's problem: `valueOf` is a plausible column name, and
+ * `__proto__` answers with `Object.prototype` rather than a function.
+ */
+describe('a For each whose list names a prototype key', () => {
+  const forEachOver = (list: string): (ControlRecord | null)[] => [
+    { kind: 'foreach', item: 'row', list, bodyStart: 1, bodyEnd: 1, label: 'Check the row' },
+    null,
+    null,
+  ];
+
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
+    'refuses `For each {{row}} in {{%s}}` as having no value, not as holding a function',
+    async (root) => {
+      const evaluation = await evaluateGuard({
+        controls: forEachOver(root),
+        index: 0,
+        state: createControlState(),
+        // A map with a REAL list in it, so "nothing binds this one" is the
+        // claim under test rather than "the map is empty".
+        resolvedParameters: { orders: '[{"id":"A"}]' },
+        executorOptions: {} as never,
+      });
+      expect(evaluation.error).toBe(
+        `\`{{${root}}}\` has no value, so there is nothing to loop over — ` +
+          `capture it first with a read of every matching element, or with a ` +
+          `tool that returns an array.`,
+      );
+      expect(evaluation.error).not.toContain('native code');
+    },
+  );
+
+  it('still loops over a list the map really binds', async () => {
+    const evaluation = await evaluateGuard({
+      controls: forEachOver('constructor'),
+      index: 0,
+      state: createControlState(),
+      // `[store as: constructor]` is a capture like any other, and the loop
+      // must read it — dropping the name is the other way to get this wrong.
+      resolvedParameters: Object.defineProperty({}, 'constructor', {
+        value: '[{"id":"A"},{"id":"B"}]',
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      }) as Record<string, string>,
+      executorOptions: {} as never,
+    });
+    expect(evaluation.error).toBeUndefined();
+    expect(evaluation.plan.pass!.bindings).toEqual({ row: '{"id":"A"}', 'row.id': 'A' });
+  });
+});
+
+/**
  * The §8.3 refusal is masked in every loop that emits it.
  *
  * `evaluateGuard`'s `… cannot be referenced as a placeholder` line already

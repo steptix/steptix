@@ -1050,6 +1050,10 @@ export class LiveCompiler {
       actions: actionsOf(input.result),
       ...(input.result.assertions && { assertions: input.result.assertions }),
       resolvedParameters: input.resolvedParameters,
+      // The snapshot carries the live map's loop-binding marks
+      // (`liveCompileSnapshot`), so the prompt's parameter block can tell a
+      // pass's `row.keyword` from an author's `user.apikey` (§7.6).
+      parameterMap: input.resolvedParameters,
       recordingCarriesPlaceholders: this.sawPlaceholder,
       ...(this.options.envData && { envData: this.options.envData }),
       aiClient: this.options.aiClient,
@@ -1109,6 +1113,12 @@ export class LiveCompiler {
       ...(ctx?.domBefore !== undefined && { dom: ctx.domBefore }),
       ...(ctx?.urlBefore !== undefined && { url: ctx.urlBefore }),
       parameters,
+      // The map those values came out of, so a dotted name in it is decided
+      // by whose it is: a `For each` pass's `payment.keyword` by its two
+      // segments, a data file's own `user.apikey` heading by the author rule
+      // (§7.6). Without it the block asked the binding rule about both and
+      // wrote the credential into the prompt in clear.
+      parameterMap: input.resolvedParameters,
       ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
     });
     return askForEntry(

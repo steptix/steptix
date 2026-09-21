@@ -289,6 +289,49 @@ export interface FrameScopeEvent {
   type: 'frame:scope';
   frameId: string;
   scope: Record<string, string>;
+  /**
+   * Which dotted names in `scope` a `For each` pass BOUND there
+   * (docs/specs/SPEC-structured-table-reads.md §7.6, §8.4).
+   *
+   * `scope` is a copy of the server's live variable map, and whose a dotted
+   * name is lives in a registry keyed on that map's object identity — so
+   * without this field a client sees `payment.keyword` and `user.apikey` as
+   * the same shape and has to guess. It guessed the narrow way, and printed a
+   * data file's own `user.apikey` heading in the Variables view while the
+   * report beside it starred the value.
+   *
+   * Pass it to {@link maskIfSecret} (repl.ts) as `bindings` and the client
+   * applies the server's `isSecretParameterName`: the two-segment rule for a
+   * name in this list, the flat author rule on the whole key for one that is
+   * not.
+   *
+   * **Absent is not empty.** A server that predates this field sends nothing,
+   * which means "unknown" and leaves the client on its older no-map rule; an
+   * empty array is the positive statement that this run has bound nothing,
+   * which is what makes a loop-free test mask its `user.apikey`. Servers that
+   * do send it send it on every `frame:scope`.
+   */
+  bindings?: string[];
+  /**
+   * The run's `## Config: unmask:` names — what the test's author declared are
+   * NOT secrets despite the name rule matching them (`keyword` is the case
+   * that motivates the hatch).
+   *
+   * A name here is exempt from ALL THREE rules — the name rule, the record
+   * scan inside the value, and any free-text masking — exactly as the
+   * server's `formatParameterBlock` exempts it, because masking a declared
+   * non-secret by its shape would take the hatch away through another door.
+   *
+   * The hatch governs what is shown LIVE — the model's `## Values` block and
+   * these scope surfaces — and deliberately nothing the server writes to a
+   * file. The report, the run log and the console line still star an unmasked
+   * name, so a view showing one beside a report that does not is the intended
+   * difference rather than a drift.
+   *
+   * Sent only when the run has one, so an ordinary run's payload is what it
+   * always was; absent means "none", which is also what an older server means.
+   */
+  unmask?: string[];
 }
 
 export interface OutputEvent {

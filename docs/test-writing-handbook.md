@@ -434,9 +434,11 @@ framework from those values, with no model call at all (§3.8).
 
 An `If`, any number of `Else if` lines and at most one `Otherwise`, on
 consecutive step lines, are one chain. The page is allowed to settle, every
-condition in the chain goes to the model **in one call**, the first that holds
-wins, and its tail runs. Every other member — the other guard lines and every
-step of their tails — is marked skipped, which is what the report and the
+condition in the chain goes to the model **in one call** — unless every
+condition in it is literal (§3.8), in which case the chain is decided from the
+values and there is no call at all — the first that holds wins, and its tail
+runs. Every other member — the other guard lines and every step of their
+tails — is marked skipped, which is what the report and the
 TestBench gutter then show you.
 
 File `tests/pay-invoice.md`:
@@ -564,7 +566,8 @@ pass; a breakpoint on the guard pauses before the decision. A loop whose tail
 is a plain instruction has no body line of its own, and a breakpoint on that
 main-flow line pauses once per run.
 
-What this costs: one model call per evaluation, so a chain costs one and a
+What this costs: one model call per evaluation — unless every condition in it
+is literal (§3.8), when the evaluation is free — so a chain costs one and a
 `While` that runs three passes costs four. A tail that is a plain instruction
 costs another call to perform it. That is why `If a cookie banner appears,
 reject it` is still better as a watch (§3.4) — one call, no `then`.
@@ -586,8 +589,10 @@ A step that ends `then return` or `then stop` ends the flow it is in, as a
 pass. The rest of a `### Section` body, the rest of a skill body, or the rest
 of the test when the step is in the main flow. The steps it leaves behind are
 marked skipped with a reason, and the run carries on after the flow that
-ended. The condition is judged against the live page, the way an `If …` step
-is.
+ended. The condition is read the way an `If …` step's is: one that asks about
+the page is judged against the live page, and one that only compares values a
+step already captured is answered by the framework from those values, with no
+model call (§3.8).
 
 ```markdown
 ### Sign in
@@ -890,7 +895,18 @@ and `"" is empty` — with no model call and no page involved, quoted or not.
 The guard's row in the report says `decided from the values: "" is empty →
 true` in place of a judge's sentence. Equality there compares strings
 exactly, which is what you want of the zero-padded ids and money strings a
-table read yields: `"0012" is "12"` is false. A condition with prose in it —
+table read yields: `"0012" is "12"` is false.
+
+The five **orderings** — `is at least`, `is at most`, `is more than`, `is
+greater than`, `is less than` — are the one family that is numeric, and they
+are only decided here when both sides read as plain numbers once the quotes
+are off, so `"5" is at least 10` is answered locally. A cell that is not a
+plain number is exactly where that stops: `If "{{payment.amount}}" is more
+than 100` over `$140.00`, or any comparison of dates, goes to the judge and
+costs a model call, silently — sorting `$140.00` by character code would be
+wrong quietly, and answering `false` would be worse. Nothing warns you. If
+the ordering matters, capture the number without its currency symbol, or put
+the arithmetic in a tool. A condition with prose in it —
 `the Cash checkbox is ticked` — is about the page, and goes to the model **as
 you authored it**, placeholders intact, with the resolved values listed
 beside it (§1, §3.5).
@@ -1177,11 +1193,17 @@ anywhere in it, case insensitive. The value is masked as `***` in the console,
 the report, the run log and the `## Values` block. The model never sees it;
 the executor substitutes it when acting. Never write `***` as a value
 yourself; the framework refuses an action containing it. If a non-secret name
-is caught by the rule, list it under `unmask` in `## Config` — but note that
-the hatch governs the report, the run log and the `## Values` block only.
-TestBench's own surfaces do not read it yet: the Variables view, the Variables
-panel, the `[input:]` echo and the gutter hover keep showing the mask for a
-name you have unmasked.
+is caught by the rule, list it under `unmask` in `## Config`. The hatch
+governs what is shown *live* — the `## Values` block the model reads, and
+TestBench's Variables view, Variables panel and skill re-run rows — and
+deliberately nothing that is written to a file: the report, the run log and
+the console line still star an unmasked name, so an `unmask` line can never
+put a real credential into an artefact you send someone. Two smaller surfaces
+still show the mask because no run is attached to ask: the `[input:]` echo and
+the gutter hover. One caveat while it lasts: running from TestBench does not
+send the list to the server at all, so `unmask` currently takes effect only on
+the `aiui` CLI and the MCP tools
+(`docs/specs/SPEC-structured-table-reads.md` §14).
 
 **A name the page chose** is decided more narrowly. A table read's column
 aliases and a tool's record keys are not your words, and a substring rule
@@ -1203,6 +1225,28 @@ whole name read as one credential key — `api.key` is `api_key` with a dot in
 it, and it is masked wherever it occurs. That last reading uses the *column*
 rule, not the substring one, so `{{row.keyword}}` and `{{payment.sort_key}}`
 stay readable.
+
+**A dot does not by itself make a loop binding.** The three-part reading above
+is for a name a `For each` pass bound — `{{payment}}` over a table read, where
+the half before the dot is yours and the half after it is the page's. A dotted
+name that no pass bound is yours end to end, and takes the plain author rule
+**on the whole key**: a data-file column headed `user.apikey`, or a capture
+written `[store as: api.key]`, is masked because `key` appears somewhere in
+it, exactly as a flat `apikey` parameter would be. Nothing is read as a
+column there, because no column is involved.
+
+**A data row's cells and a step's `[store as:]` outputs are yours too**, by
+that same whole-key author rule, and on every surface that shows them: the
+Run Rows picker, the gutter hover and the Output banner as well as the report.
+A `## Steps` data table headed `user.apikey` is a heading you typed.
+
+TestBench reads it the same way, because the run tells it which names a pass
+bound: every scope update carries that list, so a data-file `user.apikey` is
+starred in the Variables view exactly as it is in the report, while a loop's
+`{{payment.keyword}}` beside it stays readable. Against an older server that
+sends no list, both views fall back to reading every dotted name as a loop
+binding — so the only thing a version skew costs you is a `user.apikey` shown
+in full in the panel while the report stars it.
 
 **Length matters in exactly one place.** A value that a record column
 contributes has to be at least four characters before the framework will hunt

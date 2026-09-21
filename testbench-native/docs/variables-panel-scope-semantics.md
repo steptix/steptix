@@ -13,13 +13,27 @@ emits a `frame:scope` event carrying:
 {
   frameId: '' | 'fN',                // '' = test (root) frame; 'fN' = a skill frame
   scope: Record<string, string>,     // copy of the runtime resolvedParameters
+  bindings?: string[],               // dotted names a `For each` pass bound here
+  unmask?: string[],                 // the run's `## Config: unmask:` names
 }
 ```
 
+`bindings` and `unmask` are how the values get masked correctly, and both are
+optional only so an older server still type-checks. The scope is a COPY, and
+whose a dotted name is lives in a registry keyed on the server's live map —
+so without `bindings` the client cannot tell a loop's `payment.keyword` (the
+page's word, readable) from a data file's `user.apikey` heading (the author's
+word, starred by the report) and gets one of them wrong whichever rule it
+picks. `bindings` is sent on every event, empty list included: absent means
+"an older server said nothing" and keeps the pre-wire reading, `[]` means
+"this run bound nothing". See `docs/specs/SPEC-structured-table-reads.md`
+§7.6.
+
 The extension's `RunController` accumulates these in a per-frame map
-(`scopesByFrame: Map<frameId, scope>`) and exposes `currentScope()`
-returning the **top frame's** latest scope (falling back to the test
-frame).
+(`scopesByFrame: Map<frameId, scope>`), keeps the two masking fields beside
+them in `scopeMaskingByFrame`, and exposes `currentScope()` /
+`currentScopeMasking()` returning the **top frame's** latest pair (falling
+back to the test frame).
 
 The Variables tree provider renders the resulting `currentScope()`
 alphabetically as `name = value` rows. The view's title flips between

@@ -2730,4 +2730,94 @@ describe('POST /errands', () => {
       expect(started.ok).toBe(true);
     });
   });
+
+  /**
+   * An `[output:]` step whose variable is a name off `Object.prototype`.
+   *
+   * The errand loop decided what a step captured with `name in scope`, and
+   * `in` walks the prototype chain: `[output: constructor]` therefore
+   * "captured" the `Object` FUNCTION out of a scope that binds nothing of the
+   * sort. It went into the receipt's per-step `outputs`, into the errand's
+   * `captures`, and out as a `capture` frame on the stream — the frame a
+   * client's Variables view is built from, announcing a variable the errand
+   * never had. `[store as: constructor]` on a page with an "Order constructor"
+   * column is all it takes.
+   */
+  describe('an [output:] step naming a prototype key', () => {
+    /** The executor's answer: a passed step whose `read` is tagged
+     *  `as: constructor`, writing the value only when the read found one. */
+    function readsInto(value: string | undefined): void {
+      vi.mocked(executeStepMock).mockImplementation(async (idx: number, _total, _instruction, opts) => {
+        if (value !== undefined) {
+          // `defineProperty`, the way `bindVariable` writes it.
+          Object.defineProperty(opts.resolvedParameters!, 'constructor', {
+            value, writable: true, enumerable: true, configurable: true,
+          });
+        }
+        return {
+          index: idx as number,
+          instruction: 'read it',
+          status: 'passed',
+          turns: [
+            {
+              turnNumber: 1,
+              attemptNumber: 1,
+              timestamp: new Date().toISOString(),
+              aiInteractions: [],
+              subActions: [
+                { index: 1, action: { action: 'read', description: 'read it', as: 'constructor' }, durationMs: 1 },
+              ],
+            },
+          ],
+          durationMs: 1,
+          retried: false,
+          aiExplanation: 'read it',
+        };
+      });
+    }
+
+    const STEP = '[output: constructor] read the order id';
+
+    async function streamed(): Promise<{ event: string; data: any }[]> {
+      const res = await fetch(`${baseUrl}/errands?stream=1`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': API_KEY,
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify(errandBody({ steps: [STEP] })),
+      });
+      return readSse(res);
+    }
+
+    it('emits no capture frame, and no captures, for a value nothing captured', async () => {
+      readsInto(undefined);
+      const events = await streamed();
+      expect(events.at(-1)!.data).toMatchObject({ type: 'done', status: 'passed' });
+      // Not "a capture frame with a missing value" — no capture frame at all.
+      expect(events.filter((e) => e.data?.type === 'capture')).toEqual([]);
+
+      readsInto(undefined);
+      const { body } = await api('POST', '/errands', errandBody({ steps: [STEP] }));
+      expect(body.status).toBe('passed');
+      expect(body.captures).toEqual({});
+      expect(body.results[0].outputs).toEqual({});
+      expect(JSON.stringify(body)).not.toContain('native code');
+    });
+
+    it('still captures that name when the read DID find a value', async () => {
+      readsInto('ORD-1001');
+      const events = await streamed();
+      expect(events.filter((e) => e.data?.type === 'capture').map((e) => e.data)).toMatchObject([
+        { type: 'capture', name: 'constructor', value: 'ORD-1001', source: 'capture' },
+      ]);
+
+      readsInto('ORD-1001');
+      const { body } = await api('POST', '/errands', errandBody({ steps: [STEP] }));
+      expect(body.captures).toMatchObject({ constructor: 'ORD-1001' });
+      expect(body.results[0].outputs).toMatchObject({ constructor: 'ORD-1001' });
+    });
+  });
+
 });

@@ -289,3 +289,92 @@ describe('a caller argument that is an env-data reference', () => {
     expect(outcome.error).toMatch(/data\.username/);
   });
 });
+
+/**
+ * `getVar` asks three maps in turn, and a name off `Object.prototype` is a
+ * member of none of them.
+ *
+ * `scope.renames[name]`, `scope.inputs[name]` and `resolvedParameters[name]`
+ * are plain-object indexes, so `getVar('constructor')` answered with the
+ * `Object` FUNCTION on a step whose scope binds nothing of the sort — into a
+ * signature that promises `string | undefined`, and from there into whatever
+ * the generated code does with it (`page.fill`, a comparison, a template
+ * string). The renames map is asked FIRST, so on the same run a real
+ * `[store as: constructor]` capture became unreadable: the prototype answered
+ * for the rename, the function took the early return, and the value the step
+ * had actually captured was never looked for.
+ */
+describe('a code-behind variable named after a prototype key', () => {
+  /** A top-level step's binding — `{ renames: {}, inputs: {} }`, which is the
+   *  scope every one of these names is NOT in. */
+  async function topLevel(instruction: string): Promise<CodeBehindBinding> {
+    const testPath = await write('proto.md', ['# T', '', '## Steps', `1. ${instruction}`].join('\n'));
+    const parsed = await parseTestFile(testPath);
+    const registry = await buildCodeBehindRegistry(
+      {
+        steps: parsed.steps,
+        rawSteps: parsed.expansion!.rawSteps,
+        origins: parsed.expansion!.origins,
+        frames: parsed.expansion!.frames,
+      },
+      { testFilePath: parsed.filePath, onWarn: () => {} },
+    );
+    return registry.bindingFor(0)!;
+  }
+
+  /** A map that really binds `name` — `defineProperty`, because `__proto__` is
+   *  a setter on an object literal and would bind nothing at all. */
+  const bound = (name: string, value: string): Record<string, string> =>
+    Object.defineProperty({}, name, {
+      value, writable: true, enumerable: true, configurable: true,
+    }) as Record<string, string>;
+
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
+    'answers getVar(%o) with undefined when nothing binds it',
+    async (name) => {
+      const binding = await topLevel('Read the balance');
+      let seen: unknown = 'unset';
+      const outcome = await runEntry(binding, {}, ({ step }) => { seen = step.getVar(name); });
+      expect(outcome.status).toBe('passed');
+      expect(seen).toBeUndefined();
+      expect(typeof seen).not.toBe('function');
+    },
+  );
+
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
+    'reads a real [store as: %s] capture rather than the rename map’s prototype',
+    async (name) => {
+      const binding = await topLevel('Read the balance');
+      const params = bound(name, 'ORD-1001');
+      let seen: unknown = 'unset';
+      const outcome = await runEntry(binding, params, ({ step }) => { seen = step.getVar(name); });
+      expect(outcome.status).toBe('passed');
+      expect(seen).toBe('ORD-1001');
+    },
+  );
+
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
+    'does not resolve a rename TO %s through the prototype either',
+    async (name) => {
+      // The caller aliased the skill's declared output onto a variable of
+      // that name, so the rename is real and its TARGET is the prototype key.
+      // Nothing has written it yet, which is the ordinary state of an output
+      // before its step runs.
+      const bindings = await bindingsFor(
+        ['# T', '', '## Steps', `1. [skill: login username="alice" out.token="${name}"]`].join('\n'),
+      );
+      const tokenStep = bindings[1]!;
+      expect(tokenStep.scope.renames['token']).toBe(name);
+
+      let seen: unknown = 'unset';
+      const outcome = await runEntry(tokenStep, {}, ({ step }) => { seen = step.getVar('token'); });
+      expect(outcome.status).toBe('passed');
+      expect(seen).toBeUndefined();
+
+      // And with the alias actually bound, the value comes back.
+      let after: unknown = 'unset';
+      await runEntry(tokenStep, bound(name, 'T-1'), ({ step }) => { after = step.getVar('token'); });
+      expect(after).toBe('T-1');
+    },
+  );
+});

@@ -26,7 +26,7 @@ import {
   returnExit,
   type ControlRecord,
 } from './control-flow.js';
-import { dottedReferenceError } from './placeholder-substitution.js';
+import { boundValue, dottedReferenceError } from './placeholder-substitution.js';
 import {
   applyPassBindings,
   evaluateGuard,
@@ -1741,7 +1741,14 @@ export async function runTest(
         // `[output: total]` prefix.
         rawInstruction);
         if (stepResult.status === 'passed') {
-          logger.info(`[output: ${outputStep.variable}] = "${resolvedParameters[outputStep.variable] ?? '(not captured)'}"`);
+          // `boundValue`, not a bare index: this line is how an author finds
+          // out whether the capture worked, and `[output: constructor]`
+          // printed `function Object() { [native code] }` off the prototype of
+          // a map that had captured nothing. The step it describes was
+          // recorded correctly — `computeStepCaptures` asks `hasOwn` — so the
+          // console said one thing and the report another.
+          const captured = boundValue(resolvedParameters, outputStep.variable);
+          logger.info(`[output: ${outputStep.variable}] = "${captured ?? '(not captured)'}"`);
         }
       } else if (test.toolCalls[i]) {
         // [tool: ...] step — dispatch deterministic code with live page/context/browser.

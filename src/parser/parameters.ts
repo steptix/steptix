@@ -217,9 +217,21 @@ export function placeholderProperty(name: string): string | undefined {
  * just overwritten, with §8.3's refusal unable to fire on a key that was
  * still there.
  *
- * Guarded on the flat spelling, because a dotted name is a PROPERTY write
- * rather than a rebind: it must not erase its own siblings. Nothing writes one
- * today; the guard is so that a future writer cannot.
+ * That erasure is guarded on the flat spelling, because a dotted name is a
+ * PROPERTY write rather than a rebind: it must not erase its own siblings.
+ * One writer really does spell one — a tool output the caller aliased onto a
+ * dotted target, `[tool: t out.sum="row.keyword"]`, which reaches here through
+ * `call.outputAliases` (src/tools/executor.ts) — so this is a live case rather
+ * than a guard against a future one.
+ *
+ * **And a dotted write drops that name's loop mark.** A name the AUTHOR wrote
+ * in a step is nobody's binding, whoever wrote it last: if a `For each` pass
+ * had bound `row.keyword` off the page, the registry (src/utils/loop-bindings.ts)
+ * went on saying so about an entry the alias has since overwritten, and §7.6's
+ * masking read the narrow record rule — `keyword` in clear — for a value the
+ * broad author rule now covers. The flat case gets this from `clearDottedKeys`,
+ * which unmarks every key it drops; the dotted case drops no key, so it says
+ * so itself.
  *
  * Here, beside {@link placeholderRoot}, rather than in a run module: a `Set`
  * step needs it and has no page, no model and no cache, and importing it from
@@ -238,6 +250,7 @@ export function bindVariable(
     configurable: true,
   });
   if (!name.includes('.')) clearDottedKeys(map, new Set([name]));
+  else unmarkLoopBindings(map, [name]);
 }
 
 /**

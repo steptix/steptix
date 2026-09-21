@@ -944,6 +944,97 @@ describe('readTable — tables that silently read as []', () => {
     ]);
   });
 
+  it('keeps that one-cell header when the DATA rows carry row headers (§7.3)', async () => {
+    // §7.3's "realistic case": a row-header column with no `scope` attribute.
+    // Such a row is `<tr><th>O-1</th><td>Delete</td></tr>` — one `<th>` and
+    // more than one cell — and the step-over's "is there a later, wider
+    // heading row" question answered YES to it. The genuine one-cell header
+    // above was therefore stepped over, the FIRST DATA ROW became the header
+    // (`available headers are O-1, Delete`), and the positional read returned
+    // `[{_row:1,id:"Order ID"},{_row:2,id:"O-2"}]` — a data row silently
+    // deleted from the middle, which is the one outcome the step-over exists
+    // to prevent. A heading row names EVERY column, so it carries more than
+    // one `<th>`; one `<th>` beside `<td>`s is a row header.
+    const ROWHEADS = `<table id="t" aria-label="Orders"><tbody>
+      <tr><th>Order ID</th></tr>
+      <tr><th>O-1</th><td><button type="button">Delete</button></td></tr>
+      <tr><th>O-2</th><td><button type="button">Delete</button></td></tr>
+    </tbody></table>`;
+
+    // By header: the refusal names what the header row actually holds, so it
+    // proves WHICH row was taken — `O-1, Delete` is the bug's signature.
+    await load(ROWHEADS);
+    const message = await refusal({ selector: '#t', columns: [{ header: 'Payee', key: 'p' }] });
+    expect(message).not.toContain('O-1, Delete');
+    expect(message).toBe(
+      'readTable cannot map table "Orders": no column is headed "Payee" — available '
+      + 'headers are Order ID',
+    );
+
+    await load(ROWHEADS);
+    const byHeader = await run({ selector: '#t', columns: [{ header: 'Order ID', key: 'id' }] });
+    expect(byHeader.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1' },
+      { _row: '2', id: 'O-2' },
+    ]);
+
+    // By position: both data rows are present, and numbered from 1.
+    await load(ROWHEADS);
+    const byIndex = await run({ selector: '#t', columns: [{ index: 1, key: 'id' }] });
+    expect(byIndex.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1' },
+      { _row: '2', id: 'O-2' },
+    ]);
+  });
+
+  it('keeps it when those row headers are marked scope="row" (§10)', async () => {
+    // The `scope="row"` spelling of the same table. The step-over asked only
+    // whether a later row carries a `<th>`, and `scope` does not enter that
+    // question, so the header was stepped over here too — and then the row
+    // below was REFUSED as a header for being row-scoped, leaving the table
+    // headerless: `Order ID` became record 1 and every real row was numbered
+    // one too high.
+    const SCOPED = `<table id="t" aria-label="Orders"><tbody>
+      <tr><th>Order ID</th></tr>
+      <tr><th scope="row">O-1</th><td><button type="button">Delete</button></td></tr>
+      <tr><th scope="row">O-2</th><td><button type="button">Delete</button></td></tr>
+    </tbody></table>`;
+
+    await load(SCOPED);
+    const byHeader = await run({ selector: '#t', columns: [{ header: 'Order ID', key: 'id' }] });
+    expect(byHeader.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1' },
+      { _row: '2', id: 'O-2' },
+    ]);
+
+    await load(SCOPED);
+    const byIndex = await run({ selector: '#t', columns: [{ index: 1, key: 'id' }] });
+    expect(byIndex.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1' },
+      { _row: '2', id: 'O-2' },
+    ]);
+  });
+
+  it('finds it past a hidden template row above row-header data rows (§7.3)', async () => {
+    // All three guards at once: the `display:none` template row is skipped,
+    // the one-cell heading behind it is the header, and the row headers below
+    // do not pull the step-over onto it.
+    await load(`<table id="t" aria-label="Orders"><tbody>
+      <tr class="row-hidden" id="tpl"><td>—</td><td>—</td></tr>
+      <tr><th>Order ID</th></tr>
+      <tr><th>O-1</th><td><button type="button">Delete</button></td></tr>
+      <tr><th>O-2</th><td><button type="button">Delete</button></td></tr>
+    </tbody></table>`);
+    expect(await page.locator('#tpl').evaluate(
+      (el: Element) => (el as HTMLElement).getClientRects().length,
+    )).toBe(0);
+    const byHeader = await run({ selector: '#t', columns: [{ header: 'Order ID', key: 'id' }] });
+    expect(byHeader.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1' },
+      { _row: '2', id: 'O-2' },
+    ]);
+  });
+
   it('does NOT take a <th scope="row"> first row as the header (§10)', async () => {
     // That <th> is the row's own heading, not the table's headings — reading
     // it as a header row would delete the first account from the read.

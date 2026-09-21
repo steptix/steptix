@@ -821,6 +821,99 @@ describe('For each over object rows', () => {
   });
 
   /**
+   * WHOSE those dotted names are, said on the wire
+   * (docs/specs/SPEC-structured-table-reads.md §7.6, §8.4).
+   *
+   * The scope alone cannot answer it. `order.id` (a page's column, bound by
+   * this pass) and `user.apikey` (a data file's own heading, typed by the
+   * author) are the same shape to a reader, and the server tells them apart
+   * with a registry keyed on the live map's object identity — which a copy
+   * sent over HTTP arrives without. So TestBench read every dotted entry as a
+   * binding, took the narrow record rule to it, and printed `uk_live_1234` in
+   * the Variables view beside a report that starred it.
+   *
+   * `bindings` is that registry as data. Present on every `frame:scope`,
+   * EMPTY LIST INCLUDED: absent has to keep meaning "an older server said
+   * nothing", or a real loop's `row.keyword` would be masked on a server that
+   * never claimed it was the author's word.
+   */
+  it('says on frame:scope which dotted names the pass bound — and unsays them', async () => {
+    const events = await collect({
+      ...ordersBody(),
+      steps: [
+        'Open the orders page',
+        'For each {{order}} in {{orders}}, Check the order',
+        // §8.2: the last pass's bindings survive the loop. This is what takes
+        // them back out — `bindVariable` clears the root's dotted keys and
+        // `unmarkLoopBindings` drops the marks with them, so a later entry of
+        // the same name is nobody's binding.
+        'Set {{order}} to "none"',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5, 6],
+      // A dotted name the author typed, in the same map the whole time. It is
+      // never a binding, so it must never appear in the list — this is the
+      // entry the client was getting wrong.
+      parameters: { orders: ORDERS, 'user.apikey': 'uk_live_1234' },
+    });
+
+    const scopes = events.filter((e) => e.type === 'frame:scope');
+    expect(scopes.length).toBeGreaterThan(0);
+    // Every one carries the field, so a client can tell "nothing bound" from
+    // "nothing said".
+    for (const s of scopes) expect(Array.isArray(s.bindings)).toBe(true);
+
+    // Before the loop: the scope already holds `user.apikey`, and nothing is
+    // a binding.
+    expect(scopes[0]!.scope['user.apikey']).toBe('uk_live_1234');
+    expect(scopes[0]!.bindings).toEqual([]);
+
+    // Inside a pass: exactly that pass's dotted names, sorted, and not the
+    // author's heading sitting beside them.
+    const during = scopes.filter((s) => s.scope['order.id'] !== undefined);
+    expect(during.length).toBeGreaterThan(0);
+    for (const s of during) {
+      expect(s.bindings).toEqual(['order._row', 'order.id', 'order.status']);
+      expect(s.scope['user.apikey']).toBe('uk_live_1234');
+    }
+
+    // After the `Set`: the properties are gone from the scope and the list is
+    // empty again — the mark and the entry go together.
+    const last = scopes.at(-1)!;
+    expect(last.scope['order']).toBe('none');
+    expect(last.scope['order.id']).toBeUndefined();
+    expect(last.bindings).toEqual([]);
+  });
+
+  /**
+   * The other half the client could not see: `## Config: unmask:`.
+   *
+   * It is parsed from the request the client itself sent, and was then read
+   * only by the prompt's `## Values` block — so after an author unmasked
+   * `keyword`, the model saw the value and every TestBench surface went on
+   * starring it. Now it rides each `frame:scope`, and the client exempts a
+   * named entry from all three rules exactly as `formatParameterBlock` does.
+   */
+  it('carries the run’s unmask names on every scope frame, and omits the field without them', async () => {
+    const declared = await collect({
+      ...ordersBody(),
+      // Spacing and order as an author would write them; the server trims and
+      // the client matches by exact name.
+      config: { unmask: 'keyword,  order.status ' },
+    });
+    const declaredScopes = declared.filter((e) => e.type === 'frame:scope');
+    expect(declaredScopes.length).toBeGreaterThan(0);
+    for (const s of declaredScopes) expect(s.unmask).toEqual(['keyword', 'order.status']);
+
+    // A run that declares none sends no field at all, which is byte for byte
+    // what it sent before this existed — and is also what an older server
+    // sends, so the client cannot tell them apart and does not need to.
+    const plain = (await collect(ordersBody())).filter((e) => e.type === 'frame:scope');
+    expect(plain.length).toBeGreaterThan(0);
+    for (const s of plain) expect('unmask' in s).toBe(false);
+  });
+
+  /**
    * §4.6's own example header, whose tail names a property of the item it is
    * about to bind.
    *
@@ -2520,5 +2613,54 @@ describe('step mode after a return that ended a PASS', () => {
     // After line 8 (`Click Next`, the whole body) the run re-evaluates line 4.
     expect(awaitingLines.slice(awaitingLines.indexOf(8))).toContain(4);
     expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+});
+
+/**
+ * An `[output:]` step whose variable is a name off `Object.prototype`, over
+ * the wire.
+ *
+ * The session loop asked `varName in resolvedParameters` when deciding what
+ * the step captured, and `in` walks the prototype chain: `[output: constructor]`
+ * therefore "captured" the `Object` FUNCTION out of a map that binds nothing
+ * of the sort. It travelled into `session.outputs`, into the step's `outputs`
+ * and onto the wire as a `capture` event — all three typed `string`, and the
+ * Variables panel a client renders from that event then showed a variable the
+ * run never had.
+ *
+ * **Through the HTTP entry, and not against `session-manager.ts` directly**,
+ * for this file's own reason: what a client sees is the event, and the event
+ * is built from the map two layers down.
+ */
+describe('an [output:] step naming a prototype key (server)', () => {
+  const outputBody = (extra: Record<string, unknown> = {}) => ({
+    steps: ['[output: constructor] Read the order id'],
+    sourceLines: [3],
+    testFilePath,
+    ...extra,
+  });
+
+  it('emits no capture event, and no outputs, for a value nothing captured', async () => {
+    const events = await collect(outputBody());
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+    // Not "a capture event with a missing value" — no capture event at all.
+    expect(events.filter((e) => e.type === 'capture')).toEqual([]);
+
+    const body = await post(outputBody());
+    expect(body.results[0].outputs ?? {}).toEqual({});
+    expect(JSON.stringify(body)).not.toContain('native code');
+  });
+
+  it('still captures the name when the run really binds it', async () => {
+    // A `constructor` the caller handed in — a capture from an earlier run of
+    // the same session is the realistic source, and it is an OWN property of
+    // the map either way.
+    const events = await collect(outputBody({ parameters: { constructor: 'ORD-1001' } }));
+    expect(events.filter((e) => e.type === 'capture')).toMatchObject([
+      { type: 'capture', name: 'constructor', value: 'ORD-1001', source: 'capture' },
+    ]);
+
+    const body = await post(outputBody({ parameters: { constructor: 'ORD-1001' } }));
+    expect(body.results[0].outputs).toMatchObject({ constructor: 'ORD-1001' });
   });
 });

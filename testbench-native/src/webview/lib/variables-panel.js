@@ -252,16 +252,32 @@ function wholeNameIsRecordSecretInline(name) {
   return name.includes(".") && isRecordSecretKeyInline(name.split(".").join("_"));
 }
 
+/** Is `name` in a list that may be a Set or an array? A `.has` probe, the
+ *  same one runner-core's `nameIn` makes, so the panel accepts the wire's
+ *  arrays and a caller's Set without caring which arrived. */
+function nameInInline(list, name) {
+  if (!list) return false;
+  return typeof list.has === "function" ? list.has(name) : list.includes(name);
+}
+
 /** Is `varName` a secret? The three rules of runner-core's `isSecretVarName`:
  *  a flat name is the author's, so the broad substring rule decides it; a
  *  dotted `root.property` is a record binding, so the root takes the flat rule
  *  and the property takes the record-column one; and the whole dotted name is
  *  read as one credential key too (`api.key` → `api_key`), because not every
- *  dotted name is a binding. */
-export function isSecretVarNameInline(varName) {
+ *  dotted name is a binding.
+ *
+ *  `bindings` is the run's `frame:scope` saying WHICH dotted names a `For
+ *  each` pass bound. A dotted name that is not among them is a name a person
+ *  typed — a data file's `user.apikey` heading — and takes the flat author
+ *  rule on the whole key, exactly as the server's `isSecretParameterName`
+ *  does. Omitted means an older server said nothing, which keeps the older
+ *  reading; an empty list means this run bound nothing, which is honoured. */
+export function isSecretVarNameInline(varName, bindings) {
   const name = String(varName);
   const dot = name.indexOf(".");
   if (dot < 0) return isSecretFlatNameInline(name);
+  if (bindings !== undefined && !nameInInline(bindings, name)) return isSecretFlatNameInline(name);
   return (
     isSecretFlatNameInline(name.slice(0, dot))
     || isRecordSecretKeyInline(name.slice(dot + 1))
@@ -327,11 +343,21 @@ export function maskRecordSecretsInline(value) {
 /** Mask password/secret/token/key-shaped variable names, and the secret
  *  columns of any record a value holds. Same rule and same shape as
  *  runner-core/repl.maskIfSecret: the name first and outright (a secret-named
- *  value is hidden whole), then the record scan for everything else. */
-export function maskIfSecretInline(varName, value) {
+ *  value is hidden whole), then the record scan for everything else.
+ *
+ *  `opts` is what the run's `frame:scope` said about the map this entry came
+ *  from — `{ bindings, unmask }`. `unmask` is read FIRST and returns the value
+ *  untouched, because the server's `formatParameterBlock` exempts a declared
+ *  non-secret from all three rules and a record scan run on it afterwards
+ *  would star the very `keyword` column the hatch exists to keep readable.
+ *  `bindings` decides whether a dotted name is read as `root.property` or as
+ *  one author-chosen key. Both optional: an older server sends neither and
+ *  the panel renders exactly what it rendered before. */
+export function maskIfSecretInline(varName, value, opts = {}) {
+  if (nameInInline(opts.unmask, String(varName))) return String(value);
   // `String(value)` on both paths, and the falsy guard before the mask, so a
   // row with no value yet renders exactly what it rendered before.
-  if (!isSecretVarNameInline(varName)) return maskRecordSecretsInline(String(value));
+  if (!isSecretVarNameInline(varName, opts.bindings)) return maskRecordSecretsInline(String(value));
   if (!value) return "(empty)";
   return maskValueInline(String(value));
 }
