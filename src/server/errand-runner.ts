@@ -941,7 +941,11 @@ export class ErrandRunner {
         });
       }
       for (const name of new Set([...outputVars, ...autoCapturedNames(stepResult)])) {
-        if (!(name in scope)) continue;
+        // `hasOwn`, not `in`: `in` walks the prototype chain, so an
+        // `[output: constructor]` reported a capture of the `Object` function
+        // from a scope that binds nothing of the sort — the same one-word fix
+        // as `boundValue` (src/runner/placeholder-substitution.ts).
+        if (!Object.hasOwn(scope, name)) continue;
         const value = scope[name]!;
         stepOutputs[name] = value;
         captures[name] = value;

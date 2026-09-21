@@ -911,17 +911,29 @@ accepts exactly one direct header row belonging to the selected table:
   down (a row-header column with no `scope` attribute is the realistic case)
   must not be reachable, or the read would silently delete a data row from
   the middle of the table. One exception, as narrow as the rule that needs
-  it: a candidate that is a single `<th>` cell spanning one column, in a
-  table some other body row makes wider, is a group heading (§4.8), not the
-  header — a header is never narrower than the grid it names — so it is
-  stepped over and the next rendered-or-`<th>` row is the one candidate
-  instead. Review found that without this a `<tr><th>Section A</th></tr>`
-  group row was accepted as the header of a headerless table, so the real
-  heading row became record 1 and a header-named read reported
-  `available headers are Section A`. The skip applies only to a row that
-  would otherwise have been accepted; a one-cell `<td>` row still ends the
-  search with no header, which is what keeps a row-header `<th>` further
-  down unreachable;
+  it: a candidate that is a single `<th>` cell, in a table where a wider
+  heading row follows it, is a group heading (§4.8), not the header — a
+  header is never narrower than the grid it names — so it is stepped over
+  and the next rendered-or-`<th>` row is the one candidate instead. Review
+  found that without this a `<tr><th>Section A</th></tr>` group row was
+  accepted as the header of a headerless table, so the real heading row
+  became record 1 and a header-named read reported
+  `available headers are Section A`. The skip counts CELLS, not columns, so
+  `<tr><th colspan="3">Group A</th></tr>` is stepped over as well — it is
+  one cell — and it is not limited to a candidate that would otherwise have
+  been accepted, since that one is refused by the spanning-cell rule rather
+  than taken as the header. What the skip does require is a `<th>`: a
+  one-cell `<td>` row still ends the search with no header, which is what
+  keeps a row-header `<th>` further down unreachable. With no wider heading
+  row below it, a one-cell `<th>` row IS the header, however wide the data
+  rows beneath it are (§7.4: extra cells are harmless) — review found the
+  first cut of this exception stepped over exactly that header. A
+  stepped-over row is not deleted: it stays in the body as an ordinary data
+  row, because §4.8's floor makes a lone cell spanning one column data. So a
+  read of one column makes it record 1, holding that cell's own text, and a
+  read of two columns fails the whole read with
+  `readTable cannot map table "<label>": row 1 has 1 cell, so there is no cell for the "<column>" column at position 2`
+  (§10);
 - nested-table rows/cells are excluded by requiring `closest('table')` to be
   the selected table.
 
@@ -1106,6 +1118,31 @@ that breadth (a flat `keyword` masked on both sides) is accepted rather than
 tuned out on the client, because a view that disagrees with the report about
 one row is the worse failure.
 
+That copying includes WHICH rule each surface asks. The client has both map
+rules too: the two-segment one for a scope entry, which may be a loop binding,
+and the flat author rule on the whole key for a data row's cells and for a
+`[store as:]` capture — the surfaces the server gives `redactAuthoredMap`.
+Applying the scope rule to both is what printed `user.apikey = uk_live_1234`
+in the Run Rows pick, the gutter hover and the Output banner beside a report
+matrix that said `***`.
+
+**The `unmask` hatch does not reach the client.** `## Config`'s `unmask` is
+read on the server and governs the report, the run log and the prompt's
+`## Values` block. Nothing on the wire carries it, so after an author unmasks
+`keyword` the report prints it while TestBench's Variables view, its Variables
+panel, the `[input:]` echo and the gutter hover still show the mask. That is a
+known gap, not the design (§14): the two surfaces disagree about one row,
+which is the failure this section otherwise forbids, and it is the readable
+direction rather than the leaking one.
+
+**A leading byte-order mark is stripped before a value is sniffed for JSON.**
+U+FEFF is whitespace to a JavaScript regex, so `\uFEFF[{"password":…}]` passed
+a `/^\s*[[{]/` test and then threw in `JSON.parse`, and the catch handed the
+value back unmasked — the one input shaped exactly like the case record
+masking exists for. Every copy of that scan, server and client, strips it
+first; a value nothing was masked in is still returned exactly as it arrived,
+mark included.
+
 **A secret column masks at whatever JSON type the cell holds.** A `password`
 column holding `123` is the same credential as one holding `"123"`, so the
 client surfaces mask a number or a boolean exactly as they mask a string, and
@@ -1135,15 +1172,45 @@ value holding a double quote or a backslash (a Windows key path is the common
 one) sits in the variable, the report's parameter map and any trace payload
 in its escaped form, which the raw spelling does not match.
 
-**Which name rule a map gets depends on whose names they are.** The
-two-segment rule is the live variable map's, because its dotted entries are
-a loop's `row.<column>` bindings. A map whose keys are author-chosen end to
-end — a data row's cells under the data file's headings, a step's
-`[store as:]` outputs from a tool — takes the flat author rule on the whole
-key, and a data row the run never reached is masked the same way as one it
-did. And a dotted name that reads as one credential key with the dots as
-separators (`api.key` → `api_key`, `private.key`) is a secret wherever it
-occurs, while `row.keyword` and `payment.sort_key` stay clear.
+**Which name rule a dotted entry gets follows from whose name it is, not
+from how it is spelled.** The live variable map is mixed: a `For each` pass
+writes `row.<column>` bindings into it, and `resolveParameters` merges a
+data file's cells into the same map under the file's own headings, so an
+author-typed `user.apikey` sits beside a page-derived `row.keyword`. A pass
+therefore REGISTERS the names it binds (a registry keyed by the map object,
+kept beside the masking rules), and only a registered name is read as half
+page-derived — its root by the author rule, its property by the whole-word
+record rule, the whole name by the credential-key reading (`api.key` →
+`api_key`, `private.key`). Every other dotted name in that map is one a
+person typed and takes the author rule on the whole key, as it did before
+the rule was split; the accepted direction is that an unregistered
+`row.keyword` — a CSV heading that happens to look like a binding — masks,
+and the way out is `## Config`'s `unmask`. A rebind that drops a dotted key
+drops its registration with it, so a `Set` or a capture after a loop leaves
+nobody's binding behind. Asked about a name with no map in hand, the rule
+reads it as a binding. A copy of the map (the server merges frame inputs
+into one before it takes the mask set) inherits the registration, or every
+binding in the copy would fall back to the author rule and `AU` would
+rejoin the mask set. A map whose keys are author-chosen end to end — a data
+row's cells in the report's matrix band, a step's `[store as:]` tool outputs
+in a recording — is masked by the author rule on the whole key without
+consulting any registry, and a data row the run never reached is masked the
+same way as one it did.
+
+**The free-text scan accepts a single record as well as a list.** A value
+beginning, after any byte-order mark, with `[` or `{` is parsed, and a lone
+record is read as a list of one: `[store as: account]` on a one-row read
+stores `{…}`, and the two halves of record masking must accept the same
+shapes, or the same column reads as the mask in the Variables panel and in
+clear in the run log.
+
+**The mask string differs per surface, and that is by design.** The server
+writes `***` wherever it masks (report, log, prompt); the client writes a run
+of asterisks, one per character of the value up to eight
+(`********`), because its mask replaces one displayed value in place rather
+than a substring of free text, and a length hint helps an author tell an
+empty capture from a short one. The two never appear in one document, so
+nothing compares them.
 
 The action is observational and must not trigger post-action page settling.
 
@@ -1456,11 +1523,15 @@ root no loop binds, still warns.
 
 - Loop markers and `frame:scope` must include the dotted property bindings so
   the TestBench Variables panel can show the current row fields.
-- Secret masking applies using the property segment, by the two rules of
-  §7.6: the property decides by the record-column rule, the root by the
-  author-chosen one, and either is enough. (Testing the whole dotted name as
-  one string is the bug those two rules replaced: `row.keyword` matched on
-  `key` and masked every "AU" in the log, the report and the DOM snapshot.)
+- Secret masking applies using the property segment, by the rules of §7.6:
+  the property decides by the record-column rule, the root by the
+  author-chosen one, and the whole name read as one credential key with the
+  dots as separators (`api.key` → `api_key`, §7.6) decides it as well — any
+  of the three is enough. (Testing the whole dotted name with the AUTHOR
+  rule is the bug the first two replaced: `row.keyword` matched on `key` and
+  masked every "AU" in the log, the report and the DOM snapshot. The third
+  clause is the RECORD rule reading the joined name, which is why
+  `row.keyword` and `payment.sort_key` stay clear of it.)
 - The whole-record binding (`payment`) and the capture it came from
   (`payments`) are masked by looking INSIDE them — each secret column
   replaced, the rest left readable. Nothing about either name says secret, so
@@ -1564,6 +1635,8 @@ root or a literal value that can be inlined into generated source.
 | Table width, with no header row | The widest body row's cell count over **all** body rows, rendered or not — a table whose only rendered row is the full-width message would otherwise measure one column wide and fail as a merged cell instead of storing `[]`. |
 | One-column table, with or without a header | Its ordinary (`colspan="1"`) rows are data; the floor of 2 in the rule above is what keeps them out of it. |
 | One-column table with a lone `colspan="2"` message row | A placeholder, not a merged-cell error: a cell spanning more than its own column is a message. |
+| One-cell `<th>` row above a wider heading row (`<tr><th>Section A</th></tr>`, then `<tr><th>Name</th><th>Status</th></tr>`) | A group heading, stepped over by the header search (§7.3); the wider row is the header. The group row stays in the body as data: record 1 for a one-column read, the short-row refusal for a wider one. |
+| One-cell `<th>` row with NO wider heading row below it | The header, however wide the data rows are (§7.4). |
 | `<thead></thead>` present but empty, headings in the first `<tbody>` row | The body-row header rule applies (§7.3); an element-presence test read the table as headerless. |
 | `display:none` template row before the headings | Skipped when looking for the header row: the first body row that is rendered **or** carries a `<th>` is the one considered, and only that one. |
 | Header row mixing `<td>` and `<th>` (checkbox cell beside headings), no `<thead>` | The header row (§7.3); never record 1. |
@@ -1598,7 +1671,7 @@ root or a literal value that can be inlined into generated source.
 | Object property typo | Fail before AI action with available properties. |
 | Scalar `For each` | Unchanged. |
 | Array item is an object from a tool/API | Direct safe properties become dotted bindings using the same rules. |
-| Secret-named property | Mask on report/log/UI surfaces, retain raw only in execution scope. The property takes the record-column rule and the root the author-chosen one, either being enough (§7.6): `payment.password` and `token.payee` mask, `payment.sort_key` does not. |
+| Secret-named property | Mask on report/log/UI surfaces, retain raw only in execution scope. The property takes the record-column rule and the root the author-chosen one, either being enough, or the whole name read as one credential key (§7.6): `payment.password`, `token.payee` and `api.key` mask, `payment.sort_key` does not. A dotted name no `For each` registered takes the author rule on the whole key. |
 | A record column's value is shorter than four characters | It does not join the free-text mask set (§7.6), which would replace it everywhere. The entry named for it is still masked, at any length — that mask is in place, under its own key. |
 | A whole capture under a plain name (`payments`, or one pass's `payment`) | No name rule can catch it. The report redacts by value; the TestBench Variables view and panel mask each secret COLUMN inside the JSON and leave the rest readable. |
 
@@ -1945,3 +2018,11 @@ Moved out of v1 after review, each with why and what would bring it back:
   under the code-behind work rather than a note here.
 - **Per-row evidence.** A screenshot per pass, named by a record field, for
   the audit trail a payments table wants. Report/evidence story.
+- **Carry `unmask` to the client.** `## Config: unmask:` is parsed and applied
+  on the server only (§7.6), so an author who unmasks `keyword` sees it in the
+  report while TestBench's Variables view, its Variables panel, the `[input:]`
+  echo and the gutter hover keep starring it. The fix is a wire change — the
+  session's unmasked names have to reach the extension, which today receives
+  no configuration at all — plus a parameter through the three client maskers,
+  so it is a follow-up rather than part of this feature. Until then the hatch
+  is documented as governing the report, the log and the prompt.

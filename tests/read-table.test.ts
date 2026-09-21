@@ -861,6 +861,89 @@ describe('readTable — tables that silently read as []', () => {
     expect(byIndex.records.map((r) => r['name'])).toEqual(['Section A', 'Alice', 'Bob']);
   });
 
+  it('a stepped-over group row is a data row — record 1, or a short row (§4.8)', async () => {
+    // The other half of the step-over: the row is not deleted, it is left in
+    // the body, and §4.8's floor says a lone cell spanning ONE column is data.
+    // Both of its observable outcomes are pinned here, because "stepped over"
+    // is easy to read as "dropped".
+    const SECTIONED = `<table id="t" aria-label="Accounts"><tbody>
+      <tr><th>Section A</th></tr>
+      <tr><th>Name</th><th>Status</th></tr>
+      <tr><td>Alice</td><td>Active</td></tr>
+      <tr><td>Bob</td><td>Closed</td></tr>
+    </tbody></table>`;
+
+    // ONE requested column: it is record 1, holding the heading's own text.
+    await load(SECTIONED);
+    const one = await run({ selector: '#t', columns: [{ header: 'Name', key: 'name' }] });
+    expect(one.capturedRecords).toEqual([
+      { _row: '1', name: 'Section A' },
+      { _row: '2', name: 'Alice' },
+      { _row: '3', name: 'Bob' },
+    ]);
+
+    // TWO: the group row has no cell for the second, and the read fails
+    // rather than storing a record whose fields came from the wrong columns.
+    await load(SECTIONED);
+    expect(await refusal({
+      selector: '#t',
+      columns: [{ header: 'Name', key: 'name' }, { header: 'Status', key: 'status' }],
+    })).toBe(
+      'readTable cannot map table "Accounts": row 1 has 1 cell, so there is no cell for the '
+      + '"Status" column at position 2',
+    );
+  });
+
+  it('takes a one-cell <th> header above WIDER data rows (§7.3, §7.4)', async () => {
+    // The step-over is for a group row, and a group row is known by the
+    // HEADINGS BELOW it. Deciding it from the body's width alone stepped over
+    // this table's genuine one-cell header — §7.4's "extra cells are
+    // harmless" arriving as a header that is narrower than its own data rows.
+    // By header the read then said "it has no header row"; by position the
+    // heading text became record 1 and every real row was numbered one too
+    // high.
+    const WIDER = `<table id="t" aria-label="Orders"><tbody>
+      <tr><th>Order ID</th></tr>
+      <tr><td>O-1</td><td><button type="button">Delete</button></td></tr>
+      <tr><td>O-2</td><td><button type="button">Delete</button></td></tr>
+    </tbody></table>`;
+
+    await load(WIDER);
+    const byHeader = await run({ selector: '#t', columns: [{ header: 'Order ID', key: 'id' }] });
+    expect(byHeader.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1' },
+      { _row: '2', id: 'O-2' },
+    ]);
+
+    await load(WIDER);
+    const byIndex = await run({ selector: '#t', columns: [{ index: 1, key: 'id' }] });
+    expect(byIndex.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1' },
+      { _row: '2', id: 'O-2' },
+    ]);
+  });
+
+  it('finds that one-cell <th> header past a hidden template row too (§7.3)', async () => {
+    // The two guards compose: the `display:none` template row is skipped
+    // because it is neither rendered nor a heading row, and the one-cell
+    // heading behind it is still the header even though the template row —
+    // and the data rows — are wider.
+    await load(`<table id="t" aria-label="Orders"><tbody>
+      <tr class="row-hidden" id="tpl"><td>—</td><td>—</td></tr>
+      <tr><th>Order ID</th></tr>
+      <tr><td>O-1</td><td><button type="button">Delete</button></td></tr>
+      <tr><td>O-2</td><td><button type="button">Delete</button></td></tr>
+    </tbody></table>`);
+    expect(await page.locator('#tpl').evaluate(
+      (el: Element) => (el as HTMLElement).getClientRects().length,
+    )).toBe(0);
+    const byHeader = await run({ selector: '#t', columns: [{ header: 'Order ID', key: 'id' }] });
+    expect(byHeader.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1' },
+      { _row: '2', id: 'O-2' },
+    ]);
+  });
+
   it('does NOT take a <th scope="row"> first row as the header (§10)', async () => {
     // That <th> is the row's own heading, not the table's headings — reading
     // it as a header row would delete the first account from the read.

@@ -1,6 +1,14 @@
 /**
- * What counts as a secret is decided in three places, by two rules, and they
+ * What counts as a secret is decided in three places, by three rules, and they
  * must decide it identically (docs/specs/SPEC-structured-table-reads.md §7.6).
+ *
+ * The three rules are one per kind of NAME, not per surface: the flat author
+ * rule on a whole key (`isSecretName`, and the server's `redactAuthoredMap`
+ * over a data row's cells and a step's `[store as:]` outputs), the narrow
+ * record-column rule on a page-derived key (`isRecordSecretKey`), and the
+ * two-segment composition of the two that the live variable map takes
+ * (`isSecretParameterName`, and `redactMap`) — which has a third arm of its
+ * own, the whole dotted name read as one credential key.
  *
  * The FLAT rule — an author-chosen name — is the server's `isSecretName`
  * (src/parser/parameters.ts): a substring, `password|secret|token|key`. The
@@ -46,6 +54,8 @@ import {
   SECRET_NAME_PATTERN,
   isRecordSecretKey,
   isSecretFlatName,
+  isSecretVarName,
+  maskIfSecretAuthored,
   maskRecordSecrets,
 } from 'ai-ui-automation-runner-core';
 import {
@@ -53,6 +63,8 @@ import {
   SECRET_NAME_PATTERN as PANEL_SECRET_NAME,
   isRecordSecretKeyInline,
   isSecretFlatNameInline,
+  isSecretVarNameInline,
+  maskIfSecretAuthoredInline,
   maskRecordSecretsInline,
 } from '../src/webview/lib/variables-panel.js';
 
@@ -67,18 +79,22 @@ const parametersSource = readFileSync(PARAMETERS_SOURCE_FILE, 'utf8');
 const coreSource = readFileSync(CORE_SOURCE_FILE, 'utf8');
 const panelSource = readFileSync(PANEL_SOURCE_FILE, 'utf8');
 
-/** The pattern of a `const <name> = /…/;` line, as a string. Both files spell
- *  these as plain unflagged literals on one line; anything else is a reformat
- *  this reader is entitled to fail on. */
+/** The literal of a `const <name> = /…/<flags>;` line, as `{source, flags}`.
+ *  Every file spells these on one line; anything else is a reformat this
+ *  reader is entitled to fail on.
+ *
+ *  Flags are read, not assumed: `SECRET_NAME` carries `/i` and would not
+ *  match a reader that stopped at the closing slash, and dropping that `i` is
+ *  a real drift (`MACHINE_KEY` stops masking). */
 function regexLiteralSource(source, name, file) {
-  const hit = new RegExp(`const ${name} = /(.*)/;`).exec(source);
+  const hit = new RegExp(`const ${name} = /(.*)/([a-z]*);`).exec(source);
   assert.ok(
     hit,
     `could not read \`const ${name} = /…/;\` out of ${file} — if that line was ` +
       'reformatted, update this reader; if the pattern was renamed or removed, ' +
       'every mirror listed at the top of this file needs the same change',
   );
-  return hit[1];
+  return { source: hit[1], flags: hit[2] };
 }
 
 /** The literal `isSecretName` tests with, as {source, flags}. It is spelled
@@ -103,6 +119,16 @@ test('the flat, author-chosen name rule is the server\'s, character for characte
   // Sanity: the reader found the pattern, not an empty match off a comment.
   assert.ok(literal.source.includes('password'), literal.source);
   assert.equal(literal.flags, 'i', 'case-insensitive, or MACHINE_KEY would not match');
+
+  // runner-core is read from its SOURCE, not from the object this file
+  // imported. That import resolves through `ai-ui-automation-runner-core` to
+  // runner-core/dist, which `npm test` never builds — so narrowing the literal
+  // in repl.ts and running the suite left this file green against a compiled
+  // copy of the OLD rule. The panel's module is its own source, so its import
+  // is the source.
+  const core = regexLiteralSource(coreSource, 'SECRET_NAME', 'runner-core/src/repl.ts');
+  assert.equal(core.source, literal.source, 'runner-core flat pattern (source)');
+  assert.equal(core.flags, literal.flags, 'runner-core flat flags (source)');
 
   assert.equal(SECRET_NAME_PATTERN.source, literal.source, 'runner-core flat pattern');
   assert.equal(SECRET_NAME_PATTERN.flags, literal.flags, 'runner-core flat flags');
@@ -148,12 +174,20 @@ test('both client mirrors answer the flat corpus the way the server would', () =
 });
 
 test('the record-column patterns are the server\'s, character for character', () => {
-  const word = regexLiteralSource(serverSource, 'RECORD_SECRET_WORD', 'src/utils/secrets.ts');
-  const key = regexLiteralSource(serverSource, 'RECORD_SECRET_KEY', 'src/utils/secrets.ts');
+  const word = regexLiteralSource(serverSource, 'RECORD_SECRET_WORD', 'src/utils/secrets.ts').source;
+  const key = regexLiteralSource(serverSource, 'RECORD_SECRET_KEY', 'src/utils/secrets.ts').source;
 
   // Sanity: the reader found patterns, not an empty match off a comment.
   assert.ok(word.includes('password'), word);
   assert.ok(key.includes('_keys?'), key);
+
+  // From runner-core's SOURCE as well, for the same reason the flat rule is:
+  // the imported objects come from a `dist/` that `npm test` does not build.
+  for (const [name, expected] of [['RECORD_SECRET_WORD', word], ['RECORD_SECRET_KEY', key]]) {
+    const literal = regexLiteralSource(coreSource, name, 'runner-core/src/repl.ts');
+    assert.equal(literal.source, expected, `runner-core ${name} (source)`);
+    assert.equal(literal.flags, '', `runner-core ${name} flags (source)`);
+  }
 
   assert.equal(RECORD_SECRET_PATTERNS.word.source, word, 'runner-core word pattern');
   assert.equal(RECORD_SECRET_PATTERNS.key.source, key, 'runner-core key pattern');
@@ -234,6 +268,172 @@ test('both mirrors answer the corpus the same way', () => {
   for (const [key, expected] of CORPUS) {
     assert.equal(isRecordSecretKey(key), expected, `runner-core on ${key}`);
     assert.equal(isRecordSecretKeyInline(key), expected, `variables-panel on ${key}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The third clause: the whole dotted name read as one credential key
+// ---------------------------------------------------------------------------
+//
+// `isSecretParameterName` (src/utils/secrets.ts) has three arms, not two: the
+// root by the author rule, the property by the record rule, and the WHOLE name
+// with the dots read as separators — because not every dotted name is a pass
+// binding. A data column or a `[store as:]` output may be called `api.key`,
+// where neither half says secret and the two halves together say nothing but.
+// Both client mirrors stopped at two arms, so `api.key` and `private.key`
+// rendered in full in a view sitting beside a report that said `***`.
+
+test('the whole-name clause is one implementation in three spellings', () => {
+  const server = normalizedBody(serverSource, 'wholeNameIsRecordSecret', 'src/utils/secrets.ts');
+  assert.ok(server.includes('isRecordSecretKey'), `server body looks wrong: ${server}`);
+  assert.equal(
+    normalizedBody(coreSource, 'wholeNameIsRecordSecret', 'runner-core/src/repl.ts'),
+    server,
+    'runner-core\'s wholeNameIsRecordSecret is no longer the server\'s, line for line',
+  );
+  assert.equal(
+    mirrorBody(panelSource, 'wholeNameIsRecordSecretInline', PANEL_SOURCE_FILE),
+    mirrorBody(coreSource, 'wholeNameIsRecordSecret', CORE_SOURCE_FILE),
+    'the panel\'s copy is no longer runner-core\'s, line for line',
+  );
+});
+
+/** Dotted names the whole-name clause is the only arm that answers, plus the
+ *  ones it must keep its hands off. A two-arm mirror answers the first group
+ *  `false` and agrees about the second.
+ *
+ *  The server's `isSecretParameterName` takes an optional map and, when given
+ *  one, asks `isLoopBinding` whether a pass bound this name — a server-side
+ *  registry keyed by object identity, which nothing on the wire carries. So
+ *  the client mirrors the NO-MAP form, which is the three arms below; a dotted
+ *  scope entry that no pass bound is masked more broadly on the server than
+ *  here, and closing that needs the wire to say which entries a pass bound. */
+const DOTTED_CORPUS = [
+  ['api.key', true],
+  ['private.key', true],
+  ['service.access.key', true],
+  ['auth.keys', true],
+  ['signing.key', true],
+  // The record rule is what reads the joined name, so it stays whole-word.
+  ['row.keyword', false],
+  ['payment.sort_key', false],
+  ['order.monkey', false],
+  ['payment.payee', false],
+  // Still decided by their own halves, clause or no clause.
+  ['payment.password', true],
+  ['token.payee', true],
+];
+
+test('both mirrors answer the dotted corpus the way the server would', () => {
+  for (const [name, expected] of DOTTED_CORPUS) {
+    assert.equal(isSecretVarName(name), expected, `runner-core on ${name}`);
+    assert.equal(isSecretVarNameInline(name), expected, `variables-panel on ${name}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The AUTHORED map rule — the server's `redactAuthoredMap`
+// ---------------------------------------------------------------------------
+//
+// A third map rule, for keys that are author-chosen END TO END: a data row's
+// cells (src/report/merge-rows.ts) and a step's `[store as:]` outputs
+// (src/codebehind/recording.ts). `redactMap`'s two-segment rule is the live
+// variable map's, whose dotted entries are a loop's `row.<column>` bindings.
+// It is wrong here, and the client applied it to both — so a data column
+// headed `user.apikey` showed `uk_live_1234` in the Run Rows pick, the gutter
+// hover and the Output banner while the report matrix beside them said `***`.
+// The pre-feature client starred it, which makes this a regression.
+
+/** One exported map-redactor's body, out of the server's source. Read rather
+ *  than assumed: which predicate each one hands `maskMapBy` is the whole
+ *  difference between them, and it is what both client mirrors copy. */
+function mapRedactorBody(name) {
+  const hit = new RegExp(`export function ${name}\\(([\\s\\S]*?)\\n\\}`).exec(serverSource);
+  assert.ok(
+    hit,
+    `could not read \`${name}\` out of src/utils/secrets.ts — if it was reformatted ` +
+      '(a brace left at a column other than 0), update this reader; if it now uses a ' +
+      'different rule, the client mirrors (runner-core `maskIfSecretAuthored` / ' +
+      '`maskIfSecret`, and the variables-panel copies) need the same change',
+  );
+  return hit[1];
+}
+
+test('the authored-map rule is the FLAT author rule, on the whole key', () => {
+  const authored = mapRedactorBody('redactAuthoredMap');
+  assert.match(authored, /maskMapBy\([^)]*\bisSecretName\b/, 'redactAuthoredMap');
+  // Not the two-segment rule: that is `redactMap`'s, and the difference
+  // between them is this whole section. Asserted by NAME rather than by the
+  // exact call text — the server may pass it a map or wrap it in an arrow —
+  // because what the mirrors copy is which rule, not how it is spelled.
+  assert.doesNotMatch(authored, /isSecretParameterName/, 'redactAuthoredMap');
+  assert.match(
+    mapRedactorBody('redactMap'),
+    /isSecretParameterName/,
+    'redactMap is expected to keep the two-segment rule',
+  );
+});
+
+/** Author-chosen keys, dots included, with what the server's
+ *  `redactAuthoredMap` does to them. The first five are the measured
+ *  regression; the rest are what the flat rule has always said. */
+const AUTHORED_CORPUS = [
+  ['user.apikey', true],
+  ['user.apitoken', true],
+  ['row.mypassword', true],
+  ['login.passkey', true],
+  ['api.key', true],
+  ['password', true],
+  ['MACHINE_KEY', true],
+  // The accepted cost of the author rule's breadth, the same on every surface.
+  ['keyword', true],
+  ['payment.keyword', true],
+  ['payment.sort_key', true],
+  ['user.email', false],
+  ['payment.payee', false],
+  ['username', false],
+  ['_row', false],
+];
+
+test('both authored-rule mirrors answer the corpus the way the server would', () => {
+  const server = new RegExp(secretNameLiteral().source, secretNameLiteral().flags);
+  for (const [name, expected] of AUTHORED_CORPUS) {
+    assert.equal(server.test(name), expected, `the server's own rule on ${name}`);
+    const value = 'uk_live_1234';
+    const masked = '*'.repeat(8);
+    assert.equal(
+      maskIfSecretAuthored(name, value),
+      expected ? masked : value,
+      `runner-core on ${name}`,
+    );
+    assert.equal(
+      maskIfSecretAuthoredInline(name, value),
+      expected ? masked : value,
+      `variables-panel on ${name}`,
+    );
+  }
+});
+
+/** Every surface that renders an AUTHOR-chosen map, and the masker it must
+ *  use. Neither call site is reachable from `node --test` — one is a React
+ *  closure, the other needs the extension host — so this is a source scan, the
+ *  same shape `skipped-pass-consumers.test.js` uses for the same reason. */
+const AUTHORED_CALL_SITES = [
+  [
+    resolve(here, '..', 'src', 'webview', 'testbench-runner.jsx'),
+    /maskIfSecretAuthoredInline\(event\.name, event\.value\)/,
+    'the capture banner (`✎ name ← value`)',
+  ],
+  [
+    resolve(here, '..', 'src', 'extension', 'row-selection-core.ts'),
+    /maskIfSecretAuthored\(k, v\)/,
+    'rowValuesText — the Run Rows pick, the gutter hover and the Output banner',
+  ],
+];
+
+test('the author-chosen surfaces call the authored masker, not the scope one', () => {
+  for (const [file, pattern, what] of AUTHORED_CALL_SITES) {
+    assert.match(readFileSync(file, 'utf8'), pattern, `${what} (${file})`);
   }
 });
 
@@ -333,6 +533,12 @@ const MASK_CORPUS = [
   ['no four-character floor: the key is the rule here', '[{"password":"ab"}]', '[{"password":"**"}]'],
   ['not JSON at all', '[not json', '[not json'],
   ['plain text', 'Origin Energy', 'Origin Energy'],
+  // U+FEFF is whitespace to JS, so it passed the `/^\s*[[{]/` sniff and then
+  // threw in JSON.parse — and the catch hands the value back untouched, which
+  // is the one outcome this function exists to prevent.
+  ['a leading BOM does not smuggle a record past the sniff', '\uFEFF[{"password":"hunter2"}]', '[{"password":"*******"}]'],
+  ['…and a BOM on something that is not a record changes nothing', '\uFEFFOrigin Energy', '\uFEFFOrigin Energy'],
+  ['…nor on a record with nothing to mask', '\uFEFF[{"payee":"Alinta"}]', '\uFEFF[{"payee":"Alinta"}]'],
 ];
 
 test('both record-masking mirrors answer one corpus identically', () => {

@@ -199,6 +199,7 @@ let server: Server;
 let baseUrl: string;
 let tmpDir: string;
 let testFilePath: string;
+let toolsDir: string;
 
 beforeAll(async () => {
   const { app } = createApiServer(cfg);
@@ -210,11 +211,33 @@ beforeAll(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'control-flow-http-'));
   testFilePath = path.join(tmpDir, 'payments.md');
   await fs.writeFile(testFilePath, '# placeholder — the server never reads this\n');
+
+  // A tool whose output lands on a loop's item name. The server dispatches
+  // `[tool: …]` itself (session-manager, not the mocked step executor), so
+  // this is a REAL write into the live variable map over HTTP.
+  toolsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'control-flow-tools-'));
+  await fs.writeFile(
+    path.join(toolsDir, 'note-order.ts'),
+    `
+import { defineTool } from '${path.resolve(__dirname, '..', 'src', 'tools', 'index.ts').replace(/\\/g, '/')}';
+
+export default defineTool({
+  name: 'note-order',
+  description: 'Store an order reference under {{order}}',
+  parameters: { value: { type: 'string' } },
+  outputs: { order: { type: 'string' } },
+  async run(args, ctx) {
+    ctx.step.setVar('order', args.value);
+  },
+});
+`,
+  );
 });
 
 afterAll(async () => {
   await new Promise<void>((r, e) => server.close((err) => (err ? e(err) : r())));
   await fs.rm(tmpDir, { recursive: true, force: true });
+  await fs.rm(toolsDir, { recursive: true, force: true });
 });
 
 beforeEach(() => {
@@ -885,6 +908,55 @@ describe('For each over object rows', () => {
    * inputs as well as the parameter map, which is why it is handed in rather
    * than derived.
    */
+  /**
+   * The server takes its mask set from a COPY of the map (frame inputs
+   * merged in), and the loop-binding registry is by object identity, so the
+   * copy must inherit the marks (§7.6). Without `inheritLoopBindings` every
+   * `order.<column>` in the copy takes the author rule, `keyword` contains
+   * `key`, its value joins the mask set, and the refusal's own property list
+   * arrives on the wire as `id, ***`. The data file's `user.apikey` heading
+   * takes the author rule either way and is masked in the report.
+   */
+  it('reads a pass binding by the record rule on the wire, and a data-file heading by the author rule', async () => {
+    (logger.error as unknown as { mockClear: () => void }).mockClear();
+    const events = await collect({
+      steps: [
+        'Open the orders page',
+        'For each {{order}} in {{orders}}, Check the order',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: { 'user.apikey': 'uk_live_1234', orders: '[{"id":"A","keyword":"keyword"}]' },
+      sections: {
+        'check the order': {
+          name: 'Check the order',
+          headingLine: 7,
+          steps: ['Verify the row shows "{{order.nope}}"'],
+          stepLines: [8],
+        },
+      },
+    });
+
+    const expected =
+      '{{order.nope}} has no value in For each item 1; available properties are id, keyword';
+    expect(events.find((e) => e.type === 'step:fail')!.error).toBe(expected);
+    const logged = (logger.error as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(
+      (c) => String(c[0]),
+    );
+    expect(logged.some((l) => l.endsWith(expected))).toBe(true);
+
+    const report = generatedReports.at(-1)!;
+    expect(report.parameters['order.keyword']).toBe('keyword');
+    expect(report.parameters['user.apikey']).toBe('***');
+    const everywhere = JSON.stringify({
+      report,
+      events: events.filter((e) => e.type !== 'frame:scope'),
+      logged,
+    });
+    expect(everywhere).not.toContain('uk_live_1234');
+  });
+
   it('masks a secret value the refusal would otherwise put on the wire', async () => {
     (logger.error as unknown as { mockClear: () => void }).mockClear();
     const events = await collect({
@@ -1342,6 +1414,58 @@ describe('For each over object rows', () => {
     expect(keys).not.toContain('order.__proto__');
     expect(keys).not.toContain('order.content-type');
     expect(keys).toContain('order.status');
+  });
+
+  /**
+   * A write that REBINDS the loop's root erases its dotted keys
+   * (docs/specs/SPEC-structured-table-reads.md §8.2).
+   *
+   * `applyPassBindings` and `runSetStep` honoured that; every other write into
+   * the live map was a plain `resolvedParameters[name] = value`. So a capture
+   * or a tool output landing on `order` left `order.id` holding the LAST
+   * PASS's id, and a later `{{order.id}}` substituted it silently — §8.3's
+   * refusal cannot fire on a key that is still there.
+   *
+   * A `[tool: …]` step is that write on THIS entry: the server dispatches it
+   * itself, outside the (mocked) step executor, so the value really travels
+   * from `ctx.step.setVar` into the map the next step's text is checked
+   * against.
+   */
+  it('refuses a stale {{order.id}} after a tool rebinds {{order}}', async () => {
+    const events = await collect({
+      steps: [
+        'For each {{order}} in {{orders}}, Check the order',
+        '[tool: note-order value="ORD-9"]',
+        'Verify the summary shows {{order.id}}',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      toolsDir,
+      parameters: { orders: ORDERS },
+      sections: {
+        'check the order': {
+          name: 'Check the order',
+          headingLine: 7,
+          steps: ['Verify the row for "{{order.id}}"'],
+          stepLines: [8],
+        },
+      },
+    });
+
+    // The tool really ran and really rebound the name.
+    expect(
+      events.filter((e) => e.type === 'capture').map((e) => [e.name, e.value]),
+    ).toContainEqual(['order', 'ORD-9']);
+
+    const fail = events.find((e) => e.type === 'step:fail');
+    expect(fail?.error).toBe(
+      '{{order.id}} has no value in For each item 2; {{order}} holds no properties — it is not an object',
+    );
+    // …and the last pass's `B` never reached the model as this step's value.
+    expect(executedSteps).toEqual([
+      'Verify the row for "A"',
+      'Verify the row for "B"',
+    ]);
   });
 });
 

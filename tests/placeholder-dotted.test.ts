@@ -653,6 +653,51 @@ describe('a missing dotted binding fails before the model is asked', () => {
     );
   });
 
+  /**
+   * A root that was CAPTURED rather than bound by a `For each`.
+   *
+   * `[store as: order]` over a `readTable` row, or a tool that returns one
+   * object, puts a RECORD under a flat name and no dotted keys beside it —
+   * because only a loop pass writes those (§8.2). Both of the sentences the
+   * catch-all reached for were then false about the value in hand: `{"id":"A"}`
+   * was refused as "holds no properties — it is not an object", and
+   * `{"content-type":"t","id":"A"}` as "has no properties that can be spelled
+   * as placeholders (content-type)" — while `id` is spellable and is the very
+   * property the author asked for. Either sends the reader to look for a typo
+   * or a broken capture, when the real rule is that a record's properties are
+   * only addressable inside the loop that binds them.
+   */
+  it('tells a captured record the true rule, rather than denying it is an object', () => {
+    expect(dottedReferenceError('Verify {{order.id}}', { order: '{"id":"A"}' })).toBe(
+      '{{order.id}} has no value; {{order}} holds a record, but only a For each ' +
+        "item's properties can be referenced as {{order.<property>}}",
+    );
+  });
+
+  it('keeps the unspellable aside for the keys that genuinely cannot be spelled', () => {
+    expect(
+      dottedReferenceError('Verify {{order.id}}', {
+        order: '{"content-type":"t","id":"A"}',
+      }),
+    ).toBe(
+      '{{order.id}} has no value; {{order}} holds a record, but only a For each ' +
+        "item's properties can be referenced as {{order.<property>}} " +
+        '(content-type cannot be spelled as a placeholder)',
+    );
+  });
+
+  it('pluralises that aside, and still says nothing untrue about the spellable keys', () => {
+    expect(
+      dottedReferenceError('Verify {{order.id}}', {
+        order: '{"content-type":"t","Order ID":"1","id":"A"}',
+      }),
+    ).toBe(
+      '{{order.id}} has no value; {{order}} holds a record, but only a For each ' +
+        "item's properties can be referenced as {{order.<property>}} " +
+        '(content-type, Order ID cannot be spelled as placeholders)',
+    );
+  });
+
   it('keeps the existing sentence for a root that really is not an object', () => {
     expect(dottedReferenceError('Verify {{order.id}}', { order: 'Alice' })).toBe(
       '{{order.id}} has no value; {{order}} holds no properties — it is not an object',

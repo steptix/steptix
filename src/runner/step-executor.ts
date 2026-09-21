@@ -37,12 +37,14 @@ import type { StepCache, CachedStepData, StepCacheKey } from '../cache/step-cach
 import { fingerprintAssertion } from '../cache/step-cache.js';
 import type { StepValues } from '../ai/prompts.js';
 import {
+  boundValue,
   checkTurnReferences,
   inlineStoreAsNames,
   substituteAction,
   substituteText,
   type PlaceholderValues,
 } from './placeholder-substitution.js';
+import { bindVariable } from '../parser/parameters.js';
 import { decideConditionLocally } from './literal-decision.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import {
@@ -1440,7 +1442,14 @@ function buildStepValues(authored: string, opts: StepExecutorOptions): StepValue
   const defined = new Set([...captures, ...inlineStoreAsNames(authored)]);
   const parameters = placeholders
     .filter((name) => !defined.has(name))
-    .map((name) => ({ name, value: params[name] ?? NOT_YET_CAPTURED }));
+    // `boundValue`, not `params[name]`: a bare index answers `{{constructor}}`
+    // / `{{toString}}` / `{{valueOf}}` / `{{__proto__}}` off `Object.prototype`
+    // on a map that binds none of them. The function then reached
+    // `formatParameterBlock`, whose masker calls `.split` on the value — so a
+    // step naming one of four ordinary English words failed with
+    // `out.split is not a function` as soon as the run had any secret in it,
+    // instead of being told the name holds nothing yet.
+    .map((name) => ({ name, value: boundValue(params, name) ?? NOT_YET_CAPTURED }));
 
   const envRefs: Array<{ ref: string; value: string }> = [];
   if (opts.envData) {
@@ -2681,7 +2690,16 @@ async function executeStepAttempt(
       }
 
       // Store captured value from "read" / "count" / "readTable" actions into
-      // the live parameter map
+      // the live parameter map.
+      //
+      // All three through `bindVariable` (src/parser/parameters.ts), because a
+      // capture can land on a name a `For each` is binding — `Read the order
+      // id from the summary [store as: order]` after `For each {{order}} in
+      // {{orders}}` — and §8.2 says a rebind of a root erases that root's
+      // dotted keys. A plain `resolvedParameters[as] =` left `order.id`
+      // holding the LAST PASS's id, so `{{order.id}}` in a later step
+      // substituted a row the author had just overwritten, silently, with
+      // §8.3's refusal unable to fire on a key that was still there.
       if (result.capturedRecords !== undefined && action.as && opts.resolvedParameters) {
         // Structured capture (readTable) — JSON-encoded like the flat list, so
         // the map stays Record<string, string> and no protocol or session
@@ -2693,7 +2711,7 @@ async function executeStepAttempt(
         // placeholder-skip count are known — in executeAction. This line is
         // about STORAGE, and reads like its two siblings below.
         const rows = result.capturedRecords.length;
-        opts.resolvedParameters[action.as] = JSON.stringify(result.capturedRecords);
+        bindVariable(opts.resolvedParameters, action.as, JSON.stringify(result.capturedRecords));
         logger.info(
           `Stored ${rows} row record${rows === 1 ? '' : 's'} as "{{${action.as}}}"`,
         );
@@ -2703,14 +2721,14 @@ async function executeStepAttempt(
         // array-typed parameter decode this back into a typed array at the
         // bridge boundary.
         const json = JSON.stringify(result.capturedValues);
-        opts.resolvedParameters[action.as] = json;
+        bindVariable(opts.resolvedParameters, action.as, json);
         logger.info(
           `Stored ${result.capturedValues.length} captured value${
             result.capturedValues.length === 1 ? '' : 's'
           } as "{{${action.as}}}"`,
         );
       } else if (result.capturedValue !== undefined && action.as && opts.resolvedParameters) {
-        opts.resolvedParameters[action.as] = result.capturedValue;
+        bindVariable(opts.resolvedParameters, action.as, result.capturedValue);
         logger.info(`Stored captured value as "{{${action.as}}}": "${result.capturedValue}"`);
       }
 

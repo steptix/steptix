@@ -16,6 +16,10 @@ import {
   maskRecordSecrets,
   isRecordSecretKey,
   isSecretParameterName,
+  markLoopBindings,
+  unmarkLoopBindings,
+  inheritLoopBindings,
+  isLoopBinding,
   EMPTY,
   MASK,
 } from '../src/utils/secrets.js';
@@ -214,7 +218,11 @@ describe('secrets inside a record list (structured table reads)', () => {
     // Anything that is not a list of objects is not a record list, including
     // text that merely starts like one.
     expect(secretValues({ note: '[{ not json at all' })).toEqual([]);
-    expect(secretValues({ blob: '{"password":"nested"}' })).toEqual([]);
+    // A lone record IS a record list of one, since review 4 — the shape a
+    // one-row `[store as:]` stores. It used to read as "not a record" here
+    // and as a record in `maskRecordSecrets`, and the disagreement printed
+    // the column in the log while masking it in the Variables panel.
+    expect(secretValues({ blob: '{"password":"nested"}' })).toEqual(['nested']);
     expect(secretValues({ nested: '[{"password":{"deep":"x"}}]' })).toEqual([]);
     // Empty values are still not secrets.
     expect(secretValues({ orders: '[{"password":""}]' })).toEqual([]);
@@ -360,6 +368,9 @@ describe('isSecretParameterName — the pass bindings a loop leaves in the map',
       'row._row': '1',
       'row.keyword': 'AU',
     };
+    // As `applyPassBindings` registers them: these dotted names are the loop's,
+    // so the narrow record rule applies to their page-derived half.
+    markLoopBindings(pass, ['row', 'row._row', 'row.keyword']);
     const secrets = secretValues(pass);
     expect(secrets).toEqual([]);
     expect(redactMap(pass, secrets)).toEqual(pass);
@@ -373,6 +384,7 @@ describe('isSecretParameterName — the pass bindings a loop leaves in the map',
     // The round-1 defect, back through the map: the record floor kept `7` out
     // of the mask set, and the entry rule put it straight back in.
     const pass = { 'row.token': '7' };
+    markLoopBindings(pass, ['row', 'row.token']);
     const secrets = secretValues(pass);
     expect(secrets).toEqual([]);
     expect(redact('3 rows, total $1,742.70 for order ORD-1007', secrets))
@@ -380,7 +392,9 @@ describe('isSecretParameterName — the pass bindings a loop leaves in the map',
     // The entry itself still says what it is — the name is the rule (§7.6).
     expect(redactMap(pass, secrets)).toEqual({ 'row.token': MASK });
     // Four characters and up, it is a credential and joins the set.
-    expect(secretValues({ 'row.token': 'abcd1234' })).toEqual(['abcd1234']);
+    const longer = { 'row.token': 'abcd1234' };
+    markLoopBindings(longer, ['row', 'row.token']);
+    expect(secretValues(longer)).toEqual(['abcd1234']);
   });
 
   it('keeps the author-chosen root free of the record floor', () => {
@@ -631,11 +645,19 @@ describe('a dotted name the AUTHOR chose, not a loop binding', () => {
     const secrets = secretValues({ 'api.key': 'ak_live_9f2c' });
     expect(secrets).toEqual(['ak_live_9f2c']);
     expect(redact('calling with ak_live_9f2c', secrets)).toBe(`calling with ${MASK}`);
-    // The floor still applies — this half of the name is not the author's word
-    // twice over, and a short value would be replaced everywhere.
-    expect(secretValues({ 'api.key': 'ab' })).toEqual([]);
+    // No floor for a name nobody bound: it is the author's word end to end,
+    // and a name a person typed is a deliberate instruction however short the
+    // value is.
+    expect(secretValues({ 'api.key': 'ab' })).toEqual(['ab']);
+    // The floor is the PAGE's protection, so it applies to the same name once
+    // a pass has bound it: `api.key` off a table is a column, not a typed name.
+    const bound = { 'api.key': 'ab' };
+    markLoopBindings(bound, ['api.key']);
+    expect(secretValues(bound)).toEqual([]);
     // And the binding it must not catch still puts nothing in the set.
-    expect(secretValues({ 'row.keyword': 'AU' })).toEqual([]);
+    const pass = { 'row.keyword': 'AU' };
+    markLoopBindings(pass, ['row.keyword']);
+    expect(secretValues(pass)).toEqual([]);
   });
 
   it('redactAuthoredMap masks a dotted AUTHOR-chosen key by the flat rule', () => {
@@ -660,6 +682,158 @@ describe('a dotted name the AUTHOR chose, not a loop binding', () => {
 
   it('leaves redactMap — the variable map, which holds loop bindings — alone', () => {
     const pass = { 'row.keyword': 'AU', 'payment.sort_key': 'A-1', 'row.monkey': 'Bonobo' };
+    markLoopBindings(pass, Object.keys(pass));
     expect(redactMap(pass, [])).toEqual(pass);
+  });
+});
+
+/**
+ * Finding 2 (review 4): the live variable map is MIXED.
+ *
+ * `resolveParameters` merges every cell of a data-file row into it under the
+ * row's own heading, so an author-chosen dotted heading — `user.apikey`,
+ * `login.passkey` — sits in the same map as a loop's `row.keyword` binding.
+ * The two-segment rule is right for the binding and wrong for the heading, and
+ * nothing about the NAME tells them apart: §7.6's distinction is whose name it
+ * is, and only a `For each` pass writes page-derived ones.
+ *
+ * So the pass registers what it bound, and the map's own registry decides.
+ */
+describe('the loop-binding registry — which dotted names are page-derived', () => {
+  it('masks an author-chosen dotted heading sharing the map with a binding', () => {
+    // One `For each {{row}} in {{rows}}` pass over a table, running a test
+    // whose data file has a `user.apikey` column.
+    const live = {
+      username: 'octocat',
+      'user.apikey': 'uk_live_1234',
+      row: '{"_row":"1","keyword":"AU"}',
+      'row._row': '1',
+      'row.keyword': 'AU',
+    };
+    markLoopBindings(live, ['row', 'row._row', 'row.keyword']);
+
+    // The heading is the author's word on the whole key, as it was before the
+    // dotted rule existed: masked in `report.parameters` and in the free-text
+    // set, so a substituted step line cannot print it either.
+    const secrets = secretValues(live);
+    expect(secrets).toEqual(['uk_live_1234']);
+    expect(redact('sent with uk_live_1234', secrets)).toBe(`sent with ${MASK}`);
+
+    // The binding beside it keeps the narrow rule: "AU" is a page value the
+    // model must still be able to find in the DOM.
+    expect(redactMap(live, secrets)).toEqual({
+      username: 'octocat',
+      'user.apikey': MASK,
+      row: '{"_row":"1","keyword":"AU"}',
+      'row._row': '1',
+      'row.keyword': 'AU',
+    });
+  });
+
+  it('keeps the record floor for a REGISTERED binding, and the name rule for the entry', () => {
+    const live = { 'row.token': '7' };
+    markLoopBindings(live, ['row', 'row.token']);
+    const secrets = secretValues(live);
+    // One character, off the page: masking it everywhere would turn every
+    // seven in the DOM snapshot into `***`.
+    expect(secrets).toEqual([]);
+    expect(redact('3 rows, total $1,742.70', secrets)).toBe('3 rows, total $1,742.70');
+    // The entry is the one place that value is named, so it still says `***`.
+    expect(redactMap(live, secrets)).toEqual({ 'row.token': MASK });
+  });
+
+  it('masks an UNMARKED `row.keyword` — a heading that merely looks like a binding', () => {
+    // The accepted direction of the trade. Nothing registered this name, so it
+    // is read as a name a person typed, and `isSecretName` is broad on purpose
+    // for those. A test that needs the value in clear runs it through a
+    // `For each` (where the narrow rule applies) or declares it in
+    // `## Config: unmask:`.
+    const csv = { 'row.keyword': 'mortgage' };
+    expect(redactMap(csv, [])).toEqual({ 'row.keyword': MASK });
+    expect(secretValues(csv)).toEqual(['mortgage']);
+  });
+
+  it('unmarking puts a name back under the author rule, as a rebind does', () => {
+    const live = { 'row.keyword': 'AU' };
+    markLoopBindings(live, ['row.keyword']);
+    expect(redactMap(live, [])).toEqual({ 'row.keyword': 'AU' });
+    // `clearDottedKeys` drops the key and its mark together, so a later map
+    // entry of the same name is nobody's binding.
+    unmarkLoopBindings(live, ['row.keyword']);
+    expect(isLoopBinding(live, 'row.keyword')).toBe(false);
+    expect(redactMap(live, [])).toEqual({ 'row.keyword': MASK });
+  });
+
+  it('asked with NO map, a dotted name is read as a binding — the caller has no map to ask', () => {
+    // `formatParameterBlock` names one parameter at a time and holds no map.
+    expect(isSecretParameterName('row.keyword')).toBe(false);
+    expect(isSecretParameterName('user.apikey')).toBe(false);
+    // And with one: registered is the binding rule, unregistered the author's.
+    const live = { 'row.keyword': 'AU', 'user.apikey': 'uk_live_1234' };
+    markLoopBindings(live, ['row.keyword']);
+    expect(isSecretParameterName('row.keyword', live)).toBe(false);
+    expect(isSecretParameterName('user.apikey', live)).toBe(true);
+  });
+
+  it('a copy of the map is nobody’s binding until the marks are carried over', () => {
+    // The registry is by object identity, so `{ ...map }` loses them — and a
+    // copy is what `secretsNow` merges frame inputs into (session-manager.ts).
+    const live = { 'row.keyword': 'AU' };
+    markLoopBindings(live, ['row.keyword']);
+    const merged = { ...live, 'frame.input': 'x' };
+    expect(isLoopBinding(merged, 'row.keyword')).toBe(false);
+    inheritLoopBindings(live, merged);
+    expect(isLoopBinding(merged, 'row.keyword')).toBe(true);
+    expect(secretValues(merged)).toEqual([]);
+  });
+});
+
+/**
+ * Finding 3 and the nits of review 4: the two halves of record masking have to
+ * sniff the same shapes, and neither of the two inputs a file can hand them —
+ * a single record, a byte-order mark — may make one of them quietly answer
+ * "nothing here".
+ */
+describe('record masking — the shapes the two halves must agree on', () => {
+  it('collects a secret column from a SINGLE record, not only from a list', () => {
+    // `[store as: account]` on a one-row read stores `{…}`, and the free-text
+    // sniff looked for `[` alone — so the password reached the run log, the
+    // report and the step line in full, while `maskRecordSecrets`, which
+    // accepts both shapes, masked the same value in the Variables panel.
+    const one = '{"user":"alice","password":"hunter2-long"}';
+    expect(recordSecretValues(one)).toEqual(['hunter2-long']);
+
+    const secrets = secretValues({ account: one });
+    expect(secrets).toContain('hunter2-long');
+    expect(redact('signed in as alice with hunter2-long', secrets))
+      .toBe(`signed in as alice with ${MASK}`);
+
+    // And in the JSON-stored copy of it that the report carries.
+    const stored = JSON.stringify({ account: one });
+    expect(stored).toContain('hunter2-long');
+    expect(redact(stored, secrets)).not.toContain('hunter2-long');
+    expect(redact(stored, secrets)).toContain(MASK);
+  });
+
+  it('sees past a leading byte-order mark, in both halves', () => {
+    // A capture read from a file (or handed over by a tool that read one)
+    // carries U+FEFF. `\s` matches it, so the sniff passed and `JSON.parse`
+    // threw — and both halves answer a parse failure with "not a record",
+    // silently.
+    const bom = '\uFEFF[{"password":"hunter2-long"}]';
+    expect(recordSecretValues(bom)).toEqual(['hunter2-long']);
+    expect(maskRecordSecrets(bom)).toBe('[{"password":"***"}]');
+    // A single record behind a BOM is both fixes at once.
+    expect(recordSecretValues('\uFEFF{"password":"hunter2-long"}')).toEqual(['hunter2-long']);
+  });
+
+  it('ignores an empty secret rather than shredding the text with it', () => {
+    // `''.split('')` is every character, and `join(MASK)` puts the mask
+    // between all of them: `report` became `r***e***p***o***r***t`. The
+    // callers that build the list drop empties, but `redact` is also handed
+    // lists from elsewhere (a row's stored `secrets`), and the guard belongs
+    // where the damage is.
+    expect(redact('report', [''])).toBe('report');
+    expect(redact('report on hunter2-long', ['', 'hunter2-long'])).toBe(`report on ${MASK}`);
   });
 });

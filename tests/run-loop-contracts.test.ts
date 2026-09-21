@@ -20,6 +20,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { applyPassBindings, evaluateGuard } from '../src/runner/control-runtime.js';
+import { substituteText } from '../src/runner/placeholder-substitution.js';
 import {
   createControlState,
   planAfterStep,
@@ -90,6 +91,115 @@ describe('applyPassBindings', () => {
     applyPassBindings(map, { row: '{"id":"A"}', 'row.id': 'A' });
     applyPassBindings(map, { row: '{"id":"B"}', 'row.id': 'B' });
     expect(map).toEqual({ row: '{"id":"B"}', 'row.id': 'B' });
+  });
+
+  /**
+   * A pass whose ITEM is called `__proto__`.
+   *
+   * `passBindings` builds its object with a COMPUTED key, so `__proto__` is a
+   * genuine own property of the bindings — and `Object.assign` then wrote it
+   * through `Object.prototype`'s setter, which ignores a string. The flat
+   * `{{__proto__}}` silently held nothing while `{{__proto__.id}}` (an
+   * ordinary key) resolved: half a pass bound, with no error anywhere.
+   *
+   * `For each {{__proto__}} in {{orders}}` parses today — the item grammar is
+   * `[A-Za-z_]\w*` — so nothing upstream stops it arriving here.
+   */
+  it('binds an item named __proto__ as an own property, not through the setter', () => {
+    const map: Record<string, string> = {};
+    // Computed keys, exactly as `passBindings` builds them: a plain
+    // `{ __proto__: … }` literal would set the prototype instead.
+    applyPassBindings(map, { ['__proto__']: '{"id":"A"}', ['__proto__.id']: 'A' });
+
+    expect(Object.hasOwn(map, '__proto__')).toBe(true);
+    expect(map['__proto__']).toBe('{"id":"A"}');
+    // The map is still a plain object — nothing was written to its prototype.
+    expect(Object.getPrototypeOf(map)).toBe(Object.prototype);
+    // And the whole pass is visible, not the half of it that happened to be
+    // spelled ordinarily.
+    expect(substituteText('{{__proto__}} / {{__proto__.id}}', { parameters: map })).toBe(
+      '{"id":"A"} / A',
+    );
+  });
+
+  it('clears that root"s dotted keys on the next pass, like any other', () => {
+    const map: Record<string, string> = {};
+    applyPassBindings(map, { ['__proto__']: '{"id":"A","note":"first"}', ['__proto__.id']: 'A', ['__proto__.note']: 'first' });
+    applyPassBindings(map, { ['__proto__']: '{"id":"B"}', ['__proto__.id']: 'B' });
+    expect(Object.hasOwn(map, '__proto__.note')).toBe(false);
+    expect(map['__proto__']).toBe('{"id":"B"}');
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Every write into the live variable map goes through the one helper
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * A rebind of a ROOT erases that root's dotted keys
+ * (docs/specs/SPEC-structured-table-reads.md §8.2).
+ *
+ * `applyPassBindings` and `runSetStep` honoured it and every other write into
+ * the live map was a plain `resolvedParameters[name] = value`: a `read … [store
+ * as: order]` after a `For each {{order}} …` left the last pass's `order.id`
+ * in place, so `{{order.id}}` went on substituting a row the author had just
+ * overwritten and §8.3's refusal could not fire — the failure is silent and
+ * correct-looking, which is why it needs a mechanical check rather than a
+ * fixed list of the sites anyone has thought of.
+ *
+ * Same shape of canary as `tests/substitution-sites.test.ts`: it cannot see an
+ * aliased helper or a dynamic write, only a bare indexed assignment into a map
+ * this feature's rule owns. That is the write that keeps being added.
+ */
+describe('no run loop writes the live variable map by bare assignment', () => {
+  /** The files that hold a live `{{…}}` map and write captures into it. */
+  const WRITE_SITES = [
+    'src/runner/step-executor.ts',
+    'src/runner/test-runner.ts',
+    'src/runner/set-step-runner.ts',
+    'src/runner/control-runtime.ts',
+    'src/server/session-manager.ts',
+    'src/server/errand-runner.ts',
+    'src/ui/main/runner-adapter.ts',
+    'src/tools/executor.ts',
+    'src/codebehind/execute.ts',
+  ] as const;
+
+  /** `resolvedParameters[x] = …` / `scope[x] = …`, however it is reached. */
+  const BARE_WRITE = /\b(?:this\.|opts\.|options\.)?(?:resolvedParameters|scope)\s*\[[^\]\n]*\]\s*=[^=]/;
+
+  it.each(WRITE_SITES)('%s writes through bindVariable', (file) => {
+    const offending = source(file)
+      .split('\n')
+      .map((line, i) => [i + 1, line] as const)
+      .filter(([, line]) => {
+        const trimmed = line.trimStart();
+        if (trimmed.startsWith('*') || trimmed.startsWith('//')) return false;
+        return BARE_WRITE.test(line);
+      })
+      .map(([n, line]) => `${file}:${n}: ${line.trim()}`);
+
+    expect(
+      offending,
+      'A bare indexed write into the live variable map. Use `bindVariable` ' +
+        '(src/parser/parameters.ts), which does the own-property write AND ' +
+        'clears the root"s dotted keys — otherwise a capture that rebinds a ' +
+        'loop"s item name leaves the last pass"s `item.property` behind.',
+    ).toEqual([]);
+  });
+
+  /**
+   * …and the helper lives somewhere a `Set` step can reach.
+   *
+   * `runSetStep` is the "no page, no model, no cache" module all four run
+   * loops share. Importing the helper from `control-runtime.ts` pulled
+   * `step-executor.ts` in with it — Playwright, the AI client, the DOM
+   * cleaner — into a module whose whole claim is that it needs none of them.
+   */
+  it('set-step-runner reaches it without importing the control runtime', () => {
+    const body = source('src/runner/set-step-runner.ts');
+    expect(body).toContain("from '../parser/parameters.js'");
+    expect(body).not.toMatch(/from '\.\/control-runtime\.js'/);
   });
 });
 

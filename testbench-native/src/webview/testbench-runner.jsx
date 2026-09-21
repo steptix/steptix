@@ -10,7 +10,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { hostBridge } from "./lib/host-bridge.js";
-import { collectVariables, parseParametersInline, maskIfSecretInline, classifyCaptureSource } from "./lib/variables-panel.js";
+import { collectVariables, parseParametersInline, maskIfSecretInline, maskIfSecretAuthoredInline, classifyCaptureSource } from "./lib/variables-panel.js";
 import { countStepLineStatuses, extractStepLineIds } from "./lib/step-lines-inline.js";
 import {
   stripDetailInline,
@@ -681,7 +681,13 @@ function TestBenchRunner() {
         // classifyCaptureSource collapses absent/unknown to 'capture' (the
         // conservative default), so this never crashes on legacy events.
         setRuntimeSources((prev) => ({ ...prev, [event.name]: classifyCaptureSource(event.source) }));
-        log(`✎ ${event.name} ← ${maskIfSecretInline(event.name, event.value)}`, "info", uri);
+        // The AUTHOR rule on the whole name, matching the server's
+        // `redactAuthoredMap` over a step's `[store as:]` outputs: a capture
+        // name is a word a person typed, so `api.key` and `user.apikey` must
+        // not be split at the dot and handed to the narrow record rule. The
+        // Variables rows below keep `maskIfSecretInline` — those are scope
+        // entries, where a `row.<column>` binding is half the page's word.
+        log(`✎ ${event.name} ← ${maskIfSecretAuthoredInline(event.name, event.value)}`, "info", uri);
         break;
       case "frame:scope":
         // Phase 4 / Phase 5 follow-up — surface the server's per-frame

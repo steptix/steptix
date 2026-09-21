@@ -1,5 +1,5 @@
 import type { Page, BrowserContext, Browser } from 'playwright';
-import { interpolate } from '../parser/parameters.js';
+import { bindVariable, interpolate } from '../parser/parameters.js';
 import { logger } from '../utils/logger.js';
 import { createCapturingLog } from './step-api.js';
 import type { ToolCatalogue } from './registry.js';
@@ -116,7 +116,13 @@ export async function executeToolStep(
 
   const stepApi: ToolStepApi<typeof def.outputs> = {
     getVar(name) {
-      return options.resolvedParameters[name];
+      // Own properties only: a bare index answers `getVar('constructor')` and
+      // `getVar('toString')` with a FUNCTION off `Object.prototype`, on a map
+      // that binds neither — and the tool, whose signature promises
+      // `string | undefined`, then acts on it.
+      return Object.hasOwn(options.resolvedParameters, name)
+        ? options.resolvedParameters[name]
+        : undefined;
     },
     setVar(name, value) {
       if (!declaredOutputs.has(name)) {
@@ -137,7 +143,12 @@ export async function executeToolStep(
         : typeof value === 'string' ? value : String(value);
       // Apply caller's output alias if any.
       const aliased = call.outputAliases[name] ?? name;
-      options.resolvedParameters[aliased] = stored;
+      // Through the one helper: a tool output can land on a name a `For each`
+      // is binding, and §8.2 says a rebind of a root erases that root's dotted
+      // keys. A plain assignment left the last pass's `order.id` answering
+      // every later `{{order.id}}` — silently, and with §8.3's refusal unable
+      // to fire on a key that was still there.
+      bindVariable(options.resolvedParameters, aliased, stored);
       captured[aliased] = stored;
     },
     expect(condition, message) {

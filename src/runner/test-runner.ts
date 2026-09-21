@@ -44,6 +44,7 @@ import { runInteractiveRepl } from './interactive-repl.js';
 import { loadContextFiles } from '../context/loader.js';
 import { controlLineDefines } from '../parser/control-line.js';
 import {
+  bindVariable,
   resolveParameters,
   loadDataFile,
   interpolate,
@@ -185,7 +186,12 @@ function computeStepCaptures(
     .map((sa) => sa.action.as)
     .filter((name): name is string => !!name && !name.startsWith('__skill'))
     .reduce<Record<string, string>>((acc, name) => {
-      if (name in resolvedParameters) acc[name] = resolvedParameters[name]!;
+      // `hasOwn`, not `in`: `in` walks the prototype chain, so a step with
+      // `[store as: constructor]` whose read found nothing still reported a
+      // capture — of the `Object` function, into a `Record<string, string>`.
+      if (Object.hasOwn(resolvedParameters, name)) {
+        acc[name] = resolvedParameters[name]!;
+      }
       return acc;
     }, {});
   return Object.keys(captures).length > 0 ? captures : undefined;
@@ -1578,7 +1584,11 @@ export async function runTest(
       } else if (inputStep) {
         const stepStartTime = Date.now();
         const value = await promptUserForInput(inputStep.promptText);
-        resolvedParameters[inputStep.variable] = value;
+        // Through the one helper, like every other write into this map: an
+        // `[input: order]` after a `For each {{order}} …` is a rebind of that
+        // root, and left to a plain assignment it kept the last pass's
+        // `order.id` alive for every step that followed (§8.2).
+        bindVariable(resolvedParameters, inputStep.variable, value);
         logger.info(`Stored user input as parameter "{{${inputStep.variable}}}"`);
 
         // Don't count user input time against the test timeout

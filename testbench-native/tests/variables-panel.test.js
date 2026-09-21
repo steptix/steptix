@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import {
   classifyCaptureSource,
   collectVariables,
+  maskIfSecretAuthoredInline,
   maskIfSecretInline,
   maskRecordSecretsInline,
 } from "../src/webview/lib/variables-panel.js";
@@ -440,4 +441,76 @@ test("maskIfSecretInline: a masked row is one whose render differs from its valu
   assert.notEqual(maskIfSecretInline("payments", capture), capture, "must be read-only");
   assert.notEqual(maskIfSecretInline("MACHINE_KEY", "abc"), "abc", "must be read-only");
   assert.equal(maskIfSecretInline("payee", "Alinta"), "Alinta", "stays editable");
+});
+
+// ---------------------------------------------------------------------------
+// The whole dotted name, read as one credential key
+// ---------------------------------------------------------------------------
+//
+// The third clause of the server's `isSecretParameterName`, which both client
+// mirrors were missing: `api.key` is one word split by a dot, and neither half
+// says secret. Measured before the fix: the panel rendered `uk_live_1234`
+// while the report beside it said `***`.
+test("maskIfSecretInline: a dotted name that reads as one credential key masks", () => {
+  for (const name of ["api.key", "private.key", "service.access.key", "auth.keys"]) {
+    assert.equal(maskIfSecretInline(name, "uk_live_1234"), "*".repeat(8), name);
+  }
+});
+
+test("maskIfSecretInline: …and the RECORD rule reads it, so it stays whole-word", () => {
+  for (const name of ["row.keyword", "payment.sort_key", "order.monkey"]) {
+    assert.equal(maskIfSecretInline(name, "search"), "search", name);
+  }
+});
+
+test("maskRecordSecretsInline: a leading BOM does not smuggle a record past the sniff", () => {
+  // U+FEFF is whitespace to JS, so `/^\s*[[{]/` said yes and `JSON.parse` then
+  // threw — and the catch returns the value untouched, which is the one
+  // outcome this function exists to prevent.
+  assert.equal(maskRecordSecretsInline('\uFEFF[{"password":"hunter2"}]'), '[{"password":"*******"}]');
+  assert.equal(maskRecordSecretsInline("\uFEFFOrigin Energy"), "\uFEFFOrigin Energy");
+  assert.equal(maskRecordSecretsInline("\uFEFF[not json"), "\uFEFF[not json");
+  const readable = '\uFEFF[{"payee":"Alinta"}]';
+  assert.equal(maskRecordSecretsInline(readable), readable);
+});
+
+// ---------------------------------------------------------------------------
+// maskIfSecretAuthoredInline — the author rule on the WHOLE key
+// ---------------------------------------------------------------------------
+//
+// The panel's copy of runner-core's `maskIfSecretAuthored`, which mirrors the
+// server's `redactAuthoredMap`. The capture banner (`✎ name ← value`) is the
+// one surface here whose names are author-chosen end to end, and the
+// two-segment rule answered no about `user.apikey` — so the banner printed
+// `uk_live_1234` beside a report that said `***`.
+test("maskIfSecretAuthoredInline: the whole dotted key takes the flat author rule", () => {
+  for (const name of ["user.apikey", "user.apitoken", "row.mypassword", "login.passkey", "api.key"]) {
+    assert.equal(maskIfSecretAuthoredInline(name, "uk_live_1234"), "*".repeat(8), name);
+  }
+  // The difference from the scope rule, stated: these four are exactly what
+  // made the banner and the report disagree. (`api.key` is not among them —
+  // the whole-name clause catches it under either rule.)
+  for (const name of ["user.apikey", "user.apitoken", "row.mypassword", "login.passkey"]) {
+    assert.equal(maskIfSecretInline(name, "uk_live_1234"), "uk_live_1234", `${name} as a scope entry`);
+  }
+});
+
+test("maskIfSecretAuthoredInline: a flat name answers exactly as maskIfSecretInline does", () => {
+  for (const [name, value] of [
+    ["password", "hunter2"],
+    ["MACHINE_KEY", "abc"],
+    ["keyword", "search"],
+    ["username", "alice"],
+    ["payee", "Origin Energy"],
+    ["password", ""],
+  ]) {
+    assert.equal(maskIfSecretAuthoredInline(name, value), maskIfSecretInline(name, value), name);
+  }
+});
+
+test("maskIfSecretAuthoredInline: a value whose NAME says nothing is still scanned", () => {
+  const capture = JSON.stringify([{ payee: "Alinta", password: "hunter2-not-real" }]);
+  const shown = maskIfSecretAuthoredInline("payments", capture);
+  assert.ok(!shown.includes("hunter2-not-real"), shown);
+  assert.ok(shown.includes("Alinta"), shown);
 });

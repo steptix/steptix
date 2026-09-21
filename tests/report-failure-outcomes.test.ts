@@ -203,9 +203,22 @@ describe('merge-rows — a data row cell named with a dot', () => {
  * band — the data file's cells, under the data file's headings. Nothing ran,
  * so there is no run secret to mask by value, but a `password` column is a
  * secret by name whether or not its row got a turn.
+ *
+ * The cells are the DOTTED ones on purpose. A `password` column is masked by
+ * both rules, so it said nothing about which one this call uses: reverting
+ * the unrun branch to `redactMap` — the variable map's two-segment rule, in a
+ * map that holds no bindings at all — left the suite green while
+ * `user.apikey` and `login.passkey` printed in full in the band of every row
+ * the run never reached.
  */
 describe('merge-rows — a data row the run never reached', () => {
   it('masks its secret-named cells by name in the matrix band', () => {
+    const CELLS = {
+      customer: 'Bob Jones',
+      'api.key': 'ak_live_9f2c',
+      'user.apikey': 'uk_live_1234',
+      'login.passkey': 'pk_live_5678',
+    };
     const ran = {
       report: report({ status: 'passed' as const, steps: [step({ index: 1 })] }),
       dataRowIndex: 0,
@@ -214,15 +227,22 @@ describe('merge-rows — a data row the run never reached', () => {
     };
     const merged = mergeRowReports(
       [ran],
-      [{ index: 1, values: { customer: 'Bob Jones', password: 'hunter2-never-ran' }, reason: 'stopped' }],
+      [{ index: 1, values: CELLS, reason: 'stopped' }],
     );
     const rows = merged.rows!;
     expect(rows).toHaveLength(2);
     expect(rows[0]!.values).toEqual({ customer: 'Alice Smith', password: '***' });
-    expect(rows[1]!.values).toEqual({ customer: 'Bob Jones', password: '***' });
+    expect(rows[1]!.values).toEqual({
+      customer: 'Bob Jones',
+      'api.key': '***',
+      'user.apikey': '***',
+      'login.passkey': '***',
+    });
     expect(rows[1]!.status).toBe('skipped');
     const text = JSON.stringify(merged);
     expect(text).not.toContain('hunter2-ran');
-    expect(text).not.toContain('hunter2-never-ran');
+    for (const leaked of ['ak_live_9f2c', 'uk_live_1234', 'pk_live_5678']) {
+      expect(text).not.toContain(leaked);
+    }
   });
 });

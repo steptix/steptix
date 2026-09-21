@@ -34,9 +34,14 @@ import {
   type GuardVerdict,
 } from './control-flow.js';
 import { decideConditionLocally, localReasoning } from './literal-decision.js';
-import { placeholderRoot } from '../parser/parameters.js';
-import { dottedReferenceError, type PlaceholderValues } from './placeholder-substitution.js';
+import { clearDottedKeys, placeholderRoot } from '../parser/parameters.js';
+import {
+  boundValue,
+  dottedReferenceError,
+  type PlaceholderValues,
+} from './placeholder-substitution.js';
 import { redact, runSecrets } from '../utils/secrets.js';
+import { markLoopBindings } from '../utils/loop-bindings.js';
 import { logger } from '../utils/logger.js';
 import { evaluateConditions } from './step-executor.js';
 import type { ConditionVerdict, StepExecutorOptions } from './step-executor.js';
@@ -90,33 +95,32 @@ export function applyPassBindings(
   const roots = new Set<string>();
   for (const key of Object.keys(bindings)) roots.add(placeholderRoot(key));
   clearDottedKeys(map, roots);
-  Object.assign(map, bindings);
-}
-
-/**
- * Drop every `root.<anything>` binding for each of `roots`, leaving flat names
- * and every other root alone.
- *
- * The half of {@link applyPassBindings} that a `Set {{order}} to "none"` needs
- * too, and the reason it is a named export rather than four lines inline: a
- * `Set` writes the FLAT name only, so after a `For each {{order}} …` the map
- * still held `order.id` from the last pass and `{{order.id}}` went on
- * substituting that row's id — while the §8.3 refusal, asked about a root that
- * now holds a plain string, listed "available properties" that belonged to a
- * value nothing binds any more. One rule, one copy: a second copy is how the
- * two start disagreeing about what a rebind erases.
- */
-export function clearDottedKeys(
-  map: Record<string, string>,
-  roots: ReadonlySet<string>,
-): void {
-  for (const key of Object.keys(map)) {
-    // Flat names are not this rule's business: a pass rebinds its own base
-    // name, and clearing other flat variables would delete captures.
-    if (!key.includes('.')) continue;
-    if (!roots.has(placeholderRoot(key))) continue;
-    delete map[key];
+  // `defineProperty` per key, not `Object.assign`, for the reason
+  // `bindVariable` gives: assignment hits `Object.prototype`'s setter for a
+  // binding named `__proto__`, which ignores a string. `passBindings` builds
+  // its object with a COMPUTED key, so `__proto__` really is an own property
+  // of `bindings` and really did reach this line — `For each {{__proto__}} in
+  // {{orders}}` parses, and bound the dotted keys while the flat name stayed
+  // literal, which is half a pass with nothing said about the other half.
+  //
+  // Not `bindVariable` in a loop: the clear above is for the WHOLE pass, and
+  // doing it per key would make the result depend on whether the flat name
+  // happened to come before its properties.
+  for (const [key, value] of Object.entries(bindings)) {
+    Object.defineProperty(map, key, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
   }
+  // Say which of these names are a pass's, so the masking rules read them by
+  // the two-segment rule and everything else dotted in the map — a data
+  // file's `user.apikey` heading — by the author's (§7.6).
+  markLoopBindings(
+    map,
+    Object.keys(bindings).filter((key) => key.includes('.')),
+  );
 }
 
 /** What one visit to a guard produced. */
@@ -253,7 +257,11 @@ export async function evaluateGuard(args: {
         break;
       }
       case 'list': {
-        const parsed = parseListValue(request.list, resolvedParameters[request.list]);
+        // `boundValue`, not a bare index: `For each {{row}} in {{constructor}}`
+        // would otherwise hand the parser the `Object` FUNCTION off the
+        // prototype of a map that binds no such list, in place of the
+        // "nothing binds it" error the author needs.
+        const parsed = parseListValue(request.list, boundValue(resolvedParameters, request.list));
         if ('error' in parsed) {
           return {
             plan: { skip: [], next: exitFailed(controls, index) },

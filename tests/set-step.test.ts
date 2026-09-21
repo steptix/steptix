@@ -372,9 +372,10 @@ describe('a Set target that needs a guarded write', () => {
  * asked about a root that now holds a plain string, answered by listing
  * "available properties" of a value nothing binds any more.
  *
- * The rule is `applyPassBindings`' own, and the two share one helper
- * (`clearDottedKeys`, control-runtime.ts): a rebind of a root erases that
- * root's properties, whoever does the rebinding.
+ * The rule is `applyPassBindings`' own, and every writer into the live map
+ * now shares one helper (`bindVariable` / `clearDottedKeys`,
+ * src/parser/parameters.ts): a rebind of a root erases that root's
+ * properties, whoever does the rebinding.
  */
 describe('a Set over a name a loop bound', () => {
   it('clears the loop pass"s dotted keys for that root', async () => {

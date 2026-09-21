@@ -195,3 +195,50 @@ describe('substitution sites are inventoried', () => {
     expect(Object.keys(INVENTORY).filter((f) => !files.includes(f)).sort()).toEqual([]);
   });
 });
+
+/**
+ * One sentence about spacing inside the braces, in five refusals.
+ *
+ * Three of them share `NO_SPACES_SENTENCE`
+ * (src/runner/placeholder-substitution.ts): the model's action, a `Set`
+ * template and the author's own step text. The other two are hand-written and
+ * must stay that way — `setStepError` (src/parser/set-step.ts) and
+ * `foreachMessage` (src/parser/control-line.ts) are import-free by design, so
+ * a parser can answer before a runner module is loaded at all.
+ *
+ * Hand-written is exactly why this test exists. The sentence has already been
+ * reworded once; a reader who meets it twice should not have to decide whether
+ * two nearly-identical sentences mean two different things. Only the shared
+ * HEAD is compared — each site names its own fix after `write` (`{{name}}`,
+ * `Set {{name}} to "…"`, `{{item}}` for the item) and those tails are
+ * deliberately different.
+ */
+describe('the "no spaces inside the braces" sentence', () => {
+  const SITES = [
+    'src/runner/placeholder-substitution.ts',
+    'src/parser/set-step.ts',
+    'src/parser/control-line.ts',
+  ] as const;
+
+  /**
+   * The sentence as it READS, not as it is typed: template-literal
+   * concatenation seams are removed and whitespace collapsed first, so a
+   * different line wrap is not a difference.
+   */
+  function sentenceIn(file: string): string | undefined {
+    const body = readFileSync(path.resolve(__dirname, '..', file), 'utf8')
+      .replace(/`\s*\+\s*`/g, '')
+      .replace(/\s+/g, ' ');
+    return /A placeholder carries no spaces.*?write /.exec(body)?.[0];
+  }
+
+  it('reads identically at all five refusals', () => {
+    const found = SITES.map((file) => [file, sentenceIn(file)] as const);
+    // Present at all three, first — a missing one would make the comparison
+    // below vacuous.
+    expect(found.filter(([, s]) => s === undefined).map(([f]) => f)).toEqual([]);
+    expect(new Set(found.map(([, s]) => s)).size, `differs across:\n${
+      found.map(([f, s]) => `  ${f}: ${JSON.stringify(s)}`).join('\n')
+    }`).toBe(1);
+  });
+});

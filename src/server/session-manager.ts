@@ -110,7 +110,7 @@ import {
 import { LiveCompiler } from '../codebehind/live-compile.js';
 import type { CompilePhase, CompileStatus, CompileSummary } from '../codebehind/compile.js';
 import { compileLock, compileLockKey } from './compile-lock.js';
-import { redact, redactReport, runSecrets } from '../utils/secrets.js';
+import { inheritLoopBindings, redact, redactReport, runSecrets } from '../utils/secrets.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { executeToolStep } from '../tools/executor.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
@@ -3070,11 +3070,15 @@ export class SessionManager {
     //
     // Read fresh on every call, as the parameter half already is: frames are
     // built after this assignment, and captures keep adding to the map.
-    secretsNow = () =>
-      runSecrets({
-        parameters: { ...resolvedParameters, ...Object.assign({}, ...Object.values(frameInputs)) },
-        envData: envDataCtx,
-      });
+    secretsNow = () => {
+      const merged = { ...resolvedParameters, ...Object.assign({}, ...Object.values(frameInputs)) };
+      // A copy carries none of the loop's marks (the registry is by object
+      // identity), and unmarked, every `row.<column>` in it would take the
+      // author rule — `AU` back in the mask set because a column is called
+      // `keyword`, the round-2 defect through a new door (§7.6).
+      inheritLoopBindings(resolvedParameters, merged);
+      return runSecrets({ parameters: merged, envData: envDataCtx });
+    };
 
     // `## Config: unmask: keyword, data.keys.public` — names and `${…}` refs
     // this test declares are NOT secrets, despite `isSecretName` matching them
@@ -5767,7 +5771,12 @@ export class SessionManager {
 
         const stepOutputs: Record<string, string> = {};
         for (const varName of captureVars) {
-          if (varName in resolvedParameters) {
+          // `hasOwn`, not `in`: `in` walks the prototype chain, so an
+          // `[output: constructor]` — or an `as` name the model chose — was
+          // "captured" off `Object.prototype` and the `Object` FUNCTION
+          // travelled into `session.outputs`, the `capture` wire event and
+          // the step's outputs, all three typed `string`.
+          if (Object.hasOwn(resolvedParameters, varName)) {
             stepOutputs[varName] = resolvedParameters[varName]!;
             // Accumulate into session outputs
             session.outputs[varName] = resolvedParameters[varName]!;

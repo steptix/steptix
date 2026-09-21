@@ -91,6 +91,21 @@ vi.mock('../src/report/history-appender.js', () => ({
   appendRunHistory: vi.fn().mockResolvedValue(undefined),
 }));
 
+/**
+ * The one step the CLI loop answers ITSELF: `[input: name]` reads a line from
+ * the terminal and writes it into the live variable map. Scripted here so the
+ * write can be exercised without a tty.
+ */
+let inputAnswer = '';
+vi.mock('node:readline/promises', () => ({
+  default: {
+    createInterface: () => ({
+      question: async () => inputAnswer,
+      close: () => {},
+    }),
+  },
+}));
+
 import { runTest } from '../src/runner/test-runner.js';
 import { parseTestFile } from '../src/parser/markdown.js';
 // Not mocked: the console lines below are asserted by spying on the real
@@ -887,6 +902,61 @@ describe('a For each pass does not inherit the last row', () => {
       '{{row.id}} has no value in For each item 1; {{row}} holds no properties — it is not an object',
     );
   });
+
+  /**
+   * …and neither does a step AFTER the loop, once something rebinds the root.
+   *
+   * `applyPassBindings` and `runSetStep` cleared a root's dotted keys; every
+   * other write into the live map was a plain `resolvedParameters[name] =
+   * value`. So a capture that lands on a loop's item name — the shape §8.2
+   * calls a rebind — left `order.id` holding the LAST PASS's id, and
+   * `{{order.id}}` two steps later substituted it with no warning and no way
+   * for §8.3's refusal to fire.
+   *
+   * `[input: order]` is that write in the CLI loop specifically
+   * (test-runner.ts), which is why the markdown reads the way it does: the
+   * same rule, at a site the run loop owns rather than the executor.
+   */
+  it('refuses a stale {{order.id}} after something rebinds {{order}}', async () => {
+    const REBIND = [
+      '# Rebind',
+      '',
+      '## Steps',
+      '1. For each {{order}} in {{orders}}, Check the order',
+      '2. [input: order] Enter the order id you were given',
+      '3. Verify the summary shows {{order.id}}',
+      '',
+      '### Check the order',
+      '1. Note the order "{{order.id}}"',
+      '',
+    ].join('\n');
+
+    inputAnswer = 'ORD-9';
+    const inst = await instance(
+      REBIND,
+      { orders: '[{"_row":"1","id":"A"},{"_row":"2","id":"B"}]' },
+      'rebind-loop-root.md',
+    );
+    const report = await runTest(inst, makeConfig(), '');
+
+    expect(report.status).toBe('failed');
+    const failed = report.steps.find((s) => s.status === 'failed')!;
+    expect(failed.instruction).toContain('Verify the summary shows');
+    // The `in For each item 2` clause is `forEachPassOf`'s, unchanged: the
+    // loop has ended but its cursor is what last bound this root, and §8.2
+    // keeps the last pass's bindings after the loop. Pinned as-is rather than
+    // adjusted — which pass a refusal names is a separate decision.
+    expect(failed.error).toBe(
+      '{{order.id}} has no value in For each item 2; {{order}} holds no properties — it is not an object',
+    );
+    // The point: the last pass's `B` never reached the model as this step's
+    // value. Both passes did run on their own rows.
+    const executed = executeStepMock.mock.calls.map((c) => String(c[2]));
+    expect(executed).toEqual([
+      'Note the order "A"',
+      'Note the order "B"',
+    ]);
+  });
 });
 
 /**
@@ -956,6 +1026,42 @@ describe('a For each over records with keys a placeholder cannot spell', () => {
    * `cannot be referenced as a placeholder` line for exactly this case (see
    * `run-loop-contracts.test.ts`) and left the refusal beside it in the clear.
    */
+  /**
+   * The variable map is mixed (§7.6): a data file's heading `user.apikey`
+   * is merged in beside the loop's own `doc.keyword`. The pass registers
+   * what it bound, so the two are told apart by whose name they are — not
+   * by spelling, which is the same shape in both. Pins `markLoopBindings`
+   * in `applyPassBindings`: without it `doc.keyword` falls back to the
+   * author rule, `keyword` contains `key`, and its value joins the mask
+   * set — the refusal's own property list then reads `id, ***`.
+   */
+  it('reads a pass binding by the record rule and a data-file heading by the author rule', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    try {
+      const md = DOCS.replace('{{doc.id}}', '{{doc.nope}}');
+      const inst = await instance(
+        md,
+        { 'user.apikey': 'uk_live_1234', docs: '[{"id":"A","keyword":"keyword"}]' },
+        'mixed-map.md',
+      );
+      const report = await runTest(inst, makeConfig(), '');
+
+      const failed = report.steps.find((s) => s.status === 'failed')!;
+      expect(failed.error).toBe(
+        '{{doc.nope}} has no value in For each item 1; available properties are id, keyword',
+      );
+      // The pass's binding, by the record rule: a column called `keyword` is
+      // not a secret, so the entry and its value are readable.
+      expect(report.parameters['doc.keyword']).toBe('keyword');
+      // The data file's heading, by the author rule on the whole key.
+      expect(report.parameters['user.apikey']).toBe('***');
+      expect(JSON.stringify(report)).not.toContain('uk_live_1234');
+      expect(error.mock.calls.map((c) => String(c[0])).join('\n')).not.toContain('uk_live_1234');
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it('masks a secret value the refusal would otherwise print', async () => {
     const error = vi.spyOn(logger, 'error').mockImplementation(() => {});
     try {

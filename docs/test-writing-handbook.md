@@ -1177,7 +1177,11 @@ anywhere in it, case insensitive. The value is masked as `***` in the console,
 the report, the run log and the `## Values` block. The model never sees it;
 the executor substitutes it when acting. Never write `***` as a value
 yourself; the framework refuses an action containing it. If a non-secret name
-is caught by the rule, list it under `unmask` in `## Config`.
+is caught by the rule, list it under `unmask` in `## Config` — but note that
+the hatch governs the report, the run log and the `## Values` block only.
+TestBench's own surfaces do not read it yet: the Variables view, the Variables
+panel, the `[input:]` echo and the gutter hover keep showing the mask for a
+name you have unmasked.
 
 **A name the page chose** is decided more narrowly. A table read's column
 aliases and a tool's record keys are not your words, and a substring rule
@@ -1194,8 +1198,11 @@ break, so `apiKey` masks and `apikey` does not; plain `key`, `keys`,
 
 **A loop binding is where the two meet.** `{{user.password}}` is masked
 because the column says so; `{{token.payee}}` because you called the record
-`token`; `{{payment.sort_key}}` by neither, so it shows. Either half is
-enough.
+`token`; `{{payment.sort_key}}` by neither, so it shows. Either half, or the
+whole name read as one credential key — `api.key` is `api_key` with a dot in
+it, and it is masked wherever it occurs. That last reading uses the *column*
+rule, not the substring one, so `{{row.keyword}}` and `{{payment.sort_key}}`
+stay readable.
 
 **Length matters in exactly one place.** A value that a record column
 contributes has to be at least four characters before the framework will hunt

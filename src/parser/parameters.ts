@@ -1,3 +1,4 @@
+import { unmarkLoopBindings } from '../utils/loop-bindings.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline/promises';
@@ -189,6 +190,83 @@ export function placeholderRoot(name: string): string {
 export function placeholderProperty(name: string): string | undefined {
   const dot = name.indexOf('.');
   return dot === -1 ? undefined : name.slice(dot + 1);
+}
+
+/**
+ * Write `value` into the live variable map under `name`
+ * (docs/specs/SPEC-structured-table-reads.md §8.2).
+ *
+ * The ONE way anything writes that map: a `For each` pass, a `Set`, a `read` /
+ * `count` / `readTable` capture, an `[input:]` answer, a tool's `setVar`, a
+ * code-behind `setVar`. Two rules, and each of them shipped in one or two
+ * writers out of nine before this existed.
+ *
+ * **Own property, not assignment.** `map[name] = value` hits
+ * `Object.prototype`'s setter when `name` is `__proto__`, which silently
+ * ignores a string: the step reported PASSED with the value in its `outputs`
+ * while the map held nothing. `passBindings` builds a pass's bindings with a
+ * computed key, so `For each {{__proto__}} in {{orders}}` produced exactly
+ * that — the flat `{{__proto__}}` bound nothing while `{{__proto__.id}}`, an
+ * ordinary key, resolved.
+ *
+ * **A rebind of a ROOT erases that root's dotted keys.** Only a `For each`
+ * pass writes `item.property`, and they belong to the value the root held
+ * when the pass bound it. So `Read the order id [store as: order]` after a
+ * `For each {{order}} …` must not leave `order.id` holding the last pass's
+ * id — it did, and `{{order.id}}` went on substituting a row the author had
+ * just overwritten, with §8.3's refusal unable to fire on a key that was
+ * still there.
+ *
+ * Guarded on the flat spelling, because a dotted name is a PROPERTY write
+ * rather than a rebind: it must not erase its own siblings. Nothing writes one
+ * today; the guard is so that a future writer cannot.
+ *
+ * Here, beside {@link placeholderRoot}, rather than in a run module: a `Set`
+ * step needs it and has no page, no model and no cache, and importing it from
+ * `control-runtime.ts` dragged the step executor — Playwright and the AI
+ * client — into that module's import graph.
+ */
+export function bindVariable(
+  map: Record<string, string>,
+  name: string,
+  value: string,
+): void {
+  Object.defineProperty(map, name, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  if (!name.includes('.')) clearDottedKeys(map, new Set([name]));
+}
+
+/**
+ * Drop every `root.<anything>` binding for each of `roots`, leaving flat names
+ * and every other root alone.
+ *
+ * {@link bindVariable}'s second half, exported because `applyPassBindings`
+ * (src/runner/control-runtime.ts) needs it for a whole pass at once: it clears
+ * every root the incoming bindings name BEFORE assigning any of them, since
+ * the pass writes the flat name and its properties together and doing them one
+ * at a time would depend on key order.
+ *
+ * Flat names are not this rule's business: a pass rebinds its own base name,
+ * and clearing other flat variables would delete captures.
+ */
+export function clearDottedKeys(
+  map: Record<string, string>,
+  roots: ReadonlySet<string>,
+): void {
+  const dropped: string[] = [];
+  for (const key of Object.keys(map)) {
+    if (!key.includes('.')) continue;
+    if (!roots.has(placeholderRoot(key))) continue;
+    delete map[key];
+    dropped.push(key);
+  }
+  // The mark and the entry go together: a later entry of the same name is
+  // nobody's binding (src/utils/loop-bindings.ts).
+  unmarkLoopBindings(map, dropped);
 }
 
 /** The property segment on its own, anchored — what a RECORD's key has to

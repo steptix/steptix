@@ -213,11 +213,35 @@ export const RECORD_SECRET_PATTERNS = {
  *
  * The difference is not cosmetic: `payment.sort_key` and `payment.keyword`
  * used to render as `********` here while the report printed them.
+ *
+ * And a THIRD clause, the server's as well: the whole name read as one
+ * credential key with the dots as separators ({@link wholeNameIsRecordSecret}).
+ * Not every dotted name is a pass binding — a data column or a `[store as:]`
+ * output may be called `api.key`, where neither half says secret and the two
+ * halves together say nothing but. It is the record rule doing the reading, so
+ * it stays whole-word and `row.keyword` and `payment.sort_key` stay clear of
+ * it. Without this clause `api.key` and `private.key` rendered in full in the
+ * Variables view while the report beside them said `***`.
  */
 export function isSecretVarName(varName: string): boolean {
   const dot = varName.indexOf('.');
   if (dot < 0) return isSecretFlatName(varName);
-  return isSecretFlatName(varName.slice(0, dot)) || isRecordSecretKey(varName.slice(dot + 1));
+  return (
+    isSecretFlatName(varName.slice(0, dot))
+    || isRecordSecretKey(varName.slice(dot + 1))
+    || wholeNameIsRecordSecret(varName)
+  );
+}
+
+/** The dotted name read as ONE record key: `api.key` → `api_key`. The record
+ *  rule, not the author rule, so it stays whole-word — a name that merely
+ *  contains `key` across the dot (`row.keyword`) is not caught by it.
+ *
+ *  Kept line for line with the server's `wholeNameIsRecordSecret`
+ *  (src/utils/secrets.ts) and with the panel's copy; the parity test compares
+ *  all three bodies. */
+function wholeNameIsRecordSecret(name: string): boolean {
+  return name.includes('.') && isRecordSecretKey(name.split('.').join('_'));
 }
 
 /** What a masked value renders as: a star per character, capped at eight, and
@@ -280,10 +304,15 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  */
 export function maskRecordSecrets(value: string): string {
   const text = String(value);
-  if (!/^\s*[[{]/.test(text)) return text;
+  // A leading BOM is stripped before both the sniff and the parse. JS `\s`
+  // INCLUDES U+FEFF, so `\uFEFF[{"password":…}]` passed the sniff and then
+  // threw in JSON.parse, and the catch returned the credential unmasked —
+  // the one input shaped exactly like the case this function exists for.
+  const body = text.replace(/^\uFEFF/, '');
+  if (!/^\s*[[{]/.test(body)) return text;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(body);
   } catch {
     return text;
   }
@@ -315,6 +344,32 @@ export function maskRecordSecrets(value: string): string {
  */
 export function maskIfSecret(varName: string, value: string): string {
   if (!isSecretVarName(varName)) return maskRecordSecrets(value);
+  return maskValue(value);
+}
+
+/**
+ * The same, for a map whose keys are author-chosen END TO END — the mirror of
+ * the server's `redactAuthoredMap` (src/utils/secrets.ts), as {@link
+ * maskIfSecret} is the mirror of its `redactMap`.
+ *
+ * {@link maskIfSecret}'s two-segment rule is right for the live variable map,
+ * whose dotted entries are a loop's `row.<column>` bindings — half author,
+ * half page. It is wrong for a DATA ROW's cells (the Run Rows quick pick, the
+ * gutter hover, the Output banner's `k=v, k=v`) and for a step's `[store as:]`
+ * tool outputs, because nothing in either of those came off a page: a column
+ * headed `user.apikey`, `login.passkey` or `api.key` is a name a person typed,
+ * and all three are masked by the server's flat author rule. Splitting them at
+ * the dot and asking the narrow record rule about `apikey` answered no, so the
+ * client printed `uk_live_1234` in a banner sitting beside a report matrix
+ * that said `***` — the pre-feature client starred it, which makes this the
+ * regression and not merely a gap.
+ *
+ * So the WHOLE key goes to {@link isSecretFlatName}, which is what that rule
+ * was written for. Everything else is {@link maskIfSecret}'s shape: the name
+ * first and outright, then the record scan for a value whose name said nothing.
+ */
+export function maskIfSecretAuthored(name: string, value: string): string {
+  if (!isSecretFlatName(name)) return maskRecordSecrets(value);
   return maskValue(value);
 }
 

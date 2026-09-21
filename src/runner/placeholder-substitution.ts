@@ -129,8 +129,21 @@ const TYPED_FIELDS: ReadonlySet<string> = new Set([
  * — the CLI's `dottedReferenceError` sits in `runTest`'s try/finally, and the
  * guard loop's is outside `evaluateGuard`'s try, so the run died with no
  * report rather than refusing the step.
+ *
+ * Exported because the hazard is not this module's alone: every read of the
+ * variable map by a name a step or a model chose has it. The step prompt's
+ * `## Values` block indexed it bare, so `Verify {{constructor}} is shown`
+ * carried the `Object` function as a VALUE into `formatParameterBlock` — and
+ * with any secret in scope the masker there threw on it
+ * (`value.charCodeAt is not a function`, out of `maskRecordSecrets`; a
+ * `redact` that got there first says `out.split is not a function`). Either
+ * way a step whose only mistake was naming a variable nothing binds failed
+ * with a sentence about strings, and on the guard path the same throw escapes
+ * `evaluateConditions` altogether. `stepParameters` (src/codebehind/
+ * generate.ts) had the same read, and `For each {{row}} in {{constructor}}` a
+ * third. One helper, so the answer cannot differ.
  */
-function boundValue(
+export function boundValue(
   parameters: Record<string, string>,
   name: string,
 ): string | undefined {
@@ -163,18 +176,26 @@ export function collectReferences(text: string): CollectedReferences {
 }
 
 /**
- * The one sentence three refusals share: the model's action
+ * The one sentence five refusals share.
+ *
+ * Three of them read it from here: the model's action
  * ({@link checkOneString}), a `Set` template ({@link resolveSetTemplate}) and
- * the author's own step text ({@link dottedReferenceError}). Same mistake,
- * same fix, and a reader who has seen it once should not have to read a
- * variant of it.
+ * the author's own step text ({@link dottedReferenceError}). The other two are
+ * hand-written and stay that way — `setStepError` (src/parser/set-step.ts) and
+ * `foreachMessage` (src/parser/control-line.ts) are import-free by design, so
+ * a parser can answer before a runner module is loaded at all. All five are
+ * compared as text by `tests/substitution-sites.test.ts`, because the sentence
+ * has been reworded once already and a reader who meets it twice should not
+ * have to decide whether two near-identical sentences mean two different
+ * things. Same mistake, same fix, same words.
  */
 const NO_SPACES_SENTENCE = (key: string): string =>
   `A placeholder carries no spaces inside its braces — write \`{{${key}}}\`.`;
 
 /**
- * The keys of a record that could never have become dotted bindings —
- * `content-type`, `Order ID` — or empty for anything that is not a record.
+ * The keys of a root whose value IS a JSON record, in order — or undefined
+ * when the value is anything else (a scalar, an array, unparseable text, or
+ * nothing at all).
  *
  * Read back out of the ROOT's own binding, which for a `For each` pass is the
  * row's compact JSON (§8.2). That is deliberate and it is the cheap half of
@@ -182,20 +203,15 @@ const NO_SPACES_SENTENCE = (key: string): string =>
  * cursor, through the verdict, through `planForStart`'s rebuild and into four
  * call sites, to say something the value in hand already answers — and to
  * answer it for the CURRENT pass, which is the only pass the message is about.
- */
-function unspellableKeysOf(rootValue: string | undefined): string[] {
-  return recordKeysOf(rootValue)?.filter((key) => !isBindableProperty(key)) ?? [];
-}
-
-/**
- * The keys of a root whose value IS a JSON record, in order — or undefined
- * when the value is anything else (a scalar, an array, unparseable text, or
- * nothing at all).
  *
- * The distinction {@link unspellableKeysOf} alone could not draw: an empty
- * record and a string both produced an empty key list, so `{{order}}` bound to
- * `{}` was refused as "holds no properties — it is not an object", which is
- * false about the one thing the sentence asserts.
+ * `undefined` and `[]` are different answers, and the distinction is the whole
+ * reason this returns keys rather than a boolean: an empty record and a string
+ * both have no spellable keys, so `{{order}}` bound to `{}` was refused as
+ * "holds no properties — it is not an object", which is false about the one
+ * thing that sentence asserts.
+ *
+ * One parse, read twice by {@link findDottedRefusal} — for the keys and for
+ * the unspellable ones among them. It used to be parsed once per question.
  */
 function recordKeysOf(rootValue: string | undefined): string[] | undefined {
   if (rootValue === undefined || !rootValue.startsWith('{')) return undefined;
@@ -250,6 +266,14 @@ function recordKeysOf(rootValue: string | undefined): string[] | undefined {
  * server's `secretsNow` counts frame inputs too). Omitted, the fallback is
  * what the CLI and the Electron adapter build for themselves anyway, so a
  * caller that forgets still masks.
+ *
+ * That fallback is a SAFETY NET, not the production path, and it is weaker
+ * than what every real caller passes: `runSecrets({ parameters })` sees the
+ * parameter map only, so a secret that lives in the run's environment or data
+ * files (`${env.PASSWORD}`, a `data.users.admin.password`) is not in its mask
+ * set, and neither are the server's frame inputs. All four run loops pass
+ * `redactText`. Read the fallback as "a new caller cannot leak everything",
+ * not as "the mask is complete".
  */
 export function dottedReferenceError(
   text: string,
@@ -293,28 +317,47 @@ function findDottedRefusal(
       const property = placeholderProperty(key);
       if (property !== undefined) available.push(property);
     }
-    const rootValue = boundValue(parameters, root);
-    const recordKeys = recordKeysOf(rootValue);
-    const unspellable = unspellableKeysOf(rootValue);
+    const recordKeys = recordKeysOf(boundValue(parameters, root));
+    const unspellable = recordKeys?.filter((key) => !isBindableProperty(key)) ?? [];
+    const aside =
+      unspellable.length > 0
+        ? ` (${unspellable.join(', ')} cannot be spelled as ` +
+          `${unspellable.length === 1 ? 'a placeholder' : 'placeholders'})`
+        : '';
     if (available.length > 0) {
-      const aside =
-        unspellable.length > 0
-          ? ` (${unspellable.join(', ')} cannot be spelled as ` +
-            `${unspellable.length === 1 ? 'a placeholder' : 'placeholders'})`
-          : '';
       return `${prefix}; available properties are ${available.join(', ')}${aside}`;
     }
-    if (unspellable.length > 0) {
+    if (recordKeys !== undefined && recordKeys.length > 0) {
+      // A record with no dotted bindings beside it: CAPTURED, not bound by a
+      // `For each`. `[store as: order]` over one row, or a tool that returns
+      // one object, puts a record under a flat name and writes no properties,
+      // because only a pass does that (§8.2).
+      //
+      // Both sentences the catch-all used to reach for were false about it.
+      // `{"id":"A"}` was refused as "holds no properties — it is not an
+      // object", and `{"content-type":"t","id":"A"}` as "has no properties
+      // that can be spelled as placeholders (content-type)" — while `id` is
+      // spellable and is the property the author just asked for. Either sends
+      // the reader hunting for a typo or a broken capture instead of the rule.
+      //
+      // The unspellable aside stays, for the keys it is true of; when NO key
+      // can be spelled, that is the whole answer and the rule would be noise.
+      if (unspellable.length === recordKeys.length) {
+        return (
+          `${prefix}; {{${root}}} has no properties that can be spelled as ` +
+          `placeholders (${unspellable.join(', ')})`
+        );
+      }
       return (
-        `${prefix}; {{${root}}} has no properties that can be spelled as ` +
-        `placeholders (${unspellable.join(', ')})`
+        `${prefix}; {{${root}}} holds a record, but only a For each item's ` +
+        `properties can be referenced as {{${root}.<property>}}${aside}`
       );
     }
     // The record-shaped value FIRST, because the sentence below asserts one
     // thing and an empty record makes it false: `{{order}}` bound to `{}` is
     // an object, it simply has nothing in it, and an author told "it is not an
     // object" goes looking for the wrong mistake.
-    if (recordKeys !== undefined && recordKeys.length === 0) {
+    if (recordKeys !== undefined) {
       return `${prefix}; {{${root}}} is a record with no properties`;
     }
     if (Object.hasOwn(parameters, root)) {

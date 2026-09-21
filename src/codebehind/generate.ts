@@ -17,6 +17,7 @@ import {
 } from '../parser/interpolate-env-data.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import { WIDE_PLACEHOLDER_SOURCE, interpolate } from '../parser/parameters.js';
+import { boundValue } from '../runner/placeholder-substitution.js';
 import type { AssertionResult } from '../report/types.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import { logger } from '../utils/logger.js';
@@ -842,13 +843,24 @@ export function stepParameters(
   const { placeholders } = referencedVariableNames(binding.source);
   const out: Array<{ name: string; value: string }> = [];
   for (const name of placeholders) {
-    const renamed = binding.scope.renames[name];
-    const input = binding.scope.inputs[name];
+    // `boundValue` on all three maps, not a bare index. Two prototype reads
+    // sat here and cancelled each other into the wrong answer: `renames[name]`
+    // answered `{{constructor}}` with the `Object` function, so the rename
+    // branch was taken and `resolvedParameters[thatFunction]` came back
+    // undefined — a variable the run really did bind under the name
+    // `constructor` (a `[store as: constructor]` capture) was dropped from the
+    // prompt AND from the leak guard, which is how a real value reaches a
+    // committed file. Uncancel one of them — a genuine rename onto `toString`
+    // — and the FUNCTION became the `value` instead: rendered `resolved to
+    // undefined` (`JSON.stringify` of a function), and handed to the guard as
+    // the text to search for.
+    const renamed = boundValue(binding.scope.renames, name);
+    const input = boundValue(binding.scope.inputs, name);
     const value = renamed !== undefined
-      ? resolvedParameters[renamed]
+      ? boundValue(resolvedParameters, renamed)
       : input !== undefined
         ? resolveInputValue(input, resolvedParameters, envData)
-        : resolvedParameters[name];
+        : boundValue(resolvedParameters, name);
     if (value !== undefined) out.push({ name, value });
   }
   return out;

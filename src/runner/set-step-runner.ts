@@ -2,7 +2,10 @@ import type { StepResult } from '../report/types.js';
 import type { ParsedSetStep } from '../parser/set-step.js';
 import type { EnvDataContext } from '../parser/interpolate-env-data.js';
 import { resolveSetTemplate } from './placeholder-substitution.js';
-import { clearDottedKeys } from './control-runtime.js';
+// From the PARSER's light module, not from `control-runtime.ts`: that import
+// dragged the step executor — and with it Playwright and the AI client — into
+// a "no page, no model, no cache" module's graph.
+import { bindVariable } from '../parser/parameters.js';
 
 /**
  * Running one `Set {{name}} to "template"` step
@@ -64,33 +67,13 @@ export function runSetStep(
   // The write. Everything downstream — a later step's `{{…}}`, the Variables
   // panel, the report's captured box — reads it from here.
   //
-  // `defineProperty`, not `scope[name] =`, because of `__proto__`: on a plain
-  // object that assignment hits the prototype setter, which ignores a string.
-  // The step then reported PASSED with the value in its `outputs` (a computed
-  // key does create an own property) while the scope held nothing, so a later
-  // `{{__proto__}}` failed as undefined — a green step poisoning a later one,
-  // which is the exact failure the "unresolved reference fails the step"
-  // decision exists to prevent. This codebase already guards the same hazard
-  // in three other maps (`markdown.ts`, `expander.ts`); the omission here was
-  // an oversight, not a judgement.
-  Object.defineProperty(scope, step.name, {
-    value: outcome.value,
-    writable: true,
-    enumerable: true,
-    configurable: true,
-  });
-
-  // A rebind of a ROOT erases that root's dotted keys, exactly as a loop pass
-  // does (`applyPassBindings`, control-runtime.ts) — same helper, so the two
-  // cannot disagree about what a rebind means. A `Set {{order}} to "none"`
-  // after a `For each {{order}} …` wrote the flat name only, so `{{order.id}}`
-  // went on substituting the last row's id from a variable the author had just
-  // overwritten, and §8.3's refusal listed "available properties" of a value
-  // nothing binds any more. Guarded on the flat spelling because a `Set`
-  // target is flat by construction — a step writes a variable, never one
-  // property of one — and a dotted target, if one ever parsed, would be a
-  // property write rather than a rebind.
-  if (!step.name.includes('.')) clearDottedKeys(scope, new Set([step.name]));
+  // Both of `bindVariable`'s rules matter to a `Set`. The own-property write
+  // is why a `Set {{__proto__}} to "x"` does not report PASSED over a scope
+  // that held nothing; the dotted clear is why a `Set {{order}} to "none"`
+  // after a `For each {{order}} …` does not leave `{{order.id}}` substituting
+  // the last row's id. Same helper as every other writer, so none of them can
+  // disagree about what a rebind means.
+  bindVariable(scope, step.name, outcome.value);
 
   // A skill-internal name is namespaced by `applySkillScope` and must never
   // be reported: `computeStepCaptures` (CLI) and `autoCapturedNames` (server,

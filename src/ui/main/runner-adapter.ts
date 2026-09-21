@@ -24,7 +24,7 @@ import { executeStep } from '../../runner/step-executor.js';
 import { launchBrowser, closeBrowser } from '../../browser/manager.js';
 import { captureScreenshot } from '../../browser/screenshot.js';
 import { loadContextFiles } from '../../context/loader.js';
-import { interpolate } from '../../parser/parameters.js';
+import { bindVariable, interpolate } from '../../parser/parameters.js';
 import { interpolateEnvData, type EnvDataContext } from '../../parser/interpolate-env-data.js';
 import { parseSetStep } from '../../parser/set-step.js';
 import { controlLineDefines } from '../../parser/control-line.js';
@@ -407,7 +407,11 @@ export class UIRunnerAdapter {
 
   /** Respond to an [input: variable] prompt. */
   inputResponse(variable: string, value: string): void {
-    this.resolvedParameters[variable] = value;
+    // Through the one helper, like every other write into this map: an
+    // `[input: order]` after a `For each {{order}} …` rebinds that root, and
+    // §8.2 says a rebind erases the root's dotted keys — otherwise the last
+    // pass's `order.id` answers every later `{{order.id}}`.
+    bindVariable(this.resolvedParameters, variable, value);
     if (this.inputResolve) {
       this.inputResolve(value);
       this.inputResolve = null;
@@ -1082,7 +1086,9 @@ export class UIRunnerAdapter {
         const value = await this.waitForInput();
         if (this.stopped) break;
 
-        this.resolvedParameters[variable] = value;
+        // Same rule as `inputResponse` above, at the loop's own end of the
+        // handshake.
+        bindVariable(this.resolvedParameters, variable, value);
 
         this.emit('runner:resumed', {});
 

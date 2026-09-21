@@ -15,6 +15,7 @@ import {
   ambiguousSelectorComplaint,
   generateStepEntry,
   refuseReason,
+  stepParameters,
   staleHandleComplaint,
   unwaitedReadComplaint,
   undeclaredContextComplaint,
@@ -1369,5 +1370,58 @@ describe('the review envelope', () => {
   it('refuses a revision that is not a code-behind file', () => {
     expect(() => parseFileRevision(JSON.stringify({ file: 'const x = 1;' }))).toThrow(/defineSteps/);
     expect(() => parseFileRevision('sorry, no')).toThrow(/no revised file|defineSteps/);
+  });
+});
+
+/**
+ * A name off `Object.prototype` is not a parameter (`boundValue`,
+ * src/runner/placeholder-substitution.ts).
+ *
+ * `resolvedParameters[name]` is a bare index, so a step writing
+ * `{{constructor}}` handed the generator the Object FUNCTION as a value: the
+ * prompt rendered `resolved to undefined` (`JSON.stringify` of a function is
+ * `undefined`), and the leak guard was then asked to look for a function's
+ * text in the generated code. With a secret in scope the block's masker threw
+ * first — the same `out.split is not a function` the step prompt died with.
+ */
+describe('stepParameters — a reference nothing binds', () => {
+  const bindingFor = (source: string): CodeBehindBinding => ({
+    file: '/x/t.steps.ts',
+    source,
+    occurrence: 0,
+    scope: { renames: {}, inputs: {} },
+  });
+
+  const binding = (name: string, value: string): Record<string, string> =>
+    Object.defineProperty({}, name, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    }) as Record<string, string>;
+
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
+    'renders {{%s}} when the map really binds it, and not otherwise',
+    (name) => {
+      const source = `Verify {{${name}}} is shown`;
+      // Nothing binds it: the prototype must not answer for the map.
+      expect(stepParameters(bindingFor(source), {}, undefined)).toEqual([]);
+      // A `[store as: constructor]` capture IS a parameter, and dropping it
+      // leaves the leak guard with nothing to look for — the literal then
+      // lands in a committed file, which is the failure the guard exists for.
+      expect(stepParameters(bindingFor(source), binding(name, 'ACME'), undefined)).toEqual([
+        { name, value: 'ACME' },
+      ]);
+    },
+  );
+
+  it('does not let a RENAMED name reach through the prototype either', () => {
+    const renamed: CodeBehindBinding = {
+      file: '/x/t.steps.ts',
+      source: 'Verify {{who}} is shown',
+      occurrence: 0,
+      scope: { renames: { who: 'toString' }, inputs: {} },
+    };
+    expect(stepParameters(renamed, {}, undefined)).toEqual([]);
   });
 });

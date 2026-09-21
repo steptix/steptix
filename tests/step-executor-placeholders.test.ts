@@ -87,7 +87,7 @@ vi.mock('../src/browser/page-state.js', () => ({
 }));
 
 import { addLogCallback } from '../src/utils/logger.js';
-import { executeStep, executeBranchedStep } from '../src/runner/step-executor.js';
+import { executeStep, executeBranchedStep, evaluateConditions } from '../src/runner/step-executor.js';
 import { runInteractiveRepl } from '../src/runner/interactive-repl.js';
 import {
   checkTurnReferences,
@@ -357,6 +357,56 @@ describe('the model names the value, the executor puts it in', () => {
     );
     expect(allRequestText(client)).toContain('- {{balance}} resolved to "(not yet captured)" on this run');
   });
+
+  /**
+   * A name off `Object.prototype` is not a binding
+   * (`boundValue`, placeholder-substitution.ts).
+   *
+   * `params[name]` is a bare index, so `{{constructor}}` answered with the
+   * Object function on a map that binds nothing of the sort. With any secret
+   * in scope the block's masker then threw on it — `value.charCodeAt is not a
+   * function` — and the step died: a step that references a variable nobody
+   * has captured, failing with a sentence about strings.
+   */
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
+    'renders a flat {{%s}} as (not yet captured), with a secret in scope',
+    async (name) => {
+      const { result, client } = await runStep(
+        'Verify the value is shown',
+        [plan([{ action: 'click', selector: '#go', description: 'Check' }])],
+        {
+          // A secret is what turns the wrong value into a throw: the block's
+          // `redact` is only reached when there is something to mask.
+          parameters: { password: 'hunter2-correct-horse' },
+          authored: `Verify {{${name}}} is shown`,
+        },
+      );
+      expect(result.status).toBe('passed');
+      expect(result.error).toBeUndefined();
+      expect(allRequestText(client)).toContain(
+        `- {{${name}}} resolved to "(not yet captured)" on this run`,
+      );
+    },
+  );
+
+  it('does the same on the guard path, which builds the block from the conditions', async () => {
+    const client = scriptedClient(['{"matched":"A","actions":[],"reasoning":"it holds"}']);
+    const verdict = await evaluateConditions(['{{constructor}} is shown'], {
+      page: fakePage(),
+      config: CONFIG,
+      aiClient: client,
+      contextContent: '',
+      testName: 'placeholders',
+      conversationHistory: [],
+      csrfTokens: {},
+      resolvedParameters: { password: 'hunter2-correct-horse' },
+    } as unknown as Parameters<typeof evaluateConditions>[1]);
+
+    expect(verdict.selected).toBe(0);
+    expect(allRequestText(client)).toContain(
+      '- {{constructor}} resolved to "(not yet captured)" on this run',
+    );
+  });
 });
 
 // ── The structured capture (SPEC-structured-table-reads.md §12, item 13) ────
@@ -435,6 +485,93 @@ describe('a readTable capture is stored as JSON under its name', () => {
     // `[]`, not undefined and not a missing entry: the reference resolves and
     // the loop over it is empty (§4.8).
     expect(parameters['orders']).toBe('[]');
+  });
+});
+
+// ── A capture that lands on a loop's item name ─────────────────────────────
+
+/**
+ * A rebind of a ROOT erases that root's dotted keys
+ * (docs/specs/SPEC-structured-table-reads.md §8.2).
+ *
+ * The rule was honoured by the two writers that know about it —
+ * `applyPassBindings` and `runSetStep` — and by nobody else. The executor's
+ * own three capture writes were plain `resolvedParameters[as] = value`, so
+ * `Read the order id from the summary [store as: order]` after a `For each
+ * {{order}} …` left `order.id` holding the last pass's id: a later
+ * `{{order.id}}` substituted a row the author had just overwritten, and
+ * §8.3's refusal could not fire on a key that was still there.
+ */
+describe('a capture that rebinds a loop"s item name', () => {
+  /** The map as it stands after the last pass of `For each {{order}} …`. */
+  const afterLoop = (): Record<string, string> => ({
+    order: '{"_row":"2","id":"B"}',
+    'order._row': '2',
+    'order.id': 'B',
+    other: 'kept',
+    'unrelated.id': 'kept too',
+  });
+
+  it('clears order.* on a single-value read', async () => {
+    const parameters = afterLoop();
+    const { result } = await runStep(
+      'Read the order id from the summary [store as: order]',
+      [plan([{ action: 'read', selector: '#summary', as: 'order', description: 'Read it' }])],
+      { parameters },
+    );
+    expect(result.status).toBe('passed');
+    expect(parameters['order']).toBe('CAPTURED');
+    expect(Object.hasOwn(parameters, 'order.id')).toBe(false);
+    expect(Object.hasOwn(parameters, 'order._row')).toBe(false);
+    // Nothing else is this rule's business.
+    expect(parameters['other']).toBe('kept');
+    expect(parameters['unrelated.id']).toBe('kept too');
+  });
+
+  it('clears order.* on a plural read, which stores a JSON array', async () => {
+    const parameters = afterLoop();
+    const plural = vi.mocked(await import('../src/browser/actions.js')).executeAction;
+    plural.mockImplementationOnce(async (_page: unknown, action: AIAction) => {
+      actions.received.push(action);
+      return { success: true, capturedValues: ['A', 'B'] };
+    });
+    await runStep(
+      'Read every order id [store as: order]',
+      [plan([{ action: 'read', selector: '#ids', as: 'order', multiple: true, description: 'Read them' } as AIAction])],
+      { parameters },
+    );
+    expect(parameters['order']).toBe('["A","B"]');
+    expect(Object.hasOwn(parameters, 'order.id')).toBe(false);
+  });
+
+  it('clears order.* on a readTable capture', async () => {
+    const parameters = afterLoop();
+    await runStep(
+      'Read the Orders table [store as: order]',
+      [plan([{
+        action: 'readTable',
+        selector: '#orders',
+        columns: [{ header: 'Order ID', key: 'id' }],
+        as: 'order',
+        description: 'Read the Orders table',
+      } as AIAction])],
+      { parameters },
+    );
+    expect(parameters['order']).toContain('ORD-1001');
+    expect(Object.hasOwn(parameters, 'order.id')).toBe(false);
+  });
+
+  it('leaves a DOTTED capture name alone — that is a property write, not a rebind', async () => {
+    // Nothing writes one today; the guard is on the flat spelling so that if
+    // one ever does, it cannot erase its own siblings.
+    const parameters = afterLoop();
+    await runStep(
+      'Read the id [store as: order.id]',
+      [plan([{ action: 'read', selector: '#id', as: 'order.id', description: 'Read it' }])],
+      { parameters },
+    );
+    expect(parameters['order.id']).toBe('CAPTURED');
+    expect(parameters['order._row']).toBe('2');
   });
 });
 
@@ -761,6 +898,30 @@ describe('a secret-named value never reaches the model', () => {
     // The payee is not a secret and the model needs it to find the row.
     expect(text).toContain('Acme');
     expect(text).toContain('- {{payment.password}} resolved to "***" on this run');
+  });
+
+  it('masks a secret that reached a NON-secret entry, by value', async () => {
+    // The other half of the ## Values block's masking, and the half nothing
+    // pinned end to end: `buildStepValues` reads the run's free-text mask set
+    // and `formatParameterBlock` applies it, so a secret that arrived in an
+    // ordinary entry by some route no NAME describes — a summary line built
+    // from the password, a capture that swallowed it — is masked in the block
+    // exactly as it is in the DOM snapshot three lines below.
+    //
+    // Only `{{summary}}` is referenced, so the block names one entry: the
+    // password's own entry is not in it, and nothing but the mask set can
+    // hide the value inside the summary.
+    const { client } = await runStep(
+      'Confirm the summary',
+      [plan([{ action: 'click', selector: '#go', description: 'Confirm' }])],
+      {
+        parameters: { password: 'hunter2-long', summary: 'signed in with hunter2-long' },
+        authored: 'Confirm {{summary}}',
+      },
+    );
+    const text = allRequestText(client);
+    expect(text).toContain('- {{summary}} resolved to "signed in with ***" on this run');
+    expect(text).not.toContain('hunter2-long');
   });
 });
 

@@ -243,15 +243,30 @@ export function isSecretFlatNameInline(name) {
   return SECRET_NAME.test(String(name));
 }
 
-/** Is `varName` a secret? The two rules of runner-core's `isSecretVarName`: a
- *  flat name is the author's, so the broad substring rule decides it; a dotted
- *  `root.property` is a record binding, so the root takes the flat rule and
- *  the property takes the record-column one. */
+/** The dotted name read as ONE record key: `api.key` → `api_key`. The record
+ *  rule, not the author rule, so it stays whole-word — a name that merely
+ *  contains `key` across the dot (`row.keyword`) is not caught by it. Kept
+ *  line for line with runner-core's and the server's copies; the parity test
+ *  compares all three bodies. */
+function wholeNameIsRecordSecretInline(name) {
+  return name.includes(".") && isRecordSecretKeyInline(name.split(".").join("_"));
+}
+
+/** Is `varName` a secret? The three rules of runner-core's `isSecretVarName`:
+ *  a flat name is the author's, so the broad substring rule decides it; a
+ *  dotted `root.property` is a record binding, so the root takes the flat rule
+ *  and the property takes the record-column one; and the whole dotted name is
+ *  read as one credential key too (`api.key` → `api_key`), because not every
+ *  dotted name is a binding. */
 export function isSecretVarNameInline(varName) {
   const name = String(varName);
   const dot = name.indexOf(".");
   if (dot < 0) return isSecretFlatNameInline(name);
-  return isSecretFlatNameInline(name.slice(0, dot)) || isRecordSecretKeyInline(name.slice(dot + 1));
+  return (
+    isSecretFlatNameInline(name.slice(0, dot))
+    || isRecordSecretKeyInline(name.slice(dot + 1))
+    || wholeNameIsRecordSecretInline(name)
+  );
 }
 
 function maskValueInline(value) {
@@ -283,10 +298,15 @@ function isPlainRecordInline(value) {
  *  bodies, so a change to one of them fails rather than drifts. */
 export function maskRecordSecretsInline(value) {
   const text = String(value);
-  if (!/^\s*[[{]/.test(text)) return text;
+  // A leading BOM is stripped before both the sniff and the parse. JS `\s`
+  // INCLUDES U+FEFF, so `\uFEFF[{"password":…}]` passed the sniff and then
+  // threw in JSON.parse, and the catch returned the credential unmasked —
+  // the one input shaped exactly like the case this function exists for.
+  const body = text.replace(/^\uFEFF/, "");
+  if (!/^\s*[[{]/.test(body)) return text;
   let parsed;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(body);
   } catch {
     return text;
   }
@@ -312,6 +332,21 @@ export function maskIfSecretInline(varName, value) {
   // `String(value)` on both paths, and the falsy guard before the mask, so a
   // row with no value yet renders exactly what it rendered before.
   if (!isSecretVarNameInline(varName)) return maskRecordSecretsInline(String(value));
+  if (!value) return "(empty)";
+  return maskValueInline(String(value));
+}
+
+/** The same, for a name that is author-chosen END TO END — the panel's copy of
+ *  runner-core's `maskIfSecretAuthored`, which is itself the mirror of the
+ *  server's `redactAuthoredMap`. The capture banner's `✎ name ← value` is one:
+ *  a `[store as:]` name is a word a person typed, so the WHOLE key takes the
+ *  broad flat rule rather than being split at the dot and handed to the narrow
+ *  record one. `api.key` and `user.apikey` printed in the clear here while the
+ *  report beside them said `***`. The Variables rows keep `maskIfSecretInline`:
+ *  those are scope entries, and a loop's `row.<column>` binding is half the
+ *  page's word. */
+export function maskIfSecretAuthoredInline(name, value) {
+  if (!isSecretFlatNameInline(name)) return maskRecordSecretsInline(String(value));
   if (!value) return "(empty)";
   return maskValueInline(String(value));
 }

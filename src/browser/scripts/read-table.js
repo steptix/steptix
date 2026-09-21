@@ -182,8 +182,11 @@
    * whose every data row a filter has hidden, measures ONE column wide over
    * the visible rows, and then `<td colspan="7">No scheduled payments.</td>`
    * reads as a message in one table and a merged cell in the next by accident
-   * of what was on screen. §4.8's placeholder rule and §7.3's header rule both
-   * ask this same question, so it is answered once, here, before either.
+   * of what was on screen. §4.8's placeholder rule asks this, and the
+   * headerless width below is this, so it is measured once, here, over the
+   * same rows. (§7.3's group-row step-over used to ask it too, and asking the
+   * BODY's width there is what made it swallow a genuine one-cell header —
+   * see `lastWideHeadingAt`, which is the question it actually has.)
    *
    * Taken BEFORE the header row is spliced out of `bodyRows`, which is safe:
    * the only reader that could see the difference is the headerless branch
@@ -192,6 +195,24 @@
   let widestBody = 0;
   for (const row of bodyRows) {
     if (row.cells.length > widestBody) widestBody = row.cells.length;
+  }
+
+  /**
+   * The LAST body row that carries a `<th>` and is more than one cell wide,
+   * by index; -1 when there is none.
+   *
+   * The one thing that tells a group heading apart from a genuine one-cell
+   * header: a group heading has the row that names the columns BELOW it, and
+   * a real header has only data below it. Measured once here because the
+   * candidate search below asks it per candidate, and `> i` answers "is there
+   * a later one" for every i at once. Such a row is always one the search
+   * would consider anyway — carrying a `<th>` satisfies the rendered-or-
+   * heading filter on its own.
+   */
+  let lastWideHeadingAt = -1;
+  for (let i = 0; i < bodyRows.length; i++) {
+    const cells = items(bodyRows[i].cells);
+    if (cells.length > 1 && cells.some((c) => c.tagName === 'TH')) lastWideHeadingAt = i;
   }
 
   // ── 3. the header row (§7.3) ─────────────────────────────────────────────
@@ -260,9 +281,20 @@
       // no header (it has no heading in it), and that stays — stepping over
       // one could reach a `<th>` further down that is a row-header column,
       // silently deleting a data row from the middle of the read.
+      //
+      // And narrow in the other direction too: what makes this row a group
+      // heading is the LATER, WIDER heading row it sits above, not the width
+      // of the body. Asked as `widestBody > 1`, the step swallowed a genuine
+      // one-cell header whose DATA rows are wider — §7.4's "extra cells are
+      // harmless", as in `<tr><th>Order ID</th></tr>` above
+      // `<tr><td>O-1</td><td><button>Delete</button></td></tr>`. That table
+      // read as "it has no header row" by header, and by position made
+      // `Order ID` record 1 and numbered every real row one too high: the
+      // same §4.5 misalignment the step-over was added to prevent, produced
+      // by the step-over itself.
       if (
         row.cells.length === 1
-        && widestBody > 1
+        && lastWideHeadingAt > i
         && items(row.cells).some((c) => c.tagName === 'TH')
       ) continue;
       first = row;

@@ -12,6 +12,12 @@
  * captured `[as: token]` flows to later steps unchanged.
  */
 import { isSecretName } from '../parser/parameters.js';
+import {
+  inheritLoopBindings,
+  isLoopBinding,
+  markLoopBindings,
+  unmarkLoopBindings,
+} from './loop-bindings.js';
 import { envDataSecretValues, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import type { TestReport } from '../report/types.js';
 
@@ -93,13 +99,31 @@ export function isRecordSecretKey(key: string): boolean {
 const RECORD_SECRET_MIN_LENGTH = 4;
 
 /**
+ * The loop-binding registry lives in its own module (./loop-bindings.js) so
+ * that src/parser/parameters.ts — whose `clearDottedKeys` must UNMARK what it
+ * drops — can import it without importing this file, which imports
+ * `isSecretName` from parameters.ts in turn. Re-exported here because the
+ * rules that consult it are here, and that is where a reader looks.
+ */
+export { markLoopBindings, unmarkLoopBindings, isLoopBinding, inheritLoopBindings };
+
+
+/**
  * Is a variable-map NAME a secret? The one rule for a name that may be dotted.
  *
  * A flat name is author-chosen end to end, so it keeps {@link isSecretName}'s
- * substring breadth. A dotted one — `row.keyword`, `order.password` — is half
- * author and half page: the author named the loop variable, the page named the
- * column. So it is a secret when the ROOT says so, or when the PROPERTY says
- * so under the whole-word record rule ({@link isRecordSecretKey}).
+ * substring breadth. A dotted one that a LOOP bound — `row.keyword`,
+ * `order.password`, registered by `applyPassBindings` — is half author and
+ * half page: the author named the loop variable, the page named the column. So
+ * it is a secret when the ROOT says so, or when the PROPERTY says so under the
+ * whole-word record rule ({@link isRecordSecretKey}).
+ *
+ * A dotted name in `map` that NO pass bound is a name a person typed — a data
+ * file's column heading, a `[store as:]` output — and gets `isSecretName` on
+ * the WHOLE key, the rule those had before the dotted split existed. Without
+ * `map` there is nothing to ask, and the answer is the binding rule: the
+ * callers with no map (`formatParameterBlock`, naming one parameter at a
+ * time) are the ones this file has always answered that way.
  *
  * Without the split, `isSecretName` read the joined name as one string and
  * `row.keyword` matched on `key` — so a `keyword` column bound as
@@ -118,9 +142,13 @@ const RECORD_SECRET_MIN_LENGTH = 4;
  * nothing but. That is the same reading the record rule gives `api_key`, so
  * `row.keyword` and `payment.sort_key` stay clear of it.
  */
-export function isSecretParameterName(name: string): boolean {
+export function isSecretParameterName(
+  name: string,
+  map?: Record<string, string>,
+): boolean {
   const dot = name.indexOf('.');
   if (dot === -1) return isSecretName(name);
+  if (map !== undefined && !isLoopBinding(map, name)) return isSecretName(name);
   return (
     isSecretName(name.slice(0, dot))
     || isRecordSecretKey(name.slice(dot + 1))
@@ -147,12 +175,15 @@ function wholeNameIsRecordSecret(name: string): boolean {
  * which the pass bindings reintroduced by name.
  *
  * An author-chosen name, flat or as the root of a dotted one, keeps no floor:
- * that name is a deliberate instruction.
+ * that name is a deliberate instruction. Neither does a dotted name in `map`
+ * that no pass bound — it is author-chosen end to end, so it is read whole,
+ * exactly as {@link isSecretParameterName} reads it.
  */
-function joinsMaskSet(name: string, value: string): boolean {
+function joinsMaskSet(name: string, value: string, map?: Record<string, string>): boolean {
   if (value.length === 0) return false;
   const dot = name.indexOf('.');
   if (dot === -1) return isSecretName(name);
+  if (map !== undefined && !isLoopBinding(map, name)) return isSecretName(name);
   if (isSecretName(name.slice(0, dot))) return true;
   return (
     (isRecordSecretKey(name.slice(dot + 1)) || wholeNameIsRecordSecret(name))
@@ -182,6 +213,24 @@ function pushBothForms(into: string[], value: string): void {
   if (escaped !== value) into.push(escaped);
 }
 
+/**
+ * The value without a leading byte-order mark.
+ *
+ * `\s` matches U+FEFF, so the shape sniffs below pass on a BOM and
+ * `JSON.parse` then throws on the same string — and both readers answer a
+ * parse failure with "not a record", silently. A capture read from a file, or
+ * handed over by a tool that read one, carries it.
+ */
+function withoutBom(value: string): string {
+  return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
+}
+
+/** Is this value shaped like a record, or a list of them? One sniff for both
+ *  readers, so neither can accept a shape the other drops. */
+function looksLikeRecords(body: string): boolean {
+  return /^\s*[[{]/.test(body);
+}
+
 /** The answer for a value that holds no records. One shared frozen array, so
  *  the memoised path can return by identity. */
 const NO_RECORD_SECRETS: readonly string[] = Object.freeze([]);
@@ -205,44 +254,49 @@ const recordSecretCache = new Map<string, readonly string[]>();
  * cost ~0.9 ms a call for one variable. The same string always has the same
  * answer, so the parse is done once.
  *
- * The sniff is on `[`, not on `[{`: a list may be pretty-printed or spaced by
- * whatever produced it (`[ {`, or a newline), and those forms read as
- * "not a record list" and masked nothing at all.
+ * The sniff is on `[` or `{`, not on `[{`: a list may be pretty-printed or
+ * spaced by whatever produced it (`[ {`, or a newline), and those forms read
+ * as "not a record list" and masked nothing at all — and a SINGLE record is a
+ * record too. `[store as: account]` on a one-row read stores `{…}`, and while
+ * {@link maskRecordSecrets} has always accepted both shapes, this half
+ * accepted only the list: the same `password` column was `***` in the
+ * Variables panel and printed in full in the run log, the report and the
+ * substituted step line. One sniff for both ({@link looksLikeRecords}), and a
+ * lone record is read as a one-element list.
  */
 export function recordSecretValues(value: string): readonly string[] {
-  if (!/^\s*\[/.test(value)) return NO_RECORD_SECRETS;
+  const body = withoutBom(value);
+  if (!looksLikeRecords(body)) return NO_RECORD_SECRETS;
   const cached = recordSecretCache.get(value);
   if (cached) return cached;
 
   const found: string[] = [];
   try {
-    const parsed: unknown = JSON.parse(value);
-    if (Array.isArray(parsed)) {
-      for (const item of parsed) {
-        if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
-        for (const [k, v] of Object.entries(item as Record<string, unknown>)) {
-          if (!isRecordSecretKey(k)) continue;
-          // A cell is not always a string. `readTable` only ever writes them,
-          // but a code-behind step or a tool can store
-          // `[{"password":123456}]`, and a scan that looked at strings alone
-          // left that six-digit code out of the set — so the report and the
-          // run log printed it in full. Its JSON spelling is what the outputs
-          // actually contain, and it is what `redact` has to look for.
-          // null, objects and arrays are still left alone: there is no single
-          // value there to find, and `String({})` would put `[object Object]`
-          // in the mask set. A boolean is left out too: `true` and `false`
-          // clear the floor, and a `token` column holding one would turn every
-          // "true" in the DOM snapshot into the mask. In place, inside the
-          // record, {@link maskRecordSecrets} still masks it — that replacement
-          // reaches nothing outside its own cell.
-          const text = typeof v === 'string'
-            ? v
-            : typeof v === 'number' ? String(v) : undefined;
-          // The floor is the same one a string cell clears, and for the same
-          // reason: this value is about to be replaced EVERYWHERE.
-          if (text !== undefined && text.length >= RECORD_SECRET_MIN_LENGTH) {
-            pushBothForms(found, text);
-          }
+    const parsed: unknown = JSON.parse(body);
+    for (const item of Array.isArray(parsed) ? parsed : [parsed]) {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+      for (const [k, v] of Object.entries(item as Record<string, unknown>)) {
+        if (!isRecordSecretKey(k)) continue;
+        // A cell is not always a string. `readTable` only ever writes them,
+        // but a code-behind step or a tool can store
+        // `[{"password":123456}]`, and a scan that looked at strings alone
+        // left that six-digit code out of the set — so the report and the
+        // run log printed it in full. Its JSON spelling is what the outputs
+        // actually contain, and it is what `redact` has to look for.
+        // null, objects and arrays are still left alone: there is no single
+        // value there to find, and `String({})` would put `[object Object]`
+        // in the mask set. A boolean is left out too: `true` and `false`
+        // clear the floor, and a `token` column holding one would turn every
+        // "true" in the DOM snapshot into the mask. In place, inside the
+        // record, {@link maskRecordSecrets} still masks it — that replacement
+        // reaches nothing outside its own cell.
+        const text = typeof v === 'string'
+          ? v
+          : typeof v === 'number' ? String(v) : undefined;
+        // The floor is the same one a string cell clears, and for the same
+        // reason: this value is about to be replaced EVERYWHERE.
+        if (text !== undefined && text.length >= RECORD_SECRET_MIN_LENGTH) {
+          pushBothForms(found, text);
         }
       }
     }
@@ -286,15 +340,23 @@ export function recordSecretValues(value: string): readonly string[] {
  * would delete structure the reader needs.
  *
  * A value nothing was masked in is returned as it arrived, character for
- * character: the re-stringify is compact, a tool may pretty-print, and
- * reformatting a value that held no secret would be this helper inventing a
- * change.
+ * character, because reformatting a value that held no secret would be this
+ * helper inventing a change.
+ *
+ * A value something WAS masked in is re-stringified COMPACTLY — plain
+ * `JSON.stringify`, no indent — so a pretty-printed capture comes back on one
+ * line, a leading byte-order mark is gone, and the key order is whatever
+ * `JSON.parse` preserved. That is deliberate rather than merely tolerated: the
+ * masked form is a diagnostic, its text no longer matches what the page or the
+ * tool produced, and pretending otherwise by preserving the layout would
+ * suggest it still does.
  */
 export function maskRecordSecrets(value: string): string {
-  if (!/^\s*[[{]/.test(value)) return value;
+  const body = withoutBom(value);
+  if (!looksLikeRecords(body)) return value;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(value);
+    parsed = JSON.parse(body);
   } catch {
     return value;
   }
@@ -329,7 +391,8 @@ export function maskRecordSecrets(value: string): string {
 export function secretValues(parameters: Record<string, string>, extra: string[] = []): string[] {
   const fromParameters: string[] = [];
   for (const [name, value] of Object.entries(parameters)) {
-    if (joinsMaskSet(name, value)) pushBothForms(fromParameters, value);
+    // The map itself decides which of its dotted names a loop bound.
+    if (joinsMaskSet(name, value, parameters)) pushBothForms(fromParameters, value);
   }
   const fromRecords: string[] = [];
   for (const value of Object.values(parameters)) {
@@ -356,11 +419,19 @@ export function runSecrets(run: {
 }
 
 /** Every occurrence of a secret value, replaced. Longest first, so a value
- *  that contains another is masked whole. */
+ *  that contains another is masked whole.
+ *
+ *  An EMPTY secret is skipped rather than applied: `''.split('')` is every
+ *  character of the text and `join(MASK)` puts the mask between all of them,
+ *  so one empty entry turns `report` into `r***e***p***o***r***t`. The callers
+ *  that build a list here drop empties already, but a list also arrives from
+ *  elsewhere (a merged row's stored `secrets`), and the guard belongs where
+ *  the damage would be done. */
 export function redact(text: string, secrets: string[]): string {
   if (secrets.length === 0) return text;
   let out = text;
   for (const secret of [...secrets].sort((a, b) => b.length - a.length)) {
+    if (secret === '') continue;
     out = out.split(secret).join(MASK);
   }
   return out;
@@ -424,13 +495,17 @@ export const EMPTY = '(empty)';
  *  secret-named entry whose value is not in `secrets` still says what it is.
  *  The one exception is an EMPTY one, which says {@link EMPTY} instead.
  *
- *  By {@link isSecretParameterName}, so a dotted pass binding is decided by
- *  its own two segments. No length floor applies here: the floor exists to
- *  keep a short value out of the FREE-TEXT set, where it would be replaced
- *  everywhere, and this entry is the one place that value is named. So
- *  `row.token = "7"` shows as `***` here while every other seven survives. */
+ *  By {@link isSecretParameterName}, ASKED ABOUT THIS MAP, so a dotted name a
+ *  loop bound is decided by its own two segments and a dotted one nobody bound
+ *  — a data file's `user.apikey` heading, merged into the same map by
+ *  `resolveParameters` — is decided whole, by the author rule.
+ *
+ *  No length floor applies here: the floor exists to keep a short value out of
+ *  the FREE-TEXT set, where it would be replaced everywhere, and this entry is
+ *  the one place that value is named. So `row.token = "7"` shows as `***` here
+ *  while every other seven survives. */
 export function redactMap(map: Record<string, string>, secrets: string[]): Record<string, string> {
-  return maskMapBy(map, secrets, isSecretParameterName);
+  return maskMapBy(map, secrets, (name) => isSecretParameterName(name, map));
 }
 
 /**

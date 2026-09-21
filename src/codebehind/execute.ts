@@ -1,5 +1,5 @@
 import type { Page, BrowserContext, Browser } from 'playwright';
-import { interpolate } from '../parser/parameters.js';
+import { bindVariable, interpolate } from '../parser/parameters.js';
 import { envDataRefsIn, interpolateEnvData, resolveEnvDataRef, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { createCapturingLog, type CapturedLog } from '../tools/step-api.js';
 import type { CodeBehindBinding, CodeBehindVarScope } from './loader.js';
@@ -366,9 +366,17 @@ function makeStepApi(
 ): CodeBehindStepApi {
   return {
     getVar(name) {
-      const renamed = scope.renames[name];
-      if (renamed !== undefined) return resolvedParameters[renamed];
-      const input = scope.inputs[name];
+      // Own properties throughout: a bare index into any of these three plain
+      // objects answers `getVar('constructor')` / `getVar('toString')` with a
+      // FUNCTION off `Object.prototype`, and the generated code — whose
+      // signature promises `string | undefined` — then acts on it.
+      const renamed = Object.hasOwn(scope.renames, name) ? scope.renames[name] : undefined;
+      if (renamed !== undefined) {
+        return Object.hasOwn(resolvedParameters, renamed)
+          ? resolvedParameters[renamed]
+          : undefined;
+      }
+      const input = Object.hasOwn(scope.inputs, name) ? scope.inputs[name] : undefined;
       // A caller may have passed `{{outer}}` through as the argument, which
       // the expander interpolates into the body text at run time rather than
       // at expansion time. Resolve it the same way here — and then resolve
@@ -389,16 +397,22 @@ function makeStepApi(
         }
         return interpolateEnvData(value, envData);
       }
-      const bare = resolvedParameters[name];
+      const bare = Object.hasOwn(resolvedParameters, name)
+        ? resolvedParameters[name]
+        : undefined;
       if (bare !== undefined) return bare;
       return envData ? resolveEnvDataRef(name, envData) : undefined;
     },
     setVar(name, value) {
-      const effective = scope.renames[name] ?? name;
+      const effective = (Object.hasOwn(scope.renames, name) ? scope.renames[name] : undefined) ?? name;
       const stored = Array.isArray(value)
         ? JSON.stringify(value)
         : typeof value === 'string' ? value : String(value);
-      resolvedParameters[effective] = stored;
+      // Through the one helper: a code-behind capture can land on a name a
+      // `For each` is binding, and §8.2 says a rebind of a root erases that
+      // root's dotted keys — otherwise the last pass's `order.id` answers
+      // every later `{{order.id}}`.
+      bindVariable(resolvedParameters, effective, stored);
       outputs[effective] = stored;
     },
     expect(condition, message) {

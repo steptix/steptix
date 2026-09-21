@@ -901,6 +901,28 @@ test('values text: the same masking every surface shows', () => {
   assert.equal(rowValuesText({ email: 'a@b.c', password: 'pw' }), 'email=a@b.c, password=**');
 });
 
+// A data file's headings are words a person typed, dots included, so the whole
+// key takes the AUTHOR rule — the same `redactAuthoredMap` the report's matrix
+// gives these cells. Splitting `user.apikey` at the dot and asking the narrow
+// record rule about `apikey` answered no, so this text (the Run Rows pick, the
+// gutter hover, the Output banner) printed `uk_live_1234` beside a report cell
+// reading `***`. The pre-feature client starred it.
+test('values text: a dotted COLUMN is still the author’s word, whole', () => {
+  for (const column of ['user.apikey', 'user.apitoken', 'row.mypassword', 'login.passkey', 'api.key']) {
+    assert.equal(
+      rowValuesText({ [column]: 'uk_live_1234' }),
+      `${column}=********`,
+      column,
+    );
+  }
+});
+
+test('values text: an ordinary dotted column still reads', () => {
+  // The author rule is a substring rule, not a rule that masks every dot.
+  assert.equal(rowValuesText({ 'user.email': 'a@b.c' }), 'user.email=a@b.c');
+  assert.equal(rowValuesText({ 'payment.payee': 'Alinta' }), 'payment.payee=Alinta');
+});
+
 // ---------------------------------------------------------------------------
 // The matrix a file has before anybody runs it
 // ---------------------------------------------------------------------------

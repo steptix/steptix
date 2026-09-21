@@ -6,6 +6,7 @@ import {
   interpretReplCommand,
   isSecretVarName,
   maskIfSecret,
+  maskIfSecretAuthored,
   maskRecordSecrets,
 } from '../dist/repl.js';
 
@@ -313,6 +314,68 @@ test('isSecretVarName answers the split question too', () => {
   assert.equal(isSecretVarName('sort_key'), true);
 });
 
+// The third clause, and the one the two halves cannot supply between them: the
+// WHOLE dotted name read as one credential key, dots as separators. Not every
+// dotted name is a pass binding — `api.key` is one word split by a dot, and
+// the server has always masked it (`wholeNameIsRecordSecret`, the third arm of
+// `isSecretParameterName` in src/utils/secrets.ts). Measured before the fix:
+// `isSecretVarName('api.key') === false` while the report said `***`.
+test('a dotted name that reads as one credential key is a secret whole', () => {
+  for (const name of ['api.key', 'private.key', 'service.access.key', 'auth.keys']) {
+    assert.equal(isSecretVarName(name), true, name);
+    assert.equal(maskIfSecret(name, 'uk_live_1234'), '*'.repeat(8), name);
+  }
+});
+
+test('…and it is the RECORD rule doing that reading, so it stays whole-word', () => {
+  // Joined, these are `row_keyword`, `payment_sort_key`, `order_monkey`: the
+  // narrow rule says no to all three, which is what keeps a loop binding over
+  // a `keyword` column readable in the view beside a report that prints it.
+  for (const name of ['row.keyword', 'payment.sort_key', 'order.monkey']) {
+    assert.equal(isSecretVarName(name), false, name);
+    assert.equal(maskIfSecret(name, 'search'), 'search', name);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// maskIfSecretAuthored — the author rule on the WHOLE key
+// ---------------------------------------------------------------------------
+//
+// The mirror of the server's `redactAuthoredMap`, for the two maps whose keys
+// are author-chosen end to end: a data row's cells and a step's `[store as:]`
+// outputs. `maskIfSecret`'s two-segment rule is the variable map's, and it
+// answered no about `user.apikey` — so the Run Rows pick, the gutter hover and
+// the Output banner printed `uk_live_1234` beside a report matrix saying
+// `***`. The pre-feature client starred it.
+test('maskIfSecretAuthored: the whole dotted key takes the flat author rule', () => {
+  for (const name of ['user.apikey', 'user.apitoken', 'row.mypassword', 'login.passkey', 'api.key']) {
+    assert.equal(maskIfSecretAuthored(name, 'uk_live_1234'), '*'.repeat(8), name);
+  }
+});
+
+test('maskIfSecretAuthored: a flat name answers exactly as maskIfSecret does', () => {
+  for (const [name, value] of [
+    ['password', 'hunter2'],
+    ['MACHINE_KEY', 'abc'],
+    ['keyword', 'search'],
+    ['username', 'alice'],
+    ['payee', 'Origin Energy'],
+    ['password', ''],
+  ]) {
+    assert.equal(maskIfSecretAuthored(name, value), maskIfSecret(name, value), name);
+  }
+});
+
+test('maskIfSecretAuthored: a value whose NAME says nothing is still scanned', () => {
+  // Same second half as `maskIfSecret`: a capture under `payments` is a whole
+  // table, and the record-column rule is what hides the password column in it.
+  const capture = JSON.stringify([{ payee: 'Alinta', password: 'hunter2-not-real' }]);
+  const shown = maskIfSecretAuthored('payments', capture);
+  assert.ok(!shown.includes('hunter2-not-real'), shown);
+  assert.ok(shown.includes('Alinta'), shown);
+  assert.equal(maskIfSecretAuthored('payee', 'Origin Energy'), 'Origin Energy');
+});
+
 // ---------------------------------------------------------------------------
 // maskRecordSecrets
 // ---------------------------------------------------------------------------
@@ -406,6 +469,21 @@ test('maskRecordSecrets: a value it does not change is returned byte for byte', 
   // mask would be this helper inventing a change.
   const spaced = '[\n  { "payee": "Alinta" }\n]';
   assert.equal(maskRecordSecrets(spaced), spaced);
+});
+
+test('maskRecordSecrets: a leading BOM does not smuggle a record past the sniff', () => {
+  // U+FEFF is whitespace to JS, so `/^\s*[[{]/` said yes and `JSON.parse`
+  // then threw — and the catch returns the value untouched, which is the one
+  // outcome this function exists to prevent. A file read as UTF-8-with-BOM is
+  // where it comes from.
+  const withBom = '\uFEFF[{"password":"hunter2"}]';
+  assert.equal(maskRecordSecrets(withBom), '[{"password":"*******"}]');
+  // Not a record even with the BOM gone: returned exactly as it arrived, BOM
+  // included, because nothing was masked in it.
+  assert.equal(maskRecordSecrets('\uFEFFOrigin Energy'), '\uFEFFOrigin Energy');
+  assert.equal(maskRecordSecrets('\uFEFF[not json'), '\uFEFF[not json');
+  const readable = '\uFEFF[{"payee":"Alinta"}]';
+  assert.equal(maskRecordSecrets(readable), readable);
 });
 
 test('maskIfSecret: a capture under a plain name is masked INSIDE', () => {

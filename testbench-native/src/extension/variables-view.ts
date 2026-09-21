@@ -14,13 +14,29 @@ import { compareVariableNames, maskIfSecret, type FrameInfo } from 'ai-ui-automa
  * mystery hiding.
  *
  * Secret-named entries are masked via `maskIfSecret` from runner-core, which
- * carries the rule and the reason: a flat name by the author's word list
- * (`password`, `secret`, `token`, `key`, each as a WORD, so `api_key` masks
- * and `keyword` does not), a dotted `record.column` by the narrower
- * record-column rule on its property. The same call also masks the secret
- * COLUMNS inside a value that holds records — a `readTable` capture is a whole
- * table under one ordinary name, which no name rule can catch. Every other
- * name shows the raw value.
+ * carries the rule and the reason. A FLAT name is the author's own word and
+ * takes the server's SUBSTRING rule (`password`, `secret`, `token` or `key`
+ * anywhere in it), so a flat `keyword` and a flat `monkey` are masked here —
+ * the accepted price of copying the server, because the report beside this
+ * view masks them too. A DOTTED `record.column` is half the page's word, and
+ * it is the narrower record-column rule on the property that keeps
+ * `payment.keyword` and `payment.sort_key` readable. The whole dotted name is
+ * read as one credential key as well (`api.key` → `api_key`), because not
+ * every dotted name is a loop binding.
+ *
+ * The same call also masks the secret COLUMNS inside a value that holds
+ * records — a `readTable` capture is a whole table under one ordinary name,
+ * which no name rule can catch. Every other name shows the raw value.
+ *
+ * A surface whose names are author-chosen END TO END — a data row's cells, a
+ * `[store as:]` capture banner — uses `maskIfSecretAuthored` instead, which
+ * puts the whole key through the flat rule. This view is not one of those: a
+ * scope holds a loop's bindings.
+ *
+ * `## Config`'s `unmask` hatch does not reach here. It is read on the server
+ * and governs the report, the run log and the prompt; nothing on the wire
+ * carries it, so a name an author has unmasked still renders starred in this
+ * view (spec §7.6, §14).
  */
 export interface ScopeSource {
   /** Current scope to render, or empty when no run is in flight. */

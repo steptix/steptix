@@ -11,7 +11,7 @@
 
 import {
   extractSections,
-  maskIfSecret,
+  maskIfSecretAuthored,
   matchText,
   parseControlLine,
   parseDataRows,
@@ -442,10 +442,17 @@ export function dataRowLinesOf(text: string): number[] {
 }
 
 /** `"k=v, k=v"` with secrets masked — the same text the Output banner, the
- *  panel and the gutter hover use, so no surface can word a row differently. */
+ *  panel and the gutter hover use, so no surface can word a row differently.
+ *
+ *  By the AUTHOR rule on the whole column name, which is what the server's
+ *  `redactAuthoredMap` gives the same cells in the report's matrix
+ *  (src/report/merge-rows.ts). A data file's headings are words a person
+ *  typed, dots included, so `user.apikey` must not be split at the dot and
+ *  handed to the narrow record rule: it printed `uk_live_1234` here beside a
+ *  report cell reading `***`. */
 export function rowValuesText(values: Record<string, string>): string {
   return Object.entries(values)
-    .map(([k, v]) => `${k}=${maskIfSecret(k, v)}`)
+    .map(([k, v]) => `${k}=${maskIfSecretAuthored(k, v)}`)
     .join(', ');
 }
 
