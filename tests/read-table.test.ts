@@ -530,6 +530,69 @@ describe('readTable — empty tables and placeholder rows', () => {
     expect(outcome.placeholdersSkipped).toBe(1);
   });
 
+  it('reads a HEADERLESS table whose only row is the message as [] (§4.8)', async () => {
+    // `scheduled-payments.html` with nothing scheduled. The width was measured
+    // over the RENDERED rows only, so the lone message row made the table one
+    // column wide, `width > 1` never fired, and the read failed with
+    // "merged headers or cells" on a table §4.8 says must answer [].
+    await load(`
+      <table id="scheduled-payments" aria-label="Scheduled payments"><tbody>
+        <tr><td colspan="7">No scheduled payments.</td></tr>
+      </tbody></table>`);
+    const outcome = await readTableRecords(page, {
+      selector: '#scheduled-payments',
+      columns: [{ index: 1, key: 'payee' }, { index: 3, key: 'amount' }],
+    });
+    expect(outcome.records).toEqual([]);
+    expect(outcome.placeholdersSkipped).toBe(1);
+  });
+
+  it('reads a FILTERED headerless table, every data row hidden, as [] (§4.8)', async () => {
+    // Same cause with the rows still in the DOM: a filter hid all three, the
+    // "no matches" row rendered, and the visible-rows-only width was 1 again.
+    await load(`
+      <table id="t" aria-label="Scheduled payments"><tbody>
+        <tr class="row-hidden"><td>Origin Energy</td><td>REF-1</td><td>$120.00</td></tr>
+        <tr class="row-hidden"><td>Acme Water</td><td>REF-2</td><td>$80.00</td></tr>
+        <tr><td colspan="3">No payments match this filter.</td></tr>
+      </tbody></table>`);
+    const outcome = await readTableRecords(page, {
+      selector: '#t',
+      columns: [{ index: 1, key: 'payee' }],
+    });
+    expect(outcome.records).toEqual([]);
+    expect(outcome.placeholdersSkipped).toBe(1);
+  });
+
+  it('reads a one-column table with a header and a colspan="2" message row as []', async () => {
+    // The other half of the unified test: in a one-column table a lone cell
+    // spanning TWO columns is still a message, not a merged grid — but the
+    // one-column guard (`width > 1`) had excluded the whole table from the
+    // rule, so this failed as a merged cell.
+    await load(`
+      <table id="t" aria-label="Statuses">
+        <thead><tr><th>Status</th></tr></thead>
+        <tbody><tr><td colspan="2">No statuses yet.</td></tr></tbody>
+      </table>`);
+    const outcome = await readTableRecords(page, {
+      selector: '#t',
+      columns: [{ header: 'Status', key: 'status' }],
+    });
+    expect(outcome.records).toEqual([]);
+    expect(outcome.placeholdersSkipped).toBe(1);
+    // And an ordinary one-column row — colSpan 1 — is still data, which is
+    // what `Math.max(width, 2)` protects.
+    await load(`<table id="u" aria-label="Names"><tbody>
+      <tr><td>Alice</td></tr><tr><td>Bob</td></tr>
+    </tbody></table>`);
+    const data = await readTableRecords(page, {
+      selector: '#u',
+      columns: [{ index: 1, key: 'name' }],
+    });
+    expect(data.records).toEqual([{ _row: '1', name: 'Alice' }, { _row: '2', name: 'Bob' }]);
+    expect(data.placeholdersSkipped).toBe(0);
+  });
+
   it('still fails a colspan narrower than the table (§10)', async () => {
     await load(`
       <table id="t" aria-label="Pending transfers">
@@ -619,6 +682,66 @@ describe('readTable — tables that silently read as []', () => {
     expect(result.capturedRecords).toEqual([
       { _row: '1', id: 'O-1' },
       { _row: '2', id: 'O-2' },
+    ]);
+  });
+
+  it('finds the header in the body when an EMPTY <thead> element sits above it', async () => {
+    // The branch keyed on the PRESENCE of a `<thead>`, not on whether a header
+    // row was found in it. A framework that renders `<thead></thead>` and puts
+    // the headings in the first `<tbody>` row therefore read as headerless:
+    // positionally the heading text became record 1 and every `_row` was one
+    // too high, and by header the read failed "it has no header row".
+    const html = `
+      <table id="t" aria-label="Orders">
+        <thead></thead>
+        <tbody>
+          <tr><td><input type="checkbox" aria-label="Select all"></td><th>Order ID</th><th>Status</th></tr>
+          <tr><td><input type="checkbox"></td><td>O-1</td><td>Paid</td></tr>
+          <tr><td><input type="checkbox"></td><td>O-2</td><td>Due</td></tr>
+        </tbody>
+      </table>`;
+    await load(html);
+    expect(await page.locator('#t thead').count()).toBe(1);
+    const positional = await run({ selector: '#t', columns: [{ index: 2, key: 'id' }] });
+    expect(positional.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1' },
+      { _row: '2', id: 'O-2' },
+    ]);
+    const byHeader = await run({
+      selector: '#t',
+      columns: [{ header: 'Order ID', key: 'id' }, { header: 'Status', key: 'status' }],
+    });
+    expect(byHeader.capturedRecords).toEqual([
+      { _row: '1', id: 'O-1', status: 'Paid' },
+      { _row: '2', id: 'O-2', status: 'Due' },
+    ]);
+  });
+
+  it('looks past a hidden template row to find the heading row (§7.3)', async () => {
+    // The same two failures from the other direction: the body branch looked
+    // at `bodyRows[0]` BEFORE the visibility filter, so a `display:none`
+    // template row — the standard way to clone a row in plain JS — stood in
+    // front of the headings and the table read as headerless.
+    const html = `
+      <table id="t" aria-label="Orders"><tbody>
+        <tr class="row-hidden" id="tpl"><td></td><td>—</td><td>—</td></tr>
+        <tr><td></td><th>Order ID</th><th>Status</th></tr>
+        <tr><td></td><td>O-1</td><td>Paid</td></tr>
+        <tr><td></td><td>O-2</td><td>Due</td></tr>
+      </tbody></table>`;
+    await load(html);
+    expect(await page.locator('#tpl').evaluate(
+      (el: Element) => (el as HTMLElement).getClientRects().length,
+    )).toBe(0);
+    const positional = await run({ selector: '#t', columns: [{ index: 3, key: 'status' }] });
+    expect(positional.capturedRecords).toEqual([
+      { _row: '1', status: 'Paid' },
+      { _row: '2', status: 'Due' },
+    ]);
+    const byHeader = await run({ selector: '#t', columns: [{ header: 'Status', key: 'status' }] });
+    expect(byHeader.capturedRecords).toEqual([
+      { _row: '1', status: 'Paid' },
+      { _row: '2', status: 'Due' },
     ]);
   });
 
@@ -771,6 +894,26 @@ describe('readTable — structural refusals', () => {
         </tbody>
       </table>`);
     expect(await refusal({ selector: '#t', columns: [{ header: 'Account', key: 'account' }] }))
+      .toBe('readTable cannot map table "Accounts by region": merged headers or cells (rowspan/colspan > 1) are not supported');
+  });
+
+  it('refuses rowspan="0", which spans to the end of the row group', async () => {
+    // `rowspan="0"` is legal HTML for "to the end of this row group", and
+    // Chromium reports `el.rowSpan === 0` for it — which `rowSpan > 1` missed
+    // entirely. The grid below it is shifted exactly as a `rowspan="2"` one
+    // is, but the read SUCCEEDED and stored `Bonus` as row 2's Balance.
+    await load(`
+      <table id="t" aria-label="Accounts by region">
+        <thead><tr><th>Region</th><th>Balance</th></tr></thead>
+        <tbody>
+          <tr><td rowspan="0">New South Wales</td><td>$1,234.56</td></tr>
+          <tr><td>$8,410.00</td><td>Bonus</td></tr>
+        </tbody>
+      </table>`);
+    expect(await page.locator('#t tbody td').first().evaluate(
+      (el: Element) => (el as HTMLTableCellElement).rowSpan,
+    )).toBe(0);
+    expect(await refusal({ selector: '#t', columns: [{ header: 'Balance', key: 'balance' }] }))
       .toBe('readTable cannot map table "Accounts by region": merged headers or cells (rowspan/colspan > 1) are not supported');
   });
 
@@ -1097,7 +1240,105 @@ describe('readTable — how a refusal names the table', () => {
   it('refuses an empty column list', async () => {
     await load(ORDERS_HTML);
     await expect(readTableRecords(page, { selector: '#orders', columns: [] }))
-      .rejects.toThrow('readTable requires at least one column');
+      .rejects.toThrow('readTable has an empty "columns" array — name at least one column to read');
+  });
+});
+
+// ── §6.2 validation, on the helper path too (§9.2) ──────────────────────────
+//
+// "Identical validation in both paths" was true of the 20-column cap and of
+// nothing else: every other §6.2 rule lived in `action-parser.ts` alone, so
+// phase 3's generated `tables.read` — which calls the extractor directly and
+// never sees the parser — got a silently wrong read where the AI action gets a
+// precise refusal. One exported validator now answers for both, which is what
+// these pin: the same rule, and the same sentence.
+
+describe('readTable — §6.2 column and limit validation on the helper path', () => {
+  /** The message the PARSER gives for the same malformed action, minus its
+   *  `at index N` prefix — so a drift in either path shows up here. */
+  function parserMessage(action: Record<string, unknown>): string {
+    try {
+      parseAIResponse(JSON.stringify({
+        actions: [{ action: 'readTable', selector: '#orders', as: 'rows', description: 'd', ...action }],
+        reasoning: '',
+      }));
+    } catch (err) {
+      return String((err as Error).message).replace('readTable action at index 0', 'readTable');
+    }
+    throw new Error('the parser accepted it');
+  }
+
+  async function bothRefuse(
+    request: { columns: TableReadColumn[]; limit?: number },
+    expected: string,
+  ): Promise<void> {
+    await load(ORDERS_HTML);
+    await expect(readTableRecords(page, { selector: '#orders', ...request }))
+      .rejects.toThrow(expected);
+    expect(parserMessage(request as unknown as Record<string, unknown>)).toBe(expected);
+  }
+
+  it('refuses the reserved key `_row` instead of overwriting it with the row number', async () => {
+    // Unvalidated, `record[rowKey] = String(rowNumber)` was written first and
+    // the author's `_row` column overwrote it — or, ordered the other way,
+    // theirs was overwritten. Either way the read succeeded and one of the two
+    // values was gone.
+    await bothRefuse(
+      { columns: [{ header: 'Order ID', key: '_row' }] },
+      'readTable: column 1 uses the reserved key "_row" — the runtime writes the row number on every record',
+    );
+  });
+
+  it('refuses a dangerous key instead of dropping the column', async () => {
+    // `record['__proto__'] = …` on an object literal assigns nothing: the
+    // column silently vanished from every record, and the loop over them
+    // failed later on a property that was never there.
+    await bothRefuse(
+      { columns: [{ header: 'Order ID', key: '__proto__' }] },
+      'readTable: column 1 uses the reserved key "__proto__"',
+    );
+  });
+
+  it('refuses a column that names neither a header nor a position', async () => {
+    // It reached the page and came back as
+    // `there is no cell at position undefined for "id"` — a message about the
+    // table, for a fault in the request.
+    await bothRefuse(
+      { columns: [{ key: 'id' }] },
+      'readTable: column 1 has neither "header" nor "index" — name the column by its header text or by its one-based position',
+    );
+  });
+
+  it('refuses `limit: 0` instead of reading nothing and succeeding', async () => {
+    // `limit: 0` sliced zero rows and stored `[]`, so the loop over it ran
+    // zero passes and the step passed — §2's silent-`[]` outcome, reached
+    // through the request rather than the DOM.
+    await bothRefuse(
+      { columns: [{ header: 'Order ID', key: 'id' }], limit: 0 },
+      'readTable has an invalid "limit" 0 — use a whole number from 1 to 500',
+    );
+  });
+
+  it('refuses a limit above the 500-row cap instead of stepping around it', async () => {
+    // With any `limit` the unbounded 500-row guard does not apply, so
+    // `limit: 99999` was a way to ask for a 20,000-row capture the spec
+    // refuses (§7.5).
+    await bothRefuse(
+      { columns: [{ header: 'Order ID', key: 'id' }], limit: 99999 },
+      'readTable has an invalid "limit" 99999 — use a whole number from 1 to 500',
+    );
+  });
+
+  it('still reads a valid request, so the validator is not just a refusal', async () => {
+    await load(ORDERS_HTML);
+    const outcome = await readTableRecords(page, {
+      selector: '#orders',
+      columns: ORDERS_COLUMNS,
+      limit: 1,
+    });
+    expect(outcome.records).toEqual([
+      { _row: '1', id: 'ORD-1001', customer: 'Alice Smith', status: 'Completed' },
+    ]);
   });
 });
 

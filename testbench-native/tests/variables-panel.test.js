@@ -4,6 +4,7 @@ import {
   classifyCaptureSource,
   collectVariables,
   maskIfSecretInline,
+  maskRecordSecretsInline,
 } from "../src/webview/lib/variables-panel.js";
 
 test("collectVariables: empty text + no values → empty list", () => {
@@ -303,4 +304,87 @@ test("maskIfSecretInline: a word that merely contains one is not a secret", () =
 test("maskIfSecretInline: empty secret values say so, and long ones cap at 8", () => {
   assert.equal(maskIfSecretInline("password", ""), "(empty)");
   assert.equal(maskIfSecretInline("password", "a".repeat(50)), "*".repeat(8));
+});
+
+// A dotted name is `root.property`, and the property came off a page rather
+// than out of the author's head — so the narrow record-column rule decides it
+// (SPEC-structured-table-reads.md §7.6). The panel used to apply the broad
+// word list to both halves and hid `payment.sort_key`, which the report
+// prints.
+test("maskIfSecretInline: a dotted property takes the record-column rule", () => {
+  assert.equal(maskIfSecretInline("payment.sort_key", "abc"), "abc");
+  assert.equal(maskIfSecretInline("payment.key", "K-1"), "K-1");
+  assert.equal(maskIfSecretInline("payment.keys", "a,b"), "a,b");
+  assert.equal(maskIfSecretInline("payment.apikey", "abc"), "abc");
+  assert.equal(maskIfSecretInline("payment.api_key", "abc"), "***");
+  assert.equal(maskIfSecretInline("payment.pwd", "abc"), "***");
+  assert.equal(maskIfSecretInline("payment.otp", "abc"), "***");
+});
+
+test("maskIfSecretInline: the ROOT is still the author's word", () => {
+  // A record the author stored as `token` says what it is by its name, so the
+  // whole thing is hidden whatever its columns are called.
+  assert.equal(maskIfSecretInline("token.payee", "Origin Energy"), "*".repeat(8));
+  assert.equal(maskIfSecretInline("sort_key", "abc"), "***", "a FLAT name keeps the broad rule");
+});
+
+// ---------------------------------------------------------------------------
+// maskRecordSecretsInline
+// ---------------------------------------------------------------------------
+//
+// A `readTable` capture is a whole table under ONE ordinary name
+// (`payments`), and one pass's record under another (`payment`), so no name
+// rule can catch either. `frame:scope` carries raw values by design, so this
+// render is the only guard — and the panel showed both in full beside a
+// `payment.password` row rendered `********`, which reads as "masked".
+
+test("maskRecordSecretsInline: a list of records loses its secret columns", () => {
+  const capture = JSON.stringify([
+    { _row: "1", payee: "Origin Energy", password: "hunter2-not-real" },
+    { _row: "2", payee: "Alinta", password: "swordfish" },
+  ]);
+  const masked = maskRecordSecretsInline(capture);
+  assert.ok(!masked.includes("hunter2-not-real"), masked);
+  assert.ok(!masked.includes("swordfish"), masked);
+  assert.deepEqual(JSON.parse(masked), [
+    { _row: "1", payee: "Origin Energy", password: "*".repeat(8) },
+    { _row: "2", payee: "Alinta", password: "*".repeat(8) },
+  ]);
+});
+
+test("maskRecordSecretsInline: one record, and the readable columns survive", () => {
+  const masked = maskRecordSecretsInline(JSON.stringify({ payee: "Alinta", api_key: "pk-live-1" }));
+  assert.deepEqual(JSON.parse(masked), { payee: "Alinta", api_key: "*".repeat(8) });
+});
+
+test("maskRecordSecretsInline: anything that is not a record list is untouched", () => {
+  for (const value of ["Origin Energy", "", "[not json", "{oops}", '[ "a", "b" ]', "42"]) {
+    assert.equal(maskRecordSecretsInline(value), value, JSON.stringify(value));
+  }
+  const spaced = '[\n  { "payee": "Alinta" }\n]';
+  assert.equal(maskRecordSecretsInline(spaced), spaced, "a value nothing was masked in is not reformatted");
+});
+
+test("maskIfSecretInline: a capture under a plain name is masked INSIDE", () => {
+  const capture = JSON.stringify([{ payee: "Alinta", password: "hunter2-not-real" }]);
+  const shown = maskIfSecretInline("payments", capture);
+  assert.ok(!shown.includes("hunter2-not-real"), shown);
+  assert.ok(shown.includes("Alinta"), "the readable columns survive");
+  const record = JSON.stringify({ payee: "Alinta", password: "hunter2-not-real" });
+  assert.ok(!maskIfSecretInline("payment", record).includes("hunter2-not-real"));
+});
+
+test("maskIfSecretInline: a secret-named capture is still masked whole", () => {
+  const capture = JSON.stringify([{ payee: "Alinta", password: "hunter2" }]);
+  assert.equal(maskIfSecretInline("tokens", capture), "*".repeat(8));
+});
+
+// The skill-rerun scope editor decides read-only from exactly this: a value we
+// have to mask cannot be an editable input, because the mask is what the edit
+// would send back (testbench-runner.jsx, `display !== value`).
+test("maskIfSecretInline: a masked row is one whose render differs from its value", () => {
+  const capture = JSON.stringify([{ payee: "Alinta", password: "hunter2-not-real" }]);
+  assert.notEqual(maskIfSecretInline("payments", capture), capture, "must be read-only");
+  assert.notEqual(maskIfSecretInline("MACHINE_KEY", "abc"), "abc", "must be read-only");
+  assert.equal(maskIfSecretInline("payee", "Alinta"), "Alinta", "stays editable");
 });

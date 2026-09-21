@@ -50,6 +50,14 @@
  * its own way of emitting them.
  */
 
+// The one import, and it is a fact about the GRAMMAR rather than a dependency
+// on the world: whether a record's key can become a `{{item.key}}` binding is
+// decided by the property segment of `PLACEHOLDER_NAME_SOURCE`, which lives
+// with the rest of the placeholder grammar. A second copy of
+// `[A-Za-z_][A-Za-z0-9_]*` here is exactly the mirror this repository keeps
+// finding drifted. Nothing about the import performs I/O.
+import { isBindableProperty } from '../parser/parameters.js';
+
 /**
  * What the expander recorded about one guard, keyed by the guard's own
  * absolute index in the flat step list (stories/control-flow.md §Design).
@@ -877,23 +885,6 @@ export function forEachPassOf(
 }
 
 /**
- * A property name safe to expose as `{{item.property}}`: the spec's identifier
- * rule (§8.2), which is also what an alias must satisfy at the other end
- * (§4.1).
- */
-const SAFE_PROPERTY = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-/** The three names that are not data. `__proto__` on a plain object literal
- *  from `JSON.parse` is an own property rather than the setter, but a binding
- *  named after one of these travels into maps that are not — and a variable
- *  called `constructor` is a trap wherever it lands. */
-const DANGEROUS_PROPERTIES: ReadonlySet<string> = new Set([
-  '__proto__',
-  'prototype',
-  'constructor',
-]);
-
-/**
  * Validate what `{{list}}` holds for a `For each`, and bind its elements.
  *
  * A JSON array and nothing else (decision 10): a list that came from a `Set`
@@ -909,14 +900,34 @@ const DANGEROUS_PROPERTIES: ReadonlySet<string> = new Set([
  * flattened recursively — one property segment is all v1 addresses.
  *
  * A key that is not a safe identifier, or is one of the three prototype names,
- * FAILS the guard naming the one-based item index, and binds nothing at all.
- * Partial bindings are the failure mode this rule exists for: a loop that
+ * binds nothing and is REPORTED — `unspellable`, which the caller logs once
+ * per loop entry (`evaluateGuard`, control-runtime.ts). It used to fail the
+ * guard, and review 2 found that costs more than it buys: a `For each` over a
+ * tool's or an API's array of objects, using `{{item}}` as JSON text and no
+ * dotted binding at all, stopped running the moment one record carried a
+ * `content-type` — a regression against §2's promise that existing `For each`
+ * behaviour is preserved, for a binding nothing had asked for.
+ *
+ * What made the old rule look necessary was partial binding: a loop that
  * silently dropped `order.id` would run every pass against an empty string.
+ * That danger is gone at the other end — a dotted reference with no binding
+ * is refused before the model is asked (`dottedReferenceError`), and its
+ * message names the dropped keys — so a key that cannot be spelled is a fact
+ * to report, not a run to stop.
  */
 export function parseListValue(
   name: string,
   raw: string | undefined,
-): { items: string[]; properties: Array<Record<string, string> | undefined> } | { error: string } {
+):
+  | {
+      items: string[];
+      properties: Array<Record<string, string> | undefined>;
+      /** Keys that bound nothing, distinct and in first-seen order across the
+       *  whole list. Absent when there are none, so a caller that compares the
+       *  whole object sees exactly what it did before. */
+      unspellable?: string[];
+    }
+  | { error: string } {
   if (raw === undefined) {
     return {
       error:
@@ -936,7 +947,9 @@ export function parseListValue(
 
   const items: string[] = [];
   const properties: Array<Record<string, string> | undefined> = [];
-  for (const [i, element] of parsed.entries()) {
+  /** A Set, so twenty rows of the same shape name their dropped key once. */
+  const unspellable = new Set<string>();
+  for (const element of parsed) {
     items.push(typeof element === 'string' ? element : JSON.stringify(element));
     if (!isPlainRecord(element)) {
       properties.push(undefined);
@@ -944,36 +957,22 @@ export function parseListValue(
     }
     const fields: Record<string, string> = {};
     for (const key of Object.keys(element)) {
-      const refusal = unsafePropertyReason(key);
-      if (refusal !== undefined) {
-        return {
-          error:
-            `\`{{${name}}}\` item ${i + 1} has a property named \`${key}\`, which ` +
-            `${refusal}. Every property becomes a \`{{item.property}}\` binding, so ` +
-            `rename it — the read step's \`… as <alias>\`, or the field the tool returns.`,
-        };
+      if (!isBindableProperty(key)) {
+        unspellable.add(key);
+        continue;
       }
       fields[key] = propertyText((element as Record<string, unknown>)[key]);
     }
     properties.push(fields);
   }
 
-  return { items, properties };
+  return { items, properties, ...(unspellable.size > 0 && { unspellable: [...unspellable] }) };
 }
 
 /** A JSON object — not an array, not null, and not something `JSON.parse`
  *  cannot produce. */
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** Why a record's key cannot become a dotted binding, or undefined. */
-function unsafePropertyReason(key: string): string | undefined {
-  if (DANGEROUS_PROPERTIES.has(key)) return 'is a reserved JavaScript name';
-  if (!SAFE_PROPERTY.test(key)) {
-    return 'is not a name a placeholder can spell (letters, digits and underscores, not starting with a digit)';
-  }
-  return undefined;
 }
 
 /** One property value as the text its `{{item.property}}` binding holds

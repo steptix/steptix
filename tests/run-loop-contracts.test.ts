@@ -16,10 +16,17 @@
  * shared mechanism is the one they all reach for — the cheap check that a
  * fourth loop, or a revert of one of the three, cannot pass.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { applyPassBindings } from '../src/runner/control-runtime.js';
+import { applyPassBindings, evaluateGuard } from '../src/runner/control-runtime.js';
+import {
+  createControlState,
+  planAfterStep,
+  type ControlRecord,
+  type ControlState,
+} from '../src/runner/control-flow.js';
+import { logger } from '../src/utils/logger.js';
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -126,6 +133,113 @@ describe('every run loop hands its flow-control claim to the executor', () => {
     const body = source(file);
     expect(body).toMatch(/parseFlowControlStep\((raw|original)[A-Za-z]*\)/);
     expect(body).toContain('flowControlClaim }');
+  });
+});
+
+/**
+ * A key no placeholder can spell is reported, not fatal
+ * (docs/specs/SPEC-structured-table-reads.md §8.2).
+ *
+ * Here for the same reason as everything else in this file: `evaluateGuard` is
+ * the ONE place a `For each` reads its list, in all three loops, so the line
+ * is written once and cannot ship in two of three. It is also the only place
+ * that knows the loop has been entered — a pass revisit asks the planner
+ * nothing and reads no list, which is what makes "once per loop entry" a
+ * property of the helper rather than of each caller's bookkeeping.
+ */
+describe('a For each list with keys a placeholder cannot spell', () => {
+  const FOREACH: (ControlRecord | null)[] = [
+    {
+      kind: 'foreach',
+      item: 'order',
+      list: 'orders',
+      bodyStart: 1,
+      bodyEnd: 1,
+      label: 'Check the order',
+    },
+    null,
+    null,
+  ];
+  const ORDERS =
+    '[{"id":"A","status":"x","content-type":"t","Order ID":"1"},' +
+    '{"id":"B","status":"y","content-type":"t"}]';
+
+  /** `evaluateGuard` with only what the `list` branch touches — it asks no
+   *  model and reads no page, which is why a bare options object is honest
+   *  here rather than a shortcut. */
+  const visit = (state: ControlState, parameters: Record<string, string>) =>
+    evaluateGuard({
+      controls: FOREACH,
+      index: 0,
+      state,
+      resolvedParameters: parameters,
+      executorOptions: {} as never,
+    });
+
+  const infoLines = async (fn: () => Promise<void>): Promise<string[]> => {
+    const seen: string[] = [];
+    const spy = vi.spyOn(logger, 'info').mockImplementation((message: string) => {
+      seen.push(message);
+    });
+    try {
+      await fn();
+    } finally {
+      spy.mockRestore();
+    }
+    return seen;
+  };
+
+  it('runs every pass, binds the spellable keys, and says what it dropped — once', async () => {
+    const state = createControlState();
+    let first: Awaited<ReturnType<typeof visit>> | undefined;
+    const lines = await infoLines(async () => {
+      first = await visit(state, { orders: ORDERS });
+      // Pass 2, the way a run loop reaches it: the body step, then the guard
+      // again. Nothing re-reads the list, so nothing logs a second time.
+      planAfterStep(FOREACH, 1, state);
+      await visit(state, { orders: ORDERS });
+    });
+
+    expect(first!.error).toBeUndefined();
+    expect(first!.plan.pass!.bindings).toEqual({
+      order: '{"id":"A","status":"x","content-type":"t","Order ID":"1"}',
+      'order.id': 'A',
+      'order.status': 'x',
+    });
+    expect(lines.filter((l) => l.includes('cannot be referenced'))).toEqual([
+      'For each {{order}}: 2 properties cannot be referenced as placeholders ' +
+        '(content-type, Order ID)',
+    ]);
+  });
+
+  it('says nothing when every key is spellable', async () => {
+    const lines = await infoLines(async () => {
+      await visit(createControlState(), { orders: '[{"id":"A"}]' });
+    });
+    expect(lines.filter((l) => l.includes('cannot be referenced'))).toEqual([]);
+  });
+
+  it('words one dropped key in the singular', async () => {
+    const lines = await infoLines(async () => {
+      await visit(createControlState(), { orders: '[{"id":"A","content-type":"t"}]' });
+    });
+    expect(lines.filter((l) => l.includes('cannot be referenced'))).toEqual([
+      'For each {{order}}: 1 property cannot be referenced as a placeholder (content-type)',
+    ]);
+  });
+
+  it('masks a secret value that turns up in a key', async () => {
+    // The line is written from the RECORD, so it goes through the run's
+    // masker like every other string this module writes.
+    const lines = await infoLines(async () => {
+      await visit(createControlState(), {
+        password: 'hunter2',
+        orders: '[{"id":"A","hunter2 header":"t"}]',
+      });
+    });
+    expect(lines.filter((l) => l.includes('cannot be referenced'))).toEqual([
+      'For each {{order}}: 1 property cannot be referenced as a placeholder (*** header)',
+    ]);
   });
 });
 

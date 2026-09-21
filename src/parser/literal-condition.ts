@@ -2,7 +2,8 @@
  * A control-line condition whose operands are all literals once the
  * placeholders are substituted — and which therefore has an answer in the text
  * (stories/control-flow.md §Runtime; docs/specs/SPEC-structured-table-reads.md
- * §8.2, where every dotted-binding condition is of this shape).
+ * §8.3a, which is the rule this file implements — §8.2 is the BINDINGS such a
+ * condition reads).
  *
  * ## Why this exists
  *

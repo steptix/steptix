@@ -8,6 +8,7 @@ import {
 import {
   PLACEHOLDER_SOURCE,
   WIDE_PLACEHOLDER_SOURCE,
+  isBindableProperty,
   placeholderProperty,
   placeholderRoot,
 } from '../parser/parameters.js';
@@ -140,6 +141,39 @@ export function collectReferences(text: string): CollectedReferences {
 }
 
 /**
+ * The one sentence three refusals share: the model's action
+ * ({@link checkOneString}), a `Set` template ({@link resolveSetTemplate}) and
+ * the author's own step text ({@link dottedReferenceError}). Same mistake,
+ * same fix, and a reader who has seen it once should not have to read a
+ * variant of it.
+ */
+const NO_SPACES_SENTENCE = (key: string): string =>
+  `A placeholder carries no spaces inside its braces — write \`{{${key}}}\`.`;
+
+/**
+ * The keys of a record that could never have become dotted bindings —
+ * `content-type`, `Order ID` — or empty for anything that is not a record.
+ *
+ * Read back out of the ROOT's own binding, which for a `For each` pass is the
+ * row's compact JSON (§8.2). That is deliberate and it is the cheap half of
+ * the design: the alternative was to carry the dropped keys on the loop's
+ * cursor, through the verdict, through `planForStart`'s rebuild and into four
+ * call sites, to say something the value in hand already answers — and to
+ * answer it for the CURRENT pass, which is the only pass the message is about.
+ */
+function unspellableKeysOf(rootValue: string | undefined): string[] {
+  if (rootValue === undefined || !rootValue.startsWith('{')) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rootValue);
+  } catch {
+    return [];
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return [];
+  return Object.keys(parsed).filter((key) => !isBindableProperty(key));
+}
+
+/**
  * The refusal for a `{{item.property}}` this run cannot answer, or undefined
  * when every dotted reference the text makes has a binding
  * (docs/specs/SPEC-structured-table-reads.md §8.3).
@@ -160,6 +194,15 @@ export function collectReferences(text: string): CollectedReferences {
  * which the planner knows and this module does not
  * ({@link forEachPassOf}, control-flow.ts). Omitted, the message simply leaves
  * that clause out rather than guessing a number.
+ *
+ * The SPELLING is refused first, and only for a dotted name. `{{ order.id }}`
+ * matches the wide grammar and not the narrow one, so `interpolate` leaves it
+ * alone and the braces reach the model — the exact failure
+ * `WIDE_PLACEHOLDER_SOURCE` exists to catch, promised in its docstring and
+ * kept by `checkOneString` for what the MODEL writes. Review 2 found this half
+ * missing: a resolvable `{{ order.id }}` was neither substituted, refused nor
+ * warned about. A flat `{{ name }}` keeps its legacy silence, for the same
+ * reason the rest of this function is dotted-only.
  */
 export function dottedReferenceError(
   text: string,
@@ -167,8 +210,13 @@ export function dottedReferenceError(
   passOf?: ((item: string) => number | undefined) | undefined,
 ): string | undefined {
   if (!text.includes('{{')) return undefined;
-  for (const { name } of collectReferences(text).placeholders) {
+  for (const { name, raw } of collectReferences(text).placeholders) {
     if (placeholderProperty(name) === undefined) continue;
+    const canonical = `{{${name}}}`;
+    // Before "has no value", because a name spelled with spaces has no value
+    // by construction and the fix is the spelling either way. The second
+    // sentence is `checkOneString`'s, word for word.
+    if (raw !== canonical) return `This line wrote \`${raw}\`. ${NO_SPACES_SENTENCE(name)}`;
     if (Object.hasOwn(parameters, name)) continue;
 
     const root = placeholderRoot(name);
@@ -186,8 +234,20 @@ export function dottedReferenceError(
       const property = placeholderProperty(key);
       if (property !== undefined) available.push(property);
     }
+    const unspellable = unspellableKeysOf(parameters[root]);
     if (available.length > 0) {
-      return `${prefix}; available properties are ${available.join(', ')}`;
+      const aside =
+        unspellable.length > 0
+          ? ` (${unspellable.join(', ')} cannot be spelled as ` +
+            `${unspellable.length === 1 ? 'a placeholder' : 'placeholders'})`
+          : '';
+      return `${prefix}; available properties are ${available.join(', ')}${aside}`;
+    }
+    if (unspellable.length > 0) {
+      return (
+        `${prefix}; {{${root}}} has no properties that can be spelled as ` +
+        `placeholders (${unspellable.join(', ')})`
+      );
     }
     if (Object.hasOwn(parameters, root)) {
       return `${prefix}; {{${root}}} holds no properties — it is not an object`;
@@ -464,10 +524,7 @@ function checkOneString(
       // Right name, wrong spelling: `{{ email }}` matches nothing the
       // substituter replaces, so the page would receive the braces.
       const key = ctx.known.has(name) ? name : (nearMatch(name, ctx.known) ?? name);
-      return (
-        `${where}wrote \`${raw}\` in "${field}". A placeholder carries no spaces ` +
-        `inside its braces — write \`{{${key}}}\`.`
-      );
+      return `${where}wrote \`${raw}\` in "${field}". ${NO_SPACES_SENTENCE(key)}`;
     }
     if (ctx.known.has(name)) continue;
     const near = nearMatch(name, ctx.known);
@@ -569,11 +626,7 @@ export function resolveSetTemplate(
     const canonical = `{{${ref}}}`;
     if (raw !== canonical) {
       const key = known.has(ref) ? ref : (nearMatch(ref, known) ?? ref);
-      return {
-        error:
-          `${where} wrote \`${raw}\`. A placeholder carries no spaces inside ` +
-          `its braces — write \`{{${key}}}\`.`,
-      };
+      return { error: `${where} wrote \`${raw}\`. ${NO_SPACES_SENTENCE(key)}` };
     }
     if (known.has(ref)) continue;
     const near = nearMatch(ref, known);

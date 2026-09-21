@@ -1168,17 +1168,47 @@ names are `env` and `data`. String leaves in any data JSON that look like
 
 ### 4.4 Secrets
 
-A variable whose name matches `password`, `secret`, `token` or `key` (case
-insensitive, anywhere in the name) is masked as `***` in the console, the
-report, the run log and the `## Values` block. The model never sees the value;
+**A name you chose** — a parameter, a `[store as:]` capture, a `${…}`
+reference — is a secret when `password`, `secret`, `token` or `key` appears
+anywhere in it, case insensitive. The value is masked as `***` in the console,
+the report, the run log and the `## Values` block. The model never sees it;
 the executor substitutes it when acting. Never write `***` as a value
 yourself; the framework refuses an action containing it. If a non-secret name
 is caught by the rule, list it under `unmask` in `## Config`.
 
-The rule reaches inside a table read, where the name that would carry it is the
-table's: a `password` or `token` column of a record in `{{users}}` is masked on
-every surface even though `users` is not a secret name, and the
-`{{user.password}}` a pass binds is masked by its property segment.
+**A name the page chose** is decided more narrowly. A table read's column
+aliases and a tool's record keys are not your words, and a substring rule
+there hides the wrong things: `keyword` and `sort_key` both contain `key`, and
+a masked value is replaced *everywhere*, including in the page snapshot the
+model plans its next action from — so a `sort_key` column masked by accident
+can stop the next step finding the row. A record column is a secret when it
+contains `password`, `passwd`, `pwd`, `secret`, `token`, `otp` or
+`credential`/`credentials` as a whole word, or `key` with something that makes
+it a credential in front: `api_key`, `apiKey`, `access_key`, `private_key`,
+`auth_key`, `signing_key`, `encryption_key`. A camelCase hump counts as a word
+break, so `apiKey` masks and `apikey` does not; plain `key`, `keys`,
+`sort_key` and `keyword` are readable columns.
+
+**A loop binding is where the two meet.** `{{user.password}}` is masked
+because the column says so; `{{token.payee}}` because you called the record
+`token`; `{{payment.sort_key}}` by neither, so it shows. Either half is
+enough.
+
+**Length matters in exactly one place.** A value that a record column
+contributes has to be at least four characters before the framework will hunt
+for it in free text — a `token` column holding `-` and `7` would otherwise
+turn every dash and every seven in every output into `***`. An entry masked by
+its *name* has no such floor: it is hidden under its own name, where nothing
+else can be caught by it, so a one-character `password` parameter or
+`{{user.pwd}}` binding is still hidden.
+
+**Where it applies.** The report, the run log, the console step line, the
+`## Values` block and the DOM the model is shown — and, on the client side,
+TestBench's Variables view and its Variables panel. Those two mask the same
+way, and they also look *inside* a captured value: a `readTable` capture is a
+whole table under one ordinary name (`{{payments}}`), and the record one pass
+binds (`{{payment}}`) is one row of it, so no name rule could catch either.
+They render with each secret column replaced and the other columns readable.
 
 Keep real credentials in `.env` files, referenced as `$NAME` from
 `## Parameters`, and never in generated Markdown.

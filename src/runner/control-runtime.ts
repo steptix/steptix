@@ -237,6 +237,28 @@ export async function evaluateGuard(args: {
             durationMs: Date.now() - startedAt,
           };
         }
+        if (parsed.unspellable !== undefined) {
+          // Keys that bound nothing — `content-type`, `Order ID` — said once
+          // per loop ENTRY, which is what this branch is: a pass that resumes
+          // a cursor it already holds asks the planner nothing and reads no
+          // list, so the line cannot repeat per pass
+          // (docs/specs/SPEC-structured-table-reads.md §8.2).
+          //
+          // `info` rather than `warn`, because nothing is wrong: the loop
+          // runs, and the author needs this only if they go looking for
+          // `{{order.contenttype}}`. Masked, like every other string this
+          // module writes from a run's values — a key can carry one.
+          const record = controls[index];
+          const item = record?.kind === 'foreach' ? record.item : request.list;
+          const n = parsed.unspellable.length;
+          const said =
+            n === 1
+              ? '1 property cannot be referenced as a placeholder'
+              : `${n} properties cannot be referenced as placeholders`;
+          logger.info(
+            redactText(`For each {{${item}}}: ${said} (${parsed.unspellable.join(', ')})`),
+          );
+        }
         // `properties` rides along beside `items`: the planner turns it into
         // `{{item.property}}` bindings, and a list of scalars carries an
         // entry of `undefined` per element rather than nothing at all
@@ -635,19 +657,11 @@ export class LoopRuntime {
     return undefined;
   }
 
-  /** Is `index` inside any loop's body? Drives the step-cache opt-out, which
-   *  is a property of the FILE rather than of the run — so it takes the
-   *  records, not the stack. */
-  static insideLoopBody(
-    controls: readonly (ControlRecord | null)[],
-    index: number,
-  ): boolean {
-    for (const record of controls) {
-      if (!record || !isLoopRecord(record)) continue;
-      if (index >= record.bodyStart && index <= record.bodyEnd) return true;
-    }
-    return false;
-  }
+  // (There was an `insideLoopBody` here. It had no caller, and its docstring
+  //  claimed to drive the step-cache opt-out — which is really the
+  //  `loopBodySteps` set each loop builds from the records once, up front
+  //  (test-runner.ts, session-manager.ts). Two answers to one question, one of
+  //  them unreachable, is worse than none.)
 
   // ── Frame aliases (the Sessions API's half) ───────────────────────────────
 

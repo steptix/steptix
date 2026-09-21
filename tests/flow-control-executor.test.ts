@@ -111,6 +111,20 @@ function fakePage(): Page {
   } as unknown as Page;
 }
 
+/**
+ * A page that can actually be photographed, for the failure-screenshot tests.
+ *
+ * `captureScreenshot` reads the PNG's own IHDR for its size, so the buffer has
+ * to be long enough to have one — 24 bytes, whose base64 is what the row then
+ * carries. The default {@link fakePage} throws instead, which is why every
+ * other failing test in this file has no `screenshotBase64` and is unaffected.
+ */
+const SHOT = Buffer.alloc(24).toString('base64');
+
+function photographablePage(): Page {
+  return { ...fakePage(), screenshot: async () => Buffer.alloc(24) } as unknown as Page;
+}
+
 const CONFIG: Config = {
   ...DEFAULT_CONFIG,
   ai: { ...DEFAULT_CONFIG.ai, sendScreenshots: false },
@@ -154,6 +168,9 @@ async function runStep(
      *  as every loop hands it over for a `{{placeholder}}` step. The claim is
      *  computed from THIS, as the loops compute it. Defaults to `instruction`. */
     authored?: string;
+    /** A page whose `screenshot` answers, for the two failure paths that take
+     *  one. The default {@link fakePage} throws there on purpose. */
+    page?: Page;
   } = {},
 ) {
   const client = scriptedClient(responses);
@@ -164,7 +181,7 @@ async function runStep(
     3,
     instruction,
     {
-      page: fakePage(),
+      page: opts.page ?? fakePage(),
       config: opts.config ?? CONFIG,
       aiClient: client,
       contextContent: '',
@@ -968,6 +985,75 @@ describe('a claimed step whose condition is answered by the values', () => {
     );
     expect((result as StepResult).status).toBe('passed');
     expect(client.requests).toHaveLength(0);
+  });
+
+  /**
+   * A locally decided failure is still a failure, and a failure has a picture.
+   *
+   * The two other paths that produce this very row both take one on
+   * `execution.screenshotOnFailure`: the judged `fail` through the executor's
+   * shared catch, and the unconditional `Fail the test with error "…"` in each
+   * run loop. The local path built its row by hand and took none — so the same
+   * authored line, answered from the values instead of by the model, reached
+   * the report with the failure screenshot missing and nothing saying why.
+   */
+  describe('the failure screenshot', () => {
+    const FAIL = 'If Overdue is "Overdue", then fail the test with error "Still overdue"';
+    const AUTHORED = 'If {{payment.status}} is "Overdue", then fail the test with error "Still overdue"';
+    const params = { 'payment.status': 'Overdue' };
+
+    it('is taken on a locally decided fail, as it is on the judged one', async () => {
+      const { result, client } = await runStep(FAIL, [plan([])], {
+        claim: true,
+        authored: AUTHORED,
+        parameters: params,
+        page: photographablePage(),
+      });
+      const failed = result as StepResult;
+      expect(failed.status).toBe('failed');
+      expect(failed.screenshotBase64).toBe(SHOT);
+      // Still no model call: the picture is the only thing this adds.
+      expect(client.requests).toHaveLength(0);
+
+      // The judged path's row, for the same line, is the comparison.
+      const judged = await runStep(
+        'If the Overdue badge is shown, then fail the test with error "Still overdue"',
+        [plan([{ action: 'fail', description: 'the badge is shown' }])],
+        { claim: true, page: photographablePage() },
+      );
+      expect((judged.result as StepResult).screenshotBase64).toBe(SHOT);
+    });
+
+    it('is not taken when the config says not to', async () => {
+      const { result } = await runStep(FAIL, [plan([])], {
+        claim: true,
+        authored: AUTHORED,
+        parameters: params,
+        page: photographablePage(),
+        config: {
+          ...CONFIG,
+          execution: { ...CONFIG.execution, screenshotOnFailure: false },
+        },
+      });
+      const failed = result as StepResult;
+      expect(failed.status).toBe('failed');
+      expect(failed.screenshotBase64).toBeUndefined();
+    });
+
+    it.each([
+      ['return', 'If Overdue is "Overdue", then return', 'If {{payment.status}} is "Overdue", then return'],
+      ['stop', 'If Overdue is "Overdue", then stop', 'If {{payment.status}} is "Overdue", then stop'],
+    ])('is never taken by a `then %s`, which passes', async (_verb, line, authored) => {
+      const { result } = await runStep(line, [plan([])], {
+        claim: true,
+        authored,
+        parameters: params,
+        page: photographablePage(),
+      });
+      const passed = result as StepResult;
+      expect(passed.status).toBe('passed');
+      expect(passed.screenshotBase64).toBeUndefined();
+    });
   });
 
   it('masks a secret out of the sentence it decided from', async () => {

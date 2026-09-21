@@ -728,7 +728,7 @@ export async function executeStep(
   //
   // The cache is not a consideration either way: `cacheEnabledFor` already
   // returns false for any step carrying a claim.
-  const locallyDecided = decideFlowControlLocally(stepIndex, instruction, opts, startTime);
+  const locallyDecided = await decideFlowControlLocally(stepIndex, instruction, opts, startTime);
   if (locallyDecided) return applyFailureTail(withStale(locallyDecided), opts);
 
   const cacheEnabled = cacheEnabledFor(opts);
@@ -880,11 +880,7 @@ export async function executeStep(
     );
 
     // Capture failure screenshot (full-page for report visibility)
-    let failureScreenshot: string | undefined;
-    if (opts.config.execution.screenshotOnFailure) {
-      const shot = await captureScreenshot(opts.page, opts.config.browser.fullPageScreenshots);
-      failureScreenshot = shot?.base64;
-    }
+    const failureScreenshot = await failureShot(opts);
 
     // Collect turns from the final failed attempt too — unless `onFailure`
     // already took them, which it does for a failure `withRetry` declined to
@@ -993,12 +989,12 @@ function composeDeliberateFailure(
  * is what stops a diagnosis pass guessing at a failure the author wrote out.
  * The only visible difference is whose words are in `aiExplanation`.
  */
-function decideFlowControlLocally(
+async function decideFlowControlLocally(
   stepIndex: number,
   instruction: string,
   opts: StepExecutorOptions,
   startTime: number,
-): StepResult | undefined {
+): Promise<StepResult | undefined> {
   const claim = opts.flowControlClaim;
   // The CONDITIONAL form only. The unconditional one never reaches the
   // executor — the run loops dispatch it themselves, with no model call
@@ -1044,13 +1040,41 @@ function decideFlowControlLocally(
   // never diagnosed.
   const composed = composeDeliberateFailure(claim, instruction, local.reasoning, secrets);
   logger.error(`Step ${stepIndex} failed as written: ${composed}`);
+  // …and the same picture, on the same switch. This is the ONE thing this path
+  // touches the page for, and it is the one thing a reader of the report will
+  // look for: the judged `fail` and the unconditional `Fail the test with
+  // error "…"` both carry one, and a row that differed only in who decided the
+  // condition read as a capture that had failed (review 2, finding 3).
+  const screenshotBase64 = await failureShot(opts);
   return {
     ...base,
     status: 'failed',
     error: composed,
     deliberate: true,
+    ...(screenshotBase64 !== undefined && { screenshotBase64 }),
     aiExplanation: `The step's condition held (${local.reasoning}) and the step says to fail the test.`,
   };
+}
+
+/**
+ * The picture a failed step carries, or undefined when the config says not to
+ * take one (`execution.screenshotOnFailure`).
+ *
+ * One function because this file has TWO paths that end a step as failed —
+ * the shared catch, and the locally decided `fail` above — and review 2 found
+ * the second taking no screenshot at all. The third path lives in each run
+ * loop (the unconditional `Fail the test with error "…"`, test-runner.ts and
+ * its two siblings), which has its own `page` and `config` in hand and reads
+ * the same switch.
+ *
+ * Full-page or not is the browser config's answer, as it is everywhere else,
+ * and a capture that fails is already non-fatal (`captureScreenshot` logs and
+ * answers null) — a row is not worth failing over its illustration.
+ */
+async function failureShot(opts: StepExecutorOptions): Promise<string | undefined> {
+  if (!opts.config.execution.screenshotOnFailure) return undefined;
+  const shot = await captureScreenshot(opts.page, opts.config.browser.fullPageScreenshots);
+  return shot?.base64;
 }
 
 /** Where the run is right now, for a row built without touching the page.

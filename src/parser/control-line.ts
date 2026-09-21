@@ -397,6 +397,13 @@ export function parseControlLine(instruction: string): ControlLine | null {
  * next form that defines one (a `For each … with index {{n}}`, say) should
  * extend this rather than grow a second accessor.
  *
+ * The names here are FLAT, and `interpolate` is where that stops mattering:
+ * it exempts a reference whose ROOT is in the set, so the properties of the
+ * item — `{{order.id}}` in `For each {{order}} in {{orders}}, Click the row
+ * whose Order ID is "{{order.id}}"`, which is the spec's own recommended form
+ * — are exempt with it. Round 1 exempted the bare item only, and that header
+ * went on logging `Unresolved placeholder: {{order.id}}` on every loop entry.
+ *
  * Every run loop that interpolates step text passes it — the CLI got it last,
  * having shipped without it — and `tests/run-loop-contracts.test.ts` pins that
  * they all do. A rule that lives in two loops out of three is the recurring

@@ -23,7 +23,11 @@ import path from 'node:path';
 import { interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { isCodeStep as isInvocationStep } from '../parser/invocation-parser.js';
 import { parseSetStep, setStepError } from '../parser/set-step.js';
-import { PLACEHOLDER_SOURCE, placeholderProperty } from '../parser/parameters.js';
+import {
+  PLACEHOLDER_SOURCE,
+  placeholderProperty,
+  placeholderRoot,
+} from '../parser/parameters.js';
 import { controlLineError, parseControlLine } from '../parser/control-line.js';
 import { parseTestContent, resolveDataSourcePath } from '../parser/markdown.js';
 import type { ParsedSection, ParsedTest } from '../parser/types.js';
@@ -856,9 +860,8 @@ function missingParameters(
       // correct table loop. The runtime check is the one that can answer it,
       // with the pass's bindings in hand (`dottedReferenceError`). What IS
       // worth saying is that no loop in this list binds the root at all.
-      const property = placeholderProperty(name);
-      if (property !== undefined) {
-        if (!boundByLoop.has(name.slice(0, name.length - property.length - 1))) missing.add(name);
+      if (placeholderProperty(name) !== undefined) {
+        if (!boundByLoop.has(placeholderRoot(name))) missing.add(name);
         continue;
       }
       // `hasOwn` for the same reason as above: `{{toString}}` would otherwise

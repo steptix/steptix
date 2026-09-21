@@ -825,22 +825,29 @@ describe('TestBench Variables panel (Phase 4)', function () {
     void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
+    const PASSWORD = 'hunter2-not-a-real-one';
+    // `Amount` capitalised, because an alias is whatever the author wrote and
+    // the ordering below has to hold for an upper-case one too.
     const record = {
       _row: '3',
       payee: 'Origin Energy',
-      amount: '$86.10',
+      Amount: '$86.10',
       status: 'Paused',
-      password: 'hunter2-not-a-real-one',
+      password: PASSWORD,
     };
+    const capture = JSON.stringify([
+      { _row: '1', payee: 'Origin Energy', Amount: '$140.00', status: 'Due', password: PASSWORD },
+      record,
+    ]);
     fake.push({
       type: 'frame:scope',
       frameId: '',
       scope: {
-        payments: '[…]',
+        payments: capture,
         payment: JSON.stringify(record),
         'payment._row': record._row,
         'payment.payee': record.payee,
-        'payment.amount': record.amount,
+        'payment.Amount': record.Amount,
         'payment.status': record.status,
         'payment.password': record.password,
       },
@@ -851,20 +858,21 @@ describe('TestBench Variables panel (Phase 4)', function () {
     const names = items.map((i) => i.name);
     const byName = Object.fromEntries(items.map((i) => [i.name, i.description]));
 
-    for (const key of ['payment', 'payment._row', 'payment.payee', 'payment.amount']) {
+    for (const key of ['payment', 'payment._row', 'payment.payee', 'payment.Amount']) {
       assert.ok(names.includes(key), `${key} must be listed`);
     }
-    // `_row` leads the record's properties. The view orders the whole scope
-    // rather than preserving arrival order, and `_` sorts ahead of every
-    // letter, so the reserved row number comes first either way — which is
-    // the order §7.4 asks for and the reason nothing here needed changing.
+    // `_row` leads the record's properties (§7.4). The view orders the whole
+    // scope rather than preserving arrival order, and a plain `.sort()` does
+    // NOT deliver this: `_` is code unit 95, between the upper-case letters
+    // and the lower-case ones, so `payment.Amount` came first. The view sorts
+    // with runner-core's `compareVariableNames`, which says so explicitly.
     const properties = names.filter((n) => n.startsWith('payment.'));
     assert.equal(properties[0], 'payment._row', 'the row number leads the properties');
 
     // The pass's own values, which is the whole point of reading them here
     // rather than off the file: row 3 is $86.10, row 1 is $140.00.
     assert.equal(byName['payment._row'], '3');
-    assert.equal(byName['payment.amount'], '$86.10');
+    assert.equal(byName['payment.Amount'], '$86.10');
     assert.equal(byName['payment.payee'], 'Origin Energy');
     // Masking reads the property segment, so a secret column is hidden even
     // though the variable it arrived under is called `payment` (§8.4).
@@ -880,6 +888,27 @@ describe('TestBench Variables panel (Phase 4)', function () {
       '*'.repeat(8),
       'a secret-named property must render as the mask, not as its value and not as nothing',
     );
+
+    // …and the two rows the name rule cannot catch. `payments` is the whole
+    // table and `payment` is one record of it, both under names the author
+    // chose and neither of which says secret — so they rendered in full,
+    // password and all, immediately above a `payment.password` row showing
+    // `********`. `frame:scope` carries raw values by design (the wire was
+    // left alone when redaction shipped), so this render is the only guard.
+    for (const key of ['payment', 'payments']) {
+      assert.ok(
+        byName[key] !== undefined && byName[key].length > 0,
+        `${key} must still be shown, not hidden`,
+      );
+      assert.ok(
+        !byName[key].includes(PASSWORD),
+        `${key} rendered its password column: ${byName[key]}`,
+      );
+    }
+    // Masked inside, not masked whole: the readable columns are why the view
+    // is worth looking at during a loop.
+    assert.ok(byName.payments.includes('Origin Energy'), byName.payments);
+    assert.ok(byName.payment.includes('$86.10'), byName.payment);
 
     fake.end();
     await waitFor('idle', () => !hooks.isRunning());

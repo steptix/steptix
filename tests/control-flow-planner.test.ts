@@ -419,23 +419,53 @@ describe('For each over objects', () => {
     expect(Object.keys(plan.pass!.bindings!)).toEqual(['account', 'account.id']);
   });
 
-  it('an unsafe key fails the guard, names the one-based item, and binds nothing', () => {
+  /**
+   * A key no placeholder can spell is DROPPED, not fatal.
+   *
+   * It failed the whole guard until review 2, which is a regression against
+   * §2's promise that existing `For each` behaviour is preserved: a loop over
+   * a tool's or an API's array of objects, using `{{item}}` as JSON text and
+   * no dotted binding at all, stopped running the moment one record carried a
+   * `content-type`. Nothing about that loop asked for a binding the key
+   * cannot have. So the unspellable keys are reported once, and the rest of
+   * the record binds exactly as before.
+   */
+  it('an unspellable key is not bound, and does not fail the guard', () => {
     for (const [raw, key] of [
-      ['[{"id":"A"},{"order id":"B"}]', 'order id'],
-      ['[{"id":"A"},{"1st":"B"}]', '1st'],
-      ['[{"id":"A"},{"__proto__":"B"}]', '__proto__'],
-      ['[{"id":"A"},{"constructor":"B"}]', 'constructor'],
-      ['[{"id":"A"},{"prototype":"B"}]', 'prototype'],
+      ['[{"id":"A"},{"id":"B","order id":"x"}]', 'order id'],
+      ['[{"id":"A"},{"id":"B","1st":"x"}]', '1st'],
+      ['[{"id":"A"},{"id":"B","content-type":"x"}]', 'content-type'],
+      ['[{"id":"A"},{"id":"B","__proto__":"x"}]', '__proto__'],
+      ['[{"id":"A"},{"id":"B","constructor":"x"}]', 'constructor'],
+      ['[{"id":"A"},{"id":"B","prototype":"x"}]', 'prototype'],
     ] as const) {
       const parsed = parseListValue('orders', raw);
-      expect(parsed, raw).toHaveProperty('error');
-      const error = (parsed as { error: string }).error;
-      expect(error, raw).toContain('`{{orders}}` item 2');
-      expect(error, raw).toContain(`property named \`${key}\``);
-      // No partial answer: the caller gets an error OR a complete list, never
-      // item 1's bindings with item 2's missing.
-      expect(parsed, raw).not.toHaveProperty('items');
+      expect(parsed, raw).not.toHaveProperty('error');
+      const ok = parsed as {
+        items: string[];
+        properties: Array<Record<string, string> | undefined>;
+        unspellable?: string[];
+      };
+      // Both items are there, the spellable key binds, and the other does not.
+      expect(ok.items, raw).toHaveLength(2);
+      expect(ok.properties[1], raw).toEqual({ id: 'B' });
+      // Named once, for the caller to log.
+      expect(ok.unspellable, raw).toEqual([key]);
     }
+  });
+
+  it('names each unspellable key once, in first-seen order, across the whole list', () => {
+    const parsed = parseListValue(
+      'orders',
+      '[{"id":"A","content-type":"x","Order ID":"1"},{"id":"B","content-type":"y"}]',
+    ) as { properties: Array<Record<string, string>>; unspellable?: string[] };
+    expect(parsed.unspellable).toEqual(['content-type', 'Order ID']);
+    expect(parsed.properties).toEqual([{ id: 'A' }, { id: 'B' }]);
+  });
+
+  it('says nothing at all when every key is spellable', () => {
+    const parsed = parseListValue('orders', '[{"id":"A"}]');
+    expect(parsed).not.toHaveProperty('unspellable');
   });
 
   it("an inner loop's dotted bindings do not disturb an outer loop's", () => {

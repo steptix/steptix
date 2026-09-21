@@ -16,18 +16,19 @@ import { envDataSecretValues, type EnvDataContext } from '../parser/interpolate-
 import type { TestReport } from '../report/types.js';
 
 /**
- * Re-exported as the one rule for names the AUTHOR chose — parameters,
+ * Re-exported as the one rule for names the AUTHOR chose — flat parameters,
  * `[store as:]` captures, `${…}` references. It matches on a SUBSTRING, which
- * is what makes a dotted loop binding work without a second rule:
- * `{{order.password}}` is a secret because `password` is in it, and so is the
- * `order.password` entry of the live variable map a pass leaves behind
- * (docs/specs/SPEC-structured-table-reads.md §8.4). The same breadth is why a
- * record stored under a variable literally named `token` is masked whole —
- * the name is the rule, and the name says secret.
+ * is deliberate breadth for a name a human typed: a variable literally named
+ * `token` is masked whole, because the name is the rule and the name says
+ * secret.
  *
- * Column names inside a record are NOT author-chosen — they come off the page
- * — so they go through {@link isRecordSecretKey} instead, which is narrower on
- * purpose. See it for why.
+ * It is NOT the rule for a dotted name. A `For each` pass writes one entry per
+ * property into the live variable map — `order.password`, `row.keyword`
+ * (docs/specs/SPEC-structured-table-reads.md §8.4) — and the property half of
+ * those came off the PAGE, where the same breadth masks the wrong things.
+ * {@link isSecretParameterName} is the rule for a name that may be dotted, and
+ * {@link isRecordSecretKey} the narrower one it applies to the page-derived
+ * half. See that one for why.
  */
 export { isSecretName };
 
@@ -87,6 +88,77 @@ export function isRecordSecretKey(key: string): boolean {
  */
 const RECORD_SECRET_MIN_LENGTH = 4;
 
+/**
+ * Is a variable-map NAME a secret? The one rule for a name that may be dotted.
+ *
+ * A flat name is author-chosen end to end, so it keeps {@link isSecretName}'s
+ * substring breadth. A dotted one — `row.keyword`, `order.password` — is half
+ * author and half page: the author named the loop variable, the page named the
+ * column. So it is a secret when the ROOT says so, or when the PROPERTY says
+ * so under the whole-word record rule ({@link isRecordSecretKey}).
+ *
+ * Without the split, `isSecretName` read the joined name as one string and
+ * `row.keyword` matched on `key` — so a `keyword` column bound as
+ * `row.keyword = "AU"` masked every "AU" in the log, the report and the DOM
+ * snapshot the model plans its next action from. That is the same
+ * over-masking {@link isRecordSecretKey} exists to prevent inside a record,
+ * arriving one door along as a map entry instead.
+ *
+ * Anything past the first dot is the property: `a.b.c` asks the record rule
+ * about `b.c`, which normalises to `b_c` the same way a column name would.
+ */
+export function isSecretParameterName(name: string): boolean {
+  const dot = name.indexOf('.');
+  if (dot === -1) return isSecretName(name);
+  return isSecretName(name.slice(0, dot)) || isRecordSecretKey(name.slice(dot + 1));
+}
+
+/**
+ * Does this name/value pair join the free-text mask set — the values
+ * {@link redact} replaces EVERYWHERE, prose and DOM snapshot included?
+ *
+ * Stricter than {@link isSecretParameterName}, and only for the dotted case:
+ * a page-derived property must also clear {@link RECORD_SECRET_MIN_LENGTH},
+ * exactly as the same column would inside the record it came from. A `token`
+ * column holding `7` masks its own map ENTRY (the name still says secret) but
+ * must not turn every seven in every output into `***` — the round-1 defect,
+ * which the pass bindings reintroduced by name.
+ *
+ * An author-chosen name, flat or as the root of a dotted one, keeps no floor:
+ * that name is a deliberate instruction.
+ */
+function joinsMaskSet(name: string, value: string): boolean {
+  if (value.length === 0) return false;
+  const dot = name.indexOf('.');
+  if (dot === -1) return isSecretName(name);
+  if (isSecretName(name.slice(0, dot))) return true;
+  return (
+    isRecordSecretKey(name.slice(dot + 1)) && value.length >= RECORD_SECRET_MIN_LENGTH
+  );
+}
+
+/**
+ * The value as it appears INSIDE a JSON string: `he "said" hi` becomes
+ * `he \"said\" hi`.
+ *
+ * A capture is STORED as JSON — one `readTable` variable is a JSON array of
+ * records — so a secret containing `"` or `\` sits in the variable, the
+ * report's parameter map and any trace payload in its escaped form, which the
+ * raw value does not match. Prose was masked and the stored row was not.
+ * Added alongside the raw form rather than instead of it, because both
+ * spellings occur in the same run.
+ */
+function jsonEscaped(value: string): string {
+  return JSON.stringify(value).slice(1, -1);
+}
+
+/** Push `value` and, when they differ, its JSON-escaped spelling. */
+function pushBothForms(into: string[], value: string): void {
+  into.push(value);
+  const escaped = jsonEscaped(value);
+  if (escaped !== value) into.push(escaped);
+}
+
 /** The answer for a value that holds no records. One shared frozen array, so
  *  the memoised path can return by identity. */
 const NO_RECORD_SECRETS: readonly string[] = Object.freeze([]);
@@ -127,7 +199,7 @@ export function recordSecretValues(value: string): readonly string[] {
         if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
         for (const [k, v] of Object.entries(item as Record<string, unknown>)) {
           if (typeof v === 'string' && v.length >= RECORD_SECRET_MIN_LENGTH && isRecordSecretKey(k)) {
-            found.push(v);
+            pushBothForms(found, v);
           }
         }
       }
@@ -149,11 +221,16 @@ export function recordSecretValues(value: string): readonly string[] {
 
 /** The values to mask: those of secret-named parameters, plus any the caller
  *  names (the environment's secrets). Empty values are never secrets — there
- *  is nothing to find, and `split('')` would shred the text. */
+ *  is nothing to find, and `split('')` would shred the text.
+ *
+ *  A name is judged by {@link joinsMaskSet}, not by `isSecretName`: the map
+ *  holds a loop's pass bindings as well as the author's own parameters, and
+ *  `row.keyword` is not the author's word. */
 export function secretValues(parameters: Record<string, string>, extra: string[] = []): string[] {
-  const fromParameters = Object.entries(parameters)
-    .filter(([name, value]) => isSecretName(name) && value.length > 0)
-    .map(([, value]) => value);
+  const fromParameters: string[] = [];
+  for (const [name, value] of Object.entries(parameters)) {
+    if (joinsMaskSet(name, value)) pushBothForms(fromParameters, value);
+  }
   const fromRecords: string[] = [];
   for (const value of Object.values(parameters)) {
     for (const secret of recordSecretValues(value)) fromRecords.push(secret);
@@ -241,11 +318,17 @@ export const EMPTY = '(empty)';
  *  outputs, a data row's cells: secret-named entries masked outright, every
  *  other value masked by value. Outright, because the name is the rule: a
  *  secret-named entry whose value is not in `secrets` still says what it is.
- *  The one exception is an EMPTY one, which says {@link EMPTY} instead. */
+ *  The one exception is an EMPTY one, which says {@link EMPTY} instead.
+ *
+ *  By {@link isSecretParameterName}, so a dotted pass binding is decided by
+ *  its own two segments. No length floor applies here: the floor exists to
+ *  keep a short value out of the FREE-TEXT set, where it would be replaced
+ *  everywhere, and this entry is the one place that value is named. So
+ *  `row.token = "7"` shows as `***` here while every other seven survives. */
 export function redactMap(map: Record<string, string>, secrets: string[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(map)) {
-    out[k] = isSecretName(k) ? (v === '' ? EMPTY : MASK) : redact(v, secrets);
+    out[k] = isSecretParameterName(k) ? (v === '' ? EMPTY : MASK) : redact(v, secrets);
   }
   return out;
 }

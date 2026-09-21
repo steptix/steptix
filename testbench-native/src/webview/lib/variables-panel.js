@@ -208,26 +208,94 @@ export function parseParametersInline(text) {
  *  module is bundled into the webview, which imports nothing from
  *  runner-core. Keep the two lists identical — the panel and the Variables
  *  view render the same scope, and one of them showing a password the other
- *  masks is the whole bug. */
+ *  masks is the whole bug. `tests/record-secret-parity.test.js` fails if they
+ *  drift. */
 const SECRET_WORDS = new Set([
   "password", "passwords", "secret", "secrets", "token", "tokens",
   "apikey", "apikeys", "key", "keys",
   "passwd", "pwd", "otp", "credential", "credentials",
 ]);
 
-/** Mask password/secret/token/key-shaped variable names. Same rule and same
- *  shape as runner-core/repl.maskIfSecret: the words above, matched as words
- *  (every non-alphanumeric run and every camelCase hump splits), so `api_key`
- *  and `payment.password` mask while `keyword` does not. */
-export function maskIfSecretInline(varName, value) {
-  const words = String(varName)
+/** The record-COLUMN rule, hand-copied from runner-core/repl.js
+ *  `isRecordSecretKey`, which is itself the mirror of the server's
+ *  (src/utils/secrets.ts). Narrower than the list above on purpose: a column
+ *  name comes off the page, where `keyword` and `sort_key` both contain
+ *  `key`, and a column rendered as `********` is a row nobody can read. */
+const RECORD_SECRET_WORD = /(^|_)(password|passwd|pwd|secret|token|otp|credential|credentials)(_|$)/;
+const RECORD_SECRET_KEY = /(^|_)(api|access|private|auth|signing|encryption)_keys?(_|$)/;
+export const RECORD_SECRET_PATTERNS = { word: RECORD_SECRET_WORD, key: RECORD_SECRET_KEY };
+
+export function isRecordSecretKeyInline(key) {
+  const words = String(key)
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .toLowerCase();
+  return RECORD_SECRET_WORD.test(words) || RECORD_SECRET_KEY.test(words);
+}
+
+/** Is a flat, author-chosen name a secret by {@link SECRET_WORDS}? */
+function isSecretFlatNameInline(name) {
+  return String(name)
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .split(/[^A-Za-z0-9]+/)
     .filter(Boolean)
-    .map((w) => w.toLowerCase());
-  if (!words.some((w) => SECRET_WORDS.has(w))) return String(value);
-  if (!value || value.length === 0) return "(empty)";
-  return "*".repeat(Math.min(String(value).length, 8));
+    .map((w) => w.toLowerCase())
+    .some((w) => SECRET_WORDS.has(w));
+}
+
+/** Is `varName` a secret? The two rules of runner-core's `isSecretVarName`: a
+ *  flat name is the author's, so the broad list decides it; a dotted
+ *  `root.property` is a record binding, so the root takes the flat rule and
+ *  the property takes the record-column one. */
+export function isSecretVarNameInline(varName) {
+  const name = String(varName);
+  const dot = name.indexOf(".");
+  if (dot < 0) return isSecretFlatNameInline(name);
+  return isSecretFlatNameInline(name.slice(0, dot)) || isRecordSecretKeyInline(name.slice(dot + 1));
+}
+
+function maskValueInline(value) {
+  return value.length === 0 ? "(empty)" : "*".repeat(Math.min(value.length, 8));
+}
+
+/** A captured value with the secret COLUMNS of the records inside it masked;
+ *  anything that is not a record (or a list of them) is returned as it came.
+ *  Mirrors runner-core's `maskRecordSecrets` — a `readTable` capture is a
+ *  whole table under one non-secret name, so the name rule has nothing to
+ *  catch and this render is the only guard the panel has. */
+export function maskRecordSecretsInline(value) {
+  const text = String(value);
+  if (!/^\s*[[{]/.test(text)) return text;
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return text;
+  }
+  const records = Array.isArray(parsed) ? parsed : [parsed];
+  let masked = false;
+  for (const record of records) {
+    if (typeof record !== "object" || record === null || Array.isArray(record)) continue;
+    for (const [key, cell] of Object.entries(record)) {
+      if (typeof cell === "string" && isRecordSecretKeyInline(key)) {
+        record[key] = maskValueInline(cell);
+        masked = true;
+      }
+    }
+  }
+  return masked ? JSON.stringify(parsed) : text;
+}
+
+/** Mask password/secret/token/key-shaped variable names, and the secret
+ *  columns of any record a value holds. Same rule and same shape as
+ *  runner-core/repl.maskIfSecret: the name first and outright (a secret-named
+ *  value is hidden whole), then the record scan for everything else. */
+export function maskIfSecretInline(varName, value) {
+  // `String(value)` on both paths, and the falsy guard before the mask, so a
+  // row with no value yet renders exactly what it rendered before.
+  if (!isSecretVarNameInline(varName)) return maskRecordSecretsInline(String(value));
+  if (!value) return "(empty)";
+  return maskValueInline(String(value));
 }
 
 function findStepsSpan(lines) {

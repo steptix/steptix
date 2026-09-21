@@ -129,6 +129,16 @@ async function promptForValue(key: string): Promise<string> {
 }
 
 /**
+ * The PROPERTY half of a dotted name, as a regex source: one identifier.
+ *
+ * Named because three things need the same answer — the grammar below, the
+ * "more than one segment" warning further down, and {@link isBindableProperty}
+ * asking whether a record's KEY could become one. Written out three times,
+ * they are three mirrors of a rule that has already moved once.
+ */
+const PROPERTY_SEGMENT_SOURCE = '[A-Za-z_][A-Za-z0-9_]*';
+
+/**
  * The NAME inside a runtime placeholder: `name`, or `name.property` for one
  * direct property of an object a `For each` bound
  * (docs/specs/SPEC-structured-table-reads.md §8.3).
@@ -150,7 +160,7 @@ async function promptForValue(key: string): Promise<string> {
  * One property segment only. `{{order.address.city}}` matches nothing and is
  * left literal, exactly as it was before this existed (§8.2).
  */
-export const PLACEHOLDER_NAME_SOURCE = '\\w+(?:\\.[A-Za-z_][A-Za-z0-9_]*)?';
+export const PLACEHOLDER_NAME_SOURCE = `\\w+(?:\\.${PROPERTY_SEGMENT_SOURCE})?`;
 
 /** `{{name}}` / `{{name.property}}`, no whitespace inside the braces. Group 1
  *  is the whole name, dot included. */
@@ -181,13 +191,51 @@ export function placeholderProperty(name: string): string | undefined {
   return dot === -1 ? undefined : name.slice(dot + 1);
 }
 
+/** The property segment on its own, anchored — what a RECORD's key has to
+ *  look like to become one. Built from the grammar's own source, so a key and
+ *  a reference can never disagree about what is spellable. */
+const PROPERTY_SEGMENT_RE = new RegExp(`^${PROPERTY_SEGMENT_SOURCE}$`);
+
+/** The three names that are not data. `__proto__` on a plain object literal
+ *  from `JSON.parse` is an own property rather than the setter, but a binding
+ *  named after one of these travels into maps that are not — and a variable
+ *  called `constructor` is a trap wherever it lands. */
+const RESERVED_PROPERTY_NAMES: ReadonlySet<string> = new Set([
+  '__proto__',
+  'prototype',
+  'constructor',
+]);
+
+/**
+ * Can this object key become a `{{item.key}}` binding
+ * (docs/specs/SPEC-structured-table-reads.md §8.2)?
+ *
+ * Here rather than beside the `For each` that asks, because the answer is a
+ * fact about the GRAMMAR: the property segment is defined two lines up, and a
+ * second copy of `[A-Za-z_][A-Za-z0-9_]*` in the planner is the kind of mirror
+ * that drifts. `dottedReferenceError` asks it too — it explains a missing
+ * binding by naming the keys that could never have had one — so the rule has
+ * two readers and one home.
+ *
+ * `content-type` and `Order ID` fail on the grammar; `constructor` passes the
+ * grammar and fails here, which is the same answer to the same question for
+ * the caller: this key binds nothing.
+ */
+export function isBindableProperty(key: string): boolean {
+  return PROPERTY_SEGMENT_RE.test(key) && !RESERVED_PROPERTY_NAMES.has(key);
+}
+
 /**
  * Substitute {{placeholders}} in a string with resolved parameter values.
  *
  * `defines` names the placeholders this line WRITES rather than reads — a
  * `For each` header's item (`controlLineDefines`, src/parser/control-line.ts).
  * They are exempt from the warning only: a definition has no value yet by
- * definition, and warning about it fired on every correct table loop. The
+ * definition, and warning about it fired on every correct table loop. A
+ * PROPERTY of a defined name is exempt with it — `For each {{order}} in
+ * {{orders}}, Click the row whose Order ID is "{{order.id}}"` is §4.6's own
+ * recommended form, and a rule that exempted `{{order}}` alone went on
+ * warning about `{{order.id}}` on the same line, on every loop entry. The
  * SUBSTITUTION is deliberately left alone — `{{payment}}` still resolves if
  * the map happens to hold it, exactly as before — because the loops use the
  * authored line for the guard row and the interpolated one for a partial
@@ -204,14 +252,24 @@ export function interpolate(
     if (key in params) {
       return params[key] ?? match;
     }
-    if (!defines?.has(key)) logger.warn(`Unresolved placeholder: {{${key}}}`);
+    // The ROOT, so `{{order.id}}` is covered by a line that defines `order`.
+    // A definition is flat by construction (a step writes a variable, never
+    // one property of one), but the name is asked for as well as its root so
+    // that a `defines` set which one day holds a dotted name still answers.
+    if (!defines?.has(key) && !defines?.has(placeholderRoot(key))) {
+      logger.warn(`Unresolved placeholder: {{${key}}}`);
+    }
     return match;
   });
 }
 
 /** `{{a.b.c}}` — a root and TWO or more property segments, which is one more
- *  than the grammar has. */
-const MULTI_SEGMENT_RE = /\{\{\s*(\w+(?:\.[A-Za-z_][A-Za-z0-9_]*){2,})\s*\}\}/g;
+ *  than the grammar has. Same segment source as the grammar, so "one more
+ *  than" stays true of whatever the grammar accepts. */
+const MULTI_SEGMENT_RE = new RegExp(
+  `\\{\\{\\s*(\\w+(?:\\.${PROPERTY_SEGMENT_SOURCE}){2,})\\s*\\}\\}`,
+  'g',
+);
 
 /**
  * Say something about `{{order.address.city}}`.

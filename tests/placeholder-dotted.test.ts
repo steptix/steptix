@@ -515,6 +515,38 @@ describe('a missing dotted binding fails before the model is asked', () => {
     );
   });
 
+  /**
+   * A key the loop DROPPED, named where the author will look for it.
+   *
+   * `content-type` binds nothing — no placeholder can spell it — so without
+   * this the message lists the properties that do exist and leaves the author
+   * hunting for a typo in a name that was never going to work. The row's own
+   * JSON is the base binding, so the keys are in hand here with nothing
+   * threaded through the loops to fetch them.
+   */
+  it('names the keys a placeholder cannot spell, beside the ones it can', () => {
+    const MIXED = {
+      order: '{"id":"A","status":"x","content-type":"t","Order ID":"1"}',
+      'order.id': 'A',
+      'order.status': 'x',
+    };
+    expect(dottedReferenceError('Verify {{order.contenttype}}', MIXED, () => 1)).toBe(
+      '{{order.contenttype}} has no value in For each item 1; available properties are ' +
+        'id, status (content-type, Order ID cannot be spelled as placeholders)',
+    );
+  });
+
+  it('says so plainly when NO key of the row can be spelled', () => {
+    expect(
+      dottedReferenceError('Verify {{order.contenttype}}', {
+        order: '{"content-type":"t"}',
+      }),
+    ).toBe(
+      '{{order.contenttype}} has no value; {{order}} has no properties that can be ' +
+        'spelled as placeholders (content-type)',
+    );
+  });
+
   it('is silent on a dotted reference that resolves', () => {
     expect(dottedReferenceError('Verify {{order.status}}', ROW, () => 2)).toBeUndefined();
     expect(dottedReferenceError('Click Review', ROW)).toBeUndefined();
@@ -533,6 +565,65 @@ describe('a missing dotted binding fails before the model is asked', () => {
   it('reports the FIRST unanswerable reference, so one refusal names one fix', () => {
     expect(dottedReferenceError('{{order.statuz}} and {{order.custmer}}', ROW, () => 1)).toBe(
       '{{order.statuz}} has no value in For each item 1; available properties are id, customer, status',
+    );
+  });
+});
+
+/**
+ * `{{ order.id }}` — the right name, the wrong spelling.
+ *
+ * `WIDE_PLACEHOLDER_SOURCE`'s docstring promises exactly this: a reference
+ * with spaces inside its braces is "seen here and refused with the correct key
+ * named, rather than slipping through and being typed into the page as literal
+ * text". `checkOneString` and `resolveSetTemplate` both keep that promise for
+ * what the MODEL wrote; this is the same sentence for what the AUTHOR wrote,
+ * which nothing checked — `interpolate` substitutes on the NARROW grammar and
+ * leaves it alone, and the refusal `continue`d past it the moment the name
+ * happened to resolve. The braces reached the model, which is the failure this
+ * whole module exists to prevent.
+ *
+ * DOTTED only, for the reason the rest of the file gives: a flat `{{ name }}`
+ * is old ground, it has behaved this way since before any of this existed, and
+ * tightening it would fail runs this feature never touched. The test below
+ * pins that behaviour rather than improving it.
+ */
+describe('a dotted reference spelled with spaces is refused, not left literal', () => {
+  const ROW = {
+    order: '{"id":"ORD-1001","status":"Completed"}',
+    'order.id': 'ORD-1001',
+    'order.status': 'Completed',
+  };
+
+  it('refuses the spelling even when the name itself resolves', () => {
+    expect(dottedReferenceError('Verify {{ order.id }} is shown', ROW)).toBe(
+      'This line wrote `{{ order.id }}`. A placeholder carries no spaces inside ' +
+        'its braces — write `{{order.id}}`.',
+    );
+  });
+
+  it('refuses it when the name does NOT resolve, naming the same spelling', () => {
+    // Before the spelling is worth talking about, the name has to be one the
+    // author can act on — so the spacing sentence comes first either way,
+    // rather than a "has no value" about a name they did not write.
+    expect(dottedReferenceError('Verify {{ order.statuz }} is shown', ROW)).toBe(
+      'This line wrote `{{ order.statuz }}`. A placeholder carries no spaces inside ' +
+        'its braces — write `{{order.statuz}}`.',
+    );
+  });
+
+  it('leaves the canonical spelling alone, substitution included', () => {
+    expect(dottedReferenceError('Verify {{order.id}} is shown', ROW)).toBeUndefined();
+    expect(interpolate('Verify {{order.id}} is shown', ROW)).toBe(
+      'Verify ORD-1001 is shown',
+    );
+  });
+
+  it('leaves a FLAT `{{ name }}` exactly as it is today', () => {
+    // Pinned, not endorsed: no refusal, no substitution, no warning — the
+    // legacy answer for a flat name, unchanged by this feature.
+    expect(dottedReferenceError('Verify {{ name }} is shown', { name: 'Alice' })).toBeUndefined();
+    expect(interpolate('Verify {{ name }} is shown', { name: 'Alice' })).toBe(
+      'Verify {{ name }} is shown',
     );
   });
 });

@@ -57,6 +57,9 @@ vi.mock('../src/report/generator.js', async (importOriginal) => ({
 }));
 
 import { UIRunnerAdapter } from '../src/ui/main/runner-adapter.js';
+// Not mocked: the adapter calls through to the real logger, so the lines a run
+// prints are asserted by spying on it.
+import { logger } from '../src/utils/logger.js';
 
 const CHAIN = `
 # Pay
@@ -761,6 +764,61 @@ describe('a dotted reference inside a For each body', () => {
       'Verify the row for "ORD-1002" is Pending',
       'Sign out',
     ]);
+  });
+
+  /**
+   * The header's own tail, naming a property of the item it defines — §4.6's
+   * recommended form.
+   *
+   * `resolveStepText` runs on every line before the control dispatch, so the
+   * header is interpolated on the visit that has not begun a pass yet.
+   * `controlLineDefines` exempted `{{order}}` and nothing else, so
+   * `{{order.id}}` was logged as `Unresolved placeholder` on every entry to
+   * every correct table loop — in this runner and in the Sessions API alike.
+   */
+  it('does not warn about a property of the item the header binds', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const md = `
+# Orders
+
+## Parameters
+- orders: [{"id":"ORD-1001","status":"Completed"},{"id":"ORD-1002","status":"Pending"}]
+
+## Steps
+1. For each {{order}} in {{orders}}, Click the row whose Order ID is "{{order.id}}"
+2. Sign out
+`;
+      await runAdapter(writeTest(root, md));
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines.filter((l) => l.includes('Unresolved placeholder'))).toEqual([]);
+      // The loop ran: the silence is about a working line.
+      expect(asked()).toEqual([
+        'Click the row whose Order ID is "ORD-1001"',
+        'Click the row whose Order ID is "ORD-1002"',
+        'Sign out',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('still warns about a dotted name no loop binds', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const md = `
+# Orders
+
+## Steps
+1. Verify the row for "{{other.id}}" is shown
+`;
+      await runAdapter(writeTest(root, md));
+      expect(warn.mock.calls.map((c) => String(c[0]))).toContain(
+        'Unresolved placeholder: {{other.id}}',
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

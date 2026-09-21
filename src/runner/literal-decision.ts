@@ -1,6 +1,6 @@
 /**
  * One condition, decided from its own text — or null, meaning "ask the page"
- * (docs/specs/SPEC-structured-table-reads.md §8.2, §8.3a).
+ * (docs/specs/SPEC-structured-table-reads.md §8.3a).
  *
  * ## Why this is a module rather than a function in one caller
  *

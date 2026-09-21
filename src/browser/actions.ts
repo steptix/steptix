@@ -2,6 +2,14 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Page, FrameLocator, Locator } from 'playwright';
 import type { AIAction, TableReadColumn } from '../ai/types.js';
+// §9.2: one validator for both paths into the table extractor. The dependency
+// points this way because the parser owns the §6.2 rules and their wording;
+// nothing in `action-parser.ts` reaches back here.
+import {
+  validateTableRead,
+  MAX_TABLE_COLUMNS,
+  MAX_TABLE_ROWS,
+} from '../ai/action-parser.js';
 import { logger } from '../utils/logger.js';
 import { resolveUploadPaths, uploadPathsOf, type UploadPathContext } from './upload-paths.js';
 
@@ -2014,16 +2022,18 @@ export interface TableReadResult {
  * stops at 500 is obviously short; a business table that stops at 500 is a
  * convincingly wrong answer, and the step after it asserts on the wrong set.
  */
-export const READ_TABLE_MAX_ROWS = 500;
+export const READ_TABLE_MAX_ROWS = MAX_TABLE_ROWS;
 
 /**
- * Maximum requested columns (§7.5). Checked here as well as in the parser,
+ * Maximum requested columns (§7.5). Enforced here as well as in the parser,
  * because §9.2 requires both paths into this extractor — today's `readTable`
  * action and phase 3's generated `tables.read`, which never passes through
- * `action-parser.ts` — to validate identically. `action-parser.ts` pins the
- * same number; `tests/read-table.test.ts` holds the two to it.
+ * `action-parser.ts` — to validate identically.
+ *
+ * Both names now read the ONE constant rather than repeating the number, so
+ * the two caps cannot drift apart while both files still claim they agree.
  */
-export const READ_TABLE_MAX_COLUMNS = 20;
+export const READ_TABLE_MAX_COLUMNS = MAX_TABLE_COLUMNS;
 
 /** The property the runtime writes on every record (§4.5). Never an alias —
  *  the parser rejects a column that claims it. */
@@ -2095,18 +2105,15 @@ export async function readTableRecords(
   root: Page | FrameLocator,
   request: TableReadRequest,
 ): Promise<TableReadResult> {
-  const { selector, columns, limit } = request;
-  if (columns.length === 0) {
-    throw new Error('readTable requires at least one column');
-  }
-  if (columns.length > READ_TABLE_MAX_COLUMNS) {
-    // §7.5/§9.2: the same refusal the parser makes, for the callers that do
-    // not go through it. A request this wide is a mis-typed selector, not a
-    // table.
-    throw new Error(
-      `readTable requests ${columns.length} columns — the maximum is ${READ_TABLE_MAX_COLUMNS}`,
-    );
-  }
+  const { selector } = request;
+  // §6.2 in full, not just the column cap: the same validator the parser runs,
+  // so a caller that never passes through `action-parser.ts` — phase 3's
+  // generated `tables.read` — gets the same refusal and the same sentence
+  // instead of a silently wrong read (§9.2). `where` is the only difference.
+  const { columns, limit } = validateTableRead(
+    { columns: request.columns, limit: request.limit },
+    'readTable',
+  );
   logger.subAction(
     `readTable ${selector} ${columns.length} column${columns.length === 1 ? '' : 's'}`
     + (limit !== undefined ? ` (limit ${limit})` : ''),

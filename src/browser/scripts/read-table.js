@@ -97,7 +97,14 @@
     const style = styleOf(cell);
     return style && style.display === 'contents' ? squash(cell.textContent || '') : '';
   };
-  const spanned = (cell) => cell.colSpan > 1 || cell.rowSpan > 1;
+  /** Does this cell span more than its own square of the grid?
+   *
+   *  `rowSpan !== 1`, not `> 1`: `rowspan="0"` is legal HTML for "to the end
+   *  of this row group", Chromium reports `el.rowSpan === 0` for it, and the
+   *  rows below are shifted exactly as `rowspan="2"` shifts them. Read with
+   *  `> 1` the whole grid came back misaligned and the action SUCCEEDED.
+   *  `colSpan` has no such zero form — the parser clamps `colspan="0"` to 1. */
+  const spanned = (cell) => cell.colSpan > 1 || cell.rowSpan !== 1;
   const plural = (n, one, many) => (n === 1 ? one : many);
   const fail = (error) => ({ ok: false, error });
   /** Quote a page-supplied string for a message. `JSON.stringify` rather than
@@ -170,8 +177,8 @@
   // ── 3. the header row (§7.3) ─────────────────────────────────────────────
   let headerRow = null;
   const thead = table.tHead;
-  if (thead && thead.parentElement === table) {
-    const headRows = items(thead.rows);
+  const headRows = thead && thead.parentElement === table ? items(thead.rows) : [];
+  if (headRows.length > 0) {
     // Spans first, so the two-row merged header of §5.3 reports what it
     // actually is rather than "your header has 2 rows".
     for (const row of headRows) {
@@ -183,10 +190,17 @@
       return cannot(`its header has ${headRows.length} rows, and v1 supports exactly one`);
     }
     headerRow = headRows[0] || null;
-  } else {
-    // No `<thead>`: the first body row is the header when it CONTAINS a
-    // `<th>`, has no `scope="row"` cell, and is not a lone cell spanning more
-    // than one column (§7.3).
+  }
+  if (!headerRow) {
+    // No header row in a `<thead>` — either because there is no `<thead>` at
+    // all, or because there is an EMPTY one. The empty case is real: a
+    // framework that renders `<thead></thead>` and puts the headings in the
+    // first `<tbody>` row was read as headerless when this branch keyed on the
+    // PRESENCE of the element, so a positional read made the heading text
+    // record 1 and a header-named one failed with the §5.4 message.
+    //
+    // A body row is the header when it CONTAINS a `<th>`, has no `scope="row"`
+    // cell, and is not a lone cell spanning more than one column (§7.3).
     //
     // "contains at least one `<th>`" is what admits
     // `<tr><td></td><th>Order ID</th><th>Status</th></tr>` — a checkbox cell
@@ -197,11 +211,24 @@
     // `scope="row"` marks that row's own heading (§10), not the table's, and a
     // lone spanning cell is a group or placeholder row (§4.8).
     //
-    // Only the FIRST body row is considered. Scanning further rows for one
-    // that qualifies would let a `<th>` further down — a row-header column
-    // with no `scope` attribute is the realistic case — be taken for the
-    // table's header, silently deleting a data row from the middle of a read.
-    const first = bodyRows[0];
+    // Exactly ONE row is considered: the first that is RENDERED or carries a
+    // `<th>`. Index 0 alone was not enough — a `display:none` template row,
+    // the standard way to clone a row in plain JS, sat in front of the
+    // headings and produced both failures above. Stopping at the first
+    // rendered row keeps the original guard: a `<th>` further down — a
+    // row-header column with no `scope` attribute is the realistic case —
+    // cannot be reached and taken for the table's header, which would
+    // silently delete a data row from the middle of the read.
+    let first = null;
+    let firstAt = -1;
+    for (let i = 0; i < bodyRows.length; i++) {
+      const row = bodyRows[i];
+      if (rendered(row) || items(row.cells).some((c) => c.tagName === 'TH')) {
+        first = row;
+        firstAt = i;
+        break;
+      }
+    }
     if (first) {
       const cells = items(first.cells);
       const hasHeading = cells.some((c) => c.tagName === 'TH');
@@ -214,22 +241,29 @@
           if (spanned(cell)) return merged();
         }
         headerRow = first;
-        bodyRows.shift();
+        bodyRows.splice(firstAt, 1);
       }
     }
   }
 
   // ── 4. which rows are rendered, and how wide the table is ────────────────
-  // The width the placeholder rule measures against is the RENDERED table's:
-  // the header row's cell count, or, with no header, the widest visible body
-  // row's (§4.8). It is computed BEFORE any row is classified, because the
-  // classification depends on it.
+  // The width the placeholder rule measures against is the header row's cell
+  // count, or, with no header, the widest body row's (§4.8). It is computed
+  // BEFORE any row is classified, because the classification depends on it.
+  //
+  // Headerless, the width is measured over ALL body rows, rendered or not.
+  // Measured over the VISIBLE ones, a table whose only rendered row is the
+  // full-width message — `<td colspan="7">No scheduled payments.</td>` alone
+  // in the body, or every data row hidden by a filter — came out one column
+  // wide, so the placeholder rule never fired and §4.8's `[]` arrived as the
+  // merged-cell refusal instead. The hidden rows are the evidence of how wide
+  // the table is, and they are the one thing left that still says so.
   const visibleRows = bodyRows.filter(rendered);
   let width = 0;
   if (headerRow) {
     width = headerRow.cells.length;
   } else {
-    for (const row of visibleRows) {
+    for (const row of bodyRows) {
       if (row.cells.length > width) width = row.cells.length;
     }
   }
@@ -280,15 +314,20 @@
   for (const row of visibleRows) {
     const cells = row.cells;
     // A placeholder is a message, not a grid: ONE cell spanning the whole
-    // width of a table that is more than one column wide (§4.8).
+    // width of the table (§4.8).
     //
     // `>=`, not `===`: `<td colspan="99">No results</td>` is the common "span
     // all" idiom and it failed with the merged-cell message.
     //
-    // `width > 1` is what keeps a ONE-column table out of this branch. Without
-    // it the test was true of every ordinary row of one — `colSpan 1 === width
-    // 1` with a header, unconditionally without — so a one-column table read
-    // as `[]`, the loop over it ran zero passes, and the step passed.
+    // `Math.max(width, 2)` is the whole rule for BOTH the headed and the
+    // headerless case, and the floor of 2 is what keeps a ONE-column table's
+    // ordinary rows out of the branch: `colSpan 1 >= 2` is false, so they are
+    // data. An earlier `width > 1` guard did that by excluding one-column
+    // tables from the rule altogether, which was wrong in the other
+    // direction — a one-column table with a lone `colspan="2"` message row
+    // then failed as a merged cell instead of answering `[]`. The floor says
+    // what is actually meant: a lone cell that spans MORE than its own
+    // column is a message.
     //
     // Checked BEFORE the merged-cell rule, which is what lets
     // `<td colspan="5">No documents uploaded yet.</td>` answer `[]` instead of
@@ -298,7 +337,7 @@
     // there is nothing in it to map and nothing to number, and failing a whole
     // read over a `<tr>` that renders as nothing would contradict §4.8. The
     // count is what keeps the skip observable in the log (§7.6).
-    if (cells.length === 0 || (cells.length === 1 && width > 1 && cells[0].colSpan >= width)) {
+    if (cells.length === 0 || (cells.length === 1 && cells[0].colSpan >= Math.max(width, 2))) {
       placeholdersSkipped++;
       continue;
     }

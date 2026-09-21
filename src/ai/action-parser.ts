@@ -164,38 +164,44 @@ const SAFE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DANGEROUS_KEYS: ReadonlySet<string> = new Set(['__proto__', 'prototype', 'constructor']);
 /** The one property the runtime writes itself, so no alias may claim it (§4.5). */
 const ROW_NUMBER_KEY = '_row';
-/** §7.5 — a table wider than this is a mis-typed selector, not a table. */
-const MAX_TABLE_COLUMNS = 20;
-/** §7.5 — the structured row cap, and therefore the ceiling on `limit`. */
-const MAX_TABLE_ROWS = 500;
+/** §7.5 — a table wider than this is a mis-typed selector, not a table.
+ *  Exported because `src/browser/actions.ts` re-exports it rather than
+ *  spelling the number a second time (§9.2). */
+export const MAX_TABLE_COLUMNS = 20;
+/** §7.5 — the structured row cap, and therefore the ceiling on `limit`.
+ *  Exported for the same reason. */
+export const MAX_TABLE_ROWS = 500;
 /** §6.2 — a position past this is a typo, not a column. */
 const MAX_COLUMN_INDEX = 100;
 
 /**
- * Validate and copy a `readTable` action's `columns` / `limit`
- * (SPEC-structured-table-reads.md §6.2). Mutates `action` on success; throws
- * with a precise message on any rejection.
+ * Validate a `readTable` request's `columns` and `limit` — the whole of §6.2
+ * that is not about `selector`/`as` — and answer them in canonical form.
  *
- * The parser's other fields are copied opportunistically — an unrecognised
- * `direction` is dropped and the action still runs. These are not: a column
- * list is the whole meaning of the action.
+ * ONE validator, because §9.2 requires identical validation on both paths into
+ * the extractor: today's AI action, which arrives here as raw JSON, and phase
+ * 3's generated `tables.read`, which calls `readTableRecords` directly and
+ * never passes through this file. Re-checking only the 20-column cap there
+ * left every other rule to the parser, so the same malformed request got a
+ * precise refusal from one path and a silently wrong read from the other —
+ * `{ key: '_row' }` overwritten by the row number, `{ key: '__proto__' }`
+ * dropped from every record, a column naming neither header nor index
+ * answered with "there is no cell at position undefined", `limit: 0` storing
+ * `[]` successfully and `limit: 99999` stepping past the 500-row cap.
+ *
+ * `where` is what the messages are prefixed with — `readTable action at index
+ * 2` from the parser, plain `readTable` from the extractor — so the two differ
+ * in that phrase and in nothing else.
+ *
+ * Every rule rejects the WHOLE request. A dropped malformed column would run a
+ * partial read, and a row record missing a field the later steps name is a
+ * convincing lie — worse than a step that failed and said why.
  */
-function applyTableReadFields(action: AIAction, obj: Record<string, unknown>, index: number): void {
-  const where = `readTable action at index ${index}`;
-
-  if (typeof action.selector !== 'string' || !action.selector.trim()) {
-    throw new Error(`${where} missing required "selector" field (a CSS selector for one native <table>)`);
-  }
-  if (typeof action.as !== 'string' || !action.as.trim()) {
-    throw new Error(`${where} missing required "as" field (the variable the row records are stored in)`);
-  }
-  if (!SAFE_NAME_RE.test(action.as)) {
-    throw new Error(
-      `${where} has an invalid "as" name "${action.as}" — use letters, digits and underscores, starting with a letter or underscore`,
-    );
-  }
-
-  const rawColumns = obj['columns'];
+export function validateTableRead(
+  raw: { columns: unknown; limit?: unknown },
+  where: string,
+): { columns: TableReadColumn[]; limit?: number } {
+  const rawColumns = raw.columns;
   if (!Array.isArray(rawColumns)) {
     throw new Error(`${where} missing required "columns" array (name at least one column to read)`);
   }
@@ -295,22 +301,51 @@ function applyTableReadFields(action: AIAction, obj: Record<string, unknown>, in
     });
   });
 
-  action.columns = columns;
-
-  const rawLimit = obj['limit'];
-  if (rawLimit !== undefined) {
-    if (
-      typeof rawLimit !== 'number' ||
-      !Number.isInteger(rawLimit) ||
-      rawLimit < 1 ||
-      rawLimit > MAX_TABLE_ROWS
-    ) {
-      throw new Error(
-        `${where} has an invalid "limit" ${JSON.stringify(rawLimit)} — use a whole number from 1 to ${MAX_TABLE_ROWS}`,
-      );
-    }
-    action.limit = rawLimit;
+  const rawLimit = raw.limit;
+  if (rawLimit === undefined) return { columns };
+  if (
+    typeof rawLimit !== 'number' ||
+    !Number.isInteger(rawLimit) ||
+    rawLimit < 1 ||
+    rawLimit > MAX_TABLE_ROWS
+  ) {
+    throw new Error(
+      `${where} has an invalid "limit" ${JSON.stringify(rawLimit)} — use a whole number from 1 to ${MAX_TABLE_ROWS}`,
+    );
   }
+  return { columns, limit: rawLimit };
+}
+
+/**
+ * Validate and copy a `readTable` action's `selector`, `as`, `columns` and
+ * `limit` (SPEC-structured-table-reads.md §6.2). Mutates `action` on success;
+ * throws with a precise message on any rejection.
+ *
+ * The parser's other fields are copied opportunistically — an unrecognised
+ * `direction` is dropped and the action still runs. These are not: a column
+ * list is the whole meaning of the action.
+ */
+function applyTableReadFields(action: AIAction, obj: Record<string, unknown>, index: number): void {
+  const where = `readTable action at index ${index}`;
+
+  if (typeof action.selector !== 'string' || !action.selector.trim()) {
+    throw new Error(`${where} missing required "selector" field (a CSS selector for one native <table>)`);
+  }
+  if (typeof action.as !== 'string' || !action.as.trim()) {
+    throw new Error(`${where} missing required "as" field (the variable the row records are stored in)`);
+  }
+  if (!SAFE_NAME_RE.test(action.as)) {
+    throw new Error(
+      `${where} has an invalid "as" name "${action.as}" — use letters, digits and underscores, starting with a letter or underscore`,
+    );
+  }
+
+  const { columns, limit } = validateTableRead(
+    { columns: obj['columns'], limit: obj['limit'] },
+    where,
+  );
+  action.columns = columns;
+  if (limit !== undefined) action.limit = limit;
 }
 
 /**

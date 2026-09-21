@@ -261,6 +261,24 @@ describe('formatParameterBlock — masking', () => {
     expect(block).toContain('- ${data.keys.public} resolved to "pk_123" on this run');
   });
 
+  it('decides a loop binding by its property, not by the substring rule on the whole name', () => {
+    // A For each over table records leaves `row.<column>` in the map. The
+    // property is page-derived, so it takes the record-column rule: `keyword`
+    // is not `key`, `token` is. The root stays author-chosen: `secret.value`.
+    const block = formatParameterBlock(
+      [
+        { name: 'row.keyword', value: 'mortgage' },
+        { name: 'row.token', value: 'tok_live_9' },
+        { name: 'secret.value', value: 's3cr3t-value' },
+      ],
+      [],
+    );
+    expect(block).toContain('- {{row.keyword}} resolved to "mortgage" on this run');
+    expect(block).toContain('- {{row.token}} resolved to "***" on this run');
+    expect(block).toContain('- {{secret.value}} resolved to "***" on this run');
+    for (const leaked of ['tok_live_9', 's3cr3t-value']) expect(block).not.toContain(leaked);
+  });
+
   it('still says so when the step uses nothing', () => {
     expect(formatParameterBlock([], [])).toBe('(this step uses no parameters)');
   });

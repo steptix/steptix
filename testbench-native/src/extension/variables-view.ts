@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { maskIfSecret, type FrameInfo } from 'ai-ui-automation-runner-core';
+import { compareVariableNames, maskIfSecret, type FrameInfo } from 'ai-ui-automation-runner-core';
 
 /**
  * Read-only TreeView contributed to the TestBench activity-bar container.
@@ -13,10 +13,14 @@ import { maskIfSecret, type FrameInfo } from 'ai-ui-automation-runner-core';
  * runtime state, leaky abstractions and all, which is better than
  * mystery hiding.
  *
- * Secret-named entries (`password`, `secret`, `token`, `key`, each as a
- * WORD — so `api_key` and `payment.password` mask and `keyword` does not)
- * are masked via `maskIfSecret` from runner-core, which carries the rule and
- * the reason. Every other name shows the raw value.
+ * Secret-named entries are masked via `maskIfSecret` from runner-core, which
+ * carries the rule and the reason: a flat name by the author's word list
+ * (`password`, `secret`, `token`, `key`, each as a WORD, so `api_key` masks
+ * and `keyword` does not), a dotted `record.column` by the narrower
+ * record-column rule on its property. The same call also masks the secret
+ * COLUMNS inside a value that holds records — a `readTable` capture is a whole
+ * table under one ordinary name, which no name rule can catch. Every other
+ * name shows the raw value.
  */
 export interface ScopeSource {
   /** Current scope to render, or empty when no run is in flight. */
@@ -105,9 +109,12 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
     // they're shown there. Phase 4.B will replace this with a real
     // per-frame filter that reverse-resolves the renames.
     const isTestFrame = !frame || frame.id === '';
+    // `compareVariableNames`, not a plain `.sort()`: a record's `_row` has to
+    // lead its columns (§7.4), and code-unit order puts `_` between the upper
+    // and the lower case letters — so an `Amount` alias came out ahead of it.
     const names = Object.keys(scope)
       .filter((name) => !isTestFrame || !SKILL_INTERNAL_PREFIX.test(name))
-      .sort();
+      .sort(compareVariableNames);
     return names.map((name) => ({ name, rawValue: scope[name] ?? '' }));
   }
 

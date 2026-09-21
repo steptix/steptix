@@ -145,8 +145,8 @@ Everything §14 lists is outside all three.
 - Implicitly reading every column when the author names none.
 - Merged header/data grids using `rowspan` or `colspan` greater than 1. V1
   rejects them with a diagnostic; silently guessing a logical grid is unsafe.
-  The one exception is the placeholder row of §4.8: a single cell spanning
-  the whole width is a message, not a grid.
+  The one exception is the placeholder row of §4.8: a single cell spanning at
+  least the table's width, and at least two columns, is a message, not a grid.
 - Array indexing or arbitrary expression evaluation in placeholders. V1 adds
   one direct property segment (`{{row.property}}`), not
   `{{rows[0].property}}`, functions, or arithmetic.
@@ -380,19 +380,32 @@ in `fixtures/test-app/documents.html`, and a `colspan="4"` “Loading…” row 
 `delegates.html` — and the first draft's merged-cell rule (§7.4) would have
 failed both reads with “merged cells are not supported”. The rule is:
 
-- A body row whose only cell spans the whole width of a table that is
-  **more than one column wide** is a **placeholder row**, not data: one cell
-  with a `colspan` at least the table's width (`colspan="99"` on a
-  three-column table is the common "span all" idiom and counts). The width
-  is the header row's cell count, or, with no header, the widest body row's.
-  A one-column table therefore never has placeholder rows — review found
-  that the first wording ("colspan equals the header's column count") was
-  true of every ordinary cell in a one-column table, so such a table read
-  as `[]` and a loop over it ran zero passes, green.
+- A body row whose only cell spans **at least `max(width, 2)` columns** is a
+  **placeholder row**, not data. "At least", because `colspan="99"` on a
+  three-column table is the common "span all" idiom and has to count. The
+  floor of 2 is the whole one-column story: an ordinary `colspan="1"` cell
+  never reaches it, so a one-column table's rows are data — the first wording
+  ("colspan equals the header's column count") was true of every one of them,
+  and such a table read as `[]` with a loop over it running zero passes,
+  green. A one-column table with a lone `colspan="2"` message row is still a
+  placeholder, though: a cell spanning more than its own column is a message,
+  and refusing that row as a merged cell would be the same bug in the other
+  direction.
+- The width is the header row's cell count, or, with no header, the widest
+  body row's — measured over **all** body rows, rendered or not. Measured
+  over the rendered ones, a table whose only rendered row is the message
+  (`<td colspan="7">No scheduled payments.</td>` alone in the body, or every
+  data row hidden by a filter) came out one column wide, the rule never
+  fired, and the read failed as a merged cell instead of storing `[]`. The
+  hidden rows are the last evidence of how wide the table is.
+- A body row with no cells at all is skipped and counted the same way: there
+  is nothing in it to map and nothing to number.
 - If every body row is a placeholder, the table is empty: store `[]`.
 - If placeholders sit among data rows, skip them. They do not get a `_row`
   number; `_row` counts data rows only.
-- Any other merged cell is still an error.
+- Any other merged cell is still an error — including `rowspan="0"`, which is
+  legal HTML for "to the end of this row group". The DOM reports it as `0`,
+  so a `> 1` test missed it and read the row as if it stood alone.
 
 A loading row is a placeholder that will be replaced, so a read that lands on
 it stores `[]` truthfully and the test goes wrong later. `readTable` does not
@@ -874,9 +887,10 @@ A header row is required only when some requested column names a header. V1
 accepts exactly one direct header row belonging to the selected table:
 
 - normally one `<thead><tr>…</tr></thead>`;
-- if there is no `<thead>`, the first body row that contains at least one
-  `<th>`, has no cell with `scope="row"`, and is not a single cell spanning
-  more than one column is the header row. That admits the common
+- when the `<thead>` is **absent or empty**, the body-row rule applies: the
+  first body row that contains at least one `<th>`, has no cell with
+  `scope="row"`, and is not a single cell spanning more than one column is
+  the header row. That admits the common
   `<tr><td></td><th>Order ID</th><th>Status</th></tr>` (a checkbox cell
   beside headings) and a one-column `<tr><th>Order ID</th></tr>`, and keeps
   out a `<th scope="row">` row (§10, that row's own heading) and a lone
@@ -885,7 +899,18 @@ accepts exactly one direct header row belonging to the selected table:
   taking a row-header row as the header, and an implementation that
   required *every* cell to be a `<th>` missed the checkbox case — with
   positional columns the header text then became record 1 and every `_row`
-  was off by one;
+  was off by one. "Absent **or empty**" for the same reason: a framework
+  that renders `<thead></thead>` and puts the headings in the first `<tbody>`
+  row was read as headerless while the element was merely present, so a
+  positional read made the heading text record 1 and a header-named one
+  failed with the §5.4 message;
+- exactly **one** body row is considered for that, and it is the first that
+  is rendered or carries a `<th>` — a `display:none` template row, the
+  standard way to clone a row in plain JS, sits in front of the headings and
+  otherwise produced both failures above. Only the first: a `<th>` further
+  down (a row-header column with no `scope` attribute is the realistic case)
+  must not be reachable, or the read would silently delete a data row from
+  the middle of the table;
 - nested-table rows/cells are excluded by requiring `closest('table')` to be
   the selected table.
 
@@ -938,17 +963,23 @@ must include a header styled that way.
   row of one, so the read stored `[]` and succeeded.
 - Exclude nested-table rows.
 - Preserve DOM order.
-- Drop placeholder rows (§4.8): a row whose only cell spans the table's full
-  width (`colspan` equal to the header's column count, or exactly one cell in
-  a headerless table). If every body row was a placeholder, the result is
-  `[]`.
+- Drop placeholder rows (§4.8): a row whose only cell has a `colspan` of at
+  least `max(width, 2)`, where the width is the header row's cell count or,
+  with no header, the widest body row's over **all** body rows, rendered or
+  not. A row with no cells is dropped the same way. Both are counted, for the
+  log line of §7.6. If every body row was a placeholder, the result is `[]`.
+  This test runs BEFORE the merged-cell rejection below — that order is what
+  lets `<td colspan="5">No documents uploaded yet.</td>` answer `[]` instead
+  of failing the read of an empty table.
 - Number what is left: `_row` is the one-based position among the remaining
   data rows, hidden rows and placeholders excluded. Write it on every record
   before the requested columns, so the report and the Variables panel show it
   first.
 - With `limit`, select the first `limit` of those rows before cell extraction.
   Without `limit`, all of them.
-- Reject any other body cell with `rowspan` or `colspan` greater than 1.
+- Reject any other body cell with `rowspan` or `colspan` greater than 1 —
+  and `rowspan="0"` with them (§4.8: legal HTML for "to the end of this row
+  group", reported by the DOM as `0`).
 - A row missing any requested logical cell fails the whole action and names the
   row's `_row` and the header or position. Never drop the row or shift values.
   Cell-shape validation applies to selected rows; an unselected row after the
@@ -1012,16 +1043,48 @@ readTable captured 0 rows × 2 columns as "{{docs}}" (1 placeholder row skipped)
 
 Do not write every captured cell to the normal console/run log. Existing
 variable/report surfaces may show captured variables, but their secret masking
-must recursively inspect record keys: values under keys matching the existing
+must recursively inspect record keys: values under keys matching the
 password/secret/token/key rule must be masked even though the root variable is
-named `orders`. Two limits on that, both from review: a record value shorter
-than four characters is never added to the mask set — a `token` column
+named `orders`.
+
+**Two rules, because a name has two possible authors.** A flat name is the
+test author's — a parameter, a `[store as:]` capture, a `${…}` reference — and
+it takes the broad substring rule (`isSecretName`: `password`, `secret`,
+`token` or `key` anywhere in it). A record's keys are not: they come off the
+page, as a `readTable` column alias or a header turned into a property, and
+there the same breadth masks the wrong things — `keyword` and `sort_key` both
+contain `key`, and masking is not a free precaution because the value is then
+replaced EVERYWHERE, including in the DOM snapshot the model plans its next
+action from. So a record column takes the narrow rule (`isRecordSecretKey`):
+`password`/`passwd`/`pwd`/`secret`/`token`/`otp`/`credential(s)` as whole
+words, and `key` only where something makes it a credential (`api_key`,
+`apiKey`, `access_key`, `private_key`, `auth_key`, `signing_key`,
+`encryption_key`). A camelCase hump is a word boundary, so `apiKey` is a
+secret column and `apikey` — one word, no boundary — is not.
+
+A dotted binding is where the two meet. `row.<column>` (§8.4) is a secret if
+**either** half says so: the root by the author-chosen rule, the property by
+the record-column one. `{{token.payee}}` is masked because the author called
+the record `token`; `{{payment.password}}` because the page called the column
+`password`; `{{payment.sort_key}}` is not masked by either.
+
+**The four-character floor governs only the free-text mask set.** A record
+value shorter than four characters is never *added* to it — a `token` column
 holding `-` and `7` once turned every dash and seven in every output into
-`***`, including the DOM snapshot the model plans from — and for record
-columns the name rule matches whole words (`api_key`, `token`), not
-substrings (`keyword`, `sort_key`). The scan must not depend on the JSON's
-formatting (a tool may pretty-print), and its result is memoised per value
-so `secretsNow()` does not re-parse a 500-row capture on every call.
+`***`, the DOM snapshot included. An entry masked by its NAME has no such
+floor: it is replaced in place, under its own key, where it reaches nothing
+else, so a one-character `payment.password` still renders as the mask and a
+`password` parameter is hidden whatever its length. The scan must not depend
+on the JSON's formatting (a tool may pretty-print), and its result is memoised
+per value so `secretsNow()` does not re-parse a 500-row capture on every call.
+
+**The client masks what the wire does not.** `frame:scope` carries raw values
+by design, so TestBench's Variables view and Variables panel apply the same
+two rules themselves — including inside a value that holds records, which is
+the one case no name rule can catch: `payments` is a whole table and
+`payment` one record of it, both under names the author chose and neither of
+which says secret. They render with each secret column replaced and the rest
+readable, which is what makes the view worth looking at mid-loop.
 
 The action is observational and must not trigger post-action page settling.
 
@@ -1116,9 +1179,24 @@ direct property becomes a dotted binding. Property conversion is:
 Only one direct property segment is addressable in v1. `{{order.address.city}}`
 is not supported.
 
-Reject object keys which do not satisfy the safe identifier rule or are one of
-the three dangerous prototype names. A malformed item fails the `For each`
-guard and names its one-based item index; it must not partially bind fields.
+A key no placeholder can spell — one that fails the property-segment rule of
+§8.3 (`content-type`, `Order ID`, `total-amount`) or is one of the three
+prototype names (`__proto__`, `prototype`, `constructor`) — is **dropped,
+not bound, and never fails the guard**. A list that reaches `For each` from a
+tool or an API is not the author's to rename, and a test that only uses
+`{{item}}` as JSON text must keep running as it did before this feature (§2).
+The dropped keys are reported once per loop entry, at info level, redacted,
+naming the loop's item:
+
+```text
+For each {{order}}: 2 properties cannot be referenced as placeholders (content-type, Order ID)
+For each {{order}}: 1 property cannot be referenced as a placeholder (content-type)
+```
+
+The spellable keys of the same record bind normally. What does fail the guard
+is an item that is not a record where a record was expected, or a list that
+does not parse; that failure names the one-based item index and binds
+nothing of that item.
 
 As with the current scalar item binding, values from the last completed pass
 remain in the one live variable map after the loop. This includes dotted
@@ -1152,7 +1230,12 @@ to:
 {{name.property}}
 ```
 
-with no whitespace. The property segment is `[A-Za-z_][A-Za-z0-9_]*`. The
+with no whitespace — and for the dotted form that is enforced, not assumed:
+`{{ order.id }}` is refused before the model call with the spelling it
+should have had (`{{order.id}}`), whether or not the name resolves, because
+a dotted reference the narrow grammar leaves literal would otherwise reach
+the model as six braces (the flat `{{ name }}` keeps whatever it has always
+done). The property segment is `[A-Za-z_][A-Za-z0-9_]*`. The
 root segment stays what it has always been, `\w+`: tightening it would
 change what `{{1st}}` means for existing tests (`runner-core/src/data-rows.ts`
 documents that looseness as deliberate), and nothing accepted a dotted name
@@ -1183,7 +1266,14 @@ AI call with an error such as:
 ```
 
 `_row` is listed because it is bound: hiding a property that works would
-send the author hunting for a typo in a working name.
+send the author hunting for a typo in a working name. Keys the record has
+but no placeholder can spell (§8.2) are named beside the ones that work, so
+an author who tried `{{order.contenttype}}` learns why it is not there:
+
+```text
+{{order.contenttype}} has no value in For each item 1; available properties are id, status (content-type cannot be spelled as a placeholder)
+{{order.contenttype}} has no value; {{order}} has no properties that can be spelled as placeholders (content-type)
+```
 
 Do not pass the literal braces to the model. Existing unresolved flat-name
 compatibility is outside this feature and remains unchanged.
@@ -1297,14 +1387,27 @@ And the `For each` header's own item name is a definition, not a reference:
 the loops that interpolate a line before dispatching it no longer log
 `Unresolved placeholder: {{payment}}` against `For each {{payment}} in
 {{payments}}` (`controlLineDefines` in `src/parser/control-line.ts` names
-what a control line writes).
+what a control line writes). The exemption is by **root**, so it covers the
+item's properties too: a plain tail such as `For each {{order}} in
+{{orders}}, Click the row whose Order ID is "{{order.id}}"` (§4.6's own
+example) logs nothing on entry, while `{{other.id}}` on the same line, a
+root no loop binds, still warns.
 
 ### 8.4 Loop reporting and TestBench
 
 - Loop markers and `frame:scope` must include the dotted property bindings so
   the TestBench Variables panel can show the current row fields.
 - Secret masking applies using the property segment as well as the complete
-  dotted name.
+  dotted name, by the two rules of §7.6: the property decides by the
+  record-column rule, the root by the author-chosen one, and either is enough.
+- The whole-record binding (`payment`) and the capture it came from
+  (`payments`) are masked by looking INSIDE them — each secret column
+  replaced, the rest left readable. Nothing about either name says secret, so
+  without that they rendered a password in full directly above a
+  `payment.password` row showing `********`.
+- `_row` leads the properties in that view, which needs saying because a
+  plain sort does not do it: `_` is code unit 95, between the upper-case
+  letters and the lower-case ones, so an `Amount` alias came out first.
 - TestBench must recognize a dotted reference as one token rather than treating
   `{{order}}` as a partial token followed by text.
 - Minimum v1 editor behavior: no false diagnostic and correct hover/runtime
@@ -1394,8 +1497,14 @@ root or a literal value that can be inlined into generated source.
 | `<tfoot>` totals row | Excluded. |
 | Row-header `<th scope="row">` in body | Counts as that row's cell at its logical position. |
 | `rowspan`/`colspan` > 1 in a selected row | Fail as unsupported in v1, unless the row is a placeholder (below). |
-| Placeholder row: one cell spanning the full width of a table wider than one column (`colspan` ≥ width) | Not data. Alone in the body: store `[]`. Among data rows: skipped, no `_row` consumed. Logged as “N placeholder row(s) skipped”. |
-| One-column table, with or without a header | Every body row is data; there are no placeholder rows. |
+| `rowspan="0"` (“to the end of this row group”) | A merged cell. The DOM reports it as `0`, so the test is `rowSpan !== 1`, not `> 1`. |
+| Placeholder row: one cell with `colspan` ≥ max(table width, 2) | Not data. Alone in the body: store `[]`. Among data rows: skipped, no `_row` consumed. Logged as “N placeholder row(s) skipped”. Classified before the merged-cell rejection. |
+| Body row with no cells at all | Skipped and counted as a placeholder; nothing to map, nothing to number. |
+| Table width, with no header row | The widest body row's cell count over **all** body rows, rendered or not — a table whose only rendered row is the full-width message would otherwise measure one column wide and fail as a merged cell instead of storing `[]`. |
+| One-column table, with or without a header | Its ordinary (`colspan="1"`) rows are data; the floor of 2 in the rule above is what keeps them out of it. |
+| One-column table with a lone `colspan="2"` message row | A placeholder, not a merged-cell error: a cell spanning more than its own column is a message. |
+| `<thead></thead>` present but empty, headings in the first `<tbody>` row | The body-row header rule applies (§7.3); an element-presence test read the table as headerless. |
+| `display:none` template row before the headings | Skipped when looking for the header row: the first body row that is rendered **or** carries a `<th>` is the one considered, and only that one. |
 | Header row mixing `<td>` and `<th>` (checkbox cell beside headings), no `<thead>` | The header row (§7.3); never record 1. |
 | CSS-grid table (`tr`/`td` with `display: contents`) | Reads normally: a `display:contents` row or cell is rendered if its content is. |
 | Rows appended directly under `<table>` (no `<tbody>`) | Read as body rows. |
@@ -1428,7 +1537,9 @@ root or a literal value that can be inlined into generated source.
 | Object property typo | Fail before AI action with available properties. |
 | Scalar `For each` | Unchanged. |
 | Array item is an object from a tool/API | Direct safe properties become dotted bindings using the same rules. |
-| Secret-named property | Mask on report/log/UI surfaces, retain raw only in execution scope. |
+| Secret-named property | Mask on report/log/UI surfaces, retain raw only in execution scope. The property takes the record-column rule and the root the author-chosen one, either being enough (§7.6): `payment.password` and `token.payee` mask, `payment.sort_key` does not. |
+| A record column's value is shorter than four characters | It does not join the free-text mask set (§7.6), which would replace it everywhere. The entry named for it is still masked, at any length — that mask is in place, under its own key. |
+| A whole capture under a plain name (`payments`, or one pass's `payment`) | No name rule can catch it. The report redacts by value; the TestBench Variables view and panel mask each secret COLUMN inside the JSON and leave the rest readable. |
 
 ---
 
@@ -1473,6 +1584,11 @@ The implementing agent should inspect and update at least these areas:
 - TestBench runtime-placeholder completion/definition core files.
 - Variables view and protocol tests for dotted loop bindings.
 - Report/log secret masking tests for record properties.
+- The client's two copies of the record-column rule — `runner-core/src/repl.ts`
+  for the Variables view, `testbench-native/src/webview/lib/variables-panel.js`
+  for the panel — and a parity test reading the server's patterns out of
+  `src/utils/secrets.ts`, since `frame:scope` carries raw values and neither
+  copy can import the original.
 - One live TestBench fixture proving extraction -> object loop -> row-scoped
   verification across the real extension/server/browser path.
 
@@ -1532,7 +1648,9 @@ The implementing agent should inspect and update at least these areas:
     DOM data rather than replaying old records.
 15. Scalar `For each` regression suite stays green.
 16. Object `For each` binds the base JSON and all direct properties in order.
-17. Missing/unsafe object properties fail before any model call.
+17. A missing object property fails before any model call; a key no
+    placeholder can spell is dropped, reported once per loop entry, and named
+    in that refusal — never bound, never a guard failure (§8.2).
 18. Dotted placeholders substitute in step text and every string leaf of an
     emitted action, but `columns[].key` is not substituted.
 19. Loop markers, reports, and TestBench scope carry the current properties.
@@ -1557,6 +1675,18 @@ The implementing agent should inspect and update at least these areas:
     (esbuild `keepNames`) as well as `tsc`; the `For each` header warns as
     unresolved in none of the loops; `{{a.b.c}}` warns instead of staying
     silent.
+21b. From the second review round, where the rules above were made to say
+    what the code does: a one-column table with a lone `colspan="2"` message
+    row reads `[]` rather than failing as a merged cell, while its
+    `colspan="1"` rows are data; `rowspan="0"` is a merged cell; a headerless
+    table whose only rendered row is the full-width message measures its
+    width over the hidden rows and reads `[]`; an empty `<thead></thead>`
+    with the headings in the first `<tbody>` row finds that header, and a
+    `display:none` template row in front of them is skipped. On the client:
+    `payments` and `payment` render with their secret columns replaced and
+    their other columns readable, a dotted `payment.sort_key` is NOT masked
+    while `payment.api_key` is, and `payment._row` leads the properties on a
+    record whose other aliases are capitalised.
 22. (Phase 2) Each §7.7 form passes and fails on a fixed record list, the
     failure names the offending rows, and the number parser accepts `$1,234.56`,
     `+42`, `−$87.40` (U+2212) and `(87.40)` and rejects `n/a` by naming the row.

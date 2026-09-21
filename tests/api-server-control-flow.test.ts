@@ -175,6 +175,12 @@ vi.mock('../src/utils/logger.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
+// The mocked logger above, imported so a test can read what the run said.
+import { logger } from '../src/utils/logger.js';
+
+/** Every `logger.warn` line this run produced. */
+const warnings = (): string[] =>
+  (logger.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]));
 
 const API_KEY = 'sk-control-flow-test';
 const cfg: Config = {
@@ -222,6 +228,7 @@ beforeEach(() => {
   flowControlFor = () => undefined;
   judgeParksUntilAbort = false;
   judgeEntered = undefined;
+  (logger.warn as unknown as { mockClear: () => void }).mockClear();
 });
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -790,6 +797,57 @@ describe('For each over object rows', () => {
     ]);
   });
 
+  /**
+   * §4.6's own example header, whose tail names a property of the item it is
+   * about to bind.
+   *
+   * This loop interpolates EVERY step before the control dispatch, so the
+   * header is resolved on the visit that has not begun a pass yet — and
+   * `controlLineDefines` exempted the item `{{order}}` and nothing else, so
+   * `{{order.id}}` was warned about as `Unresolved placeholder` on every entry
+   * to every correct table loop. The same noise the round-1 fix removed, one
+   * dot further along, and on the line the spec prints as the recommended
+   * form.
+   */
+  it('does not warn about a property of the item the header is about to bind', async () => {
+    await collect({
+      steps: [
+        'Open the orders page',
+        'For each {{order}} in {{orders}}, Click the row whose Order ID is "{{order.id}}"',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: { orders: ORDERS },
+    });
+
+    expect(warnings().filter((w) => w.includes('Unresolved placeholder'))).toEqual([]);
+    // The loop really ran, so the silence is about a working line rather than
+    // about a line that never got here.
+    expect(executedSteps).toEqual([
+      'Open the orders page',
+      'Click the row whose Order ID is "A"',
+      'Click the row whose Order ID is "B"',
+      'Sign out',
+    ]);
+  });
+
+  it('still warns about a dotted name no loop binds, on an ordinary step', async () => {
+    // The control: only the item's OWN root is exempt, and only on the line
+    // that defines it.
+    await collect({
+      steps: [
+        'Open the orders page',
+        'Verify the row for "{{other.id}}" is shown',
+      ],
+      sourceLines: [3, 4],
+      testFilePath,
+      parameters: { orders: ORDERS },
+    });
+
+    expect(warnings()).toContain('Unresolved placeholder: {{other.id}}');
+  });
+
   it('refuses a property the row does not have, before the model is asked', async () => {
     const events = await collect({
       ...ordersBody(),
@@ -1189,15 +1247,36 @@ describe('For each over object rows', () => {
     expect(executedSteps).toEqual(['Open the statements page', 'Sign out']);
   });
 
-  it('fails the loop on an unsafe property name, naming the item', async () => {
+  /**
+   * A key no placeholder can spell is dropped, and the loop runs.
+   *
+   * It failed the whole guard until review 2 — which is a regression for every
+   * existing `For each` over a tool's or an API's array of objects, where
+   * `content-type` is ordinary and no step asks for a dotted binding at all
+   * (§2 keeps existing `For each` behaviour). `__proto__` is the sharp end of
+   * the same rule: it must not become a binding, and it must not stop a run.
+   */
+  it('drops a key no placeholder can spell, and loops over the rest', async () => {
     const events = await collect(
-      ordersBody('[{"id":"A"},{"__proto__":"boom","id":"B"}]'),
+      ordersBody(
+        '[{"_row":"1","id":"A","status":"x","__proto__":"boom"},' +
+          '{"_row":"2","id":"B","status":"y","content-type":"t"}]',
+      ),
     );
-    const failure = events.find((e) => e.type === 'step:fail');
-    expect(failure).toMatchObject({ line: 4 });
-    expect(failure!.error).toContain('`{{orders}}` item 2 has a property named `__proto__`');
-    // The guard failed on reading the list, so no pass ever started.
-    expect(executedSteps).toEqual(['Open the orders page']);
+
+    expect(events.find((e) => e.type === 'step:fail')).toBeUndefined();
+    expect(executedSteps).toEqual([
+      'Open the orders page',
+      'Verify the row for "A" shows "x"',
+      'Verify the row for "B" shows "y"',
+      'Sign out',
+    ]);
+    // Neither key became a binding — the scope holds the spellable ones only.
+    const scopes = events.filter((e) => e.type === 'frame:scope').map((e) => e.scope);
+    const keys = scopes.flatMap((s) => Object.keys(s as Record<string, unknown>));
+    expect(keys).not.toContain('order.__proto__');
+    expect(keys).not.toContain('order.content-type');
+    expect(keys).toContain('order.status');
   });
 });
 

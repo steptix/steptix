@@ -42,16 +42,16 @@ const RUNTIME_SOURCE_FILE = resolve(here, '..', '..', 'src', 'parser', 'paramete
 const TESTS_DIR = resolve(here, '..', '..', 'templates', 'init', 'tests');
 
 /**
- * The value of a single-quoted `export const <name> = '…';` in TypeScript
- * source, as JavaScript would see it. The grammar constants are plain
- * single-quoted literals with no quotes of their own, so JSON's unescaping is
- * exactly JavaScript's over this input.
+ * The value of a single-quoted `const <name> = '…';` in TypeScript source
+ * (exported or not), as JavaScript would see it. The grammar constants are
+ * plain single-quoted literals with no quotes of their own, so JSON's
+ * unescaping is exactly JavaScript's over this input.
  */
-function exportedStringLiteral(source, name) {
-  const hit = new RegExp(`export const ${name} = '([^']*)';`).exec(source);
+function stringLiteral(source, name) {
+  const hit = new RegExp(`(?:export )?const ${name} = '([^']*)';`).exec(source);
   assert.ok(
     hit,
-    `could not read \`export const ${name} = '…';\` out of src/parser/parameters.ts — ` +
+    `could not read \`const ${name} = '…';\` out of src/parser/parameters.ts — ` +
       'if that line was reformatted, update this reader; if the constant was ' +
       'renamed or removed, the extension mirror below needs the same change',
   );
@@ -59,47 +59,53 @@ function exportedStringLiteral(source, name) {
 }
 
 /**
- * The value of an `export const <name> = \`…\`;` template literal, with the
- * one interpolation the runtime uses — `${PLACEHOLDER_NAME_SOURCE}` — filled
- * in from `names`.
+ * The value of an `export const <name> = \`…\`;` template literal, with each
+ * `${…}` interpolation filled in from `fills` — the constants this reader has
+ * already resolved.
  *
- * `PLACEHOLDER_SOURCE` is COMPOSED in parameters.ts, and recomposing it here
- * instead of reading it would leave the composition itself unpinned: the file
+ * The grammar is COMPOSED in parameters.ts, one source feeding the next:
+ * `PROPERTY_SEGMENT_SOURCE` (a plain literal) into `PLACEHOLDER_NAME_SOURCE`,
+ * and that into `PLACEHOLDER_SOURCE`, which adds the braces. Recomposing any
+ * link here instead of reading it would leave that link unpinned: the file
  * also exports `WIDE_PLACEHOLDER_SOURCE`, which wraps the same name source in
- * `\\s*` on both sides, and a runtime switched to that (or to any other
- * spelling of the braces) would still satisfy a check built from
- * `PLACEHOLDER_NAME_SOURCE` alone. The extension would then read
- * `{{ order.id }}` as a reference the runtime leaves literal. So the braces
- * are read too, and a reformat that defeats this reader fails loudly.
+ * `\s*` on both sides, and a runtime switched to that (or to any other
+ * spelling of the braces) would still satisfy a check built from the name
+ * source alone. The extension would then read `{{ order.id }}` as a reference
+ * the runtime leaves literal. So every link is read, and an interpolation
+ * this reader was not told about fails loudly rather than changing the
+ * grammar silently.
  */
-function exportedTemplateLiteral(source, name, names) {
+function templateLiteral(source, name, fills) {
   const hit = new RegExp('export const ' + name + ' = `([^`]*)`;').exec(source);
   assert.ok(
     hit,
     `could not read \`export const ${name} = \`…\`;\` out of src/parser/parameters.ts — ` +
       'if that line was reformatted, update this reader; if the constant is no longer ' +
-      'composed from PLACEHOLDER_NAME_SOURCE, the extension mirror needs the same change',
+      'composed from the sources this reader fills in, the extension mirror needs the same change',
   );
   // Unescape first (a template literal takes the same escapes a string does,
-  // and this one holds no `\``), then fill the interpolation.
-  const raw = JSON.parse(`"${hit[1]}"`);
-  const filled = raw.split('${PLACEHOLDER_NAME_SOURCE}').join(names);
+  // and this one holds no backtick), then fill the interpolations.
+  let filled = JSON.parse(`"${hit[1]}"`);
+  for (const [key, value] of Object.entries(fills)) {
+    filled = filled.split('${' + key + '}').join(value);
+  }
   assert.ok(
     !filled.includes('${'),
-    `${name} interpolates something other than PLACEHOLDER_NAME_SOURCE (${hit[1]}) — ` +
-      'this reader only knows that one, and an unknown one could change the grammar',
+    `${name} interpolates something other than ${Object.keys(fills).join(', ')} (${hit[1]}) — ` +
+      'this reader only knows those, and an unknown one could change the grammar',
   );
   return filled;
 }
 
 const runtimeSource = readFileSync(RUNTIME_SOURCE_FILE, 'utf8');
-const NAME_SOURCE = exportedStringLiteral(runtimeSource, 'PLACEHOLDER_NAME_SOURCE');
+const PROPERTY_SEGMENT = stringLiteral(runtimeSource, 'PROPERTY_SEGMENT_SOURCE');
+const NAME_SOURCE = templateLiteral(runtimeSource, 'PLACEHOLDER_NAME_SOURCE', {
+  PROPERTY_SEGMENT_SOURCE: PROPERTY_SEGMENT,
+});
 /** `PLACEHOLDER_SOURCE` as parameters.ts spells it — braces included. */
-const PLACEHOLDER_SOURCE = exportedTemplateLiteral(
-  runtimeSource,
-  'PLACEHOLDER_SOURCE',
-  NAME_SOURCE,
-);
+const PLACEHOLDER_SOURCE = templateLiteral(runtimeSource, 'PLACEHOLDER_SOURCE', {
+  PLACEHOLDER_NAME_SOURCE: NAME_SOURCE,
+});
 
 // ───────────────────────────────────────────────────────────────────────────
 // The literal
@@ -121,7 +127,9 @@ test('the extension mirror is that literal, character for character', () => {
 test('the wide runtime source is a DIFFERENT string, and is not what is mirrored', () => {
   // The reader above would happily compose the narrow grammar from the name
   // source alone; this is the case that proves it is reading the braces.
-  const wide = exportedTemplateLiteral(runtimeSource, 'WIDE_PLACEHOLDER_SOURCE', NAME_SOURCE);
+  const wide = templateLiteral(runtimeSource, 'WIDE_PLACEHOLDER_SOURCE', {
+    PLACEHOLDER_NAME_SOURCE: NAME_SOURCE,
+  });
   assert.notEqual(wide, PLACEHOLDER_SOURCE);
   assert.notEqual(PARAM_REF_RE.source, wide, 'the editor must not read `{{ order.id }}`');
 });

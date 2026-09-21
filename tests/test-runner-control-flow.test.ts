@@ -889,6 +889,64 @@ describe('a For each pass does not inherit the last row', () => {
   });
 });
 
+/**
+ * A record with a key no placeholder can spell still loops
+ * (docs/specs/SPEC-structured-table-reads.md §8.2).
+ *
+ * Tool and API arrays carry `content-type`, `Order ID`, `total-amount` — and
+ * until review 2 one of those failed the whole `For each`, including the
+ * loops that only ever print `{{item}}` as JSON and never ask for a dotted
+ * binding at all. §2 promises existing `For each` behaviour is preserved, so
+ * the key is dropped and named rather than fatal.
+ */
+describe('a For each over records with keys a placeholder cannot spell', () => {
+  const DOCS = [
+    '# Documents',
+    '',
+    '## Steps',
+    '1. For each {{doc}} in {{docs}}, Check the document',
+    '',
+    '### Check the document',
+    '1. Verify the row for "{{doc.id}}" is shown',
+    '',
+  ].join('\n');
+
+  const LIST =
+    '[{"id":"A","content-type":"text/plain"},{"id":"B","content-type":"text/html"}]';
+
+  it('runs every pass, binds the spellable keys, and names the dropped one once', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    try {
+      const inst = await instance(DOCS, { docs: LIST }, 'unspellable-keys.md');
+      const report = await runTest(inst, makeConfig(), '');
+
+      expect(report.status).toBe('passed');
+      expect(executeStepMock.mock.calls.map((c) => String(c[2]))).toEqual([
+        'Verify the row for "A" is shown',
+        'Verify the row for "B" is shown',
+      ]);
+      const lines = info.mock.calls.map((c) => String(c[0]));
+      expect(lines.filter((l) => l.includes('cannot be referenced'))).toEqual([
+        'For each {{doc}}: 1 property cannot be referenced as a placeholder (content-type)',
+      ]);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('tells an author who tries to reference it why it is not there', async () => {
+    const md = DOCS.replace('{{doc.id}}', '{{doc.contenttype}}');
+    const inst = await instance(md, { docs: LIST }, 'unspellable-keys-referenced.md');
+    const report = await runTest(inst, makeConfig(), '');
+
+    expect(report.status).toBe('failed');
+    expect(report.steps.find((s) => s.status === 'failed')!.error).toBe(
+      '{{doc.contenttype}} has no value in For each item 1; available properties are id ' +
+        '(content-type cannot be spelled as a placeholder)',
+    );
+  });
+});
+
 // ─── Aborts ─────────────────────────────────────────────────────────────────
 
 describe('stopping the run mid-decision', () => {

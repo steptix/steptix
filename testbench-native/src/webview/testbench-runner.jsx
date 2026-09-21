@@ -1282,8 +1282,16 @@ function TestBenchRunner() {
             </div>
             {Object.entries(skillRerun.scope).map(([name, value]) => {
               const isParam = skillRerun.paramNames.includes(name);
-              const masked = /password|secret|token|apikey|api_key/i.test(name);
-              const readOnly = isParam || masked;
+              // What this row is allowed to show decides whether it can be
+              // edited, rather than a third spelling of the secret rule — the
+              // regex that used to sit here knew `password|secret|token|
+              // apikey|api_key` and nothing else, so `MACHINE_KEY`,
+              // `payment.pwd` and (the reason this changed) a `readTable`
+              // capture with a password column were rendered raw in an
+              // editable input. A value we have to mask cannot be an input
+              // anyway: the mask is what the edit would send back.
+              const display = maskIfSecretInline(name, value);
+              const readOnly = isParam || display !== value;
               const current = name in rerunEdits ? rerunEdits[name] : value;
               return (
                 <div key={name} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, fontSize: "0.92em" }}>
@@ -1295,7 +1303,7 @@ function TestBenchRunner() {
                   </span>
                   {readOnly ? (
                     <span style={{ flex: 1, fontFamily: "var(--vscode-editor-font-family, monospace)", opacity: 0.65 }}>
-                      {maskIfSecretInline(name, value)}
+                      {display}
                     </span>
                   ) : (
                     <input

@@ -5,7 +5,7 @@ import type { PageStateDiagnosis } from '../browser/page-state.js';
 import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseFailureTail, type ParsedFailureTail } from '../parser/failure-tail.js';
 import { WIDE_PLACEHOLDER_SOURCE } from '../parser/parameters.js';
-import { isSecretName, isSecretRef, MASK } from '../utils/secrets.js';
+import { isSecretParameterName, isSecretRef, MASK } from '../utils/secrets.js';
 
 /**
  * What a step's placeholders hold right now — the `## Values` block the model
@@ -1151,7 +1151,10 @@ export interface StepCodePromptInput {
  * (stories/placeholder-preserving-actions.md, "Prompt").
  *
  * Secret-named entries render as `"***"` (decision 2). By NAME for a
- * `{{name}}` — `isSecretName` — and by PATH for a `${…}` reference, so
+ * `{{name}}` — `isSecretParameterName`, which is `isSecretName` for an
+ * author-chosen name and the record-column rule for the property of a loop's
+ * `row.<column>` binding, so a `keyword` column does not mask as `key` — and
+ * by PATH for a `${…}` reference, so
  * `${data.secrets.smtp.host}` masks exactly as `envDataSecretValues` masks its
  * value. The model never needs a secret's value to name the placeholder that
  * holds it, and masking here is what makes the CLI and TestBench compiles
@@ -1172,7 +1175,7 @@ export function formatParameterBlock(
     JSON.stringify(secret && !unmask.has(name) ? MASK : value);
   return [
     ...parameters.map(
-      (p) => `- {{${p.name}}} resolved to ${show(isSecretName(p.name), p.name, p.value)} on this run`,
+      (p) => `- {{${p.name}}} resolved to ${show(isSecretParameterName(p.name), p.name, p.value)} on this run`,
     ),
     ...envRefs.map(
       (r) =>

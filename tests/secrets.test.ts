@@ -13,6 +13,7 @@ import {
   redactReport,
   recordSecretValues,
   isRecordSecretKey,
+  isSecretParameterName,
   EMPTY,
   MASK,
 } from '../src/utils/secrets.js';
@@ -170,8 +171,11 @@ describe('secrets inside a record list (structured table reads)', () => {
 
   it('masks the dotted binding a For each pass leaves in the map, by name and by value', () => {
     // The pass binds `order` plus one entry per property (§8.2), so the map
-    // itself carries `order.password`. `isSecretName` matches on a substring,
-    // which is what makes the property segment count without a second rule.
+    // itself carries `order.password`. A dotted name is decided by its two
+    // segments — the author-chosen root, or the page-derived property under
+    // the whole-word record rule (`isSecretParameterName`) — and `password`
+    // is one of those words. The substring rule that used to answer this
+    // also answered `order.keyword`, which is the next describe.
     const pass = {
       orders: ORDERS,
       order: '{"_row":"1","id":"ORD-1001","password":"row-1-hunter2"}',
@@ -192,7 +196,10 @@ describe('secrets inside a record list (structured table reads)', () => {
 
   it('masks a record stored under a secret-named variable whole, as it always did', () => {
     const tokens = JSON.stringify([{ _row: '1', label: 'staging' }]);
-    expect(secretValues({ token: tokens })).toEqual([tokens]);
+    // Both spellings: the raw list, and the list as it reads nested inside
+    // another JSON string (a trace payload, a report field).
+    expect(secretValues({ token: tokens }))
+      .toEqual([tokens, JSON.stringify(tokens).slice(1, -1)]);
     expect(redactMap({ token: tokens }, secretValues({ token: tokens }))).toEqual({ token: MASK });
   });
 
@@ -276,6 +283,27 @@ describe('record masking — the limits that keep it from masking the page', () 
     expect(secretValues({ c: `\n  ${JSON.stringify(records)}` })).toEqual(['row-1-hunter2']);
   });
 
+  it('masks the JSON-escaped form of a record secret as well as the raw one', () => {
+    // The capture is STORED as JSON, so a value containing `"` or `\` sits in
+    // the variable in its escaped form. With only the raw form in the mask
+    // set, prose was masked and the stored row was not — the report printed
+    // the password back verbatim inside the very value that holds it.
+    const value = 'he "said" hi';
+    const rows = JSON.stringify([{ _row: '1', payee: 'Acme', password: value }]);
+    const secrets = secretValues({ payments: rows });
+    expect(redact(rows, secrets)).toBe(`[{"_row":"1","payee":"Acme","password":"${MASK}"}]`);
+    // The raw form still masks in prose.
+    expect(redact(`typing ${value} into the field`, secrets)).toBe(`typing ${MASK} into the field`);
+    // A backslash escapes the same way.
+    const slashy = 'C:\\Users\\alice';
+    const slashyRows = JSON.stringify([{ token: slashy }]);
+    expect(redact(slashyRows, secretValues({ p: slashyRows }))).toBe(`[{"token":"${MASK}"}]`);
+    // And an author-named parameter gets both forms too.
+    const named = secretValues({ password: value });
+    expect(named).toContain(value);
+    expect(named).toContain(JSON.stringify(value).slice(1, -1));
+  });
+
   it('parses one value once — `secretsNow()` asks many times per step', () => {
     // Identity, not a stopwatch: the same string gets the same frozen array
     // back, which it cannot do without the memo. Re-parsing a 500-row capture
@@ -292,6 +320,73 @@ describe('record masking — the limits that keep it from masking the page', () 
     // A value that cannot hold records is answered without parsing at all.
     expect(recordSecretValues('Alice Smith')).toEqual([]);
     expect(recordSecretValues('Alice Smith')).toBe(recordSecretValues('[not, json'));
+  });
+});
+
+/**
+ * The same over-masking, one door along: a pass binding is a map ENTRY, and
+ * `secretValues`/`redactMap` read entries by name with the broad author rule.
+ * `row.keyword = "AU"` then put `AU` in the mask set and every `AU` in the
+ * log, the report AND the DOM snapshot the model plans from became `***`.
+ * A dotted name is page-derived, so its property segment goes through the
+ * whole-word record rule instead (SPEC-structured-table-reads.md §7.6/§8.4).
+ */
+describe('isSecretParameterName — the pass bindings a loop leaves in the map', () => {
+  it('decides a dotted name from its two segments, not from the whole string', () => {
+    // Page-derived property, merely containing a secret word: not a secret.
+    expect(isSecretParameterName('row.keyword')).toBe(false);
+    expect(isSecretParameterName('order.monkey')).toBe(false);
+    expect(isSecretParameterName('row.sort_key')).toBe(false);
+    expect(isSecretParameterName('payment._row')).toBe(false);
+    // Page-derived property that IS one of the record words: a secret.
+    expect(isSecretParameterName('row.password')).toBe(true);
+    expect(isSecretParameterName('row.api_key')).toBe(true);
+    expect(isSecretParameterName('payment.apiKey')).toBe(true);
+    // The author chose the loop variable's name, so the root decides too.
+    expect(isSecretParameterName('secret.value')).toBe(true);
+    expect(isSecretParameterName('token.label')).toBe(true);
+    // A flat name is author-chosen end to end: the broad rule, unchanged.
+    expect(isSecretParameterName('search_keyword')).toBe(true);
+    expect(isSecretParameterName('password')).toBe(true);
+    expect(isSecretParameterName('username')).toBe(false);
+  });
+
+  it('never masks "AU" because a column happens to be called keyword', () => {
+    const pass = {
+      rows: '[{"_row":"1","keyword":"AU"}]',
+      row: '{"_row":"1","keyword":"AU"}',
+      'row._row': '1',
+      'row.keyword': 'AU',
+    };
+    const secrets = secretValues(pass);
+    expect(secrets).toEqual([]);
+    expect(redactMap(pass, secrets)).toEqual(pass);
+    // The DOM snapshot the model plans its next action from is the surface
+    // this protects: masking `AU` there hides the option it must click.
+    const dom = '<select><option value="AU">Australia</option></select>';
+    expect(redact(dom, secrets)).toBe(dom);
+  });
+
+  it('masks a `token` binding by NAME without putting its one-character value in the set', () => {
+    // The round-1 defect, back through the map: the record floor kept `7` out
+    // of the mask set, and the entry rule put it straight back in.
+    const pass = { 'row.token': '7' };
+    const secrets = secretValues(pass);
+    expect(secrets).toEqual([]);
+    expect(redact('3 rows, total $1,742.70 for order ORD-1007', secrets))
+      .toBe('3 rows, total $1,742.70 for order ORD-1007');
+    // The entry itself still says what it is — the name is the rule (§7.6).
+    expect(redactMap(pass, secrets)).toEqual({ 'row.token': MASK });
+    // Four characters and up, it is a credential and joins the set.
+    expect(secretValues({ 'row.token': 'abcd1234' })).toEqual(['abcd1234']);
+  });
+
+  it('keeps the author-chosen root free of the record floor', () => {
+    // `secret` is a name the AUTHOR typed, which is a deliberate instruction,
+    // so the four-character floor that protects page-derived columns does not
+    // apply to it.
+    expect(secretValues({ 'secret.value': 'ab' })).toEqual(['ab']);
+    expect(redactMap({ 'secret.value': 'ab' }, ['ab'])).toEqual({ 'secret.value': MASK });
   });
 });
 
