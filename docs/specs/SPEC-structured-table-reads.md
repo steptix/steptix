@@ -1271,7 +1271,13 @@ otherwise the ordering goes to the judge.
 A chain (`If` / `Else if` / `Otherwise`) is decided locally only when every
 member's condition is literal; if any member needs the page, the whole chain
 goes to the judge, so one evaluation never mixes the two sources. `While`
-and `Repeat … until` conditions get the same treatment on every evaluation.
+and `Repeat … until` conditions get the same treatment on every evaluation,
+and so do the flow-control lines of the step-flow-control story — `If …,
+then return`, `then stop`, `then fail the test with error "…"` — which are
+claimed before the chain grammar and judged on their own path in the step
+executor; review found the first cut covered the chains and not these, so
+the very line this section opens with still paid a model call per pass.
+`When prompted …, then return` is a watch, and stays with the judge.
 The grammar lives in one exported parser beside `set-step.ts` and
 `flow-control-step.ts` (`src/parser/literal-condition.ts`) so the handbook
 can name it and TestBench can one day show it on hover. Anything with prose

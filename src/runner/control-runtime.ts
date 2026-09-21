@@ -33,13 +33,9 @@ import {
   type GuardRequest,
   type GuardVerdict,
 } from './control-flow.js';
-import { parseLiteralCondition } from '../parser/literal-condition.js';
+import { decideConditionLocally, localReasoning } from './literal-decision.js';
 import { placeholderRoot } from '../parser/parameters.js';
-import {
-  dottedReferenceError,
-  substituteAsLiterals,
-  type PlaceholderValues,
-} from './placeholder-substitution.js';
+import { dottedReferenceError, type PlaceholderValues } from './placeholder-substitution.js';
 import { redact, runSecrets } from '../utils/secrets.js';
 import { logger } from '../utils/logger.js';
 import { evaluateConditions } from './step-executor.js';
@@ -319,26 +315,12 @@ function conditionTexts(request: GuardRequest): readonly string[] {
  * marker, the report and TestBench identical to a judged decision — the only
  * visible difference is whose words are in `aiExplanation`.
  *
- * ## Three rules about the text it decides from
- *
- * 1. Every reference is substituted as a QUOTED literal
- *    ({@link substituteAsLiterals}), because the grammar reads values and not
- *    bare words: `If {{payment.status}} is "Paused"` is the feature's OWN
- *    example and, substituted plainly, produced `Overdue is "Paused"` — which
- *    the grammar rejects, so the acceptance tests went on paying for a judge
- *    call per pass and kept the wrong-answer risk this module exists to
- *    remove.
- * 2. A condition whose AUTHORED text made no reference at all is never decided
- *    here. `If "Welcome back" is empty` and `Repeat … until "Load more" is
- *    empty` are sentences about the PAGE that happen to be spelled with
- *    quotes; answering them from their own characters would say "false"
- *    without looking, and run a `Repeat` to its cap every time. The grammar
- *    cannot tell the two apart — only the presence of a `{{…}}` or `${…}` can,
- *    and that is a property of what the author wrote.
- * 3. The reasoning carries VALUES, so it is redacted before it is written.
- *    The judge path never had this problem: it was handed the unsubstituted
- *    text. `If "{{order.token}}" is empty` decided here would otherwise print
- *    the token into the run log and the server's `step:pass` output.
+ * The rule itself — substitute as quoted literals, refuse a condition whose
+ * AUTHORED text made no reference, redact — lives in
+ * [literal-decision.ts](literal-decision.ts), because a flow-control line's
+ * condition (`If {{payment.status}} is "Overdue", then return`) is judged in
+ * the step executor and never reaches this function at all. Two judges, one
+ * rule.
  */
 function decideLocally(
   conditions: readonly string[],
@@ -347,15 +329,9 @@ function decideLocally(
 ): ConditionVerdict | null {
   const decided: Array<{ text: string; holds: boolean }> = [];
   for (const condition of conditions) {
-    const { text, references, unspellable } = substituteAsLiterals(condition, values);
-    // Rule 2 above: no reference, no local decision.
-    if (references === 0) return null;
-    // A value with a quote in it cannot be spelled as a literal, and guessing
-    // would let a value be read as syntax. The judge gets it, as before.
-    if (unspellable) return null;
-    const literal = parseLiteralCondition(text);
-    if (!literal) return null;
-    decided.push({ text: redactText(text), holds: literal.holds });
+    const local = decideConditionLocally(condition, values, redactText);
+    if (!local) return null;
+    decided.push({ text: local.text, holds: local.holds });
   }
   if (decided.length === 0) return null;
 
@@ -381,13 +357,6 @@ function decideLocally(
   // from the values: none held — …`.
   logger.debug(`Condition judge: ${reasoning}`);
   return { selected: null, reasoning, aiInteractions: [] };
-}
-
-/** The sentence a locally decided condition carries in place of the model's.
- *  One place, so the log line, the guard row's `aiExplanation` and the tests
- *  cannot drift over its wording. */
-function localReasoning(condition: string, holds: boolean): string {
-  return `decided from the values: ${condition} → ${holds}`;
 }
 
 /**

@@ -105,6 +105,30 @@ describe('every run loop writes a pass"s bindings through the helper', () => {
   });
 });
 
+/**
+ * A flow-control condition is decided in ONE place — `executeStep` — because
+ * `If {{payment.status}} is "Overdue", then return` is claimed at rung 0 of
+ * `parseControlLine` and is therefore never a guard
+ * (docs/specs/SPEC-structured-table-reads.md §8.3a). Each loop's part is to
+ * hand the claim over, read off the AUTHORED line; the decision, local or
+ * judged, is the executor's.
+ *
+ * So this is the pin that matters here: a loop that stopped passing the claim
+ * would lose the local decision AND the model-judged return together, and the
+ * step would quietly run as ordinary prose.
+ */
+describe('every run loop hands its flow-control claim to the executor', () => {
+  // The errand runner is the fourth, and gets the same decision for free —
+  // it is listed here so a reader looking for "all the loops" finds it.
+  const CLAIM_SITES = [...RUN_LOOPS, 'src/server/errand-runner.ts'] as const;
+
+  it.each(CLAIM_SITES)('%s reads the claim off the AUTHORED line', (file) => {
+    const body = source(file);
+    expect(body).toMatch(/parseFlowControlStep\((raw|original)[A-Za-z]*\)/);
+    expect(body).toContain('flowControlClaim }');
+  });
+});
+
 describe('every run loop tells interpolate what a control line DEFINES', () => {
   // `For each {{payment}} in {{payments}}` READS the list and WRITES the item.
   // Without the third argument, `interpolate` warns

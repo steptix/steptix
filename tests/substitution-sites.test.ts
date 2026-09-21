@@ -81,21 +81,27 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   'src/mcp/assemble.ts': { why: 'not-step-text', calls: 1 },
   'src/parser/interpolate-env-data.ts': { why: 'definition', calls: 4 },
   // The literal-condition pre-check (src/parser/literal-condition.ts): a
-  // control line's CONDITION is substituted so the runtime can decide it
-  // without a model call. Not step text by construction — `parseControlLine`
-  // splits the condition off the line and the TAIL is the step, so nothing
-  // here is ever handed to `parseSetStep`. The substituted text is used twice
-  // and neither is an instruction: to evaluate, and as the report sentence
-  // `decided from the values: "" is empty → true`.
+  // CONDITION is substituted so the runtime can decide it without a model
+  // call. Not step text by construction — a control line's condition is split
+  // off by `parseControlLine` and a flow-control line's by
+  // `parseFlowControlStep`, and the TAIL is the step, so nothing here is ever
+  // handed to `parseSetStep`. The substituted text is used twice and neither
+  // is an instruction: to evaluate, and as the report sentence `decided from
+  // the values: "" is empty → true`.
   //
   // `substituteAsLiterals`, not `substituteText`: the grammar reads VALUES,
   // so a reference the author did not already wrap in quotes is substituted
   // as a quoted literal (`{{payment.status}} is "Paused"` →
   // `"Overdue" is "Paused"`). That form is also what the report sentence
-  // shows, and it is masked HERE with the run's secrets before it is written,
-  // rather than relying on `redactReport` — the judge path never carried a
-  // value in its reasoning, so nothing downstream was built expecting one.
-  'src/runner/control-runtime.ts': { why: 'not-step-text', calls: 1 },
+  // shows, and it is masked HERE with the run's secrets before it is
+  // returned, rather than relying on `redactReport` — neither judge path ever
+  // carried a value in its reasoning, so nothing downstream was built
+  // expecting one.
+  //
+  // One module, two callers: `control-runtime.ts` for a guard's condition and
+  // `step-executor.ts` for a flow-control line's. Neither substitutes on its
+  // own any more.
+  'src/runner/literal-decision.ts': { why: 'not-step-text', calls: 1 },
   // Several, and deliberately one label: a validate-only main-flow pass, the
   // hook preserve, the guarded skill-body and skill-section passes, and value
   // passes for parameters, rows, config and output names. The count is what

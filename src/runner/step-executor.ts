@@ -43,6 +43,7 @@ import {
   substituteText,
   type PlaceholderValues,
 } from './placeholder-substitution.js';
+import { decideConditionLocally } from './literal-decision.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import {
   isReturnClaim,
@@ -716,6 +717,20 @@ export async function executeStep(
   const withStale = (result: StepResult): StepResult =>
     staleAfterHeal ? { ...result, codeBehindStale: staleAfterHeal } : result;
 
+  // --- A flow-control condition this run's values already answer ---
+  //
+  // `If {{payment.status}} is "Overdue", then return` and its two siblings
+  // (docs/specs/SPEC-structured-table-reads.md §8.3a). Ahead of the cache for
+  // the reason code-behind is — no model call, no DOM snapshot, and here no
+  // `settle` wait either — and BEHIND code-behind, because a compiled entry is
+  // the author's own code for this step and `step.exit()` is its way of
+  // saying the same thing.
+  //
+  // The cache is not a consideration either way: `cacheEnabledFor` already
+  // returns false for any step carrying a claim.
+  const locallyDecided = decideFlowControlLocally(stepIndex, instruction, opts, startTime);
+  if (locallyDecided) return applyFailureTail(withStale(locallyDecided), opts);
+
   const cacheEnabled = cacheEnabledFor(opts);
 
   // --- Cache attempt (before normal AI flow) ---
@@ -908,6 +923,144 @@ export async function executeStep(
           ? `Failed to execute step. Last error: ${errorMessage}`
           : `Failed to execute step after ${attemptsMade} attempts. Last error: ${errorMessage}`,
     }), opts);
+  }
+}
+
+/**
+ * The error a CONDITIONAL `fail` puts on the row, masked
+ * (stories/step-failure-outcomes.md, decision 3).
+ *
+ * The message comes off the INTERPOLATED line, not off the claim: the claim
+ * was read from the AUTHORED text — it has to be the same answer on every run
+ * and in every runner — so `claim.message` still holds the author's
+ * `{{tokens}}`, and `Expected 10, got {{total}}` would reach the report with
+ * the braces in it. One parser read twice, exactly as `deliberateFailError`
+ * does it for the unconditional form (src/runner/flow-control.ts), fallback
+ * included: a value carrying the quote character that ends the message makes
+ * the re-parse miss.
+ *
+ * A message-less `fail` is legal and the framework words it. Read for TRUTH
+ * rather than presence: the parser keeps `with error ""` as an empty string,
+ * and an empty error is no error to put on the row.
+ *
+ * `why` is the account of the CONDITION, already masked — the model's
+ * description on the AI path, the `decided from the values: …` sentence when
+ * the condition was answered from this run's values. One function for both, so
+ * the row a reader sees cannot depend on which judged it.
+ */
+function composeDeliberateFailure(
+  claim: ParsedFlowControlStep,
+  interpolatedLine: string,
+  why: string,
+  secrets: string[],
+): string {
+  const reparsed = parseFlowControlStep(interpolatedLine);
+  const resolved = reparsed?.verb === 'fail' ? reparsed.message : undefined;
+  const authoredMessage = resolved ?? (claim.verb === 'fail' ? claim.message : undefined);
+  return authoredMessage
+    ? redact(authoredMessage, secrets)
+    : `Failed by the step: ${why || 'the condition held'}`;
+}
+
+/**
+ * A flow-control condition that this run's values already answer
+ * (docs/specs/SPEC-structured-table-reads.md §8.3a).
+ *
+ * `If {{payment.status}} is "Overdue", then return` is the spec's headline
+ * example and the shape `templates/init/tests/table-payments-review.md` and
+ * `-approve.md` are built on. It is claimed at rung 0 of `parseControlLine`,
+ * so it is never a guard and `evaluateGuard`'s local decision never sees it —
+ * it is judged HERE, by the step's own model turn, behind a `settle` wait.
+ * That cost a page stabilisation and an `ai.complete` on every pass of every
+ * row, to answer a question that was entirely in the sentence: the same
+ * arithmetic the chain path already refuses to pay
+ * (src/parser/literal-condition.ts has the run that motivated it).
+ *
+ * Returns undefined for everything else, which is the common case and means
+ * "today's behaviour, exactly". In particular a condition with no `{{…}}` or
+ * `${…}` in the AUTHORED line is never answered here, which is what keeps
+ * `When prompted for MFA, then return` and every other watch-shaped line on
+ * the model path where it belongs: those are questions about the page, and the
+ * grammar cannot tell one from a substituted value — only the author's having
+ * written a reference can.
+ *
+ * ## What it must produce
+ *
+ * Exactly what the model path produces, because everything downstream reads
+ * the result and nothing downstream should be able to tell which judged it:
+ * `flowControl` on the row is what the four run loops read to skip the rest of
+ * the flow and to word `Not run: step N returned from "…"`, and `deliberate`
+ * is what stops a diagnosis pass guessing at a failure the author wrote out.
+ * The only visible difference is whose words are in `aiExplanation`.
+ */
+function decideFlowControlLocally(
+  stepIndex: number,
+  instruction: string,
+  opts: StepExecutorOptions,
+  startTime: number,
+): StepResult | undefined {
+  const claim = opts.flowControlClaim;
+  // The CONDITIONAL form only. The unconditional one never reaches the
+  // executor — the run loops dispatch it themselves, with no model call
+  // already.
+  if (!claim || claim.body === undefined) return undefined;
+
+  const values: PlaceholderValues = {
+    parameters: opts.resolvedParameters ?? {},
+    ...(opts.envData !== undefined && { envData: opts.envData }),
+  };
+  const secrets = secretsFor(opts);
+  const local = decideConditionLocally(claim.body, values, (text) => redact(text, secrets));
+  if (!local) return undefined;
+
+  // No settle, no DOM snapshot, no model call — so no `turns`, and the row's
+  // own absence of turns is the visible record that nothing was asked.
+  const base: StepResult = {
+    index: stepIndex,
+    instruction,
+    status: 'passed',
+    turns: [],
+    durationMs: Date.now() - startTime,
+    retried: false,
+    pageUrl: activeUrl(opts),
+    aiExplanation: local.reasoning,
+  };
+
+  if (!local.holds) {
+    // The model's answer for a condition that does not hold is a `noop`: the
+    // step passes, nothing is performed, and the next step runs.
+    logger.debug(`Step ${stepIndex}: ${local.reasoning}`);
+    return base;
+  }
+
+  if (isReturnClaim(claim)) {
+    logger.info(`Step ${stepIndex} returned: ${local.reasoning}`);
+    return { ...base, flowControl: { kind: 'return', verb: claim.verb } };
+  }
+
+  // The third verb. `deliberate` and the wording of `aiExplanation` are the
+  // catch block's, verbatim — a locally decided deliberate failure is still a
+  // deliberate failure, so it is never retried (there is nothing to retry) and
+  // never diagnosed.
+  const composed = composeDeliberateFailure(claim, instruction, local.reasoning, secrets);
+  logger.error(`Step ${stepIndex} failed as written: ${composed}`);
+  return {
+    ...base,
+    status: 'failed',
+    error: composed,
+    deliberate: true,
+    aiExplanation: `The step's condition held (${local.reasoning}) and the step says to fail the test.`,
+  };
+}
+
+/** Where the run is right now, for a row built without touching the page.
+ *  Tracker first, matching every other end-of-step capture in this file. */
+function activeUrl(opts: StepExecutorOptions): string {
+  try {
+    return (opts.pageTracker ? opts.pageTracker.getActive() : opts.page).url();
+  } catch {
+    // A closed page has no url, and a row is not worth failing over one.
+    return '';
   }
 }
 
@@ -1905,23 +2058,7 @@ async function executeStepAttempt(
           const secrets = secretsNow();
           // May be empty — a model that described nothing still ends the step.
           const why = redact(action.description?.trim() ?? '', secrets);
-          // The message comes off the INTERPOLATED line, not off the claim: the
-          // claim was read from the AUTHORED text — it has to be the same answer
-          // on every run and in every runner — so `failClaim.message` still holds
-          // the author's `{{tokens}}`, and `Expected 10, got {{total}}` would
-          // reach the report with the braces in it. One parser read twice, exactly
-          // as `deliberateFailError` does it for the unconditional form
-          // (src/runner/flow-control.ts), fallback included: a value carrying the
-          // quote character that ends the message makes the re-parse miss.
-          const reparsed = parseFlowControlStep(instruction);
-          const resolved = reparsed?.verb === 'fail' ? reparsed.message : undefined;
-          const authoredMessage = resolved ?? failClaim.message;
-          // A message-less `fail` is legal and the framework words it (decision 3).
-          // Read for TRUTH rather than presence: the parser keeps `with error ""`
-          // as an empty string, and an empty error is no error to put on the row.
-          const composed = authoredMessage
-            ? redact(authoredMessage, secrets)
-            : `Failed by the step: ${why || 'the condition held'}`;
+          const composed = composeDeliberateFailure(failClaim, instruction, why, secrets);
           turnSubActions.push({ ...failSub, error: composed });
           turnFailed = true;
           // Never retried: a retry hands the model "this failed, try something
