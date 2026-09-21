@@ -20,10 +20,12 @@
  * so it is not a jump target either.
  *
  * The `{{name}}` runtime half lives here too: its cursor hit-test (the
- * runtime's `\{\{(\w+)\}\}`, src/parser/parameters.ts) and the locator for a
- * `- name:` bullet under `## Parameters`. Its other jump target — the step
- * that captures a name — is reported by `captureNamesBefore` in
- * env-data-completion-core.ts, which carries each write's column so scope and
+ * runtime's `PLACEHOLDER_SOURCE`, src/parser/parameters.ts — `{{name}}` and
+ * `{{name.property}}`) and the locator for a `- name:` bullet under
+ * `## Parameters`. Its other jump targets — the step that captures a name,
+ * and the `For each` header that binds a loop item — are reported by
+ * `captureNamesBefore` and `findForEachBinding` in
+ * env-data-completion-core.ts, which carry each write's column so scope and
  * position come from one walk.
  *
  * Where a grammar is owned elsewhere, this file locates rather than restates
@@ -101,10 +103,28 @@ export function refAtPosition(line: string, character: number): RefAtPosition | 
   return null;
 }
 
-/** The runtime's `{{name}}` grammar (src/parser/parameters.ts): `\w+`, no
- *  whitespace, flat. Finding one inside `${{name}}` is deliberate — the
- *  `${` parse above rejects it while the runtime resolves the inner pair. */
-const PARAM_REF_RE = /\{\{(\w+)\}\}/g;
+/**
+ * The runtime's `{{name}}` / `{{name.property}}` grammar, no whitespace.
+ *
+ * SOURCE OF TRUTH: `PLACEHOLDER_SOURCE` in src/parser/parameters.ts. The
+ * extension cannot import `src/`, so this literal is that string character for
+ * character, and tests/placeholder-grammar-parity.test.js fails the moment the
+ * two part company. The root stays `\w+` — `{{1st}}` has always resolved — and
+ * only the one optional property segment follows the identifier rule; there is
+ * no second one, so `{{order.address.city}}` is not a reference
+ * (docs/specs/SPEC-structured-table-reads.md §8.3).
+ *
+ * The width is what makes a dotted reference ONE token. The flat mirror this
+ * replaces matched nothing at all in `{{order.id}}` — there is no `}}` after
+ * `order` — so F12 and Peek went dead on every property of every table loop,
+ * silently; and a looser scanner, one that took the prefix and left `.id}}`
+ * behind as text, would have been worse: it would have reported confidently
+ * about `{{order}}`, a different variable.
+ *
+ * Finding one inside `${{name}}` is deliberate — the `${` parse above rejects
+ * it while the runtime resolves the inner pair.
+ */
+export const PARAM_REF_RE = /\{\{(\w+(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\}\}/g;
 
 /**
  * The complete `{{name}}` reference the cursor at `character` sits inside on

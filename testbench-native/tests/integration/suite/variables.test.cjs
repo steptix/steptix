@@ -812,4 +812,69 @@ describe('TestBench Variables panel (Phase 4)', function () {
     fake.end();
     await waitFor('run 2 idle', () => !hooks.isRunning());
   });
+
+  it('a For each pass over table records renders its dotted properties', async () => {
+    // SPEC-structured-table-reads.md §8.4. A `readTable` row bound as
+    // `{{payment}}` arrives as the base JSON plus one binding per property,
+    // in the record's own order with `_row` first — the server puts them in
+    // `frame:scope` generically, so the panel needs nothing new to show them.
+    // What it could do is lose them, by filtering on a name shape or by
+    // rendering only names the FILE mentions; this is the test that says it
+    // does neither, and that the value shown is the value of the pass the run
+    // is on (the second Origin Energy row, not the first).
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const record = {
+      _row: '3',
+      payee: 'Origin Energy',
+      amount: '$86.10',
+      status: 'Paused',
+      password: 'hunter2-not-a-real-one',
+    };
+    fake.push({
+      type: 'frame:scope',
+      frameId: '',
+      scope: {
+        payments: '[…]',
+        payment: JSON.stringify(record),
+        'payment._row': record._row,
+        'payment.payee': record.payee,
+        'payment.amount': record.amount,
+        'payment.status': record.status,
+        'payment.password': record.password,
+      },
+    });
+    await waitFor('scope arrived', () => hooks.runningScope()['payment.payee'] === 'Origin Energy');
+
+    const items = hooks.variablesViewItems();
+    const names = items.map((i) => i.name);
+    const byName = Object.fromEntries(items.map((i) => [i.name, i.description]));
+
+    for (const key of ['payment', 'payment._row', 'payment.payee', 'payment.amount']) {
+      assert.ok(names.includes(key), `${key} must be listed`);
+    }
+    // `_row` leads the record's properties. The view orders the whole scope
+    // rather than preserving arrival order, and `_` sorts ahead of every
+    // letter, so the reserved row number comes first either way — which is
+    // the order §7.4 asks for and the reason nothing here needed changing.
+    const properties = names.filter((n) => n.startsWith('payment.'));
+    assert.equal(properties[0], 'payment._row', 'the row number leads the properties');
+
+    // The pass's own values, which is the whole point of reading them here
+    // rather than off the file: row 3 is $86.10, row 1 is $140.00.
+    assert.equal(byName['payment._row'], '3');
+    assert.equal(byName['payment.amount'], '$86.10');
+    assert.equal(byName['payment.payee'], 'Origin Energy');
+    // Masking reads the property segment, so a secret column is hidden even
+    // though the variable it arrived under is called `payment` (§8.4).
+    assert.notEqual(
+      byName['payment.password'],
+      record.password,
+      'a secret-named property must not render its raw value',
+    );
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
 });

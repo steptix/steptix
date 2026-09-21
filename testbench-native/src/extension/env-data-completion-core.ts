@@ -16,19 +16,36 @@
  *
  * The same file also holds the `{{name}}` half — the *runtime* variables a run
  * fills in per step, as opposed to the parse-time `${...}` references above.
- * That grammar is one line (src/parser/parameters.ts:102):
+ * Its SOURCE OF TRUTH is `PLACEHOLDER_SOURCE` in src/parser/parameters.ts,
+ * which the extension cannot import and therefore mirrors by hand:
  *
  *   {{name}}                             name: \w+, no whitespace
+ *   {{name.property}}                    property: [A-Za-z_][A-Za-z0-9_]*
  *
- * flat by construction: no namespaces, no dotted paths, and nothing to read
- * off disk — a `{{}}` resolves against the run's variable map, which is fed by
- * the file's `## Parameters` and by whatever earlier steps capture.
+ * One property segment and no more (`{{order.address.city}}` is not a
+ * reference), and the root deliberately stays `\w+` because `{{1st}}` always
+ * resolved — docs/specs/SPEC-structured-table-reads.md §8.3. The complete
+ * mirror of that regex lives next door in env-data-definition-core.ts
+ * (`PARAM_REF_RE`); tests/placeholder-grammar-parity.test.js fails if either
+ * side parts company with the runtime's literal.
+ *
+ * What this file matches is narrower, and stays FLAT on purpose: the patterns
+ * below find the names a step WRITES, and a step writes a variable, never one
+ * property of one (`Set {{order.id}} to …` is not a Set step, and a `For each`
+ * header binds `order`, not `order.id`). The one dotted thing here is
+ * {@link findForEachBinding}, which answers "where does `{{order}}` — and so
+ * `{{order.id}}` — come from" by its root.
+ *
+ * Neither half reads anything off disk: a `{{}}` resolves against the run's
+ * variable map, which is fed by the file's `## Parameters`, by whatever
+ * earlier steps capture, and — per pass — by the enclosing loop.
  */
 import {
   buildSectionIndex,
   classifyLines,
   extractSections,
   matchText,
+  parseControlLine,
   resolveValueFromEnv,
 } from 'ai-ui-automation-runner-core';
 // `.ts` specifier, not the usual `.js`: this module is loaded directly by
@@ -133,10 +150,19 @@ export function refContextAt(line: string, character: number): RefContext | null
  * Null when there is no `{{`, when the reference is already closed, or when
  * the text since it isn't a name the runtime could resolve.
  *
- * The `/^\w*$/` gate is the runtime's `\{\{(\w+)\}\}` name class relaxed to
- * admit the empty partial (nothing typed yet). It subsumes the "no `}` in
- * between" rule rather than restating it — `}` is not a `\w` character, so a
- * cursor sitting past a closed `{{x}}` fails the same test.
+ * The `/^\w*$/` gate is the runtime's name class relaxed to admit the empty
+ * partial (nothing typed yet). It subsumes the "no `}` in between" rule rather
+ * than restating it — `}` is not a `\w` character, so a cursor sitting past a
+ * closed `{{x}}` fails the same test.
+ *
+ * It is the ROOT's class only, deliberately: a partial with a dot in it —
+ * `{{order.` — yields null and no dropdown opens. Completing a property would
+ * mean deriving the aliases from the `as <key>` words of whichever `Read …`
+ * step wrote the list the enclosing `For each` iterates, and the spec makes
+ * that optional and phase 3 for exactly that reason
+ * (SPEC-structured-table-reads.md §8.4: offer only explicit aliases, never a
+ * guess from prose). Declining to offer is the honest answer meanwhile; F12 on
+ * the finished reference still works, through PARAM_REF_RE next door.
  *
  * `${{` yields the *inner* `{{`: the `${` parse above rejects it (`{` is not a
  * namespace character) while the runtime does find a resolvable `{{name}}`
@@ -493,6 +519,51 @@ function nearestSectionAbove(
     }
   }
   return owner;
+}
+
+/**
+ * Every `For each {{item}} in {{list}}, …` header that binds `name`'s ROOT,
+ * in file order, located at its `{{item}}` token.
+ *
+ * A loop item is the one runtime variable no step writes: `captureNamesBefore`
+ * knows `[store as:]`, `[input:]`, `[output:]`, an `out.k="alias"` and a `Set`
+ * — all of which are markers a step carries — while `{{order}}` is bound by
+ * the planner, once per pass, and `{{order.id}}` with it
+ * (docs/specs/SPEC-structured-table-reads.md §8.2). Without this the editor
+ * has nothing to say about either, and — since a dotted name can never be a
+ * capture — F12 on `{{order.id}}` would toast "no step stores it" on every
+ * correct table loop.
+ *
+ * By the root, because that is what the header binds: `{{order.id}}` and
+ * `{{order}}` have the same origin, and field-level navigation is explicitly
+ * not required (§8.4).
+ *
+ * The header grammar is runner-core's `parseControlLine`, the same reading the
+ * runtime makes, so a line this walks to is a line that really loops. Fenced
+ * example blocks are excluded for the reason `captureNamesBefore` excludes
+ * them: a run binds nothing there.
+ */
+export function findForEachBinding(
+  text: string,
+  name: string,
+): Array<{ line: number; column: number; length: number }> {
+  const item = name.split('.')[0]!;
+  const lines = text.split(/\r?\n/);
+  const fenced = fenceMask(lines);
+  const out: Array<{ line: number; column: number; length: number }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i] ?? '';
+    if (fenced[i]) continue;
+    if (!STEP_PREFIX_RE.test(raw)) continue;
+    const control = parseControlLine(raw.replace(STEP_PREFIX_RE, ''));
+    if (control?.kind !== 'foreach' || control.item !== item) continue;
+    // The token, not the line: an editor selecting the whole header would
+    // highlight the body call as well as the name it is asking about.
+    const column = raw.indexOf(`{{${item}}}`);
+    if (column === -1) continue;
+    out.push({ line: i, column: column + 2, length: item.length });
+  }
+  return out;
 }
 
 /** One `## Hooks` entry: its instruction, 1-based line, the scope it declares,

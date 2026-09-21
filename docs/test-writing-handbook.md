@@ -268,6 +268,9 @@ Say precisely what to read:
 - "every", "all" or "each" makes a list: `Read the href of every invoice link
   in the Invoices section [store as: invoice_urls]`. The variable holds a
   JSON-encoded array, capped at 500 entries, which array-typed tools decode.
+  One column, though: two or more columns from the same rows of a table is a
+  different read, because three parallel arrays can lose their alignment
+  (§3.8).
 - Asking for part of a text ("just the digits after Account number:") makes
   the model add a regular expression. That read **fails the step** if the
   pattern matches nothing, so ask for a substring only when you mean it, and
@@ -520,6 +523,11 @@ A cap is a bug net, not an exit; write the condition the page really reaches.
 a plural read stores ("every", "all", "each", §3.2) or what an array-typed tool
 returns. `Set` builds text, and text is not a list: `For each` over
 `Savings, Everyday` fails the line and says so rather than guessing a delimiter.
+
+When the elements are records rather than strings — a table read (§3.8), or a
+tool that returns objects — the pass binds the whole record as `{{item}}` and
+each of its fields as `{{item.field}}` as well. Nothing about the line changes;
+the item simply has parts.
 
 File `tests/statement-archive.md`:
 
@@ -780,7 +788,7 @@ The details:
 - A tolerated step inside a loop keeps looping. `While`, `Repeat … until`, `For
   each` and a looped section all ask their next question as if the pass had
   finished, because it did. (This is not a `Continue` statement: it tolerates
-  *this step's* failure, it does not skip to the next pass — §3.8.)
+  *this step's* failure, it does not skip to the next pass — §3.9.)
 - A hook may `fail`, though it still may not `return`. A hook can already fail
   the run, so the verb adds a message and not a power; there is still no flow
   inside a hook to leave. A tolerated failure in a hook step does not abort the
@@ -828,18 +836,181 @@ question — `If the promo banner is visible, then Dismiss the promo banner`
 (§3.5), or the watch form of §3.4 — so the report says the step did not apply
 rather than that it failed and was forgiven.
 
-### 3.8 What does not exist
+### 3.8 Reading a table into rows
+
+A plural read (§3.2) gives you one column as a JSON array of strings. Three
+columns written as three plural reads are three arrays with nothing holding
+them together: one hidden row, one empty cell or one selector that matched
+something slightly different, and the arrays no longer line up — the test then
+checks Alice's order against Bob's status and passes. When a step wants more
+than one column from the same rows, read the table itself:
+
+```markdown
+1. Read the Order ID column as id, Customer column as customer, and Status column as status from every row in the Orders table [store as: orders]
+2. For each {{order}} in {{orders}}, Check the order
+
+### Check the order
+1. Verify the Orders table has a row for "{{order.id}}" and customer "{{order.customer}}"
+2. Verify the row for "{{order.id}}" shows "{{order.status}}"
+```
+
+`{{orders}}` holds one **record** per visible data row, and the loop binds the
+whole record as `{{order}}` plus one `{{order.<alias>}}` per column the step
+asked for. Alignment is the framework's: the columns are located by their
+header text and every record is built from one row, so a release that reorders
+the table changes nothing in the test, and a column the step did not name — the
+select-all checkbox in the first cell, the Actions button in the last — is not
+in the record at all.
+
+**Quote a placeholder that can be empty.** An empty cell is captured as an
+empty string, and an empty value substitutes to nothing, so `If
+{{payment.reference}} is empty, then …` reaches the model as `If  is empty,
+then …` — not the question you asked. Written `If "{{payment.reference}}" is
+empty` it reads as `If "" is empty`, which is. Quote it in `Verify` lines for
+the same reason.
+
+**Aliases.** `… column as id` names the property. An alias must look like a
+variable (`[A-Za-z_][A-Za-z0-9_]*`), must be unique in the step, and cannot be
+`_row`. Omit them and the header is mechanically lowercased and
+punctuation-replaced instead — `Order ID` becomes `order_id`, `Last updated
+(UTC)` becomes `last_updated_utc` — which works and reads worse at every use.
+Name them whenever a later step uses the field. Two headers that normalise to
+the same key is a refusal, not a guess.
+
+**Columns by position.** A table with no header row has nothing for a header
+name to match, so name the position and supply the alias yourself:
+
+```markdown
+1. Read the 1st column as payee, the 3rd column as amount and the 5th column as status from every row in the Scheduled payments table [store as: payments]
+```
+
+"1st", "first", "column 1" and "the second column" all mean position. Header
+and position can be mixed in one step, but each column is one or the other,
+and a header name against a headerless table fails with a message telling you
+to switch. Where a table *does* have a header, use it: a header survives a
+reordering and a position does not.
+
+**`{{item._row}}`, the row number.** Every record carries `_row` without being
+asked, the one-based position of its row among the table's data rows at the
+moment of the read. It is what lets a later step point at the row again when no
+value is unique — two rows for the same payee are ordinary in a payments table,
+and "the row for Origin Energy" is ambiguous on both passes:
+
+File `tests/payments-review.md`:
+
+```markdown
+# Review every scheduled payment
+
+## Config
+- baseUrl: http://localhost:8787/
+
+## Steps
+1. Navigate to scheduled-payments.html
+2. Read the 1st column as payee, the 3rd column as amount and the 5th column as status from every row in the Scheduled payments table [store as: payments]
+3. For each {{payment}} in {{payments}}, Review the payment
+4. Verify the Scheduled payments table still shows 5 payments
+
+### Review the payment
+1. If {{payment.status}} is "Overdue", then return
+2. Click View in row {{payment._row}} of the Scheduled payments table
+3. Verify the Payment details page shows "{{payment.payee}}" and the amount {{payment.amount}}
+4. Click Back to scheduled payments
+```
+
+A row number survives leaving the page and coming back, which no element
+reference would. It is a position, not an identity: if the body of the table
+deletes or moves rows, every row below the change has a different number from
+that pass on — so for a table you change as you go, re-find by a value, or use
+`Repeat … until` so each pass reads the page as it is now.
+
+One word, two counts, and they can differ. `_row` counts **data rows** — hidden
+rows and full-width message rows excluded — while "row 3" written in prose is
+whatever the model counts in the page, usually the third `<tr>`. On a plain
+table they agree. On a table with a group heading row before each block they do
+not, and a body there should verify by value (`the row for
+"{{account.account}}" with balance {{account.balance}}`) rather than by row
+number.
+
+**The first N rows.** For a smoke test that opens the first few and checks they
+load, say so and let the framework bound the read:
+
+```markdown
+1. Read the Order ID column as id from the first 10 visible rows in the Orders table [store as: orders]
+2. For each {{order}} in {{orders}}, Click the Orders table row whose Order ID is "{{order.id}}"
+```
+
+The bound applies to the rows currently rendered and visible, after hidden rows
+are dropped, in page order. Fewer rows than you asked for is not an error and
+not an assertion about the count — if the test needs at least ten, verify that
+on its own line first. There is no "rows 3 through 7", no last N and no "row N
+onward"; a test that wants one row by position reads them all and uses `_row`.
+
+**Empty tables, "No results" and "Loading…".** A table with no data rows stores
+`[]` and the loop runs zero passes; if emptiness is the failure, verify the
+table has at least one row on its own line. A body row whose single cell spans
+the whole width is a **message**, not data: it is skipped, it consumes no row
+number, and a body of nothing else reads as empty. That is deliberate, and it
+has a trap in it — a "Loading…" row is such a message, so a read that lands on
+one truthfully stores `[]` and the test goes wrong later, somewhere else. The
+read does not wait; you do, on the line before it (§3.1).
+
+**What is refused, loudly.** Each of these fails the step with a message naming
+the table rather than returning plausible data:
+
+| The table | Why it is refused |
+| --- | --- |
+| A merged header or cell (`rowspan`/`colspan` > 1) | The logical grid would have to be guessed. The full-width message row above is the one exception. |
+| Two columns with the same header, or a header you named that is not there | An ambiguous or missing match is never resolved by proximity. |
+| A row with fewer cells than the columns asked for | Dropping the row or shifting the values is how misalignment happens. |
+| More than 500 visible rows with no first-N bound | A silently truncated business table reads as a complete one. |
+| More than 20 columns in one step | Read what the test checks. |
+| `<div role="grid">`, ag-grid, a card list, a table that becomes cards at a phone viewport | Native `<table>` elements only. |
+
+**Not yet.** Reading a cell's *control* rather than its text — a checkbox's
+ticked state, an input's value, a select's chosen option — is a later phase,
+and a step that asks for it is refused by name rather than quietly storing the
+empty string a control-only cell renders as. So are whole-table assertions
+("every row is Scheduled", "no two rows share a reference", "the amounts add up
+to $1,234.56"); until they land, a tool that takes `rows="{{payments}}"` does
+the arithmetic, and a prose assertion over a long table is the thing to be
+careful of — the page snapshot the model sees collapses repeated rows, so
+"verify every row is Completed" checks the rows it can see.
+
+**Only the reads are dotted.** A property is something a record *has*, never
+something a step *writes*: `[store as: orders]` and `Set {{summary}} to "…"`
+name a variable and stay flat, `For each {{order}} in {{orders}}` names two
+variables, and `{{order.address.city}}` is not a reference — one property
+segment, and no deeper. A dotted name with no value fails the step before the
+model is asked, and says which properties the record does have.
+
+Running versions of all of it ship in `templates/init/tests/`: the eight
+`table-*.md` files tagged `table-read` cover headers and reordering
+(`table-orders.md`), the first-N bound (`table-orders-limit.md`), positions,
+duplicates and `_row` (`table-payments-review.md`), pagination
+(`table-statements.md`), an empty body (`table-documents-empty.md`) and the
+awkward shapes (`table-structures.md`). They drive
+`fixtures/test-app/tables.html`, which indexes every table page in the fixture
+app.
+
+### 3.9 What does not exist
 
 - No selector language in prose beyond what the model infers. A test id can
   be mentioned when you know it exists.
 - No arithmetic or string functions inside step text. `Set` concatenates text
   and `For each` loops over a list a step already captured (§3.5); computing
   anything from a value is a tool's job.
+- No indexing and no deeper paths in a placeholder. A record from a table read
+  exposes one property segment — `{{order.id}}`, `{{order._row}}` (§3.8) — and
+  that is the whole grammar: `{{orders[1].id}}`, `{{order.address.city}}` and
+  anything with a function in it are not references, and reach the model as the
+  literal text you typed.
 - No `Break`, no `Continue`, no pass counter readable as a variable, and no
   collecting captures across the passes of a loop. A body that must differ per
-  pass reads the difference off the page or takes it from `For each`. (The
-  `otherwise continue` of §3.7 is not a loop `Continue`: it tolerates one
-  step's failure, and the pass it is in runs on to its end.)
+  pass reads the difference off the page or takes it from `For each`.
+  (`{{item._row}}` is not a pass counter: it is the row number the read
+  recorded, so a pass over a list that came from anywhere else does not have
+  one. And the `otherwise continue` of §3.7 is not a loop `Continue`: it
+  tolerates one step's failure, and the pass it is in runs on to its end.)
 - No way to return from an outer flow by name, and no way to end the whole
   test from inside a section **as a pass** — a `return` leaves the innermost
   flow it is in (§3.6), and an iteration of a loop counts as one of those. A
@@ -869,14 +1040,21 @@ rather than that it failed and was forgiven.
 
 `## Parameters`, the current data-table row (which overrides a same-named
 parameter), captures from earlier steps, `Set` assignments, tool and skill
-outputs, and `[input:]` answers all write into one variable map, and the
-latest write wins. All values are strings; lists are JSON text.
+outputs, `[input:]` answers, and the bindings a `For each` pass makes (§3.5,
+§3.8) all write into one variable map, and the latest write wins. All values
+are strings; lists are JSON text.
 
 When a `{{name}}` is unresolved: the step text keeps the literal with a
 warning, the `## Values` block lists it as "not yet captured", and if the model
 uses it in any action field the whole turn is refused and the step fails. A
 `Set` with an unresolved reference fails immediately. So a typo in a variable
 name fails at the step that uses it, not silently later.
+
+A dotted `{{item.property}}` is stricter, because it is new syntax with no
+legacy meaning: a property nothing bound fails the step **before** the model is
+called, naming the pass and listing the properties the record does have. It is
+also the last write that survives, exactly as the item itself does — after the
+loop, `{{order}}` and `{{order.id}}` still hold the final pass's row.
 
 ### 4.2 `Set`: build a value from values you already have
 
@@ -934,6 +1112,11 @@ report, the run log and the `## Values` block. The model never sees the value;
 the executor substitutes it when acting. Never write `***` as a value
 yourself; the framework refuses an action containing it. If a non-secret name
 is caught by the rule, list it under `unmask` in `## Config`.
+
+The rule reaches inside a table read, where the name that would carry it is the
+table's: a `password` or `token` column of a record in `{{users}}` is masked on
+every surface even though `users` is not a secret name, and the
+`{{user.password}}` a pass binds is masked by its property segment.
 
 Keep real credentials in `.env` files, referenced as `$NAME` from
 `## Parameters`, and never in generated Markdown.
@@ -1578,6 +1761,9 @@ report's skipped steps and warnings, not just the summary.
 | `If the Cash checkbox is ticked, run the Pay with cash section` | `If the Cash checkbox is ticked, then Pay with cash` | Without `then` the line is a watch, and the section name in it is prose. |
 | `If the total is more than $100 then apply the discount, then Verify it` | Reword the condition | The **first** ` then ` ends the condition. |
 | `For each {{account}} in {{names}}` where `names` came from a `Set` | Capture it with a plural read | `For each` takes a JSON array, and no delimiter is guessed. |
+| Three plural reads for the ID, customer and status columns | One table read (§3.8) | Three arrays lose their alignment on one hidden row or empty cell, and the test then passes against the wrong row. |
+| `Click Approve in the row for "{{payment.payee}}"` on a table with two rows for that payee | `Click Approve in row {{payment._row}}` | A value that is not unique names two rows; the row number names one. |
+| `If {{payment.reference}} is empty, then …` | `If "{{payment.reference}}" is empty, then …` | An empty value substitutes to nothing, so the unquoted condition reaches the model with a hole in it. |
 | `Press Enter in the Search field` | `Type "shoes" into the Search field and press Enter` | The key press targets nothing. |
 | `[skill: sign_in]` when the skill declares `email` | `[skill: sign_in email password]` | Every declared parameter is required. |
 | `[tool: slugify s="x"]` for a named export | `[tool: strings/slugify s="x"]` | Named exports need the file prefix. |
@@ -1606,6 +1792,8 @@ report's skipped steps and warnings, not just the summary.
   every business outcome has a `Verify` line that could fail.
 - Every `While` or `Repeat … until` has an exit the page actually reaches; any
   `, up to N times` is a bug net you meant, not the way the loop ends.
+- Every `{{item.property}}` is a column its table read named, or `_row`, and
+  every placeholder that can be empty is quoted where it is compared.
 - No `[input:]`, `[interactive]`, or underspecified step in an unattended test.
 - Upload fixtures exist at the paths written, relative to the test file.
 - The report from a real run has no skipped steps and no warnings you have not
@@ -1621,6 +1809,7 @@ report's skipped steps and warnings, not just the summary.
 | What the model sees and the action rules | [prompts.ts](../src/ai/prompts.ts), [types.ts](../src/ai/types.ts), [placeholder-substitution.ts](../src/runner/placeholder-substitution.ts) |
 | Action execution, waits, reads, uploads | [actions.ts](../src/browser/actions.ts), [step-executor.ts](../src/runner/step-executor.ts), [upload-paths.ts](../src/browser/upload-paths.ts) |
 | Watches, decisions, loops and hooks | [step-grouper.ts](../src/runner/step-grouper.ts), [control-line.ts](../src/parser/control-line.ts), [control-flow.ts](../src/runner/control-flow.ts), [hooks.ts](../src/runner/hooks.ts), [test-runner.ts](../src/runner/test-runner.ts) |
+| Table reads, records and `{{item.property}}` | [SPEC-structured-table-reads.md](specs/SPEC-structured-table-reads.md), [actions.ts](../src/browser/actions.ts) (the extractor), [parameters.ts](../src/parser/parameters.ts) (the one placeholder grammar), [control-flow.ts](../src/runner/control-flow.ts) (the pass bindings) |
 | `return` / `stop`, and which steps a return skips | [flow-control-step.ts](../src/parser/flow-control-step.ts), [flow-control.ts](../src/runner/flow-control.ts), [control-flow.ts](../src/runner/control-flow.ts) (`returnExit`), [test-runner.ts](../src/runner/test-runner.ts) |
 | `fail`, and the `otherwise` tails | [flow-control-step.ts](../src/parser/flow-control-step.ts) (the `fail` verb and its message), [failure-tail.ts](../src/parser/failure-tail.ts), [step-executor.ts](../src/runner/step-executor.ts) |
 | Skill files, calls, expansion | [expander.ts](../src/skills/expander.ts), [invocation-parser.ts](../src/parser/invocation-parser.ts) |

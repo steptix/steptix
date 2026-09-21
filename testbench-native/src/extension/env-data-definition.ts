@@ -6,6 +6,7 @@ import {
   POST_HOOK_SCOPES,
   allCaptureWrites,
   captureNamesBefore,
+  findForEachBinding,
   hookScopeAt,
   inFrontmatter,
   isFencedLine,
@@ -164,7 +165,17 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
    *  - the `- name:` bullet under `## Parameters`, when declared;
    *  - EVERY in-scope capture (`[store as:]` / `[input:]` / `[output:]` / an
    *    `out.k="name"` alias), per `captureNamesBefore`'s execution-order walk
-   *    — pre-hooks lead, section bodies count at their call sites.
+   *    — pre-hooks lead, section bodies count at their call sites;
+   *  - failing both, every `For each {{name}} in {{list}}` header that binds
+   *    it, which is the one binding no step carries a marker for.
+   *
+   * A dotted `{{order.id}}` is answered by its ROOT throughout: the planner
+   * binds `order` and its properties together, once per pass, so the honest
+   * target is the `For each` line and field-level navigation is explicitly not
+   * required (SPEC-structured-table-reads.md §8.4). That is also what keeps
+   * the widened grammar from being a regression: a property is never a
+   * capture, so resolving `{{order.id}}` by its own name would find nothing
+   * and toast "no step stores it" on every correct table loop.
    *
    * All of them are returned, so a name written more than once peeks as a
    * list rather than silently picking one: the run's LAST write is the live
@@ -196,8 +207,12 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
     // takes `${env.X}` / `${envName}` only).
     if (inFrontmatter(text, position.line, classified)) return undefined;
 
+    // Everything below asks about the ROOT: `order.id` is bound by whatever
+    // binds `order`, and nothing writes a property under its own name.
+    const root = name.split('.')[0]!;
+
     const locations: vscode.Location[] = [];
-    const bullet = findParameterBullet(text, name);
+    const bullet = findParameterBullet(text, root);
     if (bullet) locations.push(this.locationAt(document.uri, bullet));
 
     // A post-hook reads after the whole flow; anything else reads where it
@@ -209,9 +224,17 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
       postHook ? classified.length : position.line,
       classified,
       { mainFlowOnly: postHook, dedupe: false },
-    ).filter((c) => c.name === name);
+    ).filter((c) => c.name === root);
     for (const write of writes) {
       locations.push(this.locationAt(document.uri, { ...write, line: write.line - 1 }));
+    }
+    // A loop item last, and only when nothing else claimed the name: a `For
+    // each` binds for the length of its body, while a capture or a parameter
+    // is the value the author asked about everywhere else in the file.
+    if (locations.length === 0) {
+      for (const header of findForEachBinding(text, root)) {
+        locations.push(this.locationAt(document.uri, header));
+      }
     }
     if (locations.length > 0) return locations;
 
@@ -221,13 +244,21 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
     // walk resolves an owning section for its position, so a file ending
     // inside a section body would drop the main-flow steps below its call
     // site and misreport them as never written.
-    const later = allCaptureWrites(text, classified).find((c) => c.name === name);
+    const later = allCaptureWrites(text, classified).find((c) => c.name === root);
     this.warnings.warn(
       later
         ? `TestBench: {{${name}}} has no value here — it is written on line ` +
             `${later.line}, which the run reaches after this point.`
-        : `TestBench: {{${name}}} is not a declared parameter, and no step stores ` +
-            'it (prose like "store it as {{x}}" binds nothing — use [store as: x]).',
+        : name === root
+          ? `TestBench: {{${name}}} is not a declared parameter, and no step stores ` +
+            'it (prose like "store it as {{x}}" binds nothing — use [store as: x]).'
+          : // Dotted, and its root is bound by nothing at all. Worded like the
+            // runtime's own refusal (`dottedReferenceError`), which names the
+            // root rather than the property: the property is only ever as real
+            // as the row it came from.
+            `TestBench: {{${name}}} has no value — nothing in this file binds ` +
+            `{{${root}}}. A property comes from the record a ` +
+            `"For each {{${root}}} in {{list}}" is iterating.`,
     );
     return undefined;
   }
