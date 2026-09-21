@@ -697,3 +697,69 @@ describe('the Runner UI reports both kinds of skip the same way', () => {
     ]);
   });
 });
+
+// ─── A dotted reference the pass cannot answer ──────────────────────────────
+
+/**
+ * `{{order.missing}}` inside a `For each` body, through the adapter's loop
+ * (docs/specs/SPEC-structured-table-reads.md §8.3).
+ *
+ * The helper that decides this is shared with the CLI and the Sessions API,
+ * and each of the three wires it in itself — so each of the three needs a
+ * loop-level test saying the refusal lands EARLY, before the executor is
+ * reached. That is the whole claim: `executeStepMock` is the model, and what
+ * it was never handed is the assertion.
+ *
+ * The list is seeded through `## Parameters`, the way this file's other
+ * `For each` test seeds one. Where it comes from is not the planner's
+ * business: a `readTable`, a tool returning an array and a declared parameter
+ * all put the same JSON in the same map.
+ */
+describe('a dotted reference inside a For each body', () => {
+  const doc = (bodyStep: string): string => `
+# Orders
+
+## Parameters
+- orders: [{"id":"ORD-1001","status":"Completed"},{"id":"ORD-1002","status":"Pending"}]
+
+## Steps
+1. For each {{order}} in {{orders}}, Check the order
+2. Sign out
+
+### Check the order
+1. ${bodyStep}
+`;
+
+  /** Every instruction the executor was actually given. */
+  const asked = (): unknown[] => executeStepMock.mock.calls.map((c) => c[2]);
+
+  it('fails the step before any model call, naming the pass and the properties', async () => {
+    const events = await runAdapter(writeTest(root, doc('Verify {{order.missing}} is shown')));
+
+    const message =
+      '{{order.missing}} has no value in For each item 1; available properties are id, status';
+    const failure = events.find(
+      (e) => e.channel === 'runner:step-complete' && e.data['status'] === 'failed',
+    );
+    expect(failure?.data['error']).toBe(message);
+    // …and the renderer's own error channel carries the same sentence, so the
+    // Runner UI shows it rather than a bare red line.
+    expect(
+      events.find((e) => e.channel === 'runner:error')?.data['message'],
+    ).toBe(message);
+
+    // Nothing was planned for a line carrying six literal braces, and the run
+    // stopped rather than going on to `Sign out`.
+    expect(asked()).toEqual([]);
+  });
+
+  it('substitutes a real property into the text the model receives, per pass', async () => {
+    await runAdapter(writeTest(root, doc('Verify the row for "{{order.id}}" is {{order.status}}')));
+
+    expect(asked()).toEqual([
+      'Verify the row for "ORD-1001" is Completed',
+      'Verify the row for "ORD-1002" is Pending',
+      'Sign out',
+    ]);
+  });
+});

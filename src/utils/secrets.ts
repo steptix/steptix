@@ -15,6 +15,15 @@ import { isSecretName } from '../parser/parameters.js';
 import { envDataSecretValues, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import type { TestReport } from '../report/types.js';
 
+/**
+ * Re-exported as the one rule. It matches on a SUBSTRING, which is what makes
+ * a dotted loop binding work without a second rule: `{{order.password}}` is a
+ * secret because `password` is in it, and so is the `order.password` entry of
+ * the live variable map a pass leaves behind
+ * (docs/specs/SPEC-structured-table-reads.md §8.4). The same breadth is why a
+ * record stored under a variable literally named `token` is masked whole —
+ * the name is the rule, and the name says secret.
+ */
 export { isSecretName };
 
 export const MASK = '***';
@@ -41,7 +50,26 @@ export function secretValues(parameters: Record<string, string>, extra: string[]
   const fromParameters = Object.entries(parameters)
     .filter(([name, value]) => isSecretName(name) && value.length > 0)
     .map(([, value]) => value);
-  return [...new Set([...fromParameters, ...extra.filter((v) => v.length > 0)])];
+  // A readTable record is one string under a non-secret name ("orders"), so
+  // the rule has to reach INSIDE it: a `password` column is a secret however
+  // the row it sits in is named (SPEC-structured-table-reads.md §7.6).
+  const fromRecords: string[] = [];
+  for (const value of Object.values(parameters)) {
+    if (!value.startsWith('[{')) continue;
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (!Array.isArray(parsed)) continue;
+      for (const item of parsed) {
+        if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+        for (const [k, v] of Object.entries(item as Record<string, unknown>)) {
+          if (typeof v === 'string' && v.length > 0 && isSecretName(k)) fromRecords.push(v);
+        }
+      }
+    } catch {
+      /* not a record list */
+    }
+  }
+  return [...new Set([...fromParameters, ...fromRecords, ...extra.filter((v) => v.length > 0)])];
 }
 
 /**

@@ -30,5 +30,3 @@ never clicks the hidden row or the eleventh and twelfth visible ones.
 3. For each {{order}} in {{orders}}, Click the Orders table row whose Order ID is "{{order.id}}"
 4. Verify the Clicked panel lists exactly 10 orders, ORD-2001 through ORD-2010, in that order
 5. Verify the Clicked panel does not list ORD-2099, ORD-2011 or ORD-2012
-6. Assert that {{orders}} does not contain "ORD-2099"
-7. Assert that {{orders}} does not contain "ORD-2011"

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { parseSkillFile } from '../parser/markdown.js';
-import { interpolate } from '../parser/parameters.js';
+import { PLACEHOLDER_SOURCE, interpolate, placeholderRoot } from '../parser/parameters.js';
 import type { ParsedSection, ParsedSkill } from '../parser/types.js';
 import type { EnvDataContext } from '../parser/interpolate-env-data.js';
 import { matchInput, matchText, NO_HOOKS_MARKER } from '../parser/section-match.js';
@@ -30,8 +30,13 @@ export type { ControlRecord };
  * the runner sees no skill machinery.
  */
 
+/** A capture DEFINITION, which is flat by construction — a step writes a
+ *  variable, never one property of one. */
 const STORE_AS_RE = /\[store\s+as:\s*(\w+)\]/g;
-const PLACEHOLDER_RE = /\{\{(\w+)\}\}/g;
+/** `{{name}}` / `{{name.property}}`, from the one definition in
+ *  `src/parser/parameters.ts`. Rebuilt per module rather than shared as a
+ *  RegExp object, because a `/g` regex carries `lastIndex`. */
+const PLACEHOLDER_RE = new RegExp(PLACEHOLDER_SOURCE, 'g');
 
 /**
  * Every variable name a step's text references — `{{X}}` reads and
@@ -41,6 +46,12 @@ const PLACEHOLDER_RE = /\{\{(\w+)\}\}/g;
  * code-behind uses it to decide which parameters go into the generation
  * prompt (and therefore which values the secret-literal guard looks for).
  * One copy, so the two can't drift over what counts as a reference.
+ *
+ * A dotted reference is reported WHOLE — `order.id`, not `order` — because
+ * that is the key the live variable map holds and the name the step prompt's
+ * `## Values` block and the code-behind leak guard both need
+ * (docs/specs/SPEC-structured-table-reads.md §9.3). The one caller that wants
+ * the root instead is `applySkillScope`, which says so where it asks.
  */
 export function referencedVariableNames(
   text: string,
@@ -1742,7 +1753,15 @@ function applySkillScope(
   const usedNames = new Set<string>();
   const scanForNames = (step: string): void => {
     const { placeholders, captures } = referencedVariableNames(step);
-    for (const name of placeholders) usedNames.add(name);
+    // ROOTS, not whole references: `{{order.id}}` names the variable `order`
+    // and one of its properties, and the property belongs to the object rather
+    // than to this skill's scope. Namespacing `order.id` on its own would
+    // rewrite the body to `{{__skill1_order.id}}` while the `For each` line's
+    // `{{order}}` became `{{__skill1_order}}` — consistent only by luck, and
+    // not at all when the root is a declared parameter and the dotted form is
+    // not (SPEC-structured-table-reads.md §8.2). `renameVar` carries the
+    // property segment across instead.
+    for (const name of placeholders) usedNames.add(placeholderRoot(name));
     for (const name of captures) usedNames.add(name);
   };
   for (const step of skill.steps) scanForNames(step);
@@ -1858,9 +1877,18 @@ function applySkillScope(
 
 /** Rename a variable in both `{{X}}` placeholders and `[store as: X]` directives. */
 function renameVar(text: string, from: string, to: string): string {
-  const placeholderRe = new RegExp(`\\{\\{${escapeRegex(from)}\\}\\}`, 'g');
+  // `{{name}}` and `{{name.property}}` both rename, and the property segment
+  // rides across unchanged: it names a field of the object the variable holds,
+  // which this skill's namespacing has no business rewriting
+  // (docs/specs/SPEC-structured-table-reads.md §8.2).
+  const placeholderRe = new RegExp(
+    `\\{\\{${escapeRegex(from)}((?:\\.[A-Za-z_][A-Za-z0-9_]*)?)\\}\\}`,
+    'g',
+  );
   const storeRe = new RegExp(`\\[store\\s+as:\\s*${escapeRegex(from)}\\]`, 'g');
-  return text.replace(placeholderRe, `{{${to}}}`).replace(storeRe, `[store as: ${to}]`);
+  return text
+    .replace(placeholderRe, (_match, property: string) => `{{${to}${property}}}`)
+    .replace(storeRe, `[store as: ${to}]`);
 }
 
 function escapeRegex(s: string): string {

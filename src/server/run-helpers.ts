@@ -178,7 +178,9 @@ export function isBrowserClosed(browserSession: BrowserSession): boolean {
 export function autoCapturedNames(stepResult: StepResult): string[] {
   return stepResult.turns
     .flatMap((t) => t.subActions)
-    .filter((sa) => !sa.error && (sa.action.action === 'read' || sa.action.action === 'count'))
+    .filter((sa) => !sa.error && (sa.action.action === 'read' || sa.action.action === 'count'
+      // A structured table read writes its `as` too (SPEC-structured-table-reads.md §9.3).
+      || sa.action.action === 'readTable'))
     .map((sa) => sa.action.as)
     .filter((name): name is string => !!name && !name.startsWith('__skill'));
 }

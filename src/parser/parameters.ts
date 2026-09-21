@@ -128,13 +128,82 @@ async function promptForValue(key: string): Promise<string> {
   }
 }
 
-/** Substitute {{placeholders}} in a string with resolved parameter values */
-export function interpolate(text: string, params: Record<string, string>): string {
-  return text.replace(/\{\{(\w+)\}\}/g, (match, key: string) => {
+/**
+ * The NAME inside a runtime placeholder: `name`, or `name.property` for one
+ * direct property of an object a `For each` bound
+ * (docs/specs/SPEC-structured-table-reads.md §8.3).
+ *
+ * This is the one definition; every other copy of the grammar in `src/`
+ * imports it, because a step's text and its actions resolving differently is
+ * the failure that keeps recurring. The copies that must stay hand-written —
+ * TestBench's `env-data-completion-core.ts` / `env-data-definition-core.ts`,
+ * which cannot import `src/` — are kept honest by
+ * `tests/placeholder-dotted.test.ts`.
+ *
+ * The root segment stays `\w+` rather than tightening to the spec's
+ * `[A-Za-z_][A-Za-z0-9_]*`: this feature ADDS a property segment, and
+ * narrowing what a bare `{{1st}}` means is a separate decision with its own
+ * blast radius (`data-rows.ts` already notes the looseness deliberately). The
+ * PROPERTY segment does follow the identifier rule, because nothing accepted
+ * one before and `{{order.1}}` is not a name anyone means.
+ *
+ * One property segment only. `{{order.address.city}}` matches nothing and is
+ * left literal, exactly as it was before this existed (§8.2).
+ */
+export const PLACEHOLDER_NAME_SOURCE = '\\w+(?:\\.[A-Za-z_][A-Za-z0-9_]*)?';
+
+/** `{{name}}` / `{{name.property}}`, no whitespace inside the braces. Group 1
+ *  is the whole name, dot included. */
+export const PLACEHOLDER_SOURCE = `\\{\\{(${PLACEHOLDER_NAME_SOURCE})\\}\\}`;
+
+/** The same, tolerating whitespace inside the braces — what a CHECKER wants,
+ *  so `{{ order.id }}` is seen and refused with the right name rather than
+ *  slipping through and being typed into the page as literal text. */
+export const WIDE_PLACEHOLDER_SOURCE = `\\{\\{\\s*(${PLACEHOLDER_NAME_SOURCE})\\s*\\}\\}`;
+
+/** A fresh global matcher, because a module-level `/g` regex carries
+ *  `lastIndex` between calls and `.test` would answer false every other time. */
+export function placeholderRe(): RegExp {
+  return new RegExp(PLACEHOLDER_SOURCE, 'g');
+}
+
+/** The `name` half of a placeholder name: `order` for both `order` and
+ *  `order.id`. What a rename or a scope lookup keys on — the property segment
+ *  belongs to the object the name holds, not to the variable map. */
+export function placeholderRoot(name: string): string {
+  const dot = name.indexOf('.');
+  return dot === -1 ? name : name.slice(0, dot);
+}
+
+/** The `property` half, or undefined for a flat name. */
+export function placeholderProperty(name: string): string | undefined {
+  const dot = name.indexOf('.');
+  return dot === -1 ? undefined : name.slice(dot + 1);
+}
+
+/**
+ * Substitute {{placeholders}} in a string with resolved parameter values.
+ *
+ * `defines` names the placeholders this line WRITES rather than reads — a
+ * `For each` header's item (`controlLineDefines`, src/parser/control-line.ts).
+ * They are exempt from the warning only: a definition has no value yet by
+ * definition, and warning about it fired on every correct table loop. The
+ * SUBSTITUTION is deliberately left alone — `{{payment}}` still resolves if
+ * the map happens to hold it, exactly as before — because the loops use the
+ * authored line for the guard row and the interpolated one for a partial
+ * re-run probe, and changing what that probe sees is a different decision
+ * from quietening a log line.
+ */
+export function interpolate(
+  text: string,
+  params: Record<string, string>,
+  defines?: ReadonlySet<string> | undefined,
+): string {
+  return text.replace(placeholderRe(), (match, key: string) => {
     if (key in params) {
       return params[key] ?? match;
     }
-    logger.warn(`Unresolved placeholder: {{${key}}}`);
+    if (!defines?.has(key)) logger.warn(`Unresolved placeholder: {{${key}}}`);
     return match;
   });
 }

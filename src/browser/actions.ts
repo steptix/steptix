@@ -1,5 +1,5 @@
 import type { Page, FrameLocator, Locator } from 'playwright';
-import type { AIAction } from '../ai/types.js';
+import type { AIAction, TableReadColumn } from '../ai/types.js';
 import { logger } from '../utils/logger.js';
 import { resolveUploadPaths, uploadPathsOf, type UploadPathContext } from './upload-paths.js';
 
@@ -171,6 +171,15 @@ export interface ActionExecutionResult {
    *  step-executor JSON-encodes this into the parameter map so downstream
    *  tools can decode it via array-typed parameters. */
   capturedValues?: string[];
+  /**
+   * Row records captured by a `readTable` action — one flat object per visible
+   * data row, `_row` first (SPEC-structured-table-reads.md §7.1).
+   *
+   * Deliberately NOT a widening of `capturedValues`: keeping the flat and the
+   * structured capture distinct is what stops an existing consumer treating a
+   * record as a string it can print.
+   */
+  capturedRecords?: Array<Record<string, string>>;
   /** What the runtime found at the instant it acted. Absent unless the caller
    *  asked to measure, and absent whenever measurement was impossible. */
   targeting?: ActionTargeting;
@@ -449,6 +458,22 @@ export async function executeAction(
           capturedValue: captured,
           ...(targeting !== undefined && { targeting }),
         };
+      }
+
+      // Structured table read (SPEC-structured-table-reads.md §7). Plural by
+      // construction like `read multiple`, and exempt from the ambiguity gate
+      // for a stronger reason: it runs its OWN uniqueness check, which never
+      // takes `.first()` (§7.2). Observational, so no post-action settle —
+      // `readTable` is absent from MUTATING_ACTIONS in step-executor.ts.
+      case 'readTable': {
+        const columns = eff.columns ?? [];
+        const table = await readTableRecords(root, {
+          selector: requireSelector(eff),
+          columns,
+          ...(eff.limit !== undefined && { limit: eff.limit }),
+        });
+        logger.info(formatTableReadSummary(table, columns.length, eff.as, eff.limit));
+        return { success: true, capturedRecords: table.records };
       }
 
       case 'count': {
@@ -1946,4 +1971,399 @@ async function executeReadMultiple(
     `read[multiple] captured: ${result.length} value${result.length === 1 ? '' : 's'} → variable "${action.as ?? '(unnamed)'}"`,
   );
   return { values: result, matchCount };
+}
+
+// ── Structured table reads ───────────────────────────────────────────────────
+// docs/specs/SPEC-structured-table-reads.md §7. One shared extractor, called
+// today by the `readTable` AI action and (phase 3) by generated code-behind's
+// `tables.read`: there must not be one header algorithm in generated code and
+// another here (§9.2).
+
+/** What a caller asks the extractor for. */
+export interface TableReadRequest {
+  /** CSS selector that must match exactly one visible native `<table>`. */
+  selector: string;
+  /** The columns to read, in the order they appear on every record. */
+  columns: TableReadColumn[];
+  /** At most this many visible data rows, in DOM order (§4.6). Omitted means
+   *  all of them, subject to {@link READ_TABLE_MAX_ROWS}. */
+  limit?: number | undefined;
+}
+
+/** What one extraction found. */
+export interface TableReadResult {
+  /** One flat object per selected data row, `_row` first (§7.4). */
+  records: Array<Record<string, string>>;
+  /** Full-width message rows skipped (§4.8). Reported rather than swallowed so
+   *  an unexpectedly short result can be explained from the log alone (§7.6). */
+  placeholdersSkipped: number;
+  /** Visible data rows found BEFORE `limit` was applied. */
+  dataRowCount: number;
+  /** The table's accessible name, as the diagnostics spell it. */
+  label: string;
+}
+
+/**
+ * Maximum structured rows one `readTable` returns.
+ *
+ * Unlike `READ_MULTIPLE_MAX` this is never a silent truncation: a table with
+ * more rows and no author-requested `limit` FAILS (§7.5). A flat list that
+ * stops at 500 is obviously short; a business table that stops at 500 is a
+ * convincingly wrong answer, and the step after it asserts on the wrong set.
+ */
+const READ_TABLE_MAX_ROWS = 500;
+
+/** The property the runtime writes on every record (§4.5). Never an alias —
+ *  the parser rejects a column that claims it. */
+const ROW_NUMBER_KEY = '_row';
+
+/**
+ * Read named columns from one native `<table>` into one record per visible
+ * data row.
+ *
+ * Header mapping, row selection, placeholder skipping, `_row` numbering and
+ * every structural refusal happen in ONE browser-context evaluation (§7.5), so
+ * a rerender between two round-trips cannot put one version's headers beside
+ * another version's rows. That evaluation is also where the table's uniqueness
+ * is established — strictly stronger than counting first and extracting after.
+ *
+ * Throws on every structural problem, with the message the author reads. The
+ * caller's try/catch in {@link executeAction} turns that into a failed action,
+ * which is what reaches the model and the report.
+ */
+export async function readTableRecords(
+  root: Page | FrameLocator,
+  request: TableReadRequest,
+): Promise<TableReadResult> {
+  const { selector, columns, limit } = request;
+  if (columns.length === 0) {
+    throw new Error('readTable requires at least one column');
+  }
+  logger.subAction(
+    `readTable ${selector} ${columns.length} column${columns.length === 1 ? '' : 's'}`
+    + (limit !== undefined ? ` (limit ${limit})` : ''),
+  );
+
+  const outcome = await root.locator(selector).evaluateAll(
+    (matches, args) => {
+      const {
+        selector: sel,
+        columns: wanted,
+        limit: bound,
+        maxRows,
+        rowKey,
+      } = args as {
+        selector: string;
+        columns: Array<{ header?: string; index?: number; key: string }>;
+        limit: number | null;
+        maxRows: number;
+        rowKey: string;
+      };
+
+      // ── page-context helpers ───────────────────────────────────────────
+      // Everything the extraction needs lives inside this callback: Playwright
+      // ships the function source to the page, so a reference to anything in
+      // Node scope would be undefined there.
+      //
+      // `El` stands in for the DOM types this project's `lib` does not carry
+      // (tsconfig is ES2022 with no "dom"); in the page these values are real
+      // HTMLTable{,Row,Cell}Elements, which is what the property access below
+      // relies on.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      type El = any;
+      const all = matches as El[];
+      /** `Array.from` over a live DOM collection, typed back to `El` — without
+       *  the DOM lib TypeScript widens these to `unknown[]`. */
+      const items = (collection: El): El[] => Array.from(collection) as El[];
+
+      /** Is this element rendered? Covers `display:none`, the `hidden`
+       *  attribute and a hidden/collapsed ancestor (none of which produce a
+       *  client rect), plus `visibility:hidden` (which does). */
+      const rendered = (el: El): boolean => {
+        if (el.getClientRects().length === 0) return false;
+        const view = el.ownerDocument.defaultView;
+        if (!view) return true;
+        const visibility = view.getComputedStyle(el).visibility;
+        return visibility !== 'hidden' && visibility !== 'collapse';
+      };
+      const squash = (s: string): string => s.replace(/\s+/g, ' ').trim();
+      /** Normalised header key: trimmed, collapsed and case-folded. The fold
+       *  is load-bearing — the app's own table style upper-cases `<th>`, so
+       *  `innerText` says ORDER ID where the author wrote Order ID (§7.3). */
+      const fold = (s: string): string => squash(s).toLowerCase();
+      /** Rendered header text, falling back to `textContent` for a
+       *  visually-hidden accessible heading (§7.3). */
+      const headerTextOf = (cell: El): string => {
+        const shown = squash(cell.innerText || '');
+        return shown !== '' ? shown : squash(cell.textContent || '');
+      };
+      /** Rendered cell text. A cell that is not rendered reads as "" — a
+       *  hidden column keeps its position and contributes nothing (§10).
+       *  `innerText` alone would not do: on an unrendered element it falls
+       *  back to `textContent`, which would hand back the hidden value. */
+      const cellTextOf = (cell: El): string =>
+        (rendered(cell) ? squash(cell.innerText || '') : '');
+      const spanned = (cell: El): boolean =>
+        cell.colSpan > 1 || cell.rowSpan > 1;
+      const plural = (n: number, one: string, many: string): string => (n === 1 ? one : many);
+      const fail = (error: string) => ({ ok: false as const, error });
+
+      // ── 1. table selection (§7.2) ──────────────────────────────────────
+      const visible = all.filter(rendered);
+      if (visible.length === 0) {
+        return fail(
+          all.length === 0
+            ? `readTable could not find a table matching "${sel}"`
+            : `readTable could not find a visible table matching "${sel}" (${all.length} `
+              + `${plural(all.length, 'match', 'matches')}, none visible)`,
+        );
+      }
+      if (visible.length > 1) {
+        // No `.first()`: picking one of several would be the misalignment this
+        // action exists to prevent, one table out instead of one column.
+        return fail(
+          `readTable found ${visible.length} visible elements matching "${sel}" — it must match `
+          + `exactly one table, so use a more specific selector`,
+        );
+      }
+      const el = visible[0]!;
+      if (el.tagName !== 'TABLE') {
+        return fail(
+          `readTable requires a native <table> element, but "${sel}" matched a `
+          + `<${el.tagName.toLowerCase()}> — ARIA grids and <div role="table"> are not supported`,
+        );
+      }
+      const table = el as El;
+
+      /** How the diagnostics name this table: its accessible name where it has
+       *  one, else whatever the author can recognise it by. */
+      const caption = table.caption;
+      const label =
+        table.getAttribute('aria-label')
+        || (caption ? squash(caption.textContent || '') : '')
+        || table.id
+        || sel;
+      const cannot = (why: string) => fail(`readTable cannot map table "${label}": ${why}`);
+      /** §5.3, verbatim, for a merged header AND for a merged body cell: both
+       *  mean the same thing — that a guessed logical grid would be plausible
+       *  and wrong. */
+      const merged = () =>
+        cannot('merged headers or cells (rowspan/colspan > 1) are not supported');
+
+      // ── 2. rows belonging to THIS table ────────────────────────────────
+      // `tBodies` yields direct `<tbody>` children and `section.rows` their
+      // direct `<tr>` children, so a nested table's rows belong to the nested
+      // table and appear in neither scan. The `closest` test is the rule §7.3
+      // states, kept as the explicit guard.
+      const bodyRows: El[] = [];
+      for (const section of items(table.tBodies)) {
+        if (section.parentElement !== table) continue;
+        for (const row of items(section.rows)) {
+          if (row.closest('table') === table) bodyRows.push(row);
+        }
+      }
+
+      // ── 3. the header row (§7.3) ───────────────────────────────────────
+      let headerRow: El = null;
+      const thead = table.tHead;
+      if (thead && thead.parentElement === table) {
+        const headRows = items(thead.rows);
+        // Spans first, so the two-row merged header of §5.3 reports what it
+        // actually is rather than "your header has 2 rows".
+        for (const row of headRows) {
+          for (const cell of items(row.cells)) {
+            if (spanned(cell)) return merged();
+          }
+        }
+        if (headRows.length > 1) {
+          return cannot(`its header has ${headRows.length} rows, and v1 supports exactly one`);
+        }
+        headerRow = headRows[0] ?? null;
+      } else {
+        // No `<thead>`: the FIRST body row may be the header, but only when
+        // every one of its cells is a `<th>` and there is more than one. A
+        // lone full-width `<th>` is a group or placeholder row (§4.8), and a
+        // `<th scope="row">` beside `<td>`s is that row's own heading (§10) —
+        // neither names the table's columns.
+        const first = bodyRows[0];
+        if (first) {
+          const cells = items(first.cells);
+          if (cells.length > 1 && cells.every((c) => c.tagName === 'TH')) {
+            for (const cell of cells) {
+              if (spanned(cell)) return merged();
+            }
+            headerRow = first;
+            bodyRows.shift();
+          }
+        }
+      }
+
+      /** The table's width, which the placeholder rule needs even when no
+       *  column names a header (§7.3). 0 means "no header row". */
+      const width = headerRow ? headerRow.cells.length : 0;
+
+      // ── 4. resolve each column to a one-based position ─────────────────
+      const headerLabels = headerRow ? items(headerRow.cells).map(headerTextOf) : [];
+      const resolved: Array<{ key: string; position: number; header: string | null }> = [];
+      for (const col of wanted) {
+        if (typeof col.header === 'string') {
+          if (!headerRow) {
+            // §5.4, verbatim: the message's whole job is to name the way out.
+            return cannot(
+              `it has no header row, so "${col.header}" cannot be matched — name columns by `
+              + `position ("the 1st column as ${col.key}")`,
+            );
+          }
+          const want = fold(col.header);
+          const hits: number[] = [];
+          headerLabels.forEach((text, i) => {
+            if (fold(text) === want) hits.push(i + 1);
+          });
+          if (hits.length === 0) {
+            // Exact match only. A renamed header is a test failure worth
+            // reading; a fuzzy match would quietly read the wrong column.
+            const available = headerLabels.filter((t) => t !== '');
+            return cannot(
+              `no column is headed "${col.header}"`
+              + (available.length > 0
+                ? ` — available headers are ${available.join(', ')}`
+                : ' — its header row has no non-empty headings'),
+            );
+          }
+          if (hits.length > 1) {
+            return cannot(
+              `"${col.header}" matches ${hits.length} columns (positions ${hits.join(', ')}) — name `
+              + `the one you mean by position`,
+            );
+          }
+          resolved.push({ key: col.key, position: hits[0]!, header: col.header });
+        } else {
+          resolved.push({ key: col.key, position: col.index!, header: null });
+        }
+      }
+
+      // ── 5. data rows (§7.4) ────────────────────────────────────────────
+      const dataRows: El[] = [];
+      let placeholdersSkipped = 0;
+      for (const row of bodyRows) {
+        if (!rendered(row)) continue;
+        const cells = row.cells;
+        // A placeholder is a message, not a grid: one cell spanning the whole
+        // width, or the row's only cell when there is no header to measure
+        // against. Checked BEFORE the merged-cell rule, which is what keeps
+        // `<td colspan="5">No documents uploaded yet.</td>` from failing a
+        // read that an empty table should answer with `[]`.
+        if (cells.length === 1 && (width > 0 ? cells[0]!.colSpan === width : true)) {
+          placeholdersSkipped++;
+          continue;
+        }
+        dataRows.push(row);
+      }
+
+      if (bound === null && dataRows.length > maxRows) {
+        return fail(
+          `readTable cannot read table "${label}": it has ${dataRows.length} visible data rows, more `
+          + `than the ${maxRows}-row maximum — read a bounded window instead ("the first ${maxRows} `
+          + `visible rows") or narrow the table first`,
+        );
+      }
+      // `limit` selects a PREFIX of the data rows, so a selected row's `_row`
+      // is its index here plus one — the same number it would have had on an
+      // unbounded read.
+      const selected = bound === null ? dataRows : dataRows.slice(0, bound);
+
+      // ── 6. cells (§7.4) ────────────────────────────────────────────────
+      const records: Array<Record<string, string>> = [];
+      for (let i = 0; i < selected.length; i++) {
+        const row = selected[i]!;
+        const rowNumber = i + 1;
+        const cells = items(row.cells);
+        // Cell-shape validation applies to SELECTED rows only: a malformed row
+        // past the author's explicit bound is a row nobody asked for.
+        for (const cell of cells) {
+          if (spanned(cell)) return merged();
+        }
+        const record: Record<string, string> = {};
+        // `_row` first, so the report and the Variables panel show it first.
+        record[rowKey] = String(rowNumber);
+        for (const col of resolved) {
+          const cell = cells[col.position - 1];
+          if (!cell) {
+            // Never drop the row and never shift the values: a record whose
+            // fields came from the wrong columns is exactly the failure this
+            // action exists to make impossible.
+            return cannot(
+              `row ${rowNumber} has ${cells.length} ${plural(cells.length, 'cell', 'cells')}, so `
+              + (col.header !== null
+                ? `there is no cell for the "${col.header}" column at position ${col.position}`
+                : `there is no cell at position ${col.position} for "${col.key}"`),
+            );
+          }
+          record[col.key] = cellTextOf(cell);
+        }
+        records.push(record);
+      }
+
+      return {
+        ok: true as const,
+        records,
+        placeholdersSkipped,
+        dataRowCount: dataRows.length,
+        label,
+      };
+    },
+    {
+      selector,
+      // Only the three fields the page needs. `mode` is phase 1's `'text'` by
+      // definition (the parser refuses anything else), so it would be noise.
+      columns: columns.map((c) => ({
+        ...(c.header !== undefined && { header: c.header }),
+        ...(c.index !== undefined && { index: c.index }),
+        key: c.key,
+      })),
+      limit: limit ?? null,
+      maxRows: READ_TABLE_MAX_ROWS,
+      rowKey: ROW_NUMBER_KEY,
+    },
+  );
+
+  if (!outcome.ok) throw new Error(outcome.error);
+  return {
+    records: outcome.records,
+    placeholdersSkipped: outcome.placeholdersSkipped,
+    dataRowCount: outcome.dataRowCount,
+    label: outcome.label,
+  };
+}
+
+/**
+ * The one summary line a `readTable` writes to the run log (§7.6): counts, not
+ * contents. The captured cells belong in the variable and the report, not in
+ * every console the run passes through.
+ *
+ * The bound and the placeholder-skip count ride along because without them a
+ * short result has no explanation in the log — "captured 0 rows" and "captured
+ * 0 rows (1 placeholder row skipped)" are different findings. The column count
+ * comes from what was ASKED for, so an empty table still says how wide the
+ * read was.
+ */
+export function formatTableReadSummary(
+  result: TableReadResult,
+  columnCount: number,
+  as: string | undefined,
+  limit: number | undefined,
+): string {
+  const rows = result.records.length;
+  const notes: string[] = [];
+  if (limit !== undefined) notes.push(`limit ${limit}`);
+  if (result.placeholdersSkipped > 0) {
+    notes.push(
+      `${result.placeholdersSkipped} placeholder row${result.placeholdersSkipped === 1 ? '' : 's'} skipped`,
+    );
+  }
+  return (
+    `readTable captured ${rows} row${rows === 1 ? '' : 's'} `
+    + `× ${columnCount} column${columnCount === 1 ? '' : 's'} as "{{${as ?? '(unnamed)'}}}"`
+    + (notes.length > 0 ? ` (${notes.join(', ')})` : '')
+  );
 }

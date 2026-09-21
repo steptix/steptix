@@ -15,10 +15,13 @@ at $140.00 and row 3 at $86.10 — so the body finds its row by
 
 **Requires phase 1 of the spec.** What the proving run must show (§12): the
 recorded action has `index` columns and no `header`; five records with
-`_row` 1 to 5; the Paused pass ends at its first step with the rest skipped
-as not-taken; and the two Origin Energy passes open *different* details
-pages, each showing that pass's `{{payment.amount}}`. Opening the first
-Origin Energy row twice is the failure this file exists to catch.
+`_row` 1 to 5; the Overdue pass (row 4, Sydney Water) ends at its first
+step with the rest skipped as not-taken; and the two Origin Energy passes
+(rows 1 and 3) open *different* details pages, each showing that pass's
+`{{payment.amount}}` — $140.00 and $86.10. Opening the first Origin Energy
+row twice is the failure this file exists to catch. The `return` is on
+Overdue rather than Paused precisely so that row 3, the second Origin
+Energy, is visited.
 
 The baseline got this right by inference — the step prompt's prior-steps
 history let the model reason "already reviewed", and the rows differ in
@@ -36,7 +39,7 @@ status. This version does not need either.
 4. Verify the Scheduled payments table still shows 5 payments
 
 ### Review the payment
-1. If {{payment.status}} is "Paused", then return
+1. If {{payment.status}} is "Overdue", then return
 2. Click View in row {{payment._row}} of the Scheduled payments table
 3. Verify the Payment details page shows "{{payment.payee}}" and the amount {{payment.amount}}
 4. Click Back to scheduled payments

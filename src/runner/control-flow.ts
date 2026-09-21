@@ -109,6 +109,17 @@ export const DEFAULT_MAX_LOOP_ITERATIONS = 25;
  *  read, which happens on the guard's first evaluation. */
 export interface ForEachCursor {
   items: string[] | null;
+  /**
+   * Per item, the direct properties an OBJECT element exposes as dotted
+   * bindings — `{ _row: '1', id: 'ORD-1001' }` for
+   * `{"_row":"1","id":"ORD-1001"}` (SPEC-structured-table-reads.md §8.2).
+   * Absent entries are scalars, which bind their base name and nothing else.
+   *
+   * Parallel to `items` rather than folded into it because `items` is the
+   * loop's own list — what `count` reports, what `index` walks — and every
+   * existing reader of it expects one string per pass.
+   */
+  properties?: Array<Record<string, string> | undefined> | undefined;
   /** Index of the element the current pass is bound to; -1 before the first. */
   index: number;
   /**
@@ -162,7 +173,11 @@ export type GuardVerdict =
    *  one, and skips the chain if it does not. */
   | { kind: 'chain'; selected: number | null }
   | { kind: 'condition'; holds: boolean }
-  | { kind: 'list'; items: string[] }
+  /** `properties`, when present, is parallel to `items`: the direct properties
+   *  of an OBJECT element, which become `{{item.property}}` bindings (§8.2).
+   *  Optional so a caller that builds a verdict by hand — every scalar test in
+   *  this repo — keeps working unchanged. */
+  | { kind: 'list'; items: string[]; properties?: Array<Record<string, string> | undefined> }
   | { kind: 'resume' };
 
 export interface ControlPlan {
@@ -370,7 +385,12 @@ function planForEach(
     // Entering the loop. A run resumed inside the body counts its partial
     // pass as pass 1, so the list is entered one element further on.
     const startAt = cursor?.resumed ? 1 : 0;
-    cursor = { items: [...verdict.items], index: startAt, resumed: cursor?.resumed ?? false };
+    cursor = {
+      items: [...verdict.items],
+      ...(verdict.properties && { properties: [...verdict.properties] }),
+      index: startAt,
+      resumed: cursor?.resumed ?? false,
+    };
     state.cursors.set(index, cursor);
   } else if (cursor && cursor.items !== null) {
     cursor = { ...cursor, index: cursor.index + 1 };
@@ -403,9 +423,39 @@ function planForEach(
     pass: {
       iteration: cursor.index + 1,
       count: items.length,
-      bindings: { [record.item]: items[cursor.index]! },
+      bindings: passBindings(record.item, items[cursor.index]!, cursor.properties?.[cursor.index]),
     },
   };
+}
+
+/**
+ * What one pass writes into the live variable map: the base name, plus one
+ * dotted key per direct property of an object item
+ * (docs/specs/SPEC-structured-table-reads.md §8.2).
+ *
+ * The base binding is unchanged — an object still binds `{{order}}` to its
+ * compact JSON text, which is what a scalar `For each` over a JSON array of
+ * objects already did and what a step printing the whole row still wants.
+ *
+ * Base FIRST, so a record with a property literally called `order` under an
+ * item called `order` cannot shadow the item itself... which it cannot anyway,
+ * since a property's key is always `order.something`. The order is for the
+ * Variables panel, which renders insertion order and should lead with the row.
+ *
+ * Nothing is snapshotted or restored: the last pass's bindings, dotted ones
+ * included, stay in the one live map after the loop, exactly as the scalar
+ * binding always has (§8.2, last paragraph).
+ */
+function passBindings(
+  item: string,
+  value: string,
+  properties: Record<string, string> | undefined,
+): Record<string, string> {
+  const bindings: Record<string, string> = { [item]: value };
+  for (const [key, text] of Object.entries(properties ?? {})) {
+    bindings[`${item}.${key}`] = text;
+  }
+  return bindings;
 }
 
 function planConditionLoop(
@@ -783,16 +833,73 @@ export function loopCompileRefusal(guardLine: string): string {
 }
 
 /**
+ * Which item of the innermost live `For each` binding `item` is running — the
+ * number `{{order.statuz}} has no value in For each item 2` names
+ * (docs/specs/SPEC-structured-table-reads.md §8.3).
+ *
+ * Innermost is the HIGHEST guard index, the same rule the rest of this module
+ * uses: a loop nested inside another's body sits after it in the flat list. A
+ * `For each` that has not started a pass yet, and a name no loop binds, both
+ * answer undefined, and the caller's message leaves the clause out.
+ *
+ * Reads the state the planner already keeps rather than adding a field to it,
+ * so nothing has to be threaded through the three run loops to ask.
+ */
+export function forEachPassOf(
+  controls: readonly (ControlRecord | null)[],
+  state: ControlState,
+  item: string,
+): number | undefined {
+  for (let g = controls.length - 1; g >= 0; g--) {
+    const record = controls[g];
+    if (!record || record.kind !== 'foreach' || record.item !== item) continue;
+    const passes = state.passes.get(g);
+    if (passes !== undefined) return passes;
+  }
+  return undefined;
+}
+
+/**
+ * A property name safe to expose as `{{item.property}}`: the spec's identifier
+ * rule (§8.2), which is also what an alias must satisfy at the other end
+ * (§4.1).
+ */
+const SAFE_PROPERTY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** The three names that are not data. `__proto__` on a plain object literal
+ *  from `JSON.parse` is an own property rather than the setter, but a binding
+ *  named after one of these travels into maps that are not — and a variable
+ *  called `constructor` is a trap wherever it lands. */
+const DANGEROUS_PROPERTIES: ReadonlySet<string> = new Set([
+  '__proto__',
+  'prototype',
+  'constructor',
+]);
+
+/**
  * Validate what `{{list}}` holds for a `For each`, and bind its elements.
  *
  * A JSON array and nothing else (decision 10): a list that came from a `Set`
  * is text, and guessing a delimiter is how a value with a comma in it
  * silently becomes two. A non-string element is bound as its JSON text.
+ *
+ * An OBJECT element binds that JSON text too — unchanged, because that is what
+ * a step printing the whole row reads — and, in addition, one dotted binding
+ * per direct property (docs/specs/SPEC-structured-table-reads.md §8.2). The
+ * per-property conversion is the spec's: a string travels unchanged, a number
+ * or boolean becomes its JSON lexical form, `null` becomes the four characters
+ * `null`, and a nested object or array becomes compact JSON. Nothing is
+ * flattened recursively — one property segment is all v1 addresses.
+ *
+ * A key that is not a safe identifier, or is one of the three prototype names,
+ * FAILS the guard naming the one-based item index, and binds nothing at all.
+ * Partial bindings are the failure mode this rule exists for: a loop that
+ * silently dropped `order.id` would run every pass against an empty string.
  */
 export function parseListValue(
   name: string,
   raw: string | undefined,
-): { items: string[] } | { error: string } {
+): { items: string[]; properties: Array<Record<string, string> | undefined> } | { error: string } {
   if (raw === undefined) {
     return {
       error:
@@ -810,11 +917,56 @@ export function parseListValue(
   }
   if (!Array.isArray(parsed)) return { error: notAList(name, raw) };
 
-  return {
-    items: parsed.map((element: unknown) =>
-      typeof element === 'string' ? element : JSON.stringify(element),
-    ),
-  };
+  const items: string[] = [];
+  const properties: Array<Record<string, string> | undefined> = [];
+  for (const [i, element] of parsed.entries()) {
+    items.push(typeof element === 'string' ? element : JSON.stringify(element));
+    if (!isPlainRecord(element)) {
+      properties.push(undefined);
+      continue;
+    }
+    const fields: Record<string, string> = {};
+    for (const key of Object.keys(element)) {
+      const refusal = unsafePropertyReason(key);
+      if (refusal !== undefined) {
+        return {
+          error:
+            `\`{{${name}}}\` item ${i + 1} has a property named \`${key}\`, which ` +
+            `${refusal}. Every property becomes a \`{{item.property}}\` binding, so ` +
+            `rename it — the read step's \`… as <alias>\`, or the field the tool returns.`,
+        };
+      }
+      fields[key] = propertyText((element as Record<string, unknown>)[key]);
+    }
+    properties.push(fields);
+  }
+
+  return { items, properties };
+}
+
+/** A JSON object — not an array, not null, and not something `JSON.parse`
+ *  cannot produce. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Why a record's key cannot become a dotted binding, or undefined. */
+function unsafePropertyReason(key: string): string | undefined {
+  if (DANGEROUS_PROPERTIES.has(key)) return 'is a reserved JavaScript name';
+  if (!SAFE_PROPERTY.test(key)) {
+    return 'is not a name a placeholder can spell (letters, digits and underscores, not starting with a digit)';
+  }
+  return undefined;
+}
+
+/** One property value as the text its `{{item.property}}` binding holds
+ *  (§8.2). */
+function propertyText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  // `JSON.stringify(undefined)` is `undefined`, not a string — unreachable for
+  // a parsed document, since JSON has no `undefined`, but the cast below would
+  // hide it rather than the map holding the four characters `null`.
+  return value === undefined ? 'null' : JSON.stringify(value);
 }
 
 function notAList(name: string, raw: string): string {

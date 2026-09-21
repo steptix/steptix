@@ -140,12 +140,21 @@ function makeConfig(): Config {
 }
 
 /** Write a test document, parse it for real, and hand back a runnable
- *  instance — so `test.expansion` is the expander's own table. */
-async function instanceOf(name: string, markdown: string): Promise<TestInstance> {
+ *  instance — so `test.expansion` is the expander's own table.
+ *
+ *  `parameters` seeds the live variable map the way a capture would have: the
+ *  loop tests below need a list in scope before step 1, and `## Parameters`
+ *  is not resolved on this path (`resolvedParameters` arrives from the
+ *  caller, which in a real run is `resolveParameters`). */
+async function instanceOf(
+  name: string,
+  markdown: string,
+  parameters: Record<string, string> = {},
+): Promise<TestInstance> {
   const filePath = path.join(dir, name);
   await fs.writeFile(filePath, markdown);
   const test: ParsedTest = await parseTestFile(filePath);
-  return { test, resolvedParameters: {} };
+  return { test, resolvedParameters: { ...parameters } };
 }
 
 function passed(index: number, instruction: string): StepResult {
@@ -611,5 +620,82 @@ describe('the jump respects the run`s own bounds', () => {
 
     const sidecar = await readLastRun(instance.test.filePath);
     expect(sidecar?.steps.map((s) => s.index)).toEqual([1, 2]);
+  });
+});
+
+// ─── A dotted reference the pass cannot answer ──────────────────────────────
+
+/**
+ * `{{order.missing}}` inside a `For each` body, through the CLI loop
+ * (docs/specs/SPEC-structured-table-reads.md §8.3).
+ *
+ * The rule is "fail before the model is asked", and only a loop-level test can
+ * say that: the helper on its own proves the sentence, not that the refusal
+ * happens early enough to matter. So every assertion below is about
+ * `executeStepMock` — what the model was handed, and what it was never handed.
+ *
+ * Seeded through `resolvedParameters` rather than by a `readTable` step,
+ * because the planner's contract is with the JSON in the variable map and not
+ * with the action that wrote it. A tool returning an array puts the same
+ * string there.
+ */
+describe('a dotted reference inside a For each body', () => {
+  const ROWS = '[{"id":"ORD-1001","status":"Completed"},{"id":"ORD-1002","status":"Pending"}]';
+
+  const doc = (bodyStep: string): string => `# t
+
+## Steps
+1. Navigate to /
+2. For each {{order}} in {{orders}}, Check the order
+3. Sign out
+
+### Check the order
+1. ${bodyStep}
+`;
+
+  /** Every instruction the executor was actually given. */
+  const asked = (): string[] => executeStepCalls.map((c) => c.instruction);
+
+  it('fails the step before any model call, naming the pass and the properties', async () => {
+    respond({});
+    const report = await runTest(
+      await instanceOf('dotted-missing.md', doc('Verify {{order.missing}} is shown'), {
+        orders: ROWS,
+      }),
+      makeConfig(),
+    );
+
+    const message =
+      '{{order.missing}} has no value in For each item 1; available properties are id, status';
+    const failed = report.steps.find((s) => s.status === 'failed');
+    expect(failed?.error).toBe(message);
+    expect(failed?.aiExplanation).toBe(message);
+
+    // The point of the test: the body step never reached the executor, so the
+    // model was never asked to plan an action for a line carrying six literal
+    // braces — which is what the failure would otherwise have looked like,
+    // three steps from the typo.
+    expect(asked()).toEqual(['Navigate to /']);
+    expect(report.status).toBe('failed');
+  });
+
+  it('substitutes a real property into the text the model receives, per pass', async () => {
+    respond({});
+    const report = await runTest(
+      await instanceOf('dotted-ok.md', doc('Verify the row for "{{order.id}}" is {{order.status}}'), {
+        orders: ROWS,
+      }),
+      makeConfig(),
+    );
+
+    // One pass per row, each carrying THAT row's values — not the row's JSON
+    // text, and not the placeholder.
+    expect(asked()).toEqual([
+      'Navigate to /',
+      'Verify the row for "ORD-1001" is Completed',
+      'Verify the row for "ORD-1002" is Pending',
+      'Sign out',
+    ]);
+    expect(report.status).toBe('passed');
   });
 });

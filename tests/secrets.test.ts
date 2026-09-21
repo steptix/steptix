@@ -141,6 +141,75 @@ describe('redactMap — values held under their names', () => {
   });
 });
 
+/**
+ * A `readTable` capture is ONE parameter whose value is a JSON array of row
+ * records (SPEC-structured-table-reads.md §7.1), so the name the rule reads —
+ * `orders` — says nothing about the columns inside it. §7.6 requires the
+ * masking to reach in: a `password` column is a secret however the row it sits
+ * in is named.
+ */
+describe('secrets inside a record list (structured table reads)', () => {
+  const ORDERS = JSON.stringify([
+    { _row: '1', id: 'ORD-1001', customer: 'Alice Smith', password: 'row-1-hunter2' },
+    { _row: '2', id: 'ORD-1002', customer: 'Bob Jones', password: 'row-2-hunter2' },
+  ]);
+
+  it('collects a secret-named COLUMN from every record', () => {
+    expect(secretValues({ orders: ORDERS })).toEqual(['row-1-hunter2', 'row-2-hunter2']);
+  });
+
+  it('so the console line and the report never print one', () => {
+    const secrets = secretValues({ orders: ORDERS });
+    expect(redact('typing row-1-hunter2 into the field', secrets)).toBe(`typing ${MASK} into the field`);
+    expect(
+      redactDeep({ steps: [{ action: 'type', value: 'row-2-hunter2', selector: '#pw' }] }, secrets),
+    ).toEqual({ steps: [{ action: 'type', value: MASK, selector: '#pw' }] });
+  });
+
+  it('masks the dotted binding a For each pass leaves in the map, by name and by value', () => {
+    // The pass binds `order` plus one entry per property (§8.2), so the map
+    // itself carries `order.password`. `isSecretName` matches on a substring,
+    // which is what makes the property segment count without a second rule.
+    const pass = {
+      orders: ORDERS,
+      order: '{"_row":"1","id":"ORD-1001","password":"row-1-hunter2"}',
+      'order.id': 'ORD-1001',
+      'order.password': 'row-1-hunter2',
+    };
+    const secrets = secretValues(pass);
+    expect(secrets).toContain('row-1-hunter2');
+    expect(redactMap(pass, secrets)).toEqual({
+      // The base binding is not secret-named, so it is masked by VALUE — the
+      // row survives as evidence with the one cell blanked.
+      orders: ORDERS.split('row-1-hunter2').join(MASK).split('row-2-hunter2').join(MASK),
+      order: `{"_row":"1","id":"ORD-1001","password":"${MASK}"}`,
+      'order.id': 'ORD-1001',
+      'order.password': MASK,
+    });
+  });
+
+  it('masks a record stored under a secret-named variable whole, as it always did', () => {
+    const tokens = JSON.stringify([{ _row: '1', label: 'staging' }]);
+    expect(secretValues({ token: tokens })).toEqual([tokens]);
+    expect(redactMap({ token: tokens }, secretValues({ token: tokens }))).toEqual({ token: MASK });
+  });
+
+  it('changes nothing else', () => {
+    // No secret-named column: the list is left alone.
+    const plain = JSON.stringify([{ _row: '1', id: 'ORD-1001', customer: 'Alice Smith' }]);
+    expect(secretValues({ orders: plain })).toEqual([]);
+    // A flat plural read is an array of strings, not records.
+    expect(secretValues({ ids: '["ORD-1001","ORD-1002"]' })).toEqual([]);
+    // Anything that is not a list of objects is not a record list, including
+    // text that merely starts like one.
+    expect(secretValues({ note: '[{ not json at all' })).toEqual([]);
+    expect(secretValues({ blob: '{"password":"nested"}' })).toEqual([]);
+    expect(secretValues({ nested: '[{"password":{"deep":"x"}}]' })).toEqual([]);
+    // Empty values are still not secrets.
+    expect(secretValues({ orders: '[{"password":""}]' })).toEqual([]);
+  });
+});
+
 describe('redactReport — the report every consumer sees', () => {
   function report(): TestReport {
     return {

@@ -20,11 +20,13 @@ import type { StepExecutorOptions } from './step-executor.js';
 import { identifyStepGroups } from './step-grouper.js';
 import {
   createControlState,
+  forEachPassOf,
   guardVisitEvaluates,
   planAfterStep,
   returnExit,
   type ControlRecord,
 } from './control-flow.js';
+import { dottedReferenceError } from './placeholder-substitution.js';
 import {
   evaluateGuard,
   guardHistoryLines,
@@ -170,7 +172,9 @@ function computeStepCaptures(
 ): Record<string, string> | undefined {
   const captures = result.turns
     .flatMap((t) => t.subActions)
-    .filter((sa) => !sa.error && (sa.action.action === 'read' || sa.action.action === 'count'))
+    .filter((sa) => !sa.error && (sa.action.action === 'read' || sa.action.action === 'count'
+      // A structured table read writes its `as` too (SPEC-structured-table-reads.md §9.3).
+      || sa.action.action === 'readTable'))
     .map((sa) => sa.action.as)
     .filter((name): name is string => !!name && !name.startsWith('__skill'))
     .reduce<Record<string, string>>((acc, name) => {
@@ -1443,10 +1447,32 @@ export async function runTest(
       // line asks for two endings at once and there is nothing to judge.
       const tailContradiction =
         setStep || flowControlClaim ? false : isFailureTailContradiction(rawInstruction);
+      // A `{{order.statuz}}` the pass cannot answer, refused before the model
+      // is asked anything (SPEC-structured-table-reads.md §8.3). Read off the
+      // AUTHORED line, because `interpolate` has already replaced every
+      // reference it COULD answer and leaves only the ones it could not.
+      // Dotted only: an unresolved flat name keeps its warning.
+      const dottedRefError = setStep
+        ? undefined
+        : dottedReferenceError(rawInstruction, resolvedParameters, (item) =>
+            forEachPassOf(controls, controlState, item),
+          );
       let stepResult: StepResult;
       let interactiveResults: StepResult[] = [];
 
-      if (tailContradiction) {
+      if (dottedRefError) {
+        logger.error(dottedRefError);
+        stepResult = {
+          index: i + 1,
+          instruction,
+          status: 'failed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          error: dottedRefError,
+          aiExplanation: dottedRefError,
+        };
+      } else if (tailContradiction) {
         const error = failureTailContradictionError(rawInstruction);
         logger.error(error);
         stepResult = {

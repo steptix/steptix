@@ -40,6 +40,7 @@ import { identifyStepGroups } from '../runner/step-grouper.js';
 import {
   createControlState,
   firstLoopInRange,
+  forEachPassOf,
   guardVisitEvaluates,
   loopCompileRefusal,
   planAfterStep,
@@ -48,6 +49,7 @@ import {
   snapEndAt,
   type ControlRecord,
 } from '../runner/control-flow.js';
+import { dottedReferenceError } from '../runner/placeholder-substitution.js';
 import {
   evaluateGuard,
   guardHistoryLines,
@@ -61,7 +63,7 @@ import {
   SkipQueue,
   type LoopRecord,
 } from '../runner/control-runtime.js';
-import { parseControlLine } from '../parser/control-line.js';
+import { controlLineDefines, parseControlLine } from '../parser/control-line.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
@@ -4638,9 +4640,14 @@ export class SessionManager {
         // reachable path.
         const envInterpolated =
           setStep || !envDataCtx ? originalStep : interpolateEnvData(originalStep, envDataCtx);
+        // This loop interpolates EVERY step before it reaches the control
+        // dispatch, guard lines included — so a `For each {{payment}} in
+        // {{payments}}` header asks for the item name it is about to define.
+        // `controlLineDefines` is what stops that being warned about
+        // (src/parser/control-line.ts).
         const interpolated = setStep
           ? originalStep
-          : interpolate(envInterpolated, resolvedParameters);
+          : interpolate(envInterpolated, resolvedParameters, controlLineDefines(originalStep));
 
         // Partial re-run guard: a leftover `{{__skill…}}` after interpolation
         // means this tail step needs an internal value that an earlier (skipped)
@@ -4708,6 +4715,68 @@ export class SessionManager {
         // A file never gets this far: `validateControlFlow` (parser/markdown.ts)
         // refuses the same line by name with the same sentence. This is for the
         // path with no validator — steps POSTed straight to the Sessions API.
+        // ── A dotted reference this pass cannot answer ───────────────
+        //
+        // `{{order.statuz}}` where the row has `status`
+        // (docs/specs/SPEC-structured-table-reads.md §8.3). Refused here for
+        // the same reason as the contradiction above: before the model call,
+        // naming the properties the pass does hold, rather than sending six
+        // literal braces to a judge that will report it as a step it could not
+        // plan. Read off `originalStep`, since `interpolate` has already
+        // replaced every reference it could answer.
+        //
+        // DOTTED only. An unresolved flat name is old ground and keeps its
+        // warning — see `dottedReferenceError`.
+        //
+        // A GUARD line is skipped here and refused by `evaluateGuard` instead.
+        // This loop resolves every step before the control dispatch, so it
+        // would otherwise catch a guard's condition on the step path and file
+        // a `step:fail` where the CLI and the Electron adapter — which
+        // dispatch the guard first — file a failed GUARD row. One refusal, one
+        // shape, in the module all three share.
+        const dottedRefError =
+          setStep || (hasControls && controls[i])
+            ? undefined
+            : dottedReferenceError(originalStep, resolvedParameters, (item) =>
+                forEachPassOf(controls, controlState, item),
+              );
+        if (dottedRefError) {
+          const frame = frameInfoFor(i);
+          logger.error(`Session "${sessionId}" step ${i + 1}: ${dottedRefError}`);
+          emit({
+            type: 'step:start',
+            line: sourceLineFor(i),
+            ...(frame && { frame }),
+          });
+          emit({
+            type: 'step:fail',
+            line: sourceLineFor(i),
+            error: dottedRefError,
+            ...(frame && { frame }),
+          });
+          results.push({
+            step: originalStep,
+            status: 'failed',
+            actions: [],
+            screenshot: '',
+            reasoning: dottedRefError,
+            outputs: {},
+          });
+          fullStepResults.push({
+            index: i + 1,
+            instruction: originalStep,
+            status: 'failed',
+            turns: [],
+            durationMs: 0,
+            retried: false,
+            error: dottedRefError,
+            aiExplanation: dottedRefError,
+          });
+          overallStatus = 'failed';
+          errorInfo = { step: i, message: dottedRefError };
+          break;
+        }
+
         if (failureTailContradiction) {
           const error = failureTailContradictionError(originalStep);
           const frame = frameInfoFor(i);

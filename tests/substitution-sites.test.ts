@@ -80,6 +80,15 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   'src/codebehind/generate.ts': { why: 'not-step-text', calls: 2 },
   'src/mcp/assemble.ts': { why: 'not-step-text', calls: 1 },
   'src/parser/interpolate-env-data.ts': { why: 'definition', calls: 4 },
+  // The literal-condition pre-check (src/parser/literal-condition.ts): a
+  // control line's CONDITION is substituted so the runtime can decide it
+  // without a model call. Not step text by construction — `parseControlLine`
+  // splits the condition off the line and the TAIL is the step, so nothing
+  // here is ever handed to `parseSetStep`. The substituted text is used twice
+  // and neither is an instruction: to evaluate, and as the report sentence
+  // `decided from the values: "" is empty → true` (masked by `redactDeep`
+  // like every other report string).
+  'src/runner/control-runtime.ts': { why: 'not-step-text', calls: 1 },
   // Several, and deliberately one label: a validate-only main-flow pass, the
   // hook preserve, the guarded skill-body and skill-section passes, and value
   // passes for parameters, rows, config and output names. The count is what

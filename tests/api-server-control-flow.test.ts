@@ -701,6 +701,315 @@ describe('For each', () => {
   });
 });
 
+/**
+ * A list of OBJECTS, over the same wire
+ * (docs/specs/SPEC-structured-table-reads.md §8, §12 item 19).
+ *
+ * `readTable` is what will produce such a list, and it does not exist yet —
+ * which is the point of seeding it as a `parameters` entry instead. The
+ * planner's contract is with the JSON in the variable map, not with the action
+ * that wrote it, so a tool returning an array or a pre-populated parameter is
+ * the same input. The server's job here is to carry the dotted keys the
+ * planner produced all the way to the step text and the `frame:scope` payload
+ * without knowing anything about them, which is §1.1's last bullet: one
+ * binding shape, applied generically by every run loop.
+ */
+describe('For each over object rows', () => {
+  const ORDERS =
+    '[{"_row":"1","id":"A","status":"x"},{"_row":"2","id":"B","status":"y"}]';
+
+  const ordersBody = (orders: string = ORDERS) => ({
+    steps: [
+      'Open the orders page',
+      'For each {{order}} in {{orders}}, Check the order',
+      'Sign out',
+    ],
+    sourceLines: [3, 4, 5],
+    testFilePath,
+    parameters: { orders },
+    sections: {
+      'check the order': {
+        name: 'Check the order',
+        headingLine: 7,
+        steps: ['Verify the row for "{{order.id}}" shows "{{order.status}}"'],
+        stepLines: [8],
+      },
+    },
+  });
+
+  it('substitutes the row properties into the body step the model is handed', async () => {
+    await collect(ordersBody());
+
+    // One pass per object, each body instruction carrying THAT row's values —
+    // not the JSON text, and not a literal `{{order.id}}`.
+    expect(executedSteps).toEqual([
+      'Open the orders page',
+      'Verify the row for "A" shows "x"',
+      'Verify the row for "B" shows "y"',
+      'Sign out',
+    ]);
+    expect(judgeCalls).toHaveLength(0);
+  });
+
+  it('carries the dotted bindings in frame:scope and in the loop marker', async () => {
+    const events = await collect(ordersBody());
+
+    const scopes = events.filter((e) => e.type === 'frame:scope').map((e) => e.scope);
+    // The base binding keeps its old meaning — the row's compact JSON — and
+    // every direct property is beside it, `_row` included (§8.2).
+    expect(
+      scopes.some(
+        (s) =>
+          s['order'] === '{"_row":"1","id":"A","status":"x"}' &&
+          s['order._row'] === '1' &&
+          s['order.id'] === 'A' &&
+          s['order.status'] === 'x',
+      ),
+    ).toBe(true);
+    expect(
+      scopes.some((s) => s['order.id'] === 'B' && s['order.status'] === 'y'),
+    ).toBe(true);
+
+    // …and the report's band shows the same thing, which is what the
+    // Variables panel renders for the pass (§8.4).
+    const steps: StepResult[] = generatedReports.at(-1)!.steps;
+    const body = steps.filter((s) => s.instruction.startsWith('Verify the row for'));
+    expect(body.map((s) => s.loop!.values)).toEqual([
+      {
+        order: '{"_row":"1","id":"A","status":"x"}',
+        'order._row': '1',
+        'order.id': 'A',
+        'order.status': 'x',
+      },
+      {
+        order: '{"_row":"2","id":"B","status":"y"}',
+        'order._row': '2',
+        'order.id': 'B',
+        'order.status': 'y',
+      },
+    ]);
+  });
+
+  it('refuses a property the row does not have, before the model is asked', async () => {
+    const events = await collect({
+      ...ordersBody(),
+      sections: {
+        'check the order': {
+          name: 'Check the order',
+          headingLine: 7,
+          steps: ['Verify the row shows "{{order.statuz}}"'],
+          stepLines: [8],
+        },
+      },
+    });
+
+    const failure = events.find((e) => e.type === 'step:fail');
+    expect(failure!.error).toBe(
+      '{{order.statuz}} has no value in For each item 1; available properties are _row, id, status',
+    );
+    // The body step never ran, so nothing was sent to the model with six
+    // literal braces in it.
+    expect(executedSteps).toEqual(['Open the orders page']);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'failed' });
+  });
+
+  /**
+   * A condition whose operands are all literals after substitution is decided
+   * by the runtime, not by the page judge
+   * (src/parser/literal-condition.ts).
+   *
+   * Measured on an acceptance run of `templates/init/tests/table-statements.md`:
+   * `If "{{line.debit}}" is empty` substituted to `"" is empty`, and the judge
+   * answered *"none held — the visible statement row being evaluated has debit
+   * −$65.00"*. It read a different row than the pass was bound to and took the
+   * `Otherwise`. The same line was right 5/5 in `table-payments-reference.md`,
+   * so it is a ~1-in-15 flake — in a place that should never have been a model
+   * call, because the answer was entirely in the sentence.
+   */
+  it('decides an all-literal chain itself, with no judge call', async () => {
+    const events = await collect({
+      steps: [
+        'Open the statements page',
+        'For each {{line}} in {{lines}}, Check the line',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: {
+        lines: '[{"debit":"","credit":"$65.00"},{"debit":"-$65.00","credit":""}]',
+      },
+      sections: {
+        'check the line': {
+          name: 'Check the line',
+          headingLine: 7,
+          steps: [
+            'If "{{line.debit}}" is empty, then Verify the credit',
+            'Otherwise, Verify the debit',
+          ],
+          stepLines: [8, 9],
+        },
+        'verify the credit': {
+          name: 'Verify the credit',
+          headingLine: 11,
+          steps: ['Verify the credit column shows "{{line.credit}}"'],
+          stepLines: [12],
+        },
+        'verify the debit': {
+          name: 'Verify the debit',
+          headingLine: 14,
+          steps: ['Verify the debit column shows "{{line.debit}}"'],
+          stepLines: [15],
+        },
+      },
+    });
+
+    // The point of the test.
+    expect(judgeCalls).toHaveLength(0);
+    // Pass 1's debit is blank so the `If` holds; pass 2's is not, so the
+    // `Otherwise` does — each pass on its own row's values.
+    expect(executedSteps).toEqual([
+      'Open the statements page',
+      'Verify the credit column shows "$65.00"',
+      'Verify the debit column shows "-$65.00"',
+      'Sign out',
+    ]);
+
+    // The guard still reports exactly as a judged one does — same rows, same
+    // statuses, same lines — with the runtime's sentence where the model's
+    // was. Pass 1 passes the `If`; pass 2 takes the `Otherwise`, so that is
+    // the row carrying the chain's reasoning and the `If` is skipped.
+    const steps: StepResult[] = generatedReports.at(-1)!.steps;
+    const guards = steps.filter(
+      (s) => s.instruction.startsWith('If "') || s.instruction.startsWith('Otherwise,'),
+    );
+    expect(guards.filter((s) => s.status === 'passed').map((s) => s.aiExplanation)).toEqual([
+      'decided from the values: "" is empty → true',
+      'decided from the values: none held — "-$65.00" is empty → false',
+    ]);
+    // The untaken branch is reported exactly as a judged chain reports one.
+    expect(guards.filter((s) => s.status === 'skipped').map((s) => s.aiExplanation)).toEqual([
+      'Skipped: another branch of this decision was taken',
+      'Skipped: another branch of this decision was taken',
+    ]);
+    // Nothing was asked, so no guard row carries a turn to render.
+    expect(guards.every((s) => s.turns.length === 0)).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+
+  /**
+   * A guard's OWN condition gets the same refusal a body step's text does
+   * (docs/specs/SPEC-structured-table-reads.md §8.3).
+   *
+   * It has to live in `evaluateGuard` rather than in each loop's step path:
+   * this loop resolves every step before the control dispatch and so caught
+   * the guard line incidentally, while the CLI and the Electron adapter
+   * dispatch the guard first and sent `If "{{order.missing}}" is empty` to the
+   * judge with the braces intact. One refusal, in the module all three share,
+   * with the same sentence and the same failed-guard row.
+   */
+  it('refuses a guard whose condition names a property the row lacks', async () => {
+    const events = await collect({
+      steps: [
+        'Open the statements page',
+        'For each {{line}} in {{lines}}, Check the line',
+      ],
+      sourceLines: [3, 4],
+      testFilePath,
+      parameters: { lines: '[{"debit":"","credit":"$65.00"}]' },
+      sections: {
+        'check the line': {
+          name: 'Check the line',
+          headingLine: 6,
+          // The typo is the whole test: `dbit` for `debit`.
+          steps: ['If "{{line.dbit}}" is empty, then Note it', 'Otherwise, Note it'],
+          stepLines: [7, 8],
+        },
+        'note it': { name: 'Note it', headingLine: 10, steps: ['Click Note'], stepLines: [11] },
+      },
+    });
+
+    const failure = events.find((e) => e.type === 'step:fail');
+    expect(failure!.error).toBe(
+      '{{line.dbit}} has no value in For each item 1; available properties are debit, credit',
+    );
+    // Not the judge's to answer, and not the literal pre-check's either — the
+    // refusal comes first, so neither is reached.
+    expect(judgeCalls).toHaveLength(0);
+    expect(executedSteps).toEqual(['Open the statements page']);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'failed' });
+  });
+
+  it('still asks the judge once when a member needs the page', async () => {
+    judgeScript = [0];
+    await collect({
+      steps: [
+        'Open the statements page',
+        'For each {{line}} in {{lines}}, Check the line',
+      ],
+      sourceLines: [3, 4],
+      testFilePath,
+      parameters: { lines: '[{"debit":""}]' },
+      sections: {
+        'check the line': {
+          name: 'Check the line',
+          headingLine: 6,
+          steps: [
+            // Literal…
+            'If "{{line.debit}}" is empty, then Note it',
+            // …but this one is about the page, so the WHOLE chain goes to the
+            // judge. Deciding half of it here and asking about the rest would
+            // be two decisions where the author wrote one, and the judge would
+            // be answering about a shorter list than the planner is holding
+            // indices for.
+            'Else if the Refunded badge is shown, then Note it',
+            'Otherwise, Note it',
+          ],
+          stepLines: [7, 8, 9],
+        },
+        'note it': {
+          name: 'Note it',
+          headingLine: 11,
+          steps: ['Click Note'],
+          stepLines: [12],
+        },
+      },
+    });
+
+    expect(judgeCalls).toEqual([
+      ['"{{line.debit}}" is empty', 'the Refunded badge is shown'],
+    ]);
+  });
+
+  it('decides an all-literal While condition per evaluation', async () => {
+    await collect({
+      steps: [
+        'Open the statements page',
+        'While "{{line.debit}}" is not empty, Click Next',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      // Never bound by a loop, so the condition is false on its first
+      // evaluation and the body never runs — with no model call either way.
+      parameters: { line: '{"debit":""}', 'line.debit': '' },
+    });
+
+    expect(judgeCalls).toHaveLength(0);
+    expect(executedSteps).toEqual(['Open the statements page', 'Sign out']);
+  });
+
+  it('fails the loop on an unsafe property name, naming the item', async () => {
+    const events = await collect(
+      ordersBody('[{"id":"A"},{"__proto__":"boom","id":"B"}]'),
+    );
+    const failure = events.find((e) => e.type === 'step:fail');
+    expect(failure).toMatchObject({ line: 4 });
+    expect(failure!.error).toContain('`{{orders}}` item 2 has a property named `__proto__`');
+    // The guard failed on reading the list, so no pass ever started.
+    expect(executedSteps).toEqual(['Open the orders page']);
+  });
+});
+
 // ── The guard's own events pair ──────────────────────────────────────
 
 /**

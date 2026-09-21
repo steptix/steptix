@@ -21,7 +21,11 @@ not three reads; `{{orders}}` holds three objects in DOM order, each with
 `_row` first; the checkbox, Total and Actions columns appear in no record;
 the loop runs once per object with the properties substituted; and after
 "Reorder columns" swaps Order ID and Status, the same read returns the same
-records (§5.2).
+records (§5.2). The exact records, and the absence of the checkbox, Total
+and Actions columns from them, are pinned in `tests/read-table.test.ts`;
+this file checks each record against the page rather than asserting over
+the JSON, because `Assert that {{orders}} contains "…"` is model-evaluated
+and phase 2's list assertions (§7.7) are the deterministic form.
 
 ## Config
 - baseUrl: http://localhost:8787/
@@ -32,12 +36,9 @@ records (§5.2).
 1. Navigate to structured-orders.html
 2. Read the Order ID column as id, Customer column as customer, and Status column as status from every row in the Orders table [store as: orders]
 3. For each {{order}} in {{orders}}, Check the order
-4. Assert that {{orders}} contains "Carol Diaz"
-5. Assert that {{orders}} does not contain "Review"
-6. Assert that {{orders}} does not contain "$"
-7. Click the Reorder columns button
-8. Read the Order ID column as id, Customer column as customer, and Status column as status from every row in the Orders table [store as: orders_after]
-9. Assert that {{orders_after}} equals {{orders}}
+4. Click the Reorder columns button
+5. Read the Order ID column as id, Customer column as customer, and Status column as status from every row in the Orders table [store as: orders_after]
+6. Assert that {{orders_after}} equals {{orders}}
 
 ### Check the order
 1. Verify the Orders table has a row for "{{order.id}}" and customer "{{order.customer}}"

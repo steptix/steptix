@@ -233,6 +233,53 @@ describe('parseAIResponse', () => {
     expect(result.actions[0]?.expected).toBe('$1,234.56');
   });
 
+  // "Verify the Reference cell in row 2 … is empty" — the correct expectation
+  // is the empty string, and a `.trim()` test on it rejected the model at the
+  // parser exactly when it answered right, before any page was read. An empty
+  // cell is a legitimate thing to assert (SPEC-structured-table-reads.md §8.3).
+  it('accepts an empty-string "expected" in dom mode', () => {
+    const raw = JSON.stringify({
+      actions: [
+        {
+          action: 'assert',
+          against: 'dom',
+          description: 'Reference cell in row 2 is empty',
+          condition: 'text of the Reference cell in row 2 of the Scheduled payments table',
+          expected: '',
+        },
+      ],
+      reasoning: 'The cell should hold nothing.',
+    });
+    const action = parseAIResponse(raw).actions[0]!;
+    // Present and empty, not absent: "" has to reach the evaluator, since it
+    // is what the DOM value is compared against.
+    expect(action.expected).toBe('');
+    expect(action.against).toBe('dom');
+  });
+
+  it('still rejects an assert whose "expected" is missing entirely', () => {
+    const raw = JSON.stringify({
+      actions: [
+        { action: 'assert', description: 'Balance check', condition: 'visible balance text' },
+      ],
+      reasoning: '',
+    });
+    expect(() => parseAIResponse(raw)).toThrow(/missing required "expected" field/);
+  });
+
+  it('still rejects a non-string "expected" such as null', () => {
+    for (const expected of [null, 0, false, [], {}]) {
+      const raw = JSON.stringify({
+        actions: [
+          { action: 'assert', description: 'd', condition: 'c', expected },
+        ],
+        reasoning: '',
+      });
+      expect(() => parseAIResponse(raw), JSON.stringify(expected))
+        .toThrow(/missing required "expected" field/);
+    }
+  });
+
   it('parses keyboard action with key', () => {
     const raw = JSON.stringify({
       actions: [
@@ -424,5 +471,177 @@ describe('parseAIResponse — upload action (stories/upload-action.md §2)', () 
       '{"actions":[{"action":"upload","selector":"#f","filePath":"{{statement}}","description":"d"}]}',
     );
     expect(result.actions[0]!.filePath).toBe('{{statement}}');
+  });
+});
+
+/**
+ * readTable parsing (docs/specs/SPEC-structured-table-reads.md §6.2).
+ *
+ * Every case here rejects the WHOLE action rather than dropping a column and
+ * running a partial read — a record missing a field the next step names is a
+ * convincing lie, and worse than a step that failed and said why.
+ */
+describe('parseAIResponse — readTable', () => {
+  /** One valid action, with `patch` merged over it. */
+  function readTable(patch: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      actions: [
+        {
+          action: 'readTable',
+          selector: 'table[aria-label="Orders"]',
+          columns: [
+            { header: 'Order ID', key: 'id' },
+            { header: 'Customer', key: 'customer' },
+          ],
+          as: 'orders',
+          description: 'Read the Orders table',
+          ...patch,
+        },
+      ],
+      reasoning: '',
+    });
+  }
+
+  it('parses the canonical header-named action with its columns in order', () => {
+    const action = parseAIResponse(readTable()).actions[0]!;
+    expect(action.action).toBe('readTable');
+    expect(action.selector).toBe('table[aria-label="Orders"]');
+    expect(action.as).toBe('orders');
+    expect(action.columns).toEqual([
+      { header: 'Order ID', key: 'id' },
+      { header: 'Customer', key: 'customer' },
+    ]);
+    expect(action.limit).toBeUndefined();
+  });
+
+  it('keeps positional and mixed columns exactly as written, with an explicit limit', () => {
+    const action = parseAIResponse(readTable({
+      columns: [
+        { index: 1, key: 'payee' },
+        { header: 'Status', key: 'status', mode: 'text' },
+        { index: 5, key: 'amount' },
+      ],
+      limit: 10,
+    })).actions[0]!;
+    // Never an index turned into a header or back: the runtime resolves each
+    // the way the author wrote it (§4.4).
+    expect(action.columns).toEqual([
+      { index: 1, key: 'payee' },
+      { header: 'Status', key: 'status', mode: 'text' },
+      { index: 5, key: 'amount' },
+    ]);
+    expect(action.limit).toBe(10);
+  });
+
+  it('rejects a missing or blank selector', () => {
+    expect(() => parseAIResponse(readTable({ selector: undefined })))
+      .toThrow(/missing required "selector" field/);
+    expect(() => parseAIResponse(readTable({ selector: '   ' })))
+      .toThrow(/missing required "selector" field/);
+  });
+
+  it('rejects a missing or invalid "as" name', () => {
+    expect(() => parseAIResponse(readTable({ as: undefined })))
+      .toThrow(/missing required "as" field/);
+    expect(() => parseAIResponse(readTable({ as: '2orders' })))
+      .toThrow(/invalid "as" name "2orders"/);
+  });
+
+  it('rejects absent, non-array and empty columns', () => {
+    expect(() => parseAIResponse(readTable({ columns: undefined })))
+      .toThrow(/missing required "columns" array/);
+    expect(() => parseAIResponse(readTable({ columns: 'Order ID' })))
+      .toThrow(/missing required "columns" array/);
+    expect(() => parseAIResponse(readTable({ columns: [] })))
+      .toThrow(/empty "columns" array/);
+  });
+
+  it('rejects a column that is not an object', () => {
+    expect(() => parseAIResponse(readTable({ columns: ['Order ID'] })))
+      .toThrow(/column 1 is not an object/);
+    expect(() => parseAIResponse(readTable({ columns: [{ header: 'A', key: 'a' }, null] })))
+      .toThrow(/column 2 is not an object/);
+  });
+
+  it('rejects a column with both header and index, or with neither', () => {
+    expect(() => parseAIResponse(readTable({ columns: [{ header: 'Status', index: 5, key: 's' }] })))
+      .toThrow(/column 1 has both "header" and "index"/);
+    expect(() => parseAIResponse(readTable({ columns: [{ key: 's' }] })))
+      .toThrow(/column 1 has neither "header" nor "index"/);
+  });
+
+  it('rejects a blank header', () => {
+    expect(() => parseAIResponse(readTable({ columns: [{ header: '  ', key: 's' }] })))
+      .toThrow(/column 1 has a blank "header"/);
+  });
+
+  it('rejects every non-integer, out-of-range or coercible index', () => {
+    for (const index of [0, -1, 1.5, '1', 101, null]) {
+      expect(() => parseAIResponse(readTable({ columns: [{ index, key: 'x' }] })), String(index))
+        .toThrow(index === null ? /neither "header" nor "index"/ : /invalid "index"/);
+    }
+  });
+
+  it('rejects an invalid, dangerous, duplicated or reserved key', () => {
+    expect(() => parseAIResponse(readTable({ columns: [{ header: 'A', key: '2nd' }] })))
+      .toThrow(/column 1 has an invalid "key" "2nd"/);
+    expect(() => parseAIResponse(readTable({ columns: [{ header: 'A', key: 'a b' }] })))
+      .toThrow(/invalid "key"/);
+    expect(() => parseAIResponse(readTable({ columns: [{ header: 'A' }] })))
+      .toThrow(/invalid "key"/);
+    for (const key of ['__proto__', 'prototype', 'constructor']) {
+      expect(() => parseAIResponse(readTable({ columns: [{ header: 'A', key }] })), key)
+        .toThrow(new RegExp(`reserved key "${key}"`));
+    }
+    expect(() => parseAIResponse(readTable({
+      columns: [{ header: 'A', key: 'a' }, { header: 'B', key: 'a' }],
+    }))).toThrow(/column 2 repeats the key "a"/);
+  });
+
+  it('rejects the reserved alias _row', () => {
+    expect(() => parseAIResponse(readTable({ columns: [{ header: 'Row', key: '_row' }] })))
+      .toThrow(/reserved key "_row" — the runtime writes the row number/);
+  });
+
+  // §6.2 lists a duplicated (header, key) / (index, key) pair separately; key
+  // uniqueness already settles it, since a repeated pair repeats its key.
+  it('rejects a duplicated (header, key) or (index, key) pair', () => {
+    expect(() => parseAIResponse(readTable({
+      columns: [{ header: 'Status', key: 'status' }, { header: 'Status', key: 'status' }],
+    }))).toThrow(/column 2 repeats the key "status"/);
+    expect(() => parseAIResponse(readTable({
+      columns: [{ index: 3, key: 'amount' }, { index: 3, key: 'amount' }],
+    }))).toThrow(/column 2 repeats the key "amount"/);
+  });
+
+  it('refuses a phase-2 mode by name', () => {
+    for (const mode of ['checked', 'value', 'attribute']) {
+      expect(() => parseAIResponse(readTable({ columns: [{ header: 'Auto-pay', key: 'autopay', mode }] })), mode)
+        .toThrow(/which is phase 2 — phase 1 reads rendered text only/);
+    }
+  });
+
+  it('rejects more than 20 columns', () => {
+    const columns = Array.from({ length: 21 }, (_, i) => ({ header: `H${i}`, key: `k${i}` }));
+    expect(() => parseAIResponse(readTable({ columns })))
+      .toThrow(/requests 21 columns — the maximum is 20/);
+    const twenty = columns.slice(0, 20);
+    expect(parseAIResponse(readTable({ columns: twenty })).actions[0]!.columns).toHaveLength(20);
+  });
+
+  it('rejects every invalid limit without coercing or clamping it', () => {
+    for (const limit of [0, -1, 2.5, '10', 501]) {
+      expect(() => parseAIResponse(readTable({ limit })), String(limit))
+        .toThrow(/invalid "limit"/);
+    }
+    expect(parseAIResponse(readTable({ limit: 500 })).actions[0]!.limit).toBe(500);
+    expect(parseAIResponse(readTable({ limit: 1 })).actions[0]!.limit).toBe(1);
+  });
+
+  it('leaves a {{param}} placeholder in a header for the executor to interpolate', () => {
+    const action = parseAIResponse(readTable({
+      columns: [{ header: '{{status_column}}', key: 'status' }],
+    })).actions[0]!;
+    expect(action.columns?.[0]?.header).toBe('{{status_column}}');
   });
 });

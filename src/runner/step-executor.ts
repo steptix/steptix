@@ -2511,8 +2511,24 @@ async function executeStepAttempt(
         });
       }
 
-      // Store captured value from "read" / "count" actions into the live parameter map
-      if (result.capturedValues !== undefined && action.as && opts.resolvedParameters) {
+      // Store captured value from "read" / "count" / "readTable" actions into
+      // the live parameter map
+      if (result.capturedRecords !== undefined && action.as && opts.resolvedParameters) {
+        // Structured capture (readTable) — JSON-encoded like the flat list, so
+        // the map stays Record<string, string> and no protocol or session
+        // storage migrates (SPEC-structured-table-reads.md §7.1). `For each`
+        // parses it back and binds each record's properties.
+        //
+        // The capture itself is summarised by `readTable captured N rows × M
+        // columns as "{{name}}"` (§7.6), written where the bound and the
+        // placeholder-skip count are known — in executeAction. This line is
+        // about STORAGE, and reads like its two siblings below.
+        const rows = result.capturedRecords.length;
+        opts.resolvedParameters[action.as] = JSON.stringify(result.capturedRecords);
+        logger.info(
+          `Stored ${rows} row record${rows === 1 ? '' : 's'} as "{{${action.as}}}"`,
+        );
+      } else if (result.capturedValues !== undefined && action.as && opts.resolvedParameters) {
         // List capture (read multiple: true) — JSON-encode so it round-trips
         // through the string-valued param map. Tools that declare an
         // array-typed parameter decode this back into a typed array at the

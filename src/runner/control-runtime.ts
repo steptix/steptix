@@ -23,16 +23,25 @@ import type { AiInteraction, LoopMarker, StepResult } from '../report/types.js';
 import {
   chainMembersFrom,
   exitFrom,
+  forEachPassOf,
   parseListValue,
   planAfterGuard,
   planAtGuard,
   type ControlPlan,
   type ControlRecord,
   type ControlState,
+  type GuardRequest,
   type GuardVerdict,
 } from './control-flow.js';
+import { parseLiteralCondition } from '../parser/literal-condition.js';
+import {
+  dottedReferenceError,
+  substituteText,
+  type PlaceholderValues,
+} from './placeholder-substitution.js';
+import { logger } from '../utils/logger.js';
 import { evaluateConditions } from './step-executor.js';
-import type { StepExecutorOptions } from './step-executor.js';
+import type { ConditionVerdict, StepExecutorOptions } from './step-executor.js';
 
 /** A loop record, narrowed — the three kinds that own a body and a label. */
 export type LoopRecord = Extract<ControlRecord, { label: string }>;
@@ -86,6 +95,40 @@ export async function evaluateGuard(args: {
   const { controls, index, state, resolvedParameters, executorOptions } = args;
   const startedAt = Date.now();
   const request = planAtGuard(controls, index, state);
+  /** What a condition's placeholders hold right now — the same two syntaxes
+   *  and the same live map the step text resolves against, so a condition and
+   *  the tail below it can never disagree about what `{{order.status}}` is. */
+  const values: PlaceholderValues = {
+    parameters: resolvedParameters,
+    ...(executorOptions.envData !== undefined && { envData: executorOptions.envData }),
+  };
+
+  // A dotted reference the pass cannot answer, refused before anything is
+  // asked — the guard's twin of the step path's check
+  // (docs/specs/SPEC-structured-table-reads.md §8.3). It lives HERE, in the
+  // one place all three run loops share, because the three dispatch their
+  // guards at different points: the server resolves every step's text before
+  // the control dispatch and so caught this incidentally, while the CLI and
+  // the Electron adapter dispatch the guard first and sent
+  // `If "{{order.missing}}" is empty` to the judge with the braces intact.
+  //
+  // The WHOLE chain is refused over one bad member, for the same reason
+  // `checkTurnReferences` refuses a whole turn: the judge is asked one
+  // question about every member at once, so there is no such thing as running
+  // the good half of it.
+  for (const text of conditionTexts(request)) {
+    const refusal = dottedReferenceError(text, resolvedParameters, (item) =>
+      forEachPassOf(controls, state, item),
+    );
+    if (refusal === undefined) continue;
+    return {
+      plan: { skip: [], next: exitFailed(controls, index) },
+      evaluated: true,
+      aiInteractions: [],
+      error: refusal,
+      durationMs: Date.now() - startedAt,
+    };
+  }
 
   let verdict: GuardVerdict;
   let reasoning: string | undefined;
@@ -95,10 +138,9 @@ export async function evaluateGuard(args: {
   try {
     switch (request.ask) {
       case 'chain': {
-        const judged = await evaluateConditions(
-          request.conditions.map((c) => c.condition),
-          executorOptions,
-        );
+        const conditions = request.conditions.map((c) => c.condition);
+        const local = decideLocally(conditions, values);
+        const judged = local ?? (await evaluateConditions(conditions, executorOptions));
         reasoning = judged.reasoning;
         aiInteractions = judged.aiInteractions;
         // Back to ABSOLUTE indices: the judge answered about a list the
@@ -114,7 +156,9 @@ export async function evaluateGuard(args: {
         break;
       }
       case 'condition': {
-        const judged = await evaluateConditions([request.condition], executorOptions);
+        const conditions = [request.condition];
+        const local = decideLocally(conditions, values);
+        const judged = local ?? (await evaluateConditions(conditions, executorOptions));
         reasoning = judged.reasoning;
         aiInteractions = judged.aiInteractions;
         verdict = { kind: 'condition', holds: judged.selected === 0 };
@@ -131,7 +175,11 @@ export async function evaluateGuard(args: {
             durationMs: Date.now() - startedAt,
           };
         }
-        verdict = { kind: 'list', items: parsed.items };
+        // `properties` rides along beside `items`: the planner turns it into
+        // `{{item.property}}` bindings, and a list of scalars carries an
+        // entry of `undefined` per element rather than nothing at all
+        // (SPEC-structured-table-reads.md §8.2).
+        verdict = { kind: 'list', items: parsed.items, properties: parsed.properties };
         reasoning = `\`{{${request.list}}}\` holds ${parsed.items.length} item${
           parsed.items.length === 1 ? '' : 's'
         }`;
@@ -169,6 +217,80 @@ export async function evaluateGuard(args: {
       isLoopRecord(record) && { error: capBreachMessage(record, plan.capBreached) }),
     durationMs: Date.now() - startedAt,
   };
+}
+
+/**
+ * The condition texts a guard visit is about to ask about — a chain's
+ * members, or one loop condition.
+ *
+ * Empty for a `For each` (its list name is flat, and `parseListValue` owns
+ * what that must hold) and for a visit that asks nobody.
+ */
+function conditionTexts(request: GuardRequest): readonly string[] {
+  if (request.ask === 'chain') return request.conditions.map((c) => c.condition);
+  if (request.ask === 'condition') return [request.condition];
+  return [];
+}
+
+/**
+ * A chain or a loop condition decided from its own text, with no model call —
+ * or null when the page is genuinely needed
+ * (src/parser/literal-condition.ts has the grammar and the run that motivated
+ * it).
+ *
+ * ALL OR NOTHING for a chain, and that is the whole of the design decision
+ * here. The judge is asked one question about the whole chain and answers
+ * first-holds-wins, so deciding member A locally and asking about B and C
+ * would be two decisions where the author wrote one — and the judge, shown a
+ * shorter list, would answer about a different question than the one the
+ * planner is holding indices for. If any member needs the page, the chain goes
+ * to the judge exactly as it did before this existed, unsubstituted text and
+ * `## Values` block included.
+ *
+ * Returns a {@link ConditionVerdict}, the judge's own shape, so the caller has
+ * one code path: same `selected`, same `reasoning` slot, and `aiInteractions`
+ * empty because nothing was asked. That is what keeps the guard row, the loop
+ * marker, the report and TestBench identical to a judged decision — the only
+ * visible difference is whose words are in `aiExplanation`.
+ */
+function decideLocally(
+  conditions: readonly string[],
+  values: PlaceholderValues,
+): ConditionVerdict | null {
+  const decided: Array<{ text: string; holds: boolean }> = [];
+  for (const condition of conditions) {
+    const text = substituteText(condition, values);
+    const literal = parseLiteralCondition(text);
+    if (!literal) return null;
+    decided.push({ text, holds: literal.holds });
+  }
+  if (decided.length === 0) return null;
+
+  const selected = decided.findIndex((d) => d.holds);
+  if (selected >= 0) {
+    const winner = decided[selected]!;
+    const reasoning = localReasoning(winner.text, true);
+    // Mirrors `evaluateConditions`' own line, label and all, so anything
+    // reading the run log for `Condition judge:` sees this decision too. The
+    // reasoning says who decided it.
+    logger.debug(
+      `Condition judge: ${String.fromCharCode(65 + selected)} ("${conditions[selected]}") held — ${reasoning}`,
+    );
+    return { selected, reasoning, aiInteractions: [] };
+  }
+
+  const reasoning = `decided from the values: none held — ${decided
+    .map((d) => `${d.text} → false`)
+    .join(', ')}`;
+  logger.debug(`Condition judge: none held — ${reasoning}`);
+  return { selected: null, reasoning, aiInteractions: [] };
+}
+
+/** The sentence a locally decided condition carries in place of the model's.
+ *  One place, so the log line, the guard row's `aiExplanation` and the tests
+ *  cannot drift over its wording. */
+function localReasoning(condition: string, holds: boolean): string {
+  return `decided from the values: ${condition} → ${holds}`;
 }
 
 /**

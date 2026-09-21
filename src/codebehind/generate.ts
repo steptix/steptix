@@ -16,7 +16,7 @@ import {
   type EnvDataContext,
 } from '../parser/interpolate-env-data.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
-import { interpolate } from '../parser/parameters.js';
+import { WIDE_PLACEHOLDER_SOURCE, interpolate } from '../parser/parameters.js';
 import type { AssertionResult } from '../report/types.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import { logger } from '../utils/logger.js';
@@ -45,7 +45,21 @@ import { scan, type StringToken } from './tokenizer.js';
  * (stories/codebehind-framework-actions.md) — so what is left is the one
  * action that waits on a human at a terminal. There is no code for that.
  */
-const FRAMEWORK_ACTIONS: ReadonlySet<AIAction['action']> = new Set(['prompt']);
+/**
+ * Actions a generated entry cannot express, so a step that used one stays AI.
+ *
+ * `readTable` is here TEMPORARILY, and the spec says so out loud: it is
+ * deterministic and it is meant to compile, through the shared `tables.read`
+ * context helper of docs/specs/SPEC-structured-table-reads.md §9.2 — one
+ * extractor, shared with the AI action, rather than a second header algorithm
+ * the code-generation model invents. That helper is phase 3. Until it exists,
+ * a compiled `readTable` would be exactly the reinvention §9.2 forbids, so the
+ * step keeps its model call and says why in the entry's comment. Deleting this
+ * line is part of phase 3, not a cleanup.
+ *
+ * TODO(phase 3): remove `'readTable'` when `tables.read` lands (§9.2).
+ */
+const FRAMEWORK_ACTIONS: ReadonlySet<AIAction['action']> = new Set(['prompt', 'readTable']);
 
 /**
  * Steps whose text opens with a bracket token.
@@ -901,20 +915,27 @@ export function unresolvedInputRefs(
 // ───────────────────────────────────────────────────────────────────────────
 
 /**
- * A `{{name}}` reference, in the wider grammar the placeholder story's checker
- * uses (decision 4).
+ * A `{{name}}` / `{{name.property}}` reference, in the wider grammar the
+ * placeholder story's checker uses (decision 4).
  *
- * Wider than the substituter's `\{\{(\w+)\}\}` on purpose: the model is shown
- * the authored step and writes the placeholder back itself, so `{{ email }}`
- * is a thing it can produce. Reading it as a reference is what lets the rule
- * answer with the name rather than with silence.
+ * Wider than the substituter's on purpose: the model is shown the authored
+ * step and writes the placeholder back itself, so `{{ email }}` is a thing it
+ * can produce. Reading it as a reference is what lets the rule answer with the
+ * name rather than with silence.
+ *
+ * A dotted reference is one token here, not a root plus stray text
+ * (docs/specs/SPEC-structured-table-reads.md §9.3): `{{order.id}}` names the
+ * dotted runtime binding a `For each` pass writes, so the leak guard carries
+ * that pass's value and refuses an entry that inlined it, and the accounting
+ * looks for the token the model was shown rather than declaring `order`
+ * unknown.
  */
-const PLACEHOLDER_REF_RE = /\{\{\s*(\w+)\s*\}\}/g;
+const PLACEHOLDER_REF_RE = new RegExp(WIDE_PLACEHOLDER_SOURCE, 'g');
 
 /** The same, for a yes/no question about one string. Non-global: `.test` on a
  *  global regex carries `lastIndex` between calls and would answer false every
  *  other time. */
-const ANY_PLACEHOLDER_RE = /\{\{\s*\w+\s*\}\}/;
+const ANY_PLACEHOLDER_RE = new RegExp(WIDE_PLACEHOLDER_SOURCE);
 
 /**
  * A placeholder that DEFINES a variable rather than reading one:
@@ -923,6 +944,8 @@ const ANY_PLACEHOLDER_RE = /\{\{\s*\w+\s*\}\}/;
  * A definition is not a reference — nothing has that value yet when the step
  * starts — so the rule must not ask which action carried it, or every capture
  * step would decline (decision 4, "Capture definitions are never references").
+ *
+ * Flat, and staying flat: a step writes a variable, never one property of one.
  */
 const CAPTURE_DEFINITION_RE = /\b(?:store|save)\s+as:?\s*\{\{\s*(\w+)\s*\}\}/gi;
 

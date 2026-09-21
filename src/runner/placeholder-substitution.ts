@@ -5,6 +5,12 @@ import {
   resolveEnvDataRef,
   type EnvDataContext,
 } from '../parser/interpolate-env-data.js';
+import {
+  PLACEHOLDER_SOURCE,
+  WIDE_PLACEHOLDER_SOURCE,
+  placeholderProperty,
+  placeholderRoot,
+} from '../parser/parameters.js';
 import { MASK } from '../utils/secrets.js';
 
 /**
@@ -30,11 +36,12 @@ import { MASK } from '../utils/secrets.js';
  */
 
 /**
- * The substituter's `{{name}}` grammar. Deliberately identical to
- * `interpolate`'s (src/parser/parameters.ts) — the two must agree on what a
- * placeholder is, or a step's text and its actions resolve differently.
+ * The substituter's `{{name}}` / `{{name.property}}` grammar. Imported from
+ * `interpolate`'s own definition (src/parser/parameters.ts) rather than copied
+ * — the two must agree on what a placeholder is, or a step's text and its
+ * actions resolve differently.
  */
-const NARROW_PLACEHOLDER_SOURCE = '\\{\\{(\\w+)\\}\\}';
+const NARROW_PLACEHOLDER_SOURCE = PLACEHOLDER_SOURCE;
 
 /**
  * The CHECKER's `{{name}}` grammar, deliberately wider than the substituter's:
@@ -42,7 +49,7 @@ const NARROW_PLACEHOLDER_SOURCE = '\\{\\{(\\w+)\\}\\}';
  * named, rather than slipping through both passes and being typed into the page
  * as literal text (decision 4).
  */
-const WIDE_PLACEHOLDER_RE = /\{\{\s*(\w+)\s*\}\}/g;
+const WIDE_PLACEHOLDER_RE = new RegExp(WIDE_PLACEHOLDER_SOURCE, 'g');
 
 /** Both syntaxes in ONE pass, so substitution never re-scans what it inserted:
  *  a value that itself contains `{{` is inserted verbatim. Group 1 is a
@@ -62,6 +69,25 @@ const NAME_LIKE_FIELDS: ReadonlySet<string> = new Set([
   'action',
   'against',
   'attribute',
+]);
+
+/**
+ * The same rule one level down: properties of a NESTED object which are names
+ * rather than values, keyed by the top-level field they sit under.
+ *
+ * `columns[].key` is the property name a `readTable` writes on every record
+ * (docs/specs/SPEC-structured-table-reads.md §9.1). It is a definition, exactly
+ * as `as` is, so it is never substituted — `{{…}}` in one is not a reference.
+ * `columns[].header` is NOT here on purpose: a header is matched against the
+ * page's own text, so an author may parameterise it, and the spec's sentence
+ * names the two halves together.
+ *
+ * Keyed on the FIELD rather than on `action === 'readTable'` because the walk
+ * sees a bag of fields and never the action name — and because a `columns`
+ * array means the same thing wherever it turns up.
+ */
+const NAME_LIKE_NESTED: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['columns', new Set(['key'])],
 ]);
 
 /**
@@ -114,6 +140,64 @@ export function collectReferences(text: string): CollectedReferences {
 }
 
 /**
+ * The refusal for a `{{item.property}}` this run cannot answer, or undefined
+ * when every dotted reference the text makes has a binding
+ * (docs/specs/SPEC-structured-table-reads.md §8.3).
+ *
+ * DOTTED ONLY, and that asymmetry is the whole design. An unresolved FLAT name
+ * is old ground: `interpolate` leaves it literal with a warning, a test that
+ * reads a variable before capturing it has always behaved that way, and
+ * tightening it here would fail runs this feature never touched. A dotted name
+ * is new syntax with no legacy to protect, and the failure it hides is worse —
+ * `{{order.statuz}}` reaching the model as six literal braces reads as a model
+ * that could not pick an action, three steps away from the typo.
+ *
+ * Called by each run loop on the step's text BEFORE the model sees it, which
+ * is the only place all four of them share; `checkTurnReferences` below is the
+ * same idea one turn later, over what the model wrote back.
+ *
+ * `passOf` answers "which item of the `For each` binding this name are we on",
+ * which the planner knows and this module does not
+ * ({@link forEachPassOf}, control-flow.ts). Omitted, the message simply leaves
+ * that clause out rather than guessing a number.
+ */
+export function dottedReferenceError(
+  text: string,
+  parameters: Record<string, string>,
+  passOf?: ((item: string) => number | undefined) | undefined,
+): string | undefined {
+  if (!text.includes('{{')) return undefined;
+  for (const { name } of collectReferences(text).placeholders) {
+    if (placeholderProperty(name) === undefined) continue;
+    if (Object.hasOwn(parameters, name)) continue;
+
+    const root = placeholderRoot(name);
+    const pass = passOf?.(root);
+    const where = pass === undefined ? '' : ` in For each item ${pass}`;
+    // Verbatim from §8.3, backticks and all — which is to say without them.
+    // The rest of this module quotes a reference as `` `{{name}}` ``; the spec
+    // fixes this one sentence, and a message the spec writes out is the
+    // message, not a house-style opportunity.
+    const prefix = `{{${name}}} has no value${where}`;
+
+    const available: string[] = [];
+    for (const key of Object.keys(parameters)) {
+      if (placeholderRoot(key) !== root) continue;
+      const property = placeholderProperty(key);
+      if (property !== undefined) available.push(property);
+    }
+    if (available.length > 0) {
+      return `${prefix}; available properties are ${available.join(', ')}`;
+    }
+    if (Object.hasOwn(parameters, root)) {
+      return `${prefix}; {{${root}}} holds no properties — it is not an object`;
+    }
+    return `${prefix}; nothing in this run binds {{${root}}}`;
+  }
+  return undefined;
+}
+
+/**
  * The names a step DEFINES by writing `store as {{x}}` / `save as {{x}}` in
  * prose. The bracketed `[store as: x]` form is `referencedVariableNames`'
  * `captures` half (src/skills/expander.ts); this covers the other spelling
@@ -141,23 +225,27 @@ export function walkActionStrings(
 ): void {
   for (const [field, value] of Object.entries(action as unknown as Record<string, unknown>)) {
     if (NAME_LIKE_FIELDS.has(field)) continue;
-    walkStrings(value, (text) => fn(text, field));
+    walkStrings(value, field, (text) => fn(text, field));
   }
 }
 
-function walkStrings(value: unknown, fn: (text: string) => void): void {
+function walkStrings(value: unknown, field: string, fn: (text: string) => void): void {
   if (typeof value === 'string') {
     fn(value);
     return;
   }
   if (Array.isArray(value)) {
-    for (const item of value) walkStrings(item, fn);
+    for (const item of value) walkStrings(item, field, fn);
     return;
   }
   if (value !== null && typeof value === 'object') {
     const proto = Object.getPrototypeOf(value) as unknown;
     if (proto === Object.prototype || proto === null) {
-      for (const item of Object.values(value as Record<string, unknown>)) walkStrings(item, fn);
+      const nameLike = NAME_LIKE_NESTED.get(field);
+      for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+        if (nameLike?.has(key)) continue;
+        walkStrings(item, field, fn);
+      }
     }
   }
 }
@@ -176,19 +264,19 @@ export function mapActionStrings(action: AIAction, fn: (text: string) => string)
       out[field] = value;
       continue;
     }
-    const mapped = mapStrings(value, fn);
+    const mapped = mapStrings(value, field, fn);
     if (mapped !== value) changed = true;
     out[field] = mapped;
   }
   return changed ? (out as unknown as AIAction) : action;
 }
 
-function mapStrings(value: unknown, fn: (text: string) => string): unknown {
+function mapStrings(value: unknown, field: string, fn: (text: string) => string): unknown {
   if (typeof value === 'string') return fn(value);
   if (Array.isArray(value)) {
     let changed = false;
     const out = value.map((item) => {
-      const mapped = mapStrings(item, fn);
+      const mapped = mapStrings(item, field, fn);
       if (mapped !== item) changed = true;
       return mapped;
     });
@@ -197,10 +285,14 @@ function mapStrings(value: unknown, fn: (text: string) => string): unknown {
   if (value !== null && typeof value === 'object') {
     const proto = Object.getPrototypeOf(value) as unknown;
     if (proto === Object.prototype || proto === null) {
+      const nameLike = NAME_LIKE_NESTED.get(field);
       let changed = false;
       const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-        const mapped = mapStrings(v, fn);
+        // A name-like nested property is copied ACROSS, not mapped: the copy
+        // still has to carry it, or `columns[].key` would vanish from the
+        // substituted action.
+        const mapped = nameLike?.has(k) ? v : mapStrings(v, field, fn);
         if (mapped !== v) changed = true;
         out[k] = mapped;
       }

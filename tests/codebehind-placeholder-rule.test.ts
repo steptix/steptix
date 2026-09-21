@@ -473,6 +473,109 @@ describe('accountPlaceholders — the rule on its own', () => {
   });
 });
 
+/**
+ * A `For each` pass's dotted binding, through the same rule
+ * (docs/specs/SPEC-structured-table-reads.md §9.3).
+ *
+ * The rule's failure direction is the model freezing a resolved VALUE into
+ * generated source. A dotted reference is the sharpest case of that — the
+ * value is one row of one pass and the file is committed and re-run for years
+ * — so the accounting has to read `{{order.id}}` as ONE reference to the
+ * runtime binding. Read as an unknown root, or not read at all, the step
+ * either declines forever or compiles with row 1's order number baked in.
+ */
+describe('a dotted reference to a For each binding', () => {
+  it('is one reference, not a root plus stray text', () => {
+    expect(
+      placeholderNamesIn('Verify the row for "{{order.id}}" shows "{{order.status}}"'),
+    ).toEqual(['order.id', 'order.status']);
+    // `{{order}}` and `{{order.id}}` are different references to the same row,
+    // and both are accounted for.
+    expect(placeholderNamesIn('Print {{order}} then {{order.id}}')).toEqual([
+      'order',
+      'order.id',
+    ]);
+  });
+
+  it('compiles when the model named the dotted token', () => {
+    const accounting = accountPlaceholders({
+      binding: bindingFor('Click Review in the row for "{{order.id}}"'),
+      actions: [act({ action: 'click', selector: 'tr:has-text("{{order.id}}") button' })],
+      // The dotted key is what the pass wrote into the live map, so it is
+      // what the accounting looks the value up by.
+      resolvedParameters: { 'order.id': 'ORD-1001' },
+      recordingCarriesPlaceholders: true,
+    });
+    expect(accounting).toEqual({ recoveredByValue: [], preChangeFallback: false });
+  });
+
+  it('declines — and names the dotted reference — when the model inlined the row', () => {
+    const accounting = accountPlaceholders({
+      binding: bindingFor('Click Review in the row for "{{order.id}}"'),
+      // The model wrote THIS pass's order number instead of the placeholder.
+      actions: [act({ action: 'click', selector: 'tr:has-text("ORD-1001") button' })],
+      resolvedParameters: { 'order.id': 'ORD-1001' },
+      recordingCarriesPlaceholders: true,
+    });
+    // The value-match fallback is exact-whole-field, so a row number buried in
+    // a selector does not recover it — the step declines, and the reason names
+    // the DOTTED reference rather than an `order` nobody wrote. Which is the
+    // right answer twice over: a selector built from one pass's order number
+    // is precisely what a loop body must not compile to.
+    expect(accounting.decline).toBe('{{order.id}} appears in no recorded action');
+    expect(accounting.recoveredByValue).toEqual([]);
+  });
+
+  it('recovers by value when the whole field IS the row value', () => {
+    const accounting = accountPlaceholders({
+      binding: bindingFor('Type the order number {{order.id}}'),
+      actions: [act({ action: 'type', selector: '#q', value: 'ORD-1001' })],
+      resolvedParameters: { 'order.id': 'ORD-1001' },
+      recordingCarriesPlaceholders: true,
+    });
+    expect(accounting.recoveredByValue).toEqual(['order.id']);
+    expect(accounting.decline).toBeUndefined();
+  });
+
+  it('declines when a dotted reference landed only in a description', () => {
+    const accounting = accountPlaceholders({
+      binding: bindingFor('Click Review in the row for "{{order.id}}"'),
+      actions: [
+        act({
+          action: 'click',
+          selector: '#review',
+          description: 'review the row for {{order.id}}',
+        }),
+      ],
+      resolvedParameters: { 'order.id': 'ORD-1001' },
+      recordingCarriesPlaceholders: true,
+    });
+    expect(accounting.decline).toBe(
+      "{{order.id}} appears only in an action's description, which is the model's own words rather than a value it used",
+    );
+  });
+});
+
+/**
+ * §9.2: `readTable` is deterministic and is MEANT to compile, through the
+ * shared `tables.read` helper — which is phase 3. Until then it stays AI, and
+ * the entry says why rather than a compile reinventing header mapping.
+ */
+describe('readTable is AI-only until phase 3', () => {
+  it('refuses the step and names the action', async () => {
+    const { result, calls } = await generate({
+      source: 'Read the Order ID column as id from every row in the Orders table [store as: o]',
+      actions: [act({ action: 'readTable', selector: '#orders' })],
+    });
+    // `declined` is how a step becomes an `ai: true` entry carrying its reason.
+    expect(result.kind).toBe('declined');
+    expect(result.kind === 'declined' && result.reason).toContain('readTable');
+    // No model call was paid for an answer that would be thrown away —
+    // `refuseReason` runs before the client is touched.
+    expect(calls).toBe(0);
+  });
+});
+
 // ───────────────────────────────────────────────────────────────────────────
 // The static backstop
 // ───────────────────────────────────────────────────────────────────────────

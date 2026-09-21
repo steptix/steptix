@@ -27,6 +27,7 @@ import { loadContextFiles } from '../../context/loader.js';
 import { interpolate } from '../../parser/parameters.js';
 import { interpolateEnvData, type EnvDataContext } from '../../parser/interpolate-env-data.js';
 import { parseSetStep } from '../../parser/set-step.js';
+import { controlLineDefines } from '../../parser/control-line.js';
 import { isReturnClaim, parseFlowControlStep } from '../../parser/flow-control-step.js';
 import {
   failureTailContradictionError,
@@ -46,12 +47,14 @@ import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 import { runSetStep } from '../../runner/set-step-runner.js';
 import {
   createControlState,
+  forEachPassOf,
   guardVisitEvaluates,
   planAfterStep,
   planForStart,
   returnExit,
   type ControlRecord,
 } from '../../runner/control-flow.js';
+import { dottedReferenceError } from '../../runner/placeholder-substitution.js';
 import {
   eachSkipped,
   evaluateGuard,
@@ -427,7 +430,16 @@ export class UIRunnerAdapter {
    */
   private resolveStepText(raw: string): string {
     const envData = this.test?.envData;
-    return interpolate(envData ? interpolateEnvData(raw, envData) : raw, this.resolvedParameters);
+    // The names the LINE defines are exempt from the unresolved warning: this
+    // loop, like the server's, resolves every step before the control
+    // dispatch, so a `For each {{payment}} in {{payments}}` header would warn
+    // about the item it is about to bind, once per correct table loop
+    // (`controlLineDefines`, src/parser/control-line.ts).
+    return interpolate(
+      envData ? interpolateEnvData(raw, envData) : raw,
+      this.resolvedParameters,
+      controlLineDefines(raw),
+    );
   }
 
   private async executeRun(filePath: string): Promise<void> {
@@ -877,6 +889,44 @@ export class UIRunnerAdapter {
         }
         i = advance(i);
         continue;
+      }
+
+      // --- A dotted reference this pass cannot answer ---
+      // `{{order.statuz}}` where the row has `status`
+      // (docs/specs/SPEC-structured-table-reads.md §8.3). Refused before the
+      // model call, in the same shape as the contradiction below, and read off
+      // the AUTHORED line — `resolveStepText` has already replaced every
+      // reference it could answer. Dotted only; a flat name keeps its warning.
+      const dottedRefError = setStep
+        ? undefined
+        : dottedReferenceError(rawInstruction, this.resolvedParameters, (item) =>
+            forEachPassOf(controls, controlState, item),
+          );
+      if (dottedRefError) {
+        flushSkips(i);
+        this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
+        const stepResult: StepResult = {
+          index: stepIndex,
+          instruction,
+          status: 'failed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          error: dottedRefError,
+          aiExplanation: dottedRefError,
+        };
+        this.stepResults.push(stepResult);
+        this.emit('runner:step-complete', {
+          stepIndex,
+          status: 'failed',
+          durationMs: 0,
+          error: dottedRefError,
+        });
+        this.emit('runner:error', { message: dottedRefError });
+        this.conversationHistory.push(
+          formatStepHistoryEntry(stepIndex, instruction, false, this.page?.url()),
+        );
+        break;
       }
 
       // --- The contradiction of decision 8 ---

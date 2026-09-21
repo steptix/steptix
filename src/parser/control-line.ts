@@ -381,6 +381,28 @@ export function parseControlLine(instruction: string): ControlLine | null {
 }
 
 /**
+ * The variable names a control line DEFINES rather than reads — today, a
+ * `For each` header's item, and nothing else.
+ *
+ * `For each {{payment}} in {{payments}}` reads `{{payments}}` and WRITES
+ * `{{payment}}`, one element per pass. Every other placeholder machinery in
+ * this repo already knows that distinction — a `[store as: x]` and a `Set`
+ * target are definitions too — but the run loops interpolate the raw header
+ * line like any other step, so `interpolate` warned
+ * `Unresolved placeholder: {{payment}}` on every pass-zero visit to every
+ * correct table loop. Seen in a live TestBench run, where it is noise that
+ * looks like a diagnosis.
+ *
+ * A set rather than a string, because the answer is "which names", and the
+ * next form that defines one (a `For each … with index {{n}}`, say) should
+ * extend this rather than grow a second accessor.
+ */
+export function controlLineDefines(instruction: string): ReadonlySet<string> | undefined {
+  const line = parseControlLine(instruction);
+  return line?.kind === 'foreach' ? new Set([line.item]) : undefined;
+}
+
+/**
  * {@link parseControlLine} plus `tailStart` — the 0-based offset of the tail
  * within the normalised (trimmed, `[no-hooks]`-stripped) instruction.
  *

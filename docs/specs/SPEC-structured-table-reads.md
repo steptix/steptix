@@ -424,6 +424,16 @@ Semantics are in §7.7. Until phase 2 lands, the same checks work today
 through a tool, since tool parameters already accept arrays:
 `[tool: sum_column rows="{{payments}}" column="amount" out.sum="amount_sum"]`.
 
+Do not reach for `Assert that {{accounts}} contains "Term Deposit"` in the
+meantime. It reads as deterministic and is not: the substituted step is a
+long JSON literal, the model must classify it as a self-contained predicate,
+and in the phase-1 acceptance runs gpt-5.6-luna did so about half the time
+and otherwise emitted a DOM assertion with no expectation, which fails. The
+acceptance tests prove the same facts by looping over the records and
+checking each against the page, and pin the exact record lists in
+`tests/read-table.test.ts`. A deterministic `contains` over a captured list
+is the first thing §7.7 has to deliver.
+
 ---
 
 ## 5. HTML examples
@@ -1092,7 +1102,13 @@ to:
 {{name.property}}
 ```
 
-with no whitespace. Both segments use `[A-Za-z_][A-Za-z0-9_]*`.
+with no whitespace. The property segment is `[A-Za-z_][A-Za-z0-9_]*`. The
+root segment stays what it has always been, `\w+`: tightening it would
+change what `{{1st}}` means for existing tests (`runner-core/src/data-rows.ts`
+documents that looseness as deliberate), and nothing accepted a dotted name
+before, so only the new segment gets the identifier rule. As built, the one
+definition is `PLACEHOLDER_SOURCE` in `src/parser/parameters.ts`, imported by
+every copy in `src/` and mirrored — with a parity test — in TestBench.
 
 All copies of the grammar must change together, including at least:
 
@@ -1113,8 +1129,11 @@ A missing dotted binding is new syntax with no legacy fallback. Fail before an
 AI call with an error such as:
 
 ```text
-{{order.statuz}} has no value in For each item 2; available properties are id, customer, status
+{{order.statuz}} has no value in For each item 2; available properties are _row, id, customer, status
 ```
+
+`_row` is listed because it is bound: hiding a property that works would
+send the author hunting for a typo in a working name.
 
 Do not pass the literal braces to the model. Existing unresolved flat-name
 compatibility is outside this feature and remains unchanged.
@@ -1129,6 +1148,70 @@ instead render an empty binding as `""` when the placeholder stands alone
 between spaces is an open question (§14); v1 does not, because a `Type
 {{payment.reference}} into the field` that typed two quote marks would be
 worse than a condition that reads oddly.
+
+Two things the acceptance runs found on the same theme, both fixed in
+phase 1. The assert parser rejected `"expected": ""` as a *missing* field,
+so a DOM assertion whose right answer is an empty cell — `Verify the
+Reference cell in row 2 … is empty` — failed in the parser exactly when the
+model answered correctly; it now requires the field to be a string, not a
+non-empty one. And a predicate over an empty substituted value reads
+literally `"" is empty`; the model once emitted the condition with the
+operand dropped, and the prompt now tells it to keep the two quote marks as
+the left operand.
+
+### 8.3a Conditions on captured values are decided without the judge
+
+Every dotted-binding condition in this document — `If {{payment.status}} is
+"Paused", then return`, `If "{{payment.reference}}" is empty, then …` — is,
+after substitution, a comparison of literals: `"Paused" is "Paused"`,
+`"" is empty`. The control-flow story's judge exists to decide page
+conditions from a snapshot, and asking it to compare two strings is both a
+model call per pass that buys nothing and, as the acceptance runs measured,
+a source of wrong answers: on `"" is empty` the judge once replied *"the
+visible statement row being evaluated has debit −$65.00, so it is not
+empty"* — it went to the page for a fact that was in the text, found a
+different row, and sent the loop down the wrong branch. The same shape had
+been judged right fourteen times before that.
+
+So the runtime decides such conditions itself. After placeholder
+substitution, a condition whose whole text matches the literal grammar
+below is decided locally, with no model call, and its guard row carries the
+reasoning `decided from the values: "" is empty → true` in place of the
+judge's sentence; anything else goes to the judge exactly as before. A value
+is a double-quoted string or a bare number; comparisons are exact after
+trimming, and numeric when both sides are plain numbers.
+
+```text
+<v> is empty | is blank | is not empty | is not blank
+<v> is <v> | equals <v> | is not <v> | does not equal <v> | is different from <v>
+<v> contains <v> | does not contain <v> | starts with <v> | ends with <v>
+<v> is at least <n> | is at most <n> | is more than <n> | is greater than <n> | is less than <n>
+```
+
+A chain (`If` / `Else if` / `Otherwise`) is decided locally only when every
+member's condition is literal; if any member needs the page, the whole chain
+goes to the judge, so one evaluation never mixes the two sources. `While`
+and `Repeat … until` conditions get the same treatment on every evaluation.
+The grammar lives in one exported parser beside `set-step.ts` and
+`flow-control-step.ts` (`src/parser/literal-condition.ts`) so the handbook
+can name it and TestBench can one day show it on hover. Anything with prose
+in it — `the Cash checkbox is ticked`, `"a" is "a" and "b" is "b"` — is not
+literal and is judged. A condition in which a placeholder survived
+substitution (`{{` or `${` still present) is never literal either: the
+substituter leaves what it cannot answer as written, and `"{{order.missing}}"
+is empty` would otherwise parse as a non-empty string and answer `false`
+with confidence.
+
+The §8.3 refusal covers guard lines as well as steps: a dotted reference the
+pass cannot answer inside an `If`, `Else if`, `While` or `Repeat … until`
+condition fails the guard before the local decision and before the judge,
+with the same message, in all three run loops — one bad member refuses the
+whole chain, because the judge is asked one question about every member.
+And the `For each` header's own item name is a definition, not a reference:
+the loops that interpolate a line before dispatching it no longer log
+`Unresolved placeholder: {{payment}}` against `For each {{payment}} in
+{{payments}}` (`controlLineDefines` in `src/parser/control-line.ts` names
+what a control line writes).
 
 ### 8.4 Loop reporting and TestBench
 
@@ -1458,18 +1541,22 @@ Add a third end-to-end test on a headerless fixture with a duplicate payee —
 4. Verify the Scheduled payments table still shows 5 rows
 
 ### Review the payment
-1. If {{payment.status}} is "Paused", then return
+1. If {{payment.status}} is "Overdue", then return
 2. Click View in row {{payment._row}} of the Scheduled payments table
 3. Verify the Payment details page shows "{{payment.payee}}" and {{payment.amount}}
 4. Click Back to scheduled payments
 ```
 
 The proving run must show `index` columns and no `header`, five records with
-`_row` 1 to 5, the Paused pass ending at its first step with a `not-taken`
-skip on the rest, and — the point of the fixture — both Origin Energy passes
-opening *different* details pages, with the amount on each matching that
-pass's `{{payment.amount}}`. A run that opens the first Origin Energy row
-twice is the failure this test exists to catch.
+`_row` 1 to 5, the Overdue pass (row 4) ending at its first step with a
+`not-taken` skip on the rest, and — the point of the fixture — both Origin
+Energy passes (rows 1 and 3) opening *different* details pages, with the
+amount on each matching that pass's `{{payment.amount}}`: $140.00 and
+$86.10. A run that opens the first Origin Energy row twice is the failure
+this test exists to catch. The `return` is on Overdue and not on Paused for
+that reason: the Paused row *is* the second Origin Energy, and a first
+draft of this test returned on it, passed, and never opened the page the
+fixture was built to distinguish.
 
 ---
 
