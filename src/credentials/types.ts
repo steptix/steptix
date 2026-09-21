@@ -89,6 +89,34 @@ export type VaultFailure =
   /** `bw` answered, but not in a way we could read. */
   | 'unreadable';
 
+/** What `bw status` reports, plus the one answer that means there is no `bw`. */
+export type VaultStatus = 'unlocked' | 'locked' | 'unauthenticated' | 'cli-missing';
+
+/**
+ * Why signing in did not open the vault (stories/bitwarden-sign-in.md §2.1).
+ *
+ * Categories, never text. The words the agent sees are chosen by the broker
+ * from this value alone, because the text `bw` prints during a login carries
+ * the email and any verification code in clear (story §1 fact 4).
+ */
+export type SignInFailure =
+  /** A sign-in or code dialog was cancelled, or timed out. */
+  | 'cancelled'
+  /** Wrong email or master password (or the account is on another server). */
+  | 'rejected'
+  /** The verification code was refused. */
+  | 'code-rejected'
+  /** A step the dialog cannot drive: several two-step methods, SSO, Key Connector. */
+  | 'unsupported-step'
+  /** The sign-in outlived its deadline. */
+  | 'timed-out'
+  /** Anything else — including a `bw` the driver could not safely stop. */
+  | 'failed'
+  /** This platform cannot show the sign-in dialog at all. */
+  | 'no-dialog';
+
+export type SignInResult = { ok: true } | { ok: false; reason: SignInFailure };
+
 export class VaultError extends Error {
   constructor(
     readonly kind: VaultFailure,

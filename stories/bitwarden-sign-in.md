@@ -672,9 +672,11 @@ character of the answer — immediately after the driver's write.
     Same stop after the fake child has already **exited**: `killPid` is
     **not** called.
 17. **No PID, no password:** `platform: 'win32'`, `findBwProcess` resolving
-    `null`, then separately rejecting, then separately never settling past
-    its 10s timeout (fake clock) → each stopped at the email prompt, `failed`,
-    **nothing written at all** — not the email, not the password.
+    `null`, then separately rejecting → each stopped at the email prompt,
+    `failed`, **nothing written at all** — not the email, not the password. A
+    lookup that never settles writes nothing either, and ends at the deadline.
+    The lookup's own 10s timeout is pinned where it lives, on the real
+    `findBwProcess` (Windows): given 1ms, it answers "not found".
 18. **Shims and platforms:** on `win32`, a spawned `.exe` with
     `findBwProcess` → `'self'` records the child itself, and one → PID 77
     records 77 (a Scoop-style shim); a spawned `cmd.exe` resolving `'self'`
@@ -811,6 +813,18 @@ whatever the file says.
   dialog that opens hidden is SPEC 29's known trap — and cancelled.
 - The end-to-end sign-in of the verification rule, step (1), is done by Paul
   with his own account. It is also how his machine gets signed back in.
+
+**Done 2026-09-22** (the first bullet): each of the sign-in, code (both
+kinds) and unlock dialogs was raised through `WindowsDialogApproval`, found by
+its exact title from a second process, confirmed `IsWindowVisible`, captured
+with `PrintWindow`, then driven with window messages. The sign-in and unlock
+dialogs returned `pässwörd-é-€-日本` intact; a new-device code typed as
+`123 456` came back `123456`; closing either kind of dialog returned null; the
+Sign in and Verify buttons stayed disabled until their fields had text. A
+trap for whoever repeats this: `FindWindow($null, …)` from PowerShell passes
+an EMPTY class name, not null, and finds nothing — use `[NullString]::Value`.
+The first attempt tripped on exactly that, reported every dialog "not
+visible", and left real dialogs open on screen until their timers ran out.
 
 ---
 

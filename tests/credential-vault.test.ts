@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { originForLookup } from '../src/credentials/domain-match.js';
-import { BitwardenVault, type BwRunner } from '../src/credentials/vault.js';
+import { BitwardenVault, bwLaunch, type BwRunner } from '../src/credentials/vault.js';
 import { VaultError } from '../src/credentials/types.js';
 
 /** One login item, in the shape `bw list items` emits. */
@@ -195,5 +195,92 @@ describe('runBw refuses an unexpected argument', () => {
     await expect(vault.secretFor('9f1c2b3a-0000-4444-8888-abcdefabcdef')).rejects.toThrow(
       /not installed|ENOENT|spawn/i,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A key for a signed-out CLI (stories/bitwarden-sign-in.md §2.3, test 30)
+// ---------------------------------------------------------------------------
+
+describe('dropping a dead session key', () => {
+  const NOT_LOGGED_IN = { code: 1, stdout: '', stderr: 'You are not logged in.' };
+
+  it('30. forgets the key when bw says nobody is signed in', async () => {
+    const runner: BwRunner = async (_b, args) =>
+      args[0] === 'sync' ? { code: 0, stdout: '', stderr: '' } : NOT_LOGGED_IN;
+    const vault = new BitwardenVault({ runner, session: 'key-A', environment: {} });
+
+    await expect(vault.itemsForUrl('https://www.example.com/login')).rejects.toMatchObject({
+      kind: 'not-logged-in',
+    });
+    expect(vault.unlocked).toBe(false);
+  });
+
+  it('30. keeps a NEWER key adopted while the failing call was in flight', async () => {
+    // The race §2.3 exists for: a lookup started with a stale key, a sign-in
+    // stored a fresh one, and then the stale lookup came back "not logged in".
+    const seen: Array<string | undefined> = [];
+    let vault!: BitwardenVault;
+    let first = true;
+    const runner: BwRunner = async (_b, args, env) => {
+      if (args[0] === 'sync') return { code: 0, stdout: '', stderr: '' };
+      seen.push(env['BW_SESSION']);
+      if (first) {
+        first = false;
+        vault.adoptSession('key-B'); // the concurrent sign-in lands mid-call
+        return NOT_LOGGED_IN;
+      }
+      return { code: 0, stdout: '[]', stderr: '' };
+    };
+    vault = new BitwardenVault({ runner, session: 'key-A', environment: {} });
+
+    await expect(vault.itemsForUrl('https://www.example.com/login')).rejects.toMatchObject({
+      kind: 'not-logged-in',
+    });
+    expect(vault.unlocked).toBe(true);
+    await vault.itemsForUrl('https://www.example.com/login');
+    expect(seen).toEqual(['key-A', 'key-B', 'key-B']); // the retry-after-sync ran on B too
+  });
+
+  it('30. drops the key on the secret fetch too, not only the lookup', async () => {
+    const runner: BwRunner = async () => NOT_LOGGED_IN;
+    const vault = new BitwardenVault({ runner, session: 'key-A', environment: {} });
+    await expect(vault.secretFor('id-1')).rejects.toBeInstanceOf(VaultError);
+    expect(vault.unlocked).toBe(false);
+  });
+
+  it('keeps the key for a failure that is not "not logged in"', async () => {
+    const runner: BwRunner = async (_b, args) =>
+      args[0] === 'sync' ? { code: 0, stdout: '', stderr: '' } : { code: 1, stdout: '', stderr: 'Something else.' };
+    const vault = new BitwardenVault({ runner, session: 'key-A', environment: {} });
+    await expect(vault.itemsForUrl('https://www.example.com/login')).rejects.toMatchObject({ kind: 'unreadable' });
+    expect(vault.unlocked).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The one launch rule (story §4.1, test 31)
+// ---------------------------------------------------------------------------
+
+describe('bwLaunch', () => {
+  const env = { COMSPEC: 'C:\Windows\System32\cmd.exe' };
+
+  it('31. wraps a .cmd or .bat in cmd.exe on Windows, honouring COMSPEC', () => {
+    expect(bwLaunch('C:\npm\bw.cmd', ['status', '--raw'], env, 'win32')).toEqual({
+      command: 'C:\Windows\System32\cmd.exe',
+      args: ['/d', '/s', '/c', 'C:\npm\bw.cmd', 'status', '--raw'],
+    });
+    expect(bwLaunch('C:\npm\BW.BAT', ['sync'], {}, 'win32')).toEqual({
+      command: 'cmd.exe',
+      args: ['/d', '/s', '/c', 'C:\npm\BW.BAT', 'sync'],
+    });
+  });
+
+  it('31. runs an .exe directly, and wraps nothing off Windows', () => {
+    expect(bwLaunch('C:\tools\bw.exe', ['login', '--raw'], env, 'win32')).toEqual({
+      command: 'C:\tools\bw.exe',
+      args: ['login', '--raw'],
+    });
+    expect(bwLaunch('/opt/bw/bw.cmd', ['sync'], env, 'linux')).toEqual({ command: '/opt/bw/bw.cmd', args: ['sync'] });
   });
 });

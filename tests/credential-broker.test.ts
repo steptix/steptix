@@ -19,9 +19,10 @@ import { createServer, type Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
 import { LoginBroker, GRANT_TTL_MS } from '../src/credentials/broker.js';
+import { BitwardenVault, DenyingApproval, WindowsDialogApproval, createLoginBroker } from '../src/credentials/index.js';
 import { isRealPasswordField, scanForLogin } from '../src/credentials/login-fields.js';
 import { itemsCoveringHost, pageIsFillable, uriCoversHost } from '../src/credentials/domain-match.js';
-import { VaultError, type ApprovalProvider, type VaultItem, type VaultProvider } from '../src/credentials/types.js';
+import { VaultError, type ApprovalProvider, type SignInResult, type VaultItem, type VaultProvider } from '../src/credentials/types.js';
 
 /**
  * Vitest's per-test default is 5 seconds, and the gate-order suites below each
@@ -764,5 +765,572 @@ describe('isRealPasswordField — the check no hint can bypass', { timeout: BROW
     await page.evaluate(`document.getElementById('p').type = 'text'`);
     expect(await page.evaluate(`document.getElementById('p').getAttribute('type')`)).toBe('text');
     expect(await isRealPasswordField(page.mainFrame(), '#p')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Opening a closed vault: sign in or unlock (stories/bitwarden-sign-in.md §2,
+// §5, §6 — tests §10.2 19–29)
+// ---------------------------------------------------------------------------
+
+/** The exact words of the story's §5 — pinned as literals, not imported. */
+const WORDS = {
+  cancelled:
+    'The user was asked to sign in to Bitwarden and did not. Do not ask them for any password. ' +
+    'Ask whether they want to try again.',
+  rejected:
+    'Bitwarden rejected the sign-in: the email or master password was wrong, or the account is on a ' +
+    'different Bitwarden server (for example the EU cloud). Ask the user to try again — never ask them ' +
+    'to type a password to you.',
+  'code-rejected': 'Bitwarden rejected the verification code. Ask the user to try again with a fresh code.',
+  'unsupported-step':
+    'This Bitwarden account needs a sign-in step the dialog cannot handle (several two-step methods, ' +
+    'single sign-on, Key Connector, or a self-hosted server). Ask the user to run `bw login` once in a ' +
+    'terminal, then try again.',
+  'timed-out': 'Signing in to Bitwarden did not complete. Ask the user to run `bw login` once in a terminal, then try again.',
+  failed: 'Signing in to Bitwarden did not complete. Ask the user to run `bw login` once in a terminal, then try again.',
+  'no-dialog':
+    'The Bitwarden command-line tool (not the browser extension) is signed out, and this machine cannot ' +
+    'show a sign-in prompt. Ask the user to run `bw login` in a terminal, then try again.',
+  'status-failed':
+    'The Bitwarden command-line tool did not answer, so the vault could not be opened. Ask the user to ' +
+    'check that `bw status` works in a terminal.',
+  'not-logged-in':
+    'The Bitwarden command-line tool (not the browser extension) is signed out. Ask the user to run ' +
+    '`bw login` in a terminal, then try again.',
+} as const;
+
+/** A promise the test resolves by hand, to hold a flight open. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+/** Wait until a spy has been called `n` times, without guessing at timing. */
+async function calledTimes(spy: ReturnType<typeof vi.fn>, n: number): Promise<void> {
+  for (let i = 0; i < 500 && spy.mock.calls.length < n; i++) await new Promise((r) => setTimeout(r, 10));
+  expect(spy.mock.calls.length).toBeGreaterThanOrEqual(n);
+}
+
+/**
+ * Hold the first attempt open until the second call has REACHED Gate 3.
+ *
+ * A second `attemptLogin` scans the page before it gets to the vault, and if
+ * the first attempt settles in that time the second one — correctly — starts
+ * a fresh attempt (story §6, "Release"). A test that resolves the first
+ * attempt as soon as the second call starts is therefore not testing a join at
+ * all. `vaultUnlocked` is asked once by A's Gate 3, once by A's re-check
+ * inside the attempt, and a third time by B's Gate 3 — immediately before B
+ * joins. So the third call is the moment B is inside.
+ */
+async function secondCallAtGate3(vaultUnlocked: ReturnType<typeof vi.fn>): Promise<void> {
+  await calledTimes(vaultUnlocked, 3);
+}
+
+describe('opening a closed vault — sign in or unlock', { timeout: BROWSER_TEST_TIMEOUT_MS }, () => {
+  it('19. signs in when bw is signed out, then goes straight to approval — no unlock', async () => {
+    await page.goto(`${origin}/login`);
+    let open = false;
+    const signIn = vi.fn(async () => {
+      open = true;
+      return { ok: true } as const;
+    });
+    const unlockVault = vi.fn(async () => true);
+    const approval = approver(false);
+    const broker = new LoginBroker({
+      vault: fakeVault(),
+      approval,
+      vaultUnlocked: () => open,
+      vaultStatus: vi.fn(async () => 'unauthenticated' as const),
+      signIn,
+      unlockVault,
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(signIn).toHaveBeenCalledTimes(1);
+    expect(unlockVault).not.toHaveBeenCalled();
+    expect(approval.ask).toHaveBeenCalledTimes(1);
+    expect(res.outcome).toBe('denied');
+  });
+
+  it('20. unlocks when bw is locked — and never signs in', async () => {
+    await page.goto(`${origin}/login`);
+    const signIn = vi.fn(async () => ({ ok: true }) as const);
+    const unlockVault = vi.fn(async () => false);
+    const broker = new LoginBroker({
+      vault: fakeVault(),
+      approval: approver(true),
+      vaultUnlocked: () => false,
+      vaultStatus: vi.fn(async () => 'locked' as const),
+      signIn,
+      unlockVault,
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(unlockVault).toHaveBeenCalledTimes(1);
+    expect(signIn).not.toHaveBeenCalled();
+    expect(res.outcome).toBe('vault-locked');
+  });
+
+  it('21. treats "unlocked" with no key held as locked', async () => {
+    await page.goto(`${origin}/login`);
+    const unlockVault = vi.fn(async () => false);
+    const signIn = vi.fn(async () => ({ ok: true }) as const);
+    const broker = new LoginBroker({
+      vault: fakeVault(),
+      approval: approver(true),
+      vaultUnlocked: () => false,
+      vaultStatus: vi.fn(async () => 'unlocked' as const),
+      signIn,
+      unlockVault,
+    });
+
+    await broker.attemptLogin(page);
+
+    expect(unlockVault).toHaveBeenCalledTimes(1);
+    expect(signIn).not.toHaveBeenCalled();
+  });
+
+  it('22. says "not installed" with no dialog at all when the CLI is missing', async () => {
+    await page.goto(`${origin}/login`);
+    const unlockVault = vi.fn(async () => true);
+    const signIn = vi.fn(async () => ({ ok: true }) as const);
+    const vault = fakeVault();
+    const broker = new LoginBroker({
+      vault,
+      approval: approver(true),
+      vaultUnlocked: () => false,
+      vaultStatus: vi.fn(async () => 'cli-missing' as const),
+      signIn,
+      unlockVault,
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(res.outcome).toBe('vault-unavailable');
+    expect(res.detail).toMatch(/not installed on this machine/i);
+    expect(unlockVault).not.toHaveBeenCalled();
+    expect(signIn).not.toHaveBeenCalled();
+    expect(vault.itemsForUrl).not.toHaveBeenCalled();
+  });
+
+  it('23. reports a bw that cannot answer status — no dialog, no throw', async () => {
+    await page.goto(`${origin}/login`);
+    const unlockVault = vi.fn(async () => true);
+    const signIn = vi.fn(async () => ({ ok: true }) as const);
+    const broker = new LoginBroker({
+      vault: fakeVault(),
+      approval: approver(true),
+      vaultUnlocked: () => false,
+      vaultStatus: vi.fn(async () => {
+        throw new VaultError('unreadable', 'The Bitwarden CLI did not answer within 30000ms.');
+      }),
+      signIn,
+      unlockVault,
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(res).toMatchObject({ outcome: 'vault-unavailable', detail: WORDS['status-failed'] });
+    expect(unlockVault).not.toHaveBeenCalled();
+    expect(signIn).not.toHaveBeenCalled();
+  });
+
+  it('24. a key held for a signed-out bw: sign in, look again ONCE, then stop', async () => {
+    await page.goto(`${origin}/login`);
+    let open = true; // a key is held — Gate 3 passes without asking bw
+    const itemsForUrl = vi.fn(async (): Promise<VaultItem[]> => {
+      open = false; // the vault drops the dead key (vault.ts, story §2.3)
+      throw new VaultError('not-logged-in', 'You are not logged in.');
+    });
+    const signIn = vi.fn(async () => {
+      open = true;
+      return { ok: true } as const;
+    });
+    const broker = new LoginBroker({
+      vault: fakeVault({ itemsForUrl }),
+      approval: approver(true),
+      vaultUnlocked: () => open,
+      vaultStatus: vi.fn(async () => 'unauthenticated' as const),
+      signIn,
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(signIn).toHaveBeenCalledTimes(1);
+    expect(itemsForUrl).toHaveBeenCalledTimes(2);
+    expect(res).toMatchObject({ outcome: 'vault-unavailable', detail: WORDS['not-logged-in'] });
+  });
+
+  it('24. …and when the sign-in works, the second look finds the item and approval is asked', async () => {
+    await page.goto(`${origin}/login`);
+    let open = true;
+    let calls = 0;
+    const itemsForUrl = vi.fn(async (): Promise<VaultItem[]> => {
+      calls += 1;
+      if (calls === 1) {
+        open = false;
+        throw new VaultError('not-logged-in', 'You are not logged in.');
+      }
+      return [{ id: 'item-1', name: 'Test Site', uris: ['http://127.0.0.1'], hasTotp: false }];
+    });
+    const approval = approver(false);
+    const broker = new LoginBroker({
+      vault: fakeVault({ itemsForUrl }),
+      approval,
+      vaultUnlocked: () => open,
+      vaultStatus: vi.fn(async () => 'unauthenticated' as const),
+      signIn: vi.fn(async () => {
+        open = true;
+        return { ok: true } as const;
+      }),
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(approval.ask).toHaveBeenCalledTimes(1);
+    expect(res.outcome).toBe('denied');
+  });
+
+  it('25. two calls on a signed-out vault share ONE status check and ONE sign-in dialog', async () => {
+    await page.goto(`${origin}/login`);
+    let open = false;
+    const gate = deferred<{ ok: true }>();
+    const vaultStatus = vi.fn(async () => 'unauthenticated' as const);
+    const signIn = vi.fn(async () => {
+      const r = await gate.promise;
+      open = true;
+      return r;
+    });
+    const vaultUnlocked = vi.fn(() => open);
+    const broker = new LoginBroker({
+      vault: fakeVault(),
+      approval: approver(false),
+      vaultUnlocked,
+      vaultStatus,
+      signIn,
+    });
+
+    const a = broker.attemptLogin(page);
+    await calledTimes(signIn, 1);
+    const b = broker.attemptLogin(page);
+    await secondCallAtGate3(vaultUnlocked);
+    gate.resolve({ ok: true });
+    const [ra, rb] = await Promise.all([a, b]);
+
+    expect(vaultStatus).toHaveBeenCalledTimes(1);
+    expect(signIn).toHaveBeenCalledTimes(1);
+    expect(ra.outcome).toBe('denied');
+    expect(rb.outcome).toBe('denied');
+  });
+
+  it('26. a joiner never runs its own status check — even when the first sign-in is cancelled', async () => {
+    // vaultUnlocked stays false throughout and A's sign-in is cancelled, so
+    // Gate 3's re-check can hide nothing: a joiner that ran its own status
+    // would show here as a second call.
+    await page.goto(`${origin}/login`);
+    const gate = deferred<{ ok: false; reason: 'cancelled' }>();
+    const vaultStatus = vi.fn(async () => 'unauthenticated' as const);
+    const signIn = vi.fn(() => gate.promise);
+    const unlockVault = vi.fn(async () => true);
+    const vaultUnlocked = vi.fn(() => false);
+    const broker = new LoginBroker({
+      vault: fakeVault(),
+      approval: approver(true),
+      vaultUnlocked,
+      vaultStatus,
+      signIn,
+      unlockVault,
+    });
+
+    const a = broker.attemptLogin(page);
+    await calledTimes(signIn, 1);
+    const b = broker.attemptLogin(page);
+    await secondCallAtGate3(vaultUnlocked);
+    gate.resolve({ ok: false, reason: 'cancelled' });
+    const [ra, rb] = await Promise.all([a, b]);
+
+    expect(vaultStatus).toHaveBeenCalledTimes(1);
+    expect(signIn).toHaveBeenCalledTimes(1);
+    expect(unlockVault).not.toHaveBeenCalled();
+    expect(ra).toMatchObject({ outcome: 'vault-unavailable', detail: WORDS.cancelled });
+    expect(rb).toMatchObject({ outcome: 'vault-unavailable', detail: WORDS.cancelled });
+  });
+
+  it('27. a finished attempt is released: a later call asks again, after a cancel or a throw', async () => {
+    await page.goto(`${origin}/login`);
+    const signIn = vi
+      .fn<() => Promise<SignInResult>>()
+      .mockResolvedValueOnce({ ok: false, reason: 'cancelled' })
+      .mockRejectedValueOnce(new Error('spawn EINVAL'))
+      .mockResolvedValueOnce({ ok: false, reason: 'cancelled' });
+    const broker = new LoginBroker({
+      vault: fakeVault(),
+      approval: approver(true),
+      vaultUnlocked: () => false,
+      vaultStatus: vi.fn(async () => 'unauthenticated' as const),
+      signIn,
+    });
+
+    const first = await broker.attemptLogin(page);
+    const second = await broker.attemptLogin(page);
+    const third = await broker.attemptLogin(page);
+
+    expect(signIn).toHaveBeenCalledTimes(3);
+    expect(first.detail).toBe(WORDS.cancelled);
+    expect(second).toMatchObject({ outcome: 'vault-unavailable', detail: WORDS.failed }); // a throw, not a 500
+    expect(third.detail).toBe(WORDS.cancelled);
+  });
+
+  it('28. two calls on a LOCKED vault share one unlock dialog', async () => {
+    await page.goto(`${origin}/login`);
+    let open = false;
+    const gate = deferred<boolean>();
+    const unlockVault = vi.fn(async () => {
+      const r = await gate.promise;
+      open = r;
+      return r;
+    });
+    const vaultUnlocked = vi.fn(() => open);
+    const broker = new LoginBroker({
+      vault: fakeVault(),
+      approval: approver(false),
+      vaultUnlocked,
+      vaultStatus: vi.fn(async () => 'locked' as const),
+      unlockVault,
+    });
+
+    const a = broker.attemptLogin(page);
+    await calledTimes(unlockVault, 1);
+    const b = broker.attemptLogin(page);
+    await secondCallAtGate3(vaultUnlocked);
+    gate.resolve(true);
+    await Promise.all([a, b]);
+
+    expect(unlockVault).toHaveBeenCalledTimes(1);
+  });
+
+  it('29. every way a sign-in can fail gets its own fixed words', async () => {
+    await page.goto(`${origin}/login`);
+    const reasons = ['cancelled', 'rejected', 'code-rejected', 'unsupported-step', 'timed-out', 'failed', 'no-dialog'] as const;
+    for (const reason of reasons) {
+      const broker = new LoginBroker({
+        vault: fakeVault(),
+        approval: approver(true),
+        vaultUnlocked: () => false,
+        vaultStatus: vi.fn(async () => 'unauthenticated' as const),
+        signIn: vi.fn(async () => ({ ok: false, reason }) as const),
+      });
+      const res = await broker.attemptLogin(page);
+      expect(res, reason).toMatchObject({ outcome: 'vault-unavailable', detail: WORDS[reason] });
+    }
+  });
+
+  it('29. the fallback for a signed-out bw names the command-line tool, not "an account"', async () => {
+    await page.goto(`${origin}/login`);
+    // No signIn wired: the pre-story path, with its words replaced.
+    const broker = new LoginBroker({
+      vault: fakeVault({
+        itemsForUrl: vi.fn(async (): Promise<VaultItem[]> => {
+          throw new VaultError('not-logged-in', 'You are not logged in.');
+        }),
+      }),
+      approval: approver(true),
+    });
+    const res = await broker.attemptLogin(page);
+    expect(res).toMatchObject({ outcome: 'vault-unavailable', detail: WORDS['not-logged-in'] });
+    expect(res.detail).not.toMatch(/no account is signed in/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The wiring: what sign-in does with each ending (story §4.6, tests 35–37).
+// In this file, not its own, because it needs the page — and a second browser
+// file per feature is what destabilised the suite before.
+// ---------------------------------------------------------------------------
+
+const SIGN_IN_EMAIL = 'paul@example.com';
+const SIGN_IN_PASSWORD = 'master-password-typed-into-the-dialog';
+
+/**
+ * A stand-in for `BitwardenVault` with the members the wiring touches. `status`
+ * answers from a queue, because the wiring asks twice in the `quiet` case —
+ * once at Gate 3, once to decide what the silence meant.
+ */
+function wiringVault(statuses: Array<'unauthenticated' | 'locked' | Error>) {
+  let open = false;
+  const vault = {
+    get unlocked() {
+      return open;
+    },
+    status: vi.fn(async () => {
+      const next = statuses.shift();
+      if (next instanceof Error) throw next;
+      return next ?? 'locked';
+    }),
+    unlock: vi.fn(async (_password: string) => {
+      open = true;
+      return true;
+    }),
+    adoptSession: vi.fn((_key: string) => {
+      open = true;
+    }),
+    launchContext: { binary: 'C:\\tools\\bw.cmd', environment: {} },
+    itemsForUrl: vi.fn(async () => [{ id: 'item-1', name: 'Test Site', uris: ['http://127.0.0.1'], hasTotp: false }]),
+    secretFor: vi.fn(async () => ({ username: SECRET_USERNAME, password: SECRET_PASSWORD })),
+    totpFor: vi.fn(async () => null),
+  };
+  return vault;
+}
+
+/** A real dialog provider — `instanceof` is the platform check — with every dialog stubbed. */
+function stubbedDialogs() {
+  const approval = new WindowsDialogApproval();
+  approval.ask = vi.fn(async () => ({ allowed: false, chosen: 0 }));
+  approval.askSignIn = vi.fn(async () => ({ email: SIGN_IN_EMAIL, password: SIGN_IN_PASSWORD }));
+  approval.askLoginCode = vi.fn(async () => '123456');
+  approval.askMasterPassword = vi.fn(async () => null);
+  return approval;
+}
+
+describe('the sign-in wiring', { timeout: BROWSER_TEST_TIMEOUT_MS }, () => {
+  it('35. with no dialog on this platform: no-dialog, and bw is never started', async () => {
+    await page.goto(`${origin}/login`);
+    const driveLogin = vi.fn();
+    const broker = createLoginBroker({
+      vault: wiringVault(['unauthenticated']) as unknown as BitwardenVault,
+      approval: new DenyingApproval('no dialogs on this platform'),
+      driveLogin,
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(res).toMatchObject({ outcome: 'vault-unavailable', detail: WORDS['no-dialog'] });
+    expect(driveLogin).not.toHaveBeenCalled();
+  });
+
+  it('a successful login adopts the key bw printed — no unlock, no second password', async () => {
+    await page.goto(`${origin}/login`);
+    const vault = wiringVault(['unauthenticated']);
+    const approval = stubbedDialogs();
+    const broker = createLoginBroker({
+      vault: vault as unknown as BitwardenVault,
+      approval,
+      driveLogin: vi.fn(async () => ({ kind: 'signed-in' as const, sessionKey: 'key-from-bw' })),
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(vault.adoptSession).toHaveBeenCalledWith('key-from-bw');
+    expect(vault.unlock).not.toHaveBeenCalled();
+    expect(approval.askMasterPassword).not.toHaveBeenCalled();
+    expect(res.outcome).toBe('denied'); // reached approval
+  });
+
+  it("the driver gets the dialog's credentials and the vault's binary — nothing else chooses them", async () => {
+    await page.goto(`${origin}/login`);
+    const driveLogin = vi.fn(async () => ({ kind: 'cancelled' as const }));
+    const broker = createLoginBroker({
+      vault: wiringVault(['unauthenticated']) as unknown as BitwardenVault,
+      approval: stubbedDialogs(),
+      driveLogin,
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(driveLogin).toHaveBeenCalledWith(
+      expect.objectContaining({
+        binary: 'C:\\tools\\bw.cmd',
+        credentials: { email: SIGN_IN_EMAIL, password: SIGN_IN_PASSWORD },
+      }),
+    );
+    expect(res.detail).toBe(WORDS.cancelled);
+  });
+
+  it('36. "already signed in" unlocks with the password just typed — no unlock dialog', async () => {
+    await page.goto(`${origin}/login`);
+    const vault = wiringVault(['unauthenticated']);
+    const approval = stubbedDialogs();
+    const broker = createLoginBroker({
+      vault: vault as unknown as BitwardenVault,
+      approval,
+      driveLogin: vi.fn(async () => ({ kind: 'already-signed-in' as const })),
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(vault.unlock).toHaveBeenCalledWith(SIGN_IN_PASSWORD);
+    expect(approval.askMasterPassword).not.toHaveBeenCalled();
+    expect(res.outcome).toBe('denied');
+  });
+
+  it('37. "quiet" asks bw status: locked → unlock with the password in hand', async () => {
+    await page.goto(`${origin}/login`);
+    const vault = wiringVault(['unauthenticated', 'locked']);
+    const approval = stubbedDialogs();
+    const broker = createLoginBroker({
+      vault: vault as unknown as BitwardenVault,
+      approval,
+      driveLogin: vi.fn(async () => ({ kind: 'quiet' as const })),
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(vault.status).toHaveBeenCalledTimes(2);
+    expect(vault.unlock).toHaveBeenCalledWith(SIGN_IN_PASSWORD);
+    expect(approval.askMasterPassword).not.toHaveBeenCalled();
+    expect(res.outcome).toBe('denied');
+  });
+
+  it('37. "quiet" with bw still signed out is the SSO case: unsupported-step', async () => {
+    await page.goto(`${origin}/login`);
+    const vault = wiringVault(['unauthenticated', 'unauthenticated']);
+    const broker = createLoginBroker({
+      vault: vault as unknown as BitwardenVault,
+      approval: stubbedDialogs(),
+      driveLogin: vi.fn(async () => ({ kind: 'quiet' as const })),
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(res).toMatchObject({ outcome: 'vault-unavailable', detail: WORDS['unsupported-step'] });
+    expect(vault.unlock).not.toHaveBeenCalled();
+  });
+
+  it('37. "quiet" when status then fails: failed, and no unlock', async () => {
+    await page.goto(`${origin}/login`);
+    const vault = wiringVault(['unauthenticated', new Error('bw hung')]);
+    const broker = createLoginBroker({
+      vault: vault as unknown as BitwardenVault,
+      approval: stubbedDialogs(),
+      driveLogin: vi.fn(async () => ({ kind: 'quiet' as const })),
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(res).toMatchObject({ outcome: 'vault-unavailable', detail: WORDS.failed });
+    expect(vault.unlock).not.toHaveBeenCalled();
+  });
+
+  it('a cancelled sign-in dialog starts nothing', async () => {
+    await page.goto(`${origin}/login`);
+    const approval = stubbedDialogs();
+    approval.askSignIn = vi.fn(async () => null);
+    const driveLogin = vi.fn();
+    const broker = createLoginBroker({
+      vault: wiringVault(['unauthenticated']) as unknown as BitwardenVault,
+      approval,
+      driveLogin,
+    });
+
+    const res = await broker.attemptLogin(page);
+
+    expect(res.detail).toBe(WORDS.cancelled);
+    expect(driveLogin).not.toHaveBeenCalled();
   });
 });

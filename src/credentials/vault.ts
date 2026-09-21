@@ -61,7 +61,7 @@ const WINDOWS_EXTENSIONS = ['.exe', '.cmd', '.bat'];
  * which of the two launch paths we need, and can still say "not installed"
  * when it really is not.
  */
-function resolveBinary(binary: string, env: NodeJS.ProcessEnv): string {
+export function resolveBinary(binary: string, env: NodeJS.ProcessEnv): string {
   if (process.platform !== 'win32') return binary;
   if (binary.includes('/') || binary.includes('\\') || /\.[a-z]+$/i.test(binary)) return binary;
   const pathValue = env['PATH'] ?? env['Path'] ?? '';
@@ -73,6 +73,31 @@ function resolveBinary(binary: string, env: NodeJS.ProcessEnv): string {
     }
   }
   return binary;
+}
+
+/**
+ * The command line that runs `binary` with `args`: the one launch rule shared
+ * by the one-shot calls below and the login driver (bw-login.ts).
+ *
+ * A `.cmd` or `.bat` cannot be spawned directly (see `resolveBinary`), so on
+ * Windows it goes through `cmd.exe`. That is safe only for arguments `cmd.exe`
+ * will not interpret — no `&`, `|`, `^`, `%` or space — which is why every
+ * caller passes fixed literals or values that cleared `SAFE_ARG`. Note what
+ * the wrapping costs: the program becomes a CHILD of the process we spawn, and
+ * stopping the wrapper does not always stop it (stories/bitwarden-sign-in.md
+ * §1 fact 10).
+ *
+ * `platform` is a parameter so the Windows branch is testable anywhere.
+ */
+export function bwLaunch(
+  binary: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): { command: string; args: string[] } {
+  const viaCmd = platform === 'win32' && /\.(cmd|bat)$/i.test(binary);
+  if (!viaCmd) return { command: binary, args };
+  return { command: env['COMSPEC'] ?? 'cmd.exe', args: ['/d', '/s', '/c', binary, ...args] };
 }
 
 /** How `bw` is actually invoked. A seam, so the sync and retry rules below can
@@ -133,13 +158,9 @@ function runBw(
       }
     }
 
-    // A `.cmd` cannot be spawned directly (see `resolveBinary`), so it goes
-    // through `cmd.exe`. Safe only because every argument passed the
-    // `SAFE_ARG` gate above — none can carry `&`, `|`, `^`, `%` or a space,
-    // which are the whole of what `cmd.exe` would do something with.
-    const viaCmd = process.platform === 'win32' && /\.(cmd|bat)$/i.test(binary);
-    const command = viaCmd ? (env['COMSPEC'] ?? 'cmd.exe') : binary;
-    const commandArgs = viaCmd ? ['/d', '/s', '/c', binary, ...args] : args;
+    // Safe to hand to `cmd.exe` only because every argument passed the
+    // `SAFE_ARG` gate above — see `bwLaunch`.
+    const { command, args: commandArgs } = bwLaunch(binary, args, env);
 
     let child: ReturnType<typeof spawn>;
     try {
@@ -321,14 +342,51 @@ export class BitwardenVault implements VaultProvider {
     if (result.code !== 0) return false;
     const key = result.stdout.trim();
     if (key === '') return false;
+    this.adoptSession(key);
+    return true;
+  }
+
+  /**
+   * Hold a session key obtained some other way than `unlock` — today, the
+   * one `bw login --raw` prints (stories/bitwarden-sign-in.md §4.6). In memory
+   * only, like every key here; the sync clock restarts because a fresh key can
+   * mean a different account's cache.
+   */
+  adoptSession(key: string): void {
     this.session = key;
     this.lastSyncAt = 0;
-    return true;
   }
 
   /** True when a session key is held (ambient or from `unlock`). */
   get unlocked(): boolean {
     return this.session !== undefined && this.session !== '';
+  }
+
+  /**
+   * What the login driver needs to start `bw` the same way this class does:
+   * the resolved binary and the ambient environment. The driver builds its own
+   * child environment from the latter (story §4.1) — never from `childEnv()`,
+   * which would hand it this class's session key.
+   */
+  get launchContext(): { binary: string; environment: NodeJS.ProcessEnv } {
+    return { binary: this.binary, environment: this.environment };
+  }
+
+  /**
+   * Turn a failed `bw` call into the error to throw — and forget the session
+   * key if `bw` says nobody is signed in.
+   *
+   * A key for a signed-out CLI opens nothing, and holding one makes every
+   * later call skip the check that would have found the sign-in dialog
+   * (story §2.3). But only the key the failed call actually USED is dropped:
+   * a call that started with a stale key can finish after a sign-in stored a
+   * fresh one, and throwing the fresh one away would sign the user out of
+   * what they just signed in to.
+   */
+  private failure(result: BwResult, usedKey: string | undefined, message: string): VaultError {
+    const kind = classify(result);
+    if (kind === 'not-logged-in' && this.session === usedKey) this.session = undefined;
+    return new VaultError(kind, message);
   }
 
   /**
@@ -378,9 +436,10 @@ export class BitwardenVault implements VaultProvider {
 
   /** One `bw list items --url`, parsed. */
   private async listFor(origin: string): Promise<VaultItem[]> {
+    const usedKey = this.session;
     const result = await this.run(this.binary, ['list', 'items', '--url', origin], this.childEnv());
     if (result.code !== 0) {
-      throw new VaultError(classify(result), result.stderr.trim() || 'The Bitwarden CLI refused the lookup.');
+      throw this.failure(result, usedKey, result.stderr.trim() || 'The Bitwarden CLI refused the lookup.');
     }
     let parsed: unknown;
     try {
@@ -401,9 +460,10 @@ export class BitwardenVault implements VaultProvider {
 
   async secretFor(itemId: string): Promise<VaultSecret> {
     if (!this.unlocked) throw new VaultError('locked', 'The vault is locked.');
+    const usedKey = this.session;
     const result = await this.run(this.binary, ['get', 'item', itemId], this.childEnv());
     if (result.code !== 0) {
-      throw new VaultError(classify(result), 'The Bitwarden CLI would not return that item.');
+      throw this.failure(result, usedKey, 'The Bitwarden CLI would not return that item.');
     }
     let parsed: BwItem;
     try {
