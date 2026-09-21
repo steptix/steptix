@@ -35,10 +35,17 @@ them in `scopeMaskingByFrame`, and exposes `currentScope()` /
 `currentScopeMasking()` returning the **top frame's** latest pair (falling
 back to the test frame).
 
-The Variables tree provider renders the resulting `currentScope()`
-alphabetically as `name = value` rows. The view's title flips between
-`Variables (test)` and `Variables (skill: <name>)` depending on the
-active frame.
+The Variables tree provider renders the resulting `currentScope()` as
+`name = value` rows, ordered by runner-core's `compareVariableNames` rather
+than a plain `.sort()`. It splits each name on `.` and compares segment by
+segment, with two rules a code-unit sort does not give: a shorter name leads
+the longer ones it prefixes (`payment` before `payment.payee`), and a
+`_`-leading segment leads its siblings, so `payment._row` comes before
+`payment.Amount` and `payment.payee`. §7.4 wants the row number ahead of the
+columns, and `_` sits between the upper- and lower-case letters in code-unit
+order, which delivered that by luck for `payee` and not at all for an
+`Amount` alias. The view's title flips between `Variables (test)` and
+`Variables (skill: <name>)` depending on the active frame.
 
 ## Why the scope payload is "flat" (and looks leaky)
 
@@ -117,9 +124,16 @@ skill's declared output name).
   - **Update mid-step.** `frame:scope` fires on step boundaries, not
     while a step is running. A long AI step that internally captures
     a value won't surface it until the step completes.
-  - **Mask by value pattern.** Masking is purely name-based via
-    runner-core's `maskIfSecret` (`password`, `token`, `apikey`, ...).
-    A variable named `mydata` containing a JWT will render unmasked.
+  - **Mask a bare secret under an innocent name.** `maskIfSecret`
+    (runner-core) asks the NAME first — `password`, `token`, `apikey`, … —
+    and masks a secret-named value whole. Since review round 2 a name that
+    says nothing no longer ends it: the value is then scanned as a RECORD,
+    so `mydata = {"user":"bob","password":"abc"}` renders with the
+    `password` column starred even though `mydata` says nothing. What still
+    renders unmasked is a *bare* credential under an innocent flat name —
+    `mydata` holding a JWT string and nothing else. There is no shape to
+    read there, only the value's own characters, and sniffing those would
+    star ordinary text.
 
 ## Files
 

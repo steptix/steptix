@@ -48,7 +48,14 @@ import { referencedVariableNames } from '../src/skills/expander.js';
 import { placeholderNamesIn } from '../src/codebehind/generate.js';
 import { controlLineDefines, parseControlLine } from '../src/parser/control-line.js';
 import { logger } from '../src/utils/logger.js';
-import { parseControlLine as coreParseControlLine } from '../runner-core/dist/control-line.js';
+// runner-core's SOURCE, not its `dist/` — the same reason
+// tests/control-line-parity.test.ts states at its own import. Nothing on the
+// root `npm test` path builds runner-core, so the compiled copy answers for
+// whatever the mirror used to be: measured, putting `if (instruction) return
+// null;` at the top of `parseControlLine` in runner-core/src/control-line.ts
+// and running this file left it 53/53 green. Vitest transforms the `.ts` on
+// the way in.
+import { parseControlLine as coreParseControlLine } from '../runner-core/src/control-line.ts';
 import { parseSetStep } from '../src/parser/set-step.js';
 import type { AIAction } from '../src/ai/types.js';
 

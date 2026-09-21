@@ -599,6 +599,28 @@ describe('secretValues — the env/data secrets need both spellings too', () => 
  * six-digit code out of the mask set — so the report and the run log printed
  * it.
  */
+describe('a dotted name nobody bound — the whole name read as a credential key too', () => {
+  // The author rule (`isSecretName`) does not know `otp`, `pwd`, `passwd` or
+  // `credential`; the record-column rule does. A data file headed `user.otp`
+  // is exactly as secret as one headed `user.password`, so the unregistered
+  // arm asks both — review round 6 found it asked only the first.
+  it('masks user.otp / user.pwd / login.credential when no pass bound them', () => {
+    const map: Record<string, string> = { 'user.otp': '123456', 'user.pwd': 'hunter2', 'login.credential': 'c-1' };
+    for (const name of Object.keys(map)) expect(isSecretParameterName(name, map)).toBe(true);
+    const out = redactMap(map, secretValues(map));
+    expect(out).toEqual({ 'user.otp': MASK, 'user.pwd': MASK, 'login.credential': MASK });
+    expect(secretValues(map)).toEqual(expect.arrayContaining(['123456', 'hunter2']));
+  });
+
+  it('still reads a REGISTERED row.otp by the record rule, and leaves row.keyword clear', () => {
+    const map: Record<string, string> = { 'row.otp': '123456', 'row.keyword': 'AU' };
+    markLoopBindings(map, ['row.otp', 'row.keyword']);
+    expect(isSecretParameterName('row.otp', map)).toBe(true);
+    expect(isSecretParameterName('row.keyword', map)).toBe(false);
+    expect(secretValues(map)).not.toContain('AU');
+  });
+});
+
 describe('recordSecretValues — a non-string cell under a secret key', () => {
   it('collects a number as its JSON spelling', () => {
     expect(recordSecretValues('[{"_row":"1","otp":123456}]')).toEqual(['123456']);
@@ -1017,6 +1039,20 @@ describe('redactReport — the loop band is masked by NAME, as the parameters ar
    * be masked because a column is called `keyword` (the round-2 defect). The
    * CLI/Electron twin is pinned behaviourally in
    * tests/test-runner-control-flow.test.ts.
+   *
+   * A grep and not a run, which review 6 asked about and measured: the
+   * Sessions API has TWO band sites, and a `For each` never reaches this one.
+   * `loops.markerFor(i)` answers before the frame walk, so a runtime loop's
+   * band is `ControlRuntime.beginPass`'s copy and its marks come from
+   * `markLoopBindings` over there — pinned behaviourally by
+   * `masks the report band by the binding rule` in
+   * tests/api-server-control-flow.test.ts. `loopMarkerFor` is the frame-walk
+   * twin, and every shape the api-server suites reach it with today is a
+   * section-`rows` loop whose cells are FLAT names (`file`, `tag`, `user`,
+   * `password`), which never consult the registry at all. So the line is
+   * there for the dotted frame-inputs case `cloneFramesForPass` writes, which
+   * no current entry point can present on its own; until one can, the name is
+   * all that can be asserted.
    */
   it('the server’s marker site carries the marks onto its copy', () => {
     const src = readFileSync(new URL('../src/server/session-manager.ts', import.meta.url), 'utf-8');

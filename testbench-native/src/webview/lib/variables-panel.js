@@ -277,7 +277,9 @@ export function isSecretVarNameInline(varName, bindings) {
   const name = String(varName);
   const dot = name.indexOf(".");
   if (dot < 0) return isSecretFlatNameInline(name);
-  if (bindings !== undefined && !nameInInline(bindings, name)) return isSecretFlatNameInline(name);
+  if (bindings !== undefined && !nameInInline(bindings, name)) {
+    return isSecretFlatNameInline(name) || wholeNameIsRecordSecretInline(name);
+  }
   return (
     isSecretFlatNameInline(name.slice(0, dot))
     || isRecordSecretKeyInline(name.slice(dot + 1))

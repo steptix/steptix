@@ -381,6 +381,13 @@ const SCOPE_CORPUS = [
   ['…and a passkey heading beside it', 'login.passkey', { bindings: [] }, true],
   ['…the whole key goes to the flat rule, so `keyword` masks', 'payment.keyword', { bindings: [] }, true],
   ['…and so does `sort_key`', 'payment.sort_key', { bindings: [] }, true],
+  // …and the whole name is read as one credential key too: the flat rule does
+  // not know `otp` / `pwd` / `credential`, the record-column reading does
+  // (review round 6).
+  ['…a one-time-code heading the flat rule would miss', 'user.otp', { bindings: [] }, true],
+  ['…a `pwd` heading', 'user.pwd', { bindings: [] }, true],
+  ['…a `credential` heading', 'login.credential', { bindings: [] }, true],
+  ['…while the same name REGISTERED takes the record rule (still a secret)', 'user.otp', { bindings: ['user.otp'] }, true],
   // A name a pass DID bind keeps the two-segment rule, which is what keeps a
   // page's `keyword` column readable in the view beside a report that prints it.
   ['a bound column takes the record rule', 'payment.keyword', { bindings: ['payment.keyword'] }, false],
@@ -485,6 +492,74 @@ const SCOPE_CALL_SITES = [
 test('the scope surfaces pass the run’s bindings and unmask to the masker', () => {
   for (const [file, pattern, what] of SCOPE_CALL_SITES) {
     assert.match(readFileSync(file, 'utf8'), pattern, `${what} (${file})`);
+  }
+});
+
+/**
+ * The other end of the same wire: where `bindings` / `unmask` are READ off the
+ * event and put somewhere the surfaces above can reach.
+ *
+ * `SCOPE_CALL_SITES` proves each surface hands its masking to the masker. It
+ * says nothing about whether that masking ever arrives, and the four links
+ * that carry it are each one expression long: drop any of them and every
+ * surface still compiles, still renders, and quietly answers the pre-wire way
+ * — `user.apikey` printed, or `AU` starred, depending on which way the
+ * missing field falls. The only thing that exercises them end to end is the
+ * VS Code integration suite, which `npm test` does not run.
+ *
+ * So: a source scan, the idiom this file already uses for a call it cannot
+ * reach. Each pattern is the narrowest thing that is false when the link is
+ * gone, not a copy of the line.
+ */
+const SCOPE_WIRE_SITES = [
+  [
+    resolve(here, '..', 'src', 'extension', 'extension.ts'),
+    /controller\?\.handleFrameScope\(ev\.frameId, ev\.scope, \{[\s\S]{0,400}?ev\.bindings[\s\S]{0,200}?ev\.unmask/,
+    'the frame:scope handler forwards the event’s bindings and unmask to the controller',
+  ],
+  [
+    resolve(here, '..', 'src', 'extension', 'extension.ts'),
+    /currentMasking: \(\) => registry\.runningController\(\)\?\.currentScopeMasking\(\)/,
+    'the Variables TreeView is given a way to read the running controller’s masking',
+  ],
+  [
+    resolve(here, '..', 'src', 'extension', 'run-controller.ts'),
+    /this\.scopeMaskingByFrame\.set\(frameId, \{[\s\S]{0,300}?masking\.bindings[\s\S]{0,200}?masking\.unmask/,
+    'the controller stores the masking per frame, beside the scope it describes',
+  ],
+  [
+    resolve(here, '..', 'src', 'extension', 'variables-view.ts'),
+    /const masking = this\.source\.currentMasking\?\.\(\)[\s\S]{0,200}?masking\s*\}\)\);/,
+    'the TreeView snapshots the masking once per render and puts it on every row',
+  ],
+  [
+    resolve(here, '..', 'src', 'webview', 'testbench-runner.jsx'),
+    /setRuntimeMasking\(\{[\s\S]{0,300}?event\.bindings[\s\S]{0,200}?event\.unmask/,
+    'the webview panel reads the masking off the scope event into its own state',
+  ],
+];
+
+test('the run’s bindings and unmask actually reach the surfaces that mask by them', () => {
+  for (const [file, pattern, what] of SCOPE_WIRE_SITES) {
+    assert.match(readFileSync(file, 'utf8'), pattern, `${what} (${file})`);
+  }
+});
+
+/**
+ * And the one thing the patterns above cannot say: the EMPTY case.
+ *
+ * Every link spreads the two fields conditionally, because `[]` and `absent`
+ * mean different things — `[]` says this run bound nothing, so a dotted name
+ * is the author's; absent says an older server said nothing, so the masker
+ * keeps its pre-wire reading. A link rewritten as `bindings: ev.bindings ??
+ * []` matches every pattern above and collapses the two, which masks `AU` out
+ * of a real loop against an old server.
+ */
+test('every link spreads the two fields conditionally rather than defaulting them', () => {
+  for (const [file, , what] of SCOPE_WIRE_SITES) {
+    const source = readFileSync(file, 'utf8');
+    assert.doesNotMatch(source, /bindings: [^,;\n]*\?\?\s*\[\]/, `${what} (${file})`);
+    assert.doesNotMatch(source, /unmask: [^,;\n]*\?\?\s*\[\]/, `${what} (${file})`);
   }
 });
 

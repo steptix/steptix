@@ -155,7 +155,13 @@ export function isSecretParameterName(
 ): boolean {
   const dot = name.indexOf('.');
   if (dot === -1) return isSecretName(name);
-  if (map !== undefined && !isLoopBinding(map, name)) return isSecretName(name);
+  // Nobody's binding: the author's rule on the whole key — and the whole
+  // name read as one credential key, because `isSecretName` does not know
+  // `otp`, `pwd`, `passwd` or `credential` and a data file headed `user.otp`
+  // is exactly as secret as one headed `user.password`.
+  if (map !== undefined && !isLoopBinding(map, name)) {
+    return isSecretName(name) || wholeNameIsRecordSecret(name);
+  }
   return (
     isSecretName(name.slice(0, dot))
     || isRecordSecretKey(name.slice(dot + 1))
@@ -190,7 +196,13 @@ function joinsMaskSet(name: string, value: string, map?: Record<string, string>)
   if (value.length === 0) return false;
   const dot = name.indexOf('.');
   if (dot === -1) return isSecretName(name);
-  if (map !== undefined && !isLoopBinding(map, name)) return isSecretName(name);
+  // Nobody's binding: the author's rule on the whole key — and the whole
+  // name read as one credential key, because `isSecretName` does not know
+  // `otp`, `pwd`, `passwd` or `credential` and a data file headed `user.otp`
+  // is exactly as secret as one headed `user.password`.
+  if (map !== undefined && !isLoopBinding(map, name)) {
+    return isSecretName(name) || wholeNameIsRecordSecret(name);
+  }
   if (isSecretName(name.slice(0, dot))) return true;
   return (
     (isRecordSecretKey(name.slice(dot + 1)) || wholeNameIsRecordSecret(name))
@@ -561,21 +573,56 @@ function maskMapBy(
   return out;
 }
 
-/** {@link maskRecordSecrets} over a map of captured values, returning the map
- *  ITSELF when no cell was masked — the identity is what keeps a report with
- *  no record-shaped capture byte-identical to the one written before this
- *  pass existed. Only the value's shape decides; the key is the caller's
- *  business (a `[store as:]` name is the author's, and `redactMap` /
- *  `redactAuthoredMap` have already had their say about it). */
-function maskRecordsIn(map: Record<string, string>): Record<string, string> {
-  let changed = false;
+/** {@link maskMapBy}'s VALUE half alone — the value's own shape, then free
+ *  text — for a map whose keys have already had their say elsewhere. A
+ *  step's captured `outputs` is that map: `[store as: password]` names a
+ *  value that is in `parameters` too, so the free-text set already carries
+ *  it and the name rule has nothing left to add here.
+ *
+ *  Order matters and is the same §7.6 order: SHAPE first, then free text. The
+ *  other way round is the review-6 defect — `redact` replaces a token
+ *  wherever it appears, including an UNQUOTED JSON one, so a mask set holding
+ *  `123456` turned `{"otp":123456}` into `{"otp":***}`, which no longer
+ *  parses, and the shape rule then declined the whole value and left the
+ *  short `password` cell beside it in full.
+ *
+ *  A `data:image/…` value is left alone, because reading from the original
+ *  steps around the guard {@link redactDeep}'s walk applies to exactly this
+ *  string: a short secret matches inside base64 by coincidence, and a
+ *  replacement there corrupts the image rather than hiding anything. A
+ *  capture can hold one — `[store as: logo]` on an `img` `src`. */
+function maskValuesOnly(map: Record<string, string>, secrets: string[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(map)) {
-    const masked = maskRecordSecrets(v);
-    if (masked !== v) changed = true;
-    out[k] = masked;
+    out[k] = v.startsWith('data:image/') ? v : redact(maskRecordSecrets(v), secrets);
   }
-  return changed ? out : map;
+  return out;
+}
+
+/**
+ * `mask(original)`, answering with `current` ITSELF when the two read the
+ * same entry for entry.
+ *
+ * Two things at once, and both are needed. The masking is computed from the
+ * ORIGINAL map rather than from `redactDeep`'s copy — see
+ * {@link maskStepValueMaps} for the two reasons — and the comparison is
+ * against the copy, because that is what the caller would otherwise keep.
+ * Equal means nothing this pass does changes the report, so the copy stands
+ * and {@link redactReport}'s identity case survives a step that has one of
+ * these maps but nothing in it to hide.
+ */
+function maskedOrSame(
+  original: Record<string, string>,
+  current: Record<string, string>,
+  mask: (map: Record<string, string>) => Record<string, string>,
+): Record<string, string> {
+  const masked = mask(original);
+  const keys = Object.keys(masked);
+  if (keys.length !== Object.keys(current).length) return masked;
+  for (const key of keys) {
+    if (masked[key] !== current[key]) return masked;
+  }
+  return current;
 }
 
 /**
@@ -584,17 +631,36 @@ function maskRecordsIn(map: Record<string, string>): Record<string, string> {
  *
  * `redactDeep` walks the report by VALUE, deliberately: it sees every object
  * in it and `isSecretName` over-matches, so a `press` action's `key: "Enter"`
- * must not become `***`. But that leaves the two maps here judged by value
- * alone, and both of them are exactly the shape the name rule exists for. A
- * three-character `password` cell or a boolean `token` is under the free-text
- * floor, so the band read `payment.password=abc` beside a `report.parameters`
- * that said `***` for the same binding (§7.6).
+ * must not become `***`. But that leaves the two maps here judged by free
+ * text alone, and a three-character `password` cell or a boolean `token` is
+ * under its floor — so the band read `payment.password=abc` beside a
+ * `report.parameters` that said `***` for the same binding (§7.6).
  *
- * The band's map is read from the ORIGINAL step, not from the deep copy:
- * the loop-binding registry is by object identity, so `redactDeep`'s copy is
- * nobody's binding and every `row.<column>` in it would fall back to the
- * author rule — `AU` masked because a column is called `keyword`, the round-2
- * defect through the last door left open (§7.6, `inheritLoopBindings`).
+ * The two want different rules and get them. The BAND is the live variable
+ * map's shape, so it takes {@link redactMap} — name, then shape, then free
+ * text. A step's `outputs` takes the value half only
+ * ({@link maskValuesOnly}): every name in it is a `[store as:]` the author
+ * chose, which means its value is in `parameters` too and the free-text set
+ * already carries it, so the name rule has nothing left to add.
+ *
+ * ALL THREE maps are read from the ORIGINAL step, not from the deep copy,
+ * and each for its own reason.
+ *
+ * The band's, because the loop-binding registry is by object identity, so
+ * `redactDeep`'s copy is nobody's binding and every `row.<column>` in it
+ * would fall back to the author rule — `AU` masked because a column is
+ * called `keyword`, the round-2 defect through the last door left open
+ * (§7.6, `inheritLoopBindings`).
+ *
+ * The two `outputs` maps, because the copy has already had the FREE-TEXT set
+ * applied to it, and that set can destroy the very shape the record rule
+ * reads. A capture of `[{"payee":"Acme","otp":123456,"password":"abc"}]` puts
+ * `123456` in the set — a number cell clears the floor — and the deep walk
+ * rewrites the unquoted token to `"otp":***`, which is not JSON. The record
+ * rule then declined the whole value, and a three-character `password` beside
+ * it printed in full in the report's Captures section (review 6, finding 1).
+ * Read from the original the value still parses, and the free text goes on
+ * afterwards, in the §7.6 order ({@link maskValuesOnly}).
  *
  * Returns `steps` itself when nothing changed, so
  * {@link redactReport}'s identity case survives.
@@ -609,17 +675,18 @@ function maskStepValueMaps(
     const original = originals[i] ?? step;
     let next = step;
     if (original.loop) {
-      next = {
-        ...next,
-        loop: { ...(next.loop ?? original.loop), values: redactMap(original.loop.values, secrets) },
-      };
+      const band = next.loop ?? original.loop;
+      const values = maskedOrSame(original.loop.values, band.values, (m) => redactMap(m, secrets));
+      if (values !== band.values) next = { ...next, loop: { ...band, values } };
     }
     if (next.outputs) {
-      const outputs = maskRecordsIn(next.outputs);
+      const source = original.outputs ?? next.outputs;
+      const outputs = maskedOrSame(source, next.outputs, (m) => maskValuesOnly(m, secrets));
       if (outputs !== next.outputs) next = { ...next, outputs };
     }
     if (next.toolStep) {
-      const outputs = maskRecordsIn(next.toolStep.outputs);
+      const source = original.toolStep?.outputs ?? next.toolStep.outputs;
+      const outputs = maskedOrSame(source, next.toolStep.outputs, (m) => maskValuesOnly(m, secrets));
       if (outputs !== next.toolStep.outputs) {
         next = { ...next, toolStep: { ...next.toolStep, outputs } };
       }
@@ -637,7 +704,10 @@ function maskStepValueMaps(
  * masked by name and by record shape as well.
  *
  * A copy; the run's own objects are left alone. A report with nothing to mask
- * comes back by identity.
+ * comes back by identity — band and captured outputs included, which is what
+ * {@link maskedOrSame} is for. A report with `parameters` never does: those
+ * are rebuilt by NAME whatever the mask set holds, so there is always a new
+ * map for them.
  */
 export function redactReport(report: TestReport, secrets: string[]): TestReport {
   const out = redactDeep(report, secrets);

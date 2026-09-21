@@ -1019,3 +1019,50 @@ describe('UIRunnerAdapter masks the line it shows, not the one it runs', () => {
     expect(src.slice(start, src.indexOf('}),', start))).toMatch(/text: \(k\) => shown\(/);
   });
 });
+
+/**
+ * Review 5, finding 3, second half — and review 6, finding 5c: the steer.
+ *
+ * `steer()` is the fifth writer in this loop, and it has the same two
+ * audiences as a step: `executeStep` gets the RESOLVED text because it has to
+ * act on it, and the panel (`runner:step-start`) and the model
+ * (`conversationHistory` → `## Prior Steps`) get the masked one. Round 5 added
+ * `shownSteer` for exactly that and nothing pinned it, so removing it left the
+ * suite green while a `{{password}}` typed into the steer box went to the
+ * renderer and into every later prompt in clear.
+ */
+describe('UIRunnerAdapter masks a steer the same way', () => {
+  it('the steering step-start and the history carry ***, the executor gets the value', async () => {
+    const file = writeTest(root, SECRET_STEPS);
+    const events: Emitted[] = [];
+    let steered = false;
+    const adapter = new UIRunnerAdapter((channel, data) => {
+      events.push({ channel, data: data as Record<string, unknown> });
+      if (channel === 'runner:paused' && !steered) {
+        steered = true;
+        // Paused at the breakpoint on step 1; the author types a steer that
+        // names a secret parameter, then lets the run go on.
+        void adapter
+          .steer('Type {{password}} into the field')
+          .then(() => { adapter.resume(); });
+      }
+    });
+    await adapter.start(file, [1]);
+
+    // What the renderer is told about the steering step.
+    const starts = events
+      .filter((e) => e.channel === 'runner:step-start')
+      .map((e) => String(e.data['instruction']));
+    expect(starts).toContain('(steering) Type *** into the field');
+    expect(starts.join('\n')).not.toContain('hunter2-correct-horse');
+
+    // What the executor was handed, which is the whole reason the two differ.
+    expect(executeStepMock.mock.calls[0]![2]).toBe('Type hunter2-correct-horse into the field');
+
+    // And what the model is told about it on the step that follows.
+    const next = executeStepMock.mock.calls[1]![3] as { conversationHistory: string[] };
+    const history = next.conversationHistory.join('\n');
+    expect(history).toContain('(steering) Type *** into the field');
+    expect(history).not.toContain('hunter2-correct-horse');
+  });
+});

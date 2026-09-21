@@ -91,7 +91,7 @@ import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import { writeRecording } from '../codebehind/recording.js';
 import { envDataSecretValues, interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { captureScreenshot } from '../browser/screenshot.js';
-import { redact, redactDeep, redactReport, runSecrets } from '../utils/secrets.js';
+import { maskRecordSecrets, redact, redactDeep, redactReport, runSecrets } from '../utils/secrets.js';
 
 /**
  * What the report says in place of a root-cause analysis when the run had no
@@ -1578,7 +1578,7 @@ export async function runTest(
         if (setOutcome.assigned) {
           logger.info(
             `[set] ${setOutcome.assigned.name} = ` +
-              `"${redact(setOutcome.assigned.value, secretsNow())}"`,
+              `"${redact(maskRecordSecrets(setOutcome.assigned.value), secretsNow())}"`,
           );
         }
       } else if (inputStep) {
@@ -1748,7 +1748,21 @@ export async function runTest(
           // recorded correctly — `computeStepCaptures` asks `hasOwn` — so the
           // console said one thing and the report another.
           const captured = boundValue(resolvedParameters, outputStep.variable);
-          logger.info(`[output: ${outputStep.variable}] = "${captured ?? '(not captured)'}"`);
+          // …and masked, the same composition the executor's own capture line
+          // uses: SHAPE first, then free text. Round 5 replaced the bare index
+          // read with `boundValue` and left the VALUE raw, so the CLI printed
+          // `[output: password] = "hunter2"` to the console and the SSE
+          // `output` bridge while the report, the step line and the prompt's
+          // `## Values` block all said `***` for it (review 6, finding 3).
+          // The shape half is not optional here either: `[output: rows]` over
+          // a `readTable` capture is a whole table under a name that says
+          // nothing, and a three-character `password` column never joins the
+          // free-text set.
+          const shown =
+            captured === undefined
+              ? '(not captured)'
+              : redact(maskRecordSecrets(captured), secretsNow());
+          logger.info(`[output: ${outputStep.variable}] = "${shown}"`);
         }
       } else if (test.toolCalls[i]) {
         // [tool: ...] step — dispatch deterministic code with live page/context/browser.

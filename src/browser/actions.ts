@@ -1875,7 +1875,19 @@ async function executeRead(
     value = sliced;
   }
 
-  logger.info(`read captured: "${value}" → variable "${action.as ?? '(unnamed)'}"`);
+  // No line here, deliberately. This one printed the captured text RAW —
+  // before the bind, so the name `[store as: password]` chose was not yet in
+  // the map the mask set is built from, and nothing at this depth could
+  // consult it. The logger does not redact, and the run-log file's own pass
+  // masks by the set it has, so a short or freshly-captured credential
+  // reached the console, the file and every client on the SSE `output`
+  // bridge in clear (review 6, finding 2).
+  //
+  // The capture is logged ONCE, by `executeStep` (src/runner/step-executor.ts),
+  // immediately after `bindVariable` — the seam where the name is known — and
+  // masked there by name, by record shape and by value. An `as`-less read
+  // stores nothing and gets no value line at all; the `read <selector> <target>
+  // → (unnamed)` sub-action above already records that it happened.
   return value;
 }
 

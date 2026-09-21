@@ -246,7 +246,9 @@ export function isSecretVarName(
 ): boolean {
   const dot = varName.indexOf('.');
   if (dot < 0) return isSecretFlatName(varName);
-  if (bindings !== undefined && !nameIn(bindings, varName)) return isSecretFlatName(varName);
+  if (bindings !== undefined && !nameIn(bindings, varName)) {
+    return isSecretFlatName(varName) || wholeNameIsRecordSecret(varName);
+  }
   return (
     isSecretFlatName(varName.slice(0, dot))
     || isRecordSecretKey(varName.slice(dot + 1))

@@ -2742,6 +2742,12 @@ async function executeStepAttempt(
         // so the name the author just chose is already in the map the set is
         // built from; by shape as well as by value, because a one-row read
         // stores a record under a name that says nothing.
+        //
+        // It is also the ONLY line that prints a capture. `executeRead`
+        // (src/browser/actions.ts) had one of its own — raw, and one frame too
+        // deep to ever mask, because down there the value has no name yet
+        // (review 6, finding 2). Masking has to happen where the name is, so
+        // the line lives here and there is exactly one of it.
         logger.info(
           `Stored captured value as "{{${action.as}}}": "${redact(
             maskRecordSecrets(result.capturedValue),

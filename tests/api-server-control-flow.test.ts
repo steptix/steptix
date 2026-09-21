@@ -1423,6 +1423,64 @@ describe('For each over object rows', () => {
   });
 
   /**
+   * The report's loop band, masked by the BINDING rule and not the author's
+   * (docs/specs/SPEC-structured-table-reads.md §7.6 — the round-2 defect).
+   *
+   * A band is a COPY (`values: { ...pass.bindings }`) and the binding registry
+   * is keyed on object identity, so the copy arrives carrying none of the
+   * marks unless the site that makes it says so. Without that,
+   * `redactReport` decides every `payment.<column>` by the author rule —
+   * `isSecretName` is `/password|secret|token|key/i`, so `keyword` matches —
+   * and the report starred a column the model has to FIND in the DOM.
+   *
+   * WHICH site makes the copy is worth stating, because the two are easy to
+   * confuse and only one of them is on this path. A `For each` is a RUNTIME
+   * loop, so `loops.markerFor(i)` answers before the frame walk is reached
+   * and the band is the one `ControlRuntime.beginPass` minted, marked there
+   * (src/runner/control-runtime.ts). `loopMarkerFor`'s own
+   * `inheritLoopBindings` (src/server/session-manager.ts) is the frame-walk
+   * twin, reached only when no runtime pass covers the step; measured, every
+   * shape the api-server suites produce for it today is a section-`rows` loop
+   * whose cells are FLAT names, and a flat name never consults the registry.
+   * So that line stays pinned by the grep in tests/secrets.test.ts, and this
+   * is the behavioural pin for the site a `For each` actually uses.
+   *
+   * One row, three columns, and the two rules disagree about two of them.
+   */
+  it('masks the report band by the binding rule — `password` starred, `keyword` not', async () => {
+    await collect({
+      steps: [
+        'Open the payments page',
+        'For each {{payment}} in {{payments}}, Check the payment',
+      ],
+      sourceLines: [3, 4],
+      testFilePath,
+      parameters: { payments: '[{"payee":"Acme","password":"abc","keyword":"AU"}]' },
+      sections: {
+        'check the payment': {
+          name: 'Check the payment',
+          headingLine: 6,
+          steps: ['Verify the payee is "{{payment.payee}}"'],
+          stepLines: [7],
+        },
+      },
+    });
+
+    const steps: StepResult[] = generatedReports.at(-1)!.steps;
+    const band = steps.find((s) => s.instruction.startsWith('Verify the payee'))!.loop!.values;
+
+    // The narrow record rule, which is the one a bound column gets: a real
+    // credential name still goes, an innocent one that merely CONTAINS `key`
+    // survives.
+    expect(band['payment.password']).toBe('***');
+    expect(band['payment.keyword']).toBe('AU');
+    expect(band['payment.payee']).toBe('Acme');
+    // The root binding is the row's compact JSON, masked inside by shape
+    // (review 5, finding 2) — same verdict per column, one level down.
+    expect(band['payment']).toBe('{"payee":"Acme","password":"***","keyword":"AU"}');
+  });
+
+  /**
    * A row that omits a property must not inherit the previous row's value
    * (§8.2, §8.3). All three run loops wrote a pass's bindings with
    * `Object.assign`, which cannot delete — so pass 2's `{{row.note}}`

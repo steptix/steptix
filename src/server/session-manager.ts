@@ -1417,8 +1417,12 @@ function loopMarkerFor(
  * every `payment.keyword` by the author rule and mask `AU` out of the block
  * the model writes its selector from. One line at the copy, exactly as
  * `secretsNow` does for its merge.
+ *
+ * Exported for tests/codebehind-live-compile.test.ts, which pins both halves
+ * of that: what this function answers, and that both `liveCompile.offer`
+ * call sites go through it rather than spreading the map themselves.
  */
-function liveCompileSnapshot(resolvedParameters: Record<string, string>): Record<string, string> {
+export function liveCompileSnapshot(resolvedParameters: Record<string, string>): Record<string, string> {
   const snapshot = { ...resolvedParameters };
   inheritLoopBindings(resolvedParameters, snapshot);
   return snapshot;

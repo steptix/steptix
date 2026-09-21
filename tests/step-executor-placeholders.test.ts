@@ -87,6 +87,7 @@ vi.mock('../src/browser/page-state.js', () => ({
 }));
 
 import { addLogCallback } from '../src/utils/logger.js';
+import { markLoopBindings } from '../src/utils/secrets.js';
 import { executeStep, executeBranchedStep, evaluateConditions } from '../src/runner/step-executor.js';
 import { runInteractiveRepl } from '../src/runner/interactive-repl.js';
 import {
@@ -1034,5 +1035,106 @@ describe('the "Stored captured value" line is masked like everything else', () =
   it('and still prints a plain capture, which is what the line is for', async () => {
     const lines = await logsOf('balance');
     expect(lines).toContain('Stored captured value as "{{balance}}": "CAPTURED"');
+  });
+
+  /**
+   * Review 6, finding 2: there was a SECOND capture line, one frame lower.
+   *
+   * `executeRead` logged `read captured: "<value>" → variable "<name>"` before
+   * returning, so it ran before the bind — the name `[store as: password]`
+   * chose was not yet in the parameter map the mask set is built from, and no
+   * amount of masking at that depth could have consulted it. The run-log
+   * file's own pass masks by the set it HAS, so the credential reached the
+   * console, the file and the SSE `output` bridge in clear, beside the line
+   * above saying `***` for the same value.
+   *
+   * The real `executeAction` is imported past this file's mock and driven over
+   * a fake locator root, so this is the actual read path, not a stand-in.
+   */
+  it('and executeRead no longer logs a capture line of its own', async () => {
+    const real = await vi.importActual<typeof import('../src/browser/actions.js')>(
+      '../src/browser/actions.js',
+    );
+    const VALUE = 's3cret-from-the-page';
+    const root = {
+      locator: () => ({ first: () => ({ evaluate: async () => VALUE }) }),
+    } as unknown as Page;
+
+    const lines: string[] = [];
+    const stop = addLogCallback((_level, message) => { lines.push(message); });
+    let captured: string | undefined;
+    try {
+      const out = await real.executeAction(root, {
+        action: 'read',
+        selector: '#code',
+        as: 'password',
+        description: 'Read the one-time code',
+      } as AIAction);
+      captured = out.capturedValue;
+    } finally {
+      stop();
+    }
+
+    // The read still works — the value is returned, it is just not printed.
+    expect(captured).toBe(VALUE);
+    expect(lines.join('\n')).not.toContain(VALUE);
+    expect(lines.join('\n')).not.toContain('read captured');
+  });
+});
+
+/**
+ * Review 6, finding 5a: `StepValues.map` is the LIVE variable map, and the
+ * prompt's `## Values` block asks it whose each dotted name is.
+ *
+ * tests/prompt-values-block.test.ts pins `formatParameterBlock` and
+ * `buildStepMessage` with a map handed to them; nothing pinned that
+ * `buildStepValues` actually hands one over, so deleting `map: params` left
+ * the whole suite green. Both directions are asserted below, because the two
+ * ways of getting this wrong fail differently and only one of them is
+ * "forgot the field".
+ */
+describe('the ## Values block is asked with the live variable map', () => {
+  /** The block's own lines, out of everything the model was sent. */
+  async function valuesLines(params: Record<string, string>): Promise<string[]> {
+    const authored = 'Check the row for {{user.apikey}} and {{row.keyword}}';
+    const { client } = await runStep(
+      authored,
+      [plan([{ action: 'click', selector: '#go', description: 'Go' }])],
+      { parameters: params, authored },
+    );
+    return allRequestText(client).split('\n').filter((line) => line.startsWith('- {{'));
+  }
+
+  /** The two names of §7.6's worked example: a data file's column HEADING,
+   *  which nothing bound, and a loop's pass binding, which something did. */
+  function liveMap(apikey: string): Record<string, string> {
+    const params: Record<string, string> = { 'user.apikey': apikey, 'row.keyword': 'AU' };
+    markLoopBindings(params, ['row.keyword']);
+    return params;
+  }
+
+  it('masks a dotted heading nobody bound, and leaves the column a pass did', async () => {
+    const lines = await valuesLines(liveMap('uk_live_1234'));
+    expect(lines).toContain('- {{user.apikey}} resolved to "***" on this run');
+    // The other half of the bargain, and the one a COPY of the map breaks: a
+    // copy carries none of the registry's marks, so `row.keyword` falls back
+    // to the author rule and `AU` is masked out of the block the model needs
+    // it from. Measured: `map: { ...params }` renders `***` here.
+    expect(lines).toContain('- {{row.keyword}} resolved to "AU" on this run');
+    expect(lines.join('\n')).not.toContain('uk_live_1234');
+  });
+
+  it('masks it by NAME, not only because the value joined the free-text set', async () => {
+    // The line above is true twice over for a non-empty value — `secretValues`
+    // reads the same live map and puts `uk_live_1234` in the free-text set, so
+    // `redact` would reach it even with no map at all. An EMPTY value is where
+    // the two part company: nothing empty ever joins that set (`''.split('')`
+    // would shred the text), so the NAME is the only rule left, and the name
+    // is only askable because the map travels with the values.
+    //
+    // Measured with `map: params` removed: `""` rather than `"***"`.
+    const lines = await valuesLines(liveMap(''));
+    expect(lines).toContain('- {{user.apikey}} resolved to "***" on this run');
+    expect(lines).toContain('- {{row.keyword}} resolved to "AU" on this run');
   });
 });

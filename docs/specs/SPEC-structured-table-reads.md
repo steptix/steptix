@@ -929,13 +929,41 @@ accepts exactly one direct header row belonging to the selected table:
   real header and deletes the `O-1` row from the middle of the table. The
   residual limit is the mirror image: a genuine heading row with a single
   `<th>` beside `<td>`s (`<tr><th>Name</th><td>Actions</td></tr>`) is not
-  recognised as one, so a group row above IT is not stepped over. A
-  stepped-over row is not deleted: it stays in the body as an ordinary data
-  row, because §4.8's floor makes a lone cell spanning one column data. So a
-  read of one column makes it record 1, holding that cell's own text, and a
-  read of two columns fails the whole read with
-  `readTable cannot map table "<label>": row 1 has 1 cell, so there is no cell for the "<column>" column at position 2`
-  (§10);
+  recognised as one, so a group row above IT is not stepped over. Stepping
+  over does not delete anything by itself — the row goes back into the body —
+  but §4.8 then classifies it like any other body row, and the two answers it
+  can give are different enough to be worth stating apart:
+
+  - a group row whose cell SPANS the grid
+    (`<tr><th colspan="3">Group A</th></tr>` above a three-column heading
+    row) is a **placeholder** by §4.8's `colSpan >= max(width, 2)` rule. It
+    is dropped, it gets no `_row`, and it is counted in the "N placeholder
+    rows skipped" line. Measured on that table: a read of one column gives
+    `Alice` and `Bob` numbered 1 and 2 with one placeholder skipped, and a
+    read of two columns SUCCEEDS — the spanned row never reaches the mapping
+    step at all;
+  - a group row whose cell does NOT span
+    (`<tr><th colspan="1">Group A</th></tr>`, or the same with no `colspan`
+    attribute) is **data**, because §4.8's floor of 2 makes a lone cell
+    spanning one column data. It stays in the body as an ordinary row, so a
+    read of one column makes it record 1 holding that cell's own text
+    (`Group A`, `Alice`, `Bob`, numbered 1 to 3) and a read of two columns
+    fails the whole read with
+    `readTable cannot map table "<label>": row 1 has 1 cell, so there is no cell for the "<column>" column at position 2`
+    (§10).
+
+  Two further residual limits were measured in review 6 and left as known
+  limitations rather than fixed, because each candidate fix moves the line
+  and the next shape is not known: a totals row inside `<tbody>` carrying two
+  `<th>` cells counts as the wider heading row and steps over a genuine
+  one-cell `<th>` header above it (the same row in `<tfoot>` does not), and a
+  headerless table whose body rows are ALL unscoped row-header rows
+  (`<tr><th>O-1</th><td>Delete</td></tr>` with nothing above them) takes its
+  first row as the header and loses that row from the read, with
+  `scope="row"` as the escape hatch. See
+  [issues/058](../../issues/058-tbody-totals-row-steps-over-a-one-cell-header.md)
+  and
+  [issues/059](../../issues/059-all-row-header-table-loses-its-first-row.md);
 - nested-table rows/cells are excluded by requiring `closest('table')` to be
   the selected table.
 
@@ -1868,6 +1896,25 @@ states the rule. Two entries predate the review rounds and say so.
 - **Round 2** — a framework rendering `<thead></thead>` with the headings in
   the first `<tbody>` row was read as headerless, because the element was
   present. §7.3 says absent **or empty**.
+- **Round 3** — the prompt's `## Values` block printed a record capture in
+  full whenever a step named `{{payments}}` or `{{payment}}`, while the DOM
+  beside it was masked. §7.6 states the composition: the name rule, then the
+  record's own columns in place, then the free-text set.
+- **Round 3** — env and data secrets joined the mask set only in their raw
+  spelling, so a value that reached an output JSON- or HTML-escaped was not
+  replaced. §7.6 requires the escaped forms too.
+- **Round 3** — the client's flat secret rule had been narrowed to whole
+  words in round 1, so `mypassword` and `apitoken` rendered raw in the
+  Variables view, the panel, the banner and the `[input:]` echo. §7.6 makes
+  it the server's regex, read out of the runtime source by a parity test.
+- **Round 3** — a dotted reference whose root is an `Object.prototype` name
+  (`{{constructor.id}}`) crashed the run at three substitution sites. §8.2
+  drops the three prototype names, and every map read on that path is
+  own-property.
+- **Round 3** — a one-cell `<th>` group row was taken as the header of a
+  wider headerless table, so the real heading row became record 1. §7.3's
+  step-over is the answer; the round-4 line below records what the first cut
+  of it broke.
 - **Round 4** — a `<tr><th>Section A</th></tr>` group row was accepted as the
   header of a headerless table, so the real heading row became record 1 and a
   header-named read reported `available headers are Section A`; the first cut
@@ -1880,6 +1927,32 @@ states the rule. Two entries predate the review rounds and say so.
 - **Round 4** — a leading U+FEFF cleared the `/^\s*[[{]/` sniff and then
   threw in `JSON.parse`, and the catch handed the record back unmasked. §7.6
   requires every copy of that scan to strip it first.
+- **Round 5** — a row-header row (`<th>` then `<td>`s) counted as the wider
+  heading row the step-over looks for, so a genuine one-cell `<th>` header
+  above such rows was stepped over and a data row taken as the header. §7.3
+  requires a heading row to carry **MORE THAN ONE** `<th>`.
+- **Round 5** — the client could not tell a bound `payment.keyword` from an
+  author-typed `user.apikey`: the registry that knows is by object identity
+  and `frame:scope` sends a copy. §7.6 puts `bindings` on every `frame:scope`
+  — `[]` included, since absent has to keep meaning "an older server said
+  nothing" — with `unmask` beside it.
+- **Round 5** — the report's `For each` band printed a pass's bindings with
+  no name rule at all, so a three-character `password` cell showed beside a
+  parameter map that said `***`. §7.6 masks the band by name, registry-aware,
+  and both marker sites hand their copy its marks.
+- **Round 5** — `redactMap` and `redactAuthoredMap` applied the name rule and
+  then the free-text set and never the record scan between them, so a
+  single-record capture under a plain name printed in full wherever a map is
+  rendered. §7.6 states the one composition: name, then the record's columns
+  in place, then free text.
+- **Round 5** — the Electron runner pushed raw substituted step text into its
+  prompt history and its step-start event, and the CLI's `Stored captured
+  value as …` log line printed the value raw. §7.6's masking is the run's,
+  not one runner's.
+- **Round 5** — the client corpora and the control-line parity test imported
+  runner-core from its built output, so a source drift passed until someone
+  rebuilt. Both import source; §12 item 21d names the mutations that now
+  fail.
 
 ---
 
@@ -1957,6 +2030,36 @@ states the rule. Two entries predate the review rounds and say so.
     their other columns readable, a dotted `payment.sort_key` is NOT masked
     while `payment.api_key` is, and `payment._row` leads the properties on a
     record whose other aliases are capitalised.
+21c. From the fourth review round, the extractor and the client: a
+    `<tr><th>Section A</th></tr>` group row is stepped over and the real
+    heading row below it is the header, while a one-cell `<th>` header above
+    WIDER data rows is kept — both in `tests/read-table.test.ts`, with
+    `a stepped-over group row is a data row — record 1, or a short row (§4.8)`
+    pinning that stepping over is not deleting. A leading U+FEFF does not
+    smuggle a record past the `/^\s*[[{]/` sniff, in `runner-core/tests/repl.test.js`
+    and in `testbench-native/tests/record-secret-parity.test.js` (which also
+    compares the two record-masking mirrors body for body, so the strip
+    cannot be added to one copy only).
+21d. From the fifth and sixth rounds, whose subject was the pins themselves.
+    A heading row must carry more than one `<th>`, so a one-cell header above
+    row-header data rows survives (`keeps that one-cell header when the DATA
+    rows carry row headers (§7.3)` and its `scope="row"` twin,
+    `tests/read-table.test.ts`). `frame:scope` carries `bindings` on every
+    frame — after a pass, after a TOLERATED failure and after a plain one,
+    which are three separate emits in the step loop and were pinned by one
+    test until round 6: `says on frame:scope which dotted names the pass
+    bound — and unsays them` (`tests/api-server-control-flow.test.ts`) and
+    `the scope frame beside a failure says whose the dotted names are`
+    (`tests/api-server-failure-outcomes.test.ts`), the second of which fails
+    when either of the other two spreads is deleted. The report's loop band
+    is masked by the binding rule and not the author's —
+    `masks the report band by the binding rule` in the same control-flow
+    file, which turns `keyword` into `***` when the marks are dropped. And
+    the two client parity corpora import runner-core's SOURCE rather than its
+    `dist/`, so a mutation of `parseControlLine` fails
+    `tests/placeholder-dotted.test.ts` and one of `extractSections` fails
+    `testbench-native/tests/sections-copy-parity.test.js`, neither of which a
+    build-free `npm test` could have seen before.
 22. (Phase 2) Each §7.7 form passes and fails on a fixed record list, the
     failure names the offending rows, and the number parser accepts `$1,234.56`,
     `+42`, `−$87.40` (U+2212) and `(87.40)` and rejects `n/a` by naming the row.
@@ -2138,6 +2241,31 @@ Moved out of v1 after review, each with why and what would bring it back:
   the report line — “3 of 40 rows failed: rows 7, 19, 31” — and a collapsed
   pass in the report and in TestBench when it passed cleanly. Forty passes of
   four steps is 160 rows nobody reads.
+- **A `<tbody>` totals row steps over a genuine one-cell header**
+  ([issues/058](../../issues/058-tbody-totals-row-steps-over-a-one-cell-header.md)).
+  The step-over of §7.3 asks whether a wider heading row — more than one
+  `<th>` — follows the candidate, and a totals row written as
+  `<tr><th>Total</th><th>12</th></tr>` inside `<tbody>` answers yes from
+  BELOW the data. Measured: a table whose header is `<tr><th>Order ID</th></tr>`
+  then reads as headerless, and a positional read makes `Order ID` record 1
+  and numbers every real row one too high. The same totals row in `<tfoot>`
+  reads correctly, because only body rows are scanned. The candidate fix —
+  count a wide heading row only before the first body row containing no
+  `<th>` — was written during review 6 and measured green there (83 read-table
+  tests plus probes), and left out because it moves the line and the next shape past it is not
+  known.
+- **A headerless table of row-header rows loses its first row**
+  ([issues/059](../../issues/059-all-row-header-table-loses-its-first-row.md)).
+  `<tr><th>O-1</th><td>Delete</td></tr>` repeated with nothing above it has
+  no header, but the first such row contains a `<th>`, carries no
+  `scope="row"` and is not a lone spanning cell — §7.3's three conditions —
+  so it is taken as the header and spliced out of the body. Measured: three
+  such rows read as two records starting at `O-2`. `scope="row"` is the
+  escape hatch and is the markup the shape should carry anyway (§10). The
+  candidate fix — refuse a multi-cell candidate whose `<th>` positions match
+  the next body row's, which makes it a row-header COLUMN rather than a
+  header row — was measured green over 98 tests during review 6 and left out for
+  the same reason.
 - **Grids that are not `<table>`.** `<div role="grid">` (ag-grid, MUI
   DataGrid), card lists, and responsive tables that become card stacks at a
   phone viewport (which the per-test `viewport:` config can now select). §1.2

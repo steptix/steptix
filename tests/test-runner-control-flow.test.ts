@@ -1813,6 +1813,31 @@ describe('an [output:] step naming a prototype key (CLI)', () => {
     });
   }
 
+  /**
+   * The `[set]` log line is a capture line like the others, so it takes the
+   * record scan before the free-text set: `Set {{payment}} to "{{payments}}"`
+   * over a readTable capture holds a record whose short `password` cell is
+   * below the free-text floor and is masked by its column name alone.
+   */
+  it("masks a record's secret columns on the [set] log line", async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    try {
+      const md = ['# Set', '', '## Steps', '1. Set {{payment}} to "{{payments}}"', ''].join('\n');
+      const report = await runTest(
+        await instance(md, { payments: '[{"payee":"Acme","password":"abc"}]' }, 'set-record.md'),
+        makeConfig(),
+        '',
+      );
+      expect(report.steps[0]!.status).toBe('passed');
+      const lines = info.mock.calls.map((c) => String(c[0]));
+      const setLine = lines.find((l) => l.startsWith('[set] payment = '));
+      expect(setLine).toBe('[set] payment = "[{\"payee\":\"Acme\",\"password\":\"***\"}]"');
+      expect(lines.join('\n')).not.toContain('abc');
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it('captures nothing, and says "(not captured)", when the read found nothing', async () => {
     const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
     try {
@@ -1848,5 +1873,70 @@ describe('an [output:] step naming a prototype key (CLI)', () => {
     } finally {
       info.mockRestore();
     }
+  });
+});
+
+/**
+ * Review 6, finding 3: the same `[output:]` console line, printing the VALUE.
+ *
+ * The fix above replaced a bare index with `boundValue` and left the value
+ * itself raw — so the CLI announced `[output: password] = "hunter2"` to the
+ * console and to every client on the SSE `output` bridge, while the report,
+ * the step line and the prompt's `## Values` block all said `***` for the
+ * same capture. It is the executor's own "Stored captured value" twin, and it
+ * takes the same composition: record SHAPE first, then the free-text set.
+ */
+describe('the [output:] console line is masked, like its executor twin', () => {
+  /** A one-step test whose step captures `value` into `variable`. */
+  async function outputLines(variable: string, value: string): Promise<string[]> {
+    const markdown = [
+      '# Output',
+      '',
+      '## Steps',
+      `1. [output: ${variable}] Read it`,
+      '',
+    ].join('\n');
+    executeStepMock.mockImplementation(async (
+      index: number,
+      _total: number,
+      instruction: string,
+      opts: { resolvedParameters: Record<string, string> },
+    ) => {
+      opts.resolvedParameters[variable] = value;
+      return { index, instruction, status: 'passed', turns: [], durationMs: 1, retried: false };
+    });
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    try {
+      await runTest(
+        await instance(markdown, {}, `output-mask-${variable}.md`),
+        makeConfig(),
+        '',
+      );
+      return info.mock.calls.map((c) => String(c[0]));
+    } finally {
+      info.mockRestore();
+    }
+  }
+
+  it('masks it when the author’s own name says secret', async () => {
+    const lines = await outputLines('password', 'hunter2!x');
+    expect(lines).toContain('[output: password] = "***"');
+    expect(lines.join('\n')).not.toContain('hunter2!x');
+  });
+
+  it('masks a secret COLUMN of a record capture, which no name can reach', async () => {
+    // `[output: rows]` over a `readTable` capture: one table under a name
+    // that says nothing, and a three-character cell is below the free-text
+    // floor, so only the record rule can hide it.
+    const lines = await outputLines('rows', '[{"payee":"Acme","password":"abc"}]');
+    expect(lines).toContain('[output: rows] = "[{"payee":"Acme","password":"***"}]"');
+    expect(lines.join('\n')).not.toContain('"abc"');
+    // …and the column the record rule leaves alone is still readable.
+    expect(lines.join('\n')).toContain('Acme');
+  });
+
+  it('still prints a plain capture in full', async () => {
+    const lines = await outputLines('total', '37.76');
+    expect(lines).toContain('[output: total] = "37.76"');
   });
 });

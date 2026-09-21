@@ -7,6 +7,12 @@
  * skill expansion, inline sections and conditional groups all make those two
  * lists different lengths.
  */
+// A VALUE import, and the only one in this file that leaves src/mcp — so it
+// is on the `aiui mcp` startup path that tests/mcp-entry-graph.test.ts pins.
+// Safe: src/utils/secrets.ts reaches parameters.ts, interpolate-env-data.ts,
+// data-loader.ts and logger.ts, all of which this process already loads
+// through src/mcp/tools.ts, and none of which reaches playwright.
+import { redactAuthoredMap, secretValues } from '../utils/secrets.js';
 import type { FrameInfo } from '../server/session-manager.js';
 import type {
   EffectiveSettings,
@@ -106,6 +112,10 @@ export interface FoldedRun {
   status: RunStatus;
   streamDropped: boolean;
   steps: FoldedStep[];
+  /**
+   * What the run captured, MASKED — see {@link maskCaptures}. Every other
+   * string in this object arrives masked from the server; these did not.
+   */
   captures: Record<string, string>;
   messages: { level: 'error' | 'warn'; text: string }[];
   warnings: string[];
@@ -227,6 +237,37 @@ export const DATA_URI_PREFIX = /^data:image\/png;base64,/;
  *  rule makes routine, not exotic. Hence both arms. */
 function isRootFrame(frame: FrameInfo | undefined): boolean {
   return frame === undefined || (frame.kind === 'test' && frame.id === '');
+}
+
+/**
+ * The captures, masked — the one place in this fold where that has to happen
+ * here rather than having happened already.
+ *
+ * Every other string a folded run carries is text the SERVER wrote and
+ * masked on its way out: a step's line, an error, an `output` message. A
+ * `capture` event is different by design — it exists so the TestBench
+ * Variables panel can hold the real value and reveal it on request, so the
+ * server sends it raw and each client decides. The MCP client had no such
+ * decision: `captures{}` went into `run_test_file` / `run_steps` /
+ * `run_errand`'s result verbatim, so a `[store as: password]` reached the
+ * agent — and the agent's transcript — in clear (review 6, finding 4).
+ *
+ * {@link redactAuthoredMap} is the rule, not `redactMap`: a capture's name is
+ * the AUTHOR's word end to end (`[store as: …]`, `[output: …]`, a tool's
+ * output alias), so the whole name goes to `isSecretName` and a dotted one is
+ * not split at the dot. Nothing in this map is a loop's pass binding — the
+ * server emits one `capture` per NAMED capture, not per property.
+ *
+ * The free-text set is built from the captures themselves, which is all this
+ * process has: it never sees the run's `## Parameters`, its `.env` or its
+ * data files. That is enough for the leak that matters here — a secret-named
+ * capture spelled out inside a LATER capture's record — and it is the same
+ * `secretValues` rule the runner applies to the same kind of map, rather than
+ * a second opinion about what a secret is. Values the server already masked
+ * arrive as `***` and contribute nothing.
+ */
+function maskCaptures(captures: Record<string, string>): Record<string, string> {
+  return redactAuthoredMap(captures, secretValues(captures));
 }
 
 interface OpenRow {
@@ -617,7 +658,11 @@ export function foldRun(input: FoldInput): FoldedRun {
     status,
     streamDropped,
     steps,
-    captures,
+    // Masked HERE rather than at the `capture` case, so the free-text set is
+    // built from the whole run: a password captured at step 2 is hidden
+    // inside a record captured at step 7, which a per-event pass could not
+    // see yet.
+    captures: maskCaptures(captures),
     messages: messages.slice(-MAX_MESSAGES),
     warnings,
     reportPath,

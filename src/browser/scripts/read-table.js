@@ -294,8 +294,19 @@
       //
       // Stepping OVER it rather than refusing is what lets the search reach
       // the row that does name the columns, and the step is deliberately
-      // narrow: only a row that carries a `<th>`, and so would otherwise have
-      // been ACCEPTED here. A one-cell `<td>` row already ends the search with
+      // narrow: only a ONE-CELL row that carries a `<th>`.
+      //
+      // Narrow is not the same as "a row this branch would otherwise have
+      // ACCEPTED", which is what this said and §7.3 does not: the acceptance
+      // test below also refuses a lone SPANNING cell (`lonelySpan`), so
+      // `<tr><th colspan="3">Group A</th></tr>` is stepped over HERE and
+      // would have been refused THERE. That is the right way round — a
+      // spanned group row is dropped again a moment later as a placeholder
+      // (§4.8, `colSpan >= max(width, 2)`), so ending the search on it would
+      // mean refusing to look past a row that is about to leave the table
+      // anyway.
+      //
+      // A one-cell `<td>` row already ends the search with
       // no header (it has no heading in it), and that stays — stepping over
       // one could reach a `<th>` further down that is a row-header column,
       // silently deleting a data row from the middle of the read.

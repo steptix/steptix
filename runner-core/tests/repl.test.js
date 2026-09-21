@@ -651,6 +651,17 @@ test('compareVariableNames: the record itself comes before its properties', () =
   ]);
 });
 
+test('isSecretVarName: a dotted name outside the bindings is also read as one credential key', () => {
+  // `isSecretFlatName` does not know `otp` / `pwd` / `credential`; the
+  // record-column reading of the whole name does — same arm as the server.
+  assert.equal(isSecretVarName('user.otp', []), true);
+  assert.equal(isSecretVarName('user.pwd', []), true);
+  assert.equal(isSecretVarName('login.credential', []), true);
+  assert.equal(isSecretVarName('user.keyword', []), true); // author rule: `key`
+  assert.equal(isSecretVarName('row.keyword', ['row.keyword']), false); // registered: record rule
+  assert.equal(maskIfSecret('user.otp', '123456', { bindings: [] }), '******');
+});
+
 test('compareVariableNames: roots still order by name', () => {
   assert.deepEqual(['order.id', 'delivery._row', 'order._row'].sort(compareVariableNames), [
     'delivery._row',
