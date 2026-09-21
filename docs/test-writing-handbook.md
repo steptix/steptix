@@ -180,6 +180,8 @@ to an action.
 | Intent | Write | What happens |
 | --- | --- | --- |
 | Go to a page | `Navigate to /orders` or `Navigate to https://…` | `page.goto`. Relative paths need `baseUrl`. |
+| Browser back | `Go back` / `Go back to the previous page` | `page.goBack()` on the active tab — the browser button, not anything in the page. Same-document entries count, so a single-page app that pushes history works. Fails the step when the tab does not move. |
+| Browser forward | `Go forward` | `page.goForward()`. Fails the same way when the tab does not move. |
 | Click | `Click the Sign in button` | Located by visible label, then the most stable selector on that element. |
 | Click, scoped | `Click Edit in the row for order {{order_id}}` | Scoping by row, dialog, section or form is how repeated labels are disambiguated. |
 | Enter text | `Type "{{email}}" into the Email field` | Clears the field, then fills. It does not append. |
@@ -1111,6 +1113,11 @@ test is reading.
   choice.
 - `Press Enter in the Search field` does not focus the field. Type into it in
   the same step first.
+- No keyboard route to the BROWSER. A key press is delivered to the focused
+  element inside the page, so a back or refresh shortcut does nothing at all
+  — and does it quietly, since the press itself succeeds and the step passes.
+  Going back is its own action (`Go back`, §3); reloading has none yet, so
+  navigate to the URL again.
 - A `prompt` for clarification is what the model does when a step is
   underspecified. On the CLI a person answers; on TestBench, MCP and CI the
   step is skipped or fails. Underspecified steps are therefore not portable.
