@@ -15,15 +15,16 @@
 //     code back to stderr in clear (fact 4). What comes out is a category, and
 //     on success a session key — never a line `bw` printed.
 //  3. **An echo is not a re-ask.** `bw` re-renders a prompt once per character
-//     it echoes, AFTER reading our answer. Treating that as `bw` asking again
-//     would end every real sign-in at its first prompt.
+//     it echoes, AFTER reading our answer — the masked password prompt too.
+//     Treating that as `bw` asking again would end every real sign-in at its
+//     first prompt.
 //  4. **Never write a secret to a `bw` this file could not stop.** In the SSO
 //     state `bw` ignores stdin and survives the death of the process we
 //     spawned (fact 10), so on Windows we find `bw`'s own PID before writing
 //     anything, and stop at the email prompt if we cannot.
 
 import { spawn as nodeSpawn } from 'node:child_process';
-import { bwLaunch } from './vault.js';
+import { bwLaunch, type BwLaunch } from './vault.js';
 import { findBwProcess as realFindBwProcess, type BwPick } from './bw-process.js';
 
 /** A code dialog's two flavours, which differ only in what they tell the user. */
@@ -64,6 +65,7 @@ export interface LoginChild {
   } | null;
   readonly stdout: { on(event: 'data', listener: (chunk: unknown) => void): unknown } | null;
   readonly stderr: { on(event: 'data', listener: (chunk: unknown) => void): unknown } | null;
+  on(event: 'exit', listener: (code: number | null) => void): unknown;
   on(event: 'close', listener: (code: number | null) => void): unknown;
   on(event: 'error', listener: (err: Error) => void): unknown;
   kill(): unknown;
@@ -78,8 +80,8 @@ export interface DriveLoginOptions {
   credentials: { email: string; password: string };
   /** Raise the code dialog. Resolves the code, or null if cancelled or timed out. */
   askCode: (kind: CodeKind) => Promise<string | null>;
-  /** Seams — all default to the real thing. */
-  spawn?: (command: string, args: string[], env: NodeJS.ProcessEnv) => LoginChild;
+  /** Seams — all default to the real thing. `launch` is `bwLaunch`'s answer. */
+  spawn?: (launch: BwLaunch, env: NodeJS.ProcessEnv) => LoginChild;
   findBwProcess?: (spawnedPid: number) => Promise<BwPick>;
   killPid?: (pid: number) => void;
   platform?: NodeJS.Platform;
@@ -88,7 +90,12 @@ export interface DriveLoginOptions {
   onEvent?: (event: DriverEvent) => void;
 }
 
-/** 60s: every legitimate step answers far sooner; the SSO step never does. */
+/**
+ * 60s after a write. The SSO step never answers; a server-accepted login still
+ * in its post-login sync may not either — which is why `quiet` is its own
+ * category, resolved by asking `bw status` (story §4.6), and never read as
+ * "unsupported" on its own.
+ */
 export const QUIET_MS = 60_000;
 /** 6 min: the code dialog's 180s, `bw`'s start and network, and margin. */
 export const DEADLINE_MS = 6 * 60_000;
@@ -136,6 +143,9 @@ const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\r/g;
 /** An escape sequence cut off by a chunk boundary, still waiting for its end. */
 const PARTIAL_ANSI = /\x1b(\[[0-9;?]*[ -/]*)?$/;
 
+/** One value per prompt: a line break would answer the next prompt too. */
+const LINE_BREAK = /[\r\n]/;
+
 /**
  * The text `bw` printed that is not a prompt: its final message. Render lines
  * (`? …`, echoes included) are removed first, so an echoed email that happens
@@ -159,10 +169,18 @@ function classifyExit(message: string): DriverFailure {
   return 'failed';
 }
 
-function defaultSpawn(command: string, args: string[], env: NodeJS.ProcessEnv): LoginChild {
-  // `shell: false`: argv is fixed literals, but there is still no reason to
-  // give a shell a look at it. `windowsHide` so no console flashes.
-  return nodeSpawn(command, args, { shell: false, windowsHide: true, env, stdio: ['pipe', 'pipe', 'pipe'] });
+function defaultSpawn(launch: BwLaunch, env: NodeJS.ProcessEnv): LoginChild {
+  // Never `shell: true`. On Windows a `.cmd` still runs inside `cmd.exe`, which
+  // parses the whole line — `bwLaunch` builds that line so nothing in it is
+  // interpretable, and `verbatim` stops Node re-quoting it. `windowsHide` so no
+  // console flashes.
+  return nodeSpawn(launch.command, launch.args, {
+    shell: false,
+    windowsHide: true,
+    windowsVerbatimArguments: launch.verbatim,
+    env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
 }
 
 function defaultKillPid(pid: number): void {
@@ -182,26 +200,38 @@ export function driveLogin(opts: DriveLoginOptions): Promise<DriverResult> {
   const emit = opts.onEvent ?? (() => {});
   const findBw = opts.findBwProcess ?? realFindBwProcess;
 
-  // One value, one prompt. A line break inside a value would be read by `bw`
-  // as the answer to the NEXT prompt too — so no such value is ever written.
-  // The dialogs are single-line and a user cannot type one; this is for the
-  // paste that carried one in.
-  if (/[\r\n]/.test(opts.credentials.email) || /[\r\n]/.test(opts.credentials.password)) {
+  const refuse = (): Promise<DriverResult> => {
     emit({ stopped: 'failed' });
     return Promise.resolve({ kind: 'failed' });
-  }
+  };
+
+  // One value, one prompt. The dialogs are single-line and a user cannot type
+  // a line break; this is for the paste that carried one in.
+  if (LINE_BREAK.test(opts.credentials.email) || LINE_BREAK.test(opts.credentials.password)) return refuse();
 
   const env = loginEnv(opts.environment);
-  const launch = bwLaunch(opts.binary, ['login', '--raw'], env, platform);
+  let launch: BwLaunch;
+  try {
+    launch = bwLaunch(opts.binary, ['login', '--raw'], env, platform);
+  } catch {
+    return refuse(); // a binary path cmd.exe would interpret
+  }
   const wrapped = launch.command !== opts.binary;
 
   return new Promise<DriverResult>((resolve) => {
     let settled = false;
+    /**
+     * Set when the process we SPAWNED exits. A `cmd.exe` wrapper or a shim
+     * waits for `bw` and exits after it, so from here on the recorded PID may
+     * already belong to some other process — and is never killed.
+     */
     let spawnedExited = false;
     /** `bw`'s own PID when it is not the process we spawned. */
     let bwPid: number | null = null;
     /** Whether `bw` has been identified yet (always true off Windows). */
     let identified = platform !== 'win32';
+    /** Whether the PID lookup has run, so a stop does not run it a second time. */
+    let lookupTried = false;
 
     let raw = ''; // all stderr so far, unprocessed escapes and all
     let consumed = 0; // index into the ANSI-stripped stderr already handled
@@ -209,9 +239,12 @@ export function driveLogin(opts: DriveLoginOptions): Promise<DriverResult> {
 
     const answered = new Set<PromptKind>();
     let lastAnswered: PromptKind | null = null;
-    /** The code prompt whose dialog is open right now. */
-    let pendingCode: CodeKind | null = null;
-    /** Set while awaiting the PID lookup or a code dialog: stderr just queues. */
+    /**
+     * Set while awaiting the PID lookup or a code dialog. stderr keeps arriving
+     * and queues; it is read when the wait is over. That is also why the code
+     * prompt's own echoes need no rule of their own: they are read after the
+     * code has been written, as echoes of the prompt answered last.
+     */
     let busy = false;
 
     let quietTimer: ReturnType<typeof setTimeout> | undefined;
@@ -219,7 +252,7 @@ export function driveLogin(opts: DriveLoginOptions): Promise<DriverResult> {
 
     let child: LoginChild;
     try {
-      child = spawnChild(launch.command, launch.args, env);
+      child = spawnChild(launch, env);
     } catch {
       clearTimeout(deadline);
       settled = true;
@@ -241,12 +274,23 @@ export function driveLogin(opts: DriveLoginOptions): Promise<DriverResult> {
       resolve(result);
     }
 
+    function killSpawned(): void {
+      try {
+        child.kill();
+      } catch {
+        // already gone
+      }
+    }
+
     /**
      * Stop `bw` in whatever state it is in (story §4.4): end stdin (enough at a
      * prompt), kill `bw` by PID (the only thing that works in the SSO state),
-     * kill what we spawned. The PID is used only while the process we spawned
-     * is still alive: a wrapper or shim outlives its child, so once it has
-     * exited the PID may already belong to someone else.
+     * kill what we spawned.
+     *
+     * If `bw` was never identified — a stop before its first prompt, on
+     * Windows — it is looked up now, BEFORE the spawned process is killed: the
+     * lookup finds children of a live parent, and once the parent is gone it
+     * cannot. The call settles at once; the stop finishes in the background.
      */
     function stop(kind: DriverFailure): void {
       if (settled) return;
@@ -261,12 +305,18 @@ export function driveLogin(opts: DriveLoginOptions): Promise<DriverResult> {
         } catch {
           // already gone
         }
+      } else if (!identified && !lookupTried && !spawnedExited && child.pid !== undefined) {
+        lookupTried = true;
+        void findBw(child.pid)
+          .then((pick) => {
+            if (typeof pick === 'number' && !spawnedExited) killPid(pick);
+          })
+          .catch(() => {})
+          .finally(killSpawned);
+        settle({ kind });
+        return;
       }
-      try {
-        child.kill();
-      } catch {
-        // already gone
-      }
+      killSpawned();
       settle({ kind });
     }
 
@@ -294,6 +344,7 @@ export function driveLogin(opts: DriveLoginOptions): Promise<DriverResult> {
      */
     async function identify(): Promise<boolean> {
       const pid = child.pid;
+      lookupTried = true;
       let pick: BwPick = null;
       if (pid !== undefined) {
         try {
@@ -322,7 +373,7 @@ export function driveLogin(opts: DriveLoginOptions): Promise<DriverResult> {
     /** Handle one complete render. Resolves false when the driver has stopped. */
     async function handle(render: string): Promise<boolean> {
       const kind = promptKind(render);
-      if (kind === lastAnswered || kind === pendingCode) return true; // an echo
+      if (kind === lastAnswered) return true; // an echo
       if (kind === 'unknown' || kind === 'method-list') {
         stop('unsupported-step');
         return false;
@@ -341,7 +392,6 @@ export function driveLogin(opts: DriveLoginOptions): Promise<DriverResult> {
       } else if (kind === 'password') {
         answer('password', opts.credentials.password);
       } else {
-        pendingCode = kind;
         let code: string | null;
         try {
           code = await opts.askCode(kind);
@@ -355,12 +405,11 @@ export function driveLogin(opts: DriveLoginOptions): Promise<DriverResult> {
           stop('cancelled');
           return false;
         }
-        if (/[\r\n]/.test(code)) {
+        if (LINE_BREAK.test(code)) {
           stop('failed');
           return false;
         }
         answer(kind, code);
-        pendingCode = null;
       }
       return true;
     }
@@ -369,7 +418,8 @@ export function driveLogin(opts: DriveLoginOptions): Promise<DriverResult> {
      * Read every complete render not yet handled, in order (story §4.2). A
      * render is complete once it contains a `:` or another render follows it.
      * Splitting runs over everything unconsumed, so a chunk boundary anywhere —
-     * mid-prompt, or inside the `? ` itself — joins up on the next chunk.
+     * mid-prompt, inside the `? `, or inside an escape sequence — joins up on
+     * the next chunk.
      */
     async function pump(): Promise<void> {
       if (busy || settled) return;
@@ -416,8 +466,12 @@ export function driveLogin(opts: DriveLoginOptions): Promise<DriverResult> {
     child.stdout?.on('data', (chunk) => {
       stdout += String(chunk);
     });
-    child.on('error', () => {
+    child.on('exit', () => {
       spawnedExited = true;
+    });
+    child.on('error', () => {
+      // Not an exit: a spawn or signal failure. The process may still be
+      // running, so a recorded `bw` PID is still `bw`'s and still killed.
       stop('failed');
     });
     child.on('close', (code) => {

@@ -76,16 +76,40 @@ export function resolveBinary(binary: string, env: NodeJS.ProcessEnv): string {
 }
 
 /**
+ * Characters `cmd.exe` acts on even inside double quotes — `%` expands a
+ * variable, `"` ends the quoting — plus line breaks, which end the command. A
+ * binary path containing any of them cannot be handed to `cmd.exe` safely at
+ * all, so it is refused rather than escaped.
+ */
+const CMD_UNSAFE_IN_QUOTES = /["%\r\n]/;
+
+/** How to start one `bw` command. `verbatim` is `windowsVerbatimArguments`. */
+export interface BwLaunch {
+  command: string;
+  args: string[];
+  verbatim: boolean;
+}
+
+/**
  * The command line that runs `binary` with `args`: the one launch rule shared
  * by the one-shot calls below and the login driver (bw-login.ts).
  *
  * A `.cmd` or `.bat` cannot be spawned directly (see `resolveBinary`), so on
- * Windows it goes through `cmd.exe`. That is safe only for arguments `cmd.exe`
- * will not interpret — no `&`, `|`, `^`, `%` or space — which is why every
- * caller passes fixed literals or values that cleared `SAFE_ARG`. Note what
- * the wrapping costs: the program becomes a CHILD of the process we spawn, and
- * stopping the wrapper does not always stop it (stories/bitwarden-sign-in.md
- * §1 fact 10).
+ * Windows it goes through `cmd.exe` — and `cmd.exe` parses the WHOLE line,
+ * binary path included. So the line is built the way Node builds its own
+ * `shell: true` line: `/d /s /c ""<binary>" <args>"`, passed verbatim. `/s`
+ * strips exactly the outer pair of quotes and leaves the binary quoted, which
+ * is what makes a path with a space in it work — the default npm-global
+ * location is `%APPDATA%\npm`, under a profile folder that often has one.
+ * (Node's own quoting plus `/s` did not: `/s` stripped Node's quotes off the
+ * path and `cmd.exe` split it at the space.) Inside those quotes `&`, `|`,
+ * `^`, `<` and `>` are literal; `CMD_UNSAFE_IN_QUOTES` covers what is not,
+ * and the arguments themselves are fixed literals or values that cleared
+ * `SAFE_ARG`, so none of them needs quoting.
+ *
+ * Note what the wrapping costs: the program becomes a CHILD of the process we
+ * spawn, and stopping the wrapper does not always stop it
+ * (stories/bitwarden-sign-in.md §1 fact 10).
  *
  * `platform` is a parameter so the Windows branch is testable anywhere.
  */
@@ -94,10 +118,17 @@ export function bwLaunch(
   args: string[],
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform = process.platform,
-): { command: string; args: string[] } {
+): BwLaunch {
   const viaCmd = platform === 'win32' && /\.(cmd|bat)$/i.test(binary);
-  if (!viaCmd) return { command: binary, args };
-  return { command: env['COMSPEC'] ?? 'cmd.exe', args: ['/d', '/s', '/c', binary, ...args] };
+  if (!viaCmd) return { command: binary, args, verbatim: false };
+  if (CMD_UNSAFE_IN_QUOTES.test(binary)) {
+    throw new VaultError('unreadable', 'The Bitwarden CLI path contains characters cmd.exe would interpret.');
+  }
+  return {
+    command: env['COMSPEC'] ?? 'cmd.exe',
+    args: ['/d', '/s', '/c', `""${binary}" ${args.join(' ')}"`],
+    verbatim: true,
+  };
 }
 
 /** How `bw` is actually invoked. A seam, so the sync and retry rules below can
@@ -159,16 +190,24 @@ function runBw(
     }
 
     // Safe to hand to `cmd.exe` only because every argument passed the
-    // `SAFE_ARG` gate above — see `bwLaunch`.
-    const { command, args: commandArgs } = bwLaunch(binary, args, env);
+    // `SAFE_ARG` gate above, and `bwLaunch` refuses a binary path cmd.exe
+    // would interpret — see `bwLaunch`.
+    let launch: BwLaunch;
+    try {
+      launch = bwLaunch(binary, args, env);
+    } catch (err) {
+      reject(err);
+      return;
+    }
 
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(command, commandArgs, {
+      child = spawn(launch.command, launch.args, {
         // Never `shell: true`. The origin we pass reaches here from a web page,
         // and a shell would turn a metacharacter in it into a command.
         shell: false,
         windowsHide: true,
+        windowsVerbatimArguments: launch.verbatim,
         env,
         stdio: ['pipe', 'pipe', 'pipe'],
       });

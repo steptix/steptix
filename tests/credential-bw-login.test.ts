@@ -4,9 +4,10 @@
 // real PID is ever signalled (`killPid` is always a spy). The fake reproduces
 // what the real `bw` 2026.6.0 was measured to do (story §1 fact 4): each prompt
 // is drawn on stderr as `? <text>`, and after reading an answer inquirer
-// re-draws the prompt once per character it echoes. The driver has to answer
-// the first draw and ignore the rest; half of what is pinned here is that it
-// does not mistake an echo for `bw` asking again.
+// re-draws the prompt once per character it echoes — the masked password
+// prompt included, as `[input is hidden]` once per character, then `[hidden]`.
+// The driver has to answer the first draw and ignore the rest; half of what is
+// pinned here is that it does not mistake an echo for `bw` asking again.
 
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -20,39 +21,54 @@ import {
   type DriverResult,
   type LoginChild,
 } from '../src/credentials/bw-login.js';
+import type { BwLaunch } from '../src/credentials/vault.js';
 
 const EMAIL = 'paul@example.com';
 const PASSWORD = 'correct-horse-battery-staple-9931';
 const CODE = '482913';
 const KEY = 'c2Vzc2lvbi1rZXktZnJvbS1idw==';
-const BW_CMD = 'C:\\tools\\bw.cmd';
+const BW_CMD = String.raw`C:\tools\bw.cmd`;
+const COMSPEC = String.raw`C:\Windows\System32\cmd.exe`;
 
 /** What inquirer draws before each prompt: clear the line, go to column 0. */
 const REDRAW = '\x1b[2K\x1b[G';
 
+/** A child's stdin: records writes, and emits like a real stream. */
+class FakeStdin extends EventEmitter {
+  readonly writes: string[] = [];
+  ended = false;
+  onWrite: ((text: string) => void) | undefined;
+  write(text: string): boolean {
+    this.writes.push(text);
+    this.onWrite?.(text);
+    return true;
+  }
+  end(): void {
+    this.ended = true;
+  }
+}
+
 /** A child process that records everything done to it and emits on command. */
 class FakeChild extends EventEmitter implements LoginChild {
   pid = 1000;
-  readonly writes: string[] = [];
-  stdinEnded = false;
   kills = 0;
+  readonly stdin = new FakeStdin();
   readonly stdout = new EventEmitter();
   readonly stderr = new EventEmitter();
-  /** Called after each stdin write, so a test can script `bw`'s echo. */
-  onWrite: ((text: string) => void) | undefined;
-  readonly stdin = {
-    write: (text: string) => {
-      this.writes.push(text);
-      this.onWrite?.(text);
-      return true;
-    },
-    end: () => {
-      this.stdinEnded = true;
-    },
-    on: () => this.stdin,
-  };
+  /** Everything done to stop it, in order — `killPid` spies append here too. */
+  readonly order: string[] = [];
+  get writes(): string[] {
+    return this.stdin.writes;
+  }
+  get stdinEnded(): boolean {
+    return this.stdin.ended;
+  }
+  set onWrite(fn: ((text: string) => void) | undefined) {
+    this.stdin.onWrite = fn;
+  }
   kill(): boolean {
     this.kills += 1;
+    this.order.push('kill-spawned');
     return true;
   }
   /** Emit stderr as `bw` would. */
@@ -68,8 +84,15 @@ class FakeChild extends EventEmitter implements LoginChild {
     for (let i = 1; i <= answer.length; i++) this.err(`${REDRAW}? ${promptText} ${answer.slice(0, i)}`);
     this.err('\n');
   }
+  /** inquirer's echo of a MASKED answer, as measured: one redraw per character, then `[hidden]`. */
+  echoMasked(answer: string): void {
+    for (let i = 1; i <= answer.length; i++) this.err(`${REDRAW}? Master password: [input is hidden] `);
+    this.err(`${REDRAW}? Master password: [hidden]\n`);
+  }
+  /** A real process exits, THEN its stdio closes. */
   exit(code: number | null, stdout = ''): void {
     if (stdout) this.stdout.emit('data', Buffer.from(stdout));
+    this.emit('exit', code);
     this.emit('close', code);
   }
 }
@@ -89,18 +112,22 @@ interface Harness {
   askCode: ReturnType<typeof vi.fn>;
   /** Resolves when the driver has settled — or reports that it has not. */
   settledYet(): Promise<boolean>;
+  launch(): BwLaunch;
+  env(): NodeJS.ProcessEnv;
 }
 
 function drive(overrides: Partial<DriveLoginOptions> = {}, child = new FakeChild()): Harness {
   const events: DriverEvent[] = [];
-  const spawn = vi.fn(() => child);
+  const spawn = vi.fn((_launch: BwLaunch, _env: NodeJS.ProcessEnv) => child);
   const findBwProcess = vi.fn(async () => 4242 as number | 'self' | null);
-  const killPid = vi.fn();
+  const killPid = vi.fn((pid: number) => {
+    child.order.push(`kill-pid-${pid}`);
+  });
   const askCode = vi.fn(async () => CODE as string | null);
   let done = false;
   const result = driveLogin({
     binary: BW_CMD,
-    environment: { PATH: 'C:\\tools', COMSPEC: 'C:\\Windows\\System32\\cmd.exe' },
+    environment: { PATH: String.raw`C:\tools`, COMSPEC },
     credentials: { email: EMAIL, password: PASSWORD },
     askCode,
     spawn,
@@ -124,6 +151,8 @@ function drive(overrides: Partial<DriveLoginOptions> = {}, child = new FakeChild
       await flush();
       return done;
     },
+    launch: () => spawn.mock.calls[0]![0],
+    env: () => spawn.mock.calls[0]![1],
   };
 }
 
@@ -135,8 +164,7 @@ function scriptEchoingBw(child: FakeChild): void {
       child.echo('Email address:', value);
       child.prompt('Master password: [input is hidden]');
     } else if (value === PASSWORD) {
-      // The masked prompt's one redraw after reading the answer.
-      child.err(`${REDRAW}? Master password: [hidden]\n`);
+      child.echoMasked(value);
     } else if (value === CODE) {
       child.echo('Two-step login code:', value);
     }
@@ -169,10 +197,9 @@ describe('answering the prompts', () => {
     ]);
   });
 
-  it('2. treats the echo as an echo — and still reaches and answers the password prompt', async () => {
+  it('2. treats the echo as an echo — email AND masked password — and still signs in', async () => {
     // The shape that would kill every real sign-in if the echo were read as a
-    // re-ask: after the email is written, "Email address:" is drawn again once
-    // per character. A driver that stops on that never writes the password.
+    // re-ask: after each write, the prompt is drawn again once per character.
     const h = drive();
     scriptEchoingBw(h.child);
     h.child.prompt('Email address:');
@@ -200,6 +227,22 @@ describe('answering the prompts', () => {
     await flush();
     expect(h.child.writes).toHaveLength(1);
     h.child.err(' Master password: [input is hidden] ');
+    await flush();
+    expect(h.child.writes).toEqual([`${EMAIL}\n`, `${PASSWORD}\n`]);
+    h.child.exit(0, `${KEY}\n`);
+    await expect(h.result).resolves.toMatchObject({ kind: 'signed-in' });
+  });
+
+  it('3. waits out a chunk boundary inside an ESCAPE sequence', async () => {
+    // inquirer's redraw is `ESC[2K ESC[G`. Cut after `ESC[2`, the half-escape
+    // must not be read as text — or the index into the cleaned text jumps and
+    // the next prompt's `? ` is skipped, never answered.
+    const h = drive();
+    h.child.prompt('Email address:');
+    await flush();
+    h.child.err('\n\x1b[2');
+    await flush();
+    h.child.err('K\x1b[G? Master password: [input is hidden] ');
     await flush();
     expect(h.child.writes).toEqual([`${EMAIL}\n`, `${PASSWORD}\n`]);
     h.child.exit(0, `${KEY}\n`);
@@ -328,6 +371,17 @@ describe('time', () => {
     await flush();
     expect(h.child.writes).toHaveLength(writesAtDeadline);
   });
+
+  it("11. a write racing bw's exit cannot crash the process: stdin has an 'error' listener", async () => {
+    const h = drive();
+    h.child.prompt('Email address:');
+    await flush();
+    // What a real pipe does when bw has gone: EPIPE, as an 'error' event. With
+    // no listener, EventEmitter.emit THROWS — the server's crash, in miniature.
+    expect(() => h.child.stdin.emit('error', new Error('write EPIPE'))).not.toThrow();
+    h.child.exit(1);
+    await h.result;
+  });
 });
 
 describe('how it ends', () => {
@@ -366,17 +420,20 @@ describe('how it ends', () => {
 });
 
 describe('what reaches the child', () => {
-  it('13. runs exactly `login --raw`, with no user value in the command or any argument', async () => {
+  it('13. runs exactly `login --raw`, quoted for cmd.exe, with no user value anywhere in it', async () => {
     const h = drive();
     h.child.prompt('Email address:');
     await flush();
     h.child.exit(1);
     await h.result;
 
-    const [command, args] = h.spawn.mock.calls[0] as [string, string[]];
-    expect(command).toBe('C:\\Windows\\System32\\cmd.exe');
-    expect(args).toEqual(['/d', '/s', '/c', BW_CMD, 'login', '--raw']);
-    for (const part of [command, ...args]) {
+    const launch = h.launch();
+    expect(launch).toEqual({
+      command: COMSPEC,
+      args: ['/d', '/s', '/c', `""${BW_CMD}" login --raw"`],
+      verbatim: true,
+    });
+    for (const part of [launch.command, ...launch.args]) {
       expect(part).not.toContain(EMAIL);
       expect(part).not.toContain(PASSWORD);
     }
@@ -384,7 +441,7 @@ describe('what reaches the child', () => {
 
   it('14. strips every output-shaping variable in any casing, and passes no secret', async () => {
     const ambient = {
-      PATH: 'C:\\tools',
+      PATH: String.raw`C:\tools`,
       KEEP_ME: 'yes',
       BW_SESSION: 'stale-key',
       Bw_NoInteraction: 'true',
@@ -400,7 +457,7 @@ describe('what reaches the child', () => {
     h.child.exit(1);
     await h.result;
 
-    const env = h.spawn.mock.calls[0]![2] as NodeJS.ProcessEnv;
+    const env = h.env();
     const upper = Object.keys(env).map((k) => k.toUpperCase());
     for (const name of ['BW_SESSION', 'BW_NOINTERACTION', 'BW_QUIET', 'BW_RESPONSE', 'BW_CLEANEXIT', 'BW_PRETTY', 'BW_RAW']) {
       expect(upper).not.toContain(name);
@@ -423,10 +480,16 @@ describe('what reaches the child', () => {
     expect(JSON.stringify(result)).not.toContain(CANARY);
     expect(JSON.stringify(h.events)).not.toContain(CANARY);
   });
+
+  it('refuses a binary path cmd.exe would interpret, before spawning anything', async () => {
+    const h = drive({ binary: String.raw`C:\evil%PATH%\bw.cmd` });
+    await expect(h.result).resolves.toEqual({ kind: 'failed' });
+    expect(h.spawn).not.toHaveBeenCalled();
+  });
 });
 
 describe('stopping bw — story §4.4', () => {
-  it('16. a stop ends stdin, kills the recorded bw PID, and kills what we spawned', async () => {
+  it('16. a stop ends stdin, kills the recorded bw PID, then kills what we spawned', async () => {
     const h = drive();
     scriptEchoingBw(h.child);
     h.child.prompt('Email address:');
@@ -435,19 +498,43 @@ describe('stopping bw — story §4.4', () => {
     await expect(h.result).resolves.toEqual({ kind: 'quiet' });
 
     expect(h.child.stdinEnded).toBe(true);
-    expect(h.killPid).toHaveBeenCalledWith(4242);
-    expect(h.child.kills).toBe(1);
+    expect(h.child.order).toEqual(['kill-pid-4242', 'kill-spawned']);
   });
 
-  it('16. never kills the recorded PID once what we spawned has exited', async () => {
+  it('16. never kills the recorded PID once the process we spawned has EXITED', async () => {
+    // A wrapper or shim waits for bw and exits after it — so after 'exit', PID
+    // 4242 may already belong to someone else. Its stdio can still be open
+    // (the 'close' has not come), so the driver has not settled, and a stop
+    // can still happen here.
     const h = drive();
     scriptEchoingBw(h.child);
     h.child.prompt('Email address:');
     await flush();
-    // The wrapper is gone, so 4242 may already be someone else's PID.
-    h.child.emit('error', new Error('spawned process died'));
-    await expect(h.result).resolves.toEqual({ kind: 'failed' });
+    h.child.emit('exit', 1);
+    await vi.advanceTimersByTimeAsync(QUIET_MS);
+    await expect(h.result).resolves.toEqual({ kind: 'quiet' });
     expect(h.killPid).not.toHaveBeenCalled();
+    expect(h.child.kills).toBe(1);
+  });
+
+  it("16. an 'error' from the child is not an exit: the recorded bw PID is still killed", async () => {
+    const h = drive();
+    scriptEchoingBw(h.child);
+    h.child.prompt('Email address:');
+    await flush();
+    h.child.emit('error', new Error('kill EPERM'));
+    await expect(h.result).resolves.toEqual({ kind: 'failed' });
+    expect(h.killPid).toHaveBeenCalledWith(4242);
+  });
+
+  it('16. a stop before bw was ever identified looks it up FIRST, then kills the wrapper', async () => {
+    // bw hung before drawing its first prompt: no PID recorded yet, and if it
+    // is not reading stdin, killing the wrapper alone would leave it running.
+    const h = drive({ findBwProcess: vi.fn(async () => 999) });
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await expect(h.result).resolves.toEqual({ kind: 'timed-out' });
+    await flush();
+    expect(h.child.order).toEqual(['kill-pid-999', 'kill-spawned']);
   });
 
   it('17. with no PID for bw, stops at the email prompt having written NOTHING', async () => {
@@ -462,6 +549,7 @@ describe('stopping bw — story §4.4', () => {
       await expect(h.result).resolves.toEqual({ kind: 'failed' });
       expect(h.child.writes).toEqual([]);
       expect(h.child.stdinEnded).toBe(true);
+      expect(lookup).toHaveBeenCalledTimes(1); // the stop does not look again
     }
   });
 
@@ -475,15 +563,15 @@ describe('stopping bw — story §4.4', () => {
   });
 
   it('18. a standalone bw.exe with no child IS bw; a shim .exe records its child', async () => {
-    const standalone = drive({ binary: 'C:\\tools\\bw.exe', findBwProcess: vi.fn(async () => 'self' as const) });
+    const standalone = drive({ binary: String.raw`C:\tools\bw.exe`, findBwProcess: vi.fn(async () => 'self' as const) });
     standalone.child.prompt('Email address:');
     await flush();
     expect(standalone.child.writes).toEqual([`${EMAIL}\n`]);
     standalone.child.exit(1);
     await standalone.result;
-    expect(standalone.spawn.mock.calls[0]![0]).toBe('C:\\tools\\bw.exe');
+    expect(standalone.launch()).toEqual({ command: String.raw`C:\tools\bw.exe`, args: ['login', '--raw'], verbatim: false });
 
-    const shim = drive({ binary: 'C:\\scoop\\shims\\bw.exe', findBwProcess: vi.fn(async () => 77) });
+    const shim = drive({ binary: String.raw`C:\scoop\shims\bw.exe`, findBwProcess: vi.fn(async () => 77) });
     scriptEchoingBw(shim.child);
     shim.child.prompt('Email address:');
     await flush();
@@ -510,14 +598,29 @@ describe('stopping bw — story §4.4', () => {
     expect(h.findBwProcess).not.toHaveBeenCalled();
     expect(h.killPid).not.toHaveBeenCalled();
     expect(h.child.kills).toBe(1);
-    expect(h.spawn.mock.calls[0]![1]).toEqual(['login', '--raw']);
+    expect(h.launch().args).toEqual(['login', '--raw']);
   });
 });
 
 describe('values that could answer two prompts', () => {
-  it('refuses a value containing a line break before spawning anything', async () => {
-    const h = drive({ credentials: { email: EMAIL, password: `half\n${PASSWORD}` } });
+  it('refuses an email or password containing a line break, before spawning anything', async () => {
+    for (const credentials of [
+      { email: EMAIL, password: `half\n${PASSWORD}` },
+      { email: `${EMAIL}\r`, password: PASSWORD },
+    ]) {
+      const h = drive({ credentials });
+      await expect(h.result).resolves.toEqual({ kind: 'failed' });
+      expect(h.spawn).not.toHaveBeenCalled();
+    }
+  });
+
+  it('refuses a code containing a line break, and writes nothing after the password', async () => {
+    const h = drive({ askCode: vi.fn(async () => `${CODE}\n${CODE}`) });
+    scriptEchoingBw(h.child);
+    h.child.prompt('Email address:');
+    await flush();
+    h.child.prompt('Two-step login code:');
     await expect(h.result).resolves.toEqual({ kind: 'failed' });
-    expect(h.spawn).not.toHaveBeenCalled();
+    expect(h.child.writes).toEqual([`${EMAIL}\n`, `${PASSWORD}\n`]);
   });
 });

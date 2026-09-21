@@ -73,6 +73,17 @@ zero blocking findings. **Cap:** 5 rounds; what remains goes to Paul.
 accepted; one non-blocking note (Node's `requestTimeout`) measured and
 rejected (§6). R2: the fidelity reviewer 0 blocking (all nine resolved); the security reviewer 1 — the SSO state cannot be stopped by ending stdin, and measured here, not by killing the wrapper either (fact 10) — fixed by the recorded-PID stop (§4.4), with five non-blocking notes also taken. R3: **both reviewers 0 blocking — converged.** Taken afterwards from their non-blocking notes, without a further round: the lookup covers shim `.exe`s too, has a 10s timeout, and the recorded PID is killed only while our child lives (§4.4); an accepted-risk line for a stop mid-sync; the delimiter-split case (§4.2); `killPid` and `platform` as named seams, and test 41 skips when CIM is blocked (§10).
 
+**Code review log.** CR1 (2026-09-22), two fresh reviewers: 8 blocking. A
+spaced install path could never launch `bw` (§4.1 — a pre-existing defect the
+driver made central); the partial-escape rule and stdin's `'error'` listener
+had no test that could fail; the masked prompt's echo was mis-measured (§1
+fact 4 — the probe used an empty password), so no test fed the driver the real
+stream; the canary test could not tell an early stop from the refused
+connection (43); the recorded-PID cutoff keyed on `close`/`error`, never
+`exit`, while its comment and this story said "exit" (§4.4); a `QUIET_MS`
+comment contradicted §4.6; and §10.2 named a test file that did not exist. All
+fixed, each fix mutation-tested.
+
 ---
 
 ## 1. Ground truth (measured 2026-09-22, `bw` 2026.6.0)
@@ -108,9 +119,11 @@ it is not a guess about how `bw` probably behaves.
    probe's stderr, ANSI stripped, was:
    `? Email address: ? Email address: p? Email address: pr? … ? Email address: probe@example.invalid`
    then `? Master password: [input is hidden] ? Master password: [hidden]`.
-   So every prompt's own text reappears on stderr *after* the driver has
-   answered it — once per echoed character for a plain input, once more for
-   the masked password. Two consequences: an echo is not a re-ask (§4.2 tells
+   That probe sent an EMPTY password; with a real one the masked prompt echoes
+   too — measured in code review, reproduced: a 14-character password gave 15
+   `? Master password: [input is hidden]` renders (the first draw, then one per
+   character) and then one `[hidden]`. So every prompt's own text reappears on
+   stderr *after* the driver has answered it, once per character, masked or not. Two consequences: an echo is not a re-ask (§4.2 tells
    them apart), and plain answers — the email and any two-step or new-device
    code — are on stderr in clear, so stderr is never logged or relayed (§4.5).
    The master password itself is never echoed.
@@ -290,7 +303,7 @@ the unlock dialog (SPEC 29 §10: never inside a web page, never on the phone).
 **Verify** / **Cancel**, timeout **180s** — longer, because the email has to
 arrive first. Its heading depends on which prompt `bw` showed:
 
-- two-step: *"Enter your two-step login code — from your authenticator app, or
+- two-step: *"Enter your two-step login code, from your authenticator app or
   the email Bitwarden just sent."*
 - new device: *"Bitwarden emailed a verification code to your account's email
   address because this is a new device. Enter it here."*
@@ -316,9 +329,19 @@ against a scripted fake child, with no `bw` and no dialog anywhere near it.
   attacker might shape never meets `SAFE_ARG` or `cmd.exe`.
 - **One launch rule, shared.** The `.cmd`-through-`cmd.exe` wrapping is
   today inline in the private `runBw` (`vault.ts:140-142`). It moves into an
-  exported `bwLaunch(binary, args, env) → { command, args }` in `vault.ts`,
-  which `runBw` and the driver both call; `resolveBinary` stays resolution
-  only. The driver does **not** reuse `runBw` itself: `runBw` ends stdin at
+  exported `bwLaunch(binary, args, env, platform) → { command, args,
+  verbatim }` in `vault.ts`, which `runBw` and the driver both call;
+  `resolveBinary` stays resolution only. **The line it builds changed in code
+  review:** the old `cmd.exe /d /s /c <binary> <args>` let Node quote a spaced
+  path and `/s` strip those quotes again, so `cmd.exe` split the path at the
+  space — and the default npm-global location, `%APPDATA%\npm`, sits under a
+  profile folder that often has one (`C:\Users\First Last`). Every `bw` call
+  failed for such a user, `status` included, which read as `locked` and raised
+  the wrong dialog. The line is now built the way Node builds its own
+  `shell: true` line — `/d /s /c ""<binary>" <args>"`, passed with
+  `windowsVerbatimArguments` — so `/s` strips only the outer pair and the path
+  stays quoted. Inside those quotes `&|^<>` are literal; a path containing
+  `"`, `%` or a line break, which `cmd.exe` would still act on, is refused. The driver does **not** reuse `runBw` itself: `runBw` ends stdin at
   once and kills after 30s (`vault.ts:163-168`, `198-199`), and fact 10 shows
   that ending stdin ends a login.
 - **Environment:** a copy of the vault's ambient environment with these names
@@ -343,8 +366,10 @@ everything not yet consumed, not chunk by chunk, so a boundary inside the
 delimiter itself (`…?` | ` Email address:`) simply joins up on the next chunk. Renders are read **in
 order**, and each is handled by these rules:
 
-- **Echo.** A render of the prompt most recently answered — or of the prompt
-  whose code dialog is open right now — is an echo (fact 4). Ignored.
+- **Echo.** A render of the prompt most recently answered is an echo (fact 4).
+  Ignored. The code prompt needs no rule of its own: while its dialog is open
+  the driver reads no stderr at all — it queues — so the prompt's echoes are
+  read only after the code is written, as echoes of the prompt answered last.
 - **New.** A known prompt not yet seen is answered per the table.
 - **Re-ask.** A prompt answered earlier, reappearing after a *different* prompt
   has been answered since, is `bw` asking again. No current code path does
@@ -404,10 +429,18 @@ password to a `bw` it could not later stop. Off Windows there is no wrapper
 and no shim to see through: the child is `bw`, and no lookup runs.
 
 Every "kill" in this section then means: **end `bw`'s stdin**; **kill the
-recorded `bw` PID** — only while the process we spawned has not yet exited,
-since a wrapper or shim outlives its child, so once it has exited the recorded
-PID may already belong to someone else; **`kill()` the child we spawned**. Each
-step covers a case the others do not (fact 10), and none walks a process tree.
+recorded `bw` PID** — only until the process we spawned emits `exit`. A
+wrapper or shim waits for its child and exits after it, so from then on the
+recorded PID may already belong to someone else. (Not `close`: a `close`
+settles the driver, so no stop can follow it. Not `error`: that is a spawn or
+signal failure and says nothing about `bw` having ended.) Then **`kill()`
+the child we spawned**. Each step covers a case the others do not (fact 10),
+and none walks a process tree.
+
+If a stop comes before `bw` was ever identified — it hung before drawing its
+first prompt — the lookup runs then, BEFORE the spawned process is killed (a
+lookup finds children of a live parent), and the stop finishes in the
+background after the call has already settled.
 
 Accepted risk: a stop during the post-login sync (the `quiet` case below)
 interrupts `bw` while it writes its data file. If that ever left the file
@@ -634,7 +667,9 @@ character of the answer — immediately after the driver's write.
 3. **A chunk boundary mid-prompt:** `? Email ad` then, in a later chunk,
    `dress:` → the email is answered and the run succeeds; nothing is judged
    unknown. Same again with the boundary inside the delimiter: `?` then
-   ` Email address:`.
+   ` Email address:`. And inside an ESCAPE sequence — `…\x1b[2` then
+   `K\x1b[G? Master password:` — the password is still answered (the
+   half-escape must not be read as text, or the next `? ` is skipped).
 4. **Two-step:** `Two-step login code:` → the code dialog is asked with kind
    `two-step` → the code is written, then echoed → success.
 5. **New device:** the new-device prompt → kind `new-device` → success.
@@ -651,14 +686,18 @@ character of the answer — immediately after the driver's write.
     at 59s. Second case: a code dialog held open for 170s is not stopped by
     the quiet timer.
 11. **Deadline:** a code dialog that never answers → stopped at 6 minutes,
-    `timed-out`; the dialog's late answer, delivered after, is **not written**,
-    and no unhandled error is raised.
+    `timed-out`; the dialog's late answer, delivered after, is **not written**.
+    Separately: an `'error'` emitted on the child's stdin (EPIPE, a write
+    racing `bw`'s exit) does not throw — the fake stdin is a real
+    `EventEmitter`, whose `emit('error')` throws when nobody listens.
 12. **Classification:** fact 6's wrong-password text → `rejected`; `Invalid
     verification code.` → `code-rejected`; `You are already logged in as
     x@y.` → `already-signed-in`; exit 0 with empty stdout → `failed`; exit 0
     with two tokens → `failed`.
-13. **argv is exactly `['login', '--raw']`** (inside `bwLaunch`'s wrapping, if
-    any), and neither the email nor the password is in the command or any arg.
+13. **The launch is exactly `login --raw`** — for a `.cmd`, `cmd.exe /d /s /c
+    ""<binary>" login --raw"` with `verbatim` — and neither the email nor the
+    password is in the command or any arg. A binary path containing `%` is
+    refused before anything is spawned.
 14. **env**, given an ambient environment containing `BW_SESSION`,
     `Bw_NoInteraction=true` (a case variant), `BW_QUIET=true`, `BW_RESPONSE`,
     `BW_CLEANEXIT`, `BW_PRETTY`, `BW_RAW`: none of them survives in any casing,
@@ -668,9 +707,12 @@ character of the answer — immediately after the driver's write.
     payload.
 16. **Stop means all three steps:** `platform: 'win32'`, `findBwProcess`
     resolved PID 4242; any stop (the quiet timer, here) ends stdin, calls
-    `killPid(4242)`, and `kill()`s the spawned child — all three recorded.
-    Same stop after the fake child has already **exited**: `killPid` is
-    **not** called.
+    `killPid(4242)`, then `kill()`s the spawned child — in that order. After
+    the spawned child emits **`exit`** (its stdio still open, so the driver
+    has not settled), a stop does **not** call `killPid`. After an **`error`**
+    from the child, it still does — an error is not an exit. And a stop before
+    `bw` was ever identified runs the lookup first: `killPid(999)`, then the
+    spawned child.
 17. **No PID, no password:** `platform: 'win32'`, `findBwProcess` resolving
     `null`, then separately rejecting → each stopped at the email prompt,
     `failed`, **nothing written at all** — not the email, not the password. A
@@ -721,8 +763,12 @@ In `tests/credential-vault.test.ts` (the existing `BwRunner` seam):
     calls the public `vault.adoptSession(B)` while the lookup is in flight —
     leaves B in place.
 31. `bwLaunch(binary, args, env, platform)`: on `win32` a `.cmd` or `.bat`
-    binary is wrapped `cmd.exe /d /s /c <binary> <args>`, honouring `COMSPEC`,
-    and an `.exe` is returned unwrapped; on `linux` nothing is wrapped.
+    binary is wrapped `cmd.exe /d /s /c ""<binary>" <args>"` with `verbatim`,
+    honouring `COMSPEC`; a path with a space stays whole inside that line; a
+    path with `%`, `"` or a line break is refused; an `.exe` is returned
+    unwrapped; on `linux` nothing is wrapped. Path literals are `String.raw`:
+    in a plain literal `'C:\npm\bw.cmd'` contains a newline, and a test
+    comparing two equally mangled paths proves nothing.
     (`runBw` has no spawn seam; that it calls `bwLaunch` is a code-review
     check, and every existing vault test keeps passing.)
 
@@ -737,8 +783,11 @@ parentPid, name, created }`:
 34. Zero candidates → `'self'`; two → `null`. (Whether `'self'` is usable is
     the driver's call, by what it spawned — test 18.)
 
-In a new `tests/credential-sign-in-wiring.test.ts`, against
-`createLoginBroker({ vault, approval, driveLogin })`:
+In `tests/credential-broker.test.ts`, `describe('the sign-in wiring')`, against
+`createLoginBroker({ vault, approval, driveLogin })` — in that file rather than
+a new one because the wiring is reached through `attemptLogin`, which needs the
+browser page, and a second real-browser test file for one feature is what
+destabilised this suite before:
 
 35. A non-Windows approval → `no-dialog`, and the injected `driveLogin` was
     **never called**.
@@ -784,10 +833,18 @@ In a new `tests/credential-dialog-fields.test.ts`:
     — the driver's one real fragility.
 43. **Canary (`bw` required):** a throwaway appdata that first runs `bw config
     server https://127.0.0.1:9` (fact 11), then the real driver with a canary
-    master password, the spawn observed. The canary is in no command, no arg,
-    and no env value; the result is `failed` (the refused connection); and the
-    canary never left the machine, because the first request `bw` made was
-    refused locally.
+    master password, the spawn observed. `onEvent` recorded `answered: email`,
+    `answered: password`, `stopped: failed` — so the canary really was typed
+    into bw's prompt, through its per-character masked echo, and the `failed`
+    is the refused connection and not an early stop. The canary is in no
+    command, no arg, and no env value, and it never left the machine, because
+    the first request `bw` made was refused locally.
+44. **A spaced install path, for real (Windows):** a `bw.cmd` under a folder
+    named `with space` that prints `{"status":"unauthenticated"}` → a
+    `BitwardenVault` pointed at it answers `status()` with `unauthenticated`.
+    Test 41's stub also lives under `with space`, so the driver's launch is
+    exercised on a spaced path too. Revert `bwLaunch` to the old line and both
+    fail.
 
 ### 10.4 Mutation check
 
@@ -798,7 +855,13 @@ quiet timer (10); write a late code (11); pass the email as argv (13); delete
 env names case-sensitively (14); put stderr in a result field (15); skip the
 recorded-PID kill (16, 41); kill the recorded PID after the child exited (16);
 write when no PID was found (17); drop the lookup timeout (17); treat a
-wrapper's `'self'` as `bw` (18); drop the
+wrapper's `'self'` as `bw` (18); kill the recorded PID after the spawned
+process's `exit` (16); treat a child `error` as an exit (16); skip the lookup
+when stopping an unidentified `bw` (16); drop the partial-escape rule (3); drop
+stdin's `'error'` listener (11); restore the old `cmd.exe` line (31, 44);
+refuse nothing in the binary path (31); make the driver stop at the email
+prompt, before the password is ever written (43 — whose `failed` alone would
+have passed); drop the
 creation-time filter (33); run `vaultStatus` outside the flight (26); never
 release the flight (27); clear the key without comparing (30); retry
 `not-logged-in` without bound (24); map `quiet` straight to `unsupported-step`

@@ -1,6 +1,6 @@
 // The login driver against real processes (stories/bitwarden-sign-in.md
-// §10.3, tests 41–43). Windows only, and opt-in by nature: 41 needs the
-// process table, 42 and 43 need the Bitwarden CLI and are skipped without it.
+// §10.3, tests 41–44). Windows only, and opt-in by nature: 41 and 44 need
+// Windows, 42 and 43 need the Bitwarden CLI and are skipped without it.
 //
 // These exist because the driver's unit tests run against a fake child, and
 // the two claims that matter most cannot be made against a fake:
@@ -17,14 +17,14 @@
 // Nothing here touches the user's own Bitwarden state: every `bw` run uses a
 // throwaway BITWARDENCLI_APPDATA_DIR, and 43 points it at a closed local port.
 
-import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { driveLogin, type DriverEvent, type LoginChild } from '../src/credentials/bw-login.js';
 import { findBwProcess } from '../src/credentials/bw-process.js';
-import { bwLaunch, resolveBinary } from '../src/credentials/vault.js';
+import { BitwardenVault, bwLaunch, resolveBinary, type BwLaunch } from '../src/credentials/vault.js';
 
 const IS_WINDOWS = process.platform === 'win32';
 const REAL_BW = IS_WINDOWS ? resolveBinary('bw', process.env) : 'bw';
@@ -80,8 +80,12 @@ async function lookupWorks(dir: string): Promise<boolean> {
 
 describe.runIf(IS_WINDOWS)('41. the SSO state is really stopped', () => {
   it('stops a bw that ignores stdin and outlives its wrapper — by its own PID', { timeout: 60_000 }, async (ctx) => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'bw-sso-stub-'));
-    if (!(await lookupWorks(dir))) ctx.skip();
+    const base = mkdtempSync(path.join(os.tmpdir(), 'bw-sso-stub-'));
+    if (!(await lookupWorks(base))) ctx.skip();
+    // A space in the path, as under a profile like "C:\Users\First Last": the
+    // stub is launched through the same cmd.exe line a real npm-global bw is.
+    const dir = path.join(base, 'with space');
+    mkdirSync(dir);
 
     // The stub: two prompts in bw's shape, then the SSO state — readline
     // closed, a localhost listener, no timeout. It writes its own PID so the
@@ -125,6 +129,20 @@ rl.once('line', () => {
   });
 });
 
+describe.runIf(IS_WINDOWS)('a bw installed under a path with a space', () => {
+  it('44. vault calls reach it: status() through a spaced .cmd path, for real', { timeout: 30_000 }, async () => {
+    // What `bw status --raw` prints, from a .cmd under "with space\". Before
+    // the launch fix, cmd.exe split this path at the space, the call failed,
+    // and status() could not answer.
+    const dir = path.join(mkdtempSync(path.join(os.tmpdir(), 'bw-spaced-')), 'with space');
+    mkdirSync(dir);
+    const fakeBw = path.join(dir, 'bw.cmd');
+    writeFileSync(fakeBw, '@echo {"status":"unauthenticated"}\r\n');
+    const vault = new BitwardenVault({ binary: fakeBw, environment: process.env });
+    await expect(vault.status()).resolves.toBe('unauthenticated');
+  });
+});
+
 /** A throwaway bw data folder, so the user's own sign-in state is never touched. */
 function throwawayAppData(): string {
   return mkdtempSync(path.join(os.tmpdir(), 'bw-appdata-'));
@@ -156,27 +174,43 @@ describe.runIf(HAS_BW)('against the real bw', () => {
     // Point this throwaway bw at a closed local port: its first request is
     // refused on this machine, so the canary cannot reach Bitwarden.
     const config = bwLaunch(REAL_BW, ['config', 'server', 'https://127.0.0.1:9'], env);
-    execFileSync(config.command, config.args, { env, windowsHide: true, stdio: 'ignore' });
+    const configured = spawnSync(config.command, config.args, {
+      env,
+      windowsHide: true,
+      windowsVerbatimArguments: config.verbatim,
+      stdio: 'ignore',
+    });
+    expect(configured.status).toBe(0);
 
-    const spawned: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const spawned: Array<{ launch: BwLaunch; env: NodeJS.ProcessEnv }> = [];
+    const events: DriverEvent[] = [];
     const result = await driveLogin({
       binary: REAL_BW,
       environment: env,
       credentials: { email: 'probe@example.invalid', password: CANARY },
       askCode: async () => null,
-      spawn: (command, args, childEnv): LoginChild => {
-        spawned.push({ command, args, env: childEnv });
-        return spawn(command, args, {
+      onEvent: (e) => events.push(e),
+      spawn: (launch, childEnv): LoginChild => {
+        spawned.push({ launch, env: childEnv });
+        return spawn(launch.command, launch.args, {
           shell: false,
           windowsHide: true,
+          windowsVerbatimArguments: launch.verbatim,
           env: childEnv,
           stdio: ['pipe', 'pipe', 'pipe'],
         }) as ChildProcess as LoginChild;
       },
     });
 
+    // The canary really was typed into bw's password prompt — through its echo,
+    // one "[input is hidden]" redraw per character — and bw then failed on the
+    // refused connection. Without this, a driver that stopped early (a failed
+    // PID lookup, an echo misread as a re-ask) would also end "failed" and the
+    // canary would never have been sent anywhere at all.
+    expect(events).toEqual([{ answered: 'email' }, { answered: 'password' }, { stopped: 'failed' }]);
     expect(spawned).toHaveLength(1);
-    const [{ command, args, env: childEnv }] = spawned as [(typeof spawned)[number]];
+    const [{ launch, env: childEnv }] = spawned as [(typeof spawned)[number]];
+    const { command, args } = launch;
     for (const part of [command, ...args]) expect(part).not.toContain(CANARY);
     for (const value of Object.values(childEnv)) expect(value ?? '').not.toContain(CANARY);
     expect(JSON.stringify(result)).not.toContain(CANARY);

@@ -27,7 +27,11 @@ export interface ProcessRow {
   parentPid: number;
   /** Image name, e.g. `node.exe`. */
   name: string;
-  /** Creation time in 100ns ticks — exact, so no rounding can blur the filter. */
+  /**
+   * Creation time in 100ns ticks, as integers. CIM reports it to the
+   * microsecond; keeping it as an integer means no float or Date rounding is
+   * added on top when two creation times are compared.
+   */
   created: bigint;
 }
 

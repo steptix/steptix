@@ -263,24 +263,47 @@ describe('dropping a dead session key', () => {
 // ---------------------------------------------------------------------------
 
 describe('bwLaunch', () => {
-  const env = { COMSPEC: 'C:\Windows\System32\cmd.exe' };
+  // String.raw throughout: in a plain string literal `'C:\npm\bw.cmd'` holds a
+  // NEWLINE, and a test comparing two equally-mangled paths proves nothing.
+  const COMSPEC = String.raw`C:\Windows\System32\cmd.exe`;
+  const env = { COMSPEC };
 
-  it('31. wraps a .cmd or .bat in cmd.exe on Windows, honouring COMSPEC', () => {
-    expect(bwLaunch('C:\npm\bw.cmd', ['status', '--raw'], env, 'win32')).toEqual({
-      command: 'C:\Windows\System32\cmd.exe',
-      args: ['/d', '/s', '/c', 'C:\npm\bw.cmd', 'status', '--raw'],
+  it('31. wraps a .cmd or .bat as cmd.exe /d /s /c ""<binary>" <args>", verbatim, honouring COMSPEC', () => {
+    expect(bwLaunch(String.raw`C:\npm\bw.cmd`, ['status', '--raw'], env, 'win32')).toEqual({
+      command: COMSPEC,
+      args: ['/d', '/s', '/c', String.raw`""C:\npm\bw.cmd" status --raw"`],
+      verbatim: true,
     });
-    expect(bwLaunch('C:\npm\BW.BAT', ['sync'], {}, 'win32')).toEqual({
+    expect(bwLaunch(String.raw`C:\npm\BW.BAT`, ['sync'], {}, 'win32')).toEqual({
       command: 'cmd.exe',
-      args: ['/d', '/s', '/c', 'C:\npm\BW.BAT', 'sync'],
+      args: ['/d', '/s', '/c', String.raw`""C:\npm\BW.BAT" sync"`],
+      verbatim: true,
     });
   });
 
+  it('31. keeps a path with a SPACE in it whole — the default npm-global location', () => {
+    // %APPDATA%\npm under a profile like "C:\Users\First Last". With Node's own
+    // quoting plus /s, cmd.exe stripped the quotes and split the path here.
+    const spaced = String.raw`C:\Users\First Last\AppData\Roaming\npm\bw.cmd`;
+    expect(bwLaunch(spaced, ['login', '--raw'], env, 'win32').args[3]).toBe(`""${spaced}" login --raw"`);
+  });
+
+  it('31. refuses a binary path cmd.exe would interpret even inside quotes', () => {
+    for (const bad of [String.raw`C:\a%PATH%b\bw.cmd`, String.raw`C:\a"b\bw.cmd`, 'C:\\a\nb\\bw.cmd']) {
+      expect(() => bwLaunch(bad, ['sync'], env, 'win32'), JSON.stringify(bad)).toThrow(VaultError);
+    }
+  });
+
   it('31. runs an .exe directly, and wraps nothing off Windows', () => {
-    expect(bwLaunch('C:\tools\bw.exe', ['login', '--raw'], env, 'win32')).toEqual({
-      command: 'C:\tools\bw.exe',
+    expect(bwLaunch(String.raw`C:\tools\bw.exe`, ['login', '--raw'], env, 'win32')).toEqual({
+      command: String.raw`C:\tools\bw.exe`,
       args: ['login', '--raw'],
+      verbatim: false,
     });
-    expect(bwLaunch('/opt/bw/bw.cmd', ['sync'], env, 'linux')).toEqual({ command: '/opt/bw/bw.cmd', args: ['sync'] });
+    expect(bwLaunch('/opt/bw/bw.cmd', ['sync'], env, 'linux')).toEqual({
+      command: '/opt/bw/bw.cmd',
+      args: ['sync'],
+      verbatim: false,
+    });
   });
 });
