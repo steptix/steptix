@@ -19,7 +19,12 @@ import {
   chainMemberWord as coreWord,
   chainAfterFlowControlMessage as coreAfterFlow,
   isFlowControlLine as coreFlowLine,
-} from '../runner-core/dist/control-line.js';
+  // runner-core's SOURCE, not its `dist/`. Nothing in this repo's `npm test`
+  // path builds runner-core, so importing the compiled copy asked this corpus
+  // about whatever the mirror used to be: measured, changing `'Else if'` to
+  // `'Elseif'` in runner-core/src/control-line.ts and running this file left
+  // it 16/16 green. Vitest transforms the `.ts` on the way in.
+} from '../runner-core/src/control-line.ts';
 
 /**
  * The CLI's control-line grammar and runner-core's mirror of it, fed one

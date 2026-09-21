@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 import type { AiClient } from '../src/ai/client.js';
 import type { StepResult } from '../src/report/types.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
+import { readFileSync } from 'node:fs';
+import { formatParameterBlock } from '../src/ai/prompts.js';
+import { markLoopBindings } from '../src/utils/secrets.js';
+import { liveCompileSnapshot } from '../src/server/session-manager.js';
 import {
   generationRefusal,
   LiveCompiler,
@@ -1644,5 +1648,63 @@ describe('a tolerated failure the entry itself reported', () => {
     expect(outcome.summary.notAttempted).toEqual([1]);
     expect(outcome.summary.kept).toBe(0);
     expect(framesFor(events, 1)).toContain(TOLERATED_FAILURE_REFUSAL);
+  });
+});
+
+/**
+ * Review 6, finding 5b: the parameter snapshot the live compile is handed.
+ *
+ * `liveCompileSnapshot` (src/server/session-manager.ts) copies the run's live
+ * map and carries the loop marks onto the copy. The registry is by object
+ * identity, so without that line the copy arrives as nobody's binding and the
+ * generation and repair prompts — which ask the map whose a dotted name is
+ * (§7.6) — read every `payment.keyword` by the author rule, masking `AU` out
+ * of the block the model writes its selector from.
+ *
+ * Reverting it to a plain `{ ...resolvedParameters }` left the whole suite
+ * green, in either of two ways: dropping the `inheritLoopBindings` line, or
+ * keeping the helper and spreading the map at a call site. Both are pinned.
+ */
+describe('the live compile’s parameter snapshot keeps the loop marks', () => {
+  /** What a `For each {{payment}} in {{payments}}` pass leaves in the run's
+   *  live map: one dotted entry per property, marked as a pass's, beside a
+   *  data file's own dotted heading, which nothing marked. */
+  function liveMap(): Record<string, string> {
+    const map: Record<string, string> = { 'payment.keyword': 'AU', 'user.apikey': 'uk_live_1234' };
+    markLoopBindings(map, ['payment.keyword']);
+    return map;
+  }
+
+  const parameters = [
+    { name: 'payment.keyword', value: 'AU' },
+    { name: 'user.apikey', value: 'uk_live_1234' },
+  ];
+
+  it('so the generation prompt keeps "AU" and still masks the heading', () => {
+    const snapshot = liveCompileSnapshot(liveMap());
+    const block = formatParameterBlock(parameters, [], new Set<string>(), [], snapshot);
+    expect(block).toContain('- {{payment.keyword}} resolved to "AU" on this run');
+    expect(block).toContain('- {{user.apikey}} resolved to "***" on this run');
+  });
+
+  it('which a plain copy of the same map does not', () => {
+    // The statement of what the one line buys, measured rather than asserted
+    // about: the same map, spread, and the column the model needs is gone.
+    const block = formatParameterBlock(parameters, [], new Set<string>(), [], { ...liveMap() });
+    expect(block).toContain('- {{payment.keyword}} resolved to "***" on this run');
+  });
+
+  it('and it is what BOTH offer sites hand over', () => {
+    // A behavioural test of the helper cannot see a call site that stopped
+    // using it, and there are two — the ordinary step and the branched one.
+    const source = readFileSync(
+      path.join(repoRoot, 'src', 'server', 'session-manager.ts'),
+      'utf-8',
+    );
+    const offers = source.match(/resolvedParameters: [^,\n]+/g) ?? [];
+    const toCompile = offers.filter((line) => line.includes('liveCompileSnapshot'));
+    expect(toCompile).toHaveLength(2);
+    // …and no offer spreads the map itself.
+    expect(source).not.toMatch(/resolvedParameters: \{ \.\.\.resolvedParameters \}/);
   });
 });

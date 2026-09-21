@@ -94,8 +94,9 @@ export interface TestConfig {
    *
    *  `isSecretName` is `/password|secret|token|key/i`, so `keyword` matches and
    *  a column the model has to FIND in the DOM arrives as `***` — masking that
-   *  costs the model its eyes, not just its logs. Read only by the prompt's
-   *  `## Values` block; report, log and recording masking are untouched, so
+   *  costs the model its eyes, not just its logs. Read by the prompt's
+   *  `## Values` block and forwarded on `frame:scope` to the client's live
+   *  scope surfaces; report, log and recording masking are untouched, so
    *  unmasking here cannot leak a real secret into a file.
    *
    *  Held as the raw string, like `viewport`: one parse, in the executor's

@@ -1,3 +1,4 @@
+import { unmarkLoopBindings } from '../utils/loop-bindings.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline/promises';
@@ -128,15 +129,277 @@ async function promptForValue(key: string): Promise<string> {
   }
 }
 
-/** Substitute {{placeholders}} in a string with resolved parameter values */
-export function interpolate(text: string, params: Record<string, string>): string {
-  return text.replace(/\{\{(\w+)\}\}/g, (match, key: string) => {
-    if (key in params) {
+/**
+ * The PROPERTY half of a dotted name, as a regex source: one identifier.
+ *
+ * Named because three things need the same answer — the grammar below, the
+ * "more than one segment" warning further down, and {@link isBindableProperty}
+ * asking whether a record's KEY could become one. Written out three times,
+ * they are three mirrors of a rule that has already moved once.
+ */
+const PROPERTY_SEGMENT_SOURCE = '[A-Za-z_][A-Za-z0-9_]*';
+
+/**
+ * The NAME inside a runtime placeholder: `name`, or `name.property` for one
+ * direct property of an object a `For each` bound
+ * (docs/specs/SPEC-structured-table-reads.md §8.3).
+ *
+ * This is the one definition; every other copy of the grammar in `src/`
+ * imports it, because a step's text and its actions resolving differently is
+ * the failure that keeps recurring. The copies that must stay hand-written —
+ * TestBench's `env-data-completion-core.ts` / `env-data-definition-core.ts`,
+ * which cannot import `src/` — are kept honest by
+ * `tests/placeholder-dotted.test.ts`.
+ *
+ * The root segment stays `\w+` rather than tightening to the spec's
+ * `[A-Za-z_][A-Za-z0-9_]*`: this feature ADDS a property segment, and
+ * narrowing what a bare `{{1st}}` means is a separate decision with its own
+ * blast radius (`data-rows.ts` already notes the looseness deliberately). The
+ * PROPERTY segment does follow the identifier rule, because nothing accepted
+ * one before and `{{order.1}}` is not a name anyone means.
+ *
+ * One property segment only. `{{order.address.city}}` matches nothing and is
+ * left literal, exactly as it was before this existed (§8.2).
+ */
+export const PLACEHOLDER_NAME_SOURCE = `\\w+(?:\\.${PROPERTY_SEGMENT_SOURCE})?`;
+
+/** `{{name}}` / `{{name.property}}`, no whitespace inside the braces. Group 1
+ *  is the whole name, dot included. */
+export const PLACEHOLDER_SOURCE = `\\{\\{(${PLACEHOLDER_NAME_SOURCE})\\}\\}`;
+
+/** The same, tolerating whitespace inside the braces — what a CHECKER wants,
+ *  so `{{ order.id }}` is seen and refused with the right name rather than
+ *  slipping through and being typed into the page as literal text. */
+export const WIDE_PLACEHOLDER_SOURCE = `\\{\\{\\s*(${PLACEHOLDER_NAME_SOURCE})\\s*\\}\\}`;
+
+/** A fresh global matcher, because a module-level `/g` regex carries
+ *  `lastIndex` between calls and `.test` would answer false every other time. */
+export function placeholderRe(): RegExp {
+  return new RegExp(PLACEHOLDER_SOURCE, 'g');
+}
+
+/** The `name` half of a placeholder name: `order` for both `order` and
+ *  `order.id`. What a rename or a scope lookup keys on — the property segment
+ *  belongs to the object the name holds, not to the variable map. */
+export function placeholderRoot(name: string): string {
+  const dot = name.indexOf('.');
+  return dot === -1 ? name : name.slice(0, dot);
+}
+
+/** The `property` half, or undefined for a flat name. */
+export function placeholderProperty(name: string): string | undefined {
+  const dot = name.indexOf('.');
+  return dot === -1 ? undefined : name.slice(dot + 1);
+}
+
+/**
+ * Write `value` into the live variable map under `name`
+ * (docs/specs/SPEC-structured-table-reads.md §8.2).
+ *
+ * The ONE way anything writes that map: a `For each` pass, a `Set`, a `read` /
+ * `count` / `readTable` capture, an `[input:]` answer, a tool's `setVar`, a
+ * code-behind `setVar`. Two rules, and each of them shipped in one or two
+ * writers out of nine before this existed.
+ *
+ * **Own property, not assignment.** `map[name] = value` hits
+ * `Object.prototype`'s setter when `name` is `__proto__`, which silently
+ * ignores a string: the step reported PASSED with the value in its `outputs`
+ * while the map held nothing. `passBindings` builds a pass's bindings with a
+ * computed key, so `For each {{__proto__}} in {{orders}}` produced exactly
+ * that — the flat `{{__proto__}}` bound nothing while `{{__proto__.id}}`, an
+ * ordinary key, resolved.
+ *
+ * **A rebind of a ROOT erases that root's dotted keys.** Only a `For each`
+ * pass writes `item.property`, and they belong to the value the root held
+ * when the pass bound it. So `Read the order id [store as: order]` after a
+ * `For each {{order}} …` must not leave `order.id` holding the last pass's
+ * id — it did, and `{{order.id}}` went on substituting a row the author had
+ * just overwritten, with §8.3's refusal unable to fire on a key that was
+ * still there.
+ *
+ * That erasure is guarded on the flat spelling, because a dotted name is a
+ * PROPERTY write rather than a rebind: it must not erase its own siblings.
+ * One writer really does spell one — a tool output the caller aliased onto a
+ * dotted target, `[tool: t out.sum="row.keyword"]`, which reaches here through
+ * `call.outputAliases` (src/tools/executor.ts) — so this is a live case rather
+ * than a guard against a future one.
+ *
+ * **And a dotted write drops that name's loop mark.** A name the AUTHOR wrote
+ * in a step is nobody's binding, whoever wrote it last: if a `For each` pass
+ * had bound `row.keyword` off the page, the registry (src/utils/loop-bindings.ts)
+ * went on saying so about an entry the alias has since overwritten, and §7.6's
+ * masking read the narrow record rule — `keyword` in clear — for a value the
+ * broad author rule now covers. The flat case gets this from `clearDottedKeys`,
+ * which unmarks every key it drops; the dotted case drops no key, so it says
+ * so itself.
+ *
+ * Here, beside {@link placeholderRoot}, rather than in a run module: a `Set`
+ * step needs it and has no page, no model and no cache, and importing it from
+ * `control-runtime.ts` dragged the step executor — Playwright and the AI
+ * client — into that module's import graph.
+ */
+export function bindVariable(
+  map: Record<string, string>,
+  name: string,
+  value: string,
+): void {
+  Object.defineProperty(map, name, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  if (!name.includes('.')) clearDottedKeys(map, new Set([name]));
+  else unmarkLoopBindings(map, [name]);
+}
+
+/**
+ * Drop every `root.<anything>` binding for each of `roots`, leaving flat names
+ * and every other root alone.
+ *
+ * {@link bindVariable}'s second half, exported because `applyPassBindings`
+ * (src/runner/control-runtime.ts) needs it for a whole pass at once: it clears
+ * every root the incoming bindings name BEFORE assigning any of them, since
+ * the pass writes the flat name and its properties together and doing them one
+ * at a time would depend on key order.
+ *
+ * Flat names are not this rule's business: a pass rebinds its own base name,
+ * and clearing other flat variables would delete captures.
+ */
+export function clearDottedKeys(
+  map: Record<string, string>,
+  roots: ReadonlySet<string>,
+): void {
+  const dropped: string[] = [];
+  for (const key of Object.keys(map)) {
+    if (!key.includes('.')) continue;
+    if (!roots.has(placeholderRoot(key))) continue;
+    delete map[key];
+    dropped.push(key);
+  }
+  // The mark and the entry go together: a later entry of the same name is
+  // nobody's binding (src/utils/loop-bindings.ts).
+  unmarkLoopBindings(map, dropped);
+}
+
+/** The property segment on its own, anchored — what a RECORD's key has to
+ *  look like to become one. Built from the grammar's own source, so a key and
+ *  a reference can never disagree about what is spellable. */
+const PROPERTY_SEGMENT_RE = new RegExp(`^${PROPERTY_SEGMENT_SOURCE}$`);
+
+/** The three names that are not data. `__proto__` on a plain object literal
+ *  from `JSON.parse` is an own property rather than the setter, but a binding
+ *  named after one of these travels into maps that are not — and a variable
+ *  called `constructor` is a trap wherever it lands. */
+const RESERVED_PROPERTY_NAMES: ReadonlySet<string> = new Set([
+  '__proto__',
+  'prototype',
+  'constructor',
+]);
+
+/**
+ * Can this object key become a `{{item.key}}` binding
+ * (docs/specs/SPEC-structured-table-reads.md §8.2)?
+ *
+ * Here rather than beside the `For each` that asks, because the answer is a
+ * fact about the GRAMMAR: the property segment is defined two lines up, and a
+ * second copy of `[A-Za-z_][A-Za-z0-9_]*` in the planner is the kind of mirror
+ * that drifts. `dottedReferenceError` asks it too — it explains a missing
+ * binding by naming the keys that could never have had one — so the rule has
+ * two readers and one home.
+ *
+ * `content-type` and `Order ID` fail on the grammar; `constructor` passes the
+ * grammar and fails here, which is the same answer to the same question for
+ * the caller: this key binds nothing.
+ */
+export function isBindableProperty(key: string): boolean {
+  return PROPERTY_SEGMENT_RE.test(key) && !RESERVED_PROPERTY_NAMES.has(key);
+}
+
+/**
+ * Substitute {{placeholders}} in a string with resolved parameter values.
+ *
+ * `defines` names the placeholders this line WRITES rather than reads — a
+ * `For each` header's item (`controlLineDefines`, src/parser/control-line.ts).
+ * They are exempt from the warning only: a definition has no value yet by
+ * definition, and warning about it fired on every correct table loop. A
+ * PROPERTY of a defined name is exempt with it — `For each {{order}} in
+ * {{orders}}, Click the row whose Order ID is "{{order.id}}"` is §4.6's own
+ * recommended form, and a rule that exempted `{{order}}` alone went on
+ * warning about `{{order.id}}` on the same line, on every loop entry. The
+ * SUBSTITUTION is deliberately left alone — `{{payment}}` still resolves if
+ * the map happens to hold it, exactly as before — because the loops use the
+ * authored line for the guard row and the interpolated one for a partial
+ * re-run probe, and changing what that probe sees is a different decision
+ * from quietening a log line.
+ */
+export function interpolate(
+  text: string,
+  params: Record<string, string>,
+  defines?: ReadonlySet<string> | undefined,
+): string {
+  warnMultiSegment(text);
+  return text.replace(placeholderRe(), (match, key: string) => {
+    // `hasOwn`, not `in`: `in` walks the prototype chain, so `{{constructor}}`
+    // and `{{toString}}` substituted a stringified native function into the
+    // step text on a map that binds neither. Same hazard, and the same
+    // one-word fix, as `boundValue` in
+    // [placeholder-substitution.ts](../runner/placeholder-substitution.ts).
+    if (Object.hasOwn(params, key)) {
       return params[key] ?? match;
     }
-    logger.warn(`Unresolved placeholder: {{${key}}}`);
+    // The ROOT, so `{{order.id}}` is covered by a line that defines `order`.
+    // A definition is flat by construction (a step writes a variable, never
+    // one property of one), but the name is asked for as well as its root so
+    // that a `defines` set which one day holds a dotted name still answers.
+    if (!defines?.has(key) && !defines?.has(placeholderRoot(key))) {
+      logger.warn(`Unresolved placeholder: {{${key}}}`);
+    }
     return match;
   });
+}
+
+/** `{{a.b.c}}` — a root and TWO or more property segments, which is one more
+ *  than the grammar has. Same segment source as the grammar, so "one more
+ *  than" stays true of whatever the grammar accepts. */
+const MULTI_SEGMENT_RE = new RegExp(
+  `\\{\\{\\s*(\\w+(?:\\.${PROPERTY_SEGMENT_SOURCE}){2,})\\s*\\}\\}`,
+  'g',
+);
+
+/**
+ * Say something about `{{order.address.city}}`.
+ *
+ * It matches neither grammar, so it is neither substituted nor warned about as
+ * unresolved — it is simply left in the step text, and reaches the model as
+ * six literal braces. That is the quietest possible failure for what is
+ * obviously an attempt at a reference: the author reads a step that did not
+ * work and nothing anywhere says why.
+ *
+ * One property segment is the v1 rule
+ * (docs/specs/SPEC-structured-table-reads.md §8.2), so the warning names the
+ * rule rather than the typo. Once per distinct name per call: the same
+ * reference twice in one line is one mistake.
+ *
+ * Exported because {@link interpolate} is not the only place a line is read:
+ * the CLI dispatches a CONTROL line — a `For each` header, an `If`'s condition
+ * — and `continue`s before it ever reaches the `interpolate` call above, so
+ * `{{a.b.c}}` on a control line was silent there while the Sessions API and
+ * the Electron adapter (which resolve every line's text before the control
+ * dispatch) warned about it. The CLI calls this directly instead; the guard
+ * line itself must NOT be interpolated, since the guard path owns its own
+ * substitution.
+ */
+export function warnMultiSegment(text: string): void {
+  if (!text.includes('{{')) return;
+  let seen: Set<string> | undefined;
+  for (const m of text.matchAll(MULTI_SEGMENT_RE)) {
+    const name = m[1]!;
+    seen ??= new Set();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    logger.warn(`{{${name}}} is not a placeholder: only one property segment is supported`);
+  }
 }
 
 /** Load a data file and return an array of parameter rows */

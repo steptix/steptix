@@ -20,12 +20,15 @@ import type { StepExecutorOptions } from './step-executor.js';
 import { identifyStepGroups } from './step-grouper.js';
 import {
   createControlState,
+  forEachPassOf,
   guardVisitEvaluates,
   planAfterStep,
   returnExit,
   type ControlRecord,
 } from './control-flow.js';
+import { boundValue, dottedReferenceError } from './placeholder-substitution.js';
 import {
+  applyPassBindings,
   evaluateGuard,
   guardHistoryLines,
   guardResult,
@@ -39,7 +42,14 @@ import {
 import { resolveHooks, type ResolvedHooks } from './hooks.js';
 import { runInteractiveRepl } from './interactive-repl.js';
 import { loadContextFiles } from '../context/loader.js';
-import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
+import { controlLineDefines } from '../parser/control-line.js';
+import {
+  bindVariable,
+  resolveParameters,
+  loadDataFile,
+  interpolate,
+  warnMultiSegment,
+} from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
 import {
   parseFlowControlStep,
@@ -81,7 +91,7 @@ import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import { writeRecording } from '../codebehind/recording.js';
 import { envDataSecretValues, interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { captureScreenshot } from '../browser/screenshot.js';
-import { redact, redactDeep, redactReport, runSecrets } from '../utils/secrets.js';
+import { maskRecordSecrets, redact, redactDeep, redactReport, runSecrets } from '../utils/secrets.js';
 
 /**
  * What the report says in place of a root-cause analysis when the run had no
@@ -170,11 +180,18 @@ function computeStepCaptures(
 ): Record<string, string> | undefined {
   const captures = result.turns
     .flatMap((t) => t.subActions)
-    .filter((sa) => !sa.error && (sa.action.action === 'read' || sa.action.action === 'count'))
+    .filter((sa) => !sa.error && (sa.action.action === 'read' || sa.action.action === 'count'
+      // A structured table read writes its `as` too (SPEC-structured-table-reads.md §9.3).
+      || sa.action.action === 'readTable'))
     .map((sa) => sa.action.as)
     .filter((name): name is string => !!name && !name.startsWith('__skill'))
     .reduce<Record<string, string>>((acc, name) => {
-      if (name in resolvedParameters) acc[name] = resolvedParameters[name]!;
+      // `hasOwn`, not `in`: `in` walks the prototype chain, so a step with
+      // `[store as: constructor]` whose read found nothing still reported a
+      // capture — of the `Object` function, into a `Record<string, string>`.
+      if (Object.hasOwn(resolvedParameters, name)) {
+        acc[name] = resolvedParameters[name]!;
+      }
       return acc;
     }, {});
   return Object.keys(captures).length > 0 ? captures : undefined;
@@ -1085,6 +1102,18 @@ export async function runTest(
       if (controlRecord) {
         session = browserTracker.getActive();
         const guardText = test.steps[i] ?? '';
+        // `{{a.b.c}}` matches neither grammar, so it is neither substituted nor
+        // warned about as unresolved — it simply reaches the judge as six
+        // literal braces. `interpolate` says so for an ordinary step, and this
+        // branch `continue`s long before the loop reaches that call, so a
+        // control line was the one place in this runner where the warning
+        // could not fire. The Sessions API and the Electron adapter resolve
+        // every line's text BEFORE their control dispatch and so warned all
+        // along; this is the same sentence, from the same function. The guard
+        // line is deliberately not interpolated here — the guard path owns its
+        // own substitution, and resolving it twice would change what the judge
+        // is asked.
+        warnMultiSegment(guardText);
         // Same pairing rule the event-emitting loops follow: the console's
         // `Step N` header opens a step, and only a visit that asks somebody
         // closes it with a `Step N passed` (or a failure). A visit that asks
@@ -1103,6 +1132,10 @@ export async function runTest(
           index: i,
           state: controlState,
           resolvedParameters,
+          // A locally decided condition's reasoning carries VALUES — the
+          // judge's never did — so it is masked with this run's secrets
+          // before it reaches the log or the report.
+          redact: (text) => redact(text, secretsNow()),
           executorOptions: {
             page: session.page,
             config,
@@ -1170,12 +1203,14 @@ export async function runTest(
         // A pass is starting: bind the item, open the band. Bindings go into
         // the live parameter map, so `{{account}}` in the body resolves — and
         // keeps its last value after the loop, which is the documented
-        // consequence of there being one map.
+        // consequence of there being one map. `applyPassBindings` rather than
+        // `Object.assign`, so a row missing a property the last row had does
+        // not silently inherit it (control-runtime.ts).
         const marker =
           plan.pass && isLoopRecord(controlRecord)
             ? loops.beginPass(i, controlRecord, plan.pass)
             : undefined;
-        if (plan.pass?.bindings) Object.assign(resolvedParameters, plan.pass.bindings);
+        if (plan.pass?.bindings) applyPassBindings(resolvedParameters, plan.pass.bindings);
         // The loop ended: every `(n/?)` marker it issued becomes `(n/count)`.
         if (plan.loopEnded) loops.endLoop(plan.loopEnded);
 
@@ -1392,11 +1427,18 @@ export async function runTest(
       const flowControlClaim = setStep ? null : parseFlowControlStep(rawInstruction);
       // Env/data first (parse-time semantics: fixed for the whole run), then
       // runtime `{{...}}` — the server's order, now the CLI's too.
+      // `controlLineDefines` is the third argument, and it is not optional in
+      // practice: a `For each {{payment}} in {{payments}}` header READS the
+      // list and WRITES the item, so without it `interpolate` logged
+      // `Unresolved placeholder: {{payment}}` on every visit to every correct
+      // table loop — noise in the one output that reads like a diagnosis.
+      // Every run loop passes it; that is the whole point of the helper.
       const instruction = setStep
         ? rawInstruction
         : interpolate(
             test.envData ? interpolateEnvData(rawInstruction, test.envData) : rawInstruction,
             resolvedParameters,
+            controlLineDefines(rawInstruction),
           );
 
       // The one log line that ignores the log level — so the one place the
@@ -1443,10 +1485,39 @@ export async function runTest(
       // line asks for two endings at once and there is nothing to judge.
       const tailContradiction =
         setStep || flowControlClaim ? false : isFailureTailContradiction(rawInstruction);
+      // A `{{order.statuz}}` the pass cannot answer, refused before the model
+      // is asked anything (SPEC-structured-table-reads.md §8.3). Read off the
+      // AUTHORED line, because `interpolate` has already replaced every
+      // reference it COULD answer and leaves only the ones it could not.
+      // Dotted only: an unresolved flat name keeps its warning.
+      // Masked here for the same reason the `Step N` line above is: the
+      // refusal is written from the run's own values — the properties the row
+      // does hold, the keys the loop dropped — and it reaches the console, the
+      // report and the run log verbatim.
+      const dottedRefError = setStep
+        ? undefined
+        : dottedReferenceError(
+            rawInstruction,
+            resolvedParameters,
+            (item) => forEachPassOf(controls, controlState, item),
+            (text) => redact(text, secretsNow()),
+          );
       let stepResult: StepResult;
       let interactiveResults: StepResult[] = [];
 
-      if (tailContradiction) {
+      if (dottedRefError) {
+        logger.error(dottedRefError);
+        stepResult = {
+          index: i + 1,
+          instruction,
+          status: 'failed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          error: dottedRefError,
+          aiExplanation: dottedRefError,
+        };
+      } else if (tailContradiction) {
         const error = failureTailContradictionError(rawInstruction);
         logger.error(error);
         stepResult = {
@@ -1507,13 +1578,17 @@ export async function runTest(
         if (setOutcome.assigned) {
           logger.info(
             `[set] ${setOutcome.assigned.name} = ` +
-              `"${redact(setOutcome.assigned.value, secretsNow())}"`,
+              `"${redact(maskRecordSecrets(setOutcome.assigned.value), secretsNow())}"`,
           );
         }
       } else if (inputStep) {
         const stepStartTime = Date.now();
         const value = await promptUserForInput(inputStep.promptText);
-        resolvedParameters[inputStep.variable] = value;
+        // Through the one helper, like every other write into this map: an
+        // `[input: order]` after a `For each {{order}} …` is a rebind of that
+        // root, and left to a plain assignment it kept the last pass's
+        // `order.id` alive for every step that followed (§8.2).
+        bindVariable(resolvedParameters, inputStep.variable, value);
         logger.info(`Stored user input as parameter "{{${inputStep.variable}}}"`);
 
         // Don't count user input time against the test timeout
@@ -1666,7 +1741,28 @@ export async function runTest(
         // `[output: total]` prefix.
         rawInstruction);
         if (stepResult.status === 'passed') {
-          logger.info(`[output: ${outputStep.variable}] = "${resolvedParameters[outputStep.variable] ?? '(not captured)'}"`);
+          // `boundValue`, not a bare index: this line is how an author finds
+          // out whether the capture worked, and `[output: constructor]`
+          // printed `function Object() { [native code] }` off the prototype of
+          // a map that had captured nothing. The step it describes was
+          // recorded correctly — `computeStepCaptures` asks `hasOwn` — so the
+          // console said one thing and the report another.
+          const captured = boundValue(resolvedParameters, outputStep.variable);
+          // …and masked, the same composition the executor's own capture line
+          // uses: SHAPE first, then free text. Round 5 replaced the bare index
+          // read with `boundValue` and left the VALUE raw, so the CLI printed
+          // `[output: password] = "hunter2"` to the console and the SSE
+          // `output` bridge while the report, the step line and the prompt's
+          // `## Values` block all said `***` for it (review 6, finding 3).
+          // The shape half is not optional here either: `[output: rows]` over
+          // a `readTable` capture is a whole table under a name that says
+          // nothing, and a three-character `password` column never joins the
+          // free-text set.
+          const shown =
+            captured === undefined
+              ? '(not captured)'
+              : redact(maskRecordSecrets(captured), secretsNow());
+          logger.info(`[output: ${outputStep.variable}] = "${shown}"`);
         }
       } else if (test.toolCalls[i]) {
         // [tool: ...] step — dispatch deterministic code with live page/context/browser.

@@ -2,14 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { classifyLines, isTestFile, parseFrontmatter } from 'ai-ui-automation-runner-core';
 import { DEFAULT_DATA_DIR } from './aiui-config-parse.js';
-import {
-  POST_HOOK_SCOPES,
-  allCaptureWrites,
-  captureNamesBefore,
-  hookScopeAt,
-  inFrontmatter,
-  isFencedLine,
-} from './env-data-completion-core.js';
+import { inFrontmatter, isFencedLine } from './env-data-completion-core.js';
 import {
   activeEnvFor,
   composedEnv,
@@ -21,8 +14,8 @@ import {
 } from './env-data-resolve.js';
 import {
   findEnvLine,
-  findParameterBullet,
   locateJsonPath,
+  paramDefinition,
   paramRefAtPosition,
   refAtPosition,
   type RefAtPosition,
@@ -158,31 +151,22 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
   }
 
   /**
-   * Definitions for a `{{name}}` runtime variable — everything that writes it
-   * in scope at the cursor, in the file itself:
+   * Definitions for a `{{name}}` runtime variable: the vscode half of
+   * `paramDefinition` (env-data-definition-core.ts), which decides WHICH
+   * lines define the name and why none do — the parameter bullet, the
+   * in-scope captures, the `For each` headers, their order for a dotted name,
+   * and the one reachability question the text can answer. That file carries
+   * the reasoning; this one turns its answer into Locations or a toast.
    *
-   *  - the `- name:` bullet under `## Parameters`, when declared;
-   *  - EVERY in-scope capture (`[store as:]` / `[input:]` / `[output:]` / an
-   *    `out.k="name"` alias), per `captureNamesBefore`'s execution-order walk
-   *    — pre-hooks lead, section bodies count at their call sites.
+   * There is no env gate here, matching the completion split — `{{}}`
+   * resolves with no env selected.
    *
-   * All of them are returned, so a name written more than once peeks as a
-   * list rather than silently picking one: the run's LAST write is the live
-   * value, while a reader looking for where a name comes from usually wants
-   * the first, and the editor should not have to guess which question is
-   * being asked. There is no env gate, matching the completion split —
-   * `{{}}` resolves with no env selected.
-   *
-   * Scope depends on what the cursor's line IS, not only where it sits: an
-   * `after`/`afterEach` hook runs once the whole main flow has, so a read
-   * there sees every step's captures however the file is ordered.
-   *
-   * A name nothing writes toasts instead of silently doing nothing: unlike an
+   * A name nothing binds toasts instead of silently doing nothing: unlike an
    * undeclared `${namespace}`, a `{{name}}` in a test file is almost
-   * certainly meant as a runtime variable, and the two interesting misses —
-   * the write sits later in the run, or it is prose ("store it as {{x}}"),
-   * which deliberately binds nothing — are authoring mistakes worth
-   * explaining.
+   * certainly meant as a runtime variable, and the three interesting misses —
+   * the write sits later in the run, the loop that binds it does, or it is
+   * prose ("store it as {{x}}"), which deliberately binds nothing — are
+   * authoring mistakes worth explaining.
    */
   private paramTarget(
     document: vscode.TextDocument,
@@ -196,38 +180,37 @@ export class EnvDataDefinitionProvider implements vscode.DefinitionProvider {
     // takes `${env.X}` / `${envName}` only).
     if (inFrontmatter(text, position.line, classified)) return undefined;
 
-    const locations: vscode.Location[] = [];
-    const bullet = findParameterBullet(text, name);
-    if (bullet) locations.push(this.locationAt(document.uri, bullet));
-
-    // A post-hook reads after the whole flow; anything else reads where it
-    // sits. `mainFlowOnly` also keeps the hook line — which belongs to no
-    // section — from being attributed to whatever section encloses it.
-    const postHook = POST_HOOK_SCOPES.has(hookScopeAt(text, position.line) ?? '');
-    const writes = captureNamesBefore(
-      text,
-      postHook ? classified.length : position.line,
-      classified,
-      { mainFlowOnly: postHook, dedupe: false },
-    ).filter((c) => c.name === name);
-    for (const write of writes) {
-      locations.push(this.locationAt(document.uri, { ...write, line: write.line - 1 }));
+    // Everything below asks about the ROOT: `order.id` is bound by whatever
+    // binds `order`, and nothing writes a property under its own name.
+    const root = name.split('.')[0]!;
+    const found = paramDefinition(text, position.line, name, classified);
+    if (found.kind === 'found') {
+      return found.hits.map((hit) => this.locationAt(document.uri, hit));
     }
-    if (locations.length > 0) return locations;
 
-    // Nothing writes it in scope — say why, distinguishing "written later in
-    // the run" from "written nowhere". This asks whether the name is written
-    // AT ALL, which is not the scope walk run from the end of the file: that
-    // walk resolves an owning section for its position, so a file ending
-    // inside a section body would drop the main-flow steps below its call
-    // site and misreport them as never written.
-    const later = allCaptureWrites(text, classified).find((c) => c.name === name);
+    // Where the name is dotted, every message is about the ROOT: the property
+    // is only ever as real as the record it came from, and "{{order.id}} is
+    // written on line 7" would be false of a line that writes `{{order}}`.
+    const subject =
+      name === root ?
+        `{{${name}}} has no value here — it`
+      : `{{${name}}} has no value here — {{${root}}}`;
     this.warnings.warn(
-      later
-        ? `TestBench: {{${name}}} has no value here — it is written on line ` +
-            `${later.line}, which the run reaches after this point.`
-        : `TestBench: {{${name}}} is not a declared parameter, and no step stores ` +
-            'it (prose like "store it as {{x}}" binds nothing — use [store as: x]).',
+      found.kind === 'later-capture'
+        ? `TestBench: ${subject} is written on line ${found.line}, which the run ` +
+            'reaches after this point.'
+        : found.kind === 'later-loop'
+          ? `TestBench: ${subject} is bound by the "For each" on line ` +
+            `${found.line}, which the run reaches after this point.`
+          : name === root
+            ? `TestBench: {{${name}}} is not a declared parameter, and no step stores ` +
+              'it (prose like "store it as {{x}}" binds nothing — use [store as: x]).'
+            : // Dotted, and its root is bound by nothing at all. Worded like
+              // the runtime's own refusal (`dottedReferenceError`), which
+              // names the root rather than the property.
+              `TestBench: {{${name}}} has no value — nothing in this file binds ` +
+              `{{${root}}}. A property comes from the record a ` +
+              `"For each {{${root}}} in {{list}}" is iterating.`,
     );
     return undefined;
   }

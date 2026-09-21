@@ -24,9 +24,10 @@ import { executeStep } from '../../runner/step-executor.js';
 import { launchBrowser, closeBrowser } from '../../browser/manager.js';
 import { captureScreenshot } from '../../browser/screenshot.js';
 import { loadContextFiles } from '../../context/loader.js';
-import { interpolate } from '../../parser/parameters.js';
+import { bindVariable, interpolate } from '../../parser/parameters.js';
 import { interpolateEnvData, type EnvDataContext } from '../../parser/interpolate-env-data.js';
 import { parseSetStep } from '../../parser/set-step.js';
+import { controlLineDefines } from '../../parser/control-line.js';
 import { isReturnClaim, parseFlowControlStep } from '../../parser/flow-control-step.js';
 import {
   failureTailContradictionError,
@@ -46,13 +47,16 @@ import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 import { runSetStep } from '../../runner/set-step-runner.js';
 import {
   createControlState,
+  forEachPassOf,
   guardVisitEvaluates,
   planAfterStep,
   planForStart,
   returnExit,
   type ControlRecord,
 } from '../../runner/control-flow.js';
+import { dottedReferenceError } from '../../runner/placeholder-substitution.js';
 import {
+  applyPassBindings,
   eachSkipped,
   evaluateGuard,
   guardHistoryLines,
@@ -317,10 +321,20 @@ export class UIRunnerAdapter {
       return;
     }
 
+    // The steer as everything outside the run may see it. Same rule as the
+    // run loop's `shown` (§7.6): the executor is handed the resolved text
+    // because it has to act on it, and the panel and the model are handed the
+    // masked one — a `${env.PASSWORD}` typed into a steer was going to both.
+    const shownSteer = (): string =>
+      `(steering) ${redact(
+        resolvedInstruction,
+        runSecrets({ parameters: this.resolvedParameters, envData: this.test?.envData }),
+      )}`;
+
     // Emit step-start for the steering step
     this.emit('runner:step-start', {
       stepIndex,
-      instruction: `(steering) ${resolvedInstruction}`,
+      instruction: shownSteer(),
       totalSteps,
     });
 
@@ -387,7 +401,7 @@ export class UIRunnerAdapter {
     this.conversationHistory.push(
       formatStepHistoryEntry(
         stepIndex,
-        `(steering) ${resolvedInstruction}`,
+        shownSteer(),
         result.status === 'passed',
         currentUrl,
       ),
@@ -403,7 +417,11 @@ export class UIRunnerAdapter {
 
   /** Respond to an [input: variable] prompt. */
   inputResponse(variable: string, value: string): void {
-    this.resolvedParameters[variable] = value;
+    // Through the one helper, like every other write into this map: an
+    // `[input: order]` after a `For each {{order}} …` rebinds that root, and
+    // §8.2 says a rebind erases the root's dotted keys — otherwise the last
+    // pass's `order.id` answers every later `{{order.id}}`.
+    bindVariable(this.resolvedParameters, variable, value);
     if (this.inputResolve) {
       this.inputResolve(value);
       this.inputResolve = null;
@@ -427,7 +445,16 @@ export class UIRunnerAdapter {
    */
   private resolveStepText(raw: string): string {
     const envData = this.test?.envData;
-    return interpolate(envData ? interpolateEnvData(raw, envData) : raw, this.resolvedParameters);
+    // The names the LINE defines are exempt from the unresolved warning: this
+    // loop, like the server's, resolves every step before the control
+    // dispatch, so a `For each {{payment}} in {{payments}}` header would warn
+    // about the item it is about to bind, once per correct table loop
+    // (`controlLineDefines`, src/parser/control-line.ts).
+    return interpolate(
+      envData ? interpolateEnvData(raw, envData) : raw,
+      this.resolvedParameters,
+      controlLineDefines(raw),
+    );
   }
 
   private async executeRun(filePath: string): Promise<void> {
@@ -646,6 +673,24 @@ export class UIRunnerAdapter {
       const failureTailContradiction =
         setStep || flowControlClaim ? false : isFailureTailContradiction(rawInstruction);
       const instruction = setStep ? rawInstruction : this.resolveStepText(rawInstruction);
+      /**
+       * The same line as everything OUTSIDE the run may see it.
+       *
+       * `resolveStepText` is interpolation and nothing else, so `instruction`
+       * holds the real values — which is right, it is what the executor acts
+       * on. But it was also what this loop handed the renderer
+       * (`runner:step-start`) and the model (`formatStepHistoryEntry`, whose
+       * docstring asks for the MASKED text), so a `Type {{password}} into the
+       * field` step put the password in the panel and then in every later
+       * step's `## Prior Steps`. The CLI masks at its own seam
+       * (test-runner.ts) and so does the server (session-manager.ts); this
+       * loop was the one that did not (§7.6).
+       *
+       * Read per call, not once: a `[store as: …]` capture or an `[input:]`
+       * answer during this step adds a secret the lines after it must hide.
+       */
+      const shown = (text: string): string =>
+        redact(text, runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData }));
 
       // ── Flow control, in two halves (stories/step-flow-control.md) ───────
       // Split because the ORDER matters to a watching UI: the returning step
@@ -750,6 +795,12 @@ export class UIRunnerAdapter {
           index: i,
           state: controlState,
           resolvedParameters: this.resolvedParameters,
+          // A locally decided condition's reasoning is built from the
+          // SUBSTITUTED text, so it can carry a secret the judge's reasoning
+          // never could. Masked on the same terms as every other string this
+          // runner emits.
+          redact: (text) =>
+            redact(text, runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData })),
           executorOptions: {
             page: this.page,
             config: this.config,
@@ -771,7 +822,10 @@ export class UIRunnerAdapter {
           plan.pass && isLoopRecord(controlRecord)
             ? loops.beginPass(i, controlRecord, plan.pass)
             : undefined;
-        if (plan.pass?.bindings) Object.assign(this.resolvedParameters, plan.pass.bindings);
+        // `applyPassBindings`, not `Object.assign`: a row that omits a property
+        // the last row had must not inherit its value, and this runner's
+        // jump-to-step can restart a body mid-loop (control-runtime.ts).
+        if (plan.pass?.bindings) applyPassBindings(this.resolvedParameters, plan.pass.bindings);
         if (plan.loopEnded) loops.endLoop(plan.loopEnded);
 
         const rows = guardRows(controlRecord, i, evaluation);
@@ -813,15 +867,23 @@ export class UIRunnerAdapter {
           });
           // The SELECTED member's line, plus a `did not hold` line for each
           // alternative the judge ruled out — `rawInstruction` is only where
-          // the question was asked from. Unredacted, matching every other
-          // history line this runner writes.
+          // the question was asked from. Masked like every other history line
+          // this runner writes: the comment here used to say the opposite,
+          // "unredacted, matching every other history line", and that stopped
+          // being true when those lines started being masked. Both of the
+          // other loops that write these already wrap this callback —
+          // `redact(test.steps[k] …)` in test-runner.ts,
+          // `redact(effectiveSteps[k] …)` in session-manager.ts — and a
+          // guard line is a step's text like any other: whatever a value the
+          // mask set holds is doing in it, the model's `## Prior Steps` is
+          // not where it should turn up.
           this.conversationHistory.push(
             ...guardHistoryLines({
               controls,
               index: i,
               rows,
               plan,
-              text: (k) => parsedTest.steps[k] ?? rawInstruction,
+              text: (k) => shown(parsedTest.steps[k] ?? rawInstruction),
             }),
           );
         }
@@ -848,7 +910,7 @@ export class UIRunnerAdapter {
       // and sat inert until the parse above started building that context
       // (issues/resolved/052).
       if (setStep) {
-        this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
+        this.emit('runner:step-start', { stepIndex, instruction: shown(instruction), totalSteps });
         const outcome = runSetStep(
           setStep,
           instruction,
@@ -866,7 +928,7 @@ export class UIRunnerAdapter {
         this.conversationHistory.push(
           formatStepHistoryEntry(
             stepIndex,
-            instruction,
+            shown(instruction),
             outcome.result.status === 'passed',
             this.page?.url(),
           ),
@@ -879,13 +941,62 @@ export class UIRunnerAdapter {
         continue;
       }
 
+      // --- A dotted reference this pass cannot answer ---
+      // `{{order.statuz}}` where the row has `status`
+      // (docs/specs/SPEC-structured-table-reads.md §8.3). Refused before the
+      // model call, in the same shape as the contradiction below, and read off
+      // the AUTHORED line — `resolveStepText` has already replaced every
+      // reference it could answer. Dotted only; a flat name keeps its warning.
+      // Masked on the same terms as every other string this runner emits: the
+      // refusal is written from the run's own values — the properties the row
+      // holds, the keys the loop dropped — and it reaches the IPC event, the
+      // report and the log verbatim.
+      const dottedRefError = setStep
+        ? undefined
+        : dottedReferenceError(
+            rawInstruction,
+            this.resolvedParameters,
+            (item) => forEachPassOf(controls, controlState, item),
+            (text) =>
+              redact(
+                text,
+                runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData }),
+              ),
+          );
+      if (dottedRefError) {
+        flushSkips(i);
+        this.emit('runner:step-start', { stepIndex, instruction: shown(instruction), totalSteps });
+        const stepResult: StepResult = {
+          index: stepIndex,
+          instruction,
+          status: 'failed',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          error: dottedRefError,
+          aiExplanation: dottedRefError,
+        };
+        this.stepResults.push(stepResult);
+        this.emit('runner:step-complete', {
+          stepIndex,
+          status: 'failed',
+          durationMs: 0,
+          error: dottedRefError,
+        });
+        this.emit('runner:error', { message: dottedRefError });
+        this.conversationHistory.push(
+          formatStepHistoryEntry(stepIndex, shown(instruction), false, this.page?.url()),
+        );
+        break;
+      }
+
       // --- The contradiction of decision 8 ---
       // Refused rather than resolved, with no model call: the line asks to both
       // end the flow and to tolerate its own failure. The same sentence the
       // validator and the other three loops use.
       if (failureTailContradiction) {
         flushSkips(i);
-        this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
+        this.emit('runner:step-start', { stepIndex, instruction: shown(instruction), totalSteps });
         const error = failureTailContradictionError(rawInstruction);
         const stepResult: StepResult = {
           index: stepIndex,
@@ -901,7 +1012,7 @@ export class UIRunnerAdapter {
         this.emit('runner:step-complete', { stepIndex, status: 'failed', durationMs: 0, error });
         this.emit('runner:error', { message: error });
         this.conversationHistory.push(
-          formatStepHistoryEntry(stepIndex, instruction, false, this.page?.url()),
+          formatStepHistoryEntry(stepIndex, shown(instruction), false, this.page?.url()),
         );
         break;
       }
@@ -912,7 +1023,7 @@ export class UIRunnerAdapter {
       // (stories/step-failure-outcomes.md, decisions 1 and 3).
       if (flowControlClaim && flowControlClaim.body === undefined && flowControlClaim.verb === 'fail') {
         flushSkips(i);
-        this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
+        this.emit('runner:step-start', { stepIndex, instruction: shown(instruction), totalSteps });
         // Masked here, where the message first becomes the thing the IPC
         // event, the report and the log carry — the same seam the CLI, the
         // Sessions API and the errand runner mask at. The message is the
@@ -947,7 +1058,7 @@ export class UIRunnerAdapter {
           deliberate: true,
         });
         this.conversationHistory.push(
-          formatStepHistoryEntry(stepIndex, instruction, false, this.page?.url()),
+          formatStepHistoryEntry(stepIndex, shown(instruction), false, this.page?.url()),
         );
         bail = true;
         continue;
@@ -962,7 +1073,7 @@ export class UIRunnerAdapter {
         // one, and a `Return` written as a chain tail is a step like any other
         // as far as ordering goes.
         flushSkips(i);
-        this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
+        this.emit('runner:step-start', { stepIndex, instruction: shown(instruction), totalSteps });
         const stepResult: StepResult = {
           index: stepIndex,
           instruction,
@@ -983,7 +1094,7 @@ export class UIRunnerAdapter {
         this.emit('runner:step-complete', { stepIndex, status: 'passed', durationMs: 0 });
         i = skipRestOfFlow(label);
         this.conversationHistory.push(
-          formatStepHistoryEntry(stepIndex, instruction, true, this.page?.url()),
+          formatStepHistoryEntry(stepIndex, shown(instruction), true, this.page?.url()),
         );
         this.conversationHistory.push(
           `[flow] step ${stepIndex} ${stepResult.aiExplanation} — the rest of that flow was skipped`,
@@ -998,7 +1109,7 @@ export class UIRunnerAdapter {
         const promptText = inputMatch[2]?.trim() || `Enter value for "${variable}"`;
         const stepStartTime = Date.now();
 
-        this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
+        this.emit('runner:step-start', { stepIndex, instruction: shown(instruction), totalSteps });
 
         // Pause and wait for user input
         this.emit('runner:paused', {
@@ -1011,7 +1122,9 @@ export class UIRunnerAdapter {
         const value = await this.waitForInput();
         if (this.stopped) break;
 
-        this.resolvedParameters[variable] = value;
+        // Same rule as `inputResponse` above, at the loop's own end of the
+        // handshake.
+        bindVariable(this.resolvedParameters, variable, value);
 
         this.emit('runner:resumed', {});
 
@@ -1039,7 +1152,7 @@ export class UIRunnerAdapter {
 
         // Add to conversation history
         this.conversationHistory.push(
-          formatStepHistoryEntry(stepIndex, instruction, true, this.page?.url()),
+          formatStepHistoryEntry(stepIndex, shown(instruction), true, this.page?.url()),
         );
 
         i = advance(i);
@@ -1049,7 +1162,7 @@ export class UIRunnerAdapter {
       // --- Handle [interactive] steps ---
       const interactiveMatch = instruction.match(INTERACTIVE_STEP_PATTERN);
       if (interactiveMatch) {
-        this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
+        this.emit('runner:step-start', { stepIndex, instruction: shown(instruction), totalSteps });
 
         // Pause for interactive steering
         await this.pause(stepIndex, 'interactive');
@@ -1075,7 +1188,7 @@ export class UIRunnerAdapter {
         });
 
         this.conversationHistory.push(
-          formatStepHistoryEntry(stepIndex, instruction, true, this.page?.url()),
+          formatStepHistoryEntry(stepIndex, shown(instruction), true, this.page?.url()),
         );
 
         i = advance(i);
@@ -1083,7 +1196,7 @@ export class UIRunnerAdapter {
       }
 
       // --- Normal step execution ---
-      this.emit('runner:step-start', { stepIndex, instruction, totalSteps });
+      this.emit('runner:step-start', { stepIndex, instruction: shown(instruction), totalSteps });
 
       const result = await executeStep(stepIndex, totalSteps, instruction, {
         page: this.page,
@@ -1183,7 +1296,7 @@ export class UIRunnerAdapter {
       // Add to conversation history
       const currentUrl = this.page.url();
       this.conversationHistory.push(
-        formatStepHistoryEntry(stepIndex, instruction, result.status === 'passed', currentUrl),
+        formatStepHistoryEntry(stepIndex, shown(instruction), result.status === 'passed', currentUrl),
       );
       // The skipped steps are not in the history, so the returning step's own
       // line has to explain the gap (story decision 4).

@@ -9,6 +9,8 @@ import {
   formatTestInfo,
 } from '../src/ai/prompts.js';
 import type { ChatMessage } from '../src/ai/types.js';
+import { buildRepairPrompt } from '../src/codebehind/repair.js';
+import { markLoopBindings } from '../src/utils/secrets.js';
 
 /**
  * The prompt half of stories/placeholder-preserving-actions.md, phase 1: the
@@ -261,8 +263,119 @@ describe('formatParameterBlock — masking', () => {
     expect(block).toContain('- ${data.keys.public} resolved to "pk_123" on this run');
   });
 
+  it('decides a loop binding by its property, not by the substring rule on the whole name', () => {
+    // A For each over table records leaves `row.<column>` in the map. The
+    // property is page-derived, so it takes the record-column rule: `keyword`
+    // is not `key`, `token` is. The root stays author-chosen: `secret.value`.
+    const block = formatParameterBlock(
+      [
+        { name: 'row.keyword', value: 'mortgage' },
+        { name: 'row.token', value: 'tok_live_9' },
+        { name: 'secret.value', value: 's3cr3t-value' },
+      ],
+      [],
+    );
+    expect(block).toContain('- {{row.keyword}} resolved to "mortgage" on this run');
+    expect(block).toContain('- {{row.token}} resolved to "***" on this run');
+    expect(block).toContain('- {{secret.value}} resolved to "***" on this run');
+    for (const leaked of ['tok_live_9', 's3cr3t-value']) expect(block).not.toContain(leaked);
+  });
+
   it('still says so when the step uses nothing', () => {
     expect(formatParameterBlock([], [])).toBe('(this step uses no parameters)');
+  });
+});
+
+/**
+ * The name rule has nothing to catch on a `readTable` capture: the whole table
+ * lives under one author-chosen name (`payments`) and one pass's record under
+ * another (`payment`), so both rendered RAW — every column of every row,
+ * password included, in the outbound prompt. Beside them, the DOM in the same
+ * message is `redact(domSnapshot, …)`ed, so the same value was masked in one
+ * half of the message and printed in the other.
+ *
+ * Two layers answer it, because either alone leaves a hole: `maskRecordSecrets`
+ * is structural and catches a column however short or freshly-captured its
+ * value is, and `redact` catches a secret that reached the value by some other
+ * route than a secret-named column.
+ */
+describe('formatParameterBlock — a record capture is masked by its columns', () => {
+  const PAYMENTS = JSON.stringify([
+    { _row: '1', payee: 'Acme', password: 'hunter2-long' },
+    { _row: '2', payee: 'Origin', password: 'correct-horse' },
+  ]);
+  const PAYMENT = JSON.stringify({ _row: '1', payee: 'Acme', password: 'hunter2-long' });
+
+  it('masks the password column of a readTable capture and of one pass record', () => {
+    const block = formatParameterBlock(
+      [
+        { name: 'payments', value: PAYMENTS },
+        { name: 'payment', value: PAYMENT },
+        { name: 'payment.payee', value: 'Acme' },
+        { name: 'payment.password', value: 'hunter2-long' },
+      ],
+      [],
+    );
+    // The row survives as evidence — the model still has to find Acme in the
+    // page — with the one cell blanked.
+    expect(block).toContain('{{payments}} resolved to');
+    expect(block).toContain('Acme');
+    expect(block).toContain('Origin');
+    expect(block).toContain('{{payment.payee}} resolved to "Acme" on this run');
+    expect(block).toContain('{{payment.password}} resolved to "***" on this run');
+    for (const leaked of ['hunter2-long', 'correct-horse']) {
+      expect(block).not.toContain(leaked);
+    }
+  });
+
+  it('also masks by value, for a secret that reached the entry some other way', () => {
+    // `{{summary}}` is not secret-named and holds no records — but the run's
+    // password is inside it, and every other surface that writes this value
+    // masks it.
+    const block = formatParameterBlock(
+      [{ name: 'summary', value: 'signed in as octocat with hunter2-correct' }],
+      [{ ref: 'data.note', value: 'the key is hunter2-correct' }],
+      new Set<string>(),
+      ['hunter2-correct'],
+    );
+    expect(block).toContain('signed in as octocat with ***');
+    expect(block).toContain('the key is ***');
+    expect(block).not.toContain('hunter2-correct');
+  });
+
+  it('leaves a record with no secret column exactly as it arrived', () => {
+    const plain = JSON.stringify([{ _row: '1', payee: 'Acme', amount: '$1.00' }]);
+    expect(formatParameterBlock([{ name: 'payments', value: plain }], []))
+      .toBe(`- {{payments}} resolved to ${JSON.stringify(plain)} on this run`);
+  });
+
+  it('reaches the generation prompt too, which shares the formatter', () => {
+    // `buildStepCodePrompt` passes no mask set — `compile.ts` has none to
+    // give it — so the free-text layer is absent there. The structural one
+    // is not: it needs nothing but the value, which is why it is the layer
+    // that closes this on every prompt at once.
+    const text = contentBlocksToText(
+      buildStepCodePrompt({
+        rawStepText: 'Review {{payments}}',
+        parameters: [{ name: 'payments', value: PAYMENTS }],
+        actions: [],
+      }).content,
+    );
+    expect(text).toContain('Acme');
+    expect(text).not.toContain('hunter2-long');
+  });
+
+  it('keeps unmask meaning what it says — neither layer runs on an exempt name', () => {
+    // The hatch exists because `isSecretName` matches `key` and the model must
+    // be able to find the `keyword` column in the page. Masking it by value
+    // here would take it away again through the other door.
+    const block = formatParameterBlock(
+      [{ name: 'keyword', value: 'mortgage' }],
+      [],
+      new Set(['keyword']),
+      ['mortgage'],
+    );
+    expect(block).toBe('- {{keyword}} resolved to "mortgage" on this run');
   });
 });
 
@@ -338,5 +451,87 @@ describe('code-generation prompt — a placeholder-bearing selector', () => {
     );
 
     expect(text).not.toContain('CARRIES A PLACEHOLDER');
+  });
+});
+
+/**
+ * Review 5, finding 5: `formatParameterBlock` judged a dotted name with no map
+ * to ask.
+ *
+ * With nothing to ask, `isSecretParameterName` answers with the BINDING rule —
+ * root, then the narrow whole-word record rule on the property — which is right
+ * for a `For each` pass's `row.keyword` and wrong for every dotted name a
+ * person typed. A data file's own `user.apikey` heading is merged into the
+ * variable map by `resolveParameters`, splits to `apikey`, matches neither
+ * half, and rendered its credential into the compile's generation and repair
+ * prompts in clear. The map is what says which is which (§7.6), and it has to
+ * be the LIVE object: the loop-binding registry is by identity.
+ */
+describe('formatParameterBlock — whose name is it', () => {
+  function liveMap(): Record<string, string> {
+    const map = { 'user.apikey': 'uk_live_1234', 'row.keyword': 'AU' };
+    markLoopBindings(map, ['row.keyword']);
+    return map;
+  }
+
+  const params = [
+    { name: 'user.apikey', value: 'uk_live_1234' },
+    { name: 'row.keyword', value: 'AU' },
+  ];
+
+  it('masks the heading nobody bound and leaves the column a pass did', () => {
+    const block = formatParameterBlock(params, [], new Set<string>(), [], liveMap());
+    expect(block).toContain('- {{user.apikey}} resolved to "***" on this run');
+    expect(block).toContain('- {{row.keyword}} resolved to "AU" on this run');
+    expect(block).not.toContain('uk_live_1234');
+  });
+
+  it('without a map both take the binding rule — the behaviour this replaces', () => {
+    // Kept as the statement of what the map buys: the same two names, asked
+    // with nothing to ask, and the credential is in the block.
+    const block = formatParameterBlock(params, []);
+    expect(block).toContain('uk_live_1234');
+  });
+
+  it('the repair prompt asks it', () => {
+    const text = textOf(
+      buildRepairPrompt({
+        rawStepText: 'Check the row for {{user.apikey}}',
+        stepIndex: 1,
+        entryCode: '{ source: "x", async run() {} }',
+        error: 'timed out',
+        parameters: params,
+        parameterMap: liveMap(),
+      }),
+    );
+    expect(text).toContain('- {{user.apikey}} resolved to "***" on this run');
+    expect(text).toContain('- {{row.keyword}} resolved to "AU" on this run');
+    expect(text).not.toContain('uk_live_1234');
+  });
+
+  it('the generation prompt asks it', () => {
+    const text = textOf(
+      buildStepCodePrompt({
+        rawStepText: 'Check the row for {{user.apikey}}',
+        parameters: params,
+        parameterMap: liveMap(),
+        actions: [],
+      }),
+    );
+    expect(text).toContain('- {{user.apikey}} resolved to "***" on this run');
+    expect(text).toContain('- {{row.keyword}} resolved to "AU" on this run');
+    expect(text).not.toContain('uk_live_1234');
+  });
+
+  it('and so does the step prompt’s ## Values block, through StepValues.map', () => {
+    const text = textOf(
+      buildStepMessage('Check the row for {{user.apikey}}', DOM, null, [], undefined, undefined, undefined, {
+        parameters: params,
+        map: liveMap(),
+      }),
+    );
+    expect(text).toContain('- {{user.apikey}} resolved to "***" on this run');
+    expect(text).toContain('- {{row.keyword}} resolved to "AU" on this run');
+    expect(text).not.toContain('uk_live_1234');
   });
 });

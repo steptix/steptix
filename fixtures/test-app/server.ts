@@ -1454,6 +1454,15 @@ async function handleRequest(
       '/dom-noise': 'dom-noise.html',
       '/documents': 'documents.html',
       '/control-flow': 'control-flow.html',
+      // Table fixtures (docs/specs/SPEC-structured-table-reads.md); tables.html
+      // is the index of all of them.
+      '/tables': 'tables.html',
+      '/structured-orders': 'structured-orders.html',
+      '/structured-orders-many': 'structured-orders-many.html',
+      '/scheduled-payments': 'scheduled-payments.html',
+      '/payment-details': 'payment-details.html',
+      '/statements': 'statements.html',
+      '/table-edge-cases': 'table-edge-cases.html',
     };
     const mappedFile = friendlyRoutes[pathname];
     if (mappedFile) {

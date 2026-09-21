@@ -5,7 +5,14 @@ import {
   resolveEnvDataRef,
   type EnvDataContext,
 } from '../parser/interpolate-env-data.js';
-import { MASK } from '../utils/secrets.js';
+import {
+  PLACEHOLDER_SOURCE,
+  WIDE_PLACEHOLDER_SOURCE,
+  isBindableProperty,
+  placeholderProperty,
+  placeholderRoot,
+} from '../parser/parameters.js';
+import { MASK, redact, runSecrets } from '../utils/secrets.js';
 
 /**
  * The model names the value it used; the executor puts the value in
@@ -30,11 +37,12 @@ import { MASK } from '../utils/secrets.js';
  */
 
 /**
- * The substituter's `{{name}}` grammar. Deliberately identical to
- * `interpolate`'s (src/parser/parameters.ts) — the two must agree on what a
- * placeholder is, or a step's text and its actions resolve differently.
+ * The substituter's `{{name}}` / `{{name.property}}` grammar. Imported from
+ * `interpolate`'s own definition (src/parser/parameters.ts) rather than copied
+ * — the two must agree on what a placeholder is, or a step's text and its
+ * actions resolve differently.
  */
-const NARROW_PLACEHOLDER_SOURCE = '\\{\\{(\\w+)\\}\\}';
+const NARROW_PLACEHOLDER_SOURCE = PLACEHOLDER_SOURCE;
 
 /**
  * The CHECKER's `{{name}}` grammar, deliberately wider than the substituter's:
@@ -42,7 +50,7 @@ const NARROW_PLACEHOLDER_SOURCE = '\\{\\{(\\w+)\\}\\}';
  * named, rather than slipping through both passes and being typed into the page
  * as literal text (decision 4).
  */
-const WIDE_PLACEHOLDER_RE = /\{\{\s*(\w+)\s*\}\}/g;
+const WIDE_PLACEHOLDER_RE = new RegExp(WIDE_PLACEHOLDER_SOURCE, 'g');
 
 /** Both syntaxes in ONE pass, so substitution never re-scans what it inserted:
  *  a value that itself contains `{{` is inserted verbatim. Group 1 is a
@@ -62,6 +70,25 @@ const NAME_LIKE_FIELDS: ReadonlySet<string> = new Set([
   'action',
   'against',
   'attribute',
+]);
+
+/**
+ * The same rule one level down: properties of a NESTED object which are names
+ * rather than values, keyed by the top-level field they sit under.
+ *
+ * `columns[].key` is the property name a `readTable` writes on every record
+ * (docs/specs/SPEC-structured-table-reads.md §9.1). It is a definition, exactly
+ * as `as` is, so it is never substituted — `{{…}}` in one is not a reference.
+ * `columns[].header` is NOT here on purpose: a header is matched against the
+ * page's own text, so an author may parameterise it, and the spec's sentence
+ * names the two halves together.
+ *
+ * Keyed on the FIELD rather than on `action === 'readTable'` because the walk
+ * sees a bag of fields and never the action name — and because a `columns`
+ * array means the same thing wherever it turns up.
+ */
+const NAME_LIKE_NESTED: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['columns', new Set(['key'])],
 ]);
 
 /**
@@ -88,6 +115,41 @@ const TYPED_FIELDS: ReadonlySet<string> = new Set([
   'key',
 ]);
 
+/**
+ * What `name` is bound to right now, or undefined — OWN properties only.
+ *
+ * `parameters[name]` is a plain object index, so `{{constructor}}`,
+ * `{{toString}}`, `{{valueOf}}` and `{{__proto__}}` answered with something
+ * off `Object.prototype` on a map that binds none of them. Every read in this
+ * module goes through here, because each of the three had its own way of going
+ * wrong with a function or a prototype in place of a string: `substituteText`
+ * typed `function Object() { [native code] }` into the page, and both
+ * `substituteAsLiterals` (`value.includes`) and `unspellableKeysOf`
+ * (`rootValue.startsWith`) threw a TypeError out of a call site with no catch
+ * — the CLI's `dottedReferenceError` sits in `runTest`'s try/finally, and the
+ * guard loop's is outside `evaluateGuard`'s try, so the run died with no
+ * report rather than refusing the step.
+ *
+ * Exported because the hazard is not this module's alone: every read of the
+ * variable map by a name a step or a model chose has it. The step prompt's
+ * `## Values` block indexed it bare, so `Verify {{constructor}} is shown`
+ * carried the `Object` function as a VALUE into `formatParameterBlock` — and
+ * with any secret in scope the masker there threw on it
+ * (`value.charCodeAt is not a function`, out of `maskRecordSecrets`; a
+ * `redact` that got there first says `out.split is not a function`). Either
+ * way a step whose only mistake was naming a variable nothing binds failed
+ * with a sentence about strings, and on the guard path the same throw escapes
+ * `evaluateConditions` altogether. `stepParameters` (src/codebehind/
+ * generate.ts) had the same read, and `For each {{row}} in {{constructor}}` a
+ * third. One helper, so the answer cannot differ.
+ */
+export function boundValue(
+  parameters: Record<string, string>,
+  name: string,
+): string | undefined {
+  return Object.hasOwn(parameters, name) ? parameters[name] : undefined;
+}
+
 /** Everything a substitution needs: the live parameter map and, when the run
  *  has an environment, the context its `${…}` references resolve against. */
 export interface PlaceholderValues {
@@ -111,6 +173,199 @@ export function collectReferences(text: string): CollectedReferences {
     placeholders.push({ name: m[1]!, raw: m[0] });
   }
   return { placeholders, envRefs: envDataRefsIn(text) };
+}
+
+/**
+ * The one sentence five refusals share.
+ *
+ * Three of them read it from here: the model's action
+ * ({@link checkOneString}), a `Set` template ({@link resolveSetTemplate}) and
+ * the author's own step text ({@link dottedReferenceError}). The other two are
+ * hand-written and stay that way — `setStepError` (src/parser/set-step.ts) and
+ * `foreachMessage` (src/parser/control-line.ts) are import-free by design, so
+ * a parser can answer before a runner module is loaded at all. All five are
+ * compared as text by `tests/substitution-sites.test.ts`, because the sentence
+ * has been reworded once already and a reader who meets it twice should not
+ * have to decide whether two near-identical sentences mean two different
+ * things. Same mistake, same fix, same words.
+ */
+const NO_SPACES_SENTENCE = (key: string): string =>
+  `A placeholder carries no spaces inside its braces — write \`{{${key}}}\`.`;
+
+/**
+ * The keys of a root whose value IS a JSON record, in order — or undefined
+ * when the value is anything else (a scalar, an array, unparseable text, or
+ * nothing at all).
+ *
+ * Read back out of the ROOT's own binding, which for a `For each` pass is the
+ * row's compact JSON (§8.2). That is deliberate and it is the cheap half of
+ * the design: the alternative was to carry the dropped keys on the loop's
+ * cursor, through the verdict, through `planForStart`'s rebuild and into four
+ * call sites, to say something the value in hand already answers — and to
+ * answer it for the CURRENT pass, which is the only pass the message is about.
+ *
+ * `undefined` and `[]` are different answers, and the distinction is the whole
+ * reason this returns keys rather than a boolean: an empty record and a string
+ * both have no spellable keys, so `{{order}}` bound to `{}` was refused as
+ * "holds no properties — it is not an object", which is false about the one
+ * thing that sentence asserts.
+ *
+ * One parse, read twice by {@link findDottedRefusal} — for the keys and for
+ * the unspellable ones among them. It used to be parsed once per question.
+ */
+function recordKeysOf(rootValue: string | undefined): string[] | undefined {
+  if (rootValue === undefined || !rootValue.startsWith('{')) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rootValue);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+  return Object.keys(parsed);
+}
+
+/**
+ * The refusal for a `{{item.property}}` this run cannot answer, or undefined
+ * when every dotted reference the text makes has a binding
+ * (docs/specs/SPEC-structured-table-reads.md §8.3).
+ *
+ * DOTTED ONLY, and that asymmetry is the whole design. An unresolved FLAT name
+ * is old ground: `interpolate` leaves it literal with a warning, a test that
+ * reads a variable before capturing it has always behaved that way, and
+ * tightening it here would fail runs this feature never touched. A dotted name
+ * is new syntax with no legacy to protect, and the failure it hides is worse —
+ * `{{order.statuz}}` reaching the model as six literal braces reads as a model
+ * that could not pick an action, three steps away from the typo.
+ *
+ * Called by each run loop on the step's text BEFORE the model sees it, which
+ * is the only place all four of them share; `checkTurnReferences` below is the
+ * same idea one turn later, over what the model wrote back.
+ *
+ * `passOf` answers "which item of the `For each` binding this name are we on",
+ * which the planner knows and this module does not
+ * ({@link forEachPassOf}, control-flow.ts). Omitted, the message simply leaves
+ * that clause out rather than guessing a number.
+ *
+ * The SPELLING is refused first, and only for a dotted name. `{{ order.id }}`
+ * matches the wide grammar and not the narrow one, so `interpolate` leaves it
+ * alone and the braces reach the model — the exact failure
+ * `WIDE_PLACEHOLDER_SOURCE` exists to catch, promised in its docstring and
+ * kept by `checkOneString` for what the MODEL writes. Review 2 found this half
+ * missing: a resolvable `{{ order.id }}` was neither substituted, refused nor
+ * warned about. A flat `{{ name }}` keeps its legacy silence, for the same
+ * reason the rest of this function is dotted-only.
+ *
+ * MASKED, because the message is written from the run's own values: it names
+ * the row's available properties and the keys the loop dropped, and a key can
+ * carry a secret (`hunter2 header`). Every emitter of it prints it — the CLI's
+ * `logger.error`, the `StepResult.error` and `aiExplanation` all three loops
+ * build, and the server's `step:fail` wire payload — so masking at each of
+ * those seams would be four chances to forget. `redact` is passed in for the
+ * same reason `evaluateGuard` takes one: each loop's masker differs (the
+ * server's `secretsNow` counts frame inputs too). Omitted, the fallback is
+ * what the CLI and the Electron adapter build for themselves anyway, so a
+ * caller that forgets still masks.
+ *
+ * That fallback is a SAFETY NET, not the production path, and it is weaker
+ * than what every real caller passes: `runSecrets({ parameters })` sees the
+ * parameter map only, so a secret that lives in the run's environment or data
+ * files (`${env.PASSWORD}`, a `data.users.admin.password`) is not in its mask
+ * set, and neither are the server's frame inputs. All four run loops pass
+ * `redactText`. Read the fallback as "a new caller cannot leak everything",
+ * not as "the mask is complete".
+ */
+export function dottedReferenceError(
+  text: string,
+  parameters: Record<string, string>,
+  passOf?: ((item: string) => number | undefined) | undefined,
+  redactText?: ((text: string) => string) | undefined,
+): string | undefined {
+  const refusal = findDottedRefusal(text, parameters, passOf);
+  if (refusal === undefined) return undefined;
+  return redactText ? redactText(refusal) : redact(refusal, runSecrets({ parameters }));
+}
+
+/** {@link dottedReferenceError}'s rule, before the mask. */
+function findDottedRefusal(
+  text: string,
+  parameters: Record<string, string>,
+  passOf?: ((item: string) => number | undefined) | undefined,
+): string | undefined {
+  if (!text.includes('{{')) return undefined;
+  for (const { name, raw } of collectReferences(text).placeholders) {
+    if (placeholderProperty(name) === undefined) continue;
+    const canonical = `{{${name}}}`;
+    // Before "has no value", because a name spelled with spaces has no value
+    // by construction and the fix is the spelling either way. The second
+    // sentence is `checkOneString`'s, word for word.
+    if (raw !== canonical) return `This line wrote \`${raw}\`. ${NO_SPACES_SENTENCE(name)}`;
+    if (Object.hasOwn(parameters, name)) continue;
+
+    const root = placeholderRoot(name);
+    const pass = passOf?.(root);
+    const where = pass === undefined ? '' : ` in For each item ${pass}`;
+    // Verbatim from §8.3, backticks and all — which is to say without them.
+    // The rest of this module quotes a reference as `` `{{name}}` ``; the spec
+    // fixes this one sentence, and a message the spec writes out is the
+    // message, not a house-style opportunity.
+    const prefix = `{{${name}}} has no value${where}`;
+
+    const available: string[] = [];
+    for (const key of Object.keys(parameters)) {
+      if (placeholderRoot(key) !== root) continue;
+      const property = placeholderProperty(key);
+      if (property !== undefined) available.push(property);
+    }
+    const recordKeys = recordKeysOf(boundValue(parameters, root));
+    const unspellable = recordKeys?.filter((key) => !isBindableProperty(key)) ?? [];
+    const aside =
+      unspellable.length > 0
+        ? ` (${unspellable.join(', ')} cannot be spelled as ` +
+          `${unspellable.length === 1 ? 'a placeholder' : 'placeholders'})`
+        : '';
+    if (available.length > 0) {
+      return `${prefix}; available properties are ${available.join(', ')}${aside}`;
+    }
+    if (recordKeys !== undefined && recordKeys.length > 0) {
+      // A record with no dotted bindings beside it: CAPTURED, not bound by a
+      // `For each`. `[store as: order]` over one row, or a tool that returns
+      // one object, puts a record under a flat name and writes no properties,
+      // because only a pass does that (§8.2).
+      //
+      // Both sentences the catch-all used to reach for were false about it.
+      // `{"id":"A"}` was refused as "holds no properties — it is not an
+      // object", and `{"content-type":"t","id":"A"}` as "has no properties
+      // that can be spelled as placeholders (content-type)" — while `id` is
+      // spellable and is the property the author just asked for. Either sends
+      // the reader hunting for a typo or a broken capture instead of the rule.
+      //
+      // The unspellable aside stays, for the keys it is true of; when NO key
+      // can be spelled, that is the whole answer and the rule would be noise.
+      if (unspellable.length === recordKeys.length) {
+        return (
+          `${prefix}; {{${root}}} has no properties that can be spelled as ` +
+          `placeholders (${unspellable.join(', ')})`
+        );
+      }
+      return (
+        `${prefix}; {{${root}}} holds a record, but only a For each item's ` +
+        `properties can be referenced as {{${root}.<property>}}${aside}`
+      );
+    }
+    // The record-shaped value FIRST, because the sentence below asserts one
+    // thing and an empty record makes it false: `{{order}}` bound to `{}` is
+    // an object, it simply has nothing in it, and an author told "it is not an
+    // object" goes looking for the wrong mistake.
+    if (recordKeys !== undefined) {
+      return `${prefix}; {{${root}}} is a record with no properties`;
+    }
+    if (Object.hasOwn(parameters, root)) {
+      return `${prefix}; {{${root}}} holds no properties — it is not an object`;
+    }
+    return `${prefix}; nothing in this run binds {{${root}}}`;
+  }
+  return undefined;
 }
 
 /**
@@ -141,23 +396,27 @@ export function walkActionStrings(
 ): void {
   for (const [field, value] of Object.entries(action as unknown as Record<string, unknown>)) {
     if (NAME_LIKE_FIELDS.has(field)) continue;
-    walkStrings(value, (text) => fn(text, field));
+    walkStrings(value, field, (text) => fn(text, field));
   }
 }
 
-function walkStrings(value: unknown, fn: (text: string) => void): void {
+function walkStrings(value: unknown, field: string, fn: (text: string) => void): void {
   if (typeof value === 'string') {
     fn(value);
     return;
   }
   if (Array.isArray(value)) {
-    for (const item of value) walkStrings(item, fn);
+    for (const item of value) walkStrings(item, field, fn);
     return;
   }
   if (value !== null && typeof value === 'object') {
     const proto = Object.getPrototypeOf(value) as unknown;
     if (proto === Object.prototype || proto === null) {
-      for (const item of Object.values(value as Record<string, unknown>)) walkStrings(item, fn);
+      const nameLike = NAME_LIKE_NESTED.get(field);
+      for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+        if (nameLike?.has(key)) continue;
+        walkStrings(item, field, fn);
+      }
     }
   }
 }
@@ -176,19 +435,19 @@ export function mapActionStrings(action: AIAction, fn: (text: string) => string)
       out[field] = value;
       continue;
     }
-    const mapped = mapStrings(value, fn);
+    const mapped = mapStrings(value, field, fn);
     if (mapped !== value) changed = true;
     out[field] = mapped;
   }
   return changed ? (out as unknown as AIAction) : action;
 }
 
-function mapStrings(value: unknown, fn: (text: string) => string): unknown {
+function mapStrings(value: unknown, field: string, fn: (text: string) => string): unknown {
   if (typeof value === 'string') return fn(value);
   if (Array.isArray(value)) {
     let changed = false;
     const out = value.map((item) => {
-      const mapped = mapStrings(item, fn);
+      const mapped = mapStrings(item, field, fn);
       if (mapped !== item) changed = true;
       return mapped;
     });
@@ -197,10 +456,14 @@ function mapStrings(value: unknown, fn: (text: string) => string): unknown {
   if (value !== null && typeof value === 'object') {
     const proto = Object.getPrototypeOf(value) as unknown;
     if (proto === Object.prototype || proto === null) {
+      const nameLike = NAME_LIKE_NESTED.get(field);
       let changed = false;
       const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-        const mapped = mapStrings(v, fn);
+        // A name-like nested property is copied ACROSS, not mapped: the copy
+        // still has to carry it, or `columns[].key` would vanish from the
+        // substituted action.
+        const mapped = nameLike?.has(k) ? v : mapStrings(v, field, fn);
         if (mapped !== v) changed = true;
         out[k] = mapped;
       }
@@ -217,7 +480,7 @@ export function substituteText(text: string, values: PlaceholderValues): string 
   if (!text.includes('{{') && !text.includes('${')) return text;
   return text.replace(SUBSTITUTE_RE, (match: string, name: string | undefined, ref: string | undefined) => {
     if (name !== undefined) {
-      const value = values.parameters[name];
+      const value = boundValue(values.parameters, name);
       return value === undefined ? match : value;
     }
     if (ref !== undefined && values.envData) {
@@ -226,6 +489,78 @@ export function substituteText(text: string, values: PlaceholderValues): string 
     }
     return match;
   });
+}
+
+/** What {@link substituteAsLiterals} produced. */
+export interface LiteralSubstitution {
+  /** The text with every resolvable reference replaced by a QUOTED literal. A
+   *  reference nothing answers is left exactly as written, braces included,
+   *  so the reader downstream can refuse it. */
+  text: string;
+  /** How many references the AUTHORED text made, in either syntax, answered
+   *  or not. Zero means the author wrote no reference at all — a condition
+   *  that is its own answer and was never about this run's values. */
+  references: number;
+  /** True when a value that was substituted cannot be spelled as a literal in
+   *  the condition grammar: it contains a `"` or a newline, and there is no
+   *  escape for either. The caller must NOT decide from `text` — the quoting
+   *  would be ambiguous, and `"a" is "b"` inside a value could read as a whole
+   *  condition. */
+  unspellable: boolean;
+}
+
+/** True when the character on each side of `[start, end)` is a double quote —
+ *  i.e. the author already wrote `"{{x}}"` and the value must go in bare. */
+function alreadyQuoted(text: string, start: number, end: number): boolean {
+  return text[start - 1] === '"' && text[end] === '"';
+}
+
+/**
+ * One string with every reference replaced by a LITERAL the condition grammar
+ * can read — the form a local decision is made from
+ * (src/parser/literal-condition.ts).
+ *
+ * The difference from {@link substituteText} is the quotes, and they are the
+ * whole point. `If {{payment.status}} is "Paused"` substitutes to
+ * `Overdue is "Paused"` under the ordinary rule — a bare word, which the
+ * grammar rejects on purpose, so the feature's own acceptance tests kept
+ * paying for a judge call per pass. Quoting the value gives
+ * `"Overdue" is "Paused"`, which is decided here and never asked.
+ *
+ * A reference the author ALREADY wrapped in quotes — `If "{{line.debit}}" is
+ * empty` — is substituted bare, or the result would be `""" is empty`. The
+ * test is textual and local: a quote immediately before and immediately after
+ * the reference.
+ *
+ * Quoting is what makes this safe rather than clever: a value is never read as
+ * syntax, because it arrives already delimited. The one thing that would break
+ * that is a value containing a quote of its own, and the grammar has no escape
+ * for one — so such a value is reported as {@link LiteralSubstitution.unspellable}
+ * and the condition goes to the judge with its braces intact, which is exactly
+ * the behaviour that existed before any of this.
+ */
+export function substituteAsLiterals(
+  text: string,
+  values: PlaceholderValues,
+): LiteralSubstitution {
+  if (!text.includes('{{') && !text.includes('${')) {
+    return { text, references: 0, unspellable: false };
+  }
+  let references = 0;
+  let unspellable = false;
+  const out = text.replace(
+    SUBSTITUTE_RE,
+    (match: string, name: string | undefined, ref: string | undefined, offset: number) => {
+      references++;
+      let value: string | undefined;
+      if (name !== undefined) value = boundValue(values.parameters, name);
+      else if (ref !== undefined && values.envData) value = resolveEnvDataRef(ref, values.envData);
+      if (value === undefined) return match;
+      if (value.includes('"') || value.includes('\n')) unspellable = true;
+      return alreadyQuoted(text, offset, offset + match.length) ? value : `"${value}"`;
+    },
+  );
+  return { text: out, references, unspellable };
 }
 
 /**
@@ -300,10 +635,7 @@ function checkOneString(
       // Right name, wrong spelling: `{{ email }}` matches nothing the
       // substituter replaces, so the page would receive the braces.
       const key = ctx.known.has(name) ? name : (nearMatch(name, ctx.known) ?? name);
-      return (
-        `${where}wrote \`${raw}\` in "${field}". A placeholder carries no spaces ` +
-        `inside its braces — write \`{{${key}}}\`.`
-      );
+      return `${where}wrote \`${raw}\` in "${field}". ${NO_SPACES_SENTENCE(key)}`;
     }
     if (ctx.known.has(name)) continue;
     const near = nearMatch(name, ctx.known);
@@ -405,11 +737,7 @@ export function resolveSetTemplate(
     const canonical = `{{${ref}}}`;
     if (raw !== canonical) {
       const key = known.has(ref) ? ref : (nearMatch(ref, known) ?? ref);
-      return {
-        error:
-          `${where} wrote \`${raw}\`. A placeholder carries no spaces inside ` +
-          `its braces — write \`{{${key}}}\`.`,
-      };
+      return { error: `${where} wrote \`${raw}\`. ${NO_SPACES_SENTENCE(key)}` };
     }
     if (known.has(ref)) continue;
     const near = nearMatch(ref, known);

@@ -111,6 +111,20 @@ function fakePage(): Page {
   } as unknown as Page;
 }
 
+/**
+ * A page that can actually be photographed, for the failure-screenshot tests.
+ *
+ * `captureScreenshot` reads the PNG's own IHDR for its size, so the buffer has
+ * to be long enough to have one — 24 bytes, whose base64 is what the row then
+ * carries. The default {@link fakePage} throws instead, which is why every
+ * other failing test in this file has no `screenshotBase64` and is unaffected.
+ */
+const SHOT = Buffer.alloc(24).toString('base64');
+
+function photographablePage(): Page {
+  return { ...fakePage(), screenshot: async () => Buffer.alloc(24) } as unknown as Page;
+}
+
 const CONFIG: Config = {
   ...DEFAULT_CONFIG,
   ai: { ...DEFAULT_CONFIG.ai, sendScreenshots: false },
@@ -154,6 +168,9 @@ async function runStep(
      *  as every loop hands it over for a `{{placeholder}}` step. The claim is
      *  computed from THIS, as the loops compute it. Defaults to `instruction`. */
     authored?: string;
+    /** A page whose `screenshot` answers, for the two failure paths that take
+     *  one. The default {@link fakePage} throws there on purpose. */
+    page?: Page;
   } = {},
 ) {
   const client = scriptedClient(responses);
@@ -164,7 +181,7 @@ async function runStep(
     3,
     instruction,
     {
-      page: fakePage(),
+      page: opts.page ?? fakePage(),
       config: opts.config ?? CONFIG,
       aiClient: client,
       contextContent: '',
@@ -842,5 +859,277 @@ describe('the generation prompt for a `fail`-claiming step', () => {
     expect(text).not.toContain('step.fail');
     expect(text).not.toContain('deliberate-failure step');
     expect(text).toContain('End with a post-condition');
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// A condition this run's values already answer
+// (docs/specs/SPEC-structured-table-reads.md §8.3a)
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * `If {{payment.status}} is "Overdue", then return` is the spec's headline
+ * example and the line `templates/init/tests/table-payments-review.md` and
+ * `-approve.md` are built on. Because a flow-control line is claimed at rung 0
+ * of `parseControlLine` it is never a guard, so the local decision the chain
+ * path already makes never saw it: every pass of every row paid a `settle`
+ * wait and an `ai.complete` to compare two strings — and carried the
+ * wrong-answer risk that path exists to remove, in the place most likely to
+ * meet it.
+ */
+describe('a claimed step whose condition is answered by the values', () => {
+  const REVIEW = 'If {{payment.status}} is "Overdue", then return';
+
+  it('returns with no model call and no settle wait', async () => {
+    const { result, client } = await runStep(
+      // The interpolated line the loops hand over, and the AUTHORED one the
+      // claim is read from — exactly as they differ in a real run.
+      'If Overdue is "Overdue", then return',
+      [plan([{ action: 'return', description: 'MODEL WAS ASKED' }])],
+      { claim: true, authored: REVIEW, parameters: { 'payment.status': 'Overdue' } },
+    );
+
+    const passed = result as StepResult;
+    expect(passed.status).toBe('passed');
+    expect(passed.flowControl).toEqual({ kind: 'return', verb: 'return' });
+    // The sentence the row carries in place of the model's words. The run loop
+    // prefixes it with the flow's name, exactly as it does the model's.
+    expect(passed.aiExplanation).toBe('decided from the values: "Overdue" is "Overdue" → true');
+    expect(passed.turns).toEqual([]);
+    // The two costs this removes.
+    expect(client.requests).toHaveLength(0);
+    expect(settles.calls).toHaveLength(0);
+    expect(actions.received).toHaveLength(0);
+  });
+
+  it('runs the rest of the pass when the condition does not hold, still with no model call', async () => {
+    const { result, client } = await runStep(
+      'If Scheduled is "Overdue", then return',
+      [plan([{ action: 'return', description: 'MODEL WAS ASKED' }])],
+      { claim: true, authored: REVIEW, parameters: { 'payment.status': 'Scheduled' } },
+    );
+
+    const passed = result as StepResult;
+    expect(passed.status).toBe('passed');
+    // No `flowControl`, so every loop carries on into the next step — which is
+    // what the model's `noop` answer means on this path.
+    expect(passed.flowControl).toBeUndefined();
+    expect(passed.aiExplanation).toBe('decided from the values: "Scheduled" is "Overdue" → false');
+    expect(client.requests).toHaveLength(0);
+    expect(settles.calls).toHaveLength(0);
+  });
+
+  it('reads the negative form the approve template uses', async () => {
+    // `templates/init/tests/table-payments-approve.md` step 1 of the section.
+    const authored = 'If {{payment.status}} is not "Scheduled", then return';
+    const paused = await runStep('If Paused is not "Scheduled", then return', [plan([])], {
+      claim: true,
+      authored,
+      parameters: { 'payment.status': 'Paused' },
+    });
+    expect((paused.result as StepResult).flowControl).toEqual({ kind: 'return', verb: 'return' });
+    expect(paused.client.requests).toHaveLength(0);
+
+    const scheduled = await runStep('If Scheduled is not "Scheduled", then return', [plan([])], {
+      claim: true,
+      authored,
+      parameters: { 'payment.status': 'Scheduled' },
+    });
+    expect((scheduled.result as StepResult).flowControl).toBeUndefined();
+    expect(scheduled.client.requests).toHaveLength(0);
+  });
+
+  it('honours the authored verb, so `then stop` still reports as stop', async () => {
+    const { result } = await runStep('If Overdue is "Overdue", then stop', [plan([])], {
+      claim: true,
+      authored: 'If {{payment.status}} is "Overdue", then stop',
+      parameters: { 'payment.status': 'Overdue' },
+    });
+    expect((result as StepResult).flowControl).toEqual({ kind: 'return', verb: 'stop' });
+  });
+
+  it('fails with the author"s own message on the third verb', async () => {
+    const { result, client } = await runStep(
+      'If 0 is "0", then fail the test with error "The cart is empty"',
+      [plan([{ action: 'fail', description: 'MODEL WAS ASKED' }])],
+      {
+        claim: true,
+        authored: 'If {{total}} is "0", then fail the test with error "The cart is empty"',
+        parameters: { total: '0' },
+      },
+    );
+
+    const failed = result as StepResult;
+    expect(failed.status).toBe('failed');
+    expect(failed.error).toBe('The cart is empty');
+    // The flag a client reads to tell "the author asked for this" from "the
+    // framework could not do it", and the CLI's diagnosis pass reads to stay
+    // away. Same shape as the judged path's row.
+    expect(failed.deliberate).toBe(true);
+    expect(failed.aiExplanation).toBe(
+      "The step's condition held (decided from the values: \"0\" is \"0\" → true) " +
+        'and the step says to fail the test.',
+    );
+    expect(client.requests).toHaveLength(0);
+  });
+
+  it('does not fail when the fail condition does not hold', async () => {
+    const { result, client } = await runStep(
+      'If 3 is "0", then fail the test with error "The cart is empty"',
+      [plan([{ action: 'fail', description: 'MODEL WAS ASKED' }])],
+      {
+        claim: true,
+        authored: 'If {{total}} is "0", then fail the test with error "The cart is empty"',
+        parameters: { total: '3' },
+      },
+    );
+    expect((result as StepResult).status).toBe('passed');
+    expect(client.requests).toHaveLength(0);
+  });
+
+  /**
+   * A locally decided failure is still a failure, and a failure has a picture.
+   *
+   * The two other paths that produce this very row both take one on
+   * `execution.screenshotOnFailure`: the judged `fail` through the executor's
+   * shared catch, and the unconditional `Fail the test with error "…"` in each
+   * run loop. The local path built its row by hand and took none — so the same
+   * authored line, answered from the values instead of by the model, reached
+   * the report with the failure screenshot missing and nothing saying why.
+   */
+  describe('the failure screenshot', () => {
+    const FAIL = 'If Overdue is "Overdue", then fail the test with error "Still overdue"';
+    const AUTHORED = 'If {{payment.status}} is "Overdue", then fail the test with error "Still overdue"';
+    const params = { 'payment.status': 'Overdue' };
+
+    it('is taken on a locally decided fail, as it is on the judged one', async () => {
+      const { result, client } = await runStep(FAIL, [plan([])], {
+        claim: true,
+        authored: AUTHORED,
+        parameters: params,
+        page: photographablePage(),
+      });
+      const failed = result as StepResult;
+      expect(failed.status).toBe('failed');
+      expect(failed.screenshotBase64).toBe(SHOT);
+      // Still no model call: the picture is the only thing this adds.
+      expect(client.requests).toHaveLength(0);
+
+      // The judged path's row, for the same line, is the comparison.
+      const judged = await runStep(
+        'If the Overdue badge is shown, then fail the test with error "Still overdue"',
+        [plan([{ action: 'fail', description: 'the badge is shown' }])],
+        { claim: true, page: photographablePage() },
+      );
+      expect((judged.result as StepResult).screenshotBase64).toBe(SHOT);
+    });
+
+    it('is not taken when the config says not to', async () => {
+      const { result } = await runStep(FAIL, [plan([])], {
+        claim: true,
+        authored: AUTHORED,
+        parameters: params,
+        page: photographablePage(),
+        config: {
+          ...CONFIG,
+          execution: { ...CONFIG.execution, screenshotOnFailure: false },
+        },
+      });
+      const failed = result as StepResult;
+      expect(failed.status).toBe('failed');
+      expect(failed.screenshotBase64).toBeUndefined();
+    });
+
+    it.each([
+      ['return', 'If Overdue is "Overdue", then return', 'If {{payment.status}} is "Overdue", then return'],
+      ['stop', 'If Overdue is "Overdue", then stop', 'If {{payment.status}} is "Overdue", then stop'],
+    ])('is never taken by a `then %s`, which passes', async (_verb, line, authored) => {
+      const { result } = await runStep(line, [plan([])], {
+        claim: true,
+        authored,
+        parameters: params,
+        page: photographablePage(),
+      });
+      const passed = result as StepResult;
+      expect(passed.status).toBe('passed');
+      expect(passed.screenshotBase64).toBeUndefined();
+    });
+  });
+
+  it('masks a secret out of the sentence it decided from', async () => {
+    // The reasoning is built from the SUBSTITUTED text, which the model path's
+    // never was — so it is the one string on this path that can carry a value.
+    const { result } = await runStep('If "abc123" is empty, then return', [plan([])], {
+      claim: true,
+      authored: 'If "{{order_token}}" is empty, then return',
+      parameters: { order_token: 'abc123' },
+    });
+    const passed = result as StepResult;
+    expect(passed.aiExplanation).toBe('decided from the values: "***" is empty → false');
+    expect(String(passed.aiExplanation)).not.toContain('abc123');
+  });
+
+  it('still asks the model about a condition that is about the page', async () => {
+    const { result, client } = await runStep(
+      'If the Overdue badge is shown, then return',
+      [plan([{ action: 'return', description: 'the badge is shown' }])],
+      { claim: true, parameters: { 'payment.status': 'Overdue' } },
+    );
+    expect((result as StepResult).flowControl).toEqual({ kind: 'return', verb: 'return' });
+    expect((result as StepResult).aiExplanation).toBe('the badge is shown');
+    expect(client.requests).toHaveLength(1);
+    // …and pays the settle gate, which is the whole reason it exists.
+    expect(settles.calls).toHaveLength(1);
+  });
+
+  it('leaves a watch-shaped line with the judge, however it is written', async () => {
+    // `When prompted …` is a question about the page. It has no reference, so
+    // it is never a candidate — which is the rule, not a special case.
+    const { client } = await runStep(
+      'When prompted for a verification code, then return',
+      [plan([{ action: 'noop', description: 'no prompt' }])],
+      { claim: true, parameters: { 'payment.status': 'Overdue' } },
+    );
+    expect(client.requests).toHaveLength(1);
+  });
+
+  it('leaves an all-literal AUTHORED condition with the judge', async () => {
+    // `If "Welcome back" is empty` parses perfectly and answers false from its
+    // own characters — but it is a sentence about the PAGE, and only the
+    // author having written a reference can tell the two apart.
+    const { client } = await runStep(
+      'If "Welcome back" is empty, then return',
+      [plan([{ action: 'noop', description: 'the greeting is shown' }])],
+      { claim: true, parameters: { greeting: 'Welcome back' } },
+    );
+    expect(client.requests).toHaveLength(1);
+  });
+
+  it('leaves an unanswerable reference with the judge, braces and all', async () => {
+    // Nothing binds `{{payment.statuz}}`, so the text keeps its braces and the
+    // grammar refuses it. The step path's own §8.3 refusal fires upstream in a
+    // real run; here the point is that this function invents no answer.
+    const { client } = await runStep(
+      'If {{payment.statuz}} is "Overdue", then return',
+      [plan([{ action: 'noop', description: 'cannot tell' }])],
+      { claim: true, parameters: { 'payment.status': 'Overdue' } },
+    );
+    expect(client.requests).toHaveLength(1);
+  });
+
+  it('leaves a compound body with the judge, because it asks for an action too', async () => {
+    // `If <cond>, click it and return` — the body is `{{x}} is "Yes", then
+    // click Save`, which is not a comparison, so the grammar refuses it and
+    // the click is never skipped by a decision made here.
+    const { client } = await runStep(
+      'If Yes is "Yes", then click Save and return',
+      [plan([{ action: 'click', selector: '#save' }, { action: 'return', description: 'saved' }])],
+      {
+        claim: true,
+        authored: 'If {{confirm}} is "Yes", then click Save and return',
+        parameters: { confirm: 'Yes' },
+      },
+    );
+    expect(client.requests).toHaveLength(1);
   });
 });

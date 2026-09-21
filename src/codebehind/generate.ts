@@ -16,7 +16,8 @@ import {
   type EnvDataContext,
 } from '../parser/interpolate-env-data.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
-import { interpolate } from '../parser/parameters.js';
+import { WIDE_PLACEHOLDER_SOURCE, interpolate } from '../parser/parameters.js';
+import { boundValue } from '../runner/placeholder-substitution.js';
 import type { AssertionResult } from '../report/types.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import { logger } from '../utils/logger.js';
@@ -45,7 +46,21 @@ import { scan, type StringToken } from './tokenizer.js';
  * (stories/codebehind-framework-actions.md) — so what is left is the one
  * action that waits on a human at a terminal. There is no code for that.
  */
-const FRAMEWORK_ACTIONS: ReadonlySet<AIAction['action']> = new Set(['prompt']);
+/**
+ * Actions a generated entry cannot express, so a step that used one stays AI.
+ *
+ * `readTable` is here TEMPORARILY, and the spec says so out loud: it is
+ * deterministic and it is meant to compile, through the shared `tables.read`
+ * context helper of docs/specs/SPEC-structured-table-reads.md §9.2 — one
+ * extractor, shared with the AI action, rather than a second header algorithm
+ * the code-generation model invents. That helper is phase 3. Until it exists,
+ * a compiled `readTable` would be exactly the reinvention §9.2 forbids, so the
+ * step keeps its model call and says why in the entry's comment. Deleting this
+ * line is part of phase 3, not a cleanup.
+ *
+ * TODO(phase 3): remove `'readTable'` when `tables.read` lands (§9.2).
+ */
+const FRAMEWORK_ACTIONS: ReadonlySet<AIAction['action']> = new Set(['prompt', 'readTable']);
 
 /**
  * Steps whose text opens with a bracket token.
@@ -110,6 +125,16 @@ export interface GenerateStepEntryOptions {
   assertions?: AssertionResult[] | undefined;
   /** Live parameter map from the recording, for resolving `{{param}}`. */
   resolvedParameters: Record<string, string>;
+  /**
+   * The map whose loop-binding marks decide which dotted names in the
+   * prompt's parameter block are a pass's (`row.keyword`, record rule) and
+   * which are the author's (`user.apikey`, whole-key rule) — §7.6. The live
+   * compiler passes its snapshot, which `liveCompileSnapshot` marks. The
+   * boxed compile passes nothing: its `resolvedParameters` is
+   * `report.parameters`, an unmarked copy of the already-redacted map, and
+   * handing that over would put `row.keyword` under the author rule.
+   */
+  parameterMap?: Record<string, string> | undefined;
   /**
    * The env/data context the test was parsed with, for resolving `${data.url}`
    * and kin (stories/codebehind-env-data.md). Absent when the compile ran
@@ -222,6 +247,7 @@ export async function generateStepEntry(
   const promptInput: StepCodePromptInput = {
     rawStepText: binding.source,
     parameters,
+    ...(options.parameterMap && { parameterMap: options.parameterMap }),
     ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
     actions: options.actions,
     ...(options.assertions && options.assertions.length > 0 && {
@@ -828,13 +854,24 @@ export function stepParameters(
   const { placeholders } = referencedVariableNames(binding.source);
   const out: Array<{ name: string; value: string }> = [];
   for (const name of placeholders) {
-    const renamed = binding.scope.renames[name];
-    const input = binding.scope.inputs[name];
+    // `boundValue` on all three maps, not a bare index. Two prototype reads
+    // sat here and cancelled each other into the wrong answer: `renames[name]`
+    // answered `{{constructor}}` with the `Object` function, so the rename
+    // branch was taken and `resolvedParameters[thatFunction]` came back
+    // undefined — a variable the run really did bind under the name
+    // `constructor` (a `[store as: constructor]` capture) was dropped from the
+    // prompt AND from the leak guard, which is how a real value reaches a
+    // committed file. Uncancel one of them — a genuine rename onto `toString`
+    // — and the FUNCTION became the `value` instead: rendered `resolved to
+    // undefined` (`JSON.stringify` of a function), and handed to the guard as
+    // the text to search for.
+    const renamed = boundValue(binding.scope.renames, name);
+    const input = boundValue(binding.scope.inputs, name);
     const value = renamed !== undefined
-      ? resolvedParameters[renamed]
+      ? boundValue(resolvedParameters, renamed)
       : input !== undefined
         ? resolveInputValue(input, resolvedParameters, envData)
-        : resolvedParameters[name];
+        : boundValue(resolvedParameters, name);
     if (value !== undefined) out.push({ name, value });
   }
   return out;
@@ -886,8 +923,16 @@ export function unresolvedInputRefs(
   const { placeholders } = referencedVariableNames(binding.source);
   const out: string[] = [];
   for (const name of placeholders) {
-    if (binding.scope.renames[name] !== undefined) continue;
-    const input = binding.scope.inputs[name];
+    // `boundValue` on both scope maps, for the reason `stepParameters` states
+    // above: `renames['constructor']` is the `Object` function on a scope that
+    // renames nothing, so `{{constructor}}` took the rename branch and this
+    // function returned before ever looking at the input. A skill called with
+    // `constructor="${data.username}"` in a run with no environment was then
+    // reported as having no unresolved reference at all — and `generateStepEntry`,
+    // which declines over exactly this list, compiled the step with the
+    // literal `${data.username}` text frozen into it.
+    if (boundValue(binding.scope.renames, name) !== undefined) continue;
+    const input = boundValue(binding.scope.inputs, name);
     if (input === undefined) continue;
     for (const ref of envDataRefsIn(resolveInputValue(input, resolvedParameters, envData))) {
       if (!out.includes(ref)) out.push(ref);
@@ -901,20 +946,27 @@ export function unresolvedInputRefs(
 // ───────────────────────────────────────────────────────────────────────────
 
 /**
- * A `{{name}}` reference, in the wider grammar the placeholder story's checker
- * uses (decision 4).
+ * A `{{name}}` / `{{name.property}}` reference, in the wider grammar the
+ * placeholder story's checker uses (decision 4).
  *
- * Wider than the substituter's `\{\{(\w+)\}\}` on purpose: the model is shown
- * the authored step and writes the placeholder back itself, so `{{ email }}`
- * is a thing it can produce. Reading it as a reference is what lets the rule
- * answer with the name rather than with silence.
+ * Wider than the substituter's on purpose: the model is shown the authored
+ * step and writes the placeholder back itself, so `{{ email }}` is a thing it
+ * can produce. Reading it as a reference is what lets the rule answer with the
+ * name rather than with silence.
+ *
+ * A dotted reference is one token here, not a root plus stray text
+ * (docs/specs/SPEC-structured-table-reads.md §9.3): `{{order.id}}` names the
+ * dotted runtime binding a `For each` pass writes, so the leak guard carries
+ * that pass's value and refuses an entry that inlined it, and the accounting
+ * looks for the token the model was shown rather than declaring `order`
+ * unknown.
  */
-const PLACEHOLDER_REF_RE = /\{\{\s*(\w+)\s*\}\}/g;
+const PLACEHOLDER_REF_RE = new RegExp(WIDE_PLACEHOLDER_SOURCE, 'g');
 
 /** The same, for a yes/no question about one string. Non-global: `.test` on a
  *  global regex carries `lastIndex` between calls and would answer false every
  *  other time. */
-const ANY_PLACEHOLDER_RE = /\{\{\s*\w+\s*\}\}/;
+const ANY_PLACEHOLDER_RE = new RegExp(WIDE_PLACEHOLDER_SOURCE);
 
 /**
  * A placeholder that DEFINES a variable rather than reading one:
@@ -923,6 +975,8 @@ const ANY_PLACEHOLDER_RE = /\{\{\s*\w+\s*\}\}/;
  * A definition is not a reference — nothing has that value yet when the step
  * starts — so the rule must not ask which action carried it, or every capture
  * step would decline (decision 4, "Capture definitions are never references").
+ *
+ * Flat, and staying flat: a step writes a variable, never one property of one.
  */
 const CAPTURE_DEFINITION_RE = /\b(?:store|save)\s+as:?\s*\{\{\s*(\w+)\s*\}\}/gi;
 
@@ -1149,11 +1203,18 @@ export function accountPlaceholders(options: {
   };
 
   for (const name of placeholderNamesIn(binding.source)) {
-    const renamed = binding.scope.renames[name];
+    // `boundValue` on all three maps, as `stepParameters` does. Bare, the
+    // rename map answered `{{constructor}}` with the `Object` FUNCTION, and
+    // the function then travelled the whole way through: as the TOKEN looked
+    // for in the recorded actions, which no recorded string can equal, so a
+    // step that names its value correctly declined with "appears in no
+    // recorded action"; and as the VALUE, where `value?.trim()` threw a
+    // TypeError out of the compile rather than declining at all.
+    const renamed = boundValue(binding.scope.renames, name);
     // Decision 6: the expander baked this one into the text, so no token can
     // exist. Today's behaviour, no warning, no decline.
-    if (renamed === undefined && binding.scope.inputs[name] !== undefined) continue;
-    judge(name, renamed ?? name, options.resolvedParameters[renamed ?? name]);
+    if (renamed === undefined && boundValue(binding.scope.inputs, name) !== undefined) continue;
+    judge(name, renamed ?? name, boundValue(options.resolvedParameters, renamed ?? name));
   }
   for (const ref of envDataRefsIn(binding.source)) {
     judge(

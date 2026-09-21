@@ -16,19 +16,38 @@
  *
  * The same file also holds the `{{name}}` half — the *runtime* variables a run
  * fills in per step, as opposed to the parse-time `${...}` references above.
- * That grammar is one line (src/parser/parameters.ts:102):
+ * Its SOURCE OF TRUTH is `PLACEHOLDER_SOURCE` in src/parser/parameters.ts,
+ * which the extension cannot import and therefore mirrors by hand:
  *
  *   {{name}}                             name: \w+, no whitespace
+ *   {{name.property}}                    property: [A-Za-z_][A-Za-z0-9_]*
  *
- * flat by construction: no namespaces, no dotted paths, and nothing to read
- * off disk — a `{{}}` resolves against the run's variable map, which is fed by
- * the file's `## Parameters` and by whatever earlier steps capture.
+ * One property segment and no more (`{{order.address.city}}` is not a
+ * reference), and the root deliberately stays `\w+` because `{{1st}}` always
+ * resolved — docs/specs/SPEC-structured-table-reads.md §8.3. The complete
+ * mirror of that regex lives next door in env-data-definition-core.ts
+ * (`PARAM_REF_RE`); tests/placeholder-grammar-parity.test.js fails if either
+ * side parts company with the runtime's literal.
+ *
+ * What this file matches is narrower, and stays FLAT on purpose: the patterns
+ * below find the names a step WRITES, and a step writes a variable, never one
+ * property of one (`Set {{order.id}} to …` is not a Set step, and a `For each`
+ * header binds `order`, not `order.id`). The one dotted thing here is
+ * {@link findForEachBinding}, which answers "where does `{{order}}` — and so
+ * `{{order.id}}` — come from" by its root.
+ *
+ * Neither half reads anything off disk: a `{{}}` resolves against the run's
+ * variable map, which is fed by the file's `## Parameters`, by whatever
+ * earlier steps capture, and — per pass — by the enclosing loop.
  */
 import {
   buildSectionIndex,
   classifyLines,
   extractSections,
+  isSecretFlatName,
+  maskRecordSecrets,
   matchText,
+  parseControlLine,
   resolveValueFromEnv,
 } from 'ai-ui-automation-runner-core';
 // `.ts` specifier, not the usual `.js`: this module is loaded directly by
@@ -133,10 +152,19 @@ export function refContextAt(line: string, character: number): RefContext | null
  * Null when there is no `{{`, when the reference is already closed, or when
  * the text since it isn't a name the runtime could resolve.
  *
- * The `/^\w*$/` gate is the runtime's `\{\{(\w+)\}\}` name class relaxed to
- * admit the empty partial (nothing typed yet). It subsumes the "no `}` in
- * between" rule rather than restating it — `}` is not a `\w` character, so a
- * cursor sitting past a closed `{{x}}` fails the same test.
+ * The `/^\w*$/` gate is the runtime's name class relaxed to admit the empty
+ * partial (nothing typed yet). It subsumes the "no `}` in between" rule rather
+ * than restating it — `}` is not a `\w` character, so a cursor sitting past a
+ * closed `{{x}}` fails the same test.
+ *
+ * It is the ROOT's class only, deliberately: a partial with a dot in it —
+ * `{{order.` — yields null and no dropdown opens. Completing a property would
+ * mean deriving the aliases from the `as <key>` words of whichever `Read …`
+ * step wrote the list the enclosing `For each` iterates, and the spec makes
+ * that optional and phase 3 for exactly that reason
+ * (SPEC-structured-table-reads.md §8.4: offer only explicit aliases, never a
+ * guess from prose). Declining to offer is the honest answer meanwhile; F12 on
+ * the finished reference still works, through PARAM_REF_RE next door.
  *
  * `${{` yields the *inner* `{{`: the `${` parse above rejects it (`{` is not a
  * namespace character) while the runtime does find a resolvable `{{name}}`
@@ -317,17 +345,8 @@ export function captureNamesBefore(
   // Which section (if any) each step line belongs to, and the body of each —
   // keyed the way `buildSectionIndex` keys them, so a call resolves to the
   // same definition the expander would pick (first definition wins).
-  const sections = extractSections(text);
+  const { sections, bodyOf, ownerOf } = sectionBodies(text, isStep);
   const index = buildSectionIndex(text);
-  const bodyOf = new Map<string, number[]>();
-  const ownerOf = new Map<number, string>();
-  for (const section of sections) {
-    const key = matchText(section.name);
-    if (key === '') continue;
-    const body = section.steps.map((s) => s.line - 1).filter(isStep);
-    if (!bodyOf.has(key)) bodyOf.set(key, body);
-    for (const line of body) if (!ownerOf.has(line)) ownerOf.set(line, key);
-  }
   const callAt = new Map<number, string>();
   for (const call of index.calls) {
     const key = matchText(call.name);
@@ -468,6 +487,63 @@ function dedupeByName(writes: CaptureName[]): CaptureName[] {
 }
 
 /**
+ * Every `### Section` body, keyed as `buildSectionIndex` keys them: the step
+ * lines each body holds, and the owning key of each of those lines. One
+ * definition of "which body is this line in", shared by the scope walk and by
+ * {@link bodyOwnerAt}, because two readings of that would be two answers to
+ * the same question.
+ *
+ * `isStep` is the caller's line filter — classification plus the fence mask —
+ * so a body never claims a line no run would execute.
+ */
+function sectionBodies(
+  text: string,
+  isStep: (line: number) => boolean,
+): {
+  sections: ReturnType<typeof extractSections>;
+  bodyOf: Map<string, number[]>;
+  ownerOf: Map<number, string>;
+} {
+  const sections = extractSections(text);
+  const bodyOf = new Map<string, number[]>();
+  const ownerOf = new Map<number, string>();
+  for (const section of sections) {
+    const key = matchText(section.name);
+    if (key === '') continue;
+    const body = section.steps.map((s) => s.line - 1).filter(isStep);
+    if (!bodyOf.has(key)) bodyOf.set(key, body);
+    for (const line of body) if (!ownerOf.has(line)) ownerOf.set(line, key);
+  }
+  return { sections, bodyOf, ownerOf };
+}
+
+/**
+ * The `### Section` body 0-based `lineIdx` sits in, keyed as the section index
+ * keys it — or null for the main flow.
+ *
+ * The same reading `captureNamesBefore` makes of the cursor's own line,
+ * exported for the callers that have to compare two lines' bodies rather than
+ * walk one: `{{order.id}}` on a body's line 2 and a `For each {{order}}` on
+ * its line 5 are in one body, and the second runs after the first. Across
+ * bodies no such comparison is possible from the text alone, which is why
+ * `findForEachBinding` filters on neither.
+ */
+export function bodyOwnerAt(
+  text: string,
+  lineIdx: number,
+  classified: ClassifiedLines = classifyLines(text),
+): string | null {
+  const lines = text.split(/\r?\n/);
+  const fenced = fenceMask(lines);
+  const isStep = (i: number): boolean => {
+    const kind = classified[i]?.kind;
+    return !fenced[i] && (kind === 'step' || kind === 'section-step');
+  };
+  const { sections, ownerOf } = sectionBodies(text, isStep);
+  return ownerOf.get(lineIdx) ?? nearestSectionAbove(lineIdx, sections, classified, fenced);
+}
+
+/**
  * The section body containing `lineIdx` when the cursor is on a blank or
  * prose line inside one (a step being typed classifies as prose until it has
  * content, so the owner map alone would miss exactly the live case).
@@ -493,6 +569,170 @@ function nearestSectionAbove(
     }
   }
   return owner;
+}
+
+/**
+ * Every `For each {{item}} in {{list}}, …` header that binds `name`'s ROOT,
+ * in file order, located at its `{{item}}` token.
+ *
+ * A loop item is the one runtime variable no step writes: `captureNamesBefore`
+ * knows `[store as:]`, `[input:]`, `[output:]`, an `out.k="alias"` and a `Set`
+ * — all of which are markers a step carries — while `{{order}}` is bound by
+ * the planner, once per pass, and `{{order.id}}` with it
+ * (docs/specs/SPEC-structured-table-reads.md §8.2). Without this the editor
+ * has nothing to say about either, and — since a dotted name can never be a
+ * capture — F12 on `{{order.id}}` would toast "no step stores it" on every
+ * correct table loop.
+ *
+ * By the root, because that is what the header binds: `{{order.id}}` and
+ * `{{order}}` have the same origin, and field-level navigation is explicitly
+ * not required (§8.4).
+ *
+ * The header grammar is runner-core's `parseControlLine`, the same reading the
+ * runtime makes, so a line this walks to is a line that really loops. Two
+ * further gates decide whether a matching line is one a RUN would reach:
+ *
+ *  - `classifyLines`, exactly as `captureNamesBefore` uses it: only a `step`
+ *    or a `section-step` binds anything. A numbered line under a `####`
+ *    heading classifies as `inert-step` — TestBench's own diagnostic calls it
+ *    "This step never runs" — and one outside the `## Steps` span is prose.
+ *    Resolving to either would send F12 to a line the extension elsewhere
+ *    says is dead.
+ *  - Fenced example blocks, excluded for the reason `captureNamesBefore`
+ *    excludes them: a run binds nothing there, and `classifyLines` does not
+ *    track fences.
+ *
+ * WHAT THIS DOES NOT DO is scope. Every binding in the file is returned, in
+ * file order, with no filter on position and none on reachability: a `For
+ * each` three lines BELOW the reference is in this list, and so is one in a
+ * section that never calls the section the reference sits in. That is
+ * deliberate rather than pending — a section body is DEFINED out of order
+ * (bodies sit under the main flow that calls them), so "below the reference"
+ * does not mean "after it" in general, and a position filter here would drop
+ * the ordinary case: a loop on line 3 whose body is defined on line 20.
+ * `bodyOwnerAt` is what a caller uses to ask the one question that can be
+ * answered line-locally — is this binding in the SAME body as the reference,
+ * and below it? — which is the case the definition provider reports as
+ * "written on line N, which the run reaches after this point".
+ */
+export function findForEachBinding(
+  text: string,
+  name: string,
+  classified: ClassifiedLines = classifyLines(text),
+): Array<{ line: number; column: number; length: number }> {
+  const item = name.split('.')[0]!;
+  const lines = text.split(/\r?\n/);
+  const fenced = fenceMask(lines);
+  const out: Array<{ line: number; column: number; length: number }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i] ?? '';
+    if (fenced[i]) continue;
+    const kind = classified[i]?.kind;
+    if (kind !== 'step' && kind !== 'section-step') continue;
+    if (!STEP_PREFIX_RE.test(raw)) continue;
+    const control = parseControlLine(raw.replace(STEP_PREFIX_RE, ''));
+    if (control?.kind !== 'foreach' || control.item !== item) continue;
+    // The token, not the line: an editor selecting the whole header would
+    // highlight the body call as well as the name it is asking about.
+    const column = raw.indexOf(`{{${item}}}`);
+    if (column === -1) continue;
+    out.push({ line: i, column: column + 2, length: item.length });
+  }
+  return out;
+}
+
+/** A `For each {{item}} in {{list}}` binding that is live at some point in the
+ *  run — what the `{{` dropdown offers beside parameters and captures. */
+export interface LoopItemBinding {
+  /** The item name the header binds (`payment`), which is the completion. */
+  name: string;
+  /** The list it iterates (`payments`), for the dropdown's detail. */
+  list: string;
+  /** 1-based line of the `For each` header. */
+  line: number;
+}
+
+/**
+ * The loop items in scope at 0-based `lineIdx`, innermost loop first.
+ *
+ * A loop item is bound by the planner for the length of a pass, so it is in
+ * scope in the BODY the `For each` tail calls — and, transitively, in every
+ * body that body calls, since the binding lives in the run's variable map
+ * rather than in a lexical block. It is also in scope on the header's own
+ * line, where an inline tail (`For each {{p}} in {{ps}}, Verify {{p.payee}}`)
+ * reads it.
+ *
+ * Spec §8.4 defers PROPERTY completion after `{{order.` — the aliases come
+ * from a natural-language read step and guessing them from prose is
+ * forbidden. The item name itself is not a guess: it is written verbatim on
+ * the header this walk found, and without it the dropdown inside a loop body
+ * silently omits the one variable the body is about.
+ *
+ * Where several call sites reach a body, every one of their items is offered.
+ * That is looser than `captureNamesBefore`'s earliest-call-site reading, and
+ * deliberately so in this direction only: completion offers, and an item
+ * bound on one of two call paths is a name the author may legitimately write
+ * (the run then decides). Nothing here widens what F12 or a diagnostic will
+ * claim.
+ */
+export function loopItemsInScope(
+  text: string,
+  lineIdx: number,
+  classified: ClassifiedLines = classifyLines(text),
+): LoopItemBinding[] {
+  const lines = text.split(/\r?\n/);
+  const fenced = fenceMask(lines);
+  const isStep = (i: number): boolean => {
+    const kind = classified[i]?.kind;
+    return !fenced[i] && (kind === 'step' || kind === 'section-step');
+  };
+  const { sections, ownerOf } = sectionBodies(text, isStep);
+  const index = buildSectionIndex(text);
+  const callAt = new Map<number, string>();
+  for (const call of index.calls) {
+    const key = matchText(call.name);
+    if (index.sections.has(key)) callAt.set(call.line - 1, key);
+  }
+
+  /** The `For each` a step line IS, or null — same gates as
+   *  `findForEachBinding`, so one reading decides what loops. */
+  const foreachAt = (line: number): { item: string; list: string } | null => {
+    if (!isStep(line)) return null;
+    const raw = lines[line] ?? '';
+    if (!STEP_PREFIX_RE.test(raw)) return null;
+    const control = parseControlLine(raw.replace(STEP_PREFIX_RE, ''));
+    return control?.kind === 'foreach' ? { item: control.item, list: control.list } : null;
+  };
+
+  const out: LoopItemBinding[] = [];
+  const seen = new Set<string>();
+  const add = (line: number, hit: { item: string; list: string }): void => {
+    if (seen.has(hit.item)) return;
+    seen.add(hit.item);
+    out.push({ name: hit.item, list: hit.list, line: line + 1 });
+  };
+
+  const own = foreachAt(lineIdx);
+  if (own) add(lineIdx, own);
+
+  let owner = ownerOf.get(lineIdx) ?? nearestSectionAbove(lineIdx, sections, classified, fenced);
+  const open = new Set<string>();
+  while (owner !== null && !open.has(owner)) {
+    open.add(owner);
+    const callers = [...callAt.entries()]
+      .filter(([, key]) => key === owner)
+      .map(([line]) => line)
+      .sort((a, b) => a - b);
+    for (const line of callers) {
+      const hit = foreachAt(line);
+      if (hit) add(line, hit);
+    }
+    // Keep climbing from the first call site: a body called from another
+    // body is inside that one's loops too.
+    const above = callers.length > 0 ? (ownerOf.get(callers[0]!) ?? null) : null;
+    owner = above;
+  }
+  return out;
 }
 
 /** One `## Hooks` entry: its instruction, 1-based line, the scope it declares,
@@ -628,29 +868,55 @@ export function resolveDataTree(value: DataValue, env: Record<string, string>): 
 // Secret masking
 // ---------------------------------------------------------------------------
 
-/**
- * The runtime's one rule for what a secret is — `isSecretName` in
- * src/parser/parameters.ts (and src/utils/secrets.ts), which matches bare
- * "key" (`MACHINE_KEY`, `privateKey`) on top of the obvious names. The
- * dropdown must mask everything a recording or report would redact, so this
- * deliberately does NOT reuse runner-core's narrower `maskIfSecret` pattern
- * (no bare "key") — a completion detail is as public as a report.
- */
-const SECRET_NAME_RE = /password|secret|token|key/i;
-
 /** Star-mask in the same shape `maskIfSecret` renders elsewhere. */
 function maskValue(value: string): string {
   if (value.length === 0) return '(empty)';
   return '*'.repeat(Math.min(value.length, 8));
 }
 
-/** Mask `value` when the name (a single env var, or a '.'-joined data path)
- *  is secret-shaped anywhere along it — matching the runtime's
- *  `envDataSecretValues`, which treats a secret-named key as tainting
- *  everything beneath it. Works on the joined path because no pattern word
- *  contains '.'. */
+/**
+ * Mask `value` when the name (a single env var, or a '.'-joined data path) is
+ * secret-shaped anywhere along it — matching the runtime's
+ * `envDataSecretValues`, which treats a secret-named key as tainting
+ * everything beneath it. Works on the joined path because no pattern word
+ * contains '.'.
+ *
+ * `isSecretFlatName` is runner-core's copy of the runtime's `isSecretName`
+ * (src/parser/parameters.ts), and it is the FLAT rule on purpose: every
+ * segment of a `${data.…}` path is a name from an author's own file, so
+ * nothing here is a record column and the narrow record rule would be the
+ * wrong question. Calling it rather than re-spelling the regex is the point —
+ * this file used to carry a third copy, kept because runner-core's was once
+ * narrower than the runtime's; it no longer is, and a completion detail is as
+ * public as a report, so there is one flat rule on the client now.
+ */
 function maskIfSecretName(name: string, value: string): string {
-  return SECRET_NAME_RE.test(name) ? maskValue(value) : value;
+  return isSecretFlatName(name) ? maskValue(value) : value;
+}
+
+/**
+ * The `{{` dropdown's masker for a DECLARED PARAMETER: the author's own name
+ * first, and then the value's SHAPE.
+ *
+ * The name check alone is the whole rule everywhere else in this file, and it
+ * is enough there: a `${data.…}` leaf is one scalar and an env var is one
+ * string, so if the name does not say secret there is nothing inside to say
+ * it. A parameter is the one place a RECORD can arrive — a `## Parameters`
+ * entry may hold a captured table verbatim, `[{"payee":"Alinta",
+ * "password":"hunter2"}]` — and `readTable` made that ordinary. The report
+ * redacts it column by column (`maskRecordSecrets` is runner-core's mirror of
+ * the server's rule); without this the dropdown printed it in full, under a
+ * parameter name like `rows` that says nothing at all.
+ *
+ * Masked BEFORE previewing, not after: `previewValue` truncates at
+ * PREVIEW_MAX and a truncated record no longer parses as JSON, so a table long
+ * enough to be cut — which is most of them — would come back untouched.
+ * Star-masking a whole secret-NAMED value is unaffected either way, since
+ * `maskValue` caps at eight stars.
+ */
+function maskParamPreview(name: string, value: string): string {
+  if (isSecretFlatName(name)) return maskValue(previewValue(value));
+  return previewValue(maskRecordSecrets(value));
 }
 
 // ---------------------------------------------------------------------------
@@ -659,7 +925,15 @@ function maskIfSecretName(name: string, value: string): string {
 
 export interface PlainCompletion {
   label: string;
-  kind: 'namespace' | 'env-var' | 'branch' | 'leaf' | 'env-name' | 'parameter' | 'capture';
+  kind:
+    | 'namespace'
+    | 'env-var'
+    | 'branch'
+    | 'leaf'
+    | 'env-name'
+    | 'parameter'
+    | 'capture'
+    | 'loop-item';
   /** Short right-hand text: a masked value preview, the node shape, or where
    *  a capture is written. */
   detail?: string;
@@ -801,24 +1075,34 @@ export function namespaceCompletions(opts: NamespaceOptions): PlainCompletion[] 
 
 /**
  * The `{{` dropdown: declared parameters first, then the names earlier steps
- * capture. Deduped across both — a name that is both lists once, as the
- * parameter, which is what the run resolves it to until a step overwrites it.
+ * capture, then the items of the loops enclosing this line. Deduped across all
+ * three — a name that is more than one lists once, under the source the run
+ * resolves it from first.
  *
  * `params` values arrive already `$VAR`-resolved: the caller composes `.env`
  * with `.env.<envName>` and runs runner-core's `resolveValueFromEnv`, exactly
  * as the run does, so the preview is what would be substituted. Masking is by
- * the parameter's own name under the runtime rule above, so the dropdown never
- * shows what a report would redact — and an unset `$VAR`, which previews as
- * its own literal, is masked all the same when the name is secret-shaped.
+ * the parameter's own name under the runtime rule above, and then by the
+ * VALUE's shape (`maskParamPreview`), so the dropdown never shows what a
+ * report would redact — not even a record-shaped value under a name that says
+ * nothing. An unset `$VAR`, which previews as its own literal, is masked all
+ * the same when the name is secret-shaped.
  *
  * Captures carry no preview: their values exist only mid-run. Their detail
  * names the marker form and the 1-based line that writes it, derived from the
  * `CaptureName` union rather than the spelling found in the source (`[as:]`
  * covers `[store as: x]` and the prose `store it as {{x}}` alike).
+ *
+ * Loop items last, for the same reason and with the same absence of a
+ * preview: `{{payment}}` holds one record per pass, so the only static fact
+ * about it is the header that binds it. They are offered as the flat item
+ * name alone — the properties after `{{payment.` are phase 3
+ * (SPEC-structured-table-reads.md §8.4).
  */
 export function paramCompletions(
   params: Record<string, string>,
   captures: CaptureName[],
+  loops: LoopItemBinding[] = [],
 ): PlainCompletion[] {
   const out: PlainCompletion[] = [];
   const seen = new Set<string>();
@@ -828,7 +1112,7 @@ export function paramCompletions(
     out.push({
       label: name,
       kind: 'parameter',
-      detail: maskIfSecretName(name, previewValue(value)),
+      detail: maskParamPreview(name, value),
       // Declared order inside the group; the group prefix keeps every
       // parameter above every capture.
       sortText: `0_${String(out.length).padStart(4, '0')}`,
@@ -846,6 +1130,18 @@ export function paramCompletions(
       kind: 'capture',
       detail: `[${capture.marker}:] on line ${capture.line}`,
       sortText: `1_${String(out.length - paramCount).padStart(4, '0')}`,
+    });
+  }
+
+  const beforeLoops = out.length;
+  for (const loop of loops) {
+    if (seen.has(loop.name)) continue;
+    seen.add(loop.name);
+    out.push({
+      label: loop.name,
+      kind: 'loop-item',
+      detail: `each {{${loop.list}}} on line ${loop.line}`,
+      sortText: `2_${String(out.length - beforeLoops).padStart(4, '0')}`,
     });
   }
 

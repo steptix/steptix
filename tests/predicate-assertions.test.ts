@@ -158,6 +158,35 @@ describe('prompts — predicate guidance', () => {
     expect(body).toMatch(/Number\(/);
   });
 
+  it('shows an EMPTY expected as the two quote marks, not as a blank line', () => {
+    // `Verify the Reference cell for Netflix Australia is empty` sends
+    // `expected: ""`. Rendered bare it left `- Expected:` with nothing after
+    // it, which is what the model sees for a field that was never provided —
+    // so the one assertion whose whole subject is emptiness arrived looking
+    // like an assertion with no expectation at all.
+    const msg = buildAssertionCodePrompt(
+      'reference is empty',
+      'the Reference cell is empty',
+      '',
+      '<html></html>',
+      null,
+      undefined,
+      'dom',
+    );
+    const body = typeof msg.content === 'string'
+      ? msg.content
+      : msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(body).toContain('- Expected: ""');
+    expect(body).not.toContain('- Expected: (not provided)');
+    expect(body).not.toMatch(/- Expected:\s*\n/);
+  });
+
+  it('still says (not provided) when there is no expected at all', () => {
+    const msg = buildAssertionCodePrompt('d', 'c', undefined, '<html></html>', null, undefined, 'dom');
+    const body = typeof msg.content === 'string' ? msg.content : '';
+    expect(body).toContain('- Expected: (not provided)');
+  });
+
   it('buildAssertionCodePrompt for DOM mode keeps the original Expected line', () => {
     const msg = buildAssertionCodePrompt(
       'title check',
@@ -270,6 +299,19 @@ describe('renderStep — predicate result', () => {
     expect(html).toContain('Actual:');
     expect(html).not.toContain('Predicate:');
     expect(html).not.toContain('Result:');
+  });
+
+  it('renders an EMPTY expected as the two quote marks, not as an empty cell', () => {
+    // `expected: ""` is a VALUE — the assertion expected nothing to be there.
+    // An empty span read exactly like an assertion whose expected was never
+    // recorded, so a report could not tell the two apart. (escapeHtml turns
+    // each quote into &quot;.)
+    const html = renderStep(makeStep({ against: 'dom', expected: '', pass: true }), false, 0);
+    expect(html).toContain('Expected:');
+    expect(html).toContain('<span>&quot;&quot;</span>');
+    // An absent one still renders as the empty cell it always did.
+    const absent = renderStep(makeStep({ against: 'dom', expected: undefined, pass: true }), false, 0);
+    expect(absent).not.toContain('<span>&quot;&quot;</span>');
   });
 
   it('legacy assertion records (no `against`) still render as DOM rows', () => {

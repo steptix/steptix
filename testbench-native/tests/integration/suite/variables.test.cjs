@@ -812,4 +812,202 @@ describe('TestBench Variables panel (Phase 4)', function () {
     fake.end();
     await waitFor('run 2 idle', () => !hooks.isRunning());
   });
+
+  it('a For each pass over table records renders its dotted properties', async () => {
+    // SPEC-structured-table-reads.md §8.4. A `readTable` row bound as
+    // `{{payment}}` arrives as the base JSON plus one binding per property,
+    // in the record's own order with `_row` first — the server puts them in
+    // `frame:scope` generically, so the panel needs nothing new to show them.
+    // What it could do is lose them, by filtering on a name shape or by
+    // rendering only names the FILE mentions; this is the test that says it
+    // does neither, and that the value shown is the value of the pass the run
+    // is on (the second Origin Energy row, not the first).
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const PASSWORD = 'hunter2-not-a-real-one';
+    // `Amount` capitalised, because an alias is whatever the author wrote and
+    // the ordering below has to hold for an upper-case one too.
+    const record = {
+      _row: '3',
+      payee: 'Origin Energy',
+      Amount: '$86.10',
+      status: 'Paused',
+      password: PASSWORD,
+    };
+    const capture = JSON.stringify([
+      { _row: '1', payee: 'Origin Energy', Amount: '$140.00', status: 'Due', password: PASSWORD },
+      record,
+    ]);
+    fake.push({
+      type: 'frame:scope',
+      frameId: '',
+      scope: {
+        payments: capture,
+        payment: JSON.stringify(record),
+        'payment._row': record._row,
+        'payment.payee': record.payee,
+        'payment.Amount': record.Amount,
+        'payment.status': record.status,
+        'payment.password': record.password,
+      },
+    });
+    await waitFor('scope arrived', () => hooks.runningScope()['payment.payee'] === 'Origin Energy');
+
+    const items = hooks.variablesViewItems();
+    const names = items.map((i) => i.name);
+    const byName = Object.fromEntries(items.map((i) => [i.name, i.description]));
+
+    for (const key of ['payment', 'payment._row', 'payment.payee', 'payment.Amount']) {
+      assert.ok(names.includes(key), `${key} must be listed`);
+    }
+    // `_row` leads the record's properties (§7.4). The view orders the whole
+    // scope rather than preserving arrival order, and a plain `.sort()` does
+    // NOT deliver this: `_` is code unit 95, between the upper-case letters
+    // and the lower-case ones, so `payment.Amount` came first. The view sorts
+    // with runner-core's `compareVariableNames`, which says so explicitly.
+    const properties = names.filter((n) => n.startsWith('payment.'));
+    assert.equal(properties[0], 'payment._row', 'the row number leads the properties');
+
+    // The pass's own values, which is the whole point of reading them here
+    // rather than off the file: row 3 is $86.10, row 1 is $140.00.
+    assert.equal(byName['payment._row'], '3');
+    assert.equal(byName['payment.Amount'], '$86.10');
+    assert.equal(byName['payment.payee'], 'Origin Energy');
+    // Masking reads the property segment, so a secret column is hidden even
+    // though the variable it arrived under is called `payment` (§8.4).
+    //
+    // The EXACT mask string, not `notEqual` against the raw value: a row the
+    // view dropped entirely — filtered out by its dotted name, say — has an
+    // `undefined` description, which is not equal to the password either and
+    // would pass an inequality while showing the user nothing. `maskIfSecret`
+    // renders a star per character, capped at eight.
+    assert.ok(names.includes('payment.password'), 'the secret column is still listed');
+    assert.equal(
+      byName['payment.password'],
+      '*'.repeat(8),
+      'a secret-named property must render as the mask, not as its value and not as nothing',
+    );
+
+    // …and the two rows the name rule cannot catch. `payments` is the whole
+    // table and `payment` is one record of it, both under names the author
+    // chose and neither of which says secret — so they rendered in full,
+    // password and all, immediately above a `payment.password` row showing
+    // `********`. `frame:scope` carries raw values by design (the wire was
+    // left alone when redaction shipped), so this render is the only guard.
+    for (const key of ['payment', 'payments']) {
+      assert.ok(
+        byName[key] !== undefined && byName[key].length > 0,
+        `${key} must still be shown, not hidden`,
+      );
+      assert.ok(
+        !byName[key].includes(PASSWORD),
+        `${key} rendered its password column: ${byName[key]}`,
+      );
+    }
+    // Masked inside, not masked whole: the readable columns are why the view
+    // is worth looking at during a loop.
+    assert.ok(byName.payments.includes('Origin Energy'), byName.payments);
+    assert.ok(byName.payment.includes('$86.10'), byName.payment);
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it("the event's bindings and unmask decide the rows, not the name shapes", async () => {
+    // SPEC-structured-table-reads.md §7.6. A scope holds two kinds of dotted
+    // name and nothing about either says which it is: `payment.keyword` is a
+    // page's column, bound by a `For each` pass, and `user.apikey` is a data
+    // file's own heading, typed by the author. The server tells them apart
+    // with a registry keyed on its live map's object identity; `frame:scope`
+    // sends a COPY, so the view had to guess, guessed the narrow way for both,
+    // and printed `uk_live_1234` beside a report matrix that starred it.
+    //
+    // `bindings` is that registry as data and `unmask` is the test's
+    // `## Config: unmask:` list. This is the whole path from the wire to the
+    // rendered description: event → controller → ScopeSource → TreeItem.
+    // (The webview panel's copy of the same rule is covered by
+    // `tests/variables-panel.test.js` and the call-site scan in
+    // `tests/record-secret-parity.test.js`; `webviewRuntimeVariables()` reads
+    // back the RAW map, so masking is not assertable through it.)
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const APIKEY = 'uk_live_1234';
+    fake.push({
+      type: 'frame:scope',
+      frameId: '',
+      scope: {
+        'payment.keyword': 'AU',
+        'payment.password': 'hunter2-not-a-real-one',
+        'user.apikey': APIKEY,
+        keyword: 'search',
+        password: 'hunter2-not-a-real-one',
+      },
+      // Only the pass's own names. `user.apikey` is in the scope and not in
+      // here, which is the entire distinction being tested.
+      bindings: ['payment.keyword', 'payment.password'],
+      unmask: ['keyword'],
+    });
+    await waitFor('scope arrived', () => hooks.runningScope()['user.apikey'] === APIKEY);
+
+    const byName = Object.fromEntries(
+      hooks.variablesViewItems().map((i) => [i.name, i.description]),
+    );
+
+    // Unregistered: the author's own name end to end, so the FLAT rule reads
+    // the whole key and `key` is in it. The measured leak, now closed.
+    assert.ok(byName['user.apikey'] !== undefined, 'the row must still be listed');
+    assert.equal(
+      byName['user.apikey'],
+      '*'.repeat(8),
+      `an unregistered dotted name must mask, not render ${APIKEY}`,
+    );
+
+    // Registered: half the page's word, so the narrow record rule decides the
+    // property and `AU` stays readable — which is what the model needs to find
+    // the row and what the report prints beside this view.
+    assert.equal(byName['payment.keyword'], 'AU');
+    // …and the two-segment rule is still a rule: a real credential column is
+    // hidden whichever list it is on.
+    assert.equal(byName['payment.password'], '*'.repeat(8));
+
+    // The hatch, reaching the client for the first time. A flat `keyword`
+    // masks by default (the report masks it too, and the view must not
+    // disagree) — `unmask: ['keyword']` is the author saying otherwise.
+    assert.equal(byName.keyword, 'search');
+    // By the exact name: unmasking `keyword` says nothing about `password`.
+    assert.equal(byName.password, '*'.repeat(8));
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
+
+  it('an event carrying neither field renders exactly what it always did', async () => {
+    // Absence is not emptiness. An older server sends no `bindings`, which
+    // means "nothing known" — and the safe reading of a scope full of real
+    // loop bindings is the narrow one. Reading absent as `[]` would mask `AU`
+    // out of every row whose column is called `keyword`, against a server that
+    // never said the name was the author's.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const APIKEY = 'uk_live_1234';
+    fake.push({
+      type: 'frame:scope',
+      frameId: '',
+      scope: { 'payment.keyword': 'AU', 'user.apikey': APIKEY, keyword: 'search' },
+    });
+    await waitFor('scope arrived', () => hooks.runningScope()['user.apikey'] === APIKEY);
+
+    const byName = Object.fromEntries(
+      hooks.variablesViewItems().map((i) => [i.name, i.description]),
+    );
+    assert.equal(byName['payment.keyword'], 'AU', 'the pre-wire reading of a dotted name');
+    assert.equal(byName['user.apikey'], APIKEY, '…including the gap it leaves');
+    assert.equal(byName.keyword, '*'.repeat(6), 'and no hatch without an unmask list');
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+  });
 });

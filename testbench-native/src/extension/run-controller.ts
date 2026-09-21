@@ -15,7 +15,7 @@ import {
   resolveRunSelection,
   sectionBodyLinesAt,
   interpretReplCommand,
-  maskIfSecret,
+  maskIfSecretAuthored,
   parseConfig,
   parseFrontmatter,
   parseDataRows,
@@ -40,6 +40,7 @@ import {
   type HostRowsMsg,
   type HostToWebviewMsg,
   type RunEvent,
+  type ScopeMasking,
   type StepMode,
 } from 'ai-ui-automation-runner-core';
 import { getOutputChannel } from './output-channel.js';
@@ -375,8 +376,10 @@ interface RowState {
   row: number;
   /** 1-based editor line the row occupies. */
   line: number;
-  /** `"k=v, k=v"`, masked. Built once, from `maskIfSecret`, so the gutter
-   *  hover, the panel and the Output banner cannot word it differently. */
+  /** `"k=v, k=v"`, masked. Built once, by `rowValuesText`
+   *  (row-selection-core.ts) through `maskIfSecretAuthored` — a row's column
+   *  headings are author-chosen — so the gutter hover, the panel and the
+   *  Output banner cannot word it differently. */
   values: string;
   status: DataRowStatus;
   detail?: string;
@@ -816,6 +819,19 @@ export class RunController {
    *  test (root) frame uses key '' to match the server-side convention.
    *  Cleared by `resetFrameState` at the start of each run. */
   private readonly scopesByFrame = new Map<string, Record<string, string>>();
+  /**
+   * What the same `frame:scope` event said about how to READ that scope —
+   * which of its dotted names a `For each` pass bound, and which names the
+   * test's `## Config: unmask:` declares are not secrets
+   * (docs/specs/SPEC-structured-table-reads.md §7.6).
+   *
+   * Beside `scopesByFrame` rather than inside it, so `scopeFor` keeps handing
+   * back the plain `Record<string, string>` the skill-re-run seed and the
+   * test hooks already read. Per frame for the same reason the scope is:
+   * every emit carries both, and a frame that never got one has nothing to
+   * say — which the maskers read as "older server", their pre-wire default.
+   */
+  private readonly scopeMaskingByFrame = new Map<string, ScopeMasking>();
   private readonly scopeEmitter = new vscode.EventEmitter<void>();
   /** Fires whenever any frame's scope is updated. The Variables view
    *  subscribes — bridged through the registry so a single subscriber
@@ -1078,6 +1094,7 @@ export class RunController {
     this.frameFailures.clear();
     this.lastFailureThisRow = null;
     this.scopesByFrame.clear();
+    this.scopeMaskingByFrame.clear();
     // The parked skill failure's seed scope lives in scopesByFrame, which we
     // just wiped — drop the failure too so the re-run affordance can't offer a
     // stale, unseedable retry.
@@ -1092,10 +1109,27 @@ export class RunController {
    * map and the Variables view has a single source of truth. Fires
    * `onScopeChange` so subscribers re-render.
    */
-  handleFrameScope(frameId: string, scope: Record<string, string>): void {
+  handleFrameScope(
+    frameId: string,
+    scope: Record<string, string>,
+    /**
+     * The event's `bindings` / `unmask`, forwarded verbatim — including the
+     * difference between an EMPTY `bindings` and a missing one. Empty says
+     * this run bound nothing, so every dotted entry is the author's and takes
+     * the flat rule; missing says an older server, which leaves the maskers
+     * on their pre-wire reading. Collapsing the two would mask `AU` out of a
+     * real loop's `row.keyword` against an old server, or keep printing
+     * `user.apikey` against a new one.
+     */
+    masking: ScopeMasking = {},
+  ): void {
     // Copy the payload — the SSE deserialiser shares the object across
     // listeners and mutating downstream would surprise others.
     this.scopesByFrame.set(frameId, { ...scope });
+    this.scopeMaskingByFrame.set(frameId, {
+      ...(masking.bindings !== undefined && { bindings: [...masking.bindings] }),
+      ...(masking.unmask !== undefined && { unmask: [...masking.unmask] }),
+    });
     this.scopeEmitter.fire();
   }
 
@@ -1249,6 +1283,16 @@ export class RunController {
   currentScope(): Record<string, string> {
     const topId = this._frameStack[this._frameStack.length - 1]?.id ?? '';
     return this.scopesByFrame.get(topId) ?? this.scopesByFrame.get('') ?? {};
+  }
+
+  /** How to READ the scope {@link currentScope} returns — the `bindings` and
+   *  `unmask` of the event that delivered it. Falls back the same way
+   *  `currentScope` does (top frame, then the test frame), so the two always
+   *  describe the same payload; `{}` when nothing has arrived, which the
+   *  maskers read as an older server and answer as they did before. */
+  currentScopeMasking(): ScopeMasking {
+    const topId = this._frameStack[this._frameStack.length - 1]?.id ?? '';
+    return this.scopeMaskingByFrame.get(topId) ?? this.scopeMaskingByFrame.get('') ?? {};
   }
 
   /** Atomic test-and-mark: returns true the first time a URI is seen this
@@ -3345,7 +3389,18 @@ export class RunController {
             break;
           }
           params[item.varName] = answer;
-          this.postOutput(`✎ ${item.varName} ← ${maskIfSecret(item.varName, answer)}`, 'info');
+          // `maskIfSecretAuthored`, the same masker the capture banner uses,
+          // because an `[input: name]` name is author-chosen end to end — it
+          // is written in the test file, never derived from a page. Identical
+          // in behaviour today: the two maskers differ only on a DOTTED name,
+          // and `INPUT_STEP_RE` (src/parser/markdown.ts) matches `\w*`, which
+          // has no dot in it. What it buys is that the rule stated here is the
+          // one that is true, so the day a name can carry a dot this line
+          // already agrees with the report.
+          this.postOutput(
+            `✎ ${item.varName} ← ${maskIfSecretAuthored(item.varName, answer)}`,
+            'info',
+          );
           i++;
           continue;
         }

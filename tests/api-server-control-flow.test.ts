@@ -175,6 +175,12 @@ vi.mock('../src/utils/logger.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
+// The mocked logger above, imported so a test can read what the run said.
+import { logger } from '../src/utils/logger.js';
+
+/** Every `logger.warn` line this run produced. */
+const warnings = (): string[] =>
+  (logger.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]));
 
 const API_KEY = 'sk-control-flow-test';
 const cfg: Config = {
@@ -193,6 +199,7 @@ let server: Server;
 let baseUrl: string;
 let tmpDir: string;
 let testFilePath: string;
+let toolsDir: string;
 
 beforeAll(async () => {
   const { app } = createApiServer(cfg);
@@ -204,11 +211,33 @@ beforeAll(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'control-flow-http-'));
   testFilePath = path.join(tmpDir, 'payments.md');
   await fs.writeFile(testFilePath, '# placeholder — the server never reads this\n');
+
+  // A tool whose output lands on a loop's item name. The server dispatches
+  // `[tool: …]` itself (session-manager, not the mocked step executor), so
+  // this is a REAL write into the live variable map over HTTP.
+  toolsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'control-flow-tools-'));
+  await fs.writeFile(
+    path.join(toolsDir, 'note-order.ts'),
+    `
+import { defineTool } from '${path.resolve(__dirname, '..', 'src', 'tools', 'index.ts').replace(/\\/g, '/')}';
+
+export default defineTool({
+  name: 'note-order',
+  description: 'Store an order reference under {{order}}',
+  parameters: { value: { type: 'string' } },
+  outputs: { order: { type: 'string' } },
+  async run(args, ctx) {
+    ctx.step.setVar('order', args.value);
+  },
+});
+`,
+  );
 });
 
 afterAll(async () => {
   await new Promise<void>((r, e) => server.close((err) => (err ? e(err) : r())));
   await fs.rm(tmpDir, { recursive: true, force: true });
+  await fs.rm(toolsDir, { recursive: true, force: true });
 });
 
 beforeEach(() => {
@@ -222,6 +251,7 @@ beforeEach(() => {
   flowControlFor = () => undefined;
   judgeParksUntilAbort = false;
   judgeEntered = undefined;
+  (logger.warn as unknown as { mockClear: () => void }).mockClear();
 });
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -698,6 +728,895 @@ describe('For each', () => {
     expect(failure).toMatchObject({ line: 4 });
     expect(failure!.error).toContain('`{{accounts}}` holds `Savings, Everyday`, not a list');
     expect(executedSteps).toEqual(['Open the accounts page']);
+  });
+});
+
+/**
+ * A list of OBJECTS, over the same wire
+ * (docs/specs/SPEC-structured-table-reads.md §8, §12 item 19).
+ *
+ * `readTable` is what produces such a list in a real run, and it is seeded
+ * here as a `parameters` entry instead — not because it is missing, but
+ * because the planner's contract is with the JSON in the variable map and not
+ * with the action that wrote it. A tool returning an array, a `readTable` and
+ * a pre-populated parameter are the same input. The server's job here is to carry the dotted keys the
+ * planner produced all the way to the step text and the `frame:scope` payload
+ * without knowing anything about them, which is §1.1's last bullet: one
+ * binding shape, applied generically by every run loop.
+ */
+describe('For each over object rows', () => {
+  const ORDERS =
+    '[{"_row":"1","id":"A","status":"x"},{"_row":"2","id":"B","status":"y"}]';
+
+  const ordersBody = (orders: string = ORDERS) => ({
+    steps: [
+      'Open the orders page',
+      'For each {{order}} in {{orders}}, Check the order',
+      'Sign out',
+    ],
+    sourceLines: [3, 4, 5],
+    testFilePath,
+    parameters: { orders },
+    sections: {
+      'check the order': {
+        name: 'Check the order',
+        headingLine: 7,
+        steps: ['Verify the row for "{{order.id}}" shows "{{order.status}}"'],
+        stepLines: [8],
+      },
+    },
+  });
+
+  it('substitutes the row properties into the body step the model is handed', async () => {
+    await collect(ordersBody());
+
+    // One pass per object, each body instruction carrying THAT row's values —
+    // not the JSON text, and not a literal `{{order.id}}`.
+    expect(executedSteps).toEqual([
+      'Open the orders page',
+      'Verify the row for "A" shows "x"',
+      'Verify the row for "B" shows "y"',
+      'Sign out',
+    ]);
+    expect(judgeCalls).toHaveLength(0);
+  });
+
+  it('carries the dotted bindings in frame:scope and in the loop marker', async () => {
+    const events = await collect(ordersBody());
+
+    const scopes = events.filter((e) => e.type === 'frame:scope').map((e) => e.scope);
+    // The base binding keeps its old meaning — the row's compact JSON — and
+    // every direct property is beside it, `_row` included (§8.2).
+    expect(
+      scopes.some(
+        (s) =>
+          s['order'] === '{"_row":"1","id":"A","status":"x"}' &&
+          s['order._row'] === '1' &&
+          s['order.id'] === 'A' &&
+          s['order.status'] === 'x',
+      ),
+    ).toBe(true);
+    expect(
+      scopes.some((s) => s['order.id'] === 'B' && s['order.status'] === 'y'),
+    ).toBe(true);
+
+    // …and the report's band shows the same thing, which is what the
+    // Variables panel renders for the pass (§8.4).
+    const steps: StepResult[] = generatedReports.at(-1)!.steps;
+    const body = steps.filter((s) => s.instruction.startsWith('Verify the row for'));
+    expect(body.map((s) => s.loop!.values)).toEqual([
+      {
+        order: '{"_row":"1","id":"A","status":"x"}',
+        'order._row': '1',
+        'order.id': 'A',
+        'order.status': 'x',
+      },
+      {
+        order: '{"_row":"2","id":"B","status":"y"}',
+        'order._row': '2',
+        'order.id': 'B',
+        'order.status': 'y',
+      },
+    ]);
+  });
+
+  /**
+   * WHOSE those dotted names are, said on the wire
+   * (docs/specs/SPEC-structured-table-reads.md §7.6, §8.4).
+   *
+   * The scope alone cannot answer it. `order.id` (a page's column, bound by
+   * this pass) and `user.apikey` (a data file's own heading, typed by the
+   * author) are the same shape to a reader, and the server tells them apart
+   * with a registry keyed on the live map's object identity — which a copy
+   * sent over HTTP arrives without. So TestBench read every dotted entry as a
+   * binding, took the narrow record rule to it, and printed `uk_live_1234` in
+   * the Variables view beside a report that starred it.
+   *
+   * `bindings` is that registry as data. Present on every `frame:scope`,
+   * EMPTY LIST INCLUDED: absent has to keep meaning "an older server said
+   * nothing", or a real loop's `row.keyword` would be masked on a server that
+   * never claimed it was the author's word.
+   */
+  it('says on frame:scope which dotted names the pass bound — and unsays them', async () => {
+    const events = await collect({
+      ...ordersBody(),
+      steps: [
+        'Open the orders page',
+        'For each {{order}} in {{orders}}, Check the order',
+        // §8.2: the last pass's bindings survive the loop. This is what takes
+        // them back out — `bindVariable` clears the root's dotted keys and
+        // `unmarkLoopBindings` drops the marks with them, so a later entry of
+        // the same name is nobody's binding.
+        'Set {{order}} to "none"',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5, 6],
+      // A dotted name the author typed, in the same map the whole time. It is
+      // never a binding, so it must never appear in the list — this is the
+      // entry the client was getting wrong.
+      parameters: { orders: ORDERS, 'user.apikey': 'uk_live_1234' },
+    });
+
+    const scopes = events.filter((e) => e.type === 'frame:scope');
+    expect(scopes.length).toBeGreaterThan(0);
+    // Every one carries the field, so a client can tell "nothing bound" from
+    // "nothing said".
+    for (const s of scopes) expect(Array.isArray(s.bindings)).toBe(true);
+
+    // Before the loop: the scope already holds `user.apikey`, and nothing is
+    // a binding.
+    expect(scopes[0]!.scope['user.apikey']).toBe('uk_live_1234');
+    expect(scopes[0]!.bindings).toEqual([]);
+
+    // Inside a pass: exactly that pass's dotted names, sorted, and not the
+    // author's heading sitting beside them.
+    const during = scopes.filter((s) => s.scope['order.id'] !== undefined);
+    expect(during.length).toBeGreaterThan(0);
+    for (const s of during) {
+      expect(s.bindings).toEqual(['order._row', 'order.id', 'order.status']);
+      expect(s.scope['user.apikey']).toBe('uk_live_1234');
+    }
+
+    // After the `Set`: the properties are gone from the scope and the list is
+    // empty again — the mark and the entry go together.
+    const last = scopes.at(-1)!;
+    expect(last.scope['order']).toBe('none');
+    expect(last.scope['order.id']).toBeUndefined();
+    expect(last.bindings).toEqual([]);
+  });
+
+  /**
+   * The other half the client could not see: `## Config: unmask:`.
+   *
+   * It is parsed from the request the client itself sent, and was then read
+   * only by the prompt's `## Values` block — so after an author unmasked
+   * `keyword`, the model saw the value and every TestBench surface went on
+   * starring it. Now it rides each `frame:scope`, and the client exempts a
+   * named entry from all three rules exactly as `formatParameterBlock` does.
+   */
+  it('carries the run’s unmask names on every scope frame, and omits the field without them', async () => {
+    const declared = await collect({
+      ...ordersBody(),
+      // Spacing and order as an author would write them; the server trims and
+      // the client matches by exact name.
+      config: { unmask: 'keyword,  order.status ' },
+    });
+    const declaredScopes = declared.filter((e) => e.type === 'frame:scope');
+    expect(declaredScopes.length).toBeGreaterThan(0);
+    for (const s of declaredScopes) expect(s.unmask).toEqual(['keyword', 'order.status']);
+
+    // A run that declares none sends no field at all, which is byte for byte
+    // what it sent before this existed — and is also what an older server
+    // sends, so the client cannot tell them apart and does not need to.
+    const plain = (await collect(ordersBody())).filter((e) => e.type === 'frame:scope');
+    expect(plain.length).toBeGreaterThan(0);
+    for (const s of plain) expect('unmask' in s).toBe(false);
+  });
+
+  /**
+   * §4.6's own example header, whose tail names a property of the item it is
+   * about to bind.
+   *
+   * This loop interpolates EVERY step before the control dispatch, so the
+   * header is resolved on the visit that has not begun a pass yet — and
+   * `controlLineDefines` exempted the item `{{order}}` and nothing else, so
+   * `{{order.id}}` was warned about as `Unresolved placeholder` on every entry
+   * to every correct table loop. The same noise the round-1 fix removed, one
+   * dot further along, and on the line the spec prints as the recommended
+   * form.
+   */
+  it('does not warn about a property of the item the header is about to bind', async () => {
+    await collect({
+      steps: [
+        'Open the orders page',
+        'For each {{order}} in {{orders}}, Click the row whose Order ID is "{{order.id}}"',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: { orders: ORDERS },
+    });
+
+    expect(warnings().filter((w) => w.includes('Unresolved placeholder'))).toEqual([]);
+    // The loop really ran, so the silence is about a working line rather than
+    // about a line that never got here.
+    expect(executedSteps).toEqual([
+      'Open the orders page',
+      'Click the row whose Order ID is "A"',
+      'Click the row whose Order ID is "B"',
+      'Sign out',
+    ]);
+  });
+
+  it('still warns about a dotted name no loop binds, on an ordinary step', async () => {
+    // The control: only the item's OWN root is exempt, and only on the line
+    // that defines it.
+    await collect({
+      steps: [
+        'Open the orders page',
+        'Verify the row for "{{other.id}}" is shown',
+      ],
+      sourceLines: [3, 4],
+      testFilePath,
+      parameters: { orders: ORDERS },
+    });
+
+    expect(warnings()).toContain('Unresolved placeholder: {{other.id}}');
+  });
+
+  it('refuses a property the row does not have, before the model is asked', async () => {
+    const events = await collect({
+      ...ordersBody(),
+      sections: {
+        'check the order': {
+          name: 'Check the order',
+          headingLine: 7,
+          steps: ['Verify the row shows "{{order.statuz}}"'],
+          stepLines: [8],
+        },
+      },
+    });
+
+    const failure = events.find((e) => e.type === 'step:fail');
+    expect(failure!.error).toBe(
+      '{{order.statuz}} has no value in For each item 1; available properties are _row, id, status',
+    );
+    // The body step never ran, so nothing was sent to the model with six
+    // literal braces in it.
+    expect(executedSteps).toEqual(['Open the orders page']);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'failed' });
+  });
+
+  /**
+   * …and the refusal is MASKED on the way out, on all three of the server's
+   * exits: the run log, the report row and the `step:fail` wire payload a
+   * client renders.
+   *
+   * The sentence is written from the run's own values — the properties the
+   * row holds, the keys the loop dropped — and a key can carry one:
+   * `hunter2 header`, where `hunter2` is what `{{password}}` holds. Round 2
+   * masked `evaluateGuard`'s `cannot be referenced as a placeholder` line for
+   * exactly this and left the louder sentence beside it in the clear. The
+   * server's masker is `secretsNow`, which counts a section row's frame
+   * inputs as well as the parameter map, which is why it is handed in rather
+   * than derived.
+   */
+  /**
+   * The server takes its mask set from a COPY of the map (frame inputs
+   * merged in), and the loop-binding registry is by object identity, so the
+   * copy must inherit the marks (§7.6). Without `inheritLoopBindings` every
+   * `order.<column>` in the copy takes the author rule, `keyword` contains
+   * `key`, its value joins the mask set, and the refusal's own property list
+   * arrives on the wire as `id, ***`. The data file's `user.apikey` heading
+   * takes the author rule either way and is masked in the report.
+   */
+  it('reads a pass binding by the record rule on the wire, and a data-file heading by the author rule', async () => {
+    (logger.error as unknown as { mockClear: () => void }).mockClear();
+    const events = await collect({
+      steps: [
+        'Open the orders page',
+        'For each {{order}} in {{orders}}, Check the order',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: { 'user.apikey': 'uk_live_1234', orders: '[{"id":"A","keyword":"keyword"}]' },
+      sections: {
+        'check the order': {
+          name: 'Check the order',
+          headingLine: 7,
+          steps: ['Verify the row shows "{{order.nope}}"'],
+          stepLines: [8],
+        },
+      },
+    });
+
+    const expected =
+      '{{order.nope}} has no value in For each item 1; available properties are id, keyword';
+    expect(events.find((e) => e.type === 'step:fail')!.error).toBe(expected);
+    const logged = (logger.error as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(
+      (c) => String(c[0]),
+    );
+    expect(logged.some((l) => l.endsWith(expected))).toBe(true);
+
+    const report = generatedReports.at(-1)!;
+    expect(report.parameters['order.keyword']).toBe('keyword');
+    expect(report.parameters['user.apikey']).toBe('***');
+    const everywhere = JSON.stringify({
+      report,
+      events: events.filter((e) => e.type !== 'frame:scope'),
+      logged,
+    });
+    expect(everywhere).not.toContain('uk_live_1234');
+  });
+
+  it('masks a secret value the refusal would otherwise put on the wire', async () => {
+    (logger.error as unknown as { mockClear: () => void }).mockClear();
+    const events = await collect({
+      steps: [
+        'Open the orders page',
+        'For each {{order}} in {{orders}}, Check the order',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: { password: 'hunter2', orders: '[{"id":"A","hunter2 header":"t"}]' },
+      sections: {
+        'check the order': {
+          name: 'Check the order',
+          headingLine: 7,
+          steps: ['Verify the row shows "{{order.contenttype}}"'],
+          stepLines: [8],
+        },
+      },
+    });
+
+    const expected =
+      '{{order.contenttype}} has no value in For each item 1; available properties are id ' +
+      '(*** header cannot be spelled as a placeholder)';
+
+    // 1. The wire.
+    expect(events.find((e) => e.type === 'step:fail')!.error).toBe(expected);
+    // 2. The run log.
+    const logged = (logger.error as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(
+      (c) => String(c[0]),
+    );
+    expect(logged.some((l) => l.endsWith(expected))).toBe(true);
+    // 3. The report row.
+    const failedRow = generatedReports
+      .at(-1)!
+      .steps.find((s: { status: string }) => s.status === 'failed');
+    expect(failedRow.error).toBe(expected);
+    expect(failedRow.aiExplanation).toBe(expected);
+
+    // The raw value reaches none of the three. Scoped to the refusal's own
+    // seams on purpose: `frame:scope` carries the parameter map itself, which
+    // is a different payload with its own rules and is not what this refusal
+    // decides.
+    const everywhere = JSON.stringify({
+      fail: events.filter((e) => e.type === 'step:fail'),
+      logged,
+      failedRow,
+    });
+    expect(everywhere).not.toContain('hunter2');
+  });
+
+  /**
+   * A condition whose operands are all literals after substitution is decided
+   * by the runtime, not by the page judge
+   * (src/parser/literal-condition.ts).
+   *
+   * Measured on an acceptance run of `templates/init/tests/table-statements.md`:
+   * `If "{{line.debit}}" is empty` substituted to `"" is empty`, and the judge
+   * answered *"none held — the visible statement row being evaluated has debit
+   * −$65.00"*. It read a different row than the pass was bound to and took the
+   * `Otherwise`. The same line was right 5/5 in `table-payments-reference.md`,
+   * so it is a ~1-in-15 flake — in a place that should never have been a model
+   * call, because the answer was entirely in the sentence.
+   */
+  it('decides an all-literal chain itself, with no judge call', async () => {
+    const events = await collect({
+      steps: [
+        'Open the statements page',
+        'For each {{line}} in {{lines}}, Check the line',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: {
+        lines: '[{"debit":"","credit":"$65.00"},{"debit":"-$65.00","credit":""}]',
+      },
+      sections: {
+        'check the line': {
+          name: 'Check the line',
+          headingLine: 7,
+          steps: [
+            'If "{{line.debit}}" is empty, then Verify the credit',
+            'Otherwise, Verify the debit',
+          ],
+          stepLines: [8, 9],
+        },
+        'verify the credit': {
+          name: 'Verify the credit',
+          headingLine: 11,
+          steps: ['Verify the credit column shows "{{line.credit}}"'],
+          stepLines: [12],
+        },
+        'verify the debit': {
+          name: 'Verify the debit',
+          headingLine: 14,
+          steps: ['Verify the debit column shows "{{line.debit}}"'],
+          stepLines: [15],
+        },
+      },
+    });
+
+    // The point of the test.
+    expect(judgeCalls).toHaveLength(0);
+    // Pass 1's debit is blank so the `If` holds; pass 2's is not, so the
+    // `Otherwise` does — each pass on its own row's values.
+    expect(executedSteps).toEqual([
+      'Open the statements page',
+      'Verify the credit column shows "$65.00"',
+      'Verify the debit column shows "-$65.00"',
+      'Sign out',
+    ]);
+
+    // The guard still reports exactly as a judged one does — same rows, same
+    // statuses, same lines — with the runtime's sentence where the model's
+    // was. Pass 1 passes the `If`; pass 2 takes the `Otherwise`, so that is
+    // the row carrying the chain's reasoning and the `If` is skipped.
+    const steps: StepResult[] = generatedReports.at(-1)!.steps;
+    const guards = steps.filter(
+      (s) => s.instruction.startsWith('If "') || s.instruction.startsWith('Otherwise,'),
+    );
+    expect(guards.filter((s) => s.status === 'passed').map((s) => s.aiExplanation)).toEqual([
+      'decided from the values: "" is empty → true',
+      'decided from the values: none held — "-$65.00" is empty → false',
+    ]);
+    // The untaken branch is reported exactly as a judged chain reports one.
+    expect(guards.filter((s) => s.status === 'skipped').map((s) => s.aiExplanation)).toEqual([
+      'Skipped: another branch of this decision was taken',
+      'Skipped: another branch of this decision was taken',
+    ]);
+    // Nothing was asked, so no guard row carries a turn to render.
+    expect(guards.every((s) => s.turns.length === 0)).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+
+  /**
+   * A guard's OWN condition gets the same refusal a body step's text does
+   * (docs/specs/SPEC-structured-table-reads.md §8.3).
+   *
+   * It has to live in `evaluateGuard` rather than in each loop's step path:
+   * this loop resolves every step before the control dispatch and so caught
+   * the guard line incidentally, while the CLI and the Electron adapter
+   * dispatch the guard first and sent `If "{{order.missing}}" is empty` to the
+   * judge with the braces intact. One refusal, in the module all three share,
+   * with the same sentence and the same failed-guard row.
+   */
+  it('refuses a guard whose condition names a property the row lacks', async () => {
+    const events = await collect({
+      steps: [
+        'Open the statements page',
+        'For each {{line}} in {{lines}}, Check the line',
+      ],
+      sourceLines: [3, 4],
+      testFilePath,
+      parameters: { lines: '[{"debit":"","credit":"$65.00"}]' },
+      sections: {
+        'check the line': {
+          name: 'Check the line',
+          headingLine: 6,
+          // The typo is the whole test: `dbit` for `debit`.
+          steps: ['If "{{line.dbit}}" is empty, then Note it', 'Otherwise, Note it'],
+          stepLines: [7, 8],
+        },
+        'note it': { name: 'Note it', headingLine: 10, steps: ['Click Note'], stepLines: [11] },
+      },
+    });
+
+    const failure = events.find((e) => e.type === 'step:fail');
+    expect(failure!.error).toBe(
+      '{{line.dbit}} has no value in For each item 1; available properties are debit, credit',
+    );
+    // Not the judge's to answer, and not the literal pre-check's either — the
+    // refusal comes first, so neither is reached.
+    expect(judgeCalls).toHaveLength(0);
+    expect(executedSteps).toEqual(['Open the statements page']);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'failed' });
+  });
+
+  it('still asks the judge once when a member needs the page', async () => {
+    judgeScript = [0];
+    await collect({
+      steps: [
+        'Open the statements page',
+        'For each {{line}} in {{lines}}, Check the line',
+      ],
+      sourceLines: [3, 4],
+      testFilePath,
+      parameters: { lines: '[{"debit":""}]' },
+      sections: {
+        'check the line': {
+          name: 'Check the line',
+          headingLine: 6,
+          steps: [
+            // Literal…
+            'If "{{line.debit}}" is empty, then Note it',
+            // …but this one is about the page, so the WHOLE chain goes to the
+            // judge. Deciding half of it here and asking about the rest would
+            // be two decisions where the author wrote one, and the judge would
+            // be answering about a shorter list than the planner is holding
+            // indices for.
+            'Else if the Refunded badge is shown, then Note it',
+            'Otherwise, Note it',
+          ],
+          stepLines: [7, 8, 9],
+        },
+        'note it': {
+          name: 'Note it',
+          headingLine: 11,
+          steps: ['Click Note'],
+          stepLines: [12],
+        },
+      },
+    });
+
+    expect(judgeCalls).toEqual([
+      ['"{{line.debit}}" is empty', 'the Refunded badge is shown'],
+    ]);
+  });
+
+  /**
+   * The feature's OWN examples, which the grammar was rejecting.
+   *
+   * `If {{payment.status}} is "Paused"` substituted to `Overdue is "Paused"`
+   * under plain substitution — a bare word on the left, which `VALUE` refuses
+   * on purpose (`the Cash checkbox is ticked` has to keep going to the page).
+   * So the acceptance tests' guards went on costing a judge call per pass and
+   * kept exactly the wrong-answer risk this whole path exists to remove.
+   * Substituting each reference as a QUOTED literal gives
+   * `"Overdue" is "Paused"`, which is decided here.
+   */
+  it('decides an unquoted reference by quoting it, not by asking', async () => {
+    const events = await collect({
+      steps: [
+        'Open the payments page',
+        'For each {{payment}} in {{payments}}, Check the payment',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: {
+        payments: '[{"status":"Overdue"},{"status":"Paused"}]',
+      },
+      sections: {
+        'check the payment': {
+          name: 'Check the payment',
+          headingLine: 7,
+          steps: [
+            'If {{payment.status}} is "Paused", then Resume it',
+            'Otherwise, Chase it',
+          ],
+          stepLines: [8, 9],
+        },
+        'resume it': { name: 'Resume it', headingLine: 11, steps: ['Click Resume'], stepLines: [12] },
+        'chase it': { name: 'Chase it', headingLine: 14, steps: ['Click Chase'], stepLines: [15] },
+      },
+    });
+
+    expect(judgeCalls).toHaveLength(0);
+    expect(executedSteps).toEqual(['Open the payments page', 'Click Chase', 'Click Resume', 'Sign out']);
+
+    // The reasoning shows the QUOTED form it decided from — both sides
+    // delimited, which is what makes a value unable to read as syntax.
+    const steps: StepResult[] = generatedReports.at(-1)!.steps;
+    const guards = steps.filter(
+      (s) => s.instruction.startsWith('If {{') || s.instruction.startsWith('Otherwise,'),
+    );
+    expect(guards.filter((s) => s.status === 'passed').map((s) => s.aiExplanation)).toEqual([
+      'decided from the values: none held — "Overdue" is "Paused" → false',
+      'decided from the values: "Paused" is "Paused" → true',
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+
+  /**
+   * A condition whose AUTHORED text made no reference is a sentence about the
+   * PAGE that happens to be spelled with quotes.
+   *
+   * `If "Welcome back" is empty` parses perfectly and answers `false` from its
+   * own characters, with no page look at all; `Repeat … until "Load more" is
+   * empty` answers `false` on every pass and runs the loop to its cap. The
+   * grammar cannot tell those from a substituted value — only the presence of
+   * a `{{…}}` or `${…}` in what the author wrote can.
+   */
+  it('sends an all-literal AUTHORED condition to the judge, as before', async () => {
+    judgeScript = [0];
+    await collect({
+      steps: [
+        'Open the page',
+        'If "Welcome back" is empty, then Sign in again',
+        'Verify the dashboard is shown',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      sections: {
+        'sign in again': {
+          name: 'Sign in again',
+          headingLine: 7,
+          steps: ['Click Sign in'],
+          stepLines: [8],
+        },
+      },
+    });
+
+    expect(judgeCalls).toEqual([['"Welcome back" is empty']]);
+  });
+
+  it('does not run a Repeat to its cap on a literal it could not have answered', async () => {
+    // `until "Load more" is empty` is about the page. Answered locally it is
+    // false forever, so the loop would spend its whole cap and then fail the
+    // line. The judge ends it on the second pass.
+    judgeScript = [null, 0];
+    const events = await collect({
+      steps: [
+        'Open the results page',
+        'Repeat Load more until "Load more" is empty',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      sections: {
+        'load more': { name: 'Load more', headingLine: 7, steps: ['Click Load more'], stepLines: [8] },
+      },
+    });
+
+    expect(executedSteps).toEqual([
+      'Open the results page',
+      'Click Load more',
+      'Click Load more',
+      'Sign out',
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+
+  /**
+   * A locally decided condition's reasoning is built from the SUBSTITUTED
+   * text, which the judge's never was — so it is the one string in this path
+   * that can carry a secret, and it goes out on `step:pass` as `output` as
+   * well as into the run log.
+   */
+  it('masks a secret value out of the sentence it decided from', async () => {
+    const events = await collect({
+      steps: [
+        'Open the orders page',
+        'For each {{order}} in {{orders}}, Check the order',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: { orders: '[{"token":"s3cr3t-abc123"}]' },
+      sections: {
+        'check the order': {
+          name: 'Check the order',
+          headingLine: 7,
+          steps: ['If "{{order.token}}" is empty, then Reissue it', 'Otherwise, Ship it'],
+          stepLines: [8, 9],
+        },
+        'reissue it': { name: 'Reissue it', headingLine: 11, steps: ['Click Reissue'], stepLines: [12] },
+        'ship it': { name: 'Ship it', headingLine: 14, steps: ['Click Ship'], stepLines: [15] },
+      },
+    });
+
+    expect(judgeCalls).toHaveLength(0);
+    const passes = events.filter((e) => e.type === 'step:pass');
+    const sentences = passes.map((e) => String(e.output ?? ''));
+    expect(sentences).toContain('decided from the values: none held — "***" is empty → false');
+    expect(sentences.some((s) => s.includes('s3cr3t-abc123'))).toBe(false);
+
+    const steps: StepResult[] = generatedReports.at(-1)!.steps;
+    expect(
+      steps.some((s) => (s.aiExplanation ?? '').includes('s3cr3t-abc123')),
+    ).toBe(false);
+  });
+
+  /**
+   * The report's loop band, masked by the BINDING rule and not the author's
+   * (docs/specs/SPEC-structured-table-reads.md §7.6 — the round-2 defect).
+   *
+   * A band is a COPY (`values: { ...pass.bindings }`) and the binding registry
+   * is keyed on object identity, so the copy arrives carrying none of the
+   * marks unless the site that makes it says so. Without that,
+   * `redactReport` decides every `payment.<column>` by the author rule —
+   * `isSecretName` is `/password|secret|token|key/i`, so `keyword` matches —
+   * and the report starred a column the model has to FIND in the DOM.
+   *
+   * WHICH site makes the copy is worth stating, because the two are easy to
+   * confuse and only one of them is on this path. A `For each` is a RUNTIME
+   * loop, so `loops.markerFor(i)` answers before the frame walk is reached
+   * and the band is the one `ControlRuntime.beginPass` minted, marked there
+   * (src/runner/control-runtime.ts). `loopMarkerFor`'s own
+   * `inheritLoopBindings` (src/server/session-manager.ts) is the frame-walk
+   * twin, reached only when no runtime pass covers the step; measured, every
+   * shape the api-server suites produce for it today is a section-`rows` loop
+   * whose cells are FLAT names, and a flat name never consults the registry.
+   * So that line stays pinned by the grep in tests/secrets.test.ts, and this
+   * is the behavioural pin for the site a `For each` actually uses.
+   *
+   * One row, three columns, and the two rules disagree about two of them.
+   */
+  it('masks the report band by the binding rule — `password` starred, `keyword` not', async () => {
+    await collect({
+      steps: [
+        'Open the payments page',
+        'For each {{payment}} in {{payments}}, Check the payment',
+      ],
+      sourceLines: [3, 4],
+      testFilePath,
+      parameters: { payments: '[{"payee":"Acme","password":"abc","keyword":"AU"}]' },
+      sections: {
+        'check the payment': {
+          name: 'Check the payment',
+          headingLine: 6,
+          steps: ['Verify the payee is "{{payment.payee}}"'],
+          stepLines: [7],
+        },
+      },
+    });
+
+    const steps: StepResult[] = generatedReports.at(-1)!.steps;
+    const band = steps.find((s) => s.instruction.startsWith('Verify the payee'))!.loop!.values;
+
+    // The narrow record rule, which is the one a bound column gets: a real
+    // credential name still goes, an innocent one that merely CONTAINS `key`
+    // survives.
+    expect(band['payment.password']).toBe('***');
+    expect(band['payment.keyword']).toBe('AU');
+    expect(band['payment.payee']).toBe('Acme');
+    // The root binding is the row's compact JSON, masked inside by shape
+    // (review 5, finding 2) — same verdict per column, one level down.
+    expect(band['payment']).toBe('{"payee":"Acme","password":"***","keyword":"AU"}');
+  });
+
+  /**
+   * A row that omits a property must not inherit the previous row's value
+   * (§8.2, §8.3). All three run loops wrote a pass's bindings with
+   * `Object.assign`, which cannot delete — so pass 2's `{{row.note}}`
+   * substituted pass 1's note, and the refusal below could not fire because
+   * the key was still there.
+   */
+  it('refuses the pass whose row lacks the property, rather than reusing the last one', async () => {
+    const events = await collect({
+      steps: [
+        'Open the orders page',
+        'For each {{row}} in {{rows}}, Check the row',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: { rows: '[{"_row":"1","id":"A","note":"first"},{"_row":"2","id":"B"}]' },
+      sections: {
+        'check the row': {
+          name: 'Check the row',
+          headingLine: 7,
+          steps: ['Verify the note says "{{row.note}}"'],
+          stepLines: [8],
+        },
+      },
+    });
+
+    const failure = events.find((e) => e.type === 'step:fail');
+    expect(failure!.error).toBe(
+      '{{row.note}} has no value in For each item 2; available properties are _row, id',
+    );
+    expect(executedSteps).toEqual([
+      'Open the orders page',
+      'Verify the note says "first"',
+    ]);
+  });
+
+  it('decides an all-literal While condition per evaluation', async () => {
+    await collect({
+      steps: [
+        'Open the statements page',
+        'While "{{line.debit}}" is not empty, Click Next',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      // Never bound by a loop, so the condition is false on its first
+      // evaluation and the body never runs — with no model call either way.
+      parameters: { line: '{"debit":""}', 'line.debit': '' },
+    });
+
+    expect(judgeCalls).toHaveLength(0);
+    expect(executedSteps).toEqual(['Open the statements page', 'Sign out']);
+  });
+
+  /**
+   * A key no placeholder can spell is dropped, and the loop runs.
+   *
+   * It failed the whole guard until review 2 — which is a regression for every
+   * existing `For each` over a tool's or an API's array of objects, where
+   * `content-type` is ordinary and no step asks for a dotted binding at all
+   * (§2 keeps existing `For each` behaviour). `__proto__` is the sharp end of
+   * the same rule: it must not become a binding, and it must not stop a run.
+   */
+  it('drops a key no placeholder can spell, and loops over the rest', async () => {
+    const events = await collect(
+      ordersBody(
+        '[{"_row":"1","id":"A","status":"x","__proto__":"boom"},' +
+          '{"_row":"2","id":"B","status":"y","content-type":"t"}]',
+      ),
+    );
+
+    expect(events.find((e) => e.type === 'step:fail')).toBeUndefined();
+    expect(executedSteps).toEqual([
+      'Open the orders page',
+      'Verify the row for "A" shows "x"',
+      'Verify the row for "B" shows "y"',
+      'Sign out',
+    ]);
+    // Neither key became a binding — the scope holds the spellable ones only.
+    const scopes = events.filter((e) => e.type === 'frame:scope').map((e) => e.scope);
+    const keys = scopes.flatMap((s) => Object.keys(s as Record<string, unknown>));
+    expect(keys).not.toContain('order.__proto__');
+    expect(keys).not.toContain('order.content-type');
+    expect(keys).toContain('order.status');
+  });
+
+  /**
+   * A write that REBINDS the loop's root erases its dotted keys
+   * (docs/specs/SPEC-structured-table-reads.md §8.2).
+   *
+   * `applyPassBindings` and `runSetStep` honoured that; every other write into
+   * the live map was a plain `resolvedParameters[name] = value`. So a capture
+   * or a tool output landing on `order` left `order.id` holding the LAST
+   * PASS's id, and a later `{{order.id}}` substituted it silently — §8.3's
+   * refusal cannot fire on a key that is still there.
+   *
+   * A `[tool: …]` step is that write on THIS entry: the server dispatches it
+   * itself, outside the (mocked) step executor, so the value really travels
+   * from `ctx.step.setVar` into the map the next step's text is checked
+   * against.
+   */
+  it('refuses a stale {{order.id}} after a tool rebinds {{order}}', async () => {
+    const events = await collect({
+      steps: [
+        'For each {{order}} in {{orders}}, Check the order',
+        '[tool: note-order value="ORD-9"]',
+        'Verify the summary shows {{order.id}}',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      toolsDir,
+      parameters: { orders: ORDERS },
+      sections: {
+        'check the order': {
+          name: 'Check the order',
+          headingLine: 7,
+          steps: ['Verify the row for "{{order.id}}"'],
+          stepLines: [8],
+        },
+      },
+    });
+
+    // The tool really ran and really rebound the name.
+    expect(
+      events.filter((e) => e.type === 'capture').map((e) => [e.name, e.value]),
+    ).toContainEqual(['order', 'ORD-9']);
+
+    const fail = events.find((e) => e.type === 'step:fail');
+    expect(fail?.error).toBe(
+      '{{order.id}} has no value in For each item 2; {{order}} holds no properties — it is not an object',
+    );
+    // …and the last pass's `B` never reached the model as this step's value.
+    expect(executedSteps).toEqual([
+      'Verify the row for "A"',
+      'Verify the row for "B"',
+    ]);
   });
 });
 
@@ -1752,5 +2671,54 @@ describe('step mode after a return that ended a PASS', () => {
     // After line 8 (`Click Next`, the whole body) the run re-evaluates line 4.
     expect(awaitingLines.slice(awaitingLines.indexOf(8))).toContain(4);
     expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+  });
+});
+
+/**
+ * An `[output:]` step whose variable is a name off `Object.prototype`, over
+ * the wire.
+ *
+ * The session loop asked `varName in resolvedParameters` when deciding what
+ * the step captured, and `in` walks the prototype chain: `[output: constructor]`
+ * therefore "captured" the `Object` FUNCTION out of a map that binds nothing
+ * of the sort. It travelled into `session.outputs`, into the step's `outputs`
+ * and onto the wire as a `capture` event — all three typed `string`, and the
+ * Variables panel a client renders from that event then showed a variable the
+ * run never had.
+ *
+ * **Through the HTTP entry, and not against `session-manager.ts` directly**,
+ * for this file's own reason: what a client sees is the event, and the event
+ * is built from the map two layers down.
+ */
+describe('an [output:] step naming a prototype key (server)', () => {
+  const outputBody = (extra: Record<string, unknown> = {}) => ({
+    steps: ['[output: constructor] Read the order id'],
+    sourceLines: [3],
+    testFilePath,
+    ...extra,
+  });
+
+  it('emits no capture event, and no outputs, for a value nothing captured', async () => {
+    const events = await collect(outputBody());
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+    // Not "a capture event with a missing value" — no capture event at all.
+    expect(events.filter((e) => e.type === 'capture')).toEqual([]);
+
+    const body = await post(outputBody());
+    expect(body.results[0].outputs ?? {}).toEqual({});
+    expect(JSON.stringify(body)).not.toContain('native code');
+  });
+
+  it('still captures the name when the run really binds it', async () => {
+    // A `constructor` the caller handed in — a capture from an earlier run of
+    // the same session is the realistic source, and it is an OWN property of
+    // the map either way.
+    const events = await collect(outputBody({ parameters: { constructor: 'ORD-1001' } }));
+    expect(events.filter((e) => e.type === 'capture')).toMatchObject([
+      { type: 'capture', name: 'constructor', value: 'ORD-1001', source: 'capture' },
+    ]);
+
+    const body = await post(outputBody({ parameters: { constructor: 'ORD-1001' } }));
+    expect(body.results[0].outputs).toMatchObject({ constructor: 'ORD-1001' });
   });
 });

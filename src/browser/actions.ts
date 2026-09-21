@@ -1,5 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { Page, FrameLocator, Locator } from 'playwright';
-import type { AIAction } from '../ai/types.js';
+import type { AIAction, TableReadColumn } from '../ai/types.js';
+// §9.2: one validator for both paths into the table extractor. The dependency
+// points this way because the parser owns the §6.2 rules and their wording;
+// nothing in `action-parser.ts` reaches back here.
+import { validateTableRead, MAX_TABLE_ROWS } from '../ai/action-parser.js';
 import { logger } from '../utils/logger.js';
 import { resolveUploadPaths, uploadPathsOf, type UploadPathContext } from './upload-paths.js';
 
@@ -171,6 +177,15 @@ export interface ActionExecutionResult {
    *  step-executor JSON-encodes this into the parameter map so downstream
    *  tools can decode it via array-typed parameters. */
   capturedValues?: string[];
+  /**
+   * Row records captured by a `readTable` action — one flat object per visible
+   * data row, `_row` first (SPEC-structured-table-reads.md §7.1).
+   *
+   * Deliberately NOT a widening of `capturedValues`: keeping the flat and the
+   * structured capture distinct is what stops an existing consumer treating a
+   * record as a string it can print.
+   */
+  capturedRecords?: Array<Record<string, string>>;
   /** What the runtime found at the instant it acted. Absent unless the caller
    *  asked to measure, and absent whenever measurement was impossible. */
   targeting?: ActionTargeting;
@@ -449,6 +464,22 @@ export async function executeAction(
           capturedValue: captured,
           ...(targeting !== undefined && { targeting }),
         };
+      }
+
+      // Structured table read (SPEC-structured-table-reads.md §7). Plural by
+      // construction like `read multiple`, and exempt from the ambiguity gate
+      // for a stronger reason: it runs its OWN uniqueness check, which never
+      // takes `.first()` (§7.2). Observational, so no post-action settle —
+      // `readTable` is absent from MUTATING_ACTIONS in step-executor.ts.
+      case 'readTable': {
+        const columns = eff.columns ?? [];
+        const table = await readTableRecords(root, {
+          selector: requireSelector(eff),
+          columns,
+          ...(eff.limit !== undefined && { limit: eff.limit }),
+        });
+        logger.info(formatTableReadSummary(table, columns.length, eff.as, eff.limit));
+        return { success: true, capturedRecords: table.records };
       }
 
       case 'count': {
@@ -1844,7 +1875,19 @@ async function executeRead(
     value = sliced;
   }
 
-  logger.info(`read captured: "${value}" → variable "${action.as ?? '(unnamed)'}"`);
+  // No line here, deliberately. This one printed the captured text RAW —
+  // before the bind, so the name `[store as: password]` chose was not yet in
+  // the map the mask set is built from, and nothing at this depth could
+  // consult it. The logger does not redact, and the run-log file's own pass
+  // masks by the set it has, so a short or freshly-captured credential
+  // reached the console, the file and every client on the SSE `output`
+  // bridge in clear (review 6, finding 2).
+  //
+  // The capture is logged ONCE, by `executeStep` (src/runner/step-executor.ts),
+  // immediately after `bindVariable` — the seam where the name is known — and
+  // masked there by name, by record shape and by value. An `as`-less read
+  // stores nothing and gets no value line at all; the `read <selector> <target>
+  // → (unnamed)` sub-action above already records that it happened.
   return value;
 }
 
@@ -1946,4 +1989,190 @@ async function executeReadMultiple(
     `read[multiple] captured: ${result.length} value${result.length === 1 ? '' : 's'} → variable "${action.as ?? '(unnamed)'}"`,
   );
   return { values: result, matchCount };
+}
+
+// ── Structured table reads ───────────────────────────────────────────────────
+// docs/specs/SPEC-structured-table-reads.md §7. One shared extractor, called
+// today by the `readTable` AI action and (phase 3) by generated code-behind's
+// `tables.read`: there must not be one header algorithm in generated code and
+// another here (§9.2).
+
+/** What a caller asks the extractor for. */
+export interface TableReadRequest {
+  /** CSS selector that must match exactly one visible native `<table>`. */
+  selector: string;
+  /** The columns to read, in the order they appear on every record. */
+  columns: TableReadColumn[];
+  /** At most this many visible data rows, in DOM order (§4.6). Omitted means
+   *  all of them, subject to {@link READ_TABLE_MAX_ROWS}. */
+  limit?: number | undefined;
+}
+
+/** What one extraction found. */
+export interface TableReadResult {
+  /** One flat object per selected data row, `_row` first (§7.4). */
+  records: Array<Record<string, string>>;
+  /** Rows skipped for carrying no data: a full-width message row (§4.8), or a
+   *  `<tr>` with no cells at all. Reported rather than swallowed so an
+   *  unexpectedly short result can be explained from the log alone (§7.6). */
+  placeholdersSkipped: number;
+  /** Visible data rows found BEFORE `limit` was applied. */
+  dataRowCount: number;
+  /** The table's accessible name, as the diagnostics spell it. */
+  label: string;
+}
+
+/**
+ * Maximum structured rows one `readTable` returns.
+ *
+ * Unlike `READ_MULTIPLE_MAX` this is never a silent truncation: a table with
+ * more rows and no author-requested `limit` FAILS (§7.5). A flat list that
+ * stops at 500 is obviously short; a business table that stops at 500 is a
+ * convincingly wrong answer, and the step after it asserts on the wrong set.
+ */
+export const READ_TABLE_MAX_ROWS = MAX_TABLE_ROWS;
+
+// There is no `READ_TABLE_MAX_COLUMNS` beside `READ_TABLE_MAX_ROWS`, and the
+// absence is deliberate. §9.2's "both paths validate identically" is kept by
+// `validateTableRead` below, which is the parser's own function and enforces
+// the column cap along with every other §6.2 rule — so an alias here would be
+// a second name for a number nothing in this file reads, claiming to enforce
+// something it does not.
+
+/** The property the runtime writes on every record (§4.5). Never an alias —
+ *  the parser rejects a column that claims it. */
+const ROW_NUMBER_KEY = '_row';
+
+/** What the page-side extractor answers (src/browser/scripts/read-table.js). */
+type TableReadOutcome =
+  | {
+      ok: true;
+      records: Array<Record<string, string>>;
+      placeholdersSkipped: number;
+      dataRowCount: number;
+      label: string;
+    }
+  | { ok: false; error: string };
+
+/** What it is asked. */
+interface TableReadPageArgs {
+  selector: string;
+  columns: Array<{ header?: string; index?: number; key: string }>;
+  limit: number | null;
+  maxRows: number;
+  rowKey: string;
+}
+
+/**
+ * The page-side extractor, compiled once.
+ *
+ * The body lives in `./scripts/read-table.js` and is loaded the way
+ * `dom-cleaner.ts` and `login-fields.ts` load theirs — a string read at module
+ * init, from a file the build copies next to the compiled output. `new
+ * Function` runs in NODE, not in the page, so no page Content-Security-Policy
+ * is involved; Playwright then serialises the result with
+ * `Function.prototype.toString` and evaluates THAT source in the page, so what
+ * the browser runs is the .js file verbatim.
+ *
+ * Verbatim is the point. Written inline as a TypeScript callback, its named
+ * helpers came back from esbuild as `__name(fn, "fn")` — `keepNames` — and
+ * `__name` exists only in the bundle: under `tsx` (`npm run dev`) the whole
+ * extraction threw `ReferenceError: __name is not defined`, while `dist/`
+ * (tsc, no such rewrite) was fine. Phase 3's `tables.read` bundle would have
+ * met the same wall.
+ */
+const READ_TABLE_SCRIPT = readFileSync(
+  fileURLToPath(new URL('./scripts/read-table.js', import.meta.url)),
+  'utf8',
+);
+const readTableInPage = new Function(
+  'matches',
+  'args',
+  `return (\n${READ_TABLE_SCRIPT}\n)(matches, args);`,
+) as unknown as (matches: unknown[], args: TableReadPageArgs) => TableReadOutcome;
+
+/**
+ * Read named columns from one native `<table>` into one record per visible
+ * data row.
+ *
+ * Header mapping, row selection, placeholder skipping, `_row` numbering and
+ * every structural refusal happen in ONE browser-context evaluation (§7.5), so
+ * a rerender between two round-trips cannot put one version's headers beside
+ * another version's rows. That evaluation is also where the table's uniqueness
+ * is established — strictly stronger than counting first and extracting after.
+ *
+ * Throws on every structural problem, with the message the author reads. The
+ * caller's try/catch in {@link executeAction} turns that into a failed action,
+ * which is what reaches the model and the report.
+ */
+export async function readTableRecords(
+  root: Page | FrameLocator,
+  request: TableReadRequest,
+): Promise<TableReadResult> {
+  const { selector } = request;
+  // §6.2 in full, not just the column cap: the same validator the parser runs,
+  // so a caller that never passes through `action-parser.ts` — phase 3's
+  // generated `tables.read` — gets the same refusal and the same sentence
+  // instead of a silently wrong read (§9.2). `where` is the only difference.
+  const { columns, limit } = validateTableRead(
+    { columns: request.columns, limit: request.limit },
+    'readTable',
+  );
+  logger.subAction(
+    `readTable ${selector} ${columns.length} column${columns.length === 1 ? '' : 's'}`
+    + (limit !== undefined ? ` (limit ${limit})` : ''),
+  );
+
+  const outcome = await root.locator(selector).evaluateAll(readTableInPage, {
+    selector,
+    // Only the four fields the page needs. `mode` is phase 1's `'text'` by
+    // definition (the parser refuses anything else), so it would be noise.
+    columns: columns.map((c) => ({
+      ...(c.header !== undefined && { header: c.header }),
+      ...(c.index !== undefined && { index: c.index }),
+      key: c.key,
+    })),
+    limit: limit ?? null,
+    maxRows: READ_TABLE_MAX_ROWS,
+    rowKey: ROW_NUMBER_KEY,
+  });
+  if (!outcome.ok) throw new Error(outcome.error);
+  return {
+    records: outcome.records,
+    placeholdersSkipped: outcome.placeholdersSkipped,
+    dataRowCount: outcome.dataRowCount,
+    label: outcome.label,
+  };
+}
+
+/**
+ * The one summary line a `readTable` writes to the run log (§7.6): counts, not
+ * contents. The captured cells belong in the variable and the report, not in
+ * every console the run passes through.
+ *
+ * The bound and the placeholder-skip count ride along because without them a
+ * short result has no explanation in the log — "captured 0 rows" and "captured
+ * 0 rows (1 placeholder row skipped)" are different findings. The column count
+ * comes from what was ASKED for, so an empty table still says how wide the
+ * read was.
+ */
+export function formatTableReadSummary(
+  result: TableReadResult,
+  columnCount: number,
+  as: string | undefined,
+  limit: number | undefined,
+): string {
+  const rows = result.records.length;
+  const notes: string[] = [];
+  if (limit !== undefined) notes.push(`limit ${limit}`);
+  if (result.placeholdersSkipped > 0) {
+    notes.push(
+      `${result.placeholdersSkipped} placeholder row${result.placeholdersSkipped === 1 ? '' : 's'} skipped`,
+    );
+  }
+  return (
+    `readTable captured ${rows} row${rows === 1 ? '' : 's'} `
+    + `× ${columnCount} column${columnCount === 1 ? '' : 's'} as "{{${as ?? '(unnamed)'}}}"`
+    + (notes.length > 0 ? ` (${notes.join(', ')})` : '')
+  );
 }

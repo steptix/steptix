@@ -26,6 +26,11 @@ export type ActionType =
   | 'extract_value'
   // Capture a DOM value into a test variable
   | 'read'
+  // Read named columns from one native <table> into one record per visible
+  // data row (docs/specs/SPEC-structured-table-reads.md §6). Deterministic:
+  // the model names the table and the columns, and the runtime owns header
+  // mapping, row selection and alignment.
+  | 'readTable'
   // Count elements matching a selector and store the result
   | 'count'
   // Search the full DOM for specific text, return matching elements with selectors
@@ -47,6 +52,28 @@ export type ActionType =
   // refused on every other, including one claiming `return` / `stop`. Performs
   // nothing on the page.
   | 'fail';
+
+/**
+ * One column of a `readTable` action
+ * (docs/specs/SPEC-structured-table-reads.md §6.1).
+ *
+ * A column is named EITHER by its visible header text OR by its one-based
+ * position, never both and never neither — the parser rejects the action
+ * outright rather than guessing, because a guessed column silently misaligns
+ * every row.
+ */
+export interface TableReadColumn {
+  /** Visible header text, matched after whitespace/case normalization.
+   *  Exactly one of `header` and `index` is present. */
+  header?: string;
+  /** One-based column position, for a table with no header row (§4.4). */
+  index?: number;
+  /** Property written on every output row. Never `_row` (§4.5). */
+  key: string;
+  /** How the cell is read. Phase 1 accepts only 'text' (the default);
+   *  phase 2 adds 'checked' | 'value' | 'attribute' (§1.3, §7.4). */
+  mode?: 'text';
+}
 
 /** A single action returned by the AI */
 export interface AIAction {
@@ -159,6 +186,24 @@ export interface AIAction {
    *     pattern: "Account number: ([0-9]{4} [0-9]{4} [0-9]{4})" }
    */
   pattern?: string;
+  /**
+   * For "readTable" actions, the columns to read, in the order they appear on
+   * every output record (after `_row`, which the runtime writes itself). The
+   * parser validates the whole list or rejects the action — a partial
+   * structured read is more dangerous than a failed step (§6.2).
+   */
+  columns?: TableReadColumn[];
+  /**
+   * readTable only: capture at most this many visible data rows after
+   * visibility filtering, in DOM order. Omission means all visible rows,
+   * subject to the absolute 500-row safety cap.
+   *
+   * It is the author's own bound ("the first 10 visible rows"), not a
+   * configurable replacement for `read multiple`'s READ_MULTIPLE_MAX: with a
+   * limit a table MAY hold more than 500 rows, and without one a table that
+   * does fails rather than truncating (§7.5).
+   */
+  limit?: number;
   /**
    * CSS selector identifying the <iframe> element in the main page that contains the target element.
    * When set, the action is executed inside that frame rather than the main page.

@@ -454,6 +454,35 @@ It costs nothing: no AI call, no page interaction, no action-cache entry. Notes:
 - `Set {{name}} to` claims the line the way `[skill:` does, so a missing quote is a parse error rather than prose sent to the model. `Set the filter to Recent` names no variable and stays an ordinary AI step.
 - Inside a skill you can assign to a declared `## Outputs` name or an internal one, but not to one of the skill's own `## Parameters` — a caller's arguments are written into the step text rather than kept as variables, so there would be no variable there to assign to. The same applies to the columns of a table under a `### Section`. Both are refused when the file is parsed.
 
+### Reading a table into rows
+
+A read that names two or more columns of one table stores a **record per row**
+rather than a flat list, and `For each` binds the record's fields. (So does a
+read of one column that bounds the rows — `from the first 10 visible rows` —
+since the bound and the row numbers are the record's own.)
+
+```markdown
+## Steps
+1. Read the Order ID column as id, Customer column as customer, and Status column as status from every row in the Orders table [store as: orders]
+2. For each {{order}} in {{orders}}, Check the order
+
+### Check the order
+1. Verify the Orders table has a row for "{{order.id}}" and customer "{{order.customer}}"
+2. Verify the row for "{{order.id}}" shows "{{order.status}}"
+```
+
+Columns are located by header text, so reordering the table changes nothing;
+a table with no header names them by position instead (`the 1st column as
+payee`). Every record also carries `{{order._row}}`, its one-based row number,
+for pointing at a row whose values are not unique. `Read … from the first 10
+visible rows` bounds the read without a positional selector.
+
+Full authoring rules — aliases, empty cells, placeholder and "Loading…" rows,
+what is refused — are under [Reading a table into
+rows](docs/test-writing-handbook.md#38-reading-a-table-into-rows) in the
+test-writing handbook, and the shipped `table-*.md` tests under
+`templates/init/tests/` are worked examples.
+
 ## Skills
 
 A skill is a reusable sequence of steps shared **across** tests, kept in its own `.md` file under your project's `skills/` directory. Unlike inline sections (below), a skill has its own parameters and outputs, so it's the right tool when a flow — logging in, seeding data, completing checkout — is used by more than one test.

@@ -61,6 +61,7 @@ import {
   captureNamesBefore,
   envVarCompletions,
   inFrontmatter,
+  loopItemsInScope,
   namespaceCompletions,
   paramCompletions,
   paramContextAt,
@@ -77,6 +78,9 @@ const ITEM_KINDS: Record<PlainCompletion['kind'], vscode.CompletionItemKind> = {
   'env-name': vscode.CompletionItemKind.Constant,
   parameter: vscode.CompletionItemKind.Variable,
   capture: vscode.CompletionItemKind.Reference,
+  // A loop item is bound per pass by the planner rather than written by a
+  // step, so it reads as a variable rather than as a reference to one.
+  'loop-item': vscode.CompletionItemKind.Variable,
 };
 
 /** Kinds that finish a whole reference rather than a path segment, so `}`
@@ -88,6 +92,7 @@ const CLOSES_WITH_BRACE: ReadonlySet<PlainCompletion['kind']> = new Set([
   'env-name',
   'parameter',
   'capture',
+  'loop-item',
 ]);
 
 export class EnvDataCompletionProvider implements vscode.CompletionItemProvider {
@@ -179,7 +184,9 @@ export class EnvDataCompletionProvider implements vscode.CompletionItemProvider 
 
   /**
    * The `{{` dropdown: the file's declared parameters, then the names its
-   * earlier steps capture.
+   * earlier steps capture, then the items of the `For each` loops whose body
+   * this line is in — the one runtime variable no step writes, and the only
+   * name a table-loop body is usually about.
    *
    * Same file gates as the `${...}` half minus one: `{{}}` interpolates
    * nowhere in frontmatter (a skill's dataSources path takes `${env.X}` only),
@@ -206,7 +213,10 @@ export class EnvDataCompletionProvider implements vscode.CompletionItemProvider 
     // would actually be substituted.
     const params = resolveSection(parseParameters(text), composedEnv(baseEnvPath, overlayPath));
     const captures = captureNamesBefore(text, position.line, classified);
-    return paramCompletions(params, captures).map((c) => this.toItem(c, position, replaceStart));
+    const loops = loopItemsInScope(text, position.line, classified);
+    return paramCompletions(params, captures, loops).map((c) =>
+      this.toItem(c, position, replaceStart),
+    );
   }
 
   private toItem(

@@ -573,6 +573,78 @@ describe('control lines inside a skill body', () => {
     expect(steps[2]).toBe('Verify "{{__skill1_item}}" is shown');
   });
 
+  /**
+   * The same rename, over an OBJECT row
+   * (docs/specs/SPEC-structured-table-reads.md §8.2).
+   *
+   * `{{item.id}}` names the variable `item` and one of its properties, and the
+   * property belongs to the row rather than to this skill's scope. So the
+   * rename keys on the ROOT and carries the segment across: the loop binds
+   * `__skill1_item` and, per pass, `__skill1_item.id`, which is exactly what
+   * the body now asks for.
+   *
+   * Namespacing `item.id` as a name in its own right would produce
+   * `{{__skill1_item.id}}` from a rename of `item.id`, and the same string
+   * from the root rename — consistent only by accident, and not at all when a
+   * declared parameter shares the root (the root is exempt from renaming, the
+   * dotted form is not, and the two halves then disagree).
+   */
+  it('a dotted reference in a skill body renames by its root, segment intact', async () => {
+    await writeSkill(
+      'check_orders',
+      [
+        '# Check orders',
+        '',
+        '## Parameters',
+        '',
+        '- list: the orders to check',
+        '',
+        '## Steps',
+        '',
+        '1. For each {{item}} in {{list}}, Check it',
+        '',
+        '### Check it',
+        '',
+        '1. Verify the row for "{{item.id}}" shows "{{item.status}}" in row {{item._row}}',
+      ].join('\n'),
+    );
+    const { steps, controls } = await expandInline(
+      doc(
+        '1. Read the Order ID column as id from every row in the Orders table [store as: orders]',
+        '2. [skill: check_orders list="{{orders}}"]',
+      ),
+      tmpDir,
+    );
+    expect(controls[1]).toMatchObject({ kind: 'foreach', item: '__skill1_item', list: 'orders' });
+    expect(steps[2]).toBe(
+      'Verify the row for "{{__skill1_item.id}}" shows "{{__skill1_item.status}}" ' +
+        'in row {{__skill1_item._row}}',
+    );
+  });
+
+  it('a declared parameter keeps its name, and so do its properties', async () => {
+    await writeSkill(
+      'show_order',
+      [
+        '# Show order',
+        '',
+        '## Parameters',
+        '',
+        '- order: the row to show',
+        '',
+        '## Steps',
+        '',
+        '1. Verify {{order.id}} is shown',
+      ].join('\n'),
+    );
+    const { steps } = await expandInline(doc('1. [skill: show_order order="{{row}}"]'), tmpDir);
+    // The argument is interpolated into the body TEXT, so `{{order}}` itself
+    // would be baked — but `{{order.id}}` is not a key of `call.args`, so it
+    // survives as a runtime reference rather than becoming `__skill1_order.id`,
+    // which nothing would ever bind.
+    expect(steps[0]).toBe('Verify {{order.id}} is shown');
+  });
+
   it('a condition records the text the model will be asked, parameters resolved', async () => {
     await writeSkill(
       'upgrade',

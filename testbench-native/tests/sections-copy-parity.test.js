@@ -20,7 +20,8 @@
 
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
+import { registerHooks } from "node:module";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
@@ -28,7 +29,51 @@ import {
   extractStepLineIds,
 } from "../src/webview/lib/step-lines-inline.js";
 import { extractStepLineIds as hostExtractStepLineIds } from "../src/extension/step-lines.ts";
-import { extractSections as coreExtractSections } from "../../runner-core/dist/step-lines.js";
+
+/**
+ * runner-core's SOURCE, not its `dist/`.
+ *
+ * `npm test` here is a bare `node --test tests/*.test.js` — it builds nothing,
+ * so importing `../../runner-core/dist/step-lines.js` asked this suite about
+ * whatever the mirror used to be. Measured: putting `if (text) return [];` at
+ * the top of `extractSections` in runner-core/src/step-lines.ts and running
+ * this file left it 54/54 green. Against the source the same mutation fails
+ * 24 of those 54, which is the whole point of a parity suite.
+ *
+ * Node's type stripping loads the `.ts` directly — as
+ * `record-secret-parity.test.js` does for repl.ts, and as the
+ * `src/extension/step-lines.ts` import above already does — but step-lines.ts
+ * differs from both in one way that decides the shape of this block: it has
+ * relative imports of its own (`./section-match.js`, `./control-line.js`), and
+ * the stripper does NOT remap a `.js` specifier onto the `.ts` beside it. The
+ * import dies in `finalizeResolution` on a file that was never emitted.
+ *
+ * So the specifier is rewritten on the way through, for exactly that case: a
+ * RELATIVE `.js` asked for by a `.ts` file, where the `.ts` twin is on disk.
+ * Nothing else is touched, `node --test` gives this file its own process, and
+ * the hook is gone with it. The import has to be dynamic — a static one is
+ * hoisted above the `registerHooks` call and would resolve before the hook is
+ * installed.
+ */
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (
+      specifier.startsWith(".") &&
+      specifier.endsWith(".js") &&
+      context.parentURL?.endsWith(".ts") &&
+      existsSync(
+        fileURLToPath(new URL(`${specifier.slice(0, -3)}.ts`, context.parentURL)),
+      )
+    ) {
+      return nextResolve(`${specifier.slice(0, -3)}.ts`, context);
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
+const { extractSections: coreExtractSections } = await import(
+  "../../runner-core/src/step-lines.ts"
+);
 
 const FIXTURES = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),

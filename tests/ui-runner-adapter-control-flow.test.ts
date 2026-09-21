@@ -14,7 +14,7 @@
  * the adapter's own loop are real.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
@@ -57,6 +57,9 @@ vi.mock('../src/report/generator.js', async (importOriginal) => ({
 }));
 
 import { UIRunnerAdapter } from '../src/ui/main/runner-adapter.js';
+// Not mocked: the adapter calls through to the real logger, so the lines a run
+// prints are asserted by spying on it.
+import { logger } from '../src/utils/logger.js';
 
 const CHAIN = `
 # Pay
@@ -695,5 +698,371 @@ describe('the Runner UI reports both kinds of skip the same way', () => {
       [1, 'Skipped: no condition in this decision held'],
       [2, 'Skipped: no condition in this decision held'],
     ]);
+  });
+});
+
+// ─── A dotted reference the pass cannot answer ──────────────────────────────
+
+/**
+ * `{{order.missing}}` inside a `For each` body, through the adapter's loop
+ * (docs/specs/SPEC-structured-table-reads.md §8.3).
+ *
+ * The helper that decides this is shared with the CLI and the Sessions API,
+ * and each of the three wires it in itself — so each of the three needs a
+ * loop-level test saying the refusal lands EARLY, before the executor is
+ * reached. That is the whole claim: `executeStepMock` is the model, and what
+ * it was never handed is the assertion.
+ *
+ * The list is seeded through `## Parameters`, the way this file's other
+ * `For each` test seeds one. Where it comes from is not the planner's
+ * business: a `readTable`, a tool returning an array and a declared parameter
+ * all put the same JSON in the same map.
+ */
+describe('a dotted reference inside a For each body', () => {
+  const doc = (bodyStep: string): string => `
+# Orders
+
+## Parameters
+- orders: [{"id":"ORD-1001","status":"Completed"},{"id":"ORD-1002","status":"Pending"}]
+
+## Steps
+1. For each {{order}} in {{orders}}, Check the order
+2. Sign out
+
+### Check the order
+1. ${bodyStep}
+`;
+
+  /** Every instruction the executor was actually given. */
+  const asked = (): unknown[] => executeStepMock.mock.calls.map((c) => c[2]);
+
+  it('fails the step before any model call, naming the pass and the properties', async () => {
+    const events = await runAdapter(writeTest(root, doc('Verify {{order.missing}} is shown')));
+
+    const message =
+      '{{order.missing}} has no value in For each item 1; available properties are id, status';
+    const failure = events.find(
+      (e) => e.channel === 'runner:step-complete' && e.data['status'] === 'failed',
+    );
+    expect(failure?.data['error']).toBe(message);
+    // …and the renderer's own error channel carries the same sentence, so the
+    // Runner UI shows it rather than a bare red line.
+    expect(
+      events.find((e) => e.channel === 'runner:error')?.data['message'],
+    ).toBe(message);
+
+    // Nothing was planned for a line carrying six literal braces, and the run
+    // stopped rather than going on to `Sign out`.
+    expect(asked()).toEqual([]);
+  });
+
+  /**
+   * …and the refusal is MASKED before it becomes an IPC event.
+   *
+   * It is written from the run's own values — the properties the row holds,
+   * the keys the loop dropped — and a key can carry one: `hunter2 header`,
+   * where `hunter2` is what `{{password}}` holds. Round 2 masked
+   * `evaluateGuard`'s `cannot be referenced as a placeholder` line for exactly
+   * this case and left the louder sentence beside it in the clear, in all
+   * three loops at once.
+   */
+  it('masks a secret value the refusal would otherwise emit', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    try {
+      const md = `
+# Orders
+
+## Parameters
+- password: hunter2
+- orders: [{"id":"A","hunter2 header":"t"}]
+
+## Steps
+1. For each {{order}} in {{orders}}, Check the order
+2. Sign out
+
+### Check the order
+1. Verify the row shows "{{order.contenttype}}"
+`;
+      const events = await runAdapter(writeTest(root, md));
+
+      const expected =
+        '{{order.contenttype}} has no value in For each item 1; available properties are id ' +
+        '(*** header cannot be spelled as a placeholder)';
+      const failure = events.find(
+        (e) => e.channel === 'runner:step-complete' && e.data['status'] === 'failed',
+      );
+      expect(failure?.data['error']).toBe(expected);
+      expect(events.find((e) => e.channel === 'runner:error')?.data['message']).toBe(expected);
+      // The raw value reaches neither the log nor either event.
+      const emitted = JSON.stringify([
+        failure,
+        events.find((e) => e.channel === 'runner:error'),
+        error.mock.calls.map((c) => String(c[0])),
+      ]);
+      expect(emitted).not.toContain('hunter2');
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('substitutes a real property into the text the model receives, per pass', async () => {
+    await runAdapter(writeTest(root, doc('Verify the row for "{{order.id}}" is {{order.status}}')));
+
+    expect(asked()).toEqual([
+      'Verify the row for "ORD-1001" is Completed',
+      'Verify the row for "ORD-1002" is Pending',
+      'Sign out',
+    ]);
+  });
+
+  /**
+   * The header's own tail, naming a property of the item it defines — §4.6's
+   * recommended form.
+   *
+   * `resolveStepText` runs on every line before the control dispatch, so the
+   * header is interpolated on the visit that has not begun a pass yet.
+   * `controlLineDefines` exempted `{{order}}` and nothing else, so
+   * `{{order.id}}` was logged as `Unresolved placeholder` on every entry to
+   * every correct table loop — in this runner and in the Sessions API alike.
+   */
+  it('does not warn about a property of the item the header binds', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const md = `
+# Orders
+
+## Parameters
+- orders: [{"id":"ORD-1001","status":"Completed"},{"id":"ORD-1002","status":"Pending"}]
+
+## Steps
+1. For each {{order}} in {{orders}}, Click the row whose Order ID is "{{order.id}}"
+2. Sign out
+`;
+      await runAdapter(writeTest(root, md));
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines.filter((l) => l.includes('Unresolved placeholder'))).toEqual([]);
+      // The loop ran: the silence is about a working line.
+      expect(asked()).toEqual([
+        'Click the row whose Order ID is "ORD-1001"',
+        'Click the row whose Order ID is "ORD-1002"',
+        'Sign out',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('still warns about a dotted name no loop binds', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const md = `
+# Orders
+
+## Steps
+1. Verify the row for "{{other.id}}" is shown
+`;
+      await runAdapter(writeTest(root, md));
+      expect(warn.mock.calls.map((c) => String(c[0]))).toContain(
+        'Unresolved placeholder: {{other.id}}',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+/**
+ * Rows differ in shape, and a pass must not answer from the last one
+ * (docs/specs/SPEC-structured-table-reads.md §8.2, §8.3).
+ *
+ * All three run loops wrote a pass's bindings with `Object.assign`, which
+ * cannot delete. This runner is where it is worst, because `movePointer` can
+ * rebuild a live `For each` cursor: the rebuild used to drop `properties`, so
+ * after a jump no pass bound `{{order.x}}` at all — and with a merging write
+ * that is not an error, it is the pre-jump row's value on every remaining
+ * pass, silently, with a confident green row.
+ */
+describe('a For each pass binds its own row and no other', () => {
+  it('refuses the pass whose row lacks the property, rather than reusing the last', async () => {
+    const md = `
+# Rows
+
+## Parameters
+- rows: [{"_row":"1","id":"A","note":"first"},{"_row":"2","id":"B"}]
+
+## Steps
+1. For each {{row}} in {{rows}}, Check the row
+2. Sign out
+
+### Check the row
+1. Verify the note says "{{row.note}}"
+`;
+    const events = await runAdapter(writeTest(root, md));
+
+    const failure = events.find(
+      (e) => e.channel === 'runner:step-complete' && e.data['status'] === 'failed',
+    );
+    expect(failure?.data['error']).toBe(
+      '{{row.note}} has no value in For each item 2; available properties are _row, id',
+    );
+    // Pass 1 ran on its own row; nothing leaked forward.
+    expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual([
+      'Verify the note says "first"',
+    ]);
+  });
+
+  it('keeps every row"s properties across a debugger jump into the body', async () => {
+    // `planForStart` rebuilds the cursor on every `movePointer`, and the
+    // rebuild wrote `{items, index, resumed}` — dropping `properties`, the
+    // only place the rows' dotted values live.
+    const md = `
+# Jump into a table loop
+
+## Parameters
+- orders: [{"id":"A"},{"id":"B"},{"id":"C"}]
+
+## Steps
+1. For each {{order}} in {{orders}}, Check the order
+2. Sign out
+
+### Check the order
+1. Verify the row for "{{order.id}}" is shown
+`;
+    let pauses = 0;
+    const adapter = new UIRunnerAdapter((channel) => {
+      if (channel !== 'runner:paused') return;
+      pauses += 1;
+      // Jump back to the body line on the first pause — the debugger's own
+      // move, against a loop that is already part-way through its list.
+      if (pauses === 1) adapter.movePointer(2);
+      adapter.resume();
+    });
+    await adapter.start(writeTest(root, md), [2]);
+
+    // Each pass on its OWN row. Dropping `properties` left `{{order.id}}`
+    // unbound after the jump, so every later pass re-read row A's id.
+    expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual([
+      'Verify the row for "A" is shown',
+      'Verify the row for "B" is shown',
+      'Verify the row for "C" is shown',
+      'Sign out',
+    ]);
+  });
+});
+
+/**
+ * Review 5, finding 3: the fourth run loop showed the resolved line to
+ * everything, not just to the executor.
+ *
+ * `resolveStepText` is interpolation and nothing else, and its answer went
+ * three ways: to `executeStep` (right — it has to act on it), to the renderer
+ * as `runner:step-start`, and into `conversationHistory` via
+ * `formatStepHistoryEntry`, whose docstring asks for the MASKED text and
+ * whose output is the model's `## Prior Steps`. The CLI masks at its own seam
+ * (test-runner.ts) and the server at its (session-manager.ts); this loop did
+ * not, so `Type {{password}} into the field` put the password in the panel
+ * and then in every later step's prompt (§7.6).
+ */
+const SECRET_STEPS = `
+# Sign in
+
+## Parameters
+- username: octocat
+- password: hunter2-correct-horse
+
+## Steps
+1. Type {{password}} into the field
+2. Verify {{username}} is signed in
+`;
+
+describe('UIRunnerAdapter masks the line it shows, not the one it runs', () => {
+  it('the step-start event and the next step’s ## Prior Steps carry ***', async () => {
+    const events = await runAdapter(writeTest(root, SECRET_STEPS));
+
+    // What the renderer is told.
+    expect(
+      events
+        .filter((e) => e.channel === 'runner:step-start')
+        .map((e) => e.data['instruction']),
+    ).toEqual(['Type *** into the field', 'Verify octocat is signed in']);
+
+    // What the model is told about the step before it.
+    const second = executeStepMock.mock.calls[1]![3] as { conversationHistory: string[] };
+    const history = second.conversationHistory.join('\n');
+    expect(history).toContain('Type *** into the field');
+    expect(history).not.toContain('hunter2-correct-horse');
+
+    // And what actually ran, which is the whole reason the two differ.
+    expect(executeStepMock.mock.calls[0]![2]).toBe('Type hunter2-correct-horse into the field');
+    // A non-secret parameter is untouched — masking is by name, not by
+    // "anything interpolated".
+    expect(executeStepMock.mock.calls[1]![2]).toBe('Verify octocat is signed in');
+  });
+
+  /**
+   * The fourth history writer in this loop, and the one the finding did not
+   * name: `guardHistoryLines`. Its `text` callback is wrapped in the CLI
+   * (`redact(test.steps[k] …)`, test-runner.ts) and on the server
+   * (`redact(effectiveSteps[k] …)`, session-manager.ts), and here it was not —
+   * under a comment saying so deliberately, "matching every other history
+   * line this runner writes", which the fix above made untrue.
+   *
+   * Checked at the source, in the idiom tests/run-loop-contracts.test.ts uses
+   * for the same three-of-four shape: a guard row carries the AUTHORED line,
+   * so staging a value the mask set holds inside one takes a test that lies
+   * about how it got there.
+   */
+  it('masks the guard history lines too, as the other three loops do', () => {
+    const src = readFileSync(new URL('../src/ui/main/runner-adapter.ts', import.meta.url), 'utf-8');
+    const start = src.indexOf('guardHistoryLines({');
+    expect(start).toBeGreaterThan(-1);
+    expect(src.slice(start, src.indexOf('}),', start))).toMatch(/text: \(k\) => shown\(/);
+  });
+});
+
+/**
+ * Review 5, finding 3, second half — and review 6, finding 5c: the steer.
+ *
+ * `steer()` is the fifth writer in this loop, and it has the same two
+ * audiences as a step: `executeStep` gets the RESOLVED text because it has to
+ * act on it, and the panel (`runner:step-start`) and the model
+ * (`conversationHistory` → `## Prior Steps`) get the masked one. Round 5 added
+ * `shownSteer` for exactly that and nothing pinned it, so removing it left the
+ * suite green while a `{{password}}` typed into the steer box went to the
+ * renderer and into every later prompt in clear.
+ */
+describe('UIRunnerAdapter masks a steer the same way', () => {
+  it('the steering step-start and the history carry ***, the executor gets the value', async () => {
+    const file = writeTest(root, SECRET_STEPS);
+    const events: Emitted[] = [];
+    let steered = false;
+    const adapter = new UIRunnerAdapter((channel, data) => {
+      events.push({ channel, data: data as Record<string, unknown> });
+      if (channel === 'runner:paused' && !steered) {
+        steered = true;
+        // Paused at the breakpoint on step 1; the author types a steer that
+        // names a secret parameter, then lets the run go on.
+        void adapter
+          .steer('Type {{password}} into the field')
+          .then(() => { adapter.resume(); });
+      }
+    });
+    await adapter.start(file, [1]);
+
+    // What the renderer is told about the steering step.
+    const starts = events
+      .filter((e) => e.channel === 'runner:step-start')
+      .map((e) => String(e.data['instruction']));
+    expect(starts).toContain('(steering) Type *** into the field');
+    expect(starts.join('\n')).not.toContain('hunter2-correct-horse');
+
+    // What the executor was handed, which is the whole reason the two differ.
+    expect(executeStepMock.mock.calls[0]![2]).toBe('Type hunter2-correct-horse into the field');
+
+    // And what the model is told about it on the step that follows.
+    const next = executeStepMock.mock.calls[1]![3] as { conversationHistory: string[] };
+    const history = next.conversationHistory.join('\n');
+    expect(history).toContain('(steering) Type *** into the field');
+    expect(history).not.toContain('hunter2-correct-horse');
   });
 });

@@ -50,6 +50,14 @@
  * its own way of emitting them.
  */
 
+// The one import, and it is a fact about the GRAMMAR rather than a dependency
+// on the world: whether a record's key can become a `{{item.key}}` binding is
+// decided by the property segment of `PLACEHOLDER_NAME_SOURCE`, which lives
+// with the rest of the placeholder grammar. A second copy of
+// `[A-Za-z_][A-Za-z0-9_]*` here is exactly the mirror this repository keeps
+// finding drifted. Nothing about the import performs I/O.
+import { isBindableProperty } from '../parser/parameters.js';
+
 /**
  * What the expander recorded about one guard, keyed by the guard's own
  * absolute index in the flat step list (stories/control-flow.md §Design).
@@ -109,6 +117,17 @@ export const DEFAULT_MAX_LOOP_ITERATIONS = 25;
  *  read, which happens on the guard's first evaluation. */
 export interface ForEachCursor {
   items: string[] | null;
+  /**
+   * Per item, the direct properties an OBJECT element exposes as dotted
+   * bindings — `{ _row: '1', id: 'ORD-1001' }` for
+   * `{"_row":"1","id":"ORD-1001"}` (SPEC-structured-table-reads.md §8.2).
+   * Absent entries are scalars, which bind their base name and nothing else.
+   *
+   * Parallel to `items` rather than folded into it because `items` is the
+   * loop's own list — what `count` reports, what `index` walks — and every
+   * existing reader of it expects one string per pass.
+   */
+  properties?: Array<Record<string, string> | undefined> | undefined;
   /** Index of the element the current pass is bound to; -1 before the first. */
   index: number;
   /**
@@ -162,7 +181,11 @@ export type GuardVerdict =
    *  one, and skips the chain if it does not. */
   | { kind: 'chain'; selected: number | null }
   | { kind: 'condition'; holds: boolean }
-  | { kind: 'list'; items: string[] }
+  /** `properties`, when present, is parallel to `items`: the direct properties
+   *  of an OBJECT element, which become `{{item.property}}` bindings (§8.2).
+   *  Optional so a caller that builds a verdict by hand — every scalar test in
+   *  this repo — keeps working unchanged. */
+  | { kind: 'list'; items: string[]; properties?: Array<Record<string, string> | undefined> }
   | { kind: 'resume' };
 
 export interface ControlPlan {
@@ -370,7 +393,12 @@ function planForEach(
     // Entering the loop. A run resumed inside the body counts its partial
     // pass as pass 1, so the list is entered one element further on.
     const startAt = cursor?.resumed ? 1 : 0;
-    cursor = { items: [...verdict.items], index: startAt, resumed: cursor?.resumed ?? false };
+    cursor = {
+      items: [...verdict.items],
+      ...(verdict.properties && { properties: [...verdict.properties] }),
+      index: startAt,
+      resumed: cursor?.resumed ?? false,
+    };
     state.cursors.set(index, cursor);
   } else if (cursor && cursor.items !== null) {
     cursor = { ...cursor, index: cursor.index + 1 };
@@ -403,9 +431,45 @@ function planForEach(
     pass: {
       iteration: cursor.index + 1,
       count: items.length,
-      bindings: { [record.item]: items[cursor.index]! },
+      bindings: passBindings(record.item, items[cursor.index]!, cursor.properties?.[cursor.index]),
     },
   };
+}
+
+/**
+ * What one pass writes into the live variable map: the base name, plus one
+ * dotted key per direct property of an object item
+ * (docs/specs/SPEC-structured-table-reads.md §8.2).
+ *
+ * The base binding is unchanged — an object still binds `{{order}}` to its
+ * compact JSON text, which is what a scalar `For each` over a JSON array of
+ * objects already did and what a step printing the whole row still wants.
+ *
+ * Base FIRST, so a record with a property literally called `order` under an
+ * item called `order` cannot shadow the item itself... which it cannot anyway,
+ * since a property's key is always `order.something`. The order is for the
+ * Variables panel, which renders insertion order and should lead with the row.
+ *
+ * Nothing is snapshotted or restored: the last pass's bindings, dotted ones
+ * included, stay in the one live map after the loop, exactly as the scalar
+ * binding always has (§8.2, last paragraph).
+ *
+ * What a pass does NOT write is the other half of the rule, and it lives at
+ * the other end: rows differ in shape, so `applyPassBindings`
+ * (control-runtime.ts) clears every `item.*` key before assigning these. Read
+ * the two together — this function says what a pass means, that one says what
+ * the map must therefore forget.
+ */
+function passBindings(
+  item: string,
+  value: string,
+  properties: Record<string, string> | undefined,
+): Record<string, string> {
+  const bindings: Record<string, string> = { [item]: value };
+  for (const [key, text] of Object.entries(properties ?? {})) {
+    bindings[`${item}.${key}`] = text;
+  }
+  return bindings;
 }
 
 function planConditionLoop(
@@ -693,9 +757,20 @@ export function planForStart(
       // it lets a capture made inside the body change the bound of the loop it
       // is inside, which is the thing `planAtGuard` refuses to do on an
       // ordinary pass.
+      //
+      // `properties` travels with `items`, and dropping it was a silent
+      // wrong-row bug rather than a missing feature: the Electron debugger's
+      // jump-to-step calls this against LIVE state, so a rebuild that kept the
+      // items and forgot their properties left every later pass binding the
+      // base name and no dotted key at all. With `applyPassBindings` clearing
+      // the stale ones, `{{order.id}}` after a jump is correctly refused; with
+      // a plain `Object.assign`, it silently read the pre-jump row. Either way
+      // the cursor is the only place that knowledge lives, so it is copied
+      // wherever a cursor is copied.
       const cursor = state.cursors.get(g);
       state.cursors.set(g, {
         items: cursor?.items ?? null,
+        ...(cursor?.properties && { properties: cursor.properties }),
         index: cursor?.index ?? 0,
         resumed: true,
       });
@@ -783,16 +858,76 @@ export function loopCompileRefusal(guardLine: string): string {
 }
 
 /**
+ * Which item of the innermost live `For each` binding `item` is running — the
+ * number `{{order.statuz}} has no value in For each item 2` names
+ * (docs/specs/SPEC-structured-table-reads.md §8.3).
+ *
+ * Innermost is the HIGHEST guard index, the same rule the rest of this module
+ * uses: a loop nested inside another's body sits after it in the flat list. A
+ * `For each` that has not started a pass yet, and a name no loop binds, both
+ * answer undefined, and the caller's message leaves the clause out.
+ *
+ * Reads the state the planner already keeps rather than adding a field to it,
+ * so nothing has to be threaded through the three run loops to ask.
+ */
+export function forEachPassOf(
+  controls: readonly (ControlRecord | null)[],
+  state: ControlState,
+  item: string,
+): number | undefined {
+  for (let g = controls.length - 1; g >= 0; g--) {
+    const record = controls[g];
+    if (!record || record.kind !== 'foreach' || record.item !== item) continue;
+    const passes = state.passes.get(g);
+    if (passes !== undefined) return passes;
+  }
+  return undefined;
+}
+
+/**
  * Validate what `{{list}}` holds for a `For each`, and bind its elements.
  *
  * A JSON array and nothing else (decision 10): a list that came from a `Set`
  * is text, and guessing a delimiter is how a value with a comma in it
  * silently becomes two. A non-string element is bound as its JSON text.
+ *
+ * An OBJECT element binds that JSON text too — unchanged, because that is what
+ * a step printing the whole row reads — and, in addition, one dotted binding
+ * per direct property (docs/specs/SPEC-structured-table-reads.md §8.2). The
+ * per-property conversion is the spec's: a string travels unchanged, a number
+ * or boolean becomes its JSON lexical form, `null` becomes the four characters
+ * `null`, and a nested object or array becomes compact JSON. Nothing is
+ * flattened recursively — one property segment is all v1 addresses.
+ *
+ * A key that is not a safe identifier, or is one of the three prototype names,
+ * binds nothing and is REPORTED — `unspellable`, which the caller logs once
+ * per loop entry (`evaluateGuard`, control-runtime.ts). It used to fail the
+ * guard, and review 2 found that costs more than it buys: a `For each` over a
+ * tool's or an API's array of objects, using `{{item}}` as JSON text and no
+ * dotted binding at all, stopped running the moment one record carried a
+ * `content-type` — a regression against §2's promise that existing `For each`
+ * behaviour is preserved, for a binding nothing had asked for.
+ *
+ * What made the old rule look necessary was partial binding: a loop that
+ * silently dropped `order.id` would run every pass against an empty string.
+ * That danger is gone at the other end — a dotted reference with no binding
+ * is refused before the model is asked (`dottedReferenceError`), and its
+ * message names the dropped keys — so a key that cannot be spelled is a fact
+ * to report, not a run to stop.
  */
 export function parseListValue(
   name: string,
   raw: string | undefined,
-): { items: string[] } | { error: string } {
+):
+  | {
+      items: string[];
+      properties: Array<Record<string, string> | undefined>;
+      /** Keys that bound nothing, distinct and in first-seen order across the
+       *  whole list. Absent when there are none, so a caller that compares the
+       *  whole object sees exactly what it did before. */
+      unspellable?: string[];
+    }
+  | { error: string } {
   if (raw === undefined) {
     return {
       error:
@@ -810,11 +945,44 @@ export function parseListValue(
   }
   if (!Array.isArray(parsed)) return { error: notAList(name, raw) };
 
-  return {
-    items: parsed.map((element: unknown) =>
-      typeof element === 'string' ? element : JSON.stringify(element),
-    ),
-  };
+  const items: string[] = [];
+  const properties: Array<Record<string, string> | undefined> = [];
+  /** A Set, so twenty rows of the same shape name their dropped key once. */
+  const unspellable = new Set<string>();
+  for (const element of parsed) {
+    items.push(typeof element === 'string' ? element : JSON.stringify(element));
+    if (!isPlainRecord(element)) {
+      properties.push(undefined);
+      continue;
+    }
+    const fields: Record<string, string> = {};
+    for (const key of Object.keys(element)) {
+      if (!isBindableProperty(key)) {
+        unspellable.add(key);
+        continue;
+      }
+      fields[key] = propertyText((element as Record<string, unknown>)[key]);
+    }
+    properties.push(fields);
+  }
+
+  return { items, properties, ...(unspellable.size > 0 && { unspellable: [...unspellable] }) };
+}
+
+/** A JSON object — not an array, not null, and not something `JSON.parse`
+ *  cannot produce. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** One property value as the text its `{{item.property}}` binding holds
+ *  (§8.2). */
+function propertyText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  // `JSON.stringify(undefined)` is `undefined`, not a string — unreachable for
+  // a parsed document, since JSON has no `undefined`, but the cast below would
+  // hide it rather than the map holding the four characters `null`.
+  return value === undefined ? 'null' : JSON.stringify(value);
 }
 
 function notAList(name: string, raw: string): string {

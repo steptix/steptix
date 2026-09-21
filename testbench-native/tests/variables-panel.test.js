@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import { collectVariables, classifyCaptureSource } from "../src/webview/lib/variables-panel.js";
+import {
+  classifyCaptureSource,
+  collectVariables,
+  maskIfSecretAuthoredInline,
+  maskIfSecretInline,
+  maskRecordSecretsInline,
+} from "../src/webview/lib/variables-panel.js";
 
 test("collectVariables: empty text + no values → empty list", () => {
   assert.deepEqual(collectVariables("", {}, {}), []);
@@ -262,4 +268,299 @@ test("collectVariables: a section heading does not truncate the scan", () => {
 
   const names = collectVariables(text, {}, {}).map((v) => v.name);
   assert.deepEqual(names, ["first", "second"]);
+});
+
+// ---------------------------------------------------------------------------
+// maskIfSecretInline — the panel's copy of runner-core's maskIfSecret
+// ---------------------------------------------------------------------------
+//
+// The panel and the Variables view render the same scope through two
+// implementations (the webview bundle imports nothing from runner-core), so
+// the cases below are the ones repl.test.js pins on the other side. One of
+// them showing a password the other masks is the whole bug.
+
+test("maskIfSecretInline: the secret words, as substrings", () => {
+  assert.equal(maskIfSecretInline("password", "hunter2"), "*******");
+  assert.equal(maskIfSecretInline("GITHUB_PASSWORD", "hunter2"), "*******");
+  assert.equal(maskIfSecretInline("api_key", "abc"), "***");
+  assert.equal(maskIfSecretInline("apiKey", "abc"), "***");
+  assert.equal(maskIfSecretInline("MACHINE_KEY", "abc"), "***");
+  assert.equal(maskIfSecretInline("privateKey", "abc"), "***");
+  assert.equal(maskIfSecretInline("payment.password", "abc"), "***");
+});
+
+// A flat name takes the server's `isSecretName` exactly — a SUBSTRING. Word
+// boundaries were tried and leaked: `mypassword` and `apitoken` are one word
+// to a splitter, so the panel showed values the report starred.
+test("maskIfSecretInline: a flat name masks on a substring, as the report does", () => {
+  for (const name of [
+    "mypassword",
+    "newpassword",
+    "password2",
+    "mytoken",
+    "apitoken",
+    "mysecret",
+    "secret1",
+    "MACHINE_KEY",
+  ]) {
+    assert.equal(maskIfSecretInline(name, "hunter2"), "*".repeat(7), name);
+  }
+});
+
+// `pwd`/`otp`/`credential` are COLUMN words, not flat ones: the server prints
+// a flat `pwd` in the report, the run log and the `## Values` block, so the
+// panel prints it too.
+test("maskIfSecretInline: pwd/otp/credential are column words, not flat ones", () => {
+  for (const name of ["passwd", "pwd", "user_otp", "credential", "api_credentials"]) {
+    assert.equal(maskIfSecretInline(name, "abc"), "abc", `flat ${name}`);
+    assert.equal(maskIfSecretInline(`payment.${name}`, "abc"), "***", `column ${name}`);
+  }
+});
+
+// The price of the server's breadth, stated rather than worked around: a FLAT
+// `keyword` masks because the report masks it. The narrow rule applies where
+// the name came off a page — `payment.keyword` below.
+test("maskIfSecretInline: a flat name that merely contains one masks too", () => {
+  assert.equal(maskIfSecretInline("keyword", "search"), "******");
+  assert.equal(maskIfSecretInline("monkey", "george"), "******");
+  assert.equal(maskIfSecretInline("username", "alice"), "alice");
+  assert.equal(maskIfSecretInline("payment.payee", "Origin Energy"), "Origin Energy");
+  assert.equal(maskIfSecretInline("payment.keyword", "search"), "search");
+});
+
+test("maskIfSecretInline: empty secret values say so, and long ones cap at 8", () => {
+  assert.equal(maskIfSecretInline("password", ""), "(empty)");
+  assert.equal(maskIfSecretInline("password", "a".repeat(50)), "*".repeat(8));
+});
+
+// A dotted name is `root.property`, and the property came off a page rather
+// than out of the author's head — so the narrow record-column rule decides it
+// (SPEC-structured-table-reads.md §7.6). The panel used to apply the broad
+// word list to both halves and hid `payment.sort_key`, which the report
+// prints.
+test("maskIfSecretInline: a dotted property takes the record-column rule", () => {
+  assert.equal(maskIfSecretInline("payment.sort_key", "abc"), "abc");
+  assert.equal(maskIfSecretInline("payment.key", "K-1"), "K-1");
+  assert.equal(maskIfSecretInline("payment.keys", "a,b"), "a,b");
+  assert.equal(maskIfSecretInline("payment.apikey", "abc"), "abc");
+  assert.equal(maskIfSecretInline("payment.api_key", "abc"), "***");
+  assert.equal(maskIfSecretInline("payment.pwd", "abc"), "***");
+  assert.equal(maskIfSecretInline("payment.otp", "abc"), "***");
+});
+
+test("maskIfSecretInline: the ROOT is still the author's word", () => {
+  // A record the author stored as `token` says what it is by its name, so the
+  // whole thing is hidden whatever its columns are called.
+  assert.equal(maskIfSecretInline("token.payee", "Origin Energy"), "*".repeat(8));
+  assert.equal(maskIfSecretInline("sort_key", "abc"), "***", "a FLAT name keeps the broad rule");
+});
+
+// ---------------------------------------------------------------------------
+// What the run says about its own map: `bindings` and `unmask`
+// ---------------------------------------------------------------------------
+//
+// The rule above is the reading for a name a `For each` pass bound, and the
+// panel applied it to every dotted name because nothing on the wire said which
+// ones a pass bound. So a data file's own `user.apikey` column heading —
+// author-chosen end to end, and starred by the report — rendered
+// `uk_live_1234` in the panel beside it. `frame:scope` now carries the list
+// (`FrameScopeEvent.bindings`), and the run's `## Config: unmask:` names with
+// it. The corpus that holds this mirror to runner-core's lives in
+// `record-secret-parity.test.js`; these are the panel's own edges.
+
+test("maskIfSecretInline: a dotted name nobody bound takes the flat author rule", () => {
+  assert.equal(maskIfSecretInline("user.apikey", "uk_live_1234", { bindings: [] }), "*".repeat(8));
+  assert.equal(maskIfSecretInline("payment.keyword", "search", { bindings: [] }), "******");
+});
+
+test("maskIfSecretInline: a dotted name a pass bound keeps the two-segment rule", () => {
+  const bindings = ["payment.keyword", "payment.password"];
+  assert.equal(maskIfSecretInline("payment.keyword", "AU", { bindings }), "AU");
+  assert.equal(maskIfSecretInline("payment.password", "hunter2", { bindings }), "*".repeat(7));
+  // The other name in the same map is still decided on its own terms.
+  assert.equal(maskIfSecretInline("user.apikey", "uk_live_1234", { bindings }), "*".repeat(8));
+});
+
+test("maskIfSecretInline: no opts at all is exactly what it was", () => {
+  // An older server sends neither field, and the panel's default `{}` has to
+  // be indistinguishable from the two-argument call it replaced.
+  assert.equal(maskIfSecretInline("user.apikey", "uk_live_1234"), "uk_live_1234");
+  assert.equal(maskIfSecretInline("user.apikey", "uk_live_1234", {}), "uk_live_1234");
+  assert.equal(maskIfSecretInline("payment.keyword", "search", {}), "search");
+});
+
+test("maskIfSecretInline: an unmasked name is shown, empty-value guard included", () => {
+  assert.equal(maskIfSecretInline("keyword", "search", { unmask: ["keyword"] }), "search");
+  // The hatch is read BEFORE the falsy guard, so an unmasked empty value is
+  // the empty string rather than the panel's `(empty)` marker — the author
+  // said this name is not a secret, and `(empty)` is a mask word.
+  assert.equal(maskIfSecretInline("keyword", "", { unmask: ["keyword"] }), "");
+  assert.equal(maskIfSecretInline("keyword", "", {}), "(empty)");
+});
+
+test("maskIfSecretInline: a non-string value survives both new paths", () => {
+  // The panel renders whatever React state holds, and `String(value)` on every
+  // path is what has always kept a number or an undefined from throwing here.
+  assert.equal(maskIfSecretInline("keyword", 42, { unmask: ["keyword"] }), "42");
+  assert.equal(maskIfSecretInline("user.apikey", 1234567890, { bindings: [] }), "*".repeat(8));
+});
+
+// ---------------------------------------------------------------------------
+// maskRecordSecretsInline
+// ---------------------------------------------------------------------------
+//
+// A `readTable` capture is a whole table under ONE ordinary name
+// (`payments`), and one pass's record under another (`payment`), so no name
+// rule can catch either. `frame:scope` carries raw values by design, so this
+// render is the only guard — and the panel showed both in full beside a
+// `payment.password` row rendered `********`, which reads as "masked".
+
+test("maskRecordSecretsInline: a list of records loses its secret columns", () => {
+  const capture = JSON.stringify([
+    { _row: "1", payee: "Origin Energy", password: "hunter2-not-real" },
+    { _row: "2", payee: "Alinta", password: "swordfish" },
+  ]);
+  const masked = maskRecordSecretsInline(capture);
+  assert.ok(!masked.includes("hunter2-not-real"), masked);
+  assert.ok(!masked.includes("swordfish"), masked);
+  assert.deepEqual(JSON.parse(masked), [
+    { _row: "1", payee: "Origin Energy", password: "*".repeat(8) },
+    { _row: "2", payee: "Alinta", password: "*".repeat(8) },
+  ]);
+});
+
+test("maskRecordSecretsInline: one record, and the readable columns survive", () => {
+  const masked = maskRecordSecretsInline(JSON.stringify({ payee: "Alinta", api_key: "pk-live-1" }));
+  assert.deepEqual(JSON.parse(masked), { payee: "Alinta", api_key: "*".repeat(8) });
+});
+
+// A number or a boolean under a `password` key is still a credential: the
+// panel rendered `{"password":123}` in the clear while starring
+// `{"password":"123"}`.
+test("maskRecordSecretsInline: a non-string cell under a secret key masks too", () => {
+  assert.deepEqual(JSON.parse(maskRecordSecretsInline(JSON.stringify({ password: 123 }))), {
+    password: "***",
+  });
+  assert.deepEqual(JSON.parse(maskRecordSecretsInline(JSON.stringify([{ password: true }]))), [
+    { password: "****" },
+  ]);
+  assert.deepEqual(JSON.parse(maskRecordSecretsInline(JSON.stringify([{ api_key: 4321 }]))), [
+    { api_key: "****" },
+  ]);
+});
+
+// …and the limit: a null says there is no value, and a nested object would
+// have to be walked, which neither mirror does.
+test("maskRecordSecretsInline: null and nested objects are left alone", () => {
+  for (const value of [
+    JSON.stringify([{ password: null }]),
+    JSON.stringify([{ password: { pin: "1234" } }]),
+    JSON.stringify([{ password: ["a", "b"] }]),
+  ]) {
+    assert.equal(maskRecordSecretsInline(value), value, value);
+  }
+});
+
+test("maskRecordSecretsInline: anything that is not a record list is untouched", () => {
+  for (const value of ["Origin Energy", "", "[not json", "{oops}", '[ "a", "b" ]', "42"]) {
+    assert.equal(maskRecordSecretsInline(value), value, JSON.stringify(value));
+  }
+  const spaced = '[\n  { "payee": "Alinta" }\n]';
+  assert.equal(maskRecordSecretsInline(spaced), spaced, "a value nothing was masked in is not reformatted");
+});
+
+test("maskIfSecretInline: a capture under a plain name is masked INSIDE", () => {
+  const capture = JSON.stringify([{ payee: "Alinta", password: "hunter2-not-real" }]);
+  const shown = maskIfSecretInline("payments", capture);
+  assert.ok(!shown.includes("hunter2-not-real"), shown);
+  assert.ok(shown.includes("Alinta"), "the readable columns survive");
+  const record = JSON.stringify({ payee: "Alinta", password: "hunter2-not-real" });
+  assert.ok(!maskIfSecretInline("payment", record).includes("hunter2-not-real"));
+});
+
+test("maskIfSecretInline: a secret-named capture is still masked whole", () => {
+  const capture = JSON.stringify([{ payee: "Alinta", password: "hunter2" }]);
+  assert.equal(maskIfSecretInline("tokens", capture), "*".repeat(8));
+});
+
+// The skill-rerun scope editor decides read-only from exactly this: a value we
+// have to mask cannot be an editable input, because the mask is what the edit
+// would send back (testbench-runner.jsx, `display !== value`).
+test("maskIfSecretInline: a masked row is one whose render differs from its value", () => {
+  const capture = JSON.stringify([{ payee: "Alinta", password: "hunter2-not-real" }]);
+  assert.notEqual(maskIfSecretInline("payments", capture), capture, "must be read-only");
+  assert.notEqual(maskIfSecretInline("MACHINE_KEY", "abc"), "abc", "must be read-only");
+  assert.equal(maskIfSecretInline("payee", "Alinta"), "Alinta", "stays editable");
+});
+
+// ---------------------------------------------------------------------------
+// The whole dotted name, read as one credential key
+// ---------------------------------------------------------------------------
+//
+// The third clause of the server's `isSecretParameterName`, which both client
+// mirrors were missing: `api.key` is one word split by a dot, and neither half
+// says secret. Measured before the fix: the panel rendered `uk_live_1234`
+// while the report beside it said `***`.
+test("maskIfSecretInline: a dotted name that reads as one credential key masks", () => {
+  for (const name of ["api.key", "private.key", "service.access.key", "auth.keys"]) {
+    assert.equal(maskIfSecretInline(name, "uk_live_1234"), "*".repeat(8), name);
+  }
+});
+
+test("maskIfSecretInline: …and the RECORD rule reads it, so it stays whole-word", () => {
+  for (const name of ["row.keyword", "payment.sort_key", "order.monkey"]) {
+    assert.equal(maskIfSecretInline(name, "search"), "search", name);
+  }
+});
+
+test("maskRecordSecretsInline: a leading BOM does not smuggle a record past the sniff", () => {
+  // U+FEFF is whitespace to JS, so `/^\s*[[{]/` said yes and `JSON.parse` then
+  // threw — and the catch returns the value untouched, which is the one
+  // outcome this function exists to prevent.
+  assert.equal(maskRecordSecretsInline('\uFEFF[{"password":"hunter2"}]'), '[{"password":"*******"}]');
+  assert.equal(maskRecordSecretsInline("\uFEFFOrigin Energy"), "\uFEFFOrigin Energy");
+  assert.equal(maskRecordSecretsInline("\uFEFF[not json"), "\uFEFF[not json");
+  const readable = '\uFEFF[{"payee":"Alinta"}]';
+  assert.equal(maskRecordSecretsInline(readable), readable);
+});
+
+// ---------------------------------------------------------------------------
+// maskIfSecretAuthoredInline — the author rule on the WHOLE key
+// ---------------------------------------------------------------------------
+//
+// The panel's copy of runner-core's `maskIfSecretAuthored`, which mirrors the
+// server's `redactAuthoredMap`. The capture banner (`✎ name ← value`) is the
+// one surface here whose names are author-chosen end to end, and the
+// two-segment rule answered no about `user.apikey` — so the banner printed
+// `uk_live_1234` beside a report that said `***`.
+test("maskIfSecretAuthoredInline: the whole dotted key takes the flat author rule", () => {
+  for (const name of ["user.apikey", "user.apitoken", "row.mypassword", "login.passkey", "api.key"]) {
+    assert.equal(maskIfSecretAuthoredInline(name, "uk_live_1234"), "*".repeat(8), name);
+  }
+  // The difference from the scope rule, stated: these four are exactly what
+  // made the banner and the report disagree. (`api.key` is not among them —
+  // the whole-name clause catches it under either rule.)
+  for (const name of ["user.apikey", "user.apitoken", "row.mypassword", "login.passkey"]) {
+    assert.equal(maskIfSecretInline(name, "uk_live_1234"), "uk_live_1234", `${name} as a scope entry`);
+  }
+});
+
+test("maskIfSecretAuthoredInline: a flat name answers exactly as maskIfSecretInline does", () => {
+  for (const [name, value] of [
+    ["password", "hunter2"],
+    ["MACHINE_KEY", "abc"],
+    ["keyword", "search"],
+    ["username", "alice"],
+    ["payee", "Origin Energy"],
+    ["password", ""],
+  ]) {
+    assert.equal(maskIfSecretAuthoredInline(name, value), maskIfSecretInline(name, value), name);
+  }
+});
+
+test("maskIfSecretAuthoredInline: a value whose NAME says nothing is still scanned", () => {
+  const capture = JSON.stringify([{ payee: "Alinta", password: "hunter2-not-real" }]);
+  const shown = maskIfSecretAuthoredInline("payments", capture);
+  assert.ok(!shown.includes("hunter2-not-real"), shown);
+  assert.ok(shown.includes("Alinta"), shown);
 });

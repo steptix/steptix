@@ -1,0 +1,1178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Table structures</title>
+  <!--
+    Fixture page for docs/specs/SPEC-structured-table-reads.md.
+
+    A gallery of awkward table shapes, one .section-card each, every card
+    captioned with what a structured table read (readTable) does with it:
+
+      reads normally  the read succeeds and the caption says why the shape
+                      does not get in the way (§7.3, §7.4, §10)
+      skips           the row is not data: placeholders, group headings and
+                      hidden rows are excluded and take no _row (§4.8, §7.4)
+      rejected        the read fails with a diagnostic rather than guessing a
+                      logical grid or an ambiguous column (§5.3, §5.4, §7.3)
+      phase 2         control state and number/date normalisation (§1.3, §7.4,
+                      §7.7)
+      deferred        out of every phase — a role="grid" div is not a native
+                      <table> (§3, §14)
+
+    Every table has a stable id and an aria-label so a test can name it. Two
+    tables move on their own: #t-loading swaps its "Loading…" placeholder for
+    three real rows two seconds after load, and the Preview narrow button
+    restyles #t-responsive as stacked cards.
+
+    Same shell as control-flow.html: no login redirect and no cookie banner —
+    the banner is fixed to the bottom of the viewport and would sit on top of
+    the last cards in the gallery.
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar (same shell as dashboard.html / transactions.html / control-flow.html) */
+    .sidebar {
+      width: 240px;
+      background: #1f2937;
+      color: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      min-height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      margin-bottom: 32px;
+    }
+
+    .sidebar-logo-icon {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .sidebar-logo-name {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    nav { flex: 1; }
+
+    nav ul { list-style: none; padding: 0; }
+
+    nav ul li a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 24px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav ul li a:hover { background: #374151; color: #f9fafb; }
+
+    nav ul li a.active {
+      background: #374151;
+      color: #f9fafb;
+      border-left-color: #1a56db;
+    }
+
+    nav ul li a .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+    .sidebar-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #374151;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .user-name { font-size: 13px; font-weight: 500; color: #f9fafb; }
+    .user-email { font-size: 12px; color: #6b7280; }
+
+    .logout-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover { background: #374151; color: #f9fafb; }
+
+    /* Main content */
+    .main-content {
+      margin-left: 240px;
+      flex: 1;
+      padding: 32px;
+      max-width: 1100px;
+    }
+
+    .page-header { margin-bottom: 28px; }
+
+    .page-header h1 {
+      font-size: 26px;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .page-header p {
+      font-size: 14px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+
+    .section-card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .section-title, .section-card h2 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .section-hint {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 16px;
+    }
+
+    .section-hint strong { color: #111827; }
+
+    .section-hint code, code.inline {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      background: #f3f4f6;
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: #374151;
+    }
+
+    .btn {
+      padding: 9px 16px;
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn:hover { background: #1648c0; }
+
+    .btn:disabled {
+      background: #9ca3af;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: #1a56db;
+      border: 1px solid #1a56db;
+    }
+
+    .btn-secondary:hover { background: #eff4ff; }
+
+    /* Contents: sticky at the top of the main column */
+    .contents {
+      background: #fff;
+      border-radius: 12px;
+      padding: 16px 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      flex: none;
+    }
+
+    .contents h2 {
+      font-size: 13px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 10px;
+    }
+
+    .contents ol {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 14px;
+      counter-reset: toc;
+    }
+
+    .contents li { counter-increment: toc; font-size: 13px; }
+
+    .contents li a { color: #1a56db; text-decoration: none; }
+    .contents li a::before { content: counter(toc) ". "; color: #9ca3af; }
+    .contents li a:hover { text-decoration: underline; }
+
+    /* Tables (same look as documents.html) */
+    .table-wrap { overflow-x: auto; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    thead th {
+      text-align: left;
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 8px 12px;
+      border-bottom: 1px solid #e5e7eb;
+      white-space: nowrap;
+    }
+
+    tbody td, tbody th {
+      padding: 12px;
+      border-bottom: 1px solid #f3f4f6;
+      color: #111827;
+      vertical-align: middle;
+      text-align: left;
+      font-weight: 400;
+    }
+
+    tbody th[scope="row"] { font-weight: 600; }
+
+    tbody tr:last-child td, tbody tr:last-child th { border-bottom: none; }
+
+    tfoot th, tfoot td {
+      padding: 12px;
+      border-top: 2px solid #e5e7eb;
+      color: #111827;
+      font-weight: 700;
+      text-align: left;
+      font-size: 14px;
+    }
+
+    .amount { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .muted { color: #6b7280; }
+    .empty-row td { color: #9ca3af; text-align: center; padding: 24px; }
+
+    /* Group heading rows inside a <tbody> */
+    tbody tr.group th {
+      background: #f9fafb;
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 8px 12px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+
+    /* Badges */
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      background: #f3f4f6;
+      color: #374151;
+    }
+
+    .badge-open, .badge-active, .badge-scheduled { background: #ecfdf5; color: #047857; }
+    .badge-paused, .badge-pending { background: #fffbeb; color: #b45309; }
+    .badge-closed, .badge-overdue { background: #fef2f2; color: #b91c1c; }
+
+    /* Hidden row / hidden column (card 11) */
+    .row-hidden { display: none; }
+    .col-hidden { display: none; }
+
+    /* Icon-only cells (card 12): the glyph is generated content, so the cell
+       has no text node at all and a text read of it is "". */
+    .icon-yes::before { content: "\2713"; color: #047857; font-weight: 700; }
+    .icon-no::before { content: "\2717"; color: #b91c1c; font-weight: 700; }
+    .icon-yes, .icon-no { font-size: 15px; }
+
+    input[type="checkbox"] { width: 16px; height: 16px; accent-color: #1a56db; }
+
+    /* A div grid dressed up as a table (card 14) */
+    .grid { width: 100%; font-size: 14px; }
+
+    .grid [role="row"] {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr 1fr 1fr;
+      align-items: center;
+    }
+
+    .grid [role="columnheader"] {
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 8px 12px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+
+    .grid [role="gridcell"] {
+      padding: 12px;
+      border-bottom: 1px solid #f3f4f6;
+      color: #111827;
+    }
+
+    .grid [role="row"]:last-child [role="gridcell"] { border-bottom: none; }
+
+    /* Responsive table (card 15): stacked cards at a narrow viewport, and the
+       same rules behind .narrow so the Preview narrow button shows them
+       without resizing the window. */
+    @media (max-width: 640px) {
+      #t-responsive thead { display: none; }
+
+      #t-responsive tbody tr {
+        display: block;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        margin-bottom: 12px;
+        padding: 4px 0;
+      }
+
+      #t-responsive tbody td { display: block; border-bottom: none; padding: 6px 12px; }
+
+      #t-responsive tbody td::before {
+        content: attr(data-label) ": ";
+        display: inline-block;
+        min-width: 104px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #6b7280;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+    }
+
+    #c-responsive.narrow .table-wrap { max-width: 400px; }
+
+    #c-responsive.narrow #t-responsive thead { display: none; }
+
+    #c-responsive.narrow #t-responsive tbody tr {
+      display: block;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      margin-bottom: 12px;
+      padding: 4px 0;
+    }
+
+    #c-responsive.narrow #t-responsive tbody td { display: block; border-bottom: none; padding: 6px 12px; }
+
+    #c-responsive.narrow #t-responsive tbody td::before {
+      content: attr(data-label) ": ";
+      display: inline-block;
+      min-width: 104px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    /* Nested table inside a cell (card 4) */
+    table.inner {
+      width: auto;
+      font-size: 13px;
+      background: #f9fafb;
+      border-radius: 6px;
+    }
+
+    table.inner td {
+      padding: 4px 10px;
+      border-bottom: 1px solid #eef2f7;
+      color: #6b7280;
+    }
+
+    table.inner tr:last-child td { border-bottom: none; }
+
+    /* Embedded statement (card 16) */
+    iframe.statement {
+      width: 100%;
+      height: 220px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+  <!-- Sidebar navigation -->
+  <aside class="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">S</div>
+      <span class="sidebar-logo-name">SecureBank</span>
+    </div>
+
+    <nav>
+      <ul>
+        <li>
+          <a href="dashboard.html">
+            <span class="nav-icon">🏠</span>
+            Dashboard
+          </a>
+        </li>
+        <li>
+          <a href="transactions.html">
+            <span class="nav-icon">💳</span>
+            Transactions
+          </a>
+        </li>
+        <li>
+          <a href="documents.html">
+            <span class="nav-icon">📄</span>
+            Documents
+          </a>
+        </li>
+        <li>
+          <a href="control-flow.html">
+            <span class="nav-icon">💸</span>
+            Payments
+          </a>
+        </li>
+        <li>
+          <a href="tables.html" class="active" aria-current="page">
+            <span class="nav-icon">📋</span>
+            Tables
+          </a>
+        </li>
+        <li>
+          <a href="#settings">
+            <span class="nav-icon">⚙️</span>
+            Settings
+          </a>
+        </li>
+        <li>
+          <a href="#profile">
+            <span class="nav-icon">👤</span>
+            Profile
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <div>
+          <div class="user-name">Demo User</div>
+          <div class="user-email" id="user-email">demo@securebank.com</div>
+        </div>
+      </div>
+      <button class="logout-btn" id="logout-btn" type="button">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <div class="page-header">
+      <h1>Table structures</h1>
+      <p>A gallery of the table shapes a bank's pages actually use — merged headings, grouped rows, totals, placeholders, icons and a grid that is not a table — each labelled with what a structured table read does with it.</p>
+    </div>
+
+    <nav class="contents" id="contents" aria-label="Contents">
+      <h2>Contents</h2>
+      <ol>
+        <li><a href="#c-merged-header">Merged header</a></li>
+        <li><a href="#c-rowspan">Body rowspan</a></li>
+        <li><a href="#c-duplicate-headers">Duplicate header text</a></li>
+        <li><a href="#c-nested">Nested table in a cell</a></li>
+        <li><a href="#c-grouped">Grouped rows</a></li>
+        <li><a href="#c-tfoot">Footer totals</a></li>
+        <li><a href="#c-row-headers">Row headers</a></li>
+        <li><a href="#c-th-in-tbody">Header in the first body row</a></li>
+        <li><a href="#c-no-header">No header at all</a></li>
+        <li><a href="#c-placeholder">Placeholder and loading rows</a></li>
+        <li><a href="#c-hidden">Hidden rows and columns</a></li>
+        <li><a href="#c-icons">Icon-only cells and controls</a></li>
+        <li><a href="#c-numbers">Bank number formats</a></li>
+        <li><a href="#c-div-grid">A grid that is not a table</a></li>
+        <li><a href="#c-responsive">Responsive table</a></li>
+        <li><a href="#c-iframe">Table inside an iframe</a></li>
+      </ol>
+    </nav>
+
+    <!-- 1 ── Merged header ─────────────────────────────────────────────────── -->
+    <section class="section-card" id="c-merged-header" aria-labelledby="h-merged-header">
+      <div class="section-header">
+        <h2 id="h-merged-header">Merged header</h2>
+      </div>
+      <p class="section-hint">Two header rows: <code>Order</code> spans two columns and <code>Status</code> spans two rows. The read is <strong>rejected</strong> — merged headers or cells are not supported, so it fails with a message instead of guessing which heading owns which column.</p>
+
+      <div class="table-wrap">
+        <table id="t-merged-header" aria-label="Orders with a merged header">
+          <thead>
+            <tr>
+              <th colspan="2">Order</th>
+              <th rowspan="2">Status</th>
+            </tr>
+            <tr>
+              <th>ID</th>
+              <th>Customer</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>ORD-1001</td><td>Alice Smith</td><td><span class="badge badge-open">Completed</span></td></tr>
+            <tr><td>ORD-1002</td><td>Bob Jones</td><td><span class="badge badge-pending">Pending</span></td></tr>
+            <tr><td>ORD-1003</td><td>Chen Wei</td><td><span class="badge badge-open">Completed</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 2 ── Body rowspan ──────────────────────────────────────────────────── -->
+    <section class="section-card" id="c-rowspan" aria-labelledby="h-rowspan">
+      <div class="section-header">
+        <h2 id="h-rowspan">Body rowspan</h2>
+      </div>
+      <p class="section-hint">The Region cell spans two rows, so the second row is one cell short and its values sit under the wrong headings. The read is <strong>rejected</strong> for the same reason as a merged header: a guessed grid would be plausible and wrong.</p>
+
+      <div class="table-wrap">
+        <table id="t-rowspan" aria-label="Accounts by region">
+          <thead>
+            <tr>
+              <th scope="col">Region</th>
+              <th scope="col">Account</th>
+              <th scope="col">Number</th>
+              <th scope="col">Balance</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td rowspan="2">New South Wales</td>
+              <td>Everyday</td>
+              <td class="muted">•••• 4417</td>
+              <td class="amount">$1,234.56</td>
+            </tr>
+            <tr>
+              <td>Savings</td>
+              <td class="muted">•••• 9082</td>
+              <td class="amount">$8,410.00</td>
+            </tr>
+            <tr>
+              <td>Victoria</td>
+              <td>Travel</td>
+              <td class="muted">•••• 3355</td>
+              <td class="amount">$372.19</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 3 ── Duplicate header text ─────────────────────────────────────────── -->
+    <section class="section-card" id="c-duplicate-headers" aria-labelledby="h-duplicate-headers">
+      <div class="section-header">
+        <h2 id="h-duplicate-headers">Duplicate header text</h2>
+      </div>
+      <p class="section-hint">Two columns are headed <code>Status</code> — one for the card, one for the account. A read that names that header is <strong>rejected</strong> as ambiguous and lists the matching columns; the author names the one they meant by position instead, as <code>the 4th column as account_status</code>.</p>
+
+      <div class="table-wrap">
+        <table id="t-duplicate-headers" aria-label="Cards and accounts">
+          <thead>
+            <tr>
+              <th scope="col">Card</th>
+              <th scope="col">Status</th>
+              <th scope="col">Account</th>
+              <th scope="col">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>Visa •••• 4417</td><td><span class="badge badge-active">Active</span></td><td>Everyday</td><td><span class="badge badge-open">Open</span></td></tr>
+            <tr><td>Visa •••• 9082</td><td><span class="badge badge-paused">Blocked</span></td><td>Savings</td><td><span class="badge badge-open">Open</span></td></tr>
+            <tr><td>Amex •••• 3355</td><td><span class="badge badge-active">Active</span></td><td>Travel</td><td><span class="badge badge-closed">Closed</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 4 ── Nested table in a cell ────────────────────────────────────────── -->
+    <section class="section-card" id="c-nested" aria-labelledby="h-nested">
+      <div class="section-header">
+        <h2 id="h-nested">Nested table in a cell</h2>
+      </div>
+      <p class="section-hint">The Everyday plan lists its fees in a table of its own, inside the last cell. The outer table <strong>reads normally</strong> — the inner table's rows and cells belong to the inner table, so they are part of neither the header scan nor the three data rows; the cell itself reads as its rendered text.</p>
+
+      <div class="table-wrap">
+        <table id="t-nested" aria-label="Account plans">
+          <thead>
+            <tr>
+              <th scope="col">Plan</th>
+              <th scope="col">Monthly fee</th>
+              <th scope="col">Included fees</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Everyday</td>
+              <td class="amount">$4.00</td>
+              <td>
+                <table class="inner" id="t-nested-inner" aria-label="Everyday plan fees">
+                  <tbody>
+                    <tr><td>Overseas withdrawal</td><td class="amount">$5.00</td></tr>
+                    <tr><td>Paper statement</td><td class="amount">$1.50</td></tr>
+                  </tbody>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td>Savings</td>
+              <td class="amount">$0.00</td>
+              <td class="muted">No fees</td>
+            </tr>
+            <tr>
+              <td>Travel</td>
+              <td class="amount">$9.00</td>
+              <td class="muted">No fees</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 5 ── Grouped rows with multiple tbody elements ─────────────────────── -->
+    <section class="section-card" id="c-grouped" aria-labelledby="h-grouped">
+      <div class="section-header">
+        <h2 id="h-grouped">Grouped rows with multiple <code>&lt;tbody&gt;</code> elements</h2>
+      </div>
+      <p class="section-hint">Two body sections, each opened by a full-width group heading. It <strong>reads normally</strong>: a group row is a single cell spanning the whole table, so the placeholder rule <strong>skips</strong> it, and <code>_row</code> counts the four data rows 1 to 4 across both sections in DOM order.</p>
+
+      <div class="table-wrap">
+        <table id="t-grouped" aria-label="Accounts by group">
+          <thead>
+            <tr>
+              <th scope="col">Account</th>
+              <th scope="col">Number</th>
+              <th scope="col">Balance</th>
+              <th scope="col">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="group"><th colspan="4" scope="rowgroup">Everyday accounts</th></tr>
+            <tr>
+              <td>Everyday</td>
+              <td class="muted">•••• 4417</td>
+              <td class="amount">$1,234.56</td>
+              <td><span class="badge badge-open">Open</span></td>
+            </tr>
+            <tr>
+              <td>Everyday Offset</td>
+              <td class="muted">•••• 7781</td>
+              <td class="amount">$302.00</td>
+              <td><span class="badge badge-open">Open</span></td>
+            </tr>
+          </tbody>
+          <tbody>
+            <tr class="group"><th colspan="4" scope="rowgroup">Savings accounts</th></tr>
+            <tr>
+              <td>Bonus Saver</td>
+              <td class="muted">•••• 9082</td>
+              <td class="amount">$8,410.00</td>
+              <td><span class="badge badge-open">Open</span></td>
+            </tr>
+            <tr>
+              <td>Term Deposit</td>
+              <td class="muted">•••• 5540</td>
+              <td class="amount">$15,000.00</td>
+              <td><span class="badge badge-paused">Locked</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 6 ── Footer totals ─────────────────────────────────────────────────── -->
+    <section class="section-card" id="c-tfoot" aria-labelledby="h-tfoot">
+      <div class="section-header">
+        <h2 id="h-tfoot">Footer totals</h2>
+      </div>
+      <p class="section-hint">The total lives in a <code>&lt;tfoot&gt;</code> row. The table <strong>reads normally</strong> and the footer is excluded, so the three data rows are the three payments and nothing else; read the total as its own step and compare it with the rows.</p>
+
+      <div class="table-wrap">
+        <table id="t-tfoot" aria-label="Payments due">
+          <thead>
+            <tr>
+              <th scope="col">Payee</th>
+              <th scope="col">Due</th>
+              <th scope="col">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>Origin Energy</td><td>3 Oct 2026</td><td class="amount">$140.00</td></tr>
+            <tr><td>Netflix Australia</td><td>1 Oct 2026</td><td class="amount">$22.99</td></tr>
+            <tr><td>City of Sydney Rates</td><td>12 Oct 2026</td><td class="amount">$318.75</td></tr>
+          </tbody>
+          <tfoot>
+            <tr>
+              <th scope="row">Total</th>
+              <td></td>
+              <td class="amount" id="t-tfoot-total">$481.74</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </section>
+
+    <!-- 7 ── Row headers ───────────────────────────────────────────────────── -->
+    <section class="section-card" id="c-row-headers" aria-labelledby="h-row-headers">
+      <div class="section-header">
+        <h2 id="h-row-headers">Row headers</h2>
+      </div>
+      <p class="section-hint">Each row names itself with <code>&lt;th scope="row"&gt;</code> rather than a plain cell. It <strong>reads normally</strong> — a row header counts as that row's first cell, so <code>the 1st column as account</code> and the <code>Account</code> heading both reach it.</p>
+
+      <div class="table-wrap">
+        <table id="t-row-headers" aria-label="Balances by account">
+          <thead>
+            <tr>
+              <th scope="col">Account</th>
+              <th scope="col">Number</th>
+              <th scope="col">Available</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">Everyday</th><td class="muted">•••• 4417</td><td class="amount">$1,234.56</td></tr>
+            <tr><th scope="row">Savings</th><td class="muted">•••• 9082</td><td class="amount">$8,410.00</td></tr>
+            <tr><th scope="row">Travel</th><td class="muted">•••• 3355</td><td class="amount">$372.19</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 8 ── Header in the first body row ──────────────────────────────────── -->
+    <section class="section-card" id="c-th-in-tbody" aria-labelledby="h-th-in-tbody">
+      <div class="section-header">
+        <h2 id="h-th-in-tbody">Header in the first body row, no <code>&lt;thead&gt;</code></h2>
+      </div>
+      <p class="section-hint">There is no <code>&lt;thead&gt;</code>; the first row of the body is made of <code>&lt;th&gt;</code> cells. It <strong>reads normally</strong> — that row is accepted as the header row and excluded from the data, so the three direct debits are rows 1 to 3.</p>
+
+      <div class="table-wrap">
+        <table id="t-th-in-tbody" aria-label="Direct debits">
+          <tbody>
+            <tr>
+              <th scope="col">Date</th>
+              <th scope="col">Description</th>
+              <th scope="col">Amount</th>
+            </tr>
+            <tr><td>1 Oct 2026</td><td>Origin Energy</td><td class="amount">$140.00</td></tr>
+            <tr><td>3 Oct 2026</td><td>Telstra broadband</td><td class="amount">$79.00</td></tr>
+            <tr><td>5 Oct 2026</td><td>Gym membership</td><td class="amount">$21.95</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 9 ── No header at all ──────────────────────────────────────────────── -->
+    <section class="section-card" id="c-no-header" aria-labelledby="h-no-header">
+      <div class="section-header">
+        <h2 id="h-no-header">No header at all</h2>
+      </div>
+      <p class="section-hint">Four columns of plain cells and nothing to name them by. It <strong>reads by position</strong> only — <code>the 2nd column as reference</code> — and a column named by header text is <strong>rejected</strong> with a message saying the table has no header row, so name columns by position.</p>
+
+      <div class="table-wrap">
+        <table id="t-no-header" aria-label="Scheduled payments summary">
+          <tbody>
+            <tr><td>Origin Energy</td><td>INV-2291</td><td class="amount">$140.00</td><td>Scheduled</td></tr>
+            <tr><td>Netflix Australia</td><td></td><td class="amount">$22.99</td><td>Scheduled</td></tr>
+            <tr><td>Origin Energy</td><td></td><td class="amount">$86.10</td><td>Paused</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 10 ── Placeholder and loading rows ─────────────────────────────────── -->
+    <section class="section-card" id="c-placeholder" aria-labelledby="h-placeholder">
+      <div class="section-header">
+        <h2 id="h-placeholder">Placeholder row, and a loading row that goes away</h2>
+      </div>
+      <p class="section-hint">The body of Pending transfers is one cell spanning all four columns. That is a message, not a merged grid: the read <strong>skips</strong> it and stores an empty list <code>[]</code> rather than failing.</p>
+
+      <div class="table-wrap">
+        <table id="t-placeholder" aria-label="Pending transfers">
+          <thead>
+            <tr>
+              <th scope="col">To</th>
+              <th scope="col">Reference</th>
+              <th scope="col">Amount</th>
+              <th scope="col">Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="empty-row" id="t-placeholder-empty"><td colspan="4">No pending transfers.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="section-hint" style="margin-top:20px;">The same shape, but temporary: this table shows a full-width <code>Loading…</code> row and replaces it with three real rows two seconds after the page loads. A read that lands on it truthfully stores <code>[]</code>, so <strong>skips</strong> is the right answer and waiting is the author's job — wait until the table has finished loading, then read it.</p>
+
+      <div class="table-wrap">
+        <table id="t-loading" aria-label="Recent transfers">
+          <thead>
+            <tr>
+              <th scope="col">To</th>
+              <th scope="col">Reference</th>
+              <th scope="col">Amount</th>
+              <th scope="col">Date</th>
+            </tr>
+          </thead>
+          <tbody id="t-loading-body">
+            <tr class="empty-row" id="t-loading-row"><td colspan="4">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 11 ── Hidden rows and hidden columns ───────────────────────────────── -->
+    <section class="section-card" id="c-hidden" aria-labelledby="h-hidden">
+      <div class="section-header">
+        <h2 id="h-hidden">Hidden rows and hidden columns</h2>
+      </div>
+      <p class="section-hint">One row and one whole column are <code>display: none</code>. The read <strong>skips</strong> the hidden row — it is not data on this page, and it takes no <code>_row</code> number, so the three visible payments are rows 1 to 3 — while the hidden Reference column keeps its place in every row and reads as an empty string.</p>
+
+      <div class="table-wrap">
+        <table id="t-hidden" aria-label="Filtered payments">
+          <thead>
+            <tr>
+              <th scope="col">Payee</th>
+              <th scope="col" class="col-hidden">Reference</th>
+              <th scope="col">Amount</th>
+              <th scope="col">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Origin Energy</td>
+              <td class="col-hidden">INV-2291</td>
+              <td class="amount">$140.00</td>
+              <td><span class="badge badge-scheduled">Scheduled</span></td>
+            </tr>
+            <tr class="row-hidden" id="t-hidden-filtered">
+              <td>Spotify AU</td>
+              <td class="col-hidden">INV-7740</td>
+              <td class="amount">$13.99</td>
+              <td><span class="badge badge-paused">Paused</span></td>
+            </tr>
+            <tr>
+              <td>Netflix Australia</td>
+              <td class="col-hidden">INV-3310</td>
+              <td class="amount">$22.99</td>
+              <td><span class="badge badge-scheduled">Scheduled</span></td>
+            </tr>
+            <tr>
+              <td>City of Sydney Rates</td>
+              <td class="col-hidden">INV-9921</td>
+              <td class="amount">$318.75</td>
+              <td><span class="badge badge-overdue">Overdue</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 12 ── Icon-only cells and controls ─────────────────────────────────── -->
+    <section class="section-card" id="c-icons" aria-labelledby="h-icons">
+      <div class="section-header">
+        <h2 id="h-icons">Icon-only cells and controls</h2>
+      </div>
+      <p class="section-hint">Status is a ✓ or ✗ drawn by CSS, so the cell holds no text at all, and Auto-pay is a checkbox. Both read as an empty string today; reading the tick state is <strong>phase 2</strong>, through an explicit per-column mode — <code>the Auto-pay checkbox as autopay</code> reading <code>"true"</code> or <code>"false"</code> — which phase 1 refuses by name rather than quietly storing <code>""</code>.</p>
+
+      <div class="table-wrap">
+        <table id="t-icons" aria-label="Cards and auto-pay">
+          <thead>
+            <tr>
+              <th scope="col">Card</th>
+              <th scope="col">Number</th>
+              <th scope="col">Status</th>
+              <th scope="col">Auto-pay</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Everyday Visa</td>
+              <td class="muted">•••• 4417</td>
+              <td><span class="icon-yes" role="img" aria-label="Active"></span></td>
+              <td><input type="checkbox" checked aria-label="Auto-pay for Everyday Visa"></td>
+            </tr>
+            <tr>
+              <td>Savings Visa</td>
+              <td class="muted">•••• 9082</td>
+              <td><span class="icon-no" role="img" aria-label="Blocked"></span></td>
+              <td><input type="checkbox" aria-label="Auto-pay for Savings Visa"></td>
+            </tr>
+            <tr>
+              <td>Travel Amex</td>
+              <td class="muted">•••• 3355</td>
+              <td><span class="icon-yes" role="img" aria-label="Active"></span></td>
+              <td><input type="checkbox" checked aria-label="Auto-pay for Travel Amex"></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 13 ── Numbers as a bank writes them ────────────────────────────────── -->
+    <section class="section-card" id="c-numbers" aria-labelledby="h-numbers">
+      <div class="section-header">
+        <h2 id="h-numbers">Numbers as a bank writes them</h2>
+      </div>
+      <p class="section-hint">Thousands separators, a leading plus, brackets for a negative, and a debit written with the Unicode minus U+2212 (−), which is a different character from the ASCII hyphen and which <code>Number()</code> rejects. The column <strong>reads normally</strong> as the exact text on the page; the whole-table checks that add a column up or prove it is sorted normalise these forms in <strong>phase 2</strong>.</p>
+
+      <div class="table-wrap">
+        <table id="t-numbers" aria-label="Account movements">
+          <thead>
+            <tr>
+              <th scope="col">Date</th>
+              <th scope="col">Description</th>
+              <th scope="col">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>2 Oct 2026</td><td>Salary — Acme Pty Ltd</td><td class="amount">+$2,800.00</td></tr>
+            <tr><td>3 Oct 2026</td><td>Transfer to Savings</td><td class="amount">$1,234.56</td></tr>
+            <tr><td>4 Oct 2026</td><td>Woolworths Supermarkets</td><td class="amount">−$87.40</td></tr>
+            <tr><td>5 Oct 2026</td><td>Overdrawn fee adjustment</td><td class="amount">($45.00)</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 14 ── A grid that is not a table ───────────────────────────────────── -->
+    <section class="section-card" id="c-div-grid" aria-labelledby="h-div-grid">
+      <div class="section-header">
+        <h2 id="h-div-grid">A grid that is not a table</h2>
+      </div>
+      <p class="section-hint">Same headings, same alignment, same borders — and not one <code>&lt;table&gt;</code> element in it. This is a <code>&lt;div role="grid"&gt;</code> with ARIA rows and cells, the shape ag-grid and MUI DataGrid produce. The read is <strong>deferred</strong>: it refuses anything that is not a native table rather than matching on the roles.</p>
+
+      <div class="grid" id="t-div-grid" role="grid" aria-label="Cards">
+        <div role="row">
+          <span role="columnheader">Card</span>
+          <span role="columnheader">Number</span>
+          <span role="columnheader">Limit</span>
+          <span role="columnheader">Status</span>
+        </div>
+        <div role="row">
+          <span role="gridcell">Everyday Visa</span>
+          <span role="gridcell" class="muted">•••• 4417</span>
+          <span role="gridcell" class="amount">$3,000.00</span>
+          <span role="gridcell"><span class="badge badge-active">Active</span></span>
+        </div>
+        <div role="row">
+          <span role="gridcell">Savings Visa</span>
+          <span role="gridcell" class="muted">•••• 9082</span>
+          <span role="gridcell" class="amount">$1,500.00</span>
+          <span role="gridcell"><span class="badge badge-paused">Blocked</span></span>
+        </div>
+        <div role="row">
+          <span role="gridcell">Travel Amex</span>
+          <span role="gridcell" class="muted">•••• 3355</span>
+          <span role="gridcell" class="amount">$10,000.00</span>
+          <span role="gridcell"><span class="badge badge-active">Active</span></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 15 ── Responsive table ─────────────────────────────────────────────── -->
+    <section class="section-card" id="c-responsive" aria-labelledby="h-responsive">
+      <div class="section-header">
+        <h2 id="h-responsive">Responsive table</h2>
+        <button type="button" class="btn btn-secondary" id="t-responsive-toggle" aria-pressed="false">Preview narrow</button>
+      </div>
+      <p class="section-hint">Under 640px this table stops looking like a table: the headings are hidden and every row becomes a stacked card whose labels come from each cell's <code>data-label</code>. It still <strong>reads normally</strong> at any width, because the rows are still <code>&lt;tr&gt;</code> elements and only the CSS changed. Preview narrow squeezes this card to 400px so you can see the card layout without resizing the window.</p>
+
+      <div class="table-wrap">
+        <table id="t-responsive" aria-label="Recent card transactions">
+          <thead>
+            <tr>
+              <th scope="col">Date</th>
+              <th scope="col">Description</th>
+              <th scope="col">Reference</th>
+              <th scope="col">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td data-label="Date">2 Oct 2026</td>
+              <td data-label="Description">Woolworths Supermarkets</td>
+              <td data-label="Reference">TXN-88120</td>
+              <td data-label="Amount" class="amount">$87.40</td>
+            </tr>
+            <tr>
+              <td data-label="Date">3 Oct 2026</td>
+              <td data-label="Description">Transport for NSW</td>
+              <td data-label="Reference">TXN-88164</td>
+              <td data-label="Amount" class="amount">$12.60</td>
+            </tr>
+            <tr>
+              <td data-label="Date">4 Oct 2026</td>
+              <td data-label="Description">Qantas Airways</td>
+              <td data-label="Reference">TXN-88190</td>
+              <td data-label="Amount" class="amount">$421.00</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 16 ── Table inside an iframe ───────────────────────────────────────── -->
+    <section class="section-card" id="c-iframe" aria-labelledby="h-iframe">
+      <div class="section-header">
+        <h2 id="h-iframe">Table inside an iframe</h2>
+      </div>
+      <p class="section-hint">The statement below is a separate document embedded in this page, so the table is not in the main frame's DOM. It <strong>reads normally</strong> through the existing <code>frame</code> field: name the embedded statement frame, then the table inside it.</p>
+
+      <iframe
+        class="statement"
+        id="t-iframe"
+        title="Statement (embedded)"
+        srcdoc="
+          <!DOCTYPE html>
+          <html lang='en'>
+          <head>
+            <meta charset='UTF-8'>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 12px; color: #111827; }
+              h1 { font-size: 14px; margin: 0 0 10px; }
+              table { width: 100%; border-collapse: collapse; font-size: 13px; }
+              th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; padding: 6px 8px; border-bottom: 1px solid #e5e7eb; }
+              td { padding: 8px; border-bottom: 1px solid #f3f4f6; }
+              td.amount { text-align: left; font-variant-numeric: tabular-nums; }
+            </style>
+          </head>
+          <body>
+            <h1>Statement 011 — June 2026</h1>
+            <table id='t-iframe-statement' aria-label='Statement lines'>
+              <thead>
+                <tr><th scope='col'>Date</th><th scope='col'>Description</th><th scope='col'>Amount</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>2 Jun 2026</td><td>Opening balance</td><td class='amount'>$1,402.10</td></tr>
+                <tr><td>9 Jun 2026</td><td>Origin Energy</td><td class='amount'>&#8722;$140.00</td></tr>
+                <tr><td>21 Jun 2026</td><td>Salary — Acme Pty Ltd</td><td class='amount'>+$2,800.00</td></tr>
+              </tbody>
+            </table>
+          </body>
+          </html>
+        "></iframe>
+    </section>
+
+  </main>
+
+  <script>
+    // ── Shell: user info and sign out (same as the other pages) ──────────────
+    const email = sessionStorage.getItem('user-email');
+    if (email) {
+      document.getElementById('user-email').textContent = email;
+      document.getElementById('user-avatar').textContent = email.charAt(0).toUpperCase();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.removeItem('logged-in');
+      sessionStorage.removeItem('user-email');
+      window.location.href = 'index.html';
+    });
+
+    // ── Card 10: the loading row is replaced by real rows after 2 seconds ────
+    // A read that runs before this fires stores [] truthfully, which is the
+    // point: the author waits for the table, then reads it.
+    const LOADED_TRANSFERS = [
+      { to: 'Jane Doe', reference: 'TRF-4410', amount: '$250.00', date: '1 Oct 2026' },
+      { to: 'Origin Energy', reference: 'TRF-4411', amount: '$140.00', date: '2 Oct 2026' },
+      { to: 'City of Sydney Rates', reference: 'TRF-4412', amount: '$318.75', date: '3 Oct 2026' },
+    ];
+
+    setTimeout(function () {
+      const body = document.getElementById('t-loading-body');
+      body.innerHTML = '';
+      for (const t of LOADED_TRANSFERS) {
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td>' + t.to + '</td>' +
+          '<td>' + t.reference + '</td>' +
+          '<td class="amount">' + t.amount + '</td>' +
+          '<td>' + t.date + '</td>';
+        body.appendChild(tr);
+      }
+    }, 2000);
+
+    // ── Card 15: Preview narrow ──────────────────────────────────────────────
+    const responsiveCard = document.getElementById('c-responsive');
+    const responsiveToggle = document.getElementById('t-responsive-toggle');
+
+    responsiveToggle.addEventListener('click', function () {
+      const narrow = responsiveCard.classList.toggle('narrow');
+      responsiveToggle.setAttribute('aria-pressed', narrow ? 'true' : 'false');
+      responsiveToggle.textContent = narrow ? 'Preview full width' : 'Preview narrow';
+    });
+  </script>
+</body>
+</html>

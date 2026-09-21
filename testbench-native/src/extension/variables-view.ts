@@ -1,5 +1,10 @@
 import * as vscode from 'vscode';
-import { maskIfSecret, type FrameInfo } from 'ai-ui-automation-runner-core';
+import {
+  compareVariableNames,
+  maskIfSecret,
+  type FrameInfo,
+  type ScopeMasking,
+} from 'ai-ui-automation-runner-core';
 
 /**
  * Read-only TreeView contributed to the TestBench activity-bar container.
@@ -13,13 +18,60 @@ import { maskIfSecret, type FrameInfo } from 'ai-ui-automation-runner-core';
  * runtime state, leaky abstractions and all, which is better than
  * mystery hiding.
  *
- * Secret-named entries (`password`, `token`, `apikey`, ...) are masked
- * via `maskIfSecret` from runner-core. Names that contain none of those
- * patterns show the raw value.
+ * Secret-named entries are masked via `maskIfSecret` from runner-core, which
+ * carries the rule and the reason. A FLAT name is the author's own word and
+ * takes the server's SUBSTRING rule (`password`, `secret`, `token` or `key`
+ * anywhere in it), so a flat `keyword` and a flat `monkey` are masked here —
+ * the accepted price of copying the server, because the report beside this
+ * view masks them too. A DOTTED `record.column` is half the page's word, and
+ * it is the narrower record-column rule on the property that keeps
+ * `payment.keyword` and `payment.sort_key` readable. The whole dotted name is
+ * read as one credential key as well (`api.key` → `api_key`), because not
+ * every dotted name is a loop binding.
+ *
+ * The same call also masks the secret COLUMNS inside a value that holds
+ * records — a `readTable` capture is a whole table under one ordinary name,
+ * which no name rule can catch. Every other name shows the raw value.
+ *
+ * A surface whose names are author-chosen END TO END — a data row's cells, a
+ * `[store as:]` capture banner — uses `maskIfSecretAuthored` instead, which
+ * puts the whole key through the flat rule. This view is not one of those: a
+ * scope holds a loop's bindings.
+ *
+ * And it holds the author's own dotted names beside them, which is why the
+ * mask call takes the `frame:scope` event's `bindings` list: a dotted name a
+ * pass bound takes the two-segment rule, and one nobody bound — a data file's
+ * `user.apikey` heading — takes the flat author rule on the whole key, the
+ * same split `isSecretParameterName` makes server-side. Before that list was
+ * on the wire this view had to guess, guessed the narrow way, and printed
+ * `uk_live_1234` beside a report that starred it (§7.6).
+ *
+ * `## Config`'s `unmask` hatch reaches here too, on the same event: a name in
+ * it renders in full, exempt from every rule, exactly as the server's
+ * `formatParameterBlock` exempts it. That is deliberately a place where this
+ * view and the report differ — the hatch governs what is shown LIVE and never
+ * what is written to a file, so the report still stars an unmasked `keyword`
+ * and an `unmask` line cannot put a credential into an artefact. Nothing
+ * fires it from TestBench yet, mind: `RunController`'s per-session `config`
+ * carries `baseUrl`, `timeout` and `viewport` and never `unmask`, so a
+ * TestBench run declares none and the field never arrives (spec §14). This
+ * view is ready for the run that does. Both fields are optional and their
+ * absence — an older server, or a run with no hatch — leaves this view
+ * rendering what it always did.
  */
 export interface ScopeSource {
   /** Current scope to render, or empty when no run is in flight. */
   currentScope(): Record<string, string>;
+  /**
+   * How to READ that scope: the `bindings` and `unmask` the same
+   * `frame:scope` event carried. `{}` when no run is in flight, or when the
+   * server is an older one that sends neither — which the masker treats as
+   * "nothing known" and answers exactly as it did before the fields existed.
+   *
+   * Optional on the interface so a test double that only cares about names
+   * can keep supplying two methods.
+   */
+  currentMasking?(): ScopeMasking;
   /**
    * Identity of the frame whose scope is being rendered. Lets the view
    * distinguish the test (root) frame — where skill-internal `__skillN_x`
@@ -43,6 +95,18 @@ const SKILL_INTERNAL_PREFIX = /^__skill\d+_/;
 interface VariableNode {
   name: string;
   rawValue: string;
+  /**
+   * The masking rules that came with the scope this node was read out of,
+   * snapshotted at `getChildren` time rather than re-read in `getTreeItem`.
+   *
+   * VS Code calls the two separately, and a `frame:scope` landing between
+   * them would otherwise render this row's value under the NEXT pass's
+   * bindings — the one case where the two halves of one event come apart. The
+   * value is snapshotted for the same reason; this is the rest of the pair.
+   * A shared reference to the controller's own object, so the snapshot costs
+   * a pointer per row rather than a copy.
+   */
+  masking: ScopeMasking;
 }
 
 export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNode> {
@@ -79,7 +143,7 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
   }
 
   getTreeItem(node: VariableNode): vscode.TreeItem {
-    const display = maskIfSecret(node.name, node.rawValue);
+    const display = maskIfSecret(node.name, node.rawValue, node.masking);
     const item = new vscode.TreeItem(node.name, vscode.TreeItemCollapsibleState.None);
     item.description = display;
     item.iconPath = new vscode.ThemeIcon('symbol-variable');
@@ -104,10 +168,15 @@ export class VariablesTreeProvider implements vscode.TreeDataProvider<VariableNo
     // they're shown there. Phase 4.B will replace this with a real
     // per-frame filter that reverse-resolves the renames.
     const isTestFrame = !frame || frame.id === '';
+    // `compareVariableNames`, not a plain `.sort()`: a record's `_row` has to
+    // lead its columns (§7.4), and code-unit order puts `_` between the upper
+    // and the lower case letters — so an `Amount` alias came out ahead of it.
     const names = Object.keys(scope)
       .filter((name) => !isTestFrame || !SKILL_INTERNAL_PREFIX.test(name))
-      .sort();
-    return names.map((name) => ({ name, rawValue: scope[name] ?? '' }));
+      .sort(compareVariableNames);
+    // Read once for the whole render, beside the scope it describes.
+    const masking = this.source.currentMasking?.() ?? {};
+    return names.map((name) => ({ name, rawValue: scope[name] ?? '', masking }));
   }
 
   /** Test-only readback of the description the view would show. Keeps the

@@ -15,6 +15,7 @@ import {
   anyActionCarriesPlaceholder,
   generateStepEntry,
   placeholderNamesIn,
+  unresolvedInputRefs,
 } from '../src/codebehind/generate.js';
 import {
   compileTest,
@@ -473,6 +474,109 @@ describe('accountPlaceholders — the rule on its own', () => {
   });
 });
 
+/**
+ * A `For each` pass's dotted binding, through the same rule
+ * (docs/specs/SPEC-structured-table-reads.md §9.3).
+ *
+ * The rule's failure direction is the model freezing a resolved VALUE into
+ * generated source. A dotted reference is the sharpest case of that — the
+ * value is one row of one pass and the file is committed and re-run for years
+ * — so the accounting has to read `{{order.id}}` as ONE reference to the
+ * runtime binding. Read as an unknown root, or not read at all, the step
+ * either declines forever or compiles with row 1's order number baked in.
+ */
+describe('a dotted reference to a For each binding', () => {
+  it('is one reference, not a root plus stray text', () => {
+    expect(
+      placeholderNamesIn('Verify the row for "{{order.id}}" shows "{{order.status}}"'),
+    ).toEqual(['order.id', 'order.status']);
+    // `{{order}}` and `{{order.id}}` are different references to the same row,
+    // and both are accounted for.
+    expect(placeholderNamesIn('Print {{order}} then {{order.id}}')).toEqual([
+      'order',
+      'order.id',
+    ]);
+  });
+
+  it('compiles when the model named the dotted token', () => {
+    const accounting = accountPlaceholders({
+      binding: bindingFor('Click Review in the row for "{{order.id}}"'),
+      actions: [act({ action: 'click', selector: 'tr:has-text("{{order.id}}") button' })],
+      // The dotted key is what the pass wrote into the live map, so it is
+      // what the accounting looks the value up by.
+      resolvedParameters: { 'order.id': 'ORD-1001' },
+      recordingCarriesPlaceholders: true,
+    });
+    expect(accounting).toEqual({ recoveredByValue: [], preChangeFallback: false });
+  });
+
+  it('declines — and names the dotted reference — when the model inlined the row', () => {
+    const accounting = accountPlaceholders({
+      binding: bindingFor('Click Review in the row for "{{order.id}}"'),
+      // The model wrote THIS pass's order number instead of the placeholder.
+      actions: [act({ action: 'click', selector: 'tr:has-text("ORD-1001") button' })],
+      resolvedParameters: { 'order.id': 'ORD-1001' },
+      recordingCarriesPlaceholders: true,
+    });
+    // The value-match fallback is exact-whole-field, so a row number buried in
+    // a selector does not recover it — the step declines, and the reason names
+    // the DOTTED reference rather than an `order` nobody wrote. Which is the
+    // right answer twice over: a selector built from one pass's order number
+    // is precisely what a loop body must not compile to.
+    expect(accounting.decline).toBe('{{order.id}} appears in no recorded action');
+    expect(accounting.recoveredByValue).toEqual([]);
+  });
+
+  it('recovers by value when the whole field IS the row value', () => {
+    const accounting = accountPlaceholders({
+      binding: bindingFor('Type the order number {{order.id}}'),
+      actions: [act({ action: 'type', selector: '#q', value: 'ORD-1001' })],
+      resolvedParameters: { 'order.id': 'ORD-1001' },
+      recordingCarriesPlaceholders: true,
+    });
+    expect(accounting.recoveredByValue).toEqual(['order.id']);
+    expect(accounting.decline).toBeUndefined();
+  });
+
+  it('declines when a dotted reference landed only in a description', () => {
+    const accounting = accountPlaceholders({
+      binding: bindingFor('Click Review in the row for "{{order.id}}"'),
+      actions: [
+        act({
+          action: 'click',
+          selector: '#review',
+          description: 'review the row for {{order.id}}',
+        }),
+      ],
+      resolvedParameters: { 'order.id': 'ORD-1001' },
+      recordingCarriesPlaceholders: true,
+    });
+    expect(accounting.decline).toBe(
+      "{{order.id}} appears only in an action's description, which is the model's own words rather than a value it used",
+    );
+  });
+});
+
+/**
+ * §9.2: `readTable` is deterministic and is MEANT to compile, through the
+ * shared `tables.read` helper — which is phase 3. Until then it stays AI, and
+ * the entry says why rather than a compile reinventing header mapping.
+ */
+describe('readTable is AI-only until phase 3', () => {
+  it('refuses the step and names the action', async () => {
+    const { result, calls } = await generate({
+      source: 'Read the Order ID column as id from every row in the Orders table [store as: o]',
+      actions: [act({ action: 'readTable', selector: '#orders' })],
+    });
+    // `declined` is how a step becomes an `ai: true` entry carrying its reason.
+    expect(result.kind).toBe('declined');
+    expect(result.kind === 'declined' && result.reason).toContain('readTable');
+    // No model call was paid for an answer that would be thrown away —
+    // `refuseReason` runs before the client is touched.
+    expect(calls).toBe(0);
+  });
+});
+
 // ───────────────────────────────────────────────────────────────────────────
 // The static backstop
 // ───────────────────────────────────────────────────────────────────────────
@@ -706,5 +810,97 @@ describe('the compile summary carries the compliance count', () => {
     );
     expect(notices).toHaveLength(1);
     expect(notices[0] && notices[0].kind === 'note' && notices[0].level).toBe('info');
+  });
+});
+
+/**
+ * The compiler's two remaining bare reads of a binding's scope.
+ *
+ * `binding.scope.renames[name]` and `binding.scope.inputs[name]` are
+ * plain-object indexes, and `{{constructor}}` answers off `Object.prototype`
+ * on a scope that renames and inputs nothing. `stepParameters` was taught this
+ * in review 4; these two were not, and each turns the function's answer into a
+ * different wrong one:
+ *
+ * - `accountPlaceholders` takes the rename branch, so the TOKEN it looks for
+ *   in the recorded actions is the `Object` function — which no recorded
+ *   string can equal — and a step that named its placeholder perfectly well
+ *   declines with "appears in no recorded action" forever.
+ * - `unresolvedInputRefs` takes the same branch and returns BEFORE looking at
+ *   the input, so a caller argument this run cannot resolve is reported as
+ *   resolved, and `generateStepEntry` compiles the literal `${data.username}`
+ *   text into a committed file instead of declining.
+ */
+describe('a scope read for a reference named after a prototype key', () => {
+  it('accounts for {{constructor}} against the token the model actually wrote', () => {
+    const accounting = accountPlaceholders({
+      binding: bindingFor('Type {{constructor}} into the search box'),
+      // The model did the right thing: it wrote the placeholder back.
+      actions: [act({ action: 'type', selector: '#q', value: '{{constructor}}' })],
+      // A `[store as: constructor]` capture — an own property of the map.
+      resolvedParameters: { constructor: 'ORD-1001' },
+      recordingCarriesPlaceholders: true,
+    });
+    expect(accounting.decline).toBeUndefined();
+    expect(accounting.recoveredByValue).toEqual([]);
+  });
+
+  it('judges {{constructor}} instead of waving it through as expander-supplied', () => {
+    // Decision 6's carve-out is for a name the SCOPE supplies, and this scope
+    // supplies nothing: `inputs['constructor']` is the `Object` function, not
+    // an argument. Read bare, the carve-out fired, the reference was never
+    // judged at all, and a step whose model had inlined the value compiled
+    // with it frozen in — silently, since a skipped reference produces no
+    // decline and no warning.
+    const accounting = accountPlaceholders({
+      binding: bindingFor('Type {{constructor}} into the search box'),
+      actions: [act({ action: 'type', selector: '#q', value: 'something else' })],
+      resolvedParameters: { constructor: 'ORD-1001' },
+      recordingCarriesPlaceholders: true,
+    });
+    expect(accounting.decline).toBe('{{constructor}} appears in no recorded action');
+  });
+
+  it('declines, rather than THROWING, when a rename targets a prototype key', () => {
+    // A skill output the caller aliased onto `constructor`, with nothing bound
+    // to it yet. The value lookup is `resolvedParameters[renamed]`, so bare it
+    // handed `value?.trim()` the `Object` function and the compile died on
+    // `value.trim is not a function` — a TypeError out of a pre-check, in
+    // place of the ordinary decline the author can read.
+    const binding = bindingFor('Type {{who}} into the search box', {
+      scope: { renames: { who: 'constructor' }, inputs: {} },
+    });
+    let accounting: ReturnType<typeof accountPlaceholders> | undefined;
+    expect(() => {
+      accounting = accountPlaceholders({
+        binding,
+        // The model inlined something else, so the judge reaches the
+        // value-match fallback — which is where the value is read.
+        actions: [act({ action: 'type', selector: '#q', value: 'something else' })],
+        resolvedParameters: {},
+        recordingCarriesPlaceholders: true,
+      });
+    }).not.toThrow();
+    // Named by the AUTHORED spelling, which is what the author wrote.
+    expect(accounting!.decline).toBe('{{who}} appears in no recorded action');
+  });
+
+  it('reports an unresolvable caller argument bound to a prototype-key name', () => {
+    // `[skill: login constructor="${data.username}"]` in a run with no
+    // environment. The argument is in the frame's `inputs`, raw.
+    const binding = bindingFor('Sign in as {{constructor}}', {
+      scope: { renames: {}, inputs: { constructor: '${data.username}' } },
+    });
+    expect(unresolvedInputRefs(binding, {}, undefined)).toEqual(['data.username']);
+    // And with an environment that answers it, nothing is unresolved.
+    expect(
+      unresolvedInputRefs(binding, {}, { envName: 'ci', data: { username: 'alice' } } as never),
+    ).toEqual([]);
+
+    // The other half: a scope that supplies NOTHING. Bare, the inputs map
+    // answered with the `Object` function, which `interpolate` then called
+    // `.replace` on — `text.replace is not a function`, thrown out of a
+    // pre-check that is supposed to return a list.
+    expect(unresolvedInputRefs(bindingFor('Sign in as {{constructor}}'), {}, undefined)).toEqual([]);
   });
 });

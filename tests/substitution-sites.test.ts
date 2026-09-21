@@ -50,7 +50,7 @@ import path from 'node:path';
  * found).
  */
 const SUBSTITUTION_CALL =
-  /\b(interpolate|interpolateQuiet|interpolateEnvData|interpolateEnvDataDeep|substituteText|substituteAction|resolveStepText)\s*\(/g;
+  /\b(interpolate|interpolateQuiet|interpolateEnvData|interpolateEnvDataDeep|substituteText|substituteAsLiterals|substituteAction|resolveStepText)\s*\(/g;
 
 /**
  * Why each call site is safe. The classification is the load-bearing part —
@@ -80,13 +80,37 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   'src/codebehind/generate.ts': { why: 'not-step-text', calls: 2 },
   'src/mcp/assemble.ts': { why: 'not-step-text', calls: 1 },
   'src/parser/interpolate-env-data.ts': { why: 'definition', calls: 4 },
+  // The literal-condition pre-check (src/parser/literal-condition.ts): a
+  // CONDITION is substituted so the runtime can decide it without a model
+  // call. Not step text by construction — a control line's condition is split
+  // off by `parseControlLine` and a flow-control line's by
+  // `parseFlowControlStep`, and the TAIL is the step, so nothing here is ever
+  // handed to `parseSetStep`. The substituted text is used twice and neither
+  // is an instruction: to evaluate, and as the report sentence `decided from
+  // the values: "" is empty → true`.
+  //
+  // `substituteAsLiterals`, not `substituteText`: the grammar reads VALUES,
+  // so a reference the author did not already wrap in quotes is substituted
+  // as a quoted literal (`{{payment.status}} is "Paused"` →
+  // `"Overdue" is "Paused"`). That form is also what the report sentence
+  // shows, and it is masked HERE with the run's secrets before it is
+  // returned, rather than relying on `redactReport` — neither judge path ever
+  // carried a value in its reasoning, so nothing downstream was built
+  // expecting one.
+  //
+  // One module, two callers: `control-runtime.ts` for a guard's condition and
+  // `step-executor.ts` for a flow-control line's. Neither substitutes on its
+  // own any more.
+  'src/runner/literal-decision.ts': { why: 'not-step-text', calls: 1 },
   // Several, and deliberately one label: a validate-only main-flow pass, the
   // hook preserve, the guarded skill-body and skill-section passes, and value
   // passes for parameters, rows, config and output names. The count is what
   // makes adding an eighth trip this test.
   'src/parser/markdown.ts': { why: 'step-text/guarded', calls: 8 },
   'src/parser/parameters.ts': { why: 'definition', calls: 1 },
-  'src/runner/placeholder-substitution.ts': { why: 'definition', calls: 5 },
+  // Six: `substituteText`, `substituteAction` and `substituteAsLiterals`
+  // themselves, and the calls the last three make on the first two.
+  'src/runner/placeholder-substitution.ts': { why: 'definition', calls: 6 },
   'src/runner/step-executor.ts': { why: 'not-step-text', calls: 2 },
   'src/runner/test-runner.ts': { why: 'step-text/authored', calls: 3 },
   'src/server/errand-runner.ts': { why: 'step-text/authored', calls: 2 },
@@ -169,5 +193,118 @@ describe('substitution sites are inventoried', () => {
     // A classification for a file that no longer substitutes is a reader
     // being told to trust something that is not there.
     expect(Object.keys(INVENTORY).filter((f) => !files.includes(f)).sort()).toEqual([]);
+  });
+});
+
+/**
+ * One sentence about spacing inside the braces, in five refusals.
+ *
+ * Three of them share `NO_SPACES_SENTENCE`
+ * (src/runner/placeholder-substitution.ts): the model's action, a `Set`
+ * template and the author's own step text. The other two are hand-written and
+ * must stay that way — `setStepError` (src/parser/set-step.ts) and
+ * `foreachMessage` (src/parser/control-line.ts) are import-free by design, so
+ * a parser can answer before a runner module is loaded at all.
+ *
+ * Hand-written is exactly why this test exists. The sentence has already been
+ * reworded once; a reader who meets it twice should not have to decide whether
+ * two nearly-identical sentences mean two different things. Only the shared
+ * HEAD is compared — each site names its own fix after `write` (`{{name}}`,
+ * `Set {{name}} to "…"`, `{{item}}` for the item) and those tails are
+ * deliberately different.
+ *
+ * The SITES are not hand-written, and nor is the count per site. The file
+ * above already records what a hand-written list of substitution call sites
+ * cost — six rounds of the next site along — and the same two holes are here:
+ * a list names only the files someone remembered, and reading one sentence per
+ * file cannot see a second copy inside a file already listed. So the list is
+ * derived by scanning src/ for the phrase, every occurrence in each file is
+ * collected, and the union of all of them must have exactly one member. The
+ * three copies above survive as a floor: they must still be there.
+ */
+describe('the "no spaces inside the braces" sentence', () => {
+  const root = path.resolve(__dirname, '..');
+  const PHRASE = 'A placeholder carries no spaces';
+
+  /**
+   * The copies that must still exist. A floor, not the list compared: the
+   * comparison runs over whatever the scan below finds, and this only catches
+   * a copy silently DELETED — at which point a reader meets one wording in the
+   * runner and none in the parser, and cannot tell whether the refusal moved
+   * or the rule did.
+   */
+  const KNOWN = [
+    'src/runner/placeholder-substitution.ts',
+    'src/parser/set-step.ts',
+    'src/parser/control-line.ts',
+  ] as const;
+
+  /**
+   * One file as the sentence READS, not as it is typed: comment lines dropped
+   * (a docblock that merely mentions the sentence is not a fourth copy of it —
+   * `placeholder-substitution.ts` has such a docblock directly above the
+   * const), template-literal concatenation seams removed, whitespace
+   * collapsed. So a different line wrap is not a difference.
+   */
+  function flatten(file: string): string {
+    return readFileSync(path.join(root, file), 'utf8')
+      .split('\n')
+      .filter((line) => {
+        const trimmed = line.trimStart();
+        return !trimmed.startsWith('*') && !trimmed.startsWith('//');
+      })
+      .join('\n')
+      .replace(/`\s*\+\s*`/g, '')
+      .replace(/\s+/g, ' ');
+  }
+
+  /** EVERY reading of the sentence in one file, not just the first.
+   *
+   *  Reading only the first is how a hand-written list fails twice over: the
+   *  list cannot see a copy in a file it does not name, and a first-match read
+   *  cannot see a SECOND copy in a file it does. Measured: appending a drifted
+   *  copy to `src/parser/set-step.ts` left the previous version of this test
+   *  green. */
+  function sentencesIn(file: string): string[] {
+    return [...flatten(file).matchAll(/A placeholder carries no spaces.*?write /g)].map(
+      (m) => m[0],
+    );
+  }
+
+  // Derived, not hand-written: every `.ts` under src/ that carries the phrase
+  // outside a comment. A new refusal that spells the rule again is compared
+  // whether or not anyone remembered to add it here.
+  const sites = walk(path.join(root, 'src'))
+    .map((full) => path.relative(root, full).split(path.sep).join('/'))
+    .filter((file) => flatten(file).includes(PHRASE))
+    .sort();
+
+  it('reads identically at all three copies, and so at all five refusals', () => {
+    // Five refusals, three copies. `placeholder-substitution.ts` holds ONE
+    // copy — `NO_SPACES_SENTENCE`, a function — and three refusals call it:
+    // the model's action, a `Set` template and the author's own step text.
+    // The other two copies are one refusal each, and are hand-written because
+    // `setStepError` (src/parser/set-step.ts) and `foreachMessage`
+    // (src/parser/control-line.ts) are import-free by design. So text
+    // comparison has three things to compare, and five places it protects.
+    expect(
+      KNOWN.filter((f) => !sites.includes(f)),
+      'A file that carried the sentence no longer does. If the refusal moved, ' +
+        'move this entry with it; if the rule is gone, delete the entry.',
+    ).toEqual([]);
+
+    // Every site yields at least one reading — a file that contains the
+    // phrase but no match means the tail stopped ending in `write `, and the
+    // comparison below would be quietly comparing fewer things than it names.
+    const found = sites.flatMap((file) => sentencesIn(file).map((s) => [file, s] as const));
+    expect(
+      sites.filter((file) => sentencesIn(file).length === 0),
+      'contains the phrase but no readable sentence — has the wording past ' +
+        '`write ` changed shape?',
+    ).toEqual([]);
+
+    expect(new Set(found.map(([, s]) => s)).size, `differs across:\n${
+      found.map(([f, s]) => `  ${f}: ${JSON.stringify(s)}`).join('\n')
+    }`).toBe(1);
   });
 });

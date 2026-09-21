@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Statements</title>
+  <!--
+    Fixture page for the pagination pattern of SPEC-structured-table-reads.md
+    §4.7: `While the Next button is enabled, go to the next page and read it`.
+
+    Twenty statement lines, five per page, four pages. ONLY the current page's
+    rows are in the DOM, so a read of "every row" on page 2 must return page
+    2's five rows and nothing else — that is what makes the loop worth writing.
+
+    Deliberate details:
+      - Debit amounts are written with the Unicode minus sign U+2212 (−$87.40),
+        the way transactions.html does. Number() rejects it, so it is the
+        normalisation trap the §7.7 "add up to" assertion has to survive.
+      - Debit and Credit are mutually exclusive per row: the other cell is a
+        genuinely empty <td></td>.
+      - Balance is a running balance computed from an opening balance, so it
+        is arithmetically correct down the whole twenty lines and across page
+        boundaries.
+      - The <tfoot> "Page total" row is excluded from data rows by §7.4, so a
+        read of every row must never pick it up.
+
+    No login redirect and no cookie banner, as on control-flow.html.
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar (same shell as dashboard.html / transactions.html / control-flow.html) */
+    .sidebar {
+      width: 240px;
+      background: #1f2937;
+      color: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      min-height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      margin-bottom: 32px;
+    }
+
+    .sidebar-logo-icon {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .sidebar-logo-name {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    nav { flex: 1; }
+
+    nav ul { list-style: none; padding: 0; }
+
+    nav ul li a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 24px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav ul li a:hover { background: #374151; color: #f9fafb; }
+
+    nav ul li a.active {
+      background: #374151;
+      color: #f9fafb;
+      border-left-color: #1a56db;
+    }
+
+    nav ul li a .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+    .sidebar-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #374151;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .user-name { font-size: 13px; font-weight: 500; color: #f9fafb; }
+    .user-email { font-size: 12px; color: #6b7280; }
+
+    .logout-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover { background: #374151; color: #f9fafb; }
+
+    /* Main content */
+    .main-content {
+      margin-left: 240px;
+      flex: 1;
+      padding: 32px;
+    }
+
+    .page-header { margin-bottom: 24px; }
+
+    .page-header h1 {
+      font-size: 26px;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .page-header p {
+      font-size: 14px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+
+    .section-card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      overflow: hidden;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 20px 24px 16px;
+    }
+
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .section-hint {
+      font-size: 13px;
+      color: #6b7280;
+      padding: 0 24px 16px;
+    }
+
+    .muted { color: #6b7280; font-size: 13px; }
+
+    .btn {
+      padding: 9px 16px;
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn:hover { background: #1648c0; }
+
+    .btn:disabled {
+      background: #9ca3af;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: #1a56db;
+      border: 1px solid #1a56db;
+    }
+
+    .btn-secondary:hover { background: #eff4ff; }
+
+    .btn-secondary:disabled {
+      color: #9ca3af;
+      border-color: #d1d5db;
+      background: transparent;
+      cursor: not-allowed;
+    }
+
+    /* Statement table (same look as transactions.html) */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    thead { background: #f9fafb; }
+
+    th {
+      text-align: left;
+      padding: 14px 20px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      border-bottom: 1px solid #e5e7eb;
+    }
+
+    th.numeric, td.numeric { text-align: right; }
+
+    tbody tr {
+      border-bottom: 1px solid #f3f4f6;
+      transition: background 0.1s;
+    }
+
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: #f9fafb; }
+
+    td {
+      padding: 14px 20px;
+      font-size: 14px;
+      color: #111827;
+    }
+
+    .stmt-date { color: #6b7280; white-space: nowrap; }
+    .stmt-amount { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+    .stmt-amount.debit { color: #dc2626; }
+    .stmt-amount.credit { color: #047857; }
+    .stmt-amount.balance { color: #111827; }
+
+    tfoot tr { background: #f9fafb; border-top: 1px solid #e5e7eb; }
+
+    tfoot td {
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pager {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 16px 24px;
+      border-top: 1px solid #e5e7eb;
+    }
+
+    .pager-label { font-size: 13px; font-weight: 600; color: #374151; }
+  </style>
+</head>
+<body>
+  <!-- Sidebar navigation -->
+  <aside class="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">S</div>
+      <span class="sidebar-logo-name">SecureBank</span>
+    </div>
+
+    <nav>
+      <ul>
+        <li>
+          <a href="dashboard.html">
+            <span class="nav-icon">🏠</span>
+            Dashboard
+          </a>
+        </li>
+        <li>
+          <a href="transactions.html">
+            <span class="nav-icon">💳</span>
+            Transactions
+          </a>
+        </li>
+        <li>
+          <a href="documents.html">
+            <span class="nav-icon">📄</span>
+            Documents
+          </a>
+        </li>
+        <li>
+          <a href="control-flow.html">
+            <span class="nav-icon">💸</span>
+            Payments
+          </a>
+        </li>
+        <li>
+          <a href="tables.html">
+            <span class="nav-icon">📋</span>
+            Tables
+          </a>
+        </li>
+        <li>
+          <a href="#settings">
+            <span class="nav-icon">⚙️</span>
+            Settings
+          </a>
+        </li>
+        <li>
+          <a href="#profile">
+            <span class="nav-icon">👤</span>
+            Profile
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <div>
+          <div class="user-name">Demo User</div>
+          <div class="user-email" id="user-email">demo@securebank.com</div>
+        </div>
+      </div>
+      <button class="logout-btn" id="logout-btn" type="button">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <div class="page-header">
+      <h1>Statements</h1>
+      <p>Everyday account •••• 4417 — 1 September to 19 September 2026.</p>
+    </div>
+
+    <section class="section-card" id="statements-card" aria-labelledby="statements-title">
+      <div class="section-header">
+        <h2 class="section-title" id="statements-title">Statement lines</h2>
+        <span class="muted" id="statements-range">Showing 1–5 of 20 lines</span>
+      </div>
+      <p class="section-hint">Five lines per page. Next is disabled on the last page.</p>
+
+      <table id="statement-lines" aria-label="Statement lines">
+        <thead>
+          <tr>
+            <th scope="col">Date</th>
+            <th scope="col">Description</th>
+            <th scope="col" class="numeric">Debit</th>
+            <th scope="col" class="numeric">Credit</th>
+            <th scope="col" class="numeric">Balance</th>
+          </tr>
+        </thead>
+        <tbody id="statement-lines-body"></tbody>
+        <tfoot>
+          <tr id="statements-page-total">
+            <td>Page total</td>
+            <td></td>
+            <td class="numeric" id="statements-page-debits"></td>
+            <td class="numeric" id="statements-page-credits"></td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+
+      <div class="pager">
+        <button type="button" class="btn btn-secondary" id="statements-prev" disabled>Previous</button>
+        <span class="pager-label" id="statements-page">Page 1 of 4</span>
+        <button type="button" class="btn" id="statements-next">Next</button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    // ── Shell: user info and sign out (same as the other pages) ──────────────
+    var email = sessionStorage.getItem('user-email');
+    if (email) {
+      document.getElementById('user-email').textContent = email;
+      document.getElementById('user-avatar').textContent = email.charAt(0).toUpperCase();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.removeItem('logged-in');
+      sessionStorage.removeItem('user-email');
+      window.location.href = 'index.html';
+    });
+
+    // ── Twenty statement lines ───────────────────────────────────────────────
+    // Exactly one of debit/credit is non-zero on every line; the other column
+    // renders as an empty <td></td>. Balances are computed, not typed, so the
+    // running balance cannot drift out of step with the amounts.
+    var OPENING_BALANCE = 4820.00;
+
+    var LINES = [
+      { date: '1 Sep 2026',  description: 'Salary — Contoso Pty Ltd',        debit: 0,       credit: 3250.00 },
+      { date: '1 Sep 2026',  description: 'Rent — Harbour Property Group',   debit: 1450.00, credit: 0 },
+      { date: '2 Sep 2026',  description: 'Woolworths Supermarkets',         debit: 87.40,   credit: 0 },
+      { date: '3 Sep 2026',  description: 'Origin Energy direct debit',      debit: 140.00,  credit: 0 },
+      { date: '4 Sep 2026',  description: 'Transfer from Savings •••• 9082', debit: 0,       credit: 500.00 },
+      { date: '5 Sep 2026',  description: 'Netflix Australia',               debit: 22.99,   credit: 0 },
+      { date: '6 Sep 2026',  description: 'Opal card top-up',                debit: 40.00,   credit: 0 },
+      { date: '7 Sep 2026',  description: 'Cafe Amaro',                      debit: 6.50,    credit: 0 },
+      { date: '8 Sep 2026',  description: 'ATM withdrawal — George Street',  debit: 200.00,  credit: 0 },
+      { date: '9 Sep 2026',  description: 'Refund — Myer Sydney',            debit: 0,       credit: 79.95 },
+      { date: '10 Sep 2026', description: 'Sydney Water',                    debit: 210.45,  credit: 0 },
+      { date: '11 Sep 2026', description: 'Telstra mobile',                  debit: 65.00,   credit: 0 },
+      { date: '12 Sep 2026', description: 'Interest paid',                   debit: 0,       credit: 12.38 },
+      { date: '13 Sep 2026', description: 'Bunnings Warehouse',              debit: 143.20,  credit: 0 },
+      { date: '14 Sep 2026', description: 'Qantas Airways',                  debit: 418.60,  credit: 0 },
+      { date: '15 Sep 2026', description: 'Dividend — AusShares Ltd',        debit: 0,       credit: 186.24 },
+      { date: '16 Sep 2026', description: 'Coles Online',                    debit: 112.75,  credit: 0 },
+      { date: '17 Sep 2026', description: 'Gym membership — Fitness First',  debit: 29.00,   credit: 0 },
+      { date: '18 Sep 2026', description: 'Transfer to Travel •••• 3355',    debit: 300.00,  credit: 0 },
+      { date: '19 Sep 2026', description: 'Salary — Contoso Pty Ltd',        debit: 0,       credit: 3250.00 }
+    ];
+
+    var PAGE_SIZE = 5;
+    var PAGE_COUNT = Math.ceil(LINES.length / PAGE_SIZE);
+
+    // Cents, so twenty additions cannot leave a 6532.599999999999 in a balance.
+    function cents(value) { return Math.round(value * 100); }
+
+    var balanceCents = cents(OPENING_BALANCE);
+    for (var i = 0; i < LINES.length; i++) {
+      balanceCents += cents(LINES[i].credit) - cents(LINES[i].debit);
+      LINES[i].balance = balanceCents / 100;
+    }
+
+    function formatAmount(value) {
+      var fixed = Math.abs(value).toFixed(2);
+      var parts = fixed.split('.');
+      var whole = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      return '$' + whole + '.' + parts[1];
+    }
+
+    // U+2212 MINUS SIGN, not a hyphen — same convention as transactions.html.
+    function formatDebit(value) { return '−' + formatAmount(value); }
+
+    function esc(text) {
+      return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    // ── Paging ───────────────────────────────────────────────────────────────
+    var tbody = document.getElementById('statement-lines-body');
+    var pageLabel = document.getElementById('statements-page');
+    var rangeLabel = document.getElementById('statements-range');
+    var prevButton = document.getElementById('statements-prev');
+    var nextButton = document.getElementById('statements-next');
+    var debitsCell = document.getElementById('statements-page-debits');
+    var creditsCell = document.getElementById('statements-page-credits');
+
+    var page = 1;
+
+    function render() {
+      var start = (page - 1) * PAGE_SIZE;
+      var visible = LINES.slice(start, start + PAGE_SIZE);
+
+      var html = '';
+      var debitCents = 0;
+      var creditCents = 0;
+
+      for (var i = 0; i < visible.length; i++) {
+        var line = visible[i];
+        debitCents += cents(line.debit);
+        creditCents += cents(line.credit);
+
+        html +=
+          '<tr data-testid="statement-row" data-line="' + (start + i + 1) + '">' +
+            '<td class="stmt-date">' + esc(line.date) + '</td>' +
+            '<td>' + esc(line.description) + '</td>' +
+            '<td class="numeric stmt-amount debit">' + (line.debit ? formatDebit(line.debit) : '') + '</td>' +
+            '<td class="numeric stmt-amount credit">' + (line.credit ? formatAmount(line.credit) : '') + '</td>' +
+            '<td class="numeric stmt-amount balance">' + formatAmount(line.balance) + '</td>' +
+          '</tr>';
+      }
+
+      tbody.innerHTML = html;
+
+      debitsCell.textContent = debitCents ? formatDebit(debitCents / 100) : '';
+      creditsCell.textContent = creditCents ? formatAmount(creditCents / 100) : '';
+
+      pageLabel.textContent = 'Page ' + page + ' of ' + PAGE_COUNT;
+      rangeLabel.textContent = 'Showing ' + (start + 1) + '–' + (start + visible.length) +
+        ' of ' + LINES.length + ' lines';
+
+      prevButton.disabled = page === 1;
+      nextButton.disabled = page === PAGE_COUNT;
+    }
+
+    prevButton.addEventListener('click', function () {
+      if (page > 1) { page -= 1; render(); }
+    });
+
+    nextButton.addEventListener('click', function () {
+      if (page < PAGE_COUNT) { page += 1; render(); }
+    });
+
+    render();
+  </script>
+</body>
+</html>

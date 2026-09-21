@@ -91,6 +91,21 @@ vi.mock('../src/report/history-appender.js', () => ({
   appendRunHistory: vi.fn().mockResolvedValue(undefined),
 }));
 
+/**
+ * The one step the CLI loop answers ITSELF: `[input: name]` reads a line from
+ * the terminal and writes it into the live variable map. Scripted here so the
+ * write can be exercised without a tty.
+ */
+let inputAnswer = '';
+vi.mock('node:readline/promises', () => ({
+  default: {
+    createInterface: () => ({
+      question: async () => inputAnswer,
+      close: () => {},
+    }),
+  },
+}));
+
 import { runTest } from '../src/runner/test-runner.js';
 import { parseTestFile } from '../src/parser/markdown.js';
 // Not mocked: the console lines below are asserted by spying on the real
@@ -763,6 +778,40 @@ describe('For each binds the list', () => {
     expect(failed.error).toContain('capture it with a read of every matching element');
   });
 
+  /**
+   * Review 5, finding 1: the band is a map of values held under their names,
+   * and it was masked by VALUE only.
+   *
+   * `abc` is three characters, so it never joins the free-text set — masking
+   * it everywhere would replace every "abc" in the run log and in the DOM the
+   * model plans from. The name is what has to answer here, exactly as it does
+   * for `report.parameters`, and it can only answer correctly because the
+   * marker's own copy of the bindings remembers that a PASS wrote them: read
+   * as the author's, `account.keyword` matches on `key` and `AU` disappears
+   * from the band as well (§7.6, §8.4).
+   */
+  it('masks the band by name — and by whose name it is', async () => {
+    const inst = await instance(
+      FOR_EACH,
+      { accounts: '[{"payee":"Acme","password":"abc","keyword":"AU"}]' },
+      'for-each-secret.md',
+    );
+    const report = await runTest(inst, makeConfig(), '');
+
+    const body = report.steps.filter((s) => s.instruction === 'Click the account row');
+    expect(body).toHaveLength(1);
+    expect(body[0]!.loop!.values).toEqual({
+      account: '{"payee":"Acme","password":"***","keyword":"AU"}',
+      'account.payee': 'Acme',
+      'account.password': '***',
+      'account.keyword': 'AU',
+    });
+    // The same answer the parameter block gives for the same binding, which is
+    // the disagreement this fixes.
+    expect(report.parameters!['account.password']).toBe('***');
+    expect(report.parameters!['account.keyword']).toBe('AU');
+  });
+
   it('skips the body over an empty list, and the guard still passes', async () => {
     const inst = await instance(FOR_EACH, { accounts: '[]' }, 'for-each-empty.md');
     const report = await runTest(inst, makeConfig(), '');
@@ -774,6 +823,390 @@ describe('For each binds the list', () => {
       ['Verify the balance is shown', 'skipped'],
       ['Sign out', 'passed'],
     ]);
+  });
+
+  /**
+   * `controlLineDefines` shipped in the Sessions API and the Electron loop and
+   * not in this one.
+   *
+   * Through the GUARD path it makes no difference and cannot: a step with a
+   * control record is dispatched, reported and `continue`d before the loop
+   * reaches its `interpolate` call, so the header's text is never interpolated
+   * at all. The reachable case is a run whose steps were NOT expanded into
+   * controls — then the `For each` line is an ordinary step like any other,
+   * and `interpolate` warned `Unresolved placeholder: {{account}}` about the
+   * item the line is there to bind. Same line, same noise, same "reads like a
+   * diagnosis on something that is working"; the other two loops resolve every
+   * step's text before the control dispatch and so hit it on every table loop.
+   */
+  it('does not warn about the item a For each header is there to bind', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const inst = await instance(FOR_EACH, { accounts: '["Everyday"]' }, 'for-each-quiet.md');
+      await runTest(
+        // No `expansion`, so no controls: every line runs as an ordinary step.
+        { ...inst, test: { ...inst.test, expansion: undefined } },
+        makeConfig(),
+        '',
+      );
+      const warnings = warn.mock.calls.map((c) => String(c[0]));
+      expect(warnings).not.toContain('Unresolved placeholder: {{account}}');
+      // The control: the LIST is a genuine reference, and if it were missing
+      // it would still be warned about. Only the item is exempt.
+      expect(warnings).not.toContain('Unresolved placeholder: {{accounts}}');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+/**
+ * A row that omits a property must not inherit the previous row's value
+ * (docs/specs/SPEC-structured-table-reads.md §8.2, §8.3).
+ *
+ * All three run loops wrote a pass's bindings with `Object.assign`, which
+ * cannot delete. Over rows of different shapes that left the last row's
+ * `{{row.note}}` in the map, so pass 2 substituted pass 1's note — and §8.3's
+ * refusal, whose whole job is to say `{{row.note}} has no value in For each
+ * item 2`, could not fire, because the key was there.
+ */
+describe('a For each pass does not inherit the last row', () => {
+  const ROWS_BODY = [
+    '# Rows',
+    '',
+    '## Steps',
+    '1. Open the orders page',
+    '2. For each {{row}} in {{rows}}, Check the row',
+    '3. Sign out',
+    '',
+    '### Check the row',
+    '1. Verify the note says "{{row.note}}"',
+    '',
+  ].join('\n');
+
+  it('refuses the second pass when the row has no such property', async () => {
+    const inst = await instance(
+      ROWS_BODY,
+      { rows: '[{"_row":"1","id":"A","note":"first"},{"_row":"2","id":"B"}]' },
+      'rows-missing-property.md',
+    );
+    const report = await runTest(inst, makeConfig(), '');
+
+    expect(report.status).toBe('failed');
+    const failed = report.steps.find((s) => s.status === 'failed')!;
+    expect(failed.error).toBe(
+      '{{row.note}} has no value in For each item 2; available properties are _row, id',
+    );
+    // Pass 1 ran on its own row and nothing leaked forward into pass 2.
+    const executed = executeStepMock.mock.calls.map((c) => String(c[2]));
+    expect(executed).toContain('Verify the note says "first"');
+    expect(executed.filter((s) => s.includes('first'))).toHaveLength(1);
+  });
+
+  it('does not answer a second loop from the first loop"s last row', async () => {
+    // No debugger and no odd row needed: two `For each` loops sharing an item
+    // name, the second over a list of plain strings. Nothing a scalar pass
+    // writes is called `row.id`, so `{{row.id}}` held `A` for every pass of
+    // the second loop.
+    const TWO_LOOPS = [
+      '# Two loops',
+      '',
+      '## Steps',
+      '1. For each {{row}} in {{records}}, Check the record',
+      '2. For each {{row}} in {{names}}, Check the name',
+      '',
+      '### Check the record',
+      '1. Verify the id is "{{row.id}}"',
+      '',
+      '### Check the name',
+      '1. Verify the name is "{{row.id}}"',
+      '',
+    ].join('\n');
+
+    const inst = await instance(
+      TWO_LOOPS,
+      { records: '[{"id":"A"}]', names: '["Everyday"]' },
+      'two-loops-same-item.md',
+    );
+    const report = await runTest(inst, makeConfig(), '');
+
+    expect(report.status).toBe('failed');
+    const failed = report.steps.find((s) => s.status === 'failed')!;
+    expect(failed.error).toBe(
+      '{{row.id}} has no value in For each item 1; {{row}} holds no properties — it is not an object',
+    );
+  });
+
+  /**
+   * …and neither does a step AFTER the loop, once something rebinds the root.
+   *
+   * `applyPassBindings` and `runSetStep` cleared a root's dotted keys; every
+   * other write into the live map was a plain `resolvedParameters[name] =
+   * value`. So a capture that lands on a loop's item name — the shape §8.2
+   * calls a rebind — left `order.id` holding the LAST PASS's id, and
+   * `{{order.id}}` two steps later substituted it with no warning and no way
+   * for §8.3's refusal to fire.
+   *
+   * `[input: order]` is that write in the CLI loop specifically
+   * (test-runner.ts), which is why the markdown reads the way it does: the
+   * same rule, at a site the run loop owns rather than the executor.
+   */
+  it('refuses a stale {{order.id}} after something rebinds {{order}}', async () => {
+    const REBIND = [
+      '# Rebind',
+      '',
+      '## Steps',
+      '1. For each {{order}} in {{orders}}, Check the order',
+      '2. [input: order] Enter the order id you were given',
+      '3. Verify the summary shows {{order.id}}',
+      '',
+      '### Check the order',
+      '1. Note the order "{{order.id}}"',
+      '',
+    ].join('\n');
+
+    inputAnswer = 'ORD-9';
+    const inst = await instance(
+      REBIND,
+      { orders: '[{"_row":"1","id":"A"},{"_row":"2","id":"B"}]' },
+      'rebind-loop-root.md',
+    );
+    const report = await runTest(inst, makeConfig(), '');
+
+    expect(report.status).toBe('failed');
+    const failed = report.steps.find((s) => s.status === 'failed')!;
+    expect(failed.instruction).toContain('Verify the summary shows');
+    // The `in For each item 2` clause is `forEachPassOf`'s, unchanged: the
+    // loop has ended but its cursor is what last bound this root, and §8.2
+    // keeps the last pass's bindings after the loop. Pinned as-is rather than
+    // adjusted — which pass a refusal names is a separate decision.
+    expect(failed.error).toBe(
+      '{{order.id}} has no value in For each item 2; {{order}} holds no properties — it is not an object',
+    );
+    // The point: the last pass's `B` never reached the model as this step's
+    // value. Both passes did run on their own rows.
+    const executed = executeStepMock.mock.calls.map((c) => String(c[2]));
+    expect(executed).toEqual([
+      'Note the order "A"',
+      'Note the order "B"',
+    ]);
+  });
+});
+
+/**
+ * A record with a key no placeholder can spell still loops
+ * (docs/specs/SPEC-structured-table-reads.md §8.2).
+ *
+ * Tool and API arrays carry `content-type`, `Order ID`, `total-amount` — and
+ * until review 2 one of those failed the whole `For each`, including the
+ * loops that only ever print `{{item}}` as JSON and never ask for a dotted
+ * binding at all. §2 promises existing `For each` behaviour is preserved, so
+ * the key is dropped and named rather than fatal.
+ */
+describe('a For each over records with keys a placeholder cannot spell', () => {
+  const DOCS = [
+    '# Documents',
+    '',
+    '## Steps',
+    '1. For each {{doc}} in {{docs}}, Check the document',
+    '',
+    '### Check the document',
+    '1. Verify the row for "{{doc.id}}" is shown',
+    '',
+  ].join('\n');
+
+  const LIST =
+    '[{"id":"A","content-type":"text/plain"},{"id":"B","content-type":"text/html"}]';
+
+  it('runs every pass, binds the spellable keys, and names the dropped one once', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    try {
+      const inst = await instance(DOCS, { docs: LIST }, 'unspellable-keys.md');
+      const report = await runTest(inst, makeConfig(), '');
+
+      expect(report.status).toBe('passed');
+      expect(executeStepMock.mock.calls.map((c) => String(c[2]))).toEqual([
+        'Verify the row for "A" is shown',
+        'Verify the row for "B" is shown',
+      ]);
+      const lines = info.mock.calls.map((c) => String(c[0]));
+      expect(lines.filter((l) => l.includes('cannot be referenced'))).toEqual([
+        'For each {{doc}}: 1 property cannot be referenced as a placeholder (content-type)',
+      ]);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('tells an author who tries to reference it why it is not there', async () => {
+    const md = DOCS.replace('{{doc.id}}', '{{doc.contenttype}}');
+    const inst = await instance(md, { docs: LIST }, 'unspellable-keys-referenced.md');
+    const report = await runTest(inst, makeConfig(), '');
+
+    expect(report.status).toBe('failed');
+    expect(report.steps.find((s) => s.status === 'failed')!.error).toBe(
+      '{{doc.contenttype}} has no value in For each item 1; available properties are id ' +
+        '(content-type cannot be spelled as a placeholder)',
+    );
+  });
+
+  /**
+   * …and it says it MASKED, because the sentence is written from the run's
+   * own values.
+   *
+   * The dropped key here is `hunter2 header`, and `hunter2` is what
+   * `{{password}}` holds — so the refusal printed a secret into the console,
+   * the report and the run log. Round 2 masked `evaluateGuard`'s
+   * `cannot be referenced as a placeholder` line for exactly this case (see
+   * `run-loop-contracts.test.ts`) and left the refusal beside it in the clear.
+   */
+  /**
+   * The variable map is mixed (§7.6): a data file's heading `user.apikey`
+   * is merged in beside the loop's own `doc.keyword`. The pass registers
+   * what it bound, so the two are told apart by whose name they are — not
+   * by spelling, which is the same shape in both. Pins `markLoopBindings`
+   * in `applyPassBindings`: without it `doc.keyword` falls back to the
+   * author rule, `keyword` contains `key`, and its value joins the mask
+   * set — the refusal's own property list then reads `id, ***`.
+   */
+  it('reads a pass binding by the record rule and a data-file heading by the author rule', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    try {
+      const md = DOCS.replace('{{doc.id}}', '{{doc.nope}}');
+      const inst = await instance(
+        md,
+        { 'user.apikey': 'uk_live_1234', docs: '[{"id":"A","keyword":"keyword"}]' },
+        'mixed-map.md',
+      );
+      const report = await runTest(inst, makeConfig(), '');
+
+      const failed = report.steps.find((s) => s.status === 'failed')!;
+      expect(failed.error).toBe(
+        '{{doc.nope}} has no value in For each item 1; available properties are id, keyword',
+      );
+      // The pass's binding, by the record rule: a column called `keyword` is
+      // not a secret, so the entry and its value are readable.
+      expect(report.parameters['doc.keyword']).toBe('keyword');
+      // The data file's heading, by the author rule on the whole key.
+      expect(report.parameters['user.apikey']).toBe('***');
+      expect(JSON.stringify(report)).not.toContain('uk_live_1234');
+      expect(error.mock.calls.map((c) => String(c[0])).join('\n')).not.toContain('uk_live_1234');
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('masks a secret value the refusal would otherwise print', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    try {
+      const md = DOCS.replace('{{doc.id}}', '{{doc.contenttype}}');
+      const inst = await instance(
+        md,
+        { password: 'hunter2', docs: '[{"id":"A","hunter2 header":"t"}]' },
+        'unspellable-keys-secret.md',
+      );
+      const report = await runTest(inst, makeConfig(), '');
+
+      const expected =
+        '{{doc.contenttype}} has no value in For each item 1; available properties are id ' +
+        '(*** header cannot be spelled as a placeholder)';
+      const failed = report.steps.find((s) => s.status === 'failed')!;
+      expect(failed.error).toBe(expected);
+      expect(failed.aiExplanation).toBe(expected);
+      expect(error.mock.calls.map((c) => String(c[0]))).toContain(expected);
+      // The whole point: the value itself reaches none of the three.
+      const everywhere = [
+        String(failed.error),
+        String(failed.aiExplanation),
+        ...error.mock.calls.map((c) => String(c[0])),
+      ].join('\n');
+      expect(everywhere).not.toContain('hunter2');
+    } finally {
+      error.mockRestore();
+    }
+  });
+});
+
+/**
+ * `{{a.b.c}}` on a CONTROL line says so, in this runner too.
+ *
+ * It matches neither grammar, so it is neither substituted nor warned about
+ * as unresolved — it reaches the judge as six literal braces. `interpolate`
+ * warns about that for an ordinary step, and the guard branch `continue`s
+ * before the loop ever reaches the `interpolate` call, so a `For each` header
+ * or an `If` condition was the one place in this runner where the warning
+ * could not fire. The Sessions API and the Electron adapter resolve every
+ * line's text BEFORE dispatching the control and so warned all along.
+ */
+describe('a multi-segment reference on a control line', () => {
+  /**
+   * A CONDITION is the reachable shape, and the only one.
+   *
+   * A `For each` header carries its multi-segment reference in the TAIL, which
+   * this runner dispatches as an ordinary body step and interpolates like any
+   * other — so that case warned all along and is no test of this at all. The
+   * item and the list are both refused at parse time as names. What is left is
+   * a condition: `If`, `While`, `Repeat`. Its text lives on the guard line and
+   * nowhere else, so if the guard branch does not say it, nothing does.
+   */
+  it('warns about one in a While condition', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      evaluateConditionsMock.mockResolvedValue({
+        selected: null,
+        reasoning: 'nothing held',
+        aiInteractions: [],
+      });
+      const md = [
+        '# Deep while',
+        '',
+        '## Steps',
+        '1. While {{order.address.city}} is "Paris", Go to the next page',
+        '',
+        '### Go to the next page',
+        '1. Click Next',
+        '',
+      ].join('\n');
+      await runTest(await instance(md, {}, 'multi-segment-while.md'), makeConfig(), '');
+
+      expect(
+        warn.mock.calls
+          .map((c) => String(c[0]))
+          .filter((l) => l.includes('is not a placeholder')),
+      ).toEqual([
+        '{{order.address.city}} is not a placeholder: only one property segment is supported',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('warns exactly once for an If condition, which is visited once', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      judgeAnswers(0);
+      const md = [
+        '# Deep if',
+        '',
+        '## Steps',
+        '1. If {{order.address.city}} is "Paris", then Pay by card',
+        '',
+        '### Pay by card',
+        '1. Click Pay',
+        '',
+      ].join('\n');
+      await runTest(await instance(md, {}, 'multi-segment-if.md'), makeConfig(), '');
+
+      expect(
+        warn.mock.calls
+          .map((c) => String(c[0]))
+          .filter((l) => l.includes('is not a placeholder')),
+      ).toEqual([
+        '{{order.address.city}} is not a placeholder: only one property segment is supported',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
@@ -1319,5 +1752,191 @@ describe('the loop band survives the rows a return produced (CLI)', () => {
       ['passed', 1],
       ['passed', 2],
     ]);
+  });
+});
+
+/**
+ * An `[output:]` step whose variable is a name off `Object.prototype`.
+ *
+ * Two bare indexes into the live parameter map sat on this one line of the
+ * CLI. `computeStepCaptures` asked `name in resolvedParameters`, so a step
+ * whose read found NOTHING still reported a capture — of the `Object`
+ * function, into a `Record<string, string>` that the report and the run
+ * history print. And the `[output:]` console line indexed the map directly,
+ * so it announced `= "function Object() { [native code] }"` about a value
+ * nothing had captured. `[store as: constructor]` on a page with an "Order
+ * constructor" column is all it takes, and both surfaces are ones an author
+ * reads to find out whether the capture worked.
+ */
+describe('an [output:] step naming a prototype key (CLI)', () => {
+  const OUTPUT_PROTO = [
+    '# Output',
+    '',
+    '## Steps',
+    '1. [output: constructor] Read the order id',
+    '',
+  ].join('\n');
+
+  /** The executor's answer: a `read` tagged `as: constructor`, which is what
+   *  the `[output:]` enrichment turns into, and which `computeStepCaptures`
+   *  auto-captures. `write` says whether it actually found a value. */
+  function readsInto(write: string | undefined): void {
+    executeStepMock.mockImplementation(async (
+      index: number,
+      _total: number,
+      instruction: string,
+      opts: { resolvedParameters: Record<string, string> },
+    ) => {
+      if (write !== undefined) {
+        // `defineProperty`, the way `bindVariable` writes it — a plain
+        // assignment to `__proto__` would write nothing at all.
+        Object.defineProperty(opts.resolvedParameters, 'constructor', {
+          value: write, writable: true, enumerable: true, configurable: true,
+        });
+      }
+      return {
+        index,
+        instruction,
+        status: 'passed',
+        turns: [{
+          turnNumber: 1,
+          attemptNumber: 1,
+          timestamp: new Date().toISOString(),
+          aiInteractions: [],
+          subActions: [
+            { index: 1, action: { action: 'read', description: 'read it', as: 'constructor' }, durationMs: 1 },
+          ],
+        }],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+  }
+
+  /**
+   * The `[set]` log line is a capture line like the others, so it takes the
+   * record scan before the free-text set: `Set {{payment}} to "{{payments}}"`
+   * over a readTable capture holds a record whose short `password` cell is
+   * below the free-text floor and is masked by its column name alone.
+   */
+  it("masks a record's secret columns on the [set] log line", async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    try {
+      const md = ['# Set', '', '## Steps', '1. Set {{payment}} to "{{payments}}"', ''].join('\n');
+      const report = await runTest(
+        await instance(md, { payments: '[{"payee":"Acme","password":"abc"}]' }, 'set-record.md'),
+        makeConfig(),
+        '',
+      );
+      expect(report.steps[0]!.status).toBe('passed');
+      const lines = info.mock.calls.map((c) => String(c[0]));
+      const setLine = lines.find((l) => l.startsWith('[set] payment = '));
+      expect(setLine).toBe('[set] payment = "[{\"payee\":\"Acme\",\"password\":\"***\"}]"');
+      expect(lines.join('\n')).not.toContain('abc');
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('captures nothing, and says "(not captured)", when the read found nothing', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    try {
+      readsInto(undefined);
+      const report = await runTest(
+        await instance(OUTPUT_PROTO, {}, 'output-proto-empty.md'),
+        makeConfig(),
+        '',
+      );
+      expect(report.steps[0]!.status).toBe('passed');
+      expect(report.steps[0]!.outputs).toBeUndefined();
+
+      const lines = info.mock.calls.map((c) => String(c[0]));
+      expect(lines).toContain('[output: constructor] = "(not captured)"');
+      expect(lines.join('\n')).not.toContain('native code');
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('captures and prints the value when the read DID find one', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    try {
+      readsInto('ORD-1001');
+      const report = await runTest(
+        await instance(OUTPUT_PROTO, {}, 'output-proto-found.md'),
+        makeConfig(),
+        '',
+      );
+      expect(report.steps[0]!.outputs).toEqual({ constructor: 'ORD-1001' });
+      expect(info.mock.calls.map((c) => String(c[0])))
+        .toContain('[output: constructor] = "ORD-1001"');
+    } finally {
+      info.mockRestore();
+    }
+  });
+});
+
+/**
+ * Review 6, finding 3: the same `[output:]` console line, printing the VALUE.
+ *
+ * The fix above replaced a bare index with `boundValue` and left the value
+ * itself raw — so the CLI announced `[output: password] = "hunter2"` to the
+ * console and to every client on the SSE `output` bridge, while the report,
+ * the step line and the prompt's `## Values` block all said `***` for the
+ * same capture. It is the executor's own "Stored captured value" twin, and it
+ * takes the same composition: record SHAPE first, then the free-text set.
+ */
+describe('the [output:] console line is masked, like its executor twin', () => {
+  /** A one-step test whose step captures `value` into `variable`. */
+  async function outputLines(variable: string, value: string): Promise<string[]> {
+    const markdown = [
+      '# Output',
+      '',
+      '## Steps',
+      `1. [output: ${variable}] Read it`,
+      '',
+    ].join('\n');
+    executeStepMock.mockImplementation(async (
+      index: number,
+      _total: number,
+      instruction: string,
+      opts: { resolvedParameters: Record<string, string> },
+    ) => {
+      opts.resolvedParameters[variable] = value;
+      return { index, instruction, status: 'passed', turns: [], durationMs: 1, retried: false };
+    });
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    try {
+      await runTest(
+        await instance(markdown, {}, `output-mask-${variable}.md`),
+        makeConfig(),
+        '',
+      );
+      return info.mock.calls.map((c) => String(c[0]));
+    } finally {
+      info.mockRestore();
+    }
+  }
+
+  it('masks it when the author’s own name says secret', async () => {
+    const lines = await outputLines('password', 'hunter2!x');
+    expect(lines).toContain('[output: password] = "***"');
+    expect(lines.join('\n')).not.toContain('hunter2!x');
+  });
+
+  it('masks a secret COLUMN of a record capture, which no name can reach', async () => {
+    // `[output: rows]` over a `readTable` capture: one table under a name
+    // that says nothing, and a three-character cell is below the free-text
+    // floor, so only the record rule can hide it.
+    const lines = await outputLines('rows', '[{"payee":"Acme","password":"abc"}]');
+    expect(lines).toContain('[output: rows] = "[{"payee":"Acme","password":"***"}]"');
+    expect(lines.join('\n')).not.toContain('"abc"');
+    // …and the column the record rule leaves alone is still readable.
+    expect(lines.join('\n')).toContain('Acme');
+  });
+
+  it('still prints a plain capture in full', async () => {
+    const lines = await outputLines('total', '37.76');
+    expect(lines).toContain('[output: total] = "37.76"');
   });
 });

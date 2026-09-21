@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   chainMembers,
   createControlState,
+  forEachPassOf,
   parseListValue,
   planAfterGuard,
   planAfterStep,
@@ -314,16 +315,221 @@ describe('For each', () => {
   });
 });
 
+/**
+ * A list whose elements are OBJECTS
+ * (docs/specs/SPEC-structured-table-reads.md §8.2; §12 items 16 and 17).
+ *
+ * The scalar block above is the regression half of §12 item 15 and must stay
+ * exactly as it was: an object list is an ADDITION to what a pass binds, never
+ * a replacement. Every assertion here therefore names the base binding too.
+ */
+describe('For each over objects', () => {
+  const ROWS =
+    '[{"_row":"1","id":"ORD-1001","customer":"Alice Smith","status":"Completed"},' +
+    '{"_row":"2","id":"ORD-1002","customer":"Bob Jones","status":"Pending"}]';
+
+  const enter = (raw: string, state: ControlState) => {
+    const parsed = parseListValue('orders', raw);
+    if ('error' in parsed) throw new Error(parsed.error);
+    return planAfterGuard(
+      FOREACH_LOOP,
+      0,
+      { kind: 'list', items: parsed.items, properties: parsed.properties },
+      state,
+    );
+  };
+
+  it('binds the base JSON and every direct property, in the record"s order', () => {
+    const state = createControlState();
+    const first = enter(ROWS, state);
+    // Base first, then the properties in the order the record wrote them —
+    // `_row` leads because `readTable` writes it first (§7.4), which is what
+    // makes the Variables panel show the row number at the top.
+    expect(Object.entries(first.pass!.bindings!)).toEqual([
+      ['account', '{"_row":"1","id":"ORD-1001","customer":"Alice Smith","status":"Completed"}'],
+      ['account._row', '1'],
+      ['account.id', 'ORD-1001'],
+      ['account.customer', 'Alice Smith'],
+      ['account.status', 'Completed'],
+    ]);
+
+    planAfterStep(FOREACH_LOOP, 1, state);
+    const second = planAfterGuard(FOREACH_LOOP, 0, { kind: 'resume' }, state);
+    expect(second.pass).toMatchObject({
+      iteration: 2,
+      count: 2,
+      bindings: {
+        'account._row': '2',
+        'account.id': 'ORD-1002',
+        'account.status': 'Pending',
+      },
+    });
+  });
+
+  it('converts each property the way §8.2 says', () => {
+    const parsed = parseListValue(
+      'n',
+      '[{"s":"text","n":42,"b":true,"z":null,"o":{"a":1},"a":[1,"two"]}]',
+    );
+    expect(parsed).toEqual({
+      items: ['{"s":"text","n":42,"b":true,"z":null,"o":{"a":1},"a":[1,"two"]}'],
+      properties: [
+        {
+          s: 'text',
+          n: '42',
+          b: 'true',
+          z: 'null',
+          o: '{"a":1}',
+          a: '[1,"two"]',
+        },
+      ],
+    });
+  });
+
+  it('an empty cell binds "" and is not dropped', () => {
+    const parsed = parseListValue('p', '[{"payee":"Netflix","reference":""}]');
+    expect(parsed).toEqual({
+      items: ['{"payee":"Netflix","reference":""}'],
+      properties: [{ payee: 'Netflix', reference: '' }],
+    });
+  });
+
+  it('a mixed list binds properties only where there are any', () => {
+    const parsed = parseListValue('m', '["plain",{"id":"A"},7]');
+    expect(parsed).toEqual({
+      items: ['plain', '{"id":"A"}', '7'],
+      properties: [undefined, { id: 'A' }, undefined],
+    });
+  });
+
+  it('one property segment only — a nested object is text, not more bindings', () => {
+    const state = createControlState();
+    const plan = enter('[{"id":"A","address":{"city":"Perth"}}]', state);
+    expect(plan.pass!.bindings).toEqual({
+      account: '{"id":"A","address":{"city":"Perth"}}',
+      'account.id': 'A',
+      'account.address': '{"city":"Perth"}',
+    });
+    expect(plan.pass!.bindings).not.toHaveProperty('account.address.city');
+  });
+
+  it('a record from a tool with no _row simply has no {{item._row}}', () => {
+    const state = createControlState();
+    const plan = enter('[{"id":"A"}]', state);
+    expect(Object.keys(plan.pass!.bindings!)).toEqual(['account', 'account.id']);
+  });
+
+  /**
+   * A key no placeholder can spell is DROPPED, not fatal.
+   *
+   * It failed the whole guard until review 2, which is a regression against
+   * §2's promise that existing `For each` behaviour is preserved: a loop over
+   * a tool's or an API's array of objects, using `{{item}}` as JSON text and
+   * no dotted binding at all, stopped running the moment one record carried a
+   * `content-type`. Nothing about that loop asked for a binding the key
+   * cannot have. So the unspellable keys are reported once, and the rest of
+   * the record binds exactly as before.
+   */
+  it('an unspellable key is not bound, and does not fail the guard', () => {
+    for (const [raw, key] of [
+      ['[{"id":"A"},{"id":"B","order id":"x"}]', 'order id'],
+      ['[{"id":"A"},{"id":"B","1st":"x"}]', '1st'],
+      ['[{"id":"A"},{"id":"B","content-type":"x"}]', 'content-type'],
+      ['[{"id":"A"},{"id":"B","__proto__":"x"}]', '__proto__'],
+      ['[{"id":"A"},{"id":"B","constructor":"x"}]', 'constructor'],
+      ['[{"id":"A"},{"id":"B","prototype":"x"}]', 'prototype'],
+    ] as const) {
+      const parsed = parseListValue('orders', raw);
+      expect(parsed, raw).not.toHaveProperty('error');
+      const ok = parsed as {
+        items: string[];
+        properties: Array<Record<string, string> | undefined>;
+        unspellable?: string[];
+      };
+      // Both items are there, the spellable key binds, and the other does not.
+      expect(ok.items, raw).toHaveLength(2);
+      expect(ok.properties[1], raw).toEqual({ id: 'B' });
+      // Named once, for the caller to log.
+      expect(ok.unspellable, raw).toEqual([key]);
+    }
+  });
+
+  it('names each unspellable key once, in first-seen order, across the whole list', () => {
+    const parsed = parseListValue(
+      'orders',
+      '[{"id":"A","content-type":"x","Order ID":"1"},{"id":"B","content-type":"y"}]',
+    ) as { properties: Array<Record<string, string>>; unspellable?: string[] };
+    expect(parsed.unspellable).toEqual(['content-type', 'Order ID']);
+    expect(parsed.properties).toEqual([{ id: 'A' }, { id: 'B' }]);
+  });
+
+  it('says nothing at all when every key is spellable', () => {
+    const parsed = parseListValue('orders', '[{"id":"A"}]');
+    expect(parsed).not.toHaveProperty('unspellable');
+  });
+
+  it("an inner loop's dotted bindings do not disturb an outer loop's", () => {
+    // ```
+    // 0  For each {{order}} in {{orders}}, …     body 1..3
+    // 1    For each {{line}} in {{lines}}, …     body 2..2
+    // 2      Check the line
+    // 3    Verify the order
+    // ```
+    const NESTED: (ControlRecord | null)[] = [
+      { kind: 'foreach', item: 'order', list: 'orders', bodyStart: 1, bodyEnd: 3, label: 'o' },
+      { kind: 'foreach', item: 'line', list: 'lines', bodyStart: 2, bodyEnd: 2, label: 'l' },
+      null,
+      null,
+    ];
+    const state = createControlState();
+    const outer = planAfterGuard(
+      NESTED,
+      0,
+      { kind: 'list', items: ['{"id":"A"}'], properties: [{ id: 'A' }] },
+      state,
+    );
+    const inner = planAfterGuard(
+      NESTED,
+      1,
+      { kind: 'list', items: ['{"id":"L1"}'], properties: [{ id: 'L1' }] },
+      state,
+    );
+    // Different item names, so the live map holds both at once; the planner
+    // writes only its own, exactly as the scalar binding always has.
+    expect(outer.pass!.bindings).toEqual({ order: '{"id":"A"}', 'order.id': 'A' });
+    expect(inner.pass!.bindings).toEqual({ line: '{"id":"L1"}', 'line.id': 'L1' });
+  });
+
+  it('forEachPassOf answers with the pass the item is on, innermost first', () => {
+    const state = createControlState();
+    expect(forEachPassOf(FOREACH_LOOP, state, 'account')).toBeUndefined();
+    enter(ROWS, state);
+    expect(forEachPassOf(FOREACH_LOOP, state, 'account')).toBe(1);
+    planAfterStep(FOREACH_LOOP, 1, state);
+    planAfterGuard(FOREACH_LOOP, 0, { kind: 'resume' }, state);
+    expect(forEachPassOf(FOREACH_LOOP, state, 'account')).toBe(2);
+    expect(forEachPassOf(FOREACH_LOOP, state, 'nobody')).toBeUndefined();
+  });
+});
+
 describe('what {{list}} must hold', () => {
   it('a JSON array of strings', () => {
+    // `properties` rides alongside for object support
+    // (SPEC-structured-table-reads.md §8.2); a scalar element has none, and
+    // its entry is `undefined` rather than absent so the array stays parallel
+    // to `items` and can be indexed by the cursor.
     expect(parseListValue('accounts', '["Savings","Everyday"]')).toEqual({
       items: ['Savings', 'Everyday'],
+      properties: [undefined, undefined],
     });
   });
 
   it('a non-string element is bound as its JSON text', () => {
     expect(parseListValue('n', '[1, true, null, {"a":1}]')).toEqual({
       items: ['1', 'true', 'null', '{"a":1}'],
+      // The object element keeps its base JSON binding AND gains a property
+      // one — the base half is what this test has always asserted.
+      properties: [undefined, undefined, undefined, { a: '1' }],
     });
   });
 
@@ -389,6 +595,37 @@ describe('runs that start mid-structure', () => {
   it('starting outside every structure plans nothing', () => {
     expect(planForStart(CHAIN, 0, createControlState())).toEqual({ skip: [], next: 0 });
     expect(planForStart(CHAIN, 9, createControlState())).toEqual({ skip: [], next: 9 });
+  });
+
+  /**
+   * The Electron debugger's jump-to-step calls `planForStart` against LIVE
+   * state, and the rebuild it does there used to write `{items, index,
+   * resumed}` — dropping `properties`, which is the only place the row's
+   * dotted values live.
+   *
+   * Nothing failed at the jump. Every pass AFTER it bound the base name and no
+   * dotted key, so `{{order.id}}` in the body resolved to whatever the last
+   * pass before the jump had left in the map: the pre-jump row's id, on every
+   * remaining row, silently.
+   */
+  it('a jump into a For each body keeps the rows properties', () => {
+    const state = createControlState();
+    const parsed = parseListValue('accounts', '[{"id":"A"},{"id":"B"},{"id":"C"}]');
+    if ('error' in parsed) throw new Error(parsed.error);
+    planAfterGuard(
+      FOREACH_LOOP,
+      0,
+      { kind: 'list', items: parsed.items, properties: parsed.properties },
+      state,
+    );
+
+    // The debugger jumps back into the body.
+    planForStart(FOREACH_LOOP, 1, state);
+    expect(state.cursors.get(0)!.properties).toEqual([{ id: 'A' }, { id: 'B' }, { id: 'C' }]);
+
+    // …and the next pass binds its own row's property, not the previous one's.
+    const next = planAfterGuard(FOREACH_LOOP, 0, { kind: 'resume' }, state);
+    expect(next.pass!.bindings).toEqual({ account: '{"id":"B"}', 'account.id': 'B' });
   });
 });
 

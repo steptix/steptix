@@ -12,6 +12,7 @@ import {
   findEnvLine,
   findParameterBullet,
   locateJsonPath,
+  paramDefinition,
   paramRefAtPosition,
   refAtPosition,
 } from '../src/extension/env-data-definition-core.ts';
@@ -552,4 +553,132 @@ test('isFencedLine marks the fenced body and its delimiters, not the prose', () 
   assert.equal(isFencedLine(text, 0), false);
   assert.equal(isFencedLine(text, 2), true);
   assert.equal(isFencedLine(text, 4), false);
+});
+
+// ---------------------------------------------------------------------------
+// paramDefinition — which line defines a `{{name}}`, and why none does
+// ---------------------------------------------------------------------------
+//
+// The decision the provider used to make inline. Kept here because it is the
+// part that can be wrong: which source wins for a dotted name, and which
+// bindings a run has actually reached by the cursor's line.
+
+/** `## Parameters` declares `order`, and a loop binds it too. Line numbers
+ *  are 0-based, as `paramDefinition` reports its hits. */
+const BOTH_SOURCES = [
+  '# Orders', //                                                         0
+  '', //                                                                 1
+  '## Parameters', //                                                    2
+  '- order: ORD-1', //                                                   3
+  '', //                                                                 4
+  '## Steps', //                                                         5
+  '1. Read the Order ID column as id from every row [store as: orders]', // 6
+  '2. For each {{order}} in {{orders}}, Check the order', //              7
+  '', //                                                                 8
+  '### Check the order', //                                              9
+  '1. Verify the row for "{{order.id}}" is shown', //                    10
+].join('\n');
+
+test('a dotted reference prefers the For each over a same-named parameter', () => {
+  // A `## Parameters` bullet holds a string; `{{order.id}}` reads a property,
+  // which only a record a loop bound has. The bullet is still offered, second
+  // — it is what `{{order}}` means everywhere the loop is not running.
+  const found = paramDefinition(BOTH_SOURCES, 10, 'order.id');
+  assert.equal(found.kind, 'found');
+  assert.deepEqual(
+    found.hits.map((h) => h.line),
+    [7, 3],
+  );
+});
+
+test('a flat reference prefers the parameter, which is the other reading', () => {
+  const found = paramDefinition(BOTH_SOURCES, 10, 'order');
+  assert.equal(found.kind, 'found');
+  assert.deepEqual(
+    found.hits.map((h) => h.line),
+    [3, 7],
+  );
+});
+
+test('the hit selects the name token, not the line it sits on', () => {
+  const lines = BOTH_SOURCES.split('\n');
+  const hit = paramDefinition(BOTH_SOURCES, 10, 'order.id').hits[0];
+  assert.equal(lines[hit.line].slice(hit.column, hit.column + hit.length), 'order');
+});
+
+test('a loop below the reference IN THE SAME BODY has not run yet', () => {
+  // `{{item}}` on the body's first line, the `For each` that binds it three
+  // lines below: the run reaches the reference first, so this is the same
+  // miss as a capture written later — not a jump.
+  const text = [
+    '## Steps', //                                     0
+    '1. Read the rows [store as: rows]', //            1
+    '2. Check them', //                                2
+    '', //                                             3
+    '### Check them', //                               4
+    '1. Verify {{item.id}} is shown', //               5
+    '2. Click Next', //                                6
+    '3. For each {{item}} in {{rows}}, Check them', // 7
+  ].join('\n');
+  assert.deepEqual(paramDefinition(text, 5, 'item.id'), { kind: 'later-loop', line: 8 });
+  // …and from BELOW that header, in the same body, it resolves.
+  assert.equal(paramDefinition(text, 7, 'item.id').kind, 'found');
+});
+
+test('a loop in ANOTHER body is not judged by position — bodies are out of order', () => {
+  // The header is on a LOWER line than the reference and still binds it: the
+  // body it calls is defined under the main flow, as every body is.
+  const text = [
+    '## Steps', //                                        0
+    '1. Read the rows [store as: rows]', //               1
+    '2. For each {{item}} in {{rows}}, Check the row', // 2
+    '', //                                                3
+    '### Check the row', //                               4
+    '1. Verify {{item.id}} is shown', //                  5
+  ].join('\n');
+  const found = paramDefinition(text, 5, 'item.id');
+  assert.equal(found.kind, 'found');
+  assert.deepEqual(
+    found.hits.map((h) => h.line),
+    [2],
+  );
+});
+
+test('a For each under a #### heading never runs, so it defines nothing', () => {
+  // `classifyLines` calls it an `inert-step`, and TestBench's own diagnostic
+  // says "This step never runs" on that line. F12 must not land there.
+  const text = [
+    '## Steps', //                                             0
+    '1. Read the rows [store as: rows]', //                    1
+    '2. Check the row', //                                     2
+    '', //                                                     3
+    '#### Idea we dropped', //                                 4
+    '1. For each {{item}} in {{rows}}, Check the row', //       5
+    '', //                                                     6
+    '### Check the row', //                                    7
+    '1. Verify {{item.id}} is shown', //                       8
+  ].join('\n');
+  assert.deepEqual(paramDefinition(text, 8, 'item.id'), { kind: 'none' });
+});
+
+test('a numbered line outside the Steps span is prose, not a binding', () => {
+  const text = [
+    '# Notes', //                                          0
+    '', //                                                 1
+    '1. For each {{item}} in {{rows}}, do the thing', //    2
+    '', //                                                 3
+    '## Steps', //                                         4
+    '1. Verify {{item.id}} is shown', //                   5
+  ].join('\n');
+  assert.deepEqual(paramDefinition(text, 5, 'item.id'), { kind: 'none' });
+});
+
+test('a capture written later is still reported as later, ahead of any loop', () => {
+  const text = ['## Steps', '1. Verify {{token}}', '2. Read it [store as: token]'].join('\n');
+  assert.deepEqual(paramDefinition(text, 1, 'token'), { kind: 'later-capture', line: 3 });
+});
+
+test('a dotted name whose root nothing binds is a plain miss', () => {
+  const text = ['## Steps', '1. Verify {{ghost.id}} is shown'].join('\n');
+  assert.deepEqual(paramDefinition(text, 1, 'ghost.id'), { kind: 'none' });
 });

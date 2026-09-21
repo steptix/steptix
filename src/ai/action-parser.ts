@@ -1,4 +1,10 @@
-import type { AIAction, AIResponse, BranchedAIResponse, ActionType } from './types.js';
+import type {
+  AIAction,
+  AIResponse,
+  BranchedAIResponse,
+  ActionType,
+  TableReadColumn,
+} from './types.js';
 import { logger } from '../utils/logger.js';
 import { normaliseUploadPath } from '../browser/upload-paths.js';
 
@@ -10,6 +16,9 @@ const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   'assert', 'keyboard', 'keypress', 'prompt',
   'api_call', 'extract_csrf', 'extract_value',
   'read', 'count',
+  // docs/specs/SPEC-structured-table-reads.md §6 — named columns from one
+  // native <table>, one record per visible data row.
+  'readTable',
   'find', 'expand',
   'noop',
   // stories/step-flow-control.md — the model's "the condition holds" answer.
@@ -140,6 +149,203 @@ function parseWithUploadPathRepair(jsonString: string): unknown {
     }
     throw err;
   }
+}
+
+// ── readTable validation (SPEC-structured-table-reads.md §6.2) ──────────────
+//
+// Every rule here rejects the WHOLE action. That is the one design decision
+// this block exists to enforce: a dropped malformed column would run a partial
+// read, and a row record missing a field the later steps name is a convincing
+// lie — worse than a step that failed and said why.
+
+/** Alias and variable names: a plain identifier, as §4.1 requires. */
+const SAFE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Names that are legal identifiers but poison an object literal. */
+const DANGEROUS_KEYS: ReadonlySet<string> = new Set(['__proto__', 'prototype', 'constructor']);
+/** The one property the runtime writes itself, so no alias may claim it (§4.5). */
+const ROW_NUMBER_KEY = '_row';
+/** §7.5 — a table wider than this is a mis-typed selector, not a table.
+ *  Exported because `src/browser/actions.ts` re-exports it rather than
+ *  spelling the number a second time (§9.2). */
+export const MAX_TABLE_COLUMNS = 20;
+/** §7.5 — the structured row cap, and therefore the ceiling on `limit`.
+ *  Exported for the same reason. */
+export const MAX_TABLE_ROWS = 500;
+/** §6.2 — a position past this is a typo, not a column. */
+const MAX_COLUMN_INDEX = 100;
+
+/**
+ * Validate a `readTable` request's `columns` and `limit` — the whole of §6.2
+ * that is not about `selector`/`as` — and answer them in canonical form.
+ *
+ * ONE validator, because §9.2 requires identical validation on both paths into
+ * the extractor: today's AI action, which arrives here as raw JSON, and phase
+ * 3's generated `tables.read`, which calls `readTableRecords` directly and
+ * never passes through this file. Re-checking only the 20-column cap there
+ * left every other rule to the parser, so the same malformed request got a
+ * precise refusal from one path and a silently wrong read from the other —
+ * `{ key: '_row' }` overwritten by the row number, `{ key: '__proto__' }`
+ * dropped from every record, a column naming neither header nor index
+ * answered with "there is no cell at position undefined", `limit: 0` storing
+ * `[]` successfully and `limit: 99999` stepping past the 500-row cap.
+ *
+ * `where` is what the messages are prefixed with — `readTable action at index
+ * 2` from the parser, plain `readTable` from the extractor — so the two differ
+ * in that phrase and in nothing else.
+ *
+ * Every rule rejects the WHOLE request. A dropped malformed column would run a
+ * partial read, and a row record missing a field the later steps name is a
+ * convincing lie — worse than a step that failed and said why.
+ */
+export function validateTableRead(
+  raw: { columns: unknown; limit?: unknown },
+  where: string,
+): { columns: TableReadColumn[]; limit?: number } {
+  const rawColumns = raw.columns;
+  if (!Array.isArray(rawColumns)) {
+    throw new Error(`${where} missing required "columns" array (name at least one column to read)`);
+  }
+  if (rawColumns.length === 0) {
+    throw new Error(`${where} has an empty "columns" array — name at least one column to read`);
+  }
+  if (rawColumns.length > MAX_TABLE_COLUMNS) {
+    throw new Error(
+      `${where} requests ${rawColumns.length} columns — the maximum is ${MAX_TABLE_COLUMNS}`,
+    );
+  }
+
+  const columns: TableReadColumn[] = [];
+  const seenKeys = new Set<string>();
+  rawColumns.forEach((rawColumn, i) => {
+    const at = `${where}: column ${i + 1}`;
+    if (typeof rawColumn !== 'object' || rawColumn === null || Array.isArray(rawColumn)) {
+      throw new Error(`${at} is not an object`);
+    }
+    const col = rawColumn as Record<string, unknown>;
+
+    // PRESENT means present-and-not-undefined, and `null` is present. A model
+    // that emits `"index": null` beside a header has contradicted itself, and
+    // `{ "index": null }` alone is a column that names nothing; reading either
+    // as "absent" ran a read the author did not ask for. Same rule for
+    // "limit" and "mode" below, so all three refuse a null the same way.
+    const hasHeader = col['header'] !== undefined;
+    const hasIndex = col['index'] !== undefined;
+    if (hasHeader && hasIndex) {
+      throw new Error(
+        `${at} has both "header" and "index" — a column is named by its header text OR by its position, never both`,
+      );
+    }
+    if (!hasHeader && !hasIndex) {
+      throw new Error(
+        `${at} has neither "header" nor "index" — name the column by its header text or by its one-based position`,
+      );
+    }
+
+    let header: string | undefined;
+    let columnIndex: number | undefined;
+    if (hasHeader) {
+      if (typeof col['header'] !== 'string' || !col['header'].trim()) {
+        throw new Error(
+          `${at} has a blank "header" ${JSON.stringify(col['header'])} — copy the header text exactly as the page renders it`,
+        );
+      }
+      header = col['header'];
+    } else {
+      const raw = col['index'];
+      if (
+        typeof raw !== 'number' ||
+        !Number.isInteger(raw) ||
+        raw < 1 ||
+        raw > MAX_COLUMN_INDEX
+      ) {
+        throw new Error(
+          `${at} has an invalid "index" ${JSON.stringify(raw)} — use a one-based whole number from 1 to ${MAX_COLUMN_INDEX}`,
+        );
+      }
+      columnIndex = raw;
+    }
+
+    const key = col['key'];
+    if (typeof key !== 'string' || !SAFE_NAME_RE.test(key)) {
+      throw new Error(
+        `${at} has an invalid "key" ${JSON.stringify(key)} — use letters, digits and underscores, starting with a letter or underscore`,
+      );
+    }
+    if (key === ROW_NUMBER_KEY) {
+      throw new Error(
+        `${at} uses the reserved key "${ROW_NUMBER_KEY}" — the runtime writes the row number on every record`,
+      );
+    }
+    if (DANGEROUS_KEYS.has(key)) {
+      throw new Error(`${at} uses the reserved key "${key}"`);
+    }
+    // Key uniqueness also settles §6.2's duplicated `(header, key)` /
+    // `(index, key)` pair: a repeated pair repeats its key.
+    if (seenKeys.has(key)) {
+      throw new Error(`${at} repeats the key "${key}" — every column needs its own name`);
+    }
+    seenKeys.add(key);
+
+    const mode = col['mode'];
+    if (mode !== undefined && mode !== 'text') {
+      throw new Error(
+        `${at} uses mode ${JSON.stringify(mode)}, which is phase 2 — phase 1 reads rendered text only, so omit "mode" or set it to "text"`,
+      );
+    }
+
+    columns.push({
+      ...(header !== undefined && { header }),
+      ...(columnIndex !== undefined && { index: columnIndex }),
+      key,
+      ...(mode === 'text' && { mode: 'text' as const }),
+    });
+  });
+
+  const rawLimit = raw.limit;
+  if (rawLimit === undefined) return { columns };
+  if (
+    typeof rawLimit !== 'number' ||
+    !Number.isInteger(rawLimit) ||
+    rawLimit < 1 ||
+    rawLimit > MAX_TABLE_ROWS
+  ) {
+    throw new Error(
+      `${where} has an invalid "limit" ${JSON.stringify(rawLimit)} — use a whole number from 1 to ${MAX_TABLE_ROWS}`,
+    );
+  }
+  return { columns, limit: rawLimit };
+}
+
+/**
+ * Validate and copy a `readTable` action's `selector`, `as`, `columns` and
+ * `limit` (SPEC-structured-table-reads.md §6.2). Mutates `action` on success;
+ * throws with a precise message on any rejection.
+ *
+ * The parser's other fields are copied opportunistically — an unrecognised
+ * `direction` is dropped and the action still runs. These are not: a column
+ * list is the whole meaning of the action.
+ */
+function applyTableReadFields(action: AIAction, obj: Record<string, unknown>, index: number): void {
+  const where = `readTable action at index ${index}`;
+
+  if (typeof action.selector !== 'string' || !action.selector.trim()) {
+    throw new Error(`${where} missing required "selector" field (a CSS selector for one native <table>)`);
+  }
+  if (typeof action.as !== 'string' || !action.as.trim()) {
+    throw new Error(`${where} missing required "as" field (the variable the row records are stored in)`);
+  }
+  if (!SAFE_NAME_RE.test(action.as)) {
+    throw new Error(
+      `${where} has an invalid "as" name "${action.as}" — use letters, digits and underscores, starting with a letter or underscore`,
+    );
+  }
+
+  const { columns, limit } = validateTableRead(
+    { columns: obj['columns'], limit: obj['limit'] },
+    where,
+  );
+  action.columns = columns;
+  if (limit !== undefined) action.limit = limit;
 }
 
 /**
@@ -514,6 +720,13 @@ function parseAction(raw: unknown, index: number): AIAction {
     );
   }
 
+  // Structured table reads. Validated as a unit AFTER the scalar fields are
+  // copied, because every rule reads `selector` / `as` off the canonical
+  // action rather than the raw object (SPEC-structured-table-reads.md §6.2).
+  if (action.action === 'readTable') {
+    applyTableReadFields(action, obj, index);
+  }
+
   const modeRaw = obj['apiMode'];
   if (modeRaw === 'browser' || modeRaw === 'standalone') {
     action.apiMode = modeRaw;
@@ -574,7 +787,14 @@ function parseAction(raw: unknown, index: number): AIAction {
       }
     } else {
       // dom / api / both / undefined (defaults to dom in the runner).
-      if (typeof obj['expected'] !== 'string' || !obj['expected'].trim()) {
+      //
+      // PRESENT, not non-empty: `""` is the right expectation for "the
+      // Reference cell is empty", so the old `.trim()` test rejected the model
+      // exactly when it answered correctly, and the step failed in the parser
+      // before any page was read. An empty cell is a legitimate thing to
+      // assert (SPEC-structured-table-reads.md §8.3, "Empty values"); what is
+      // not legitimate is omitting the field, which is a half-built action.
+      if (typeof obj['expected'] !== 'string') {
         throw new Error(
           `Assert action at index ${index} missing required "expected" field (or set "against": "predicate" for self-contained predicates over already-substituted values)`,
         );

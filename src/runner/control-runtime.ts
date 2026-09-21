@@ -23,16 +23,28 @@ import type { AiInteraction, LoopMarker, StepResult } from '../report/types.js';
 import {
   chainMembersFrom,
   exitFrom,
+  forEachPassOf,
   parseListValue,
   planAfterGuard,
   planAtGuard,
   type ControlPlan,
   type ControlRecord,
   type ControlState,
+  type GuardRequest,
   type GuardVerdict,
 } from './control-flow.js';
+import { decideConditionLocally, localReasoning } from './literal-decision.js';
+import { clearDottedKeys, placeholderRoot } from '../parser/parameters.js';
+import {
+  boundValue,
+  dottedReferenceError,
+  type PlaceholderValues,
+} from './placeholder-substitution.js';
+import { redact, runSecrets } from '../utils/secrets.js';
+import { markLoopBindings } from '../utils/loop-bindings.js';
+import { logger } from '../utils/logger.js';
 import { evaluateConditions } from './step-executor.js';
-import type { StepExecutorOptions } from './step-executor.js';
+import type { ConditionVerdict, StepExecutorOptions } from './step-executor.js';
 
 /** A loop record, narrowed — the three kinds that own a body and a label. */
 export type LoopRecord = Extract<ControlRecord, { label: string }>;
@@ -40,6 +52,75 @@ export type LoopRecord = Extract<ControlRecord, { label: string }>;
 /** True for a `While` / `Repeat` / `For each` record. */
 export function isLoopRecord(record: ControlRecord): record is LoopRecord {
   return record.kind === 'while' || record.kind === 'repeat' || record.kind === 'foreach';
+}
+
+/**
+ * Write one loop pass's bindings into the live variable map, clearing the
+ * previous pass's dotted ones first
+ * (docs/specs/SPEC-structured-table-reads.md §8.2, §8.3).
+ *
+ * ## Why this is not `Object.assign`
+ *
+ * It was, in all three run loops, and rows are not all the same shape. Over
+ * `[{"_row":"1","id":"A","note":"first"},{"_row":"2","id":"B"}]`, pass 1
+ * writes `row`, `row._row`, `row.id`, `row.note`; pass 2 writes three of those
+ * four and leaves `row.note` where it was. So `{{row.note}}` on pass 2
+ * substituted `first` — the PREVIOUS row's note, printed, asserted on and
+ * typed into the page as if it belonged to row 2 — and §8.3's refusal, whose
+ * whole job is to say `{{row.note}} has no value in For each item 2`, could
+ * not fire, because the key was there.
+ *
+ * It needs no debugger and no odd row to reach. Two sequential `For each`
+ * loops sharing an item name do it, and so does a loop over a list of scalars
+ * after one over records: nothing about a scalar pass writes `{{row.id}}`, so
+ * `{{row.id}}` still holds the last record's id, for every pass of the second
+ * loop.
+ *
+ * ## What it clears, and what it deliberately does not
+ *
+ * For each ROOT the incoming bindings name — `row`, from `row` and `row.id`
+ * alike — every `row.<anything>` already in the map goes, and then the new
+ * bindings are assigned. Nothing else is touched: a different loop's `order.x`
+ * survives, and so does a flat `row` when a later pass happens not to rebind
+ * it (it always does, since a pass always binds its base name).
+ *
+ * §8.2's "the last pass's bindings remain after the loop" is unchanged. A loop
+ * that has ENDED binds nothing more, so nothing clears its keys; they are
+ * cleared when, and only when, the same root is bound again.
+ */
+export function applyPassBindings(
+  map: Record<string, string>,
+  bindings: Record<string, string>,
+): void {
+  const roots = new Set<string>();
+  for (const key of Object.keys(bindings)) roots.add(placeholderRoot(key));
+  clearDottedKeys(map, roots);
+  // `defineProperty` per key, not `Object.assign`, for the reason
+  // `bindVariable` gives: assignment hits `Object.prototype`'s setter for a
+  // binding named `__proto__`, which ignores a string. `passBindings` builds
+  // its object with a COMPUTED key, so `__proto__` really is an own property
+  // of `bindings` and really did reach this line — `For each {{__proto__}} in
+  // {{orders}}` parses, and bound the dotted keys while the flat name stayed
+  // literal, which is half a pass with nothing said about the other half.
+  //
+  // Not `bindVariable` in a loop: the clear above is for the WHOLE pass, and
+  // doing it per key would make the result depend on whether the flat name
+  // happened to come before its properties.
+  for (const [key, value] of Object.entries(bindings)) {
+    Object.defineProperty(map, key, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  // Say which of these names are a pass's, so the masking rules read them by
+  // the two-segment rule and everything else dotted in the map — a data
+  // file's `user.apikey` heading — by the author's (§7.6).
+  markLoopBindings(
+    map,
+    Object.keys(bindings).filter((key) => key.includes('.')),
+  );
 }
 
 /** What one visit to a guard produced. */
@@ -82,10 +163,64 @@ export async function evaluateGuard(args: {
   resolvedParameters: Record<string, string>;
   /** Options for the judge's model call. */
   executorOptions: StepExecutorOptions;
+  /**
+   * This run's masker, for the one string this module writes that can carry a
+   * VALUE: a locally decided condition's reasoning.
+   *
+   * Each run loop has its own — the server's `secretsNow` counts frame inputs
+   * as well as the parameter map — so it is passed in rather than derived.
+   * Omitted, the fallback below is what the CLI and the Electron adapter build
+   * for themselves anyway, so a caller that forgets still masks.
+   */
+  redact?: ((text: string) => string) | undefined;
 }): Promise<GuardEvaluation> {
   const { controls, index, state, resolvedParameters, executorOptions } = args;
+  const redactText =
+    args.redact ??
+    ((text: string) =>
+      redact(text, runSecrets({ parameters: resolvedParameters, envData: executorOptions.envData })));
   const startedAt = Date.now();
   const request = planAtGuard(controls, index, state);
+  /** What a condition's placeholders hold right now — the same two syntaxes
+   *  and the same live map the step text resolves against, so a condition and
+   *  the tail below it can never disagree about what `{{order.status}}` is. */
+  const values: PlaceholderValues = {
+    parameters: resolvedParameters,
+    ...(executorOptions.envData !== undefined && { envData: executorOptions.envData }),
+  };
+
+  // A dotted reference the pass cannot answer, refused before anything is
+  // asked — the guard's twin of the step path's check
+  // (docs/specs/SPEC-structured-table-reads.md §8.3). It lives HERE, in the
+  // one place all three run loops share, because the three dispatch their
+  // guards at different points: the server resolves every step's text before
+  // the control dispatch and so caught this incidentally, while the CLI and
+  // the Electron adapter dispatch the guard first and sent
+  // `If "{{order.missing}}" is empty` to the judge with the braces intact.
+  //
+  // The WHOLE chain is refused over one bad member, for the same reason
+  // `checkTurnReferences` refuses a whole turn: the judge is asked one
+  // question about every member at once, so there is no such thing as running
+  // the good half of it.
+  for (const text of conditionTexts(request)) {
+    const refusal = dottedReferenceError(
+      text,
+      resolvedParameters,
+      (item) => forEachPassOf(controls, state, item),
+      // The refusal names the row's properties and the keys the loop dropped,
+      // either of which can carry a secret — masked on the same terms as the
+      // `cannot be referenced as a placeholder` line below.
+      redactText,
+    );
+    if (refusal === undefined) continue;
+    return {
+      plan: { skip: [], next: exitFailed(controls, index) },
+      evaluated: true,
+      aiInteractions: [],
+      error: refusal,
+      durationMs: Date.now() - startedAt,
+    };
+  }
 
   let verdict: GuardVerdict;
   let reasoning: string | undefined;
@@ -95,10 +230,9 @@ export async function evaluateGuard(args: {
   try {
     switch (request.ask) {
       case 'chain': {
-        const judged = await evaluateConditions(
-          request.conditions.map((c) => c.condition),
-          executorOptions,
-        );
+        const conditions = request.conditions.map((c) => c.condition);
+        const local = decideLocally(conditions, values, redactText);
+        const judged = local ?? (await evaluateConditions(conditions, executorOptions));
         reasoning = judged.reasoning;
         aiInteractions = judged.aiInteractions;
         // Back to ABSOLUTE indices: the judge answered about a list the
@@ -114,14 +248,20 @@ export async function evaluateGuard(args: {
         break;
       }
       case 'condition': {
-        const judged = await evaluateConditions([request.condition], executorOptions);
+        const conditions = [request.condition];
+        const local = decideLocally(conditions, values, redactText);
+        const judged = local ?? (await evaluateConditions(conditions, executorOptions));
         reasoning = judged.reasoning;
         aiInteractions = judged.aiInteractions;
         verdict = { kind: 'condition', holds: judged.selected === 0 };
         break;
       }
       case 'list': {
-        const parsed = parseListValue(request.list, resolvedParameters[request.list]);
+        // `boundValue`, not a bare index: `For each {{row}} in {{constructor}}`
+        // would otherwise hand the parser the `Object` FUNCTION off the
+        // prototype of a map that binds no such list, in place of the
+        // "nothing binds it" error the author needs.
+        const parsed = parseListValue(request.list, boundValue(resolvedParameters, request.list));
         if ('error' in parsed) {
           return {
             plan: { skip: [], next: exitFailed(controls, index) },
@@ -131,7 +271,33 @@ export async function evaluateGuard(args: {
             durationMs: Date.now() - startedAt,
           };
         }
-        verdict = { kind: 'list', items: parsed.items };
+        if (parsed.unspellable !== undefined) {
+          // Keys that bound nothing — `content-type`, `Order ID` — said once
+          // per loop ENTRY, which is what this branch is: a pass that resumes
+          // a cursor it already holds asks the planner nothing and reads no
+          // list, so the line cannot repeat per pass
+          // (docs/specs/SPEC-structured-table-reads.md §8.2).
+          //
+          // `info` rather than `warn`, because nothing is wrong: the loop
+          // runs, and the author needs this only if they go looking for
+          // `{{order.contenttype}}`. Masked, like every other string this
+          // module writes from a run's values — a key can carry one.
+          const record = controls[index];
+          const item = record?.kind === 'foreach' ? record.item : request.list;
+          const n = parsed.unspellable.length;
+          const said =
+            n === 1
+              ? '1 property cannot be referenced as a placeholder'
+              : `${n} properties cannot be referenced as placeholders`;
+          logger.info(
+            redactText(`For each {{${item}}}: ${said} (${parsed.unspellable.join(', ')})`),
+          );
+        }
+        // `properties` rides along beside `items`: the planner turns it into
+        // `{{item.property}}` bindings, and a list of scalars carries an
+        // entry of `undefined` per element rather than nothing at all
+        // (SPEC-structured-table-reads.md §8.2).
+        verdict = { kind: 'list', items: parsed.items, properties: parsed.properties };
         reasoning = `\`{{${request.list}}}\` holds ${parsed.items.length} item${
           parsed.items.length === 1 ? '' : 's'
         }`;
@@ -169,6 +335,84 @@ export async function evaluateGuard(args: {
       isLoopRecord(record) && { error: capBreachMessage(record, plan.capBreached) }),
     durationMs: Date.now() - startedAt,
   };
+}
+
+/**
+ * The condition texts a guard visit is about to ask about — a chain's
+ * members, or one loop condition.
+ *
+ * Empty for a `For each` (its list name is flat, and `parseListValue` owns
+ * what that must hold) and for a visit that asks nobody.
+ */
+function conditionTexts(request: GuardRequest): readonly string[] {
+  if (request.ask === 'chain') return request.conditions.map((c) => c.condition);
+  if (request.ask === 'condition') return [request.condition];
+  return [];
+}
+
+/**
+ * A chain or a loop condition decided from its own text, with no model call —
+ * or null when the page is genuinely needed
+ * (src/parser/literal-condition.ts has the grammar and the run that motivated
+ * it).
+ *
+ * ALL OR NOTHING for a chain, and that is the whole of the design decision
+ * here. The judge is asked one question about the whole chain and answers
+ * first-holds-wins, so deciding member A locally and asking about B and C
+ * would be two decisions where the author wrote one — and the judge, shown a
+ * shorter list, would answer about a different question than the one the
+ * planner is holding indices for. If any member needs the page, the chain goes
+ * to the judge exactly as it did before this existed, unsubstituted text and
+ * `## Values` block included.
+ *
+ * Returns a {@link ConditionVerdict}, the judge's own shape, so the caller has
+ * one code path: same `selected`, same `reasoning` slot, and `aiInteractions`
+ * empty because nothing was asked. That is what keeps the guard row, the loop
+ * marker, the report and TestBench identical to a judged decision — the only
+ * visible difference is whose words are in `aiExplanation`.
+ *
+ * The rule itself — substitute as quoted literals, refuse a condition whose
+ * AUTHORED text made no reference, redact — lives in
+ * [literal-decision.ts](literal-decision.ts), because a flow-control line's
+ * condition (`If {{payment.status}} is "Overdue", then return`) is judged in
+ * the step executor and never reaches this function at all. Two judges, one
+ * rule.
+ */
+function decideLocally(
+  conditions: readonly string[],
+  values: PlaceholderValues,
+  redactText: (text: string) => string,
+): ConditionVerdict | null {
+  const decided: Array<{ text: string; holds: boolean }> = [];
+  for (const condition of conditions) {
+    const local = decideConditionLocally(condition, values, redactText);
+    if (!local) return null;
+    decided.push({ text: local.text, holds: local.holds });
+  }
+  if (decided.length === 0) return null;
+
+  const selected = decided.findIndex((d) => d.holds);
+  if (selected >= 0) {
+    const winner = decided[selected]!;
+    const reasoning = localReasoning(winner.text, true);
+    // Mirrors `evaluateConditions`' own line, label and all, so anything
+    // reading the run log for `Condition judge:` sees this decision too. The
+    // reasoning says who decided it. The AUTHORED condition is quoted here —
+    // it holds references, not values, so it needs no masking.
+    logger.debug(
+      `Condition judge: ${String.fromCharCode(65 + selected)} ("${conditions[selected]}") held — ${reasoning}`,
+    );
+    return { selected, reasoning, aiInteractions: [] };
+  }
+
+  const reasoning = `decided from the values: none held — ${decided
+    .map((d) => `${d.text} → false`)
+    .join(', ')}`;
+  // The reasoning already opens with `none held`; the log line prefixes the
+  // label and nothing else, or it read `Condition judge: none held — decided
+  // from the values: none held — …`.
+  logger.debug(`Condition judge: ${reasoning}`);
+  return { selected: null, reasoning, aiInteractions: [] };
 }
 
 /**
@@ -408,6 +652,18 @@ export class LoopRuntime {
       ...(pass.count !== undefined && { count: pass.count }),
       values: { ...(pass.bindings ?? {}) },
     };
+    // Whose names these are, recorded on the COPY — the registry is by object
+    // identity, so a `{ ...bindings }` arrives unmarked and `redactReport`
+    // would decide every dotted one by the author rule, masking `AU` because
+    // a column is called `keyword` (§7.6, the round-2 defect). Marked
+    // directly rather than inherited from the live map, because this map IS
+    // the pass's bindings and nothing else is in it: `applyPassBindings` is
+    // about to record exactly these names over there, from exactly this
+    // object, and it has not run yet on the first pass.
+    markLoopBindings(
+      marker.values,
+      Object.keys(marker.values).filter((key) => key.includes('.')),
+    );
     const ordinal = (this.ordinals.get(guard) ?? 0) + 1;
     this.ordinals.set(guard, ordinal);
     this.stack.push({ guard, record, marker, ordinal, frameAlias: new Map() });
@@ -447,19 +703,11 @@ export class LoopRuntime {
     return undefined;
   }
 
-  /** Is `index` inside any loop's body? Drives the step-cache opt-out, which
-   *  is a property of the FILE rather than of the run — so it takes the
-   *  records, not the stack. */
-  static insideLoopBody(
-    controls: readonly (ControlRecord | null)[],
-    index: number,
-  ): boolean {
-    for (const record of controls) {
-      if (!record || !isLoopRecord(record)) continue;
-      if (index >= record.bodyStart && index <= record.bodyEnd) return true;
-    }
-    return false;
-  }
+  // (There was an `insideLoopBody` here. It had no caller, and its docstring
+  //  claimed to drive the step-cache opt-out — which is really the
+  //  `loopBodySteps` set each loop builds from the records once, up front
+  //  (test-runner.ts, session-manager.ts). Two answers to one question, one of
+  //  them unreachable, is worse than none.)
 
   // ── Frame aliases (the Sessions API's half) ───────────────────────────────
 

@@ -40,6 +40,7 @@ import { identifyStepGroups } from '../runner/step-grouper.js';
 import {
   createControlState,
   firstLoopInRange,
+  forEachPassOf,
   guardVisitEvaluates,
   loopCompileRefusal,
   planAfterStep,
@@ -48,7 +49,9 @@ import {
   snapEndAt,
   type ControlRecord,
 } from '../runner/control-flow.js';
+import { dottedReferenceError } from '../runner/placeholder-substitution.js';
 import {
+  applyPassBindings,
   evaluateGuard,
   guardHistoryLines,
   guardResult,
@@ -61,7 +64,7 @@ import {
   SkipQueue,
   type LoopRecord,
 } from '../runner/control-runtime.js';
-import { parseControlLine } from '../parser/control-line.js';
+import { controlLineDefines, parseControlLine } from '../parser/control-line.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
@@ -107,7 +110,13 @@ import {
 import { LiveCompiler } from '../codebehind/live-compile.js';
 import type { CompilePhase, CompileStatus, CompileSummary } from '../codebehind/compile.js';
 import { compileLock, compileLockKey } from './compile-lock.js';
-import { redact, redactReport, runSecrets } from '../utils/secrets.js';
+import {
+  inheritLoopBindings,
+  loopBindingsOf,
+  redact,
+  redactReport,
+  runSecrets,
+} from '../utils/secrets.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { executeToolStep } from '../tools/executor.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
@@ -751,7 +760,42 @@ export type RunEvent =
     }
   | { type: 'frame:push'; frame: FrameInfo }
   | { type: 'frame:pop'; frameId: string; outputs: Record<string, string> }
-  | { type: 'frame:scope'; frameId: string; scope: Record<string, string> }
+  | {
+      type: 'frame:scope';
+      frameId: string;
+      scope: Record<string, string>;
+      /**
+       * Which dotted names in `scope` a `For each` pass BOUND there
+       * (docs/specs/SPEC-structured-table-reads.md §7.6).
+       *
+       * `scope` is a copy, and the loop-binding registry is by object
+       * identity, so without this the client saw a mixed map with nothing in
+       * it saying which half a name came from: `payment.keyword` (a page's
+       * column) and `user.apikey` (a data file's own heading) are both
+       * `root.property` to a reader. TestBench answered both the narrow way
+       * and printed the second in a view sitting beside a report that starred
+       * it. With the list, `maskIfSecret` (runner-core) applies the server's
+       * two-segment rule to a name that is in it and the flat author rule to
+       * one that is not — the same `isSecretParameterName` does.
+       *
+       * ALWAYS sent, empty list included: an absent field means "an older
+       * server, nothing known", which is the no-map fallback, while `[]` is
+       * the positive statement that this run has bound nothing — and that is
+       * what makes a test with no loop at all mask its `user.apikey`.
+       */
+      bindings?: string[];
+      /**
+       * The run's `## Config: unmask:` names — what the author has declared
+       * are NOT secrets despite `isSecretName` matching them. Sent only when
+       * the list is non-empty, so an ordinary run's payload is unchanged.
+       *
+       * Exempts an entry from ALL THREE rules on the client, exactly as
+       * `formatParameterBlock` (src/ai/prompts.ts) exempts it on the server:
+       * masking a declared non-secret by its value or by its record shape
+       * would take the hatch away again through another door.
+       */
+      unmask?: string[];
+    }
   | { type: 'step:awaiting'; line: number; frame?: FrameInfo }
   | { type: 'tool:awaiting-debugger'; toolName: string; toolFilePath?: string; line: number; frame?: FrameInfo }
   | { type: 'codebehind:awaiting-debugger'; file: string; line: number; frame?: FrameInfo }
@@ -1329,6 +1373,13 @@ function loopMarkerFor(
   // The wire FrameInfo deliberately carries no `inputs` — they are kept in a
   // parallel server-side map — so the row values come in separately.
   inputsByFrame: Record<string, Record<string, string>>,
+  // The LIVE variable map, only so the marker's values can be told whose
+  // names they are. `applyPassBindings` marks a pass's dotted bindings there
+  // and the registry is by object identity, so the frame-inputs copy this
+  // builds from — itself a copy, made in `cloneFramesForPass` — arrives with
+  // none of them, and `redactReport` would decide `payment.keyword` by the
+  // author rule and mask `AU` (§7.6, the round-2 defect).
+  boundIn?: object,
 ): LoopMarker | undefined {
   if (!frameId || !frames) return undefined;
   const seen = new Set<string>();
@@ -1341,17 +1392,40 @@ function loopMarkerFor(
     // (stories/control-flow.md). Requiring it here would have made every such
     // frame read as unlooped and dropped the band from the report entirely.
     if (current.iteration !== undefined) {
+      const values = { ...(inputsByFrame[current.id] ?? {}) };
+      if (boundIn) inheritLoopBindings(boundIn, values);
       return {
         kind: 'iteration',
         ...(current.skillName && { label: current.skillName }),
         index: current.iteration,
         ...(current.iterationCount !== undefined && { count: current.iterationCount }),
-        values: { ...(inputsByFrame[current.id] ?? {}) },
+        values,
       };
     }
     current = current.parentId ? frames[current.parentId] : undefined;
   }
   return undefined;
+}
+
+/**
+ * The parameter snapshot the live compile is handed — a copy, because the run
+ * keeps writing to its own map, with the loop marks carried onto it.
+ *
+ * The copy is the point and the hazard at once. The registry is by object
+ * identity, so the snapshot arrives as nobody's binding, and the compile's
+ * prompts — which now ask the map whose a dotted name is (§7.6) — would read
+ * every `payment.keyword` by the author rule and mask `AU` out of the block
+ * the model writes its selector from. One line at the copy, exactly as
+ * `secretsNow` does for its merge.
+ *
+ * Exported for tests/codebehind-live-compile.test.ts, which pins both halves
+ * of that: what this function answers, and that both `liveCompile.offer`
+ * call sites go through it rather than spreading the map themselves.
+ */
+export function liveCompileSnapshot(resolvedParameters: Record<string, string>): Record<string, string> {
+  const snapshot = { ...resolvedParameters };
+  inheritLoopBindings(resolvedParameters, snapshot);
+  return snapshot;
 }
 
 function outermostSectionName(
@@ -3067,11 +3141,15 @@ export class SessionManager {
     //
     // Read fresh on every call, as the parameter half already is: frames are
     // built after this assignment, and captures keep adding to the map.
-    secretsNow = () =>
-      runSecrets({
-        parameters: { ...resolvedParameters, ...Object.assign({}, ...Object.values(frameInputs)) },
-        envData: envDataCtx,
-      });
+    secretsNow = () => {
+      const merged = { ...resolvedParameters, ...Object.assign({}, ...Object.values(frameInputs)) };
+      // A copy carries none of the loop's marks (the registry is by object
+      // identity), and unmarked, every `row.<column>` in it would take the
+      // author rule — `AU` back in the mask set because a column is called
+      // `keyword`, the round-2 defect through a new door (§7.6).
+      inheritLoopBindings(resolvedParameters, merged);
+      return runSecrets({ parameters: merged, envData: envDataCtx });
+    };
 
     // `## Config: unmask: keyword, data.keys.public` — names and `${…}` refs
     // this test declares are NOT secrets, despite `isSecretName` matching them
@@ -3084,6 +3162,34 @@ export class SessionManager {
         .map((name) => name.trim())
         .filter((name) => name.length > 0),
     );
+
+    /**
+     * The two fields every `frame:scope` carries besides the scope itself:
+     * whose the dotted names are, and which names the author has unmasked
+     * (§7.6). Without them the client has a mixed map and no way to read it —
+     * a copy carries none of the loop-binding registry's marks, and `unmask`
+     * lived entirely server-side — so TestBench applied the two-segment rule
+     * to every dotted name and the mask to every unmasked one.
+     *
+     * Computed at each emit rather than once: `applyPassBindings` rewrites the
+     * registry on every pass and `clearDottedKeys` unmarks what a `Set`
+     * rebind drops, so the answer is only true for the instant it is read.
+     *
+     * `bindings` is unconditional, `[]` included — the client reads an ABSENT
+     * field as "older server, nothing known" and falls back to today's
+     * behaviour, so an empty list has to be a value it can receive. `unmask`
+     * is omitted when empty, which keeps an ordinary run's payload byte for
+     * byte what it was.
+     *
+     * The same pair for a frame whose scope merges `frameInputs`: those
+     * inputs are either a caller's flat skill args or the very pass bindings
+     * this registry was marked from (`cloneFramesForPass` copies
+     * `pass.bindings` into them), so the list already names them.
+     */
+    const scopeMasking = (): { bindings: string[]; unmask?: string[] } => ({
+      bindings: loopBindingsOf(resolvedParameters),
+      ...(unmaskNames.size > 0 && { unmask: [...unmaskNames] }),
+    });
 
     // Determine per-step timeout
     const stepTimeout = parseTimeoutMs(session.sessionConfig.timeout)
@@ -3787,6 +3893,7 @@ export class SessionManager {
           type: 'frame:scope',
           frameId: f.id,
           scope: { ...resolvedParameters, ...(frameInputs[f.id] ?? {}) },
+          ...scopeMasking(),
         });
       }
     };
@@ -3887,6 +3994,7 @@ export class SessionManager {
       type: 'frame:scope',
       frameId: '',
       scope: { ...resolvedParameters },
+      ...scopeMasking(),
     });
 
     // Partial re-run ("re-run this skill step with its variables"): skip every
@@ -4638,9 +4746,14 @@ export class SessionManager {
         // reachable path.
         const envInterpolated =
           setStep || !envDataCtx ? originalStep : interpolateEnvData(originalStep, envDataCtx);
+        // This loop interpolates EVERY step before it reaches the control
+        // dispatch, guard lines included — so a `For each {{payment}} in
+        // {{payments}}` header asks for the item name it is about to define.
+        // `controlLineDefines` is what stops that being warned about
+        // (src/parser/control-line.ts).
         const interpolated = setStep
           ? originalStep
-          : interpolate(envInterpolated, resolvedParameters);
+          : interpolate(envInterpolated, resolvedParameters, controlLineDefines(originalStep));
 
         // Partial re-run guard: a leftover `{{__skill…}}` after interpolation
         // means this tail step needs an internal value that an earlier (skipped)
@@ -4708,6 +4821,77 @@ export class SessionManager {
         // A file never gets this far: `validateControlFlow` (parser/markdown.ts)
         // refuses the same line by name with the same sentence. This is for the
         // path with no validator — steps POSTed straight to the Sessions API.
+        // ── A dotted reference this pass cannot answer ───────────────
+        //
+        // `{{order.statuz}}` where the row has `status`
+        // (docs/specs/SPEC-structured-table-reads.md §8.3). Refused here for
+        // the same reason as the contradiction above: before the model call,
+        // naming the properties the pass does hold, rather than sending six
+        // literal braces to a judge that will report it as a step it could not
+        // plan. Read off `originalStep`, since `interpolate` has already
+        // replaced every reference it could answer.
+        //
+        // DOTTED only. An unresolved flat name is old ground and keeps its
+        // warning — see `dottedReferenceError`.
+        //
+        // A GUARD line is skipped here and refused by `evaluateGuard` instead.
+        // This loop resolves every step before the control dispatch, so it
+        // would otherwise catch a guard's condition on the step path and file
+        // a `step:fail` where the CLI and the Electron adapter — which
+        // dispatch the guard first — file a failed GUARD row. One refusal, one
+        // shape, in the module all three share.
+        //
+        // Masked with `secretsNow` — which counts a section row's frame inputs
+        // as well as the parameter map — because the refusal is written from
+        // the run's own values (the properties the row holds, the keys the
+        // loop dropped) and goes out on the `step:fail` wire payload as well
+        // as into the run log and the report.
+        const dottedRefError =
+          setStep || (hasControls && controls[i])
+            ? undefined
+            : dottedReferenceError(
+                originalStep,
+                resolvedParameters,
+                (item) => forEachPassOf(controls, controlState, item),
+                (text) => redact(text, secretsNow()),
+              );
+        if (dottedRefError) {
+          const frame = frameInfoFor(i);
+          logger.error(`Session "${sessionId}" step ${i + 1}: ${dottedRefError}`);
+          emit({
+            type: 'step:start',
+            line: sourceLineFor(i),
+            ...(frame && { frame }),
+          });
+          emit({
+            type: 'step:fail',
+            line: sourceLineFor(i),
+            error: dottedRefError,
+            ...(frame && { frame }),
+          });
+          results.push({
+            step: originalStep,
+            status: 'failed',
+            actions: [],
+            screenshot: '',
+            reasoning: dottedRefError,
+            outputs: {},
+          });
+          fullStepResults.push({
+            index: i + 1,
+            instruction: originalStep,
+            status: 'failed',
+            turns: [],
+            durationMs: 0,
+            retried: false,
+            error: dottedRefError,
+            aiExplanation: dottedRefError,
+          });
+          overallStatus = 'failed';
+          errorInfo = { step: i, message: dottedRefError };
+          break;
+        }
+
         if (failureTailContradiction) {
           const error = failureTailContradictionError(originalStep);
           const frame = frameInfoFor(i);
@@ -5010,6 +5194,12 @@ export class SessionManager {
               index: i,
               state: controlState,
               resolvedParameters,
+              // A locally decided condition's reasoning carries VALUES — it is
+              // built from the substituted text — and goes out on `step:pass`
+              // as `output` as well as into the run log. `secretsNow` rather
+              // than the parameter map alone, because a looped section's row
+              // arrives as frame inputs.
+              redact: (text) => redact(text, secretsNow()),
               executorOptions: {
                 page: session.browserSession.pageTracker.getActive(),
                 config: runConfig,
@@ -5060,7 +5250,10 @@ export class SessionManager {
               // Into the live map, which is what makes `{{account}}` resolve in
               // the body. It keeps its last value after the loop — there is one
               // map, and the story says so rather than pretending otherwise.
-              Object.assign(resolvedParameters, plan.pass.bindings);
+              // `applyPassBindings` clears the last pass's dotted keys first,
+              // so a row that omits a property does not inherit the previous
+              // row's (control-runtime.ts).
+              applyPassBindings(resolvedParameters, plan.pass.bindings);
             }
           }
           // The loop ended: every `(n/?)` marker it issued becomes `(n/count)`,
@@ -5679,7 +5872,12 @@ export class SessionManager {
 
         const stepOutputs: Record<string, string> = {};
         for (const varName of captureVars) {
-          if (varName in resolvedParameters) {
+          // `hasOwn`, not `in`: `in` walks the prototype chain, so an
+          // `[output: constructor]` — or an `as` name the model chose — was
+          // "captured" off `Object.prototype` and the `Object` FUNCTION
+          // travelled into `session.outputs`, the `capture` wire event and
+          // the step's outputs, all three typed `string`.
+          if (Object.hasOwn(resolvedParameters, varName)) {
             stepOutputs[varName] = resolvedParameters[varName]!;
             // Accumulate into session outputs
             session.outputs[varName] = resolvedParameters[varName]!;
@@ -5772,7 +5970,7 @@ export class SessionManager {
         // agree; a table-driven section loop has only the frame's.
         const loop =
           loops.markerFor(i) ??
-          loopMarkerFor(emittedFrameId(i), expansionFrames, frameInputs);
+          loopMarkerFor(emittedFrameId(i), expansionFrames, frameInputs, resolvedParameters);
 
         const fullResult: StepResult = {
           ...stepResult,
@@ -5809,7 +6007,7 @@ export class SessionManager {
             index: i,
             ...(binding && { binding }),
             result: fullResult,
-            resolvedParameters: { ...resolvedParameters },
+            resolvedParameters: liveCompileSnapshot(resolvedParameters),
           });
         }
 
@@ -5909,6 +6107,7 @@ export class SessionManager {
             type: 'frame:scope',
             frameId: stepFrameId,
             scope: { ...resolvedParameters, ...(frameInputs[stepFrameId] ?? {}) },
+            ...scopeMasking(),
           });
 
           // Persist every resolvedParameters entry to session scope — a
@@ -6106,7 +6305,7 @@ export class SessionManager {
               // iteration band at exactly the rows a return produced.
               const skippedLoop =
                 loops.markerFor(j) ??
-                loopMarkerFor(emittedFrameId(j), expansionFrames, frameInputs);
+                loopMarkerFor(emittedFrameId(j), expansionFrames, frameInputs, resolvedParameters);
               const fullSkipped: StepResult = {
                 ...skippedResult,
                 ...(skippedSkill && { sourceSkill: skippedSkill }),
@@ -6129,7 +6328,7 @@ export class SessionManager {
                   index: j,
                   ...(skippedBinding && { binding: skippedBinding }),
                   result: fullSkipped,
-                  resolvedParameters: { ...resolvedParameters },
+                  resolvedParameters: liveCompileSnapshot(resolvedParameters),
                 });
               }
               logger.info(`Session "${sessionId}" step ${j + 1} skipped — ${reason}`);
@@ -6180,6 +6379,7 @@ export class SessionManager {
             type: 'frame:scope',
             frameId: stepFrameId,
             scope: { ...resolvedParameters, ...(frameInputs[stepFrameId] ?? {}) },
+            ...scopeMasking(),
           });
           // It EXECUTED (decision 6). `session.totalStepsExecuted` already counted
           // it above, before the pass/fail split; this is the other half of the
@@ -6229,6 +6429,7 @@ export class SessionManager {
             type: 'frame:scope',
             frameId: stepFrameId,
             scope: { ...resolvedParameters, ...(frameInputs[stepFrameId] ?? {}) },
+            ...scopeMasking(),
           });
           break;
         }

@@ -10,7 +10,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { hostBridge } from "./lib/host-bridge.js";
-import { collectVariables, parseParametersInline, maskIfSecretInline, classifyCaptureSource } from "./lib/variables-panel.js";
+import { collectVariables, parseParametersInline, maskIfSecretInline, maskIfSecretAuthoredInline, classifyCaptureSource } from "./lib/variables-panel.js";
 import { countStepLineStatuses, extractStepLineIds } from "./lib/step-lines-inline.js";
 import {
   stripDetailInline,
@@ -422,6 +422,25 @@ function TestBenchRunner() {
   // parametersResolved carry no such discriminator, so they leave this map
   // untouched — those rows render as parameters / plain captures.
   const [runtimeSources, setRuntimeSources] = useState({});
+  /**
+   * How to READ the values in `runtimeVariables`: `{ bindings, unmask }` from
+   * the run's latest `frame:scope` (docs/specs/SPEC-structured-table-reads.md
+   * §7.6).
+   *
+   * `bindings` names the dotted entries a `For each` pass bound, so
+   * `payment.keyword` takes the two-segment rule and a data file's own
+   * `user.apikey` heading takes the flat author rule — which is what the
+   * report does with it, and what this panel could not do while the wire said
+   * nothing. `unmask` is the test's `## Config: unmask:` list, exempt from
+   * every rule.
+   *
+   * REPLACED on each event rather than merged: both describe the map as of
+   * now, and a pass that rebinds a root must be able to take a name back out.
+   * An event carrying neither leaves `{}`, which the masker reads as "nothing
+   * known" and answers exactly as it did before these fields existed — so an
+   * older server renders what it always rendered.
+   */
+  const [runtimeMasking, setRuntimeMasking] = useState({});
   const [variablesCollapsed, setVariablesCollapsed] = useState(false);
   // "Re-run a skill step with its variables": { skillName, scope, paramNames }
   // when a top-level skill step fails on a live session, else null.
@@ -535,6 +554,7 @@ function TestBenchRunner() {
           if (msg.running && !runningRef.current && !msg.sync) {
             setRuntimeVariables({});
             setRuntimeSources({});
+            setRuntimeMasking({});
             // A new run invalidates any parked skill-failure re-run offer (its
             // captured scope is wiped on the host side too).
             setSkillRerun(null);
@@ -681,7 +701,13 @@ function TestBenchRunner() {
         // classifyCaptureSource collapses absent/unknown to 'capture' (the
         // conservative default), so this never crashes on legacy events.
         setRuntimeSources((prev) => ({ ...prev, [event.name]: classifyCaptureSource(event.source) }));
-        log(`✎ ${event.name} ← ${maskIfSecretInline(event.name, event.value)}`, "info", uri);
+        // The AUTHOR rule on the whole name, matching the server's
+        // `redactAuthoredMap` over a step's `[store as:]` outputs: a capture
+        // name is a word a person typed, so `api.key` and `user.apikey` must
+        // not be split at the dot and handed to the narrow record rule. The
+        // Variables rows below keep `maskIfSecretInline` — those are scope
+        // entries, where a `row.<column>` binding is half the page's word.
+        log(`✎ ${event.name} ← ${maskIfSecretAuthoredInline(event.name, event.value)}`, "info", uri);
         break;
       case "frame:scope":
         // Phase 4 / Phase 5 follow-up — surface the server's per-frame
@@ -698,6 +724,14 @@ function TestBenchRunner() {
         // the skill's `## Parameters` section, which reads as if the
         // parameter wasn't passed in at all.
         setRuntimeVariables((prev) => ({ ...prev, ...event.scope }));
+        // …and how to read them. Spread conditionally so a field the server
+        // did not send stays undefined: `[]` says this run bound nothing (so
+        // every dotted name is the author's), while absent says an older
+        // server said nothing (so the panel keeps its pre-wire reading).
+        setRuntimeMasking({
+          ...(event.bindings !== undefined && { bindings: event.bindings }),
+          ...(event.unmask !== undefined && { unmask: event.unmask }),
+        });
         break;
       case "done":
         log(
@@ -752,6 +786,7 @@ function TestBenchRunner() {
     setRowMenu(null);
     setRuntimeVariables({});
     setRuntimeSources({});
+    setRuntimeMasking({});
     setSkillRerun(null);
     setRerunEdits({});
   }, [snapshot?.uri]);
@@ -1282,8 +1317,22 @@ function TestBenchRunner() {
             </div>
             {Object.entries(skillRerun.scope).map(([name, value]) => {
               const isParam = skillRerun.paramNames.includes(name);
-              const masked = /password|secret|token|apikey|api_key/i.test(name);
-              const readOnly = isParam || masked;
+              // What this row is allowed to show decides whether it can be
+              // edited, rather than a third spelling of the secret rule — the
+              // regex that used to sit here knew `password|secret|token|
+              // apikey|api_key` and nothing else, so `MACHINE_KEY`,
+              // `payment.pwd` and (the reason this changed) a `readTable`
+              // capture with a password column were rendered raw in an
+              // editable input. A value we have to mask cannot be an input
+              // anyway: the mask is what the edit would send back.
+              // Scope entries, so the run's own `bindings` / `unmask` decide
+              // them — the same rule the Variables rows below take. Without
+              // the run's answer a dotted name is read as a binding whoever
+              // typed it, and a name the author unmasked stays starred, which
+              // here also makes the row read-only: the mask is what an edit
+              // would send back.
+              const display = maskIfSecretInline(name, value, runtimeMasking);
+              const readOnly = isParam || display !== value;
               const current = name in rerunEdits ? rerunEdits[name] : value;
               return (
                 <div key={name} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, fontSize: "0.92em" }}>
@@ -1295,7 +1344,7 @@ function TestBenchRunner() {
                   </span>
                   {readOnly ? (
                     <span style={{ flex: 1, fontFamily: "var(--vscode-editor-font-family, monospace)", opacity: 0.65 }}>
-                      {maskIfSecretInline(name, value)}
+                      {display}
                     </span>
                   ) : (
                     <input
@@ -1450,7 +1499,7 @@ function TestBenchRunner() {
                         )}
                       </span>
                       <span style={{ fontFamily: "var(--vscode-editor-font-family, monospace)", color: "var(--vscode-textPreformat-foreground, inherit)" }}>
-                        {maskIfSecretInline(row.name, row.value)}
+                        {maskIfSecretInline(row.name, row.value, runtimeMasking)}
                       </span>
                     </div>
                   );

@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Tables</title>
+  <!--
+    Index of every table fixture in the SecureBank test app, for
+    docs/specs/SPEC-structured-table-reads.md.
+
+    One row per page: where it is, what shape of table it holds, where a
+    structured read stands with it (v1 / phase 2 / rejected / deferred) and
+    the spec section that says so. The last card says in plain words what a
+    read does with any table, so a test author does not have to open the spec
+    to write the first step.
+
+    Same shell as control-flow.html: no login redirect, no cookie banner.
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar (same shell as dashboard.html / transactions.html / control-flow.html) */
+    .sidebar {
+      width: 240px;
+      background: #1f2937;
+      color: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      min-height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      margin-bottom: 32px;
+    }
+
+    .sidebar-logo-icon {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .sidebar-logo-name {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    nav { flex: 1; }
+
+    nav ul { list-style: none; padding: 0; }
+
+    nav ul li a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 24px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav ul li a:hover { background: #374151; color: #f9fafb; }
+
+    nav ul li a.active {
+      background: #374151;
+      color: #f9fafb;
+      border-left-color: #1a56db;
+    }
+
+    nav ul li a .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+    .sidebar-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #374151;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .user-name { font-size: 13px; font-weight: 500; color: #f9fafb; }
+    .user-email { font-size: 12px; color: #6b7280; }
+
+    .logout-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover { background: #374151; color: #f9fafb; }
+
+    /* Main content */
+    .main-content {
+      margin-left: 240px;
+      flex: 1;
+      padding: 32px;
+      max-width: 1100px;
+    }
+
+    .page-header { margin-bottom: 28px; }
+
+    .page-header h1 {
+      font-size: 26px;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .page-header p {
+      font-size: 14px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+
+    .section-card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .section-title, .section-card h2 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .section-hint {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 16px;
+    }
+
+    .section-card p.prose {
+      font-size: 14px;
+      color: #374151;
+      line-height: 1.65;
+    }
+
+    .section-card p.prose + p.prose { margin-top: 12px; }
+
+    code, .section-hint code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      background: #f3f4f6;
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: #374151;
+    }
+
+    /* Index tables */
+    .table-wrap { overflow-x: auto; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    thead th {
+      text-align: left;
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 8px 12px;
+      border-bottom: 1px solid #e5e7eb;
+      white-space: nowrap;
+    }
+
+    tbody td, tbody th {
+      padding: 12px;
+      border-bottom: 1px solid #f3f4f6;
+      color: #111827;
+      vertical-align: top;
+      text-align: left;
+      font-weight: 400;
+    }
+
+    tbody tr:last-child td, tbody tr:last-child th { border-bottom: none; }
+
+    tbody th[scope="row"] { font-weight: 600; white-space: nowrap; }
+
+    tbody th[scope="row"] a { color: #1a56db; text-decoration: none; }
+    tbody th[scope="row"] a:hover { text-decoration: underline; }
+
+    td.what { color: #374151; line-height: 1.55; min-width: 320px; }
+    td.spec { color: #6b7280; white-space: nowrap; font-size: 13px; }
+    td.verdict { white-space: nowrap; }
+
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      background: #f3f4f6;
+      color: #374151;
+    }
+
+    .badge-v1 { background: #ecfdf5; color: #047857; }
+    .badge-phase2 { background: #fffbeb; color: #b45309; }
+    .badge-rejected { background: #fef2f2; color: #b91c1c; }
+    .badge-deferred { background: #f3f4f6; color: #4b5563; }
+
+    .verdict-note {
+      display: block;
+      margin-top: 6px;
+      font-size: 12px;
+      color: #6b7280;
+      white-space: normal;
+      max-width: 180px;
+    }
+  </style>
+</head>
+<body>
+  <!-- Sidebar navigation -->
+  <aside class="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">S</div>
+      <span class="sidebar-logo-name">SecureBank</span>
+    </div>
+
+    <nav>
+      <ul>
+        <li>
+          <a href="dashboard.html">
+            <span class="nav-icon">🏠</span>
+            Dashboard
+          </a>
+        </li>
+        <li>
+          <a href="transactions.html">
+            <span class="nav-icon">💳</span>
+            Transactions
+          </a>
+        </li>
+        <li>
+          <a href="documents.html">
+            <span class="nav-icon">📄</span>
+            Documents
+          </a>
+        </li>
+        <li>
+          <a href="control-flow.html">
+            <span class="nav-icon">💸</span>
+            Payments
+          </a>
+        </li>
+        <li>
+          <a href="tables.html" class="active" aria-current="page">
+            <span class="nav-icon">📋</span>
+            Tables
+          </a>
+        </li>
+        <li>
+          <a href="#settings">
+            <span class="nav-icon">⚙️</span>
+            Settings
+          </a>
+        </li>
+        <li>
+          <a href="#profile">
+            <span class="nav-icon">👤</span>
+            Profile
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <div>
+          <div class="user-name">Demo User</div>
+          <div class="user-email" id="user-email">demo@securebank.com</div>
+        </div>
+      </div>
+      <button class="logout-btn" id="logout-btn" type="button">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <div class="page-header">
+      <h1>Tables</h1>
+      <p>Every table fixture in SecureBank, what it exercises, and where a structured read stands with it — v1 today, phase 2 later, rejected on purpose, or deferred past every phase.</p>
+    </div>
+
+    <!-- ── Structured table fixtures ─────────────────────────────────────── -->
+    <section class="section-card" id="c-structured" aria-labelledby="h-structured">
+      <div class="section-header">
+        <h2 id="h-structured">Structured table fixtures</h2>
+      </div>
+      <p class="section-hint">Built for the structured table read: header mapping, positional columns, row limits, pagination and the awkward shapes.</p>
+
+      <div class="table-wrap">
+        <table id="structured-fixtures" aria-label="Structured table fixtures">
+          <thead>
+            <tr>
+              <th scope="col">Page</th>
+              <th scope="col">What it shows</th>
+              <th scope="col">Read verdict</th>
+              <th scope="col">Spec section</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row"><a href="structured-orders.html">structured-orders.html</a></th>
+              <td class="what">Orders table with a <code>&lt;thead&gt;</code>, a select-all checkbox column, a link cell, badge cells and Review buttons. A Status filter hides rows, the headers sort, Review expands a full-width detail row (skipped as a placeholder), a <code>&lt;tfoot&gt;</code> carries the total, and a Reorder columns button proves a header-mapped read survives the columns moving.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span></td>
+              <td class="spec">§5.1, §5.2, §12</td>
+            </tr>
+            <tr>
+              <th scope="row"><a href="structured-orders-many.html">structured-orders-many.html</a></th>
+              <td class="what">The same table with 14 visible rows and one hidden row before the tenth; clicking a row records it in a Clicked list. The fixture for <code>limit</code> reads — the first N rows — and for proving the hidden row takes none of the N slots.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span></td>
+              <td class="spec">§4.6, §12</td>
+            </tr>
+            <tr>
+              <th scope="row"><a href="scheduled-payments.html">scheduled-payments.html</a></th>
+              <td class="what">No header row at all. Five rows with a duplicate payee (Origin Energy twice), empty Reference and Next-payment cells, and per-status actions: View opens a details page, Approve and Skip change the status in place, Pay now removes the row, Resume restarts it. There is an Auto-pay checkbox column and a total under the table. Columns are read by position, and <code>_row</code> tells the two Origin Energy rows apart.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span><span class="verdict-note">Checkbox column is phase 2</span></td>
+              <td class="spec">§4.4, §4.5, §5.4, §12</td>
+            </tr>
+            <tr>
+              <th scope="row"><a href="payment-details.html?id=1">payment-details.html?id=1</a></th>
+              <td class="what">The details page View opens from the scheduled payments row: it shows the payee and the amount, with a Back link to the list. It is how a run proves the two Origin Energy rows opened <em>different</em> payments.</td>
+              <td class="verdict"><span class="badge badge-deferred">n/a</span><span class="verdict-note">No table — read the fields</span></td>
+              <td class="spec">§4.5</td>
+            </tr>
+            <tr>
+              <th scope="row"><a href="statements.html">statements.html</a></th>
+              <td class="what">Paginated statement lines: four pages of five, Previous and Next, Debit and Credit mutually empty, debits written with the Unicode minus, and a page total in the <code>&lt;tfoot&gt;</code>. The fixture for <code>While the Next button is enabled</code> loops, reading each page as it comes.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span></td>
+              <td class="spec">§4.7</td>
+            </tr>
+            <tr>
+              <th scope="row"><a href="table-edge-cases.html">table-edge-cases.html</a></th>
+              <td class="what">A gallery of sixteen structures: merged headers, rowspan, duplicate headers, a nested table, grouped <code>&lt;tbody&gt;</code> sections, <code>&lt;tfoot&gt;</code>, row headers, a header in the first body row, no header, placeholder and loading rows, hidden rows and columns, icon-only cells, bank number formats, a <code>role="grid"</code> div grid, a responsive card table, and a table in an iframe — each captioned with its verdict.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span><span class="verdict-note">Plus the rejected, phase 2 and deferred shapes, each labelled</span></td>
+              <td class="spec">§5.3–5.5, §7.3–7.4, §10, §14</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── Existing pages with tables or lists ───────────────────────────── -->
+    <section class="section-card" id="c-existing" aria-labelledby="h-existing">
+      <div class="section-header">
+        <h2 id="h-existing">Existing pages with tables or lists</h2>
+      </div>
+      <p class="section-hint">Pages that were here first and already exercise part of the read.</p>
+
+      <div class="table-wrap">
+        <table id="existing-fixtures" aria-label="Existing pages with tables or lists">
+          <thead>
+            <tr>
+              <th scope="col">Page</th>
+              <th scope="col">What it shows</th>
+              <th scope="col">Read verdict</th>
+              <th scope="col">Spec section</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row"><a href="documents.html">documents.html</a></th>
+              <td class="what">The Uploaded documents table. After Clear all its body is one <code>colspan="5"</code> placeholder row — “No documents uploaded yet.” — which is a message, not a merged grid.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span><span class="verdict-note">Reads <code>[]</code>, not an error</span></td>
+              <td class="spec">§4.8, §5.5</td>
+            </tr>
+            <tr>
+              <th scope="row"><a href="delegates.html">delegates.html</a></th>
+              <td class="what">The Delegates table, rendered from <code>/api/delegates</code> after a <code>colspan="4"</code> “Loading…” row. Wait for the table to finish loading, then read it — a read that lands on the loading row stores an empty list truthfully.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span><span class="verdict-note">Wait, then read</span></td>
+              <td class="spec">§4.8</td>
+            </tr>
+            <tr>
+              <th scope="row"><a href="transactions.html">transactions.html</a></th>
+              <td class="what">Transaction history, where the merchant cell holds an icon, a name and a category together, and amounts are written like <code>−$87.40</code> with the Unicode minus.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span><span class="verdict-note">Text in v1; normalising the numbers is <span class="badge badge-phase2">phase 2</span></span></td>
+              <td class="spec">§7.7</td>
+            </tr>
+            <tr>
+              <th scope="row"><a href="control-flow.html">control-flow.html</a></th>
+              <td class="what">The Your accounts panel is a <code>&lt;ul&gt;</code>, not a table: the existing <code>For each</code> fixture behind <code>templates/init/tests/control-flow.md</code>.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span><span class="verdict-note">Plural read plus a scalar loop, unchanged</span></td>
+              <td class="spec">§8.1, §8.2</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── How a read sees a table ────────────────────────────────────────── -->
+    <section class="section-card" id="c-how" aria-labelledby="h-how">
+      <div class="section-header">
+        <h2 id="h-how">How a read sees a table</h2>
+      </div>
+
+      <p class="prose">A column is named either by the text of its header or by its position, so a table with no header row is still readable — you just count the columns yourself. Every record the read stores carries <code>_row</code>, the row's one-based position among the data rows, which is how a later step points at the right row when two rows look alike. Rows that are hidden on the page are not data, and neither is anything in the <code>&lt;tfoot&gt;</code>, so a total under the table never turns up as a row; read it separately. A body whose only content is one cell spanning the whole table — “No documents uploaded yet.”, “Loading…” — is an empty table, and the read stores an empty list rather than failing. Anything else that merges cells with <code>rowspan</code> or <code>colspan</code> is refused outright, because a guessed grid looks right and is wrong. And a loop never holds on to a row it read earlier: each pass finds its row again by a value, such as an order ID, or by <code>_row</code>.</p>
+    </section>
+
+  </main>
+
+  <script>
+    // ── Shell: user info and sign out (same as the other pages) ──────────────
+    const email = sessionStorage.getItem('user-email');
+    if (email) {
+      document.getElementById('user-email').textContent = email;
+      document.getElementById('user-avatar').textContent = email.charAt(0).toUpperCase();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.removeItem('logged-in');
+      sessionStorage.removeItem('user-email');
+      window.location.href = 'index.html';
+    });
+  </script>
+</body>
+</html>

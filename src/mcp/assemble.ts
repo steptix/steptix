@@ -23,7 +23,12 @@ import path from 'node:path';
 import { interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { isCodeStep as isInvocationStep } from '../parser/invocation-parser.js';
 import { parseSetStep, setStepError } from '../parser/set-step.js';
-import { controlLineError } from '../parser/control-line.js';
+import {
+  PLACEHOLDER_SOURCE,
+  placeholderProperty,
+  placeholderRoot,
+} from '../parser/parameters.js';
+import { controlLineError, parseControlLine } from '../parser/control-line.js';
 import { parseTestContent, resolveDataSourcePath } from '../parser/markdown.js';
 import type { ParsedSection, ParsedTest } from '../parser/types.js';
 import {
@@ -93,9 +98,10 @@ const NAMESPACE_PLACEHOLDER = /\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z0-9_.\-]
  *  diagnostic. */
 const WHOLE_VALUE_VAR = /^\$([A-Za-z_][A-Za-z0-9_]*)$/;
 
-/** Runtime parameter placeholder, matching `src/parser/parameters.ts` and the
- *  skill expander. */
-const PARAM_PLACEHOLDER = /\{\{(\w+)\}\}/g;
+/** Runtime parameter placeholder — `{{name}}` and `{{name.property}}` — from
+ *  the one definition in `src/parser/parameters.ts`, which the skill expander
+ *  imports too. */
+const PARAM_PLACEHOLDER = new RegExp(PLACEHOLDER_SOURCE, 'g');
 
 export interface AssembleArgs {
   /** The same `deps.resolveProject` the tools hold, injected so the seam
@@ -835,16 +841,33 @@ function missingParameters(
   parameters: Record<string, string>,
 ): string[] {
   const assigned = new Set<string>();
+  /** Names a `For each` in this same list binds one item at a time. */
+  const boundByLoop = new Set<string>();
   for (const step of steps) {
     const setStep = parseSetStep(step);
     if (setStep) assigned.add(setStep.name);
+    const control = parseControlLine(step);
+    if (control?.kind === 'foreach') boundByLoop.add(control.item);
   }
   const missing = new Set<string>();
   for (const step of steps) {
     for (const match of step.matchAll(PARAM_PLACEHOLDER)) {
       const name = match[1]!;
+      // A DOTTED reference reads one property of an object a `For each` binds
+      // per pass (SPEC-structured-table-reads.md §8.2). Nothing can put it in
+      // the parameter map — there is no pass yet — so measuring it against the
+      // map would report a false "will reach the AI literally" on every
+      // correct table loop. The runtime check is the one that can answer it,
+      // with the pass's bindings in hand (`dottedReferenceError`). What IS
+      // worth saying is that no loop in this list binds the root at all.
+      if (placeholderProperty(name) !== undefined) {
+        if (!boundByLoop.has(placeholderRoot(name))) missing.add(name);
+        continue;
+      }
       // `hasOwn` for the same reason as above: `{{toString}}` would otherwise
-      // look resolved and never be reported as left-literal.
+      // look resolved and never be reported as left-literal. A flat name keeps
+      // today's answer exactly, loop item included — widening THAT is a
+      // separate call with its own regression surface.
       if (!Object.hasOwn(parameters, name) && !assigned.has(name)) missing.add(name);
     }
   }

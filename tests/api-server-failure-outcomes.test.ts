@@ -618,3 +618,87 @@ describe('a failure that is BOTH deliberate and tolerated', () => {
     expect(r.done).toMatchObject({ type: 'done', status: 'passed' });
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+/**
+ * The scope frame emitted BESIDE a failure
+ * (docs/specs/SPEC-structured-table-reads.md §7.6, §8.4).
+ *
+ * `frame:scope` is emitted from three places in the step loop — after a pass,
+ * after a tolerated failure, and after a plain one — and each builds its own
+ * payload with its own `...scopeMasking()`. Only the first was under test:
+ * `api-server-control-flow.test.ts` runs no failing step, so deleting the
+ * spread from either of the other two left every api-server suite green while
+ * the client lost the one field that tells `order.id` (this pass bound it)
+ * from `user.apikey` (the author typed it) — and the Variables panel falls
+ * back to the two-segment rule, printing a bound secret or starring a bound
+ * `keyword`.
+ *
+ * A failure is where that matters most, because it is the scope the user is
+ * actually reading. So both sites get a run of their own, over a loop, so the
+ * list is non-empty and a dropped field cannot pass as "nothing bound".
+ */
+describe('the scope frame beside a failure says whose the dotted names are', () => {
+  const ORDERS = '[{"id":"A","status":"x"}]';
+
+  /** One pass of a `For each`, whose single body step is `bodyStep`. */
+  const loopBody = (bodyStep: string) => ({
+    steps: ['Open the orders page', 'For each {{order}} in {{orders}}, Check the order'],
+    sourceLines: [3, 4],
+    testFilePath,
+    parameters: { orders: ORDERS },
+    sections: {
+      'check the order': {
+        name: 'Check the order',
+        headingLine: 6,
+        steps: [bodyStep],
+        stepLines: [7],
+      },
+    },
+  });
+
+  it.each([
+    {
+      label: 'after a TOLERATED failure — the run carries on past it',
+      authored: 'Verify the row for "{{order.id}}" otherwise continue',
+      resolved: 'Verify the row for "A" otherwise continue',
+      outcome: 'tolerated' as const,
+      status: 'passed',
+    },
+    {
+      label: 'after a PLAIN failure — the run stops on it',
+      authored: 'Verify the row for "{{order.id}}"',
+      resolved: 'Verify the row for "A"',
+      outcome: 'failed' as const,
+      status: 'failed',
+    },
+  ])('$label', async ({ authored, resolved, outcome, status }) => {
+    const r = await run({
+      body: loopBody(authored),
+      on: resolved,
+      outcome,
+      stream: true,
+    });
+
+    expect(r.fail).toBeDefined();
+    const failAt = r.types.indexOf('step:fail');
+    const beside = r.events.slice(failAt).find((e) => e.type === 'frame:scope');
+
+    // The field is unconditional — `[]` included — so the client can tell
+    // "nothing bound" from "nothing said". Absent is what an older server
+    // sends, and is the state a dropped spread puts this one back into.
+    expect(beside).toBeDefined();
+    expect(Array.isArray(beside!.bindings)).toBe(true);
+    // …and it is this pass's dotted names, not an empty list that would have
+    // passed the `isArray` check by accident.
+    expect(beside!.bindings).toEqual(['order.id', 'order.status']);
+    expect(beside!.scope['order.id']).toBe('A');
+
+    // The last one too: on the plain failure the loop `break`s here, so this
+    // IS the scope the user is left looking at.
+    const scopes = r.events.filter((e) => e.type === 'frame:scope');
+    expect(Array.isArray(scopes.at(-1)!.bindings)).toBe(true);
+
+    expect(r.done).toMatchObject({ type: 'done', status });
+  });
+});

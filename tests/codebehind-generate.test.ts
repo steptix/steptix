@@ -10,11 +10,14 @@ import {
   parseStepCodeOrDecline,
 } from '../src/ai/action-parser.js';
 import { buildStepCodePrompt, contentBlocksToText } from '../src/ai/prompts.js';
+import { markLoopBindings } from '../src/utils/secrets.js';
+import { readFileSync } from 'node:fs';
 import {
   aiEntryFor,
   ambiguousSelectorComplaint,
   generateStepEntry,
   refuseReason,
+  stepParameters,
   staleHandleComplaint,
   unwaitedReadComplaint,
   undeclaredContextComplaint,
@@ -1302,6 +1305,67 @@ describe('aiEntryFor', () => {
   });
 });
 
+describe('generateStepEntry — which dotted names the prompt masks (§7.6)', () => {
+  /** Every message of the one call the stub recorded, as text. */
+  const promptTextOf = (calls: ChatMessage[][]): string =>
+    calls[0]!
+      .map((m) => (typeof m.content === 'string' ? m.content : contentBlocksToText(m.content)))
+      .join('\n');
+
+  const source = 'Verify the row shows {{row.keyword}} for {{user.apikey}}';
+  /** A live map: `row.keyword` is a pass's binding, `user.apikey` is a data
+   *  file's heading merged in beside it. Same spelling, different owner. */
+  function liveMap(): Record<string, string> {
+    const map: Record<string, string> = { 'row.keyword': 'AU', 'user.apikey': 'uk_live_1234' };
+    markLoopBindings(map, ['row.keyword']);
+    return map;
+  }
+
+  it('tells a pass binding from an author heading by the map it is handed', async () => {
+    const { client, calls } = stubClient(JSON.stringify({ entry: null, reason: 'not needed' }));
+    const map = liveMap();
+    await generateStepEntry({
+      binding: bindingFor(source),
+      actions: PASSING_ACTIONS,
+      resolvedParameters: map,
+      parameterMap: map,
+      aiClient: client,
+      contextContent: '',
+      testName: 'demo',
+    });
+    const text = promptTextOf(calls);
+    expect(text).toContain('{{row.keyword}} resolved to "AU" on this run');
+    expect(text).toContain('{{user.apikey}} resolved to "***" on this run');
+    expect(text).not.toContain('uk_live_1234');
+  });
+
+  it('without the map reads every dotted name as a binding — which is what the map buys', async () => {
+    // The boxed compile passes no map on purpose: its parameters are an
+    // unmarked copy of the already-redacted report map, and handing that over
+    // would put `row.keyword` under the author rule. This twin states the
+    // cost of that choice so nobody mistakes it for the live path's answer.
+    const { client, calls } = stubClient(JSON.stringify({ entry: null, reason: 'not needed' }));
+    await generateStepEntry({
+      binding: bindingFor(source),
+      actions: PASSING_ACTIONS,
+      resolvedParameters: liveMap(),
+      aiClient: client,
+      contextContent: '',
+      testName: 'demo',
+    });
+    const text = promptTextOf(calls);
+    expect(text).toContain('{{row.keyword}} resolved to "AU" on this run');
+    expect(text).toContain('{{user.apikey}} resolved to "uk_live_1234" on this run');
+  });
+
+  it('is handed the marked snapshot by the live compiler, and nothing by the boxed one', () => {
+    const live = readFileSync(path.join(repoRoot, 'src', 'codebehind', 'live-compile.ts'), 'utf8');
+    const boxed = readFileSync(path.join(repoRoot, 'src', 'codebehind', 'compile.ts'), 'utf8');
+    expect(live).toContain('parameterMap: input.resolvedParameters');
+    expect(boxed).not.toContain('parameterMap');
+  });
+});
+
 describe('buildRepairPrompt', () => {
   it('carries the entry, the error, the DOM and the screenshot', () => {
     const msg = buildRepairPrompt({
@@ -1369,5 +1433,58 @@ describe('the review envelope', () => {
   it('refuses a revision that is not a code-behind file', () => {
     expect(() => parseFileRevision(JSON.stringify({ file: 'const x = 1;' }))).toThrow(/defineSteps/);
     expect(() => parseFileRevision('sorry, no')).toThrow(/no revised file|defineSteps/);
+  });
+});
+
+/**
+ * A name off `Object.prototype` is not a parameter (`boundValue`,
+ * src/runner/placeholder-substitution.ts).
+ *
+ * `resolvedParameters[name]` is a bare index, so a step writing
+ * `{{constructor}}` handed the generator the Object FUNCTION as a value: the
+ * prompt rendered `resolved to undefined` (`JSON.stringify` of a function is
+ * `undefined`), and the leak guard was then asked to look for a function's
+ * text in the generated code. With a secret in scope the block's masker threw
+ * first — the same `out.split is not a function` the step prompt died with.
+ */
+describe('stepParameters — a reference nothing binds', () => {
+  const bindingFor = (source: string): CodeBehindBinding => ({
+    file: '/x/t.steps.ts',
+    source,
+    occurrence: 0,
+    scope: { renames: {}, inputs: {} },
+  });
+
+  const binding = (name: string, value: string): Record<string, string> =>
+    Object.defineProperty({}, name, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    }) as Record<string, string>;
+
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
+    'renders {{%s}} when the map really binds it, and not otherwise',
+    (name) => {
+      const source = `Verify {{${name}}} is shown`;
+      // Nothing binds it: the prototype must not answer for the map.
+      expect(stepParameters(bindingFor(source), {}, undefined)).toEqual([]);
+      // A `[store as: constructor]` capture IS a parameter, and dropping it
+      // leaves the leak guard with nothing to look for — the literal then
+      // lands in a committed file, which is the failure the guard exists for.
+      expect(stepParameters(bindingFor(source), binding(name, 'ACME'), undefined)).toEqual([
+        { name, value: 'ACME' },
+      ]);
+    },
+  );
+
+  it('does not let a RENAMED name reach through the prototype either', () => {
+    const renamed: CodeBehindBinding = {
+      file: '/x/t.steps.ts',
+      source: 'Verify {{who}} is shown',
+      occurrence: 0,
+      scope: { renames: { who: 'toString' }, inputs: {} },
+    };
+    expect(stepParameters(renamed, {}, undefined)).toEqual([]);
   });
 });

@@ -37,12 +37,15 @@ import type { StepCache, CachedStepData, StepCacheKey } from '../cache/step-cach
 import { fingerprintAssertion } from '../cache/step-cache.js';
 import type { StepValues } from '../ai/prompts.js';
 import {
+  boundValue,
   checkTurnReferences,
   inlineStoreAsNames,
   substituteAction,
   substituteText,
   type PlaceholderValues,
 } from './placeholder-substitution.js';
+import { bindVariable } from '../parser/parameters.js';
+import { decideConditionLocally } from './literal-decision.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import {
   isReturnClaim,
@@ -56,7 +59,7 @@ import {
 } from '../parser/failure-tail.js';
 import { envDataRefsIn, resolveEnvDataRef } from '../parser/interpolate-env-data.js';
 import { parseOutputPrefixes, buildEnrichedInstruction } from '../server/run-helpers.js';
-import { redact, runSecrets } from '../utils/secrets.js';
+import { maskRecordSecrets, redact, runSecrets } from '../utils/secrets.js';
 import type { CodeBehindBinding } from '../codebehind/loader.js';
 import { entrySourceText, runCodeBehindEntry, EXIT_NOT_CLAIMED } from '../codebehind/execute.js';
 import { makeBrowserApi, makeTabApi } from '../codebehind/tabs.js';
@@ -716,6 +719,20 @@ export async function executeStep(
   const withStale = (result: StepResult): StepResult =>
     staleAfterHeal ? { ...result, codeBehindStale: staleAfterHeal } : result;
 
+  // --- A flow-control condition this run's values already answer ---
+  //
+  // `If {{payment.status}} is "Overdue", then return` and its two siblings
+  // (docs/specs/SPEC-structured-table-reads.md §8.3a). Ahead of the cache for
+  // the reason code-behind is — no model call, no DOM snapshot, and here no
+  // `settle` wait either — and BEHIND code-behind, because a compiled entry is
+  // the author's own code for this step and `step.exit()` is its way of
+  // saying the same thing.
+  //
+  // The cache is not a consideration either way: `cacheEnabledFor` already
+  // returns false for any step carrying a claim.
+  const locallyDecided = await decideFlowControlLocally(stepIndex, instruction, opts, startTime);
+  if (locallyDecided) return applyFailureTail(withStale(locallyDecided), opts);
+
   const cacheEnabled = cacheEnabledFor(opts);
 
   // --- Cache attempt (before normal AI flow) ---
@@ -865,11 +882,7 @@ export async function executeStep(
     );
 
     // Capture failure screenshot (full-page for report visibility)
-    let failureScreenshot: string | undefined;
-    if (opts.config.execution.screenshotOnFailure) {
-      const shot = await captureScreenshot(opts.page, opts.config.browser.fullPageScreenshots);
-      failureScreenshot = shot?.base64;
-    }
+    const failureScreenshot = await failureShot(opts);
 
     // Collect turns from the final failed attempt too — unless `onFailure`
     // already took them, which it does for a failure `withRetry` declined to
@@ -908,6 +921,172 @@ export async function executeStep(
           ? `Failed to execute step. Last error: ${errorMessage}`
           : `Failed to execute step after ${attemptsMade} attempts. Last error: ${errorMessage}`,
     }), opts);
+  }
+}
+
+/**
+ * The error a CONDITIONAL `fail` puts on the row, masked
+ * (stories/step-failure-outcomes.md, decision 3).
+ *
+ * The message comes off the INTERPOLATED line, not off the claim: the claim
+ * was read from the AUTHORED text — it has to be the same answer on every run
+ * and in every runner — so `claim.message` still holds the author's
+ * `{{tokens}}`, and `Expected 10, got {{total}}` would reach the report with
+ * the braces in it. One parser read twice, exactly as `deliberateFailError`
+ * does it for the unconditional form (src/runner/flow-control.ts), fallback
+ * included: a value carrying the quote character that ends the message makes
+ * the re-parse miss.
+ *
+ * A message-less `fail` is legal and the framework words it. Read for TRUTH
+ * rather than presence: the parser keeps `with error ""` as an empty string,
+ * and an empty error is no error to put on the row.
+ *
+ * `why` is the account of the CONDITION, already masked — the model's
+ * description on the AI path, the `decided from the values: …` sentence when
+ * the condition was answered from this run's values. One function for both, so
+ * the row a reader sees cannot depend on which judged it.
+ */
+function composeDeliberateFailure(
+  claim: ParsedFlowControlStep,
+  interpolatedLine: string,
+  why: string,
+  secrets: string[],
+): string {
+  const reparsed = parseFlowControlStep(interpolatedLine);
+  const resolved = reparsed?.verb === 'fail' ? reparsed.message : undefined;
+  const authoredMessage = resolved ?? (claim.verb === 'fail' ? claim.message : undefined);
+  return authoredMessage
+    ? redact(authoredMessage, secrets)
+    : `Failed by the step: ${why || 'the condition held'}`;
+}
+
+/**
+ * A flow-control condition that this run's values already answer
+ * (docs/specs/SPEC-structured-table-reads.md §8.3a).
+ *
+ * `If {{payment.status}} is "Overdue", then return` is the spec's headline
+ * example and the shape `templates/init/tests/table-payments-review.md` and
+ * `-approve.md` are built on. It is claimed at rung 0 of `parseControlLine`,
+ * so it is never a guard and `evaluateGuard`'s local decision never sees it —
+ * it is judged HERE, by the step's own model turn, behind a `settle` wait.
+ * That cost a page stabilisation and an `ai.complete` on every pass of every
+ * row, to answer a question that was entirely in the sentence: the same
+ * arithmetic the chain path already refuses to pay
+ * (src/parser/literal-condition.ts has the run that motivated it).
+ *
+ * Returns undefined for everything else, which is the common case and means
+ * "today's behaviour, exactly". In particular a condition with no `{{…}}` or
+ * `${…}` in the AUTHORED line is never answered here, which is what keeps
+ * `When prompted for MFA, then return` and every other watch-shaped line on
+ * the model path where it belongs: those are questions about the page, and the
+ * grammar cannot tell one from a substituted value — only the author's having
+ * written a reference can.
+ *
+ * ## What it must produce
+ *
+ * Exactly what the model path produces, because everything downstream reads
+ * the result and nothing downstream should be able to tell which judged it:
+ * `flowControl` on the row is what the four run loops read to skip the rest of
+ * the flow and to word `Not run: step N returned from "…"`, and `deliberate`
+ * is what stops a diagnosis pass guessing at a failure the author wrote out.
+ * The only visible difference is whose words are in `aiExplanation`.
+ */
+async function decideFlowControlLocally(
+  stepIndex: number,
+  instruction: string,
+  opts: StepExecutorOptions,
+  startTime: number,
+): Promise<StepResult | undefined> {
+  const claim = opts.flowControlClaim;
+  // The CONDITIONAL form only. The unconditional one never reaches the
+  // executor — the run loops dispatch it themselves, with no model call
+  // already.
+  if (!claim || claim.body === undefined) return undefined;
+
+  const values: PlaceholderValues = {
+    parameters: opts.resolvedParameters ?? {},
+    ...(opts.envData !== undefined && { envData: opts.envData }),
+  };
+  const secrets = secretsFor(opts);
+  const local = decideConditionLocally(claim.body, values, (text) => redact(text, secrets));
+  if (!local) return undefined;
+
+  // No settle, no DOM snapshot, no model call — so no `turns`, and the row's
+  // own absence of turns is the visible record that nothing was asked.
+  const base: StepResult = {
+    index: stepIndex,
+    instruction,
+    status: 'passed',
+    turns: [],
+    durationMs: Date.now() - startTime,
+    retried: false,
+    pageUrl: activeUrl(opts),
+    aiExplanation: local.reasoning,
+  };
+
+  if (!local.holds) {
+    // The model's answer for a condition that does not hold is a `noop`: the
+    // step passes, nothing is performed, and the next step runs.
+    logger.debug(`Step ${stepIndex}: ${local.reasoning}`);
+    return base;
+  }
+
+  if (isReturnClaim(claim)) {
+    logger.info(`Step ${stepIndex} returned: ${local.reasoning}`);
+    return { ...base, flowControl: { kind: 'return', verb: claim.verb } };
+  }
+
+  // The third verb. `deliberate` and the wording of `aiExplanation` are the
+  // catch block's, verbatim — a locally decided deliberate failure is still a
+  // deliberate failure, so it is never retried (there is nothing to retry) and
+  // never diagnosed.
+  const composed = composeDeliberateFailure(claim, instruction, local.reasoning, secrets);
+  logger.error(`Step ${stepIndex} failed as written: ${composed}`);
+  // …and the same picture, on the same switch. This is the ONE thing this path
+  // touches the page for, and it is the one thing a reader of the report will
+  // look for: the judged `fail` and the unconditional `Fail the test with
+  // error "…"` both carry one, and a row that differed only in who decided the
+  // condition read as a capture that had failed (review 2, finding 3).
+  const screenshotBase64 = await failureShot(opts);
+  return {
+    ...base,
+    status: 'failed',
+    error: composed,
+    deliberate: true,
+    ...(screenshotBase64 !== undefined && { screenshotBase64 }),
+    aiExplanation: `The step's condition held (${local.reasoning}) and the step says to fail the test.`,
+  };
+}
+
+/**
+ * The picture a failed step carries, or undefined when the config says not to
+ * take one (`execution.screenshotOnFailure`).
+ *
+ * One function because this file has TWO paths that end a step as failed —
+ * the shared catch, and the locally decided `fail` above — and review 2 found
+ * the second taking no screenshot at all. The third path lives in each run
+ * loop (the unconditional `Fail the test with error "…"`, test-runner.ts and
+ * its two siblings), which has its own `page` and `config` in hand and reads
+ * the same switch.
+ *
+ * Full-page or not is the browser config's answer, as it is everywhere else,
+ * and a capture that fails is already non-fatal (`captureScreenshot` logs and
+ * answers null) — a row is not worth failing over its illustration.
+ */
+async function failureShot(opts: StepExecutorOptions): Promise<string | undefined> {
+  if (!opts.config.execution.screenshotOnFailure) return undefined;
+  const shot = await captureScreenshot(opts.page, opts.config.browser.fullPageScreenshots);
+  return shot?.base64;
+}
+
+/** Where the run is right now, for a row built without touching the page.
+ *  Tracker first, matching every other end-of-step capture in this file. */
+function activeUrl(opts: StepExecutorOptions): string {
+  try {
+    return (opts.pageTracker ? opts.pageTracker.getActive() : opts.page).url();
+  } catch {
+    // A closed page has no url, and a row is not worth failing over one.
+    return '';
   }
 }
 
@@ -1263,7 +1442,14 @@ function buildStepValues(authored: string, opts: StepExecutorOptions): StepValue
   const defined = new Set([...captures, ...inlineStoreAsNames(authored)]);
   const parameters = placeholders
     .filter((name) => !defined.has(name))
-    .map((name) => ({ name, value: params[name] ?? NOT_YET_CAPTURED }));
+    // `boundValue`, not `params[name]`: a bare index answers `{{constructor}}`
+    // / `{{toString}}` / `{{valueOf}}` / `{{__proto__}}` off `Object.prototype`
+    // on a map that binds none of them. The function then reached
+    // `formatParameterBlock`, whose masker calls `.split` on the value — so a
+    // step naming one of four ordinary English words failed with
+    // `out.split is not a function` as soon as the run had any secret in it,
+    // instead of being told the name holds nothing yet.
+    .map((name) => ({ name, value: boundValue(params, name) ?? NOT_YET_CAPTURED }));
 
   const envRefs: Array<{ ref: string; value: string }> = [];
   if (opts.envData) {
@@ -1278,10 +1464,23 @@ function buildStepValues(authored: string, opts: StepExecutorOptions): StepValue
   }
 
   if (parameters.length === 0 && envRefs.length === 0) return undefined;
+  // The same mask set `redact(domSnapshot, …)` uses, read here rather than
+  // passed in for the same reason the values are: this is rebuilt per turn,
+  // and a `[as: …]` capture in turn 1 can add a secret turn 2 must not print.
+  // Without it the `## Values` block was the one part of the message that
+  // still carried a record's `password` column in full, three lines above the
+  // DOM where the same value read `***`.
+  const secrets = secretsFor(opts);
   return {
     parameters,
+    // The LIVE map, not a copy: it is what says which of its dotted names a
+    // `For each` pass bound, and the block masks `payment.password` by the
+    // record rule and a data file's `user.apikey` heading by the author's
+    // only because it can ask (§7.6).
+    map: params,
     ...(envRefs.length > 0 && { envRefs }),
     ...(opts.unmask !== undefined && { unmask: opts.unmask }),
+    ...(secrets.length > 0 && { secrets }),
   };
 }
 
@@ -1905,23 +2104,7 @@ async function executeStepAttempt(
           const secrets = secretsNow();
           // May be empty — a model that described nothing still ends the step.
           const why = redact(action.description?.trim() ?? '', secrets);
-          // The message comes off the INTERPOLATED line, not off the claim: the
-          // claim was read from the AUTHORED text — it has to be the same answer
-          // on every run and in every runner — so `failClaim.message` still holds
-          // the author's `{{tokens}}`, and `Expected 10, got {{total}}` would
-          // reach the report with the braces in it. One parser read twice, exactly
-          // as `deliberateFailError` does it for the unconditional form
-          // (src/runner/flow-control.ts), fallback included: a value carrying the
-          // quote character that ends the message makes the re-parse miss.
-          const reparsed = parseFlowControlStep(instruction);
-          const resolved = reparsed?.verb === 'fail' ? reparsed.message : undefined;
-          const authoredMessage = resolved ?? failClaim.message;
-          // A message-less `fail` is legal and the framework words it (decision 3).
-          // Read for TRUTH rather than presence: the parser keeps `with error ""`
-          // as an empty string, and an empty error is no error to put on the row.
-          const composed = authoredMessage
-            ? redact(authoredMessage, secrets)
-            : `Failed by the step: ${why || 'the condition held'}`;
+          const composed = composeDeliberateFailure(failClaim, instruction, why, secrets);
           turnSubActions.push({ ...failSub, error: composed });
           turnFailed = true;
           // Never retried: a retry hands the model "this failed, try something
@@ -2511,22 +2694,66 @@ async function executeStepAttempt(
         });
       }
 
-      // Store captured value from "read" / "count" actions into the live parameter map
-      if (result.capturedValues !== undefined && action.as && opts.resolvedParameters) {
+      // Store captured value from "read" / "count" / "readTable" actions into
+      // the live parameter map.
+      //
+      // All three through `bindVariable` (src/parser/parameters.ts), because a
+      // capture can land on a name a `For each` is binding — `Read the order
+      // id from the summary [store as: order]` after `For each {{order}} in
+      // {{orders}}` — and §8.2 says a rebind of a root erases that root's
+      // dotted keys. A plain `resolvedParameters[as] =` left `order.id`
+      // holding the LAST PASS's id, so `{{order.id}}` in a later step
+      // substituted a row the author had just overwritten, silently, with
+      // §8.3's refusal unable to fire on a key that was still there.
+      if (result.capturedRecords !== undefined && action.as && opts.resolvedParameters) {
+        // Structured capture (readTable) — JSON-encoded like the flat list, so
+        // the map stays Record<string, string> and no protocol or session
+        // storage migrates (SPEC-structured-table-reads.md §7.1). `For each`
+        // parses it back and binds each record's properties.
+        //
+        // The capture itself is summarised by `readTable captured N rows × M
+        // columns as "{{name}}"` (§7.6), written where the bound and the
+        // placeholder-skip count are known — in executeAction. This line is
+        // about STORAGE, and reads like its two siblings below.
+        const rows = result.capturedRecords.length;
+        bindVariable(opts.resolvedParameters, action.as, JSON.stringify(result.capturedRecords));
+        logger.info(
+          `Stored ${rows} row record${rows === 1 ? '' : 's'} as "{{${action.as}}}"`,
+        );
+      } else if (result.capturedValues !== undefined && action.as && opts.resolvedParameters) {
         // List capture (read multiple: true) — JSON-encode so it round-trips
         // through the string-valued param map. Tools that declare an
         // array-typed parameter decode this back into a typed array at the
         // bridge boundary.
         const json = JSON.stringify(result.capturedValues);
-        opts.resolvedParameters[action.as] = json;
+        bindVariable(opts.resolvedParameters, action.as, json);
         logger.info(
           `Stored ${result.capturedValues.length} captured value${
             result.capturedValues.length === 1 ? '' : 's'
           } as "{{${action.as}}}"`,
         );
       } else if (result.capturedValue !== undefined && action.as && opts.resolvedParameters) {
-        opts.resolvedParameters[action.as] = result.capturedValue;
-        logger.info(`Stored captured value as "{{${action.as}}}": "${result.capturedValue}"`);
+        bindVariable(opts.resolvedParameters, action.as, result.capturedValue);
+        // The only one of the three "Stored …" lines that prints the VALUE,
+        // and it printed it raw. `logger` does not redact — the run-log file
+        // does, on its way to disk, and the SSE `output` bridge does not — so
+        // a `[store as: password]` capture reached the console and every
+        // client watching the stream in clear (§7.6). Masked after the bind,
+        // so the name the author just chose is already in the map the set is
+        // built from; by shape as well as by value, because a one-row read
+        // stores a record under a name that says nothing.
+        //
+        // It is also the ONLY line that prints a capture. `executeRead`
+        // (src/browser/actions.ts) had one of its own — raw, and one frame too
+        // deep to ever mask, because down there the value has no name yet
+        // (review 6, finding 2). Masking has to happen where the name is, so
+        // the line lives here and there is exactly one of it.
+        logger.info(
+          `Stored captured value as "{{${action.as}}}": "${redact(
+            maskRecordSecrets(result.capturedValue),
+            secretsFor(opts),
+          )}"`,
+        );
       }
 
       // Capture state after action (full-page for report visibility).

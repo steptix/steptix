@@ -21,6 +21,15 @@ import type { StepGroup } from '../src/runner/step-grouper.js';
 
 const actions = vi.hoisted(() => ({ received: [] as AIAction[] }));
 
+/** What the mocked `readTable` captures — see the mock below. Hoisted with it,
+ *  because `vi.mock` factories run before the module body. */
+const { RECORDS } = vi.hoisted(() => ({
+  RECORDS: [
+    { _row: '1', id: 'ORD-1001', customer: 'Alice Smith' },
+    { _row: '2', id: 'ORD-1002', customer: 'Bob Jones' },
+  ] as Array<Record<string, string>>,
+}));
+
 vi.mock('../src/browser/actions.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/browser/actions.js')>();
   return {
@@ -31,6 +40,11 @@ vi.mock('../src/browser/actions.js', async (importOriginal) => {
       // is what makes the "captured later" and two-step cases exercisable.
       if (action.action === 'read' || action.action === 'count') {
         return { success: true, capturedValue: 'CAPTURED' };
+      }
+      // A structured capture, the shape `readTable` hands back (§7.1): one
+      // flat object per visible data row, `_row` first.
+      if (action.action === 'readTable') {
+        return { success: true, capturedRecords: RECORDS };
       }
       return { success: true };
     }),
@@ -72,7 +86,9 @@ vi.mock('../src/browser/page-state.js', () => ({
   },
 }));
 
-import { executeStep, executeBranchedStep } from '../src/runner/step-executor.js';
+import { addLogCallback } from '../src/utils/logger.js';
+import { markLoopBindings } from '../src/utils/secrets.js';
+import { executeStep, executeBranchedStep, evaluateConditions } from '../src/runner/step-executor.js';
 import { runInteractiveRepl } from '../src/runner/interactive-repl.js';
 import {
   checkTurnReferences,
@@ -341,6 +357,222 @@ describe('the model names the value, the executor puts it in', () => {
       { authored: 'Check the balance equals {{balance}}' },
     );
     expect(allRequestText(client)).toContain('- {{balance}} resolved to "(not yet captured)" on this run');
+  });
+
+  /**
+   * A name off `Object.prototype` is not a binding
+   * (`boundValue`, placeholder-substitution.ts).
+   *
+   * `params[name]` is a bare index, so `{{constructor}}` answered with the
+   * Object function on a map that binds nothing of the sort. With any secret
+   * in scope the block's masker then threw on it — `value.charCodeAt is not a
+   * function` — and the step died: a step that references a variable nobody
+   * has captured, failing with a sentence about strings.
+   */
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
+    'renders a flat {{%s}} as (not yet captured), with a secret in scope',
+    async (name) => {
+      const { result, client } = await runStep(
+        'Verify the value is shown',
+        [plan([{ action: 'click', selector: '#go', description: 'Check' }])],
+        {
+          // A secret is what turns the wrong value into a throw: the block's
+          // `redact` is only reached when there is something to mask.
+          parameters: { password: 'hunter2-correct-horse' },
+          authored: `Verify {{${name}}} is shown`,
+        },
+      );
+      expect(result.status).toBe('passed');
+      expect(result.error).toBeUndefined();
+      expect(allRequestText(client)).toContain(
+        `- {{${name}}} resolved to "(not yet captured)" on this run`,
+      );
+    },
+  );
+
+  it('does the same on the guard path, which builds the block from the conditions', async () => {
+    const client = scriptedClient(['{"matched":"A","actions":[],"reasoning":"it holds"}']);
+    const verdict = await evaluateConditions(['{{constructor}} is shown'], {
+      page: fakePage(),
+      config: CONFIG,
+      aiClient: client,
+      contextContent: '',
+      testName: 'placeholders',
+      conversationHistory: [],
+      csrfTokens: {},
+      resolvedParameters: { password: 'hunter2-correct-horse' },
+    } as unknown as Parameters<typeof evaluateConditions>[1]);
+
+    expect(verdict.selected).toBe(0);
+    expect(allRequestText(client)).toContain(
+      '- {{constructor}} resolved to "(not yet captured)" on this run',
+    );
+  });
+});
+
+// ── The structured capture (SPEC-structured-table-reads.md §12, item 13) ────
+
+describe('a readTable capture is stored as JSON under its name', () => {
+  it('JSON-encodes the records, _row first, into the live parameter map', async () => {
+    const parameters: Record<string, string> = {};
+    const { result } = await runStep(
+      'Read the Order ID and Customer columns from every row in the Orders table',
+      [plan([{
+        action: 'readTable',
+        selector: '#orders',
+        columns: [{ header: 'Order ID', key: 'id' }, { header: 'Customer', key: 'customer' }],
+        as: 'orders',
+        description: 'Read the Orders table',
+      } as AIAction])],
+      { parameters },
+    );
+    expect(result.status).toBe('passed');
+    // The map stays Record<string, string>, so nothing about the protocol or
+    // the session storage has to change (§7.1) — and `For each` parses this
+    // string straight back. Byte-for-byte, because `_row` and the column
+    // order are the contract: a later pass finds its row BY `_row`, and a
+    // record without it can only be matched by its values, which is exactly
+    // what two rows sharing a payee make impossible.
+    expect(parameters['orders']).toBe(
+      '[{"_row":"1","id":"ORD-1001","customer":"Alice Smith"},'
+      + '{"_row":"2","id":"ORD-1002","customer":"Bob Jones"}]',
+    );
+    expect(JSON.parse(parameters['orders']!).map((r: Record<string, string>) => r['_row']))
+      .toEqual(['1', '2']);
+  });
+
+  it('logs the count under the variable name, not the rows', async () => {
+    const lines: string[] = [];
+    const stop = addLogCallback((_level, message) => { lines.push(message); });
+    try {
+      await runStep(
+        'Read the Orders table',
+        [plan([{
+          action: 'readTable',
+          selector: '#orders',
+          columns: [{ header: 'Order ID', key: 'id' }],
+          as: 'orders',
+          description: 'Read the Orders table',
+        } as AIAction])],
+        { parameters: {} },
+      );
+    } finally {
+      stop();
+    }
+    expect(lines).toContain('Stored 2 row records as "{{orders}}"');
+    // Counts, not contents (§7.6): the captured cells belong in the variable
+    // and the report, not in every console the run passes through.
+    expect(lines.join('\n')).not.toContain('Alice Smith');
+  });
+
+  it('stores [] for an empty table, so For each runs zero passes rather than failing', async () => {
+    const parameters: Record<string, string> = {};
+    const empty = vi.mocked(await import('../src/browser/actions.js')).executeAction;
+    empty.mockImplementationOnce(async (_page: unknown, action: AIAction) => {
+      actions.received.push(action);
+      return { success: true, capturedRecords: [] };
+    });
+    await runStep(
+      'Read the Orders table',
+      [plan([{
+        action: 'readTable',
+        selector: '#orders',
+        columns: [{ header: 'Order ID', key: 'id' }],
+        as: 'orders',
+        description: 'Read the Orders table',
+      } as AIAction])],
+      { parameters },
+    );
+    // `[]`, not undefined and not a missing entry: the reference resolves and
+    // the loop over it is empty (§4.8).
+    expect(parameters['orders']).toBe('[]');
+  });
+});
+
+// ── A capture that lands on a loop's item name ─────────────────────────────
+
+/**
+ * A rebind of a ROOT erases that root's dotted keys
+ * (docs/specs/SPEC-structured-table-reads.md §8.2).
+ *
+ * The rule was honoured by the two writers that know about it —
+ * `applyPassBindings` and `runSetStep` — and by nobody else. The executor's
+ * own three capture writes were plain `resolvedParameters[as] = value`, so
+ * `Read the order id from the summary [store as: order]` after a `For each
+ * {{order}} …` left `order.id` holding the last pass's id: a later
+ * `{{order.id}}` substituted a row the author had just overwritten, and
+ * §8.3's refusal could not fire on a key that was still there.
+ */
+describe('a capture that rebinds a loop"s item name', () => {
+  /** The map as it stands after the last pass of `For each {{order}} …`. */
+  const afterLoop = (): Record<string, string> => ({
+    order: '{"_row":"2","id":"B"}',
+    'order._row': '2',
+    'order.id': 'B',
+    other: 'kept',
+    'unrelated.id': 'kept too',
+  });
+
+  it('clears order.* on a single-value read', async () => {
+    const parameters = afterLoop();
+    const { result } = await runStep(
+      'Read the order id from the summary [store as: order]',
+      [plan([{ action: 'read', selector: '#summary', as: 'order', description: 'Read it' }])],
+      { parameters },
+    );
+    expect(result.status).toBe('passed');
+    expect(parameters['order']).toBe('CAPTURED');
+    expect(Object.hasOwn(parameters, 'order.id')).toBe(false);
+    expect(Object.hasOwn(parameters, 'order._row')).toBe(false);
+    // Nothing else is this rule's business.
+    expect(parameters['other']).toBe('kept');
+    expect(parameters['unrelated.id']).toBe('kept too');
+  });
+
+  it('clears order.* on a plural read, which stores a JSON array', async () => {
+    const parameters = afterLoop();
+    const plural = vi.mocked(await import('../src/browser/actions.js')).executeAction;
+    plural.mockImplementationOnce(async (_page: unknown, action: AIAction) => {
+      actions.received.push(action);
+      return { success: true, capturedValues: ['A', 'B'] };
+    });
+    await runStep(
+      'Read every order id [store as: order]',
+      [plan([{ action: 'read', selector: '#ids', as: 'order', multiple: true, description: 'Read them' } as AIAction])],
+      { parameters },
+    );
+    expect(parameters['order']).toBe('["A","B"]');
+    expect(Object.hasOwn(parameters, 'order.id')).toBe(false);
+  });
+
+  it('clears order.* on a readTable capture', async () => {
+    const parameters = afterLoop();
+    await runStep(
+      'Read the Orders table [store as: order]',
+      [plan([{
+        action: 'readTable',
+        selector: '#orders',
+        columns: [{ header: 'Order ID', key: 'id' }],
+        as: 'order',
+        description: 'Read the Orders table',
+      } as AIAction])],
+      { parameters },
+    );
+    expect(parameters['order']).toContain('ORD-1001');
+    expect(Object.hasOwn(parameters, 'order.id')).toBe(false);
+  });
+
+  it('leaves a DOTTED capture name alone — that is a property write, not a rebind', async () => {
+    // Nothing writes one today; the guard is on the flat spelling so that if
+    // one ever does, it cannot erase its own siblings.
+    const parameters = afterLoop();
+    await runStep(
+      'Read the id [store as: order.id]',
+      [plan([{ action: 'read', selector: '#id', as: 'order.id', description: 'Read it' }])],
+      { parameters },
+    );
+    expect(parameters['order.id']).toBe('CAPTURED');
+    expect(parameters['order._row']).toBe('2');
   });
 });
 
@@ -636,6 +868,62 @@ describe('a secret-named value never reaches the model', () => {
     // rule.
     expect(actions.received[0]!.value).toBe('debentures');
   });
+
+  it('masks the secret COLUMNS of a record capture in the ## Values block', async () => {
+    // The gap the name rule cannot see: `payments` is the author's word for a
+    // whole table and `payment` for one row of it, so neither entry says
+    // "secret" and both printed every column — while the DOM in the same
+    // message had the same value masked.
+    const PAYMENTS = JSON.stringify([
+      { _row: '1', payee: 'Acme', password: 'hunter2-long' },
+      { _row: '2', payee: 'Origin', password: 'correct-horse' },
+    ]);
+    const { client } = await runStep(
+      'Review the payments',
+      [plan([{ action: 'click', selector: '#go', description: 'Review' }])],
+      {
+        parameters: {
+          payments: PAYMENTS,
+          payment: JSON.stringify({ _row: '1', payee: 'Acme', password: 'hunter2-long' }),
+          'payment.payee': 'Acme',
+          'payment.password': 'hunter2-long',
+        },
+        authored: 'Review {{payments}}, starting with {{payment}} for {{payment.payee}} '
+          + 'using {{payment.password}}',
+      },
+    );
+    const text = allRequestText(client);
+    for (const leaked of ['hunter2-long', 'correct-horse']) {
+      expect(text).not.toContain(leaked);
+    }
+    // The payee is not a secret and the model needs it to find the row.
+    expect(text).toContain('Acme');
+    expect(text).toContain('- {{payment.password}} resolved to "***" on this run');
+  });
+
+  it('masks a secret that reached a NON-secret entry, by value', async () => {
+    // The other half of the ## Values block's masking, and the half nothing
+    // pinned end to end: `buildStepValues` reads the run's free-text mask set
+    // and `formatParameterBlock` applies it, so a secret that arrived in an
+    // ordinary entry by some route no NAME describes — a summary line built
+    // from the password, a capture that swallowed it — is masked in the block
+    // exactly as it is in the DOM snapshot three lines below.
+    //
+    // Only `{{summary}}` is referenced, so the block names one entry: the
+    // password's own entry is not in it, and nothing but the mask set can
+    // hide the value inside the summary.
+    const { client } = await runStep(
+      'Confirm the summary',
+      [plan([{ action: 'click', selector: '#go', description: 'Confirm' }])],
+      {
+        parameters: { password: 'hunter2-long', summary: 'signed in with hunter2-long' },
+        authored: 'Confirm {{summary}}',
+      },
+    );
+    const text = allRequestText(client);
+    expect(text).toContain('- {{summary}} resolved to "signed in with ***" on this run');
+    expect(text).not.toContain('hunter2-long');
+  });
 });
 
 // ── The module's own rules, without a step around them ──────────────────────
@@ -709,5 +997,144 @@ describe('the walk and the copy', () => {
         { known: new Set() },
       ),
     ).toBeUndefined();
+  });
+});
+
+/**
+ * Review 5, finding 4: the one "Stored …" line that prints the VALUE.
+ *
+ * Its two siblings print a count; this one printed the captured text raw. The
+ * logger does not redact — the run-log FILE does, on its way to disk, and the
+ * Sessions API's `output` bridge does not — so a `[store as: password]`
+ * capture reached the console and every client watching the stream in clear,
+ * while the report, the step line and the prompt's `## Values` block all said
+ * `***` for the same value (§7.6).
+ */
+describe('the "Stored captured value" line is masked like everything else', () => {
+  async function logsOf(as: string): Promise<string[]> {
+    const lines: string[] = [];
+    const stop = addLogCallback((_level, message) => { lines.push(message); });
+    try {
+      await runStep(
+        'Read the one-time code',
+        [plan([{ action: 'read', selector: '#code', as, description: 'Read it' }])],
+        { parameters: {} },
+      );
+    } finally {
+      stop();
+    }
+    return lines;
+  }
+
+  it('masks it when the author’s own name says secret', async () => {
+    const lines = await logsOf('password');
+    expect(lines).toContain('Stored captured value as "{{password}}": "***"');
+    expect(lines.join('\n')).not.toContain('CAPTURED');
+  });
+
+  it('and still prints a plain capture, which is what the line is for', async () => {
+    const lines = await logsOf('balance');
+    expect(lines).toContain('Stored captured value as "{{balance}}": "CAPTURED"');
+  });
+
+  /**
+   * Review 6, finding 2: there was a SECOND capture line, one frame lower.
+   *
+   * `executeRead` logged `read captured: "<value>" → variable "<name>"` before
+   * returning, so it ran before the bind — the name `[store as: password]`
+   * chose was not yet in the parameter map the mask set is built from, and no
+   * amount of masking at that depth could have consulted it. The run-log
+   * file's own pass masks by the set it HAS, so the credential reached the
+   * console, the file and the SSE `output` bridge in clear, beside the line
+   * above saying `***` for the same value.
+   *
+   * The real `executeAction` is imported past this file's mock and driven over
+   * a fake locator root, so this is the actual read path, not a stand-in.
+   */
+  it('and executeRead no longer logs a capture line of its own', async () => {
+    const real = await vi.importActual<typeof import('../src/browser/actions.js')>(
+      '../src/browser/actions.js',
+    );
+    const VALUE = 's3cret-from-the-page';
+    const root = {
+      locator: () => ({ first: () => ({ evaluate: async () => VALUE }) }),
+    } as unknown as Page;
+
+    const lines: string[] = [];
+    const stop = addLogCallback((_level, message) => { lines.push(message); });
+    let captured: string | undefined;
+    try {
+      const out = await real.executeAction(root, {
+        action: 'read',
+        selector: '#code',
+        as: 'password',
+        description: 'Read the one-time code',
+      } as AIAction);
+      captured = out.capturedValue;
+    } finally {
+      stop();
+    }
+
+    // The read still works — the value is returned, it is just not printed.
+    expect(captured).toBe(VALUE);
+    expect(lines.join('\n')).not.toContain(VALUE);
+    expect(lines.join('\n')).not.toContain('read captured');
+  });
+});
+
+/**
+ * Review 6, finding 5a: `StepValues.map` is the LIVE variable map, and the
+ * prompt's `## Values` block asks it whose each dotted name is.
+ *
+ * tests/prompt-values-block.test.ts pins `formatParameterBlock` and
+ * `buildStepMessage` with a map handed to them; nothing pinned that
+ * `buildStepValues` actually hands one over, so deleting `map: params` left
+ * the whole suite green. Both directions are asserted below, because the two
+ * ways of getting this wrong fail differently and only one of them is
+ * "forgot the field".
+ */
+describe('the ## Values block is asked with the live variable map', () => {
+  /** The block's own lines, out of everything the model was sent. */
+  async function valuesLines(params: Record<string, string>): Promise<string[]> {
+    const authored = 'Check the row for {{user.apikey}} and {{row.keyword}}';
+    const { client } = await runStep(
+      authored,
+      [plan([{ action: 'click', selector: '#go', description: 'Go' }])],
+      { parameters: params, authored },
+    );
+    return allRequestText(client).split('\n').filter((line) => line.startsWith('- {{'));
+  }
+
+  /** The two names of §7.6's worked example: a data file's column HEADING,
+   *  which nothing bound, and a loop's pass binding, which something did. */
+  function liveMap(apikey: string): Record<string, string> {
+    const params: Record<string, string> = { 'user.apikey': apikey, 'row.keyword': 'AU' };
+    markLoopBindings(params, ['row.keyword']);
+    return params;
+  }
+
+  it('masks a dotted heading nobody bound, and leaves the column a pass did', async () => {
+    const lines = await valuesLines(liveMap('uk_live_1234'));
+    expect(lines).toContain('- {{user.apikey}} resolved to "***" on this run');
+    // The other half of the bargain, and the one a COPY of the map breaks: a
+    // copy carries none of the registry's marks, so `row.keyword` falls back
+    // to the author rule and `AU` is masked out of the block the model needs
+    // it from. Measured: `map: { ...params }` renders `***` here.
+    expect(lines).toContain('- {{row.keyword}} resolved to "AU" on this run');
+    expect(lines.join('\n')).not.toContain('uk_live_1234');
+  });
+
+  it('masks it by NAME, not only because the value joined the free-text set', async () => {
+    // The line above is true twice over for a non-empty value — `secretValues`
+    // reads the same live map and puts `uk_live_1234` in the free-text set, so
+    // `redact` would reach it even with no map at all. An EMPTY value is where
+    // the two part company: nothing empty ever joins that set (`''.split('')`
+    // would shred the text), so the NAME is the only rule left, and the name
+    // is only askable because the map travels with the values.
+    //
+    // Measured with `map: params` removed: `""` rather than `"***"`.
+    const lines = await valuesLines(liveMap(''));
+    expect(lines).toContain('- {{user.apikey}} resolved to "***" on this run');
+    expect(lines).toContain('- {{row.keyword}} resolved to "AU" on this run');
   });
 });
