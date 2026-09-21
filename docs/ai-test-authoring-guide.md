@@ -92,6 +92,7 @@ These are natural-language examples, not literal command keywords. The model cho
 | Capability | Example step text |
 | --- | --- |
 | Navigation | `Navigate to /orders` |
+| Browser history | `Go back` / `Go forward` | The browser's own back and forward buttons, on the active tab. Not a click: there is no such element in the page, and a keyboard shortcut does nothing. Fails the step if the tab did not move. |
 | Clicking | `Click Edit in the row for order {{order_id}}` |
 | Text entry | `Type "{{email}}" into the Email field` |
 | Native select or custom dropdown | `Select Australia from the Country dropdown` |

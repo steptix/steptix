@@ -4,6 +4,13 @@ export type ActionType =
   | 'type'
   | 'select'
   | 'navigate'
+  // Move the ACTIVE TAB through its own session history — the browser's back
+  // and forward buttons (docs/specs/SPEC-browser-history.md). Not a click on
+  // anything in the page, and not reachable by a keypress: a key event is
+  // delivered to the focused element, so a back shortcut silently does
+  // nothing, which is the measured defect these exist to close (§2).
+  | 'back'
+  | 'forward'
   | 'upload'
   | 'hover'
   | 'wait'

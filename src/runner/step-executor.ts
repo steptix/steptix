@@ -78,6 +78,10 @@ const MUTATING_ACTIONS: ReadonlySet<AIAction['action']> = new Set([
   'type',
   'select',
   'navigate',
+  // The browser's own history moves the page, so the app gets the same settle
+  // a navigate gets (docs/specs/SPEC-browser-history.md §4.4).
+  'back',
+  'forward',
   'upload',
   'hover',
   'keyboard',

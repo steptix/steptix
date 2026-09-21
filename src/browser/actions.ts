@@ -389,6 +389,15 @@ export async function executeAction(
         await executeNavigate(page, eff, baseUrl);
         break;
 
+      case 'back':
+      case 'forward':
+        // Page-level for the same reason navigate is: session history belongs
+        // to the tab, and a frame does not navigate independently
+        // (docs/specs/SPEC-browser-history.md §4.2). `page`, never `root` —
+        // a frame-switched run must still move the whole tab.
+        await executeHistory(page, eff);
+        break;
+
       case 'upload':
         uploadRoute = await executeUpload(page, root, eff, uploadFiles ?? [], remainingMs);
         break;
@@ -550,6 +559,12 @@ export async function executeAction(
     return {
       success: false,
       error: errorMessage,
+      // A history move that did not happen cannot be fixed by re-planning,
+      // so a retry only burns an AI turn — the upload path takes the same
+      // flag for the same reason. Worse here: the re-ask hands the model a
+      // failure it can satisfy with a `navigate` or a `noop`, turning the
+      // loud failure §4.3 chose back into the quiet pass §2 is about.
+      ...((eff.action === 'back' || eff.action === 'forward') && { retryable: false as const }),
       ...(eff.selector !== undefined && { failedSelector: eff.selector }),
       ...(matchCount !== undefined && { matchCount }),
       ...(targeting !== undefined && { targeting }),
@@ -649,6 +664,74 @@ async function executeNavigate(page: Page, action: AIAction, baseUrl?: string): 
   }
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+}
+
+/**
+ * Where in its history this tab is standing: the URL, and the history state
+ * beside it.
+ *
+ * The state is read because a single-page app can push two entries at the SAME
+ * url and differ only in what it stored — a filter panel that pushes
+ * `{view:'paid'}` over `{view:'all'}` on `/payments`. Without it, moving
+ * between those two reads as "nothing happened". It is wrapped because reading
+ * `history` can throw on a document the test cannot script: an unreadable
+ * state is simply left out of the comparison, which leaves the url doing the
+ * work it did before.
+ */
+async function historyPositionOf(page: Page): Promise<{ url: string; state: string }> {
+  let state = '';
+  try {
+    state = await page.evaluate(() => {
+      try {
+        return JSON.stringify((globalThis as any).history?.state ?? null);
+      } catch {
+        return '';
+      }
+    });
+  } catch {
+    state = '';
+  }
+  return { url: page.url(), state };
+}
+
+/**
+ * The browser's back and forward buttons, on the active tab
+ * (docs/specs/SPEC-browser-history.md §4).
+ *
+ * The failure this action exists to close is a silent no-op reported as
+ * success (§2: a step asked for the browser's back button, got a keypress that
+ * went to the focused element, and passed without moving). So a move that did
+ * not happen FAILS the step (§4.3) rather than passing quietly.
+ *
+ * Deciding whether it happened is the whole subtlety, and the obvious reading
+ * is wrong: `goBack`/`goForward` resolve `null` whenever the move produced no
+ * HTTP **Response**, which is every SAME-DOCUMENT move — a `#hash` entry, a
+ * `history.pushState` entry — not only an empty history. Review measured the
+ * first cut of this function failing a `pushState` back that HAD moved the
+ * tab, with a message saying there was no previous page: the single-page-app
+ * case §2 names as a reason to have the action at all. So `null` is not the
+ * test; the position before and after is. A null response with an unchanged
+ * position is the real no-op, and only that throws.
+ */
+async function executeHistory(page: Page, action: AIAction): Promise<void> {
+  const forward = action.action === 'forward';
+  const before = await historyPositionOf(page);
+  // Matching `executeNavigate`: a history move is a navigation, and waiting
+  // for `load` (Playwright's default) where a `navigate` waits for
+  // `domcontentloaded` would make one page quick to reach one way and slow the
+  // other, for no reason an author could see.
+  const options = { waitUntil: 'domcontentloaded' as const, timeout: 30_000 };
+  const response = forward ? await page.goForward(options) : await page.goBack(options);
+  if (response !== null) return;
+
+  const after = await historyPositionOf(page);
+  if (after.url !== before.url || after.state !== before.state) return;
+
+  throw new Error(
+    forward
+      ? "forward: the browser has no page ahead in this tab's history"
+      : "back: the browser has no previous page in this tab's history",
+  );
 }
 
 /**

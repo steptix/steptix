@@ -272,6 +272,7 @@ Plan your next action based on the observed result — do not batch multiple act
 14. For "count" actions, set "selector" to the CSS selector to count and "as" to a snake_case variable name. Use "count" when a step asks how many elements exist (e.g. "how many accounts", "count the rows"). The result is stored as a string (e.g. "3") and available as {{variable_name}} in later steps
 15. Set "needs_reeval": true if the current step instruction is NOT yet fully satisfied after this action. Set false (or omit) when the step instruction IS satisfied. IMPORTANT: only consider the current step instruction — do NOT continue into actions that belong to subsequent steps. For example, if the step says "Enter username and password", set needs_reeval: true after entering the username (you still need to enter the password), but set needs_reeval: false after entering the password — do NOT proceed to click Login unless the step says to
 16. For elements inside an <iframe>, set "frame" to the CSS selector of the iframe element (shown in the <!-- comment --> after the <iframe> tag). For **nested iframes** (an iframe inside another iframe), chain the selectors with " >> " from outermost to innermost. Example: if the DOM snapshot shows \`<iframe id="outer"> <!-- #outer -->\n  <iframe id="inner"> <!-- #inner -->\n    <button id="btn">\`, then to click #btn set "frame": "#outer >> #inner", "selector": "#btn". Never put an iframe selector inside the "selector" field — iframe traversal belongs entirely in the "frame" field. Omit "frame" for elements in the main page
+16a. BROWSER HISTORY. To move the active tab through its own session history, use { "action": "back" } or { "action": "forward" } — the browser back and forward buttons, no other fields. A step that says "go back", "go back to the previous page", "browser back", "click the browser back button" or "navigate back in the history" means this action. A keyboard shortcut does NOT do it: a keypress is delivered to the focused element inside the page, not to the browser, so it silently does nothing and the step passes without moving. When the step names something in the PAGE instead ("Click Back to payments", "Click the Return to list link"), that is an ordinary click on that element, not this action. There is no history entry to move to when the tab has not navigated yet; the framework fails the step in that case rather than pretending it worked.
 17. When the application opens a new window or tab (via window.open or target="_blank"), the framework tracks all open pages. An "Open Pages" section will appear in the prompt listing each page with its label, URL, and title. Use a "switchPage" action to switch context before interacting with another page: { "action": "switchPage", "page": "page:2", "description": "Switch to popup window" }. After switching, all actions execute against that page and the DOM snapshot will reflect it on the next turn (set "needs_reeval": true after switchPage). Use "switchPage" with "main" to return to the original page. Do NOT use switchPage if there is only one page open
 18. To close a browser tab or popup window, use a "closePage" action: { "action": "closePage", "page": "page:2", "description": "Close the popup window" }. The "page" field accepts the same identifiers as switchPage: an auto label ("page:2"), a custom label (the name supplied via openPage's "as" field — e.g. "docs"), a URL substring, or a title substring. Prefer the custom label when one was assigned (deterministic, refactor-proof). You cannot close the main page. After closing, the framework automatically switches back to the main page — set "needs_reeval": true to get the updated DOM snapshot. Use this when a step asks to close a tab, window, or popup
 18a. To open a brand-new browser tab/window at a URL the test specifies (rather than waiting for the application to spawn one via window.open or a target="_blank" link), use an "openPage" action: { "action": "openPage", "url": "https://docs.example.com", "description": "Open documentation in a new tab" }. The new page is automatically promoted to the active page, so subsequent actions in this step and following steps target it without an explicit switchPage. Use this when a step asks to "open a new tab/window to <URL>", "open <URL> in a new tab", or similar. Always set "needs_reeval": true so the next turn sees the new page's DOM. To return to the original page later, use a "switchPage" action with "main".
@@ -1381,6 +1382,24 @@ const CLOSING_ACTIONS: ReadonlySet<string> = new Set(['closePage', 'closeBrowser
  * step that touched no tab never sees it. Same principle as
  * `measuredSelectorRules`.
  */
+/**
+ * How a recorded history move becomes code (SPEC-browser-history.md §7).
+ *
+ * Conditional for `tabHandleRule`'s reason, stated above it: a rule the
+ * transcript cannot trigger is pure cost on every compile. Numbered `7b` so it
+ * sits beside `7a` without disturbing the selector rules, whose numbering the
+ * post-condition rule computes from.
+ */
+function historyRule(actions: TranscriptAction[]): string {
+  if (!actions.some((a) => a.action === 'back' || a.action === 'forward')) return '';
+  return (
+    `\n7b. **A recorded \`back\` or \`forward\` is the browser's own session history.** ` +
+    `Write \`await page.goBack()\` or \`await page.goForward()\`. Never a keyboard shortcut: a key ` +
+    `event is delivered to the focused element inside the page, not to the browser, so it does ` +
+    `nothing at all — quietly, since the press itself succeeds.`
+  );
+}
+
 function tabHandleRule(actions: TranscriptAction[]): string {
   if (!actions.some((a) => TAB_ACTIONS.has(a.action))) return '';
   return (
@@ -1715,7 +1734,7 @@ Rules — all of them are enforced:
 4. **Turn assertions into \`step.expect(condition, message)\`**, with a message that names what was compared.
 5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake.
 6. **No imports.** Everything you need arrives via the context object — and everything you use must be in \`run\`'s destructured parameter list. The shape above shows \`{ page, step, log }\` because that is the common case, not because it is the whole context: an entry that calls \`tabs.open(...)\` must be written \`async run({ page, step, log, tabs })\`. A name you use but do not destructure is a \`ReferenceError\` on the first replay.
-7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.${tabHandleRule(input.actions)}
+7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.${historyRule(input.actions)}${tabHandleRule(input.actions)}
 7b. **Files come through \`step.filePath\`.** An \`upload\` action's \`filePath\` / \`filePaths\` in the transcript are relative to the test file, so pass each through \`step.filePath('…')\` — the verbatim string — and give the result to Playwright. When the action's \`upload.via\` is \`"input"\`, that is \`await page.locator('#statement-file').setInputFiles(step.filePath('attachments/logo.png'))\`. When it is \`"chooser"\`, the action clicked a control that opened a picker, so write:
 \`\`\`
 const chooser = page.waitForEvent('filechooser');

@@ -10,6 +10,8 @@ import { normaliseUploadPath } from '../browser/upload-paths.js';
 
 const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   'click', 'type', 'select', 'navigate', 'upload',
+  // docs/specs/SPEC-browser-history.md §4 — the browser's own history.
+  'back', 'forward',
   'hover', 'wait', 'scroll', 'switchFrame', 'switchPage', 'closePage', 'openPage',
   'openBrowser', 'switchBrowser', 'closeBrowser',
   'dismiss',
@@ -35,6 +37,27 @@ const VALID_ACTION_TYPES: Set<ActionType> = new Set([
  * AI models sometimes return "api", "http", "request" etc. instead of "api_call".
  */
 const ACTION_TYPE_ALIASES: Record<string, ActionType> = {
+  // docs/specs/SPEC-browser-history.md §4.1. An unrecognised action type is
+  // kept with a WARN and then executed as a no-op that REPORTS SUCCESS, so a
+  // near-miss spelling here reproduces the exact defect these actions close.
+  // `goBack` is the likeliest miss of all: it is the Playwright call the
+  // code-generation prompt teaches two screens away.
+  goBack: 'back',
+  go_back: 'back',
+  browserBack: 'back',
+  browser_back: 'back',
+  navigateBack: 'back',
+  navigate_back: 'back',
+  historyBack: 'back',
+  history_back: 'back',
+  goForward: 'forward',
+  go_forward: 'forward',
+  browserForward: 'forward',
+  browser_forward: 'forward',
+  navigateForward: 'forward',
+  navigate_forward: 'forward',
+  historyForward: 'forward',
+  history_forward: 'forward',
   'api': 'api_call',
   'http': 'api_call',
   'request': 'api_call',
