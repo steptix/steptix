@@ -593,6 +593,70 @@ describe('readTable — empty tables and placeholder rows', () => {
     expect(data.placeholdersSkipped).toBe(0);
   });
 
+  it('measures a HEADERLESS table against its hidden rows, so a narrow message still fails', async () => {
+    // The half of the width rule that `Math.max(width, 2)` cannot stand in
+    // for. Every data row is hidden by a filter and the visible message spans
+    // FIVE of the table's seven columns, so it is a merged grid and not a
+    // message (§10) — but only if the width came from the rows that are still
+    // there to say so. Measured over the visible rows alone the width is 1,
+    // `5 >= max(1, 2)` is true, and the read answers `[]` and SUCCEEDS on a
+    // table it could not map.
+    await load(`
+      <table id="t" aria-label="Scheduled payments"><tbody>
+        <tr class="row-hidden">
+          <td>Origin Energy</td><td>INV-1</td><td>$140.00</td><td>3 Oct 2026</td>
+          <td>Scheduled</td><td>Yes</td><td>View</td>
+        </tr>
+        <tr><td colspan="5">No scheduled payments.</td></tr>
+      </tbody></table>`);
+    expect(await refusal({ selector: '#t', columns: [{ index: 1, key: 'payee' }] }))
+      .toBe(
+        'readTable cannot map table "Scheduled payments": merged headers or cells '
+        + '(rowspan/colspan > 1) are not supported',
+      );
+  });
+
+  it('and reads the same table as [] when the message spans all seven', async () => {
+    // The sibling that says what the refusal above is actually about: not
+    // colspan, but a message narrower than the grid it sits in. Same table,
+    // same hidden row, one number different.
+    await load(`
+      <table id="t" aria-label="Scheduled payments"><tbody>
+        <tr class="row-hidden">
+          <td>Origin Energy</td><td>INV-1</td><td>$140.00</td><td>3 Oct 2026</td>
+          <td>Scheduled</td><td>Yes</td><td>View</td>
+        </tr>
+        <tr><td colspan="7">No scheduled payments.</td></tr>
+      </tbody></table>`);
+    const outcome = await readTableRecords(page, {
+      selector: '#t',
+      columns: [{ index: 1, key: 'payee' }],
+    });
+    expect(outcome.records).toEqual([]);
+    expect(outcome.placeholdersSkipped).toBe(1);
+  });
+
+  it('reads a colspan="1" message row in a one-column table as a data record (§4.8)', async () => {
+    // The deliberate floor, stated as an outcome rather than as a guard: a
+    // lone cell that spans no more than its own column is data, whatever its
+    // text says. A one-column table is the only place the two readings differ,
+    // and the rule picks this one — because the alternative deletes an
+    // ordinary row from every one-column read.
+    await load(`<table id="t" aria-label="Names"><tbody>
+      <tr><td>Alice</td></tr>
+      <tr><td colspan="1">No more names.</td></tr>
+    </tbody></table>`);
+    const outcome = await readTableRecords(page, {
+      selector: '#t',
+      columns: [{ index: 1, key: 'name' }],
+    });
+    expect(outcome.records).toEqual([
+      { _row: '1', name: 'Alice' },
+      { _row: '2', name: 'No more names.' },
+    ]);
+    expect(outcome.placeholdersSkipped).toBe(0);
+  });
+
   it('still fails a colspan narrower than the table (§10)', async () => {
     await load(`
       <table id="t" aria-label="Pending transfers">
@@ -751,6 +815,50 @@ describe('readTable — tables that silently read as []', () => {
     </tbody></table>`);
     const result = await run({ selector: '#t', columns: [{ header: 'Order ID', key: 'id' }] });
     expect(result.capturedRecords).toEqual([{ _row: '1', id: 'O-1' }, { _row: '2', id: 'O-2' }]);
+  });
+
+  it('does NOT take a one-cell GROUP row as the header of a wider table', async () => {
+    // `<tr><th>Section A</th></tr>` above the real headings is a group row,
+    // and a header is never narrower than the grid it names. Taken as the
+    // header, the heading row became record 1 — `{_row:"1",name:"Name"}` —
+    // and every real row was numbered one too high, which is exactly the
+    // misalignment §4.5 exists to prevent. `lonelySpan` did not catch it
+    // because the cell carries no colspan at all.
+    const SECTIONED = `<table id="t" aria-label="Accounts"><tbody>
+      <tr><th>Section A</th></tr>
+      <tr><th>Name</th><th>Status</th></tr>
+      <tr><td>Alice</td><td>Active</td></tr>
+      <tr><td>Bob</td><td>Closed</td></tr>
+    </tbody></table>`;
+
+    await load(SECTIONED);
+    // By header: the read now finds the row that actually names the columns,
+    // which is what this message proves — it lists what the header row holds.
+    expect(await refusal({ selector: '#t', columns: [{ header: 'Payee', key: 'p' }] }))
+      .toBe(
+        'readTable cannot map table "Accounts": no column is headed "Payee" — available '
+        + 'headers are Name, Status',
+      );
+    const byHeader = await readTableRecords(page, {
+      selector: '#t',
+      columns: [{ header: 'Name', key: 'name' }],
+    });
+    expect(byHeader.records).toEqual([
+      // The group row spans nothing, so §4.8's floor leaves it a data row —
+      // loud and visible, rather than silently renumbering the ones below it.
+      { _row: '1', name: 'Section A' },
+      { _row: '2', name: 'Alice' },
+      { _row: '3', name: 'Bob' },
+    ]);
+
+    // By position, the same three rows and the same numbers.
+    await load(SECTIONED);
+    const byIndex = await readTableRecords(page, {
+      selector: '#t',
+      columns: [{ index: 1, key: 'name' }],
+    });
+    expect(byIndex.records.map((r) => r['_row'])).toEqual(['1', '2', '3']);
+    expect(byIndex.records.map((r) => r['name'])).toEqual(['Section A', 'Alice', 'Bob']);
   });
 
   it('does NOT take a <th scope="row"> first row as the header (§10)', async () => {
@@ -1198,6 +1306,14 @@ describe('readTable — the page-side extractor is a file, not a TS callback', (
 
 // ── diagnostics and the column cap (§7.5, §9.2) ─────────────────────────────
 
+/** Twenty columns exactly, so the cap can be tested at its boundary on both
+ *  paths rather than at a number comfortably under it. Headerless, because the
+ *  boundary is about the COUNT and positional columns say it with no fixture
+ *  headings to invent. */
+const WIDE_HTML = `<table id="wide" aria-label="Wide"><tbody><tr>${
+  Array.from({ length: 20 }, (_, i) => `<td>c${i + 1}</td>`).join('')
+}</tr></tbody></table>`;
+
 describe('readTable — how a refusal names the table', () => {
   it('quotes a caption containing quote marks so the message stays readable', async () => {
     await load(`
@@ -1232,9 +1348,19 @@ describe('readTable — how a refusal names the table', () => {
       actions: [{ action: 'readTable', selector: '#orders', columns, as: 'rows', description: 'd' }],
       reasoning: '',
     }))).toThrow(/requests 21 columns — the maximum is 20/);
-    // Twenty is still fine on both paths.
-    const twenty = await readTableRecords(page, { selector: '#orders', columns: columns.slice(0, 6) });
-    expect(twenty.records).toHaveLength(2);
+    // Twenty is still fine on both paths — the boundary itself, not a number
+    // safely under it. Six columns proved only that the cap is above six, so
+    // a cap that had drifted to 19 on one path went unnoticed here.
+    await load(WIDE_HTML);
+    const twenty = columns.slice(0, 20);
+    const accepted = await readTableRecords(page, { selector: '#wide', columns: twenty });
+    expect(accepted.records).toHaveLength(1);
+    expect(Object.keys(accepted.records[0]!)).toHaveLength(21); // 20 columns plus `_row`
+    expect(accepted.records[0]!['k19']).toBe('c20');
+    expect(() => parseAIResponse(JSON.stringify({
+      actions: [{ action: 'readTable', selector: '#wide', columns: twenty, as: 'rows', description: 'd' }],
+      reasoning: '',
+    }))).not.toThrow();
   });
 
   it('refuses an empty column list', async () => {

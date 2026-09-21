@@ -5,7 +5,13 @@ import type { PageStateDiagnosis } from '../browser/page-state.js';
 import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseFailureTail, type ParsedFailureTail } from '../parser/failure-tail.js';
 import { WIDE_PLACEHOLDER_SOURCE } from '../parser/parameters.js';
-import { isSecretParameterName, isSecretRef, MASK } from '../utils/secrets.js';
+import {
+  isSecretParameterName,
+  isSecretRef,
+  maskRecordSecrets,
+  redact,
+  MASK,
+} from '../utils/secrets.js';
 
 /**
  * What a step's placeholders hold right now — the `## Values` block the model
@@ -29,6 +35,10 @@ export interface StepValues {
   /** Names and refs the test has declared are not secrets, despite
    *  `isSecretName` matching them (the per-test `## Config` hatch). */
   unmask?: ReadonlySet<string>;
+  /** The run's free-text mask set — the same values `redact(domSnapshot, …)`
+   *  hides three lines below this block. Without it the block is the one
+   *  surface in the message that still printed them. */
+  secrets?: string[];
 }
 
 /** The `## Values` block, or '' when the step references nothing — absence is
@@ -38,7 +48,12 @@ function formatValuesBlock(values?: StepValues): string {
   if (!values) return '';
   const { parameters, envRefs = [] } = values;
   if (parameters.length === 0 && envRefs.length === 0) return '';
-  return formatParameterBlock(parameters, envRefs, values.unmask ?? new Set<string>());
+  return formatParameterBlock(
+    parameters,
+    envRefs,
+    values.unmask ?? new Set<string>(),
+    values.secrets ?? [],
+  );
 }
 
 /** Viewport dimensions passed to the system prompt */
@@ -1161,18 +1176,35 @@ export interface StepCodePromptInput {
  * agree: only the CLI's was masked before, by the accident of reading
  * `report.parameters` after `redactReport`.
  *
+ * A name that is NOT secret still has its value masked two further ways, and
+ * both exist because the name rule cannot see inside a value. A `readTable`
+ * capture is a whole table under one author-chosen name (`payments`) and a
+ * `For each` pass's record is one row under another (`payment`), so neither
+ * entry says secret and both used to render every column — password included —
+ * into the outbound prompt, while `redact(domSnapshot, …)` masked the same
+ * value in the DOM three lines below it (§8.2). `maskRecordSecrets` answers
+ * that structurally, by column key. `secrets` — the run's free-text mask set,
+ * the same one the DOM is redacted with — answers the other direction: a
+ * secret that reached a non-secret-named entry by some route no key names.
+ *
  * `unmask` is the per-test escape hatch: names (and refs) the author has
  * declared are not secrets after all, because `isSecretName` matches `key`
  * and a `keyword` column the model must find in the DOM is a real casualty.
+ * It exempts an entry from ALL THREE rules — masking a declared non-secret by
+ * value would take the hatch away again through the other door.
  */
 export function formatParameterBlock(
   parameters: Array<{ name: string; value: string }>,
   envRefs: Array<{ ref: string; value: string }>,
   unmask: ReadonlySet<string> = new Set<string>(),
+  secrets: string[] = [],
 ): string {
   if (parameters.length === 0 && envRefs.length === 0) return '(this step uses no parameters)';
-  const show = (secret: boolean, name: string, value: string): string =>
-    JSON.stringify(secret && !unmask.has(name) ? MASK : value);
+  const show = (secret: boolean, name: string, value: string): string => {
+    if (unmask.has(name)) return JSON.stringify(value);
+    if (secret) return JSON.stringify(MASK);
+    return JSON.stringify(redact(maskRecordSecrets(value), secrets));
+  };
   return [
     ...parameters.map(
       (p) => `- {{${p.name}}} resolved to ${show(isSecretParameterName(p.name), p.name, p.value)} on this run`,

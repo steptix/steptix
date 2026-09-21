@@ -945,6 +945,129 @@ describe('a For each over records with keys a placeholder cannot spell', () => {
         '(content-type cannot be spelled as a placeholder)',
     );
   });
+
+  /**
+   * …and it says it MASKED, because the sentence is written from the run's
+   * own values.
+   *
+   * The dropped key here is `hunter2 header`, and `hunter2` is what
+   * `{{password}}` holds — so the refusal printed a secret into the console,
+   * the report and the run log. Round 2 masked `evaluateGuard`'s
+   * `cannot be referenced as a placeholder` line for exactly this case (see
+   * `run-loop-contracts.test.ts`) and left the refusal beside it in the clear.
+   */
+  it('masks a secret value the refusal would otherwise print', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    try {
+      const md = DOCS.replace('{{doc.id}}', '{{doc.contenttype}}');
+      const inst = await instance(
+        md,
+        { password: 'hunter2', docs: '[{"id":"A","hunter2 header":"t"}]' },
+        'unspellable-keys-secret.md',
+      );
+      const report = await runTest(inst, makeConfig(), '');
+
+      const expected =
+        '{{doc.contenttype}} has no value in For each item 1; available properties are id ' +
+        '(*** header cannot be spelled as a placeholder)';
+      const failed = report.steps.find((s) => s.status === 'failed')!;
+      expect(failed.error).toBe(expected);
+      expect(failed.aiExplanation).toBe(expected);
+      expect(error.mock.calls.map((c) => String(c[0]))).toContain(expected);
+      // The whole point: the value itself reaches none of the three.
+      const everywhere = [
+        String(failed.error),
+        String(failed.aiExplanation),
+        ...error.mock.calls.map((c) => String(c[0])),
+      ].join('\n');
+      expect(everywhere).not.toContain('hunter2');
+    } finally {
+      error.mockRestore();
+    }
+  });
+});
+
+/**
+ * `{{a.b.c}}` on a CONTROL line says so, in this runner too.
+ *
+ * It matches neither grammar, so it is neither substituted nor warned about
+ * as unresolved — it reaches the judge as six literal braces. `interpolate`
+ * warns about that for an ordinary step, and the guard branch `continue`s
+ * before the loop ever reaches the `interpolate` call, so a `For each` header
+ * or an `If` condition was the one place in this runner where the warning
+ * could not fire. The Sessions API and the Electron adapter resolve every
+ * line's text BEFORE dispatching the control and so warned all along.
+ */
+describe('a multi-segment reference on a control line', () => {
+  /**
+   * A CONDITION is the reachable shape, and the only one.
+   *
+   * A `For each` header carries its multi-segment reference in the TAIL, which
+   * this runner dispatches as an ordinary body step and interpolates like any
+   * other — so that case warned all along and is no test of this at all. The
+   * item and the list are both refused at parse time as names. What is left is
+   * a condition: `If`, `While`, `Repeat`. Its text lives on the guard line and
+   * nowhere else, so if the guard branch does not say it, nothing does.
+   */
+  it('warns about one in a While condition', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      evaluateConditionsMock.mockResolvedValue({
+        selected: null,
+        reasoning: 'nothing held',
+        aiInteractions: [],
+      });
+      const md = [
+        '# Deep while',
+        '',
+        '## Steps',
+        '1. While {{order.address.city}} is "Paris", Go to the next page',
+        '',
+        '### Go to the next page',
+        '1. Click Next',
+        '',
+      ].join('\n');
+      await runTest(await instance(md, {}, 'multi-segment-while.md'), makeConfig(), '');
+
+      expect(
+        warn.mock.calls
+          .map((c) => String(c[0]))
+          .filter((l) => l.includes('is not a placeholder')),
+      ).toEqual([
+        '{{order.address.city}} is not a placeholder: only one property segment is supported',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('warns exactly once for an If condition, which is visited once', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      judgeAnswers(0);
+      const md = [
+        '# Deep if',
+        '',
+        '## Steps',
+        '1. If {{order.address.city}} is "Paris", then Pay by card',
+        '',
+        '### Pay by card',
+        '1. Click Pay',
+        '',
+      ].join('\n');
+      await runTest(await instance(md, {}, 'multi-segment-if.md'), makeConfig(), '');
+
+      expect(
+        warn.mock.calls
+          .map((c) => String(c[0]))
+          .filter((l) => l.includes('is not a placeholder')),
+      ).toEqual([
+        '{{order.address.city}} is not a placeholder: only one property segment is supported',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 // ─── Aborts ─────────────────────────────────────────────────────────────────

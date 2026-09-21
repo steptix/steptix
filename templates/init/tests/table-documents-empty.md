@@ -16,9 +16,10 @@ message, not data: the read stores `[]`, and the loop runs zero passes.
 **Requires phase 1 of the spec.** Step 6's body can only run if the read
 returned a record from an empty table, and then it fails — the table does
 have that row, because that is where the record came from. That zero-pass
-loop, with step 4's check that the message row is the only thing in the body,
-is how the file proves `{{docs}}` is `[]`: asserting it as text would be a
-model-evaluated JSON predicate, which §4.9 refuses in phase 1.
+loop, with step 4's check that the table is showing the "No documents
+uploaded yet." message, is how the file proves `{{docs}}` is `[]`: asserting
+it as text would be a model-evaluated JSON predicate, which §4.9 refuses in
+phase 1.
 
 ## Config
 - baseUrl: http://localhost:8787/

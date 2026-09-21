@@ -910,7 +910,18 @@ accepts exactly one direct header row belonging to the selected table:
   otherwise produced both failures above. Only the first: a `<th>` further
   down (a row-header column with no `scope` attribute is the realistic case)
   must not be reachable, or the read would silently delete a data row from
-  the middle of the table;
+  the middle of the table. One exception, as narrow as the rule that needs
+  it: a candidate that is a single `<th>` cell spanning one column, in a
+  table some other body row makes wider, is a group heading (§4.8), not the
+  header — a header is never narrower than the grid it names — so it is
+  stepped over and the next rendered-or-`<th>` row is the one candidate
+  instead. Review found that without this a `<tr><th>Section A</th></tr>`
+  group row was accepted as the header of a headerless table, so the real
+  heading row became record 1 and a header-named read reported
+  `available headers are Section A`. The skip applies only to a row that
+  would otherwise have been accepted; a one-cell `<td>` row still ends the
+  search with no header, which is what keeps a row-header `<th>` further
+  down unreachable;
 - nested-table rows/cells are excluded by requiring `closest('table')` to be
   the selected table.
 
@@ -1043,9 +1054,9 @@ readTable captured 0 rows × 2 columns as "{{docs}}" (1 placeholder row skipped)
 
 Do not write every captured cell to the normal console/run log. Existing
 variable/report surfaces may show captured variables, but their secret masking
-must recursively inspect record keys: values under keys matching the
-password/secret/token/key rule must be masked even though the root variable is
-named `orders`.
+must look INSIDE a capture rather than only at the name it is stored under:
+values under a key the record-column rule below calls a secret must be masked
+even though the root variable is named `orders`.
 
 **Two rules, because a name has two possible authors.** A flat name is the
 test author's — a parameter, a `[store as:]` capture, a `${…}` reference — and
@@ -1085,6 +1096,54 @@ the one case no name rule can catch: `payments` is a whole table and
 `payment` one record of it, both under names the author chose and neither of
 which says secret. They render with each secret column replaced and the rest
 readable, which is what makes the view worth looking at mid-loop.
+
+The client's copies of both rules must be the server's, not merely close to
+them. Either direction of a difference is a defect, and the leaking one is
+quiet: a name the client alone thinks is innocent shows a value the report
+beside it redacts. That the author-chosen rule is a SUBSTRING is part of what
+must be copied — `mypassword` and `apitoken` are secrets — and the cost of
+that breadth (a flat `keyword` masked on both sides) is accepted rather than
+tuned out on the client, because a view that disagrees with the report about
+one row is the worse failure.
+
+**A secret column masks at whatever JSON type the cell holds.** A `password`
+column holding `123` is the same credential as one holding `"123"`, so the
+client surfaces mask a number or a boolean exactly as they mask a string, and
+so does the server wherever it masks a record in place. Only a NUMBER also
+joins the free-text mask set, in its JSON spelling (`123`, not `"123"`, the
+form that occurs in the capture and in any prose quoting it) and under the
+same four-character floor. A boolean does not: `true` clears the floor, and a
+`token` column holding one would turn every "true" in the DOM snapshot into
+the mask. A cell that is null, an object or an array is left as it is: null
+says there is no value to hide, and nothing on either side walks into a
+nested object to mask what is under it.
+
+**The prompt's `## Values` block is a surface like the others.** It renders
+a record capture with its secret columns masked by the record-column rule,
+then masks what is left by the run's secret values — so `{{payments}}` and
+`{{payment}}` say `***` in the same places the DOM beside them does. A name
+the test has unmasked (`## Config`'s hatch) is exempt from both, otherwise
+the hatch would be taken away through the other door. The code-behind
+compile and repair prompts share the formatter and so get the record-column
+masking; they carry no free-text mask set, which is the state they were in
+before this feature.
+
+**A secret joins the mask set in both its raw and its JSON-escaped
+spelling**, whichever surface named it — a parameter, a record cell, an
+`${env.X}` or a `${data…}` secret alike. A capture is stored as JSON, so a
+value holding a double quote or a backslash (a Windows key path is the common
+one) sits in the variable, the report's parameter map and any trace payload
+in its escaped form, which the raw spelling does not match.
+
+**Which name rule a map gets depends on whose names they are.** The
+two-segment rule is the live variable map's, because its dotted entries are
+a loop's `row.<column>` bindings. A map whose keys are author-chosen end to
+end — a data row's cells under the data file's headings, a step's
+`[store as:]` outputs from a tool — takes the flat author rule on the whole
+key, and a data row the run never reached is masked the same way as one it
+did. And a dotted name that reads as one credential key with the dots as
+separators (`api.key` → `api_key`, `private.key`) is a secret wherever it
+occurs, while `row.keyword` and `payment.sort_key` stay clear.
 
 The action is observational and must not trigger post-action page settling.
 
@@ -1397,9 +1456,11 @@ root no loop binds, still warns.
 
 - Loop markers and `frame:scope` must include the dotted property bindings so
   the TestBench Variables panel can show the current row fields.
-- Secret masking applies using the property segment as well as the complete
-  dotted name, by the two rules of §7.6: the property decides by the
-  record-column rule, the root by the author-chosen one, and either is enough.
+- Secret masking applies using the property segment, by the two rules of
+  §7.6: the property decides by the record-column rule, the root by the
+  author-chosen one, and either is enough. (Testing the whole dotted name as
+  one string is the bug those two rules replaced: `row.keyword` matched on
+  `key` and masked every "AU" in the log, the report and the DOM snapshot.)
 - The whole-record binding (`payment`) and the capture it came from
   (`payments`) are masked by looking INSIDE them — each secret column
   replaced, the rest left readable. Nothing about either name says secret, so

@@ -4735,11 +4735,20 @@ export class SessionManager {
         // a `step:fail` where the CLI and the Electron adapter — which
         // dispatch the guard first — file a failed GUARD row. One refusal, one
         // shape, in the module all three share.
+        //
+        // Masked with `secretsNow` — which counts a section row's frame inputs
+        // as well as the parameter map — because the refusal is written from
+        // the run's own values (the properties the row holds, the keys the
+        // loop dropped) and goes out on the `step:fail` wire payload as well
+        // as into the run log and the report.
         const dottedRefError =
           setStep || (hasControls && controls[i])
             ? undefined
-            : dottedReferenceError(originalStep, resolvedParameters, (item) =>
-                forEachPassOf(controls, controlState, item),
+            : dottedReferenceError(
+                originalStep,
+                resolvedParameters,
+                (item) => forEachPassOf(controls, controlState, item),
+                (text) => redact(text, secretsNow()),
               );
         if (dottedRefError) {
           const frame = frameInfoFor(i);

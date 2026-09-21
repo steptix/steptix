@@ -1455,10 +1455,18 @@ function buildStepValues(authored: string, opts: StepExecutorOptions): StepValue
   }
 
   if (parameters.length === 0 && envRefs.length === 0) return undefined;
+  // The same mask set `redact(domSnapshot, …)` uses, read here rather than
+  // passed in for the same reason the values are: this is rebuilt per turn,
+  // and a `[as: …]` capture in turn 1 can add a secret turn 2 must not print.
+  // Without it the `## Values` block was the one part of the message that
+  // still carried a record's `password` column in full, three lines above the
+  // DOM where the same value read `***`.
+  const secrets = secretsFor(opts);
   return {
     parameters,
     ...(envRefs.length > 0 && { envRefs }),
     ...(opts.unmask !== undefined && { unmask: opts.unmask }),
+    ...(secrets.length > 0 && { secrets }),
   };
 }
 

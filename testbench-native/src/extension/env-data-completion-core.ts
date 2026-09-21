@@ -44,6 +44,7 @@ import {
   buildSectionIndex,
   classifyLines,
   extractSections,
+  isSecretFlatName,
   matchText,
   parseControlLine,
   resolveValueFromEnv,
@@ -866,29 +867,30 @@ export function resolveDataTree(value: DataValue, env: Record<string, string>): 
 // Secret masking
 // ---------------------------------------------------------------------------
 
-/**
- * The runtime's one rule for what a secret is — `isSecretName` in
- * src/parser/parameters.ts (and src/utils/secrets.ts), which matches bare
- * "key" (`MACHINE_KEY`, `privateKey`) on top of the obvious names. The
- * dropdown must mask everything a recording or report would redact, so this
- * deliberately does NOT reuse runner-core's narrower `maskIfSecret` pattern
- * (no bare "key") — a completion detail is as public as a report.
- */
-const SECRET_NAME_RE = /password|secret|token|key/i;
-
 /** Star-mask in the same shape `maskIfSecret` renders elsewhere. */
 function maskValue(value: string): string {
   if (value.length === 0) return '(empty)';
   return '*'.repeat(Math.min(value.length, 8));
 }
 
-/** Mask `value` when the name (a single env var, or a '.'-joined data path)
- *  is secret-shaped anywhere along it — matching the runtime's
- *  `envDataSecretValues`, which treats a secret-named key as tainting
- *  everything beneath it. Works on the joined path because no pattern word
- *  contains '.'. */
+/**
+ * Mask `value` when the name (a single env var, or a '.'-joined data path) is
+ * secret-shaped anywhere along it — matching the runtime's
+ * `envDataSecretValues`, which treats a secret-named key as tainting
+ * everything beneath it. Works on the joined path because no pattern word
+ * contains '.'.
+ *
+ * `isSecretFlatName` is runner-core's copy of the runtime's `isSecretName`
+ * (src/parser/parameters.ts), and it is the FLAT rule on purpose: every
+ * segment of a `${data.…}` path is a name from an author's own file, so
+ * nothing here is a record column and the narrow record rule would be the
+ * wrong question. Calling it rather than re-spelling the regex is the point —
+ * this file used to carry a third copy, kept because runner-core's was once
+ * narrower than the runtime's; it no longer is, and a completion detail is as
+ * public as a report, so there is one flat rule on the client now.
+ */
 function maskIfSecretName(name: string, value: string): string {
-  return SECRET_NAME_RE.test(name) ? maskValue(value) : value;
+  return isSecretFlatName(name) ? maskValue(value) : value;
 }
 
 // ---------------------------------------------------------------------------

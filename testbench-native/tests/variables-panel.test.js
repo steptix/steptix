@@ -278,7 +278,7 @@ test("collectVariables: a section heading does not truncate the scan", () => {
 // the cases below are the ones repl.test.js pins on the other side. One of
 // them showing a password the other masks is the whole bug.
 
-test("maskIfSecretInline: the secret words, as words", () => {
+test("maskIfSecretInline: the secret words, as substrings", () => {
   assert.equal(maskIfSecretInline("password", "hunter2"), "*******");
   assert.equal(maskIfSecretInline("GITHUB_PASSWORD", "hunter2"), "*******");
   assert.equal(maskIfSecretInline("api_key", "abc"), "***");
@@ -288,17 +288,43 @@ test("maskIfSecretInline: the secret words, as words", () => {
   assert.equal(maskIfSecretInline("payment.password", "abc"), "***");
 });
 
-test("maskIfSecretInline: the record-column words the server also masks", () => {
-  for (const name of ["passwd", "pwd", "user_otp", "credential", "api_credentials"]) {
-    assert.equal(maskIfSecretInline(name, "abc"), "***", name);
+// A flat name takes the server's `isSecretName` exactly — a SUBSTRING. Word
+// boundaries were tried and leaked: `mypassword` and `apitoken` are one word
+// to a splitter, so the panel showed values the report starred.
+test("maskIfSecretInline: a flat name masks on a substring, as the report does", () => {
+  for (const name of [
+    "mypassword",
+    "newpassword",
+    "password2",
+    "mytoken",
+    "apitoken",
+    "mysecret",
+    "secret1",
+    "MACHINE_KEY",
+  ]) {
+    assert.equal(maskIfSecretInline(name, "hunter2"), "*".repeat(7), name);
   }
 });
 
-test("maskIfSecretInline: a word that merely contains one is not a secret", () => {
-  assert.equal(maskIfSecretInline("keyword", "search"), "search");
-  assert.equal(maskIfSecretInline("monkey", "george"), "george");
+// `pwd`/`otp`/`credential` are COLUMN words, not flat ones: the server prints
+// a flat `pwd` in the report, the run log and the `## Values` block, so the
+// panel prints it too.
+test("maskIfSecretInline: pwd/otp/credential are column words, not flat ones", () => {
+  for (const name of ["passwd", "pwd", "user_otp", "credential", "api_credentials"]) {
+    assert.equal(maskIfSecretInline(name, "abc"), "abc", `flat ${name}`);
+    assert.equal(maskIfSecretInline(`payment.${name}`, "abc"), "***", `column ${name}`);
+  }
+});
+
+// The price of the server's breadth, stated rather than worked around: a FLAT
+// `keyword` masks because the report masks it. The narrow rule applies where
+// the name came off a page — `payment.keyword` below.
+test("maskIfSecretInline: a flat name that merely contains one masks too", () => {
+  assert.equal(maskIfSecretInline("keyword", "search"), "******");
+  assert.equal(maskIfSecretInline("monkey", "george"), "******");
   assert.equal(maskIfSecretInline("username", "alice"), "alice");
   assert.equal(maskIfSecretInline("payment.payee", "Origin Energy"), "Origin Energy");
+  assert.equal(maskIfSecretInline("payment.keyword", "search"), "search");
 });
 
 test("maskIfSecretInline: empty secret values say so, and long ones cap at 8", () => {
@@ -355,6 +381,33 @@ test("maskRecordSecretsInline: a list of records loses its secret columns", () =
 test("maskRecordSecretsInline: one record, and the readable columns survive", () => {
   const masked = maskRecordSecretsInline(JSON.stringify({ payee: "Alinta", api_key: "pk-live-1" }));
   assert.deepEqual(JSON.parse(masked), { payee: "Alinta", api_key: "*".repeat(8) });
+});
+
+// A number or a boolean under a `password` key is still a credential: the
+// panel rendered `{"password":123}` in the clear while starring
+// `{"password":"123"}`.
+test("maskRecordSecretsInline: a non-string cell under a secret key masks too", () => {
+  assert.deepEqual(JSON.parse(maskRecordSecretsInline(JSON.stringify({ password: 123 }))), {
+    password: "***",
+  });
+  assert.deepEqual(JSON.parse(maskRecordSecretsInline(JSON.stringify([{ password: true }]))), [
+    { password: "****" },
+  ]);
+  assert.deepEqual(JSON.parse(maskRecordSecretsInline(JSON.stringify([{ api_key: 4321 }]))), [
+    { api_key: "****" },
+  ]);
+});
+
+// …and the limit: a null says there is no value, and a nested object would
+// have to be walked, which neither mirror does.
+test("maskRecordSecretsInline: null and nested objects are left alone", () => {
+  for (const value of [
+    JSON.stringify([{ password: null }]),
+    JSON.stringify([{ password: { pin: "1234" } }]),
+    JSON.stringify([{ password: ["a", "b"] }]),
+  ]) {
+    assert.equal(maskRecordSecretsInline(value), value, value);
+  }
 });
 
 test("maskRecordSecretsInline: anything that is not a record list is untouched", () => {

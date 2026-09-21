@@ -10,8 +10,10 @@ import {
   redact,
   redactDeep,
   redactMap,
+  redactAuthoredMap,
   redactReport,
   recordSecretValues,
+  maskRecordSecrets,
   isRecordSecretKey,
   isSecretParameterName,
   EMPTY,
@@ -470,5 +472,194 @@ describe('redactReport — the report every consumer sees', () => {
     const out = redactReport(report(), []);
     expect(out.parameters!.password).toBe(MASK);
     expect(out.steps[0]!.instruction).toBe('Enter the password hunter2!x');
+  });
+});
+
+/**
+ * The server twin of the client's `maskRecordSecrets` (runner-core/src/repl.ts).
+ *
+ * `redact` can only replace values it was TOLD about, and the surface this
+ * exists for — the prompt's `## Values` block — renders one entry's value
+ * directly. A `readTable` capture is a whole table under one non-secret name,
+ * so nothing about the entry says "look inside": the masking has to be
+ * structural, by column key, the same way the client's render is.
+ */
+describe('maskRecordSecrets — a record list masked by its own column keys', () => {
+  it('masks a secret column in every record of a list, and leaves the rest', () => {
+    const payments = JSON.stringify([
+      { _row: '1', payee: 'Acme', password: 'hunter2-long' },
+      { _row: '2', payee: 'Origin', password: 'correct-horse' },
+    ]);
+    expect(maskRecordSecrets(payments)).toBe(JSON.stringify([
+      { _row: '1', payee: 'Acme', password: MASK },
+      { _row: '2', payee: 'Origin', password: MASK },
+    ]));
+  });
+
+  it('masks a SINGLE record too — the pass binding of a For each (§8.2)', () => {
+    expect(maskRecordSecrets('{"_row":"1","payee":"Acme","api_key":"ak_live_9"}'))
+      .toBe(`{"_row":"1","payee":"Acme","api_key":"${MASK}"}`);
+  });
+
+  it('masks a non-string cell as well, because a number under `password` is still one', () => {
+    // The floor that keeps a short value out of the FREE-TEXT set does not
+    // apply here: this replacement reaches nothing but the cell it is in.
+    expect(maskRecordSecrets('[{"password":123456,"ok":true}]'))
+      .toBe(`[{"password":"${MASK}","ok":true}]`);
+    expect(maskRecordSecrets('[{"token":false}]')).toBe(`[{"token":"${MASK}"}]`);
+  });
+
+  it('leaves null, a nested object and an array alone — there is no cell to blank', () => {
+    for (const value of [
+      '[{"password":null}]',
+      '[{"password":{"deep":"x"}}]',
+      '[{"password":["a","b"]}]',
+    ]) {
+      expect(maskRecordSecrets(value)).toBe(value);
+    }
+  });
+
+  it('returns anything that is not a record, byte for byte', () => {
+    for (const value of [
+      'Alice Smith',
+      '["ORD-1001","ORD-1002"]',
+      '[{ not json at all',
+      '',
+      '42',
+    ]) {
+      expect(maskRecordSecrets(value)).toBe(value);
+    }
+  });
+
+  it('does not reformat a value it masked nothing in, however it was printed', () => {
+    // Re-stringifying compacts, and a tool may pretty-print. Reformatting a
+    // value that held no secret would be this helper inventing a change.
+    const pretty = '[\n  {\n    "payee": "Acme",\n    "amount": "$1.00"\n  }\n]';
+    expect(maskRecordSecrets(pretty)).toBe(pretty);
+  });
+});
+
+/**
+ * Finding 2: an `extra` value — an `.env` or data-file secret — is masked in
+ * prose but not inside a JSON-stored one, because only the parameters got
+ * both spellings. A Windows key path (`C:\keys\smtp.pem`) or a password
+ * holding a quote is stored escaped in a capture, a report field or a trace
+ * payload, and the raw form does not match there.
+ */
+describe('secretValues — the env/data secrets need both spellings too', () => {
+  const WINDOWS_PATH = 'C:\\keys\\smtp-cert.pem';
+
+  it('adds the JSON-escaped spelling of an extra value', () => {
+    const secrets = secretValues({}, [WINDOWS_PATH]);
+    expect(secrets).toContain(WINDOWS_PATH);
+    expect(secrets).toContain('C:\\\\keys\\\\smtp-cert.pem');
+  });
+
+  it('so a JSON-stored copy of it is masked as well as the prose one', () => {
+    const secrets = runSecrets({
+      parameters: {},
+      envData: { env: { SMTP_KEYFILE: WINDOWS_PATH }, data: {}, envName: 'uat' },
+    });
+    expect(redact(`reading ${WINDOWS_PATH}`, secrets)).toBe(`reading ${MASK}`);
+    // The same value as it sits inside a stored JSON string.
+    const stored = JSON.stringify({ path: WINDOWS_PATH });
+    expect(redact(stored, secrets)).toBe(`{"path":"${MASK}"}`);
+  });
+
+  it('still dedups and still drops empties', () => {
+    expect(secretValues({ password: 'same' }, ['same', 'other'])).toEqual(['same', 'other']);
+    expect(secretValues({ password: '' }, [''])).toEqual([]);
+  });
+});
+
+/**
+ * Finding 3: the server half of the non-string record value. `readTable`
+ * produces strings, but a code-behind step or a tool can store
+ * `[{"password":123456}]`, and a scan that only looked at strings left that
+ * six-digit code out of the mask set — so the report and the run log printed
+ * it.
+ */
+describe('recordSecretValues — a non-string cell under a secret key', () => {
+  it('collects a number as its JSON spelling', () => {
+    expect(recordSecretValues('[{"_row":"1","otp":123456}]')).toEqual(['123456']);
+    expect(redact('the code is 123456', recordSecretValues('[{"otp":123456}]')))
+      .toBe(`the code is ${MASK}`);
+  });
+
+  it('keeps the four-character floor, so a short number is not masked everywhere', () => {
+    // The round-1 defect in its numeric form: `7` in the set turns every
+    // seven in the DOM snapshot the model plans from into `***`.
+    expect(recordSecretValues('[{"token":7}]')).toEqual([]);
+    expect(recordSecretValues('[{"token":123}]')).toEqual([]);
+  });
+
+  it('leaves a boolean out of the free-text set — every "true" in a DOM is not a secret', () => {
+    // In place, inside the record, the cell still masks (maskRecordSecrets);
+    // it is the free-text replacement that must not reach for the word.
+    expect(recordSecretValues('[{"token":true}]')).toEqual([]);
+    expect(recordSecretValues('[{"token":false}]')).toEqual([]);
+    expect(maskRecordSecrets('[{"token":true}]')).toBe(`[{"token":"${MASK}"}]`);
+  });
+
+  it('still leaves null, objects and arrays out', () => {
+    expect(recordSecretValues('[{"password":null}]')).toEqual([]);
+    expect(recordSecretValues('[{"password":{"deep":"longenough"}}]')).toEqual([]);
+    expect(recordSecretValues('[{"password":["longenough"]}]')).toEqual([]);
+  });
+});
+
+/**
+ * Finding 6: the two-segment rule is right for a LOOP BINDING, whose property
+ * half came off the page — and wrong everywhere else a dotted key occurs. A
+ * data-file column called `api.key` and a tool output called `user.apikey` are
+ * names the AUTHOR typed; both were masked by `isSecretName` before structured
+ * table reads split the rule, and both went back to printing in full.
+ */
+describe('a dotted name the AUTHOR chose, not a loop binding', () => {
+  it('masks a whole name that normalises to a credential key', () => {
+    // `api.key` reads as `api_key` once the dot is a separator, which is the
+    // record rule's own spelling. The property half alone ("key") is not.
+    expect(isSecretParameterName('api.key')).toBe(true);
+    expect(isSecretParameterName('service.access.key')).toBe(true);
+    // And the bindings this must not catch are still clear.
+    expect(isSecretParameterName('row.keyword')).toBe(false);
+    expect(isSecretParameterName('payment.sort_key')).toBe(false);
+    expect(isSecretParameterName('row.monkey')).toBe(false);
+  });
+
+  it('lets an `api.key` column join the free-text mask set', () => {
+    const secrets = secretValues({ 'api.key': 'ak_live_9f2c' });
+    expect(secrets).toEqual(['ak_live_9f2c']);
+    expect(redact('calling with ak_live_9f2c', secrets)).toBe(`calling with ${MASK}`);
+    // The floor still applies — this half of the name is not the author's word
+    // twice over, and a short value would be replaced everywhere.
+    expect(secretValues({ 'api.key': 'ab' })).toEqual([]);
+    // And the binding it must not catch still puts nothing in the set.
+    expect(secretValues({ 'row.keyword': 'AU' })).toEqual([]);
+  });
+
+  it('redactAuthoredMap masks a dotted AUTHOR-chosen key by the flat rule', () => {
+    // A data row's cells and a step's `[store as:]` outputs are author-named
+    // end to end. There is no page-derived half to protect, so the breadth
+    // that makes `isSecretName` right for a flat name is right for these too.
+    const cells = {
+      customer: 'Alice Smith',
+      'api.key': 'ak_live_9f2c',
+      'user.apikey': 'uk_live_1234',
+      'login.passkey': 'pk_live_5678',
+    };
+    expect(redactAuthoredMap(cells, [])).toEqual({
+      customer: 'Alice Smith',
+      'api.key': MASK,
+      'user.apikey': MASK,
+      'login.passkey': MASK,
+    });
+    // Empty still says so rather than `***`.
+    expect(redactAuthoredMap({ 'api.key': '' }, [])).toEqual({ 'api.key': EMPTY });
+  });
+
+  it('leaves redactMap — the variable map, which holds loop bindings — alone', () => {
+    const pass = { 'row.keyword': 'AU', 'payment.sort_key': 'A-1', 'row.monkey': 'Bonobo' };
+    expect(redactMap(pass, [])).toEqual(pass);
   });
 });

@@ -89,6 +89,27 @@ export function applyPassBindings(
 ): void {
   const roots = new Set<string>();
   for (const key of Object.keys(bindings)) roots.add(placeholderRoot(key));
+  clearDottedKeys(map, roots);
+  Object.assign(map, bindings);
+}
+
+/**
+ * Drop every `root.<anything>` binding for each of `roots`, leaving flat names
+ * and every other root alone.
+ *
+ * The half of {@link applyPassBindings} that a `Set {{order}} to "none"` needs
+ * too, and the reason it is a named export rather than four lines inline: a
+ * `Set` writes the FLAT name only, so after a `For each {{order}} …` the map
+ * still held `order.id` from the last pass and `{{order.id}}` went on
+ * substituting that row's id — while the §8.3 refusal, asked about a root that
+ * now holds a plain string, listed "available properties" that belonged to a
+ * value nothing binds any more. One rule, one copy: a second copy is how the
+ * two start disagreeing about what a rebind erases.
+ */
+export function clearDottedKeys(
+  map: Record<string, string>,
+  roots: ReadonlySet<string>,
+): void {
   for (const key of Object.keys(map)) {
     // Flat names are not this rule's business: a pass rebinds its own base
     // name, and clearing other flat variables would delete captures.
@@ -96,7 +117,6 @@ export function applyPassBindings(
     if (!roots.has(placeholderRoot(key))) continue;
     delete map[key];
   }
-  Object.assign(map, bindings);
 }
 
 /** What one visit to a guard produced. */
@@ -179,8 +199,14 @@ export async function evaluateGuard(args: {
   // question about every member at once, so there is no such thing as running
   // the good half of it.
   for (const text of conditionTexts(request)) {
-    const refusal = dottedReferenceError(text, resolvedParameters, (item) =>
-      forEachPassOf(controls, state, item),
+    const refusal = dottedReferenceError(
+      text,
+      resolvedParameters,
+      (item) => forEachPassOf(controls, state, item),
+      // The refusal names the row's properties and the keys the loop dropped,
+      // either of which can carry a secret — masked on the same terms as the
+      // `cannot be referenced as a placeholder` line below.
+      redactText,
     );
     if (refusal === undefined) continue;
     return {

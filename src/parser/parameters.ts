@@ -249,7 +249,12 @@ export function interpolate(
 ): string {
   warnMultiSegment(text);
   return text.replace(placeholderRe(), (match, key: string) => {
-    if (key in params) {
+    // `hasOwn`, not `in`: `in` walks the prototype chain, so `{{constructor}}`
+    // and `{{toString}}` substituted a stringified native function into the
+    // step text on a map that binds neither. Same hazard, and the same
+    // one-word fix, as `boundValue` in
+    // [placeholder-substitution.ts](../runner/placeholder-substitution.ts).
+    if (Object.hasOwn(params, key)) {
       return params[key] ?? match;
     }
     // The ROOT, so `{{order.id}}` is covered by a line that defines `order`.
@@ -284,8 +289,17 @@ const MULTI_SEGMENT_RE = new RegExp(
  * (docs/specs/SPEC-structured-table-reads.md §8.2), so the warning names the
  * rule rather than the typo. Once per distinct name per call: the same
  * reference twice in one line is one mistake.
+ *
+ * Exported because {@link interpolate} is not the only place a line is read:
+ * the CLI dispatches a CONTROL line — a `For each` header, an `If`'s condition
+ * — and `continue`s before it ever reaches the `interpolate` call above, so
+ * `{{a.b.c}}` on a control line was silent there while the Sessions API and
+ * the Electron adapter (which resolve every line's text before the control
+ * dispatch) warned about it. The CLI calls this directly instead; the guard
+ * line itself must NOT be interpolated, since the guard path owns its own
+ * substitution.
  */
-function warnMultiSegment(text: string): void {
+export function warnMultiSegment(text: string): void {
   if (!text.includes('{{')) return;
   let seen: Set<string> | undefined;
   for (const m of text.matchAll(MULTI_SEGMENT_RE)) {

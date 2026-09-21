@@ -178,6 +178,43 @@ describe('the recording', () => {
     expect(raw).not.toContain('hunter2-horse');
   });
 
+  it('masks a dotted output name by the AUTHOR rule, not the loop-binding one', async () => {
+    // A step's `[store as:]` names are author-chosen end to end. The
+    // two-segment rule structured table reads introduced is for a loop's
+    // `row.<column>` bindings, whose property half came off a page — split at
+    // the dot, `api.key` leaves `key`, which the narrow record rule
+    // deliberately does not mask, and the recording on disk held the
+    // credential in clear.
+    const test = path.join(dir, 'tools.md');
+    await writeRecording(test, {
+      steps: [
+        step(1, {
+          outputs: {
+            customer: 'Alice Smith',
+            'api.key': 'ak_live_9f2c',
+            'user.apikey': 'uk_live_1234',
+            'login.passkey': 'pk_live_5678',
+          },
+        }),
+      ],
+      status: 'passed',
+      startedAt: 't',
+      parameters: {},
+      source: 'cli',
+    });
+    const recording = (await readRecording(test))!;
+    expect(recording.steps[0]!.outputs).toEqual({
+      customer: 'Alice Smith',
+      'api.key': '***',
+      'user.apikey': '***',
+      'login.passkey': '***',
+    });
+    const raw = await fs.readFile(path.join(recordingDirFor(test), 'step-01.json'), 'utf-8');
+    for (const leaked of ['ak_live_9f2c', 'uk_live_1234', 'pk_live_5678']) {
+      expect(raw).not.toContain(leaked);
+    }
+  });
+
   it('writes a replay failure beside the recording, with its screenshot and DOM', async () => {
     const test = path.join(dir, 'checkout.md');
     await writeReplayFailure(test, {

@@ -361,6 +361,85 @@ describe('a Set target that needs a guarded write', () => {
   });
 });
 
+/**
+ * A `Set` over a name a `For each` bound erases that name's dotted keys
+ * (docs/specs/SPEC-structured-table-reads.md §8.2, §8.3).
+ *
+ * A `Set` writes the FLAT name only, so after a `For each {{order}} …` the map
+ * still held `order.id` from the last pass. `{{order.id}}` went on
+ * substituting that row's id into steps run AFTER the author had overwritten
+ * `{{order}}` — silently, with the right-looking value — and the §8.3 refusal,
+ * asked about a root that now holds a plain string, answered by listing
+ * "available properties" of a value nothing binds any more.
+ *
+ * The rule is `applyPassBindings`' own, and the two share one helper
+ * (`clearDottedKeys`, control-runtime.ts): a rebind of a root erases that
+ * root's properties, whoever does the rebinding.
+ */
+describe('a Set over a name a loop bound', () => {
+  it('clears the loop pass"s dotted keys for that root', async () => {
+    const { runSetStep } = await import('../src/runner/set-step-runner.js');
+    const { dottedReferenceError } = await import('../src/runner/placeholder-substitution.js');
+
+    // What a `For each {{order}} in {{orders}}` leaves behind on its last pass.
+    const scope: Record<string, string> = {
+      email: 'a@b.c',
+      order: '{"id":"ORD-1001","status":"Completed"}',
+      'order.id': 'ORD-1001',
+      'order.status': 'Completed',
+    };
+
+    const out = runSetStep(
+      { name: 'order', template: 'none' },
+      'Set {{order}} to "none"',
+      9,
+      scope,
+    );
+
+    expect(out.result.status).toBe('passed');
+    expect(scope).toEqual({ email: 'a@b.c', order: 'none' });
+    // …so a later `{{order.id}}` is refused rather than answering with the
+    // last row's id.
+    expect(dottedReferenceError('Verify {{order.id}} is shown', scope)).toBe(
+      '{{order.id}} has no value; {{order}} holds no properties — it is not an object',
+    );
+  });
+
+  it('leaves every other root"s properties, and every flat name, alone', async () => {
+    const { runSetStep } = await import('../src/runner/set-step-runner.js');
+    const scope: Record<string, string> = {
+      'line.debit': '10',
+      line: '{"debit":"10"}',
+      total: '10',
+    };
+    runSetStep({ name: 'note', template: 'x' }, 'Set {{note}} to "x"', 1, scope);
+    expect(scope).toEqual({
+      'line.debit': '10',
+      line: '{"debit":"10"}',
+      total: '10',
+      note: 'x',
+    });
+  });
+
+  it('clears nothing when the assignment failed', async () => {
+    const { runSetStep } = await import('../src/runner/set-step-runner.js');
+    const scope: Record<string, string> = {
+      order: '{"id":"A"}',
+      'order.id': 'A',
+    };
+    // The template references a name nothing binds, so the step fails and
+    // writes nothing — including the erase.
+    const out = runSetStep(
+      { name: 'order', template: '{{nope}}' },
+      'Set {{order}} to "{{nope}}"',
+      1,
+      scope,
+    );
+    expect(out.result.status).toBe('failed');
+    expect(scope).toEqual({ order: '{"id":"A"}', 'order.id': 'A' });
+  });
+});
+
 describe('recognised on the AUTHORED line, not the interpolated one', () => {
   /**
    * The single load-bearing decision of this feature, and it was pinned

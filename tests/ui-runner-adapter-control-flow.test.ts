@@ -756,6 +756,55 @@ describe('a dotted reference inside a For each body', () => {
     expect(asked()).toEqual([]);
   });
 
+  /**
+   * …and the refusal is MASKED before it becomes an IPC event.
+   *
+   * It is written from the run's own values — the properties the row holds,
+   * the keys the loop dropped — and a key can carry one: `hunter2 header`,
+   * where `hunter2` is what `{{password}}` holds. Round 2 masked
+   * `evaluateGuard`'s `cannot be referenced as a placeholder` line for exactly
+   * this case and left the louder sentence beside it in the clear, in all
+   * three loops at once.
+   */
+  it('masks a secret value the refusal would otherwise emit', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    try {
+      const md = `
+# Orders
+
+## Parameters
+- password: hunter2
+- orders: [{"id":"A","hunter2 header":"t"}]
+
+## Steps
+1. For each {{order}} in {{orders}}, Check the order
+2. Sign out
+
+### Check the order
+1. Verify the row shows "{{order.contenttype}}"
+`;
+      const events = await runAdapter(writeTest(root, md));
+
+      const expected =
+        '{{order.contenttype}} has no value in For each item 1; available properties are id ' +
+        '(*** header cannot be spelled as a placeholder)';
+      const failure = events.find(
+        (e) => e.channel === 'runner:step-complete' && e.data['status'] === 'failed',
+      );
+      expect(failure?.data['error']).toBe(expected);
+      expect(events.find((e) => e.channel === 'runner:error')?.data['message']).toBe(expected);
+      // The raw value reaches neither the log nor either event.
+      const emitted = JSON.stringify([
+        failure,
+        events.find((e) => e.channel === 'runner:error'),
+        error.mock.calls.map((c) => String(c[0])),
+      ]);
+      expect(emitted).not.toContain('hunter2');
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it('substitutes a real property into the text the model receives, per pass', async () => {
     await runAdapter(writeTest(root, doc('Verify the row for "{{order.id}}" is {{order.status}}')));
 

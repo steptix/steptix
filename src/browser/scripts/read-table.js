@@ -174,6 +174,26 @@
     bodyRows.push(row);
   }
 
+  /**
+   * How wide the table is, measured over ALL body rows — rendered or not.
+   *
+   * The hidden rows are evidence of the grid's shape and nothing else left
+   * says it: a table whose only rendered row is a full-width message, or one
+   * whose every data row a filter has hidden, measures ONE column wide over
+   * the visible rows, and then `<td colspan="7">No scheduled payments.</td>`
+   * reads as a message in one table and a merged cell in the next by accident
+   * of what was on screen. §4.8's placeholder rule and §7.3's header rule both
+   * ask this same question, so it is answered once, here, before either.
+   *
+   * Taken BEFORE the header row is spliced out of `bodyRows`, which is safe:
+   * the only reader that could see the difference is the headerless branch
+   * below, and nothing is spliced when there is no header.
+   */
+  let widestBody = 0;
+  for (const row of bodyRows) {
+    if (row.cells.length > widestBody) widestBody = row.cells.length;
+  }
+
   // ── 3. the header row (§7.3) ─────────────────────────────────────────────
   let headerRow = null;
   const thead = table.tHead;
@@ -223,11 +243,31 @@
     let firstAt = -1;
     for (let i = 0; i < bodyRows.length; i++) {
       const row = bodyRows[i];
-      if (rendered(row) || items(row.cells).some((c) => c.tagName === 'TH')) {
-        first = row;
-        firstAt = i;
-        break;
-      }
+      if (!(rendered(row) || items(row.cells).some((c) => c.tagName === 'TH'))) continue;
+      // One exception to "exactly one row is considered": a lone HEADING cell
+      // narrower than the grid is a GROUP row, and a header is never narrower
+      // than the table it names. `<tr><th>Section A</th></tr>` above the real
+      // `<tr><th>Name</th><th>Status</th></tr>` was accepted as the header, so
+      // the heading row became record 1 (`{_row:"1",name:"Name"}`) and every
+      // real row was numbered one too high — §4.5's misalignment, arriving
+      // through the door `lonelySpan` guards, which this shape walks past
+      // because the cell carries no colspan at all.
+      //
+      // Stepping OVER it rather than refusing is what lets the search reach
+      // the row that does name the columns, and the step is deliberately
+      // narrow: only a row that carries a `<th>`, and so would otherwise have
+      // been ACCEPTED here. A one-cell `<td>` row already ends the search with
+      // no header (it has no heading in it), and that stays — stepping over
+      // one could reach a `<th>` further down that is a row-header column,
+      // silently deleting a data row from the middle of the read.
+      if (
+        row.cells.length === 1
+        && widestBody > 1
+        && items(row.cells).some((c) => c.tagName === 'TH')
+      ) continue;
+      first = row;
+      firstAt = i;
+      break;
     }
     if (first) {
       const cells = items(first.cells);
@@ -248,25 +288,13 @@
 
   // ── 4. which rows are rendered, and how wide the table is ────────────────
   // The width the placeholder rule measures against is the header row's cell
-  // count, or, with no header, the widest body row's (§4.8). It is computed
-  // BEFORE any row is classified, because the classification depends on it.
+  // count, or, with no header, `widestBody` — every body row, rendered or not
+  // (§4.8, and see that measurement for why the hidden ones count).
   //
-  // Headerless, the width is measured over ALL body rows, rendered or not.
-  // Measured over the VISIBLE ones, a table whose only rendered row is the
-  // full-width message — `<td colspan="7">No scheduled payments.</td>` alone
-  // in the body, or every data row hidden by a filter — came out one column
-  // wide, so the placeholder rule never fired and §4.8's `[]` arrived as the
-  // merged-cell refusal instead. The hidden rows are the evidence of how wide
-  // the table is, and they are the one thing left that still says so.
+  // It is settled BEFORE any row is classified, because the classification
+  // depends on it.
   const visibleRows = bodyRows.filter(rendered);
-  let width = 0;
-  if (headerRow) {
-    width = headerRow.cells.length;
-  } else {
-    for (const row of bodyRows) {
-      if (row.cells.length > width) width = row.cells.length;
-    }
-  }
+  const width = headerRow ? headerRow.cells.length : widestBody;
 
   // ── 5. resolve each column to a one-based position ───────────────────────
   const headerLabels = headerRow ? items(headerRow.cells).map(headerTextOf) : [];

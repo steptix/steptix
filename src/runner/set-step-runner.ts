@@ -2,6 +2,7 @@ import type { StepResult } from '../report/types.js';
 import type { ParsedSetStep } from '../parser/set-step.js';
 import type { EnvDataContext } from '../parser/interpolate-env-data.js';
 import { resolveSetTemplate } from './placeholder-substitution.js';
+import { clearDottedKeys } from './control-runtime.js';
 
 /**
  * Running one `Set {{name}} to "template"` step
@@ -78,6 +79,18 @@ export function runSetStep(
     enumerable: true,
     configurable: true,
   });
+
+  // A rebind of a ROOT erases that root's dotted keys, exactly as a loop pass
+  // does (`applyPassBindings`, control-runtime.ts) — same helper, so the two
+  // cannot disagree about what a rebind means. A `Set {{order}} to "none"`
+  // after a `For each {{order}} …` wrote the flat name only, so `{{order.id}}`
+  // went on substituting the last row's id from a variable the author had just
+  // overwritten, and §8.3's refusal listed "available properties" of a value
+  // nothing binds any more. Guarded on the flat spelling because a `Set`
+  // target is flat by construction — a step writes a variable, never one
+  // property of one — and a dotted target, if one ever parsed, would be a
+  // property write rather than a rebind.
+  if (!step.name.includes('.')) clearDottedKeys(scope, new Set([step.name]));
 
   // A skill-internal name is namespaced by `applySkillScope` and must never
   // be reported: `computeStepCaptures` (CLI) and `autoCapturedNames` (server,

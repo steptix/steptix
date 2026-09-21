@@ -872,6 +872,71 @@ describe('For each over object rows', () => {
   });
 
   /**
+   * …and the refusal is MASKED on the way out, on all three of the server's
+   * exits: the run log, the report row and the `step:fail` wire payload a
+   * client renders.
+   *
+   * The sentence is written from the run's own values — the properties the
+   * row holds, the keys the loop dropped — and a key can carry one:
+   * `hunter2 header`, where `hunter2` is what `{{password}}` holds. Round 2
+   * masked `evaluateGuard`'s `cannot be referenced as a placeholder` line for
+   * exactly this and left the louder sentence beside it in the clear. The
+   * server's masker is `secretsNow`, which counts a section row's frame
+   * inputs as well as the parameter map, which is why it is handed in rather
+   * than derived.
+   */
+  it('masks a secret value the refusal would otherwise put on the wire', async () => {
+    (logger.error as unknown as { mockClear: () => void }).mockClear();
+    const events = await collect({
+      steps: [
+        'Open the orders page',
+        'For each {{order}} in {{orders}}, Check the order',
+        'Sign out',
+      ],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      parameters: { password: 'hunter2', orders: '[{"id":"A","hunter2 header":"t"}]' },
+      sections: {
+        'check the order': {
+          name: 'Check the order',
+          headingLine: 7,
+          steps: ['Verify the row shows "{{order.contenttype}}"'],
+          stepLines: [8],
+        },
+      },
+    });
+
+    const expected =
+      '{{order.contenttype}} has no value in For each item 1; available properties are id ' +
+      '(*** header cannot be spelled as a placeholder)';
+
+    // 1. The wire.
+    expect(events.find((e) => e.type === 'step:fail')!.error).toBe(expected);
+    // 2. The run log.
+    const logged = (logger.error as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(
+      (c) => String(c[0]),
+    );
+    expect(logged.some((l) => l.endsWith(expected))).toBe(true);
+    // 3. The report row.
+    const failedRow = generatedReports
+      .at(-1)!
+      .steps.find((s: { status: string }) => s.status === 'failed');
+    expect(failedRow.error).toBe(expected);
+    expect(failedRow.aiExplanation).toBe(expected);
+
+    // The raw value reaches none of the three. Scoped to the refusal's own
+    // seams on purpose: `frame:scope` carries the parameter map itself, which
+    // is a different payload with its own rules and is not what this refusal
+    // decides.
+    const everywhere = JSON.stringify({
+      fail: events.filter((e) => e.type === 'step:fail'),
+      logged,
+      failedRow,
+    });
+    expect(everywhere).not.toContain('hunter2');
+  });
+
+  /**
    * A condition whose operands are all literals after substitution is decided
    * by the runtime, not by the page judge
    * (src/parser/literal-condition.ts).

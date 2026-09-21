@@ -5,11 +5,7 @@ import type { AIAction, TableReadColumn } from '../ai/types.js';
 // §9.2: one validator for both paths into the table extractor. The dependency
 // points this way because the parser owns the §6.2 rules and their wording;
 // nothing in `action-parser.ts` reaches back here.
-import {
-  validateTableRead,
-  MAX_TABLE_COLUMNS,
-  MAX_TABLE_ROWS,
-} from '../ai/action-parser.js';
+import { validateTableRead, MAX_TABLE_ROWS } from '../ai/action-parser.js';
 import { logger } from '../utils/logger.js';
 import { resolveUploadPaths, uploadPathsOf, type UploadPathContext } from './upload-paths.js';
 
@@ -2024,16 +2020,12 @@ export interface TableReadResult {
  */
 export const READ_TABLE_MAX_ROWS = MAX_TABLE_ROWS;
 
-/**
- * Maximum requested columns (§7.5). Enforced here as well as in the parser,
- * because §9.2 requires both paths into this extractor — today's `readTable`
- * action and phase 3's generated `tables.read`, which never passes through
- * `action-parser.ts` — to validate identically.
- *
- * Both names now read the ONE constant rather than repeating the number, so
- * the two caps cannot drift apart while both files still claim they agree.
- */
-export const READ_TABLE_MAX_COLUMNS = MAX_TABLE_COLUMNS;
+// There is no `READ_TABLE_MAX_COLUMNS` beside `READ_TABLE_MAX_ROWS`, and the
+// absence is deliberate. §9.2's "both paths validate identically" is kept by
+// `validateTableRead` below, which is the parser's own function and enforces
+// the column cap along with every other §6.2 rule — so an alias here would be
+// a second name for a number nothing in this file reads, claiming to enforce
+// something it does not.
 
 /** The property the runtime writes on every record (§4.5). Never an alias —
  *  the parser rejects a column that claims it. */

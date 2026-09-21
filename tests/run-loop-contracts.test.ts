@@ -243,6 +243,102 @@ describe('a For each list with keys a placeholder cannot spell', () => {
   });
 });
 
+/**
+ * A guard whose condition names a root the map does not own.
+ *
+ * `{{constructor.id}}` indexed the parameter map with a bare `[root]` and got
+ * the `Object` function back, so `rootValue.startsWith('{')` threw — and the
+ * guard loop's `dottedReferenceError` call sits OUTSIDE `evaluateGuard`'s
+ * try/catch, so the TypeError escaped into the run loop rather than becoming
+ * the refusal every other unanswerable reference gets. The judge's own throws
+ * are caught two dozen lines below; this one was not.
+ */
+describe('a guard condition naming a prototype key', () => {
+  const chainAt = (condition: string): (ControlRecord | null)[] => [
+    { kind: 'if', chainId: 'c1', condition, bodyStart: 1, bodyEnd: 1, chainEnd: 1 },
+    null,
+  ];
+
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
+    'refuses {{%s.id}} rather than throwing out of the run loop',
+    async (root) => {
+      const evaluation = await evaluateGuard({
+        controls: chainAt(`If {{${root}.id}} is "x", then Do the thing`),
+        index: 0,
+        state: createControlState(),
+        resolvedParameters: { order: '{"id":"A"}', 'order.id': 'A' },
+        executorOptions: {} as never,
+      });
+      expect(evaluation.error).toBe(
+        `{{${root}.id}} has no value; nothing in this run binds {{${root}}}`,
+      );
+    },
+  );
+});
+
+/**
+ * The §8.3 refusal is masked in every loop that emits it.
+ *
+ * `evaluateGuard`'s `… cannot be referenced as a placeholder` line already
+ * was (see the `*** header` pin above); the refusal it sits beside was not,
+ * and it is the louder of the two — `logger.error`, `StepResult.error`,
+ * `aiExplanation`, and on the server the `step:fail` wire payload. Each loop's
+ * masker differs, so each loop has to hand its own in; this is the cheap check
+ * that all three do, beside the behavioural tests in the three loop suites.
+ */
+describe('every run loop masks the dotted-reference refusal', () => {
+  /** The argument text of `name(` at its first call in `body`, brackets
+   *  balanced — so a multi-line call is read whole rather than to the first
+   *  `)` that happens to be a nested one. */
+  const callArgs = (body: string, name: string): string => {
+    const open = body.indexOf(`${name}(`) + name.length;
+    expect(open).toBeGreaterThan(name.length - 1);
+    let depth = 0;
+    for (let k = open; k < body.length; k++) {
+      if (body[k] === '(') depth++;
+      else if (body[k] === ')' && --depth === 0) return body.slice(open + 1, k);
+    }
+    throw new Error(`unbalanced ${name}( in source`);
+  };
+
+  it.each(RUN_LOOPS)('%s passes a masker to dottedReferenceError', (file) => {
+    expect(callArgs(source(file), 'dottedReferenceError')).toMatch(/redact/);
+  });
+
+  it('the guard path masks it too, from the masker evaluateGuard was given', () => {
+    expect(callArgs(source('src/runner/control-runtime.ts'), 'dottedReferenceError')).toMatch(
+      /redactText/,
+    );
+  });
+});
+
+/**
+ * `{{a.b.c}}` is warned about on a CONTROL line as well as an ordinary one.
+ *
+ * The CLI dispatches a guard and `continue`s before the loop reaches its
+ * `interpolate` call, which is where the warning lives — so `For each
+ * {{order.address.city}} in {{orders}}` was silent in this runner and loud in
+ * the other two, which resolve every line's text before their control
+ * dispatch. Same function, called directly.
+ */
+describe('every run loop warns about a multi-segment reference on a control line', () => {
+  it('src/runner/test-runner.ts calls warnMultiSegment on the guard line', () => {
+    const body = source('src/runner/test-runner.ts');
+    expect(body).toContain('warnMultiSegment');
+    expect(body).toMatch(/warnMultiSegment\(guardText\)/);
+  });
+
+  it.each(['src/server/session-manager.ts', 'src/ui/main/runner-adapter.ts'])(
+    '%s gets it from interpolate, which it runs on every line',
+    (file) => {
+      // Not a second call site: these two resolve the text of EVERY step,
+      // control lines included, before the dispatch — which is why they never
+      // had the gap. The pin is that they still resolve every line.
+      expect(source(file)).toMatch(/interpolate\(/);
+    },
+  );
+});
+
 describe('every run loop tells interpolate what a control line DEFINES', () => {
   // `For each {{payment}} in {{payments}}` READS the list and WRITES the item.
   // Without the third argument, `interpolate` warns

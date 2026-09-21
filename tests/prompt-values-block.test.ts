@@ -284,6 +284,99 @@ describe('formatParameterBlock — masking', () => {
   });
 });
 
+/**
+ * The name rule has nothing to catch on a `readTable` capture: the whole table
+ * lives under one author-chosen name (`payments`) and one pass's record under
+ * another (`payment`), so both rendered RAW — every column of every row,
+ * password included, in the outbound prompt. Beside them, the DOM in the same
+ * message is `redact(domSnapshot, …)`ed, so the same value was masked in one
+ * half of the message and printed in the other.
+ *
+ * Two layers answer it, because either alone leaves a hole: `maskRecordSecrets`
+ * is structural and catches a column however short or freshly-captured its
+ * value is, and `redact` catches a secret that reached the value by some other
+ * route than a secret-named column.
+ */
+describe('formatParameterBlock — a record capture is masked by its columns', () => {
+  const PAYMENTS = JSON.stringify([
+    { _row: '1', payee: 'Acme', password: 'hunter2-long' },
+    { _row: '2', payee: 'Origin', password: 'correct-horse' },
+  ]);
+  const PAYMENT = JSON.stringify({ _row: '1', payee: 'Acme', password: 'hunter2-long' });
+
+  it('masks the password column of a readTable capture and of one pass record', () => {
+    const block = formatParameterBlock(
+      [
+        { name: 'payments', value: PAYMENTS },
+        { name: 'payment', value: PAYMENT },
+        { name: 'payment.payee', value: 'Acme' },
+        { name: 'payment.password', value: 'hunter2-long' },
+      ],
+      [],
+    );
+    // The row survives as evidence — the model still has to find Acme in the
+    // page — with the one cell blanked.
+    expect(block).toContain('{{payments}} resolved to');
+    expect(block).toContain('Acme');
+    expect(block).toContain('Origin');
+    expect(block).toContain('{{payment.payee}} resolved to "Acme" on this run');
+    expect(block).toContain('{{payment.password}} resolved to "***" on this run');
+    for (const leaked of ['hunter2-long', 'correct-horse']) {
+      expect(block).not.toContain(leaked);
+    }
+  });
+
+  it('also masks by value, for a secret that reached the entry some other way', () => {
+    // `{{summary}}` is not secret-named and holds no records — but the run's
+    // password is inside it, and every other surface that writes this value
+    // masks it.
+    const block = formatParameterBlock(
+      [{ name: 'summary', value: 'signed in as octocat with hunter2-correct' }],
+      [{ ref: 'data.note', value: 'the key is hunter2-correct' }],
+      new Set<string>(),
+      ['hunter2-correct'],
+    );
+    expect(block).toContain('signed in as octocat with ***');
+    expect(block).toContain('the key is ***');
+    expect(block).not.toContain('hunter2-correct');
+  });
+
+  it('leaves a record with no secret column exactly as it arrived', () => {
+    const plain = JSON.stringify([{ _row: '1', payee: 'Acme', amount: '$1.00' }]);
+    expect(formatParameterBlock([{ name: 'payments', value: plain }], []))
+      .toBe(`- {{payments}} resolved to ${JSON.stringify(plain)} on this run`);
+  });
+
+  it('reaches the generation prompt too, which shares the formatter', () => {
+    // `buildStepCodePrompt` passes no mask set — `compile.ts` has none to
+    // give it — so the free-text layer is absent there. The structural one
+    // is not: it needs nothing but the value, which is why it is the layer
+    // that closes this on every prompt at once.
+    const text = contentBlocksToText(
+      buildStepCodePrompt({
+        rawStepText: 'Review {{payments}}',
+        parameters: [{ name: 'payments', value: PAYMENTS }],
+        actions: [],
+      }).content,
+    );
+    expect(text).toContain('Acme');
+    expect(text).not.toContain('hunter2-long');
+  });
+
+  it('keeps unmask meaning what it says — neither layer runs on an exempt name', () => {
+    // The hatch exists because `isSecretName` matches `key` and the model must
+    // be able to find the `keyword` column in the page. Masking it by value
+    // here would take it away again through the other door.
+    const block = formatParameterBlock(
+      [{ name: 'keyword', value: 'mortgage' }],
+      [],
+      new Set(['keyword']),
+      ['mortgage'],
+    );
+    expect(block).toBe('- {{keyword}} resolved to "mortgage" on this run');
+  });
+});
+
 describe('system prompt — the placeholder rule and the rewritten predicate clause', () => {
   const flat = contentBlocksToText(buildSystemPrompt(''));
 

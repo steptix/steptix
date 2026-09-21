@@ -178,14 +178,35 @@ test('maskIfSecret: masks a bare "key", however the name spells it', () => {
   assert.equal(maskIfSecret('APIKEY', 'abc'), '***');
 });
 
-// …matched as WORDS, which is the one place the client is deliberately
-// tighter: over-masking is its own bug, and a column called `keyword`
-// rendered as `********` is a row nobody can read.
-test('maskIfSecret: a word that merely contains one is not a secret', () => {
-  assert.equal(maskIfSecret('keyword', 'search'), 'search');
-  assert.equal(maskIfSecret('monkey', 'george'), 'george');
-  assert.equal(maskIfSecret('tokenize', 'yes'), 'yes');
-  assert.equal(maskIfSecret('passwordless', 'yes'), 'yes');
+// …matched as a SUBSTRING, the server's own breadth. Word boundaries were
+// tried here and leaked: `mypassword`, `newpassword` and `apitoken` are one
+// word to a splitter, so they matched nothing and rendered their values in the
+// Variables view while every report starred them.
+test('maskIfSecret: a flat name masks on a substring, as the report does', () => {
+  for (const name of [
+    'mypassword',
+    'newpassword',
+    'password2',
+    'mytoken',
+    'apitoken',
+    'mysecret',
+    'secret1',
+    'MACHINE_KEY',
+  ]) {
+    assert.equal(maskIfSecret(name, 'hunter2'), '*'.repeat(7), name);
+  }
+});
+
+// The price of that breadth, stated rather than worked around: a FLAT
+// `keyword` masks here because it masks in the report, and a view that
+// disagrees with the report beside it about one row is the worse bug. The
+// narrow rule still applies where the name came off a page — see the dotted
+// cases below.
+test('maskIfSecret: a flat name that merely contains one masks too', () => {
+  assert.equal(maskIfSecret('keyword', 'search'), '******');
+  assert.equal(maskIfSecret('monkey', 'george'), '******');
+  assert.equal(maskIfSecret('tokenize', 'yes'), '***');
+  assert.equal(maskIfSecret('passwordless', 'yes'), '***');
 });
 
 // A dotted loop binding is one name with a property segment
@@ -198,19 +219,23 @@ test('maskIfSecret: a dotted record property masks on its own segment', () => {
   assert.equal(maskIfSecret('payment._row', '3'), '3');
 });
 
-// The server masks a record COLUMN by a longer list than `isSecretName`
-// (`isRecordSecretKey`, src/utils/secrets.ts), and `frame:scope` carries raw
-// values — so the client's list must cover every word on it.
-test('maskIfSecret: the record-column words the server also treats as secret', () => {
+// The record-COLUMN list is longer than `isSecretName` in one direction —
+// `pwd`, `otp`, `credential` — and that list decides a COLUMN, not a flat
+// name. A flat `pwd` is not masked, because the server does not mask it
+// either: the report, the run log and the `## Values` block all print it, and
+// the client's job is to say what they say.
+test('maskIfSecret: pwd/otp/credential are column words, not flat ones', () => {
   for (const name of ['passwd', 'pwd', 'user_otp', 'credential', 'api_credentials']) {
-    assert.equal(maskIfSecret(name, 'abc'), '***', name);
+    assert.equal(maskIfSecret(name, 'abc'), 'abc', `flat ${name}`);
+    assert.equal(maskIfSecret(`payment.${name}`, 'abc'), '***', `column ${name}`);
   }
 });
 
 test('isSecretVarName answers the same question without a mask string', () => {
   assert.equal(isSecretVarName('api_key'), true);
   assert.equal(isSecretVarName('payment.password'), true);
-  assert.equal(isSecretVarName('keyword'), false);
+  assert.equal(isSecretVarName('keyword'), true, 'flat: the server masks it, so this does');
+  assert.equal(isSecretVarName('payment.keyword'), false, 'column: the narrow rule');
   assert.equal(isSecretVarName('payee'), false);
 });
 
@@ -265,11 +290,21 @@ test('a secret ROOT masks every property under it, column rule or not', () => {
   assert.equal(maskIfSecret('api_key.id', 'abc'), '***');
 });
 
-test('a flat name still takes the broad list — a bare KEY is a secret', () => {
+test('a flat name still takes the broad rule — a bare KEY is a secret', () => {
   assert.equal(maskIfSecret('MACHINE_KEY', 'abc'), '***');
   assert.equal(maskIfSecret('key', 'abc'), '***');
   assert.equal(maskIfSecret('sort_key', 'abc'), '***');
   assert.equal(maskIfSecret('apikey', 'abc'), '***');
+  assert.equal(maskIfSecret('keyword', 'abc'), '***');
+});
+
+// The same word, both sides of the dot: flat it is the author's and masks,
+// as a column it is the page's and does not. This pair is the whole split.
+test('the split decides `keyword` and `sort_key` twice, and differently', () => {
+  assert.equal(maskIfSecret('keyword', 'search'), '******');
+  assert.equal(maskIfSecret('payment.keyword', 'search'), 'search');
+  assert.equal(maskIfSecret('sort_key', 'abc'), '***');
+  assert.equal(maskIfSecret('payment.sort_key', 'abc'), 'abc');
 });
 
 test('isSecretVarName answers the split question too', () => {
@@ -322,6 +357,33 @@ test('maskRecordSecrets: no four-character floor — the KEY is the rule here', 
   assert.deepEqual(JSON.parse(maskRecordSecrets(JSON.stringify([{ password: '' }]))), [
     { password: '(empty)' },
   ]);
+});
+
+// A tool returning records can put a number or a boolean under a `password`
+// key, and `{"password":123}` rendered it in the clear while
+// `{"password":"123"}` starred it — a distinction the surface does not make
+// visible and the rule does not intend.
+test('maskRecordSecrets: a non-string cell under a secret key masks too', () => {
+  assert.deepEqual(JSON.parse(maskRecordSecrets(JSON.stringify({ password: 123 }))), {
+    password: '***',
+  });
+  assert.deepEqual(JSON.parse(maskRecordSecrets(JSON.stringify([{ password: true }]))), [
+    { password: '****' },
+  ]);
+  assert.deepEqual(JSON.parse(maskRecordSecrets(JSON.stringify([{ api_key: 4321 }]))), [
+    { api_key: '****' },
+  ]);
+});
+
+// …and the limit, stated: a null says there is no value, and a nested object
+// would have to be walked — neither side masks inside one today.
+test('maskRecordSecrets: null and nested objects under a secret key are left alone', () => {
+  const withNull = JSON.stringify([{ password: null }]);
+  assert.equal(maskRecordSecrets(withNull), withNull);
+  const nested = JSON.stringify([{ password: { pin: '1234' } }]);
+  assert.equal(maskRecordSecrets(nested), nested);
+  const listed = JSON.stringify([{ password: ['a', 'b'] }]);
+  assert.equal(maskRecordSecrets(listed), listed);
 });
 
 test('maskRecordSecrets: anything that is not a record list is returned as it was', () => {

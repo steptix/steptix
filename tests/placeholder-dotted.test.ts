@@ -40,6 +40,7 @@ import {
   dottedReferenceError,
   mapActionStrings,
   substituteAction,
+  substituteAsLiterals,
   substituteText,
   walkActionStrings,
 } from '../src/runner/placeholder-substitution.js';
@@ -566,6 +567,153 @@ describe('a missing dotted binding fails before the model is asked', () => {
     expect(dottedReferenceError('{{order.statuz}} and {{order.custmer}}', ROW, () => 1)).toBe(
       '{{order.statuz}} has no value in For each item 1; available properties are id, customer, status',
     );
+  });
+
+  /**
+   * A root whose NAME is a key of `Object.prototype`.
+   *
+   * `parameters[root]` is a plain object index, so `{{constructor.id}}` got
+   * the `Object` function back from a map that binds nothing of the sort, and
+   * `rootValue.startsWith('{')` threw a TypeError. The throw escaped: this
+   * function is called from `runTest`'s try/finally with no catch, and from
+   * the guard loop OUTSIDE `evaluateGuard`'s try — so a step or a condition
+   * naming one of four ordinary English words killed the run with no report,
+   * where every other unanswerable reference is a refusal.
+   *
+   * Nothing exotic reaches it. `{{constructor.name}}` is a plausible thing to
+   * write about a page, and `{{valueOf.x}}` needs only a typo.
+   */
+  it.each(['constructor', 'toString', 'valueOf', '__proto__'])(
+    'refuses {{%s.id}} with the ordinary sentence rather than throwing',
+    (root) => {
+      expect(dottedReferenceError(`Verify {{${root}.id}} is shown`, ROW)).toBe(
+        `{{${root}.id}} has no value; nothing in this run binds {{${root}}}`,
+      );
+    },
+  );
+
+  it('reads the ROOT"s own binding by own-property too, not off the prototype', () => {
+    // The same index one level in: the root IS bound here, so the refusal
+    // reaches `unspellableKeysOf` — which is where the throw happened.
+    expect(
+      dottedReferenceError('Verify {{toString.id}}', { toString: '{"a-b":"1"}' }),
+    ).toBe(
+      '{{toString.id}} has no value; {{toString}} has no properties that can be ' +
+        'spelled as placeholders (a-b)',
+    );
+  });
+
+  /**
+   * The same hazard at the SUBSTITUTION sites, which is how it reaches the
+   * page rather than the log: `{{constructor}}` typed
+   * `function Object() { [native code] }` into a field, and
+   * `substituteAsLiterals` threw `value.includes is not a function` deciding
+   * a condition.
+   */
+  it('leaves a prototype-named FLAT reference literal at every substitution site', () => {
+    expect(substituteText('Verify {{constructor}} is shown', { parameters: {} })).toBe(
+      'Verify {{constructor}} is shown',
+    );
+    expect(substituteAsLiterals('If {{constructor}} is "x"', { parameters: {} })).toEqual({
+      text: 'If {{constructor}} is "x"',
+      references: 1,
+      unspellable: false,
+    });
+    // `interpolate` is the step text's own copy of the rule (`key in params`
+    // walked the prototype chain there too).
+    expect(interpolate('Verify {{toString}} is shown', {})).toBe(
+      'Verify {{toString}} is shown',
+    );
+  });
+
+  it('warns about a prototype-named reference exactly as about any other unresolved one', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      interpolate('Verify {{constructor}} is shown', {});
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+        'Unresolved placeholder: {{constructor}}',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /**
+   * `{}` is a record. It just has nothing in it.
+   *
+   * The catch-all said `{{order}} holds no properties — it is not an object`,
+   * whose second clause is false about the one value it is asserting over —
+   * and false in the direction that sends the author looking for the wrong
+   * mistake (a `readTable` that returned rows, when what they have is a row
+   * that matched no columns).
+   */
+  it('says what is true about a root bound to an empty record', () => {
+    expect(dottedReferenceError('Verify {{order.id}}', { order: '{}' })).toBe(
+      '{{order.id}} has no value; {{order}} is a record with no properties',
+    );
+  });
+
+  it('keeps the existing sentence for a root that really is not an object', () => {
+    expect(dottedReferenceError('Verify {{order.id}}', { order: 'Alice' })).toBe(
+      '{{order.id}} has no value; {{order}} holds no properties — it is not an object',
+    );
+    expect(dottedReferenceError('Verify {{order.id}}', { order: '[1,2]' })).toBe(
+      '{{order.id}} has no value; {{order}} holds no properties — it is not an object',
+    );
+    // Not-JSON-at-all is the same answer: there is no record here either.
+    expect(dottedReferenceError('Verify {{order.id}}', { order: '{not json' })).toBe(
+      '{{order.id}} has no value; {{order}} holds no properties — it is not an object',
+    );
+  });
+});
+
+/**
+ * The refusal is written from the run's VALUES, so it is masked
+ * (stories/placeholder-preserving-actions.md; `src/utils/secrets.ts`).
+ *
+ * It names the properties the row does hold and the keys the loop dropped,
+ * and a key can carry a secret — `{"hunter2 header": "…"}` where `hunter2` is
+ * what `{{password}}` holds. Round 2 masked `evaluateGuard`'s `… cannot be
+ * referenced as a placeholder` line for exactly this and left the refusal,
+ * which is the louder of the two: it is a `logger.error`, a `StepResult.error`
+ * and (on the server) a `step:fail` wire payload.
+ */
+describe('the refusal is masked', () => {
+  const SECRET_KEY = {
+    password: 'hunter2',
+    order: '{"id":"A","hunter2 header":"t"}',
+    'order.id': 'A',
+  };
+
+  it('masks a secret value that turns up in a dropped key, with no masker passed', () => {
+    expect(dottedReferenceError('Verify {{order.contenttype}}', SECRET_KEY)).toBe(
+      '{{order.contenttype}} has no value; available properties are id ' +
+        '(*** header cannot be spelled as a placeholder)',
+    );
+  });
+
+  it('uses the masker the run loop hands it, when one is handed', () => {
+    // Each loop has its own — the server's counts a section row's frame
+    // inputs as well as the parameter map — so the argument is what decides,
+    // not the fallback.
+    expect(
+      dottedReferenceError('Verify {{order.contenttype}}', SECRET_KEY, undefined, (text) =>
+        text.replace(/hunter2/g, '[MASKED]'),
+      ),
+    ).toBe(
+      '{{order.contenttype}} has no value; available properties are id ' +
+        '([MASKED] header cannot be spelled as a placeholder)',
+    );
+  });
+
+  it('leaves a refusal with no secret in it exactly as it was', () => {
+    expect(
+      dottedReferenceError('Verify {{order.statuz}}', {
+        password: 'hunter2',
+        order: '{"id":"A"}',
+        'order.id': 'A',
+      }),
+    ).toBe('{{order.statuz}} has no value; available properties are id');
   });
 });
 

@@ -907,10 +907,21 @@ export class UIRunnerAdapter {
       // model call, in the same shape as the contradiction below, and read off
       // the AUTHORED line — `resolveStepText` has already replaced every
       // reference it could answer. Dotted only; a flat name keeps its warning.
+      // Masked on the same terms as every other string this runner emits: the
+      // refusal is written from the run's own values — the properties the row
+      // holds, the keys the loop dropped — and it reaches the IPC event, the
+      // report and the log verbatim.
       const dottedRefError = setStep
         ? undefined
-        : dottedReferenceError(rawInstruction, this.resolvedParameters, (item) =>
-            forEachPassOf(controls, controlState, item),
+        : dottedReferenceError(
+            rawInstruction,
+            this.resolvedParameters,
+            (item) => forEachPassOf(controls, controlState, item),
+            (text) =>
+              redact(
+                text,
+                runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData }),
+              ),
           );
       if (dottedRefError) {
         flushSkips(i);

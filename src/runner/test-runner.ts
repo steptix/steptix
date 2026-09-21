@@ -43,7 +43,12 @@ import { resolveHooks, type ResolvedHooks } from './hooks.js';
 import { runInteractiveRepl } from './interactive-repl.js';
 import { loadContextFiles } from '../context/loader.js';
 import { controlLineDefines } from '../parser/control-line.js';
-import { resolveParameters, loadDataFile, interpolate } from '../parser/parameters.js';
+import {
+  resolveParameters,
+  loadDataFile,
+  interpolate,
+  warnMultiSegment,
+} from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
 import {
   parseFlowControlStep,
@@ -1091,6 +1096,18 @@ export async function runTest(
       if (controlRecord) {
         session = browserTracker.getActive();
         const guardText = test.steps[i] ?? '';
+        // `{{a.b.c}}` matches neither grammar, so it is neither substituted nor
+        // warned about as unresolved — it simply reaches the judge as six
+        // literal braces. `interpolate` says so for an ordinary step, and this
+        // branch `continue`s long before the loop reaches that call, so a
+        // control line was the one place in this runner where the warning
+        // could not fire. The Sessions API and the Electron adapter resolve
+        // every line's text BEFORE their control dispatch and so warned all
+        // along; this is the same sentence, from the same function. The guard
+        // line is deliberately not interpolated here — the guard path owns its
+        // own substitution, and resolving it twice would change what the judge
+        // is asked.
+        warnMultiSegment(guardText);
         // Same pairing rule the event-emitting loops follow: the console's
         // `Step N` header opens a step, and only a visit that asks somebody
         // closes it with a `Step N passed` (or a failure). A visit that asks
@@ -1467,10 +1484,17 @@ export async function runTest(
       // AUTHORED line, because `interpolate` has already replaced every
       // reference it COULD answer and leaves only the ones it could not.
       // Dotted only: an unresolved flat name keeps its warning.
+      // Masked here for the same reason the `Step N` line above is: the
+      // refusal is written from the run's own values — the properties the row
+      // does hold, the keys the loop dropped — and it reaches the console, the
+      // report and the run log verbatim.
       const dottedRefError = setStep
         ? undefined
-        : dottedReferenceError(rawInstruction, resolvedParameters, (item) =>
-            forEachPassOf(controls, controlState, item),
+        : dottedReferenceError(
+            rawInstruction,
+            resolvedParameters,
+            (item) => forEachPassOf(controls, controlState, item),
+            (text) => redact(text, secretsNow()),
           );
       let stepResult: StepResult;
       let interactiveResults: StepResult[] = [];

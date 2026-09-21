@@ -12,7 +12,7 @@ import {
   placeholderProperty,
   placeholderRoot,
 } from '../parser/parameters.js';
-import { MASK } from '../utils/secrets.js';
+import { MASK, redact, runSecrets } from '../utils/secrets.js';
 
 /**
  * The model names the value it used; the executor puts the value in
@@ -115,6 +115,28 @@ const TYPED_FIELDS: ReadonlySet<string> = new Set([
   'key',
 ]);
 
+/**
+ * What `name` is bound to right now, or undefined — OWN properties only.
+ *
+ * `parameters[name]` is a plain object index, so `{{constructor}}`,
+ * `{{toString}}`, `{{valueOf}}` and `{{__proto__}}` answered with something
+ * off `Object.prototype` on a map that binds none of them. Every read in this
+ * module goes through here, because each of the three had its own way of going
+ * wrong with a function or a prototype in place of a string: `substituteText`
+ * typed `function Object() { [native code] }` into the page, and both
+ * `substituteAsLiterals` (`value.includes`) and `unspellableKeysOf`
+ * (`rootValue.startsWith`) threw a TypeError out of a call site with no catch
+ * — the CLI's `dottedReferenceError` sits in `runTest`'s try/finally, and the
+ * guard loop's is outside `evaluateGuard`'s try, so the run died with no
+ * report rather than refusing the step.
+ */
+function boundValue(
+  parameters: Record<string, string>,
+  name: string,
+): string | undefined {
+  return Object.hasOwn(parameters, name) ? parameters[name] : undefined;
+}
+
 /** Everything a substitution needs: the live parameter map and, when the run
  *  has an environment, the context its `${…}` references resolve against. */
 export interface PlaceholderValues {
@@ -162,15 +184,29 @@ const NO_SPACES_SENTENCE = (key: string): string =>
  * answer it for the CURRENT pass, which is the only pass the message is about.
  */
 function unspellableKeysOf(rootValue: string | undefined): string[] {
-  if (rootValue === undefined || !rootValue.startsWith('{')) return [];
+  return recordKeysOf(rootValue)?.filter((key) => !isBindableProperty(key)) ?? [];
+}
+
+/**
+ * The keys of a root whose value IS a JSON record, in order — or undefined
+ * when the value is anything else (a scalar, an array, unparseable text, or
+ * nothing at all).
+ *
+ * The distinction {@link unspellableKeysOf} alone could not draw: an empty
+ * record and a string both produced an empty key list, so `{{order}}` bound to
+ * `{}` was refused as "holds no properties — it is not an object", which is
+ * false about the one thing the sentence asserts.
+ */
+function recordKeysOf(rootValue: string | undefined): string[] | undefined {
+  if (rootValue === undefined || !rootValue.startsWith('{')) return undefined;
   let parsed: unknown;
   try {
     parsed = JSON.parse(rootValue);
   } catch {
-    return [];
+    return undefined;
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return [];
-  return Object.keys(parsed).filter((key) => !isBindableProperty(key));
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+  return Object.keys(parsed);
 }
 
 /**
@@ -203,8 +239,31 @@ function unspellableKeysOf(rootValue: string | undefined): string[] {
  * missing: a resolvable `{{ order.id }}` was neither substituted, refused nor
  * warned about. A flat `{{ name }}` keeps its legacy silence, for the same
  * reason the rest of this function is dotted-only.
+ *
+ * MASKED, because the message is written from the run's own values: it names
+ * the row's available properties and the keys the loop dropped, and a key can
+ * carry a secret (`hunter2 header`). Every emitter of it prints it — the CLI's
+ * `logger.error`, the `StepResult.error` and `aiExplanation` all three loops
+ * build, and the server's `step:fail` wire payload — so masking at each of
+ * those seams would be four chances to forget. `redact` is passed in for the
+ * same reason `evaluateGuard` takes one: each loop's masker differs (the
+ * server's `secretsNow` counts frame inputs too). Omitted, the fallback is
+ * what the CLI and the Electron adapter build for themselves anyway, so a
+ * caller that forgets still masks.
  */
 export function dottedReferenceError(
+  text: string,
+  parameters: Record<string, string>,
+  passOf?: ((item: string) => number | undefined) | undefined,
+  redactText?: ((text: string) => string) | undefined,
+): string | undefined {
+  const refusal = findDottedRefusal(text, parameters, passOf);
+  if (refusal === undefined) return undefined;
+  return redactText ? redactText(refusal) : redact(refusal, runSecrets({ parameters }));
+}
+
+/** {@link dottedReferenceError}'s rule, before the mask. */
+function findDottedRefusal(
   text: string,
   parameters: Record<string, string>,
   passOf?: ((item: string) => number | undefined) | undefined,
@@ -234,7 +293,9 @@ export function dottedReferenceError(
       const property = placeholderProperty(key);
       if (property !== undefined) available.push(property);
     }
-    const unspellable = unspellableKeysOf(parameters[root]);
+    const rootValue = boundValue(parameters, root);
+    const recordKeys = recordKeysOf(rootValue);
+    const unspellable = unspellableKeysOf(rootValue);
     if (available.length > 0) {
       const aside =
         unspellable.length > 0
@@ -248,6 +309,13 @@ export function dottedReferenceError(
         `${prefix}; {{${root}}} has no properties that can be spelled as ` +
         `placeholders (${unspellable.join(', ')})`
       );
+    }
+    // The record-shaped value FIRST, because the sentence below asserts one
+    // thing and an empty record makes it false: `{{order}}` bound to `{}` is
+    // an object, it simply has nothing in it, and an author told "it is not an
+    // object" goes looking for the wrong mistake.
+    if (recordKeys !== undefined && recordKeys.length === 0) {
+      return `${prefix}; {{${root}}} is a record with no properties`;
     }
     if (Object.hasOwn(parameters, root)) {
       return `${prefix}; {{${root}}} holds no properties — it is not an object`;
@@ -369,7 +437,7 @@ export function substituteText(text: string, values: PlaceholderValues): string 
   if (!text.includes('{{') && !text.includes('${')) return text;
   return text.replace(SUBSTITUTE_RE, (match: string, name: string | undefined, ref: string | undefined) => {
     if (name !== undefined) {
-      const value = values.parameters[name];
+      const value = boundValue(values.parameters, name);
       return value === undefined ? match : value;
     }
     if (ref !== undefined && values.envData) {
@@ -442,7 +510,7 @@ export function substituteAsLiterals(
     (match: string, name: string | undefined, ref: string | undefined, offset: number) => {
       references++;
       let value: string | undefined;
-      if (name !== undefined) value = values.parameters[name];
+      if (name !== undefined) value = boundValue(values.parameters, name);
       else if (ref !== undefined && values.envData) value = resolveEnvDataRef(ref, values.envData);
       if (value === undefined) return match;
       if (value.includes('"') || value.includes('\n')) unspellable = true;

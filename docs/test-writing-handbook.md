@@ -1050,9 +1050,12 @@ Running versions of all of it ship in `templates/init/tests/`: the eight
 (`table-orders.md`), the first-N bound (`table-orders-limit.md`), positions,
 duplicates and `_row` (`table-payments-review.md`), pagination
 (`table-statements.md`), an empty body (`table-documents-empty.md`) and the
-awkward shapes (`table-structures.md`). They drive
-`fixtures/test-app/tables.html`, which indexes every table page in the fixture
-app.
+awkward shapes (`table-structures.md`). Each navigates straight to the page it
+needs in the fixture app — `structured-orders.html` and
+`structured-orders-many.html`, `scheduled-payments.html`, `statements.html`,
+`documents.html`, `table-edge-cases.html`. `fixtures/test-app/tables.html`
+indexes them all and is the page to open by hand when you want to see what a
+test is reading.
 
 ### 3.9 What does not exist
 

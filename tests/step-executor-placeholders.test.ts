@@ -730,6 +730,38 @@ describe('a secret-named value never reaches the model', () => {
     // rule.
     expect(actions.received[0]!.value).toBe('debentures');
   });
+
+  it('masks the secret COLUMNS of a record capture in the ## Values block', async () => {
+    // The gap the name rule cannot see: `payments` is the author's word for a
+    // whole table and `payment` for one row of it, so neither entry says
+    // "secret" and both printed every column — while the DOM in the same
+    // message had the same value masked.
+    const PAYMENTS = JSON.stringify([
+      { _row: '1', payee: 'Acme', password: 'hunter2-long' },
+      { _row: '2', payee: 'Origin', password: 'correct-horse' },
+    ]);
+    const { client } = await runStep(
+      'Review the payments',
+      [plan([{ action: 'click', selector: '#go', description: 'Review' }])],
+      {
+        parameters: {
+          payments: PAYMENTS,
+          payment: JSON.stringify({ _row: '1', payee: 'Acme', password: 'hunter2-long' }),
+          'payment.payee': 'Acme',
+          'payment.password': 'hunter2-long',
+        },
+        authored: 'Review {{payments}}, starting with {{payment}} for {{payment.payee}} '
+          + 'using {{payment.password}}',
+      },
+    );
+    const text = allRequestText(client);
+    for (const leaked of ['hunter2-long', 'correct-horse']) {
+      expect(text).not.toContain(leaked);
+    }
+    // The payee is not a secret and the model needs it to find the row.
+    expect(text).toContain('Acme');
+    expect(text).toContain('- {{payment.password}} resolved to "***" on this run');
+  });
 });
 
 // ── The module's own rules, without a step around them ──────────────────────

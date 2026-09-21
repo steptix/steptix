@@ -112,65 +112,49 @@ export function interpretReplCommand(
 }
 
 /**
- * The words that make an AUTHOR-CHOSEN name a secret, matched as WORDS rather
- * than as substrings: `password`, `secret`, `token`, `key` (and `apikey`,
- * which is one word however it is spelled), each optionally plural.
+ * What makes an AUTHOR-CHOSEN name a secret: the server's `isSecretName`
+ * (src/parser/parameters.ts), mirrored character for character. A SUBSTRING,
+ * so `mypassword`, `password2` and `apitoken` are secrets exactly as the
+ * server reads them.
  *
- * The server's rule for such a name is `isSecretName`
- * (src/parser/parameters.ts), and what it masks the client must mask too — a
- * value the report redacts must not sit in plain sight in the Variables view
- * or the Output banner. This used to be NARROWER than the server's in a way
- * that leaked: bare `key` was missing, so `MACHINE_KEY` and `privateKey`
- * rendered their values while every report redacted them.
+ * Identical and not merely similar, because the difference is a leak in
+ * whichever direction it falls. `frame:scope` carries RAW values by design —
+ * the wire was left alone when redaction shipped, and the client is what hides
+ * them — so a client rule the server's does not match shows in the Variables
+ * view a value the report beside it redacts. Word boundaries were tried here
+ * (`nameWords` + a word list) and did exactly that: `mypassword`, `newpassword`
+ * and `apitoken` are single words to a splitter and matched nothing, while
+ * `pwd` and `user_otp` went the other way and masked what the report prints.
  *
- * Word boundaries, not the server's plain substring, because that direction
- * of the difference costs nothing real and over-masking is its own bug:
- * `keyword` and `monkey` contain "key" and hold nothing secret, and a variable
- * called `keyword` rendered as `********` is a row nobody can read. The
- * separator set is what a variable name actually uses — `_`, `-` and a
- * camelCase hump — so `api_key`, `apiKey` and `APIKEY` all mask.
+ * So the server's breadth comes with it, `keyword` and `monkey` included: they
+ * are masked here because they are masked in the report, and a view that
+ * disagrees with the report about one row is worse than a row that is
+ * needlessly starred. Spec §7.6 states the rule that way.
  *
- * This list decides a FLAT name only. A dotted one is `root.property`, whose
+ * This decides a FLAT name only. A dotted one is `root.property`, whose
  * property came off a page rather than out of the author's head, and that goes
  * through {@link isRecordSecretKey} instead — see {@link isSecretVarName}.
+ * `tests/record-secret-parity.test.js` in testbench-native reads the literal
+ * out of the server's source and fails if this one drifts from it.
  */
-const SECRET_WORDS: ReadonlySet<string> = new Set([
-  'password',
-  'passwords',
-  'secret',
-  'secrets',
-  'token',
-  'tokens',
-  'apikey',
-  'apikeys',
-  'key',
-  'keys',
-  // The rest of the server's record-column list (`isRecordSecretKey`,
-  // src/utils/secrets.ts). Kept here as well so a variable the author called
-  // `pwd` or `otp` masks: widening an author-chosen name costs nothing (the
-  // author picked a word that says credential), and `frame:scope` carries raw
-  // values, so this render is the only thing between such a value and the
-  // screen.
-  'passwd',
-  'pwd',
-  'otp',
-  'credential',
-  'credentials',
-]);
+const SECRET_NAME = /password|secret|token|key/i;
 
-/** The words in a variable name: split on every non-alphanumeric run and at
- *  each camelCase hump, lower-cased. `api_key` → api, key. */
-function nameWords(varName: string): string[] {
-  return varName
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .split(/[^A-Za-z0-9]+/)
-    .filter((word) => word !== '')
-    .map((word) => word.toLowerCase());
-}
+/** The pattern above, exported so the parity test can compare its `.source`
+ *  with the server's rather than eyeballing two files. */
+export const SECRET_NAME_PATTERN = SECRET_NAME;
 
-/** Is a flat, author-chosen name a secret by {@link SECRET_WORDS}? */
-function isSecretFlatName(name: string): boolean {
-  return nameWords(name).some((word) => SECRET_WORDS.has(word));
+/**
+ * Is a flat, author-chosen name a secret by {@link SECRET_NAME}?
+ *
+ * Exported for the one other client surface that answers this question about
+ * an author-chosen name — the `${env.X}` / `${data.X.Y}` completion dropdown
+ * (testbench-native/src/extension/env-data-completion-core.ts), which asks it
+ * of a '.'-joined data PATH, where every segment is author-chosen and none of
+ * them is a record column. Not for a runtime variable name: that may be
+ * dotted, and {@link isSecretVarName} is the rule for those.
+ */
+export function isSecretFlatName(name: string): boolean {
+  return SECRET_NAME.test(name);
 }
 
 /**
@@ -178,7 +162,7 @@ function isSecretFlatName(name: string): boolean {
  * (src/utils/secrets.ts), regex for regex — `tests/record-secret-parity.test.js`
  * in testbench-native reads both sources and fails if they drift.
  *
- * Narrower than {@link SECRET_WORDS} on purpose, and the reason is on the
+ * Narrower than {@link SECRET_NAME} on purpose, and the reason is on the
  * server side: a record's keys are picked off the page — a `readTable` column
  * alias, a header turned into a property — where `keyword` and `sort_key` both
  * contain `key`, and masking is not a free precaution because the server's
@@ -189,7 +173,8 @@ function isSecretFlatName(name: string): boolean {
  *
  * So: `password` / `passwd` / `pwd` / `secret` / `token` / `otp` /
  * `credential(s)` as whole words, and `key` only where something makes it a
- * credential (`api_key`, `apiKey`, `access_key`, `private_key`). `apikey` as
+ * credential — all seven of them: `api_key`, `apiKey`, `access_key`,
+ * `private_key`, `auth_key`, `signing_key`, `encryption_key`. `apikey` as
  * one word has no boundary to read and is not a secret COLUMN — as an
  * author-chosen name it still is (above).
  */
@@ -220,15 +205,14 @@ export const RECORD_SECRET_PATTERNS = {
  * server makes, docs/specs/SPEC-structured-table-reads.md §7.6):
  *
  * - a FLAT name is the author's — a parameter, a `[store as:]` capture — so
- *   the broad {@link SECRET_WORDS} list decides it;
+ *   the broad {@link SECRET_NAME} substring decides it;
  * - a DOTTED one is `root.property`, a binding a `For each` pass made over a
  *   record (§8.4). The property is the page's word, not the author's, so
  *   {@link isRecordSecretKey} decides it — while the ROOT is still the
  *   author's, and a record stored under `token` is a secret whole.
  *
  * The difference is not cosmetic: `payment.sort_key` and `payment.keyword`
- * used to render as `********` here while the report printed them, and
- * `payment.pwd` had to be spelled into the flat list to mask at all.
+ * used to render as `********` here while the report printed them.
  */
 export function isSecretVarName(varName: string): boolean {
   const dot = varName.indexOf('.');
@@ -245,6 +229,14 @@ function maskValue(value: string): string {
   return value.length === 0 ? EMPTY_VALUE : '*'.repeat(Math.min(value.length, 8));
 }
 
+/** Is this parsed JSON value one record — an object with keys, rather than a
+ *  list, a null or a scalar? Its own function so the mask loop below is one
+ *  call rather than a three-part condition a TypeScript cast has to repair,
+ *  which is what lets the panel's copy stay identical to it. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /**
  * A captured value with the secret COLUMNS of the records inside it masked.
  * Anything that is not a record (or a list of them) comes back untouched.
@@ -257,9 +249,17 @@ function maskValue(value: string): string {
  * redaction shipped, and the client is what hides them — so this render is the
  * only guard those two surfaces have.
  *
- * Strings only, and by key only: the server masks a record value the same way
- * (`recordSecretValues`), and a number or a nested object under a `password`
- * key is not something `readTable` can produce.
+ * By KEY, and at any JSON type a cell can hold on its own: a string, but also
+ * a number or a boolean, because `{"password":123}` rendered the credential in
+ * the clear while `{"password":"123"}` starred it — a distinction nothing in
+ * the surface makes visible and nothing in the rule intends. A tool returning
+ * records is what produces those, `readTable` having only strings to give.
+ *
+ * The LIMIT is a cell that is itself null, an object or an array: those are
+ * left exactly as they came. Replacing null with `********` would report a
+ * value where there is none, and a nested object would have to be walked to
+ * mask anything — a shape neither the server nor this helper masks inside
+ * today, so a `password` object stays readable here as it does in the report.
  *
  * No four-character floor here, unlike the server's. That floor exists because
  * a short value joins a free-text mask set and is then replaced EVERYWHERE,
@@ -271,27 +271,34 @@ function maskValue(value: string): string {
  * character: the re-stringify is compact and a capture the server wrote is
  * compact as well, but a tool may pretty-print, and reformatting a value that
  * held no secret would be this helper inventing a change.
+ *
+ * Kept line for line with `maskRecordSecretsInline`
+ * (testbench-native/src/webview/lib/variables-panel.js), which the webview
+ * bundle uses because it can import nothing from here: the parity test
+ * compares the two bodies with the TypeScript spellings normalised away, so a
+ * change made in one and not the other fails rather than drifts.
  */
 export function maskRecordSecrets(value: string): string {
-  if (!/^\s*[[{]/.test(value)) return value;
+  const text = String(value);
+  if (!/^\s*[[{]/.test(text)) return text;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(value);
+    parsed = JSON.parse(text);
   } catch {
-    return value;
+    return text;
   }
   const records = Array.isArray(parsed) ? parsed : [parsed];
   let masked = false;
   for (const record of records) {
-    if (typeof record !== 'object' || record === null || Array.isArray(record)) continue;
-    for (const [key, cell] of Object.entries(record as Record<string, unknown>)) {
-      if (typeof cell === 'string' && isRecordSecretKey(key)) {
-        (record as Record<string, unknown>)[key] = maskValue(cell);
-        masked = true;
-      }
+    if (!isPlainRecord(record)) continue;
+    for (const [key, cell] of Object.entries(record)) {
+      if (!isRecordSecretKey(key)) continue;
+      if (cell === null || typeof cell === 'object') continue;
+      record[key] = maskValue(String(cell));
+      masked = true;
     }
   }
-  return masked ? JSON.stringify(parsed) : value;
+  return masked ? JSON.stringify(parsed) : text;
 }
 
 /**

@@ -1,4 +1,4 @@
-import { redactMap } from '../utils/secrets.js';
+import { redactAuthoredMap } from '../utils/secrets.js';
 import type { RowSummaryLine, StepResult, TestReport } from './types.js';
 
 /**
@@ -84,7 +84,14 @@ export function mergeRowReports(rows: RowReport[], unrun: UnrunRow[] = []): Test
             // Masked by name as well as by value: a `password` column shows
             // `***` even when its cell is too short or too common for
             // value-masking to be safe to apply.
-            values: redactMap(row.dataRowValues ?? {}, row.secrets ?? []),
+            //
+            // By the AUTHOR rule on the whole key, not the variable map's
+            // two-segment one. These keys are the data file's column
+            // headings, typed by a person; none of them is half page-derived,
+            // which is the only thing the split exists for. Split at the dot,
+            // `api.key` leaves `key` — which the record rule deliberately
+            // does not mask — and the band printed the credential.
+            values: redactAuthoredMap(row.dataRowValues ?? {}, row.secrets ?? []),
           };
 
     for (const step of r.steps) {
@@ -122,7 +129,9 @@ export function mergeRowReports(rows: RowReport[], unrun: UnrunRow[] = []): Test
   for (const row of unrun) {
     rowLines.push({
       index: row.index,
-      values: row.values,
+      // Never run, so no run secrets to mask by value — but the cells are
+      // still the data file's, and a `password` column is one by name.
+      values: redactAuthoredMap(row.values, []),
       status: 'skipped',
       notRunReason: row.reason,
       durationMs: 0,

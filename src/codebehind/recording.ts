@@ -4,7 +4,13 @@ import type { AIAction } from '../ai/types.js';
 import type { ActionTargeting } from '../browser/actions.js';
 import type { AssertionResult, StepResult, StepStatus } from '../report/types.js';
 import { logger } from '../utils/logger.js';
-import { isSecretName, secretValues, redact, redactDeep, redactMap } from '../utils/secrets.js';
+import {
+  isSecretName,
+  secretValues,
+  redact,
+  redactDeep,
+  redactAuthoredMap,
+} from '../utils/secrets.js';
 import { resolveCodeBehindCacheDir } from './loader.js';
 
 /**
@@ -325,7 +331,12 @@ async function writeRecordedStep(
     ...(result.pageUrl !== undefined && { pageUrl: result.pageUrl }),
     actions: actionsOf(result).map((a) => redactDeep(a, secrets)),
     ...(result.assertions && { assertions: result.assertions }),
-    ...(result.outputs && { outputs: redactMap(result.outputs, secrets) }),
+    // By the AUTHOR rule on the whole name: a `[store as:]` output is named
+    // end to end by the person who wrote the step, so there is no page-derived
+    // half for the variable map's two-segment rule to protect. Asked that way,
+    // `api.key` split to `key` — which the narrow record rule deliberately
+    // leaves clear — and the recording on disk held the credential.
+    ...(result.outputs && { outputs: redactAuthoredMap(result.outputs, secrets) }),
     durationMs: result.durationMs,
     files,
   };
