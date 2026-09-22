@@ -2675,7 +2675,8 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
         'login wall interrupted an errand. Calling it on a page with no form ' +
         'is free and harmless: it answers `not-a-login-page` without reading ' +
         'the vault or interrupting anyone. The user is asked to approve every ' +
-        'sign-in, once per site.\n\n' +
+        'sign-in, once per site. The first time on a machine, the user may be ' +
+        'asked to sign in to Bitwarden before approving.\n\n' +
         'Multi-page sign-ins (email, then password, then a code) take several ' +
         'calls: when `continues` is true, wait for the next page to load and ' +
         'call again.\n\n' +

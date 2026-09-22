@@ -16,6 +16,10 @@ import type { ApprovalDecision, ApprovalProvider, ApprovalRequest } from './type
 const APPROVAL_TIMEOUT_MS = 60_000;
 /** The unlock prompt gets longer — a master password is long and typed carefully. */
 const UNLOCK_TIMEOUT_MS = 120_000;
+/** Sign-in asks for the same master password, plus an email. */
+const SIGN_IN_TIMEOUT_MS = 120_000;
+/** Longer again: an emailed code has to arrive before it can be typed. */
+const CODE_TIMEOUT_MS = 180_000;
 
 /**
  * Shared head for both dialogs, and the fix for a trap that cost a live run.
@@ -30,6 +34,16 @@ const UNLOCK_TIMEOUT_MS = 120_000;
  * `Reveal` overrides that explicitly with `ShowWindow(SW_SHOW)` once the form
  * exists, then pulls it to the front. `$form.Activate()` alone does not do it —
  * activating a window that was never shown leaves it hidden.
+ *
+ * `Write-AiuiFields` is how every dialog that returns typed values hands them
+ * back (stories/bitwarden-sign-in.md §7). PowerShell 5.1 writes redirected
+ * stdout in the console code page, which on a default Windows install is not
+ * UTF-8: measured, `pässwörd-é-€-日本` arrives as `p�ssw�rd-�-?-??` under code
+ * page 437. So each value goes out as Base64 of its UTF-8 bytes — ASCII, which
+ * survives any code page — one per line, and `decodeDialogFields` reverses it.
+ * It writes with `[Console]::Out` and never to the output stream: PowerShell
+ * transcription (a Group Policy option) records the output stream to disk, and
+ * `[Console]::Out` bypasses the host that transcription listens to.
  */
 const DIALOG_PREAMBLE = `
 $ErrorActionPreference = 'Stop'
@@ -44,6 +58,12 @@ public class AiuiWin {
   public static void Reveal(IntPtr h) { ShowWindow(h, 5); SetForegroundWindow(h); }
 }
 "@
+function Write-AiuiFields([string[]]$values) {
+  foreach ($v in $values) {
+    [Console]::Out.Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$v)) + [char]10)
+  }
+  [Console]::Out.Flush()
+}
 `;
 
 /**
@@ -212,11 +232,203 @@ $result = $form.ShowDialog()
 $timer.Stop()
 
 if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-  [Console]::Out.Write($box.Text)
+  Write-AiuiFields @($box.Text)
   exit 0
 }
 exit 1
 `;
+
+/**
+ * The sign-in prompt (stories/bitwarden-sign-in.md §3): email and master
+ * password, once per machine, for a `bw` that nobody has signed in to.
+ *
+ * The note about the browser extension is there because of how this story
+ * started: an agent told a user to sign in to the Chrome extension, which is a
+ * separate app with its own sign-in and fixes nothing here.
+ */
+const SIGN_IN_SCRIPT = `
+$timeout = [int]$env:AIUI_APPROVAL_TIMEOUT
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'Sign in to Bitwarden'
+$form.Size = New-Object System.Drawing.Size(460, 300)
+$form.StartPosition = 'CenterScreen'
+$form.TopMost = $true
+$form.FormBorderStyle = 'FixedDialog'
+$form.MaximizeBox = $false
+$form.MinimizeBox = $false
+
+$head = New-Object System.Windows.Forms.Label
+$head.Text = 'An agent needs your Bitwarden vault. Sign in once on this computer.'
+$head.Location = New-Object System.Drawing.Point(18, 18)
+$head.Size = New-Object System.Drawing.Size(410, 20)
+$form.Controls.Add($head)
+
+$emailLabel = New-Object System.Windows.Forms.Label
+$emailLabel.Text = 'Email'
+$emailLabel.Location = New-Object System.Drawing.Point(18, 48)
+$emailLabel.Size = New-Object System.Drawing.Size(410, 18)
+$form.Controls.Add($emailLabel)
+
+$email = New-Object System.Windows.Forms.TextBox
+$email.Location = New-Object System.Drawing.Point(18, 68)
+$email.Size = New-Object System.Drawing.Size(410, 26)
+$form.Controls.Add($email)
+
+$pwLabel = New-Object System.Windows.Forms.Label
+$pwLabel.Text = 'Master password'
+$pwLabel.Location = New-Object System.Drawing.Point(18, 102)
+$pwLabel.Size = New-Object System.Drawing.Size(410, 18)
+$form.Controls.Add($pwLabel)
+
+$pw = New-Object System.Windows.Forms.TextBox
+$pw.UseSystemPasswordChar = $true
+$pw.Location = New-Object System.Drawing.Point(18, 122)
+$pw.Size = New-Object System.Drawing.Size(410, 26)
+$form.Controls.Add($pw)
+
+$note = New-Object System.Windows.Forms.Label
+$note.Text = 'This signs in the Bitwarden command-line tool on this PC. Your browser extension is separate.'
+$note.ForeColor = [System.Drawing.Color]::FromArgb(90, 90, 90)
+$note.Location = New-Object System.Drawing.Point(18, 158)
+$note.Size = New-Object System.Drawing.Size(410, 34)
+$form.Controls.Add($note)
+
+$ok = New-Object System.Windows.Forms.Button
+$ok.Text = 'Sign in'
+$ok.Location = New-Object System.Drawing.Point(238, 204)
+$ok.Size = New-Object System.Drawing.Size(90, 30)
+$ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+$ok.Enabled = $false
+$form.Controls.Add($ok)
+
+$cancel = New-Object System.Windows.Forms.Button
+$cancel.Text = 'Cancel'
+$cancel.Location = New-Object System.Drawing.Point(338, 204)
+$cancel.Size = New-Object System.Drawing.Size(90, 30)
+$cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+$form.Controls.Add($cancel)
+
+# Enter submits only once both fields have something in them: a disabled
+# AcceptButton ignores Enter, and there is nothing useful to send half-filled.
+$update = { $ok.Enabled = ($email.Text.Length -gt 0) -and ($pw.Text.Length -gt 0) }
+$email.Add_TextChanged($update)
+$pw.Add_TextChanged($update)
+
+$form.AcceptButton = $ok
+$form.CancelButton = $cancel
+
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = $timeout
+$timer.Add_Tick({ $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $form.Close() })
+$timer.Start()
+
+$form.Add_Shown({ [AiuiWin]::Reveal($form.Handle); $email.Focus() })
+$result = $form.ShowDialog()
+$timer.Stop()
+
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+  Write-AiuiFields @($email.Text, $pw.Text)
+  exit 0
+}
+exit 1
+`;
+
+/**
+ * The verification-code prompt: shown only when `bw login` asks for one. The
+ * wording is chosen here from a KIND passed in the environment, not from any
+ * text `bw` printed — `bw`'s output never reaches a dialog.
+ */
+const CODE_SCRIPT = `
+$timeout = [int]$env:AIUI_APPROVAL_TIMEOUT
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'Bitwarden verification code'
+$form.Size = New-Object System.Drawing.Size(460, 200)
+$form.StartPosition = 'CenterScreen'
+$form.TopMost = $true
+$form.FormBorderStyle = 'FixedDialog'
+$form.MaximizeBox = $false
+$form.MinimizeBox = $false
+
+$head = New-Object System.Windows.Forms.Label
+if ($env:AIUI_CODE_KIND -eq 'new-device') {
+  $head.Text = 'Bitwarden emailed a verification code to your account''s email address because this is a new device. Enter it here.'
+} else {
+  $head.Text = 'Enter your two-step login code, from your authenticator app or the email Bitwarden just sent.'
+}
+$head.Location = New-Object System.Drawing.Point(18, 14)
+$head.Size = New-Object System.Drawing.Size(410, 36)
+$form.Controls.Add($head)
+
+$box = New-Object System.Windows.Forms.TextBox
+$box.Location = New-Object System.Drawing.Point(18, 58)
+$box.Size = New-Object System.Drawing.Size(410, 26)
+$form.Controls.Add($box)
+
+$ok = New-Object System.Windows.Forms.Button
+$ok.Text = 'Verify'
+$ok.Location = New-Object System.Drawing.Point(238, 100)
+$ok.Size = New-Object System.Drawing.Size(90, 30)
+$ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+$ok.Enabled = $false
+$form.Controls.Add($ok)
+
+$cancel = New-Object System.Windows.Forms.Button
+$cancel.Text = 'Cancel'
+$cancel.Location = New-Object System.Drawing.Point(338, 100)
+$cancel.Size = New-Object System.Drawing.Size(90, 30)
+$cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+$form.Controls.Add($cancel)
+
+$box.Add_TextChanged({ $ok.Enabled = ($box.Text.Trim().Length -gt 0) })
+$form.AcceptButton = $ok
+$form.CancelButton = $cancel
+
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = $timeout
+$timer.Add_Tick({ $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $form.Close() })
+$timer.Start()
+
+$form.Add_Shown({ [AiuiWin]::Reveal($form.Handle); $box.Focus() })
+$result = $form.ShowDialog()
+$timer.Stop()
+
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+  Write-AiuiFields @($box.Text)
+  exit 0
+}
+exit 1
+`;
+
+/**
+ * The dialog scripts, for tests: test 40 pins that every dialog returning
+ * typed values does so through `Write-AiuiFields`, and test 39 runs the helper
+ * alone under a default code page.
+ */
+export const DIALOG_SCRIPTS = {
+  preamble: DIALOG_PREAMBLE,
+  unlock: UNLOCK_SCRIPT,
+  signIn: SIGN_IN_SCRIPT,
+  code: CODE_SCRIPT,
+} as const;
+
+/**
+ * Reverse `Write-AiuiFields`: one Base64 line per value, each ending in a
+ * newline. Anything else — a missing terminator, a line that is not Base64 —
+ * voids the whole answer, because a half-read password is worse than none.
+ */
+export function decodeDialogFields(stdout: string): string[] | null {
+  const lines = stdout.split('\n');
+  if (lines.pop() !== '') return null; // every field is newline-terminated
+  const fields: string[] = [];
+  for (const raw of lines) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    if (line.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(line)) return null;
+    fields.push(Buffer.from(line, 'base64').toString('utf8'));
+  }
+  return fields;
+}
 
 /** Base64/UTF-16LE, which is what `-EncodedCommand` wants. Sidesteps every
  *  quoting question about passing a multi-line script through a command line. */
@@ -311,7 +523,47 @@ export class WindowsDialogApproval implements ApprovalProvider {
       UNLOCK_TIMEOUT_MS,
     );
     if (result.code !== 0) return null;
-    return result.stdout === '' ? null : result.stdout;
+    const fields = decodeDialogFields(result.stdout);
+    if (!fields || fields.length !== 1 || fields[0] === '') return null;
+    return fields[0]!;
+  }
+
+  /**
+   * Ask for the email and master password that sign `bw` in
+   * (stories/bitwarden-sign-in.md §3). Null when cancelled or timed out. Same
+   * rule as `askMasterPassword`: the caller hands these to the login driver
+   * and keeps no copy.
+   */
+  async askSignIn(): Promise<{ email: string; password: string } | null> {
+    const result = await runDialog(
+      SIGN_IN_SCRIPT,
+      { ...process.env, AIUI_APPROVAL_TIMEOUT: String(SIGN_IN_TIMEOUT_MS) },
+      SIGN_IN_TIMEOUT_MS,
+    );
+    if (result.code !== 0) return null;
+    const fields = decodeDialogFields(result.stdout);
+    if (!fields || fields.length !== 2) return null;
+    const email = fields[0]!.trim();
+    const password = fields[1]!;
+    if (email === '' || password === '') return null;
+    return { email, password };
+  }
+
+  /**
+   * Ask for the verification code `bw login` is waiting on. Spaces are
+   * removed — a code copied from an authenticator app often carries one.
+   */
+  async askLoginCode(kind: 'two-step' | 'new-device'): Promise<string | null> {
+    const result = await runDialog(
+      CODE_SCRIPT,
+      { ...process.env, AIUI_APPROVAL_TIMEOUT: String(CODE_TIMEOUT_MS), AIUI_CODE_KIND: kind },
+      CODE_TIMEOUT_MS,
+    );
+    if (result.code !== 0) return null;
+    const fields = decodeDialogFields(result.stdout);
+    if (!fields || fields.length !== 1) return null;
+    const code = fields[0]!.replace(/\s+/g, '');
+    return code === '' ? null : code;
   }
 }
 

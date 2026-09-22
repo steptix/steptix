@@ -31,8 +31,11 @@ import { hostOf, itemsCoveringHost, pageIsFillable } from './domain-match.js';
 import type {
   ApprovalProvider,
   LoginResult,
+  SignInFailure,
+  SignInResult,
   VaultItem,
   VaultProvider,
+  VaultStatus,
 } from './types.js';
 import { VaultError } from './types.js';
 
@@ -69,9 +72,60 @@ export interface BrokerDeps {
   unlockVault?: (() => Promise<boolean>) | undefined;
   /** True when a session key is held. Consulted before every vault call. */
   vaultUnlocked?: (() => boolean) | undefined;
+  /**
+   * `bw status`, for telling a signed-out CLI from a locked one
+   * (stories/bitwarden-sign-in.md §2). May throw. Absent = assume locked,
+   * which is how the broker behaved before sign-in existed.
+   */
+  vaultStatus?: (() => Promise<VaultStatus>) | undefined;
+  /** Raise the sign-in dialog and drive `bw login`. Never throws. Absent = no sign-in. */
+  signIn?: (() => Promise<SignInResult>) | undefined;
   /** Injected so grant expiry is testable without waiting two minutes. */
   now?: (() => number) | undefined;
 }
+
+/**
+ * What the agent is told when the vault could not be opened
+ * (stories/bitwarden-sign-in.md §5). Fixed text, chosen from a category — never
+ * from anything `bw` printed, which carries the email and any code in clear.
+ * Each one tells the agent what to do next, and none lets it ask for a password.
+ */
+const OPEN_VAULT_WORDS: Record<SignInFailure | 'status-failed' | 'not-logged-in', string> = {
+  cancelled:
+    'The user was asked to sign in to Bitwarden and did not. Do not ask them for any password. ' +
+    'Ask whether they want to try again.',
+  rejected:
+    'Bitwarden rejected the sign-in: the email or master password was wrong, or the account is on a ' +
+    'different Bitwarden server (for example the EU cloud). Ask the user to try again — never ask them ' +
+    'to type a password to you.',
+  'code-rejected': 'Bitwarden rejected the verification code. Ask the user to try again with a fresh code.',
+  'unsupported-step':
+    'This Bitwarden account needs a sign-in step the dialog cannot handle (several two-step methods, ' +
+    'single sign-on, Key Connector, or a self-hosted server). Ask the user to run `bw login` once in a ' +
+    'terminal, then try again.',
+  'timed-out': 'Signing in to Bitwarden did not complete. Ask the user to run `bw login` once in a terminal, then try again.',
+  failed: 'Signing in to Bitwarden did not complete. Ask the user to run `bw login` once in a terminal, then try again.',
+  'no-dialog':
+    'The Bitwarden command-line tool (not the browser extension) is signed out, and this machine cannot ' +
+    'show a sign-in prompt. Ask the user to run `bw login` in a terminal, then try again.',
+  'status-failed':
+    'The Bitwarden command-line tool did not answer, so the vault could not be opened. Ask the user to ' +
+    'check that `bw status` works in a terminal.',
+  // This replaces "Bitwarden is installed but no account is signed in.", which
+  // named neither the command-line tool nor a remedy — and an agent filled the
+  // gap by sending the user to the browser extension, which changes nothing.
+  'not-logged-in':
+    'The Bitwarden command-line tool (not the browser extension) is signed out. Ask the user to run ' +
+    '`bw login` in a terminal, then try again.',
+};
+
+/** `bw` is not installed at all. Unchanged by the sign-in story. */
+const CLI_MISSING_WORDS =
+  'The Bitwarden CLI is not installed on this machine, so there is no vault to read. ' +
+  'Tell the user to install it and sign in.';
+
+/** Why the vault is not open, as the agent will be told it. Null = open. */
+type OpenVaultResult = { outcome: 'vault-locked' | 'vault-unavailable'; detail: string } | null;
 
 function result(
   outcome: LoginResult['outcome'],
@@ -85,9 +139,77 @@ function result(
 export class LoginBroker {
   private readonly deps: BrokerDeps;
   private readonly grants = new Map<string, Grant>();
+  /** The one vault-opening attempt in progress, if any (story §6). */
+  private opening: Promise<OpenVaultResult> | null = null;
 
   constructor(deps: BrokerDeps) {
     this.deps = deps;
+  }
+
+  /**
+   * Open the vault — sign in or unlock, whichever `bw` needs — at most once at
+   * a time (stories/bitwarden-sign-in.md §6).
+   *
+   * Two `log_into_site` calls on a closed vault must not raise two dialogs:
+   * two live prompts for one decision is how a user ends up approving
+   * something they did not mean to. So a call that finds an attempt in
+   * progress JOINS it and takes its result — and the status check is inside
+   * the attempt, so a joiner never reads a status from before the first
+   * caller's sign-in and opens a second dialog on the strength of it.
+   *
+   * The attempt is RELEASED when it settles, resolved or rejected: a call that
+   * arrives afterwards starts a fresh one. Without that, one cancelled sign-in
+   * would read as "did not sign in" for the life of the server.
+   */
+  private openVault(): Promise<OpenVaultResult> {
+    if (!this.opening) {
+      const attempt = this.openVaultOnce()
+        // `signIn` and `unlockVault` never throw by contract. One that does
+        // anyway is reported as a sign-in that did not complete — to every
+        // caller that joined — rather than as a 500.
+        .catch((): OpenVaultResult => ({ outcome: 'vault-unavailable', detail: OPEN_VAULT_WORDS.failed }))
+        .finally(() => {
+          if (this.opening === attempt) this.opening = null;
+        });
+      this.opening = attempt;
+    }
+    return this.opening;
+  }
+
+  private async openVaultOnce(): Promise<OpenVaultResult> {
+    // A flight that finished between this caller's check and now has already
+    // done the work.
+    if (this.deps.vaultUnlocked?.() ?? true) return null;
+
+    let status: VaultStatus = 'locked';
+    if (this.deps.vaultStatus) {
+      try {
+        status = await this.deps.vaultStatus();
+      } catch {
+        // A `bw` that cannot answer `status` would not answer a login either,
+        // and asking for a master password it cannot use is worse than saying so.
+        return { outcome: 'vault-unavailable', detail: OPEN_VAULT_WORDS['status-failed'] };
+      }
+    }
+
+    if (status === 'cli-missing') {
+      return { outcome: 'vault-unavailable', detail: CLI_MISSING_WORDS };
+    }
+    if (status === 'unauthenticated') {
+      if (!this.deps.signIn) return { outcome: 'vault-unavailable', detail: OPEN_VAULT_WORDS['not-logged-in'] };
+      const signedIn = await this.deps.signIn();
+      return signedIn.ok ? null : { outcome: 'vault-unavailable', detail: OPEN_VAULT_WORDS[signedIn.reason] };
+    }
+
+    // `locked` — and `unlocked` with no key held, which this process cannot
+    // use: `bw` reports unlocked only to a child handed a live key (story §2.2).
+    if (!this.deps.unlockVault) {
+      return { outcome: 'vault-locked', detail: 'The vault is locked and no unlock prompt is configured.' };
+    }
+    const opened = await this.deps.unlockVault();
+    return opened
+      ? null
+      : { outcome: 'vault-locked', detail: 'The vault is locked. Ask the user to unlock Bitwarden, then try again.' };
   }
 
   private now(): number {
@@ -148,16 +270,13 @@ export class LoginBroker {
       return result('stuck', '', 'The page has no host to match a credential against.');
     }
 
-    // ---- Gate 3: the vault. Locked vaults prompt; absent vaults say so.
+    // ---- Gate 3: the vault. A closed vault is opened — signed in or unlocked,
+    // whichever `bw` needs — and one that cannot be opened says why. A held key
+    // skips this entirely: no `bw` spawn on the path of an open vault.
     const unlocked = this.deps.vaultUnlocked?.() ?? true;
     if (!unlocked) {
-      if (!this.deps.unlockVault) {
-        return result('vault-locked', host, 'The vault is locked and no unlock prompt is configured.');
-      }
-      const opened = await this.deps.unlockVault();
-      if (!opened) {
-        return result('vault-locked', host, 'The vault is locked. Ask the user to unlock Bitwarden, then try again.');
-      }
+      const refused = await this.openVault();
+      if (refused) return result(refused.outcome, host, refused.detail);
     }
 
     // ---- Gate 4: match by the URL the BROWSER reported. Never the model's.
@@ -165,7 +284,21 @@ export class LoginBroker {
     try {
       candidates = await this.deps.vault.itemsForUrl(scan.url);
     } catch (err) {
-      return this.vaultFailure(err, host);
+      // A key was held, but `bw` has been signed out underneath it (story
+      // §2.3) — the vault has already dropped the dead key. Sign in, and look
+      // again ONCE: a second "not logged in" straight after a successful
+      // sign-in is a vault we do not understand, and looping on it would raise
+      // dialog after dialog.
+      if (!(err instanceof VaultError && err.kind === 'not-logged-in' && this.deps.signIn)) {
+        return this.vaultFailure(err, host);
+      }
+      const refused = await this.openVault();
+      if (refused) return result(refused.outcome, host, refused.detail);
+      try {
+        candidates = await this.deps.vault.itemsForUrl(scan.url);
+      } catch (again) {
+        return this.vaultFailure(again, host);
+      }
     }
     // Re-checked here rather than trusted from the vault's own matching, for
     // the reason `itemsCoveringHost` documents: per-item match modes make the
@@ -245,14 +378,9 @@ export class LoginBroker {
     if (err instanceof VaultError) {
       switch (err.kind) {
         case 'cli-missing':
-          return result(
-            'vault-unavailable',
-            host,
-            'The Bitwarden CLI is not installed on this machine, so there is no vault to read. ' +
-              'Tell the user to install it and sign in.',
-          );
+          return result('vault-unavailable', host, CLI_MISSING_WORDS);
         case 'not-logged-in':
-          return result('vault-unavailable', host, 'Bitwarden is installed but no account is signed in.');
+          return result('vault-unavailable', host, OPEN_VAULT_WORDS['not-logged-in']);
         case 'locked':
           return result('vault-locked', host, 'The vault locked again before the lookup ran.');
         default:
