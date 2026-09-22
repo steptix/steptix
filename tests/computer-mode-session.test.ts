@@ -14,7 +14,7 @@
  * second and imports half of the first.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../src/config/types.js';
@@ -512,5 +512,201 @@ describe('closeSession resets the surface and releases the lock (acceptance 6)',
     await other.closeSession('s-other');
 
     expect(readComputerLock({ lockPath })!.sessionId).toBe('s-owner');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The PROJECT decides, not the server (§5.1 item 1, §5.10)
+//
+// Measured defect: a server started from a checkout whose `aiui.config.json`
+// has no `desktop` key refused `[use computer]` for a test file whose project
+// config said `"desktop": {"enabled": true}` — the server read its own startup
+// config, because `resolveRunSettings` rebuilds `runConfig` by spreading it.
+// These tests drive the real `resolveProjectBundle` against a project written
+// to disk, which is the only way to prove the value travelled.
+// ---------------------------------------------------------------------------
+
+let projectDir: string;
+
+/**
+ * A project on disk: `aiui.config.json` with the given sections, and a test
+ * file under it for `testFilePath` to point at. The file's content is never
+ * read for the steps (those come from the request), but it exists so the
+ * code-behind lookup sees a real path.
+ */
+function writeProject(config: Record<string, unknown>): string {
+  const root = mkdtempSync(path.join(projectDir, 'proj-'));
+  writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify(config));
+  mkdirSync(path.join(root, 'tests'), { recursive: true });
+  const testFile = path.join(root, 'tests', 'print.md');
+  writeFileSync(testFile, '# Print\n\n1. [use computer]\n');
+  return testFile;
+}
+
+/** The `computer` context the step loop was handed — §5.10's three values. */
+function computerContextOf(call = 0): any {
+  return (executeComputerStepMock.mock.calls[call] as unknown as any[])[3].computer;
+}
+
+/** The browser config `launchBrowser` was called with. */
+function launchConfig(call = 0): any {
+  return (launchBrowserMock.mock.calls[call] as unknown[])[0];
+}
+
+beforeEach(() => {
+  projectDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-project-'));
+});
+
+afterEach(() => {
+  rmSync(projectDir, { recursive: true, force: true });
+});
+
+describe('desktop.enabled comes from the test file project, not the server', () => {
+  it('a project that opted in is allowed by a server that did not', async () => {
+    // The server's own config is the shipped default: desktop off.
+    const manager = makeManager(configWith({ enabled: false }));
+    const testFilePath = writeProject({ desktop: { enabled: true } });
+
+    const response = await manager.executeSteps('s-project-on', {
+      steps: ['[use computer]', 'Click Print in the dialog'],
+      testFilePath,
+    });
+
+    expect(response.results[0]!.reasoning).not.toBe(COMPUTER_DISABLED_MESSAGE);
+    expect(response.status).toBe('passed');
+    expect(managed(manager, 's-project-on').surface).toBe('computer');
+    // Past precondition 1: the adapter loaded and the lock was taken.
+    expect(loadDesktopAdapter).toHaveBeenCalledTimes(1);
+    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-project-on');
+  });
+
+  it('a project that did NOT opt in is refused by a server that did', async () => {
+    const manager = makeManager(configWith({ enabled: true }));
+    const testFilePath = writeProject({ desktop: { enabled: false } });
+
+    const response = await manager.executeSteps('s-project-off', {
+      steps: ['[use computer]', 'Click Print'],
+      testFilePath,
+    });
+
+    expect(response.status).toBe('failed');
+    expect(response.results[0]!.reasoning).toBe(COMPUTER_DISABLED_MESSAGE);
+    expect(managed(manager, 's-project-off').surface).toBe('browser');
+    expect(loadDesktopAdapter).not.toHaveBeenCalled();
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('with no testFilePath the server own answer still decides', async () => {
+    const manager = makeManager(configWith({ enabled: false }));
+
+    const response = await manager.executeSteps('s-no-file', { steps: ['[use computer]'] });
+
+    expect(response.status).toBe('failed');
+    expect(response.results[0]!.reasoning).toBe(COMPUTER_DISABLED_MESSAGE);
+  });
+});
+
+describe('the §5.10 values reach the step loop from the project', () => {
+  it('settleMs, maxImageWidth and reportScreenshots are the project values', async () => {
+    // Every one of these differs from `baseConfig.desktop` above, so a value
+    // that came off the server's config fails the assertion.
+    const manager = makeManager();
+    const testFilePath = writeProject({
+      desktop: { enabled: true, settleMs: 42, maxImageWidth: 640, reportScreenshots: false },
+    });
+
+    await manager.executeSteps('s-ctx', {
+      steps: ['[use computer]', 'Click Print in the dialog'],
+      testFilePath,
+    });
+
+    expect(computerContextOf()).toMatchObject({
+      settleMs: 42,
+      maxImageWidth: 640,
+      reportScreenshots: false,
+    });
+  });
+
+  it('falls back to the project config defaults for keys it left out', async () => {
+    const manager = makeManager();
+    const testFilePath = writeProject({ desktop: { enabled: true } });
+
+    await manager.executeSteps('s-ctx-default', {
+      steps: ['[use computer]', 'Click Print'],
+      testFilePath,
+    });
+
+    // The loaded project config's defaults (config/defaults.ts), not the
+    // server's 400/0 above.
+    expect(computerContextOf()).toMatchObject({
+      settleMs: 300,
+      maxImageWidth: 1600,
+      reportScreenshots: true,
+    });
+  });
+
+  it('with no testFilePath they are the server values, as before', async () => {
+    const manager = makeManager();
+
+    await manager.executeSteps('s-ctx-server', { steps: ['[use computer]', 'Click'] });
+
+    expect(computerContextOf()).toMatchObject({
+      settleMs: 0,
+      maxImageWidth: 400,
+      reportScreenshots: true,
+    });
+  });
+});
+
+describe('browser.launchArgs reaches the launch from the project (§5.10)', () => {
+  it('the project args are passed to launchBrowser at step 1', async () => {
+    const manager = makeManager();
+    const testFilePath = writeProject({
+      browser: { launchArgs: ['--disable-print-preview'] },
+    });
+
+    await manager.executeSteps('s-args', { steps: ['Click Print'], testFilePath });
+
+    expect(launchBrowserMock).toHaveBeenCalledTimes(1);
+    expect(launchConfig().launchArgs).toEqual(['--disable-print-preview']);
+  });
+
+  it('a project that names none keeps the server ones', async () => {
+    const manager = makeManager({
+      ...baseConfig,
+      browser: { ...baseConfig.browser, launchArgs: ['--server-only'] },
+    } as Config);
+    const testFilePath = writeProject({ desktop: { enabled: true } });
+
+    await manager.executeSteps('s-args-server', { steps: ['Click Print'], testFilePath });
+
+    expect(launchConfig().launchArgs).toEqual(['--server-only']);
+  });
+
+  it('with no testFilePath the server ones are used, as before', async () => {
+    const manager = makeManager({
+      ...baseConfig,
+      browser: { ...baseConfig.browser, launchArgs: ['--server-only'] },
+    } as Config);
+
+    await manager.executeSteps('s-args-nofile', { steps: ['Click Print'] });
+
+    expect(launchConfig().launchArgs).toEqual(['--server-only']);
+  });
+
+  it('the launch still happens only at the first browser-surface step', async () => {
+    const manager = makeManager();
+    const testFilePath = writeProject({
+      desktop: { enabled: true },
+      browser: { launchArgs: ['--disable-print-preview'] },
+    });
+
+    await manager.executeSteps('s-args-late', {
+      steps: ['[use computer]', 'Click Print in the dialog', '[use browser]', 'Click the heading'],
+      testFilePath,
+    });
+
+    expect(launchBrowserMock).toHaveBeenCalledTimes(1);
+    expect(launchConfig().launchArgs).toEqual(['--disable-print-preview']);
   });
 });

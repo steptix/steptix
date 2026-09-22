@@ -1248,7 +1248,9 @@ export async function runTest(
         if (useStep.surface === 'computer') {
           const entered = await enterComputerMode({
             lockId: computerLockId,
-            config,
+            // The CLI's `config` IS the project's — it was loaded from the
+            // test file's own root — so the section comes straight off it.
+            desktop: config.desktop,
             state: surfaceState,
             loadDesktopAdapter: extras.loadDesktopAdapter ?? defaultLoadDesktopAdapter,
             probeCapture: extras.probeComputerCapture ?? defaultProbeComputerCapture,
@@ -1399,7 +1401,7 @@ export async function runTest(
             ...(extras.signal && { signal: extras.signal }),
             // §5.6 — judged from a capture of the screen, with no DOM.
             ...(surfaceState.surface === 'computer' && surfaceState.adapter
-              ? { computer: computerContextFor(config, surfaceState.adapter) }
+              ? { computer: computerContextFor(config.desktop, surfaceState.adapter) }
               : {}),
           },
           });
@@ -2081,7 +2083,7 @@ export async function runTest(
             ...(flowControlClaim && { flowControlClaim }),
             ...(failureTail && { failureTail }),
             ...(extras.signal && { signal: extras.signal }),
-            computer: computerContextFor(config, surfaceState.adapter),
+            computer: computerContextFor(config.desktop, surfaceState.adapter),
           },
           rawInstruction,
         );

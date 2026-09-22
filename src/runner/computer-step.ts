@@ -74,7 +74,7 @@ import {
   type DesktopAdapter,
   type ImageView,
 } from '../desktop/index.js';
-import type { Config } from '../config/types.js';
+import type { DesktopConfig } from '../config/types.js';
 
 /** Options for a computer-mode step: a step's ordinary options, with the
  *  surface's own context guaranteed present. */
@@ -128,7 +128,20 @@ export interface EnterComputerModeInput {
   /** Who holds the lock (§5.9). The session id on the server; the run's own
    *  identity on the CLI — see `computerLockIdFor`. */
   lockId: string;
-  config: Config;
+  /**
+   * THIS project's `desktop` section — the one loaded from the test file's
+   * `aiui.config.json`, not the server's startup config.
+   *
+   * The section alone rather than the whole `Config`, and that narrowing is
+   * the fix for a measured defect: on the server path the `Config` an
+   * executor is handed is rebuilt by `resolveRunSettings`
+   * (src/config/run-settings.ts) by spreading the SERVER's startup config, so
+   * `config.desktop` there was always the server's answer. A project that had
+   * opted in was refused because the server had not. Taking `desktop` on its
+   * own makes every caller name which project's it is. `undefined` reads as
+   * "off", exactly like a missing section (§5.1 item 1).
+   */
+  desktop: DesktopConfig | undefined;
   state: SurfaceState;
   /** §5.1 item 2 — the lazy nut.js load, injectable so tests never import it
    *  and a machine with no prebuilt binary still runs every browser test. */
@@ -163,7 +176,7 @@ export async function enterComputerMode(
 
   // 1. Project opt-in. A test file in a shared project must not be able to
   //    move the mouse on a machine whose owner did not allow it.
-  if (!input.config.desktop?.enabled) {
+  if (!input.desktop?.enabled) {
     return { ok: false, error: COMPUTER_DISABLED_MESSAGE };
   }
 
@@ -253,16 +266,22 @@ export function modeMarkerText(surface: 'browser' | 'computer'): string {
   return `→ ${surface}`;
 }
 
-/** §5.10 read into the shape a step's options take. */
+/**
+ * §5.10 read into the shape a step's options take.
+ *
+ * Takes the `desktop` SECTION, not a whole `Config`, for the reason
+ * {@link EnterComputerModeInput.desktop} gives: the server path's `Config` is
+ * the server's, and these three values are per project.
+ */
 export function computerContextFor(
-  config: Config,
+  desktop: DesktopConfig | undefined,
   adapter: DesktopAdapter,
 ): ComputerStepContext {
   return {
     adapter,
-    settleMs: config.desktop?.settleMs ?? 300,
-    maxImageWidth: config.desktop?.maxImageWidth ?? DEFAULT_MAX_IMAGE_WIDTH,
-    reportScreenshots: config.desktop?.reportScreenshots !== false,
+    settleMs: desktop?.settleMs ?? 300,
+    maxImageWidth: desktop?.maxImageWidth ?? DEFAULT_MAX_IMAGE_WIDTH,
+    reportScreenshots: desktop?.reportScreenshots !== false,
   };
 }
 

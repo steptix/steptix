@@ -1333,6 +1333,21 @@ interface ManagedSession {
    * SERVER's cleaner settings to every project but its own.
    */
   browserConfig: Config['browser'];
+  /**
+   * THIS project's `desktop` section, retained for the same reason
+   * `browserConfig` is and fixing a measured defect: `[use computer]` and the
+   * computer step's §5.10 values used to be read off `runConfig`, which
+   * `resolveRunSettings` rebuilds from the SERVER's startup config — so a
+   * project whose `aiui.config.json` said `desktop.enabled: true` was refused
+   * by a server whose own config said nothing.
+   *
+   * Seeded from the server's startup config (which carries the `enabled:
+   * false` default) so a session that never runs a batch — and a request with
+   * no `testFilePath`, whose bundle IS the server's config — behaves exactly
+   * as it did before. Overwritten with the project's values on the first
+   * batch, beside `browserConfig`.
+   */
+  desktopConfig: Config['desktop'];
   /** `cdp` is retained, not just consumed at launch: without it `list_sessions`
    *  cannot say which session is driving a persistent signed-in browser, and
    *  the answer is unrecoverable afterwards. It was always assigned here — the
@@ -2689,9 +2704,19 @@ export class SessionManager {
     // computer mode is step 1. A test that opens with `[use computer]` never
     // triggers it and never starts a browser at all.
     //
-    // `session` is assigned by the step boundary, not from here — this closure
-    // exists before the ManagedSession does, so it captures nothing of it.
+    // `session.browserSession` is assigned by the step boundary, not from
+    // here. What the closure DOES hold of the session is `created` below, and
+    // only to read a value that does not exist yet when this runs.
+    //
+    // `browser.launchArgs` is per PROJECT (§5.10: `--disable-print-preview` is
+    // how a test reaches the OS print dialog), and the project's config is not
+    // known at creation — the steps handler resolves the bundle and writes
+    // `session.browserConfig` before the first step, which is before this
+    // closure runs. So it is read LATE, off the session, rather than frozen
+    // from `this.config.browser` with everything else.
+    let created: ManagedSession | undefined;
     const launcher = async (): Promise<BrowserSession> => {
+      const launchArgs = created?.browserConfig?.launchArgs ?? this.config.browser.launchArgs;
       // Override only `video` with the per-project record mode; the rest of the
       // browser config stays server-global. videoDir is co-located with where
       // reports are written (the project-anchored reportOutputDir) so the
@@ -2701,7 +2726,14 @@ export class SessionManager {
         // server (or project, §8) that pinned its own keeps it on the sessions
         // that said nothing — which is the §1 precedence, test over project,
         // expressed as an absence rather than an override.
-        { ...this.config.browser, video: videoMode, ...(fixedViewport ? { fixedViewport } : {}) },
+        {
+          ...this.config.browser,
+          video: videoMode,
+          // Present only when someone configured it, so the server's own stays
+          // in force for a project that said nothing.
+          ...(launchArgs !== undefined && { launchArgs }),
+          ...(fixedViewport ? { fixedViewport } : {}),
+        },
         sessionConfig?.cdp,
         {
           videoDir,
@@ -2773,6 +2805,7 @@ export class SessionManager {
         status: 'active',
         // Startup defaults until the first batch resolves the project's own.
         browserConfig: this.config.browser,
+        desktopConfig: this.config.desktop,
         sessionConfig: sessionConfig ?? {},
         configSet: sessionConfig !== undefined,
         // Empty, not seeded from the server config: an override means "the
@@ -2795,6 +2828,11 @@ export class SessionManager {
         pauseAtNextCodeBehind: false,
         deadSectionsReported: new Set<string>(),
       };
+
+      // What the deferred launcher reads `launchArgs` off when it eventually
+      // runs. Assigned here rather than captured above because the closure is
+      // built before this object exists.
+      created = session;
 
       this.sessions.set(this.sessionKey(sessionId), session);
       return session;
@@ -3183,7 +3221,14 @@ export class SessionManager {
     const projectConfig = projectBundle.config;
     // Retain the project's browser settings for out-of-band reads
     // (`getPageContent`), which have no test file to re-resolve a bundle from.
+    // It is also what the deferred launcher reads `browser.launchArgs` off at
+    // launch time — the launch happens at the first browser-surface step,
+    // which is after this line.
     session.browserConfig = projectConfig.browser;
+    // The computer surface's per-project section (§5.10), for the same reason
+    // and read by `[use computer]` and by `computerContextFor` below. NOT off
+    // `runConfig`: that is the server's config with four values re-sourced.
+    session.desktopConfig = projectConfig.desktop ?? this.config.desktop;
 
     // This batch's run settings: server base → project bundle → the session's
     // retained overrides (stories/run-settings.md §2).
@@ -4940,7 +4985,9 @@ export class SessionManager {
           if (useStep.surface === 'computer') {
             const entered = await enterComputerMode({
               lockId: session.id,
-              config: runConfig,
+              // The PROJECT's section, stored above from the bundle this batch
+              // resolved — `runConfig.desktop` would be the server's.
+              desktop: session.desktopConfig,
               state: surfaceStateOf(session),
               loadDesktopAdapter: this.loadDesktopAdapter,
               probeCapture: this.probeComputerCapture,
@@ -5670,7 +5717,7 @@ export class SessionManager {
                 ...(signal && { signal }),
                 // §5.6 — judged from a capture of the screen, with no DOM.
                 ...(session.surface === 'computer' && session.computerAdapter
-                  ? { computer: computerContextFor(runConfig, session.computerAdapter) }
+                  ? { computer: computerContextFor(session.desktopConfig, session.computerAdapter) }
                   : {}),
               },
             });
@@ -6135,7 +6182,7 @@ export class SessionManager {
                 ...(flowControlClaim && { flowControlClaim }),
                 ...(failureTail && { failureTail }),
                 ...(signal && { signal }),
-                computer: computerContextFor(runConfig, session.computerAdapter),
+                computer: computerContextFor(session.desktopConfig, session.computerAdapter),
               },
               originalStep,
             );
