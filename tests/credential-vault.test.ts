@@ -315,3 +315,115 @@ describe('bwLaunch', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Which calls may prompt: BW_NOINTERACTION
+// ---------------------------------------------------------------------------
+//
+// `bw` reads `BW_NOINTERACTION` (every check is `!== "true"`); the vault used to
+// set `BITWARDENCLI_NOINTERACTION`, which `bw` never reads, so the guard was a
+// no-op — and unlock only worked because it was, since unlock hands the master
+// password to bw's interactive prompt. These pin the split: every call that
+// must not prompt says so, unlock is the one call that must be able to.
+
+describe('BW_NOINTERACTION: which calls may prompt', () => {
+  interface Call {
+    args: string[];
+    env: NodeJS.ProcessEnv;
+    input: string | undefined;
+  }
+
+  /** A fake bw that answers every call the vault makes, and records each one. */
+  function recordingBw() {
+    const calls: Call[] = [];
+    const runner: BwRunner = async (_binary, args, env, input) => {
+      calls.push({ args, env, input });
+      switch (args[0]) {
+        case 'status':
+          return { code: 0, stdout: '{"status":"unlocked"}', stderr: '' };
+        case 'unlock':
+          return { code: 0, stdout: 'fresh-session-key\n', stderr: '' };
+        case 'list':
+          return { code: 0, stdout: JSON.stringify([bwItem('SecureBank', 'https://www.example.com')]), stderr: '' };
+        case 'get':
+          return args[1] === 'totp'
+            ? { code: 0, stdout: '123456', stderr: '' }
+            : { code: 0, stdout: JSON.stringify({ login: { username: 'u', password: 'p' } }), stderr: '' };
+        default:
+          return { code: 0, stdout: '', stderr: '' };
+      }
+    };
+    return { calls, runner };
+  }
+
+  /** Every key that is some casing of BW_NOINTERACTION. */
+  function noInteractionKeys(env: NodeJS.ProcessEnv): string[] {
+    return Object.keys(env).filter((k) => k.toUpperCase() === 'BW_NOINTERACTION');
+  }
+
+  it('sets BW_NOINTERACTION=true — in exactly one casing — on every call that must not prompt', async () => {
+    const bw = recordingBw();
+    // The user's own environment carries it in another casing, set to "false":
+    // neither may survive, or bw could still stop at a prompt nobody answers.
+    const vault = new BitwardenVault({
+      runner: bw.runner,
+      session: 'key-A',
+      environment: { KEEP_ME: 'yes', Bw_NoInteraction: 'false' },
+    });
+
+    await vault.status();
+    await vault.itemsForUrl('https://www.example.com/login'); // sync + list
+    await vault.secretFor('id-SecureBank');
+    await vault.totpFor('id-SecureBank');
+
+    expect(bw.calls.map((c) => c.args[0])).toEqual(['status', 'sync', 'list', 'get', 'get']);
+    for (const call of bw.calls) {
+      expect(noInteractionKeys(call.env), call.args.join(' ')).toEqual(['BW_NOINTERACTION']);
+      expect(call.env['BW_NOINTERACTION'], call.args.join(' ')).toBe('true');
+      expect(call.env['KEEP_ME']).toBe('yes');
+    }
+  });
+
+  it('REMOVES it for unlock, in any casing — even when the user set it themselves', async () => {
+    // With BW_NOINTERACTION=true, `bw unlock` never draws its "Master password:"
+    // prompt, so the password written to stdin is never read and bw refuses.
+    const bw = recordingBw();
+    const vault = new BitwardenVault({
+      runner: bw.runner,
+      environment: { KEEP_ME: 'yes', BW_NOINTERACTION: 'true', bw_nointeraction: 'true' },
+    });
+
+    await expect(vault.unlock('master-password')).resolves.toBe(true);
+
+    const unlock = bw.calls.find((c) => c.args[0] === 'unlock');
+    expect(unlock).toBeDefined(); // through the runner seam, like every other call
+    expect(noInteractionKeys(unlock!.env)).toEqual([]);
+    expect(unlock!.env['KEEP_ME']).toBe('yes');
+    expect(unlock!.input).toBe('master-password\n');
+    expect(unlock!.args).toEqual(['unlock', '--raw']);
+    expect(vault.unlocked).toBe(true);
+  });
+
+  it('never sets the misnamed BITWARDENCLI_NOINTERACTION, on any call', async () => {
+    const bw = recordingBw();
+    const vault = new BitwardenVault({ runner: bw.runner, environment: {} });
+    await vault.status();
+    await vault.unlock('master-password');
+    await vault.itemsForUrl('https://www.example.com/login');
+    for (const call of bw.calls) {
+      expect(Object.keys(call.env).some((k) => k.toUpperCase() === 'BITWARDENCLI_NOINTERACTION'), call.args[0]).toBe(
+        false,
+      );
+    }
+  });
+
+  it("classifies bw's answer to a lookup on a locked vault, once prompts are off, as locked", async () => {
+    // With BW_NOINTERACTION=true bw answers a locked lookup with exactly this
+    // (bw.js BaseProgram.handleLockedUser); with it unset it would instead run
+    // an inline unlock and draw a password prompt on a closed stdin.
+    const runner: BwRunner = async (_b, args) =>
+      args[0] === 'sync' ? { code: 0, stdout: '', stderr: '' } : { code: 1, stdout: '', stderr: 'Vault is locked.' };
+    const vault = new BitwardenVault({ runner, session: 'key-A', environment: {} });
+    await expect(vault.itemsForUrl('https://www.example.com/login')).rejects.toMatchObject({ kind: 'locked' });
+  });
+});

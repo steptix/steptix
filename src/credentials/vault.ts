@@ -30,6 +30,9 @@ const BW_TIMEOUT_MS = 30_000;
 const NOT_LOGGED_IN = /not logged in|you are not logged in/i;
 const LOCKED = /vault is locked|session key|BW_SESSION/i;
 
+/** The variable `bw` reads to decide whether it may prompt. See `childEnv`. */
+const NO_INTERACTION = 'BW_NOINTERACTION';
+
 interface BwResult {
   code: number | null;
   stdout: string;
@@ -344,12 +347,40 @@ export class BitwardenVault implements VaultProvider {
     this.session = opts.session ?? this.environment['BW_SESSION'] ?? undefined;
   }
 
-  /** The child environment, carrying the session key if we hold one. */
-  private childEnv(): NodeJS.ProcessEnv {
-    const env: NodeJS.ProcessEnv = { ...this.environment };
+  /**
+   * The child environment, carrying the session key if we hold one.
+   *
+   * `BW_NOINTERACTION` decides whether `bw` may stop at an interactive prompt
+   * (its every check is `process.env.BW_NOINTERACTION !== "true"`). It must be
+   * set for some calls and ABSENT for others:
+   *
+   * - `'no-prompts'` — status, sync, list, get. Set to `"true"`. With it unset,
+   *   a lookup against a locked vault does not fail: `bw` runs an inline
+   *   unlock and draws a "Master password:" prompt on a stdin nobody will
+   *   answer. With it set, the same lookup answers `Vault is locked.`, which
+   *   `LOCKED` classifies.
+   * - `'prompts'` — unlock. REMOVED, in any casing. `bw unlock` takes a
+   *   password from argv, a file, a named variable, or its interactive prompt,
+   *   and `unlock()` below uses the prompt so the password travels down stdin;
+   *   with `BW_NOINTERACTION=true` that prompt is never drawn and `bw` refuses
+   *   ("Master password is required. Try again in interactive mode…"). That
+   *   includes a `BW_NOINTERACTION=true` in the user's OWN environment, which
+   *   is why it is deleted rather than merely not added. (The login driver,
+   *   bw-login.ts, strips it from its own child environment for the same
+   *   reason.)
+   *
+   * This replaces `BITWARDENCLI_NOINTERACTION`, a name `bw` never reads — the
+   * guard it claimed to be was a no-op, and unlock worked only because it was.
+   */
+  private childEnv(mode: 'no-prompts' | 'prompts'): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {};
+    // In any casing: a copied `process.env` is a plain object, so on Windows
+    // `Bw_NoInteraction` would survive an exact-key delete and still be read.
+    for (const [name, value] of Object.entries(this.environment)) {
+      if (name.toUpperCase() !== NO_INTERACTION) env[name] = value;
+    }
     if (this.session) env['BW_SESSION'] = this.session;
-    // Never let `bw` stop for input it will not get: the server has no console.
-    env['BITWARDENCLI_NOINTERACTION'] = 'true';
+    if (mode === 'no-prompts') env[NO_INTERACTION] = 'true';
     return env;
   }
 
@@ -357,7 +388,7 @@ export class BitwardenVault implements VaultProvider {
   async status(): Promise<'unlocked' | 'locked' | 'unauthenticated' | 'cli-missing'> {
     let result: BwResult;
     try {
-      result = await this.run(this.binary, ['status', '--raw'], this.childEnv());
+      result = await this.run(this.binary, ['status', '--raw'], this.childEnv('no-prompts'));
     } catch (err) {
       if (err instanceof VaultError && err.kind === 'cli-missing') return 'cli-missing';
       throw err;
@@ -381,10 +412,12 @@ export class BitwardenVault implements VaultProvider {
    * it from the user directly and to drop its own copy immediately.
    */
   async unlock(masterPassword: string): Promise<boolean> {
-    const result = await runBw(
+    // Through `this.run`, like every other call, so the environment and input
+    // it receives are testable. Prompts allowed: see `childEnv`.
+    const result = await this.run(
       this.binary,
       ['unlock', '--raw'],
-      this.childEnv(),
+      this.childEnv('prompts'),
       `${masterPassword}\n`,
     );
     if (result.code !== 0) return false;
@@ -448,7 +481,7 @@ export class BitwardenVault implements VaultProvider {
   private async ensureSynced(force = false): Promise<void> {
     if (!force && this.lastSyncAt !== 0 && this.now() - this.lastSyncAt < SYNC_TTL_MS) return;
     try {
-      await this.run(this.binary, ['sync'], this.childEnv());
+      await this.run(this.binary, ['sync'], this.childEnv('no-prompts'));
     } catch {
       // Deliberately swallowed; see above.
     }
@@ -485,7 +518,7 @@ export class BitwardenVault implements VaultProvider {
   /** One `bw list items --url`, parsed. */
   private async listFor(origin: string): Promise<VaultItem[]> {
     const usedKey = this.session;
-    const result = await this.run(this.binary, ['list', 'items', '--url', origin], this.childEnv());
+    const result = await this.run(this.binary, ['list', 'items', '--url', origin], this.childEnv('no-prompts'));
     if (result.code !== 0) {
       throw this.failure(result, usedKey, result.stderr.trim() || 'The Bitwarden CLI refused the lookup.');
     }
@@ -509,7 +542,7 @@ export class BitwardenVault implements VaultProvider {
   async secretFor(itemId: string): Promise<VaultSecret> {
     if (!this.unlocked) throw new VaultError('locked', 'The vault is locked.');
     const usedKey = this.session;
-    const result = await this.run(this.binary, ['get', 'item', itemId], this.childEnv());
+    const result = await this.run(this.binary, ['get', 'item', itemId], this.childEnv('no-prompts'));
     if (result.code !== 0) {
       throw this.failure(result, usedKey, 'The Bitwarden CLI would not return that item.');
     }
@@ -526,7 +559,7 @@ export class BitwardenVault implements VaultProvider {
 
   async totpFor(itemId: string): Promise<string | null> {
     if (!this.unlocked) throw new VaultError('locked', 'The vault is locked.');
-    const result = await this.run(this.binary, ['get', 'totp', itemId], this.childEnv());
+    const result = await this.run(this.binary, ['get', 'totp', itemId], this.childEnv('no-prompts'));
     if (result.code !== 0) return null;
     const code = result.stdout.trim();
     return code === '' ? null : code;
