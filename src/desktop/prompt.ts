@@ -119,6 +119,30 @@ function actionTable(): string {
   }).join('\n');
 }
 
+/**
+ * The heading of the running record a step keeps of what it has already done.
+ *
+ * Named once because it is said twice — in the step message that carries the
+ * list, and in the system prompt's rule that tells the model to read it — and
+ * a model told to look for a heading that is spelled differently elsewhere
+ * looks for nothing.
+ */
+export const PERFORMED_HEADING = '## Actions already performed for this step';
+
+/**
+ * What the list is FOR, said to the model directly underneath it.
+ *
+ * The measured defect this exists for: a `focus_window` succeeded on turn 1
+ * against a window that was already frontmost, so turn 2 showed the same step
+ * and the same pixels with no record that anything had happened, the model
+ * answered with the same action, and the stall detector ended the step three
+ * turns later. The screen could not say the action had landed; this sentence
+ * and the list above it can.
+ */
+export const NO_REPEAT_SENTENCE =
+  'If the step is now satisfied, answer with `noop`. Do not repeat an action that already ' +
+  'succeeded unless the screen shows it did not take effect.';
+
 /** §5.3's note, quoted back in the model's own numbers. */
 export function zoomNote(region: ImageRegion): string {
   return (
@@ -190,7 +214,8 @@ Never type a password, passphrase, PIN, API key, card number or other credential
 4. \`type\` goes to whatever has keyboard focus. If you are not certain the right field has focus, click it first.
 5. Native windows redraw slowly. If the screenshot shows a dialog still opening or a control mid-repaint, answer with a short \`wait\` rather than clicking into it.
 6. Only answer \`assert\` when the step's intent is verification. A click's result will be visible in the next screenshot; you do not need to assert it succeeded.
-7. When the step is done, answer \`noop\`.`,
+7. When the step is done, answer \`noop\`.
+8. Every action you have already performed for this step is listed in the message under "${PERFORMED_HEADING}": do not repeat one that already succeeded unless the screen shows it did not take effect — if the step is now satisfied, answer \`noop\`.`,
     },
   ];
 
@@ -223,6 +248,17 @@ export interface ComputerStepMessageInput {
    * by before. The caller passes values already resolved and already masked.
    */
   variables?: Record<string, string>;
+  /**
+   * What this step has ALREADY done, one line per outcome, oldest first.
+   *
+   * Unlike {@link refusals} and {@link priorFailure} this is not consumed per
+   * turn: it accumulates for the whole step (and resets with the retry
+   * attempt), because the thing it answers — "have I done this already?" — is
+   * a question about the step, not about the last turn. The page loop tells
+   * the model the same thing through `buildContinuationMessage`'s list of
+   * executed actions; on this surface there was nothing.
+   */
+  performed?: string[];
   /** Previous steps, as the page message formats them. */
   conversationHistory?: string[];
   /** The `## Test Information` block the caller already builds. */
@@ -255,6 +291,13 @@ export function buildComputerStepMessage(input: ComputerStepMessageInput): ChatM
   if (names.length > 0) {
     sections.push(
       `## Values\n${names.map((name) => `- {{${name}}} = ${variables[name]}`).join('\n')}`,
+    );
+  }
+
+  if (input.performed && input.performed.length > 0) {
+    sections.push(
+      `${PERFORMED_HEADING}\n${input.performed.map((line) => `- ${line}`).join('\n')}\n\n` +
+        NO_REPEAT_SENTENCE,
     );
   }
 

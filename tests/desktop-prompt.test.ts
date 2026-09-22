@@ -83,6 +83,15 @@ describe('buildComputerSystemPrompt — §5.7', () => {
     expect(text).toMatch(/do not answer it with `fail`/);
   });
 
+  it('tells the model not to repeat an action that already succeeded', () => {
+    // The rule that answers the measured stall: the step message carries the
+    // record, and this is what makes the model read it.
+    const text = systemText();
+    expect(text).toContain('## Actions already performed for this step');
+    expect(text).toMatch(/do not repeat one that already succeeded/);
+    expect(text).toMatch(/unless the screen shows it did not take effect/);
+  });
+
   it('says never to type a credential', () => {
     const text = systemText();
     expect(text).toMatch(/Never type a password, passphrase, PIN, API key, card number/);
@@ -153,6 +162,36 @@ describe('buildComputerStepMessage — §5.7', () => {
         'coordinates you return now are in THIS image.',
     );
     expect(text).toContain('ZOOMED');
+  });
+
+  it('lists what the step has already done, and says not to repeat it', () => {
+    const text = contentBlocksToText(
+      buildComputerStepMessage({
+        ...base,
+        performed: [
+          'turn 1: focus_window "statement.pdf" → ok (window found and brought to the front)',
+          'turn 2: click image(812,544) → screen(1624,1088) ok',
+        ],
+      }).content,
+    );
+    expect(text).toContain('## Actions already performed for this step');
+    expect(text).toContain(
+      '- turn 1: focus_window "statement.pdf" → ok (window found and brought to the front)',
+    );
+    expect(text).toContain('- turn 2: click image(812,544) → screen(1624,1088) ok');
+    expect(text).toContain(
+      'If the step is now satisfied, answer with `noop`. Do not repeat an action that already ' +
+        'succeeded unless the screen shows it did not take effect.',
+    );
+  });
+
+  it('omits the section on the first turn, when nothing has been performed', () => {
+    expect(contentBlocksToText(buildComputerStepMessage(base).content)).not.toContain(
+      'Actions already performed',
+    );
+    expect(
+      contentBlocksToText(buildComputerStepMessage({ ...base, performed: [] }).content),
+    ).not.toContain('Actions already performed');
   });
 
   it('puts last turn\'s refusals in front of the model (§5.4)', () => {

@@ -413,6 +413,98 @@ function log(message: string): void {
 }
 
 /**
+ * One line of the `## Actions already performed for this step` list.
+ *
+ * Deliberately close to the `[computer]` log line each action already writes
+ * (src/desktop/executor.ts) — the same facts in the same order — so a reader
+ * comparing the run log with what the model was shown is comparing two
+ * spellings of one thing rather than two accounts of it. `type` prints its
+ * LENGTH and never its text, for the reason the executor gives: a
+ * computer-mode `type` into a password box looks exactly like one into a
+ * filename box.
+ */
+function performedLine(
+  turn: number,
+  action: ComputerAction,
+  outcome: { screenPoint?: { x: number; y: number } },
+  elapsedMs: number,
+): string {
+  const at = (p?: { x: number; y: number }): string => (p ? ` → screen(${p.x},${p.y})` : '');
+  const head = `turn ${turn}: `;
+  switch (action.action) {
+    case 'click': {
+      const extra =
+        action.button === 'left' && action.count === 1
+          ? ''
+          : ` [${action.button}${action.count > 1 ? ` ×${action.count}` : ''}]`;
+      return `${head}click image(${action.x},${action.y})${at(outcome.screenPoint)} ok${extra}`;
+    }
+    case 'move':
+      return `${head}move image(${action.x},${action.y})${at(outcome.screenPoint)} ok`;
+    case 'drag':
+      return (
+        `${head}drag image(${action.from.x},${action.from.y})→(${action.to.x},${action.to.y})` +
+        `${at(outcome.screenPoint)} ok`
+      );
+    case 'scroll':
+      return (
+        `${head}scroll image(${action.x},${action.y}) ${action.direction} ` +
+        `×${action.amount}${at(outcome.screenPoint)} ok`
+      );
+    case 'type':
+      return `${head}type ${action.text.length} chars → ok`;
+    case 'key':
+      return `${head}key ${action.key} → ok`;
+    case 'wait':
+      return `${head}wait ${action.seconds}s → ok`;
+    case 'zoom':
+      return (
+        `${head}zoom (${action.region.x},${action.region.y},` +
+        `${action.region.width},${action.region.height}) → shown`
+      );
+    case 'focus_window':
+      return `${head}focus_window "${action.title}" → ok (window found and brought to the front)`;
+    case 'wait_window':
+      return (
+        `${head}wait_window "${action.title}" ${action.state} → ok after ` +
+        `${(elapsedMs / 1000).toFixed(1)}s`
+      );
+    default:
+      return `${head}${action.action} → ok`;
+  }
+}
+
+/** The log line the safety net writes when it answers a repeat itself. */
+export const REPEATED_WINDOW_ACTION_MESSAGE =
+  'repeated an already-satisfied window action — step complete';
+
+/**
+ * The turn's DETERMINISTIC window actions as one key — or `null` the moment it
+ * asks for anything else.
+ *
+ * `focus_window` and `wait_window` are the two actions whose success the screen
+ * may not show: focusing a window that was already frontmost changes no pixel,
+ * and waiting for a window that is already open returns at once. They are also
+ * the two answered by the operating system's window list rather than by the
+ * model's reading of the image, so a turn that repeats one that has just
+ * succeeded, unchanged, cannot mean anything but "I did not notice that it
+ * worked" — which {@link computerAttempt} answers by completing the step
+ * rather than by acting again. `timeoutMs` is in the key because it is an
+ * argument the model chose.
+ */
+function windowOnlyKey(actions: readonly ComputerAction[]): string | null {
+  if (actions.length === 0) return null;
+  const parts: string[] = [];
+  for (const action of actions) {
+    if (action.action === 'focus_window') parts.push(`focus_window:${action.title}`);
+    else if (action.action === 'wait_window') {
+      parts.push(`wait_window:${action.title}:${action.state}:${action.timeoutMs}`);
+    } else return null;
+  }
+  return parts.join('|');
+}
+
+/**
  * The model's object as the report and the recording carry it.
  *
  * `SubActionResult.action` is typed `AIAction`, whose `ActionType` is the PAGE
@@ -636,6 +728,19 @@ async function computerAttempt(
   });
   let refusals: Refusal[] = [];
   let priorFailure: string | undefined;
+  /**
+   * What this attempt has already done, one line per successful action.
+   *
+   * Lives here — beside `stall`, per ATTEMPT — because a retry starts the step
+   * over: the screen is re-read, the turn count starts at 1, and a list of
+   * actions from the attempt that failed would tell the model not to redo the
+   * very thing the retry exists to redo. The page path resets per attempt for
+   * the same reason.
+   */
+  const performed: string[] = [];
+  /** The window-only key of the previous turn, when every one of its actions
+   *  succeeded. The safety net below is the only reader. */
+  let satisfiedWindowKey: string | null = null;
   let lastReasoning = '';
   let flowControlSignal: StepResult['flowControl'] | undefined;
   let flowControlDetail: string | undefined;
@@ -673,6 +778,7 @@ async function computerAttempt(
         imageWidth: shownView.imageWidth,
         imageHeight: shownView.imageHeight,
         ...(variables && { variables }),
+        ...(performed.length > 0 && { performed }),
         conversationHistory,
         testInfoSection: formatTestInfo(
           testName,
@@ -688,6 +794,8 @@ async function computerAttempt(
     ];
     // Consumed: each is shown for exactly one turn, or the model reads a
     // refusal it has already acted on and spends the turn apologising.
+    // `performed` is NOT consumed — it is the step's running record, and a
+    // model that is told once and then not told again is back where it started.
     refusals = [];
     priorFailure = undefined;
 
@@ -723,6 +831,35 @@ async function computerAttempt(
       );
     }
     lastReasoning = parsed.reasoning || lastReasoning;
+
+    // The safety net for a model that ignores the list above: a turn whose
+    // ONLY actions are window actions that all succeeded, followed by a turn
+    // asking for exactly the same ones, is a step that is already done. It is
+    // answered here rather than by executing it again — and BEFORE the stall
+    // detector observes the turn, so a repeat that the step survives does not
+    // also count towards a stall.
+    const windowKey = windowOnlyKey(parsed.actions);
+    if (windowKey !== null && windowKey === satisfiedWindowKey && parsed.refused.length === 0) {
+      log(REPEATED_WINDOW_ACTION_MESSAGE);
+      turnSubActions.push({
+        index: ++globalSubActionIndex,
+        action: {
+          action: 'noop',
+          description: 'This window action already succeeded on the previous turn.',
+        } as AIAction,
+        durationMs: 0,
+        timestamp: new Date().toISOString(),
+      });
+      allTurns.push({
+        turnNumber: currentTurn,
+        attemptNumber,
+        timestamp: turnTimestamp,
+        aiInteractions: turnAiInteractions,
+        subActions: turnSubActions,
+        computer: computerTurnRecord(shownView, recordShot),
+      });
+      break;
+    }
 
     // §5.5 — three turns whose capture AND actions are identical is a stall.
     // Measured over what the model was SHOWN and what it asked for, which is
@@ -944,6 +1081,14 @@ async function computerAttempt(
         break;
       }
 
+      // It worked, and the screen may be about to show nothing of the sort —
+      // a window that was already frontmost, a key that only changed state the
+      // image does not carry. The record of it goes to the model on every
+      // remaining turn of this step.
+      if (outcome.performed) {
+        performed.push(performedLine(currentTurn, action, outcome, Date.now() - subStartTime));
+      }
+
       if (action.action === 'zoom') {
         // §5.3 — the zoomed image becomes the next turn's, and coordinates
         // move with it. Nothing on the screen changed, so nothing is
@@ -955,6 +1100,17 @@ async function computerAttempt(
         view = await captureView(computer.adapter, { maxImageWidth: computer.maxImageWidth });
       }
     }
+
+    // Armed only by a turn that asked for window actions and nothing else, and
+    // got them all. A refusal, a failure or a deliberate end disarms it, so the
+    // next turn's repeat is a real repeat of a real success.
+    satisfiedWindowKey =
+      windowKey !== null &&
+      !turnFailed &&
+      priorFailure === undefined &&
+      parsed.refused.length === 0
+        ? windowKey
+        : null;
 
     allTurns.push({
       turnNumber: currentTurn,
