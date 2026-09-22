@@ -68,3 +68,85 @@ describe('renderStep — captured variables (issue 042)', () => {
     expect(html).toContain('tool-block');
   });
 });
+
+
+// ── §7.10's report line (SPEC-structured-table-reads.md, "Log and report") ──
+//
+// A `readTable` the runtime had to ask the model about reads exactly like a
+// structural one in the records, and the mapping it used rides in the step
+// cache from then on. Without this line a report of a run over an odd grid
+// shows a read that "just worked" — and a stale cached mapping is invisible
+// after the fact, which is the one thing a reader needs when the values look
+// wrong.
+describe('renderStep — the structure a readTable was read with', () => {
+  function stepWithAction(action: Record<string, unknown>): StepResult {
+    return {
+      ...baseStep(),
+      turns: [{
+        turnNumber: 1,
+        attemptNumber: 1,
+        timestamp: '2026-09-23T00:00:00.000Z',
+        aiInteractions: [],
+        subActions: [{
+          index: 1,
+          action: {
+            action: 'readTable',
+            description: 'Read the payees table',
+            selector: '#legacy-payees',
+            ...action,
+          },
+          durationMs: 7,
+        }],
+      }],
+    } as unknown as StepResult;
+  }
+
+  it('renders a table mapping as the shape, not as JSON', () => {
+    const html = renderStep(stepWithAction({
+      mapping: {
+        kind: 'table',
+        rows: '#late-header-rows',
+        header: { selector: '#late-header-head', bodyRow: 1 },
+      },
+    }));
+    expect(html).toContain('structure (table)');
+    expect(html).toContain('rows: #late-header-rows');
+    expect(html).toContain('header: #late-header-head (body row 1)');
+  });
+
+  it('leaves the body row out when the header has none', () => {
+    const html = renderStep(stepWithAction({
+      mapping: { kind: 'table', rows: '#rows', header: { selector: '#head' } },
+    }));
+    expect(html).toContain('header: #head');
+    expect(html).not.toContain('body row');
+  });
+
+  it('renders a collection mapping as the item and one line per field', () => {
+    const html = renderStep(stepWithAction({
+      mapping: {
+        kind: 'collection',
+        item: '.account-card',
+        fields: { account: '.card-title', balance: '.field:nth-child(1) .value' },
+      },
+    }));
+    expect(html).toContain('structure (collection)');
+    expect(html).toContain('item: .account-card');
+    expect(html).toContain('account: .card-title');
+    expect(html).toContain('balance: .field:nth-child(1) .value');
+  });
+
+  it('renders nothing at all for an ordinary read', () => {
+    // A report of a run that met no odd grid is byte-identical to one written
+    // before this existed.
+    expect(renderStep(stepWithAction({}))).not.toContain('structure (');
+  });
+
+  it('escapes a selector rather than putting it into the page as markup', () => {
+    const html = renderStep(stepWithAction({
+      mapping: { kind: 'table', rows: '<img src=x onerror=alert(1)>' },
+    }));
+    expect(html).not.toContain('<img src=x onerror');
+    expect(html).toContain('&lt;img src=x');
+  });
+});

@@ -1,0 +1,1034 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Accounts</title>
+  <!--
+    Fixture page for docs/specs/SPEC-structured-table-reads.md, §5.8 and §7.9.
+
+    Two grids that contain no <table> at all. Everything a reader can use is an
+    ARIA attribute: role="grid" on the box, role="row" on the rows,
+    role="columnheader" / role="gridcell" on the cells, aria-colindex for the
+    column order and aria-rowindex for the row order. Take those away and the
+    markup is a pile of divs.
+
+      #accounts-grid  MUI DataGrid. MEASURED on https://mui.com/x/react-data-grid/
+                      (headless Chromium, 2026-09-23) — element nesting, class
+                      names, roles and aria wiring as that component actually
+                      renders them, with SecureBank accounts in place of the
+                      demo's Game-of-Thrones people. Four things here are worth
+                      knowing before writing a rule:
+
+                        · role="grid" is NOT on the box the author names. The
+                          id sits on the .MuiDataGrid-root wrapper; the grid is
+                          .MuiDataGrid-main, two divs in, under a
+                          .MuiDataGrid-mainContent that carries role="none".
+                        · Every row STARTS with a role="none" filler
+                          (.MuiDataGrid-cellOffsetLeft, width 0) and data rows
+                          END with another (.MuiDataGrid-cellEmpty). The header
+                          row ends with .MuiDataGrid-filler. They are not cells
+                          and they take no column.
+                        · The first real cell is the SELECT-ALL CHECKBOX column
+                          at aria-colindex="1", whose columnheader renders
+                          blank. The column an author asks for is never the
+                          first one.
+                        · aria-rowindex is absolute and counts the header, so
+                          the first account is row 2, and the Status filter
+                          below does not renumber it. The two Frozen accounts
+                          are Business One and Joint Everyday, so filtering to
+                          Frozen leaves exactly those two visible, still
+                          reading aria-rowindex 5 and 9 — while a read of the
+                          filtered grid numbers them _row 1 and 2. That is
+                          exactly why _row is the position among the DATA rows
+                          and aria-rowindex is not it. (In the real component
+                          aria-rowcount also counts rows that were never
+                          rendered — 10 on a demo showing 5 — which is the same
+                          point from the other side.)
+
+                      The live demo marks its last column role="rowheader"
+                      rather than role="gridcell"; that is not copied here,
+                      because the row-header case already has fixtures and this
+                      page is about the plain one.
+
+      #trades-grid    ag-Grid with a PINNED-LEFT column. DOCUMENTATION-DERIVED:
+                      https://www.ag-grid.com/example/ and the column-pinning
+                      docs page were both walked headless on 2026-09-23 and
+                      neither rendered a single .ag-row inside 90 seconds, so
+                      this follows ag-Grid's documented DOM (v30+) instead of a
+                      measurement. The shape that matters is the pinning:
+
+                        · The header is SPLIT in two. .ag-pinned-left-header
+                          holds a header row with the one pinned columnheader
+                          (aria-colindex 1); .ag-header-viewport holds another
+                          header row with the other five (aria-colindex 2..6).
+                          BOTH are role="row" with aria-rowindex="1".
+                        · So is every data row. .ag-pinned-left-cols-container
+                          holds a role="row" carrying only the Symbol cell, and
+                          .ag-center-cols-container holds ANOTHER role="row",
+                          for the same trade, carrying the other five. The two
+                          fragments share row-index, row-id and aria-rowindex —
+                          that, and nothing else in the markup, is what says
+                          they are one record. CSS lays the containers side by
+                          side so the seam is invisible on screen.
+                        · Emptied, ag-Grid shows no row at all: a plain
+                          <div class="ag-overlay-no-rows-center">, which is not
+                          a role="row" and not a §4.8 placeholder cell either.
+
+    Everything is client-side — no login, no cookie banner, no persistence — so
+    every shard can share one server and every run starts from the same state.
+    The rows are written out as static markup; the filter hides them in place
+    and the empty-state toggle restores the markup it replaced.
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar (same shell as dashboard.html / radgrid.html) */
+    .sidebar {
+      width: 240px;
+      background: #1f2937;
+      color: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      min-height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      margin-bottom: 32px;
+    }
+
+    .sidebar-logo-icon {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .sidebar-logo-name { font-size: 18px; font-weight: 700; }
+
+    nav { flex: 1; }
+
+    nav ul { list-style: none; padding: 0; }
+
+    nav ul li a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 24px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav ul li a:hover { background: #374151; color: #f9fafb; }
+
+    nav ul li a.active {
+      background: #374151;
+      color: #f9fafb;
+      border-left-color: #1a56db;
+    }
+
+    nav ul li a .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+    .sidebar-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #374151;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .user-name { font-size: 13px; font-weight: 500; color: #f9fafb; }
+    .user-email { font-size: 12px; color: #6b7280; }
+
+    .logout-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover { background: #374151; color: #f9fafb; }
+
+    /* Main content */
+    .main-content {
+      margin-left: 240px;
+      flex: 1;
+      padding: 32px;
+      max-width: 1100px;
+    }
+
+    .page-header { margin-bottom: 28px; }
+
+    .page-header h1 { font-size: 26px; font-weight: 700; color: #111827; }
+
+    .page-header p { font-size: 14px; color: #6b7280; margin-top: 4px; }
+
+    .section-card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .section-title, .section-card h2 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .section-hint {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 16px;
+    }
+
+    .section-hint strong { color: #111827; }
+
+    .section-hint code, code.inline {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      background: #f3f4f6;
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: #374151;
+    }
+
+    .muted { font-size: 13px; color: #6b7280; }
+
+    .result-line {
+      margin-top: 12px;
+      font-size: 13px;
+      color: #047857;
+      min-height: 18px;
+      font-weight: 500;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+      font-size: 13px;
+      color: #374151;
+    }
+
+    .toolbar select, .toolbar button {
+      font-family: inherit;
+      font-size: 13px;
+      padding: 6px 10px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      background: #fff;
+      color: #111827;
+      cursor: pointer;
+    }
+
+    .toolbar button:hover { background: #f9fafb; }
+
+    .contents {
+      background: #fff;
+      border-radius: 12px;
+      padding: 16px 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+    }
+
+    .contents h2 {
+      font-size: 13px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 10px;
+    }
+
+    .contents ol {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 14px;
+      counter-reset: toc;
+    }
+
+    .contents li { counter-increment: toc; font-size: 13px; }
+    .contents li a { color: #1a56db; text-decoration: none; }
+    .contents li a::before { content: counter(toc) ". "; color: #9ca3af; }
+    .contents li a:hover { text-decoration: underline; }
+
+    /* ── MUI DataGrid skin ───────────────────────────────────────────────────
+       Enough of MUI's default theme to make the divs read as a grid: a light
+       header strip, 52px rows with a hairline between them, and columns laid
+       out with flex at the widths the component sets inline. The class names
+       are the component's own, so a selector written against a real MUI grid
+       finds the same things here. */
+    .MuiDataGrid-root {
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      background: #fff;
+      font-size: 14px;
+      color: rgba(0,0,0,0.87);
+      overflow: hidden;
+    }
+
+    .MuiDataGrid-main { display: block; }
+
+    .MuiDataGrid-columnHeaders { background: #fff; }
+
+    .MuiDataGrid-row--borderBottom {
+      display: flex;
+      align-items: stretch;
+      height: 56px;
+      border-bottom: 1px solid #e0e0e0;
+      font-weight: 500;
+    }
+
+    .MuiDataGrid-row {
+      display: flex;
+      align-items: stretch;
+      height: 52px;
+      border-bottom: 1px solid #e0e0e0;
+    }
+
+    .MuiDataGrid-row:hover { background: rgba(0,0,0,0.04); }
+
+    .MuiDataGrid-columnHeader,
+    .MuiDataGrid-cell {
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .MuiDataGrid-columnHeaderTitle { font-weight: 500; color: rgba(0,0,0,0.87); }
+
+    .MuiDataGrid-columnHeaderDraggableContainer,
+    .MuiDataGrid-columnHeaderTitleContainer,
+    .MuiDataGrid-columnHeaderTitleContainerContent { display: flex; align-items: center; width: 100%; }
+
+    /* Column widths, as MUI writes them inline on every cell. */
+    .MuiDataGrid-columnHeaderCheckbox,
+    .MuiDataGrid-cellCheckbox { width: 50px; min-width: 50px; justify-content: center; }
+
+    [data-field="account"] { width: 160px; min-width: 160px; }
+    [data-field="number"]  { width: 110px; min-width: 110px; }
+    [data-field="balance"] { width: 120px; min-width: 120px; justify-content: flex-end; }
+    [data-field="status"]  { width: 110px; min-width: 110px; }
+    [data-field="owner"]   { width: 180px; min-width: 180px; }
+    [data-field="actions"] { width: 110px; min-width: 110px; }
+
+    .MuiDataGrid-cell--textRight { justify-content: flex-end; }
+
+    .MuiDataGrid-filler, .MuiDataGrid-cellEmpty { flex: 1; }
+
+    .MuiDataGrid-checkboxInput { display: inline-flex; }
+
+    .freeze-btn {
+      font-family: inherit;
+      font-size: 12px;
+      padding: 4px 10px;
+      border: 1px solid #1976d2;
+      border-radius: 4px;
+      background: #fff;
+      color: #1976d2;
+      cursor: pointer;
+      /* MUI's own Button upper-cases its label; left alone here so the button
+         reads "Freeze" in innerText as well as in the markup. The RadGrid page
+         keeps its component's upper-casing on purpose — one fixture carrying
+         that trap is enough, and this page is about the ARIA wiring. */
+    }
+
+    .freeze-btn:hover { background: #e3f2fd; }
+
+    .status-pill {
+      font-size: 12px;
+      padding: 2px 9px;
+      border-radius: 11px;
+      background: #e5e7eb;
+      color: #374151;
+    }
+
+    .status-active { background: #d1fae5; color: #065f46; }
+    .status-frozen { background: #fef3c7; color: #92400e; }
+    .status-closed { background: #e5e7eb; color: #4b5563; }
+
+    /* ── ag-Grid "Alpine" skin ───────────────────────────────────────────────
+       The pinned-left container and the centre container are laid out side by
+       side with flex, at the same row height, so the two halves of every row
+       line up and the grid looks like one thing. That is what ag-Grid does
+       with absolute positioning; flex reaches the same picture with markup
+       that stays readable. */
+    .ag-root-wrapper {
+      border: 1px solid #babfc7;
+      border-radius: 4px;
+      background: #fff;
+      font-size: 14px;
+      color: #181d1f;
+      overflow: hidden;
+    }
+
+    .ag-header {
+      display: flex;
+      background: #f8f8f8;
+      border-bottom: 1px solid #babfc7;
+      height: 48px;
+    }
+
+    .ag-pinned-left-header {
+      width: 120px;
+      min-width: 120px;
+      border-right: 1px solid #babfc7;
+      background: #f8f8f8;
+    }
+
+    .ag-header-viewport { flex: 1; overflow: hidden; }
+
+    .ag-header-row {
+      display: flex;
+      align-items: center;
+      height: 48px;
+      font-weight: 600;
+    }
+
+    .ag-header-cell {
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      height: 48px;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+
+    .ag-body-viewport { display: flex; align-items: flex-start; }
+
+    .ag-pinned-left-cols-container {
+      width: 120px;
+      min-width: 120px;
+      border-right: 1px solid #babfc7;
+      background: #fcfcfc;
+    }
+
+    .ag-center-cols-container { flex: 1; }
+
+    .ag-row {
+      display: flex;
+      align-items: center;
+      height: 42px;
+      border-bottom: 1px solid #e2e2e2;
+    }
+
+    .ag-row-odd { background: #fcfcfc; }
+
+    .ag-cell {
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      height: 42px;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+
+    .ag-header-cell[col-id="symbol"], .ag-cell[col-id="symbol"] { width: 120px; min-width: 120px; font-weight: 600; }
+    .ag-header-cell[col-id="side"], .ag-cell[col-id="side"] { width: 90px; min-width: 90px; }
+    .ag-header-cell[col-id="quantity"], .ag-cell[col-id="quantity"] { width: 100px; min-width: 100px; justify-content: flex-end; }
+    .ag-header-cell[col-id="price"], .ag-cell[col-id="price"] { width: 110px; min-width: 110px; justify-content: flex-end; }
+    .ag-header-cell[col-id="value"], .ag-cell[col-id="value"] { width: 130px; min-width: 130px; justify-content: flex-end; }
+    .ag-header-cell[col-id="status"], .ag-cell[col-id="status"] { width: 120px; min-width: 120px; }
+
+    .ag-overlay-no-rows-wrapper {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 48px 0;
+    }
+
+    .ag-overlay-no-rows-center { color: #181d1f; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside class="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">S</div>
+      <span class="sidebar-logo-name">SecureBank</span>
+    </div>
+
+    <nav>
+      <ul>
+        <li>
+          <a href="dashboard.html">
+            <span class="nav-icon">🏠</span>
+            Dashboard
+          </a>
+        </li>
+        <li>
+          <a href="transactions.html">
+            <span class="nav-icon">💳</span>
+            Transactions
+          </a>
+        </li>
+        <li>
+          <a href="documents.html">
+            <span class="nav-icon">📄</span>
+            Documents
+          </a>
+        </li>
+        <li>
+          <a href="control-flow.html">
+            <span class="nav-icon">💸</span>
+            Payments
+          </a>
+        </li>
+        <li>
+          <a href="tables.html" class="active" aria-current="page">
+            <span class="nav-icon">📋</span>
+            Tables
+          </a>
+        </li>
+        <li>
+          <a href="#settings">
+            <span class="nav-icon">⚙️</span>
+            Settings
+          </a>
+        </li>
+        <li>
+          <a href="#profile">
+            <span class="nav-icon">👤</span>
+            Profile
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <div>
+          <div class="user-name">Demo User</div>
+          <div class="user-email" id="user-email">demo@securebank.com</div>
+        </div>
+      </div>
+      <button class="logout-btn" id="logout-btn" type="button">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <div class="page-header">
+      <h1>Accounts</h1>
+      <p>Two grids with no <code class="inline">&lt;table&gt;</code> anywhere in them: a MUI DataGrid of accounts, and an ag-Grid of trades whose first column is pinned and therefore lives in a separate half of every row.</p>
+    </div>
+
+    <nav class="contents" id="contents" aria-label="Contents">
+      <h2>Contents</h2>
+      <ol>
+        <li><a href="#c-accounts">Accounts</a></li>
+        <li><a href="#c-trades">Trades</a></li>
+      </ol>
+    </nav>
+
+    <!-- 1 ── MUI DataGrid: a div grid with a checkbox column ───────────────── -->
+    <section class="section-card" id="c-accounts" aria-labelledby="h-accounts">
+      <div class="section-header">
+        <h2 id="h-accounts">Accounts</h2>
+      </div>
+      <p class="section-hint">A <strong>MUI DataGrid</strong>, <strong>measured</strong> on <code>https://mui.com/x/react-data-grid/</code> (2026-09-23): nesting, class names, roles and aria wiring as the component renders them. There is <strong>no <code>&lt;table&gt;</code></strong> here — the structure is carried entirely by ARIA. <code>role="grid"</code> with <code>aria-rowcount="9"</code> and <code>aria-colcount="7"</code> sits on <code>.MuiDataGrid-main</code>, <em>two divs inside</em> the <code>#accounts-grid</code> wrapper the author names, under containers marked <code>role="none"</code> and <code>role="presentation"</code>. Rows are <code>role="row"</code>: the header is <code>aria-rowindex="1"</code> and the eight accounts are <code>2</code>…<code>9</code>. Cells are <code>role="columnheader"</code> and <code>role="gridcell"</code>, ordered by <code>aria-colindex</code> — <strong>1 is the select-all checkbox column</strong>, whose heading is blank, then <em>Account</em>, <em>Number</em>, <em>Balance</em>, <em>Status</em>, <em>Owner</em> and <em>Actions</em> at 2…7. Every row begins with a <code>role="none"</code> filler and ends with another; they are not cells and take no column. A read of <em>Account</em>, <em>Balance</em>, <em>Status</em> and <em>Owner</em> by heading should return the <strong>8 accounts</strong>, with the checkbox column's empty heading and the fillers skipped. Two accounts belong to <strong>Sarah Mitchell</strong>, so a step that names an owner is ambiguous and <code>_row</code> is what tells them apart. The <em>Status</em> filter hides the rows that do not match with <code>display:none</code> and <strong>does not renumber anything</strong>: filter to <em>Frozen</em> and the two visible rows still read <code>aria-rowindex="5"</code> and <code>"9"</code>, which is the short version of why <code>_row</code> counts data rows and <code>aria-rowindex</code> is not it.</p>
+
+      <div class="toolbar">
+        <label for="accounts-status-filter">Status</label>
+        <select id="accounts-status-filter">
+          <option value="all" selected>All</option>
+          <option value="Active">Active</option>
+          <option value="Frozen">Frozen</option>
+          <option value="Closed">Closed</option>
+        </select>
+      </div>
+
+      <div class="MuiDataGrid-root MuiDataGrid-root--densityStandard MuiDataGrid-withBorderColor" id="accounts-grid">
+        <div class="MuiDataGrid-mainContent" role="none">
+          <div class="MuiDataGrid-main" role="grid" aria-colcount="7" aria-rowcount="9" aria-multiselectable="true" tabindex="-1">
+            <div role="none" data-id="gridPanelAnchor"></div>
+            <div class="MuiDataGrid-virtualScroller" role="presentation">
+              <div class="MuiDataGrid-virtualScrollerContent" role="presentation">
+                <div role="presentation">
+
+                  <div class="MuiDataGrid-topContainer MuiDataGrid-container--top" role="none">
+                    <div class="MuiDataGrid-columnHeaders" role="rowgroup">
+                      <div role="row" aria-rowindex="1" class="MuiDataGrid-row--borderBottom">
+                        <!-- MUI's leading filler: role="none", zero width, not a cell. -->
+                        <div role="none" style="width: 0px;"></div>
+                        <div class="MuiDataGrid-columnHeader MuiDataGrid-columnHeader--alignCenter MuiDataGrid-withBorderColor MuiDataGrid-columnHeaderCheckbox" role="columnheader" aria-colindex="1" aria-sort="none" data-field="__check__" tabindex="0">
+                          <div class="MuiDataGrid-columnHeaderDraggableContainer" role="none">
+                            <div class="MuiDataGrid-columnHeaderTitleContainer" role="none">
+                              <div class="MuiDataGrid-columnHeaderTitleContainerContent">
+                                <span class="MuiCheckbox-root MuiDataGrid-checkboxInput"><input type="checkbox" id="accounts-select-all" aria-label="Select all rows" name="select_all_rows" tabindex="-1"></span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="MuiDataGrid-columnHeader MuiDataGrid-columnHeader--sortable MuiDataGrid-withBorderColor" role="columnheader" aria-colindex="2" aria-sort="none" data-field="account" tabindex="-1">
+                          <div class="MuiDataGrid-columnHeaderDraggableContainer" role="none">
+                            <div class="MuiDataGrid-columnHeaderTitleContainer" role="none">
+                              <div class="MuiDataGrid-columnHeaderTitleContainerContent">
+                                <div class="MuiDataGrid-columnHeaderTitle">Account</div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="MuiDataGrid-columnHeader MuiDataGrid-columnHeader--sortable MuiDataGrid-withBorderColor" role="columnheader" aria-colindex="3" aria-sort="none" data-field="number" tabindex="-1">
+                          <div class="MuiDataGrid-columnHeaderDraggableContainer" role="none">
+                            <div class="MuiDataGrid-columnHeaderTitleContainer" role="none">
+                              <div class="MuiDataGrid-columnHeaderTitleContainerContent">
+                                <div class="MuiDataGrid-columnHeaderTitle">Number</div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="MuiDataGrid-columnHeader MuiDataGrid-columnHeader--alignRight MuiDataGrid-columnHeader--sortable MuiDataGrid-columnHeader--numeric MuiDataGrid-withBorderColor" role="columnheader" aria-colindex="4" aria-sort="none" data-field="balance" tabindex="-1">
+                          <div class="MuiDataGrid-columnHeaderDraggableContainer" role="none">
+                            <div class="MuiDataGrid-columnHeaderTitleContainer" role="none">
+                              <div class="MuiDataGrid-columnHeaderTitleContainerContent">
+                                <div class="MuiDataGrid-columnHeaderTitle">Balance</div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="MuiDataGrid-columnHeader MuiDataGrid-columnHeader--sortable MuiDataGrid-withBorderColor" role="columnheader" aria-colindex="5" aria-sort="none" data-field="status" tabindex="-1">
+                          <div class="MuiDataGrid-columnHeaderDraggableContainer" role="none">
+                            <div class="MuiDataGrid-columnHeaderTitleContainer" role="none">
+                              <div class="MuiDataGrid-columnHeaderTitleContainerContent">
+                                <div class="MuiDataGrid-columnHeaderTitle">Status</div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="MuiDataGrid-columnHeader MuiDataGrid-columnHeader--sortable MuiDataGrid-withBorderColor" role="columnheader" aria-colindex="6" aria-sort="none" data-field="owner" tabindex="-1">
+                          <div class="MuiDataGrid-columnHeaderDraggableContainer" role="none">
+                            <div class="MuiDataGrid-columnHeaderTitleContainer" role="none">
+                              <div class="MuiDataGrid-columnHeaderTitleContainerContent">
+                                <div class="MuiDataGrid-columnHeaderTitle">Owner</div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="MuiDataGrid-columnHeader MuiDataGrid-withBorderColor MuiDataGrid-columnHeader--last" role="columnheader" aria-colindex="7" data-field="actions" tabindex="-1">
+                          <div class="MuiDataGrid-columnHeaderDraggableContainer" role="none">
+                            <div class="MuiDataGrid-columnHeaderTitleContainer" role="none">
+                              <div class="MuiDataGrid-columnHeaderTitleContainerContent">
+                                <div class="MuiDataGrid-columnHeaderTitle">Actions</div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <!-- MUI's trailing header filler. Also role="none". -->
+                        <div role="none" class="MuiDataGrid-filler MuiDataGrid-filler--horizontal"></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="MuiDataGrid-virtualScrollerRenderZone" role="rowgroup">
+                    <div data-id="acc-1" data-rowindex="0" role="row" class="MuiDataGrid-row MuiDataGrid-row--firstVisible" aria-rowindex="2" aria-selected="false">
+                      <div role="none" class="MuiDataGrid-cellOffsetLeft" style="width: 0px;"></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textCenter MuiDataGrid-cellCheckbox MuiDataGrid-cell--flex" role="gridcell" data-field="__check__" aria-colindex="1" aria-colspan="1" tabindex="-1"><span class="MuiCheckbox-root MuiDataGrid-checkboxInput"><input type="checkbox" aria-label="Select row" name="select_row" tabindex="-1"></span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="account" aria-colindex="2" aria-colspan="1" title="Everyday" tabindex="-1">Everyday</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="number" aria-colindex="3" aria-colspan="1" title="12-3456" tabindex="-1">12-3456</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textRight" role="gridcell" data-field="balance" aria-colindex="4" aria-colspan="1" title="$2,340.10" tabindex="-1">$2,340.10</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="status" aria-colindex="5" aria-colspan="1" tabindex="-1"><span class="status-pill status-active">Active</span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="owner" aria-colindex="6" aria-colspan="1" title="Sarah Mitchell" tabindex="-1">Sarah Mitchell</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--flex" role="gridcell" data-field="actions" aria-colindex="7" aria-colspan="1" tabindex="-1"><button type="button" class="freeze-btn">Freeze</button></div>
+                      <div role="none" class="MuiDataGrid-cell MuiDataGrid-cellEmpty"></div>
+                    </div>
+                    <div data-id="acc-2" data-rowindex="1" role="row" class="MuiDataGrid-row" aria-rowindex="3" aria-selected="false">
+                      <div role="none" class="MuiDataGrid-cellOffsetLeft" style="width: 0px;"></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textCenter MuiDataGrid-cellCheckbox MuiDataGrid-cell--flex" role="gridcell" data-field="__check__" aria-colindex="1" aria-colspan="1" tabindex="-1"><span class="MuiCheckbox-root MuiDataGrid-checkboxInput"><input type="checkbox" aria-label="Select row" name="select_row" tabindex="-1"></span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="account" aria-colindex="2" aria-colspan="1" title="Savings Plus" tabindex="-1">Savings Plus</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="number" aria-colindex="3" aria-colspan="1" title="12-3457" tabindex="-1">12-3457</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textRight" role="gridcell" data-field="balance" aria-colindex="4" aria-colspan="1" title="$18,902.55" tabindex="-1">$18,902.55</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="status" aria-colindex="5" aria-colspan="1" tabindex="-1"><span class="status-pill status-active">Active</span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="owner" aria-colindex="6" aria-colspan="1" title="Sarah Mitchell" tabindex="-1">Sarah Mitchell</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--flex" role="gridcell" data-field="actions" aria-colindex="7" aria-colspan="1" tabindex="-1"><button type="button" class="freeze-btn">Freeze</button></div>
+                      <div role="none" class="MuiDataGrid-cell MuiDataGrid-cellEmpty"></div>
+                    </div>
+                    <div data-id="acc-3" data-rowindex="2" role="row" class="MuiDataGrid-row" aria-rowindex="4" aria-selected="false">
+                      <div role="none" class="MuiDataGrid-cellOffsetLeft" style="width: 0px;"></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textCenter MuiDataGrid-cellCheckbox MuiDataGrid-cell--flex" role="gridcell" data-field="__check__" aria-colindex="1" aria-colspan="1" tabindex="-1"><span class="MuiCheckbox-root MuiDataGrid-checkboxInput"><input type="checkbox" aria-label="Select row" name="select_row" tabindex="-1"></span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="account" aria-colindex="2" aria-colspan="1" title="Offset" tabindex="-1">Offset</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="number" aria-colindex="3" aria-colspan="1" title="12-4410" tabindex="-1">12-4410</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textRight" role="gridcell" data-field="balance" aria-colindex="4" aria-colspan="1" title="$61,004.00" tabindex="-1">$61,004.00</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="status" aria-colindex="5" aria-colspan="1" tabindex="-1"><span class="status-pill status-active">Active</span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="owner" aria-colindex="6" aria-colspan="1" title="James Whitfield" tabindex="-1">James Whitfield</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--flex" role="gridcell" data-field="actions" aria-colindex="7" aria-colspan="1" tabindex="-1"><button type="button" class="freeze-btn">Freeze</button></div>
+                      <div role="none" class="MuiDataGrid-cell MuiDataGrid-cellEmpty"></div>
+                    </div>
+                    <div data-id="acc-4" data-rowindex="3" role="row" class="MuiDataGrid-row" aria-rowindex="5" aria-selected="false">
+                      <div role="none" class="MuiDataGrid-cellOffsetLeft" style="width: 0px;"></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textCenter MuiDataGrid-cellCheckbox MuiDataGrid-cell--flex" role="gridcell" data-field="__check__" aria-colindex="1" aria-colspan="1" tabindex="-1"><span class="MuiCheckbox-root MuiDataGrid-checkboxInput"><input type="checkbox" aria-label="Select row" name="select_row" tabindex="-1"></span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="account" aria-colindex="2" aria-colspan="1" title="Business One" tabindex="-1">Business One</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="number" aria-colindex="3" aria-colspan="1" title="20-0087" tabindex="-1">20-0087</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textRight" role="gridcell" data-field="balance" aria-colindex="4" aria-colspan="1" title="$9,120.35" tabindex="-1">$9,120.35</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="status" aria-colindex="5" aria-colspan="1" tabindex="-1"><span class="status-pill status-frozen">Frozen</span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="owner" aria-colindex="6" aria-colspan="1" title="Priya Raghunathan" tabindex="-1">Priya Raghunathan</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--flex" role="gridcell" data-field="actions" aria-colindex="7" aria-colspan="1" tabindex="-1"><button type="button" class="freeze-btn">Freeze</button></div>
+                      <div role="none" class="MuiDataGrid-cell MuiDataGrid-cellEmpty"></div>
+                    </div>
+                    <div data-id="acc-5" data-rowindex="4" role="row" class="MuiDataGrid-row" aria-rowindex="6" aria-selected="false">
+                      <div role="none" class="MuiDataGrid-cellOffsetLeft" style="width: 0px;"></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textCenter MuiDataGrid-cellCheckbox MuiDataGrid-cell--flex" role="gridcell" data-field="__check__" aria-colindex="1" aria-colspan="1" tabindex="-1"><span class="MuiCheckbox-root MuiDataGrid-checkboxInput"><input type="checkbox" aria-label="Select row" name="select_row" tabindex="-1"></span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="account" aria-colindex="2" aria-colspan="1" title="Travel" tabindex="-1">Travel</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="number" aria-colindex="3" aria-colspan="1" title="12-9902" tabindex="-1">12-9902</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textRight" role="gridcell" data-field="balance" aria-colindex="4" aria-colspan="1" title="$410.00" tabindex="-1">$410.00</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="status" aria-colindex="5" aria-colspan="1" tabindex="-1"><span class="status-pill status-closed">Closed</span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="owner" aria-colindex="6" aria-colspan="1" title="Dominic Ferreira" tabindex="-1">Dominic Ferreira</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--flex" role="gridcell" data-field="actions" aria-colindex="7" aria-colspan="1" tabindex="-1"><button type="button" class="freeze-btn">Freeze</button></div>
+                      <div role="none" class="MuiDataGrid-cell MuiDataGrid-cellEmpty"></div>
+                    </div>
+                    <div data-id="acc-6" data-rowindex="5" role="row" class="MuiDataGrid-row" aria-rowindex="7" aria-selected="false">
+                      <div role="none" class="MuiDataGrid-cellOffsetLeft" style="width: 0px;"></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textCenter MuiDataGrid-cellCheckbox MuiDataGrid-cell--flex" role="gridcell" data-field="__check__" aria-colindex="1" aria-colspan="1" tabindex="-1"><span class="MuiCheckbox-root MuiDataGrid-checkboxInput"><input type="checkbox" aria-label="Select row" name="select_row" tabindex="-1"></span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="account" aria-colindex="2" aria-colspan="1" title="Term Deposit" tabindex="-1">Term Deposit</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="number" aria-colindex="3" aria-colspan="1" title="30-1122" tabindex="-1">30-1122</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textRight" role="gridcell" data-field="balance" aria-colindex="4" aria-colspan="1" title="$50,000.00" tabindex="-1">$50,000.00</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="status" aria-colindex="5" aria-colspan="1" tabindex="-1"><span class="status-pill status-active">Active</span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="owner" aria-colindex="6" aria-colspan="1" title="Aoife Brennan" tabindex="-1">Aoife Brennan</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--flex" role="gridcell" data-field="actions" aria-colindex="7" aria-colspan="1" tabindex="-1"><button type="button" class="freeze-btn">Freeze</button></div>
+                      <div role="none" class="MuiDataGrid-cell MuiDataGrid-cellEmpty"></div>
+                    </div>
+                    <div data-id="acc-7" data-rowindex="6" role="row" class="MuiDataGrid-row" aria-rowindex="8" aria-selected="false">
+                      <div role="none" class="MuiDataGrid-cellOffsetLeft" style="width: 0px;"></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textCenter MuiDataGrid-cellCheckbox MuiDataGrid-cell--flex" role="gridcell" data-field="__check__" aria-colindex="1" aria-colspan="1" tabindex="-1"><span class="MuiCheckbox-root MuiDataGrid-checkboxInput"><input type="checkbox" aria-label="Select row" name="select_row" tabindex="-1"></span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="account" aria-colindex="2" aria-colspan="1" title="Youth Saver" tabindex="-1">Youth Saver</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="number" aria-colindex="3" aria-colspan="1" title="12-7781" tabindex="-1">12-7781</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textRight" role="gridcell" data-field="balance" aria-colindex="4" aria-colspan="1" title="$1,205.90" tabindex="-1">$1,205.90</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="status" aria-colindex="5" aria-colspan="1" tabindex="-1"><span class="status-pill status-active">Active</span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="owner" aria-colindex="6" aria-colspan="1" title="Daniel Osei" tabindex="-1">Daniel Osei</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--flex" role="gridcell" data-field="actions" aria-colindex="7" aria-colspan="1" tabindex="-1"><button type="button" class="freeze-btn">Freeze</button></div>
+                      <div role="none" class="MuiDataGrid-cell MuiDataGrid-cellEmpty"></div>
+                    </div>
+                    <div data-id="acc-8" data-rowindex="7" role="row" class="MuiDataGrid-row MuiDataGrid-row--lastVisible" aria-rowindex="9" aria-selected="false">
+                      <div role="none" class="MuiDataGrid-cellOffsetLeft" style="width: 0px;"></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textCenter MuiDataGrid-cellCheckbox MuiDataGrid-cell--flex" role="gridcell" data-field="__check__" aria-colindex="1" aria-colspan="1" tabindex="-1"><span class="MuiCheckbox-root MuiDataGrid-checkboxInput"><input type="checkbox" aria-label="Select row" name="select_row" tabindex="-1"></span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="account" aria-colindex="2" aria-colspan="1" title="Joint Everyday" tabindex="-1">Joint Everyday</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="number" aria-colindex="3" aria-colspan="1" title="12-3390" tabindex="-1">12-3390</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textRight" role="gridcell" data-field="balance" aria-colindex="4" aria-colspan="1" title="$3,775.20" tabindex="-1">$3,775.20</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="status" aria-colindex="5" aria-colspan="1" tabindex="-1"><span class="status-pill status-frozen">Frozen</span></div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--textLeft" role="gridcell" data-field="owner" aria-colindex="6" aria-colspan="1" title="Grace Abernathy" tabindex="-1">Grace Abernathy</div>
+                      <div class="MuiDataGrid-cell MuiDataGrid-cell--flex" role="gridcell" data-field="actions" aria-colindex="7" aria-colspan="1" tabindex="-1"><button type="button" class="freeze-btn">Freeze</button></div>
+                      <div role="none" class="MuiDataGrid-cell MuiDataGrid-cellEmpty"></div>
+                    </div>
+                  </div>
+
+                  <div class="MuiDataGrid-contentFiller" role="presentation"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p class="result-line" id="freeze-result" role="status"></p>
+    </section>
+
+    <!-- 2 ── ag-Grid: one pinned column, so every row is in two pieces ─────── -->
+    <section class="section-card" id="c-trades" aria-labelledby="h-trades">
+      <div class="section-header">
+        <h2 id="h-trades">Trades</h2>
+      </div>
+      <p class="section-hint">An <strong>ag-Grid</strong> whose <em>Symbol</em> column is <strong>pinned left</strong>. This markup is <strong>documented, not measured</strong>: both <code>ag-grid.com/example/</code> and its column-pinning docs page were walked headless on 2026-09-23 and neither rendered a single <code>.ag-row</code> within 90 seconds, so the nesting follows ag-Grid's documented DOM for v30+. The point of the fixture is what pinning does to a row: <strong>every row exists twice</strong>. <code>.ag-pinned-left-cols-container</code> holds a <code>role="row"</code> with the <em>one</em> Symbol cell at <code>aria-colindex="1"</code>, and <code>.ag-center-cols-container</code> holds <em>another</em> <code>role="row"</code>, for the same trade, with <em>Side</em>, <em>Quantity</em>, <em>Price</em>, <em>Value</em> and <em>Status</em> at <code>aria-colindex</code> 2…6. The header is split the same way, both halves marked <code>aria-rowindex="1"</code>. The only thing joining the two fragments of a trade is that they carry the <strong>same <code>row-index</code>, <code>row-id</code> and <code>aria-rowindex</code></strong> — the CSS puts them side by side, and on screen there is no seam to see. A read should return <strong>6 trades</strong>, each with its Symbol taken from the pinned fragment and the rest from the centre one; a reader that walks only one container gets six half-records that look complete. <em>Show no trades</em> empties the grid the way the component does — <strong>no row at all</strong>, just a <code>&lt;div class="ag-overlay-no-rows-center"&gt;No Rows To Show&lt;/div&gt;</code>, which is not a row and not a <code>colspan</code> placeholder either, so an empty read has to recognise a third shape.</p>
+
+      <div class="toolbar">
+        <button type="button" id="trades-empty-toggle">Show no trades</button>
+      </div>
+
+      <div class="ag-root-wrapper ag-layout-normal ag-theme-alpine" id="trades-grid">
+        <div class="ag-root-wrapper-body ag-layout-normal" role="presentation">
+          <div class="ag-root ag-unselectable ag-layout-normal" role="grid" aria-colcount="6" aria-rowcount="7">
+
+            <div class="ag-header ag-pivot-off" role="presentation">
+              <div class="ag-pinned-left-header" role="presentation">
+                <div class="ag-header-row ag-header-row-column" role="row" aria-rowindex="1">
+                  <div class="ag-header-cell ag-header-cell-sortable" role="columnheader" aria-colindex="1" col-id="symbol">
+                    <div class="ag-header-cell-comp-wrapper">
+                      <div class="ag-cell-label-container" role="presentation">
+                        <div class="ag-header-cell-label" role="presentation">
+                          <span class="ag-header-cell-text">Symbol</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="ag-header-viewport" role="presentation">
+                <div class="ag-header-container" role="presentation">
+                  <div class="ag-header-row ag-header-row-column" role="row" aria-rowindex="1">
+                    <div class="ag-header-cell ag-header-cell-sortable" role="columnheader" aria-colindex="2" col-id="side">
+                      <div class="ag-header-cell-comp-wrapper">
+                        <div class="ag-cell-label-container" role="presentation">
+                          <div class="ag-header-cell-label" role="presentation">
+                            <span class="ag-header-cell-text">Side</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="ag-header-cell ag-header-cell-sortable ag-right-aligned-header" role="columnheader" aria-colindex="3" col-id="quantity">
+                      <div class="ag-header-cell-comp-wrapper">
+                        <div class="ag-cell-label-container" role="presentation">
+                          <div class="ag-header-cell-label" role="presentation">
+                            <span class="ag-header-cell-text">Quantity</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="ag-header-cell ag-header-cell-sortable ag-right-aligned-header" role="columnheader" aria-colindex="4" col-id="price">
+                      <div class="ag-header-cell-comp-wrapper">
+                        <div class="ag-cell-label-container" role="presentation">
+                          <div class="ag-header-cell-label" role="presentation">
+                            <span class="ag-header-cell-text">Price</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="ag-header-cell ag-header-cell-sortable ag-right-aligned-header" role="columnheader" aria-colindex="5" col-id="value">
+                      <div class="ag-header-cell-comp-wrapper">
+                        <div class="ag-cell-label-container" role="presentation">
+                          <div class="ag-header-cell-label" role="presentation">
+                            <span class="ag-header-cell-text">Value</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="ag-header-cell ag-header-cell-sortable" role="columnheader" aria-colindex="6" col-id="status">
+                      <div class="ag-header-cell-comp-wrapper">
+                        <div class="ag-cell-label-container" role="presentation">
+                          <div class="ag-header-cell-label" role="presentation">
+                            <span class="ag-header-cell-text">Status</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="ag-body-viewport ag-layout-normal ag-row-no-animation" role="presentation">
+              <!-- The pinned half: one cell per row, the Symbol. -->
+              <div class="ag-pinned-left-cols-container" role="rowgroup" id="trades-pinned-rows">
+                <div class="ag-row ag-row-even ag-row-level-0 ag-row-first" role="row" row-index="0" aria-rowindex="2" row-id="0">
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="1" col-id="symbol">VAS</div>
+                </div>
+                <div class="ag-row ag-row-odd ag-row-level-0" role="row" row-index="1" aria-rowindex="3" row-id="1">
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="1" col-id="symbol">VGS</div>
+                </div>
+                <div class="ag-row ag-row-even ag-row-level-0" role="row" row-index="2" aria-rowindex="4" row-id="2">
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="1" col-id="symbol">NDQ</div>
+                </div>
+                <div class="ag-row ag-row-odd ag-row-level-0" role="row" row-index="3" aria-rowindex="5" row-id="3">
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="1" col-id="symbol">IOO</div>
+                </div>
+                <div class="ag-row ag-row-even ag-row-level-0" role="row" row-index="4" aria-rowindex="6" row-id="4">
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="1" col-id="symbol">A200</div>
+                </div>
+                <div class="ag-row ag-row-odd ag-row-level-0 ag-row-last" role="row" row-index="5" aria-rowindex="7" row-id="5">
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="1" col-id="symbol">BOND</div>
+                </div>
+              </div>
+
+              <!-- The centre half: the SAME six rows again, other five cells. -->
+              <div class="ag-center-cols-container" role="rowgroup" id="trades-center-rows">
+                <div class="ag-row ag-row-even ag-row-level-0 ag-row-first" role="row" row-index="0" aria-rowindex="2" row-id="0">
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="2" col-id="side">Buy</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="3" col-id="quantity">120</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="4" col-id="price">$95.10</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="5" col-id="value">$11,412.00</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="6" col-id="status">Filled</div>
+                </div>
+                <div class="ag-row ag-row-odd ag-row-level-0" role="row" row-index="1" aria-rowindex="3" row-id="1">
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="2" col-id="side">Sell</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="3" col-id="quantity">40</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="4" col-id="price">$130.45</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="5" col-id="value">$5,218.00</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="6" col-id="status">Filled</div>
+                </div>
+                <div class="ag-row ag-row-even ag-row-level-0" role="row" row-index="2" aria-rowindex="4" row-id="2">
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="2" col-id="side">Buy</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="3" col-id="quantity">50</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="4" col-id="price">$42.30</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="5" col-id="value">$2,115.00</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="6" col-id="status">Pending</div>
+                </div>
+                <div class="ag-row ag-row-odd ag-row-level-0" role="row" row-index="3" aria-rowindex="5" row-id="3">
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="2" col-id="side">Buy</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="3" col-id="quantity">15</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="4" col-id="price">$150.20</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="5" col-id="value">$2,253.00</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="6" col-id="status">Cancelled</div>
+                </div>
+                <div class="ag-row ag-row-even ag-row-level-0" role="row" row-index="4" aria-rowindex="6" row-id="4">
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="2" col-id="side">Sell</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="3" col-id="quantity">100</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="4" col-id="price">$135.60</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="5" col-id="value">$13,560.00</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="6" col-id="status">Filled</div>
+                </div>
+                <div class="ag-row ag-row-odd ag-row-level-0 ag-row-last" role="row" row-index="5" aria-rowindex="7" row-id="5">
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="2" col-id="side">Buy</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="3" col-id="quantity">300</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="4" col-id="price">$48.75</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value ag-right-aligned-cell" role="gridcell" aria-colindex="5" col-id="value">$14,625.00</div>
+                  <div class="ag-cell ag-cell-not-inline-editing ag-cell-normal-height ag-cell-value" role="gridcell" aria-colindex="6" col-id="status">Pending</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- The empty state lives here; the toggle fills it in. -->
+            <div class="ag-overlay" role="presentation" id="trades-overlay"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    // ── Shell: user info and sign out (same as the other pages) ──────────────
+    var email = sessionStorage.getItem('user-email');
+    if (email) {
+      document.getElementById('user-email').textContent = email;
+      document.getElementById('user-avatar').textContent = email.charAt(0).toUpperCase();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.removeItem('logged-in');
+      sessionStorage.removeItem('user-email');
+      window.location.href = 'index.html';
+    });
+
+    // ── Accounts: the Status filter hides rows where they stand ──────────────
+    // Nothing is renumbered: a hidden row keeps its aria-rowindex, so the
+    // visible rows can read 2, 3, 8, 9 with gaps in between.
+    var accountsGrid = document.getElementById('accounts-grid');
+    var accountRows = Array.prototype.slice.call(
+      accountsGrid.querySelectorAll('.MuiDataGrid-virtualScrollerRenderZone > [role="row"]')
+    );
+
+    document.getElementById('accounts-status-filter').addEventListener('change', function (event) {
+      var wanted = event.target.value;
+      accountRows.forEach(function (row) {
+        var status = row.querySelector('[data-field="status"]').textContent.trim();
+        row.style.display = (wanted === 'all' || status === wanted) ? '' : 'none';
+      });
+    });
+
+    // The select-all checkbox ticks every RENDERED row, so it agrees with what
+    // the filter is showing.
+    document.getElementById('accounts-select-all').addEventListener('change', function (event) {
+      var checked = event.target.checked;
+      accountRows.forEach(function (row) {
+        if (row.style.display === 'none') return;
+        row.querySelector('[data-field="__check__"] input').checked = checked;
+        row.setAttribute('aria-selected', checked ? 'true' : 'false');
+      });
+    });
+
+    // ── Accounts: Freeze names the account it was pressed in ─────────────────
+    var freezeResult = document.getElementById('freeze-result');
+
+    accountsGrid.addEventListener('click', function (event) {
+      var button = event.target.closest('button.freeze-btn');
+      if (!button) return;
+      var row = button.closest('[role="row"]');
+      var account = row.querySelector('[data-field="account"]').textContent.trim();
+      freezeResult.textContent = 'Freeze requested for ' + account + '.';
+    });
+
+    // ── Trades: the empty state is a div, not a row ──────────────────────────
+    // ag-Grid removes every .ag-row and shows an overlay instead, so there is
+    // no placeholder cell to read — just a message div beside empty containers.
+    var pinnedRows = document.getElementById('trades-pinned-rows');
+    var centerRows = document.getElementById('trades-center-rows');
+    var tradesOverlay = document.getElementById('trades-overlay');
+    var tradesToggle = document.getElementById('trades-empty-toggle');
+    var pinnedMarkup = pinnedRows.innerHTML;
+    var centerMarkup = centerRows.innerHTML;
+    var tradesEmpty = false;
+
+    tradesToggle.addEventListener('click', function () {
+      tradesEmpty = !tradesEmpty;
+      if (tradesEmpty) {
+        pinnedRows.innerHTML = '';
+        centerRows.innerHTML = '';
+        tradesOverlay.innerHTML =
+          '<div class="ag-overlay-panel">' +
+            '<div class="ag-overlay-wrapper ag-overlay-no-rows-wrapper">' +
+              '<div class="ag-overlay-no-rows-center">No Rows To Show</div>' +
+            '</div>' +
+          '</div>';
+        tradesToggle.textContent = 'Show the trades';
+      } else {
+        pinnedRows.innerHTML = pinnedMarkup;
+        centerRows.innerHTML = centerMarkup;
+        tradesOverlay.innerHTML = '';
+        tradesToggle.textContent = 'Show no trades';
+      }
+    });
+  </script>
+</body>
+</html>

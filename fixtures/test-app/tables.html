@@ -408,6 +408,18 @@
               <td class="verdict"><span class="badge badge-v1">v1</span></td>
               <td class="spec">§5.7, §7.3b, §7.4</td>
             </tr>
+            <tr>
+              <th scope="row"><a href="aria-grid.html">aria-grid.html</a></th>
+              <td class="what">Two grids with <strong>no <code>&lt;table&gt;</code> in them at all</strong>. Accounts is a MUI DataGrid walked from the live docs: <code>role="grid"</code> two divs inside the id the author names, a <code>role="none"</code> filler at the start of every row and another at the end, a blank select-all checkbox column at <code>aria-colindex="1"</code>, eight accounts at <code>aria-rowindex</code> 2…9 with two of them owned by Sarah Mitchell, a Status filter that hides rows without renumbering them, and a per-row Freeze button. Trades is ag-Grid with the Symbol column <strong>pinned left</strong>, so every row exists twice — the pinned fragment and the centre fragment share <code>row-index</code>, <code>row-id</code> and <code>aria-rowindex</code>, and only that says they are one trade — plus a Show no trades toggle whose empty state is a bare <code>ag-overlay-no-rows-center</code> div.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span><span class="verdict-note">Read by the ARIA table model</span></td>
+              <td class="spec">§5.8, §7.9</td>
+            </tr>
+            <tr>
+              <th scope="row"><a href="odd-tables.html">odd-tables.html</a></th>
+              <td class="what">Four shapes no structural rule reads. Payees is a table with no <code>&lt;thead&gt;</code> and no <code>&lt;th&gt;</code>, its headings written as <code>&lt;td&gt;&lt;b&gt;</code> in the first body row; Account summary puts the rows table <em>first</em> and a header-only table after it with a Column key paragraph between, so the sibling pairing rule never fires; Accounts as cards is six repeated <code>div.account-card</code> of label/value spans with one card hidden; Payment property sheets is four records each drawn as its own two-column <code>&lt;th scope="row"&gt;</code> table. Each one is a shape refusal, and each is answered by one validated structure question to the model, then cached.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span><span class="verdict-note">Only via the structure question</span></td>
+              <td class="spec">§5.9, §7.10</td>
+            </tr>
           </tbody>
         </table>
       </div>

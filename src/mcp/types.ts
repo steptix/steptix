@@ -177,7 +177,17 @@ export interface McpStepRequest {
   /** `viewport` is the raw `## Config: viewport:` spec, forwarded as a string —
    *  the Sessions API resolves and validates it (stories/per-test-viewport.md
    *  §3/§7), so this side never has to know what `mobile` means. */
-  config?: { baseUrl?: string; timeout?: string; viewport?: string; cdp?: { port: number; tab?: string } };
+  /** `tableStructure` is the raw `## Config: tableStructure:` value — `ask` or
+   *  `strict` (docs/specs/SPEC-structured-table-reads.md §7.10) — forwarded
+   *  the same way and for the same reason: the Sessions API owns the one
+   *  validator, so an MCP run and a Run in TestBench treat a typo alike. */
+  config?: {
+    baseUrl?: string;
+    timeout?: string;
+    viewport?: string;
+    tableStructure?: string;
+    cdp?: { port: number; tab?: string };
+  };
   parameters?: Record<string, string>;
   dataSources?: Record<string, string>;
   skillsDir?: string;

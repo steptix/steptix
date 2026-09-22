@@ -1468,6 +1468,11 @@ async function handleRequest(
       // Telerik RadGrid: three tables in one wrapper, a banded header with a
       // filter row, and row ids that renumber on every page.
       '/radgrid': 'radgrid.html',
+      // Grids with no <table> in them: MUI DataGrid and ag-Grid, where the
+      // structure is carried by role, aria-rowindex and aria-colindex alone.
+      '/aria-grid': 'aria-grid.html',
+      // Four shapes no structural rule reads, for the structure question.
+      '/odd-tables': 'odd-tables.html',
     };
     const mappedFile = friendlyRoutes[pathname];
     if (mappedFile) {

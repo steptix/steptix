@@ -16,12 +16,33 @@
 //
 // The file is ONE expression — an arrow function of (matches, args):
 //   matches — the elements Playwright's locator matched, in DOM order.
-//   args    — { selector, columns, limit, maxRows, rowKey }.
+//   args    — { selector, columns, limit, maxRows, rowKey, mapping,
+//               maskValues, sketchOnly }.
 // It answers
 // { ok: true, records, placeholdersSkipped, dataRowCount, label,
-//   headerFromSeparateTable }
-// or { ok: false, error } and never throws: a throw arrives at the caller as a
-// Playwright evaluation error, which buries the message the author must read.
+//   headerFromSeparateTable, structure, fieldsMissing }
+// or { ok: false, error, shape, sketch } and never throws: a throw arrives at
+// the caller as a Playwright evaluation error, which buries the message the
+// author must read.
+//
+// Three things live here that the tag names alone do not explain:
+//
+//  - §7.9's ARIA table model. A `div[role="grid"]` of `role="row"` /
+//    `role="gridcell"` is a table in everything but tag names. It is read by
+//    the SAME code as a `<table>`: every rule below §7.3's header SEARCH runs
+//    against "row views" a provider builds, so the header grid, the
+//    placeholder and detail rules, the naming, the stamp and the records loop
+//    are one algorithm with two providers rather than two copies that drift.
+//  - §7.10's sketch. When a read fails for a SHAPE reason — nothing with rows
+//    under the region, two things with rows, no header found at all — the
+//    refusal carries a description of what IS there, so the caller can ask the
+//    model to name the parts once. Every other refusal (a header typo, a short
+//    row, a merged cell, too many rows, an ambiguous selector) is the author's
+//    own problem and carries none.
+//  - §7.10's `mapping`, the validated answer to that question, replayed
+//    deterministically: `{ kind: 'table', rows, header }` pins the tables the
+//    search would have looked for, and `{ kind: 'collection', item, fields }`
+//    reads repeated elements that are not a table at all.
 //
 // It also writes ONE thing to the page: `data-aiui-row` on the rows it
 // numbered (§7.4, step 8), so that "row 7 of the Orders table" is a selector a
@@ -34,12 +55,47 @@
     limit: bound,
     maxRows,
     rowKey,
+    // §7.10: the validated structure, when this read is replaying one. Absent
+    // on an ordinary read, which searches for the table itself.
+    mapping,
+    // Where that mapping came from — `model`, `memo` or `cache` — so the one
+    // summary line §7.6 writes can say it. The extractor cannot know: a
+    // mapping the model answered a moment ago and one read back off disk are
+    // the same object by the time they get here, and "structure from the
+    // model" printed over a cached replay is a line that says a model call
+    // happened when none did.
+    structureSource,
+    // §7.6's secret set, for the sketch's cell text ONLY. The sketch is the
+    // one place this extractor quotes page CONTENT back to the caller, and it
+    // goes to a model and to the debug log.
+    maskValues,
+    // Build the sketch and answer with it, reading nothing. What
+    // `sketchTable()` calls for the re-ask path (§7.10's "asked once more").
+    sketchOnly,
   } = args;
 
   // ── page-context helpers ─────────────────────────────────────────────────
   const all = matches;
   /** The attribute this read leaves on the rows it numbered (§7.4, step 8). */
   const ROW_STAMP = 'data-aiui-row';
+  /**
+   * Number `rows` 1..N inside `root`, clearing whatever was there.
+   *
+   * Cleared over every DESCENDANT carrying the stamp, not over a row list: a
+   * nested table inside a detail row is not in `table.rows`, so a stamp an
+   * earlier read of THAT table left behind survived a row-list clear, and
+   * `#outer [data-aiui-row="2"]` then matched the nested row as well as the
+   * real one. The root itself is never stamped and never cleared — it is not
+   * one of its own rows.
+   */
+  const stampRows = (root, rows) => {
+    for (const stamped of items(root.querySelectorAll(`[${ROW_STAMP}]`))) {
+      stamped.removeAttribute(ROW_STAMP);
+    }
+    for (let i = 0; i < rows.length; i++) {
+      rows[i].setAttribute(ROW_STAMP, String(i + 1));
+    }
+  };
   /** `Array.from` over a live DOM collection. */
   const items = (collection) => Array.from(collection);
   const squash = (s) => s.replace(/\s+/g, ' ').trim();
@@ -164,18 +220,333 @@
   };
   /** Does this cell span more than its own square of the grid?
    *
-   *  `rowSpan !== 1`, not `> 1`: `rowspan="0"` is legal HTML for "to the end
+   *  `down !== 1`, not `> 1`: `rowspan="0"` is legal HTML for "to the end
    *  of this row group", Chromium reports `el.rowSpan === 0` for it, and the
    *  rows below are shifted exactly as `rowspan="2"` shifts them. Read with
    *  `> 1` the whole grid came back misaligned and the action SUCCEEDED.
-   *  `colSpan` has no such zero form — the parser clamps `colspan="0"` to 1. */
-  const spanned = (cell) => cell.colSpan > 1 || cell.rowSpan !== 1;
+   *  `colSpan` has no such zero form — the parser clamps `colspan="0"` to 1.
+   *  An ARIA cell's `aria-rowspan="0"` is read the same way (§7.9). */
+  const spanned = (cell) => cell.across > 1 || cell.down !== 1;
   const plural = (n, one, many) => (n === 1 ? one : many);
-  const fail = (error) => ({ ok: false, error });
+  /**
+   * A refusal. `shape` marks the five SHAPE reasons of §7.10 — the ones a
+   * structure question can answer — and only those carry a sketch; the caller
+   * throws a different error class for them. Everything else is the author's
+   * own problem and gets the sentence it has always had.
+   *
+   * The sketch is built HERE rather than in a second evaluation, because a
+   * second round-trip describes a page that has had time to change: the
+   * refusal and the sketch must be two halves of one observation.
+   */
+  const fail = (error) => ({ ok: false, error, shape: false });
+  /** Set once `el` is known — until then there is no region to sketch. */
+  let sketchRegion = null;
+  const failShape = (error) => ({
+    ok: false,
+    error,
+    shape: true,
+    sketch: sketchRegion ? buildSketch(sketchRegion) : null,
+  });
   /** Quote a page-supplied string for a message. `JSON.stringify` rather than
    *  `"…"`, because an aria-label or caption may contain quotes of its own and
    *  `readTable cannot map table "The "Orders" table"` reads as nonsense. */
   const quoted = (s) => JSON.stringify(String(s));
+
+  // ── rows and cells, for BOTH providers (§7.9) ────────────────────────────
+  //
+  // Everything from §7.3b's header grid down to the `data-aiui-row` stamp is
+  // written against these two shapes, so a `<table>` and a `div[role="grid"]`
+  // are read by the same code:
+  //
+  //   cell view — { el, across, down, at, pos }
+  //     `across`/`down` are `colspan`/`rowspan`, with `down === 0` keeping its
+  //     "to the end of this row group" meaning (§4.8). `at` is the ZERO-based
+  //     column the cell declares (`aria-colindex` minus one), or null for "the
+  //     next free column", which is what every `<td>` is and what §7.9 says an
+  //     ARIA cell without `aria-colindex` is. `pos` is the ONE-based position
+  //     a requested column is looked up by — the cell's order in the row for a
+  //     table, its `aria-colindex` for a grid that declares one.
+  //
+  //   row view — { el, els, cells, byPos, width }
+  //     `els` is the row's FRAGMENTS: ag-Grid renders one logical row as two
+  //     `role="row"` elements, one per pinned container, and §7.9 joins them
+  //     by `aria-rowindex`. `el` is the first of them — the one that carries
+  //     the stamp and the one whose document position orders the rows. A
+  //     `<tr>` is always a row of one fragment, so the table path pays
+  //     nothing for the generality.
+  //
+  // `width` is how many COLUMNS the row reaches, which for a `<tr>` is its
+  // cell count (what §4.8's rules have always measured) and for a grid row is
+  // the highest column any of its cells covers.
+
+  /** The roles that make an element a table (§7.9). A `<table>` carrying one
+   *  is still a table — the tag wins (§10) — so the tag is tested too. */
+  const GRID_ROLES = { grid: 1, table: 1, treegrid: 1 };
+  /** The roles that make a row's child a cell. `role="none"` /
+   *  `"presentation"` (MUI's filler) and a child with no role are not here,
+   *  which is how they are skipped. */
+  const CELL_ROLES = { columnheader: 1, rowheader: 1, gridcell: 1, cell: 1 };
+  /**
+   * `role` is a TOKEN LIST, not a word (WAI-ARIA: "an ordered set of
+   * whitespace-separated values, the first one the user agent supports"), and
+   * frameworks write several: `role="row presentation"` on a decorated row,
+   * `role="gridcell selected"` on a cell. Compared as a whole string, a data
+   * row spelled that way was not a row at all — the grid read its remaining
+   * rows and answered successfully with half the table in it, which is the
+   * outcome this action exists to prevent.
+   *
+   * So: an element counts for a role when ANY of its tokens is that role,
+   * folded to lower case (`role="GRID"` is a grid).
+   */
+  const rolesOf = (e) => {
+    const raw = fold(e.getAttribute('role') || '');
+    return raw === '' ? [] : raw.split(' ');
+  };
+  const hasRole = (e, name) => rolesOf(e).indexOf(name) !== -1;
+  /** The first token of `e` that names a CELL role, or `''`. What the layout
+   *  and the sketch read: `role="gridcell selected"` is a gridcell. */
+  const cellRoleOf = (e) => {
+    for (const role of rolesOf(e)) if (CELL_ROLES[role] === 1) return role;
+    return '';
+  };
+  const isGridRole = (e) => rolesOf(e).some((role) => GRID_ROLES[role] === 1);
+  /** An ARIA grid: a role that makes it a table, on something that is not one
+   *  already. `<table role="grid">` reads through the table path (§10). */
+  const isAriaGrid = (e) => e.tagName !== 'TABLE' && isGridRole(e);
+  /**
+   * The nearest element above `node` that is a table — by role, or by being a
+   * `<table>`. What decides whose rows these are when one grid holds another
+   * (§7.9).
+   *
+   * A `<table>` counts whatever role it carries, and that is load-bearing
+   * rather than tidy: Kendo writes `role="row"` on its `<tr>`s and
+   * `role="grid"` on its WRAPPER, so rows that plainly belong to the tables
+   * inside it answered to the wrapper, which then read as an ARIA grid of one
+   * header row and no data — `[]`, successfully, for a grid with five rows in
+   * it. A `<tr>` belongs to its table; nothing above the table can claim it.
+   */
+  const gridHostOf = (node) => {
+    let p = node.parentElement;
+    while (p) {
+      if (p.tagName === 'TABLE' || isGridRole(p)) return p;
+      p = p.parentElement;
+    }
+    return null;
+  };
+  /** A positive integer attribute, or null. `aria-colindex="0"` and
+   *  `aria-colspan="x"` are not counts and are read as absent. */
+  const countAttr = (el2, name) => {
+    const raw = el2.getAttribute(name);
+    if (raw === null) return null;
+    const n = Number(squash(raw));
+    return Number.isFinite(n) ? Math.trunc(n) : null;
+  };
+
+  /** Finish a row view: index its cells by position and measure its width. */
+  const rowView = (el2, els, cells) => {
+    const byPos = new Map();
+    let width = 0;
+    for (const cell of cells) {
+      if (!byPos.has(cell.pos)) byPos.set(cell.pos, cell);
+      const reach = cell.pos + (cell.across > 0 ? cell.across : 1) - 1;
+      if (reach > width) width = reach;
+    }
+    return { el: el2, els, cells, byPos, width };
+  };
+
+  /**
+   * One `<tr>` as a row view — remembered, because §7.3a asks about the same
+   * tables from both sides and the views must be the same objects each time
+   * (`messageRow` and the classification compare them by identity).
+   *
+   * `width` is the CELL COUNT, not the columns the cells cover: that is what
+   * §4.8's placeholder rule, §7.4's short-row refusal and §7.3a's pairing
+   * check have always measured, and a merged data cell is refused rather than
+   * laid out, so the two numbers only differ on rows that are about to be
+   * refused anyway.
+   */
+  const rowViewsByRow = new Map();
+  const tableRowView = (tr) => {
+    let view = rowViewsByRow.get(tr);
+    if (view) return view;
+    const cells = items(tr.cells).map((el2, i) => ({
+      el: el2,
+      across: el2.colSpan > 0 ? el2.colSpan : 1,
+      down: el2.rowSpan,
+      at: null,
+      pos: i + 1,
+    }));
+    view = rowView(tr, [tr], cells);
+    view.width = cells.length;
+    rowViewsByRow.set(tr, view);
+    return view;
+  };
+
+  /**
+   * The `role="row"` elements belonging to grid `g` — its own, never a nested
+   * grid's (§7.9). Scanned over `[role]` rather than `[role="row"]` because
+   * the attribute is a whitespace-separated list that a framework may write
+   * padded or capitalised, and a grid whose rows were missed reads `[]`
+   * successfully, which is the outcome this action exists to prevent.
+   */
+  const ariaRowsOf = (g) =>
+    items(g.querySelectorAll('[role]')).filter(
+      (e) => hasRole(e, 'row') && gridHostOf(e) === g,
+    );
+
+  /**
+   * Is this element an ARIA grid that actually HAS rows of its own?
+   *
+   * The role alone is not enough, and Kendo is why: its wrapper is
+   * `<div class="k-grid" role="grid" aria-label="Dividends">` and everything
+   * inside it is native `<table>` markup, with not one `role="row"` anywhere.
+   * Read as a grid on the strength of the attribute, that wrapper answered
+   * `[]` — a green step that read nothing, which is the outcome §2 exists to
+   * prevent — and the two real tables under it were never looked at. A role
+   * with no rows under it is a WRAPPER (§7.2), whatever it calls itself.
+   *
+   * Remembered: `nestedUnder` asks it of every ancestor of every candidate,
+   * and each answer is a `querySelectorAll` over everything below.
+   */
+  const ariaRowOwners = new Map();
+  const ownsAriaRows = (e) => {
+    let owns = ariaRowOwners.get(e);
+    if (owns === undefined) {
+      owns = isAriaGrid(e) && ariaRowsOf(e).length > 0;
+      ariaRowOwners.set(e, owns);
+    }
+    return owns;
+  };
+
+  /**
+   * One grid's rows as views, fragments joined (§7.9).
+   *
+   * ag-Grid renders a pinned column's cells in a container of their own, so
+   * ONE logical row is two `role="row"` elements sharing `aria-rowindex` (and
+   * `row-index`, and `row-id`). Read as two rows, a pinned grid produced two
+   * half-records per row — the misalignment §4.5 exists to prevent, with
+   * twice as many rows as the grid has. Joined, the cells merge by position:
+   * the pinned fragment's `aria-colindex="1"` and the centre fragment's 2, 3, 4
+   * are one row of four cells.
+   *
+   * A row with neither attribute is its own row — MUI writes only
+   * `aria-rowindex`, and a grid that writes nothing at all has no fragments to
+   * join.
+   */
+  const ariaRowViews = (g) => {
+    const groups = [];
+    const byKey = new Map();
+    for (const el2 of ariaRowsOf(g)) {
+      // `aria-rowindex` first, `row-index` only when it is absent (§7.9), and
+      // the two are kept in separate key spaces: a grid that writes
+      // `row-index` on some rows and `aria-rowindex` on others must not merge
+      // its row 2 with its row 2.
+      const aria = squash(el2.getAttribute('aria-rowindex') || '');
+      const own = squash(el2.getAttribute('row-index') || '');
+      const key = aria !== '' ? `a:${aria}` : (own !== '' ? `r:${own}` : null);
+      let group = key !== null ? byKey.get(key) : undefined;
+      if (!group) {
+        group = { els: [] };
+        groups.push(group);
+        if (key !== null) byKey.set(key, group);
+      }
+      group.els.push(el2);
+    }
+    return groups.map((group) => {
+      const cells = [];
+      const taken = new Set();
+      // The running column, carried ACROSS fragments: a cell with no
+      // `aria-colindex` takes the next one (§7.9), and the pinned fragment's
+      // cells come first in document order.
+      let next = 1;
+      for (const el2 of group.els) {
+        for (const child of items(el2.children)) {
+          if (cellRoleOf(child) === '') continue;
+          const declared = countAttr(child, 'aria-colindex');
+          const colspan = countAttr(child, 'aria-colspan');
+          const rowspan = countAttr(child, 'aria-rowspan');
+          const across = colspan !== null && colspan > 0 ? colspan : 1;
+          const pos = declared !== null && declared > 0 ? declared : next;
+          next = pos + across;
+          // Two fragments claiming one position is a grid contradicting
+          // itself; the first fragment's cell stands, because dropping the row
+          // or guessing between them are both worse than reading what the row
+          // says first.
+          if (taken.has(pos)) continue;
+          taken.add(pos);
+          cells.push({
+            el: child,
+            across,
+            // `aria-rowspan="0"` keeps `rowspan="0"`'s meaning (§4.8).
+            down: rowspan !== null ? rowspan : 1,
+            at: declared !== null && declared > 0 ? declared - 1 : null,
+            pos,
+          });
+        }
+      }
+      cells.sort((a, b) => a.pos - b.pos);
+      const view = rowView(group.els[0], group.els, cells);
+      view.hasHeadings = cells.some((c) => cellRoleOf(c.el) === 'columnheader');
+      view.hasData = cells.some((c) => {
+        const role = cellRoleOf(c.el);
+        return role === 'gridcell' || role === 'cell';
+      });
+      return view;
+    });
+  };
+
+  /**
+   * §7.9's split of one grid's rows: the header rows that form the header grid
+   * (§7.3b) and the rows left over, which §4.8 and §7.4 classify exactly as
+   * they classify a `<tbody>`'s.
+   *
+   * A header row is one holding at least one `columnheader` and no
+   * `gridcell`/`cell` — several of them in a row are a banded header. One
+   * AFTER the data is the ARIA spelling of `<tfoot>` and is excluded the same
+   * way (§7.4), rather than becoming a record of heading text.
+   *
+   * A row holding only `rowheader`s is neither, and stays in the body: a row
+   * heading is that row's own cell at its logical position (§10), so the row
+   * is data with one cell in it.
+   */
+  /**
+   * The section each of `views` belongs to, in one pass — the classification
+   * `ariaSplit` splits on AND the word the sketch prints, so the two can never
+   * disagree about which row is the header.
+   *
+   *   `header` — a header row, one of the header grid's (§7.3b).
+   *   `row`    — a body row, which §4.8 and §7.4 then classify.
+   *   `tfoot`  — a heading row AFTER the data. §7.9 calls it the ARIA spelling
+   *              of `<tfoot>` and excludes it the same way, so it is given the
+   *              table's own word for it: a model naming it as the header then
+   *              gets the footer refusal rather than a body-row number that
+   *              would splice a real row out of the data.
+   */
+  const ariaSections = (views) => {
+    const out = [];
+    let seenData = false;
+    for (const view of views) {
+      if (view.hasHeadings && !view.hasData) {
+        out.push(seenData ? 'tfoot' : 'header');
+        continue;
+      }
+      if (view.hasData) seenData = true;
+      out.push('row');
+    }
+    return out;
+  };
+
+  const ariaSplit = (g) => {
+    const views = ariaRowViews(g);
+    const sections = ariaSections(views);
+    const headerRows = [];
+    const bodyRows = [];
+    for (let i = 0; i < views.length; i++) {
+      if (sections[i] === 'header') headerRows.push(views[i]);
+      else if (sections[i] === 'row') bodyRows.push(views[i]);
+    }
+    return { headerRows, bodyRows };
+  };
 
   // ── structure, asked of ANY table (§7.2, §7.3, §7.3a) ────────────────────
   // A split grid means the same three questions — where are the body rows,
@@ -222,14 +593,14 @@
    * against the table's real width.
    */
   const messageRow = (row) => {
-    const cells = items(row.cells);
+    const cells = row.cells;
     if (cells.length === 0) return true;
-    if (cells.length === 1) return cells[0].colSpan > 1;
-    const wide = cells.filter((c) => c.colSpan > 1);
+    if (cells.length === 1) return cells[0].across > 1;
+    const wide = cells.filter((c) => c.across > 1);
     return (
       wide.length === 1
-      && rendered(wide[0])
-      && cells.every((c) => c === wide[0] || !rendered(c))
+      && rendered(wide[0].el)
+      && cells.every((c) => c === wide[0] || !rendered(c.el))
     );
   };
 
@@ -267,16 +638,22 @@
     let width = 0;
     for (let r = 0; r < headerRows.length; r++) {
       let c = 0;
-      for (const el of items(headerRows[r].cells)) {
-        while (taken[r].has(c)) c++;
-        const across = el.colSpan > 0 ? el.colSpan : 1;
+      for (const cell of headerRows[r].cells) {
+        // A cell that DECLARES its column takes it, occupied or not: that is
+        // what `aria-colindex` is for (§7.9), and a grid that repeats a column
+        // across two fragments is saying they are the same column, not the
+        // next free one. Everything else — every `<td>`, and an ARIA cell with
+        // no `aria-colindex` — takes the first column no cell above it holds.
+        if (cell.at !== null) c = cell.at;
+        else while (taken[r].has(c)) c++;
+        const across = cell.across > 0 ? cell.across : 1;
         const down =
-          el.rowSpan === 0 ? headerRows.length - r : (el.rowSpan > 0 ? el.rowSpan : 1);
+          cell.down === 0 ? headerRows.length - r : (cell.down > 0 ? cell.down : 1);
         const lastRow = Math.min(headerRows.length - 1, r + down - 1);
         for (let rr = r; rr <= lastRow; rr++) {
           for (let cc = c; cc < c + across; cc++) taken[rr].add(cc);
         }
-        cells.push({ text: headerTextOf(el), first: c, last: c + across - 1, row: r });
+        cells.push({ text: headerTextOf(cell.el), first: c, last: c + across - 1, row: r });
         if (c + across > width) width = c + across;
         c += across;
       }
@@ -488,9 +865,14 @@
    * every column of it no name at all.
    */
   const classify = (t) => {
-    const rows = bodyRowsOf(t);
-    const head = findHeader(t, rows);
-    const laid = head.rows ? headerGridOf(head.rows) : null;
+    // The header SEARCH is the one part of this that a `<table>` does its own
+    // way (§7.3: a `<thead>`, or the first body row that carries a `<th>`);
+    // §7.9's provider answers it from `role="columnheader"` instead. From the
+    // header GRID down, both hand the same row views to the same code.
+    const trs = bodyRowsOf(t);
+    const head = findHeader(t, trs);
+    const rows = trs.map(tableRowView);
+    const laid = head.rows ? headerGridOf(head.rows.map(tableRowView)) : null;
     const named = laid !== null && laid.names.some((name) => name !== '');
     const grid = laid !== null && (named || head.index >= 0) ? laid : null;
     const index = grid ? head.index : -1;
@@ -851,6 +1233,336 @@
     return { partner: null, frozen: false };
   };
 
+  // ── the sketch (§7.10) ───────────────────────────────────────────────────
+  // What the region HOLDS, described rather than read, so that a shape refusal
+  // can be turned into one question to the model instead of a dead end. It is
+  // built in this evaluation and not a second one: a sketch fetched after the
+  // refusal describes a page that has had time to change, and the model would
+  // be answering about markup the refusal never saw.
+  //
+  // Everything in it is DATA FROM THE PAGE. It reaches a model as such, never
+  // as instructions, and every piece of cell text goes through the caller's
+  // secret set first (§7.6) — the sketch is the one place this file quotes
+  // page content back out, and it lands in a model call and in the debug log.
+
+  /** The whole sketch, in bytes of JSON. A few kilobytes is what §7.10 allows
+   *  — enough to describe a grid, far short of a page of markup. */
+  const SKETCH_BYTES = 6144;
+  /** `…` rather than a hard cut, so a truncated value is visibly truncated. */
+  const cut = (s, n) => (n <= 0 ? '' : (s.length > n ? `${s.slice(0, n - 1)}…` : s));
+
+  /**
+   * §7.6's masking, over one string of page text.
+   *
+   * LONGEST first, so a secret that contains another secret is replaced whole
+   * rather than left with `***` embedded in the rest of it. Applied BEFORE the
+   * length cut, because a cut applied first can slice a secret in half and
+   * leave the first half in the sketch.
+   */
+  const masked = (s) => {
+    if (!maskValues || maskValues.length === 0) return s;
+    const values = maskValues
+      .filter((v) => typeof v === 'string' && v !== '')
+      .sort((a, b) => b.length - a.length);
+    let out = s;
+    for (const value of values) out = out.split(value).join('***');
+    return out;
+  };
+
+  /** `#id`, escaped, or null. The escape matters: a grid widget's id is
+   *  routinely a GUID, and `#14277be2-grid` starts with a number, so it is not
+   *  a selector at all (see `wrapperSelector`). */
+  const cssId = (e) => {
+    if (!e.id) return null;
+    const view = e.ownerDocument.defaultView;
+    const css = view ? view.CSS : null;
+    return css && typeof css.escape === 'function'
+      ? `#${css.escape(e.id)}`
+      : `[id=${cssString(e.id)}]`;
+  };
+
+  /**
+   * A selector for `e` that `root.querySelector` resolves back to it — `#id`
+   * when the id is unique under the root, otherwise a `:scope > …` path of
+   * `nth-of-type` steps, which needs no class names and survives a page whose
+   * classes are generated (MUI's `css-1hburdq` changes with the build).
+   *
+   * `:scope` alone is the ROOT itself: a mapping that names the region — the
+   * §5.9 table whose headings are its own first body row — has nothing else to
+   * call it, and `querySelector` never matches its own root.
+   *
+   * NEVER null. Both dead ends below — an element that is not under the root
+   * at all, and one whose id cannot be spelled as a selector — fall back to
+   * `:scope`, which resolves to something and refuses honestly ("matches no
+   * table or ARIA grid", or a width that does not line up). A `null` here
+   * would reach the sketch as `"selector": null`, and the model would answer
+   * with it: `JSON.stringify(null)` is the string `"null"`, which
+   * `querySelectorAll` throws on, so an unreachable element turned into a
+   * refusal about CSS syntax instead of about the page.
+   */
+  const pathFrom = (root, e) => {
+    if (e === root) return ':scope';
+    const byId = cssId(e);
+    if (byId) {
+      try {
+        if (root.querySelector(byId) === e) return byId;
+      } catch (err) { /* an id no selector can spell: fall through to the path */ }
+    }
+    const parts = [];
+    let node = e;
+    while (node && node !== root) {
+      const parent = node.parentElement;
+      if (!parent) return byId || ':scope';
+      const sames = items(parent.children).filter((c) => c.tagName === node.tagName);
+      const tag = node.tagName.toLowerCase();
+      parts.unshift(sames.length > 1 ? `${tag}:nth-of-type(${sames.indexOf(node) + 1})` : tag);
+      node = parent;
+    }
+    if (node !== root) return byId || ':scope';
+    return `:scope > ${parts.join(' > ')}`;
+  };
+
+  /** Is `e` inside a table or an ARIA grid that is itself under `root`? A
+   *  table in a cell of another belongs to that table, not to the region
+   *  (§7.2), and the same is true of a grid inside a gridcell. `root` itself
+   *  counts, which is what keeps a `<table>` region's own nested tables out of
+   *  its candidate list. */
+  const nestedUnder = (root, e) => {
+    let p = e.parentElement;
+    while (p && root.contains(p)) {
+      if (p.tagName === 'TABLE' || ownsAriaRows(p)) return true;
+      p = p.parentElement;
+    }
+    return false;
+  };
+
+  /**
+   * The tables and ARIA grids of a region, in document order — the things a
+   * structure answer can name (§7.10).
+   *
+   * A region that is ITSELF a table or a grid is the one candidate: what is
+   * inside it belongs to it (§7.2's nested-table rule), and a mapping naming
+   * one of its own cells' tables would be reading a table out of a cell.
+   */
+  const candidatesOf = (root) => {
+    if (root.tagName === 'TABLE') return [{ el: root, kind: 'table' }];
+    if (ownsAriaRows(root)) return [{ el: root, kind: 'grid' }];
+    const found = [];
+    for (const e of items(root.querySelectorAll('table, [role]'))) {
+      if (nestedUnder(root, e)) continue;
+      if (e.tagName === 'TABLE') found.push({ el: e, kind: 'table' });
+      else if (ownsAriaRows(e)) found.push({ el: e, kind: 'grid' });
+    }
+    return found;
+  };
+
+  /**
+   * The element a sketch's selectors are relative to, and the one a `mapping`
+   * is resolved against.
+   *
+   * The matched element, except when it is a `<table>`: a table's partner is
+   * beside it, not inside it (§5.9's header table after the rows), so the
+   * sketch is taken from the nearest ancestor below `<body>` that holds
+   * something else as well. Below `<body>` for §7.3a's reason — the body
+   * element is the page, not a grid container. With no such ancestor the table
+   * is its own root and is the one candidate, named `:scope`.
+   */
+  const sketchRootOf = (e) => {
+    if (e.tagName !== 'TABLE') return e;
+    let anc = e.parentElement;
+    while (anc && anc.tagName !== 'BODY') {
+      if (candidatesOf(anc).length > 1) return anc;
+      anc = anc.parentElement;
+    }
+    return e;
+  };
+
+  /** The accessible name of anything, for the sketch and for the log. */
+  const nameOf = (e) =>
+    squash(e.getAttribute('aria-label') || '')
+    || (e.tagName === 'TABLE' && e.caption ? squash(e.caption.textContent || '') : '')
+    || labelledByText(e)
+    || e.id
+    || '';
+
+  /** The rows of one candidate as views, in document order, headings and all
+   *  — the sketch describes what is there, including the `<thead>` and
+   *  `<tfoot>` rows a read would never return. */
+  const sketchRowsOf = (cand) => {
+    if (cand.kind === 'grid') return ariaRowViews(cand.el);
+    return items(cand.el.rows)
+      .filter((tr) => tr.closest('table') === cand.el)
+      .map(tableRowView);
+  };
+
+  /**
+   * The section words the sketch prints for one candidate's rows, in order.
+   *
+   * This is what turns a model's "row 2 of T1" into a `header` mapping: a
+   * heading row needs no number (the extractor finds the header grid of the
+   * element it was handed), a body row is counted among the BODY rows alone,
+   * and a footer row is refused. So the two shapes have to be TELLABLE APART
+   * here or the arithmetic is done on the wrong list — an ARIA grid whose
+   * every row said `row` had its blank `columnheader` row counted as body row
+   * 1, and "row 2" then read the row of real headings as data.
+   *
+   *   `<tr>`     — `thead` / `tbody` / `tfoot`, from the section it sits in.
+   *   ARIA row   — `header` / `row` / `tfoot`, from {@link ariaSections}.
+   */
+  const sectionsOf = (views, kind) => {
+    if (kind === 'grid') return ariaSections(views);
+    return views.map((view) => {
+      const parent = view.el.parentElement;
+      const tag = parent ? parent.tagName : '';
+      if (tag === 'THEAD') return 'thead';
+      if (tag === 'TFOOT') return 'tfoot';
+      return 'tbody';
+    });
+  };
+
+  /** `th×8`, `td×1+th×2`, `columnheader×3` — the composition of one row, in
+   *  first-appearance order, which is how a `<td>`-headed row (§5.9.1) is
+   *  told apart from a real one without quoting the markup. */
+  const tagsOf = (view, kind) => {
+    const order = [];
+    const counts = new Map();
+    for (const cell of view.cells) {
+      const name = kind === 'grid' ? cellRoleOf(cell.el) : cell.el.tagName.toLowerCase();
+      if (!counts.has(name)) order.push(name);
+      counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    return order.map((name) => `${name}×${counts.get(name)}`).join('+');
+  };
+
+  /** `colspan 2,3,3; rowspan 2`, or "" — the spans alone, which is what
+   *  decides whether a header is banded and whether a row is a message. */
+  const spansOf = (view) => {
+    const across = view.cells.filter((c) => c.across > 1).map((c) => c.across);
+    const down = view.cells.filter((c) => c.down !== 1).map((c) => c.down);
+    const parts = [];
+    if (across.length > 0) parts.push(`colspan ${across.join(',')}`);
+    if (down.length > 0) parts.push(`rowspan ${down.join(',')}`);
+    return parts.join('; ');
+  };
+
+  /** One candidate at one budget. */
+  const renderCandidate = (root, cand, index, budget) => {
+    const id = `T${index + 1}`;
+    const rows = sketchRowsOf(cand);
+    let headerRowCount = 0;
+    let dataRowCount = 0;
+    if (cand.kind === 'grid') {
+      const split = ariaSplit(cand.el);
+      headerRowCount = split.headerRows.length;
+      dataRowCount = split.bodyRows.filter((v) => !messageRow(v)).length;
+    } else {
+      const info = classified(cand.el);
+      const thead = cand.el.tHead;
+      headerRowCount = thead && thead.parentElement === cand.el
+        ? items(thead.rows).length
+        : (info.index >= 0 ? 1 : 0);
+      dataRowCount = info.data.length;
+    }
+    const sections = sectionsOf(rows, cand.kind);
+    const shown = rows.slice(0, budget.rows).map((view, i) => ({
+      id: `${id}.r${i + 1}`,
+      section: sections[i],
+      cells: view.cells.length,
+      tags: tagsOf(view, cand.kind),
+      spans: spansOf(view),
+      rendered: view.els.some(rendered),
+      text: view.cells
+        .slice(0, budget.cells)
+        .map((cell) => cut(masked(cellTextOf(cell.el)), budget.text)),
+    }));
+    const out = {
+      id,
+      // NOT masked, unlike everything else here: this string is machinery, not
+      // description. The caller looks the model's `"rows": "T2"` up in this
+      // list and hands the selector back as the mapping, so a `#***` would be
+      // a mapping that resolves to nothing. A selector holding a secret is a
+      // page whose ids are secrets; the label and the cell text beside it are
+      // where the values actually live.
+      selector: pathFrom(root, cand.el),
+      kind: cand.kind,
+      label: masked(nameOf(cand.el)),
+      headerRowCount,
+      dataRowCount,
+      rows: shown,
+    };
+    if (rows.length > shown.length) out.moreRows = rows.length - shown.length;
+    return out;
+  };
+
+  /**
+   * The sketch of one region, shrunk until it fits (§7.10's "capped at a few
+   * kilobytes"). Text goes first, then rows, then candidates: the SHAPE of the
+   * region is what the question is about, and a page with forty tables in it
+   * still has to describe all of them before it describes any of their
+   * contents.
+   *
+   * The first budget's EIGHT rows is the number the question actually needs,
+   * not a round one. The header is in the first few rows of a candidate — a
+   * band row, a row of names, a filter row is the widest real header measured
+   * (RadGrid, §5.7) — and everything below that is data whose shape repeats,
+   * so the model learns nothing from row nine that row four did not tell it.
+   * Eight leaves room for a three-row banded header and still shows several
+   * data rows under it, which is what an answer has to tell apart; at the same
+   * time it is what keeps a 500-row grid inside the byte cap at the FIRST
+   * budget, so the common case is never described at the shrunken one.
+   */
+  const buildSketch = (region) => {
+    const root = sketchRootOf(region);
+    const cands = candidatesOf(root);
+    const budgets = [
+      { rows: 8, cells: 6, text: 40, cands: 12 },
+      { rows: 6, cells: 4, text: 28, cands: 12 },
+      { rows: 4, cells: 3, text: 20, cands: 8 },
+      { rows: 2, cells: 2, text: 14, cands: 6 },
+      { rows: 1, cells: 0, text: 0, cands: 4 },
+    ];
+    let out = null;
+    for (let b = 0; b < budgets.length; b++) {
+      const budget = budgets[b];
+      const kept = cands.slice(0, budget.cands);
+      out = {
+        region: {
+          // Masked like every other string in here, and for the same reason:
+          // a selector is as often page-derived as a cell is
+          // (`[data-token="…"]`, `#user-hunter2`), and this object is rendered
+          // whole into a model call and the debug log (§7.6).
+          selector: masked(sel),
+          tag: region.tagName.toLowerCase(),
+          id: masked(region.id || ''),
+          label: masked(nameOf(region)),
+        },
+        candidates: kept.map((cand, i) => renderCandidate(root, cand, i, budget)),
+      };
+      if (cands.length > kept.length) out.moreCandidates = cands.length - kept.length;
+      if (b > 0) out.truncated = true;
+      let size = SKETCH_BYTES + 1;
+      try {
+        size = JSON.stringify(out).length;
+      } catch (err) { /* nothing here is circular; a throw would be the page's */ }
+      if (size <= SKETCH_BYTES) return out;
+    }
+    // Even the smallest form is over budget — a page of hundreds of tables.
+    // Answering with it beats answering with nothing: the caller caps what it
+    // sends, and a question with a long sketch is still a question.
+    return out;
+  };
+
+  /** The `T<n>` a resolved element has in its own region's sketch, for the log
+   *  line (§7.6: `rows in T2, header row 2 of T1`), or the selector when it is
+   *  not one of them — the caller's summary should name what the model named. */
+  const candidateIdOf = (root, e) => {
+    const cands = candidatesOf(root);
+    for (let i = 0; i < cands.length; i++) {
+      if (cands[i].el === e) return `T${i + 1}`;
+    }
+    return null;
+  };
+
   // ── 1. table selection (§7.2) ────────────────────────────────────────────
   const visible = all.filter(rendered);
   if (visible.length === 0) {
@@ -870,28 +1582,322 @@
     );
   }
   const el = visible[0];
+  // The region every §7.10 answer is about: the element the author's selector
+  // matched, which is what a sketch describes and what a `mapping`'s selectors
+  // are resolved against.
+  sketchRegion = el;
+  if (sketchOnly) {
+    // `sketchTable()`'s call: describe the region and read nothing. Not an
+    // `ok: true`, because nothing was read — the caller reads `.sketch`.
+    return {
+      ok: false,
+      error: `readTable described "${sel}" without reading it`,
+      shape: true,
+      sketch: buildSketch(el),
+    };
+  }
 
+  // ── the validated structure, replayed (§7.10) ────────────────────────────
+  //
+  // A `mapping` is an answer that has already been through the model ONCE and
+  // is now page data like any other: every selector in it is resolved against
+  // the page and every count is checked before a single cell is read. It
+  // names the parts the search would otherwise have looked for, so the rules
+  // it replaces — §7.2's "which table", §7.3's header search, §7.3a's pairing
+  // — are skipped, and everything else (§7.3b's layout, §4.8, §7.4, `_row`,
+  // the stamp) runs exactly as it does on an ordinary read.
+  //
+  // Its selectors are relative to the MAPPING ROOT, which is the region — the
+  // element the author's selector matched — except when the region is a
+  // `<table>`, where it is the same ancestor the sketch's candidates were
+  // listed from, since a table's partner sits beside it and `querySelector`
+  // cannot reach out of its own root. `:scope` is that root itself, which is
+  // how a table whose headings are its own first body row (§5.9.1) names
+  // itself. Root and region are not the same fence: see `mayName` for what a
+  // mapping is allowed to READ once the root has been widened.
+  //
+  // Worked out LAZILY, and only on a mapped read: for a `<table>` region the
+  // walk asks every ancestor up to `<body>` what tables and grids it holds,
+  // and a page of several hundred tables pays for that walk on every
+  // ordinary read that never needed it (§7.3a's beside search measured 1.3s
+  // on exactly such a page before it was made to walk once).
+  let mappingRootCache = null;
+  const rootForMapping = () => {
+    if (mappingRootCache === null) mappingRootCache = sketchRootOf(el);
+    return mappingRootCache;
+  };
+  /** What the refusals call the region. The model was asked about THIS, so a
+   *  sentence about its answer names it and not the table it chose. */
+  const regionLabel = nameOf(el) || sel;
+  const badStructure = (why) =>
+    fail(`readTable cannot use the structure given for ${quoted(regionLabel)}: ${why}`);
+  /** `root.querySelectorAll`, with `:scope` meaning the root and a selector
+   *  the browser rejects answered as a refusal rather than a thrown error —
+   *  the string came from a model and may be anything at all. */
+  const lookup = (spelled) => {
+    if (spelled === ':scope') return [rootForMapping()];
+    try {
+      return items(rootForMapping().querySelectorAll(spelled));
+    } catch (err) {
+      return null;
+    }
+  };
+  /**
+   * May a `table` mapping name this element (§7.10)?
+   *
+   * The mapping root is deliberately WIDER than the region — a `<table>`
+   * region resolves its selectors against the ancestor its sketch was taken
+   * from, because §5.9.2's header table sits beside the rows and
+   * `querySelector` cannot reach out of its own root. Widening the root
+   * widened what a mapping can READ, and that is a different thing: measured,
+   * `{ rows: "#payroll" }` under `selector: "#orders"` read the payroll table
+   * and reported it as the orders table, with the author's selector in the log
+   * line and somebody else's salaries in the records. Nothing about the answer
+   * looked wrong.
+   *
+   * So the two halves get different reach:
+   *
+   *   ROWS — the region itself or something inside it. The author chose that
+   *     element and the VALUES come out of it.
+   *   HEADER — that, or one of the candidates this region's sketch listed,
+   *     which is how §5.9.2 and §7.3a's `aria-owns` partner are named. A
+   *     header supplies only NAMES, and the width and name checks below have
+   *     to agree with them before a cell is read.
+   */
+  const insideRegion = (target) => target === el || el.contains(target);
+  const listedForRegion = (target) =>
+    candidatesOf(rootForMapping()).some((cand) => cand.el === target);
+  const mayName = (target, what) =>
+    insideRegion(target) || (what === 'header' && listedForRegion(target));
+
+  /** One table or ARIA grid the mapping names, or the refusal that says why
+   *  not. Only a table or a grid can be one: a `<div>` the model liked the
+   *  look of is a structure answer that would read nothing. */
+  const resolveTarget = (raw, what) => {
+    const spelled = typeof raw === 'string' ? squash(raw) : '';
+    if (spelled === '') return { error: badStructure(`no ${what} selector was given`) };
+    const found = lookup(spelled);
+    if (found === null) {
+      return { error: badStructure(`the ${what} selector "${spelled}" is not a CSS selector`) };
+    }
+    const targets = found.filter((e) => e.tagName === 'TABLE' || ownsAriaRows(e));
+    if (targets.length === 0) {
+      return {
+        error: badStructure(
+          `the ${what} selector "${spelled}" matches no table or ARIA grid under "${sel}"`,
+        ),
+      };
+    }
+    if (targets.length > 1) {
+      return {
+        error: badStructure(
+          `the ${what} selector "${spelled}" matches ${targets.length} tables or ARIA grids under `
+          + `"${sel}" — it must match exactly one`,
+        ),
+      };
+    }
+    const target = targets[0];
+    if (!mayName(target, what)) {
+      return {
+        error: badStructure(
+          `the ${what} selector "${spelled}" is not the selected element nor one of the tables `
+          + `beside it`,
+        ),
+      };
+    }
+    // Named as the SKETCH named it (`T2`) with the selector beside it: the
+    // model's answer says T2 and the log line says T2 (§7.6), but an author
+    // reading a refusal has never seen the sketch and needs the selector.
+    const id = candidateIdOf(rootForMapping(), target);
+    return {
+      el: target,
+      kind: target.tagName === 'TABLE' ? 'table' : 'grid',
+      selector: spelled,
+      name: id ? `${id} ("${spelled}")` : `"${spelled}"`,
+    };
+  };
+
+  /** §7.6's parenthetical, when a structure answer produced this read. */
+  let structure = null;
+
+  if (mapping && mapping.kind === 'collection') {
+    // §7.10's other answer: the region holds no rows and no cells at all —
+    // repeated cards, or one small key/value table per record (§5.9.3, §5.9.4)
+    // — so there is no table to read and the record is assembled from one
+    // field selector per requested column. Everything the author can observe
+    // is the same as a table read: `_row` first, hidden items excluded, the
+    // §7.4 rendered-text rule, the `data-aiui-row` stamp.
+    const itemSel = typeof mapping.item === 'string' ? squash(mapping.item) : '';
+    if (itemSel === '') return badStructure('no item selector was given');
+    const found = lookup(itemSel);
+    if (found === null) {
+      return badStructure(`the item selector "${itemSel}" is not a CSS selector`);
+    }
+    if (found.length === 0) {
+      return badStructure(`the item selector "${itemSel}" matches nothing under "${sel}"`);
+    }
+    // The same fence the `rows` half gets, for the same measured reason: the
+    // mapping root is wider than the region, so `".card"` written against a
+    // sibling box would collect records the author never selected and report
+    // them under the author's selector.
+    const outside = found.filter((e) => !insideRegion(e));
+    if (outside.length > 0) {
+      return badStructure(
+        `the item selector "${itemSel}" matches ${outside.length} `
+        + `${plural(outside.length, 'element', 'elements')} outside "${sel}" — every item must `
+        + `be inside the selected element`,
+      );
+    }
+    if (found.length > maxRows) {
+      return badStructure(
+        `the item selector "${itemSel}" matches ${found.length} elements under "${sel}" — the `
+        + `maximum is ${maxRows}`,
+      );
+    }
+    // An item inside another item is a selector that matched a container AND
+    // its contents, so every record would be read twice, once whole and once
+    // in pieces. Refused rather than de-duplicated: which of the two the
+    // author meant is exactly the guess this action does not make.
+    const nested = found.filter((e) => found.some((other) => other !== e && other.contains(e)));
+    if (nested.length > 0) {
+      return badStructure(
+        `the item selector "${itemSel}" matches ${nested.length} `
+        + `${plural(nested.length, 'element', 'elements')} inside another match — an item must not `
+        + `contain another item`,
+      );
+    }
+    // A field is keyed by the column's KEY, not by its header or its position:
+    // a collection has no headers to name and no columns to count, so the name
+    // the author gave the value is the only thing both sides can agree on.
+    const fieldsFor = mapping.fields && typeof mapping.fields === 'object' ? mapping.fields : {};
+    const fieldSelectors = new Map();
+    for (const col of wanted) {
+      const raw = fieldsFor[col.key];
+      const spelled = typeof raw === 'string' ? squash(raw) : '';
+      if (spelled === '') return badStructure(`no field was given for the "${col.key}" column`);
+      fieldSelectors.set(col.key, spelled);
+    }
+    const shownItems = found.filter(rendered);
+    const chosenItems = bound === null ? shownItems : shownItems.slice(0, bound);
+    /** How many items a field was ABSENT from — §7.10's "counted in the log
+     *  line", which is the only signal that a column read `""` because the
+     *  card did not have it rather than because it was empty. */
+    const fieldsMissing = {};
+    const fieldsFound = new Map();
+    const collected = [];
+    for (let i = 0; i < chosenItems.length; i++) {
+      const item = chosenItems[i];
+      const record = {};
+      record[rowKey] = String(i + 1);
+      for (const col of wanted) {
+        const spelled = fieldSelectors.get(col.key);
+        let matched;
+        try {
+          matched = items(item.querySelectorAll(spelled));
+        } catch (err) {
+          return badStructure(`the field "${col.key}" ("${spelled}") is not a CSS selector`);
+        }
+        if (matched.length > 1) {
+          // Two elements for one value is the collection's version of §7.4's
+          // misalignment: whichever was picked, half the records could take
+          // the other one.
+          return badStructure(
+            `the field "${col.key}" ("${spelled}") matches ${matched.length} elements in item `
+            + `${i + 1} — it must match at most one`,
+          );
+        }
+        if (matched.length === 0) {
+          record[col.key] = '';
+          fieldsMissing[col.key] = (fieldsMissing[col.key] || 0) + 1;
+          continue;
+        }
+        fieldsFound.set(col.key, (fieldsFound.get(col.key) || 0) + 1);
+        record[col.key] = cellTextOf(matched[0]);
+      }
+      collected.push(record);
+    }
+    for (const col of wanted) {
+      // Absent from EVERY item is a wrong selector, not an empty value: a
+      // column of nothing but `""` is a convincingly wrong answer, which is
+      // the one outcome this action exists to prevent.
+      if (!fieldsFound.has(col.key)) {
+        return badStructure(
+          `the field "${col.key}" ("${fieldSelectors.get(col.key)}") matches nothing in any of the `
+          + `${chosenItems.length} ${plural(chosenItems.length, 'item', 'items')}`,
+        );
+      }
+    }
+    const missingNotes = Object.keys(fieldsMissing).map(
+      (key) => `${fieldsMissing[key]} ${plural(fieldsMissing[key], 'item', 'items')} missing ${key}`,
+    );
+    stampRows(rootForMapping(), chosenItems);
+    return {
+      ok: true,
+      records: collected,
+      // Nothing here is a placeholder: an item either rendered and was read or
+      // was not there at all.
+      placeholdersSkipped: 0,
+      dataRowCount: shownItems.length,
+      label: regionLabel,
+      headerFromSeparateTable: false,
+      structure: {
+        kind: 'collection',
+        source: structureSource || 'model',
+        summary:
+          `${shownItems.length} ${plural(shownItems.length, 'item', 'items')} by "${itemSel}"`
+          + (missingNotes.length > 0 ? `; ${missingNotes.join('; ')}` : ''),
+      },
+      ...(missingNotes.length > 0 && { fieldsMissing }),
+    };
+  }
+
+  /** The two halves a `{ kind: 'table' }` mapping pins (§7.10). */
+  let mappedRows = null;
+  let mappedHeader = null;
+  if (mapping && mapping.kind === 'table') {
+    const rowsTarget = resolveTarget(mapping.rows, 'rows');
+    if (rowsTarget.error) return rowsTarget.error;
+    mappedRows = rowsTarget;
+    const spec = mapping.header;
+    if (spec && typeof spec === 'object') {
+      const headerTarget = resolveTarget(spec.selector, 'header');
+      if (headerTarget.error) return headerTarget.error;
+      mappedHeader = { target: headerTarget, bodyRow: spec.bodyRow };
+    }
+  }
+
+  /** The thing being read: a `<table>`, or an ARIA grid (§7.9). Both answer
+   *  the same questions from here on, through their row views. */
+  let container = null;
+  let containerKind = 'table';
   /**
    * The grid WRAPPER, when one is in play (§5.6): the matched element itself
-   * when it is not a table, and otherwise the element holding both halves
-   * once a header is adopted from another table (§7.3a), which is discovered
-   * further down.
+   * when it is neither a table nor an ARIA grid, and otherwise the element
+   * holding both halves once a header is adopted from another table (§7.3a),
+   * which is discovered further down.
    *
    * It exists for the diagnostics as much as for the search. Kendo's own
    * tables carry `role="none"` and no accessible name at all, so without the
    * wrapper's name a failure reads `cannot map table "#holdings-grid
    * .k-grid-content table"` — the selector, not the grid (§7.2 point 4).
    */
-  let wrapper = el.tagName === 'TABLE' ? null : el;
+  let wrapper = el.tagName === 'TABLE' || ownsAriaRows(el) ? null : el;
   /** Every table under that wrapper, classified — kept so the header search
    *  below does not walk the grid a second time. */
   let wrapperTables = [];
-  let table;
   /** The selected table, already classified on the wrapper path. */
   let picked = null;
 
-  if (!wrapper) {
-    table = el;
+  if (mappedRows) {
+    // §7.10: the rows were NAMED, so §7.2's search does not run. Validated
+    // already — it resolved to exactly one table or grid under the region.
+    container = mappedRows.el;
+    containerKind = mappedRows.kind;
+  } else if (!wrapper) {
+    // §7.9: the matched element IS the table — as a `<table>` whatever role it
+    // carries (`<table role="grid">` is a table, §10), or as an ARIA grid.
+    container = el;
+    containerKind = el.tagName === 'TABLE' ? 'table' : 'grid';
   } else {
     // §7.2: any non-table match is a grid wrapper. The tables under it that
     // are not nested inside another one are the grid's halves; exactly one of
@@ -903,6 +1909,16 @@
     // must be visible: a `display:none` table is not part of the grid on
     // screen, and counting one would refuse a live grid as ambiguous.
     wrapperTables = tablesUnder(wrapper).filter(rendered).map(classified);
+    // §7.9: the ARIA grids under the wrapper, on the same terms — rendered,
+    // and not sitting inside a table or another grid, which `candidatesOf`
+    // already decides. A `<table role="grid">` is not among them: the tag
+    // wins, so it is one of `wrapperTables` and is read as a table (§10).
+    const ariaGrids = candidatesOf(wrapper)
+      .filter((cand) => cand.kind === 'grid' && rendered(cand.el))
+      .map((cand) => ({ el: cand.el, split: ariaSplit(cand.el) }));
+    const ariaWithData = ariaGrids.filter(
+      (grid) => grid.split.bodyRows.some((view) => !messageRow(view)),
+    );
     // DATA rows (§7.2): body rows that are not §4.8 message rows, rendered or
     // not. RadGrid's header table holds one hidden `<td colspan="9">` spacer
     // and its pager table one `<td colspan="9">` row, and counting those as
@@ -935,14 +1951,45 @@
     // (locked) columns shape, and picking one of them would be reading half a
     // grid (§7.3a, §14).
     const withData = wrapperTables.filter((info) => info.data.length > 0);
-    let withRows = withData;
-    if (withRows.length === 0) {
+    // §7.9's arbitration between the two providers, asked before either is
+    // read. A `<table>` with data rows and an ARIA grid with data rows under
+    // one wrapper are TWO things with rows, and picking either is the
+    // half-a-grid misalignment §7.2 refuses for two tables. An ARIA grid with
+    // no data rows is not in the running at all — a MUI grid rendered empty
+    // beside a real table must not stop that table from being read.
+    if (withData.length > 0 && ariaWithData.length > 0) {
+      return failShape(
+        `readTable found a table and an ARIA grid with rows under "${sel}" — it must be exactly `
+        + `one, so select the one you mean`,
+      );
+    }
+    if (ariaWithData.length > 1) {
+      return failShape(
+        `readTable found ${ariaWithData.length} ARIA grids with rows under "${sel}" — it must be `
+        + `exactly one, so select the one you mean`,
+      );
+    }
+    // The one grid with rows wins whenever no table has any; failing that, a
+    // LONE grid with no data rows is still the thing the author pointed at,
+    // and §4.8 says an empty table reads `[]` rather than refusing. Both are
+    // gated on there being no table under the wrapper to read instead.
+    const grid = ariaWithData.length === 1
+      ? ariaWithData[0]
+      : (withData.length === 0 && wrapperTables.length === 0 && ariaGrids.length === 1
+        ? ariaGrids[0]
+        : null);
+    if (grid) {
+      container = grid.el;
+      containerKind = 'grid';
+    }
+    let withRows = container ? [] : withData;
+    if (!container && withRows.length === 0) {
       const candidates = wrapperTables.filter(
         (info) => info.body.length > 0 && !info.headerOnly,
       );
       const declaring = candidates.filter((info) => declaredHeaderSource(info.table) !== null);
       const grids = candidates.filter(
-        (info) => (info.table.getAttribute('role') || '').trim().toLowerCase() === 'grid',
+        (info) => hasRole(info.table, 'grid'),
       );
       const rest = candidates.filter(
         (info) => !declaring.includes(info) && !grids.includes(info),
@@ -954,24 +2001,32 @@
         }
       }
     }
-    if (withRows.length === 0) {
-      // A `<div role="grid">` of `<div role="row">`s lands here: still
-      // unsupported (§3), now said in terms of what was looked for.
-      return fail(`readTable found no table with rows under "${sel}"`);
+    if (!container && withRows.length === 0) {
+      // Nothing with rows under the wrapper at all. §7.9 widens what the
+      // sentence MEANS — no `<table>` and no ARIA grid with data rows — and
+      // leaves the words alone, because they still say what was looked for.
+      // §7.10 can answer this one: it is the first of the shape reasons.
+      return failShape(`readTable found no table with rows under "${sel}"`);
     }
     if (withRows.length > 1) {
       // Never `.first()`: a grid with frozen (locked) columns renders its
       // rows TWICE, split by column across two tables, so reading one half is
       // exactly the misalignment this action exists to prevent (§7.3a, §14).
-      return fail(
+      return failShape(
         `readTable found ${withRows.length} tables with rows under "${sel}" — it must be exactly `
         + `one; a grid with frozen (locked) columns splits its rows across two tables, which is `
         + `not supported`,
       );
     }
-    picked = withRows[0];
-    table = picked.table;
+    if (!container) {
+      picked = withRows[0];
+      container = picked.table;
+    }
   }
+  /** The selected `<table>`, or null on the ARIA path. Every §7.3/§7.3a rule
+   *  below is a question about a `<table>` and is asked only when there is
+   *  one; §7.9's provider answers the same questions its own way. */
+  const table = containerKind === 'table' ? container : null;
 
   /**
    * How the diagnostics name this table (§7.2 point 4), in order: the table's
@@ -990,15 +2045,25 @@
    * than closing over a copy — and why that discovery happens BEFORE the
    * refusals that follow it, which otherwise name a grid by its row table's
    * GUID.
+   *
+   * §7.9 spells the same chain for an ARIA grid — `aria-label`, then what
+   * `aria-labelledby` names, then the `id`, then the selector — with the
+   * wrapper's name in the one place a table's grid name goes. A grid has no
+   * `<caption>`, so that link of the chain is simply absent for one.
    */
-  const caption = table.caption;
+  const caption = table ? table.caption : null;
   const ownName =
-    squash(table.getAttribute('aria-label') || '')
+    squash(container.getAttribute('aria-label') || '')
     || (caption ? squash(caption.textContent || '') : '')
-    || labelledByText(table);
-  const nameNow = () => ownName || (wrapper ? wrapperName(wrapper) : '') || table.id || sel;
+    || labelledByText(container);
+  const nameNow = () => ownName || (wrapper ? wrapperName(wrapper) : '') || container.id || sel;
   let label = nameNow();
   const cannot = (why) => fail(`readTable cannot map table ${quoted(label)}: ${why}`);
+  /** The same sentence, for the two `cannot` refusals §7.10 counts as SHAPE:
+   *  a header that was requested and does not exist anywhere, and a pairing
+   *  whose two halves are different widths. Both are questions about what the
+   *  page IS, which is the only kind the model is asked. */
+  const cannotShape = (why) => failShape(`readTable cannot map table ${quoted(label)}: ${why}`);
   /** Adopt `found` as the grid now that it is known to hold both halves, and
    *  rename the table after it. */
   const nameAfterWrapper = (found) => {
@@ -1012,167 +2077,318 @@
   const merged = () =>
     cannot('merged headers or cells (rowspan/colspan > 1) are not supported');
 
-  // ── 2. rows belonging to THIS table (§7.4) ───────────────────────────────
-  // A COPY: the header row is spliced out below, and `selected` is the
-  // classification `classified` remembers — §7.3a asks about this same table
-  // again from the other side, and it must not be asked about a row list this
-  // read has since edited.
-  const selectedInfo = picked || classified(table);
-  const bodyRows = selectedInfo.rows.slice();
-
-  /**
-   * How wide the table is, measured over ALL body rows — rendered or not.
-   *
-   * The hidden rows are evidence of the grid's shape and nothing else left
-   * says it: a table whose only rendered row is a full-width message, or one
-   * whose every data row a filter has hidden, measures ONE column wide over
-   * the visible rows, and then `<td colspan="7">No scheduled payments.</td>`
-   * reads as a message in one table and a merged cell in the next by accident
-   * of what was on screen. §4.8's placeholder rule asks this, and the
-   * headerless width below is this, so it is measured once, here, over the
-   * same rows. (§7.3's group-row step-over used to ask it too, and asking the
-   * BODY's width there is what made it swallow a genuine one-cell header —
-   * see `lastWideHeadingAt`, which is the question it actually has.)
-   *
-   * Taken BEFORE the header row is spliced out of `bodyRows`, which is safe:
-   * the only reader that could see the difference is the headerless branch
-   * below, and nothing is spliced when there is no header.
-   */
+  // ── 2. rows and the header grid, from ONE of the two providers ───────
+  //
+  // Four answers is all the rest of this file needs: which rows are the
+  // body’s, how wide the thing is, what its header grid is, and whether that
+  // header came from somewhere else. A `<table>` answers them through §7.4,
+  // §7.3 and §7.3a; an ARIA grid answers them through §7.9. Nothing below this
+  // point asks which it was reading — that is what keeps §4.8’s placeholder
+  // rules, §7.4’s records loop and the stamp from existing twice.
+  let bodyRows;
   let widestBody = 0;
-  for (const row of bodyRows) {
-    if (row.cells.length > widestBody) widestBody = row.cells.length;
-  }
-
-  // ── 3. the header grid (§7.3, §7.3b), and where it comes from (§7.3a) ────
-  let headerGrid = selectedInfo.grid;
+  let headerGrid = null;
   /** Did the header come from a DIFFERENT table (§7.3a)? The summary line says
    *  so (§7.6): a wrong pairing is otherwise invisible in the log, and the
-   *  records it produces look exactly like a correct read. */
+   *  records it produces look exactly like a correct read. Always false on the
+   *  ARIA path: a grid’s header is inside it or nowhere (§7.9). */
   let headerFromSeparateTable = false;
-  if (headerGrid && selectedInfo.index >= 0) bodyRows.splice(selectedInfo.index, 1);
 
-  /** The rows of this table that are DATA — §7.2's test, the cheap one that
-   *  does not need the width (§4.8's own rule runs later, against it). Two
-   *  questions ask it: whether a header-only table is the one being read, and
-   *  what an adopted header's width has to line up with. */
-  const nonMessageRows = bodyRows.filter((row) => !messageRow(row));
-
-  if (!headerGrid) {
-    // §7.3a: a table with no header of its own may take one from another
-    // table — the grid of §5.6, where the header and the rows are separate
-    // `<table>` elements. A header IN the table always wins, which is why this
-    // whole branch is reached only when the search above found none.
-    let source = null;
-    let ambiguous = 0;
-    // What the page DECLARES beats what merely sits beside it (§7.3a.1 before
-    // §7.3a.2) — on BOTH paths. Asked only of the tables under the wrapper,
-    // the wrapper answered differently from the row table's own selector for
-    // the same grid: a wrapper whose header table follows its rows read as
-    // headerless while `#rows` read the grid correctly, because `aria-owns`
-    // is the one thing that says which half is which whatever the DOM order.
-    const declared = declaredHeaderSource(table);
-    if (declared) {
-      source = classified(declared);
-    } else if (wrapper) {
-      // Naming the wrapper is the author asserting that these tables belong
-      // together, so §7.3a's name and contiguity conditions do not apply here
-      // (§7.2 point 3) — only "the one header-only table before it".
-      const before = wrapperTables.filter(
-        (info) => info.headerOnly && precedes(info.table, table),
-      );
-      if (before.length > 1) ambiguous = before.length;
-      else source = before[0] || null;
-    } else {
-      const beside = besideHeaderSource(table);
-      if (beside.length > 1) ambiguous = beside.length;
-      else source = beside[0] || null;
-    }
-    if (ambiguous > 0) {
-      // Two header tables for one row table is the frozen-columns shape seen
-      // from the row table's side — the same grid the wrapper path refuses by
-      // counting tables with rows (§7.3a, "what this does not read").
-      //
-      // `beside "<label>"` rather than `beside table "<label>"`: the label is
-      // the GRID's name as often as the table's (§7.2 point 4), and calling a
-      // wrapper a table is the kind of small lie that sends an author looking
-      // for the wrong element.
-      return fail(
-        `readTable found ${ambiguous} header-only tables beside ${quoted(label)} — it must be `
-        + `exactly one; a grid with frozen (locked) columns splits its header across two tables, `
-        + `which is not supported`,
-      );
-    }
-    if (source) {
-      // Both halves are known, so the element holding them is the grid and
-      // the diagnostics name the table after it (§7.2 point 4) — BEFORE the
-      // width refusal below, which otherwise names the grid by the row table's
-      // generated GUID (`cannot map table "14277be2-015b-…"`).
-      if (!wrapper) nameAfterWrapper(commonAncestor(table, source.table));
-      // The adopted header is the other table's HEADER GRID (§7.3b), laid out
-      // in the table it lives in — RadGrid's is three rows of bands, names and
-      // filters and is nine columns wide.
-      const adopted = source.grid;
-      if (adopted) {
-        // The widths must line up, because a header one column off is §4.5's
-        // misalignment wearing a plausible face. Measured over the rows that
-        // hold a GRID: a body of nothing but full-width message rows (the
-        // grouped grid's "No records available." row, §4.8) is one cell wide
-        // and has nothing to misalign, so it is no evidence either way —
-        // counted, it refused every emptied grid as a mismatch.
-        let widestData = 0;
-        for (const row of nonMessageRows) {
-          if (row.cells.length > widestData) widestData = row.cells.length;
-        }
-        if (nonMessageRows.length > 0 && adopted.width !== widestData) {
-          // "the header table", not "the header in the table beside it": the
-          // same check runs on the DECLARED path, where the header table is
-          // wherever `aria-owns` pointed and need not be beside anything. The
-          // count is the header GRID's width, not a row's cell count: a banded
-          // header's name row is narrower than the grid it names (§7.3b).
-          return cannot(
-            `the header table has ${adopted.width} `
-            + `${plural(adopted.width, 'cell', 'cells')} but its widest row has `
-            + `${widestData} — the two tables do not line up`,
+  if (mappedRows) {
+    // ── §7.10: both halves named, nothing searched for ─────────────────────
+    //
+    // The validation is everything the search would otherwise have
+    // established, asked outright: the rows table has rows, the header names
+    // columns, and the two line up. All of it is deterministic — the model
+    // said where to look, never what is there — so a mapping that has stopped
+    // fitting the page fails with a sentence about the page rather than
+    // reading the wrong columns (§7.10, "a cached mapping no longer fits").
+    //
+    // `bodyRowsOf` for a table, NOT `classify`: §7.3's header search must not
+    // run here at all. A §5.9.1 table's headings are in its first body row,
+    // and the search — which needs a `<th>` — would leave that row in the
+    // data and read the headings as record 1.
+    bodyRows = containerKind === 'grid'
+      ? ariaSplit(container).bodyRows
+      : bodyRowsOf(container).map(tableRowView);
+    if (mappedHeader) {
+      const target = mappedHeader.target;
+      const asked = mappedHeader.bodyRow;
+      if (asked !== undefined && asked !== null) {
+        // "the k-th BODY row", one-based — the rows a read would return, not
+        // the rows of the element, so `<thead>` never shifts the count.
+        const rows = target.kind === 'grid'
+          ? ariaSplit(target.el).bodyRows
+          : bodyRowsOf(target.el).map(tableRowView);
+        const at = Math.trunc(Number(asked));
+        if (!Number.isFinite(at) || at < 1 || at > rows.length) {
+          return badStructure(
+            `${target.name} has ${rows.length} body ${plural(rows.length, 'row', 'rows')}, so `
+            + `there is no body row ${JSON.stringify(asked)} to use as the header`,
           );
         }
-        headerGrid = adopted;
-        headerFromSeparateTable = true;
+        const named = rows[at - 1];
+        // A header row has to be a row a reader can SEE holding the names,
+        // and the two rows that are not are exactly the two this mapping can
+        // land on by accident. An unrendered row is a template or a filtered
+        // row: its cells still hold text, so it would name every column
+        // plausibly and the read would look right. A §4.8 message row ("No
+        // records found", one cell across the table) names one column and
+        // nothing else, and taking it as the header ALSO splices the real
+        // first row out of the data.
+        if (!named.els.some(rendered)) {
+          return badStructure(`body row ${at} of ${target.name} is hidden`);
+        }
+        if (messageRow(named)) {
+          return badStructure(
+            `body row ${at} of ${target.name} is a placeholder row, not a header`,
+          );
+        }
+        headerGrid = headerGridOf([named]);
+        // Spliced out of the data when it is THIS table's own row: a header
+        // left in the body becomes record 1 and shifts every `_row` below it
+        // by one, which is §4.5's misalignment (§7.3 splices it for the same
+        // reason).
+        if (target.el === container) bodyRows.splice(at - 1, 1);
+      } else {
+        // No row named: the header is that element's own header grid — a
+        // `<thead>`, or an ARIA grid's `columnheader` rows (§7.3b, §7.9).
+        const own = target.kind === 'grid'
+          ? (() => {
+            const split = ariaSplit(target.el);
+            return split.headerRows.length > 0 ? headerGridOf(split.headerRows) : null;
+          })()
+          : classified(target.el).grid;
+        if (!own) {
+          return badStructure(
+            `${target.name} has no header row of its own — name the body row that holds the `
+            + `headings`,
+          );
+        }
+        headerGrid = own;
       }
+      if (!headerGrid.names.some((name) => name !== '')) {
+        return badStructure(`${target.name} names no column, so it cannot be the header`);
+      }
+      headerFromSeparateTable = target.el !== container;
     }
-  } else if (!wrapper && nonMessageRows.length === 0) {
-    // §7.3a.3, the header-only pick. This table holds the header row and no
-    // DATA — RadGrid's header table holds one hidden `<td colspan="9">` spacer
-    // row, which is a message and not a row of the grid (§4.8, §5.7) — and the
-    // rows are in a table that names this header through
-    // `aria-owns` or would have adopted it from beside. It is the selector a
-    // model reaches for first — the table where it can SEE the words "Order
-    // ID" — and storing `[]` for it is a green step that read nothing, which
-    // is the outcome this action exists to make impossible. With no such
-    // partner, a header with no rows is simply an empty table and still reads
-    // `[]` (§4.8).
-    const partner = rowPartnerOf(table);
-    if (partner.partner) {
-      // Named after the grid before either sentence is built, so a Kendo
-      // failure says `#holdings-grid` and not a GUID (§7.2 point 4).
-      nameAfterWrapper(commonAncestor(table, partner.partner));
-      if (partner.frozen) {
-        // Two header tables for the rows beside them: this table is one half
-        // of a split header, and there is no half of a grid to read (§14).
-        return fail(
-          `readTable cannot read table ${quoted(label)}: it holds only the header row of a grid `
-          + `with frozen (locked) columns, which is not supported`,
+    const mappedData = bodyRows.filter((row) => !messageRow(row));
+    if (mappedData.length === 0) {
+      // An empty table reads `[]` when the author pointed at it (§4.8), but a
+      // STRUCTURE answer naming a table with no rows in it is an answer about
+      // the wrong table — the rows the author asked for are somewhere else.
+      return badStructure(`${mappedRows.name} has no data rows`);
+    }
+    for (const row of bodyRows) {
+      if (row.width > widestBody) widestBody = row.width;
+    }
+    if (headerGrid) {
+      let widestData = 0;
+      for (const row of mappedData) {
+        if (row.width > widestData) widestData = row.width;
+      }
+      if (headerGrid.width !== widestData) {
+        // §7.3a's sentence, word for word: a header one column off is the
+        // same misalignment whether a search or a model paired the two.
+        return cannot(
+          `the header table has ${headerGrid.width} `
+          + `${plural(headerGrid.width, 'cell', 'cells')} but its widest row has `
+          + `${widestData} — the two tables do not line up`,
         );
       }
-      const where = wrapper ? wrapperSelector(wrapper) : null;
-      // "beside it", not "after it": `aria-owns` pairs a header table that
-      // FOLLOWS its rows just as readily, and the sentence has to be true of
-      // the grid the author is looking at.
-      return fail(
-        `readTable cannot read table ${quoted(label)}: it holds only the header row; the rows `
-        + `are in the table beside it — select the element that contains both`
-        + (where ? ` ("${where}")` : '')
-        + ` or that table`,
-      );
+    }
+    structure = {
+      kind: 'table',
+      source: structureSource || 'model',
+      // Did the mapping read a table OTHER than the one the author selected?
+      // Legitimate and common — a wrapper region's rows are always a table
+      // inside it — but it is the difference between "the read you asked for"
+      // and "a read of something next to it", and the caller warns on it so a
+      // reader of the log has been told before the values look wrong.
+      rowsElsewhere: mappedRows.el !== el,
+      summary:
+        `rows in ${mappedRows.name}`
+        + (mappedHeader
+          ? (mappedHeader.bodyRow !== undefined && mappedHeader.bodyRow !== null
+            ? `, header row ${mappedHeader.bodyRow} of ${mappedHeader.target.name}`
+            : `, header from ${mappedHeader.target.name}`)
+          : ', no header'),
+    };
+  } else if (containerKind === 'grid') {
+    // §7.9: the rows are the `role="row"` descendants this grid owns — never a
+    // nested grid’s — joined by `aria-rowindex` where a pinned container has
+    // split one row across two elements; the header rows are the ones holding
+    // `columnheader`s and no data, laid out by the same §7.3b code as a
+    // `<thead>`. There is no §7.3a pairing here and no header-only pick: a
+    // grid that holds only headings is an empty table and reads `[]` (§4.8).
+    const split = ariaSplit(container);
+    bodyRows = split.bodyRows;
+    headerGrid = split.headerRows.length > 0 ? headerGridOf(split.headerRows) : null;
+    // A grid row’s width is the highest column its cells COVER, not how many
+    // it has: `aria-colindex` may leave gaps, and MUI’s `role="none"` filler
+    // occupies no column at all, so a cell count measures a four-column row
+    // as three and §4.8’s full-width test then misreads every message row.
+    for (const row of bodyRows) {
+      if (row.width > widestBody) widestBody = row.width;
+    }
+  } else {
+    // ── 2. rows belonging to THIS table (§7.4) ───────────────────────────────
+    // A COPY: the header row is spliced out below, and `selected` is the
+    // classification `classified` remembers — §7.3a asks about this same table
+    // again from the other side, and it must not be asked about a row list this
+    // read has since edited.
+    const selectedInfo = picked || classified(table);
+    bodyRows = selectedInfo.rows.slice();
+
+    /**
+     * How wide the table is, measured over ALL body rows — rendered or not.
+     *
+     * The hidden rows are evidence of the grid's shape and nothing else left
+     * says it: a table whose only rendered row is a full-width message, or one
+     * whose every data row a filter has hidden, measures ONE column wide over
+     * the visible rows, and then `<td colspan="7">No scheduled payments.</td>`
+     * reads as a message in one table and a merged cell in the next by accident
+     * of what was on screen. §4.8's placeholder rule asks this, and the
+     * headerless width below is this, so it is measured once, here, over the
+     * same rows. (§7.3's group-row step-over used to ask it too, and asking the
+     * BODY's width there is what made it swallow a genuine one-cell header —
+     * see `lastWideHeadingAt`, which is the question it actually has.)
+     *
+     * Taken BEFORE the header row is spliced out of `bodyRows`, which is safe:
+     * the only reader that could see the difference is the headerless branch
+     * below, and nothing is spliced when there is no header.
+     */
+    for (const row of bodyRows) {
+      if (row.width > widestBody) widestBody = row.width;
+    }
+
+    // ── 3. the header grid (§7.3, §7.3b), and where it comes from (§7.3a) ────
+    headerGrid = selectedInfo.grid;
+    if (headerGrid && selectedInfo.index >= 0) bodyRows.splice(selectedInfo.index, 1);
+
+    /** The rows of this table that are DATA — §7.2's test, the cheap one that
+     *  does not need the width (§4.8's own rule runs later, against it). Two
+     *  questions ask it: whether a header-only table is the one being read, and
+     *  what an adopted header's width has to line up with. */
+    const nonMessageRows = bodyRows.filter((row) => !messageRow(row));
+
+    if (!headerGrid) {
+      // §7.3a: a table with no header of its own may take one from another
+      // table — the grid of §5.6, where the header and the rows are separate
+      // `<table>` elements. A header IN the table always wins, which is why this
+      // whole branch is reached only when the search above found none.
+      let source = null;
+      let ambiguous = 0;
+      // What the page DECLARES beats what merely sits beside it (§7.3a.1 before
+      // §7.3a.2) — on BOTH paths. Asked only of the tables under the wrapper,
+      // the wrapper answered differently from the row table's own selector for
+      // the same grid: a wrapper whose header table follows its rows read as
+      // headerless while `#rows` read the grid correctly, because `aria-owns`
+      // is the one thing that says which half is which whatever the DOM order.
+      const declared = declaredHeaderSource(table);
+      if (declared) {
+        source = classified(declared);
+      } else if (wrapper) {
+        // Naming the wrapper is the author asserting that these tables belong
+        // together, so §7.3a's name and contiguity conditions do not apply here
+        // (§7.2 point 3) — only "the one header-only table before it".
+        const before = wrapperTables.filter(
+          (info) => info.headerOnly && precedes(info.table, table),
+        );
+        if (before.length > 1) ambiguous = before.length;
+        else source = before[0] || null;
+      } else {
+        const beside = besideHeaderSource(table);
+        if (beside.length > 1) ambiguous = beside.length;
+        else source = beside[0] || null;
+      }
+      if (ambiguous > 0) {
+        // Two header tables for one row table is the frozen-columns shape seen
+        // from the row table's side — the same grid the wrapper path refuses by
+        // counting tables with rows (§7.3a, "what this does not read").
+        //
+        // `beside "<label>"` rather than `beside table "<label>"`: the label is
+        // the GRID's name as often as the table's (§7.2 point 4), and calling a
+        // wrapper a table is the kind of small lie that sends an author looking
+        // for the wrong element.
+        return failShape(
+          `readTable found ${ambiguous} header-only tables beside ${quoted(label)} — it must be `
+          + `exactly one; a grid with frozen (locked) columns splits its header across two tables, `
+          + `which is not supported`,
+        );
+      }
+      if (source) {
+        // Both halves are known, so the element holding them is the grid and
+        // the diagnostics name the table after it (§7.2 point 4) — BEFORE the
+        // width refusal below, which otherwise names the grid by the row table's
+        // generated GUID (`cannot map table "14277be2-015b-…"`).
+        if (!wrapper) nameAfterWrapper(commonAncestor(table, source.table));
+        // The adopted header is the other table's HEADER GRID (§7.3b), laid out
+        // in the table it lives in — RadGrid's is three rows of bands, names and
+        // filters and is nine columns wide.
+        const adopted = source.grid;
+        if (adopted) {
+          // The widths must line up, because a header one column off is §4.5's
+          // misalignment wearing a plausible face. Measured over the rows that
+          // hold a GRID: a body of nothing but full-width message rows (the
+          // grouped grid's "No records available." row, §4.8) is one cell wide
+          // and has nothing to misalign, so it is no evidence either way —
+          // counted, it refused every emptied grid as a mismatch.
+          let widestData = 0;
+          for (const row of nonMessageRows) {
+            if (row.width > widestData) widestData = row.width;
+          }
+          if (nonMessageRows.length > 0 && adopted.width !== widestData) {
+            // "the header table", not "the header in the table beside it": the
+            // same check runs on the DECLARED path, where the header table is
+            // wherever `aria-owns` pointed and need not be beside anything. The
+            // count is the header GRID's width, not a row's cell count: a banded
+            // header's name row is narrower than the grid it names (§7.3b).
+            return cannotShape(
+              `the header table has ${adopted.width} `
+              + `${plural(adopted.width, 'cell', 'cells')} but its widest row has `
+              + `${widestData} — the two tables do not line up`,
+            );
+          }
+          headerGrid = adopted;
+          headerFromSeparateTable = true;
+        }
+      }
+    } else if (!wrapper && nonMessageRows.length === 0) {
+      // §7.3a.3, the header-only pick. This table holds the header row and no
+      // DATA — RadGrid's header table holds one hidden `<td colspan="9">` spacer
+      // row, which is a message and not a row of the grid (§4.8, §5.7) — and the
+      // rows are in a table that names this header through
+      // `aria-owns` or would have adopted it from beside. It is the selector a
+      // model reaches for first — the table where it can SEE the words "Order
+      // ID" — and storing `[]` for it is a green step that read nothing, which
+      // is the outcome this action exists to make impossible. With no such
+      // partner, a header with no rows is simply an empty table and still reads
+      // `[]` (§4.8).
+      const partner = rowPartnerOf(table);
+      if (partner.partner) {
+        // Named after the grid before either sentence is built, so a Kendo
+        // failure says `#holdings-grid` and not a GUID (§7.2 point 4).
+        nameAfterWrapper(commonAncestor(table, partner.partner));
+        if (partner.frozen) {
+          // Two header tables for the rows beside them: this table is one half
+          // of a split header, and there is no half of a grid to read (§14).
+          return fail(
+            `readTable cannot read table ${quoted(label)}: it holds only the header row of a grid `
+            + `with frozen (locked) columns, which is not supported`,
+          );
+        }
+        const where = wrapper ? wrapperSelector(wrapper) : null;
+        // "beside it", not "after it": `aria-owns` pairs a header table that
+        // FOLLOWS its rows just as readily, and the sentence has to be true of
+        // the grid the author is looking at.
+        return fail(
+          `readTable cannot read table ${quoted(label)}: it holds only the header row; the rows `
+          + `are in the table beside it — select the element that contains both`
+          + (where ? ` ("${where}")` : '')
+          + ` or that table`,
+        );
+      }
     }
   }
 
@@ -1185,7 +2401,11 @@
   //
   // It is settled BEFORE any row is classified, because the classification
   // depends on it.
-  const visibleRows = bodyRows.filter(rendered);
+  //
+  // A row is rendered when ANY of its fragments is (§7.9): ag-Grid's pinned
+  // container and its centre container are laid out separately, and a row
+  // whose pinned half is scrolled out of view is still on the page.
+  const visibleRows = bodyRows.filter((row) => row.els.some(rendered));
   const width = headerGrid ? headerGrid.width : widestBody;
 
   // ── 5. resolve each column to a one-based position ───────────────────────
@@ -1235,7 +2455,11 @@
     if (typeof col.header === 'string') {
       if (!headerGrid) {
         // §5.4, verbatim: the message's whole job is to name the way out.
-        return cannot(
+        // SHAPE (§7.10): a header was asked for and no path found one — not a
+        // `<thead>`, not a body row of `<th>`s, not a table beside it, not a
+        // grid's `columnheader`s. That is exactly the question §5.9's
+        // `<td>`-headed table and header-after-rows pair are answered by.
+        return cannotShape(
           `it has no header row, so "${col.header}" cannot be matched — name columns by `
           + `position ("the 1st column as ${col.key}")`,
         );
@@ -1250,7 +2474,13 @@
         // author meant to type. The second half of this sentence is the only
         // difference between "you named a group" and "you named nothing here".
         const band = headerGrid.bands.find((b) => fold(b.text) === fold(col.header));
-        return cannot(
+        // A header that EXISTS and does not hold this name is the author's own
+        // problem — a typo, or a renamed column — and §7.10 never asks the
+        // model about it: the answer would be a licence to read some other
+        // column. A header that names NOTHING is the shape question again,
+        // asked one row too high.
+        const say = available.length > 0 ? cannot : cannotShape;
+        return say(
           `no column is headed "${col.header}"`
           // §7.3b.5 keeps a `<thead>` that names nothing from being a header at
           // all, so the second branch is reached only by a BODY-row header
@@ -1306,8 +2536,12 @@
     // there is nothing in it to map and nothing to number, and failing a whole
     // read over a `<tr>` that renders as nothing would contradict §4.8. The
     // count is what keeps the skip observable in the log (§7.6).
+    //
+    // `across` rather than `colSpan`, so §4.8's lone-spanning test reads an
+    // ARIA row's `aria-colspan` the same way (§7.9). A `role="row"` with no
+    // cell in it at all lands in the first branch, as an empty `<tr>` does.
     const full = Math.max(width, 2);
-    if (cells.length === 0 || (cells.length === 1 && cells[0].colSpan >= full)) {
+    if (cells.length === 0 || (cells.length === 1 && cells[0].across >= full)) {
       placeholdersSkipped++;
       continue;
     }
@@ -1322,12 +2556,11 @@
     // attribute test: an ordinary row never has one, so the `rendered()` scan
     // (a computed style per cell) does not run on the 500-row case.
     if (cells.length > 1) {
-      const list = items(cells);
-      const wide = list.filter((c) => c.colSpan >= full);
+      const wide = cells.filter((c) => c.across >= full);
       if (
         wide.length === 1
-        && rendered(wide[0])
-        && list.every((c) => c === wide[0] || !rendered(c))
+        && rendered(wide[0].el)
+        && cells.every((c) => c === wide[0] || !rendered(c.el))
       ) {
         placeholdersSkipped++;
         continue;
@@ -1360,14 +2593,13 @@
     //    included, which the DOM reports as 0), and nothing about skipping one
     //    row fixes what it did to the next.
     if (cells.length > 0 && width - cells.length >= 2) {
-      const list = items(cells);
       let covered = 0;
       let across = false;
       let down = false;
-      for (const cell of list) {
-        covered += cell.colSpan > 0 ? cell.colSpan : 1;
-        if (cell.colSpan > 1) across = true;
-        if (cell.rowSpan !== 1) down = true;
+      for (const cell of cells) {
+        covered += cell.across > 0 ? cell.across : 1;
+        if (cell.across > 1) across = true;
+        if (cell.down !== 1) down = true;
       }
       if (across && !down && covered >= width) {
         placeholdersSkipped++;
@@ -1395,7 +2627,7 @@
   for (let i = 0; i < selected.length; i++) {
     const row = selected[i];
     const rowNumber = i + 1;
-    const cells = items(row.cells);
+    const cells = row.cells;
     // Cell-shape validation applies to SELECTED rows only: a malformed row
     // past the author's explicit bound is a row nobody asked for.
     for (const cell of cells) {
@@ -1405,7 +2637,12 @@
     // `_row` first, so the report and the Variables panel show it first.
     record[rowKey] = String(rowNumber);
     for (const col of resolved) {
-      const cell = cells[col.position - 1];
+      // By POSITION, not by order: a `<td>`'s position is its place in the
+      // row, but an ARIA cell's is its `aria-colindex` (§7.9), which is what
+      // makes MUI's `role="none"` filler cost nothing and what lets ag-Grid's
+      // pinned fragment contribute column 1 while the centre one contributes
+      // 2 and 3.
+      const cell = row.byPos.get(col.position);
       if (!cell) {
         // Never drop the row and never shift the values: a record whose fields
         // came from the wrong columns is exactly the failure this action
@@ -1417,7 +2654,7 @@
             : `there is no cell at position ${col.position} for "${col.key}"`),
         );
       }
-      record[col.key] = cellTextOf(cell);
+      record[col.key] = cellTextOf(cell.el);
     }
     records.push(record);
   }
@@ -1455,12 +2692,12 @@
   // row too short for a column — changes nothing at all. Stamped before those
   // checks, a failed read left its own numbering behind and the next step
   // addressed rows of a table the framework had just said it could not map.
-  for (const stamped of items(table.querySelectorAll(`[${ROW_STAMP}]`))) {
-    stamped.removeAttribute(ROW_STAMP);
-  }
-  for (let i = 0; i < dataRows.length; i++) {
-    dataRows[i].setAttribute(ROW_STAMP, String(i + 1));
-  }
+  //
+  // An ARIA grid's data rows are stamped the same way (§7.9), on the FIRST
+  // fragment: ag-Grid's pinned half and its centre half are one row, and
+  // stamping both would make `[data-aiui-row="7"]` match two elements and the
+  // step after the read ambiguous.
+  stampRows(container, dataRows.map((row) => row.el));
 
   return {
     ok: true,
@@ -1469,5 +2706,6 @@
     dataRowCount: dataRows.length,
     label,
     headerFromSeparateTable,
+    ...(structure !== null && { structure }),
   };
 }

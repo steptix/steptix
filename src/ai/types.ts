@@ -82,6 +82,44 @@ export interface TableReadColumn {
   mode?: 'text';
 }
 
+/**
+ * The structure of a table the model named once, validated against the page
+ * and then replayed deterministically
+ * (docs/specs/SPEC-structured-table-reads.md §7.10).
+ *
+ * Every selector in one is CSS **relative to the mapping root** and is
+ * resolved with `root.querySelector(…)`. The root is the region — the element
+ * the action's own `selector` matched — except when the region is a
+ * `<table>`, where it is the nearest ancestor below `<body>` holding another
+ * table or grid, because §5.9.2's header table sits BESIDE the rows and
+ * `querySelector` cannot reach out of its own root. `:scope` is that root,
+ * which is how a table whose headings are its own first body row (§5.9.1)
+ * names itself. The runtime derives these selectors from the sketch it showed
+ * the model, as `#id` when the element has one and a `:scope > …`
+ * `nth-of-type` path otherwise, so a page with generated class names still
+ * maps.
+ *
+ * A wider root is not a wider licence to read: `rows` must still resolve
+ * inside the region the author selected, and only `header.selector` may reach
+ * a table beside it (§7.10, and `mayName` in the extractor).
+ *
+ *  - `table` — the ordinary extractor with the two tables pinned instead of
+ *    searched for. `rows` names the table or ARIA grid holding the data;
+ *    `header.selector` names the one whose header grid is used (the same
+ *    element when the headings are in the rows table), and `header.bodyRow`
+ *    is the one-based BODY row of it that holds the headings, spliced out of
+ *    the data when it belongs to the rows table. No `header` at all is a
+ *    positional read.
+ *  - `collection` — repeated elements that are not a table: `item` is the
+ *    element repeated once per record, and `fields` maps each requested
+ *    column's `key` (never its header or its index — a collection has no
+ *    headings to match and no columns to count) to a selector relative to
+ *    that item.
+ */
+export type TableReadMapping =
+  | { kind: 'table'; rows: string; header?: { selector: string; bodyRow?: number } }
+  | { kind: 'collection'; item: string; fields: Record<string, string> };
+
 /** A single action returned by the AI */
 export interface AIAction {
   action: ActionType;
@@ -211,6 +249,17 @@ export interface AIAction {
    * does fails rather than truncating (§7.5).
    */
   limit?: number;
+  /**
+   * readTable only: how to read a table structure alone cannot decide (§7.10).
+   *
+   * A field the RUNTIME owns, not the model. The parser strips it from
+   * anything the model emits — a mapping the runtime never validated would
+   * pin the read to whatever selectors a hallucination produced — the step
+   * cache stores it, and the report shows it. It is written only after a
+   * shape refusal, one structure question and a validation pass against the
+   * page, and a cached run applies it without asking anything.
+   */
+  mapping?: TableReadMapping;
   /**
    * CSS selector identifying the <iframe> element in the main page that contains the target element.
    * When set, the action is executed inside that frame rather than the main page.
