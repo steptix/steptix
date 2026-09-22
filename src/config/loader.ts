@@ -10,6 +10,7 @@ import {
   flowControlInHookError,
   isReturnClaim,
 } from '../parser/flow-control-step.js';
+import { parseUseStep } from '../parser/use-step.js';
 import { readUserRootEnv } from '../env/user-root.js';
 import { logger } from '../utils/logger.js';
 
@@ -377,8 +378,35 @@ function assertNoFlowControlInDefaultHooks(config: Config, configPath: string): 
           ),
         );
       }
+      // A surface switch is refused in a hook on the same terms and at the
+      // same moment (SPEC-use-computer.md §4.4: a hook runs on the page
+      // surface). Stronger than the flow-control rule above, which admits the
+      // `fail` verb: BOTH `[use …]` directives are refused, because a hook
+      // that changed the surface would change it for the step it wraps and
+      // for every step after it — `afterEach` would leave the run somewhere
+      // the author never wrote.
+      const useStep = parseUseStep(instruction);
+      if (useStep) {
+        throw new Error(
+          useStepInHookError(instruction, ` in ${configPath} (execution.defaultHooks.${scope})`),
+        );
+      }
     }
   }
+}
+
+/**
+ * §4.4's refusal, written once for the two places that need it: this loader,
+ * over `execution.defaultHooks`, and the CLI runner's hook loop, which is the
+ * only thing standing in front of a `[use …]` line reached through a
+ * `[skill: …]` named as a hook.
+ */
+export function useStepInHookError(instruction: string, where = ''): string {
+  return (
+    `Cannot use "${instruction.trim()}"${where}: a hook runs on the page surface, so it may ` +
+    'not switch surface. Put the `[use computer]` / `[use browser]` line in the test\'s ' +
+    '`## Steps` instead.'
+  );
 }
 
 /** Apply CLI flag overrides onto an already-loaded config */

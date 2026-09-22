@@ -980,6 +980,25 @@ describe('POST /errands', () => {
     expect(seen).toEqual(['open the page']);
   });
 
+  // docs/specs/SPEC-use-computer.md §4.4 — an errand is a browser errand, and
+  // §12 keeps `[use …]` in one for later. Refused by name at RUN time, which
+  // is the only place it can be: an errand's steps arrive straight off an MCP
+  // call with no validator in front of them.
+  it.each(['[use computer]', '[use browser]'])('refuses %s in an errand', async (line) => {
+    const seen = recordInstructions();
+    const { body } = await api(
+      'POST', '/errands', errandBody({ steps: ['open the page', line, 'never reached'] }),
+    );
+
+    expect(body.status).toBe('failed');
+    expect(body.error).toMatchObject({ step: 2 });
+    expect(body.error.message).toContain('cannot be used in an errand');
+    expect(body.error.message).toContain('an errand runs on the page surface');
+    // Never handed to a model as prose, which is the silent-`noop` failure the
+    // bracket spelling exists to prevent (§4.2).
+    expect(seen).toEqual(['open the page']);
+  });
+
   it('a conditional return gets a claim, and streams step:skip for the rest', async () => {
     const line = 'If the page title contains "Dashboard" then stop';
     const claims: unknown[] = [];

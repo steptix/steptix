@@ -250,6 +250,22 @@ export const TOLERATED_CODE_BEHIND_REFUSAL =
   'the step ran as code and its failure was tolerated (otherwise continue) — the entry stands';
 
 /**
+ * A step that EXECUTED on the computer surface (SPEC-use-computer.md §9).
+ *
+ * The other half of {@link SURFACE_SWITCH_NOT_COMPILED}, and a different rule
+ * from it: that one is about the `[use …]` LINE, which performs nothing; this
+ * one is about an ordinary step that happened to run while the surface was
+ * `computer`. Its transcript is a list of screen coordinates, and a coordinate
+ * is specific to one machine's resolution, scaling and window layout — so it
+ * becomes an `ai: true` entry carrying this sentence rather than code that
+ * would click somewhere plausible and wrong on the next machine.
+ *
+ * Judged from the RUN, never from the file: a shared `### Section` or a skill
+ * body runs on whatever surface its caller was on.
+ */
+export const COMPUTER_MODE_STAYS_AI = 'computer-mode step; coordinates are not portable';
+
+/**
  * The unconditional `Return` / `Stop` / `Fail` — a line the run loops dispatch
  * with no model call at all, as they dispatch `Set`
  * (stories/step-flow-control.md, decision 3; stories/step-failure-outcomes.md,
@@ -332,6 +348,9 @@ export function generationRefusal(input: {
   deliberate?: boolean | undefined;
   fromCodeBehind?: boolean | undefined;
   codeBehindStale?: unknown;
+  /** `StepResult.surface` — which surface answered the step
+   *  (SPEC-use-computer.md §9). Absent means `browser`. */
+  surface?: 'browser' | 'computer' | undefined;
 }): string | undefined {
   // `[skill` / `[tool` calls only — `[input:]`, `[output:]` and
   // `[interactive]` DO reach generation and are declined there, with the
@@ -376,6 +395,10 @@ export function generationRefusal(input: {
   if (parseUseStep(input.text)) {
     return SURFACE_SWITCH_NOT_COMPILED;
   }
+  // …and the other half of §9: an ORDINARY step that ran while the surface was
+  // `computer`. Ahead of the binding check, because the answer does not depend
+  // on there being a file to bind into — the step stays AI either way.
+  if (input.surface === 'computer') return COMPUTER_MODE_STAYS_AI;
   if (!input.binding) return 'the step has no code-behind file to bind into';
   if (input.status === 'skipped') return SKIPPED_BY_RETURN_REFUSAL;
   // Which of the two tolerated reasons depends on what ran it. An entry that ran
@@ -832,6 +855,7 @@ export class LiveCompiler {
       deliberate: input.result.deliberate,
       fromCodeBehind: input.result.fromCodeBehind,
       codeBehindStale: input.result.codeBehindStale,
+      surface: input.result.surface,
     });
     if (refusal !== undefined) {
       // Both "ran as code" reasons: the entry ran, so the step is one this

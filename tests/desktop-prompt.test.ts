@@ -18,7 +18,7 @@ import {
   zoomNote,
 } from '../src/desktop/prompt.js';
 import { COMPUTER_ACTION_TYPES } from '../src/desktop/actions.js';
-import { contentBlocksToText } from '../src/ai/prompts.js';
+import { buildSystemPrompt, contentBlocksToText } from '../src/ai/prompts.js';
 
 function systemText(overrides: Record<string, unknown> = {}): string {
   return contentBlocksToText(
@@ -188,5 +188,25 @@ describe('zoomNote — §5.3', () => {
       'This is a zoomed view of region (1, 2, 3, 4) of the previous screenshot; coordinates you ' +
         'return now are in THIS image.',
     );
+  });
+});
+
+/**
+ * §8 — the PAGE prompt's one new sentence.
+ *
+ * Lives here rather than in a page-prompt suite because it is the net for the
+ * phrasings §4.2 cannot catch: the directive never reaches a model when it is
+ * spelled right, so this sentence is what answers "use the computer to open
+ * the print dialog" written as prose. It must name the unachievable outcome
+ * and must rule out `noop`, which reports success for a step that did nothing.
+ */
+describe('the page prompt refuses a surface change (§8)', () => {
+  it('names it unachievable and rules out noop', () => {
+    const text = contentBlocksToText(buildSystemPrompt('', undefined, { dismissalGuidance: false }));
+
+    expect(text).toContain('CHANGING SURFACE IS NOT A PAGE ACTION');
+    expect(text).toContain('UNACHIEVABLE');
+    expect(text).toContain('[use computer]');
+    expect(text).toMatch(/never answer it with "noop"/i);
   });
 });

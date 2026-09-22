@@ -30,6 +30,7 @@ import {
   clipLine,
   DISPATCHED_NOT_COMPILED,
   endedAsWrittenReason,
+  COMPUTER_MODE_STAYS_AI,
   TOLERATED_FAILURE_REFUSAL,
 } from './live-compile.js';
 import { clearStale, readLastRun } from './last-run.js';
@@ -685,6 +686,23 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       return finish('failed', { compiled: 0, kept: keptExisting, keptAi: keptAiExisting, written: [], error: 'aborted' }, 'Compile aborted.');
     }
     const result = record.steps[step.index];
+
+    // ── A step that EXECUTED in computer mode stays AI (§9) ──────────────
+    //
+    // Judged from the RUN's recording rather than from the file, and that is
+    // the whole reason it is here and not in `describeSteps`: a shared
+    // `### Section` or a skill body runs on whatever surface its caller was
+    // on, so the file cannot know. `ai: true` with the reason, and no model
+    // call — generation would be asked to write a `page.mouse.click(812, 544)`
+    // that means something else on the next machine.
+    if (result?.surface === 'computer') {
+      stepEvent('generate', step, COMPUTER_MODE_STAYS_AI);
+      await candidate.apply(step, aiEntryFor(step.text, COMPUTER_MODE_STAYS_AI));
+      await candidate.persist();
+      declined++;
+      continue;
+    }
+
     const generated = await generateStepEntry({
       binding: step.binding!,
       actions: actionsOf(result),

@@ -297,6 +297,25 @@ export function getReportTemplate(): string {
     .step-in-loop { margin-left: 10px; }
     .badge-row { background: #ede9fe; color: #5b21b6; border: 1px solid #ddd6fe; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
 
+    /* Surface switches (docs/specs/SPEC-use-computer.md §10.1). A mode MARKER,
+       not a step: no chevron, no body, nothing to expand — the whole content
+       of the row is which surface the run moved to. Slate rather than green so
+       it does not read as a step that passed. */
+    .step-mode { cursor: default; }
+    .step-mode .step-header { cursor: default; background: #f8fafc; }
+    .step-mode .step-header:hover { background: #f1f5f9; }
+    .badge-mode { background: #e2e8f0; color: #334155; border: 1px solid #cbd5e1; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.75rem; padding: 1px 8px; border-radius: 4px; margin-left: auto; }
+    .step-mode-failed .step-header { background: #fef2f2; }
+    .step-mode-failed .badge-mode { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
+    .step-mode .failure-message { margin: 0; padding: 8px 14px; }
+
+    /* A computer-mode capture, with the pointer ring §10.1 asks for. The ring
+       is positioned over the image rather than burnt into it, so the bytes the
+       model saw and the bytes here are the same file. */
+    .computer-frame { position: relative; display: inline-block; max-width: 100%; }
+    .computer-frame .screenshot-img { display: block; }
+    .computer-click-ring { position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px; border: 2px solid #ef4444; border-radius: 50%; box-shadow: 0 0 0 1px rgba(255,255,255,0.9), 0 0 0 4px rgba(239,68,68,0.25); pointer-events: auto; }
+
     /* The matrix table: which rows passed, answered without opening anything else. */
     .rows-matrix { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; margin-bottom: 18px; }
     .rows-matrix h2 { margin: 0 0 10px; font-size: 0.95rem; }

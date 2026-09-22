@@ -299,7 +299,8 @@ Plan your next action based on the observed result — do not batch multiple act
      ], "reasoning": "...", "needs_reeval": false }
    When the instruction does NOT name a completion condition (e.g. just "click Login"), return only the triggering action — do not invent speculative waits
 23. LEAVING A FLOW EARLY. Some steps are written as flow control: "If <condition> then return", "When <condition> then stop", "If <condition> then stop running the remaining steps", and the compound form "If the Save button is visible, click it and return". On such a step, judge the condition against the page. If it HOLDS, return { "action": "return", "description": "<why the condition holds>", "needs_reeval": false } — after any action the step also asks for, in the same response. If it does NOT hold, return { "action": "noop", "description": "<why the condition does not hold>", "needs_reeval": false } and the next step will run. NEVER return "return" on a step that does not say to return or stop: the framework rejects it and the step fails. A step that merely mentions going back ("Click the details link then return", "Navigate back") is an ordinary browser step, not flow control
-   The same rule has a third verb: FAILING ON PURPOSE. Some steps are written as "If <condition> then fail the test with error '<message>'", "When <condition> then fail the test", or just "If <condition> fail the test with message '<message>'". Judge the condition exactly the same way. If it HOLDS, return { "action": "fail", "description": "<why the condition holds>", "needs_reeval": false }. If it does NOT hold, return { "action": "noop", "description": "<why the condition does not hold>", "needs_reeval": false } and the next step will run. The message in the step is the author's — you do not write it, repeat it, or judge whether it is accurate; your description says only what you found on the page. NEVER return "fail" on a step that does not say to fail the test, including one that says to return or stop: the framework rejects it and the step fails`, true),
+   The same rule has a third verb: FAILING ON PURPOSE. Some steps are written as "If <condition> then fail the test with error '<message>'", "When <condition> then fail the test", or just "If <condition> fail the test with message '<message>'". Judge the condition exactly the same way. If it HOLDS, return { "action": "fail", "description": "<why the condition holds>", "needs_reeval": false }. If it does NOT hold, return { "action": "noop", "description": "<why the condition does not hold>", "needs_reeval": false } and the next step will run. The message in the step is the author's — you do not write it, repeat it, or judge whether it is accurate; your description says only what you found on the page. NEVER return "fail" on a step that does not say to fail the test, including one that says to return or stop: the framework rejects it and the step fails
+24. CHANGING SURFACE IS NOT A PAGE ACTION. A step asking to drive the desktop, the operating system, a native window or the machine's screen — "use computer", "switch to the desktop", "take over the whole screen" — is not something any action here can do: the surface is switched by a \`[use computer]\` / \`[use browser]\` line in the test file. Report such a step as UNACHIEVABLE — an \`assert\` with "holds": false and an "evidence" saying the step asks for a surface change — and never answer it with "noop", which reports success for a step that did nothing`, true),
   ];
 
   if (contextContent) {
@@ -1205,6 +1206,31 @@ export interface StepCodePromptInput {
  * It exempts an entry from ALL THREE rules — masking a declared non-secret by
  * value would take the hatch away again through the other door.
  */
+/**
+ * One value, as a prompt may print it: the three rules of
+ * {@link formatParameterBlock} in the order the doc comment above argues for
+ * them, over a single entry and without the quoting.
+ *
+ * Lifted out because the COMPUTER surface needs the same answer in a different
+ * shape: `buildComputerStepMessage` (src/desktop/prompt.ts) takes a plain
+ * `name → value` map that is "already resolved and already masked", and a
+ * second implementation of masking beside a first is exactly the mirror this
+ * repo has been bitten by (docs/specs/SPEC-use-computer.md, `variables`). One
+ * function, two callers; the page block still quotes, the computer map does
+ * not.
+ */
+export function maskValueForPrompt(
+  secret: boolean,
+  name: string,
+  value: string,
+  unmask: ReadonlySet<string> = new Set<string>(),
+  secrets: string[] = [],
+): string {
+  if (unmask.has(name)) return value;
+  if (secret) return MASK;
+  return redact(maskRecordSecrets(value), secrets);
+}
+
 export function formatParameterBlock(
   parameters: Array<{ name: string; value: string }>,
   envRefs: Array<{ ref: string; value: string }>,
@@ -1221,11 +1247,8 @@ export function formatParameterBlock(
   map?: Record<string, string>,
 ): string {
   if (parameters.length === 0 && envRefs.length === 0) return '(this step uses no parameters)';
-  const show = (secret: boolean, name: string, value: string): string => {
-    if (unmask.has(name)) return JSON.stringify(value);
-    if (secret) return JSON.stringify(MASK);
-    return JSON.stringify(redact(maskRecordSecrets(value), secrets));
-  };
+  const show = (secret: boolean, name: string, value: string): string =>
+    JSON.stringify(maskValueForPrompt(secret, name, value, unmask, secrets));
   return [
     ...parameters.map(
       (p) => `- {{${p.name}}} resolved to ${show(isSecretParameterName(p.name, map), p.name, p.value)} on this run`,

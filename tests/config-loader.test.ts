@@ -182,6 +182,21 @@ describe('loadConfig — aiui.config.json loading + deep merge', () => {
     expect(config.execution.defaultHooks?.beforeEach).toEqual(['[skill: only_this]']);
   });
 
+  // docs/specs/SPEC-use-computer.md §4.4 — a hook runs on the page surface, so
+  // it may not switch surface. At LOAD, beside the flow-control rule and for
+  // the same reason: `defaultHooks` merges into every test in the project, and
+  // a hook that changed the surface would change it for the step it wraps and
+  // for every step after it.
+  it.each(['[use computer]', '[use browser]'])(
+    'refuses %s in execution.defaultHooks',
+    async (line) => {
+      const file = await writeConfig({ execution: { defaultHooks: { beforeEach: [line] } } });
+
+      await expect(loadConfig(file)).rejects.toThrow(/hook runs on the page surface/);
+      await expect(loadConfig(file)).rejects.toThrow(/defaultHooks\.beforeEach/);
+    },
+  );
+
   it('throws when an explicit --config path does not exist', async () => {
     const missing = path.join(tmpDir, 'does-not-exist.json');
     await expect(loadConfig(missing)).rejects.toThrow(missing);

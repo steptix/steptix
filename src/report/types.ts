@@ -142,6 +142,31 @@ export interface TurnResult {
   aiInteractions: AiInteraction[];
   /** Sub-actions executed from this turn's action plan */
   subActions: SubActionResult[];
+  /**
+   * What the COMPUTER surface showed and did this turn
+   * (docs/specs/SPEC-use-computer.md §10.1). Absent on every page-surface
+   * turn, so a report from a browser-only run is byte-identical to one
+   * written before computer mode existed.
+   *
+   * `screenshotBase64` is the downscaled capture the model was actually shown,
+   * and it is recorded only when `desktop.reportScreenshots` is true — a
+   * desktop capture is the WHOLE screen and `src/utils/secrets.ts` cannot mask
+   * pixels, so the switch is about privacy rather than size (§10.1).
+   *
+   * `imagePoint` / `screenPoint` are the two halves of §10.2's log line: where
+   * the model pointed in the image it was shown, and the logical screen point
+   * that mapped to. The report draws its ring at `imagePoint`, because that is
+   * the space `screenshotBase64` is in; `screenPoint` is what actually moved.
+   */
+  computer?: {
+    screenshotBase64?: string;
+    imageWidth: number;
+    imageHeight: number;
+    /** `zoom` when this turn's image was a crop of the previous one (§5.3). */
+    kind: 'full' | 'zoom';
+    imagePoint?: { x: number; y: number };
+    screenPoint?: { x: number; y: number };
+  };
 }
 
 /** Result of a single test step */
@@ -155,6 +180,32 @@ export interface StepResult {
   /** Set when this step ran inside a loop. Absent on an ordinary step, so a
    *  report with no loops is byte-identical to one from before the feature. */
   loop?: LoopMarker;
+  /**
+   * Which surface answered this step (docs/specs/SPEC-use-computer.md §4.5).
+   *
+   * Absent means `browser` — every step of every test written before computer
+   * mode, and every page step after it. Present and `computer`, it is the one
+   * fact the compile reads to keep the step on AI (§9: coordinates are not
+   * portable), and the report reads to label the row.
+   *
+   * On a {@link stepKind} `'mode'` row it means something slightly different
+   * and deliberately so: the surface the run switched TO, which is also the
+   * surface the step after it runs on.
+   */
+  surface?: 'browser' | 'computer';
+  /**
+   * A `[use computer]` / `[use browser]` row (§10.1).
+   *
+   * The directive performs nothing, calls no model and touches no page, so a
+   * report rendering it as an ordinary passed step says "✓" over a step that
+   * did nothing. It renders as a MODE MARKER instead — "→ computer" — and
+   * {@link surface} says which way.
+   *
+   * A discriminant with one member, like `flowControl.kind`: it is here
+   * because a second kind of dispatched-and-not-executed row arriving as a
+   * widened union is found by the compiler at every consumer.
+   */
+  stepKind?: 'mode';
   /** Ordered turns — each groups an AI decision with the sub-actions it produced */
   turns: TurnResult[];
   /** All assertions evaluated during this step, in execution order */

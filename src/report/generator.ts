@@ -564,7 +564,43 @@ interface RenderStepOverrides {
   displayInstruction?: string;
 }
 
+/**
+ * A `[use computer]` / `[use browser]` row (SPEC-use-computer.md §10.1).
+ *
+ * A MODE MARKER, not a step that did nothing: the directive calls no model,
+ * touches no page and costs no tokens, so the ordinary step chrome — the ✓
+ * badge, the duration, the "Screenshot not captured" placeholder — would all
+ * be answers to questions this line never asked. What a reader wants from it
+ * is one thing, which surface the run moved to, and it is in the row.
+ *
+ * A FAILED one keeps the failure block, because a refused `[use computer]` is
+ * one of §5.1's four preconditions saying no and the message is the whole
+ * point of the row.
+ *
+ * Exported for unit-test use; not part of the report's public API.
+ */
+export function renderModeStep(step: StepResult, numberLabel: string): string {
+  const failed = step.status === 'failed';
+  const marker = failed ? '✗' : `→ ${step.surface ?? 'browser'}`;
+  const detail = failed
+    ? `<div class="failure-message">${escapeHtml(step.error ?? 'the surface switch failed')}</div>`
+    : '';
+  return `<div class="step step-mode${failed ? ' step-mode-failed' : ''}">
+  <div class="step-header">
+    <span class="step-number">${escapeHtml(numberLabel)}</span>
+    <span class="step-instruction">${escapeHtml(step.instruction)}</span>
+    <span class="badge badge-mode" title="${escapeHtml(step.aiExplanation ?? '')}">${escapeHtml(marker)}</span>
+  </div>
+  ${detail}
+</div>`;
+}
+
 function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): string {
+  // §10.1 — the surface-switch row has its own shape and leaves before any of
+  // the step chrome below is built.
+  if (step.stepKind === 'mode') {
+    return renderModeStep(step, overrides.numberLabel ?? `Step ${step.index}`);
+  }
   // The interrupted step (run stopped here — issue 021) is its own state, not a
   // failure: amber "ABORTED" badge, no red failure block. Checked first so it
   // overrides the underlying 'failed' status it carries for back-compat.
@@ -953,9 +989,64 @@ function renderTurn(turn: TurnResult, showTurnHeader: boolean, showAttempt: bool
 
   return `<div class="turn">
   ${headerHtml}
+  ${renderComputerTurn(turn)}
   ${aiHtml}
   ${subActionsHtml}
 </div>`;
+}
+
+/**
+ * The computer-mode capture a turn was decided from, with the click ring
+ * (SPEC-use-computer.md §10.1, §10.2).
+ *
+ * The ring is a positioned `<span>` over the image rather than pixels burnt
+ * into the PNG, and that is the cheap answer the spec asks for: the model's
+ * copy of the image is untouched by construction, the report's copy is the
+ * same bytes, and re-deriving the ring from `imagePoint` costs two percentages
+ * instead of a jimp round-trip per turn inside a synchronous renderer. It also
+ * stays legible when the browser scales the image down to the column width,
+ * which a burnt-in ring would not.
+ *
+ * `screenPoint` is in the tooltip beside it, because the two numbers together
+ * are what §10.2's log line prints and what a coordinate bug is diagnosed
+ * from — "the model pointed HERE and the mouse went THERE".
+ *
+ * Nothing renders when `desktop.reportScreenshots` is false: the row says so
+ * rather than showing an empty frame, because a desktop capture is the whole
+ * screen and its absence is a deliberate privacy choice, not a missing file.
+ */
+function renderComputerTurn(turn: TurnResult): string {
+  const computer = turn.computer;
+  if (!computer) return '';
+
+  const label = computer.kind === 'zoom'
+    ? `Screen at AI decision — ZOOMED view (${computer.imageWidth}×${computer.imageHeight})`
+    : `Screen at AI decision (${computer.imageWidth}×${computer.imageHeight})`;
+
+  if (!computer.screenshotBase64) {
+    return `<div class="screenshot-container turn-screenshot screenshot-disabled">
+        <div class="screenshot-label">${escapeHtml(label)}</div>
+        <div class="screenshot-placeholder">Desktop capture not embedded — set <code>desktop.reportScreenshots: true</code> to include it. A desktop capture is the whole screen, so this is off-by-choice, not a missing file.</div>
+       </div>`;
+  }
+
+  const point = computer.imagePoint;
+  const ring = point && computer.imageWidth > 0 && computer.imageHeight > 0
+    ? `<span class="computer-click-ring" style="left:${((point.x / computer.imageWidth) * 100).toFixed(3)}%;top:${((point.y / computer.imageHeight) * 100).toFixed(3)}%" title="${escapeHtml(
+        `pointer: image(${point.x},${point.y})` +
+          (computer.screenPoint
+            ? ` → screen(${computer.screenPoint.x},${computer.screenPoint.y})`
+            : ''),
+      )}"></span>`
+    : '';
+
+  return `<div class="screenshot-container turn-screenshot computer-screenshot">
+        <div class="screenshot-label">${escapeHtml(label)}</div>
+        <div class="computer-frame">
+          <img class="screenshot-img" src="${toDataUri(computer.screenshotBase64)}" alt="Computer-mode screen capture" loading="lazy">
+          ${ring}
+        </div>
+       </div>`;
 }
 
 function renderAiInteraction(ai: AiInteraction): string {

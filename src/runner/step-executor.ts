@@ -66,6 +66,8 @@ import { makeBrowserApi, makeTabApi } from '../codebehind/tabs.js';
 import type { EnvDataContext } from '../parser/interpolate-env-data.js';
 import type { StepGroup } from './step-grouper.js';
 import type { AssertionResult } from '../report/types.js';
+import type { DesktopAdapter } from '../desktop/index.js';
+import { captureView } from '../desktop/index.js';
 
 /**
  * Actions that may mutate the page and therefore warrant a post-action settle
@@ -136,7 +138,44 @@ export const POLICY_HEAL_SKIPPED_ERROR =
   '(runSettings.ai: off, or ai.allowInRuns: false in aiui.config.json). ' +
   'Repair this step, or run again with AI allowed.';
 
+/**
+ * Everything the COMPUTER surface needs, in one field
+ * (docs/specs/SPEC-use-computer.md §5).
+ *
+ * Present on a step's options only while `surface === 'computer'`. Two
+ * consumers read it: `executeComputerStep` (src/runner/computer-step.ts),
+ * which is the whole turn loop for such a step, and {@link evaluateConditions},
+ * which judges an `If … then` from a capture instead of a DOM (§5.6).
+ *
+ * The adapter is the one the run's `[use computer]` step loaded and the
+ * session holds. It is passed rather than loaded here for the reason §5.1
+ * gives: the import is lazy, it happens once per session at the directive, and
+ * a load failure has a STEP to fail there rather than an executor to crash.
+ */
+export interface ComputerStepContext {
+  adapter: DesktopAdapter;
+  /** §5.5 — the pause after every action that touches the screen. */
+  settleMs: number;
+  /** §5.2 — the longer side of the image the model is shown. */
+  maxImageWidth: number;
+  /** §10.1 — embed the capture in the report. A desktop capture is the whole
+   *  screen and no redaction can mask pixels, so this is a privacy switch. */
+  reportScreenshots: boolean;
+}
+
 export interface StepExecutorOptions {
+  /**
+   * The page this step acts on.
+   *
+   * **Absent in fact, though not in type, on the computer surface**: a
+   * desktop-first test launches no browser (§4.6), so a caller in computer
+   * mode passes whatever `browserSession?.pageTracker.getActive()` gave it,
+   * which is `undefined`. Nothing on the computer path dereferences it —
+   * {@link evaluateConditions} branches on `opts.computer` before it reads a
+   * page, and `executeComputerStep` never touches this field at all. Typing it
+   * `Page | undefined` would put a `!` on ~200 page-surface reads and say
+   * nothing this comment does not.
+   */
   page: Page;
   config: Config;
   aiClient: AiClient;
@@ -311,6 +350,12 @@ export interface StepExecutorOptions {
    * that is not that line must not inherit either.
    */
   failureTail?: ParsedFailureTail | undefined;
+  /**
+   * The computer surface, when this run is on it
+   * (docs/specs/SPEC-use-computer.md §4.5). Absent on every browser-surface
+   * step, which is every step of every test written before computer mode.
+   */
+  computer?: ComputerStepContext | undefined;
 }
 
 /**
@@ -614,7 +659,7 @@ function resolvedTailMessage(
  * The original failure is never lost: a renamed one keeps it in the explanation,
  * and the log line at failure time printed it before this ran (decision 5).
  */
-function applyFailureTail(result: StepResult, opts: StepExecutorOptions): StepResult {
+export function applyFailureTail(result: StepResult, opts: StepExecutorOptions): StepResult {
   const tail = opts.failureTail;
   if (!tail) return result;
   if (result.status !== 'failed' || result.interrupted) return result;
@@ -950,7 +995,7 @@ export async function executeStep(
  * the condition was answered from this run's values. One function for both, so
  * the row a reader sees cannot depend on which judged it.
  */
-function composeDeliberateFailure(
+export function composeDeliberateFailure(
   claim: ParsedFlowControlStep,
   interpolatedLine: string,
   why: string,
@@ -1440,7 +1485,7 @@ function enrichAuthored(text: string): string {
  * nothing, which is what keeps a plain step's prompt byte-identical to the one
  * built before this block existed.
  */
-function buildStepValues(authored: string, opts: StepExecutorOptions): StepValues | undefined {
+export function buildStepValues(authored: string, opts: StepExecutorOptions): StepValues | undefined {
   const params = opts.resolvedParameters ?? {};
   const { placeholders, captures } = referencedVariableNames(authored);
   const defined = new Set([...captures, ...inlineStoreAsNames(authored)]);
@@ -1498,7 +1543,7 @@ function buildStepValues(authored: string, opts: StepExecutorOptions): StepValue
  * secret typed into a text field reached the model masked on one path and raw
  * on the next turn (review 3, finding 2).
  */
-function secretsFor(opts: StepExecutorOptions): string[] {
+export function secretsFor(opts: StepExecutorOptions): string[] {
   return runSecrets({
     parameters: opts.resolvedParameters ?? {},
     ...(opts.envData !== undefined && { envData: opts.envData }),
@@ -2350,6 +2395,15 @@ async function executeStepAttempt(
           switchBrErr = 'switchBrowser failed: missing required "to" field';
         } else {
           try {
+            // `switchBrowser default` on a tracker that never launched
+            // (SPEC-use-computer.md §4.6): the default browser is the one the
+            // deferred launcher opens, so asking for it by name IS the
+            // request to open it. Only `default` — every other label names a
+            // browser an `openBrowser` created, and launching the default
+            // under that name would answer a question nobody asked.
+            if (action.browserLabel === 'default' && !opts.browserTracker.hasActive()) {
+              await opts.browserTracker.ensureLaunched();
+            }
             opts.browserTracker.switchTo(action.browserLabel);
             page = opts.browserTracker.getActivePage();
             logger.info(`Switched to browser "${action.browserLabel}" (${page.url()})`);
@@ -3275,9 +3329,21 @@ async function runAssertionCode(
  * Execute an api_call action using either the Playwright browser context or standalone fetch.
  * Stores the response in the provided ApiResponseStore for subsequent steps.
  */
-async function executeApiCallAction(
+export async function executeApiCallAction(
   action: AIAction,
-  page: Page,
+  /**
+   * The page, or `undefined` on the computer surface — where an `api_call` is
+   * still legal (§5.4: "as today — they touch no surface") and there may be no
+   * browser at all (§4.6).
+   *
+   * Two things degrade without one, and both degrade to "say so" rather than
+   * to a guess: a RELATIVE url has only `baseUrl` to resolve against, and the
+   * opportunistic CSRF pre-flight is skipped. `apiMode: 'browser'` needs a
+   * real browser context and is refused by name rather than silently
+   * downgraded to a standalone fetch that would carry none of the cookies the
+   * mode exists for.
+   */
+  page: Page | undefined,
   stepIndex: number,
   csrfTokens: Record<string, string>,
   requestTimeout: number | undefined,
@@ -3287,9 +3353,26 @@ async function executeApiCallAction(
   const method = (action.method ?? 'GET').toUpperCase();
   let url = action.url ?? '';
 
+  if (!page && action.apiMode === 'browser') {
+    return {
+      failed: true,
+      error:
+        'api_call with apiMode "browser" needs a browser context, and this run has no ' +
+        'browser open. Use the default standalone mode, or switch back with [use browser].',
+    };
+  }
+
   // Resolve relative URLs against baseUrl or the current page URL
   if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
-    const base = baseUrl ?? page.url();
+    const base = baseUrl ?? page?.url();
+    if (!base) {
+      return {
+        failed: true,
+        error:
+          `api_call url "${url}" is relative and there is nothing to resolve it against — ` +
+          'this run has no page and no baseUrl. Give the full URL.',
+      };
+    }
     if (base) {
       try {
         url = new URL(url, base).toString();
@@ -3320,7 +3403,7 @@ async function executeApiCallAction(
   // If no CSRF token has been captured yet, opportunistically try to extract one from
   // the current page.  This handles the case where the AI skips the navigate/wait steps
   // and goes straight to the api_call without an explicit extract_csrf action.
-  if (!csrfTokens['__latest__'] && !headers['x-csrf-token'] && !headers['X-CSRF-Token']) {
+  if (page && !csrfTokens['__latest__'] && !headers['x-csrf-token'] && !headers['X-CSRF-Token']) {
     const autoResult = await extractCsrfToken(page, '').catch(() => undefined);
     if (autoResult) {
       csrfTokens[autoResult.selector] = autoResult.token;
@@ -3346,8 +3429,10 @@ async function executeApiCallAction(
   logger.subAction(`API ${method} ${url}`);
 
   try {
+    // `page!` is safe: the `apiMode === 'browser'` + no-page combination is
+    // refused at the top of this function, so this branch only runs with one.
     const apiResult = action.apiMode === 'browser'
-      ? await callApiBrowserContext(page, callOpts)
+      ? await callApiBrowserContext(page!, callOpts)
       : await callApiStandalone(callOpts);
 
     // Store in response store for subsequent steps
@@ -3448,6 +3533,24 @@ export interface ConditionVerdict {
 }
 
 /**
+ * What stands in the condition judge's `## DOM Snapshot` fence on the computer
+ * surface (docs/specs/SPEC-use-computer.md §5.6).
+ *
+ * The fence is part of a prompt shared with the page surface, and it cannot be
+ * left empty: an empty `html` block reads as "the page is blank", which is an
+ * assertion about a page and would answer "is the Save As dialog open" no, for
+ * a reason that has nothing to do with the screen. So it says what is true —
+ * there is no DOM here, judge the image — in one sentence.
+ *
+ * Exported so the test that proves §5.6 can assert on the one thing that
+ * matters: an image went, and no markup did.
+ */
+export const COMPUTER_CONDITION_NO_DOM =
+  'There is no DOM: this decision is being judged on the COMPUTER surface, ' +
+  'where the evidence is the attached screenshot of the whole screen — ' +
+  "operating-system windows, dialogs and menus included — and nothing else.";
+
+/**
  * Ask the model which of `conditions` holds on the page now
  * (stories/control-flow.md §"Condition evaluation").
  *
@@ -3469,17 +3572,33 @@ export async function evaluateConditions(
   opts: StepExecutorOptions,
 ): Promise<ConditionVerdict> {
   const { config, aiClient, contextContent, testName, baseUrl, conversationHistory, pageTracker } = opts;
-  const page = pageTracker ? pageTracker.getActive() : opts.page;
+  /**
+   * The computer surface, when this run is on it (SPEC-use-computer.md §5.6).
+   *
+   * Everything below asks the SAME question of the model — which of these
+   * conditions holds right now — and differs only in what the evidence is: a
+   * DOM plus an optional page screenshot, or a capture of the machine's screen
+   * and no DOM. The predicate path never gets here (`decideLocally` in
+   * control-runtime.ts answers it first, on both surfaces), which is why §5.6
+   * says it is unchanged.
+   */
+  const computer = opts.computer;
+  const page = computer ? undefined : pageTracker ? pageTracker.getActive() : opts.page;
   const startTime = Date.now();
   const deadline = startTime + CONDITION_JUDGE_BUDGET_MS;
   const aiInteractions: AiInteraction[] = [];
 
   // The same gate the watch form opens with, and for the same reason: a page
   // that is still painting answers a different question from the one asked.
-  await waitForPageStability(page, {
-    timeoutMs: Math.min(10_000, config.execution.timeout * 1000),
-    quiesceMs: 1000,
-  });
+  // There is no such signal for a native window — `desktop.settleMs` is the
+  // whole of it, and the executor has already spent it after whatever action
+  // preceded this decision — so the computer surface simply does not wait.
+  if (page) {
+    await waitForPageStability(page, {
+      timeoutMs: Math.min(10_000, config.execution.timeout * 1000),
+      quiesceMs: 1000,
+    });
+  }
 
   // Every `{{name}}` and `${…}` any condition references, with what it holds
   // now — built off the joined authored text so one block covers the chain.
@@ -3492,17 +3611,33 @@ export async function evaluateConditions(
       throw new DOMException('Run aborted by client', 'AbortError');
     }
 
-    const domSnapshot = await captureDomSnapshot(page, {
-      ...config.browser.domNoiseReduction,
-      maxIframeDepth: config.browser.maxIframeDepth,
-      domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-    });
-    const screenshot = config.ai.sendScreenshots
-      ? await captureScreenshot(page, config.browser.fullPageScreenshots)
+    // §5.6 — on the computer surface the evidence is a fresh capture and the
+    // DOM block says, in words, that there is no DOM. It is not left empty:
+    // an empty ```html``` fence reads to a model as "the page is blank",
+    // which is a fact about a page, and the answer to "is the Save As dialog
+    // open" would then be no for the wrong reason.
+    //
+    // The capture is ALWAYS attached, whatever `ai.sendScreenshots` says
+    // (§5.2): on this surface the image is the entire evidence, and the flag
+    // governs whether the model sees a PAGE's image beside a DOM.
+    const desktopView = computer
+      ? await captureView(computer.adapter, { maxImageWidth: computer.maxImageWidth })
+      : undefined;
+    const domSnapshot = computer
+      ? COMPUTER_CONDITION_NO_DOM
+      : await captureDomSnapshot(page!, {
+          ...config.browser.domNoiseReduction,
+          maxIframeDepth: config.browser.maxIframeDepth,
+          domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+        });
+    const screenshot = computer || config.ai.sendScreenshots
+      ? computer
+        ? { base64: desktopView!.pngBase64 }
+        : await captureScreenshot(page!, config.browser.fullPageScreenshots)
       : null;
     const screenshotBase64 = screenshot?.base64 ?? null;
 
-    const openPages = pageTracker && pageTracker.count > 1
+    const openPages = !computer && pageTracker && pageTracker.count > 1
       ? await pageTracker.getPageListWithTitles()
       : undefined;
 
@@ -3543,12 +3678,12 @@ export async function evaluateConditions(
 
     let currentUrl = '';
     try {
-      currentUrl = page.url();
+      currentUrl = page ? page.url() : '';
     } catch { /* a page mid-navigation still gets judged; the URL is a label */ }
 
     const completion = await aiClient.complete(messages, opts.signal);
     aiInteractions.push({
-      purpose: 'condition-judge',
+      purpose: computer ? 'condition-judge [computer]' : 'condition-judge',
       requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
       response: completion.text,
       ...(completion.model !== undefined && { model: completion.model }),
@@ -3594,14 +3729,16 @@ export async function evaluateConditions(
 
     if (Date.now() + CONDITION_JUDGE_POLL_MS >= deadline) break;
     await new Promise((resolve) => setTimeout(resolve, CONDITION_JUDGE_POLL_MS));
-    await waitForPageStability(page, {
-      timeoutMs: Math.max(0, Math.min(5000, deadline - Date.now())),
-      quiesceMs: 500,
-    });
+    if (page) {
+      await waitForPageStability(page, {
+        timeoutMs: Math.max(0, Math.min(5000, deadline - Date.now())),
+        quiesceMs: 500,
+      });
+    }
   }
 
   throw new Error(
-    `could not decide: the page did not settle within ` +
+    `could not decide: the ${computer ? 'screen' : 'page'} did not settle within ` +
       `${Math.round(CONDITION_JUDGE_BUDGET_MS / 1000)}s while judging "${conditions[0] ?? ''}"`,
   );
 }
