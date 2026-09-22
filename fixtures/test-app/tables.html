@@ -392,9 +392,15 @@
             </tr>
             <tr>
               <th scope="row"><a href="table-edge-cases.html">table-edge-cases.html</a></th>
-              <td class="what">A gallery of sixteen structures: merged headers, rowspan, duplicate headers, a nested table, grouped <code>&lt;tbody&gt;</code> sections, <code>&lt;tfoot&gt;</code>, row headers, a header in the first body row, no header, placeholder and loading rows, hidden rows and columns, icon-only cells, bank number formats, a <code>role="grid"</code> div grid, a responsive card table, and a table in an iframe — each captioned with its verdict.</td>
+              <td class="what">A gallery of eighteen structures: merged headers, rowspan, duplicate headers, a nested table, grouped <code>&lt;tbody&gt;</code> sections, <code>&lt;tfoot&gt;</code>, row headers, a header in the first body row, no header, placeholder and loading rows, hidden rows and columns, icon-only cells, bank number formats, a <code>role="grid"</code> div grid, a responsive card table, a table in an iframe, two named tables that are not one grid, and two unnamed tables with a heading between them — each captioned with its verdict.</td>
               <td class="verdict"><span class="badge badge-v1">v1</span><span class="verdict-note">Plus the rejected, phase 2 and deferred shapes, each labelled</span></td>
-              <td class="spec">§5.3–5.5, §7.3–7.4, §10, §14</td>
+              <td class="spec">§5.3–5.5, §7.3, §7.3a, §7.4, §10, §14</td>
+            </tr>
+            <tr>
+              <th scope="row"><a href="split-grids.html">split-grids.html</a></th>
+              <td class="what">Four component grids that split one grid across two tables — the header in one <code>&lt;table&gt;</code>, the rows in another, inside one wrapper div. Holdings is Kendo's three tables (header, rows, <code>&lt;tfoot&gt;</code> totals) plus a pager, wired with <code>aria-owns</code>, with a select-all checkbox column and a Swap the Symbol and Value columns button that moves both tables at once; Dividends is two tables with no <code>aria-owns</code>, grouped by year, and a Show no dividends toggle; Watchlist is the same split with DevExpress class names, no aria at all and a hidden Target column; Frozen holdings is Kendo's locked columns — four tables, two of them holding rows.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span><span class="verdict-note">Frozen holdings is <span class="badge badge-rejected">rejected</span> on purpose</span></td>
+              <td class="spec">§5.6, §7.2, §7.3a</td>
             </tr>
           </tbody>
         </table>

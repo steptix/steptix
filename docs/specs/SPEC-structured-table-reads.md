@@ -136,7 +136,10 @@ Everything §14 lists is outside all three.
 ## 3. Non-goals for v1
 
 - ARIA grids or `<div role="table">` implementations. V1 supports native
-  `<table>` elements only.
+  `<table>` elements only. A grid whose header and rows are TWO native
+  tables inside one wrapper — the shape Telerik/Kendo, DevExpress and
+  Syncfusion render for a fixed header — is not this case: it is one table
+  in two pieces, and §7.2/§7.3a read it as one (§5.6).
 - Automatically paging, scrolling a virtual grid, or clicking “Load more.” An
   author composes the existing `While`/`Repeat` forms explicitly.
 - Persisting Playwright `Locator` or DOM element handles in variables.
@@ -396,6 +399,11 @@ failed both reads with “merged cells are not supported”. The rule is:
   data row hidden by a filter) came out one column wide, the rule never
   fired, and the read failed as a merged cell instead of storing `[]`. The
   hidden rows are the last evidence of how wide the table is.
+- The same when the spanning cell is the row's only RENDERED cell and every
+  other cell in the row is unrendered. Kendo's group row (§5.6) is
+  `<td colspan="6">Year: 2026</td>` followed by five `<td hidden>` filler
+  cells, so it has six cells and one visible one; counted as six it reached
+  the merged-cell rule and failed the whole read of a grouped grid.
 - A body row with no cells at all is skipped and counted the same way: there
   is nothing in it to map and nothing to number.
 - If every body row is a placeholder, the table is empty: store `[]`.
@@ -648,6 +656,85 @@ readTable cannot map table "Scheduled payments": it has no header row, so "Payee
 stores `[]` (§4.8). The same row among real rows would be skipped, and a
 `colspan="3"` cell in a five-column table is still the §5.3 error.
 
+### 5.6 Header and rows in separate tables
+
+`fixtures/test-app/split-grids.html`, the Holdings grid — the markup Kendo UI
+renders for a scrollable grid, copied from the live Telerik demo. The header
+is one `<table>`, the rows are a second `<table>`, and a footer is a third;
+the app's own id is on the wrapper `<div>`, and the row table's `id` is a
+generated GUID (the fixture spells it `holdings-table`):
+
+```html
+<div id="holdings-grid" class="k-grid" data-role="grid">
+  <div class="k-grid-header">
+    <div class="k-grid-header-wrap">
+      <table role="none" class="k-grid-header-table k-table">
+        <thead class="k-table-thead" role="rowgroup" id="holdings-thead">
+          <tr class="k-table-row" role="row">
+            <th scope="col" class="k-table-th k-header" role="columnheader"><input type="checkbox" aria-label="Select all rows"></th>
+            <th scope="col" class="k-table-th k-header" role="columnheader" data-field="symbol" data-title="Symbol" rowspan="1">
+              <span class="k-cell-inner"><span class="k-link"><span class="k-column-title">Symbol</span></span>
+              <a class="k-grid-column-menu" href="#" aria-hidden="true" title="Symbol edit column settings"><span class="k-icon" aria-hidden="true"></span></a></span>
+            </th>
+            <th …>Name</th> <th …>Units</th> <th …>Price</th> <th …>Value</th> <th …>Change</th> <th …>Actions</th>
+          </tr>
+        </thead>
+      </table>
+    </div>
+  </div>
+  <div class="k-grid-container">
+    <div class="k-grid-content">
+      <table class="k-grid-table k-table" role="grid" aria-rowcount="-1"
+             aria-owns="holdings-thead holdings-tbody">
+        <tbody class="k-table-tbody" role="rowgroup" id="holdings-tbody">
+          <tr class="k-table-row k-master-row" role="row"><td class="k-table-td" role="gridcell"><input type="checkbox" aria-label="Select row"></td><td …>VAS</td><td …>Vanguard Australian Shares</td><td …>120</td><td …>$95.10</td><td …>$11,412.00</td><td …>+1.2%</td><td …><button type="button">Sell</button></td></tr>
+          …
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="k-grid-footer"><div class="k-grid-footer-wrap">
+    <table class="k-table k-grid-footer-table" role="none"><tfoot><tr><td></td><td>Total</td><td></td><td></td><td></td><td>$67,961.00</td><td></td><td></td></tr></tfoot></table>
+  </div></div>
+</div>
+```
+
+`Read the Symbol column as symbol, Name column as name, and Value column as value from every row in the Holdings grid`
+is one `readTable` whose `selector` is the wrapper, `#holdings-grid`:
+
+```json
+{
+  "action": "readTable",
+  "selector": "#holdings-grid",
+  "columns": [
+    { "header": "Symbol", "key": "symbol" },
+    { "header": "Name", "key": "name" },
+    { "header": "Value", "key": "value" }
+  ],
+  "as": "holdings",
+  "description": "Read symbol, name and value from every Holdings row"
+}
+```
+
+The runtime finds the one table under the wrapper that has rows, takes the
+header from the table that has only a header (§7.2), and the records are the
+six rows, `_row` first, exactly as they would be from one table. The same
+read with `selector: "#holdings-grid .k-grid-content table"` — the row
+table itself — gives the same records: that table names its header through
+`aria-owns`, and a table that does not is paired with the header-only table
+beside it (§7.3a). The one selector that does NOT work is the header table:
+it has no rows, and rather than storing `[]` the read fails and names the
+wrapper (§7.3a, "the header-only pick").
+
+The Dividends grid on the same page is the grouped form, with a group row
+`<td colspan="6">Year: 2026</td>` followed by five `<td hidden>` filler
+cells (§4.8) and no `aria-owns`; the Watchlist grid is the same split under
+DevExpress class names with a hidden column; and the Frozen holdings grid is
+Kendo's locked-columns form — FOUR tables, the rows split by column across
+two of them — which the read refuses by name through the wrapper, the header
+tables and the locked half, rather than reading half of it as the whole
+(§7.3a says what each of the four tables gives).
+
 ---
 
 ## 6. AI action contract
@@ -687,7 +774,8 @@ limit?: number;
 
 `readTable` reuses these existing fields:
 
-- `selector`: CSS selector for one native `<table>`;
+- `selector`: CSS selector for one native `<table>`, or for one element that
+  contains a grid's header table and row table (§5.6, §7.2);
 - `frame`: optional existing iframe selector;
 - `as`: destination variable name;
 - `description`: model-authored description.
@@ -807,7 +895,8 @@ replacement for the existing `READ_MULTIPLE_MAX` behavior of `read` with
 Teach the step-planning prompt:
 
 - Use `readTable` when one step asks for two or more named columns from every
-  row of a native HTML table, or explicitly asks for row records/objects.
+  row of a native HTML table — or of a grid that renders its header and its
+  rows as two tables (below) — or explicitly asks for row records/objects.
 - Also use `readTable` when the author asks for the first/up to/at most N rows,
   even if only one named column is needed; emit that positive integer as
   `limit`.
@@ -819,6 +908,22 @@ Teach the step-planning prompt:
   emit `index` (one-based) instead of `header`. Never emit both for one
   column, and never turn a header name into an index or an index into a
   header name: the runtime resolves each the way the author wrote it.
+- Split grids (§5.6): some grid widgets (Telerik/Kendo, DevExpress,
+  Syncfusion) render the header row in one `<table>` and the data rows in a
+  second `<table>`, inside one wrapper element that carries the grid's id,
+  `aria-label` or `role="grid"`. Treat the pair as ONE table. Put the
+  WRAPPER's selector in `selector` (`#orders-grid`,
+  `[aria-label="Orders"]`), or the selector of the table that holds the
+  rows. NEVER select the table that holds only the header: it has no rows.
+  Keep naming columns by `header`: the runtime maps the header table's
+  headings onto the row table's cells. Do not switch to `index` because the
+  row table shows no `<th>` — the clause above about a table with no header
+  row is about a table with no header anywhere, not about one whose header
+  is in the table beside it. (Rule 13d "SPLIT GRIDS" in `src/ai/prompts.ts`,
+  pinned by `tests/prompts-read-table.test.ts`.) The runtime holds this
+  regardless of what the model emits: the row table is paired with its
+  header (§7.3a), and the header-only table is refused with a message that
+  names the wrapper.
 - Copy explicit author aliases exactly; otherwise apply the normalization rule
   in §4.2. A positional column has no header to derive from, so it needs an
   explicit alias; without one, return a `prompt` asking for it.
@@ -881,10 +986,47 @@ session storage migration is required.
 ### 7.2 Table selection
 
 1. Resolve `frame` using the existing locator-root path.
-2. Resolve `selector` and require exactly one matching visible element.
-3. Require that element to be a native `HTMLTableElement`.
-4. Zero matches fail as not found; more than one fails as ambiguous. Do not call
+2. Resolve `selector` and require exactly one matching visible element. Zero
+   matches fail as not found; more than one fails as ambiguous. Do not call
    `.first()` for `readTable`.
+3. The matched element is one of two things:
+   - a native `HTMLTableElement`: the table to read. Its header is its own
+     header row (§7.3) or, when it has none, one found in another table
+     (§7.3a);
+   - any other element: a **grid wrapper** (§5.6). Consider the RENDERED
+     tables under it that are not nested inside another table under it, in
+     document order. Exactly one of them must have body rows (§7.4's rows,
+     rendered or not); that is the table to read. Its header is, in order:
+     its own header row when it has one; the header its `aria-owns` declares
+     (§7.3a.1), so the wrapper and the row table give the same records
+     whatever the DOM order; else the one header-only table before it under
+     the wrapper (§7.3a.2 says what header-only means and applies its width
+     check; its name and contiguity conditions do not apply, because naming
+     the wrapper is the author asserting that the tables belong together,
+     and a header-only table whose header is REFUSED — two rows, a spanned
+     cell — surfaces that refusal here rather than being passed over). A
+     table with neither body rows nor a header row — a footer table holding
+     only a `<tfoot>` — is ignored. No table with rows fails as
+     `readTable found no table with rows under "<selector>"`, which is what
+     a `<div role="grid">` of `<div role="row">`s now gets (§3, §14: the
+     outcome is the same as before, the sentence changed). Two or more tables
+     with rows fail as
+     `readTable found 2 tables with rows under "<selector>" — it must be exactly one; a grid with frozen (locked) columns splits its rows across two tables, which is not supported`,
+     because reading one half would be the misalignment this action exists
+     to prevent (two whole grids under one wrapper get the same sentence;
+     the cause it names is the usual one).
+4. The label the diagnostics use is, in order: the read table's own
+   `aria-label`, its `<caption>`, or the text its `aria-labelledby` resolves
+   to; the GRID's name — the wrapper the selector named or, once a header
+   has been found in another table (§7.3a), the nearest common ancestor of
+   the two — by its `aria-label`, then the text its `aria-labelledby` names,
+   then its `id`; the read table's `id`; the selector. The grid is named
+   BEFORE the width and adopted-header refusals fire, so they name it too.
+   The grid's name beats the table's `id` because Kendo's row table carries
+   a GUID (`id="14277be2-015b-…"`), and a failure that names that names
+   nothing the author can find; and Kendo's tables have `role="none"` and no
+   name of their own, so without the wrapper's a failure would read
+   `cannot map table "#holdings-grid .k-grid-content table"`.
 
 ### 7.3 Header mapping
 
@@ -967,8 +1109,9 @@ accepts exactly one direct header row belonging to the selected table:
 - nested-table rows/cells are excluded by requiring `closest('table')` to be
   the selected table.
 
-If no header row exists and a column names one, fail with the §5.4 message,
-which tells the author to name columns by position. If every requested column
+If no header row exists — in the table, or in another table §7.3a can pair it
+with — and a column names one, fail with the §5.4 message, which tells the
+author to name columns by position. If every requested column
 is positional, the header row (if any) is still identified so that it is
 excluded from the body and so the placeholder-row rule (§7.4) knows the
 table's width, but nothing is matched against it.
@@ -999,6 +1142,144 @@ is `ORDER ID` while the author wrote `Order ID` and `textContent` says so
 too. Step 3's fold makes all three the same key. `tests/read-table.test.ts`
 must include a header styled that way.
 
+### 7.3a Header in another table
+
+A table with no header row of its own — no `<thead>` row and no body row §7.3
+accepts — may take its header from another table, in one of two ways, tried
+in this order. Both exist for the grid of §5.6, where the header and the rows
+are separate `<table>` elements, and neither applies to a table that has a
+header of its own: a header in the table always wins.
+
+1. **Declared.** The selected table's `aria-owns` names elements by id. If
+   one of them is a `<thead>` or a `<tr>` whose nearest `<table>` is a
+   different table, that table's header row — found by §7.3's own rules, so a
+   spanned or multi-row header is refused the same way — is the header. Kendo
+   writes exactly this on the row table:
+   `aria-owns="<header thead id> <own tbody id>"`. The page said which header
+   is this table's, so the name and contiguity conditions below do not apply;
+   the width check does.
+2. **Beside it.** Otherwise — and only when the selected table does not name
+   itself: a non-empty `aria-label`, an `aria-labelledby` that resolves to
+   text, or a `<caption>` with text makes it a whole table, never half of a
+   grid, and ends this path with no search and no refusal — walk up from the
+   selected table, ancestor by ancestor, BELOW `<body>`: a grid widget always
+   has a wrapper of its own, so `<body>` is never the container and the walk
+   ends with no candidate when the next ancestor would be it. (Walking to
+   `<body>` was measured to pair an unnamed empty table in one `<div>` with an
+   unrelated headerless table in the next, and to refuse the empty one as
+   "only the header row" where §4.8 says `[]`.) At each ancestor the
+   candidates are the tables under it that:
+   - precede the selected table in document order;
+   - are rendered;
+   - are **header-only**: §7.3's header search FINDS a row in them and they
+     have no body row other than that one — Kendo's header table is a
+     `<thead>` with no `<tbody>` at all; a framework that puts the headings
+     in the first `<tbody>` row and nothing under it qualifies the same way.
+     A table whose header is REFUSED (two rows, a spanned cell) is not a
+     candidate on this path: measured, it made a positional read of the plain
+     table beside it fail "its header has 2 rows" — a neighbour's problem.
+     (The declared and wrapper paths, where the page or the author asserted
+     the grouping, surface that refusal instead.) A table with rows is never
+     a candidate, and a table with neither (a footer holding a `<tfoot>`
+     alone) is ignored;
+   - are not nested inside ANY table — asked of the candidate outright, not
+     relative to the ancestor: asked relative to it, two tables sitting in
+     two cells of an enclosing layout table paired once the walk reached
+     that table's row, and a table inside a header-only table's `<th>`
+     adopted the header around it;
+   - do not name themselves (the same three forms as above; a dangling
+     `aria-labelledby` or an empty `<caption>` is not a name). A named empty
+     table above a headerless one is a whole table, not a header half.
+     Kendo's tables carry `role="none"` and no name;
+   - are contiguous with the selected table: between the candidate's end and
+     the selected table's start in document order there is no rendered text
+     outside a table, and no table WITH ROWS — a data table sitting between
+     them is that header's own partner. Text inside a header-only table
+     between them does not break contiguity: in Kendo's frozen grid the
+     second header table sits between the first and the rows, and both must
+     be seen for the refusal below to fire. A fixed-header grid is
+     contiguous; two tables have a heading between them. Empty wrapper
+     `<div>`s, `<colgroup>`s and scrollbar padding are not text.
+
+   Stop at the first ancestor with at least one candidate (stopping at the
+   nearest ancestor that merely contained another table was measured to
+   miss Kendo's frozen grid: the unlocked row table's nearest table-bearing
+   ancestor is `div.k-grid-container`, which holds the locked row table and
+   no header). Then count:
+   - two or more candidates is a grid with frozen (locked) columns, or a
+     page shaped like one — two unnamed header-only tables above an unnamed
+     headerless one with nothing but tables between them — and is refused:
+     `readTable found 2 header-only tables beside "<label>" — it must be exactly one; a grid with frozen (locked) columns splits its header across two tables, which is not supported`.
+     Naming either table (§10) reads the page as separate tables again;
+   - exactly one: the widths must match — the header row's cell count
+     equals the selected table's widest body row, rendered or not, measured
+     over the body rows that are not §4.8 message rows (a lone cell spanning
+     more than its own column, a lone rendered cell among unrendered
+     fillers, or a row with no cells; `colspan > 1` is the test here, the
+     §4.8 rule without the width it is about to measure). Measured over
+     every row, an emptied grid whose only row is
+     `<td colspan="6">No records available.</td>` is one cell wide against a
+     six-cell header, and was refused instead of reading `[]`; with no
+     non-message row the check is skipped. A mismatch is refused with both
+     counts —
+     `readTable cannot map table "<label>": the header table has <H> cells but its widest row has <W> — the two tables do not line up`
+     — because a header one column off is the §4.5 misalignment with a
+     plausible face. The same check, and the same sentence, apply to a header
+     the row table declared through `aria-owns`;
+   - none leaves the table headerless, as today.
+
+3. **The header-only pick.** The mirror image, and the case that made this
+   section necessary: the selected table HAS a header row and NO body rows,
+   and either another table's `aria-owns` — anywhere in the document, before
+   or after it — names that header (declared), or a rendered headerless
+   table with rows after it, under an ancestor below `<body>`, would adopt
+   this table's header by the rules in 2 (beside it: the search is run from
+   THAT table's side, so the refusal fires exactly when selecting it would
+   have paired the two). Then the read FAILS:
+   `readTable cannot read table "<label>": it holds only the header row; the rows are in the table beside it — select the element that contains both ("#holdings-grid") or that table`
+   — the parenthesised selector is the wrapper's `#id` (CSS-escaped, so a
+   GUID id comes out pasteable) or its `[aria-label='…']` (single quotes,
+   because it sits inside a double-quoted parenthetical), and with neither
+   the sentence is
+   `… — select the element that contains both or that table`. When the
+   search from the row table's side finds two or more candidates and this
+   table is one of them, this is a frozen grid's header table, and the
+   refusal says so:
+   `readTable cannot read table "<label>": it holds only the header row of a grid with frozen (locked) columns, which is not supported`
+   — measured before this sentence existed, both header tables of the frozen
+   fixture read `[]` and passed. This probe runs BEFORE the width check, so a
+   pair whose widths do not line up is refused this way rather than read as
+   `[]`. Without such a partner, a header with no rows is an empty table and
+   stores `[]` as before (§4.8). This is what stops the one selector a model
+   reaches for first — the table where it can SEE the words "Order ID" — from
+   passing green with nothing read.
+
+With a header adopted, nothing else changes: a positional column is a
+position in the selected table's rows; header text is normalised and matched
+exactly as §7.3 says; a blank header (the checkbox column) is ignored; the
+placeholder rule uses the adopted header's width. `_row` numbers the selected
+table's data rows. The summary line says where the header came from (§7.6).
+
+What this does not read: a grid with frozen (locked) columns — four tables,
+the rows split by column across two of them — stays deferred (§14), and the
+four ways into it come out like this, each measured on the fixture: the
+wrapper is refused (two tables with rows); either header table is refused
+(the frozen sentence above); the locked row table is refused (two header-only
+candidates: the second header table sits between the first and it, and a
+header-only table's text does not break contiguity); and the unlocked row
+table is HEADERLESS — the locked row table sits between both headers and it,
+and a table with rows does break contiguity — so a header-named read of it
+fails with the §5.4 message and a positional read returns that table's own
+columns, three of the grid's five, exactly as it did before this section
+existed. The one frozen form that reads by header is a row table that
+DECLARES its header through `aria-owns`, as current Kendo does: that half is
+then the table it says it is, its headers are the unlocked columns only, a
+request for a locked one fails naming the available headers, and a request
+for unlocked ones returns them — the same rows in the same order, so nothing
+is misaligned. A grid that repeats the header table for a second scroll pane
+is refused the same way as frozen columns, and a virtualised grid still
+yields only the rows it has rendered (§10).
+
 ### 7.4 Row mapping
 
 - Read direct rows from all direct `<tbody>` elements belonging to the
@@ -1016,9 +1297,11 @@ must include a header styled that way.
 - Exclude nested-table rows.
 - Preserve DOM order.
 - Drop placeholder rows (§4.8): a row whose only cell has a `colspan` of at
-  least `max(width, 2)`, where the width is the header row's cell count or,
-  with no header, the widest body row's over **all** body rows, rendered or
-  not. A row with no cells is dropped the same way. Both are counted, for the
+  least `max(width, 2)`, or whose only RENDERED cell does while every other
+  cell in the row is unrendered (Kendo's group row, §5.6: one spanning cell
+  and five `<td hidden>` fillers), where the width is the header row's cell
+  count or, with no header, the widest body row's over **all** body rows,
+  rendered or not. A row with no cells is dropped the same way. Both are counted, for the
   log line of §7.6. If every body row was a placeholder, the result is `[]`.
   This test runs BEFORE the merged-cell rejection below — that order is what
   lets `<td colspan="5">No documents uploaded yet.</td>` answer `[]` instead
@@ -1092,6 +1375,18 @@ can be explained from the log alone:
 ```text
 readTable captured 0 rows × 2 columns as "{{docs}}" (1 placeholder row skipped)
 ```
+
+When the header came from another table (§7.3a) — declared through
+`aria-owns` or found beside the rows — say so, so a wrong pairing can be
+seen from the log alone:
+
+```text
+readTable captured 6 rows × 3 columns as "{{holdings}}" (header from a separate table)
+readTable captured 5 rows × 3 columns as "{{dividends}}" (2 placeholder rows skipped, header from a separate table)
+```
+
+The note is the last of the parenthesised notes, after the bound and the
+placeholder count.
 
 Do not write every captured cell to the normal console/run log. Existing
 variable/report surfaces may show captured variables, but their secret masking
@@ -1737,6 +2032,24 @@ root or a literal value that can be inlined into generated source.
 | Rows appended directly under `<table>` (no `<tbody>`) | Read as body rows. |
 | “Loading…” row | A placeholder; the read stores `[]` truthfully. Waiting is the author's step, before the read. |
 | A `colspan` narrower than the table | Still the §5.3 error. |
+| Group row with one spanning cell and hidden filler cells (Kendo) | A placeholder (§4.8): the only rendered cell spans the width. Skipped, counted, no `_row`. |
+| Header in one `<table>`, rows in another, selector names the wrapper | Read as one table (§7.2): the one table with rows, its header from the one header-only table before it. Width mismatch refused with both counts. |
+| The same, selector names the row table | The header is declared by the row table's `aria-owns`, or taken from the one header-only table beside it — before it, rendered, its header found, nested in no table, unnamed, with nothing but headerless tables between them — when the row table does not name itself and the widths match (§7.3a). Otherwise headerless, as before. |
+| The same, selector names the header-only table | Refused, naming the wrapper (§7.3a). Never `[]`. |
+| A header-only table with no rows anywhere near it | An empty table: `[]`, as before. |
+| Split grid emptied to its "No records available." row | `[]` with one placeholder skipped: the width check ignores message rows (§7.3a). |
+| Frozen grid whose unlocked row table declares its header (`aria-owns`) | Reads that half by header; a locked column is "no column is headed …" with the available headers listed (§7.3a). |
+| Two separate tables, the first empty, the second headerless | Not paired when either names itself (`aria-label`, resolved `aria-labelledby`, `<caption>` text), when anything with text sits between them, or when their only common ancestor is `<body>`; the second stays headerless and the first reads `[]`. Named columns fail with the §5.4 message. |
+| Two unnamed header-only tables above an unnamed headerless table, nothing but tables between them | Refused as frozen columns (§7.3a.2), by name and by position. Name either table, or put a heading between them, to read them as separate tables. |
+| A header-only table whose own header is refused (two-row `<thead>`, spanned cell) beside a plain headerless table | The plain table is untouched: it reads by position and fails a header-named read with the §5.4 message. Through a wrapper, or declared by `aria-owns`, the header refusal is reported instead. |
+| Selected table names itself | Never paired and never refused: a whole table. A dangling `aria-labelledby` or an empty `<caption>` is not a name. |
+| Header-only table whose only partner would be through `<body>` | An empty table: `[]`. `<body>` is never a grid container. |
+| Header table of a frozen grid selected | Refused as the header row of a grid with frozen columns (§7.3a.3). Never `[]`. |
+| Two tables in two cells of a layout table, or a table inside a header-only table's `<th>` | Never paired: a candidate nested inside any table is not one. |
+| Frozen (locked) columns — two header tables and two row tables, no `aria-owns` | Wrapper: refused, two tables with rows. Either header table: refused as a frozen grid's header. Locked row table: refused, two header-only candidates. Unlocked row table: headerless — the §5.4 message by header, its own columns by position (§7.3a). Deferred (§14). |
+| Wrapper holds a footer table too (`<tfoot>` only) | Ignored: neither rows nor a header. |
+| Wrapper is a `<div role="grid">` of `<div role="row">`s | Fails as "no table with rows under" the selector: still unsupported (§3). |
+| Hidden column in a split grid | The header cell and the body cells are hidden together, so the counts still match and the column reads `""` as in one table. |
 | No header row, columns named by header | Fail with the §5.4 message: name columns by position. |
 | No header row, columns named by position | Supported; every column needs an explicit alias. |
 | Header row present, columns named by position | Supported; the header is excluded from the body and otherwise ignored for those columns. Reordering breaks the read by design (§4.4). |
@@ -1787,6 +2100,9 @@ The implementing agent should inspect and update at least these areas:
 - `src/runner/step-executor.ts` — `capturedRecords` storage/logging.
 - `tests/read-table.test.ts` — real Playwright page tests using the fixtures in
   §5 and every structural error above.
+- `src/browser/scripts/read-table.js` — the in-page extractor: table or
+  wrapper selection (§7.2), the header from another table (§7.3a), the
+  rendered-cell placeholder rule (§4.8), and the label from the wrapper.
 
 ### Object iteration and placeholder paths
 
@@ -1836,8 +2152,11 @@ The implementing agent should inspect and update at least these areas:
   button),
   `structured-orders-many.html` (14 visible rows + a hidden one for
   `limit`), `scheduled-payments.html` + `payment-details.html` (§5.4),
-  `statements.html` (§4.7), `table-edge-cases.html` (sixteen structures).
-  Under `templates/init/tests/`: eight `table-*.md` acceptance tests tagged
+  `statements.html` (§4.7), `table-edge-cases.html` (eighteen structures —
+  the last two are pairs of separate tables that must NOT be read as one
+  grid), `split-grids.html` (§5.6: Kendo's split header, grouped, DevExpress
+  class names with a hidden column, and frozen columns).
+  Under `templates/init/tests/`: nine `table-*.md` acceptance tests tagged
   `table-read` (listed in §12) and four `table-baseline-*.md` tests that
   record what today's runtime does with the same table (§12).
 - (Phase 2) A parser for the §7.7 assertion forms beside `set-step.ts` and
@@ -1953,6 +2272,20 @@ states the rule. Two entries predate the review rounds and say so.
   runner-core from its built output, so a source drift passed until someone
   rebuilt. Both import source; §12 item 21d names the mutations that now
   fail.
+- **Split grids, review 1 (2026-09-22)** — one round, two reviewers, on the
+  §7.3a pairing. Found: both header tables of a frozen grid read `[]` green
+  (the pick's beside search saw two candidates and called that "no
+  partner"); a walk to `<body>` paired an unnamed empty table with an
+  unrelated headerless one two `<div>`s down and refused the empty one;
+  candidates were excluded from nesting only relative to the ancestor, so
+  two tables in two cells of a layout table paired; a neighbour's refused
+  two-row header failed a positional read of the plain table beside it;
+  the width and adopted-header refusals named the row table's GUID; a
+  dangling `aria-labelledby` and an empty `<caption>` counted as names; the
+  suggested `#id` was not CSS-escaped; and the spec said "after it" of rows
+  that `aria-owns` may put before. §7.2, §7.3a and §10 now say what the
+  code does, in the order it does it, and §12 item 24 names the mutation
+  each new test catches.
 
 ---
 
@@ -2066,18 +2399,52 @@ states the rule. Two entries predate the review rounds and say so.
 23. (Phase 2) `mode: 'checked'` reads a ticked and an unticked checkbox as
     `"true"`/`"false"`; `'value'` reads an input and a select's chosen option;
     phase-1 code refuses both modes by name.
+24. Split grids (§5.6, §7.2, §7.3a), on inline copies of the shapes on
+    `split-grids.html` and of the two negative shapes of
+    `table-edge-cases.html` (`tests/read-table.test.ts` is inline HTML in
+    real Chromium; the pages themselves are exercised by the acceptance test
+    below): the wrapper selector, the row-table selector with `aria-owns`
+    and without it, and a header-named read give the same records from the
+    Holdings grid; the header-only table is refused naming the wrapper, and
+    without a wrapper id or name in the shorter form; a header with no
+    partner still reads `[]`, and so does one whose only partner would be
+    through `<body>`; the two named tables and the two tables with a
+    heading between them are NOT paired (the §5.4 message, and a positional
+    read that works), and neither are two tables in two cells of a layout
+    table nor a table inside a header-only table's `<th>`; a selected table
+    that names itself is never paired; a dangling `aria-labelledby` and an
+    empty `<caption>` do not count as names; a width mismatch is refused
+    with both counts, naming the grid; a header-only table whose own header
+    is refused does not touch the plain table beside it; the frozen grid is
+    refused through the wrapper, through its header tables and through its
+    locked row table; a wrapper whose header table follows the rows reads
+    through `aria-owns` and is otherwise refused (the `precedes` filter);
+    the footer table is ignored; a nested table in a data cell does not make
+    a second table with rows; the grouped grid's group rows are placeholders
+    and the "no records" row reads `[]`; the DevExpress-named grid with its
+    hidden column reads `""` for that column with the counts intact. Each
+    is a test that fails when its rule is removed.
+25. The prompt carries the "SPLIT GRIDS" clause of §6.3, after the
+    positional clause it overrides (`tests/prompts-read-table.test.ts`).
 
 ### End-to-end proof
 
 The fixtures exist (§11) and so do the tests: `aiui run -t table-read` from
-`templates/init` runs the eight acceptance files, and phase 1 is done when
+`templates/init` runs the nine acceptance files, and phase 1 is done when
 they are green through the CLI and through TestBench. The three proofs below
 are `table-orders.md`, `table-orders-limit.md` and
 `table-payments-review.md`; the other five are `table-payments-approve.md`
 and `table-payments-reference.md` (the "after" of two baselines),
 `table-statements.md` (§4.7), `table-documents-empty.md` (§4.8/§5.5) and
 `table-structures.md` (grouped `<tbody>`, header-in-tbody, `<tfoot>`, no
-header).
+header). The ninth, `table-split-grids.md`, is the §5.6 proof: the model is
+shown the Holdings grid and must emit a `readTable` against the wrapper or
+the row table with the columns named by header; the records are checked
+against the page row by row, the swap is run and the read repeated, and the
+grouped Dividends grid is read through its group rows. A live run of it is
+the measurement of the prompt clause in §6.3 — what the model actually
+selected is in the run log, and the runtime's pairing and refusal are what
+make either choice come out right.
 
 **The baseline** (`table-baseline-view/approve/reference/pay-overdue.md`,
 run 2026-09-21 with today's runtime, one string per pass) is what phase 1
@@ -2207,6 +2574,12 @@ The feature is complete only when:
 15. (Phase 2) The four §7.7 assertions run without a model call, and their
     number parsing accepts the currency, sign and Unicode-minus forms listed
     there.
+16. (Phase 1) A grid whose header and rows are separate native tables (§5.6)
+    reads as one table by header, whether the selector names the wrapper or
+    the row table; the header-only table is refused rather than read as
+    empty; two separate tables are never paired; a frozen grid is refused
+    by name through its wrapper, its header tables and its locked half, and
+    never read as the whole grid.
 
 ---
 
@@ -2271,7 +2644,19 @@ Moved out of v1 after review, each with why and what would bring it back:
   phone viewport (which the per-test `viewport:` config can now select). §1.2
   says why v1 stops at native tables; a `readCollection` with an item selector
   and per-field selectors is the follow-on, and the positional form of §4.4
-  is the same idea for a row whose cells are its direct children.
+  is the same idea for a row whose cells are its direct children. A grid
+  whose header and rows are two native tables is not this case and is read
+  now (§5.6, §7.2, §7.3a).
+- **Frozen (locked) columns.** Kendo, DevExpress and Syncfusion render a
+  frozen grid as two header tables and two row tables, the columns split
+  between the pairs and every row present in both. §7.2 and §7.3a refuse
+  the wrapper, both header tables and the locked row table by name; the
+  unlocked row table reads as the headerless table it is, and a row table
+  that declares its header through `aria-owns` reads its own half by
+  header. Reading the whole grid means joining the two row
+  tables by position — the same row index in each — into one record, which
+  is another pairing rule and a fixture nobody has needed yet; the Frozen
+  holdings grid on `split-grids.html` is there for when one does.
 - **Indexing the captured list** (`{{payments[5].status}}`). One index
   segment, one-based to match `_row`, and stale by design. Page reads cover
   the real cases so far (§4.5).

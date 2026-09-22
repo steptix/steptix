@@ -872,6 +872,19 @@ the table changes nothing in the test, and a column the step did not name — th
 select-all checkbox in the first cell, the Actions button in the last — is not
 in the record at all.
 
+**Grids whose header and rows are separate tables.** Telerik/Kendo,
+DevExpress and Syncfusion render a scrollable grid as two `<table>` elements
+inside one wrapper — the header row in the first, the data rows in the
+second, and often a footer in a third. Name the grid the way you see it ("the
+Holdings grid") and the framework reads the pair as one table: header names
+work exactly as above, the footer is ignored, and `_row` numbers the data
+rows. You do not have to switch to column positions because the rows carry no
+`<th>`, and you should not point a read at the header table — it has no rows,
+so that read is refused rather than quietly storing nothing. A grid with
+frozen (locked) columns is the one shape that is refused outright: it renders
+the same rows twice, split by column, and reading one half would misalign
+every record.
+
 **Quote a placeholder that can be empty — in a step.** An empty cell is
 captured as the empty string, and the emptiness survives to somewhere it
 matters. A `Verify` or `Assert` whose comparison is entirely between values —
@@ -1018,9 +1031,10 @@ read does not wait; you do, on the line before it (§3.1).
 
 **What is refused, loudly.** Each of these fails the step rather than
 returning plausible data. Most of the messages name the table — by its
-`aria-label`, its `<caption>`, its id, or failing all three the selector that
-matched it — and the two that cannot say `readTable requires a native
-<table> element, but "…" matched a <div>` and `readTable action … requests 24
+`aria-label` or `<caption>`, then the grid's name where the header and the
+rows are separate tables, then its id, and failing all of those the selector
+that matched it — and the two that cannot say `readTable found no table with
+rows under "…"` and `readTable action … requests 24
 columns — the maximum is 20`, which are about the selector and the step:
 
 | The table | Why it is refused |
@@ -1063,15 +1077,17 @@ variables, and `{{order.address.city}}` is not a reference — one property
 segment, and no deeper. A dotted name with no value fails the step before the
 model is asked, and says which properties the record does have.
 
-Running versions of all of it ship in `templates/init/tests/`: the eight
+Running versions of all of it ship in `templates/init/tests/`: the nine
 `table-*.md` files tagged `table-read` cover headers and reordering
 (`table-orders.md`), the first-N bound (`table-orders-limit.md`), positions,
 duplicates and `_row` (`table-payments-review.md`), pagination
-(`table-statements.md`), an empty body (`table-documents-empty.md`) and the
-awkward shapes (`table-structures.md`). Each navigates straight to the page it
-needs in the fixture app — `structured-orders.html` and
+(`table-statements.md`), an empty body (`table-documents-empty.md`), the
+awkward shapes (`table-structures.md`) and a grid whose header and rows are
+separate tables (`table-split-grids.md`). Each navigates straight to the page
+it needs in the fixture app — `structured-orders.html` and
 `structured-orders-many.html`, `scheduled-payments.html`, `statements.html`,
-`documents.html`, `table-edge-cases.html`. `fixtures/test-app/tables.html`
+`documents.html`, `table-edge-cases.html`, `split-grids.html`.
+`fixtures/test-app/tables.html`
 indexes them all and is the page to open by hand when you want to see what a
 test is reading.
 

@@ -2103,6 +2103,11 @@ export interface TableReadResult {
   dataRowCount: number;
   /** The table's accessible name, as the diagnostics spell it. */
   label: string;
+  /** Did the header come from a DIFFERENT `<table>` — declared through
+   *  `aria-owns` or found beside the rows (§7.3a)? The summary line says so
+   *  (§7.6), because a wrong pairing produces records that look exactly like
+   *  a correct read and is otherwise invisible in the log. */
+  headerFromSeparateTable: boolean;
 }
 
 /**
@@ -2134,6 +2139,7 @@ type TableReadOutcome =
       placeholdersSkipped: number;
       dataRowCount: number;
       label: string;
+      headerFromSeparateTable: boolean;
     }
   | { ok: false; error: string };
 
@@ -2225,6 +2231,7 @@ export async function readTableRecords(
     placeholdersSkipped: outcome.placeholdersSkipped,
     dataRowCount: outcome.dataRowCount,
     label: outcome.label,
+    headerFromSeparateTable: outcome.headerFromSeparateTable,
   };
 }
 
@@ -2238,6 +2245,10 @@ export async function readTableRecords(
  * 0 rows (1 placeholder row skipped)" are different findings. The column count
  * comes from what was ASKED for, so an empty table still says how wide the
  * read was.
+ *
+ * "header from a separate table" is the same argument for §7.3a: a grid whose
+ * header was paired with the wrong rows returns records that look exactly like
+ * a correct read, and this line is the only place the pairing is visible.
  */
 export function formatTableReadSummary(
   result: TableReadResult,
@@ -2253,6 +2264,7 @@ export function formatTableReadSummary(
       `${result.placeholdersSkipped} placeholder row${result.placeholdersSkipped === 1 ? '' : 's'} skipped`,
     );
   }
+  if (result.headerFromSeparateTable) notes.push('header from a separate table');
   return (
     `readTable captured ${rows} row${rows === 1 ? '' : 's'} `
     + `× ${columnCount} column${columnCount === 1 ? '' : 's'} as "{{${as ?? '(unnamed)'}}}"`

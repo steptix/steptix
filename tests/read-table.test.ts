@@ -1272,8 +1272,13 @@ describe('readTable — structural refusals', () => {
         <div role="row"><span role="columnheader">Card</span></div>
         <div role="row"><span role="gridcell">Visa</span></div>
       </div>`);
+    // The outcome is what it always was — a div grid is not read — but the
+    // sentence changed with §7.2: a non-table match is now a grid WRAPPER
+    // (§5.6), looked inside for the table that holds the rows, so the refusal
+    // says what was looked for rather than what was matched. §10, "Wrapper is
+    // a `<div role="grid">` of `<div role="row">`s".
     expect(await refusal({ selector: '#grid', columns: [{ header: 'Card', key: 'card' }] }))
-      .toBe('readTable requires a native <table> element, but "#grid" matched a <div> — ARIA grids and <div role="table"> are not supported');
+      .toBe('readTable found no table with rows under "#grid"');
   });
 });
 
@@ -1642,6 +1647,961 @@ describe('readTable — §6.2 column and limit validation on the helper path', (
   });
 });
 
+// ── split grids: the header in another table (§5.6, §7.2, §7.3a, §12.24) ───
+//
+// The markup is Telerik's, taken from a DOM walk of the live Kendo UI grid
+// demo and matched by `fixtures/test-app/split-grids.html`: the wrapper
+// carries the app's id and no accessible name of its own, the header is a
+// `<table role="none">` holding only a `<thead>`, the rows are a second
+// `<table role="grid">` whose `aria-owns` names that `<thead>`, and the footer
+// is a third table holding only a `<tfoot>`. DevExpress and Syncfusion render
+// the same split under their own class names.
+//
+// Every case below is a failure this shape produced before §7.3a existed: a
+// header-named read of the row table failed "it has no header row", and a read
+// of the header table — the one selector a model reaches for first, because it
+// is where the words "Symbol" and "Value" are — stored `[]` and passed GREEN.
+
+/** Symbol, Name, Units, Price, Value, Change — the Holdings grid of §5.6. */
+const HOLDINGS: Array<[string, string, string, string, string, string]> = [
+  ['VAS', 'Vanguard Australian Shares', '120', '$95.10', '$11,412.00', '+1.2%'],
+  ['VGS', 'Vanguard International Shares', '80', '$130.45', '$10,436.00', '-0.4%'],
+  ['NDQ', 'Betashares Nasdaq 100', '50', '$42.30', '$2,115.00', '+2.1%'],
+  ['IOO', 'iShares Global 100', '15', '$150.20', '$2,253.00', '+0.6%'],
+  ['A200', 'Betashares Australia 200', '200', '$135.60', '$27,120.00', '-1.1%'],
+  ['BOND', 'Vanguard Bond Index', '300', '$48.75', '$14,625.00', '+0.1%'],
+];
+
+/** One Kendo header cell: the title sits three spans deep, beside an
+ *  icon-only `<a aria-hidden>` that renders no text of its own — so a naive
+ *  `textContent` read of the `<th>` would still work, and the point of
+ *  copying it is that `innerText` does too. */
+const kendoTh = (title: string) =>
+  `<th scope="col" rowspan="1" data-title="${title}" class="k-table-th k-header" role="columnheader">`
+  + `<span class="k-cell-inner"><span class="k-link"><span class="k-column-title">${title}</span></span>`
+  + `<a class="k-grid-column-menu" href="#" aria-hidden="true" title="${title} edit column settings">`
+  + `<span class="k-icon k-svg-icon" aria-hidden="true"></span></a></span></th>`;
+
+/**
+ * The Holdings grid, with or without the `aria-owns` that DECLARES the
+ * pairing. Without it, the only thing holding the two tables together is
+ * §7.3a.2 — one header-only table, neither self-named, nothing with text
+ * between them, and the widths matching.
+ */
+function holdingsGrid(opts: {
+  id: string;
+  owns: boolean;
+  /** What Kendo really puts on the row table: a generated GUID (§7.2). */
+  rowId?: string;
+  /** An accessible name on the WRAPPER, which is where a grid widget puts
+   *  one — never on either table. */
+  label?: string;
+}): string {
+  const heads = ['Symbol', 'Name', 'Units', 'Price', 'Value', 'Change', 'Actions']
+    .map(kendoTh).join('');
+  const rows = HOLDINGS.map(([symbol, name, units, price, value, change]) => `
+        <tr class="k-table-row k-master-row" role="row">
+          <td class="k-table-td" role="gridcell"><input type="checkbox" aria-label="Select row"></td>
+          <td class="k-table-td" role="gridcell">${symbol}</td>
+          <td class="k-table-td" role="gridcell">${name}</td>
+          <td class="k-table-td" role="gridcell">${units}</td>
+          <td class="k-table-td" role="gridcell">${price}</td>
+          <td class="k-table-td" role="gridcell">${value}</td>
+          <td class="k-table-td" role="gridcell">${change}</td>
+          <td class="k-table-td" role="gridcell"><button type="button">Sell</button></td>
+        </tr>`).join('');
+  const owns = opts.owns ? ` aria-owns="${opts.id}-thead ${opts.id}-tbody"` : '';
+  return `
+<div id="${opts.id}" class="k-grid" data-role="grid"${opts.label ? ` aria-label="${opts.label}"` : ''}>
+  <div class="k-grid-header"><div class="k-grid-header-wrap">
+    <table role="none" class="k-grid-header-table k-table">
+      <colgroup><col><col><col><col><col><col><col><col></colgroup>
+      <thead class="k-table-thead" role="rowgroup" id="${opts.id}-thead">
+        <tr class="k-table-row" role="row">
+          <th scope="col" class="k-table-th k-header checkbox-align" role="columnheader"><input type="checkbox" aria-label="Select all rows"></th>
+          ${heads}
+        </tr>
+      </thead>
+    </table>
+  </div></div>
+  <div class="k-grid-container"><div class="k-grid-content">
+    <table class="k-grid-table k-table" id="${opts.rowId ?? `${opts.id}-table`}" tabindex="0" role="grid" aria-rowcount="-1"${owns}>
+      <colgroup><col><col><col><col><col><col><col><col></colgroup>
+      <tbody class="k-table-tbody" role="rowgroup" id="${opts.id}-tbody">${rows}
+      </tbody>
+    </table>
+  </div></div>
+  <div class="k-grid-footer"><div class="k-grid-footer-wrap">
+    <table class="k-table k-grid-footer-table" role="none">
+      <tfoot class="k-table-tfoot" role="rowgroup"><tr class="k-footer-template k-table-row" role="row">
+        <td></td><td></td><td>Total</td><td></td><td></td><td>$67,961.00</td><td></td><td></td>
+      </tr></tfoot>
+    </table>
+  </div></div>
+</div>`;
+}
+
+const HOLDINGS_COLUMNS: TableReadColumn[] = [
+  { header: 'Symbol', key: 'symbol' },
+  { header: 'Name', key: 'name' },
+  { header: 'Value', key: 'value' },
+];
+
+const HOLDINGS_RECORDS = HOLDINGS.map(([symbol, name, , , value], i) => ({
+  _row: String(i + 1),
+  symbol,
+  name,
+  value,
+}));
+
+/** The Dividends grid: grouped, no `aria-owns`, and the wrapper — not either
+ *  table — is what carries `role="grid"` and the accessible name. */
+function dividendsGrid(bodyRows: string): string {
+  const heads = ['Symbol', 'Ex-date', 'Amount', 'Franking', 'Paid'].map(kendoTh).join('');
+  return `
+<div id="dividends-grid" class="k-grid" data-role="grid" role="grid" aria-label="Dividends">
+  <div class="k-grid-header"><div class="k-grid-header-wrap">
+    <table role="none" class="k-grid-header-table k-table">
+      <thead class="k-table-thead" role="rowgroup" id="dividends-thead">
+        <tr class="k-table-row" role="row">
+          <th class="k-group-cell k-header k-table-th" scope="col" role="columnheader"></th>
+          ${heads}
+        </tr>
+      </thead>
+    </table>
+  </div></div>
+  <div class="k-grid-container"><div class="k-grid-content">
+    <table class="k-grid-table k-table" tabindex="0" role="grid" aria-rowcount="-1">
+      <tbody class="k-table-tbody" role="rowgroup" id="dividends-tbody">${bodyRows}
+      </tbody>
+    </table>
+  </div></div>
+</div>`;
+}
+
+/** Kendo's group row: ONE visible cell spanning the grid, then five
+ *  `<td hidden>` fillers — six cells, one of them rendered (§4.8). */
+const dividendGroup = (year: string) => `
+        <tr class="k-table-group-row k-grouping-row k-table-row" role="row">
+          <td class="k-table-td" colspan="6" aria-expanded="true" role="gridcell"><p class="k-reset"><a href="#" tabindex="-1" aria-label="Collapse" class="k-icon" aria-hidden="true"></a>Year: ${year}</p></td>
+          <td hidden group-header-spanned-hidden role="gridcell"></td>
+          <td hidden group-header-spanned-hidden role="gridcell"></td>
+          <td hidden group-header-spanned-hidden role="gridcell"></td>
+          <td hidden group-header-spanned-hidden role="gridcell"></td>
+          <td hidden group-header-spanned-hidden role="gridcell"></td>
+        </tr>`;
+
+const dividendRow = (symbol: string, exDate: string, amount: string, franking: string, paid: string) => `
+        <tr class="k-table-row k-master-row" role="row">
+          <td class="k-group-cell k-table-group-td k-table-td" role="gridcell"></td>
+          <td class="k-table-td" role="gridcell">${symbol}</td>
+          <td class="k-table-td" role="gridcell">${exDate}</td>
+          <td class="k-table-td" role="gridcell">${amount}</td>
+          <td class="k-table-td" role="gridcell">${franking}</td>
+          <td class="k-table-td" role="gridcell">${paid}</td>
+        </tr>`;
+
+const DIVIDEND_ROWS =
+  dividendGroup('2026')
+  + dividendRow('VAS', '2026-03-28', '$412.50', '100%', 'Yes')
+  + dividendRow('VGS', '2026-03-20', '$88.20', '0%', 'Yes')
+  + dividendRow('A200', '2026-01-15', '$655.00', '100%', 'No')
+  + dividendGroup('2025')
+  + dividendRow('VAS', '2025-12-19', '$398.10', '100%', 'Yes')
+  + dividendRow('NDQ', '2025-12-05', '$21.40', '0%', 'Yes');
+
+/** The Watchlist grid: DevExpress class names, no `aria-owns`, no name on
+ *  either table or on the wrapper, and a hidden Target column — the `<th>`
+ *  and every `<td>` of it are `display:none` together, so the counts still
+ *  line up and the column reads `""` (§10). */
+const WATCHLIST_HTML = `
+<div id="watchlist-grid" class="dx-widget dx-datagrid">
+  <div class="dx-datagrid-headers"><div class="dx-datagrid-content">
+    <table class="dx-datagrid-table dx-datagrid-table-fixed" role="presentation">
+      <thead><tr class="dx-row dx-header-row" role="row">
+        <th class="dx-datagrid-action">Symbol</th>
+        <th class="dx-datagrid-action">Name</th>
+        <th class="dx-datagrid-action">Last</th>
+        <th class="dx-datagrid-action col-hidden">Target</th>
+        <th class="dx-datagrid-action">Alert</th>
+      </tr></thead>
+    </table>
+  </div></div>
+  <div class="dx-datagrid-rowsview"><div class="dx-datagrid-content">
+    <table class="dx-datagrid-table dx-datagrid-table-fixed" role="presentation">
+      <tbody>
+        <tr class="dx-row dx-data-row"><td>VHY</td><td>Vanguard High Yield</td><td>$70.15</td><td class="col-hidden">$75.00</td><td>On</td></tr>
+        <tr class="dx-row dx-data-row"><td>VEU</td><td>Vanguard All-World ex-US</td><td>$88.90</td><td class="col-hidden">$90.00</td><td>Off</td></tr>
+        <tr class="dx-row dx-data-row"><td>QUAL</td><td>VanEck Quality</td><td>$52.35</td><td class="col-hidden">$55.00</td><td>On</td></tr>
+        <tr class="dx-row dx-data-row"><td>ETHI</td><td>Betashares Ethical</td><td>$12.80</td><td class="col-hidden">$14.00</td><td>Off</td></tr>
+      </tbody>
+    </table>
+  </div></div>
+</div>`;
+
+/**
+ * Kendo's locked-columns form: FOUR tables, the SAME rows split by column
+ * across two of them. Deferred (§14) and refused by name rather than
+ * half-read.
+ *
+ * Unlike `holdingsGrid`, this nesting is DOCUMENTATION-derived, not walked:
+ * the DOM dump this file's Kendo markup comes from is of a demo with no
+ * locked columns, so the class names and the two-tables-per-half arrangement
+ * are Telerik's published structure for a locked grid rather than something
+ * measured. What the tests below pin is this shape, whatever a particular
+ * Kendo build emits.
+ *
+ * The nesting is the point of the fixture either way: the two header tables
+ * share `div.k-grid-header` and the two row tables share
+ * `div.k-grid-container`, so the nearest ancestor holding another table,
+ * asked from the unlocked row table, is the row half — where there is no
+ * header table to find. A candidate walk that stopped there left this grid
+ * headerless, and a positional read of it then returned half a grid with no
+ * complaint at all.
+ */
+function frozenGrid(owns: boolean): string {
+  return `
+<div id="frozen-grid" class="k-grid" data-role="grid">
+  <div class="k-grid-header">
+    <div class="k-grid-header-locked">
+      <table id="frozen-locked-header" role="none" class="k-grid-header-table k-table">
+        <thead id="frozen-locked-thead"><tr><th scope="col">Symbol</th></tr></thead>
+      </table>
+    </div>
+    <div class="k-grid-header-wrap">
+      <table id="frozen-header" role="none" class="k-grid-header-table k-table">
+        <thead id="frozen-thead"><tr><th scope="col">Units</th><th scope="col">Price</th><th scope="col">Value</th></tr></thead>
+      </table>
+    </div>
+  </div>
+  <div class="k-grid-container">
+    <div class="k-grid-content-locked">
+      <table class="k-grid-table k-table" id="frozen-locked-rows" role="grid">
+        <tbody><tr><td>VAS</td></tr><tr><td>VGS</td></tr></tbody>
+      </table>
+    </div>
+    <div class="k-grid-content">
+      <table class="k-grid-table k-table" id="frozen-rows" role="grid"${owns ? ' aria-owns="frozen-thead frozen-tbody"' : ''}>
+        <tbody id="frozen-tbody">
+          <tr><td>120</td><td>$95.10</td><td>$11,412.00</td></tr>
+          <tr><td>80</td><td>$130.45</td><td>$10,436.00</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>`;
+}
+
+describe('readTable — header and rows in separate tables (§5.6, §7.2, §7.3a)', () => {
+  it('gives the same records through the wrapper, the row table, and a row table with no aria-owns', async () => {
+    // Three selectors, one grid: the wrapper (what §6.3 tells the model to
+    // emit), the row table that DECLARES its header through `aria-owns`
+    // (§7.3a.1), and the same row table with that attribute removed, where
+    // only the sibling rule pairs them (§7.3a.2). A difference between any
+    // two of them is a difference the author cannot see in the test text.
+    await load(holdingsGrid({ id: 'holdings-grid', owns: true }));
+    expect((await run({ selector: '#holdings-grid', columns: HOLDINGS_COLUMNS })).capturedRecords)
+      .toEqual(HOLDINGS_RECORDS);
+    expect((await run({ selector: '#holdings-grid-table', columns: HOLDINGS_COLUMNS })).capturedRecords)
+      .toEqual(HOLDINGS_RECORDS);
+
+    await load(holdingsGrid({ id: 'sibling-grid', owns: false }));
+    expect((await run({ selector: '#sibling-grid-table', columns: HOLDINGS_COLUMNS })).capturedRecords)
+      .toEqual(HOLDINGS_RECORDS);
+    expect((await run({ selector: '#sibling-grid', columns: HOLDINGS_COLUMNS })).capturedRecords)
+      .toEqual(HOLDINGS_RECORDS);
+  });
+
+  it('says on the result and in the summary line that the header came from another table (§7.6)', async () => {
+    await load(holdingsGrid({ id: 'holdings-grid', owns: true }));
+    const split = await readTableRecords(page, {
+      selector: '#holdings-grid',
+      columns: HOLDINGS_COLUMNS,
+    });
+    expect(split.headerFromSeparateTable).toBe(true);
+    expect(formatTableReadSummary(split, 3, 'holdings', undefined))
+      .toBe('readTable captured 6 rows × 3 columns as "{{holdings}}" (header from a separate table)');
+    // A one-table read must not claim it: the note is the only place a wrong
+    // pairing is visible, so it has to mean something.
+    await load(ORDERS_HTML);
+    const plain = await readTableRecords(page, { selector: '#orders', columns: ORDERS_COLUMNS });
+    expect(plain.headerFromSeparateTable).toBe(false);
+    expect(formatTableReadSummary(plain, 3, 'orders', undefined))
+      .toBe('readTable captured 2 rows × 3 columns as "{{orders}}"');
+  });
+
+  it('ignores the footer table, which has neither rows nor a header', async () => {
+    // Counted as a table with rows it would make the wrapper ambiguous; taken
+    // for a data row its Total would become record 7.
+    await load(holdingsGrid({ id: 'holdings-grid', owns: true }));
+    const result = await readTableRecords(page, {
+      selector: '#holdings-grid',
+      columns: HOLDINGS_COLUMNS,
+    });
+    expect(result.records).toHaveLength(6);
+    expect(result.records.some((r) => r['value'] === '$67,961.00')).toBe(false);
+  });
+
+  it('refuses the header-only table and names the wrapper, instead of storing [] green', async () => {
+    // Declared, and then the same grid with no `aria-owns` at all: the
+    // refusal has to reach the author either way, because storing `[]` for
+    // the table where the column names are visible is the quiet pass §7.3a.3
+    // exists to stop.
+    //
+    // "beside it", not "after it": `aria-owns` pairs a header table that
+    // FOLLOWS its rows just as readily (the test below), so a sentence that
+    // said "after" would send the author looking the wrong way down the page.
+    await load(holdingsGrid({ id: 'holdings-grid', owns: true }));
+    expect(await refusal({
+      selector: '#holdings-grid .k-grid-header-table',
+      columns: HOLDINGS_COLUMNS,
+    })).toBe(
+      'readTable cannot read table "holdings-grid": it holds only the header row; the rows are '
+      + 'in the table beside it — select the element that contains both ("#holdings-grid") or that table',
+    );
+
+    await load(holdingsGrid({ id: 'sibling-grid', owns: false }));
+    expect(await refusal({
+      selector: '#sibling-grid .k-grid-header-table',
+      columns: HOLDINGS_COLUMNS,
+    })).toBe(
+      'readTable cannot read table "sibling-grid": it holds only the header row; the rows are '
+      + 'in the table beside it — select the element that contains both ("#sibling-grid") or that table',
+    );
+  });
+
+  it('spells the grid in that refusal as a selector the author can paste, or not at all', async () => {
+    // A grid widget's wrapper id is routinely a GUID, and `#14277be2-grid` is
+    // not a selector — a leading digit starts a number, so `querySelector`
+    // throws on it. Escaped, the sentence hands back something that works.
+    await load(`
+      <div id="14277be2-grid">
+        <table id="guid-header"><thead><tr><th>Date</th><th>Amount</th></tr></thead></table>
+        <table><tbody><tr><td>2026-01-02</td><td>$12.00</td></tr></tbody></table>
+      </div>`);
+    expect(await refusal({ selector: '#guid-header', columns: [{ header: 'Date', key: 'date' }] }))
+      .toBe(
+        'readTable cannot read table "14277be2-grid": it holds only the header row; the rows are '
+        + 'in the table beside it — select the element that contains both ("#\\31 4277be2-grid") '
+        + 'or that table',
+      );
+    // And with nothing to name the grid by, the sentence drops the
+    // parenthetical rather than inventing a selector out of a class name.
+    await load(`
+      <div>
+        <table id="nameless-header"><thead><tr><th>Date</th><th>Amount</th></tr></thead></table>
+        <table><tbody><tr><td>2026-01-02</td><td>$12.00</td></tr></tbody></table>
+      </div>`);
+    expect(await refusal({ selector: '#nameless-header', columns: [{ header: 'Date', key: 'date' }] }))
+      .toBe(
+        'readTable cannot read table "nameless-header": it holds only the header row; the rows '
+        + 'are in the table beside it — select the element that contains both or that table',
+      );
+  });
+
+  it('still reads a header-only table with no partner as an empty table (§4.8)', async () => {
+    // The mirror of the refusal above, and the reason it cannot simply key on
+    // "a header and no rows": that is also what an empty table looks like.
+    await load(`
+      <table id="lonely" aria-label="Holdings">
+        <thead><tr><th>Symbol</th><th>Value</th></tr></thead>
+        <tbody></tbody>
+      </table>`);
+    const result = await run({ selector: '#lonely', columns: [{ header: 'Symbol', key: 'symbol' }] });
+    expect(result.success).toBe(true);
+    expect(result.capturedRecords).toEqual([]);
+  });
+
+  it('does not pair two tables that name themselves, and reads the second by position', async () => {
+    // A table with an `aria-label` or a `<caption>` is a whole table, not half
+    // of a grid (§7.3a): pairing these two would invent a grid out of two
+    // unrelated tables that happen to sit together.
+    await load(`
+      <div id="statements">
+        <table aria-label="Statement columns"><thead><tr><th>Date</th><th>Amount</th></tr></thead></table>
+        <table aria-label="Statement rows"><tbody>
+          <tr><td>2026-01-02</td><td>$12.00</td></tr>
+          <tr><td>2026-02-02</td><td>$14.00</td></tr>
+        </tbody></table>
+      </div>`);
+    expect(await refusal({
+      selector: '[aria-label="Statement rows"]',
+      columns: [{ header: 'Date', key: 'date' }],
+    })).toBe(
+      'readTable cannot map table "Statement rows": it has no header row, so "Date" cannot be '
+      + 'matched — name columns by position ("the 1st column as date")',
+    );
+    const byPosition = await run({
+      selector: '[aria-label="Statement rows"]',
+      columns: [{ index: 1, key: 'date' }, { index: 2, key: 'amount' }],
+    });
+    expect(byPosition.capturedRecords).toEqual([
+      { _row: '1', date: '2026-01-02', amount: '$12.00' },
+      { _row: '2', date: '2026-02-02', amount: '$14.00' },
+    ]);
+  });
+
+  it('does not pair two unnamed tables with a heading between them — and does pair them without it', async () => {
+    // Both halves, because the separator test is only worth anything if the
+    // SAME markup pairs once the separator goes: a contiguity rule that never
+    // pairs and a contiguity rule that always pairs both pass the first half.
+    const report = (heading: string) => `
+      <div id="report">
+        <table><thead><tr><th>Date</th><th>Amount</th></tr></thead></table>
+        ${heading}
+        <table id="report-rows"><tbody>
+          <tr><td>2026-01-02</td><td>$12.00</td></tr>
+        </tbody></table>
+      </div>`;
+    await load(report('<h3>Transactions</h3>'));
+    expect(await refusal({ selector: '#report-rows', columns: [{ header: 'Date', key: 'date' }] }))
+      .toBe(
+        'readTable cannot map table "report-rows": it has no header row, so "Date" cannot be '
+        + 'matched — name columns by position ("the 1st column as date")',
+      );
+    // Empty wrapper `<div>`s and `<colgroup>`s are not text, so a grid whose
+    // halves are wrapped in scroll containers stays contiguous.
+    await load(report('<div class="scroll-pad"><colgroup></colgroup></div>'));
+    expect((await run({ selector: '#report-rows', columns: [{ header: 'Date', key: 'date' }] })).capturedRecords)
+      .toEqual([{ _row: '1', date: '2026-01-02' }]);
+  });
+
+  it('refuses a header whose width does not match the rows, naming both counts', async () => {
+    // A header one column off is §4.5's misalignment with a plausible face —
+    // every record would be built, and every value would be from the cell
+    // next door.
+    await load(`
+      <div id="mismatch-grid">
+        <div><table><thead><tr><th>Date</th><th>Payee</th><th>Amount</th></tr></thead></table></div>
+        <div><table><tbody>
+          <tr><td>2026-01-02</td><td>Origin Energy</td><td>$12.00</td><td><button type="button">Pay</button></td></tr>
+        </tbody></table></div>
+      </div>`);
+    expect(await refusal({ selector: '#mismatch-grid', columns: [{ header: 'Payee', key: 'payee' }] }))
+      .toBe(
+        'readTable cannot map table "mismatch-grid": the header table has 3 cells '
+        + 'but its widest row has 4 — the two tables do not line up',
+      );
+
+    // The same sentence on the DECLARED path, where the header table is
+    // wherever `aria-owns` pointed and need not be beside anything: "the
+    // header in the table beside it" was a claim about the markup that this
+    // grid does not make.
+    await load(`
+      <div id="declared-mismatch">
+        <table><thead id="dm-head"><tr><th>Date</th><th>Payee</th><th>Amount</th></tr></thead></table>
+        <table id="dm-rows" aria-owns="dm-head"><tbody>
+          <tr><td>2026-01-02</td><td>Origin Energy</td><td>$12.00</td><td><button type="button">Pay</button></td></tr>
+        </tbody></table>
+      </div>`);
+    expect(await refusal({ selector: '#dm-rows', columns: [{ header: 'Payee', key: 'payee' }] }))
+      .toBe(
+        'readTable cannot map table "declared-mismatch": the header table has 3 cells '
+        + 'but its widest row has 4 — the two tables do not line up',
+      );
+  });
+
+  it('names the GRID in the width-mismatch refusal, not the row table\'s generated id (§7.2)', async () => {
+    // The grid is discovered when the header is adopted, and the label is
+    // settled from it BEFORE this refusal is built — otherwise the sentence
+    // reads `cannot map table "14277be2-guid-rows"`, a GUID that names
+    // nothing the author can look for.
+    await load(`
+      <div id="holdings-grid">
+        <div><table><thead><tr><th>Date</th><th>Payee</th><th>Amount</th></tr></thead></table></div>
+        <div><table id="14277be2-guid-rows"><tbody>
+          <tr><td>2026-01-02</td><td>Origin Energy</td><td>$12.00</td><td><button type="button">Pay</button></td></tr>
+        </tbody></table></div>
+      </div>`);
+    expect(await refusal({
+      selector: '[id="14277be2-guid-rows"]',
+      columns: [{ header: 'Payee', key: 'payee' }],
+    })).toBe(
+      'readTable cannot map table "holdings-grid": the header table has 3 cells but its widest '
+      + 'row has 4 — the two tables do not line up',
+    );
+  });
+
+  it('refuses a frozen-column grid through its wrapper and through its locked row table', async () => {
+    // Four tables, the SAME rows split by column across two of them: reading
+    // either half is the misalignment this action exists to prevent (§7.3a,
+    // §14).
+    await load(frozenGrid(false));
+    expect(await refusal({ selector: '#frozen-grid', columns: [{ header: 'Value', key: 'value' }] }))
+      .toBe(
+        'readTable found 2 tables with rows under "#frozen-grid" — it must be exactly one; a grid '
+        + 'with frozen (locked) columns splits its rows across two tables, which is not supported',
+      );
+    // From the LOCKED row table, both header tables are beside it: the walk
+    // reaches `div.k-grid` rather than stopping at `div.k-grid-container`,
+    // and the second header does not separate it from the first because text
+    // inside a table is not a separator (§7.3a.2).
+    expect(await refusal({ selector: '#frozen-locked-rows', columns: [{ header: 'Symbol', key: 's' }] }))
+      .toBe(
+        'readTable found 2 header-only tables beside "frozen-locked-rows" — it must be exactly one; '
+        + 'a grid with frozen (locked) columns splits its header across two tables, which is not supported',
+      );
+    // Not only about header names: a POSITIONAL read of that half would have
+    // returned one column of a four-column grid and said nothing.
+    expect(await refusal({ selector: '#frozen-locked-rows', columns: [{ index: 1, key: 'a' }] }))
+      .toContain('2 header-only tables beside "frozen-locked-rows"');
+  });
+
+  it('refuses EITHER header table of a frozen grid, which used to read [] green', async () => {
+    // The blocker §7.3a.3 exists for, in its worst form: each header table of
+    // a locked grid holds a header and no rows, so both stored `[]` and both
+    // steps passed — with the words "Symbol", "Units", "Price" and "Value"
+    // visible on screen and nothing read.
+    //
+    // The refusal is reached by running the beside-it search from the LOCKED
+    // row table, which finds two header-only candidates with this table among
+    // them: one rule asked from the other side, so the two halves of the
+    // section cannot drift apart (§7.3a.3).
+    await load(frozenGrid(false));
+    for (const selector of ['#frozen-locked-header', '#frozen-header']) {
+      expect(await refusal({ selector, columns: [{ index: 1, key: 'a' }] })).toBe(
+        'readTable cannot read table "frozen-grid": it holds only the header row of a grid with '
+        + 'frozen (locked) columns, which is not supported',
+      );
+    }
+    // `aria-owns` changes which sentence the unlocked header gets — the rows
+    // that DECLARE it are readable, so it is the ordinary header-only pick —
+    // but the locked header, which nothing declares, is still half a split
+    // header.
+    await load(frozenGrid(true));
+    expect(await refusal({ selector: '#frozen-header', columns: [{ index: 1, key: 'a' }] })).toBe(
+      'readTable cannot read table "frozen-grid": it holds only the header row; the rows are in '
+      + 'the table beside it — select the element that contains both ("#frozen-grid") or that table',
+    );
+    expect(await refusal({ selector: '#frozen-locked-header', columns: [{ index: 1, key: 'a' }] })).toBe(
+      'readTable cannot read table "frozen-grid": it holds only the header row of a grid with '
+      + 'frozen (locked) columns, which is not supported',
+    );
+  });
+
+  it('leaves the UNLOCKED row table of a frozen grid headerless, because a data table sits between', async () => {
+    // Measured, and pinned as measured (§7.3a.2): between either header table
+    // and these rows sits the LOCKED row table, and a table with rows between
+    // a header and a candidate's rows is that header's partner rather than
+    // something to look past — so neither header is a candidate here and the
+    // table is simply headerless.
+    //
+    // That is weaker than the locked half, which is refused as ambiguous: a
+    // positional read of THIS half returns three columns of a four-column
+    // grid and says nothing. What stops the grid from being read in halves
+    // unnoticed is the wrapper (two tables with rows), the locked row table
+    // (two header-only tables beside it) and both header tables (the frozen
+    // refusal above) — three of the four ways in.
+    await load(frozenGrid(false));
+    expect(await refusal({ selector: '#frozen-rows', columns: [{ header: 'Value', key: 'value' }] }))
+      .toBe(
+        'readTable cannot map table "frozen-rows": it has no header row, so "Value" cannot be '
+        + 'matched — name columns by position ("the 1st column as value")',
+      );
+    const byPosition = await run({ selector: '#frozen-rows', columns: [{ index: 1, key: 'units' }] });
+    expect(byPosition.success).toBe(true);
+    expect(byPosition.capturedRecords).toEqual([
+      { _row: '1', units: '120' },
+      { _row: '2', units: '80' },
+    ]);
+  });
+
+  it('reads the unlocked half of a frozen grid that DECLARES its header, and refuses a locked-half name', async () => {
+    // `aria-owns` is the page saying outright which header belongs to these
+    // rows, so the ambiguity above does not arise: the declared path wins and
+    // the read is of the three columns that table actually holds. Asking for
+    // a column from the LOCKED half then fails the way any missing header
+    // does, listing what this half has — which is the honest answer, and not
+    // the same as silently reading the wrong column.
+    await load(frozenGrid(true));
+    const result = await run({
+      selector: '#frozen-rows',
+      columns: [
+        { header: 'Units', key: 'units' },
+        { header: 'Price', key: 'price' },
+        { header: 'Value', key: 'value' },
+      ],
+    });
+    expect(result.capturedRecords).toEqual([
+      { _row: '1', units: '120', price: '$95.10', value: '$11,412.00' },
+      { _row: '2', units: '80', price: '$130.45', value: '$10,436.00' },
+    ]);
+    // The headings are upper-cased by the suite's own table style, as this
+    // app's are (§7.3): the match still works because the fold is applied to
+    // an adopted header exactly as to a native one, and the message lists the
+    // headings as the page renders them.
+    expect(await refusal({ selector: '#frozen-rows', columns: [{ header: 'Symbol', key: 'symbol' }] }))
+      .toBe(
+        'readTable cannot map table "frozen-grid": no column is headed "Symbol" — available '
+        + 'headers are UNITS, PRICE, VALUE',
+      );
+  });
+
+  it('does not adopt a header-only table far above it in the page', async () => {
+    // The walk goes up until it finds a header-only table that precedes the
+    // rows — as far as `<body>` — so an unrelated one at the top of the page
+    // IS a candidate, and the thing that rejects it is the text between them,
+    // not the walk giving up early.
+    await load(`
+      <table><thead><tr><th>Date</th><th>Amount</th></tr></thead></table>
+      <h2>Transactions</h2>
+      <section><div class="panel">
+        <table id="far-rows"><tbody><tr><td>2026-01-02</td><td>$12.00</td></tr></tbody></table>
+      </div></section>`);
+    expect(await refusal({ selector: '#far-rows', columns: [{ header: 'Date', key: 'date' }] }))
+      .toBe(
+        'readTable cannot map table "far-rows": it has no header row, so "Date" cannot be matched '
+        + '— name columns by position ("the 1st column as date")',
+      );
+  });
+
+  it('reads a grouped grid: group rows are placeholders, master rows are numbered without them', async () => {
+    // Kendo's group row is one spanning cell plus five `<td hidden>` fillers,
+    // so it has SIX cells and one rendered one. Counted as six it reached the
+    // merged-cell rule and failed the whole read of a grouped grid (§4.8).
+    await load(dividendsGrid(DIVIDEND_ROWS));
+    const columns: TableReadColumn[] = [
+      { header: 'Symbol', key: 'symbol' },
+      { header: 'Ex-date', key: 'ex_date' },
+      { header: 'Amount', key: 'amount' },
+    ];
+    const result = await readTableRecords(page, { selector: '#dividends-grid', columns });
+    expect(result.records).toEqual([
+      { _row: '1', symbol: 'VAS', ex_date: '2026-03-28', amount: '$412.50' },
+      { _row: '2', symbol: 'VGS', ex_date: '2026-03-20', amount: '$88.20' },
+      { _row: '3', symbol: 'A200', ex_date: '2026-01-15', amount: '$655.00' },
+      { _row: '4', symbol: 'VAS', ex_date: '2025-12-19', amount: '$398.10' },
+      { _row: '5', symbol: 'NDQ', ex_date: '2025-12-05', amount: '$21.40' },
+    ]);
+    expect(result.placeholdersSkipped).toBe(2);
+    expect(result.headerFromSeparateTable).toBe(true);
+    // No "Year: 2026" anywhere in the records, and the row table's own
+    // selector answers the same thing.
+    const viaRows = await readTableRecords(page, { selector: '#dividends-grid .k-grid-content table', columns });
+    expect(viaRows.records).toEqual(result.records);
+
+    // Emptied, the grid keeps its header table and its rows become one
+    // full-width message. That row is one cell wide, so the §7.3a width check
+    // must not measure the grid by it — measured, it refused every emptied
+    // split grid as a mismatch.
+    await load(dividendsGrid(`
+        <tr class="k-table-row" role="row"><td class="k-table-td" colspan="6" role="gridcell">No records available.</td></tr>`));
+    const empty = await readTableRecords(page, { selector: '#dividends-grid', columns });
+    expect(empty.records).toEqual([]);
+    expect(empty.placeholdersSkipped).toBe(1);
+    expect(formatTableReadSummary(empty, 3, 'dividends', undefined))
+      .toBe('readTable captured 0 rows × 3 columns as "{{dividends}}" (1 placeholder row skipped, header from a separate table)');
+  });
+
+  it('keeps a hidden column aligned across both tables and reads it as ""', async () => {
+    // The `<th>` and every `<td>` of the Target column are `display:none`
+    // together, so the cell counts still match on both sides and the column
+    // holds its position — the value is empty because it is not rendered,
+    // which is the one-table behaviour §10 pins.
+    await load(WATCHLIST_HTML);
+    const result = await run({
+      selector: '#watchlist-grid',
+      columns: [
+        { header: 'Symbol', key: 'symbol' },
+        { header: 'Target', key: 'target' },
+        { header: 'Alert', key: 'alert' },
+      ],
+    });
+    expect(result.capturedRecords).toEqual([
+      { _row: '1', symbol: 'VHY', target: '', alert: 'On' },
+      { _row: '2', symbol: 'VEU', target: '', alert: 'Off' },
+      { _row: '3', symbol: 'QUAL', target: '', alert: 'On' },
+      { _row: '4', symbol: 'ETHI', target: '', alert: 'Off' },
+    ]);
+  });
+
+  it('names the grid by the wrapper when neither table has a name of its own (§7.2)', async () => {
+    // Kendo's and DevExpress's tables carry `role="none"`/`role="presentation"`
+    // and nothing else, so without the wrapper's name a failure reads
+    // `cannot map table "#watchlist-grid .dx-datagrid-rowsview table"` — the
+    // selector, which tells the author nothing about which grid broke. The
+    // wrapper's `aria-label` is the preference and its `id` the fallback
+    // (§7.2 point 4).
+    await load(WATCHLIST_HTML);
+    expect(await refusal({ selector: '#watchlist-grid .dx-datagrid-rowsview table', columns: [{ index: 7, key: 'x' }] }))
+      .toBe('readTable cannot map table "watchlist-grid": row 1 has 5 cells, so there is no cell at position 7 for "x"');
+    await load(dividendsGrid(DIVIDEND_ROWS));
+    expect(await refusal({ selector: '#dividends-grid .k-grid-content table', columns: [{ header: 'Yield', key: 'y' }] }))
+      .toBe(
+        'readTable cannot map table "Dividends": no column is headed "Yield" — available headers '
+        + 'are SYMBOL, EX-DATE, AMOUNT, FRANKING, PAID',
+      );
+  });
+
+  it('names the grid rather than the row table\'s generated id, but not over a plain table\'s own id (§7.2)', async () => {
+    // The order is: the table's own ACCESSIBLE name, the grid's name, the
+    // table's id, the selector. The middle two are the only pair that is not
+    // obvious, and this is why round: Kendo writes
+    // `id="14277be2-015b-4257-bd9e-b7fa3904037e"` on the row table — a GUID
+    // that names nothing to anyone — while the app's own `#holdings-grid` is
+    // on the wrapper, so naming the table by its id would make every failure
+    // on every grid unreadable.
+    await load(holdingsGrid({ id: 'holdings-grid', owns: true, rowId: '14277be2-guid' }));
+    expect(await refusal({ selector: '[id="14277be2-guid"]', columns: [{ index: 12, key: 'x' }] }))
+      .toBe('readTable cannot map table "holdings-grid": row 1 has 8 cells, so there is no cell at position 12 for "x"');
+
+    // A name on the grid beats its id, the same way round as on a table.
+    await load(holdingsGrid({ id: 'holdings-grid', owns: true, rowId: '14277be2-guid', label: 'Holdings' }));
+    expect(await refusal({ selector: '[id="14277be2-guid"]', columns: [{ index: 12, key: 'x' }] }))
+      .toBe('readTable cannot map table "Holdings": row 1 has 8 cells, so there is no cell at position 12 for "x"');
+
+    // And an ordinary one-table read is untouched: with no grid in the
+    // picture its id is still what names it.
+    await load(`
+      <table id="plain-orders">
+        <thead><tr><th>Order ID</th><th>Status</th></tr></thead>
+        <tbody><tr><td>ORD-1001</td><td>Completed</td></tr></tbody>
+      </table>`);
+    expect(await refusal({ selector: '#plain-orders', columns: [{ index: 5, key: 'x' }] }))
+      .toBe('readTable cannot map table "plain-orders": row 1 has 2 cells, so there is no cell at position 5 for "x"');
+  });
+
+  it('prefers a table\'s own header to a header-only table beside it', async () => {
+    // "A header in the table always wins" (§7.3a): the sibling here would
+    // give every record the wrong column names, and nothing in the result
+    // would look wrong.
+    await load(`
+      <div id="mixed-grid">
+        <table><thead><tr><th>Wrong</th><th>Also wrong</th></tr></thead></table>
+        <table id="mixed-rows">
+          <thead><tr><th>Symbol</th><th>Value</th></tr></thead>
+          <tbody><tr><td>VAS</td><td>$11,412.00</td></tr></tbody>
+        </table>
+      </div>`);
+    const result = await readTableRecords(page, {
+      selector: '#mixed-grid',
+      columns: [{ header: 'Symbol', key: 'symbol' }, { header: 'Value', key: 'value' }],
+    });
+    expect(result.records).toEqual([{ _row: '1', symbol: 'VAS', value: '$11,412.00' }]);
+    expect(result.headerFromSeparateTable).toBe(false);
+  });
+
+  it('does not adopt a header from a table that is not rendered', async () => {
+    // A `display:none` table is not part of the grid on screen, and a grid
+    // widget that keeps a template table around would otherwise donate its
+    // headings to whatever rows follow.
+    await load(`
+      <div id="hidden-header-grid">
+        <table style="display:none"><thead><tr><th>Symbol</th><th>Value</th></tr></thead></table>
+        <table><tbody><tr><td>VAS</td><td>$11,412.00</td></tr></tbody></table>
+      </div>`);
+    expect(await refusal({ selector: '#hidden-header-grid', columns: [{ header: 'Symbol', key: 'symbol' }] }))
+      .toBe(
+        'readTable cannot map table "hidden-header-grid": it has no header row, so "Symbol" cannot '
+        + 'be matched — name columns by position ("the 1st column as symbol")',
+      );
+  });
+
+  it('does not make <body> a grid container, so two sections stay two tables', async () => {
+    // An EMPTY table in one section and an unrelated headerless one in the
+    // next is the ordinary page, not a split grid: the walk stops below
+    // `<body>`, so neither table can reach the other. Reaching it, the empty
+    // Orders table was refused as "the header half of the grid below" and the
+    // unrelated table read its rows under Orders' column names.
+    const page = `
+      <div id="section-a">
+        <table id="empty-orders"><thead><tr><th>Order ID</th><th>Status</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div id="section-b">
+        <table id="later-rows"><tbody><tr><td>ORD-1001</td><td>Completed</td></tr></tbody></table>
+      </div>`;
+    await load(page);
+    const empty = await run({ selector: '#empty-orders', columns: [{ header: 'Order ID', key: 'id' }] });
+    expect(empty.success).toBe(true);
+    expect(empty.capturedRecords).toEqual([]);
+    // The other one reads by position, and by header name it fails with the
+    // §5.4 message — the answer for a table that has no header, not for half
+    // a grid.
+    expect((await run({ selector: '#later-rows', columns: [{ index: 1, key: 'id' }] })).capturedRecords)
+      .toEqual([{ _row: '1', id: 'ORD-1001' }]);
+    expect(await refusal({ selector: '#later-rows', columns: [{ header: 'Order ID', key: 'id' }] }))
+      .toBe(
+        'readTable cannot map table "later-rows": it has no header row, so "Order ID" cannot be '
+        + 'matched — name columns by position ("the 1st column as id")',
+      );
+  });
+
+  it('does not pair two tables sitting in two cells of a layout table', async () => {
+    // A table inside another table belongs to that table (§7.2, §7.3a), and
+    // the test has to be asked WITHOUT a root: relative to the ancestor this
+    // walk reaches — the `<tr>`, then the layout table itself — neither of
+    // these is "nested inside a table under it", so both looked like halves
+    // of one grid and the second read its rows under the first's headings.
+    await load(`
+      <table id="layout"><tbody><tr>
+        <td><table><thead><tr><th>Date</th><th>Amount</th></tr></thead></table></td>
+        <td><table id="cell-rows"><tbody><tr><td>2026-01-02</td><td>$12.00</td></tr></tbody></table></td>
+      </tr></tbody></table>`);
+    expect(await refusal({ selector: '#cell-rows', columns: [{ header: 'Date', key: 'date' }] }))
+      .toBe(
+        'readTable cannot map table "cell-rows": it has no header row, so "Date" cannot be '
+        + 'matched — name columns by position ("the 1st column as date")',
+      );
+    expect((await run({ selector: '#cell-rows', columns: [{ index: 2, key: 'amount' }] })).capturedRecords)
+      .toEqual([{ _row: '1', amount: '$12.00' }]);
+  });
+
+  it('does not give a table nested in a header cell the header it is sitting in', async () => {
+    // The mirror shape, and the reason the document-order test is not enough
+    // on its own: an ancestor "precedes" its descendant, so the header-only
+    // table wrapped around this one was a candidate to donate its headings to
+    // it — `<th>Date</th>` became the name of the inner table's first column.
+    await load(`
+      <div id="outer-grid">
+        <table><thead><tr>
+          <th>Date</th>
+          <th><table id="inner"><tbody><tr><td>2026-01-02</td><td>$12.00</td></tr></tbody></table></th>
+        </tr></thead></table>
+      </div>`);
+    expect(await refusal({ selector: '#inner', columns: [{ header: 'Date', key: 'date' }] }))
+      .toBe(
+        'readTable cannot map table "inner": it has no header row, so "Date" cannot be matched '
+        + '— name columns by position ("the 1st column as date")',
+      );
+  });
+
+  it('reads a wrapper whose header table FOLLOWS its rows when aria-owns declares it', async () => {
+    // What the page declares beats what sits beside it on the WRAPPER path
+    // too (§7.3a.1 before §7.3a.2): asked only of "the header-only table
+    // before the rows", the wrapper answered `[]`'s headerless read for a
+    // grid whose own row table read correctly — the same grid, two answers,
+    // depending on which selector the author happened to write.
+    const declared = `
+      <div id="footer-header-grid">
+        <table id="fh-rows" aria-owns="fh-head"><tbody>
+          <tr><td>2026-01-02</td><td>$12.00</td></tr>
+        </tbody></table>
+        <table><thead id="fh-head"><tr><th>Date</th><th>Amount</th></tr></thead></table>
+      </div>`;
+    await load(declared);
+    const columns: TableReadColumn[] = [{ header: 'Date', key: 'date' }, { header: 'Amount', key: 'amount' }];
+    const viaWrapper = await run({ selector: '#footer-header-grid', columns });
+    const viaRows = await run({ selector: '#fh-rows', columns });
+    expect(viaWrapper.capturedRecords).toEqual([{ _row: '1', date: '2026-01-02', amount: '$12.00' }]);
+    expect(viaRows.capturedRecords).toEqual(viaWrapper.capturedRecords);
+
+    // Without that declaration the header table is simply one that follows
+    // the rows, and "the one header-only table BEFORE it" finds nothing — the
+    // grid stays headerless rather than pairing across the rows.
+    await load(`
+      <div id="undeclared-grid">
+        <table id="ud-rows"><tbody><tr><td>2026-01-02</td><td>$12.00</td></tr></tbody></table>
+        <table><thead><tr><th>Date</th><th>Amount</th></tr></thead></table>
+      </div>`);
+    expect(await refusal({ selector: '#undeclared-grid', columns: [{ header: 'Date', key: 'date' }] }))
+      .toBe(
+        'readTable cannot map table "undeclared-grid": it has no header row, so "Date" cannot be '
+        + 'matched — name columns by position ("the 1st column as date")',
+      );
+  });
+
+  it('counts a nested table in a data cell as part of its row, not as a second half of the grid', async () => {
+    // "Exactly one table with rows under the wrapper" is what refuses a
+    // frozen grid, so a table inside a CELL has to be excluded from the
+    // count: an expandable detail row would otherwise make every such grid
+    // ambiguous.
+    await load(`
+      <div id="nested-cell-grid">
+        <table><thead><tr><th>Date</th><th>Detail</th></tr></thead></table>
+        <table><tbody><tr>
+          <td>2026-01-02</td>
+          <td><table><tbody><tr><td>Origin Energy</td><td>$12.00</td></tr></tbody></table></td>
+        </tr></tbody></table>
+      </div>`);
+    const result = await run({
+      selector: '#nested-cell-grid',
+      columns: [{ header: 'Date', key: 'date' }, { header: 'Detail', key: 'detail' }],
+    });
+    expect(result.success).toBe(true);
+    expect(result.capturedRecords).toEqual([
+      { _row: '1', date: '2026-01-02', detail: 'Origin Energy $12.00' },
+    ]);
+  });
+
+  it('pairs a grid whose row table has a dangling aria-labelledby and an empty caption', async () => {
+    // Both are markup a widget leaves behind, and counted as names they made
+    // the row table a "whole table" — this grid read as headerless, with the
+    // column names visible on screen one table above.
+    await load(`
+      <div id="leftovers-grid">
+        <table><thead><tr><th>Date</th><th>Amount</th></tr></thead></table>
+        <table id="leftovers-rows" aria-labelledby="not-on-this-page"><caption></caption><tbody>
+          <tr><td>2026-01-02</td><td>$12.00</td></tr>
+        </tbody></table>
+      </div>`);
+    const result = await run({ selector: '#leftovers-rows', columns: [{ header: 'Amount', key: 'amount' }] });
+    expect(result.success).toBe(true);
+    expect(result.capturedRecords).toEqual([{ _row: '1', amount: '$12.00' }]);
+
+    // An `aria-labelledby` that RESOLVES is a name, and still ends the
+    // pairing — the difference is whether anything on the page says it.
+    await load(`
+      <h3 id="statement-heading">Statement rows</h3>
+      <div id="named-grid">
+        <table><thead><tr><th>Date</th><th>Amount</th></tr></thead></table>
+        <table id="named-rows" aria-labelledby="statement-heading"><tbody>
+          <tr><td>2026-01-02</td><td>$12.00</td></tr>
+        </tbody></table>
+      </div>`);
+    expect(await refusal({ selector: '#named-rows', columns: [{ header: 'Amount', key: 'amount' }] }))
+      .toBe(
+        'readTable cannot map table "Statement rows": it has no header row, so "Amount" cannot be '
+        + 'matched — name columns by position ("the 1st column as amount")',
+      );
+  });
+
+  it('does not take a two-row header from the table beside it, but does through the wrapper', async () => {
+    // The two paths differ here on purpose (§7.3a): a table whose header §7.3
+    // REFUSES is evidence of nothing when the only thing suggesting a
+    // pairing is that it sits nearby, so the plain table after it is read as
+    // what it is — a headerless table. Named by a wrapper, the author has
+    // asserted the pairing, and the refusal is the answer.
+    const markup = (wrapperId: string) => `
+      <div id="${wrapperId}">
+        <table><thead>
+          <tr><th>Date</th><th>Amount</th></tr>
+          <tr><th>(AEST)</th><th>(AUD)</th></tr>
+        </thead></table>
+        <table id="two-row-rows"><tbody><tr><td>2026-01-02</td><td>$12.00</td></tr></tbody></table>
+      </div>`;
+    await load(markup('beside-two-row'));
+    expect((await run({ selector: '#two-row-rows', columns: [{ index: 1, key: 'date' }] })).capturedRecords)
+      .toEqual([{ _row: '1', date: '2026-01-02' }]);
+    expect(await refusal({ selector: '#two-row-rows', columns: [{ header: 'Date', key: 'date' }] }))
+      .toBe(
+        'readTable cannot map table "two-row-rows": it has no header row, so "Date" cannot be '
+        + 'matched — name columns by position ("the 1st column as date")',
+      );
+
+    await load(markup('wrapper-two-row'));
+    expect(await refusal({ selector: '#wrapper-two-row', columns: [{ header: 'Date', key: 'date' }] }))
+      .toBe('readTable cannot map table "wrapper-two-row": its header has 2 rows, and v1 supports exactly one');
+  });
+
+  it('looks for no partner at all for a table that names itself (§7.3a)', async () => {
+    // A name is the author saying this is a whole table, so the beside-it
+    // search does not run — not even far enough to find two header-only
+    // tables and refuse as ambiguous, which would end a read that a name was
+    // supposed to make safe.
+    await load(`
+      <div id="named-half-grid">
+        <table><thead><tr><th>Date</th></tr></thead></table>
+        <table><thead><tr><th>Amount</th></tr></thead></table>
+        <table id="self-named-rows" aria-label="Statement rows"><tbody>
+          <tr><td>2026-01-02</td></tr>
+        </tbody></table>
+      </div>`);
+    const result = await run({ selector: '#self-named-rows', columns: [{ index: 1, key: 'date' }] });
+    expect(result.success).toBe(true);
+    expect(result.capturedRecords).toEqual([{ _row: '1', date: '2026-01-02' }]);
+  });
+});
+
 // ── the run-log summary line (§7.6) ─────────────────────────────────────────
 //
 // Counts, not contents: the captured cells belong in the variable and the
@@ -1650,11 +2610,12 @@ describe('readTable — §6.2 column and limit validation on the helper path', (
 // explanation in the log.
 
 describe('formatTableReadSummary', () => {
-  const result = (records: number, placeholdersSkipped = 0) => ({
+  const result = (records: number, placeholdersSkipped = 0, headerFromSeparateTable = false) => ({
     records: Array.from({ length: records }, (_, i) => ({ _row: String(i + 1) })),
     placeholdersSkipped,
     dataRowCount: records,
     label: 'Orders',
+    headerFromSeparateTable,
   });
 
   it('says how many rows by how many columns, under the variable name', () => {
@@ -1677,6 +2638,16 @@ describe('formatTableReadSummary', () => {
   it('carries both notes at once, and names an unnamed capture', () => {
     expect(formatTableReadSummary(result(1, 2), 1, undefined, 5))
       .toBe('readTable captured 1 row × 1 column as "{{(unnamed)}}" (limit 5, 2 placeholder rows skipped)');
+  });
+
+  it('says when the header came from a separate table (§7.3a), beside the other notes', () => {
+    // §7.6 verbatim. A grid whose header was paired with the wrong rows
+    // returns records that look exactly like a correct read, so this note is
+    // the only place the pairing shows up at all.
+    expect(formatTableReadSummary(result(6, 0, true), 3, 'holdings', undefined))
+      .toBe('readTable captured 6 rows × 3 columns as "{{holdings}}" (header from a separate table)');
+    expect(formatTableReadSummary(result(2, 1, true), 3, 'holdings', 5))
+      .toBe('readTable captured 2 rows × 3 columns as "{{holdings}}" (limit 5, 1 placeholder row skipped, header from a separate table)');
   });
 });
 
