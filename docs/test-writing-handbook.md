@@ -145,6 +145,11 @@ The order of `## Config` and `## Parameters` does not matter.
   instruction the model must satisfy.
 - `{{name}}` is a placeholder only when written without spaces inside the
   braces; `{{ name }}` is refused.
+- `${name}` is the *environment* form and is not interchangeable with it.
+  Writing `${email}` where `email` is a captured value or a loop binding is
+  refused before the step runs, naming `{{email}}` as the correction — and
+  that holds even when the test declares no environment at all, which is how
+  the wrong braces used to reach the browser as written.
 
 ### Frontmatter
 
@@ -880,10 +885,22 @@ Holdings grid") and the framework reads the pair as one table: header names
 work exactly as above, the footer is ignored, and `_row` numbers the data
 rows. You do not have to switch to column positions because the rows carry no
 `<th>`, and you should not point a read at the header table — it has no rows,
-so that read is refused rather than quietly storing nothing. A grid with
-frozen (locked) columns is the one shape that is refused outright: it renders
-the same rows twice, split by column, and reading one half would misalign
-every record.
+so that read is refused rather than quietly storing nothing. Telerik RadGrid
+(the ASP.NET AJAX one) is the same thing in three tables — a header table, the
+rows, and a pager table in one box — and reads the same way: name the grid, or
+the table with the rows in it. A grid with frozen (locked) columns is the one
+shape that is refused outright: it renders the same rows twice, split by
+column, and reading one half would misalign every record.
+
+**Headers of more than one row.** A grid widget's header is often a band row
+over groups of columns, then the column names, then a row of filter boxes. Use
+the name in the LOWEST heading over the column — `Amount`, not the `LOAN` band
+above it — because that is what names the column; a band names a group and is
+refused with the leaves under it listed, and a filter row names nothing at all
+(its `All` is the state of a dropdown, not a heading). Where the same leaf name
+sits under two bands — a `Fee` column under `Q1` and another under `Q2` — the
+plain name is ambiguous and the read is refused with both positions, so write
+the band with the leaf: `the "Q1 > Fee" column as q1_fee`.
 
 **Quote a placeholder that can be empty — in a step.** An empty cell is
 captured as the empty string, and the emptiness survives to somewhere it
@@ -991,6 +1008,13 @@ deletes or moves rows, every row below the change has a different number from
 that pass on — so for a table you change as you go, re-find by a value, or use
 `Repeat … until` so each pass reads the page as it is now.
 
+The read also leaves that numbering on the page: every data row of the table
+it read carries `data-aiui-row="N"`, the same N as the record's `_row`, and a
+later step's "row 7 of the …" resolves through that attribute rather than
+through counting or an element id. You never write it — it is there so that
+"row 7" means the seventh row of DATA and not the seventh `<tr>`, on a grid
+whose own row ids happen to start at zero.
+
 `_row` counts **data rows**: hidden rows and full-width message or group rows
 are excluded and consume no number. The model is told to count the same way
 when a step says "row 3", so on most tables the two agree — but one is a
@@ -1039,8 +1063,7 @@ columns — the maximum is 20`, which are about the selector and the step:
 
 | The table | Why it is refused |
 | --- | --- |
-| A merged header or cell (`rowspan`/`colspan` > 1) | The logical grid would have to be guessed. The full-width message row above is the one exception. |
-| A `<thead>` with more than one row | Same reason, and it is usually the merged case dressed differently. v1 maps exactly one header row. |
+| A merged DATA cell (`rowspan`/`colspan` > 1 in a body row) | The logical grid would have to be guessed. Headers are not this case: a header of several rows — a band row over groups of columns, a filter row — is laid out, and each column takes the lowest heading over it. Two body rows are exceptions: the full-width message row above, and the detail row a grid inserts under a record you expanded. |
 | Two columns with the same header, or a header you named that is not there | An ambiguous or missing match is never resolved by proximity; the message lists the headers the table does have. |
 | A selector matching more than one visible table, or none | Picking one of several would be the misalignment the action exists to prevent. Scope the selector. |
 | No cell at a column's resolved position, in a row the read returned | Dropping the row or shifting the values is how misalignment happens. Checked on the rows the read returns, so a ragged row past your first-N bound is a row nobody asked for and does not fail anything. |
@@ -1077,16 +1100,19 @@ variables, and `{{order.address.city}}` is not a reference — one property
 segment, and no deeper. A dotted name with no value fails the step before the
 model is asked, and says which properties the record does have.
 
-Running versions of all of it ship in `templates/init/tests/`: the nine
+Running versions of all of it ship in `templates/init/tests/`: the ten
 `table-*.md` files tagged `table-read` cover headers and reordering
 (`table-orders.md`), the first-N bound (`table-orders-limit.md`), positions,
 duplicates and `_row` (`table-payments-review.md`), pagination
 (`table-statements.md`), an empty body (`table-documents-empty.md`), the
-awkward shapes (`table-structures.md`) and a grid whose header and rows are
-separate tables (`table-split-grids.md`). Each navigates straight to the page
+awkward shapes (`table-structures.md`), a grid whose header and rows are
+separate tables (`table-split-grids.md`) and a Telerik RadGrid — three
+tables in one box, a banded header with a filter row, and a pager
+(`table-radgrid.md`). Each navigates straight to the page
 it needs in the fixture app — `structured-orders.html` and
 `structured-orders-many.html`, `scheduled-payments.html`, `statements.html`,
-`documents.html`, `table-edge-cases.html`, `split-grids.html`.
+`documents.html`, `table-edge-cases.html`, `split-grids.html`,
+`radgrid.html`.
 `fixtures/test-app/tables.html`
 indexes them all and is the page to open by hand when you want to see what a
 test is reading.

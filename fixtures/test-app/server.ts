@@ -1465,6 +1465,9 @@ async function handleRequest(
       '/table-edge-cases': 'table-edge-cases.html',
       // Component grids that split the header and the rows across two tables.
       '/split-grids': 'split-grids.html',
+      // Telerik RadGrid: three tables in one wrapper, a banded header with a
+      // filter row, and row ids that renumber on every page.
+      '/radgrid': 'radgrid.html',
     };
     const mappedFile = friendlyRoutes[pathname];
     if (mappedFile) {

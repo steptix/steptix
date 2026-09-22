@@ -1,0 +1,1160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Loan applications</title>
+  <!--
+    Fixture page for docs/specs/SPEC-structured-table-reads.md, §5.7, §7.3b and
+    §7.4.
+
+    split-grids.html holds the TWO-table shape: a header table beside a body
+    table, as Kendo, DevExpress and AG Grid draw a grid. Telerik RadGrid
+    (ASP.NET AJAX) is a third shape again, and it is the one the user's real
+    application is built from, so it gets a page of its own.
+
+    The markup below copies a structural walk of the live RadGrid demo at
+    https://demos.telerik.com/aspnet-ajax/grid/examples/overview/defaultcs.aspx
+    taken on 2026-09-23 (headless Chromium) — element nesting, class names,
+    roles, aria wiring, id patterns and hidden rows as that component actually
+    renders them, with plain RadGrid1… ids in place of the demo's
+    ctl00_ContentPlaceholder1_ prefix and SecureBank content in place of the
+    rental cars.
+
+      #RadGrid1     The STATIC-HEADERS form: THREE tables in one wrapper div.
+                    A header table inside .rgHeaderWrapper > .rgHeaderDiv, a
+                    data table inside .rgDataDiv, and a pager table as a direct
+                    child of the wrapper. Four things here are not in any other
+                    fixture:
+
+                      · The header is THREE rows — a band row of merged column
+                        groups, a leaf row of eight column names, and a FILTER
+                        row of nine <td> holding the filter controls. Only the
+                        first two carry <th>, so the label for a column is the
+                        lowest <th> covering it and the filter row is not a
+                        header row at all.
+                      · The header table's <tbody> holds a SPACER row — one
+                        <td colspan="9"> — hidden with display:none on the
+                        <tbody>. It is a row in a table that has rows, and it
+                        is not a record.
+                      · The data table carries a <thead> OF ITS OWN: one hidden
+                        empty <th>. It is the nearer header and it says
+                        nothing, so a read that stops at the first header row
+                        it finds sees a grid with no column names. The real
+                        header is named by aria-owns on the data table, which
+                        points at the header table's <thead> and at the data
+                        table's own <tbody>. (RadGrid emits that attribute with
+                        a TRAILING SPACE — "…_Header_thead …_tbody " — copied
+                        here as measured, because splitting it naively yields
+                        an empty id.)
+                      · Row ids are ZERO-based — RadGrid1_ctl00__0 — and they
+                        are re-numbered from __0 on every page, so an id is a
+                        position on the current page, never a record.
+
+                    The expand arrow inserts a detail row that is worth reading
+                    carefully: RadGrid gives it NO class and NO id. It is a
+                    bare <tr role="row"> with TWO cells, an empty .rgExpandCol
+                    and a <td colspan="8"> holding a nested table. Nothing on
+                    the element says "not a record" — only its shape does. The
+                    brief for this page guessed tr.rgExpandedRow; the live
+                    component emits no such class, and the classless version is
+                    the one worth measuring against.
+
+                    The expand column's <th> is the other measured trap: it
+                    renders blank but contains <span style="display:none">
+                    ExpandColumn</span>, so its textContent is "ExpandColumn"
+                    and its innerText is "".
+
+      #RadGrid2     The NON-SCROLLING form: ONE table, everything in <thead>
+                    (band row, leaf row, filter row) and the pager in <tfoot>.
+                    This one is NOT walked from the demo — the demo has static
+                    headers — so it is derived from RadGrid's documentation of
+                    ClientSettings.Scrolling.AllowScroll="false", where the
+                    header wrapper and the separate pager table both collapse
+                    into the master table. The aria-owns here therefore points
+                    at the table's OWN thead and tbody.
+
+      #banded-table A plain <table> with the same banded header and no widget
+                    around it, so the multi-row-header rule can be checked
+                    without any component markup in the way. Its leaf names
+                    repeat: two columns are called Fee and two are called
+                    Rebate.
+
+    Everything is client-side — no login, no cookie banner, no persistence — so
+    every shard can share one server and every run starts from the same state.
+    Page 1 of the loan applications is written out as static markup; paging,
+    sorting and filtering re-render the same markup from the record list.
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar (same shell as dashboard.html / split-grids.html) */
+    .sidebar {
+      width: 240px;
+      background: #1f2937;
+      color: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      min-height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      margin-bottom: 32px;
+    }
+
+    .sidebar-logo-icon {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .sidebar-logo-name { font-size: 18px; font-weight: 700; }
+
+    nav { flex: 1; }
+
+    nav ul { list-style: none; padding: 0; }
+
+    nav ul li a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 24px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav ul li a:hover { background: #374151; color: #f9fafb; }
+
+    nav ul li a.active {
+      background: #374151;
+      color: #f9fafb;
+      border-left-color: #1a56db;
+    }
+
+    nav ul li a .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+    .sidebar-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #374151;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .user-name { font-size: 13px; font-weight: 500; color: #f9fafb; }
+    .user-email { font-size: 12px; color: #6b7280; }
+
+    .logout-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover { background: #374151; color: #f9fafb; }
+
+    /* Main content */
+    .main-content {
+      margin-left: 240px;
+      flex: 1;
+      padding: 32px;
+      max-width: 1100px;
+    }
+
+    .page-header { margin-bottom: 28px; }
+
+    .page-header h1 { font-size: 26px; font-weight: 700; color: #111827; }
+
+    .page-header p { font-size: 14px; color: #6b7280; margin-top: 4px; }
+
+    .section-card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .section-title, .section-card h2 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .section-hint {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 16px;
+    }
+
+    .section-hint strong { color: #111827; }
+
+    .section-hint code, code.inline {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      background: #f3f4f6;
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: #374151;
+    }
+
+    .muted { font-size: 13px; color: #6b7280; }
+
+    .result-line {
+      margin-top: 12px;
+      font-size: 13px;
+      color: #047857;
+      min-height: 18px;
+      font-weight: 500;
+    }
+
+    .contents {
+      background: #fff;
+      border-radius: 12px;
+      padding: 16px 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+    }
+
+    .contents h2 {
+      font-size: 13px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 10px;
+    }
+
+    .contents ol {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 14px;
+      counter-reset: toc;
+    }
+
+    .contents li { counter-increment: toc; font-size: 13px; }
+    .contents li a { color: #1a56db; text-decoration: none; }
+    .contents li a::before { content: counter(toc) ". "; color: #9ca3af; }
+    .contents li a:hover { text-decoration: underline; }
+
+    /* ── RadGrid "Silk" skin ─────────────────────────────────────────────────
+       Enough of the skin to make the page look like the demo screenshot: a
+       grey banded header, a filter row under it, alternating body rows and a
+       grey pager bar. The header and data tables are laid out identically —
+       table-layout: fixed plus the same <colgroup> widths — so the two line up
+       as one grid even though only the rows scroll.
+
+       RadGrid's own CSS UPPER-CASES header text: the markup says "Applicant"
+       and innerText reports "APPLICANT". That is copied here, unlike
+       split-grids.html where Kendo leaves headings alone, because it is what
+       the component does — and because a read that case-folds its headings
+       (§7.3) finds the column either way, so the difference is exactly the
+       kind of thing this fixture exists to prove. */
+    .RadGrid {
+      border: 1px solid #c6c6c6;
+      background: #fff;
+      font-size: 13px;
+      color: #333;
+      border-radius: 2px;
+    }
+
+    .RadGrid .rgMasterTable {
+      width: 100%;
+      table-layout: fixed;
+      border-collapse: collapse;
+      empty-cells: show;
+    }
+
+    .rgHeaderWrapper { background: #f4f4f4; }
+    .rgHeaderDiv { overflow: hidden; }
+    .rgDataDiv { overflow-x: auto; overflow-y: auto; }
+
+    .rgHeader {
+      background: #f4f4f4;
+      border-bottom: 1px solid #d5d5d5;
+      border-right: 1px solid #e4e4e4;
+      padding: 9px 10px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: #7a7a7a;
+      white-space: nowrap;
+      overflow: hidden;
+      vertical-align: middle;
+    }
+
+    .rgHeader:last-child { border-right: none; }
+
+    .rgMultiHeaderRow:first-child .rgHeader {
+      background: #ececec;
+      border-bottom: 1px solid #dcdcdc;
+      color: #8a8a8a;
+    }
+
+    .rgHeader a {
+      color: #7a7a7a;
+      text-decoration: none;
+    }
+
+    .rgHeader a:hover { color: #1a56db; text-decoration: underline; }
+
+    .rgHeader[aria-sort="ascending"] a::after { content: ' \25B2'; font-size: 9px; }
+    .rgHeader[aria-sort="descending"] a::after { content: ' \25BC'; font-size: 9px; }
+
+    .rgFilterRow td {
+      background: #fafafa;
+      border-bottom: 1px solid #d5d5d5;
+      padding: 6px 8px;
+      vertical-align: middle;
+    }
+
+    .rgFilterBox {
+      width: 90px;
+      padding: 4px 6px;
+      border: 1px solid #c6c6c6;
+      border-radius: 2px;
+      font-size: 12px;
+      font-family: inherit;
+    }
+
+    .rgFilterSelect {
+      padding: 4px 4px;
+      border: 1px solid #c6c6c6;
+      border-radius: 2px;
+      font-size: 12px;
+      font-family: inherit;
+      background: #fff;
+      max-width: 100%;
+    }
+
+    .RadGrid td[role="gridcell"] {
+      padding: 10px;
+      border-bottom: 1px solid #ededed;
+      border-right: 1px solid #f3f3f3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+
+    .rgRow { background: #fff; }
+    .rgAltRow { background: #fafafa; }
+    .rgRow:hover, .rgAltRow:hover { background: #f1f6ff; }
+
+    .rgExpandCol {
+      width: 36px;
+      text-align: center;
+      padding: 0 !important;
+    }
+
+    .t-button.rgActionButton {
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    button.rgExpand, button.rgCollapse {
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border: none;
+      background: transparent;
+      color: #8a8a8a;
+      line-height: 1;
+    }
+
+    button.rgExpand:hover, button.rgCollapse:hover { color: #1a56db; }
+
+    .rgExpandIcon::before { content: '\25B8'; font-size: 13px; }
+    .rgCollapseIcon::before { content: '\25BE'; font-size: 13px; }
+
+    input.rgActionButton {
+      padding: 4px 12px;
+      border: 1px solid #c6c6c6;
+      border-radius: 2px;
+      background: #f6f6f6;
+      color: #444;
+      cursor: pointer;
+    }
+
+    input.rgActionButton:hover { background: #ebf2ff; border-color: #1a56db; color: #1a56db; }
+
+    button.rgFilter {
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      margin-left: 4px;
+      border: 1px solid #c6c6c6;
+      border-radius: 2px;
+      background: #f6f6f6;
+      color: #777;
+      cursor: pointer;
+      vertical-align: middle;
+    }
+
+    .rgFilterIcon::before { content: '\25BC'; font-size: 9px; }
+
+    /* Detail row inserted by the expand arrow. */
+    .rgDetailTable {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      background: #fff;
+    }
+
+    .rgDetailTable th, .rgDetailTable td {
+      border: 1px solid #e4e4e4;
+      padding: 6px 10px;
+      font-size: 12px;
+      text-align: left;
+    }
+
+    .rgDetailTable th {
+      background: #f4f4f4;
+      color: #7a7a7a;
+      font-weight: 600;
+    }
+
+    .applicantDetail {
+      background: #f8fafc;
+      border: 1px solid #e4e4e4;
+      border-radius: 3px;
+      padding: 12px 14px;
+      margin: 8px 10px 10px 0;
+    }
+
+    .detailTitle { font-size: 13px; font-weight: 600; color: #333; }
+
+    /* Pager */
+    .rgPager td, td.rgPagerCell {
+      background: #f4f4f4;
+      border-top: 1px solid #d5d5d5;
+      padding: 8px 10px;
+    }
+
+    .NextPrevAndNumeric {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .rgWrap { display: flex; align-items: center; gap: 4px; }
+    .rgInfoPart { margin-left: auto; color: #666; }
+    .rgAdvPart { gap: 6px; }
+    .rgPagerLabel { color: #666; font-size: 12px; }
+
+    .NextPrevAndNumeric button {
+      width: 26px;
+      height: 24px;
+      padding: 0;
+      border: 1px solid #c6c6c6;
+      border-radius: 2px;
+      background: #fff;
+      color: #666;
+      cursor: pointer;
+      line-height: 1;
+    }
+
+    .NextPrevAndNumeric button:hover:not(:disabled) { border-color: #1a56db; color: #1a56db; }
+    .NextPrevAndNumeric button:disabled { opacity: 0.45; cursor: default; }
+
+    .rgPageFirst .rgIcon::before { content: '\23EE'; font-size: 10px; }
+    .rgPagePrev  .rgIcon::before { content: '\25C0'; font-size: 9px; }
+    .rgPageNext  .rgIcon::before { content: '\25B6'; font-size: 9px; }
+    .rgPageLast  .rgIcon::before { content: '\23ED'; font-size: 10px; }
+
+    .rgNumPart a {
+      display: inline-block;
+      min-width: 24px;
+      padding: 3px 5px;
+      text-align: center;
+      color: #444;
+      text-decoration: none;
+      border: 1px solid transparent;
+      border-radius: 2px;
+      font-size: 12px;
+    }
+
+    .rgNumPart a:hover { border-color: #c6c6c6; }
+
+    .rgNumPart a.rgCurrentPage {
+      border-color: #1a56db;
+      color: #1a56db;
+      font-weight: 600;
+      background: #fff;
+    }
+
+    .rgPageSizeSelect {
+      padding: 3px 4px;
+      border: 1px solid #c6c6c6;
+      border-radius: 2px;
+      font-size: 12px;
+      font-family: inherit;
+      background: #fff;
+    }
+
+    /* Status badges (same shape as structured-orders.html) */
+    .status {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    .status-approved  { background: #d1fae5; color: #065f46; }
+    .status-pending   { background: #fef3c7; color: #92400e; }
+    .status-declined  { background: #fee2e2; color: #991b1b; }
+    .status-active    { background: #d1fae5; color: #065f46; }
+    .status-paused    { background: #e0e7ff; color: #3730a3; }
+    .status-cancelled { background: #f3f4f6; color: #4b5563; }
+
+    /* 3 ── plain banded table, SecureBank's own table style */
+    .plain-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    .plain-table th, .plain-table td {
+      border: 1px solid #e5e7eb;
+      padding: 10px 12px;
+      text-align: left;
+    }
+
+    .plain-table thead th {
+      background: #f9fafb;
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .plain-table thead tr:first-child th:not(:first-child) { text-align: center; }
+    .plain-table td { font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside class="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">S</div>
+      <span class="sidebar-logo-name">SecureBank</span>
+    </div>
+
+    <nav>
+      <ul>
+        <li>
+          <a href="dashboard.html">
+            <span class="nav-icon">🏠</span>
+            Dashboard
+          </a>
+        </li>
+        <li>
+          <a href="transactions.html">
+            <span class="nav-icon">💳</span>
+            Transactions
+          </a>
+        </li>
+        <li>
+          <a href="documents.html">
+            <span class="nav-icon">📄</span>
+            Documents
+          </a>
+        </li>
+        <li>
+          <a href="control-flow.html">
+            <span class="nav-icon">💸</span>
+            Payments
+          </a>
+        </li>
+        <li>
+          <a href="tables.html" class="active" aria-current="page">
+            <span class="nav-icon">📋</span>
+            Tables
+          </a>
+        </li>
+        <li>
+          <a href="#settings">
+            <span class="nav-icon">⚙️</span>
+            Settings
+          </a>
+        </li>
+        <li>
+          <a href="#profile">
+            <span class="nav-icon">👤</span>
+            Profile
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <div>
+          <div class="user-name">Demo User</div>
+          <div class="user-email" id="user-email">demo@securebank.com</div>
+        </div>
+      </div>
+      <button class="logout-btn" id="logout-btn" type="button">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <div class="page-header">
+      <h1>Loan applications</h1>
+      <p>Telerik RadGrid, the shape behind SecureBank's lending desk: a banded three-row header, a filter row, a hidden spacer, zero-based row ids that renumber on every page, and a pager in a table of its own.</p>
+    </div>
+
+    <nav class="contents" id="contents" aria-label="Contents">
+      <h2>Contents</h2>
+      <ol>
+        <li><a href="#c-applications">Loan applications</a></li>
+        <li><a href="#c-mandates">Direct debit mandates</a></li>
+        <li><a href="#c-fees">Quarterly fees</a></li>
+      </ol>
+    </nav>
+
+    <!-- 1 ── RadGrid with static headers: three tables ────────────────────── -->
+    <section class="section-card" id="c-applications" aria-labelledby="h-applications">
+      <div class="section-header">
+        <h2 id="h-applications">Loan applications</h2>
+      </div>
+      <p class="section-hint">A RadGrid with <strong>static headers</strong>, as the live Telerik demo renders it: <strong>three tables</strong> in one <code>.RadGrid</code> wrapper — the header in <code>.rgHeaderWrapper &gt; .rgHeaderDiv</code>, the rows in <code>.rgDataDiv</code>, and the pager in a third table that is a direct child of the wrapper. The header table's <code>&lt;thead&gt;</code> has <strong>three rows</strong>: a band row of merged groups (Applicant, Loan, Review), a leaf row of the eight column names, and a <code>rgFilterRow</code> of nine <code>&lt;td&gt;</code> that is not a header row at all. Its <code>&lt;tbody&gt;</code> holds a hidden <strong>spacer</strong> row of one <code>&lt;td colspan="9"&gt;</code>. The data table brings a <code>&lt;thead&gt;</code> of its own — one hidden, empty <code>&lt;th&gt;</code> — so the nearest header says nothing; the real one is named by <code>aria-owns="RadGrid1_ctl00_Header_thead RadGrid1_ctl00_tbody&nbsp;"</code> on the data table (trailing space included, as RadGrid emits it). Row ids are <strong>zero-based</strong> and are <strong>renumbered from <code>__0</code> on every page</strong>, so <code>RadGrid1_ctl00__3</code> is a position, never a record. Two applicants on this page are both called <strong>Sarah Mitchell</strong>, so a step that names an applicant is ambiguous and <code>_row</code> is what tells them apart. A read of <em>Applicant</em>, <em>Amount</em> and <em>Status</em> by heading should return the <strong>10 records</strong> on page 1 — not the spacer, not the filter row, not the pager, and not a detail row if one is open. Watch two things: the header CSS upper-cases every heading, so <code>innerText</code> says <code>APPLICANT</code> where the markup says <code>Applicant</code>; and the expand column's <code>&lt;th&gt;</code> renders blank but its <code>textContent</code> is <code>ExpandColumn</code>, hidden in a <code>display:none</code> span.</p>
+
+      <div id="RadGrid1" class="RadGrid RadGrid_Silk rgMultiHeader" tabindex="0">
+        <div class="rgHeaderWrapper">
+          <div id="RadGrid1_GridHeader" class="rgHeaderDiv" style="overflow:hidden;">
+            <table class="rgMasterTable rgClipCells" id="RadGrid1_ctl00_Header" style="width:100%;table-layout:fixed;overflow:hidden;empty-cells:show;" role="presentation">
+              <colgroup>
+                <col style="width:36px">
+                <col style="width:170px">
+                <col style="width:90px">
+                <col style="width:110px">
+                <col style="width:90px">
+                <col style="width:80px">
+                <col style="width:110px">
+                <col style="width:120px">
+                <col style="width:100px">
+              </colgroup>
+              <thead id="RadGrid1_ctl00_Header_thead">
+                <tr class="rgMultiHeaderRow" role="row">
+                  <th scope="col" id="RadGrid1_ctl00ExpandColumn0_MultiHeader-1" class="rgHeader rgExpandCol" rowspan="2" role="columnheader" aria-label="ExpandColumn"><span style="display:none;">ExpandColumn</span></th><th scope="col" class="rgHeader" colspan="2" style="text-align:center;" role="columnheader">Applicant</th><th scope="col" class="rgHeader" colspan="3" style="text-align:center;" role="columnheader">Loan</th><th scope="col" class="rgHeader" colspan="3" style="text-align:center;" role="columnheader">Review</th>
+                </tr><tr class="rgMultiHeaderRow" role="row">
+                  <th scope="col" id="RadGrid1_ctl00Applicant0_MultiHeader2" class="rgHeader" rowspan="1" role="columnheader" aria-sort="none" aria-label="Applicant"><a title="Click here to sort" data-sort="applicant" href="javascript:void(0)">Applicant</a></th><th scope="col" id="RadGrid1_ctl00Type1_MultiHeader3" class="rgHeader" rowspan="1" role="columnheader" aria-label="Type">Type</th><th scope="col" id="RadGrid1_ctl00Amount2_MultiHeader4" class="rgHeader" rowspan="1" role="columnheader" aria-sort="none" aria-label="Amount"><a title="Click here to sort" data-sort="amount" href="javascript:void(0)">Amount</a></th><th scope="col" id="RadGrid1_ctl00Term3_MultiHeader5" class="rgHeader" rowspan="1" role="columnheader" aria-label="Term">Term</th><th scope="col" id="RadGrid1_ctl00Rate4_MultiHeader6" class="rgHeader" rowspan="1" role="columnheader" aria-label="Rate">Rate</th><th scope="col" id="RadGrid1_ctl00Status5_MultiHeader7" class="rgHeader" rowspan="1" role="columnheader" aria-sort="none" aria-label="Status"><a title="Click here to sort" data-sort="status" href="javascript:void(0)">Status</a></th><th scope="col" id="RadGrid1_ctl00Officer6_MultiHeader8" class="rgHeader" rowspan="1" role="columnheader" aria-label="Officer">Officer</th><th scope="col" id="RadGrid1_ctl00TemplateColumn7_MultiHeader9" class="rgHeader" rowspan="1" role="columnheader" aria-label="TemplateColumn">Action</th>
+                </tr><tr class="rgFilterRow" role="presentation">
+                  <td>&nbsp;</td><td style="white-space:nowrap;"><input type="text" size="10" id="filter-applicant" class="rgFilterBox" alt="Filter Applicant column" aria-label="Applicant" autocomplete="off"><button type="button" title="Filter" class="t-button rgActionButton rgFilter" aria-label="Filter"><span class="t-font-icon rgIcon rgFilterIcon"></span></button></td><td style="white-space:nowrap;"><select id="filter-type" class="rgFilterSelect" aria-label="Type"><option value="all">All</option><option value="Home">Home</option><option value="Car">Car</option><option value="Personal">Personal</option></select></td><td style="white-space:nowrap;">&nbsp;</td><td style="white-space:nowrap;">&nbsp;</td><td style="white-space:nowrap;">&nbsp;</td><td style="white-space:nowrap;"><select id="filter-status" class="rgFilterSelect" aria-label="Status"><option value="all">All</option><option value="Approved">Approved</option><option value="Pending">Pending</option><option value="Declined">Declined</option></select></td><td>&nbsp;</td><td>&nbsp;</td>
+                </tr>
+              </thead><tbody style="display:none;"><tr role="presentation"><td colspan="9"></td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="RadGrid1_GridData" class="rgDataDiv" style="overflow-x:auto;overflow-y:auto;width:100%;height:;">
+          <table class="rgMasterTable rgClipCells" summary="Grid table view level . Contains flat or hierarchical data represented in a tabular manner." id="RadGrid1_ctl00" style="width:100%;table-layout:fixed;overflow:hidden;empty-cells:show;" tabindex="0" aria-owns="RadGrid1_ctl00_Header_thead RadGrid1_ctl00_tbody " role="grid">
+            <colgroup>
+              <col style="width:36px">
+              <col style="width:170px">
+              <col style="width:90px">
+              <col style="width:110px">
+              <col style="width:90px">
+              <col style="width:80px">
+              <col style="width:110px">
+              <col style="width:120px">
+              <col style="width:100px">
+            </colgroup>
+            <thead style="display:none;">
+              <tr>
+                <th scope="col"></th>
+              </tr>
+            </thead><tbody id="RadGrid1_ctl00_tbody"><tr class="rgRow" id="RadGrid1_ctl00__0" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid1_ctl00_ctl04_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Sarah Mitchell</td><td role="gridcell">Home</td><td role="gridcell"><strong>$420,000</strong></td><td role="gridcell">30 years</td><td role="gridcell">5.89%</td><td role="gridcell"><span class="status status-approved">Approved</span></td><td role="gridcell">D. Okafor</td><td role="gridcell"><input type="button" class="t-button rgActionButton" value="Review" title="Review" id="RadGrid1_ctl00_ctl04_ReviewButton"></td></tr><tr class="rgAltRow" id="RadGrid1_ctl00__1" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid1_ctl00_ctl07_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Sarah Mitchell</td><td role="gridcell">Car</td><td role="gridcell"><strong>$32,500</strong></td><td role="gridcell">5 years</td><td role="gridcell">8.25%</td><td role="gridcell"><span class="status status-pending">Pending</span></td><td role="gridcell">L. Fontaine</td><td role="gridcell"><input type="button" class="t-button rgActionButton" value="Review" title="Review" id="RadGrid1_ctl00_ctl07_ReviewButton"></td></tr><tr class="rgRow" id="RadGrid1_ctl00__2" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid1_ctl00_ctl10_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">James Whitfield</td><td role="gridcell">Home</td><td role="gridcell"><strong>$615,000</strong></td><td role="gridcell">25 years</td><td role="gridcell">6.05%</td><td role="gridcell"><span class="status status-pending">Pending</span></td><td role="gridcell">D. Okafor</td><td role="gridcell"><input type="button" class="t-button rgActionButton" value="Review" title="Review" id="RadGrid1_ctl00_ctl10_ReviewButton"></td></tr><tr class="rgAltRow" id="RadGrid1_ctl00__3" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid1_ctl00_ctl13_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Priya Raghunathan</td><td role="gridcell">Personal</td><td role="gridcell"><strong>$18,000</strong></td><td role="gridcell">3 years</td><td role="gridcell">11.40%</td><td role="gridcell"><span class="status status-declined">Declined</span></td><td role="gridcell">M. Castellano</td><td role="gridcell"><input type="button" class="t-button rgActionButton" value="Review" title="Review" id="RadGrid1_ctl00_ctl13_ReviewButton"></td></tr><tr class="rgRow" id="RadGrid1_ctl00__4" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid1_ctl00_ctl16_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Dominic Ferreira</td><td role="gridcell">Car</td><td role="gridcell"><strong>$47,900</strong></td><td role="gridcell">7 years</td><td role="gridcell">7.95%</td><td role="gridcell"><span class="status status-approved">Approved</span></td><td role="gridcell">L. Fontaine</td><td role="gridcell"><input type="button" class="t-button rgActionButton" value="Review" title="Review" id="RadGrid1_ctl00_ctl16_ReviewButton"></td></tr><tr class="rgAltRow" id="RadGrid1_ctl00__5" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid1_ctl00_ctl19_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Aoife Brennan</td><td role="gridcell">Home</td><td role="gridcell"><strong>$288,000</strong></td><td role="gridcell">30 years</td><td role="gridcell">5.74%</td><td role="gridcell"><span class="status status-approved">Approved</span></td><td role="gridcell">R. Nakamura</td><td role="gridcell"><input type="button" class="t-button rgActionButton" value="Review" title="Review" id="RadGrid1_ctl00_ctl19_ReviewButton"></td></tr><tr class="rgRow" id="RadGrid1_ctl00__6" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid1_ctl00_ctl22_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Daniel Osei</td><td role="gridcell">Personal</td><td role="gridcell"><strong>$9,750</strong></td><td role="gridcell">2 years</td><td role="gridcell">12.10%</td><td role="gridcell"><span class="status status-pending">Pending</span></td><td role="gridcell">M. Castellano</td><td role="gridcell"><input type="button" class="t-button rgActionButton" value="Review" title="Review" id="RadGrid1_ctl00_ctl22_ReviewButton"></td></tr><tr class="rgAltRow" id="RadGrid1_ctl00__7" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid1_ctl00_ctl25_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Grace Abernathy</td><td role="gridcell">Car</td><td role="gridcell"><strong>$26,300</strong></td><td role="gridcell">5 years</td><td role="gridcell">8.60%</td><td role="gridcell"><span class="status status-declined">Declined</span></td><td role="gridcell">R. Nakamura</td><td role="gridcell"><input type="button" class="t-button rgActionButton" value="Review" title="Review" id="RadGrid1_ctl00_ctl25_ReviewButton"></td></tr><tr class="rgRow" id="RadGrid1_ctl00__8" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid1_ctl00_ctl28_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Marcus Delacroix</td><td role="gridcell">Home</td><td role="gridcell"><strong>$534,500</strong></td><td role="gridcell">25 years</td><td role="gridcell">6.18%</td><td role="gridcell"><span class="status status-pending">Pending</span></td><td role="gridcell">D. Okafor</td><td role="gridcell"><input type="button" class="t-button rgActionButton" value="Review" title="Review" id="RadGrid1_ctl00_ctl28_ReviewButton"></td></tr><tr class="rgAltRow" id="RadGrid1_ctl00__9" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid1_ctl00_ctl31_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Hannah Lindqvist</td><td role="gridcell">Personal</td><td role="gridcell"><strong>$22,400</strong></td><td role="gridcell">4 years</td><td role="gridcell">10.85%</td><td role="gridcell"><span class="status status-approved">Approved</span></td><td role="gridcell">L. Fontaine</td><td role="gridcell"><input type="button" class="t-button rgActionButton" value="Review" title="Review" id="RadGrid1_ctl00_ctl31_ReviewButton"></td></tr></tbody>
+          </table>
+        </div>
+        <table class="rgMasterTable rgClipCells" id="RadGrid1_ctl00_Pager" style="width:100%;table-layout:fixed;overflow:hidden;empty-cells:show;" role="presentation">
+          <thead style="display:none;">
+            <tr>
+            </tr>
+          </thead><tbody>
+            <tr class="rgPager" role="presentation">
+              <td class="rgPagerCell" colspan="9"><div class="NextPrevAndNumeric">
+                <div class="rgWrap rgArrPart1">
+                  <button type="button" value=" " title="First Page" class="t-button rgActionButton rgPageFirst" aria-label="First Page" id="RadGrid1_pageFirst"><span class="t-font-icon rgIcon"></span></button><button type="button" value=" " title="Previous Page" class="t-button rgActionButton rgPagePrev" aria-label="Previous Page" id="RadGrid1_pagePrev"><span class="t-font-icon rgIcon"></span></button>
+                </div><div class="rgWrap rgNumPart" id="RadGrid1_pageNumbers">
+                  <a title="Go to Page 1" class="rgCurrentPage" data-page="1" href="javascript:void(0)">1</a><a title="Go to Page 2" data-page="2" href="javascript:void(0)">2</a><a title="Go to Page 3" data-page="3" href="javascript:void(0)">3</a>
+                </div><div class="rgWrap rgArrPart2">
+                  <button type="button" value=" " title="Next Page" class="t-button rgActionButton rgPageNext" aria-label="Next Page" id="RadGrid1_pageNext"><span class="t-font-icon rgIcon"></span></button><button type="button" value=" " title="Last Page" class="t-button rgActionButton rgPageLast" aria-label="Last Page" id="RadGrid1_pageLast"><span class="t-font-icon rgIcon"></span></button>
+                </div><div class="rgWrap rgAdvPart">
+                  <span id="RadGrid1_ctl00_ctl03_ctl01_ChangePageSizeLabel" title="Applications per page:" class="rgPagerLabel">Applications per page:</span><select id="RadGrid1_pageSize" class="rgPageSizeSelect" title="Change page size control" aria-label="Change page size control"><option value="10" selected>10</option><option value="20">20</option></select>
+                </div><div class="rgWrap rgInfoPart" id="RadGrid1_pageInfo">
+                  <strong>26</strong> applications
+                </div>
+              </div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="result-line" id="review-result" role="status"></div>
+    </section>
+
+    <!-- 2 ── RadGrid without scrolling: one table, pager in the tfoot ──────── -->
+    <section class="section-card" id="c-mandates" aria-labelledby="h-mandates">
+      <div class="section-header">
+        <h2 id="h-mandates">Direct debit mandates</h2>
+      </div>
+      <p class="section-hint">The same component with <code>ClientSettings.Scrolling.AllowScroll="false"</code>, which is the form <strong>documentation</strong> describes and the live demo does not show: there is no header wrapper and no separate pager table, so <strong>one table</strong> carries everything. The band row, the leaf row and the filter row are all in the <code>&lt;thead&gt;</code>, the eight mandates are in the <code>&lt;tbody&gt;</code>, and the pager is a <code>rgPager</code> row in the <code>&lt;tfoot&gt;</code> spanning all seven columns. Because RadGrid emits <code>aria-owns</code> either way, here it points at this table's <em>own</em> <code>&lt;thead&gt;</code> and <code>&lt;tbody&gt;</code> — a self-reference that must not be read as a pairing with some other table. Row ids are zero-based again. A read by heading should return the <strong>8 mandates</strong>, skipping the filter row and the pager.</p>
+
+      <div id="RadGrid2" class="RadGrid RadGrid_Silk rgMultiHeader" tabindex="0">
+        <table class="rgMasterTable rgClipCells" summary="Grid table view level . Contains flat or hierarchical data represented in a tabular manner." id="RadGrid2_ctl00" style="width:100%;table-layout:fixed;overflow:hidden;empty-cells:show;" tabindex="0" aria-owns="RadGrid2_ctl00_Header_thead RadGrid2_ctl00_tbody " role="grid">
+          <colgroup>
+            <col style="width:36px">
+            <col style="width:180px">
+            <col style="width:120px">
+            <col style="width:110px">
+            <col style="width:120px">
+            <col style="width:120px">
+            <col style="width:110px">
+          </colgroup>
+          <thead id="RadGrid2_ctl00_Header_thead">
+            <tr class="rgMultiHeaderRow" role="row">
+              <th scope="col" id="RadGrid2_ctl00ExpandColumn0_MultiHeader-1" class="rgHeader rgExpandCol" rowspan="2" role="columnheader" aria-label="ExpandColumn"><span style="display:none;">ExpandColumn</span></th><th scope="col" class="rgHeader" colspan="2" style="text-align:center;" role="columnheader">Payee</th><th scope="col" class="rgHeader" colspan="3" style="text-align:center;" role="columnheader">Schedule</th><th scope="col" class="rgHeader" colspan="1" style="text-align:center;" role="columnheader">Status</th>
+            </tr><tr class="rgMultiHeaderRow" role="row">
+              <th scope="col" id="RadGrid2_ctl00Payee0_MultiHeader2" class="rgHeader" rowspan="1" role="columnheader" aria-label="Payee">Payee</th><th scope="col" id="RadGrid2_ctl00Reference1_MultiHeader3" class="rgHeader" rowspan="1" role="columnheader" aria-label="Reference">Reference</th><th scope="col" id="RadGrid2_ctl00Amount2_MultiHeader4" class="rgHeader" rowspan="1" role="columnheader" aria-label="Amount">Amount</th><th scope="col" id="RadGrid2_ctl00Frequency3_MultiHeader5" class="rgHeader" rowspan="1" role="columnheader" aria-label="Frequency">Frequency</th><th scope="col" id="RadGrid2_ctl00NextDate4_MultiHeader6" class="rgHeader" rowspan="1" role="columnheader" aria-label="NextDate">Next date</th><th scope="col" id="RadGrid2_ctl00Status5_MultiHeader7" class="rgHeader" rowspan="1" role="columnheader" aria-label="Status">Status</th>
+            </tr><tr class="rgFilterRow" role="presentation">
+              <td>&nbsp;</td><td style="white-space:nowrap;"><input type="text" size="10" class="rgFilterBox" alt="Filter Payee column" aria-label="Payee" autocomplete="off"><button type="button" title="Filter" class="t-button rgActionButton rgFilter" aria-label="Filter"><span class="t-font-icon rgIcon rgFilterIcon"></span></button></td><td style="white-space:nowrap;">&nbsp;</td><td style="white-space:nowrap;">&nbsp;</td><td style="white-space:nowrap;"><select class="rgFilterSelect" aria-label="Frequency"><option value="all">All</option><option value="Monthly">Monthly</option><option value="Fortnightly">Fortnightly</option><option value="Quarterly">Quarterly</option><option value="Annual">Annual</option></select></td><td style="white-space:nowrap;">&nbsp;</td><td>&nbsp;</td>
+            </tr>
+          </thead>
+          <tbody id="RadGrid2_ctl00_tbody"><tr class="rgRow" id="RadGrid2_ctl00__0" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid2_ctl00_ctl04_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Origin Energy</td><td role="gridcell">INV-2291</td><td role="gridcell"><strong>$140.00</strong></td><td role="gridcell">Monthly</td><td role="gridcell">2026-10-05</td><td role="gridcell"><span class="status status-active">Active</span></td></tr><tr class="rgAltRow" id="RadGrid2_ctl00__1" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid2_ctl00_ctl07_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Telstra Broadband</td><td role="gridcell">TEL-88134</td><td role="gridcell"><strong>$89.99</strong></td><td role="gridcell">Monthly</td><td role="gridcell">2026-10-08</td><td role="gridcell"><span class="status status-active">Active</span></td></tr><tr class="rgRow" id="RadGrid2_ctl00__2" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid2_ctl00_ctl10_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Sydney Water</td><td role="gridcell">SW-40027</td><td role="gridcell"><strong>$212.60</strong></td><td role="gridcell">Quarterly</td><td role="gridcell">2026-11-12</td><td role="gridcell"><span class="status status-active">Active</span></td></tr><tr class="rgAltRow" id="RadGrid2_ctl00__3" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid2_ctl00_ctl13_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">AAMI Home Cover</td><td role="gridcell">POL-55831</td><td role="gridcell"><strong>$1,046.00</strong></td><td role="gridcell">Annual</td><td role="gridcell">2027-02-01</td><td role="gridcell"><span class="status status-active">Active</span></td></tr><tr class="rgRow" id="RadGrid2_ctl00__4" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid2_ctl00_ctl16_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">GymNation Pyrmont</td><td role="gridcell">GYM-7740</td><td role="gridcell"><strong>$32.00</strong></td><td role="gridcell">Fortnightly</td><td role="gridcell">2026-10-02</td><td role="gridcell"><span class="status status-paused">Paused</span></td></tr><tr class="rgAltRow" id="RadGrid2_ctl00__5" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid2_ctl00_ctl19_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Apple Services</td><td role="gridcell">APL-90012</td><td role="gridcell"><strong>$14.99</strong></td><td role="gridcell">Monthly</td><td role="gridcell">2026-10-11</td><td role="gridcell"><span class="status status-active">Active</span></td></tr><tr class="rgRow" id="RadGrid2_ctl00__6" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid2_ctl00_ctl22_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Council Rates</td><td role="gridcell">RTE-33418</td><td role="gridcell"><strong>$487.25</strong></td><td role="gridcell">Quarterly</td><td role="gridcell">2026-12-01</td><td role="gridcell"><span class="status status-pending">Pending</span></td></tr><tr class="rgAltRow" id="RadGrid2_ctl00__7" role="row"><td class="rgExpandCol" role="gridcell" aria-expanded="false"><button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid2_ctl00_ctl25_GECBtnExpandColumn"><span class="t-font-icon rgIcon rgExpandIcon"></span></button></td><td role="gridcell">Bluestone Childcare</td><td role="gridcell">BCC-1207</td><td role="gridcell"><strong>$620.00</strong></td><td role="gridcell">Fortnightly</td><td role="gridcell">2026-10-03</td><td role="gridcell"><span class="status status-cancelled">Cancelled</span></td></tr></tbody>
+          <tfoot>
+            <tr class="rgPager" role="presentation">
+              <td class="rgPagerCell" colspan="7"><div class="NextPrevAndNumeric">
+                <div class="rgWrap rgArrPart1">
+                  <button type="button" value=" " title="First Page" class="t-button rgActionButton rgPageFirst" aria-label="First Page" disabled><span class="t-font-icon rgIcon"></span></button><button type="button" value=" " title="Previous Page" class="t-button rgActionButton rgPagePrev" aria-label="Previous Page" disabled><span class="t-font-icon rgIcon"></span></button>
+                </div><div class="rgWrap rgNumPart">
+                  <a title="Go to Page 1" class="rgCurrentPage" data-page="1" href="javascript:void(0)">1</a>
+                </div><div class="rgWrap rgArrPart2">
+                  <button type="button" value=" " title="Next Page" class="t-button rgActionButton rgPageNext" aria-label="Next Page" disabled><span class="t-font-icon rgIcon"></span></button><button type="button" value=" " title="Last Page" class="t-button rgActionButton rgPageLast" aria-label="Last Page" disabled><span class="t-font-icon rgIcon"></span></button>
+                </div><div class="rgWrap rgAdvPart">
+                  <span class="rgPagerLabel" title="Mandates per page:">Mandates per page:</span><select class="rgPageSizeSelect" title="Change page size control" aria-label="Change page size control"><option value="10" selected>10</option><option value="20">20</option></select>
+                </div><div class="rgWrap rgInfoPart">
+                  <strong>8</strong> mandates
+                </div>
+              </div></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </section>
+
+    <!-- 3 ── A plain banded table: no widget, repeated leaf names ──────────── -->
+    <section class="section-card" id="c-fees" aria-labelledby="h-fees">
+      <div class="section-header">
+        <h2 id="h-fees">Quarterly fees</h2>
+      </div>
+      <p class="section-hint">The same banded header with <strong>no component around it</strong>: one <code>&lt;table&gt;</code>, two header rows, four body rows. <em>Account</em> spans both header rows; <em>Q1</em> and <em>Q2</em> each span two columns and are <strong>not columns themselves</strong> — nothing in the body lines up under them. The leaf names <strong>repeat</strong>: two columns are called <em>Fee</em> and two are called <em>Rebate</em>, so a read of "Fee" is ambiguous and has to be told <em>which</em> by position — or the band and the leaf have to be read together, which the runtime spells <code>Q1 &gt; Fee</code> and <code>Q2 &gt; Fee</code> — plain <em>Q1 Fee</em> is refused. The header grid is <strong>five columns wide</strong>, not seven.</p>
+
+      <table id="banded-table" class="plain-table">
+        <thead>
+          <tr>
+            <th rowspan="2">Account</th>
+            <th colspan="2">Q1</th>
+            <th colspan="2">Q2</th>
+          </tr>
+          <tr>
+            <th>Fee</th>
+            <th>Rebate</th>
+            <th>Fee</th>
+            <th>Rebate</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Everyday</td>
+            <td>$12.00</td>
+            <td>$2.00</td>
+            <td>$12.00</td>
+            <td>$0.00</td>
+          </tr>
+          <tr>
+            <td>Savings Plus</td>
+            <td>$0.00</td>
+            <td>$0.00</td>
+            <td>$0.00</td>
+            <td>$0.00</td>
+          </tr>
+          <tr>
+            <td>Offset Account</td>
+            <td>$10.00</td>
+            <td>$10.00</td>
+            <td>$10.00</td>
+            <td>$5.00</td>
+          </tr>
+          <tr>
+            <td>Business One</td>
+            <td>$28.50</td>
+            <td>$4.00</td>
+            <td>$30.00</td>
+            <td>$4.00</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <script>
+    // ── Shell: user info and sign out (same as the other pages) ──────────────
+    var email = sessionStorage.getItem('user-email');
+    if (email) {
+      document.getElementById('user-email').textContent = email;
+      document.getElementById('user-avatar').textContent = email.charAt(0).toUpperCase();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.removeItem('logged-in');
+      sessionStorage.removeItem('user-email');
+      window.location.href = 'index.html';
+    });
+
+    // ── The 26 loan applications ─────────────────────────────────────────────
+    // applicant, type, amount, term, rate, status, officer, then the two
+    // documents the expand arrow shows: name, date, name, date.
+    var APPLICATIONS = [
+      ['Sarah Mitchell',    'Home',     '$420,000', '30 years', '5.89%',  'Approved', 'D. Okafor',     'Proof of income', '2026-08-14', 'Property valuation', '2026-08-21'],
+      ['Sarah Mitchell',    'Car',      '$32,500',  '5 years',  '8.25%',  'Pending',  'L. Fontaine',   'Proof of income', '2026-09-02', 'Vehicle invoice',    '2026-09-04'],
+      ['James Whitfield',   'Home',     '$615,000', '25 years', '6.05%',  'Pending',  'D. Okafor',     'Proof of income', '2026-08-28', 'Property valuation', '2026-09-08'],
+      ['Priya Raghunathan', 'Personal', '$18,000',  '3 years',  '11.40%', 'Declined', 'M. Castellano', 'Proof of income', '2026-07-19', 'Identity check',     '2026-07-22'],
+      ['Dominic Ferreira',  'Car',      '$47,900',  '7 years',  '7.95%',  'Approved', 'L. Fontaine',   'Proof of income', '2026-09-01', 'Vehicle invoice',    '2026-09-05'],
+      ['Aoife Brennan',     'Home',     '$288,000', '30 years', '5.74%',  'Approved', 'R. Nakamura',   'Proof of income', '2026-08-05', 'Property valuation', '2026-08-12'],
+      ['Daniel Osei',       'Personal', '$9,750',   '2 years',  '12.10%', 'Pending',  'M. Castellano', 'Proof of income', '2026-09-10', 'Identity check',     '2026-09-11'],
+      ['Grace Abernathy',   'Car',      '$26,300',  '5 years',  '8.60%',  'Declined', 'R. Nakamura',   'Proof of income', '2026-07-30', 'Vehicle invoice',    '2026-08-02'],
+      ['Marcus Delacroix',  'Home',     '$534,500', '25 years', '6.18%',  'Pending',  'D. Okafor',     'Proof of income', '2026-09-06', 'Property valuation', '2026-09-15'],
+      ['Hannah Lindqvist',  'Personal', '$22,400',  '4 years',  '10.85%', 'Approved', 'L. Fontaine',   'Proof of income', '2026-08-18', 'Identity check',     '2026-08-19'],
+      ['Yusuf Demir',       'Home',     '$372,000', '30 years', '5.95%',  'Approved', 'D. Okafor',     'Proof of income', '2026-08-09', 'Property valuation', '2026-08-17'],
+      ['Beatriz Carvalho',  'Car',      '$19,800',  '4 years',  '9.10%',  'Pending',  'L. Fontaine',   'Proof of income', '2026-09-03', 'Vehicle invoice',    '2026-09-07'],
+      ['Oliver Trent',      'Personal', '$14,600',  '3 years',  '11.75%', 'Approved', 'M. Castellano', 'Proof of income', '2026-07-25', 'Identity check',     '2026-07-26'],
+      ['Nadia Haddad',      'Home',     '$455,000', '25 years', '6.02%',  'Declined', 'R. Nakamura',   'Proof of income', '2026-08-11', 'Property valuation', '2026-08-20'],
+      ['Callum Ferguson',   'Car',      '$38,250',  '6 years',  '8.05%',  'Approved', 'D. Okafor',     'Proof of income', '2026-09-12', 'Vehicle invoice',    '2026-09-14'],
+      ['Ingrid Solberg',    'Home',     '$310,750', '30 years', '5.68%',  'Pending',  'L. Fontaine',   'Proof of income', '2026-08-23', 'Property valuation', '2026-09-01'],
+      ['Rafael Moreno',     'Personal', '$7,200',   '2 years',  '12.45%', 'Declined', 'M. Castellano', 'Proof of income', '2026-07-14', 'Identity check',     '2026-07-16'],
+      ['Chloe Bannerman',   'Car',      '$52,400',  '7 years',  '7.80%',  'Approved', 'R. Nakamura',   'Proof of income', '2026-09-08', 'Vehicle invoice',    '2026-09-13'],
+      ['Soren Vestergaard', 'Home',     '$198,900', '20 years', '6.35%',  'Pending',  'D. Okafor',     'Proof of income', '2026-08-27', 'Property valuation', '2026-09-03'],
+      ['Amara Nwosu',       'Personal', '$27,500',  '5 years',  '10.20%', 'Approved', 'L. Fontaine',   'Proof of income', '2026-08-02', 'Identity check',     '2026-08-04'],
+      ['Victor Lindholm',   'Home',     '$689,000', '30 years', '5.82%',  'Pending',  'R. Nakamura',   'Proof of income', '2026-09-09', 'Property valuation', '2026-09-18'],
+      ['Isabelle Roux',     'Car',      '$23,950',  '5 years',  '8.90%',  'Declined', 'M. Castellano', 'Proof of income', '2026-07-21', 'Vehicle invoice',    '2026-07-24'],
+      ['Kofi Mensah',       'Personal', '$16,300',  '3 years',  '11.05%', 'Approved', 'D. Okafor',     'Proof of income', '2026-08-15', 'Identity check',     '2026-08-16'],
+      ['Mei Tanaka',        'Home',     '$407,600', '25 years', '5.99%',  'Approved', 'L. Fontaine',   'Proof of income', '2026-08-06', 'Property valuation', '2026-08-13'],
+      ['Gareth Pryce',      'Car',      '$44,100',  '6 years',  '8.15%',  'Pending',  'R. Nakamura',   'Proof of income', '2026-09-05', 'Vehicle invoice',    '2026-09-10'],
+      ['Leila Farhadi',     'Personal', '$31,800',  '5 years',  '10.60%', 'Declined', 'M. Castellano', 'Proof of income', '2026-07-28', 'Identity check',     '2026-07-29']
+    ];
+
+    // The documents behind each mandate in RadGrid2, by row index. Kept here
+    // rather than in a data- attribute because RadGrid puts nothing of the
+    // sort on its rows and the markup is meant to stay faithful.
+    var MANDATE_DOCS = [
+      ['Signed mandate', '2024-03-11', 'Latest invoice', '2026-09-05'],
+      ['Signed mandate', '2023-11-02', 'Latest invoice', '2026-09-08'],
+      ['Signed mandate', '2022-06-30', 'Latest invoice', '2026-08-12'],
+      ['Signed mandate', '2025-02-01', 'Policy schedule', '2026-02-01'],
+      ['Signed mandate', '2026-01-19', 'Membership terms', '2026-01-19'],
+      ['Signed mandate', '2024-08-22', 'Latest invoice', '2026-09-11'],
+      ['Signed mandate', '2021-09-15', 'Rates notice', '2026-08-30'],
+      ['Signed mandate', '2025-07-04', 'Cancellation notice', '2026-09-17']
+    ];
+
+    var STATUS_CLASS = {
+      Approved: 'approved', Pending: 'pending', Declined: 'declined',
+      Active: 'active', Paused: 'paused', Cancelled: 'cancelled'
+    };
+
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // RadGrid numbers the per-row controls ctl04, ctl07, ctl10, … — three apart
+    // — and starts again at ctl04 on every page, exactly like the row ids.
+    function ctlFor(index) {
+      var n = 4 + index * 3;
+      return 'ctl' + (n < 10 ? '0' + n : String(n));
+    }
+
+    // ── RadGrid1: paging, sorting, filtering ─────────────────────────────────
+    var grid1Body = document.getElementById('RadGrid1_ctl00_tbody');
+    var pageSizeSelect = document.getElementById('RadGrid1_pageSize');
+    var pageNumbers = document.getElementById('RadGrid1_pageNumbers');
+    var filterApplicant = document.getElementById('filter-applicant');
+    var filterType = document.getElementById('filter-type');
+    var filterStatus = document.getElementById('filter-status');
+    var reviewResult = document.getElementById('review-result');
+
+    var order = APPLICATIONS.slice();
+    var currentPage = 1;
+    var pageSize = 10;
+    var sortField = null;
+    var sortDescending = false;
+
+    function pageCount() {
+      return Math.max(1, Math.ceil(order.length / pageSize));
+    }
+
+    function rowHtml(record, index) {
+      var ctl = ctlFor(index);
+      return '<tr class="' + (index % 2 === 0 ? 'rgRow' : 'rgAltRow') +
+        '" id="RadGrid1_ctl00__' + index + '" role="row">' +
+        '<td class="rgExpandCol" role="gridcell" aria-expanded="false">' +
+        '<button type="button" value="Expand" title="Expand" class="t-button rgActionButton rgExpand" aria-label="Expand" aria-expanded="false" id="RadGrid1_ctl00_' + ctl + '_GECBtnExpandColumn">' +
+        '<span class="t-font-icon rgIcon rgExpandIcon"></span></button></td>' +
+        '<td role="gridcell">' + escapeHtml(record[0]) + '</td>' +
+        '<td role="gridcell">' + escapeHtml(record[1]) + '</td>' +
+        '<td role="gridcell"><strong>' + escapeHtml(record[2]) + '</strong></td>' +
+        '<td role="gridcell">' + escapeHtml(record[3]) + '</td>' +
+        '<td role="gridcell">' + escapeHtml(record[4]) + '</td>' +
+        '<td role="gridcell"><span class="status status-' + STATUS_CLASS[record[5]] + '">' + escapeHtml(record[5]) + '</span></td>' +
+        '<td role="gridcell">' + escapeHtml(record[6]) + '</td>' +
+        '<td role="gridcell"><input type="button" class="t-button rgActionButton" value="Review" title="Review" id="RadGrid1_ctl00_' + ctl + '_ReviewButton"></td>' +
+        '</tr>';
+    }
+
+    // Every render rebuilds the whole <tbody>, so the row ids restart at __0
+    // and any open detail row is gone — which is what a postback does.
+    function renderPage() {
+      var total = pageCount();
+      if (currentPage > total) currentPage = total;
+      var start = (currentPage - 1) * pageSize;
+      var slice = order.slice(start, start + pageSize);
+      var html = '';
+      for (var i = 0; i < slice.length; i++) html += rowHtml(slice[i], i);
+      grid1Body.innerHTML = html;
+      renderPageNumbers(total);
+      document.getElementById('RadGrid1_pageFirst').disabled = currentPage === 1;
+      document.getElementById('RadGrid1_pagePrev').disabled = currentPage === 1;
+      document.getElementById('RadGrid1_pageNext').disabled = currentPage === total;
+      document.getElementById('RadGrid1_pageLast').disabled = currentPage === total;
+      applyFilters();
+    }
+
+    function renderPageNumbers(total) {
+      var html = '';
+      for (var p = 1; p <= total; p++) {
+        html += '<a title="Go to Page ' + p + '"' +
+          (p === currentPage ? ' class="rgCurrentPage"' : '') +
+          ' data-page="' + p + '" href="javascript:void(0)">' + p + '</a>';
+      }
+      pageNumbers.innerHTML = html;
+    }
+
+    function goToPage(page) {
+      var total = pageCount();
+      currentPage = Math.min(Math.max(1, page), total);
+      renderPage();
+    }
+
+    pageNumbers.addEventListener('click', function (event) {
+      var link = event.target.closest('a[data-page]');
+      if (link) goToPage(Number(link.getAttribute('data-page')));
+    });
+
+    document.getElementById('RadGrid1_pageFirst').addEventListener('click', function () { goToPage(1); });
+    document.getElementById('RadGrid1_pagePrev').addEventListener('click', function () { goToPage(currentPage - 1); });
+    document.getElementById('RadGrid1_pageNext').addEventListener('click', function () { goToPage(currentPage + 1); });
+    document.getElementById('RadGrid1_pageLast').addEventListener('click', function () { goToPage(pageCount()); });
+
+    pageSizeSelect.addEventListener('change', function () {
+      pageSize = Number(pageSizeSelect.value);
+      currentPage = 1;
+      renderPage();
+    });
+
+    // Sorting reorders the records and re-renders the page in place, the way
+    // RadGrid does: the row ids stay __0…__9, the records under them move.
+    var SORT_INDEX = { applicant: 0, amount: 2, status: 5 };
+
+    function sortValue(record, field) {
+      if (field === 'amount') return Number(record[2].replace(/[^0-9.]/g, ''));
+      return record[SORT_INDEX[field]].toLowerCase();
+    }
+
+    function sortBy(field) {
+      sortDescending = sortField === field ? !sortDescending : false;
+      sortField = field;
+      order = APPLICATIONS.slice().sort(function (a, b) {
+        var left = sortValue(a, field);
+        var right = sortValue(b, field);
+        if (left < right) return sortDescending ? 1 : -1;
+        if (left > right) return sortDescending ? -1 : 1;
+        return 0;
+      });
+      var links = document.querySelectorAll('#RadGrid1_ctl00_Header_thead a[data-sort]');
+      for (var i = 0; i < links.length; i++) {
+        var th = links[i].parentElement;
+        th.setAttribute('aria-sort', links[i].getAttribute('data-sort') === field
+          ? (sortDescending ? 'descending' : 'ascending')
+          : 'none');
+      }
+      renderPage();
+    }
+
+    document.getElementById('RadGrid1_ctl00_Header_thead')
+      .addEventListener('click', function (event) {
+        var link = event.target.closest('a[data-sort]');
+        if (link) sortBy(link.getAttribute('data-sort'));
+      });
+
+    // Filters HIDE rows with display:none rather than removing them — a read
+    // excludes hidden rows (§7.4), so the two ways of shrinking a grid, paging
+    // and filtering, are both on this page and they look different in the DOM.
+    function applyFilters() {
+      var name = filterApplicant.value.trim().toLowerCase();
+      var type = filterType.value;
+      var status = filterStatus.value;
+      var rows = grid1Body.querySelectorAll('tr[id]');
+      for (var i = 0; i < rows.length; i++) {
+        var cells = rows[i].children;
+        var matches =
+          (name === '' || cells[1].textContent.toLowerCase().indexOf(name) !== -1) &&
+          (type === 'all' || cells[2].textContent === type) &&
+          (status === 'all' || cells[6].textContent.trim() === status);
+        rows[i].style.display = matches ? '' : 'none';
+        var detail = rows[i].nextElementSibling;
+        if (detail && !detail.id) detail.style.display = matches ? '' : 'none';
+      }
+    }
+
+    filterApplicant.addEventListener('input', applyFilters);
+    filterType.addEventListener('change', applyFilters);
+    filterStatus.addEventListener('change', applyFilters);
+    document.querySelector('.rgFilterRow button.rgFilter')
+      .addEventListener('click', applyFilters);
+
+    // ── Expanding a row ──────────────────────────────────────────────────────
+    // RadGrid inserts a row with NO class and NO id: a bare <tr role="row">
+    // whose first cell is an empty .rgExpandCol and whose second spans the
+    // remaining columns. Collapsing removes it again, and the button swaps
+    // rgExpand for rgCollapse.
+    function detailRowHtml(columns, subject, docs) {
+      return '<tr role="row">' +
+        '<td class="rgExpandCol" style="border-right-width:0;" role="gridcell">&nbsp;</td>' +
+        '<td align="left" valign="top" colspan="' + columns + '" style="border-left-width:0;overflow:visible;">' +
+        '<div class="applicantDetail">' +
+        '<div class="detailTitle">Documents received for ' + escapeHtml(subject) + '</div>' +
+        '<table class="rgDetailTable">' +
+        '<thead><tr><th>Document</th><th>Received</th></tr></thead>' +
+        '<tbody>' +
+        '<tr><td>' + escapeHtml(docs[0]) + '</td><td>' + escapeHtml(docs[1]) + '</td></tr>' +
+        '<tr><td>' + escapeHtml(docs[2]) + '</td><td>' + escapeHtml(docs[3]) + '</td></tr>' +
+        '</tbody></table></div></td></tr>';
+    }
+
+    function toggleExpand(button, columns, docsFor) {
+      var cell = button.parentElement;
+      var row = cell.parentElement;
+      var expanded = cell.getAttribute('aria-expanded') === 'true';
+      var next = row.nextElementSibling;
+      if (expanded) {
+        if (next && !next.id) next.parentElement.removeChild(next);
+      } else {
+        var index = Number(row.id.split('__')[1]);
+        var subject = row.children[1].textContent;
+        row.insertAdjacentHTML('afterend', detailRowHtml(columns, subject, docsFor(index)));
+      }
+      cell.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+      button.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+      button.className = 't-button rgActionButton ' + (expanded ? 'rgExpand' : 'rgCollapse');
+      button.title = expanded ? 'Expand' : 'Collapse';
+      button.value = expanded ? 'Expand' : 'Collapse';
+      button.setAttribute('aria-label', expanded ? 'Expand' : 'Collapse');
+      button.firstChild.className = 't-font-icon rgIcon ' + (expanded ? 'rgExpandIcon' : 'rgCollapseIcon');
+    }
+
+    grid1Body.addEventListener('click', function (event) {
+      var button = event.target.closest('button.rgExpand, button.rgCollapse');
+      if (button) {
+        toggleExpand(button, 8, function (index) {
+          var record = order[(currentPage - 1) * pageSize + index];
+          return [record[7], record[8], record[9], record[10]];
+        });
+        return;
+      }
+      var review = event.target.closest('input.rgActionButton');
+      if (review) {
+        var row = review.closest('tr');
+        reviewResult.textContent = 'Review opened for ' + row.children[1].textContent + '.';
+      }
+    });
+
+    // ── RadGrid2: the expand arrows work the same way ────────────────────────
+    document.getElementById('RadGrid2_ctl00_tbody')
+      .addEventListener('click', function (event) {
+        var button = event.target.closest('button.rgExpand, button.rgCollapse');
+        if (button) {
+          toggleExpand(button, 6, function (index) { return MANDATE_DOCS[index]; });
+        }
+      });
+  </script>
+</body>
+</html>
