@@ -108,7 +108,7 @@ it is not a guess about how `bw` probably behaves.
 2. **Interactivity is controlled by `BW_NOINTERACTION`** (`canInteract =
    process.env.BW_NOINTERACTION !== "true"`). The vault today sets
    `BITWARDENCLI_NOINTERACTION`, a name `bw` never reads (0 occurrences in the
-   bundle). That is a separate defect, split off (§11); this story only needs
+   bundle). That is a separate defect, split off and since fixed (§11); this story only needs
    to be immune to it. Other ambient variables also change what `bw` prints or
    how it exits: `BW_QUIET`, `BW_RESPONSE`, `BW_CLEANEXIT`, `BW_PRETTY`,
    `BW_RAW` (all read by the bundle). An ambient `BW_QUIET=true` would suppress
@@ -911,7 +911,19 @@ visible", and left real dialogs open on screen until their timers ran out.
 
 `BitwardenVault.childEnv()` sets `BITWARDENCLI_NOINTERACTION`, which `bw`
 never reads (fact 2). Fixing it is not a rename: `unlock()` writes the password
-to an interactive prompt that exists only *because* the guard is broken, and a
-locked-vault lookup would change its error text and classify as `unreadable`
-instead of `locked`. That is its own change with its own tests. This story only
-ensures the new driver is immune to both the bug and its eventual fix.
+to an interactive prompt that exists only *because* the guard is broken. That
+is its own change with its own tests. This story only ensures the new driver
+is immune to both the bug and its eventual fix.
+
+**Fixed on `claude/bw-nointeraction`** (stacked on this branch). `childEnv`
+now takes a mode: status, sync, list and get set `BW_NOINTERACTION=true`;
+unlock REMOVES it in any casing, including one the user set themselves, and
+now goes through the `BwRunner` seam so what it receives is tested. Reading
+the bundle corrected one prediction above: with prompts off, a lookup on a
+locked vault does not answer "Master password is required…" — that text comes
+only from the unlock command (`CliUtils.getPassword`). A lookup takes
+`BaseProgram.handleLockedUser` and answers `Vault is locked.`, which `LOCKED`
+already matched; with prompts ON, as before the fix, it instead ran an inline
+unlock and drew a password prompt on a closed stdin. Not measurable offline —
+`bw unlock` checks for an account before it asks for a password — so the
+unlock half rests on the bundle's code until a real account is used.
