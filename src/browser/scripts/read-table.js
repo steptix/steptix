@@ -22,6 +22,11 @@
 //   headerFromSeparateTable }
 // or { ok: false, error } and never throws: a throw arrives at the caller as a
 // Playwright evaluation error, which buries the message the author must read.
+//
+// It also writes ONE thing to the page: `data-aiui-row` on the rows it
+// numbered (§7.4, step 8), so that "row 7 of the Orders table" is a selector a
+// later step can use rather than a sum it has to do. Only a read that
+// SUCCEEDS writes it.
 (matches, args) => {
   const {
     selector: sel,
@@ -33,6 +38,8 @@
 
   // ── page-context helpers ─────────────────────────────────────────────────
   const all = matches;
+  /** The attribute this read leaves on the rows it numbered (§7.4, step 8). */
+  const ROW_STAMP = 'data-aiui-row';
   /** `Array.from` over a live DOM collection. */
   const items = (collection) => Array.from(collection);
   const squash = (s) => s.replace(/\s+/g, ' ').trim();
@@ -76,11 +83,67 @@
    *  load-bearing — the app's own table style upper-cases `<th>`, so
    *  `innerText` says ORDER ID where the author wrote Order ID (§7.3). */
   const fold = (s) => squash(s).toLowerCase();
-  /** Rendered header text, falling back to `textContent` for a
-   *  visually-hidden accessible heading (§7.3). */
+  /**
+   * Rendered header text, falling back to `textContent` for a visually-hidden
+   * accessible heading (§7.3) — RadGrid's expand column renders nothing and
+   * carries `<span style="display:none">ExpandColumn</span>`, which is the
+   * name it would be read out by.
+   *
+   * What a FIELD holds is not a heading, though (§7.3b.3). A filter row's
+   * cells hold inputs and selects, and a `<select>` renders its options — so
+   * the Status filter's "All" became the name of the Status column, one row
+   * below the word Status, and every read of that column failed "no column is
+   * headed". An `<input>` and a `<textarea>` contribute nothing to `innerText`
+   * in the first place (measured: a `<textarea>`'s content is its VALUE, and
+   * `innerText` is "" for it); a `<select>` contributes its option text, which
+   * is a value rather than a label.
+   *
+   * So the heading is the cell's OWN rendered text: `innerText` with each
+   * control's `innerText` subtracted out of it as a string. `innerText`
+   * rather than a text-node walk is the whole point — a walk reads
+   * `display:none` text, so `<th>Status<span style="display:none">SORTKEY
+   * </span><input type="hidden"></th>` was named `StatusSORTKEY`. A
+   * `<button>` is deliberately left in: a sortable header's title is
+   * routinely inside one, and dropping it would leave that column nameless.
+   *
+   * The accessible-name fallback below is for a cell that renders NOTHING.
+   * A cell holding a RENDERED control renders something — it just is not a
+   * heading — so it names nothing rather than falling through: RadGrid's
+   * filter cell is `<td><input><span style="display:none">Filter Name</span>
+   * </td>`, and the fallback read that hidden span as the column's name, one
+   * row below the real one. A control that is not rendered (`<input
+   * type="hidden">`) is no such evidence and does not block the fallback,
+   * which is why the walk still skips the three tags: a `display:none`
+   * `<select>` answers `innerText` with its options and would otherwise
+   * donate them as the heading. `OPTION` is not in that list because `SELECT`
+   * is — the walk never descends into one.
+   */
   const headerTextOf = (cell) => {
-    const shown = squash(cell.innerText || '');
-    return shown !== '' ? shown : squash(cell.textContent || '');
+    const controls = items(cell.querySelectorAll('input, select, textarea'));
+    let text = squash(cell.innerText || '');
+    for (const control of controls) {
+      const value = squash(control.innerText || '');
+      if (value === '') continue;
+      const at = text.indexOf(value);
+      if (at >= 0) text = squash(`${text.slice(0, at)} ${text.slice(at + value.length)}`);
+    }
+    if (text !== '') return text;
+    if (controls.some(rendered)) return '';
+    let out = '';
+    const walk = (node) => {
+      for (const child of items(node.childNodes)) {
+        // 3 is `Node.TEXT_NODE`, 1 is `Node.ELEMENT_NODE`, spelled as numbers
+        // because this file is evaluated as source in the page and should not
+        // depend on a global the page could have shadowed.
+        if (child.nodeType === 3) { out += child.nodeValue || ''; continue; }
+        if (child.nodeType !== 1) continue;
+        const tag = child.tagName;
+        if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') continue;
+        walk(child);
+      }
+    };
+    walk(cell);
+    return squash(out);
   };
   /** Rendered cell text. A cell that is not rendered reads as "" — a hidden
    *  column keeps its position and contributes nothing (§10). `innerText`
@@ -171,34 +234,100 @@
   };
 
   /**
-   * §7.3's header search, over one table and its body rows.
+   * §7.3b's header GRID: the header rows laid out the way the HTML table
+   * algorithm lays a table out, and the name each column ends up with.
    *
-   * Returns { row, index, refusal }: `index` is the row's position in `rows`
-   * when the header came from the BODY (the caller splices it out), -1 from a
-   * `<thead>`. `refusal` is a TOKEN — 'merged' or 'rows:<n>' — not a
-   * sentence, because §7.3a runs this against a DIFFERENT table and the
-   * message has to name the table being READ, not the one the header sits in.
+   * More than one header row is the norm for a grid widget — a band row over
+   * groups of columns, the row of column names, and often a filter row of
+   * inputs. V1 read exactly ONE row and refused the rest as "merged headers",
+   * which on RadGrid refused every read by header of a nine-column grid whose
+   * band row has four cells and whose name row has eight.
    *
-   * Nothing here decides anything new; it is the code that used to be inline,
-   * moved so the adopted header of §7.3a goes through exactly these checks.
+   * Each cell takes the first column of its row that no cell from a row above
+   * already occupies, and covers `colspan` columns across and `rowspan` rows
+   * down. `rowspan="0"` — legal HTML for "to the end of this row group", which
+   * the DOM reports as `0` (§4.8) — runs to the LAST header row; read as 1, a
+   * corner cell written that way stopped occupying the name row and every
+   * column under it took the wrong row's heading.
+   *
+   * The name of a column is the text of the LOWEST cell covering it that says
+   * anything. A blank corner cell and a filter cell holding only an input name
+   * nothing, so a filter row is laid out — it can widen the grid — and never
+   * names a column. A non-blank cell that names no column is a BAND (§7.3b.4):
+   * it groups columns, and a request for it is refused by name (§5.3).
+   *
+   * `width` is the highest column any cell reached plus one, and is the width
+   * every later rule uses — §4.8's placeholder rule, §7.4's short row, §7.3a's
+   * pairing check — never a row's cell count, which for RadGrid's name row is
+   * eight of nine.
+   */
+  const headerGridOf = (headerRows) => {
+    const cells = [];
+    const taken = headerRows.map(() => new Set());
+    let width = 0;
+    for (let r = 0; r < headerRows.length; r++) {
+      let c = 0;
+      for (const el of items(headerRows[r].cells)) {
+        while (taken[r].has(c)) c++;
+        const across = el.colSpan > 0 ? el.colSpan : 1;
+        const down =
+          el.rowSpan === 0 ? headerRows.length - r : (el.rowSpan > 0 ? el.rowSpan : 1);
+        const lastRow = Math.min(headerRows.length - 1, r + down - 1);
+        for (let rr = r; rr <= lastRow; rr++) {
+          for (let cc = c; cc < c + across; cc++) taken[rr].add(cc);
+        }
+        cells.push({ text: headerTextOf(el), first: c, last: c + across - 1, row: r });
+        if (c + across > width) width = c + across;
+        c += across;
+      }
+    }
+    const names = [];
+    const namers = [];
+    for (let col = 0; col < width; col++) {
+      let lowest = null;
+      for (const cell of cells) {
+        if (cell.first > col || cell.last < col || cell.text === '') continue;
+        if (!lowest || cell.row > lowest.row) lowest = cell;
+      }
+      namers.push(lowest);
+      names.push(lowest ? lowest.text : '');
+    }
+    const bands = cells.filter((cell) => cell.text !== '' && !namers.includes(cell));
+    return { width, names, cells, namers, bands };
+  };
+
+  /** The bands over one column, TOP-DOWN — what `Band > Leaf` walks (§7.3b.4). */
+  const bandsOver = (grid, col) =>
+    grid.bands
+      .filter((band) => band.first <= col && band.last >= col)
+      .sort((a, b) => a.row - b.row);
+
+  /** The non-blank column names under a band, in column order and without
+   *  repeats — a leaf cell spanning two columns names both, and listing it
+   *  twice reads as a mistake. */
+  const leavesUnder = (grid, band) => {
+    const out = [];
+    for (let col = band.first; col <= band.last; col++) {
+      const name = grid.names[col];
+      if (name && !out.includes(name)) out.push(name);
+    }
+    return out;
+  };
+
+  /**
+   * §7.3's header ROWS, over one table and its body rows.
+   *
+   * Returns { rows, index }: `index` is the row's position in `rows` when the
+   * header came from the BODY (the caller splices it out), -1 from a
+   * `<thead>`. Nothing is refused here any more — §7.3b.6: the header grid
+   * lays every shape out, and "merged headers" and "its header has N rows"
+   * are gone. A merged BODY cell is still the §7.4 error, further down.
    */
   const findHeader = (t, rows) => {
-    const none = { row: null, index: -1, refusal: null };
+    const none = { rows: null, index: -1 };
     const thead = t.tHead;
     const headRows = thead && thead.parentElement === t ? items(thead.rows) : [];
-    if (headRows.length > 0) {
-      // Spans first, so the two-row merged header of §5.3 reports what it
-      // actually is rather than "your header has 2 rows".
-      for (const row of headRows) {
-        for (const cell of items(row.cells)) {
-          if (spanned(cell)) return { row: null, index: -1, refusal: 'merged' };
-        }
-      }
-      if (headRows.length > 1) {
-        return { row: null, index: -1, refusal: `rows:${headRows.length}` };
-      }
-      return { row: headRows[0], index: -1, refusal: null };
-    }
+    if (headRows.length > 0) return { rows: headRows, index: -1 };
     // No header row in a `<thead>` — either because there is no `<thead>` at
     // all, or because there is an EMPTY one. The empty case is real: a
     // framework that renders `<thead></thead>` and puts the headings in the
@@ -322,36 +451,60 @@
     );
     const lonelySpan = cells.length === 1 && cells[0].colSpan > 1;
     if (!(cells.length > 0 && hasHeading && !rowScoped && !lonelySpan)) return none;
-    for (const cell of cells) {
-      if (spanned(cell)) return { row: null, index: -1, refusal: 'merged' };
-    }
-    return { row: first, index: firstAt, refusal: null };
+    // A body-row header is always ONE row (§7.3b.1), laid out like any other.
+    return { rows: [first], index: firstAt };
   };
 
   /**
    * One table, described the way §7.2 and §7.3a ask about it: its body rows,
-   * its header row, the body rows that are LEFT once the header is taken out,
-   * and whether it is **header-only** — a header and nothing under it.
+   * its header grid, the body rows that are LEFT once a body header is taken
+   * out, which of those are DATA, and whether it is **header-only** — a header
+   * and no data under it.
    *
-   * Kendo's header table is a `<thead>` with no `<tbody>` at all; a framework
-   * that puts the headings in the first `<tbody>` row and nothing below them
-   * qualifies the same way, which is why `body` is measured after the header
-   * row is removed rather than by counting `<tr>`s.
+   * Kendo's header table is a `<thead>` with no `<tbody>` at all; RadGrid's
+   * holds one hidden `<td colspan="9">` spacer row, which is a §4.8 message
+   * row and not data; a framework that puts the headings in the first
+   * `<tbody>` row and nothing below them qualifies the same way. So
+   * header-only is measured over the rows that are DATA (§7.2, §7.3a.2), not
+   * by counting `<tr>`s.
    *
-   * A table whose header REFUSES (a merged or two-row header) still counts as
-   * having one: where the author POINTS at the pairing — a wrapper (§7.2), or
-   * `aria-owns` (§7.3a.1) — it is half of a grid either way, and the refusal
-   * is reported when it is adopted rather than making the table vanish from
-   * the search. The beside-it path (§7.3a.2) narrows that to a header the
-   * search FINDS, because there the table is evidence for the pairing rather
-   * than a consequence of it; `candidatesUnder` is where that is asked.
+   * §7.3b.5: a `<thead>` whose grid names NO column is no header at all.
+   * RadGrid's data table carries a `<thead>` of its own, hidden, with a single
+   * empty `<th>`; taken as the header, every read by name failed "its header
+   * row has no non-empty headings" one table away from the headings. Treated
+   * as none, §7.3a finds the real one through `aria-owns` or beside.
+   *
+   * A `<thead>` ONLY. A BODY row §7.3 took as the header is still the header
+   * when its cells happen to be blank — `<tr><th></th><th></th></tr>` above
+   * the data — because it is a row of the table and nothing else would take it
+   * out: read as "no header" it stayed in the body, became record 1 with two
+   * empty values and shifted every `_row` below it by one, which is §4.5's
+   * misalignment. Nothing is lost by keeping it: a grid naming no column
+   * refuses every read BY name anyway, and a read by position gets the right
+   * rows.
+   *
+   * `headerOnly` still means a header that NAMES something, because that is
+   * what §7.3a adopts: a blank grid donated to the table beside it would give
+   * every column of it no name at all.
    */
   const classify = (t) => {
     const rows = bodyRowsOf(t);
     const head = findHeader(t, rows);
-    const body = head.index >= 0 ? rows.filter((_, i) => i !== head.index) : rows;
-    const hasHeader = head.row !== null || head.refusal !== null;
-    return { table: t, rows, head, body, headerOnly: hasHeader && body.length === 0 };
+    const laid = head.rows ? headerGridOf(head.rows) : null;
+    const named = laid !== null && laid.names.some((name) => name !== '');
+    const grid = laid !== null && (named || head.index >= 0) ? laid : null;
+    const index = grid ? head.index : -1;
+    const body = index >= 0 ? rows.filter((_, i) => i !== index) : rows;
+    const data = body.filter((row) => !messageRow(row));
+    return {
+      table: t,
+      rows,
+      grid,
+      index,
+      body,
+      data,
+      headerOnly: named && data.length === 0,
+    };
   };
 
   /**
@@ -534,7 +687,10 @@
       node = walker.nextNode();
     }
     for (const other of tablesUnder(root)) {
-      if (classified(other).body.length > 0) found.push(other);
+      // DATA rows, not any rows: a pager or spacer table whose one row is a
+      // lone spanning cell (§4.8, RadGrid) is not the data table that would
+      // have been this header's own partner.
+      if (classified(other).data.length > 0) found.push(other);
     }
     // Two lists, each already in document order, so the sort only interleaves
     // them — and the caller reads the list from the end, which needs it.
@@ -571,14 +727,11 @@
       // per candidate row table in the header-only pick — costs a map lookup
       // for every table that is not a header, rather than a computed style.
       const info = classified(other);
-      // On THIS path "header-only" means §7.3's search FINDS a header row. A
-      // table whose header is refused — two rows, a spanned cell — is half of
-      // a grid when the author POINTS at the pairing (a wrapper, or
-      // `aria-owns`), and that refusal is then reported; but it is no
-      // evidence that these two tables are one grid, and treated as a
-      // candidate it failed the read of the plain table that merely sat
-      // after it.
-      if (!(info.headerOnly && info.head.row !== null)) continue;
+      // "Header-only" is §7.3a.2's: its header grid NAMES at least one column
+      // (§7.3b.5 — a `<thead>` of blank cells is no header) and it has no data
+      // row. A hidden spacer row in its body is a message row and does not
+      // make it a data table (§5.7).
+      if (!info.headerOnly) continue;
       if (insideATable(other) || selfNamed(other) || !rendered(other)) continue;
       cheap.push(info);
     }
@@ -683,8 +836,8 @@
         if (other === t || t.contains(other) || !precedes(t, other)) continue;
         if (!rendered(other)) continue;
         const info = classified(other);
-        if (info.body.length === 0) continue;
-        if (info.head.row !== null || info.head.refusal !== null) continue;
+        if (info.data.length === 0) continue;
+        if (info.grid !== null) continue;
         const beside = besideHeaderSource(other);
         if (beside.length === 1 && beside[0].table === t) {
           return { partner: other, frozen: false };
@@ -750,7 +903,57 @@
     // must be visible: a `display:none` table is not part of the grid on
     // screen, and counting one would refuse a live grid as ambiguous.
     wrapperTables = tablesUnder(wrapper).filter(rendered).map(classified);
-    const withRows = wrapperTables.filter((info) => info.body.length > 0);
+    // DATA rows (§7.2): body rows that are not §4.8 message rows, rendered or
+    // not. RadGrid's header table holds one hidden `<td colspan="9">` spacer
+    // and its pager table one `<td colspan="9">` row, and counting those as
+    // rows made its box "3 tables with rows" — the measured refusal §5.7 is
+    // written to fix.
+    //
+    // The fallback is the emptied grid: a split grid whose rows have become
+    // one "No records available." message row has no table with DATA under
+    // its wrapper at all, and §4.8 says that reads `[]`. So when nothing has
+    // data, the tables that have any body row are counted instead — but
+    // counted FLAT, that is every table in the box: RadGrid's emptied box
+    // still holds the header table's hidden `<td colspan="9">` spacer and the
+    // pager's own row, so it refused "found 3 tables with rows … frozen
+    // (locked) columns" for a grid that simply has no rows in it.
+    //
+    // So the fallback asks which of those is the DATA half (§7.2), in three
+    // steps that are each a fact the page states about itself:
+    //
+    //  - a HEADER-ONLY table is out. It names columns and has no data row,
+    //    which is what the header half of a split grid is; the spacer row in
+    //    RadGrid's header table is a §4.8 message and does not make it a data
+    //    table (§5.7).
+    //  - a table whose `aria-owns` names another table's header (§7.3a.1) is
+    //    the row half, said outright. RadGrid's emptied data table carries it.
+    //  - failing that, `role="grid"` — what Kendo's body table carries and its
+    //    header table (a `<thead>` with no `<tbody>` at all) does not.
+    //
+    // The first level that has anything in it decides, and it has to hold
+    // exactly ONE table: two tables at the same level is still the frozen
+    // (locked) columns shape, and picking one of them would be reading half a
+    // grid (§7.3a, §14).
+    const withData = wrapperTables.filter((info) => info.data.length > 0);
+    let withRows = withData;
+    if (withRows.length === 0) {
+      const candidates = wrapperTables.filter(
+        (info) => info.body.length > 0 && !info.headerOnly,
+      );
+      const declaring = candidates.filter((info) => declaredHeaderSource(info.table) !== null);
+      const grids = candidates.filter(
+        (info) => (info.table.getAttribute('role') || '').trim().toLowerCase() === 'grid',
+      );
+      const rest = candidates.filter(
+        (info) => !declaring.includes(info) && !grids.includes(info),
+      );
+      for (const level of [declaring, grids, rest]) {
+        if (level.length > 0) {
+          withRows = level;
+          break;
+        }
+      }
+    }
     if (withRows.length === 0) {
       // A `<div role="grid">` of `<div role="row">`s lands here: still
       // unsupported (§3), now said in terms of what was looked for.
@@ -803,27 +1006,19 @@
     wrapper = found;
     label = nameNow();
   };
-  /** §5.3, verbatim, for a merged header AND for a merged body cell: both mean
-   *  the same thing — that a guessed logical grid would be plausible and
-   *  wrong. */
+  /** §7.4, verbatim, for a merged BODY cell: a guessed logical grid would be
+   *  plausible and wrong. The header has no such refusal any more — §7.3b lays
+   *  every header shape out instead (§7.3b.6). */
   const merged = () =>
     cannot('merged headers or cells (rowspan/colspan > 1) are not supported');
-  /** Turn one of `findHeader`'s refusal TOKENS into the sentence, now that
-   *  there is a label to name. The token exists because the same search runs
-   *  against a table that is not the one being read (§7.3a), and the message
-   *  must still name the table the author asked for. */
-  const headerRefusal = (info) =>
-    info.refusal === 'merged'
-      ? merged()
-      // `'rows:'.length` — the token carries the count the sentence needs.
-      : cannot(`its header has ${info.refusal.slice(5)} rows, and v1 supports exactly one`);
 
   // ── 2. rows belonging to THIS table (§7.4) ───────────────────────────────
-  // A COPY on the wrapper path: the header row is spliced out below, and
-  // `picked` is the classification `classified` remembers — §7.3a asks about
-  // this same table again from the other side, and it must not be asked about
-  // a row list this read has since edited.
-  const bodyRows = picked ? picked.rows.slice() : bodyRowsOf(table);
+  // A COPY: the header row is spliced out below, and `selected` is the
+  // classification `classified` remembers — §7.3a asks about this same table
+  // again from the other side, and it must not be asked about a row list this
+  // read has since edited.
+  const selectedInfo = picked || classified(table);
+  const bodyRows = selectedInfo.rows.slice();
 
   /**
    * How wide the table is, measured over ALL body rows — rendered or not.
@@ -848,17 +1043,21 @@
     if (row.cells.length > widestBody) widestBody = row.cells.length;
   }
 
-  // ── 3. the header row (§7.3), and where it comes from (§7.3a) ────────────
-  const own = picked ? picked.head : findHeader(table, bodyRows);
-  if (own.refusal !== null) return headerRefusal(own);
-  let headerRow = own.row;
+  // ── 3. the header grid (§7.3, §7.3b), and where it comes from (§7.3a) ────
+  let headerGrid = selectedInfo.grid;
   /** Did the header come from a DIFFERENT table (§7.3a)? The summary line says
    *  so (§7.6): a wrong pairing is otherwise invisible in the log, and the
    *  records it produces look exactly like a correct read. */
   let headerFromSeparateTable = false;
-  if (headerRow && own.index >= 0) bodyRows.splice(own.index, 1);
+  if (headerGrid && selectedInfo.index >= 0) bodyRows.splice(selectedInfo.index, 1);
 
-  if (!headerRow) {
+  /** The rows of this table that are DATA — §7.2's test, the cheap one that
+   *  does not need the width (§4.8's own rule runs later, against it). Two
+   *  questions ask it: whether a header-only table is the one being read, and
+   *  what an adopted header's width has to line up with. */
+  const nonMessageRows = bodyRows.filter((row) => !messageRow(row));
+
+  if (!headerGrid) {
     // §7.3a: a table with no header of its own may take one from another
     // table — the grid of §5.6, where the header and the rows are separate
     // `<table>` elements. A header IN the table always wins, which is why this
@@ -906,13 +1105,13 @@
     if (source) {
       // Both halves are known, so the element holding them is the grid and
       // the diagnostics name the table after it (§7.2 point 4) — BEFORE the
-      // two refusals below, which otherwise name the grid by the row table's
+      // width refusal below, which otherwise names the grid by the row table's
       // generated GUID (`cannot map table "14277be2-015b-…"`).
       if (!wrapper) nameAfterWrapper(commonAncestor(table, source.table));
-      // The adopted row goes through §7.3's own checks, in the table it lives
-      // in: a spanned or two-row header is refused exactly as a native one is.
-      if (source.head.refusal !== null) return headerRefusal(source.head);
-      const adopted = source.head.row;
+      // The adopted header is the other table's HEADER GRID (§7.3b), laid out
+      // in the table it lives in — RadGrid's is three rows of bands, names and
+      // filters and is nine columns wide.
+      const adopted = source.grid;
       if (adopted) {
         // The widths must line up, because a header one column off is §4.5's
         // misalignment wearing a plausible face. Measured over the rows that
@@ -921,29 +1120,30 @@
         // and has nothing to misalign, so it is no evidence either way —
         // counted, it refused every emptied grid as a mismatch.
         let widestData = 0;
-        let dataShaped = 0;
-        for (const row of bodyRows) {
-          if (messageRow(row)) continue;
-          dataShaped++;
+        for (const row of nonMessageRows) {
           if (row.cells.length > widestData) widestData = row.cells.length;
         }
-        if (dataShaped > 0 && adopted.cells.length !== widestData) {
+        if (nonMessageRows.length > 0 && adopted.width !== widestData) {
           // "the header table", not "the header in the table beside it": the
           // same check runs on the DECLARED path, where the header table is
-          // wherever `aria-owns` pointed and need not be beside anything.
+          // wherever `aria-owns` pointed and need not be beside anything. The
+          // count is the header GRID's width, not a row's cell count: a banded
+          // header's name row is narrower than the grid it names (§7.3b).
           return cannot(
-            `the header table has ${adopted.cells.length} `
-            + `${plural(adopted.cells.length, 'cell', 'cells')} but its widest row has `
+            `the header table has ${adopted.width} `
+            + `${plural(adopted.width, 'cell', 'cells')} but its widest row has `
             + `${widestData} — the two tables do not line up`,
           );
         }
-        headerRow = adopted;
+        headerGrid = adopted;
         headerFromSeparateTable = true;
       }
     }
-  } else if (!wrapper && bodyRows.length === 0) {
-    // §7.3a.3, the header-only pick. This table holds the header row and
-    // nothing else, and the rows are in a table that names this header through
+  } else if (!wrapper && nonMessageRows.length === 0) {
+    // §7.3a.3, the header-only pick. This table holds the header row and no
+    // DATA — RadGrid's header table holds one hidden `<td colspan="9">` spacer
+    // row, which is a message and not a row of the grid (§4.8, §5.7) — and the
+    // rows are in a table that names this header through
     // `aria-owns` or would have adopted it from beside. It is the selector a
     // model reaches for first — the table where it can SEE the words "Order
     // ID" — and storing `[]` for it is a green step that read nothing, which
@@ -977,41 +1177,92 @@
   }
 
   // ── 4. which rows are rendered, and how wide the table is ────────────────
-  // The width the placeholder rule measures against is the header row's cell
-  // count, or, with no header, `widestBody` — every body row, rendered or not
-  // (§4.8, and see that measurement for why the hidden ones count).
+  // The width the placeholder rule measures against is the header GRID's
+  // width (§7.3b: never a row's cell count — RadGrid's name row has eight
+  // cells for nine columns), or, with no header, `widestBody` — every body
+  // row, rendered or not (§4.8, and see that measurement for why the hidden
+  // ones count).
   //
   // It is settled BEFORE any row is classified, because the classification
   // depends on it.
   const visibleRows = bodyRows.filter(rendered);
-  const width = headerRow ? headerRow.cells.length : widestBody;
+  const width = headerGrid ? headerGrid.width : widestBody;
 
   // ── 5. resolve each column to a one-based position ───────────────────────
-  const headerLabels = headerRow ? items(headerRow.cells).map(headerTextOf) : [];
+  const headerLabels = headerGrid ? headerGrid.names : [];
+
+  /**
+   * The one-based positions a requested header matches (§7.3b.4).
+   *
+   * The PLAIN reading is tried first, over the whole string: a column whose
+   * heading genuinely contains " > " is named by typing it, and splitting
+   * first would make that column unreachable. Only when nothing is headed
+   * that is the request read as `Band > Leaf` — the last segment names the
+   * leaf, and each earlier segment must match a band over that column, taken
+   * from the top down. That is how `Q1 > Fee` and `Q2 > Fee` are told apart
+   * where the plain `Fee` is the duplicate refusal with two positions.
+   *
+   * The split takes ANY whitespace around the `>`, none included: `Q1>Fee` and
+   * `Q1 >Fee` are how the separator gets typed at least as often as the spaced
+   * form, and split on the three-character `' > '` alone each of those stayed
+   * ONE segment, matched no leaf and refused a column that is there.
+   */
+  const matchHeader = (grid, requested) => {
+    const plain = [];
+    const wantPlain = fold(requested);
+    for (let col = 0; col < grid.width; col++) {
+      if (fold(grid.names[col] || '') === wantPlain) plain.push(col + 1);
+    }
+    if (plain.length > 0) return plain;
+    const segments = requested.split(/\s*>\s*/).map(squash).filter((s) => s !== '');
+    if (segments.length < 2) return plain;
+    const leaf = fold(segments[segments.length - 1]);
+    const over = segments.slice(0, -1).map(fold);
+    const hits = [];
+    for (let col = 0; col < grid.width; col++) {
+      if (fold(grid.names[col] || '') !== leaf) continue;
+      let at = 0;
+      for (const band of bandsOver(grid, col)) {
+        if (at < over.length && fold(band.text) === over[at]) at++;
+      }
+      if (at === over.length) hits.push(col + 1);
+    }
+    return hits;
+  };
+
   const resolved = [];
   for (const col of wanted) {
     if (typeof col.header === 'string') {
-      if (!headerRow) {
+      if (!headerGrid) {
         // §5.4, verbatim: the message's whole job is to name the way out.
         return cannot(
           `it has no header row, so "${col.header}" cannot be matched — name columns by `
           + `position ("the 1st column as ${col.key}")`,
         );
       }
-      const want = fold(col.header);
-      const hits = [];
-      headerLabels.forEach((text, i) => {
-        if (fold(text) === want) hits.push(i + 1);
-      });
+      const hits = matchHeader(headerGrid, col.header);
       if (hits.length === 0) {
         // Exact match only. A renamed header is a test failure worth reading;
         // a fuzzy match would quietly read the wrong column.
         const available = headerLabels.filter((t) => t !== '');
+        // A request that names a BAND says so (§5.3): "Order" over ID and
+        // Customer is not a column, and the leaves under it are what the
+        // author meant to type. The second half of this sentence is the only
+        // difference between "you named a group" and "you named nothing here".
+        const band = headerGrid.bands.find((b) => fold(b.text) === fold(col.header));
         return cannot(
           `no column is headed "${col.header}"`
+          // §7.3b.5 keeps a `<thead>` that names nothing from being a header at
+          // all, so the second branch is reached only by a BODY-row header
+          // whose cells are all blank — which stays the header, because it is a
+          // row of the table and nothing else would take it out of the data.
           + (available.length > 0
             ? ` — available headers are ${available.join(', ')}`
-            : ' — its header row has no non-empty headings'),
+            : ' — its header row has no non-empty headings')
+          + (band
+            ? ` ("${col.header}" is a band over ${leavesUnder(headerGrid, band).join(', ')}, `
+              + 'not a column)'
+            : ''),
         );
       }
       if (hits.length > 1) {
@@ -1082,6 +1333,47 @@
         continue;
       }
     }
+    // The DETAIL row, measured on RadGrid and the same in Kendo: expanding a
+    // row inserts, right after it and with no class or id of its own,
+    // `<td class="rgExpandCol">&nbsp;</td><td colspan="8">…</td>` — TWO cells,
+    // both rendered, so neither rule above sees it. It reached the merged-cell
+    // refusal, and every read of the grid failed from the moment a user
+    // expanded anything.
+    //
+    // What it is, structurally: TWO OR MORE cells fewer than the grid has
+    // columns, spanning their way to the full width. Four neighbours stay out
+    // of it, each because a skip would be the wrong answer:
+    //
+    //  - a row that does NOT reach the width (§10's `<td colspan="3">` in a
+    //    five-column table) is a merged grid, not a message, and is refused;
+    //  - a row with as many cells as the width AND a spanning cell is wider
+    //    than the grid, so it is refused as before;
+    //  - a row ONE cell short of the width is refused too. `<td>a</td>
+    //    <td colspan="2">b</td>` in a three-column table is the merged DATA
+    //    row §10 has always refused — two values where three columns are, and
+    //    which of B and C the wide cell holds is exactly the guess §7.4 exists
+    //    not to make. A detail row is a row of a different SHAPE, not a row
+    //    missing one cell: RadGrid's is 2 cells of 9 and Kendo's 2 of 6, so
+    //    `width - cells.length >= 2` keeps both and hands the one-short row
+    //    back to the merged-cell refusal;
+    //  - a cell spanning ROWS shifts every row below it (§4.8's `rowspan="0"`
+    //    included, which the DOM reports as 0), and nothing about skipping one
+    //    row fixes what it did to the next.
+    if (cells.length > 0 && width - cells.length >= 2) {
+      const list = items(cells);
+      let covered = 0;
+      let across = false;
+      let down = false;
+      for (const cell of list) {
+        covered += cell.colSpan > 0 ? cell.colSpan : 1;
+        if (cell.colSpan > 1) across = true;
+        if (cell.rowSpan !== 1) down = true;
+      }
+      if (across && !down && covered >= width) {
+        placeholdersSkipped++;
+        continue;
+      }
+    }
     dataRows.push(row);
   }
 
@@ -1092,6 +1384,7 @@
       + `${maxRows} visible rows") or narrow the table first`,
     );
   }
+
   // `limit` selects a PREFIX of the data rows, so a selected row's `_row` is
   // its index here plus one — the same number it would have had on an
   // unbounded read.
@@ -1127,6 +1420,46 @@
       record[col.key] = cellTextOf(cell);
     }
     records.push(record);
+  }
+
+  // ── 8. leave the numbering ON the page (§7.4) ────────────────────────────
+  //
+  // The one and only mutation this extractor makes, and it is here because of
+  // a measured failure. On pass 7 of a loop over the RadGrid records the step
+  // read "row 7 of the Loan applications grid"; the model counted the rows
+  // itself and built `#RadGrid1_ctl00__7`, whose ids run from ZERO — so it
+  // clicked row 8, Grace Abernathy, and the step passed green. A row's own
+  // number is written nowhere in the markup, so the read writes it: every DATA
+  // row of the table it just read carries `data-aiui-row="<_row>"`, which a
+  // later step addresses as `[data-aiui-row="7"]` instead of doing arithmetic
+  // on an id.
+  //
+  // Cleared over the table FIRST, so a re-read after paging, sorting or
+  // filtering renumbers from scratch and a row that has stopped being a data
+  // row — hidden by a filter, or now sitting under a detail row — loses its
+  // stamp instead of keeping a stale one. A header, filter, spacer,
+  // placeholder, detail or hidden row is never stamped, and nothing outside
+  // this table is touched at all.
+  //
+  // Over every DESCENDANT carrying the stamp, not `table.rows`: a nested table
+  // inside a detail row is not in `table.rows`, so a stamp an earlier read of
+  // THAT table left behind survived the clear, and `#outer [data-aiui-row="2"]`
+  // then matched the nested row as well as the real one.
+  //
+  // ALL the data rows, not only the `limit` prefix: the numbering describes
+  // the table, and a bounded read must not leave row 11 of the same table
+  // unaddressable.
+  //
+  // Written LAST, after the row cap and after every cell of every selected row
+  // has been read, so a read that REFUSES — too many rows, a merged cell, a
+  // row too short for a column — changes nothing at all. Stamped before those
+  // checks, a failed read left its own numbering behind and the next step
+  // addressed rows of a table the framework had just said it could not map.
+  for (const stamped of items(table.querySelectorAll(`[${ROW_STAMP}]`))) {
+    stamped.removeAttribute(ROW_STAMP);
+  }
+  for (let i = 0; i < dataRows.length; i++) {
+    dataRows[i].setAttribute(ROW_STAMP, String(i + 1));
   }
 
   return {
