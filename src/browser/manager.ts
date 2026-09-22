@@ -792,6 +792,32 @@ function validateBrowserLabel(label: string): string | null {
   return null;
 }
 
+/**
+ * The one sentence every "there is no browser yet" answer uses
+ * (SPEC-use-computer.md §4.6).
+ *
+ * Exported as a constant, not retyped per caller: the HTTP route, the MCP
+ * tool and the tracker itself all say it, and three near-identical sentences
+ * would read to an agent as three different conditions.
+ */
+export const NO_BROWSER_LAUNCHED_MESSAGE =
+  'no browser has been launched in this session';
+
+/**
+ * Thrown wherever a launched browser is required and none exists yet.
+ *
+ * A distinct class, not a bare Error, because the layers above must tell it
+ * apart from "the session does not exist" (404) and from a page-capture
+ * failure — the remedies are opposite (run a browser step / create a session /
+ * retry the read).
+ */
+export class NoBrowserLaunchedError extends Error {
+  constructor(message = NO_BROWSER_LAUNCHED_MESSAGE) {
+    super(message);
+    this.name = 'NoBrowserLaunchedError';
+  }
+}
+
 export interface BrowserInfo {
   label: string;
   engine: string;
@@ -814,9 +840,106 @@ export interface BrowserInfo {
 export class BrowserTracker {
   private sessions: Array<{ label: string; session: BrowserSession }> = [];
   private activeIndex = 0;
+  /**
+   * The deferred launch (SPEC-use-computer.md §4.6). Set only by `deferred()`;
+   * an eagerly-constructed tracker leaves it undefined and behaves exactly as
+   * it always has.
+   */
+  private launcher: (() => Promise<BrowserSession>) | undefined;
+  /** Label the deferred launch registers under — `default` for every caller
+   *  today, a parameter so the name lives in one place. */
+  private deferredLabel = 'default';
+  /** True once a browser has existed in this tracker: the eager constructor,
+   *  or a `launcher` that RESOLVED. Not set by `add()` — a desktop-first test
+   *  that ran `openBrowser` still gets its `default` when a browser-surface
+   *  step arrives. */
+  private launched: boolean;
+  /** The in-flight launch, shared by concurrent `ensureLaunched()` callers so
+   *  the launcher runs exactly once. Cleared on BOTH settle paths: a failed
+   *  launch must not be cached, or a transient failure (a channel that was
+   *  momentarily unavailable) would poison every later step. */
+  private launchInFlight: Promise<BrowserSession> | undefined;
 
   constructor(initialSession: BrowserSession, initialLabel = 'default') {
     this.sessions.push({ label: initialLabel, session: initialSession });
+    this.launched = true;
+  }
+
+  /**
+   * A tracker with no browser yet (SPEC-use-computer.md §4.6).
+   *
+   * `launch` is the closure that used to run at session creation — launch,
+   * plus whatever navigation the caller did to the fresh page. It runs at the
+   * first step executed while the surface is `browser`, so a test whose first
+   * step is `[use computer]` never launches one at all.
+   */
+  static deferred(
+    launch: () => Promise<BrowserSession>,
+    label = 'default',
+  ): BrowserTracker {
+    // Built through the prototype rather than the constructor: the constructor
+    // exists to take a LAUNCHED session, and giving it an optional one would
+    // make `getActive()`'s "never launched" case indistinguishable from
+    // "constructed with undefined by mistake".
+    const tracker = Object.create(BrowserTracker.prototype) as BrowserTracker;
+    tracker.sessions = [];
+    tracker.activeIndex = 0;
+    tracker.launcher = launch;
+    tracker.deferredLabel = label;
+    tracker.launched = false;
+    tracker.launchInFlight = undefined;
+    return tracker;
+  }
+
+  /**
+   * Launch the deferred browser if it has not been launched yet, and hand back
+   * the session every later step targets.
+   *
+   * Idempotent and concurrency-safe: the second caller awaits the first
+   * caller's promise rather than starting a second browser. A rejection is
+   * propagated to every waiter and NOT remembered — the step boundary that
+   * calls this turns it into that step's failure, and the next step tries
+   * again.
+   */
+  async ensureLaunched(): Promise<BrowserSession> {
+    if (this.launched) return this.getActive();
+    if (!this.launcher) return this.getActive();
+    if (!this.launchInFlight) {
+      const launch = this.launcher;
+      this.launchInFlight = (async () => {
+        try {
+          const session = await launch();
+          this.sessions.push({ label: this.deferredLabel, session });
+          // The launch is the FIRST browser of the session in every path that
+          // reaches here except one: a desktop-first test that ran
+          // `openBrowser` first has entries already, and `add()` promoted the
+          // one it opened. Promoting here too would silently move the run off
+          // the browser the author just named.
+          if (this.sessions.length === 1) this.activeIndex = 0;
+          this.launched = true;
+          return session;
+        } finally {
+          this.launchInFlight = undefined;
+        }
+      })();
+    }
+    return this.launchInFlight;
+  }
+
+  /**
+   * Is there a browser to read right now?
+   *
+   * For callers that must NOT launch one — `GET /sessions/:id/content`,
+   * `POST /sessions/:id/login`, the session listings. A read is not a reason
+   * to start a browser (§4.6).
+   */
+  hasActive(): boolean {
+    return this.sessions[this.activeIndex] !== undefined;
+  }
+
+  /** Has a deferred launch happened (or was this tracker built eagerly)? */
+  isLaunched(): boolean {
+    return this.launched;
   }
 
   /** Register a freshly-launched browser session under a custom label.
@@ -840,6 +963,11 @@ export class BrowserTracker {
   getActive(): BrowserSession {
     const entry = this.sessions[this.activeIndex];
     if (!entry) {
+      // Two different empties, two different messages. A tracker that never
+      // launched is not one an author emptied, and telling them `closeBrowser`
+      // did it would be a lie that sends them looking at a step they never
+      // wrote (SPEC-use-computer.md §4.6).
+      if (!this.launched) throw new NoBrowserLaunchedError();
       throw new Error('no active browser session — closeBrowser left zero browsers tracked');
     }
     return entry.session;
@@ -877,6 +1005,15 @@ export class BrowserTracker {
   switchTo(label: string): BrowserSession {
     const idx = this.sessions.findIndex((s) => s.label === label);
     if (idx === -1) {
+      // `switchBrowser default` before anything launched. In every path that
+      // reaches a step, the step boundary has already called
+      // `ensureLaunched()`, so this is the defensive arm — and "known: " with
+      // nothing after it is the least useful sentence we could print.
+      // `switchTo` is synchronous and its caller (step-executor) discards the
+      // return, so it cannot launch here; it says what happened instead.
+      if (!this.launched && label === this.deferredLabel) {
+        throw new NoBrowserLaunchedError();
+      }
       const known = this.sessions.map((s) => s.label).join(', ');
       throw new Error(`No browser registered as "${label}" — known: ${known}`);
     }
@@ -1331,11 +1468,24 @@ export async function launchBrowser(
   } else {
     ({ width, height } = headed ? config.windowSize : config.viewport);
   }
+  // `browser.launchArgs` (SPEC-use-computer.md §5.10) — extra Chromium switches
+  // APPENDED to the window size above, never replacing it. Needed so a fixture
+  // workspace can pass `--disable-print-preview` (Chromium's Print button then
+  // opens the OS dialog instead of its own preview), and so a Wayland desktop
+  // can pass `--ozone-platform=x11` (§11).
+  //
+  // Not threaded into the CDP path: that attaches to a browser somebody else
+  // started, and its command line is theirs. `connectOverCdpSession` returns
+  // above before reaching here.
+  const launchArgs = config.launchArgs ?? [];
   const launchOptions = {
     headless: !headed,
     slowMo: config.slowMo,
-    args: [`--window-size=${width},${height}`],
+    args: [`--window-size=${width},${height}`, ...launchArgs],
   };
+  if (launchArgs.length > 0) {
+    logger.info(`Extra browser launch args: ${launchArgs.join(' ')}`);
+  }
 
   let browser: Browser;
   switch (browserType) {
@@ -1637,8 +1787,13 @@ export async function closeBrowser(session: BrowserSession): Promise<void> {
 
 export interface FinalizeMainPageVideoArgs {
   /** The MAIN page — its `video()` handle must be grabbed BEFORE the context
-   *  is closed, so pass the page itself and let this helper read it. */
-  page: Page;
+   *  is closed, so pass the page itself and let this helper read it.
+   *
+   *  Optional since the browser launches lazily (SPEC-use-computer.md §4.6): a
+   *  session that only ever ran computer-mode steps has no main page, and
+   *  closing it must still run `closeContext()` rather than throw on
+   *  `undefined.video()`. */
+  page: Page | undefined;
   /** Resolved recording mode. */
   mode: VideoMode;
   /** Run's overall outcome: `true` = passed, `false` = failed/aborted. Drives
@@ -1689,7 +1844,7 @@ export async function finalizeMainPageVideo(
   // there and path()'s remote-throw case is never reached; the file is always
   // local to the server, and source+target share videoDir, so the rename is
   // same-dir (never EXDEV).
-  const video = args.mode === 'off' ? null : args.page.video();
+  const video = args.mode === 'off' || !args.page ? null : args.page.video();
   let sourcePath: string | undefined;
   if (video) {
     try {

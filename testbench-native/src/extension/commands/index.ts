@@ -10,7 +10,7 @@ import {
   type StepMode,
 } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds } from '../step-lines.js';
-import { parseInvocationLine } from '../invocation-target-core.js';
+import { classifyDebuggableLine, parseInvocationLine } from '../invocation-target-core.js';
 import { computeRenumberEdits } from '../renumber-core.js';
 import { selectionLines, type ActiveFileTracker } from '../active-file-tracker.js';
 import {
@@ -1688,9 +1688,17 @@ function sectionOwningLine(text: string, line: number): string | null {
  *    expanding), so F11 on one descends into the body's first step's code
  *    when that step is compiled — one level deeper than the `.md` pause,
  *    still "into".
+ *  - `use`   → neither, and this is the NON-STEPPABLE case
+ *    (docs/specs/SPEC-use-computer.md §10.3). `[use computer]` /
+ *    `[use browser]` is a surface switch the run loop performs with no model
+ *    call and no code-behind entry — §9 excludes it from compilation
+ *    outright — so `pauseAtNextCodeBehind` would arm a flag for an entry that
+ *    can never exist. Under `plain` the flag was harmless but misleading: F11
+ *    would silently degrade to an ordinary step pause on a line that has no
+ *    "into" at all.
  *  - `unknown` → no paused entry / no document; send no flag.
  */
-type PausedLineKind = 'tool' | 'skill' | 'plain' | 'unknown';
+type PausedLineKind = 'tool' | 'skill' | 'plain' | 'use' | 'unknown';
 
 function pausedLineKind(registry: Registry, controller: RunController): PausedLineKind {
   const entry = registry.stepPausedEntry(controller.document.uri);
@@ -1708,16 +1716,12 @@ function pausedLineKind(registry: Registry, controller: RunController): PausedLi
  * Line-text half of {@link pausedLineKind}, shared with the
  * breakpoint-relaunch branch (which reads the text straight off the editor).
  *
- * Delegates to `parseInvocationLine` rather than matching `[tool:` itself:
- * that parser mirrors the runner's grammar, where the colon is OPTIONAL
- * (`[tool echo]` ≡ `[tool: echo]`) and a markdown link or prose like
- * `[skill level: expert]` is declined. A local regex would disagree with the
- * runner on exactly those lines — and disagreeing here means arming the
- * code-behind flag on a line the server is about to dispatch as a tool.
+ * Lives in `invocation-target-core.ts` so the DECISION is unit-testable under
+ * `node --test`, which cannot load the `vscode` module — the same split
+ * `section-diagnostics-core.ts` makes. Only the three flag-arming call sites
+ * below need a host.
  */
-function classifyStepLine(text: string): 'tool' | 'skill' | 'plain' {
-  return parseInvocationLine(text)?.kind ?? 'plain';
-}
+const classifyStepLine = classifyDebuggableLine;
 
 /**
  * Phase 3 step-control dispatch. Routes Step Into / Over / Out to one of

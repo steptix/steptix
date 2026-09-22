@@ -16,7 +16,12 @@ import {
   type StartResult,
 } from '../browser/cdp-registry.js';
 import { discoverCdpPorts, listPageTabs } from '../browser/cdp-discovery.js';
-import { CdpTabNotFoundError, closeBrowser, launchBrowser } from '../browser/manager.js';
+import {
+  CdpTabNotFoundError,
+  NoBrowserLaunchedError,
+  closeBrowser,
+  launchBrowser,
+} from '../browser/manager.js';
 import { userRootDir } from '../env/user-root.js';
 import { loadConfig } from '../config/loader.js';
 import fs from 'node:fs';
@@ -221,6 +226,28 @@ function goneTabMessage(port: number, targetId: string): string {
  * `if (respondToPageCaptureError(err, res)) return;` and passes anything else
  * to `next`.
  */
+/**
+ * The session exists but has not opened a browser yet
+ * (SPEC-use-computer.md §4.6) — answered by every route that READS a page.
+ *
+ * 409, not 404 and not 500. 404 is taken, and means something else here: "no
+ * such session". 500 would say the server is broken when what happened is
+ * that the caller asked for a page before the test asked for one — a run
+ * whose first step is `[use computer]` has no page to read until a
+ * `[use browser]` step arrives. 409 matches the other "right request, wrong
+ * moment" answer this file already gives (a read that lost to a navigation).
+ *
+ * These routes never launch a browser to satisfy themselves: a read is not a
+ * reason to open a window on the user's screen.
+ */
+function respondToNoBrowserLaunched(err: unknown, res: Response): boolean {
+  if (err instanceof NoBrowserLaunchedError) {
+    res.status(409).json({ error: err.message });
+    return true;
+  }
+  return false;
+}
+
 function respondToPageCaptureError(err: unknown, res: Response): boolean {
   // A read that lost to a navigation is the caller's to retry — it says
   // nothing about the session's health, so it must not read as a 500.
@@ -1301,6 +1328,7 @@ export function createApiServer(
       }
       res.status(200).json(content);
     } catch (err) {
+      if (respondToNoBrowserLaunched(err, res)) return;
       if (respondToPageCaptureError(err, res)) return;
       next(err);
     }
@@ -1365,6 +1393,11 @@ export function createApiServer(
       // layer applies to `isError`.
       res.status(200).json(result);
     } catch (err) {
+      // A login is a page action, so it needs a page. It does NOT get to open
+      // one: the broker types a password, and starting a browser to do that
+      // out of band is not something a caller should be able to trigger with
+      // a POST (§4.6).
+      if (respondToNoBrowserLaunched(err, res)) return;
       next(err);
     }
   });

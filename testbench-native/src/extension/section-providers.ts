@@ -30,6 +30,7 @@ import {
   openSkillArgsContext,
   openSkillNamePrefix,
   skillIoFor,
+  useDirectiveCompletions,
   type SkillIo,
 } from './invocation-target-core.js';
 import {
@@ -98,11 +99,13 @@ export class SectionLinkProvider implements vscode.DocumentLinkProvider {
  *  2. At an ARGUMENT position of an open call — `1. [skill login │` — that
  *     skill's declared parameters (minus those already passed) as
  *     `name="│"` snippets, then its outputs as `out.<name>`.
- *  3. Right after a step number — `1. │` — the file's section names plus
- *     `[skill: name]` whole-call snippets for the project's skills.
+ *  3. Right after a step number — `1. │` — the file's section names, then
+ *     `[skill: name]` whole-call snippets for the project's skills, then the
+ *     two surface switches `[use computer]` / `[use browser]`.
  *
  * Sections sort first (they're the file-local reuse mechanism); skills are a
- * cheap walk of `skillsDir` (see `collectSkillNames`) and a bonus.
+ * cheap walk of `skillsDir` (see `collectSkillNames`) and a bonus; the two
+ * surface switches are last, being a fixed pair most files never use.
  */
 export class SectionCompletionProvider implements vscode.CompletionItemProvider {
   provideCompletionItems(
@@ -244,6 +247,26 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
       item.insertText = new vscode.SnippetString(`[skill: ${skill}$0]`);
       item.range = tokenRange;
       item.sortText = `1_${skill}`;
+      items.push(item);
+    }
+
+    // The two surface switches, beside the whole-call snippets and on the same
+    // token range (docs/specs/SPEC-use-computer.md §10.3). Offered rather than
+    // left to memory because the §4.2 rule makes a near miss an ERROR now:
+    // `[computer]` no longer runs as prose, so the list is what stops an
+    // author guessing the spelling.
+    //
+    // Sorted after skills — a project may have dozens of skills and exactly
+    // two of these, and a run that never leaves the browser needs neither.
+    // They carry no `$0`: the directive is the whole step and takes no
+    // arguments, so there is nowhere for a caret to usefully land.
+    for (const [order, row] of useDirectiveCompletions().entries()) {
+      const item = new vscode.CompletionItem(row.token, vscode.CompletionItemKind.Keyword);
+      item.detail = row.detail;
+      item.documentation = new vscode.MarkdownString(row.documentation);
+      item.insertText = row.token;
+      item.range = tokenRange;
+      item.sortText = `2_${order}`;
       items.push(item);
     }
 

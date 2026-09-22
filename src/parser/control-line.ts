@@ -23,7 +23,8 @@
  * and says what the grammar makes of it. It is NOT the whole decision. A
  * caller resolves a step in this order (decision 3 of the story):
  *
- *   1. bracket directives — `[skill:`, `[tool:`, `[input:`, `[interactive]`;
+ *   1. bracket directives — `[skill:`, `[tool:`, `[input:`, `[interactive]`,
+ *      `[use computer]` / `[use browser]` (SPEC-use-computer.md §4.3);
  *   2. the bare-name section match (a step that IS a section name is a call
  *      before it is anything else, so a section named `While waiting` still
  *      resolves as a call);
@@ -34,6 +35,16 @@
  * Nothing here enforces rungs 1 and 2. Rung 1 needs no enforcing — a bracket
  * directive opens with `[`, which none of the six openings can match — but
  * rung 2 does, and the expander is where it happens.
+ *
+ * Rung 1 is also where a control line's TAIL resolves, and the bracket
+ * directives divide there. `[input:` and `[interactive]` are refused as tails
+ * (`validateControlFlow`, markdown.ts): both hand the run back to a human and
+ * split a batch, so neither half of the decision is right on its own.
+ * `[use computer]` / `[use browser]` are not — a surface switch hands nothing
+ * back and splits nothing — so `If a window titled "Save As" is open, then
+ * [use computer]` is legal (SPEC-use-computer.md §4.3). It may not be a
+ * control line's CONDITION; nothing needs to enforce that either, since a
+ * condition is judged and a directive is not a question.
  *
  * Both entry points take the instruction (the text after the `N. ` ordinal)
  * and strip a leading `[no-hooks]` marker themselves, for the reason

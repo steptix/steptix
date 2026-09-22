@@ -14,7 +14,7 @@ import type { TestReport, StepResult, RunSummary } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { aiConfigured } from '../config/loader.js';
 import { TokenTracker } from '../utils/tokens.js';
-import { launchBrowser, closeBrowser, BrowserTracker, resolveVideoMode, finalizeMainPageVideo, type CdpLaunchOptions } from '../browser/manager.js';
+import { launchBrowser, closeBrowser, BrowserTracker, resolveVideoMode, finalizeMainPageVideo, type BrowserSession, type CdpLaunchOptions } from '../browser/manager.js';
 import { executeStep, executeBranchedStep } from './step-executor.js';
 import type { StepExecutorOptions } from './step-executor.js';
 import { identifyStepGroups } from './step-grouper.js';
@@ -562,20 +562,76 @@ export async function runTest(
   // non-CDP path; the .webm is finalised + named in the `finally` below.
   const videoMode = resolveVideoMode(config.browser.video);
   const videoDir = path.resolve(config.reports.outputDir, 'videos');
-  const initialSession = await launchBrowser(config.browser, cdpOptions, {
-    videoDir,
-    // §4's provenance half. Present whenever a size is in effect, so a
-    // project-wide pin (§8) is named as such rather than looking like the
-    // test's own choice.
-    ...(config.browser.fixedViewport
-      ? { viewportSource: describeViewportSource(test.config.viewport) }
-      : {}),
+  /**
+   * The surface the next step runs on (SPEC-use-computer.md §4.5), the CLI's
+   * copy of the session's. Always `browser` until the `[use …]` directive
+   * lands; it is here now because the launch below reads it, and a launch rule
+   * with no state to read would have to be rewritten rather than extended.
+   */
+  let surface: 'browser' | 'computer' = 'browser';
+  /**
+   * The initial browser, once it exists. `undefined` before the first
+   * browser-surface step — the teardown below reads it and must tolerate a run
+   * that never launched one (a desktop-only test, or a test that timed out at
+   * step 0).
+   */
+  let initialSession: BrowserSession | undefined;
+  // THE LAUNCH IS DEFERRED (§4.6): the browser opens at the first step that
+  // runs while `surface` is `browser`, not here. Base-URL navigation moved
+  // into the closure with it — it needs a page, and a `goto` rejection must
+  // close the browser it just opened rather than leak the window past the
+  // `finally`, which cannot see a session the tracker never registered.
+  const browserTracker = BrowserTracker.deferred(async () => {
+    const launched = await launchBrowser(config.browser, cdpOptions, {
+      videoDir,
+      // §4's provenance half. Present whenever a size is in effect, so a
+      // project-wide pin (§8) is named as such rather than looking like the
+      // test's own choice.
+      ...(config.browser.fixedViewport
+        ? { viewportSource: describeViewportSource(test.config.viewport) }
+        : {}),
+    });
+    try {
+      if (baseUrl) {
+        logger.info(`Navigating to base URL: ${baseUrl}`);
+        await launched.page.goto(baseUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30_000,
+        });
+      }
+    } catch (err) {
+      try {
+        await closeBrowser(launched);
+      } catch {
+        // Best-effort; the original error is the one worth reporting.
+      }
+      throw err;
+    }
+    initialSession = launched;
+    return launched;
   });
-  const browserTracker = new BrowserTracker(initialSession);
   // `session` is a *snapshot* of the current active browser — re-read from
   // the tracker before/after each step so openBrowser/switchBrowser actions
   // can transparently shift which browser subsequent steps target.
-  let session = browserTracker.getActive();
+  //
+  // Definitely-assigned rather than optional: `ensureBrowser()` below fills it
+  // before anything reads it, and every one of the ~30 `session.page` reads in
+  // this function sits downstream of a call to it. Making it `| undefined`
+  // would put a `!` on all thirty and say nothing the comment does not.
+  let session!: BrowserSession;
+  /**
+   * Open the browser if this run has not yet, and refresh the `session`
+   * snapshot. The ONE place this runner launches one.
+   *
+   * Called at the top of each step (when the surface is `browser`) and at the
+   * top of a hook scope — a hook runs on the page surface by definition
+   * (§4.4), so a `before` hook is a page step for this purpose even though it
+   * is not in the step list.
+   */
+  const ensureBrowser = async (): Promise<BrowserSession> => {
+    session = await browserTracker.ensureLaunched();
+    return session;
+  };
 
   // Load the tool catalogue once per test. Node caches dynamic imports so
   // subsequent loads are cheap; failures are surfaced as a fatal startup
@@ -645,14 +701,8 @@ export async function runTest(
   let overallStatus: 'passed' | 'failed' = 'failed';
 
   try {
-    // Navigate to base URL if provided
-    if (baseUrl) {
-      logger.info(`Navigating to base URL: ${baseUrl}`);
-      await session.page.goto(baseUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30_000,
-      });
-    }
+    // (Base-URL navigation lives in the deferred launcher above — it needs a
+    // page, and there is none until the first browser-surface step.)
 
     const stepResults: StepResult[] = [];
     let timeoutDeadline = Date.now() + testTimeout;
@@ -818,6 +868,13 @@ export async function runTest(
       sourceSkills: (string | null)[],
       hookIndex: number,
     ): Promise<{ failed: boolean; error?: string }> => {
+      // A hook runs on the PAGE surface by definition (SPEC-use-computer.md
+      // §4.4 refuses `[use computer]` in a hook), and `before` hooks run ahead
+      // of step 1 — so a run with hooks opens its browser here rather than at
+      // the first step. One `await` for a scope, not per hook line:
+      // `ensureLaunched` is idempotent, but saying it once is what makes the
+      // launch point readable.
+      if (instructions.length > 0) await ensureBrowser();
       for (let idx = 0; idx < instructions.length; idx++) {
         const raw = instructions[idx]!;
         const toolCall = toolCalls[idx] ?? null;
@@ -1087,6 +1144,44 @@ export async function runTest(
         logger.error(`Test timeout after ${testTimeout}ms at step ${i + 1}`);
         timedOut = true;
         break;
+      }
+
+      // ── THE BROWSER LAUNCH (SPEC-use-computer.md §4.6) ──────────────────
+      //
+      // Same rule as the Sessions API's: the browser opens at the first step
+      // that runs while the surface is `browser`, so a desktop-only test run
+      // from the CLI opens none. Ahead of the control-flow guard below, which
+      // reads `session.page` for its executor options — this is the earliest
+      // point in the iteration and every page read in the body is downstream
+      // of it.
+      //
+      // A launch failure is THIS STEP's failure: the run records a failed row
+      // and bails, exactly as a refused step does, rather than throwing out of
+      // `runTest` with no report.
+      if (surface === 'browser' && !browserTracker.hasActive()) {
+        try {
+          await ensureBrowser();
+        } catch (err) {
+          const error = `browser launch failed: ${(err as Error).message}`;
+          logger.error(error);
+          stepResults.push(
+            tagOrigin(
+              {
+                index: i + 1,
+                instruction: test.steps[i] ?? '',
+                status: 'failed',
+                turns: [],
+                durationMs: 0,
+                retried: false,
+                error,
+                aiExplanation: error,
+              },
+              i,
+            ),
+          );
+          bail = true;
+          break;
+        }
       }
 
       // ── Control flow: a guard decides, and the planner says what follows ──
@@ -2223,7 +2318,11 @@ export async function runTest(
       !aborted &&
       !deliberateFailure &&
       config.ai.diagnoseFailures &&
-      !keyless
+      !keyless &&
+      // A diagnosis reads the page it failed on. A run that never launched a
+      // browser (§4.6) has none, and the one thing worse than no diagnosis is
+      // a crash inside the teardown that was about to write the report.
+      browserTracker.hasActive()
     ) {
       logger.info('Running failure diagnosis…');
       const diagnosis = await diagnoseFailure(report, session.page, aiClient, contextContent, {
@@ -2281,8 +2380,13 @@ export async function runTest(
     // relative path is written back onto the hoisted `report` so the
     // already-`return`ed object carries `videoRelPath` (try/return/finally
     // same-object mutation). Recording failures never break teardown.
+    //
+    // `initialSession` is undefined when the run never launched a browser
+    // (§4.6) — a desktop-only test, or a failure before step 1. `closeAll()`
+    // over an unlaunched tracker is already a no-op, so the else arm is the
+    // right fallback, not a special case.
     const closeContext = async (): Promise<void> => {
-      if (initialSession.cdp) {
+      if (initialSession?.cdp) {
         await closeBrowser(initialSession);
       } else {
         await browserTracker.closeAll();
@@ -2290,7 +2394,10 @@ export async function runTest(
     };
     if (report) {
       const savedAbs = await finalizeMainPageVideo({
-        page: initialSession.page,
+        // `undefined` on a run that never launched (§4.6). The helper takes it
+        // optional and still runs `closeContext()`, so teardown is unchanged;
+        // there is simply no `.webm` to finalise.
+        page: initialSession?.page,
         mode: videoMode,
         passed: overallStatus === 'passed',
         videoDir,

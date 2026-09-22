@@ -6,6 +6,7 @@ import type { StepResult, TestReport } from '../report/types.js';
 import type { TokenTracker } from '../utils/tokens.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import { parseUseStep } from '../parser/use-step.js';
 import { loopCompileRefusal } from '../runner/control-flow.js';
 import { buildCodeBehindRegistry } from './loader.js';
 import {
@@ -16,6 +17,7 @@ import {
   guardedValues,
   stepEnvRefs,
   stepParameters,
+  SURFACE_SWITCH_NOT_COMPILED,
   valueMatchWarning,
   type GeneratedEntry,
 } from './generate.js';
@@ -1485,6 +1487,15 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
       // rationale.
       : parseSetStep(text)
       ? 'a Set step is dispatched, not compiled'
+      // A `[use computer]` / `[use browser]` line, on the same terms as `Set`
+      // and the unconditional flow-control step: the loop dispatches it with
+      // no model call, so there is nothing recorded for an entry to replace
+      // (SPEC-use-computer.md §9). `parseUseStep` normalises the `[no-hooks]`
+      // marker itself, which matters here because `text` can be a RAW authored
+      // line still carrying one — the same reason `parseSetStep` is asked the
+      // raw text a line above.
+      : parseUseStep(text)
+      ? SURFACE_SWITCH_NOT_COMPILED
       : flowControl && flowControl.body === undefined
       ? DISPATCHED_NOT_COMPILED
       : !binding

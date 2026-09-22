@@ -28,7 +28,9 @@ import { TokenTracker } from '../utils/tokens.js';
 import type { Page } from 'playwright';
 import {
   launchBrowser,
+  closeBrowser,
   BrowserTracker,
+  NoBrowserLaunchedError,
   resolveVideoMode,
   finalizeMainPageVideo,
   briefly,
@@ -1133,22 +1135,57 @@ interface OpenCompile {
   anyFailed: boolean;
 }
 
+/**
+ * The surface a session's steps are answered from
+ * (SPEC-use-computer.md §4.5).
+ *
+ * Exported because it is the one piece of this state other layers need to
+ * name: the `[use computer]` / `[use browser]` directive sets it, the step
+ * boundary reads it to decide whether to launch a browser, and the report
+ * marks the steps that ran off-page with it.
+ */
+export type SessionSurface = 'browser' | 'computer';
+
 interface ManagedSession {
   id: string;
   /** The compile riding this session's run, when one is open. */
   liveCompile?: OpenCompile | undefined;
   /** Snapshot of the currently-active browser. Refreshed from `browserTracker`
    *  after every step so subsequent steps target whatever openBrowser /
-   *  switchBrowser / closeBrowser left as active. */
-  browserSession: BrowserSession;
+   *  switchBrowser / closeBrowser left as active.
+   *
+   *  `undefined` until the browser launches. The launch moved out of session
+   *  creation and onto the first step that runs while `surface` is `browser`
+   *  (SPEC-use-computer.md §4.6), so a session created for a test whose first
+   *  step is `[use computer]` holds none — and the out-of-band readers
+   *  (`getPageContent`, `activePageFor`, the listings) must answer that rather
+   *  than launch one. */
+  browserSession: BrowserSession | undefined;
   /** Owns every browser launched in this session — the initial one plus any
    *  added by `openBrowser`. Closing the session calls `closeAll()` so no
    *  named browser leaks. */
   browserTracker: BrowserTracker;
-  /** The MAIN page captured at session creation — needed to read its
+  /** The MAIN page captured at the browser launch — needed to read its
    *  `video()` handle at closeSession time, since the active page may have
-   *  shifted via openBrowser/switchBrowser. Tier 1 records the main page only. */
-  mainPage: Page;
+   *  shifted via openBrowser/switchBrowser. Tier 1 records the main page only.
+   *
+   *  `undefined` until the browser launches (§4.6); `finalizeMainPageVideo`
+   *  takes it optional for exactly that reason. */
+  mainPage: Page | undefined;
+  /**
+   * Which surface the next step is answered from (SPEC-use-computer.md §4.5):
+   * `browser` = DOM snapshot + Playwright, `computer` = a screenshot of the
+   * whole screen driven through nut.js.
+   *
+   * Session state, not file state: TestBench posts steps one request at a
+   * time, so `[use computer]` in step 1 of a file is a fact about the session
+   * from then on, not something the server could read off the document.
+   *
+   * Always `browser` today — the `[use …]` directive that flips it is a
+   * separate change. It is read here for one thing only: the step boundary
+   * calls `ensureLaunched()` when, and only when, this says `browser`.
+   */
+  surface: SessionSurface;
   /** Resolved video-recording mode for this session (from the test's project
    *  `browser.video`). */
   videoMode: VideoMode;
@@ -1922,12 +1959,17 @@ export class SessionManager {
       return null;
     }
 
-    const page = session.browserSession.pageTracker.getActive();
+    // A state read must not start a browser (§4.6). An unlaunched session is a
+    // real, listable session with no page — report it with empty url/title
+    // rather than throwing, which is what every other "page is in an
+    // intermediate state" case here already does.
+    const page = session.browserSession?.pageTracker.getActive();
     let currentUrl = '';
     let pageTitle = '';
     let screenshotBase64 = '';
 
     try {
+      if (!page) throw new NoBrowserLaunchedError();
       currentUrl = page.url();
       pageTitle = await page.title();
       const shot = await captureScreenshot(page);
@@ -1987,6 +2029,11 @@ export class SessionManager {
       return null;
     }
 
+    // Reading a page is not a reason to open a browser (§4.6). Distinct from
+    // the `null` above, which the route turns into a 404: "this session has no
+    // browser yet" and "this session does not exist" have opposite remedies.
+    if (!session.browserSession) throw new NoBrowserLaunchedError();
+
     const page = session.browserSession.pageTracker.getActive();
     const captured = await capturePageContent(page, session.browserConfig, opts);
 
@@ -2015,6 +2062,11 @@ export class SessionManager {
   activePageFor(sessionId: string): Page | null {
     const session = this.sessions.get(this.sessionKey(sessionId));
     if (!session || session.status === 'closed') return null;
+    // Throws rather than returning null: null already means "unknown or closed
+    // session" here, and the route answers that with a 404. A session that
+    // simply has not launched a browser yet is a different answer (§4.6) and
+    // gets its own status.
+    if (!session.browserSession) throw new NoBrowserLaunchedError();
     return session.browserSession.pageTracker.getActive();
   }
 
@@ -2178,12 +2230,14 @@ export class SessionManager {
     for (const [id, session] of this.sessions) {
       if (session.status === 'closed') continue;
 
-      const page = session.browserSession.pageTracker.getActive();
+      // `?.` — a session whose browser has not launched yet (§4.6) is still a
+      // session worth listing; it simply has no url to report.
+      const page = session.browserSession?.pageTracker.getActive();
       let currentUrl = '';
       let pageTitle = '';
 
       try {
-        currentUrl = page.url();
+        currentUrl = page?.url() ?? '';
         // page.title() is async but we need sync here; use URL as fallback
       } catch {
         // ignore
@@ -2222,10 +2276,12 @@ export class SessionManager {
 
     return Promise.all(
       live.map(async ([id, session]) => {
-        const page = session.browserSession.pageTracker.getActive();
+        // `?.` for the same reason as the sync listing above: a session that
+        // has not launched a browser yet (§4.6) still gets a row.
+        const page = session.browserSession?.pageTracker.getActive();
         let currentUrl = '';
         try {
-          currentUrl = page.url();
+          currentUrl = page?.url() ?? '';
         } catch {
           // ignore — a closed page still has a session row worth reporting
         }
@@ -2234,7 +2290,7 @@ export class SessionManager {
           briefly(
             (async () => {
               try {
-                return await page.title();
+                return page ? await page.title() : '';
               } catch {
                 return '';
               }
@@ -2245,7 +2301,7 @@ export class SessionManager {
           briefly(
             (async () => {
               try {
-                return await session.browserSession.pageTracker.activeTabRef();
+                return (await session.browserSession?.pageTracker.activeTabRef()) ?? null;
               } catch {
                 // A diagnostic field must never be the reason a listing fails.
                 return null;
@@ -2511,36 +2567,70 @@ export class SessionManager {
     // 'off'. Under CDP launchBrowser short-circuits before newContext, so
     // nothing records.
     const videoDir = pathJoin(reportOutputDir, 'videos');
-    // Override only `video` with the per-project record mode; the rest of the
-    // browser config stays server-global. videoDir is co-located with where
-    // reports are written (the project-anchored reportOutputDir) so the report's
-    // relative <video> link resolves.
-    const browserSession = await launchBrowser(
-      // `fixedViewport` is spread in ONLY when the test declared one, so a
-      // server (or project, §8) that pinned its own keeps it on the sessions
-      // that said nothing — which is the §1 precedence, test over project,
-      // expressed as an absence rather than an override.
-      { ...this.config.browser, video: videoMode, ...(fixedViewport ? { fixedViewport } : {}) },
-      sessionConfig?.cdp,
-      {
-        videoDir,
-        // §4's launch line: the size AND its source. Passed whenever a size is
-        // in effect at all, so a project-wide pin is named as such instead of
-        // reading like the test's own choice.
-        ...((fixedViewport ?? this.config.browser.fixedViewport)
-          ? { viewportSource: describeViewportSource(sessionConfig?.viewport) }
-          : {}),
-      },
-    );
-    const browserTracker = new BrowserTracker(browserSession);
 
-    // Everything past the browser launch can throw (notably an invalid baseUrl
-    // makes page.goto reject) — and the session isn't registered in
-    // `this.sessions` until the very end, so a throw here would orphan the
-    // just-launched browser: the caller's later closeSession(sessionId) finds
-    // nothing to close and the window leaks. Tear the browser down on any
-    // setup failure before re-throwing so the error still surfaces but no
-    // browser is left behind.
+    // THE LAUNCH IS DEFERRED (SPEC-use-computer.md §4.6). Everything the launch
+    // needs is computed HERE, at creation, and frozen into this closure — the
+    // viewport spec and its `cdp` conflict, the record mode, the videos dir.
+    // What moved is only *when* the browser appears: the first step that runs
+    // while `session.surface` is `browser`, which for every test written before
+    // computer mode is step 1. A test that opens with `[use computer]` never
+    // triggers it and never starts a browser at all.
+    //
+    // `session` is assigned by the step boundary, not from here — this closure
+    // exists before the ManagedSession does, so it captures nothing of it.
+    const launcher = async (): Promise<BrowserSession> => {
+      // Override only `video` with the per-project record mode; the rest of the
+      // browser config stays server-global. videoDir is co-located with where
+      // reports are written (the project-anchored reportOutputDir) so the
+      // report's relative <video> link resolves.
+      const launched = await launchBrowser(
+        // `fixedViewport` is spread in ONLY when the test declared one, so a
+        // server (or project, §8) that pinned its own keeps it on the sessions
+        // that said nothing — which is the §1 precedence, test over project,
+        // expressed as an absence rather than an override.
+        { ...this.config.browser, video: videoMode, ...(fixedViewport ? { fixedViewport } : {}) },
+        sessionConfig?.cdp,
+        {
+          videoDir,
+          // §4's launch line: the size AND its source. Passed whenever a size is
+          // in effect at all, so a project-wide pin is named as such instead of
+          // reading like the test's own choice.
+          ...((fixedViewport ?? this.config.browser.fixedViewport)
+            ? { viewportSource: describeViewportSource(sessionConfig?.viewport) }
+            : {}),
+        },
+      );
+      // BASE-URL NAVIGATION MOVED HERE WITH THE LAUNCH, and so did the
+      // teardown around it. An invalid baseUrl makes `page.goto` reject, and
+      // the browser it just opened is not tracked anywhere yet — the tracker
+      // only registers the session this closure RESOLVES with — so a throw
+      // would leak the window. Close what we opened, then rethrow: the step
+      // boundary turns the rejection into that step's failure.
+      try {
+        if (sessionConfig?.baseUrl) {
+          logger.info(`Session "${sessionId}": navigating to base URL ${sessionConfig.baseUrl}`);
+          await launched.page.goto(sessionConfig.baseUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: 30_000,
+          });
+        }
+      } catch (err) {
+        try {
+          await closeBrowser(launched);
+        } catch {
+          // Best-effort cleanup; surface the ORIGINAL error to the caller.
+        }
+        throw err;
+      }
+      return launched;
+    };
+    const browserTracker = BrowserTracker.deferred(launcher);
+
+    // Nothing below launches a browser any more, so the orphaned-browser case
+    // this try/catch was written for (a throw between the launch and
+    // `this.sessions.set`) can no longer happen from the launch itself. It is
+    // kept because `closeAll()` over an unlaunched tracker is a no-op and an
+    // `openBrowser` inside a future setup step would put that case back.
     try {
       const tokenTracker = new TokenTracker();
       const aiClient = new AiClient(aiConfig, tokenTracker);
@@ -2552,20 +2642,18 @@ export class SessionManager {
         logger.info(`Session "${sessionId}": loaded ${context.files.length} context file(s)`);
       }
 
-      // Navigate to baseUrl if provided
-      if (sessionConfig?.baseUrl) {
-        logger.info(`Session "${sessionId}": navigating to base URL ${sessionConfig.baseUrl}`);
-        await browserSession.page.goto(sessionConfig.baseUrl, {
-          waitUntil: 'domcontentloaded',
-          timeout: 30_000,
-        });
-      }
+      // (baseUrl navigation lives in `launcher` above — it needs a page.)
 
       const session: ManagedSession = {
         id: sessionId,
-        browserSession,
+        // Both filled by the step boundary at the first browser-surface step.
+        browserSession: undefined,
         browserTracker,
-        mainPage: browserSession.page,
+        mainPage: undefined,
+        // Every session starts on the page (§4.5). `[use computer]` is the
+        // only thing that changes it, and it is a STEP, so it cannot have run
+        // yet.
+        surface: 'browser',
         videoMode,
         reportOutputDir,
         videoDir,
@@ -2599,7 +2687,7 @@ export class SessionManager {
       return session;
     } catch (err) {
       logger.warn(
-        `Session "${sessionId}": creation failed after browser launch — closing the orphaned browser. ${err instanceof Error ? err.message : String(err)}`,
+        `Session "${sessionId}": creation failed — closing any browser it opened. ${err instanceof Error ? err.message : String(err)}`,
       );
       try {
         await browserTracker.closeAll();
@@ -4677,6 +4765,71 @@ export class SessionManager {
           break;
         }
         const originalStep = effectiveSteps[i]!;
+
+        // ── THE BROWSER LAUNCH (SPEC-use-computer.md §4.6) ────────────────
+        //
+        // The one place in this server that opens a browser for a session. It
+        // is here, at the top of the step, because it must be ahead of every
+        // page capture and every `executeStep` call in this loop — and there
+        // are a dozen of those, down four branches.
+        //
+        // Deliberately NOT at session creation: TestBench posts steps one
+        // request at a time, so at creation the server cannot know whether
+        // step 1 is `[use computer]`. For every test written before computer
+        // mode this fires on step 1 and nothing observable changes but the
+        // timing of the launch.
+        //
+        // `session.surface` is always `browser` until the `[use …]` directive
+        // lands, so today this always launches — a test that never reaches a
+        // step (an empty batch) still never launches one.
+        //
+        // A failed launch is THIS STEP's failure, not a thrown batch: the
+        // author sees "step 1 failed: <the launch error>" where they used to
+        // see the same message from `POST /sessions`. `ensureLaunched` does not
+        // cache the rejection, so a retry genuinely retries.
+        //
+        // Every `session.browserSession!` in the rest of this loop body reads
+        // its non-null assertion from HERE: a browser-surface step cannot get
+        // past this block without one, and a step that failed to launch one
+        // `break`s out.
+        if (session.surface === 'browser' && !session.browserTracker.hasActive()) {
+          try {
+            const launched = await session.browserTracker.ensureLaunched();
+            session.browserSession = launched;
+            // The MAIN page is the one the FIRST launch produced — `??=`, not
+            // `=`, so a later relaunch (after `closeBrowser default`) cannot
+            // re-point the video handle at a different page.
+            session.mainPage ??= launched.page;
+          } catch (err) {
+            const error = err instanceof Error ? err.message : String(err);
+            const frame = frameInfoFor(i);
+            logger.error(`Session "${sessionId}" step ${i + 1}: browser launch failed — ${error}`);
+            emit({ type: 'step:start', line: sourceLineFor(i), ...(frame && { frame }) });
+            emit({ type: 'step:fail', line: sourceLineFor(i), error, ...(frame && { frame }) });
+            results.push({
+              step: originalStep,
+              status: 'failed',
+              actions: [],
+              screenshot: '',
+              reasoning: error,
+              outputs: {},
+            });
+            fullStepResults.push({
+              index: i + 1,
+              instruction: originalStep,
+              status: 'failed',
+              turns: [],
+              durationMs: 0,
+              retried: false,
+              error,
+              aiExplanation: error,
+            });
+            overallStatus = 'failed';
+            errorInfo = { step: i, message: error };
+            break;
+          }
+        }
+
         /** Set when this step ended its flow: the last index the return skips,
          *  which the loop tail resumes after (stories/step-flow-control.md). */
         let flowControlJumpTo: number | null = null;
@@ -4948,7 +5101,7 @@ export class SessionManager {
           let branchedResults: StepResult[];
           try {
             branchedResults = await executeBranchedStep(group, stepsTotal, {
-              page: session.browserSession.pageTracker.getActive(),
+              page: session.browserSession!.pageTracker.getActive(),
               // `runConfig`, not `this.config` — see the resolution above.
               config: runConfig,
               aiClient: session.aiClient,
@@ -4961,7 +5114,7 @@ export class SessionManager {
               apiResponseStore: session.apiResponseStore,
               csrfTokens: session.csrfTokens,
               resolvedParameters,
-              pageTracker: session.browserSession.pageTracker,
+              pageTracker: session.browserSession!.pageTracker,
               browserTracker: session.browserTracker,
               // The poller reads the page on every poll and sends the snapshot
               // to the model, so it needs the same secret set the step prompt
@@ -5026,7 +5179,7 @@ export class SessionManager {
 
             let currentUrl = '';
             try {
-              currentUrl = session.browserSession.pageTracker.getActive().url();
+              currentUrl = session.browserSession!.pageTracker.getActive().url();
             } catch { /* ignore */ }
 
             session.conversationHistory.push(
@@ -5201,7 +5354,7 @@ export class SessionManager {
               // arrives as frame inputs.
               redact: (text) => redact(text, secretsNow()),
               executorOptions: {
-                page: session.browserSession.pageTracker.getActive(),
+                page: session.browserSession!.pageTracker.getActive(),
                 config: runConfig,
                 aiClient: session.aiClient,
                 contextContent: session.contextContent,
@@ -5213,7 +5366,7 @@ export class SessionManager {
                 apiResponseStore: session.apiResponseStore,
                 csrfTokens: session.csrfTokens,
                 resolvedParameters,
-                pageTracker: session.browserSession.pageTracker,
+                pageTracker: session.browserSession!.pageTracker,
                 browserTracker: session.browserTracker,
                 // The condition reaches the model AUTHORED, beside a `## Values`
                 // block, so the judge needs the same env context a step gets.
@@ -5483,7 +5636,7 @@ export class SessionManager {
             if (runConfig.execution.screenshotOnFailure) {
               try {
                 const shot = await captureScreenshot(
-                  session.browserSession.pageTracker.getActive(),
+                  session.browserSession!.pageTracker.getActive(),
                   runConfig.browser.fullPageScreenshots,
                 );
                 if (shot?.base64) stepResult.screenshotBase64 = shot.base64;
@@ -5588,9 +5741,9 @@ export class SessionManager {
             }
             const startedAt = Date.now();
             const outcome = await executeToolStep(toolCall, {
-              page: session.browserSession.pageTracker.getActive(),
-              context: session.browserSession.context,
-              browser: session.browserSession.browser,
+              page: session.browserSession!.pageTracker.getActive(),
+              context: session.browserSession!.context,
+              browser: session.browserSession!.browser,
               resolvedParameters,
               catalogue: toolCatalogue,
               ...(session.sessionConfig.baseUrl !== undefined && {
@@ -5685,7 +5838,7 @@ export class SessionManager {
               stepsTotal,
               stepInstruction,
               {
-                page: session.browserSession.pageTracker.getActive(),
+                page: session.browserSession!.pageTracker.getActive(),
                 // `runConfig`, not `this.config` — see the resolution above.
                 config: runConfig,
                 aiClient: session.aiClient,
@@ -5710,7 +5863,7 @@ export class SessionManager {
                   projectRoot: projectBundle.projectRoot,
                 },
                 resolvedParameters,
-                pageTracker: session.browserSession.pageTracker,
+                pageTracker: session.browserSession!.pageTracker,
                 browserTracker: session.browserTracker,
                 ...(stepCache && { stepCache }),
                 cacheEnabled:
@@ -5795,7 +5948,7 @@ export class SessionManager {
           let errorScreenshot = '';
           try {
             const shot = await captureScreenshot(
-              session.browserSession.pageTracker.getActive(),
+              session.browserSession!.pageTracker.getActive(),
             );
             errorScreenshot = shot?.base64
               ? `data:image/png;base64,${shot.base64}`
@@ -6014,7 +6167,7 @@ export class SessionManager {
         // Update conversation history
         let currentUrl = '';
         try {
-          currentUrl = session.browserSession.pageTracker.getActive().url();
+          currentUrl = session.browserSession!.pageTracker.getActive().url();
         } catch {
           // ignore
         }
@@ -6527,17 +6680,25 @@ export class SessionManager {
         // active. If the tracker has no browsers left (closeBrowser closed
         // the only one) or the active one was disconnected by the step
         // (e.g. "Close the browser"), tear down the session.
-        let trackerEmpty = false;
-        try {
-          session.browserSession = session.browserTracker.getActive();
-        } catch {
-          trackerEmpty = true;
-        }
-        if (trackerEmpty || isBrowserClosed(session.browserSession)) {
-          logger.info(`Session "${sessionId}": browser closed by step, removing session`);
-          session.status = 'closed';
-          this.sessions.delete(this.sessionKey(sessionId));
-          break;
+        //
+        // Skipped entirely when the session has never had a browser (§4.6) —
+        // a computer-surface run that launched none. `getActive()` throws
+        // there too, but "no browser was ever opened" is not "the step closed
+        // the browser", and tearing the session down for it would end a
+        // desktop-only run at its first step.
+        if (session.browserTracker.hasActive() || session.browserSession) {
+          let trackerEmpty = false;
+          try {
+            session.browserSession = session.browserTracker.getActive();
+          } catch {
+            trackerEmpty = true;
+          }
+          if (trackerEmpty || !session.browserSession || isBrowserClosed(session.browserSession)) {
+            logger.info(`Session "${sessionId}": browser closed by step, removing session`);
+            session.status = 'closed';
+            this.sessions.delete(this.sessionKey(sessionId));
+            break;
+          }
         }
 
         // Where the run goes next, with both features' rules applied in the
@@ -6592,7 +6753,9 @@ export class SessionManager {
     let pageTitle = '';
     if (session.status !== 'closed') {
       try {
-        pageTitle = await session.browserSession.pageTracker.getActive().title();
+        // `?.` — a run that never launched a browser (§4.6) has no title, and
+        // that is a report with a blank title, not a failure.
+        pageTitle = (await session.browserSession?.pageTracker.getActive().title()) ?? '';
       } catch {
         // browser may be in an intermediate state
       }

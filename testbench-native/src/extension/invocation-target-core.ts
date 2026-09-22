@@ -34,7 +34,7 @@ import * as path from 'node:path';
 // A bare package import stays loadable under `node --test`'s direct-.ts
 // loading (env-data-completion-core.ts set the precedent) — it resolves
 // through node_modules to runner-core's built JS either way.
-import { parseParameters } from 'ai-ui-automation-runner-core';
+import { parseParameters, parseUseStep, USE_SURFACES } from 'ai-ui-automation-runner-core';
 
 /**
  * Extensions a tool file may carry, in the order the registry probes them.
@@ -589,4 +589,80 @@ export function skillIoFor(skillsDir: string, name: string): SkillIo | null {
   };
   skillIoCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, io });
   return io;
+}
+
+// ---------------------------------------------------------------------------
+// The surface switches, as completion rows
+// ---------------------------------------------------------------------------
+
+/**
+ * One bracket-directive completion offered at the start of a step, as plain
+ * data. The provider maps these onto `vscode.CompletionItem`.
+ *
+ * Plain data rather than items built in `section-providers.ts` for the reason
+ * `section-diagnostics-core.ts` exists: the DECISION — which tokens are
+ * offered and what they are labelled — is then unit-testable under
+ * `node --test`, which cannot load the `vscode` module.
+ */
+export interface DirectiveCompletion {
+  /** The text inserted, which is also the label. */
+  token: string;
+  detail: string;
+  documentation: string;
+}
+
+/**
+ * `[use computer]` and `[use browser]`, in that order
+ * (docs/specs/SPEC-use-computer.md §10.3).
+ *
+ * Derived from runner-core's `USE_SURFACES` rather than typed out, so the
+ * dropdown cannot offer a spelling the grammar refuses — the property every
+ * other mirror in this file is written for. §4.2 makes that matter more than
+ * it used to: a near miss like `[computer]` is now a parse ERROR rather than
+ * prose, so the list is what stops an author guessing.
+ */
+export function useDirectiveCompletions(): DirectiveCompletion[] {
+  return USE_SURFACES.map((surface) => ({
+    token: `[use ${surface}]`,
+    detail: 'surface switch',
+    documentation:
+      surface === 'computer'
+        ? "Drive the operating system's screen from here on — windows, dialogs " +
+          'and menus — answered from a screenshot rather than the page.'
+        : 'Return to the page: DOM snapshots and Playwright, on the tab the ' +
+          'test left.',
+  }));
+}
+
+/**
+ * What kind of line the debugger's Step Into is parked on — the decision
+ * behind `pausedLineKind` in `commands/index.ts`, and the only thing that
+ * decides which one-shot flag (if any) an F11 sends.
+ *
+ * Delegates to `parseInvocationLine` rather than matching `[tool:` itself:
+ * that parser mirrors the runner's grammar, where the colon is OPTIONAL
+ * (`[tool echo]` ≡ `[tool: echo]`) and a markdown link or prose like
+ * `[skill level: expert]` is declined. A local regex would disagree with the
+ * runner on exactly those lines — and disagreeing here means arming the
+ * code-behind flag on a line the server is about to dispatch as a tool.
+ *
+ * `parseUseStep` is asked on the same terms and for the same reason — it is
+ * runner-core's mirror of the grammar the server runs, not a look-alike. It is
+ * asked FIRST only because it is the cheaper test; the two grammars cannot
+ * both claim a line, since `[use` is not an invocation keyword.
+ *
+ * `'use'` is the NON-STEPPABLE answer (docs/specs/SPEC-use-computer.md §10.3):
+ * a surface switch is dispatched by the run loop with no model call, and §9
+ * excludes it from compilation outright, so there is no code-behind entry for
+ * `pauseAtNextCodeBehind` to pause at and no "into" for F11 to take. Under
+ * `'plain'` the flag was harmless but misleading — F11 degraded silently to an
+ * ordinary step pause.
+ *
+ * The text arrives with its `N. ` ordinal still on it (every caller reads it
+ * straight off the editor), so the prefix is stripped here. `parseUseStep`
+ * normalises the `[no-hooks]` marker itself.
+ */
+export function classifyDebuggableLine(text: string): 'tool' | 'skill' | 'plain' | 'use' {
+  if (parseUseStep(text.replace(/^\s*\d+\.\s+/, ''))) return 'use';
+  return parseInvocationLine(text)?.kind ?? 'plain';
 }

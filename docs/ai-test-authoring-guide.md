@@ -14,7 +14,7 @@ The output is a Markdown test file, optionally accompanied by reusable Markdown 
 4. Make the expected result explicit. A successful click is not evidence that the business requirement passed. Add a `Verify` or `Assert` step with a concrete expected value or state.
 5. Supply every referenced input before use, and explicitly name every captured value that later steps need. Use placeholders for values that change between runs.
 6. Reuse an existing skill or tool only after reading its file. If a required helper does not exist, create it within the requested scope or identify it as a missing dependency. Calling a plausible name does not create a helper.
-7. For unattended runs, resolve all parameters and avoid `[input: ...]`, `[interactive]`, and instructions that require a human answer.
+7. For unattended runs, resolve all parameters and avoid `[input: ...]`, `[interactive]`, and instructions that require a human answer. `[use computer]` is a different case: nobody types, but the run drives the real mouse on a visible desktop nobody may touch, and the project must have opted in — see "Leaving the browser" below before writing one.
 8. Return the test and any required supporting files separately. Keep explanations and assumptions outside executable step text. Report whether you actually ran the test; a parser check alone does not establish that the application flow passes.
 
 ## Project files and their roles
@@ -119,7 +119,36 @@ Tabs share their browser session. A separately opened browser supports independe
 
 Upload paths are resolved relative to the **test file's directory**, including upload steps expanded from a skill. Prefer forward slashes. Create or supply the fixture files; a path in prose does not generate a file. The upload action handles file inputs and file-chooser controls, not arbitrary operating-system UI.
 
-The engine uses the DOM and can also use screenshots when configured. Do not promise pixel-perfect visual regression, native desktop automation, accessibility audits, or arbitrary JavaScript execution as built-in natural-language test assertions. Implement specialised checks in tools when appropriate. Downloads, drag-and-drop choreography, and native browser-dialog handling should use a verified project tool when the standard action vocabulary is insufficient.
+The engine uses the DOM and can also use screenshots when configured. Do not promise pixel-perfect visual regression, accessibility audits, or arbitrary JavaScript execution as built-in natural-language test assertions. Implement specialised checks in tools when appropriate. Downloads and drag-and-drop choreography should use a verified project tool when the standard action vocabulary is insufficient. Native dialogs and other operating-system windows are not in this table because they are not in the page; they are reached by switching surface — see "Leaving the browser: `[use computer]` and `[use browser]`" below.
+
+## Leaving the browser: `[use computer]` and `[use browser]`
+
+Two whole-step directives switch which **surface** the following steps run on. From `[use computer]` on, each step is answered from a screenshot of the primary display and nothing else — no DOM snapshot, no Playwright — and the model's answer is performed as a real mouse move, click, or keystroke. `[use browser]` returns to DOM snapshots and Playwright on the same tab the test left. Use it for what is genuinely not in the page: a PDF viewer's toolbar, a print dialog, a native Save As window, a file picker, an installer.
+
+```markdown
+## Steps
+1. Navigate to statement.pdf
+2. Wait for the PDF to finish loading
+3. [use computer]
+4. Focus the window whose title contains "statement.pdf"
+5. Click the Print button in the PDF viewer's toolbar
+6. Wait until the Print dialog is showing
+7. Click the Cancel button in the Print dialog
+8. [use browser]
+9. Verify the page URL ends with statement.pdf
+```
+
+Rules the generated file must respect:
+
+- **The directive is the whole step.** A bare bracket token alone on the line, like `[interactive]`. `[use computer] Click Cancel` is a parse error, not two steps, and so is any argument. The colon is optional (`[use: browser]` is the same directive). A step that is nothing but an unrecognised bracket — `[computer]`, `[use the computer]`, `[computer-use]` — is also a parse error, by design: none of them should reach a model as prose.
+- **The project must opt in.** `desktop.enabled: true` in `aiui.config.json`, which defaults to `false`. Without it, `[use computer]` fails the step. Do not write a computer-mode test for a project whose config you have not read.
+- **Switching surface arranges nothing.** It changes what the model is shown and how its answer is performed, and nothing else — so when a run starts from an editor, the first computer-mode screenshot is of that editor. Write a step that brings the target window forward. Two phrasings are answered from the OS window list rather than from pixels: `Focus the window whose title contains "Save As"`, and `Wait until a window titled "Save As" is open` / `… is gone`.
+- **A test whose first step is `[use computer]` launches no browser at all.** That is how a native application is tested here.
+- **The person at the machine must not touch the mouse or the keyboard** while a computer-mode step runs, and the desktop must be visible and unlocked. Only one computer-mode run per machine — the framework takes a lock and refuses a second. Say this in the test's prose header; do not generate a computer-mode test as if it were an ordinary unattended one.
+- **Captures are of the whole screen**, including whatever else is on the desktop, and they go into the report. Text redaction cannot mask pixels. `desktop.reportScreenshots: false` keeps desktop captures out of the report.
+- **No cache and no code-behind for these steps.** A recorded coordinate has nothing to re-validate against on a machine whose resolution or window layout has moved, so a step that ran in computer mode stays AI-driven when the file is compiled.
+
+Worked examples: `templates/init/tests/pdf-print-cancel.md` (open a print dialog and cancel it) and `templates/init/tests/pdf-save-as.md` (save through the native Save As dialog, then confirm the file landed with `[tool: assert_file_exists]`, because nothing in the browser vocabulary can look at a file system).
 
 ## Waits and assertions
 
@@ -561,7 +590,7 @@ CDP uses persistent browser state. Configure `cdp` and an appropriate `cdpTab` (
 - Every referenced skill/tool exists, all required inputs are passed, and output aliases name real outputs.
 - Environment selection, relative file paths, and fixture contents are correct for the execution project.
 - Waits name observable states; assertions can fail when the requirement is violated.
-- Unattended tests contain no unresolved human dependencies.
+- Unattended tests contain no unresolved human dependencies. A `[use computer]` test says in its prose what the machine must look like — visible unlocked desktop, mouse untouched, `desktop.enabled: true` — and brings its target window forward itself.
 - Specialised or external operations use implemented tools, not invented natural-language capabilities.
 - The delivery distinguishes “written”, “parser-checked”, and “executed successfully”.
 
@@ -577,6 +606,7 @@ Use these when extending or checking this guide. Source and tests take precedenc
 | Tool signatures, lookup, and execution | [types.ts](../src/tools/types.ts), [registry.ts](../src/tools/registry.ts), [executor.ts](../src/tools/executor.ts), [finalise.ts](../src/tools/finalise.ts) |
 | Supported AI actions and interpretation | [types.ts](../src/ai/types.ts), [prompts.ts](../src/ai/prompts.ts), [step-executor.ts](../src/runner/step-executor.ts) |
 | Table reads: action validation and extraction | [action-parser.ts](../src/ai/action-parser.ts), [actions.ts](../src/browser/actions.ts), [SPEC-structured-table-reads.md](specs/SPEC-structured-table-reads.md) |
+| Computer mode: surface switch, screen actions, window lookup | [SPEC-use-computer.md](specs/SPEC-use-computer.md), [control-line.ts](../src/parser/control-line.ts), [invocation-parser.ts](../src/parser/invocation-parser.ts) |
 | Watches, decisions, loops, hooks, and test execution | [step-grouper.ts](../src/runner/step-grouper.ts), [control-line.ts](../src/parser/control-line.ts), [control-flow.ts](../src/runner/control-flow.ts), [hooks.ts](../src/runner/hooks.ts), [test-runner.ts](../src/runner/test-runner.ts) |
 | MCP inputs and limitations | [schemas.ts](../src/mcp/schemas.ts), [assemble.ts](../src/mcp/assemble.ts) |
 | Defaults and application context | [defaults.ts](../src/config/defaults.ts), [loader.ts](../src/context/loader.ts) |

@@ -43,14 +43,49 @@ vi.mock('../src/browser/manager.js', () => {
   class BrowserTracker {
     getActive: ReturnType<typeof vi.fn>;
     closeAll: ReturnType<typeof vi.fn>;
+    hasActive: ReturnType<typeof vi.fn>;
+    ensureLaunched: ReturnType<typeof vi.fn>;
     constructor(initialSession: typeof mockBrowserSession) {
       this.getActive = vi.fn(() => initialSession);
       this.closeAll = vi.fn(async () => {});
+      this.hasActive = vi.fn(() => true);
+      this.ensureLaunched = vi.fn(async () => initialSession);
+    }
+    /**
+     * Lazy twin of the real static (SPEC-use-computer.md §4.6). Modelled, not
+     * stubbed: nothing launches until ensureLaunched(), and it launches at
+     * most once — so these suites exercise the same launch-at-first-step rule
+     * the session manager now follows instead of hiding it behind a mock that
+     * always has a browser.
+     */
+    static deferred(launch: () => Promise<any>): BrowserTracker {
+      const tracker = new BrowserTracker(undefined as any);
+      let launched: any;
+      tracker.hasActive = vi.fn(() => launched !== undefined);
+      tracker.getActive = vi.fn(() => {
+        if (!launched) throw new Error('no browser has been launched in this session');
+        return launched;
+      });
+      tracker.ensureLaunched = vi.fn(async () => {
+        if (!launched) launched = await launch();
+        return launched;
+      });
+      return tracker;
     }
   }
   return {
     launchBrowser: vi.fn(async () => ({ ...mockBrowserSession })),
     PageTracker: vi.fn(),
+    // The 'no browser yet' sentinel (SPEC-use-computer.md §4.6). A mock of
+    // this module must export it: api-server and session-manager both do
+    // `instanceof` against it, and `instanceof undefined` throws.
+    NoBrowserLaunchedError: class NoBrowserLaunchedError extends Error {
+      constructor(message = 'no browser has been launched in this session') {
+        super(message);
+        this.name = 'NoBrowserLaunchedError';
+      }
+    },
+    NO_BROWSER_LAUNCHED_MESSAGE: 'no browser has been launched in this session',
     BrowserTracker,
     // Real behaviour, not a stub: session-manager uses it to bound page reads
     // while listing, and a mock that resolved instantly would hide a hang.
@@ -146,6 +181,7 @@ vi.mock('../src/utils/logger.js', () => ({
 // ---------------------------------------------------------------------------
 
 import { createApiServer } from '../src/server/api-server.js';
+import { launchBrowser } from '../src/browser/manager.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import {
   captureVisibleText,
@@ -579,5 +615,54 @@ describe('GET /sessions/:id/content — project config, not server config', () =
     await api('GET', '/sessions/s-noproj/content?format=dom');
 
     expect(captureDom.mock.calls[0]![1]?.domSnapshotCharLimit).toBe(SERVER_CHAR_LIMIT);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The browser launches lazily now (SPEC-use-computer.md §4.6), so a session
+// can exist with no page at all. These two routes must SAY that rather than
+// open a browser to answer, and rather than 404 — the session is fine.
+//
+// The unlaunched session is produced the way it happens in the field: the
+// launch itself fails at step 1. The session survives (it is registered before
+// the launch), holds no browser, and its next read has to land somewhere.
+// ---------------------------------------------------------------------------
+
+describe('routes that read a page, before any browser exists', () => {
+  async function sessionWithNoBrowser(id: string): Promise<void> {
+    vi.mocked(launchBrowser).mockRejectedValueOnce(
+      new Error('Chromium distribution "chrome" is not found'),
+    );
+    const { status, body } = await api('POST', `/sessions/${id}/steps`, { steps: ['click'] });
+    expect(status).toBe(200);
+    // The launch failure is step 1's failure, not a thrown request.
+    expect(body.status).toBe('failed');
+    expect(body.results[0].reasoning).toContain('is not found');
+  }
+
+  it('GET /content answers 409 with the no-browser sentence', async () => {
+    await sessionWithNoBrowser('s-nobrowser');
+
+    const { status, body } = await api('GET', '/sessions/s-nobrowser/content');
+
+    expect(status).toBe(409);
+    expect(body.error).toBe('no browser has been launched in this session');
+    // It did not open one to find out.
+    expect(captureText).not.toHaveBeenCalled();
+  });
+
+  it('POST /login answers 409, not 404', async () => {
+    await sessionWithNoBrowser('s-nobrowser-login');
+
+    const { status, body } = await api('POST', '/sessions/s-nobrowser-login/login', {});
+
+    expect(status).toBe(409);
+    expect(body.error).toBe('no browser has been launched in this session');
+  });
+
+  it('a session that does not exist is still 404, not 409', async () => {
+    const { status } = await api('GET', '/sessions/s-never-existed/content');
+
+    expect(status).toBe(404);
   });
 });

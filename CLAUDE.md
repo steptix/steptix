@@ -373,6 +373,60 @@ empty after 86 s — so a flake there is not automatically a regression.
 Traced by reading, not proven by running two full suites at once. Within one
 worktree, four shards and two shards have both come back clean.
 
+### Computer-mode live test
+
+`computer-use.test.cjs` drives `templates/init/tests/pdf-print-cancel.md`,
+which leaves the browser at `[use computer]` and clicks a PDF toolbar and a
+print dialog with the **real mouse**
+([SPEC-use-computer.md](docs/specs/SPEC-use-computer.md) §13.3). It skips
+itself unless `TESTBENCH_LIVE_COMPUTER=1` is set, and the reason is the
+sharding section above: a default run is four shards on one box, and there is
+one pointer. Two shards moving it do not produce two flaky runs — they produce
+one run clicking where the other run's dialog used to be. The framework's lock
+(spec §5.9) refuses the second computer-mode session outright, which would
+turn the whole parallel suite red for a reason unrelated to the code under
+test. So the gate is in the suite, not in the runner: the file is discovered
+and scheduled like any other, costs a few seconds, and reports as a `pending`
+row (an `o`) rather than vanishing.
+
+Run it alone, one shard, against a server you started:
+
+```powershell
+cd <worktree>
+node dist/index.js serve -p <n> --idle-timeout 60
+```
+
+```powershell
+cd <worktree>\testbench-native
+$env:TESTBENCH_LIVE_COMPUTER = '1'
+npm run test:live -- --shards=1 --files=computer-use.test.cjs --server=http://localhost:<n>
+```
+
+`--server=<url>` is not optional here even though `--shards=1` defaults to
+`:3100`: the serial path is the one mode with two independent notions of where
+the server is (see above), so pass the same URL that this worktree's
+`templates/.env` carries as `SERVER_URL`.
+
+**Start that server from a normal terminal or from VS Code**, not from a
+sandboxed tool runner. Measured 2026-09-23: a process started by the Claude
+desktop app's tool runner can enumerate windows and get a screen DC but cannot
+blit from it — `screen.grab()` fails with BitBlt error 6, in and out of that
+tool's own sandbox flag, and a .NET `CopyFromScreen` fails identically from the
+same context. The server then boots fine and every computer-mode step is
+blind; the spec's §5.1 capture probe turns that into a named failure at
+`[use computer]` instead of a model that cannot find a button.
+
+While it runs: a visible, unlocked desktop, and nobody touching the mouse or
+the keyboard. A disconnected RDP session captures black. A stray click moves
+focus and the next screenshot is no longer of what the model was answering
+about. The test says so in its own header too, because the person who starts
+it is not always the person who wrote it.
+
+The sibling fixture `pdf-save-as.md` has no live test of its own — it drives a
+native Save As dialog to completion and is run by hand (spec §13.2). It reads
+`$AIUI_SAVE_DIR` from `templates/.env`, which is gitignored, so a fresh
+checkout has to add that line before running it.
+
 ### Why the junction repair matters
 
 `testbench-native/node_modules/ai-ui-automation-runner-core` is the

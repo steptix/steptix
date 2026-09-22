@@ -35,6 +35,8 @@ import {
   errandTabNotFound,
   errandsHaveNoSessions,
   listSessionsTimedOut,
+  NO_BROWSER_LAUNCHED_WIRE_MESSAGE,
+  pageContentNoBrowserYet,
   pageContentSessionGone,
   navigateNeedsExactTarget,
   peekRouteMissing,
@@ -638,6 +640,45 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
  * a blank page would be a claim about the page that nobody downstream can
  * correct.
  */
+/**
+ * Is this 409 the "session has no browser yet" one (SPEC-use-computer.md
+ * §4.6), rather than the "your read lost to a navigation" one?
+ *
+ * Matched on the server's sentence because both are 409 on the same route and
+ * they mean opposite things to the caller: retry, versus stop retrying and run
+ * a browser step.
+ */
+function isNoBrowserYet(err: unknown): boolean {
+  return (
+    err instanceof ApiHttpError &&
+    err.status === 409 &&
+    err.serverMessage.includes(NO_BROWSER_LAUNCHED_WIRE_MESSAGE)
+  );
+}
+
+/**
+ * Ask the content route whether this session has a browser at all.
+ *
+ * Called only from an already-failed screenshot read, never on a happy path:
+ * `GET /sessions/:id` cannot distinguish "no browser" from "capture failed"
+ * (both come back as an empty screenshot), and that distinction is the whole
+ * difference between an agent retrying forever and an agent running a step.
+ *
+ * `maxChars: 1` — the answer wanted is the STATUS CODE, not the page.
+ */
+async function noBrowserYet(
+  client: ApiClient,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  try {
+    await client.getPageContent(sessionId, { format: 'text', maxChars: 1 }, signal);
+    return false;
+  } catch (err) {
+    return isNoBrowserYet(err);
+  }
+}
+
 async function screenshotResult(
   client: ApiClient,
   sessionId: string,
@@ -647,6 +688,15 @@ async function screenshotResult(
   const raw = typeof state.screenshot === 'string' ? state.screenshot : '';
   const base64 = raw.replace(DATA_URI_PREFIX, '');
   if (base64 === '') {
+    // `GET /sessions/:id` reports a session with no browser yet
+    // (SPEC-use-computer.md §4.6) as a state read with empty fields, which is
+    // right for a STATE read and useless as a diagnosis here — "capture
+    // failed, try again" would send the agent round a loop that cannot
+    // succeed. One probe, only on the already-failed path, tells the two
+    // apart: the content route answers 409 with the sentence below.
+    if (await noBrowserYet(client, sessionId, signal)) {
+      return errorResult(pageContentNoBrowserYet(sessionId));
+    }
     return errorResult(
       preflightError(
         `Could not photograph the page of session "${sessionId}". The session is ` +
@@ -2584,6 +2634,12 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
               extra.signal,
             );
           } catch (err) {
+            // The session is there; the BROWSER is not (§4.6). Ahead of the 404
+            // arm because it is the narrower claim, and its remedy is the
+            // opposite one: run a step, do not go looking for another session.
+            if (isNoBrowserYet(err)) {
+              return errorResult(pageContentNoBrowserYet(args.session_id));
+            }
             if (err instanceof ApiHttpError && !(err instanceof ApiRouteNotFoundError) && err.status === 404) {
               return errorResult(pageContentSessionGone(args.session_id));
             }
@@ -2715,6 +2771,12 @@ export function registerTools(server: McpServer, deps: McpDeps): void {
           try {
             login = await client.logIntoSite(args.session_id, { hint }, extra.signal);
           } catch (err) {
+            // The session is there; the BROWSER is not (§4.6). Ahead of the 404
+            // arm because it is the narrower claim, and its remedy is the
+            // opposite one: run a step, do not go looking for another session.
+            if (isNoBrowserYet(err)) {
+              return errorResult(pageContentNoBrowserYet(args.session_id));
+            }
             if (err instanceof ApiHttpError && !(err instanceof ApiRouteNotFoundError) && err.status === 404) {
               return errorResult(pageContentSessionGone(args.session_id));
             }

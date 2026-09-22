@@ -10,6 +10,7 @@ import { parseSetStep } from '../parser/set-step.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseFailureTail } from '../parser/failure-tail.js';
 import { isControlLineClaim } from '../parser/control-line.js';
+import { parseUseStep } from '../parser/use-step.js';
 
 /** A single step reference within a group */
 export interface GroupedStep {
@@ -148,6 +149,15 @@ export function identifyStepGroups(steps: string[]): Map<number, StepGroup> {
     // three: the fix is to form no group, so nothing jumps.
     if (i < steps.length && parseSetStep(steps[i]!)) continue;
     if (i < steps.length && parseFlowControlStep(steps[i]!)) continue;
+    // The fifth member of the same exemption: a `[use computer]` /
+    // `[use browser]` surface switch (SPEC-use-computer.md §4.4). Swallowed as
+    // the continuation it would be handed to `executeBranchedStep` as the
+    // model's fallback action — so the switch would never happen — and both
+    // loops advance with `i = group.continuationStep.index`, which jumps past
+    // it. Every step after it would then run on the surface the author had
+    // just left, which on the computer surface means real clicks at
+    // coordinates chosen for a page.
+    if (i < steps.length && parseUseStep(steps[i]!)) continue;
     // The fourth member of the same exemption, and the quietest: swallowed as the
     // continuation, a tail step is performed by `executeBranchedStep` with the tail
     // in its prose and its own `failureTail` never computed — so an `otherwise

@@ -9,6 +9,7 @@ import {
 import { isCodeStep } from '../parser/invocation-parser.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseControlLine } from '../parser/control-line.js';
+import { parseUseStep } from '../parser/use-step.js';
 import { logger } from '../utils/logger.js';
 import {
   actionsOf,
@@ -25,6 +26,7 @@ import {
   generateStepEntry,
   guardedValues,
   refuseReason,
+  SURFACE_SWITCH_NOT_COMPILED,
   stepEnvRefs,
   stepParameters,
   unresolvedRefsReason,
@@ -363,6 +365,16 @@ export function generationRefusal(input: {
   // acts.
   if (parseControlLine(input.text.trim())) {
     return 'a control line is dispatched, never generated';
+  }
+  // A surface switch, for the third time and the same reason
+  // (SPEC-use-computer.md §9): `[use computer]` / `[use browser]` is a
+  // run-loop signal that performs nothing on any surface, so there is no
+  // transcript to generate an entry from. Belt and braces beside the two
+  // above — the run loops never offer one — but `offer` is public, and a
+  // generated entry for a `[use …]` line would replace the switch with code
+  // that acts on the surface the test was leaving.
+  if (parseUseStep(input.text)) {
+    return SURFACE_SWITCH_NOT_COMPILED;
   }
   if (!input.binding) return 'the step has no code-behind file to bind into';
   if (input.status === 'skipped') return SKIPPED_BY_RETURN_REFUSAL;

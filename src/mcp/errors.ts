@@ -579,6 +579,49 @@ export function cdpFocusRouteMissing(baseUrl: string): McpToolError {
 // ---------------------------------------------------------------------------
 
 /**
+ * The Sessions API's 409 body when a session has no browser yet — the wire
+ * copy of `NO_BROWSER_LAUNCHED_MESSAGE` (src/browser/manager.ts).
+ *
+ * Repeated rather than imported: `manager.ts` pulls in Playwright and
+ * playwright-extra at module load, and the MCP process has no business
+ * loading a browser driver in order to recognise a string. The two are one
+ * wire contract and a test pins them equal, which is the thing an import
+ * would have bought.
+ *
+ * Matched on because 409 alone is ambiguous on `/sessions/:id/content`: a
+ * read that lost to a navigation answers 409 too, and it means "try again",
+ * the opposite of this one.
+ */
+export const NO_BROWSER_LAUNCHED_WIRE_MESSAGE =
+  'no browser has been launched in this session';
+
+/**
+ * `get_page_content` asked a session that exists but has never opened a
+ * browser (SPEC-use-computer.md §4.6).
+ *
+ * The server answers 409 rather than 404 for exactly this — the session is
+ * fine, the page is what is missing — and the difference matters to the
+ * agent: retrying is pointless, creating a new session is wrong, and the one
+ * thing that produces a page is running a browser step. A run whose first
+ * step was `[use computer]` is driving the screen, not a tab, and a read of
+ * "the page" has no answer until a `[use browser]` step arrives.
+ *
+ * Deliberately does NOT offer to launch one. A read starting a browser window
+ * on someone's screen is a side effect no read should have.
+ */
+export function pageContentNoBrowserYet(sessionId: string): McpToolError {
+  return preflightError(
+    `Session "${sessionId}" exists but has not opened a browser yet, so there is no ` +
+      'page to read or sign in to.\n' +
+      'A session launches its browser at the first step that runs on the page. If this ' +
+      'run is in computer mode ([use computer]), it is driving the screen rather than a ' +
+      'tab — there is no page until a [use browser] step.\n' +
+      'Run a step with run_steps first, then read the page; or, if what you want is a tab ' +
+      'the user already has open, that is peek_tab.',
+  );
+}
+
+/**
  * `get_page_content` asked the server for a session it does not have.
  *
  * The natural flow that lands here was measured live (2026-08-13): a model

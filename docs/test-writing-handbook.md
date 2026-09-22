@@ -18,12 +18,14 @@ every TypeScript example is a tool the registry loads. Each is introduced by a
 ## 1. How a step is executed
 
 A test is a Markdown file. The numbered lines under `## Steps` are the
-instructions. Five kinds of line are handled by the framework itself rather
+instructions. Six kinds of line are handled by the framework itself rather
 than performed by a model:
 
 - `Set {{name}} to "…"` assigns a variable.
 - `[skill: name …]` inlines a reusable step sequence from another file.
 - `[tool: name …]` runs a TypeScript function.
+- `[use computer]` / `[use browser]` switch which *surface* the following
+  steps run on — the whole screen, or the page (§3.10).
 - A line that is exactly the name of a `### Section` in the same file runs
   that section's steps.
 - A control line — `If …, then …`, `Else if …`, `Otherwise, …`, `While …`,
@@ -1123,20 +1125,112 @@ test is reading.
   arguments as a convenience, but `{{baseUrl}}` in a prose step is just the
   model reading the test information block.
 - No native OS dialogs, no drag-and-drop choreography, no file downloads, no
-  visual-regression comparison as built-in vocabulary. Use a tool.
+  visual-regression comparison as built-in vocabulary **in browser mode**. A
+  native dialog is reachable by switching surface (§3.10); the rest want a
+  tool.
 - JavaScript `alert`/`confirm` dialogs are answered automatically by the
   framework (dismissed, and `beforeunload` accepted); you cannot script a
   choice.
 - `Press Enter in the Search field` does not focus the field. Type into it in
   the same step first.
-- No keyboard route to the BROWSER. A key press is delivered to the focused
-  element inside the page, so a back or refresh shortcut does nothing at all
-  — and does it quietly, since the press itself succeeds and the step passes.
-  Going back is its own action (`Go back`, §3); reloading has none yet, so
-  navigate to the URL again.
+- No keyboard route to the BROWSER **in browser mode**. A key press is
+  delivered to the focused element inside the page, so a back or refresh
+  shortcut does nothing at all — and does it quietly, since the press itself
+  succeeds and the step passes. Going back is its own action (`Go back`, §3);
+  reloading has none yet, so navigate to the URL again. In computer mode
+  (§3.10) a key press goes to whatever has OS focus, which is the whole point
+  of that surface and also why it is not a substitute for `Go back`.
 - A `prompt` for clarification is what the model does when a step is
   underspecified. On the CLI a person answers; on TestBench, MCP and CI the
   step is skipped or fails. Underspecified steps are therefore not portable.
+
+### 3.10 Leaving the page: `[use computer]` and `[use browser]`
+
+Some things a test must drive are not in any page: a PDF viewer's toolbar, a
+print dialog, a native **Save As** window, a file picker, an installer. Two
+whole-step directives switch which surface the steps after them run on.
+
+```markdown
+5. Click the Print button in the PDF viewer's toolbar
+6. [use computer]
+7. Click the Cancel button in the Print dialog
+8. [use browser]
+9. Verify the page URL ends with statement.pdf
+```
+
+From `[use computer]` on, every step is answered from **a screenshot of the
+primary display and nothing else** — no DOM snapshot, no Playwright. The model
+returns screen coordinates and an action; the framework performs it with a
+real mouse move, a real click, real keystrokes. `[use browser]` goes back to
+DOM snapshots and Playwright, on the same tab the test left. The browser is
+not touched by the switch in either direction; while you are in computer mode
+it is pixels on the screen like everything else.
+
+Each directive is the **whole step**: a line that is nothing but the bracket,
+with no sentence after it. `[use computer] and click Save` is a parse error,
+not two steps. Re-entering the mode you are already in is a no-op, so a
+section or skill may open with `[use computer]` defensively. A skill call
+restores the caller's surface when it returns; an inline section does not —
+which is how you write a desktop excursion once and call it by name.
+
+A test whose **first** step is `[use computer]` never launches a browser at
+all. That is also how a native application is tested with this framework.
+
+**Steps that name a window.** Two phrasings are deterministic once the model
+has turned your words into a title — no vision is involved, the framework asks
+the OS for its window list:
+
+- `Focus the window whose title contains "Save As"` brings it to the front.
+- `Wait until a window titled "Save As" is open` / `… is gone` polls until it
+  is so.
+
+Everything else is ordinary prose about what you can see: `Click the Cancel
+button in the Print dialog`, `Type "{{save_dir}}\report.pdf" into the File
+name field`, `Press Ctrl+S`.
+
+**What you must arrange yourself.**
+
+- **The project has to opt in.** `desktop.enabled: true` in `aiui.config.json`,
+  which defaults to `false`. A test file in a shared project must not be able
+  to move the mouse on a machine whose owner did not allow it.
+- **`[use computer]` does nothing to arrange the screen.** It changes what the
+  model is shown and how its answer is performed, and nothing else. When a run
+  starts from TestBench, VS Code is frontmost and the browser is behind it, so
+  the first screenshot is a picture of the editor unless a step brings the
+  window forward. Write that step — it is what `Focus the window whose title
+  contains …` is for.
+- **The desktop must be visible and unlocked, and you must not touch the
+  mouse or the keyboard while it runs.** A stray click moves focus, and the
+  next screenshot no longer shows what the model was answering about. A locked
+  screen, a screensaver or a disconnected RDP session captures black.
+- **One computer-mode run per machine.** Two would fight over the one mouse,
+  so the framework takes a lock and refuses the second.
+- **The server must be able to read the screen.** A server started by some
+  sandboxed spawners can enumerate windows and still not capture — start it
+  from a normal terminal or from VS Code.
+
+**Captures are of the whole screen.** Not of the page: the model needs to see
+the dialog, and the dialog is not in the page. Those images are embedded in
+the report, which means the report can carry whatever else was on your desktop
+— other windows, a file listing, a notification. Redaction cannot help here;
+`src/utils/secrets.ts` masks text and there is no text to mask. Set
+`desktop.reportScreenshots: false` to keep desktop captures out of the report
+entirely.
+
+**Two things computer-mode steps do not get.** They are never replayed from
+the step cache and never compiled to code-behind: a cached selector is
+re-validated against a DOM at replay, and a recorded coordinate has nothing to
+validate against — it would replay blind on a machine whose resolution,
+scaling or window layout has moved. A compiled step that ran in computer mode
+stays AI-driven, and the compile report says so.
+
+Worked examples, both against the fixture app:
+[`templates/init/tests/pdf-print-cancel.md`](../templates/init/tests/pdf-print-cancel.md)
+opens a print dialog and cancels it, and
+[`templates/init/tests/pdf-save-as.md`](../templates/init/tests/pdf-save-as.md)
+saves the PDF through the native Save As dialog and then checks the file
+landed with `[tool: assert_file_exists]` — because nothing in the browser
+vocabulary can look at a file system.
 
 ## 4. Variables and data
 
@@ -1904,6 +1998,13 @@ Away from the CLI's terminal (TestBench, MCP, CI) both are reported as
 skipped, and a skipped step counts as not run. Do not put them in unattended
 tests.
 
+A test that uses `[use computer]` (§3.10) is unattended in a different sense:
+nobody types, but somebody has to leave the machine alone. It needs a visible,
+unlocked desktop, `desktop.enabled: true` in the project's config, and the
+mouse untouched for the length of the run, and only one such test can run on a
+machine at a time. That last constraint is why they are kept out of parallel
+suites rather than sharded with everything else.
+
 When the authoring AI has the framework's MCP server, `list_test_files`,
 `run_test_file`, `run_steps` (exploratory steps that keep a session's browser
 state), `get_page_content` (to read real labels before writing steps),
@@ -1937,6 +2038,9 @@ report's skipped steps and warnings, not just the summary.
 | `[skill: sign_in]` when the skill declares `email` | `[skill: sign_in email password]` | Every declared parameter is required. |
 | `[tool: slugify s="x"]` for a named export | `[tool: strings/slugify s="x"]` | Named exports need the file prefix. |
 | `[tool: visit_each urls={{links}}]` | `urls="{{links}}"` | Unquoted templates are a parse error. |
+| `[use computer] Click Cancel` | `[use computer]`, then `Click Cancel` | The directive is the whole step; trailing text is a parse error (§3.10). |
+| `[computer]`, `[use the computer]`, `[computer-use]` | `[use computer]` | A step that is nothing but an unknown bracket is refused by name, so none of these reaches a model as prose. |
+| `[use computer]` with no step bringing the window forward | Add `Focus the window whose title contains "…"` | Switching surface arranges nothing; the first screenshot is whatever was frontmost (§3.10). |
 | `[tool: a] [tool: b]` on one line | Two lines | Only one call per line survives. |
 | A popup-opening click, then `[tool: …]` | Add `and switch to the tab it opened` to the click | A tab the app opens is tracked but not active; the tool reads the old page and passes. |
 | `password: hunter2` under `## Parameters` | `password: $TEST_PASSWORD` | Secrets live in `.env`, and the name alone triggers masking. |

@@ -98,11 +98,42 @@ vi.mock('../src/browser/manager.js', () => {
       this.closeAll = vi.fn(async () => {});
       this.list = vi.fn(() => []);
       this.all = vi.fn(() => [initialSession]);
+      this.hasActive = vi.fn(() => true);
+      this.ensureLaunched = vi.fn(async () => initialSession);
+    }
+    hasActive: ReturnType<typeof vi.fn> = vi.fn(() => true);
+    ensureLaunched: ReturnType<typeof vi.fn> = vi.fn();
+    /** Lazy twin of the real static (SPEC-use-computer.md §4.6). */
+    static deferred(launch: () => Promise<any>): BrowserTracker {
+      const tracker = new BrowserTracker(undefined as any);
+      let launched: any;
+      tracker.hasActive = vi.fn(() => launched !== undefined);
+      tracker.getActive = vi.fn(() => {
+        if (!launched) throw new Error('no browser has been launched in this session');
+        return launched;
+      });
+      tracker.getActivePage = vi.fn(() => launched?.page);
+      tracker.all = vi.fn(() => (launched ? [launched] : []));
+      tracker.ensureLaunched = vi.fn(async () => {
+        if (!launched) launched = await launch();
+        return launched;
+      });
+      return tracker;
     }
   }
   return {
     launchBrowser: vi.fn(async () => ({ ...mockBrowserSession })),
     PageTracker: vi.fn(),
+    // The 'no browser yet' sentinel (SPEC-use-computer.md §4.6). A mock of
+    // this module must export it: api-server and session-manager both do
+    // `instanceof` against it, and `instanceof undefined` throws.
+    NoBrowserLaunchedError: class NoBrowserLaunchedError extends Error {
+      constructor(message = 'no browser has been launched in this session') {
+        super(message);
+        this.name = 'NoBrowserLaunchedError';
+      }
+    },
+    NO_BROWSER_LAUNCHED_MESSAGE: 'no browser has been launched in this session',
     BrowserTracker,
     briefly: async (p: Promise<unknown>, ms: number, fallback: unknown) =>
       Promise.race([p, new Promise((r) => setTimeout(() => r(fallback), ms))]),
