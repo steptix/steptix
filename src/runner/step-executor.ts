@@ -2,7 +2,7 @@ import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import type { Config } from '../config/types.js';
-import type { AIAction, BranchedAIResponse } from '../ai/types.js';
+import type { AIAction, BranchedAIResponse, TableReadMapping } from '../ai/types.js';
 import type { StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import {
@@ -15,15 +15,24 @@ import {
   buildBranchedStepMessage,
   buildConditionJudgeMessage,
   formatTestInfo,
+  buildGridStructurePrompt,
+  contentBlocksToText,
 } from '../ai/prompts.js';
-import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome, ScrollPositionInfo } from '../ai/prompts.js';
+import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOutcome, ScrollPositionInfo, GridStructureSketch } from '../ai/prompts.js';
 import { diagnosePageState, waitForPageStability, waitForPostActionSettle, capturePageSignal, PageActivityTracker } from '../browser/page-state.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
 import type { ChatMessage } from '../ai/types.js';
-import { parseAIResponse, parseAssertionCode, parseBranchedResponse } from '../ai/action-parser.js';
+import { parseAIResponse, parseAssertionCode, parseBranchedResponse, extractJson } from '../ai/action-parser.js';
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
-import { executeAction } from '../browser/actions.js';
+import { executeAction, sketchTable } from '../browser/actions.js';
+import type {
+  ActionExecutionResult,
+  ExecuteActionOptions,
+  TableStructureSource,
+} from '../browser/actions.js';
+import { tableStructureOf } from '../config/table-structure.js';
+import { structureMemoKey, type StructureMemo } from './structure-memo.js';
 import type { UploadPathContext } from '../browser/upload-paths.js';
 import { launchBrowser, type PageTracker, type BrowserTracker, type LaunchOverrides } from '../browser/manager.js';
 import { withRetry } from './retry.js';
@@ -98,6 +107,20 @@ function isMutatingAction(action: AIAction): boolean {
 /** Mutable ref for capturing all AI turns for cache writing. */
 export interface CacheCapture {
   turns: CachedStepData[];
+  /**
+   * Set when a turn's actions were CHANGED after the model emitted them — in
+   * practice only by a `readTable`'s structure mapping
+   * (SPEC-structured-table-reads.md §7.10, "Caching").
+   *
+   * It exists for the replay path. An ordinary AI run writes the cache on
+   * success anyway, so the mapping rides along with everything else; a CACHED
+   * run writes nothing, because re-writing a file with the same contents it
+   * was read from buys nothing and risks the reverse-interpolation round trip
+   * for free. A mapping that had to be asked again is the one thing a replay
+   * learns that is worth keeping, so this flag — and only this flag — turns
+   * that one write back on.
+   */
+  rewrite?: boolean;
 }
 
 /**
@@ -164,6 +187,20 @@ export interface StepExecutorOptions {
    *  invocations don't collide on a shared source line (issue 016). When absent
    *  (CLI path), the cache falls back to `stepIndex` — the legacy behaviour. */
   cacheKey?: StepCacheKey;
+  /**
+   * What this RUN has already learned about a region's structure
+   * (docs/specs/SPEC-structured-table-reads.md §7.10,
+   * src/runner/structure-memo.ts). Created once per run and threaded exactly
+   * as `stepCache` is — the CLI's `runTest` makes one, the server makes one
+   * per batch.
+   *
+   * Unlike `stepCache` it is NOT gated by `cacheEnabled`: that switch is
+   * about replaying a frozen action PLAN, which a row run and a loop body
+   * must not do, and this is about not asking the same structural question
+   * twice inside one run. A loop body that reads a table on every pass is
+   * exactly the case the memo is for.
+   */
+  structureMemo?: StructureMemo;
   /** When true, include dismissal-related guidance in the system prompt and
    *  retry hints. Enabled by the runner when the test has hooks configured. */
   dismissalGuidance?: boolean;
@@ -744,6 +781,13 @@ export async function executeStep(
     const cached = await opts.stepCache.read(cacheKey, opts.resolvedParameters ?? {});
     if (cached) {
       logger.info(`Cache HIT for step ${stepIndex} — replaying ${cached.length} cached turn(s)`);
+      // A capture on the REPLAY path, which never had one. It is written back
+      // only when something asked for it (`rewrite`), which today means one
+      // thing: a `readTable`'s cached structure mapping stopped fitting the
+      // page, the model was asked once more, and the new mapping must outlive
+      // this run or every future run pays the same model call
+      // (SPEC-structured-table-reads.md §7.10, "Caching").
+      const replayCapture: CacheCapture = { turns: [] };
       try {
         const result = await executeStepAttempt(
           stepIndex,
@@ -755,9 +799,17 @@ export async function executeStep(
           [],
           1,
           cached,
-          undefined,
+          replayCapture,
           authoredInstruction,
         );
+        if (replayCapture.rewrite && replayCapture.turns.length > 0) {
+          await opts.stepCache.write(
+            cacheKey,
+            replayCapture.turns,
+            opts.resolvedParameters ?? {},
+          );
+          logger.info(`Step ${stepIndex}: cached table structure rewritten`);
+        }
         logger.success(`Step ${stepIndex} passed (from cache)`);
         // Mark the result so the server's RunEvent emitter can attach
         // `fromCache: true` to the step:pass wire event. Without this,
@@ -1516,6 +1568,650 @@ function namesDefinedIn(steps: readonly string[]): ReadonlySet<string> {
   return out;
 }
 
+// ── The structure question (SPEC-structured-table-reads.md §7.10) ───────────
+//
+// A `readTable` that fails for a SHAPE reason — no table or grid with rows
+// under the selector, two or more, or header names requested with no header
+// found — is not necessarily an author's mistake. It is often a shape nobody
+// has measured: headings written as `<td>`, a header table after the rows, a
+// card list, one key/value table per record. For those the runtime asks the
+// model ONE question about the structure, validates the answer against the
+// page, reads deterministically, and stores the answer as the action's
+// `mapping` so every later run replays it with no model call at all.
+//
+// Everything below is the ASKING half. The extractor owns the sketch, the
+// validation of a mapping and the reading (src/browser/actions.ts,
+// src/browser/scripts/read-table.js).
+
+/** The one JSON object the structure question may answer (§7.10). */
+type GridStructureAnswer =
+  | { kind: 'table'; rows: string; header?: { table: string; row?: number } }
+  | { kind: 'collection'; item: string; fields: Record<string, string> }
+  | { kind: 'none'; reason: string };
+
+/** A shape refusal and the sketch that came with it. */
+interface ShapeRefusal {
+  /** The sentence the step would have failed with. */
+  message: string;
+  sketch: GridStructureSketch;
+}
+
+/**
+ * Is this failure a SHAPE refusal — the only kind §7.10 lets the model be
+ * asked about?
+ *
+ * Recognised by the sketch riding on it rather than by `instanceof`, and that
+ * is deliberate on two counts. The extractor decides which refusals carry a
+ * sketch, so "has one" is precisely the question this layer wants to ask and
+ * `instanceof TableShapeError` is a proxy for it. And a suite that replaces
+ * `src/browser/actions.js` with a partial `vi.mock` gets a DIFFERENT class
+ * object for the same name, so an `instanceof` test would quietly answer
+ * "no" in exactly the tests written to prove this path.
+ *
+ * Both carriers are accepted: the error thrown out of `executeAction`, and a
+ * `{ success: false }` result that carried the sketch instead of throwing.
+ * Neither is speculative — the shape refusal has to reach this function
+ * somehow, and which of the two it uses is the extractor's choice, not a
+ * contract this file should pin.
+ */
+function shapeRefusalOf(
+  thrown: unknown,
+  result?: { error?: string | undefined } | undefined,
+): ShapeRefusal | undefined {
+  for (const carrier of [thrown, result]) {
+    if (typeof carrier !== 'object' || carrier === null) continue;
+    const sketch = (carrier as { sketch?: unknown }).sketch;
+    if (typeof sketch !== 'object' || sketch === null) continue;
+    const candidates = (sketch as { candidates?: unknown }).candidates;
+    const region = (sketch as { region?: unknown }).region;
+    if (!Array.isArray(candidates) || typeof region !== 'object' || region === null) continue;
+    const message =
+      typeof (carrier as { message?: unknown }).message === 'string'
+        ? (carrier as { message: string }).message
+        : typeof (carrier as { error?: unknown }).error === 'string'
+          ? (carrier as { error: string }).error
+          : 'the table read failed for a shape reason';
+    return { message, sketch: sketch as GridStructureSketch };
+  }
+  return undefined;
+}
+
+/** The message a non-shape failure carries out of `executeAction`. */
+function failureTextOf(thrown: unknown, result?: { error?: string | undefined }): string {
+  if (thrown instanceof Error) return thrown.message;
+  if (thrown !== undefined && thrown !== null) return String(thrown);
+  return result?.error ?? 'readTable failed';
+}
+
+/**
+ * Read the model's answer, refusing anything that is not one of the three
+ * kinds §7.10 defines.
+ *
+ * Strict on purpose. The next thing that happens to a `table` answer is that
+ * its candidate ids are looked up and a mapping is built from them, and the
+ * next thing after that is a read of the page — so a `{ "kind": "table" }`
+ * with no `rows`, or a `fields` whose values are not strings, must die here
+ * with the answer quoted rather than three frames later as a type error
+ * nobody can trace back to a model call.
+ */
+function parseGridStructureAnswer(raw: string): GridStructureAnswer {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(extractJson(raw));
+  } catch (err) {
+    throw new Error(
+      `the structure answer was not JSON (${(err as Error).message}): ${raw.slice(0, 400)}`,
+    );
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`the structure answer was not a JSON object: ${raw.slice(0, 400)}`);
+  }
+  const obj = parsed as Record<string, unknown>;
+  const kind = obj['kind'];
+
+  if (kind === 'none') {
+    const reason = typeof obj['reason'] === 'string' ? obj['reason'].trim() : '';
+    return { kind: 'none', reason: reason === '' ? '(no reason given)' : reason };
+  }
+
+  if (kind === 'table') {
+    const rows = obj['rows'];
+    if (typeof rows !== 'string' || rows.trim() === '') {
+      throw new Error('a "table" structure answer needs a "rows" candidate id');
+    }
+    const rawHeader = obj['header'];
+    if (rawHeader === undefined || rawHeader === null) {
+      return { kind: 'table', rows: rows.trim() };
+    }
+    if (typeof rawHeader !== 'object' || Array.isArray(rawHeader)) {
+      throw new Error('"header" must be an object of { "table": "T1", "row": 2 }');
+    }
+    const header = rawHeader as Record<string, unknown>;
+    const table = header['table'];
+    const row = header['row'];
+    if (typeof table !== 'string' || table.trim() === '') {
+      throw new Error('"header.table" must be a candidate id from the sketch');
+    }
+    // OPTIONAL, because a candidate with header rows of its own needs no
+    // number: the extractor is handed the element and finds its `<thead>` or
+    // its `columnheader` rows itself (§7.3b, §7.9). Required only where the
+    // headings are a body row — §5.9.1's `<td>`-headed table — and that is
+    // decided below, against the sketch, not here.
+    if (row === undefined || row === null) {
+      return { kind: 'table', rows: rows.trim(), header: { table: table.trim() } };
+    }
+    if (typeof row !== 'number' || !Number.isInteger(row) || row < 1) {
+      throw new Error('"header.row" must be a whole row number, counting from 1');
+    }
+    return { kind: 'table', rows: rows.trim(), header: { table: table.trim(), row } };
+  }
+
+  if (kind === 'collection') {
+    const item = obj['item'];
+    if (typeof item !== 'string' || item.trim() === '') {
+      throw new Error('a "collection" structure answer needs an "item" selector');
+    }
+    const rawFields = obj['fields'];
+    if (typeof rawFields !== 'object' || rawFields === null || Array.isArray(rawFields)) {
+      throw new Error('"fields" must be an object of one CSS selector per column key');
+    }
+    const fields: Record<string, string> = {};
+    for (const [key, value] of Object.entries(rawFields as Record<string, unknown>)) {
+      if (typeof value !== 'string' || value.trim() === '') {
+        throw new Error(`"fields.${key}" must be a CSS selector`);
+      }
+      fields[key] = value.trim();
+    }
+    if (Object.keys(fields).length === 0) {
+      throw new Error('"fields" named no columns');
+    }
+    return { kind: 'collection', item: item.trim(), fields };
+  }
+
+  throw new Error(
+    `"kind" must be "table", "collection" or "none" — got ${JSON.stringify(kind)}`,
+  );
+}
+
+/**
+ * Turn an answer into the `mapping` the extractor takes: candidate IDS become
+ * the selectors the runtime derived for them.
+ *
+ * The translation is also the first half of §7.10's validation, and the half
+ * this side owns: an id the sketch does not list, or a header row past the end
+ * of the candidate's listed rows, is refused HERE, before the page is touched
+ * — a selector built from a candidate that does not exist would otherwise
+ * reach Playwright as `undefined`.
+ *
+ * `bodyRow` is the header row's one-based position among the candidate's BODY
+ * rows, which is what "row 1 of T1 is the header" means for §5.9's
+ * `<td>`-headed table. A row in a `<thead>`, or an ARIA grid's own header row,
+ * needs no number at all: the extractor finds the header of a table it has
+ * been handed, so the selector alone pins it.
+ *
+ * The three sections are what the sketch prints, and telling them apart is the
+ * whole of this translation:
+ *
+ *  - `thead` / `header` — the candidate's own header grid. No `bodyRow`.
+ *  - `tbody` / `row` — a body row, counted among the BODY rows alone. A
+ *    `<thead>` above the headings, or an ARIA grid's blank `columnheader`
+ *    row, would otherwise shift the number by one and the extractor would
+ *    read the row BELOW the names. Measured: the probe's ARIA grid whose
+ *    header row names nothing and whose second row holds `Name`/`Amount`
+ *    answered "row 2", which counted as body row 2 and read `Alice`/`$1` as
+ *    the column names.
+ *  - `tfoot` — refused outright. A footer is excluded from the body (§7.4,
+ *    §7.9), so its number is not in the body list at all; counting it landed
+ *    on the LAST DATA ROW instead, which was then spliced out of the records
+ *    as if it were the header. A wrong header is visible; a table one row
+ *    short is not.
+ */
+function mappingFromAnswer(
+  answer: Extract<GridStructureAnswer, { kind: 'table' | 'collection' }>,
+  sketch: GridStructureSketch,
+): TableReadMapping {
+  if (answer.kind === 'collection') {
+    return { kind: 'collection', item: answer.item, fields: { ...answer.fields } };
+  }
+
+  const listed = sketch.candidates.map((c) => c.id).join(', ') || '(none)';
+  const rowsCandidate = sketch.candidates.find((c) => c.id === answer.rows);
+  if (!rowsCandidate) {
+    throw new Error(
+      `"rows": ${JSON.stringify(answer.rows)} is not one of the candidates in the sketch (${listed})`,
+    );
+  }
+  if (!answer.header) {
+    return { kind: 'table', rows: rowsCandidate.selector };
+  }
+
+  const headerCandidate = sketch.candidates.find((c) => c.id === answer.header!.table);
+  if (!headerCandidate) {
+    throw new Error(
+      `"header.table": ${JSON.stringify(answer.header.table)} is not one of the candidates in `
+      + `the sketch (${listed})`,
+    );
+  }
+  const rows = (headerCandidate.rows ?? []) as Array<{ section?: unknown }>;
+  const sectionAt = (i: number): string => {
+    const s = rows[i] as { section?: unknown } | undefined;
+    return typeof s?.section === 'string' ? s.section : '';
+  };
+  /** A row the extractor will keep in the body, and therefore one `bodyRow`
+   *  counts. `thead`, `tfoot` and an ARIA `header` row are all outside it. */
+  const isBodyRow = (section: string): boolean =>
+    section !== 'thead' && section !== 'tfoot' && section !== 'header';
+
+  const headerRowCount = rows.filter((_, i) => !isBodyRow(sectionAt(i))).length;
+  if (answer.header.row === undefined) {
+    // No row named. Legal exactly when the candidate has a header of its own
+    // for the extractor to find; without one it would refuse against the live
+    // page with a sentence about the element, and this refusal names the
+    // ANSWER, which is what the reader needs to see beside it.
+    if (headerRowCount === 0) {
+      throw new Error(
+        `"header.row" is missing and ${headerCandidate.id} has no header row of its own — name `
+        + 'the body row that holds the headings',
+      );
+    }
+    return {
+      kind: 'table',
+      rows: rowsCandidate.selector,
+      header: { selector: headerCandidate.selector },
+    };
+  }
+
+  const named = rows[answer.header.row - 1];
+  if (named === undefined) {
+    throw new Error(
+      `"header.row": ${answer.header.row} is past the end of ${headerCandidate.id}, which has `
+      + `${rows.length} row${rows.length === 1 ? '' : 's'} in the sketch`,
+    );
+  }
+  const section = typeof named.section === 'string' ? named.section : '';
+  if (section === 'tfoot') {
+    throw new Error(
+      `"header.row": ${answer.header.row} of ${headerCandidate.id} is a footer row, and a footer `
+      + 'row cannot be the header',
+    );
+  }
+  if (section === 'thead' || section === 'header') {
+    return {
+      kind: 'table',
+      rows: rowsCandidate.selector,
+      header: { selector: headerCandidate.selector },
+    };
+  }
+  let bodyRow = 0;
+  for (let i = 0; i <= answer.header.row - 1; i += 1) {
+    if (isBodyRow(sectionAt(i))) bodyRow += 1;
+  }
+  return {
+    kind: 'table',
+    rows: rowsCandidate.selector,
+    header: { selector: headerCandidate.selector, bodyRow },
+  };
+}
+
+/** A mapping in one line, for the log and for a failure message. */
+function describeMapping(mapping: TableReadMapping): string {
+  if (mapping.kind === 'table') {
+    const header = mapping.header
+      ? `, header ${mapping.header.selector}`
+        + (mapping.header.bodyRow !== undefined ? ` row ${mapping.header.bodyRow}` : '')
+      : ', no header (columns by position)';
+    return `rows in ${mapping.rows}${header}`;
+  }
+  const keys = Object.keys(mapping.fields).join(', ');
+  return `collection of "${mapping.item}" (${keys})`;
+}
+
+/** What one `readTable` execution, question and all, produced. */
+interface ReadTableOutcome {
+  result: ActionExecutionResult;
+  /**
+   * The mapping the RECORDED copy of the action should carry from now on, or
+   * `null` to drop the one it arrived with. `undefined` means "leave it as it
+   * is" — every read that needed no question.
+   */
+  mapping?: TableReadMapping | null;
+}
+
+interface ReadTableArgs {
+  page: Page;
+  /** The substituted action, carrying a cached `mapping` when there is one. */
+  action: AIAction;
+  baseUrl: string | undefined;
+  execOptions: ExecuteActionOptions;
+  config: Config;
+  aiClient: AiClient;
+  signal: AbortSignal | undefined;
+  /** The run's secret VALUES — the same set the DOM snapshot is redacted with,
+   *  so a secret column cannot reach the model inside the sketch (§7.6). */
+  maskValues: string[];
+  /** The authored step text, for the question's `## The step` section. */
+  stepText: string;
+  /** Where a model call this function makes is recorded for the report. */
+  onAiInteraction: (interaction: AiInteraction) => void;
+  /** What this RUN has already learned about a region's structure
+   *  (src/runner/structure-memo.ts). Absent on a caller that keeps no run
+   *  state — the REPL, a hook — which then behaves as it did before the memo
+   *  existed: one question per step. */
+  memo: StructureMemo | undefined;
+  /** Which step this read belongs to, so a reuse can say where the answer it
+   *  is reusing came from. */
+  stepIndex: number;
+}
+
+/**
+ * How much of the region's markup the question may carry when the sketch has
+ * no candidates in it (§7.10: "capped at a few kilobytes"). Big enough for a
+ * handful of cards, small enough that a mis-selected wrapper cannot put a
+ * whole page into a prompt.
+ */
+const GRID_STRUCTURE_SNAPSHOT_CHARS = 6000;
+
+/**
+ * Run one `readTable`, asking the model about the region's STRUCTURE once if
+ * the read fails for a shape reason (SPEC-structured-table-reads.md §7.10).
+ *
+ * The order is the specification's, and each step of it is load-bearing:
+ *
+ *  1. Read, with the cached `mapping` first when the action carries one. A
+ *     cached run therefore costs no model call at all, which is the whole
+ *     point of storing the answer.
+ *  2. A cached mapping that no longer fits is not by itself a failure: the
+ *     read is repeated WITHOUT it, which either succeeds (the page's structure
+ *     decides again, and the stale mapping is dropped) or produces the
+ *     refusal — and the sketch — that the second question is asked from.
+ *  3. Only a SHAPE refusal may be asked about, and only when
+ *     `tables.structure` is `ask`. An author's own mistake keeps the sentence
+ *     it has, whatever the setting.
+ *  4. The answer is translated to a mapping and the read is repeated with it.
+ *     Every validation is the extractor's, against the live page, so a wrong
+ *     answer costs a failed step with the answer in the message — never a
+ *     plausible-looking read of the wrong table.
+ */
+async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome> {
+  const { page, action, baseUrl, execOptions, config, aiClient, signal, maskValues } = args;
+  const options: ExecuteActionOptions = { ...execOptions, maskValues };
+
+  /** One read. Never throws: a thrown refusal and a returned one are the same
+   *  event to everything below, and only the carrier differs.
+   *
+   *  `source` says where the `mapping` on `candidate` came from, for the
+   *  summary line alone (§7.6) — the extractor cannot tell a fresh answer from
+   *  a cached one, and "structure from the model" over a cached replay claims
+   *  a model call that never happened. */
+  const attempt = async (
+    candidate: AIAction,
+    source?: TableStructureSource,
+  ): Promise<{ result: ActionExecutionResult; thrown?: unknown }> => {
+    const withSource: ExecuteActionOptions =
+      source === undefined ? options : { ...options, structureSource: source };
+    try {
+      return { result: await executeAction(page, candidate, baseUrl, signal, withSource) };
+    } catch (err) {
+      return {
+        result: {
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+          ...(candidate.selector !== undefined && { failedSelector: candidate.selector }),
+        },
+        thrown: err,
+      };
+    }
+  };
+
+  const { memo, stepIndex } = args;
+  const memoKey = structureMemoKey(action);
+  const cachedMapping = action.mapping;
+  // The action arrives carrying a mapping only when the step cache put one on
+  // it, so that first read is the `cache` source by construction.
+  let first = await attempt(action, cachedMapping ? 'cache' : undefined);
+  if (first.result.success) {
+    // A mapping that worked belongs in the memo whether it came from the step
+    // cache or from a question — this is the cached-step half of "one
+    // question per structure per run". Without it, step 2 replaying its own
+    // cached mapping leaves step 10 with nothing to reuse, and step 10 asks.
+    if (cachedMapping && memo) memo.set(memoKey, { mapping: cachedMapping, stepIndex });
+    return { result: first.result };
+  }
+
+  /** Set when a cached mapping was dropped on the way here. */
+  let droppedCachedMapping = false;
+  if (cachedMapping) {
+    // Step 2. The mapping in the cache was validated against the page as it
+    // was, not as it is. Repeating the read without it is free — no model call
+    // — and it is the only way to tell "the page changed and structure can
+    // read it now" from "the page changed and the model must look again".
+    logger.debug(
+      `readTable: the cached mapping no longer fits (${describeMapping(cachedMapping)}) — `
+      + `re-reading without it. Refusal: ${first.result.error ?? '(none)'}`,
+    );
+    const { mapping: _dropped, ...withoutMapping } = action;
+    const retry = await attempt(withoutMapping);
+    if (retry.result.success) {
+      logger.info(
+        'readTable: the cached structure mapping is no longer needed — the page\'s own '
+        + 'structure decides it now, so the mapping has been dropped from the cache.',
+      );
+      return { result: retry.result, mapping: null };
+    }
+    droppedCachedMapping = true;
+    first = retry;
+  }
+
+  let refusal = shapeRefusalOf(first.thrown, first.result);
+  if (!refusal && droppedCachedMapping) {
+    // §7.10's re-ask, in full: "if it fails too, its refusal is what the
+    // question is asked from ONCE more". The unmapped re-read above failed for
+    // a reason that carries no sketch — a header the page no longer has, a
+    // short row — and without one there is nothing to ask FROM, so the branch
+    // used to give up here and the step died with a cached mapping's ghost and
+    // no second question. That is the one situation `sketchTable()` exists for
+    // (it was, until this line, dead code).
+    //
+    // This is not the "never for an author's own problem" rule being bent. The
+    // step was passing on the last run, off a mapping this runtime wrote — so
+    // the page has CHANGED, which is a question about shape whatever sentence
+    // the extractor reached for. A read that never had a mapping still gets
+    // the rule as written: no sketch, no question.
+    const sketch = await sketchTable(page, action.selector ?? '', maskValues).catch(() => null);
+    if (sketch) {
+      refusal = { message: failureTextOf(first.thrown, first.result), sketch };
+      logger.debug(
+        'readTable: the re-read without the cached mapping failed for a non-shape reason — '
+        + 'sketching the region so the second question has something to answer from.',
+      );
+    }
+  }
+  if (!refusal) {
+    // Not a shape reason: an author's own problem (a header that is not there,
+    // a short row, a selector matching several elements). §7.10 is explicit
+    // that these are never a model question.
+    return { result: first.result, ...(droppedCachedMapping ? { mapping: null } : {}) };
+  }
+
+  if (tableStructureOf(config) === 'strict') {
+    logger.info(
+      'readTable: the read failed for a shape reason and `tableStructure: strict` is set, '
+      + 'so the model was not asked about the structure.',
+    );
+    return { result: first.result, ...(droppedCachedMapping ? { mapping: null } : {}) };
+  }
+
+  // Step 3. Has THIS RUN already been told how this region is laid out? One
+  // question per structure per run (§7.10): the step cache answers only for
+  // the same line of the same file, so a test that reads a table in step 2 and
+  // again in step 10 would otherwise pay twice — measured at five questions
+  // for the four shapes of `table-odd-shapes.md`.
+  //
+  // Applied, never assumed: the extractor validates a remembered mapping
+  // against the live page exactly as it validates a fresh answer, so a page
+  // that changed between the two steps falls through to the question below
+  // instead of reading the wrong table. A mapping identical to the one that
+  // just failed is skipped rather than tried twice.
+  /** A mapping already tried and refused, named in a second failure. */
+  let priorMapping: { mapping: TableReadMapping; source: string } | undefined =
+    cachedMapping ? { mapping: cachedMapping, source: 'cached' } : undefined;
+  const remembered = memo?.get(memoKey);
+  if (
+    remembered
+    && JSON.stringify(remembered.mapping) !== JSON.stringify(cachedMapping)
+  ) {
+    const reused = await attempt({ ...action, mapping: remembered.mapping }, 'memo');
+    if (reused.result.success) {
+      logger.info(`readTable: structure reused from step ${remembered.stepIndex}`);
+      logger.debug(`readTable structure mapping: ${JSON.stringify(remembered.mapping)}`);
+      return { result: reused.result, mapping: remembered.mapping };
+    }
+    logger.debug(
+      `readTable: the structure remembered from step ${remembered.stepIndex} `
+      + `(${describeMapping(remembered.mapping)}) no longer fits — asking again. `
+      + `Refusal: ${reused.result.error ?? '(none)'}`,
+    );
+    priorMapping = { mapping: remembered.mapping, source: 'remembered' };
+  }
+
+  // A region with no table and no grid in it has nothing to summarise, so the
+  // question carries the region's own cleaned markup instead. Capped: a
+  // mis-selected wrapper must cost a few kilobytes, not a whole page.
+  //
+  // REDACTED before anything else touches it, with the same set and the same
+  // function the DOM snapshot uses one message earlier (§7.6). The sketch's
+  // own cell text is masked in the page, where it is built — but this snapshot
+  // comes out of `expandDomSubtree`, which knows nothing about the run's
+  // secrets, so a card list holding a password reached the model verbatim and
+  // then the `AiInteraction` and the report with it. Masked HERE rather than
+  // at either surface, because there are two of them and a third would be one
+  // more place to forget.
+  //
+  // The cut comes after the mask, never before: a cut applied first can slice
+  // a secret in two and leave the first half in the prompt.
+  let regionSnapshot: string | undefined;
+  if (refusal.sketch.candidates.length === 0) {
+    const subtree = await expandDomSubtree(page, action.selector ?? '').catch(() => '');
+    if (subtree !== '') {
+      regionSnapshot = redact(subtree, maskValues).slice(0, GRID_STRUCTURE_SNAPSHOT_CHARS);
+    }
+  }
+
+  logger.debug(`readTable structure sketch: ${JSON.stringify(refusal.sketch)}`);
+  const messages = buildGridStructurePrompt({
+    sketch: refusal.sketch,
+    request: {
+      columns: action.columns ?? [],
+      // The `Selector:` line, masked for the reason the snapshot is: a
+      // selector is page-derived as often as a cell (`[data-token="…"]`), and
+      // this one is printed as itself rather than inside the sketch.
+      selector: redact(action.selector ?? '', maskValues),
+      stepText: args.stepText,
+    },
+    refusal: refusal.message,
+    ...(regionSnapshot !== undefined && { regionSnapshot }),
+  });
+  const completion = await aiClient.complete(messages, signal);
+  args.onAiInteraction({
+    purpose: 'grid-structure',
+    requestMessages: messages.map((m) => ({ role: m.role, content: contentBlocksToText(m.content) })),
+    response: completion.text,
+    ...(completion.model !== undefined && { model: completion.model }),
+    pageUrl: page.url(),
+    timestamp: new Date().toISOString(),
+  });
+  logger.debug(`readTable structure answer: ${completion.text}`);
+
+  /**
+   * Every failure below this point is NON-RETRYABLE, and the reason is the
+   * budget §7.10 sets: ONE model call per step per structure.
+   *
+   * Without the flag a failed step is retried — and a cached replay that
+   * fails is worse still, because `executeStep` invalidates the entry and
+   * runs the whole step again under AI. Either way the second pass meets the
+   * same refusal, asks the same question, and gets the same answer, so the
+   * step that §7.10 budgets one call for spends two or three and fails
+   * identically. Re-planning cannot conjure a structure the model has just
+   * been asked about and got wrong.
+   *
+   * It is also what makes "a second failure is the refusal with both answers"
+   * true: a retryable failure discards this message and re-runs from the top,
+   * where there is no cached mapping left to name.
+   */
+  const spent = (result: ActionExecutionResult, error: string): ActionExecutionResult => ({
+    ...result,
+    error,
+    retryable: false as const,
+  });
+
+  /** What a second failure has to say, so the reader sees both attempts —
+   *  whichever mapping was tried first, from the cache or from this run's
+   *  memo, and then what the model said when it was asked again. */
+  const bothAnswers = (secondAnswer: string): string =>
+    (priorMapping
+      ? `The ${priorMapping.source} structure mapping was ${describeMapping(priorMapping.mapping)}. `
+      : '')
+    + `The model was asked about the region's structure and answered: ${secondAnswer}`;
+
+  let answer: GridStructureAnswer;
+  try {
+    answer = parseGridStructureAnswer(completion.text);
+  } catch (err) {
+    return {
+      result: spent(first.result, `${refusal.message} ${bothAnswers((err as Error).message)}`),
+      ...(droppedCachedMapping ? { mapping: null } : {}),
+    };
+  }
+
+  if (answer.kind === 'none') {
+    logger.info(
+      `readTable: structure asked of the model — it answered none: ${answer.reason}`,
+    );
+    return {
+      result: spent(first.result, `${refusal.message} ${bothAnswers(`none — ${answer.reason}`)}`),
+      ...(droppedCachedMapping ? { mapping: null } : {}),
+    };
+  }
+
+  let mapping: TableReadMapping;
+  try {
+    mapping = mappingFromAnswer(answer, refusal.sketch);
+  } catch (err) {
+    return {
+      result: spent(
+        first.result,
+        `${refusal.message} ${bothAnswers(`${JSON.stringify(answer)} — ${(err as Error).message}`)}`,
+      ),
+      ...(droppedCachedMapping ? { mapping: null } : {}),
+    };
+  }
+
+  logger.info(`readTable: structure asked of the model — ${describeMapping(mapping)}`);
+  logger.debug(`readTable structure mapping: ${JSON.stringify(mapping)}`);
+
+  // Step 4. Every remaining rule in §7.10's "Validation" is the extractor's,
+  // and it runs against the LIVE page: the candidates still hold rows, the
+  // header row still names the requested columns, the widths agree, the item
+  // selector still matches at most 500 non-nested elements, each field matches
+  // at most one element per item.
+  const second = await attempt({ ...action, mapping }, 'model');
+  if (!second.result.success) {
+    return {
+      result: spent(
+        second.result,
+        `${second.result.error ?? refusal.message} ` + bothAnswers(JSON.stringify(answer)),
+      ),
+      ...(droppedCachedMapping ? { mapping: null } : {}),
+    };
+  }
+  // Validated against the live page, so the rest of this run may reuse it —
+  // replacing whatever was remembered before, which is how a memo entry that
+  // stopped fitting is repaired rather than retried at every step.
+  memo?.set(memoKey, { mapping, stepIndex });
+  return { result: second.result, mapping };
+}
+
+
 async function executeStepAttempt(
   stepIndex: number,
   totalSteps: number,
@@ -2029,13 +2725,28 @@ async function executeStepAttempt(
       });
     }
 
-    for (const emitted of refusal === undefined ? aiResponse.actions : []) {
+    for (const [emittedIndex, emitted] of (refusal === undefined ? aiResponse.actions : []).entries()) {
       // What the page gets: a COPY with `{{name}}` and `${…}` resolved. The
       // emitted object is never written to — the transcript, the recording and
       // the cache keep it as the model wrote it, which is the whole point of
       // asking for the placeholder (decision 3). Every consumer below reads
-      // `action`; the three record sites read `emitted`.
+      // `action`; the three record sites read `recordedEmitted`.
       const action = substituteAction(emitted, placeholderValues);
+      /**
+       * What the three record sites write: `emitted` itself for every action
+       * ever emitted, and a COPY carrying `mapping` for a `readTable` whose
+       * structure the model had to name (SPEC-structured-table-reads.md
+       * §7.10, "Caching").
+       *
+       * A copy, never a write through `emitted`: the model's object is what
+       * the transcript quotes and what `rawResponse` says it emitted, and a
+       * field appearing on it that the model never wrote would make the two
+       * disagree. The replacement is pushed back into `aiResponse.actions`
+       * below, which is the array `cacheCapture` is holding — so the cache,
+       * the recording and the report all see the mapping without three
+       * separate assignments that could drift apart.
+       */
+      let recordedEmitted = emitted;
       if (action.action === 'prompt') continue;
 
       const subStartTime = Date.now();
@@ -2677,13 +3388,58 @@ async function executeStepAttempt(
       // generates nothing. `browser.ambiguousTarget: 'fail'` is the stated
       // exception: it decides by reading the visible count, so it turns that
       // one call on whatever the mode.
-      const result = await traceOp(`action.${action.action}: ${action.description}`, () =>
-        executeAction(page, action, baseUrl, opts.signal, {
-          measure: opts.captureStepContext === true && !cachedTurnForCapture,
-          ambiguousTarget: config.browser.ambiguousTarget,
-          ...(opts.uploadPaths !== undefined && { uploadPaths: opts.uploadPaths }),
-        }),
-      );
+      const execOptions: ExecuteActionOptions = {
+        measure: opts.captureStepContext === true && !cachedTurnForCapture,
+        ambiguousTarget: config.browser.ambiguousTarget,
+        ...(opts.uploadPaths !== undefined && { uploadPaths: opts.uploadPaths }),
+      };
+      const result = await traceOp(`action.${action.action}: ${action.description}`, async () => {
+        if (action.action !== 'readTable') {
+          return executeAction(page, action, baseUrl, opts.signal, execOptions);
+        }
+        // Structured table reads carry a structure question of their own
+        // (SPEC-structured-table-reads.md §7.10) — at most one model call,
+        // only on a SHAPE refusal, and never on a run whose cached mapping
+        // still fits. `secretsNow()` is the same set the DOM snapshot is
+        // redacted with, so a secret column is masked in the sketch before it
+        // reaches the model, exactly as it is masked in the page the model is
+        // shown one message earlier (§7.6).
+        const outcome = await runReadTableAction({
+          page,
+          action,
+          baseUrl,
+          execOptions,
+          config,
+          aiClient,
+          signal: opts.signal,
+          maskValues: secretsNow(),
+          stepText: promptAuthored,
+          memo: opts.structureMemo,
+          stepIndex,
+          onAiInteraction: (interaction) => {
+            turnAiInteractions.push({ ...interaction, attemptNumber });
+          },
+        });
+        if (outcome.mapping !== undefined) {
+          // Record site 1 of 3: the array `cacheCapture` is holding. Replacing
+          // the SLOT rather than writing through the object keeps `emitted`
+          // as the model wrote it, and carries the mapping into the cache file
+          // the moment this step passes.
+          //
+          // `null` REMOVES the field rather than setting it to `undefined`:
+          // the recorded action is read back in-process by the report and by
+          // generation, and a `mapping: undefined` there would render as a
+          // structure note for a read that had none.
+          const { mapping: _dropped, ...withoutMapping } = emitted;
+          recordedEmitted =
+            outcome.mapping === null
+              ? withoutMapping
+              : { ...emitted, mapping: outcome.mapping };
+          aiResponse.actions[emittedIndex] = recordedEmitted;
+          if (cacheCapture) cacheCapture.rewrite = true;
+        }
+        return outcome.result;
+      });
       const subDuration = Date.now() - subStartTime;
 
       // Post-action settle: waits for the page to reflect the action's effect
@@ -2787,8 +3543,12 @@ async function executeStepAttempt(
       const postUrl = page.url();
       const domSnapshotVal = config.reports.includeDomSnapshots ? postDom : undefined;
       turnSubActions.push({
+        // Record sites 2 and 3: the transcript the report renders and the
+        // recording `actionsOf` reads for generation. `recordedEmitted` is
+        // `emitted` itself unless a `readTable` above put a validated
+        // `mapping` on a copy of it (§7.10).
         index: ++globalSubActionIndex,
-        action: emitted,
+        action: recordedEmitted,
         ...(postShotBase64 !== undefined && { screenshotBase64: postShotBase64 }),
         ...(domSnapshotVal !== undefined && { domSnapshot: domSnapshotVal }),
         ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
@@ -2825,9 +3585,19 @@ async function executeStepAttempt(
         turnFailed = true;
         turnError = result.error;
 
-        // Build list of actions that succeeded before this failure
+        // Build list of actions that succeeded before this failure.
+        //
+        // `emittedIndex` — the loop's own counter — not `indexOf(emitted)`.
+        // A `readTable` whose structure the model had to name REPLACES its
+        // slot in this array with a copy carrying `mapping`
+        // (SPEC-structured-table-reads.md §7.10), so by the time a later
+        // action fails, `emitted` is no longer in `aiResponse.actions` and
+        // `indexOf` answers -1 — `slice(0, -1)` then drops the LAST action
+        // instead of keeping the ones before this one, and the retry prompt is
+        // told a different set of actions succeeded than actually did. The
+        // index is known; looking it up again was the mistake.
         const currentTurnSucceeded = aiResponse.actions
-          .slice(0, aiResponse.actions.indexOf(emitted))
+          .slice(0, emittedIndex)
           .filter((a) => a.action !== 'assert' && a.action !== 'prompt')
           .map((a) => ({ action: a.action, description: a.description }));
         const allSucceeded = [

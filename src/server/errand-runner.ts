@@ -34,6 +34,7 @@ import {
   toleratedLogLine,
 } from '../runner/flow-control.js';
 import { runSetStep } from '../runner/set-step-runner.js';
+import { createStructureMemo } from '../runner/structure-memo.js';
 import { redact, runSecrets } from '../utils/secrets.js';
 import { interpolateEnvData, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
@@ -618,6 +619,22 @@ export class ErrandRunner {
     const conversationHistory: string[] = [];
     const apiResponseStore = new ApiResponseStore();
     const csrfTokens: Record<string, string> = {};
+    /**
+     * What THIS errand learns about a region's structure
+     * (SPEC-structured-table-reads.md §7.10, src/runner/structure-memo.ts).
+     *
+     * One per errand, beside `scope` and for the same reason: an errand is a
+     * run, and the budget §7.10 sets is one structure question per structure
+     * per run. An errand of "read the holdings grid, click the first row, read
+     * it again" is exactly the two-reads case the memo exists for, and without
+     * one here it asked the model twice. A *second* errand starts with an
+     * empty memo, as it starts with an empty scope — it may be pointed at a
+     * different page entirely.
+     *
+     * There is no step cache to pair it with: an errand has no file and no
+     * step lines, so the memo is the only layer it has.
+     */
+    const structureMemo = createStructureMemo();
 
     /** Refreshed from the tracker after each step — openBrowser / switchBrowser
      *  / closeBrowser move which browser is active. */
@@ -859,6 +876,7 @@ export class ErrandRunner {
             uploadPaths: args.uploadPaths,
             pageTracker: active.pageTracker,
             browserTracker,
+            structureMemo,
             // No console is attached to an errand either, so an AI clarification
             // must fail the step fast rather than block on stdin.
             nonInteractive: true,

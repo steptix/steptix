@@ -45,6 +45,7 @@ import {
 } from '../../runner/flow-control.js';
 import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 import { runSetStep } from '../../runner/set-step-runner.js';
+import { createStructureMemo, type StructureMemo } from '../../runner/structure-memo.js';
 import {
   createControlState,
   forEachPassOf,
@@ -209,6 +210,19 @@ export class UIRunnerAdapter {
   private contextContent = '';
   private conversationHistory: string[] = [];
   private csrfTokens: Record<string, string> = {};
+  /**
+   * What this run has learned about a region's structure
+   * (SPEC-structured-table-reads.md §7.10, src/runner/structure-memo.ts).
+   *
+   * Run state, beside `conversationHistory` and `csrfTokens`, and cleared with
+   * them in `reset()`: §7.10 budgets ONE structure question per structure per
+   * run, and a debug session that reads the same odd grid at step 2 and again
+   * at step 10 otherwise pays for it twice — in an interactive window, where
+   * the second wait is the one the user is watching. Shared with the STEERING
+   * call as well, because a steer is a step of this same run against this same
+   * page.
+   */
+  private structureMemo: StructureMemo = createStructureMemo();
   private resolvedParameters: Record<string, string> = {};
   private test: ParsedTest | null = null;
   /** The project root an upload path is fenced by. Resolved once per run,
@@ -358,6 +372,7 @@ export class UIRunnerAdapter {
       resolvedParameters: this.resolvedParameters,
       ...(this.test.envData && { envData: this.test.envData }),
       ...(this.session?.pageTracker && { pageTracker: this.session.pageTracker }),
+      structureMemo: this.structureMemo,
       // A broken entry fails with the heal-skip copy instead of reaching AI
       // (stories/keyless-replay-and-gateway-env.md §Part B). Read off
       // `this.config.ai` — `loadConfig()` has already applied env, the project
@@ -1221,6 +1236,7 @@ export class UIRunnerAdapter {
         // `step.getVar('data.x')` and secret masking read the same values.
         ...(parsedTest.envData && { envData: parsedTest.envData }),
         ...(this.session?.pageTracker && { pageTracker: this.session.pageTracker }),
+        structureMemo: this.structureMemo,
         // Keyless, same as the steering call above — both call sites or
         // neither: a run and a steer on the same machine must not disagree
         // about whether there is AI to heal with.
@@ -1475,6 +1491,7 @@ export class UIRunnerAdapter {
     this.steeringCount = 0;
     this.conversationHistory = [];
     this.csrfTokens = {};
+    this.structureMemo = createStructureMemo();
     this.resolvedParameters = {};
     this.test = null;
     this.config = null;

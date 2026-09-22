@@ -102,6 +102,17 @@ export interface TestConfig {
    *  Held as the raw string, like `viewport`: one parse, in the executor's
    *  caller, so the CLI and the server agree on what a name is. */
   unmask?: string;
+  /** What a `readTable` does when the page's structure cannot decide how to
+   *  read it (docs/specs/SPEC-structured-table-reads.md §7.10): `ask` — the
+   *  default — shows the model a sketch of the region once and caches the
+   *  answer; `strict` asks nothing and lets the shape refusal stand.
+   *
+   *  Overrides the project's `tables.structure` in `aiui.config.json`. Held as
+   *  the raw string, like `viewport` and `unmask`: one validator
+   *  (`resolveTableStructure`, src/config/table-structure.ts) serves the CLI,
+   *  the Sessions API and MCP, so an unrecognised value produces one sentence
+   *  rather than three. */
+  tableStructure?: string;
 }
 
 /**

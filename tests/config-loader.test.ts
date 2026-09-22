@@ -152,6 +152,17 @@ describe('loadConfig — aiui.config.json loading + deep merge', () => {
     expect(dnr.hideHiddenInputs).toBe(true);
   });
 
+  it("tables.structure defaults to 'ask' and merges to 'strict'", async () => {
+    // SPEC-structured-table-reads.md §7.10. The default has to be a REAL value
+    // and not an absence: the executor reads it on every failed table read,
+    // and "undefined means ask" would make a project that set 'strict'
+    // indistinguishable from one that set nothing the moment a merge dropped
+    // the section.
+    expect((await loadConfig(await writeConfig({}))).tables.structure).toBe('ask');
+    const file = await writeConfig({ tables: { structure: 'strict' } });
+    expect((await loadConfig(file)).tables.structure).toBe('strict');
+  });
+
   it('browser.cdp.hideAutomation defaults to false and merges when set', async () => {
     expect((await loadConfig(await writeConfig({}))).browser.cdp?.hideAutomation).toBe(false);
     const file = await writeConfig({ browser: { cdp: { hideAutomation: true } } });
@@ -454,6 +465,17 @@ describe('aiui.config.schema.json validates configs', () => {
     expect(validate({ browser: { ambiguousTarget: 'strict' } })).toBe(false);
     expect(validate({ browser: { ambiguousTarget: true } })).toBe(false);
     expect(validate({ browser: { ambiguousTargets: 'fail' } })).toBe(false);
+  });
+
+  it("accepts tables.structure as 'ask'/'strict' and nothing else", () => {
+    expect(validate({ tables: { structure: 'ask' } })).toBe(true);
+    expect(validate({ tables: { structure: 'strict' } })).toBe(true);
+    // 'off' reads like a third mode and is not one: the switch is between
+    // asking and letting the refusal stand (§7.10).
+    expect(validate({ tables: { structure: 'off' } })).toBe(false);
+    expect(validate({ tables: { structure: true } })).toBe(false);
+    expect(validate({ tables: { structures: 'ask' } })).toBe(false);
+    expect(validate({ table: { structure: 'ask' } })).toBe(false);
   });
 
   it('rejects an unknown top-level key', () => {

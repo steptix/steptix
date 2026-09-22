@@ -342,6 +342,30 @@ export interface ServerConfig {
   idleTimeoutMinutes?: number;
 }
 
+/**
+ * Structured table reads (docs/specs/SPEC-structured-table-reads.md §7.10).
+ */
+export interface TablesConfig {
+  /**
+   * What a `readTable` does when the page's structure cannot decide how to
+   * read it — headings written as `<td>`, a header table after the rows, a
+   * card list, one key/value table per record (§5.9).
+   *
+   *   - `'ask'` (default): the runtime shows the model a sketch of the region
+   *     ONCE, validates the answer against the page, reads deterministically
+   *     and caches the mapping. Every later run replays it with no model call.
+   *   - `'strict'`: no question. The shape refusal stands as the step failure,
+   *     so a run that must be deterministic never spends an unplanned model
+   *     call (§7.10 "Cost and control").
+   *
+   * A test overrides the project with `## Config: tableStructure: strict`.
+   * Only the four SHAPE refusals reach this switch — an author's own mistake
+   * (a header typo, a short row, a selector matching several elements) is
+   * refused as before, whatever this says.
+   */
+  structure: 'ask' | 'strict';
+}
+
 export interface CacheConfig {
   /** Enable AI response caching for test steps */
   enabled: boolean;
@@ -515,6 +539,8 @@ export interface Config {
   server: ServerConfig;
   cache: CacheConfig;
   logging: LoggingConfig;
+  /** Structured table reads (§7.10). */
+  tables: TablesConfig;
   /**
    * MCP-only settings. Optional, and deliberately without a `defaults.ts`
    * entry so absence stays absence through `deepMerge` — the same treatment as

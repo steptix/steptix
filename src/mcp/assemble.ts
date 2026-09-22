@@ -639,6 +639,11 @@ function projectConfig(
   // Not resolved here on purpose: §3 puts the one validator on the server, so
   // `run_test_file` and a Run in TestBench refuse `390` with the same words.
   if (resolved['viewport'] !== undefined) out.viewport = resolved['viewport'];
+  // Same projection, same reason (SPEC-structured-table-reads.md §7.10): a key
+  // absent from this whitelist never reaches the wire, so without this line an
+  // MCP-run test that asked for `tableStructure: strict` would quietly spend
+  // the model call it asked not to spend.
+  if (resolved['tableStructure'] !== undefined) out.tableStructure = resolved['tableStructure'];
 
   // A file-declared `cdp` is read from the FILE's config, never the merged
   // map, and that separation is now doing MORE work than when it was written,

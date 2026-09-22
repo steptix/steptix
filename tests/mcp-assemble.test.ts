@@ -258,6 +258,32 @@ describe('assembleTestFile — goldens', () => {
     expect(run.request.config).toEqual({ viewport: 'tablet' });
   });
 
+  // SPEC-structured-table-reads.md §7.10. The same whitelist, the same
+  // argument: a key it does not name never reaches the wire, so without this
+  // an MCP-run test that asked for `tableStructure: strict` would quietly
+  // spend the model call it asked not to spend — and a run that had to be
+  // deterministic would not be, with nothing in the result saying so.
+  it("forwards a file's `tableStructure` to the wire, raw", async () => {
+    const run = await assemble('table-structure.md');
+    expect(run.request.config).toEqual({
+      baseUrl: 'https://example.com',
+      tableStructure: 'strict',
+    });
+  });
+
+  it('lets a tool `tableStructure` override the file per key', async () => {
+    const run = await assemble('table-structure.md', { config: { tableStructure: 'ask' } });
+    expect(run.request.config).toEqual({
+      baseUrl: 'https://example.com',
+      tableStructure: 'ask',
+    });
+  });
+
+  it('sends a tool `tableStructure` for a file that declares none', async () => {
+    const run = await assemble('simple.md', { config: { tableStructure: 'strict' } });
+    expect(run.request.config).toEqual({ tableStructure: 'strict' });
+  });
+
   it('passes an invalid value THROUGH — the server owns the one validator', async () => {
     // Deliberately not refused here (§3): two validators drift, and the day
     // they disagree an agent gets a different answer from `run_test_file` than

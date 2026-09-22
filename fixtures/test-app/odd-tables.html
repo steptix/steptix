@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Legacy screens</title>
+  <!--
+    Fixture page for docs/specs/SPEC-structured-table-reads.md, §5.9 and §7.10.
+
+    Four shapes that no structural rule reads. Every other table fixture in this
+    app can be read by walking the markup — a <thead>, a header table named by
+    aria-owns, an ARIA grid. These four cannot, and they are not exotic: each
+    one is what a business screen written before anybody thought about
+    accessibility actually looks like. They are the fixtures for the structure
+    question of §7.10, where the read fails for a SHAPE reason, the model is
+    asked one question about the parts, the answer is validated against the
+    page, and the mapping is then cached and reused.
+
+      #legacy-payees    A <table> with NO <thead> and NO <th>. The headings are
+                        <td><b>…</b></td> in the first body row. §7.3 looks for
+                        a header row, finds none, and a read by column NAME
+                        fails — though a read by POSITION already works today
+                        (§4.4), which is the deliberate contrast: the shape is
+                        only undecidable when names are wanted.
+
+      #late-header      The rows come FIRST, in a headerless table, and the
+                        header table comes AFTER them with a paragraph between.
+                        §7.3a pairs a header-only table with a rows table when
+                        they are contiguous siblings; here they are neither in
+                        that order nor contiguous, so the pairing rule stays
+                        silent. Nothing is malformed — this is what a screen
+                        looks like when somebody added a "Column key" under a
+                        report a decade after it was written.
+
+      #account-cards    Repeated <div class="account-card">, each one an
+                        <h3 class="card-title"> and a <div class="fields"> of
+                        <div class="field"> rows, each a
+                        <span class="label">/<span class="value"> pair. No
+                        <table>, no role, no row, no cell — there is nothing
+                        for a table rule to fail ON. The model answers a
+                        COLLECTION instead: an item selector plus one field
+                        selector per column. One card is hidden with
+                        display:none (a closed account), so an item selector
+                        that matches it must still drop it the way §7.4 drops
+                        a hidden row.
+
+                        The cards carry DIFFERENT balances, statuses and
+                        owners from #late-header-rows above, deliberately:
+                        the two sections list the same account names, and if
+                        the values matched as well, a read that resolved the
+                        wrong region would satisfy the other region's verify
+                        and the test would pass on the wrong page.
+
+      #property-tables  Four records, each drawn as its own two-column table:
+                        the label in a <th scope="row"> and the value in a <td>,
+                        one row per field. Every table IS structurally readable
+                        — and reading one gives four rows of two columns, which
+                        is the transpose of the record somebody wants. The
+                        collection answer here has the item being the table
+                        itself and each field a row by its label.
+
+                        The four payees here are NOT the payees of
+                        #legacy-payees above, for the same reason the cards
+                        differ from the account summary: both sections are read
+                        for a Payee and an Amount, and identical values would
+                        let a read of the wrong region pass the other's verify.
+
+    Everything is client-side — no login, no cookie banner, no persistence, no
+    scripts beyond the shared sidebar shell — so every shard can share one
+    server and every run starts from the same state.
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar (same shell as dashboard.html / radgrid.html) */
+    .sidebar {
+      width: 240px;
+      background: #1f2937;
+      color: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      min-height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      margin-bottom: 32px;
+    }
+
+    .sidebar-logo-icon {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .sidebar-logo-name { font-size: 18px; font-weight: 700; }
+
+    nav { flex: 1; }
+
+    nav ul { list-style: none; padding: 0; }
+
+    nav ul li a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 24px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav ul li a:hover { background: #374151; color: #f9fafb; }
+
+    nav ul li a.active {
+      background: #374151;
+      color: #f9fafb;
+      border-left-color: #1a56db;
+    }
+
+    nav ul li a .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+    .sidebar-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #374151;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .user-name { font-size: 13px; font-weight: 500; color: #f9fafb; }
+    .user-email { font-size: 12px; color: #6b7280; }
+
+    .logout-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover { background: #374151; color: #f9fafb; }
+
+    /* Main content */
+    .main-content {
+      margin-left: 240px;
+      flex: 1;
+      padding: 32px;
+      max-width: 1100px;
+    }
+
+    .page-header { margin-bottom: 28px; }
+
+    .page-header h1 { font-size: 26px; font-weight: 700; color: #111827; }
+
+    .page-header p { font-size: 14px; color: #6b7280; margin-top: 4px; }
+
+    .section-card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .section-title, .section-card h2 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .section-hint {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 16px;
+    }
+
+    .section-hint strong { color: #111827; }
+
+    .section-hint code, code.inline {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      background: #f3f4f6;
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: #374151;
+    }
+
+    .muted { font-size: 13px; color: #6b7280; }
+
+    .contents {
+      background: #fff;
+      border-radius: 12px;
+      padding: 16px 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+    }
+
+    .contents h2 {
+      font-size: 13px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 10px;
+    }
+
+    .contents ol {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 14px;
+      counter-reset: toc;
+    }
+
+    .contents li { counter-increment: toc; font-size: 13px; }
+    .contents li a { color: #1a56db; text-decoration: none; }
+    .contents li a::before { content: counter(toc) ". "; color: #9ca3af; }
+    .contents li a:hover { text-decoration: underline; }
+
+    /* ── The legacy look ─────────────────────────────────────────────────────
+       Flat borders, a grey band for the row somebody meant as a heading, and
+       no rounded corners: the house style of a screen that was last restyled
+       when tables were how you did layout. It is CSS doing the work — bold
+       text and a background — which is exactly why structure cannot see it. */
+    table.legacy-table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 13px;
+      color: #1f2937;
+      border: 1px solid #9ca3af;
+      background: #fff;
+    }
+
+    table.legacy-table td, table.legacy-table th {
+      border: 1px solid #d1d5db;
+      padding: 7px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    /* The first body row of #legacy-payees. A <tr> of <td><b>…</b></td> that
+       LOOKS like a header and is not one. */
+    table.legacy-table tr.heading-row td {
+      background: #e5e7eb;
+      border-bottom: 2px solid #9ca3af;
+      white-space: nowrap;
+    }
+
+    /* The "Column key" paragraph that sits between the rows and their header.
+       Deliberately NOT upper-cased: the text between the two tables is what
+       the model has to read, so it should say what the markup says. */
+    .caption {
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      letter-spacing: 0.02em;
+      margin: 18px 0 8px;
+    }
+
+    #late-header-head { margin-bottom: 0; }
+
+    #late-header-head th {
+      background: #e5e7eb;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    /* Card list: no table anywhere. */
+    .card-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .account-card {
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 14px 16px;
+      background: #fafafa;
+      width: 232px;
+    }
+
+    .account-card .card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #111827;
+      margin-bottom: 8px;
+    }
+
+    .account-card .fields { margin: 0; }
+
+    .account-card .field {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 13px;
+      padding: 3px 0;
+    }
+
+    .account-card .label { color: #6b7280; }
+    .account-card .value { color: #111827; font-weight: 500; }
+
+    /* One small key/value table per record. */
+    #property-tables {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    table.property-table {
+      border-collapse: collapse;
+      font-size: 13px;
+      color: #1f2937;
+      border: 1px solid #9ca3af;
+      background: #fff;
+      width: 268px;
+    }
+
+    table.property-table th, table.property-table td {
+      border: 1px solid #d1d5db;
+      padding: 6px 10px;
+      text-align: left;
+    }
+
+    table.property-table th {
+      background: #f3f4f6;
+      font-weight: 600;
+      color: #374151;
+      width: 96px;
+    }
+  </style>
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside class="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">S</div>
+      <span class="sidebar-logo-name">SecureBank</span>
+    </div>
+
+    <nav>
+      <ul>
+        <li>
+          <a href="dashboard.html">
+            <span class="nav-icon">🏠</span>
+            Dashboard
+          </a>
+        </li>
+        <li>
+          <a href="transactions.html">
+            <span class="nav-icon">💳</span>
+            Transactions
+          </a>
+        </li>
+        <li>
+          <a href="documents.html">
+            <span class="nav-icon">📄</span>
+            Documents
+          </a>
+        </li>
+        <li>
+          <a href="control-flow.html">
+            <span class="nav-icon">💸</span>
+            Payments
+          </a>
+        </li>
+        <li>
+          <a href="tables.html" class="active" aria-current="page">
+            <span class="nav-icon">📋</span>
+            Tables
+          </a>
+        </li>
+        <li>
+          <a href="#settings">
+            <span class="nav-icon">⚙️</span>
+            Settings
+          </a>
+        </li>
+        <li>
+          <a href="#profile">
+            <span class="nav-icon">👤</span>
+            Profile
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <div>
+          <div class="user-name">Demo User</div>
+          <div class="user-email" id="user-email">demo@securebank.com</div>
+        </div>
+      </div>
+      <button class="logout-btn" id="logout-btn" type="button">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <div class="page-header">
+      <h1>Legacy screens</h1>
+      <p>Four shapes no structural rule can read: headings written as ordinary cells, a column key that comes after the report, a list drawn as cards, and one small table per record. Each is what an older business screen actually looks like, and each is answered by asking the model about the structure once.</p>
+    </div>
+
+    <nav class="contents" id="contents" aria-label="Contents">
+      <h2>Contents</h2>
+      <ol>
+        <li><a href="#c-legacy-payees">Payees</a></li>
+        <li><a href="#c-late-header">Account summary</a></li>
+        <li><a href="#c-account-cards">Accounts as cards</a></li>
+        <li><a href="#c-property-tables">Payment property sheets</a></li>
+      </ol>
+    </nav>
+
+    <!-- 1 ── Headings as <td> in the first body row ────────────────────────── -->
+    <section class="section-card" id="c-legacy-payees" aria-labelledby="h-legacy-payees">
+      <div class="section-header">
+        <h2 id="h-legacy-payees">Payees</h2>
+      </div>
+      <p class="section-hint">A <code>&lt;table&gt;</code> with <strong>no <code>&lt;thead&gt;</code> and not one <code>&lt;th&gt;</code></strong>. The first body row is <code>&lt;tr&gt;&lt;td&gt;&lt;b&gt;Payee&lt;/b&gt;&lt;/td&gt;…</code> and CSS gives it a grey band, so it reads as a heading to a person and is an ordinary data row to the markup. <strong>Why structure cannot decide:</strong> §7.3 has nothing to map — no header row exists — so a read that names <em>Payee</em> or <em>Amount</em> fails for a shape reason, and a rule that promoted the first row on sight would eat a record from every headerless table in the app (<a href="scheduled-payments.html">scheduled-payments.html</a> has five records and no heading row at all). A read <strong>by position</strong> already works here today (§4.4): six rows, three columns, the first row being the heading is the author's problem. <strong>What the model is asked</strong> (§7.10): one question, with a sketch of the region, answered as <code>{"kind": "table", "rows": "T1", "header": {"table": "T1", "row": 1}}</code> — row 1 of this same table is the header. Validation then checks that row 1 names at least one column, that the widths agree and that every requested name resolves, and the read returns the <strong>5 payees</strong> under <em>Payee</em>, <em>Reference</em> and <em>Amount</em>. The mapping is cached, so the model is asked once and never again while the page keeps this shape.</p>
+
+      <table id="legacy-payees" class="legacy-table">
+        <tbody>
+          <tr class="heading-row">
+            <td><b>Payee</b></td>
+            <td><b>Reference</b></td>
+            <td><b>Amount</b></td>
+          </tr>
+          <tr>
+            <td>Origin Energy</td>
+            <td>INV-2291</td>
+            <td>$140.00</td>
+          </tr>
+          <tr>
+            <td>Telstra</td>
+            <td>TEL-88134</td>
+            <td>$89.99</td>
+          </tr>
+          <tr>
+            <td>Sydney Water</td>
+            <td>SW-40027</td>
+            <td>$212.60</td>
+          </tr>
+          <tr>
+            <td>AAMI</td>
+            <td>POL-55831</td>
+            <td>$1,046.00</td>
+          </tr>
+          <tr>
+            <td>Council</td>
+            <td>RTE-33418</td>
+            <td>$487.25</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 2 ── The header table comes AFTER the rows ─────────────────────────── -->
+    <section class="section-card" id="c-late-header" aria-labelledby="h-late-header">
+      <div class="section-header">
+        <h2 id="h-late-header">Account summary</h2>
+      </div>
+      <p class="section-hint">The <strong>rows come first</strong>, in a table with no header of its own, and the header arrives <strong>afterwards</strong> as a table of nothing but a <code>&lt;thead&gt;</code> — with a <em>Column key</em> paragraph between the two. <strong>Why structure cannot decide:</strong> §7.3a pairs a header-only table with a rows table when they are <em>contiguous siblings</em> and the header comes first; here the order is reversed and a paragraph sits in the gap, so the sibling rule never fires and the read fails for a shape reason rather than guessing. Nothing here is broken — it is what a report looks like when somebody bolted a key onto the bottom of it years later. <strong>What the model is asked</strong> (§7.10): the sketch shows two candidates, and the answer is <code>{"kind": "table", "rows": "T1", "header": {"table": "T2", "row": 1}}</code> — read the first table's rows under the second table's header row. Validation checks that T1 has data rows, that T2's header row names columns and that the two widths agree (three and three), and the read returns the <strong>4 accounts</strong> under <em>Account</em>, <em>Balance</em> and <em>Status</em>. Note the pair is <em>only</em> decidable by reading the words: swap the header's labels and no structural signal changes at all.</p>
+
+      <div id="late-header">
+        <table id="late-header-rows" class="legacy-table">
+          <tbody>
+            <tr>
+              <td>Everyday</td>
+              <td>$2,340.10</td>
+              <td>Active</td>
+            </tr>
+            <tr>
+              <td>Savings Plus</td>
+              <td>$18,902.55</td>
+              <td>Active</td>
+            </tr>
+            <tr>
+              <td>Offset</td>
+              <td>$61,004.00</td>
+              <td>Active</td>
+            </tr>
+            <tr>
+              <td>Travel</td>
+              <td>$410.00</td>
+              <td>Closed</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="caption">Column key</p>
+
+        <table id="late-header-head" class="legacy-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Balance</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+        </table>
+      </div>
+    </section>
+
+    <!-- 3 ── A card list: no table, no roles, no cells ─────────────────────── -->
+    <section class="section-card" id="c-account-cards" aria-labelledby="h-account-cards">
+      <div class="section-header">
+        <h2 id="h-account-cards">Accounts as cards</h2>
+      </div>
+      <p class="section-hint">Six repeated <code>&lt;div class="account-card"&gt;</code>, each with an <code>&lt;h3 class="card-title"&gt;</code> holding the account's name and a <code>&lt;div class="fields"&gt;</code> of <code>&lt;div class="field"&gt;</code> rows, each one a <code>&lt;span class="label"&gt;</code> / <code>&lt;span class="value"&gt;</code> pair for <em>Balance</em>, <em>Status</em> and <em>Owner</em> — so the <em>Account</em> column comes off the title and the other three off the pairs. <strong>Why structure cannot decide:</strong> there is no <code>&lt;table&gt;</code>, no <code>role</code>, no row and no cell anywhere — not a table the rules read badly, but nothing for a table rule to fail <em>on</em>. The read refuses with "found no table with rows", which §7.10 treats as a shape reason. <strong>What the model is asked:</strong> a <strong>collection</strong>, not a table — <code>{"kind": "collection", "item": ".account-card", "fields": {…}}</code>, one selector for the repeated element and one per requested column, each relative to the item. Validation checks the item selector matches between 1 and 500 elements with none nested inside another, and that each field selector matches at most one element per item; a field that matches in <em>no</em> item fails the read, and one that matches in some reads <code>""</code> in the others and is counted in the log. Extraction gives one record per <strong>rendered</strong> item in document order, each with <code>_row</code>. <strong>The last card is hidden</strong> with <code>display:none</code> — a closed Travel account — so a correct read returns <strong>5 records</strong> from 6 matching elements, the same way §7.4 drops a hidden row, and <code>_row</code> runs 1…5 with no gap for it. The balances, statuses and owners here are deliberately <strong>not</strong> the ones in <em>Account summary</em> above, which lists the same account names: were they the same, a read that resolved the wrong region would satisfy the other region's verify and the test would pass on the wrong markup.</p>
+
+      <div id="account-cards" class="card-grid">
+        <div class="account-card">
+          <h3 class="card-title">Everyday</h3>
+          <div class="fields">
+            <div class="field"><span class="label">Balance</span><span class="value">$1,205.75</span></div>
+            <div class="field"><span class="label">Status</span><span class="value">Active</span></div>
+            <div class="field"><span class="label">Owner</span><span class="value">Marcus Feld</span></div>
+          </div>
+        </div>
+        <div class="account-card">
+          <h3 class="card-title">Savings Plus</h3>
+          <div class="fields">
+            <div class="field"><span class="label">Balance</span><span class="value">$24,668.20</span></div>
+            <div class="field"><span class="label">Status</span><span class="value">Active</span></div>
+            <div class="field"><span class="label">Owner</span><span class="value">Ingrid Halvorsen</span></div>
+          </div>
+        </div>
+        <div class="account-card">
+          <h3 class="card-title">Offset</h3>
+          <div class="fields">
+            <div class="field"><span class="label">Balance</span><span class="value">$72,310.45</span></div>
+            <div class="field"><span class="label">Status</span><span class="value">Active</span></div>
+            <div class="field"><span class="label">Owner</span><span class="value">Helen Okonjo</span></div>
+          </div>
+        </div>
+        <div class="account-card">
+          <h3 class="card-title">Business One</h3>
+          <div class="fields">
+            <div class="field"><span class="label">Balance</span><span class="value">$6,842.90</span></div>
+            <div class="field"><span class="label">Status</span><span class="value">Frozen</span></div>
+            <div class="field"><span class="label">Owner</span><span class="value">Priya Raghunathan</span></div>
+          </div>
+        </div>
+        <div class="account-card">
+          <h3 class="card-title">Term Deposit</h3>
+          <div class="fields">
+            <div class="field"><span class="label">Balance</span><span class="value">$35,000.00</span></div>
+            <div class="field"><span class="label">Status</span><span class="value">Active</span></div>
+            <div class="field"><span class="label">Owner</span><span class="value">Aoife Brennan</span></div>
+          </div>
+        </div>
+        <!-- Hidden: a closed account. It matches .account-card and must not be
+             read, the way a hidden row is not a record (§7.4). -->
+        <div class="account-card" style="display: none;">
+          <h3 class="card-title">Travel</h3>
+          <div class="fields">
+            <div class="field"><span class="label">Balance</span><span class="value">$88.15</span></div>
+            <div class="field"><span class="label">Status</span><span class="value">Closed</span></div>
+            <div class="field"><span class="label">Owner</span><span class="value">Dominic Ferreira</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4 ── One two-column table per record ───────────────────────────────── -->
+    <section class="section-card" id="c-property-tables" aria-labelledby="h-property-tables">
+      <div class="section-header">
+        <h2 id="h-property-tables">Payment property sheets</h2>
+      </div>
+      <p class="section-hint">Four payments, each drawn as its <strong>own two-column table</strong>: the field name in a <code>&lt;th scope="row"&gt;</code> and the value in the <code>&lt;td&gt;</code> beside it, four rows — <em>Payee</em>, <em>Reference</em>, <em>Amount</em>, <em>Status</em> — per record. <strong>Why structure cannot decide:</strong> the problem is not that the tables are unreadable, it is that they are readable and give the wrong answer. Name one and a read returns four rows of two columns — the record on its side. Name the <code>#property-tables</code> wrapper and §7.2 finds <em>four</em> tables with rows and refuses as ambiguous, with the sentence about frozen columns. Both are shape reasons, so both reach §7.10. <strong>What the model is asked:</strong> again a <strong>collection</strong>, with the item being the <em>table</em> and each field one of its rows, as <code>{"kind": "collection", "item": "…", "fields": {"payee": "tr:nth-child(1) td", …}}</code>. The sketch lists these four by the paths the runtime derived for them — <code>:scope &gt; table:nth-of-type(1)</code> through <code>(4)</code> — so the item selector usually comes back in that shape rather than as the class selector <code>table.property-table</code>, and nothing depends on which spelling it picks. What matters, and what validation checks, is that it matches <strong>one element per record</strong>: four here, none nested inside another, at most one element per field per item. A path that named a single <code>nth-of-type</code> table would validate and read <em>one</em> record rather than four, which is why the test below verifies the count. A correct read returns <strong>4 records</strong> with <code>_row</code> 1…4, in document order, and the cached mapping means the next run does it without asking. The payees here are deliberately not the payees of <em>Payees</em> above: both sections are read for a Payee and an Amount, and identical values would let a read of the wrong region pass the other's verify.</p>
+
+      <div id="property-tables">
+        <table class="property-table">
+          <tbody>
+            <tr><th scope="row">Payee</th><td>Bupa</td></tr>
+            <tr><th scope="row">Reference</th><td>HLT-20931</td></tr>
+            <tr><th scope="row">Amount</th><td>$189.40</td></tr>
+            <tr><th scope="row">Status</th><td>Paid</td></tr>
+          </tbody>
+        </table>
+        <table class="property-table">
+          <tbody>
+            <tr><th scope="row">Payee</th><td>Optus</td></tr>
+            <tr><th scope="row">Reference</th><td>OPT-55810</td></tr>
+            <tr><th scope="row">Amount</th><td>$65.00</td></tr>
+            <tr><th scope="row">Status</th><td>Scheduled</td></tr>
+          </tbody>
+        </table>
+        <table class="property-table">
+          <tbody>
+            <tr><th scope="row">Payee</th><td>Ausgrid</td></tr>
+            <tr><th scope="row">Reference</th><td>ELC-77302</td></tr>
+            <tr><th scope="row">Amount</th><td>$302.15</td></tr>
+            <tr><th scope="row">Status</th><td>Paid</td></tr>
+          </tbody>
+        </table>
+        <table class="property-table">
+          <tbody>
+            <tr><th scope="row">Payee</th><td>Woolworths</td></tr>
+            <tr><th scope="row">Reference</th><td>WOW-11009</td></tr>
+            <tr><th scope="row">Amount</th><td>$148.60</td></tr>
+            <tr><th scope="row">Status</th><td>Scheduled</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    // ── Shell: user info and sign out (same as the other pages) ──────────────
+    // Nothing else on this page is scripted: the four shapes are static markup,
+    // because what they exercise is the reading of them.
+    var email = sessionStorage.getItem('user-email');
+    if (email) {
+      document.getElementById('user-email').textContent = email;
+      document.getElementById('user-avatar').textContent = email.charAt(0).toUpperCase();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.removeItem('logged-in');
+      sessionStorage.removeItem('user-email');
+      window.location.href = 'index.html';
+    });
+  </script>
+</body>
+</html>

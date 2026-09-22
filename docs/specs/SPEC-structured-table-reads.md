@@ -82,6 +82,14 @@ headers while deterministic runtime code owns alignment. Object-aware
 `For each` is generic now; additional structured-data adapters can be added
 later without changing its contract.
 
+§7.10 does ask for exactly that item selector and those field selectors — but
+once, as a separate question about STRUCTURE, validated against the live page
+before a cell is read, and then cached, so the selectors are chosen once and
+the reading stays deterministic on this run and every run after. What the
+argument above is against is a model inventing one selector per field on every
+read, per row, with nothing checking that they line up; asking once, checking
+the answer, and never asking again is the opposite of that.
+
 ### 1.3 Phases
 
 The feature ships in three slices, each its own PR with its own live proof,
@@ -106,8 +114,9 @@ Everything §14 lists is outside all three.
 
 ## 2. Goals
 
-- Read two or more explicitly named columns from a native HTML `<table>` in one
-  action while preserving row alignment.
+- Read two or more explicitly named columns from a native HTML `<table>` — or
+  an ARIA grid (§7.9), or, through one question, any repeated structure
+  (§7.10) — in one action while preserving row alignment.
 - Ignore unrelated columns, including checkbox/select columns, when the author
   did not request them.
 - Resolve columns by header text rather than by an AI-chosen `nth-child()`,
@@ -135,8 +144,9 @@ Everything §14 lists is outside all three.
 
 ## 3. Non-goals for v1
 
-- ARIA grids or `<div role="table">` implementations. V1 supports native
-  `<table>` elements only. A grid whose header and rows are TWO native
+- (Lifted.) ARIA grids and `<div role="table">` implementations read as
+  tables since §7.9; repeated elements with no roles read through §7.10's
+  collection answer. A grid whose header and rows are TWO native
   tables inside one wrapper — the shape Telerik/Kendo, DevExpress and
   Syncfusion render for a fixed header — is not this case: it is one table
   in two pieces, and §7.2/§7.3a read it as one (§5.6).
@@ -857,6 +867,64 @@ non-scrolling RadGrid on the same page (`#RadGrid2`) is ONE table with the
 same three header rows in its `<thead>` and the pager in `<tfoot>`, and reads
 with no pairing at all.
 
+### 5.8 A grid with no `<table>` in it: MUI DataGrid, ag-Grid
+
+`fixtures/test-app/aria-grid.html`. The MUI DataGrid shape, measured on
+https://mui.com/x/react-data-grid/ (2026-09-23): a `div[role="grid"]` with
+`aria-rowcount` and `aria-colcount`, rows as `div[role="row"]` carrying
+`aria-rowindex` (the header row is 1), header cells `role="columnheader"`
+and data cells `role="gridcell"`, each with `aria-colindex`, and a
+`role="none"` filler cell first in every row:
+
+```html
+<div role="grid" aria-rowcount="7" aria-colcount="4" class="MuiDataGrid-main">
+  <div role="presentation" class="MuiDataGrid-virtualScroller">
+    <div role="row" aria-rowindex="1">
+      <div role="none"></div>
+      <div role="columnheader" aria-colindex="1">Account</div>
+      <div role="columnheader" aria-colindex="2">Balance</div>
+      <div role="columnheader" aria-colindex="3">Status</div>
+    </div>
+    <div role="rowgroup">
+      <div role="row" aria-rowindex="2"><div role="none"></div><div role="gridcell" aria-colindex="1">Everyday</div><div role="gridcell" aria-colindex="2">$2,340.10</div><div role="gridcell" aria-colindex="3">Active</div></div>
+      …
+    </div>
+  </div>
+</div>
+```
+
+The ag-Grid shape on the same page is documentation-derived (its demo did not
+render headless): `div.ag-root[role="grid"]`, header rows
+`div.ag-header-row[role="row"]` of `div.ag-header-cell[role="columnheader"]`
+with `aria-colindex`, data rows `div.ag-row[role="row"]` with `row-index`
+and `aria-rowindex`, cells `div.ag-cell[role="gridcell"]` with
+`aria-colindex` — and a pinned-left container that holds the SAME rows'
+first cells again, split by column, each fragment carrying the same
+`aria-rowindex`. §7.9 reads both as one table by header name, and joins the
+pinned fragments by row index into one record.
+
+### 5.9 Shapes structure cannot decide
+
+`fixtures/test-app/odd-tables.html`, four shapes that no structural rule
+reads, each common in older business applications, and each read through
+§7.10 after the model names the parts once:
+
+1. **Headings as `<td>` in the first body row.** No `<thead>`, no `<th>`:
+   `<tr><td><b>Payee</b></td><td><b>Reference</b></td><td><b>Amount</b></td></tr>`
+   over the data.
+   §7.3 sees no header; the model says "row 1 of T1 is the header".
+2. **A header table AFTER the rows**, with a paragraph between them, so the
+   §7.3a contiguity rule keeps them apart. The model pairs them.
+3. **A card list.** `div.account-card` repeated, each holding an
+   `h3.card-title` with the account's name and a `div.fields` of
+   `div.field` rows, each a `span.label`/`span.value` pair — Balance,
+   Status and Owner. No rows or cells anywhere; the model answers a
+   collection: the item selector and one field selector per requested column,
+   the name coming from the title rather than from a label/value pair.
+4. **One small key/value table per record.** Each record is its own
+   two-column table (label, value), stacked. A collection whose item is the
+   table and whose fields are rows by label.
+
 ---
 
 ## 6. AI action contract
@@ -896,8 +964,13 @@ limit?: number;
 
 `readTable` reuses these existing fields:
 
-- `selector`: CSS selector for one native `<table>`, or for one element that
-  contains a grid's header table and row table (§5.6, §7.2);
+- `selector`: CSS selector for one native `<table>`, one ARIA grid (§7.9),
+  or one element that contains a grid's header table and row table (§5.6,
+  §7.2) — or, when structure cannot decide, the region the model is asked
+  about (§7.10);
+- `mapping`: runtime-owned (§7.10). Never emitted by the model — the parser
+  strips it — written by the runtime after a validated structure answer,
+  stored in the step cache and shown in the report;
 - `frame`: optional existing iframe selector;
 - `as`: destination variable name;
 - `description`: model-authored description.
@@ -1075,6 +1148,15 @@ Teach the step-planning prompt:
   `src/runner/placeholder-substitution.ts`). Measured: a selector of
   `#RadGrid1_ctl00__${item._row} …` reached Playwright as written, because
   `${…}` is only checked against an environment and this test had none.
+- Grids with no `<table>` (§5.8, §7.9): a `div[role="grid"]`,
+  `role="table"` or `role="treegrid"` reads exactly as a table; name it the
+  same way and name columns by their `columnheader` text. A `treegrid`
+  reads flat — every rendered row is a data row (§14).
+- When the read fails for a shape reason the runtime asks the model once
+  for the structure (§7.10) — that is a separate question with its own
+  prompt, not something this step's plan should attempt: never answer a
+  "readTable" with a hand-built set of `read` actions or `nth-child`
+  selectors because the table looks unusual.
 - Copy explicit author aliases exactly; otherwise apply the normalization rule
   in §4.2. A positional column has no header to derive from, so it needs an
   explicit alias; without one, return a `prompt` asking for it.
@@ -1145,8 +1227,8 @@ session storage migration is required.
      header row (§7.3) or, when it has none, one found in another table
      (§7.3a);
    - any other element: a **grid wrapper** (§5.6). Consider the RENDERED
-     tables under it that are not nested inside another table under it, in
-     document order. Exactly one of them must have DATA rows — body rows
+     tables and ARIA grids (§7.9) under it that are not nested inside another
+     table or grid under it, in document order. Exactly one of them must have DATA rows — body rows
      that are not §4.8 message rows, rendered or not: RadGrid's header table
      holds one hidden `<td colspan="9">` spacer and its pager table one
      `<td colspan="9">` row, and neither is data (§5.7); that is the table to
@@ -1173,10 +1255,18 @@ session storage migration is required.
      check; its name and contiguity conditions do not apply, because naming
      the wrapper is the author asserting that the tables belong together). A
      table with neither body rows nor a header row — a footer table holding
-     only a `<tfoot>` — is ignored. No table with rows fails as
-     `readTable found no table with rows under "<selector>"`, which is what
-     a `<div role="grid">` of `<div role="row">`s now gets (§3, §14: the
-     outcome is the same as before, the sentence changed). Two or more tables
+     only a `<tfoot>` — is ignored. An ARIA grid under the wrapper is a
+     candidate on the same terms and by the same test — it must own
+     `role="row"` descendants of its own (§7.9) — so a `<div role="grid">`
+     of `<div role="row">`s under the wrapper IS the one thing with rows and
+     reads as a table. Nothing with rows fails as
+     `readTable found no table with rows under "<selector>"`, which now means
+     no `<table>` and no ARIA grid with data rows. A `<table>` with rows
+     beside an ARIA grid with rows is
+     `readTable found a table and an ARIA grid with rows under "<selector>" — it must be exactly one, so select the one you mean`,
+     and two grids
+     `readTable found <n> ARIA grids with rows under "<selector>" — it must be exactly one, so select the one you mean`
+     (§7.9). Two or more tables
      with rows fail as
      `readTable found 2 tables with rows under "<selector>" — it must be exactly one; a grid with frozen (locked) columns splits its rows across two tables, which is not supported`,
      because reading one half would be the misalignment this action exists
@@ -1184,7 +1274,8 @@ session storage migration is required.
      the cause it names is the usual one).
 4. The label the diagnostics use is, in order: the read table's own
    `aria-label`, its `<caption>`, or the text its `aria-labelledby` resolves
-   to; the GRID's name — the wrapper the selector named or, once a header
+   to — an ARIA grid reads the same chain, minus the `<caption>` it cannot
+   have, and falls back to its `id` (§7.9); the GRID's name — the wrapper the selector named or, once a header
    has been found in another table (§7.3a), the nearest common ancestor of
    the two — by its `aria-label`, then the text its `aria-labelledby` names,
    then its `id`; the read table's `id`; the selector. The grid is named
@@ -1686,8 +1777,10 @@ readTable captured 6 rows × 3 columns as "{{holdings}}" (header from a separate
 readTable captured 5 rows × 3 columns as "{{dividends}}" (2 placeholder rows skipped, header from a separate table)
 ```
 
-The note is the last of the parenthesised notes, after the bound and the
-placeholder count.
+The note comes after the bound and the placeholder count, and is last unless
+the structure question was involved: §7.10's `structure from the …` note
+goes last of all, because it is the one that says the records came from an
+answer rather than from the markup.
 
 Do not write every captured cell to the normal console/run log. Existing
 variable/report surfaces may show captured variables, but their secret masking
@@ -1931,6 +2024,330 @@ Where the same assertion is written in prose without a `{{list}}` — “verify
 every row in the table shows Completed” — it remains a model assertion over
 the snapshot, with the collapse caveat of §4.9. The handbook should say which
 form is which.
+
+### 7.9 Grids with no `<table>`: the ARIA table model
+
+A `div` grid is a table in everything but tag names, and the ARIA attributes
+that make it one for a screen reader make it one here (§5.8, measured on
+MUI DataGrid; ag-Grid from its documentation). Read as a table when the
+matched element, or the one such thing under a wrapper, carries
+`role="grid"`, `role="table"` or `role="treegrid"`:
+
+- **Rows** are the descendants with `role="row"` whose nearest
+  grid/table/treegrid ancestor is this element (a nested grid's rows are its
+  own). **Cells** are a row's element children with `role="columnheader"`,
+  `"rowheader"`, `"gridcell"` or `"cell"`; children with `role="none"` or
+  `"presentation"` (MUI's filler) and children with no role are skipped.
+  `role` is an attribute of whitespace-separated TOKENS, and the first token
+  is the role: `role="row presentation"` is a row and `role="gridcell "` is a
+  cell. Measured against the whole attribute string: both were dropped
+  silently — the row vanished from the read, the grid came back one record
+  short, and nothing said so.
+- **Header rows** are rows that hold at least one `columnheader` and no
+  `gridcell`/`cell`. Several header rows form the header grid of §7.3b, with
+  `aria-colindex`, `aria-colspan` and `aria-rowspan` in place of the table
+  attributes; a cell without `aria-colindex` takes the next free column.
+  Rows before the first header row that hold only `columnheader`s are part
+  of it; a header row after data rows is not a header.
+- **Data rows** are the rows holding at least one `gridcell`/`cell`. The
+  §4.8 rule reads `aria-colspan` for its lone-spanning-cell test, and a row
+  with no cells is skipped and counted, as for a table.
+- **Position** of a cell is its `aria-colindex` when present (one-based),
+  else its order among the row's cells. Width is the header grid's.
+- **Fragments.** Rows with the same `aria-rowindex` (or, failing that, the
+  same `row-index`) inside one grid are ONE row whose cells are merged by
+  position: ag-Grid's pinned containers repeat a row's first cells beside
+  the rest. Without either attribute, each `role="row"` is its own row.
+- **`_row`** is the one-based position among data rows in document order of
+  their first fragment — not `aria-rowindex`, which counts the header and,
+  in a virtualised grid, rows that are not in the DOM.
+- **Rendered** rows and cells are decided as for a table (§7.4). A
+  virtualised grid yields only the rows it has rendered (§10), as before.
+- **Label** is the grid's `aria-label`, then the text `aria-labelledby`
+  names, then its `id`, then the selector.
+- **The sentences** are the table ones. "found no table with rows under"
+  now means no `<table>` and no ARIA grid with data rows under the wrapper.
+
+A `<table>` under a wrapper wins over an ARIA grid under it when both exist
+with data rows only if they are the same element (a `<table role="grid">`
+is read as a table); otherwise that is two things with rows and is refused:
+`readTable found a table and an ARIA grid with rows under "<selector>" — it must be exactly one, so select the one you mean`,
+and two grids `readTable found <n> ARIA grids with rows under "<selector>" — it must be exactly one, so select the one you mean`.
+
+Five refinements, each measured on the way in:
+
+- An element is an ARIA grid only when it OWNS `role="row"` descendants.
+  Kendo's wrapper is `<div class="k-grid" role="grid" aria-label="Dividends">`
+  with native `<table>` markup inside and not one `role="row"` of its own;
+  read as a grid on the strength of the attribute it answered `[]`, green.
+  Whatever it calls itself, an element with no rows of its own is a wrapper
+  (§7.2).
+- A row belongs to its nearest table OR grid host. Kendo writes `role="row"`
+  on its `<tr>`s, and those rows answered to the wrapper two levels up; a
+  `<tr>` belongs to its `<table>`, and nothing above the table can claim it.
+- A header row AFTER data rows is excluded, as a `<tfoot>` is (§7.4) — not
+  demoted to a record of heading text.
+- A lone ARIA grid with no data rows under a wrapper that holds no `<table>`
+  at all reads `[]`, as an empty table does (§4.8): an author who filtered
+  every row out of a MUI grid gets an empty list, not a broken step.
+- Fragment keys are namespaced: rows merge by `aria-rowindex` with rows that
+  carry `aria-rowindex`, and by `row-index` with rows that carry `row-index`,
+  never across the two; where two fragments claim the same position the
+  first wins. A row whose only cells are `rowheader`s stays in the body (§10:
+  a row header is that row's cell at its position); only a row with no cells
+  is skipped and counted.
+
+### 7.10 When structure cannot decide: the model names the parts, once
+
+Everything above is structural and free. What is left is the long tail —
+headings written as `<td>`, a header table after the rows, card lists,
+key/value tables per record, widgets nobody has measured — and it is read
+by asking the model ONE question about structure, validating the answer
+against the page, and then reading deterministically, on this run and on
+every run after.
+
+**When.** Only when a read fails for a SHAPE reason: no table or grid with
+data rows under the matched element (§7.2); two or more with data rows
+(frozen columns, or two grids in one box); header names requested and no
+header found — no header row, a header grid naming nothing, no header table
+paired (§7.3, §7.3a, §7.3b); two header-only candidates or a width mismatch
+in the pairing (§7.3a). NEVER for the author's own problems: a named header
+absent from a header that exists (typo), a short row, a merged body cell,
+more than 500 rows, a selector matching several elements. Those stay
+refusals with the sentence they have.
+
+**The sketch.** The extractor returns, beside the refusal, a sketch of the
+region: for a region holding tables or grids, each candidate with an index
+(`T1`, `T2`, …), a selector the runtime derived (`#id` when it has one, else
+a path relative to the matched element), and its rows summarised — section,
+cell count, tags or roles, spans, and the first cells' text — capped at a few
+kilobytes; for a region with no table or grid, the cleaned DOM snapshot of the
+matched element alone (the existing capture, rooted there), capped the same
+way.
+
+**Everything in the sketch is masked with the run's secret set, exactly as
+the DOM snapshot is** (§7.6): the candidates' cell text, the region snapshot,
+and the `Selector:` line of the question — which is the author's own selector
+and can carry a value as readily as a cell can. Measured with the masking on
+the cells alone: a card list whose fields held a secret reached the prompt,
+and the recorded interaction in the report, verbatim.
+
+**The region snapshot is carried INSIDE the sketch JSON, as a string**, never
+pasted raw into the message beside it. A JSON string has no line starts and
+no terminator a page can spell; markup dropped between the delimiters does.
+Measured: a text node reading `--- END SKETCH ---` survived the clean and
+came out at the start of a line, ending the data block early and leaving the
+rest of the page where the instructions are. The sketch is data from the
+page: it reaches the model as such and never as instructions.
+
+**At most eight rows per candidate** are listed, the rest counted in
+`moreRows` — and fewer as the sketch is shrunk to fit its byte budget, since
+rows are given up before candidates are: the SHAPE of the region is what the
+question is about. So a heading row below the eighth cannot be named at all.
+The model may answer only from what the sketch lists (R1), so a table whose
+headings sit under nine rows of preamble gets `none`, or a wrong row, rather
+than the right one. Nothing has needed more yet; §14 carries it as a
+follow-up.
+
+**The question.** `buildGridStructurePrompt` (`src/ai/prompts.ts`) shows
+the sketch, the author's request (the columns wanted, by header or by
+position) and the refusal, and asks for one JSON answer of three kinds:
+
+```json
+{ "kind": "table", "rows": "T2", "header": { "table": "T1", "row": 2 } }
+{ "kind": "collection", "item": ".account-card", "fields": { "account": ".card-title", "balance": ".field:nth-child(1) .value" } }
+{ "kind": "none", "reason": "the element is a navigation menu, not a list of records" }
+```
+
+`header` is omitted for a positional request, and `header.row` may be
+omitted as well when the candidate it names HAS header rows of its own — a
+header-only table's `<thead>`, an ARIA grid's header row — because there is
+then nothing to choose between and the header grid of §7.3b is the answer.
+`item` is a CSS selector
+relative to the region; each field selector is relative to the item. Every
+selector is PLAIN CSS — what `querySelectorAll` accepts — never a Playwright
+pseudo-class (`:has-text()`, `:text-is()`, `:visible`): validation and
+extraction both run in the page, where such a selector throws rather than
+misses. Structural selectors inside an item (`:nth-child`, `+`, `>`) are
+fine, because the item is the record boundary. The prompt's rules, pinned
+by `tests/prompts-grid-structure.test.ts`: answer from the sketch only,
+never invent a table or a cell; the rows table is the one whose rows carry
+the values the author asked for; the header row is the one whose cells are
+the names the author used; a collection's item is the repeated element, one
+per record; fields are relative to the item and match at most one element
+in it; plain CSS only; answer `none` when the region is not a list of
+records, and say why; JSON only. The sketch reaches the model inside a
+delimited block headed as data, not instructions.
+
+**Sections, and what "row 2" resolves to.** Every row the sketch lists
+carries a `section`: `thead`, `tbody` or `tfoot` for a `<table>`, and
+`header` or `row` for an ARIA grid — a grid has no element saying which, so
+the split of §7.9 decides it. The model answers with the row's position among
+the rows the sketch listed for that candidate (row id `T1.r2` is row 2), and
+the runtime converts that to the mapping's `bodyRow`: a `thead` (or
+`header`) answer resolves to the candidate's own header grid, whichever of
+its rows was named, while a `tbody` or `row` answer becomes the k-th BODY
+row of that candidate, **counted among body rows only**. Measured counting among ALL of the candidate's rows: on a
+grid whose header row is row 1, a correct answer of "row 2" — the first data
+row, which is exactly where a `<td>`-headed grid keeps its headings —
+pointed one row too low, took a data row as the header and spliced it out of
+the read. A `tfoot` row is refused as a header: a totals row is not a
+heading row, and §7.4 excludes `<tfoot>` from the body, so the row named
+would not be there to splice out anyway.
+
+Mapping selectors resolve against the **mapping root**: the region itself
+when the region is a wrapper, and, when the region is a `<table>`, the
+nearest ancestor below `<body>` that holds another table or grid — the same
+root the sketch's candidates were listed from, because a table's partner
+sits beside it and `querySelector` cannot reach out of its own root.
+`:scope` in a mapping means that root.
+
+**Validation**, all of it deterministic and all of it required, or the step
+fails with the model's answer and what was wrong with it:
+
+- *table*: `rows` and `header.table` name candidates the sketch listed.
+  Resolved against the mapping root, each of `rows` and `header.selector`
+  must land on the region itself, on something inside it, or on one of the
+  candidates the sketch listed FOR that region; anything else is refused —
+  `… the rows selector "<sel>" is not the selected element nor one of the
+  tables beside it`. Measured without that check: a mapping naming an
+  unrelated `#payroll` table that happened to sit beside the region was
+  applied as given, and the read came back holding the payroll table's rows
+  under the author's own selector. Reading a table that is not the region —
+  the legitimate case, a header table or a rows table BESIDE it — is allowed
+  and logged at warn, because the only thing making it right is a model's
+  answer. Then: the rows table has at least one data row (§7.4); the header
+  row's grid (§7.3b) names at least one column; the widths agree; every
+  requested header resolves, and every requested position is within the
+  width. A `bodyRow` that is HIDDEN, or that §4.8 reads as a message row or
+  §7.4 as a detail row, is refused as the header rather than promoted out of
+  the body: measured, a `display:none` first row and a "No records"
+  placeholder were both accepted, the first naming every column from markup
+  nobody can see and the second naming one column `No records`.
+- *collection*: the item selector matches at least one and at most 500
+  elements under the region, none nested inside another match; each field
+  selector matches at most one element inside each item; every requested
+  key has a field; a field that matches in no item at all fails the read,
+  one that matches in some reads `""` in the others and is counted in the
+  log line.
+- *none*: the read fails with the model's reason after the original
+  refusal.
+
+**Extraction.** *table*: the ordinary extractor, with the two tables pinned
+by an internal `mapping` argument rather than searched for — §7.3b, §7.4,
+§4.8 and `_row` apply unchanged. *collection*: one record per rendered
+item in document order, `_row` first, each field the rendered text of its
+element (§7.4's text rule), `""` when the field is absent from that item.
+
+**Caching.** Within one run, a validated mapping is remembered in a **memo**
+(`src/runner/structure-memo.ts`), so a later step that reads the same region —
+the next page of a legacy table in a `While` loop, a second read after an
+action — reuses it (validated against the page as always) and logs
+`structure reused from step N` instead of asking; measured before the memo,
+the repeat read at the end of `table-odd-shapes.md` asked the same question
+its first read had, and the file's four shapes cost five questions.
+
+The memo's **key** is the frame, the selector, and the requested columns
+sorted — each column by its header or its position AND by its output key.
+The key is what a mapping was validated against: a `table` answer resolved
+every requested header against the header row it named, and a `collection`
+answer carries one field selector per requested key, so the same cards read
+for `account, balance` and later for `account, owner` are two structures and
+reusing the first would read a column the model never chose a selector for.
+`Payee → payee` and `Payee → who` want the same table and different
+`fields`, which is why the output key is in the key too. Sorted, because the
+order of the columns changes the record's property order and nothing about
+the structure.
+
+The memo's **lifetime is one run**, and each runner draws that line where its
+own run ends:
+
+- the CLI makes one per `runTest`, which is one per **data row** — a row
+  that navigates somewhere else should not start out holding the previous
+  row's answers;
+- the server makes one per **batch**, the lifetime `stepCache` already has:
+  a batch is what the server knows about, and a run split by a breakpoint or
+  an `[input:]` simply asks once more on the far side rather than reusing an
+  answer from before a pause the user may have spent editing the page;
+- the errand runner (`src/server/errand-runner.ts`) and the Electron runner
+  (`src/ui/main/runner-adapter.ts`) each make one per run;
+- hook steps share the test's memo: a `beforeEach` that reads the same
+  region as the step after it pays for one question between them, not two;
+- a caller that keeps no run state at all — the REPL — passes none and
+  behaves as it did before the memo existed: one question per step.
+
+The memo is deliberately **not gated by the step cache**. That switch is
+about replaying a frozen action plan; this is about not asking the same
+structural question twice in one run, and the two do not answer to each
+other. A run with the cache off still asks once — and a loop body, which
+never uses the cache at all, is precisely the shape the memo exists for: a
+`While` that re-reads one legacy table every pass asks on the first pass and
+on no other.
+
+Across runs, the validated mapping is written onto the cached `readTable`
+action as `mapping` — a field the RUNTIME owns: the parser strips it from
+anything the model emits, the step cache stores it, the report shows it.
+A cached run applies the mapping first and validates it against the page
+as above (the header texts are still there, the counts agree, the item
+selector still matches). When that fails, the read is first repeated
+WITHOUT the mapping — free, no model call — and if that succeeds the
+mapping was simply no longer needed and is dropped from the cache; if it
+fails too, the question is asked ONCE more, the cache rewritten with the new
+answer, and a second failure is the refusal with both answers in the log.
+That second question is asked from a **fresh sketch of the region**
+(`sketchTable`, `src/browser/actions.ts`) rather than from the re-read's
+refusal, because the re-read need not have failed for a shape reason at all:
+a mapping that no longer fits can leave the unmapped read failing for any
+reason the page now has, and a refusal that is not a shape one carries no
+sketch. Sketching the region again is what keeps "asked once more" true in
+the case the sentence was written for. Every failure that follows a question is
+non-retryable: retried, a failing cached replay would be invalidated and
+re-run under AI, asking the same question a second and a third time, and
+the "both answers" sentence would be lost with the cache that held the
+first. Code-behind: readTable stays an AI-only framework
+action (§9.2); the mapping rides in the cache until phase 3's `tables.read`
+writes it into the generated call.
+
+**Log and report.** Four lines at info, quoted here because they are what a
+reader greps for (`src/runner/step-executor.ts`):
+
+```text
+readTable: structure asked of the model — <summary>
+readTable: structure reused from step N
+readTable: the read failed for a shape reason and `tableStructure: strict` is set, so the model was not asked about the structure.
+readTable: the cached structure mapping is no longer needed — the page's own structure decides it now, so the mapping has been dropped from the cache.
+```
+
+An answer of `none` writes the first of them as
+`readTable: structure asked of the model — it answered none: <reason>`.
+
+The read's own summary line (§7.6) then says where the structure came from,
+as its last parenthesised note — `structure from the model: …` when this
+step asked, `structure from the run: …` when the memo answered, and
+`structure from the cache: …` when the cached mapping did, so a green read
+says which of the three paid for it. That phrase leads a TABLE mapping,
+and what follows names each candidate by the id the model used AND by its
+selector, because the id alone means nothing once the sketch has scrolled
+out of the log. A COLLECTION's note is the bare `collection: ` form — the
+item count and selector, with the missing-field count after it — and the
+source is on the info line above it (`structure asked of the model — …` /
+`structure reused from step N`):
+
+```text
+readTable captured 12 rows × 3 columns as "{{accounts}}" (structure from the model: rows in T1 ("#rows"), header row 1 of T1 (":scope"))
+readTable captured 5 rows × 3 columns as "{{cards}}" (collection: 5 items by ".account-card"; 2 items missing balance)
+```
+
+The sketch, the question and the answer go to the debug log; the report's
+action carries `mapping`.
+
+**Cost and control.** One model call per structure per run, and none on a
+cached run. `## Config` `tableStructure: strict` (and `"tables": { "structure": "strict" }` in
+`aiui.config.json`) turns the question off for a test or a project, so a
+run that must be deterministic gets the refusal instead. TestBench's own
+client does not forward `tableStructure` (its per-session config carries
+`baseUrl`, `timeout` and `viewport`, as it does not forward `unmask`, §14);
+a test run from TestBench takes the project's `aiui.config.json` value.
 
 ---
 
@@ -2359,7 +2776,12 @@ root or a literal value that can be inlined into generated source.
 | Two tables in two cells of a layout table, or a table inside a header-only table's `<th>` | Never paired: a candidate nested inside any table is not one. |
 | Frozen (locked) columns — two header tables and two row tables, no `aria-owns` | Wrapper: refused, two tables with rows. Either header table: refused as a frozen grid's header. Locked row table: refused, two header-only candidates. Unlocked row table: headerless — the §5.4 message by header, its own columns by position (§7.3a). Deferred (§14). |
 | Wrapper holds a footer table too (`<tfoot>` only) | Ignored: neither rows nor a header. |
-| Wrapper is a `<div role="grid">` of `<div role="row">`s | Fails as "no table with rows under" the selector: still unsupported (§3). |
+| Wrapper is a `<div role="grid">` of `<div role="row">`s | Read as a table by header name (§7.9). |
+| `<div role="grid">` wrapper around a native `<table>` (Kendo) | A wrapper, not an ARIA grid: it owns no `role="row"` of its own (§7.9). |
+| A `<tr role="row">` inside a `<table>` inside a `role="grid"` wrapper | Belongs to its table (§7.9). |
+| ARIA header row after the data rows | Excluded like a `<tfoot>` (§7.9). |
+| Lone ARIA grid with no data rows under a wrapper with no `<table>` | `[]` (§7.9). |
+| A mapping selector using a Playwright pseudo-class | Refused as not a CSS selector (§7.10); the prompt forbids them. |
 | Hidden column in a split grid | The header cell and the body cells are hidden together, so the counts still match and the column reads `""` as in one table. |
 | Banded header: a band cell over several column names | Laid out (§7.3b); each column is named by the lowest heading over it; the band is not a column. Requesting the band fails naming the leaves under it. |
 | Blank corner cell spanning two header rows (`<th rowspan="2"></th>`) | Occupies its column in both rows; the column is blank; the name row has one cell fewer than the grid is wide. |
@@ -2406,6 +2828,19 @@ root or a literal value that can be inlined into generated source.
 | Secret-named property | Mask on report/log/UI surfaces, retain raw only in execution scope. The property takes the record-column rule and the root the author-chosen one, either being enough, or the whole name read as one credential key (§7.6): `payment.password`, `token.payee` and `api.key` mask, `payment.sort_key` does not. A dotted name no `For each` registered takes the author rule on the whole key. |
 | A record column's value is shorter than four characters | It does not join the free-text mask set (§7.6), which would replace it everywhere. The entry named for it is still masked, at any length — that mask is in place, under its own key. |
 | A whole capture under a plain name (`payments`, or one pass's `payment`) | No name rule can catch it. The report redacts by value; the TestBench Variables view and panel mask each secret COLUMN inside the JSON and leave the rest readable. |
+| `div[role="grid"]` of `role="row"` / `columnheader` / `gridcell` (MUI DataGrid) | Read as a table by header name (§7.9); `aria-colindex` orders cells; `role="none"` fillers skipped. |
+| Pinned columns as row fragments with the same `aria-rowindex` (ag-Grid) | Joined into one record by row index (§7.9). |
+| ARIA grid with several header rows | The header grid of §7.3b over `aria-colspan`/`aria-rowspan`. |
+| `<table role="grid">` | A table (the tag wins). |
+| A `<table>` with data rows and an ARIA grid with data rows under one wrapper | Two things with rows: refused, then the model may be asked (§7.10). |
+| Headings as `<td>` in the first body row, no `<th>` | No structural header; the model names the row once (§7.10); cached. |
+| Header table after the rows with a paragraph between | Not paired structurally (§7.3a); the model pairs them (§7.10); cached. |
+| Repeated cards, no rows or cells | The model answers a collection (§7.10): item selector plus a field selector per column. |
+| One key/value table per record | A collection whose item is the table (§7.10). |
+| The model answers `none` | The read fails with the original refusal and the model's reason. |
+| A cached mapping no longer fits the page (header renamed, cards restyled) | Asked once more, cache rewritten; a second miss fails with both answers logged. |
+| `## Config: tableStructure: strict` | No model question: the shape refusal stands. |
+| A named header absent from a header that exists | Still the §7.3 refusal listing the available headers; never a model question. |
 
 ---
 
@@ -2426,9 +2861,30 @@ The implementing agent should inspect and update at least these areas:
 - `src/runner/step-executor.ts` — `capturedRecords` storage/logging.
 - `tests/read-table.test.ts` — real Playwright page tests using the fixtures in
   §5 and every structural error above.
+- `tests/read-table-aria.test.ts` — the ARIA table model (§7.9), on inline
+  copies of the §5.8 shapes.
 - `src/browser/scripts/read-table.js` — the in-page extractor: table or
   wrapper selection (§7.2), the header from another table (§7.3a), the
-  rendered-cell placeholder rule (§4.8), and the label from the wrapper.
+  header grid (§7.3b), the rendered-cell and detail-row rules (§4.8, §7.4),
+  the label from the wrapper, the ARIA table model (§7.9), the sketch and
+  the pinned `mapping` path (§7.10).
+- `src/runner/step-executor.ts` — the structure question (§7.10): on a
+  shape refusal, the sketch → `buildGridStructurePrompt` → one model call →
+  validation → the pinned read → `mapping` on the cached action; the
+  once-more rule on a cached mapping that no longer fits.
+- `src/ai/prompts.ts` — `buildGridStructurePrompt`; `src/ai/action-parser.ts`
+  strips `mapping` from model output. The step cache keeps `mapping` with no
+  edit of its own: it rides on the recorded action like any other field.
+- `src/config/table-structure.ts` — `tableStructureOf`, the one place
+  `## Config: tableStructure:` and `aiui.config.json`'s `tables.structure`
+  are resolved into one answer.
+- `src/runner/structure-memo.ts` — the run's memo (`createStructureMemo`,
+  `structureMemoKey`) and the one-per-run lifetime of §7.10, threaded
+  through `src/runner/test-runner.ts` (one per data row),
+  `src/server/session-manager.ts` (one per batch),
+  `src/server/errand-runner.ts` and `src/ui/main/runner-adapter.ts`.
+- `tests/read-table-structure.test.ts`, `tests/api-server-table-structure.test.ts`,
+  `tests/prompts-grid-structure.test.ts`.
 
 ### Object iteration and placeholder paths
 
@@ -2484,8 +2940,12 @@ The implementing agent should inspect and update at least these areas:
   class names with a hidden column, and frozen columns), `radgrid.html`
   (§5.7: RadGrid static headers with a banded three-row header, filter row,
   spacer, pager and zero-based ids; the non-scrolling form; a plain banded
-  table with repeated leaf names).
-  Under `templates/init/tests/`: ten `table-*.md` acceptance tests tagged
+  table with repeated leaf names), `aria-grid.html` (§5.8: a MUI DataGrid
+  measured from the live demo, and an ag-Grid with a pinned-left column —
+  neither holding one `<table>`), `odd-tables.html` (§5.9: headings as
+  `<td>`, a header table after its rows, a card list with one card hidden,
+  and one two-column sheet per record).
+  Under `templates/init/tests/`: twelve `table-*.md` acceptance tests tagged
   `table-read` (listed in §12) and four `table-baseline-*.md` tests that
   record what today's runtime does with the same table (§12).
 - (Phase 2) A parser for the §7.7 assertion forms beside `set-step.ts` and
@@ -2819,11 +3279,45 @@ states the rule. Two entries predate the review rounds and say so.
     inside a detail row's nested table is cleared with the rest; an inserted
     detail row does not shift the numbers; RadGrid's `__7` row carries
     `data-aiui-row="8"`; the DOM snapshot keeps the attribute.
+29. The ARIA table model (§7.9), on inline copies of the §5.8 shapes: the
+    MUI grid reads by header name with `aria-colindex` ordering and the
+    `role="none"` filler skipped; `aria-rowindex` is not `_row`; ag-Grid's
+    pinned fragments join by `aria-rowindex` (and by `row-index` when
+    `aria-rowindex` is absent) into one record; two header rows form a
+    header grid over `aria-colspan`; a nested grid's rows are not read; a
+    `<table role="grid">` reads as a table; a `<table>` and an ARIA grid
+    both with data rows under one wrapper are refused; hidden rows are
+    excluded; a row with no cells is skipped and counted.
+30. The structure question (§7.10), against a fake model in
+    `tests/read-table-structure.test.ts` and through the api-server entry in
+    `tests/api-server-table-structure.test.ts` (the FakeApiClient pattern):
+    each shape refusal produces a sketch and NO other refusal does; the
+    sketch is capped and masks a secret column; a `table` answer naming a
+    table not in the sketch, a rows table with no data row, a header row
+    naming nothing, or mismatched widths fails naming the fault; a valid
+    `table` answer reads the §5.9 `<td>`-headed table and the
+    header-after-rows pair; a `collection` answer reads the card list and
+    the key/value tables, refuses an item selector matching nothing or
+    more than 500, refuses a field matching two elements in an item, reads
+    `""` and counts a field missing in some items, fails one missing in all;
+    a `none` answer fails with the reason; the validated `mapping` is on the
+    cached action and a second run through the api-server makes NO model
+    call; a mapping that no longer fits asks once more and rewrites the
+    cache, and a second miss fails with both answers; two steps reading the
+    same region in one run ask exactly once (the memo), a third with other
+    columns asks again, and a memo entry that no longer validates is
+    re-asked; `mapping` emitted by
+    the model is stripped by the parser; `tableStructure: strict` in
+    `## Config` and `tables.structure` in `aiui.config.json` turns the question off.
+31. The structure prompt (`tests/prompts-grid-structure.test.ts`) carries the
+    three answer kinds, the "answer from the sketch only" rule, the
+    collection rules, and `none`; and rule 13d carries the ARIA-grid and
+    the "never hand-build a table read" clauses of §6.3.
 
 ### End-to-end proof
 
 The fixtures exist (§11) and so do the tests: `aiui run -t table-read` from
-`templates/init` runs the ten acceptance files, and phase 1 is done when
+`templates/init` runs the twelve acceptance files, and phase 1 is done when
 they are green through the CLI and through TestBench. The three proofs below
 are `table-orders.md`, `table-orders-limit.md` and
 `table-payments-review.md`; the other five are `table-payments-approve.md`
@@ -2849,7 +3343,14 @@ header with no pairing; and the plain Quarterly fees table read as
 §7.3b.4 — the leaf name `Fee` sits under both `Q1` and `Q2`, so the plain
 name is the duplicate refusal and the band is what picks the column. The run
 log must show no selector built from a row number, and the summary line
-`(header from a separate table)` on the static-headers reads.
+`(header from a separate table)` on the static-headers reads. The eleventh, `table-aria-grid.md`, reads the
+MUI-shaped and the ag-Grid-shaped grids of §5.8 by header name, joins the
+pinned fragments, and loops over the records with a per-row click; the
+twelfth, `table-odd-shapes.md`, reads the four §5.9 shapes — each first read
+is a model question, and the run log must show the sketch, the answer and
+the `(structure from the model: …)` note, then a second read of the same
+shape in the same test must show `structure reused from step 2` — the
+run-scoped memo, not a question.
 
 **The baseline** (`table-baseline-view/approve/reference/pay-overdue.md`,
 run 2026-09-21 with today's runtime, one string per pass) is what phase 1
@@ -2991,6 +3492,17 @@ The feature is complete only when:
     merged. RadGrid's three-table static-headers grid reads by header name
     through its box and through its data table, and its non-scrolling form
     reads as one table (§5.7).
+18. (Phase 1) A `div` grid with ARIA roles reads as a table by header name,
+    pinned fragments joined by row index (§7.9); MUI DataGrid and ag-Grid
+    shapes are in the fixture app and the acceptance suite.
+19. (Phase 1) A read that fails for a shape reason asks the model once for
+    the structure, validates the answer against the page, reads
+    deterministically, caches the mapping, and never asks on a cached run;
+    the four §5.9 shapes read; `tableStructure: strict` turns it off;
+    a named-header typo is never a model question (§7.10).
+20. (Phase 1) A collection answer reads repeated elements with one field
+    selector per column, with the same `_row`, hidden-item and `""` rules
+    as a table (§7.10).
 
 ---
 
@@ -3050,14 +3562,25 @@ Moved out of v1 after review, each with why and what would bring it back:
   the next body row's, which makes it a row-header COLUMN rather than a
   header row — was measured green over 98 tests during review 6 and left out for
   the same reason.
-- **Grids that are not `<table>`.** `<div role="grid">` (ag-grid, MUI
-  DataGrid), card lists, and responsive tables that become card stacks at a
-  phone viewport (which the per-test `viewport:` config can now select). §1.2
-  says why v1 stops at native tables; a `readCollection` with an item selector
-  and per-field selectors is the follow-on, and the positional form of §4.4
-  is the same idea for a row whose cells are its direct children. A grid
-  whose header and rows are two native tables is not this case and is read
-  now (§5.6, §7.2, §7.3a).
+- **Repeated elements with no roles** — card lists, responsive tables that
+  become card stacks at a phone viewport, key/value tables per record — are
+  read through §7.10's collection answer, one model question per structure.
+  A structural reader for them (a `readCollection` with an item selector
+  and field selectors the AUTHOR writes) would make them free of the
+  question; nothing has needed it yet. ARIA grids read structurally (§7.9),
+  and a grid whose header and rows are two native tables is read as one
+  (§5.6, §7.2, §7.3a).
+- **A heading row below the eighth cannot be named.** §7.10's sketch lists at
+  most eight rows per candidate — fewer once it is shrunk to fit its byte
+  budget — and the model may answer only from what the sketch lists, so a
+  region whose headings sit under nine rows of preamble gets `none` or a
+  wrong row rather than the right one. Raising the cap costs prompt budget on
+  every question for a shape nothing has hit yet; the narrower fix, listing
+  the first rows AND any row whose cells read as the requested column names,
+  needs a rule for "read as" that the sketch deliberately does not have.
+- **Trees.** A `role="treegrid"` reads flat: every rendered row is a data
+  row and `aria-level` is not carried. A collapsed subtree's rows are not
+  in the DOM, so they are not read, which is the virtualisation rule again.
 - **Group footers and in-body totals.** A Kendo group footer, or a "Closing
   balance" row in a statement, is a normal-width row of `td` cells. Nothing
   structural marks it, so it reads as a record with blank fields. The honest

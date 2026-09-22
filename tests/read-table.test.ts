@@ -1326,19 +1326,23 @@ describe('readTable — structural refusals', () => {
       .toBe('readTable could not find a visible table matching "#hidden-table" (1 match, none visible)');
   });
 
-  it('refuses a <div role="grid">, which is a v1 non-goal (§3)', async () => {
+  it('reads a <div role="grid">, which §7.9 made a table', async () => {
     await load(`
       <div id="grid" role="grid" aria-label="Cards">
         <div role="row"><span role="columnheader">Card</span></div>
         <div role="row"><span role="gridcell">Visa</span></div>
       </div>`);
-    // The outcome is what it always was — a div grid is not read — but the
-    // sentence changed with §7.2: a non-table match is now a grid WRAPPER
-    // (§5.6), looked inside for the table that holds the rows, so the refusal
-    // says what was looked for rather than what was matched. §10, "Wrapper is
-    // a `<div role="grid">` of `<div role="row">`s".
-    expect(await refusal({ selector: '#grid', columns: [{ header: 'Card', key: 'card' }] }))
-      .toBe('readTable found no table with rows under "#grid"');
+    // This shape used to be the "found no table with rows under" refusal, and
+    // §7.9 turned it into a read: the roles that make a div grid a table for a
+    // screen reader make it one here. The sentence is still the one a region
+    // holding NOTHING with rows gets, which `tests/read-table-aria.test.ts`
+    // and `tests/read-table-structure.test.ts` pin from the other side.
+    const result = await run({
+      selector: '#grid',
+      columns: [{ header: 'Card', key: 'card' }],
+    });
+    expect(result.success).toBe(true);
+    expect(result.capturedRecords).toEqual([{ _row: '1', card: 'Visa' }]);
   });
 });
 
