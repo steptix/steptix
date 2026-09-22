@@ -1463,6 +1463,8 @@ async function handleRequest(
       '/payment-details': 'payment-details.html',
       '/statements': 'statements.html',
       '/table-edge-cases': 'table-edge-cases.html',
+      // Component grids that split the header and the rows across two tables.
+      '/split-grids': 'split-grids.html',
     };
     const mappedFile = friendlyRoutes[pathname];
     if (mappedFile) {

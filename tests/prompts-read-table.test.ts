@@ -43,6 +43,30 @@ describe('step prompt — readTable rule', () => {
     expect(prompt).toContain('needs an explicit alias');
   });
 
+  it('carries the SPLIT GRIDS clause, after the positional rule it overrides (§6.3)', () => {
+    // §12.25. Without this clause the model does the reasonable thing with a
+    // Kendo grid — sees a row table with no `<th>` in it and switches to
+    // `index` — and a release that reorders the columns then reads the wrong
+    // ones, silently. The three vendor names are how it recognises the markup
+    // in the first place.
+    expect(prompt).toContain('SPLIT GRIDS.');
+    expect(prompt).toMatch(/Telerik\/Kendo, DevExpress and Syncfusion/);
+    expect(prompt).toContain('"selector": "#orders-grid"');
+    expect(prompt).toMatch(/NEVER select the table that holds only the header/);
+    expect(prompt).toMatch(/Do NOT switch to "index" because the row table shows no <th>/);
+    // It overrides the positional clause, so it has to come after it — and
+    // before the bound, where the rest of the read vocabulary lives.
+    expect(prompt.indexOf('COLUMNS BY POSITION.')).toBeLessThan(prompt.indexOf('SPLIT GRIDS.'));
+    expect(prompt.indexOf('SPLIT GRIDS.')).toBeLessThan(prompt.indexOf('BOUNDED ROWS.'));
+  });
+
+  it('keeps the SPLIT GRIDS clause inside the cacheable rules block', () => {
+    const blocks = buildSystemPrompt('');
+    const rules = blocks.find((b) => b.type === 'text' && b.text.includes('SPLIT GRIDS.'));
+    expect(rules, 'the split-grid clause should live in the rules block').toBeDefined();
+    expect(rules && 'cache' in rules ? rules.cache : false).toBe(true);
+  });
+
   it('carries the bounded-window example and its limit restrictions', () => {
     expect(prompt).toContain('"limit": 10');
     expect(prompt).toContain('nth-child(-n+10)');

@@ -1,0 +1,1278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecureBank — Investments</title>
+  <!--
+    Fixture page for docs/specs/SPEC-structured-table-reads.md, §5.6, §7.2 and §7.3.
+
+    Every other table fixture in SecureBank is ONE <table>: header row and data
+    rows in the same element. Component grids are not built that way. Telerik
+    Kendo, DevExpress DataGrid, AG Grid and Syncfusion all render the HEADER in
+    one <table> and the ROWS in a SECOND <table>, side by side inside one
+    wrapper div, so the header can stay put while the rows scroll under it. A
+    read that resolves a single table finds either the headings with no rows or
+    the rows with no headings.
+
+    The four grids here are the shapes a pairing rule has to survive. The markup
+    copies a structural dump of the live Kendo UI for jQuery grid demo taken on
+    2026-09-22 — element names, classes, roles and attributes as that component
+    actually renders them, with our own ids in place of Kendo's GUIDs:
+
+      #holdings-grid   THREE tables — header, rows, footer — plus a pager div.
+                       The body table declares the link itself:
+                       aria-owns="holdings-thead holdings-tbody" names the
+                       header table's <thead> and its own <tbody>. First column
+                       is a select-all checkbox whose header text is empty, so
+                       the column a reader wants is never the first one.
+                       Swap the Symbol and Value columns moves both header and
+                       body cells (and the colgroup and footer), the §5.2 case
+                       through two tables instead of one.
+
+      #dividends-grid  TWO tables, GROUPED by year, and NO aria-owns — the
+                       pairing has to come from structure alone. The body
+                       carries Kendo's grouped shape: a k-grouping-row whose
+                       single visible cell spans the grid, followed by five
+                       hidden filler cells, and every data row starting with an
+                       empty k-group-cell. Show no dividends swaps the whole
+                       body for one k-grid-norecords row.
+
+      #watchlist-grid  The same split with DevExpress class names, no aria
+                       anywhere and no role on the wrapper: dx-datagrid-headers
+                       holding one table, dx-datagrid-rowsview holding another.
+                       (DevExpress renders header cells as <td role=
+                       "columnheader">; these are <th> so the header rule has
+                       something to map.) The fourth column, Target, is hidden
+                       with display:none in both tables, so every row still has
+                       five cells while four render.
+
+      #frozen-grid     Kendo with LOCKED columns: FOUR tables — a locked header
+                       beside the scrolling header, a locked body beside the
+                       scrolling body. This grid exists to be REFUSED: two
+                       tables in the wrapper carry rows, so there is no single
+                       pairing to make and guessing one would silently drop
+                       Symbol and Name (or Units, Price and Value) from every
+                       record. The read should fail with a diagnostic.
+                       This one is NOT walked from the dump: the demo that was
+                       captured has no locked columns, so the layout here is
+                       taken from Kendo's documentation of locked columns.
+
+    Everything is client-side — no login, no cookie banner, no persistence — so
+    every shard can share one server and every run starts from the same state.
+  -->
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar (same shell as dashboard.html / structured-orders.html) */
+    .sidebar {
+      width: 240px;
+      background: #1f2937;
+      color: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 0;
+      min-height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      margin-bottom: 32px;
+    }
+
+    .sidebar-logo-icon {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .sidebar-logo-name {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    nav { flex: 1; }
+
+    nav ul { list-style: none; padding: 0; }
+
+    nav ul li a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 24px;
+      color: #9ca3af;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav ul li a:hover { background: #374151; color: #f9fafb; }
+
+    nav ul li a.active {
+      background: #374151;
+      color: #f9fafb;
+      border-left-color: #1a56db;
+    }
+
+    nav ul li a .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+    .sidebar-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #374151;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .user-avatar {
+      width: 32px;
+      height: 32px;
+      background: #1a56db;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .user-name { font-size: 13px; font-weight: 500; color: #f9fafb; }
+    .user-email { font-size: 12px; color: #6b7280; }
+
+    .logout-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #374151;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .logout-btn:hover { background: #374151; color: #f9fafb; }
+
+    /* Main content */
+    .main-content {
+      margin-left: 240px;
+      flex: 1;
+      padding: 32px;
+      max-width: 1100px;
+    }
+
+    .page-header { margin-bottom: 28px; }
+
+    .page-header h1 {
+      font-size: 26px;
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .page-header p {
+      font-size: 14px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+
+    .section-card {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .section-title, .section-card h2 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .section-hint {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 16px;
+    }
+
+    .section-hint strong { color: #111827; }
+
+    .section-hint code, code.inline {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      background: #f3f4f6;
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: #374151;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+
+    .btn {
+      padding: 9px 16px;
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn:hover { background: #1648c0; }
+
+    .btn-secondary {
+      background: transparent;
+      color: #1a56db;
+      border: 1px solid #1a56db;
+    }
+
+    .btn-secondary:hover { background: #eff4ff; }
+
+    .muted { font-size: 13px; color: #6b7280; }
+
+    .result-line {
+      margin-top: 12px;
+      font-size: 13px;
+      color: #047857;
+      min-height: 18px;
+      font-weight: 500;
+    }
+
+    .contents {
+      background: #fff;
+      border-radius: 12px;
+      padding: 16px 24px;
+      box-shadow: 0 1px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+    }
+
+    .contents h2 {
+      font-size: 13px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 10px;
+    }
+
+    .contents ol {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 14px;
+      counter-reset: toc;
+    }
+
+    .contents li { counter-increment: toc; font-size: 13px; }
+    .contents li a { color: #1a56db; text-decoration: none; }
+    .contents li a::before { content: counter(toc) ". "; color: #9ca3af; }
+    .contents li a:hover { text-decoration: underline; }
+
+    /* ── Kendo-flavoured grid chrome ────────────────────────────────────────
+       The header table and the body table are laid out identically —
+       table-layout: fixed plus the same <colgroup> percentages — and both
+       scroll containers reserve the scrollbar gutter, so the two tables line
+       up as one grid even though the rows scroll and the header does not. */
+    .k-grid {
+      border: 1px solid #dfe3e8;
+      border-radius: 8px;
+      background: #fff;
+      overflow: hidden;
+      font-size: 14px;
+      color: #111827;
+    }
+
+    .k-grid table,
+    .dx-datagrid-table {
+      width: 100%;
+      table-layout: fixed;
+      border-collapse: collapse;
+    }
+
+    .k-grid-header {
+      background: #f9fafb;
+      border-bottom: 1px solid #e5e7eb;
+    }
+
+    .k-grid-header-wrap,
+    .k-grid-footer-wrap {
+      overflow: hidden;
+      scrollbar-gutter: stable;
+    }
+
+    /* Kendo draws header text as the author wrote it — the dump says
+       "Product Name", not "PRODUCT NAME" — unlike SecureBank's own table
+       style, which upper-cases every <th> in CSS. Faithful wins here: these
+       headings read the same in the markup and in innerText. */
+    .k-table-th {
+      text-align: left;
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+      padding: 10px 12px;
+      border-right: 1px solid #eef2f6;
+      white-space: nowrap;
+      overflow: hidden;
+      vertical-align: middle;
+    }
+
+    .k-table-th:last-child { border-right: none; }
+
+    .k-cell-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .k-link { display: flex; min-width: 0; }
+
+    .k-column-title { overflow: hidden; text-overflow: ellipsis; }
+
+    .k-grid-column-menu {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      flex: none;
+      color: #b6bec9;
+      text-decoration: none;
+    }
+
+    .k-grid-column-menu svg { width: 11px; height: 11px; fill: currentColor; }
+
+    .k-grid-content {
+      height: 200px;
+      overflow-y: auto;
+      scrollbar-gutter: stable;
+    }
+
+    .k-table-td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #f3f4f6;
+      border-right: 1px solid #f8fafc;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+
+    .k-table-td:last-child { border-right: none; }
+
+    /* Kendo hides the filler cells of a group row with the hidden attribute;
+       nothing above may put display back on them. */
+    td[hidden], th[hidden] { display: none !important; }
+
+    .k-grouping-row .k-table-td {
+      background: #eef2f9;
+      font-weight: 600;
+      color: #1f2937;
+    }
+
+    .k-reset { margin: 0; }
+
+    .k-group-cell { width: 28px; }
+
+    .k-grid-norecords .k-table-td {
+      text-align: center;
+      color: #6b7280;
+      padding: 28px 12px;
+      white-space: normal;
+    }
+
+    .k-grid-footer {
+      border-top: 2px solid #e5e7eb;
+      background: #f9fafb;
+    }
+
+    .k-grid-footer .k-table-td {
+      font-weight: 600;
+      color: #374151;
+      border-bottom: none;
+    }
+
+    .k-pager {
+      padding: 9px 12px;
+      border-top: 1px solid #e5e7eb;
+      background: #f9fafb;
+      font-size: 13px;
+      color: #6b7280;
+    }
+
+    .k-button {
+      padding: 4px 12px;
+      border: 1px solid #d1d5db;
+      background: #f3f4f6;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 500;
+      color: #374151;
+      cursor: pointer;
+    }
+
+    .k-button:hover { background: #e5e7eb; }
+
+    .change-up { color: #047857; }
+    .change-down { color: #b91c1c; }
+
+    /* ── Locked (frozen) columns: four tables, two panes ─────────────────── */
+    #frozen-grid .k-grid-header,
+    #frozen-grid .k-grid-container { display: flex; align-items: stretch; }
+
+    .k-grid-header-locked,
+    .k-grid-content-locked {
+      width: 46%;
+      flex: none;
+      overflow: hidden;
+      border-right: 2px solid #cbd5e1;
+    }
+
+    #frozen-grid .k-grid-header-wrap,
+    #frozen-grid .k-grid-content {
+      flex: 1;
+      min-width: 0;
+      height: auto;
+      overflow: visible;
+      scrollbar-gutter: auto;
+    }
+
+    /* ── DevExpress-flavoured grid chrome ───────────────────────────────── */
+    .dx-datagrid {
+      border: 1px solid #dfe3e8;
+      border-radius: 8px;
+      background: #fff;
+      overflow: hidden;
+      font-size: 14px;
+      color: #111827;
+    }
+
+    .dx-datagrid-headers {
+      background: #f9fafb;
+      border-bottom: 1px solid #e5e7eb;
+      overflow: hidden;
+      scrollbar-gutter: stable;
+    }
+
+    .dx-header-row th {
+      text-align: left;
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+      padding: 10px 12px;
+      border-right: 1px solid #eef2f6;
+      white-space: nowrap;
+    }
+
+    .dx-header-row th:last-child { border-right: none; }
+
+    .dx-datagrid-rowsview {
+      height: 160px;
+      overflow-y: auto;
+      scrollbar-gutter: stable;
+    }
+
+    .dx-data-row td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #f3f4f6;
+      border-right: 1px solid #f8fafc;
+      white-space: nowrap;
+    }
+
+    .dx-data-row td:last-child { border-right: none; }
+
+    /* The Target column: present in the markup, not rendered. */
+    .col-hidden { display: none; }
+    col.col-zero { width: 0; }
+
+    /* Event log */
+    .log-card { margin-top: 24px; }
+
+    ol.log-list, ul.log-list { list-style: none; padding: 0; margin: 0; }
+
+    .log-list li {
+      padding: 8px 0;
+      border-bottom: 1px solid #f3f4f6;
+      font-size: 13px;
+      color: #374151;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .log-list li:last-child { border-bottom: none; }
+
+    .log-index { color: #9ca3af; margin-right: 10px; }
+  </style>
+</head>
+<body>
+  <!-- Sidebar navigation -->
+  <aside class="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">S</div>
+      <span class="sidebar-logo-name">SecureBank</span>
+    </div>
+
+    <nav>
+      <ul>
+        <li>
+          <a href="dashboard.html">
+            <span class="nav-icon">🏠</span>
+            Dashboard
+          </a>
+        </li>
+        <li>
+          <a href="transactions.html">
+            <span class="nav-icon">💳</span>
+            Transactions
+          </a>
+        </li>
+        <li>
+          <a href="documents.html">
+            <span class="nav-icon">📄</span>
+            Documents
+          </a>
+        </li>
+        <li>
+          <a href="control-flow.html">
+            <span class="nav-icon">💸</span>
+            Payments
+          </a>
+        </li>
+        <li>
+          <a href="tables.html" class="active" aria-current="page">
+            <span class="nav-icon">📋</span>
+            Tables
+          </a>
+        </li>
+        <li>
+          <a href="#settings">
+            <span class="nav-icon">⚙️</span>
+            Settings
+          </a>
+        </li>
+        <li>
+          <a href="#profile">
+            <span class="nav-icon">👤</span>
+            Profile
+          </a>
+        </li>
+      </ul>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar" id="user-avatar">D</div>
+        <div>
+          <div class="user-name">Demo User</div>
+          <div class="user-email" id="user-email">demo@securebank.com</div>
+        </div>
+      </div>
+      <button class="logout-btn" id="logout-btn" type="button">Sign out</button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <div class="page-header">
+      <h1>Investments</h1>
+      <p>Holdings, dividends and a watchlist, drawn by component grids that split one grid across two tables — a header table and a body table inside one wrapper.</p>
+    </div>
+
+    <nav class="contents" id="contents" aria-label="Contents">
+      <h2>Contents</h2>
+      <ol>
+        <li><a href="#c-holdings">Holdings</a></li>
+        <li><a href="#c-dividends">Dividends</a></li>
+        <li><a href="#c-watchlist">Watchlist</a></li>
+        <li><a href="#c-frozen">Frozen holdings</a></li>
+      </ol>
+    </nav>
+
+    <!-- 1 ── Holdings: header + body + footer, wired with aria-owns ───────── -->
+    <section class="section-card" id="c-holdings" aria-labelledby="h-holdings">
+      <div class="section-header">
+        <h2 id="h-holdings">Holdings</h2>
+      </div>
+      <p class="section-hint">A Kendo grid as the jQuery component renders it: <strong>three tables</strong> in one <code>.k-grid</code> wrapper — the header in <code>.k-grid-header-wrap</code>, the rows in <code>.k-grid-content</code>, the totals in <code>.k-grid-footer-wrap</code> — and a pager div after them. The wrapper carries no <code>role</code> and no <code>aria-label</code>; the link between the halves is declared on the body table, whose <code>aria-owns="holdings-thead holdings-tbody"</code> names the header table's <code>&lt;thead&gt;</code> and its own <code>&lt;tbody&gt;</code>. The row table does have an id of its own — <code>holdings-table</code> here, a generated GUID in a real Kendo grid — but the id that <em>names</em> the grid the way a test author says it, <code>holdings-grid</code>, is the <strong>wrapper's</strong>. A read should <strong>pair the two</strong> and return six records under the eight headings, skipping the <code>&lt;tfoot&gt;</code> and the pager. The first column is a select-all checkbox with an empty heading, so the column a reader wants is never the first one, and <em>Swap the Symbol and Value columns</em> moves the cells in <em>both</em> tables at once — a header-mapped read must still return the same records.</p>
+
+      <div class="toolbar">
+        <button type="button" class="btn btn-secondary" id="holdings-swap">Swap the Symbol and Value columns</button>
+      </div>
+
+      <div id="holdings-grid" data-role="grid" class="k-grid">
+        <div class="k-grid-header">
+          <div class="k-grid-header-wrap k-auto-scrollable" data-role="resizable">
+            <table role="none" class="k-grid-header-table k-table">
+              <colgroup id="holdings-header-colgroup">
+                <col style="width: 6%;">
+                <col style="width: 10%;">
+                <col style="width: 26%;">
+                <col style="width: 10%;">
+                <col style="width: 12%;">
+                <col style="width: 14%;">
+                <col style="width: 12%;">
+                <col style="width: 10%;">
+              </colgroup>
+              <thead class="k-table-thead" role="rowgroup" id="holdings-thead">
+                <tr class="k-table-row" role="row">
+                  <th scope="col" id="holdings-th-select" class="checkbox-align k-table-th k-header" rowspan="1" data-index="0" data-resizable="true" role="columnheader">
+                    <span class="k-checkbox-wrap">
+                      <input tabindex="-1" class="k-select-checkbox k-checkbox" data-role="checkbox" aria-label="Select all rows" aria-checked="false" type="checkbox">
+                    </span>
+                  </th>
+                  <th scope="col" data-field="symbol" aria-haspopup="menu" rowspan="1" data-title="Symbol" title="Press ctrl + space to group" data-index="1" id="holdings-th-symbol" data-resizable="true" class="k-table-th k-sortable k-header k-filterable" data-role="columnsorter" role="columnheader" aria-sort="none">
+                    <span class="k-cell-inner">
+                      <span class="k-link"><span class="k-column-title">Symbol</span></span>
+                      <a class="k-grid-column-menu k-grid-header-menu" href="#" aria-hidden="true" title="Symbol edit column settings" tabindex="-1"><span class="k-icon k-svg-icon k-svg-i-more-vertical" aria-hidden="true"><svg viewBox="0 0 512 512" focusable="false" aria-hidden="true"><circle cx="256" cy="106" r="46"></circle><circle cx="256" cy="256" r="46"></circle><circle cx="256" cy="406" r="46"></circle></svg></span></a>
+                    </span>
+                  </th>
+                  <th scope="col" data-field="name" aria-haspopup="menu" rowspan="1" data-title="Name" title="Press ctrl + space to group" data-index="2" id="holdings-th-name" data-resizable="true" class="k-table-th k-sortable k-header k-filterable" data-role="columnsorter" role="columnheader" aria-sort="none">
+                    <span class="k-cell-inner">
+                      <span class="k-link"><span class="k-column-title">Name</span></span>
+                      <a class="k-grid-column-menu k-grid-header-menu" href="#" aria-hidden="true" title="Name edit column settings" tabindex="-1"><span class="k-icon k-svg-icon k-svg-i-more-vertical" aria-hidden="true"><svg viewBox="0 0 512 512" focusable="false" aria-hidden="true"><circle cx="256" cy="106" r="46"></circle><circle cx="256" cy="256" r="46"></circle><circle cx="256" cy="406" r="46"></circle></svg></span></a>
+                    </span>
+                  </th>
+                  <th scope="col" data-field="units" aria-haspopup="menu" rowspan="1" data-title="Units" title="Press ctrl + space to group" data-index="3" id="holdings-th-units" data-resizable="true" class="k-table-th k-sortable k-header k-filterable" data-role="columnsorter" role="columnheader" aria-sort="none">
+                    <span class="k-cell-inner">
+                      <span class="k-link"><span class="k-column-title">Units</span></span>
+                      <a class="k-grid-column-menu k-grid-header-menu" href="#" aria-hidden="true" title="Units edit column settings" tabindex="-1"><span class="k-icon k-svg-icon k-svg-i-more-vertical" aria-hidden="true"><svg viewBox="0 0 512 512" focusable="false" aria-hidden="true"><circle cx="256" cy="106" r="46"></circle><circle cx="256" cy="256" r="46"></circle><circle cx="256" cy="406" r="46"></circle></svg></span></a>
+                    </span>
+                  </th>
+                  <th scope="col" data-field="price" aria-haspopup="menu" rowspan="1" data-title="Price" title="Press ctrl + space to group" data-index="4" id="holdings-th-price" data-resizable="true" class="k-table-th k-sortable k-header k-filterable" data-role="columnsorter" role="columnheader" aria-sort="none">
+                    <span class="k-cell-inner">
+                      <span class="k-link"><span class="k-column-title">Price</span></span>
+                      <a class="k-grid-column-menu k-grid-header-menu" href="#" aria-hidden="true" title="Price edit column settings" tabindex="-1"><span class="k-icon k-svg-icon k-svg-i-more-vertical" aria-hidden="true"><svg viewBox="0 0 512 512" focusable="false" aria-hidden="true"><circle cx="256" cy="106" r="46"></circle><circle cx="256" cy="256" r="46"></circle><circle cx="256" cy="406" r="46"></circle></svg></span></a>
+                    </span>
+                  </th>
+                  <th scope="col" data-field="value" aria-haspopup="menu" rowspan="1" data-title="Value" title="Press ctrl + space to group" data-index="5" id="holdings-th-value" data-resizable="true" class="k-table-th k-sortable k-header k-filterable" data-role="columnsorter" role="columnheader" aria-sort="none">
+                    <span class="k-cell-inner">
+                      <span class="k-link"><span class="k-column-title">Value</span></span>
+                      <a class="k-grid-column-menu k-grid-header-menu" href="#" aria-hidden="true" title="Value edit column settings" tabindex="-1"><span class="k-icon k-svg-icon k-svg-i-more-vertical" aria-hidden="true"><svg viewBox="0 0 512 512" focusable="false" aria-hidden="true"><circle cx="256" cy="106" r="46"></circle><circle cx="256" cy="256" r="46"></circle><circle cx="256" cy="406" r="46"></circle></svg></span></a>
+                    </span>
+                  </th>
+                  <th scope="col" data-field="change" aria-haspopup="menu" rowspan="1" data-title="Change" title="Press ctrl + space to group" data-index="6" id="holdings-th-change" data-resizable="true" class="k-table-th k-sortable k-header k-filterable" data-role="columnsorter" role="columnheader" aria-sort="none">
+                    <span class="k-cell-inner">
+                      <span class="k-link"><span class="k-column-title">Change</span></span>
+                      <a class="k-grid-column-menu k-grid-header-menu" href="#" aria-hidden="true" title="Change edit column settings" tabindex="-1"><span class="k-icon k-svg-icon k-svg-i-more-vertical" aria-hidden="true"><svg viewBox="0 0 512 512" focusable="false" aria-hidden="true"><circle cx="256" cy="106" r="46"></circle><circle cx="256" cy="256" r="46"></circle><circle cx="256" cy="406" r="46"></circle></svg></span></a>
+                    </span>
+                  </th>
+                  <th scope="col" data-field="actions" rowspan="1" data-title="Actions" data-index="7" id="holdings-th-actions" data-resizable="true" class="k-table-th k-header" role="columnheader">
+                    <span class="k-cell-inner">
+                      <span class="k-link"><span class="k-column-title">Actions</span></span>
+                      <a class="k-grid-column-menu k-grid-header-menu" href="#" aria-hidden="true" title="Actions edit column settings" tabindex="-1"><span class="k-icon k-svg-icon k-svg-i-more-vertical" aria-hidden="true"><svg viewBox="0 0 512 512" focusable="false" aria-hidden="true"><circle cx="256" cy="106" r="46"></circle><circle cx="256" cy="256" r="46"></circle><circle cx="256" cy="406" r="46"></circle></svg></span></a>
+                    </span>
+                  </th>
+                </tr>
+              </thead>
+            </table>
+          </div>
+        </div>
+
+        <div class="k-grid-container">
+          <div class="k-grid-content k-auto-scrollable">
+            <table class="k-grid-table k-table" id="holdings-table" tabindex="0" role="grid" aria-rowcount="-1" aria-owns="holdings-thead holdings-tbody">
+              <colgroup id="holdings-body-colgroup">
+                <col style="width: 6%;">
+                <col style="width: 10%;">
+                <col style="width: 26%;">
+                <col style="width: 10%;">
+                <col style="width: 12%;">
+                <col style="width: 14%;">
+                <col style="width: 12%;">
+                <col style="width: 10%;">
+              </colgroup>
+              <tbody class="k-table-tbody" role="rowgroup" id="holdings-tbody">
+                <tr class="k-table-row k-master-row" data-uid="holding-vas" role="row">
+                  <td class="checkbox-align k-table-td" role="gridcell"><span class="k-checkbox-wrap"><input tabindex="-1" class="k-select-checkbox k-checkbox" data-role="checkbox" aria-label="Select row" aria-checked="false" type="checkbox"></span></td>
+                  <td class="k-table-td" role="gridcell">VAS</td>
+                  <td class="k-table-td" role="gridcell">Vanguard Australian Shares</td>
+                  <td class="k-table-td" role="gridcell">120</td>
+                  <td class="k-table-td" role="gridcell">$95.10</td>
+                  <td class="k-table-td" role="gridcell">$11,412.00</td>
+                  <td class="k-table-td" role="gridcell"><span class="change-up">+1.2%</span></td>
+                  <td class="k-table-td" role="gridcell"><button type="button" class="k-button k-button-solid-base" data-symbol="VAS">Sell</button></td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="holding-vgs" role="row">
+                  <td class="checkbox-align k-table-td" role="gridcell"><span class="k-checkbox-wrap"><input tabindex="-1" class="k-select-checkbox k-checkbox" data-role="checkbox" aria-label="Select row" aria-checked="false" type="checkbox"></span></td>
+                  <td class="k-table-td" role="gridcell">VGS</td>
+                  <td class="k-table-td" role="gridcell">Vanguard International Shares</td>
+                  <td class="k-table-td" role="gridcell">80</td>
+                  <td class="k-table-td" role="gridcell">$130.45</td>
+                  <td class="k-table-td" role="gridcell">$10,436.00</td>
+                  <td class="k-table-td" role="gridcell"><span class="change-down">-0.4%</span></td>
+                  <td class="k-table-td" role="gridcell"><button type="button" class="k-button k-button-solid-base" data-symbol="VGS">Sell</button></td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="holding-ndq" role="row">
+                  <td class="checkbox-align k-table-td" role="gridcell"><span class="k-checkbox-wrap"><input tabindex="-1" class="k-select-checkbox k-checkbox" data-role="checkbox" aria-label="Select row" aria-checked="false" type="checkbox"></span></td>
+                  <td class="k-table-td" role="gridcell">NDQ</td>
+                  <td class="k-table-td" role="gridcell">Betashares Nasdaq 100</td>
+                  <td class="k-table-td" role="gridcell">50</td>
+                  <td class="k-table-td" role="gridcell">$42.30</td>
+                  <td class="k-table-td" role="gridcell">$2,115.00</td>
+                  <td class="k-table-td" role="gridcell"><span class="change-up">+2.1%</span></td>
+                  <td class="k-table-td" role="gridcell"><button type="button" class="k-button k-button-solid-base" data-symbol="NDQ">Sell</button></td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="holding-ioo" role="row">
+                  <td class="checkbox-align k-table-td" role="gridcell"><span class="k-checkbox-wrap"><input tabindex="-1" class="k-select-checkbox k-checkbox" data-role="checkbox" aria-label="Select row" aria-checked="false" type="checkbox"></span></td>
+                  <td class="k-table-td" role="gridcell">IOO</td>
+                  <td class="k-table-td" role="gridcell">iShares Global 100</td>
+                  <td class="k-table-td" role="gridcell">15</td>
+                  <td class="k-table-td" role="gridcell">$150.20</td>
+                  <td class="k-table-td" role="gridcell">$2,253.00</td>
+                  <td class="k-table-td" role="gridcell"><span class="change-up">+0.6%</span></td>
+                  <td class="k-table-td" role="gridcell"><button type="button" class="k-button k-button-solid-base" data-symbol="IOO">Sell</button></td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="holding-a200" role="row">
+                  <td class="checkbox-align k-table-td" role="gridcell"><span class="k-checkbox-wrap"><input tabindex="-1" class="k-select-checkbox k-checkbox" data-role="checkbox" aria-label="Select row" aria-checked="false" type="checkbox"></span></td>
+                  <td class="k-table-td" role="gridcell">A200</td>
+                  <td class="k-table-td" role="gridcell">Betashares Australia 200</td>
+                  <td class="k-table-td" role="gridcell">200</td>
+                  <td class="k-table-td" role="gridcell">$135.60</td>
+                  <td class="k-table-td" role="gridcell">$27,120.00</td>
+                  <td class="k-table-td" role="gridcell"><span class="change-down">-1.1%</span></td>
+                  <td class="k-table-td" role="gridcell"><button type="button" class="k-button k-button-solid-base" data-symbol="A200">Sell</button></td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="holding-bond" role="row">
+                  <td class="checkbox-align k-table-td" role="gridcell"><span class="k-checkbox-wrap"><input tabindex="-1" class="k-select-checkbox k-checkbox" data-role="checkbox" aria-label="Select row" aria-checked="false" type="checkbox"></span></td>
+                  <td class="k-table-td" role="gridcell">BOND</td>
+                  <td class="k-table-td" role="gridcell">Vanguard Bond Index</td>
+                  <td class="k-table-td" role="gridcell">300</td>
+                  <td class="k-table-td" role="gridcell">$48.75</td>
+                  <td class="k-table-td" role="gridcell">$14,625.00</td>
+                  <td class="k-table-td" role="gridcell"><span class="change-up">+0.1%</span></td>
+                  <td class="k-table-td" role="gridcell"><button type="button" class="k-button k-button-solid-base" data-symbol="BOND">Sell</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="k-grid-footer" tabindex="-1">
+          <div class="k-grid-footer-wrap">
+            <table class="k-table k-grid-footer-table" role="none">
+              <colgroup id="holdings-footer-colgroup">
+                <col style="width: 6%;">
+                <col style="width: 10%;">
+                <col style="width: 26%;">
+                <col style="width: 10%;">
+                <col style="width: 12%;">
+                <col style="width: 14%;">
+                <col style="width: 12%;">
+                <col style="width: 10%;">
+              </colgroup>
+              <tfoot class="k-table-tfoot" role="rowgroup" id="holdings-tfoot">
+                <tr class="k-footer-template k-table-row" role="row">
+                  <td class="k-table-td" role="gridcell"></td>
+                  <td class="k-table-td" role="gridcell">Total</td>
+                  <td class="k-table-td" role="gridcell"></td>
+                  <td class="k-table-td" role="gridcell"></td>
+                  <td class="k-table-td" role="gridcell"></td>
+                  <td class="k-table-td" role="gridcell">$67,961.00</td>
+                  <td class="k-table-td" role="gridcell"></td>
+                  <td class="k-table-td" role="gridcell"></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+
+        <div class="k-pager k-grid-pager k-pager-responsive" data-role="pager" aria-label="Page 1 of 1" role="application" aria-roledescription="pager" id="holdings-pager" tabindex="0" aria-controls="holdings-table">
+          <span class="k-pager-info k-label">1 - 6 of 6 items</span>
+        </div>
+      </div>
+
+      <div class="result-line" id="sell-result" role="status"></div>
+    </section>
+
+    <!-- 1b ── Event log ───────────────────────────────────────────────────── -->
+    <section class="section-card log-card" id="c-holdings-log" aria-labelledby="h-holdings-log">
+      <div class="section-header">
+        <h2 class="section-title" id="h-holdings-log">Event log</h2>
+        <span class="muted" id="holdings-log-count">0 events</span>
+      </div>
+      <p class="muted" id="holdings-log-empty">Nothing yet — sell a holding or swap the columns.</p>
+      <ul class="log-list" id="holdings-log" aria-label="Holdings activity log"></ul>
+    </section>
+
+    <!-- 2 ── Dividends: grouped, two tables, no aria-owns ─────────────────── -->
+    <section class="section-card" id="c-dividends" aria-labelledby="h-dividends">
+      <div class="section-header">
+        <h2 id="h-dividends">Dividends</h2>
+      </div>
+      <p class="section-hint">The same split — header table, body table — as the Angular and React flavours render it: the <code>role="grid"</code> and the <code>aria-label</code> sit on the <strong>wrapper</strong>, and the body table has <strong>no <code>aria-owns</code></strong>, so nothing in the markup declares which header belongs to these rows. The pairing has to come from structure: one wrapper, one table with a <code>&lt;thead&gt;</code> and no rows, one table with rows and no <code>&lt;thead&gt;</code>. The body is also <strong>grouped by year</strong>: each <code>k-grouping-row</code> is one visible cell spanning the grid followed by five cells carrying the <code>hidden</code> attribute, and every data row starts with an empty <code>k-group-cell</code>. A read should pair the tables, <strong>skip the two group rows</strong> as headings rather than data (§7.4), and return five records. <em>Show no dividends</em> replaces the whole body with a single <code>k-grid-norecords</code> row, which is a placeholder: the read then returns <code>[]</code>, not an error.</p>
+
+      <div class="toolbar">
+        <button type="button" class="btn btn-secondary" id="dividends-toggle">Show no dividends</button>
+      </div>
+
+      <div id="dividends-grid" data-role="grid" class="k-grid" role="grid" aria-label="Dividends">
+        <div class="k-grid-header">
+          <div class="k-grid-header-wrap k-auto-scrollable" data-role="resizable">
+            <table role="none" class="k-grid-header-table k-table">
+              <colgroup>
+                <col style="width: 4%;">
+                <col style="width: 12%;">
+                <col style="width: 20%;">
+                <col style="width: 18%;">
+                <col style="width: 16%;">
+                <col style="width: 30%;">
+              </colgroup>
+              <thead class="k-table-thead" role="rowgroup" id="dividends-thead">
+                <tr class="k-table-row" role="row">
+                  <th class="k-group-cell k-header k-table-th" scope="col" role="columnheader"></th>
+                  <th scope="col" data-field="symbol" aria-haspopup="menu" rowspan="1" data-title="Symbol" data-index="1" id="dividends-th-symbol" data-resizable="true" class="k-table-th k-sortable k-header k-filterable" data-role="columnsorter" role="columnheader" aria-sort="none">
+                    <span class="k-cell-inner">
+                      <span class="k-link"><span class="k-column-title">Symbol</span></span>
+                      <a class="k-grid-column-menu k-grid-header-menu" href="#" aria-hidden="true" title="Symbol edit column settings" tabindex="-1"><span class="k-icon k-svg-icon k-svg-i-more-vertical" aria-hidden="true"><svg viewBox="0 0 512 512" focusable="false" aria-hidden="true"><circle cx="256" cy="106" r="46"></circle><circle cx="256" cy="256" r="46"></circle><circle cx="256" cy="406" r="46"></circle></svg></span></a>
+                    </span>
+                  </th>
+                  <th scope="col" data-field="exDate" aria-haspopup="menu" rowspan="1" data-title="Ex-date" data-index="2" id="dividends-th-exdate" data-resizable="true" class="k-table-th k-sortable k-header k-filterable" data-role="columnsorter" role="columnheader" aria-sort="none">
+                    <span class="k-cell-inner">
+                      <span class="k-link"><span class="k-column-title">Ex-date</span></span>
+                      <a class="k-grid-column-menu k-grid-header-menu" href="#" aria-hidden="true" title="Ex-date edit column settings" tabindex="-1"><span class="k-icon k-svg-icon k-svg-i-more-vertical" aria-hidden="true"><svg viewBox="0 0 512 512" focusable="false" aria-hidden="true"><circle cx="256" cy="106" r="46"></circle><circle cx="256" cy="256" r="46"></circle><circle cx="256" cy="406" r="46"></circle></svg></span></a>
+                    </span>
+                  </th>
+                  <th scope="col" data-field="amount" aria-haspopup="menu" rowspan="1" data-title="Amount" data-index="3" id="dividends-th-amount" data-resizable="true" class="k-table-th k-sortable k-header k-filterable" data-role="columnsorter" role="columnheader" aria-sort="none">
+                    <span class="k-cell-inner">
+                      <span class="k-link"><span class="k-column-title">Amount</span></span>
+                      <a class="k-grid-column-menu k-grid-header-menu" href="#" aria-hidden="true" title="Amount edit column settings" tabindex="-1"><span class="k-icon k-svg-icon k-svg-i-more-vertical" aria-hidden="true"><svg viewBox="0 0 512 512" focusable="false" aria-hidden="true"><circle cx="256" cy="106" r="46"></circle><circle cx="256" cy="256" r="46"></circle><circle cx="256" cy="406" r="46"></circle></svg></span></a>
+                    </span>
+                  </th>
+                  <th scope="col" data-field="franking" aria-haspopup="menu" rowspan="1" data-title="Franking" data-index="4" id="dividends-th-franking" data-resizable="true" class="k-table-th k-sortable k-header k-filterable" data-role="columnsorter" role="columnheader" aria-sort="none">
+                    <span class="k-cell-inner">
+                      <span class="k-link"><span class="k-column-title">Franking</span></span>
+                      <a class="k-grid-column-menu k-grid-header-menu" href="#" aria-hidden="true" title="Franking edit column settings" tabindex="-1"><span class="k-icon k-svg-icon k-svg-i-more-vertical" aria-hidden="true"><svg viewBox="0 0 512 512" focusable="false" aria-hidden="true"><circle cx="256" cy="106" r="46"></circle><circle cx="256" cy="256" r="46"></circle><circle cx="256" cy="406" r="46"></circle></svg></span></a>
+                    </span>
+                  </th>
+                  <th scope="col" data-field="paid" aria-haspopup="menu" rowspan="1" data-title="Paid" data-index="5" id="dividends-th-paid" data-resizable="true" class="k-table-th k-sortable k-header k-filterable" data-role="columnsorter" role="columnheader" aria-sort="none">
+                    <span class="k-cell-inner">
+                      <span class="k-link"><span class="k-column-title">Paid</span></span>
+                      <a class="k-grid-column-menu k-grid-header-menu" href="#" aria-hidden="true" title="Paid edit column settings" tabindex="-1"><span class="k-icon k-svg-icon k-svg-i-more-vertical" aria-hidden="true"><svg viewBox="0 0 512 512" focusable="false" aria-hidden="true"><circle cx="256" cy="106" r="46"></circle><circle cx="256" cy="256" r="46"></circle><circle cx="256" cy="406" r="46"></circle></svg></span></a>
+                    </span>
+                  </th>
+                </tr>
+              </thead>
+            </table>
+          </div>
+        </div>
+
+        <div class="k-grid-container">
+          <div class="k-grid-content k-auto-scrollable">
+            <table class="k-grid-table k-table" id="dividends-table" tabindex="0" role="grid" aria-rowcount="-1">
+              <colgroup>
+                <col style="width: 4%;">
+                <col style="width: 12%;">
+                <col style="width: 20%;">
+                <col style="width: 18%;">
+                <col style="width: 16%;">
+                <col style="width: 30%;">
+              </colgroup>
+              <tbody class="k-table-tbody" role="rowgroup" id="dividends-tbody">
+                <tr class="k-table-group-row k-grouping-row k-table-row" role="row">
+                  <td class="k-table-td" colspan="6" aria-expanded="true" role="gridcell"><p class="k-reset">Year: 2026</p></td>
+                  <td hidden="" group-header-spanned-hidden="" role="gridcell"></td>
+                  <td hidden="" group-header-spanned-hidden="" role="gridcell"></td>
+                  <td hidden="" group-header-spanned-hidden="" role="gridcell"></td>
+                  <td hidden="" group-header-spanned-hidden="" role="gridcell"></td>
+                  <td hidden="" group-header-spanned-hidden="" role="gridcell"></td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="dividend-2026-vas" role="row">
+                  <td class="k-group-cell k-table-group-td k-table-td" role="gridcell"></td>
+                  <td class="k-table-td" role="gridcell">VAS</td>
+                  <td class="k-table-td" role="gridcell">2026-03-28</td>
+                  <td class="k-table-td" role="gridcell">$412.50</td>
+                  <td class="k-table-td" role="gridcell">100%</td>
+                  <td class="k-table-td" role="gridcell">Yes</td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="dividend-2026-vgs" role="row">
+                  <td class="k-group-cell k-table-group-td k-table-td" role="gridcell"></td>
+                  <td class="k-table-td" role="gridcell">VGS</td>
+                  <td class="k-table-td" role="gridcell">2026-03-20</td>
+                  <td class="k-table-td" role="gridcell">$88.20</td>
+                  <td class="k-table-td" role="gridcell">0%</td>
+                  <td class="k-table-td" role="gridcell">Yes</td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="dividend-2026-a200" role="row">
+                  <td class="k-group-cell k-table-group-td k-table-td" role="gridcell"></td>
+                  <td class="k-table-td" role="gridcell">A200</td>
+                  <td class="k-table-td" role="gridcell">2026-01-15</td>
+                  <td class="k-table-td" role="gridcell">$655.00</td>
+                  <td class="k-table-td" role="gridcell">100%</td>
+                  <td class="k-table-td" role="gridcell">No</td>
+                </tr>
+                <tr class="k-table-group-row k-grouping-row k-table-row" role="row">
+                  <td class="k-table-td" colspan="6" aria-expanded="true" role="gridcell"><p class="k-reset">Year: 2025</p></td>
+                  <td hidden="" group-header-spanned-hidden="" role="gridcell"></td>
+                  <td hidden="" group-header-spanned-hidden="" role="gridcell"></td>
+                  <td hidden="" group-header-spanned-hidden="" role="gridcell"></td>
+                  <td hidden="" group-header-spanned-hidden="" role="gridcell"></td>
+                  <td hidden="" group-header-spanned-hidden="" role="gridcell"></td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="dividend-2025-vas" role="row">
+                  <td class="k-group-cell k-table-group-td k-table-td" role="gridcell"></td>
+                  <td class="k-table-td" role="gridcell">VAS</td>
+                  <td class="k-table-td" role="gridcell">2025-12-19</td>
+                  <td class="k-table-td" role="gridcell">$398.10</td>
+                  <td class="k-table-td" role="gridcell">100%</td>
+                  <td class="k-table-td" role="gridcell">Yes</td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="dividend-2025-ndq" role="row">
+                  <td class="k-group-cell k-table-group-td k-table-td" role="gridcell"></td>
+                  <td class="k-table-td" role="gridcell">NDQ</td>
+                  <td class="k-table-td" role="gridcell">2025-12-05</td>
+                  <td class="k-table-td" role="gridcell">$21.40</td>
+                  <td class="k-table-td" role="gridcell">0%</td>
+                  <td class="k-table-td" role="gridcell">Yes</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3 ── Watchlist: the same split, DevExpress class names ────────────── -->
+    <section class="section-card" id="c-watchlist" aria-labelledby="h-watchlist">
+      <div class="section-header">
+        <h2 id="h-watchlist">Watchlist</h2>
+      </div>
+      <p class="section-hint">The same two-table split drawn by a different component: <code>dx-datagrid-headers</code> holds the header table, <code>dx-datagrid-rowsview</code> holds the body table, both <code>role="presentation"</code>. There is <strong>no <code>aria-owns</code>, no <code>aria-label</code> and no <code>role</code> on the wrapper</strong> — only the id — so a pairing rule that keys off Kendo's class names or Kendo's aria wiring finds nothing here. (DevExpress renders header cells as <code>&lt;td role="columnheader"&gt;</code>; these are <code>&lt;th&gt;</code> so the header rule has something to map.) The fourth column, <strong>Target</strong>, is hidden with <code>display:none</code> in the header and in every row, so each row still has five cells while four render. As on the hidden column in <a href="table-edge-cases.html#c-hidden">table-edge-cases.html</a>, the hidden column <strong>keeps its place</strong>: the heading is still <code>Target</code> and every Target cell reads as an empty string, so Symbol, Name, Last and Alert stay lined up with their own values (§7.4, §10).</p>
+
+      <div id="watchlist-grid" class="dx-datagrid dx-gridbase-container">
+        <div class="dx-datagrid-headers dx-datagrid-nowrap">
+          <table class="dx-datagrid-table dx-datagrid-table-fixed" role="presentation">
+            <colgroup>
+              <col style="width: 16%;">
+              <col style="width: 34%;">
+              <col style="width: 16%;">
+              <col class="col-zero">
+              <col style="width: 34%;">
+            </colgroup>
+            <thead>
+              <tr class="dx-row dx-header-row">
+                <th role="columnheader" class="dx-datagrid-action dx-cell-focus-disabled">Symbol</th>
+                <th role="columnheader" class="dx-datagrid-action dx-cell-focus-disabled">Name</th>
+                <th role="columnheader" class="dx-datagrid-action dx-cell-focus-disabled">Last</th>
+                <th role="columnheader" class="dx-datagrid-action dx-cell-focus-disabled col-hidden">Target</th>
+                <th role="columnheader" class="dx-datagrid-action dx-cell-focus-disabled">Alert</th>
+              </tr>
+            </thead>
+          </table>
+        </div>
+        <div class="dx-datagrid-rowsview dx-datagrid-nowrap">
+          <table class="dx-datagrid-table dx-datagrid-table-fixed" role="presentation">
+            <colgroup>
+              <col style="width: 16%;">
+              <col style="width: 34%;">
+              <col style="width: 16%;">
+              <col class="col-zero">
+              <col style="width: 34%;">
+            </colgroup>
+            <tbody>
+              <tr class="dx-row dx-data-row dx-column-lines">
+                <td>VHY</td>
+                <td>Vanguard High Yield</td>
+                <td>$70.15</td>
+                <td class="col-hidden">$75.00</td>
+                <td>On</td>
+              </tr>
+              <tr class="dx-row dx-data-row dx-column-lines">
+                <td>VEU</td>
+                <td>Vanguard All-World ex-US</td>
+                <td>$88.90</td>
+                <td class="col-hidden">$90.00</td>
+                <td>Off</td>
+              </tr>
+              <tr class="dx-row dx-data-row dx-column-lines">
+                <td>QUAL</td>
+                <td>VanEck Quality</td>
+                <td>$52.35</td>
+                <td class="col-hidden">$55.00</td>
+                <td>On</td>
+              </tr>
+              <tr class="dx-row dx-data-row dx-column-lines">
+                <td>ETHI</td>
+                <td>Betashares Ethical</td>
+                <td>$12.80</td>
+                <td class="col-hidden">$14.00</td>
+                <td>Off</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4 ── Frozen holdings: four tables, and a read that must be refused ── -->
+    <section class="section-card" id="c-frozen" aria-labelledby="h-frozen">
+      <div class="section-header">
+        <h2 id="h-frozen">Frozen holdings</h2>
+      </div>
+      <p class="section-hint">The same Kendo grid with the first two columns <strong>locked</strong>, which is <strong>four tables</strong>, not two: a locked header beside the scrolling header, and a locked body beside the scrolling body, each pair holding half of every row. Neither body table carries <code>aria-owns</code>. This grid is here to be <strong>rejected</strong>: two tables inside the wrapper have rows, so there is no one pairing to make, and picking either would silently drop half of every record — Symbol and Name, or Units, Price and Value. The read should fail with a diagnostic naming both candidates rather than return three records that look complete and are not. Unlike the other three grids on this page, this markup is <strong>not</strong> walked from the captured demo — the dump has no locked columns in it — so the four-table layout follows Kendo's documentation of locked columns instead.</p>
+
+      <div id="frozen-grid" data-role="grid" class="k-grid" aria-label="Frozen holdings">
+        <div class="k-grid-header">
+          <div class="k-grid-header-locked">
+            <table role="none" class="k-grid-header-table k-table">
+              <colgroup>
+                <col style="width: 30%;">
+                <col style="width: 70%;">
+              </colgroup>
+              <thead class="k-table-thead" role="rowgroup" id="frozen-thead-locked">
+                <tr class="k-table-row" role="row">
+                  <th scope="col" data-field="symbol" rowspan="1" data-title="Symbol" data-index="0" class="k-table-th k-header" role="columnheader">
+                    <span class="k-cell-inner"><span class="k-link"><span class="k-column-title">Symbol</span></span></span>
+                  </th>
+                  <th scope="col" data-field="name" rowspan="1" data-title="Name" data-index="1" class="k-table-th k-header" role="columnheader">
+                    <span class="k-cell-inner"><span class="k-link"><span class="k-column-title">Name</span></span></span>
+                  </th>
+                </tr>
+              </thead>
+            </table>
+          </div>
+          <div class="k-grid-header-wrap k-auto-scrollable" data-role="resizable">
+            <table role="none" class="k-grid-header-table k-table">
+              <colgroup>
+                <col style="width: 33.33%;">
+                <col style="width: 33.33%;">
+                <col style="width: 33.34%;">
+              </colgroup>
+              <thead class="k-table-thead" role="rowgroup" id="frozen-thead">
+                <tr class="k-table-row" role="row">
+                  <th scope="col" data-field="units" rowspan="1" data-title="Units" data-index="2" class="k-table-th k-header" role="columnheader">
+                    <span class="k-cell-inner"><span class="k-link"><span class="k-column-title">Units</span></span></span>
+                  </th>
+                  <th scope="col" data-field="price" rowspan="1" data-title="Price" data-index="3" class="k-table-th k-header" role="columnheader">
+                    <span class="k-cell-inner"><span class="k-link"><span class="k-column-title">Price</span></span></span>
+                  </th>
+                  <th scope="col" data-field="value" rowspan="1" data-title="Value" data-index="4" class="k-table-th k-header" role="columnheader">
+                    <span class="k-cell-inner"><span class="k-link"><span class="k-column-title">Value</span></span></span>
+                  </th>
+                </tr>
+              </thead>
+            </table>
+          </div>
+        </div>
+
+        <div class="k-grid-container">
+          <div class="k-grid-content-locked">
+            <table class="k-grid-table k-table" id="frozen-table-locked" tabindex="0" role="grid" aria-rowcount="-1">
+              <colgroup>
+                <col style="width: 30%;">
+                <col style="width: 70%;">
+              </colgroup>
+              <tbody class="k-table-tbody" role="rowgroup" id="frozen-tbody-locked">
+                <tr class="k-table-row k-master-row" data-uid="frozen-vas" role="row">
+                  <td class="k-table-td" role="gridcell">VAS</td>
+                  <td class="k-table-td" role="gridcell">Vanguard Australian Shares</td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="frozen-ndq" role="row">
+                  <td class="k-table-td" role="gridcell">NDQ</td>
+                  <td class="k-table-td" role="gridcell">Betashares Nasdaq 100</td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="frozen-bond" role="row">
+                  <td class="k-table-td" role="gridcell">BOND</td>
+                  <td class="k-table-td" role="gridcell">Vanguard Bond Index</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="k-grid-content k-auto-scrollable">
+            <table class="k-grid-table k-table" id="frozen-table" tabindex="0" role="grid" aria-rowcount="-1">
+              <colgroup>
+                <col style="width: 33.33%;">
+                <col style="width: 33.33%;">
+                <col style="width: 33.34%;">
+              </colgroup>
+              <tbody class="k-table-tbody" role="rowgroup" id="frozen-tbody">
+                <tr class="k-table-row k-master-row" data-uid="frozen-vas" role="row">
+                  <td class="k-table-td" role="gridcell">120</td>
+                  <td class="k-table-td" role="gridcell">$95.10</td>
+                  <td class="k-table-td" role="gridcell">$11,412.00</td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="frozen-ndq" role="row">
+                  <td class="k-table-td" role="gridcell">50</td>
+                  <td class="k-table-td" role="gridcell">$42.30</td>
+                  <td class="k-table-td" role="gridcell">$2,115.00</td>
+                </tr>
+                <tr class="k-table-row k-master-row" data-uid="frozen-bond" role="row">
+                  <td class="k-table-td" role="gridcell">300</td>
+                  <td class="k-table-td" role="gridcell">$48.75</td>
+                  <td class="k-table-td" role="gridcell">$14,625.00</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script>
+    // ── Shell: user info and sign out (same as the other pages) ──────────────
+    var email = sessionStorage.getItem('user-email');
+    if (email) {
+      document.getElementById('user-email').textContent = email;
+      document.getElementById('user-avatar').textContent = email.charAt(0).toUpperCase();
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', function () {
+      sessionStorage.removeItem('logged-in');
+      sessionStorage.removeItem('user-email');
+      window.location.href = 'index.html';
+    });
+
+    // ── Event log ────────────────────────────────────────────────────────────
+    var logList = document.getElementById('holdings-log');
+    var logEmpty = document.getElementById('holdings-log-empty');
+    var logCount = document.getElementById('holdings-log-count');
+
+    function logEvent(message) {
+      var li = document.createElement('li');
+      li.dataset.testid = 'holdings-log-entry';
+      var index = document.createElement('span');
+      index.className = 'log-index';
+      index.textContent = String(logList.children.length + 1) + '.';
+      li.appendChild(index);
+      li.appendChild(document.createTextNode(' ' + message));
+      logList.appendChild(li);
+      logEmpty.hidden = true;
+      logCount.textContent = logList.children.length +
+        (logList.children.length === 1 ? ' event' : ' events');
+    }
+
+    // ── Holdings: Sell ───────────────────────────────────────────────────────
+    // The button carries its own row's symbol, so a run that clicks the Sell in
+    // the third row can prove it acted on the third row and not on the first.
+    var sellResult = document.getElementById('sell-result');
+    var holdingsBody = document.getElementById('holdings-tbody');
+
+    holdingsBody.addEventListener('click', function (event) {
+      var button = event.target.closest('button[data-symbol]');
+      if (!button) return;
+      var message = 'Sell order for ' + button.dataset.symbol + ' placed.';
+      sellResult.textContent = message;
+      logEvent(message);
+    });
+
+    // ── Holdings: swap the Symbol and Value columns ──────────────────────────
+    // The §5.2 case across a split grid: the two columns change places in the
+    // header table, in every body row, in the footer and in all three
+    // colgroups, so the grid still lines up and a header-mapped read still
+    // returns the same records. Clicking again puts them back.
+    var SWAP_LEFT = 1;
+    var SWAP_RIGHT = 5;
+
+    function swapCells(parent, a, b) {
+      var cells = Array.prototype.slice.call(parent.children);
+      if (cells.length <= Math.max(a, b)) return;
+      var first = cells[a];
+      var second = cells[b];
+      var after = second.nextSibling;
+      parent.insertBefore(second, first);
+      parent.insertBefore(first, after);
+    }
+
+    document.getElementById('holdings-swap').addEventListener('click', function () {
+      var rows = [
+        document.querySelector('#holdings-thead tr'),
+        document.querySelector('#holdings-tfoot tr')
+      ];
+      Array.prototype.push.apply(
+        rows,
+        Array.prototype.slice.call(holdingsBody.querySelectorAll('tr.k-master-row'))
+      );
+      Array.prototype.push.apply(
+        rows,
+        Array.prototype.slice.call(document.querySelectorAll(
+          '#holdings-header-colgroup, #holdings-body-colgroup, #holdings-footer-colgroup'
+        ))
+      );
+      rows.forEach(function (row) {
+        if (row) swapCells(row, SWAP_LEFT, SWAP_RIGHT);
+      });
+      logEvent('Swapped the Symbol and Value columns.');
+    });
+
+    // ── Dividends: show no records, then put the rows back ───────────────────
+    // A clone of the original body is kept so the restore is exact, group rows
+    // and all.
+    var dividendsBody = document.getElementById('dividends-tbody');
+    var dividendsToggle = document.getElementById('dividends-toggle');
+    var originalDividendRows = Array.prototype.map.call(
+      dividendsBody.children,
+      function (row) { return row.cloneNode(true); }
+    );
+    var dividendsEmpty = false;
+
+    dividendsToggle.addEventListener('click', function () {
+      dividendsBody.innerHTML = '';
+      if (dividendsEmpty) {
+        originalDividendRows.forEach(function (row) {
+          dividendsBody.appendChild(row.cloneNode(true));
+        });
+        dividendsToggle.textContent = 'Show no dividends';
+      } else {
+        var tr = document.createElement('tr');
+        tr.className = 'k-grid-norecords k-table-row';
+        tr.setAttribute('role', 'row');
+        var td = document.createElement('td');
+        td.className = 'k-table-td';
+        td.colSpan = 6;
+        td.setAttribute('role', 'gridcell');
+        td.textContent = 'No records available.';
+        tr.appendChild(td);
+        dividendsBody.appendChild(tr);
+        dividendsToggle.textContent = 'Show dividends';
+      }
+      dividendsEmpty = !dividendsEmpty;
+    });
+  </script>
+</body>
+</html>

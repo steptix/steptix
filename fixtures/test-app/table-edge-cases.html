@@ -465,6 +465,26 @@
       border-radius: 8px;
       background: #fff;
     }
+
+    /* Two adjacent tables (cards 17 and 18): drawn as one block so they look
+       like a split grid, which is exactly the trap. */
+    .pair {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .pair table { width: 100%; }
+
+    .pair h3 {
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+      padding: 10px 12px;
+      background: #f9fafb;
+      border-top: 1px solid #e5e7eb;
+      border-bottom: 1px solid #e5e7eb;
+    }
   </style>
 </head>
 <body>
@@ -560,6 +580,8 @@
         <li><a href="#c-div-grid">A grid that is not a table</a></li>
         <li><a href="#c-responsive">Responsive table</a></li>
         <li><a href="#c-iframe">Table inside an iframe</a></li>
+        <li><a href="#c-two-named-tables">Two named tables, not one grid</a></li>
+        <li><a href="#c-two-unnamed-tables">Two unnamed tables with a heading between</a></li>
       </ol>
     </nav>
 
@@ -1123,6 +1145,63 @@
           </body>
           </html>
         "></iframe>
+    </section>
+
+    <!-- 17 ── Two named tables, not one grid ───────────────────────────────── -->
+    <section class="section-card" id="c-two-named-tables" aria-labelledby="h-two-named-tables">
+      <div class="section-header">
+        <h2 id="h-two-named-tables">Two named tables, not one grid</h2>
+      </div>
+      <p class="section-hint">A table of headings with an empty body, and immediately after it — same parent, nothing in between — a table of three rows with no headings. That is the outline of a split grid (see <a href="split-grids.html">split-grids.html</a>), and it is <strong>not one</strong>: each table names itself, <code>Pending orders</code> and <code>Order summary</code>, so they are two things the page is showing, not two halves of one. A read of <code>Pending orders</code> <strong>reads normally</strong> and returns <code>[]</code>; it must not borrow the rows from its neighbour.</p>
+
+      <div class="table-wrap">
+        <div class="pair"><table id="t-empty-named" aria-label="Pending orders">
+            <thead>
+              <tr>
+                <th scope="col">Symbol</th>
+                <th scope="col">Units</th>
+                <th scope="col">Status</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table><table id="t-summary-named" aria-label="Order summary">
+            <tbody>
+              <tr><td>VAS</td><td>120</td><td>Held</td></tr>
+              <tr><td>NDQ</td><td>50</td><td>Held</td></tr>
+              <tr><td>BOND</td><td>300</td><td>Sold</td></tr>
+            </tbody>
+          </table></div>
+      </div>
+    </section>
+
+    <!-- 18 ── Two unnamed tables with a heading between ─────────────────────── -->
+    <section class="section-card" id="c-two-unnamed-tables" aria-labelledby="h-two-unnamed-tables">
+      <div class="section-header">
+        <h2 id="h-two-unnamed-tables">Two unnamed tables with a heading between</h2>
+      </div>
+      <p class="section-hint">The same two tables with neither an <code>aria-label</code> nor a <code>&lt;caption&gt;</code>, so nothing names either one — but an <code>&lt;h3&gt;Summary&lt;/h3&gt;</code> sits between them. A heading between two tables is the page telling the reader that a new thing starts here, so these are still two tables and <strong>not</strong> a header half and a body half of one grid. A read of <code>#t-unnamed-header</code> <strong>reads normally</strong> and returns <code>[]</code>.</p>
+
+      <div class="table-wrap">
+        <div class="pair">
+          <table id="t-unnamed-header">
+            <thead>
+              <tr>
+                <th scope="col">Symbol</th>
+                <th scope="col">Units</th>
+                <th scope="col">Status</th>
+              </tr>
+            </thead>
+          </table>
+          <h3>Summary</h3>
+          <table id="t-unnamed-body">
+            <tbody>
+              <tr><td>VAS</td><td>120</td><td>Held</td></tr>
+              <tr><td>NDQ</td><td>50</td><td>Held</td></tr>
+              <tr><td>BOND</td><td>300</td><td>Sold</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
   </main>
