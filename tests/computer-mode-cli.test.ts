@@ -12,7 +12,7 @@
  * first.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../src/config/types.js';
@@ -122,6 +122,7 @@ import { runTest, type RunTestExtras } from '../src/runner/test-runner.js';
 import { FakeDesktopAdapter } from '../src/desktop/fake-adapter.js';
 import { readComputerLock } from '../src/desktop/lock.js';
 import { COMPUTER_DISABLED_MESSAGE, SkillSurfaceStack } from '../src/runner/computer-step.js';
+import { parseToolCall } from '../src/tools/tool-call-parser.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -544,5 +545,98 @@ describe('SkillSurfaceStack — the shared push/pop both loops use', () => {
     // One restore, not two: the inner frame's caller was the outer frame, and
     // both were entered on the browser.
     expect(restored).toEqual(['browser']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §5.4 — a bracket directive nobody dispatched never reaches the model
+// ---------------------------------------------------------------------------
+
+describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surface (§5.4)', () => {
+  const ACTED_OUT =
+    'In computer mode a tool line is never handed to the model, because it would act it out on the real screen.';
+
+  let toolsDir: string;
+  beforeEach(() => {
+    toolsDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-cli-tools-'));
+    writeFileSync(
+      path.join(toolsDir, 'echo.ts'),
+      "export default { name: 'echo', description: 'echo', parameters: {}, run() {} };\n",
+    );
+  });
+  afterEach(() => {
+    rmSync(toolsDir, { recursive: true, force: true });
+  });
+
+  function configWithTools(): Config {
+    const config = makeConfig();
+    return { ...config, tests: { ...config.tests, toolsDir } };
+  }
+
+  it('a [tool:] line the parse did not dispatch fails, and neither executor is called', async () => {
+    // `makeInstance` leaves `toolCalls` null — the shape of a `test` whose
+    // builder dropped the dispatch, which is the only way this runner (which
+    // always loads a catalogue) reaches the computer branch with a tool line.
+    const report = await runTest(
+      makeInstance(['[use computer]', '[tool: open_calculator]', 'Click equals']),
+      configWithTools(),
+      '',
+      undefined,
+      extras(),
+    );
+
+    expect(report.status).toBe('failed');
+    expect(report.steps[1]!.status).toBe('failed');
+    expect(report.steps[1]!.error).toBe(
+      `[tool: open_calculator] was not run: the runner did not dispatch it as a tool call. ${ACTED_OUT}`,
+    );
+    expect(report.steps[1]!.surface).toBe('computer');
+    expect(report.steps[1]!.turns).toHaveLength(0);
+    expect(report.steps).toHaveLength(2);
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(executeStepMock).not.toHaveBeenCalled();
+  });
+
+  it('an unknown tool name fails with the catalogue\'s message — even with no browser open', async () => {
+    const instance = makeInstance(['[use computer]', '[tool: open_calculator]']);
+    instance.test.toolCalls = [null, parseToolCall('[tool: open_calculator]')];
+
+    const report = await runTest(instance, configWithTools(), '', undefined, extras());
+
+    expect(report.status).toBe('failed');
+    expect(report.steps[1]!.error).toContain('Tool "open_calculator" not found in catalogue.');
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+  });
+
+  it('a raw [skill:] line fails the same way', async () => {
+    const report = await runTest(
+      makeInstance(['[use computer]', '[skill: open-calculator]']),
+      configWithTools(),
+      '',
+      undefined,
+      extras(),
+    );
+
+    expect(report.status).toBe('failed');
+    expect(report.steps[1]!.error).toContain(
+      '[skill: open-calculator] was not run: skills are expanded into their steps before the run starts',
+    );
+    expect(report.steps[1]!.error).toContain('In computer mode a skill line is never handed to the model');
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+  });
+
+  it('the page surface is unchanged: an undispatched tool line still goes to executeStep', async () => {
+    const report = await runTest(
+      makeInstance(['[tool: open_calculator]']),
+      configWithTools(),
+      '',
+      undefined,
+      extras(),
+    );
+
+    expect(report.status).toBe('passed');
+    expect(executeStepMock).toHaveBeenCalledTimes(1);
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
   });
 });

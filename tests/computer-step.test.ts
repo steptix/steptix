@@ -21,6 +21,7 @@ import { mapToScreen, viewFromGrab } from '../src/desktop/index.js';
 import {
   executeComputerStep,
   resetComputerScreenshotNotice,
+  undispatchedDirectiveError,
   type ComputerStepOptions,
 } from '../src/runner/computer-step.js';
 import { logger } from '../src/utils/logger.js';
@@ -969,5 +970,71 @@ describe('image_input_unsupported fails the step at once (§15.4)', () => {
 
     expect(evaluation.error).toBe(BRIDGE_REJECTION);
     expect(calls).toBe(1);
+  });
+});
+
+describe('undispatchedDirectiveError — what may not reach the computer-surface model (§5.4)', () => {
+  const none = { toolsLoaded: false, skillsDirSupplied: false };
+  const all = { toolsLoaded: true, skillsDirSupplied: true };
+
+  it('names the missing toolsDir, and how to supply one', () => {
+    expect(undispatchedDirectiveError('[tool: open_calculator]', none)).toBe(
+      '[tool: open_calculator] was not run: this request carried no tools directory (toolsDir), ' +
+        "so no tool is loaded — declare tests.toolsDir in the project's aiui.config.json so the " +
+        'client sends one. In computer mode a tool line is never handed to the model, because it ' +
+        'would act it out on the real screen.',
+    );
+  });
+
+  it('reads a tool line the way the dispatcher does: labelled, colonless, with arguments', () => {
+    for (const step of [
+      'Open the calculator [tool: open_calculator]',
+      '[tool open_calculator]',
+      '[tool: open_calculator mode="scientific"]',
+      '[no-hooks] [tool: open_calculator]',
+    ]) {
+      expect(undispatchedDirectiveError(step, none), step).toMatch(/^\[tool: open_calculator\] was not run/);
+    }
+  });
+
+  it('a tool line that does not parse is still a tool line, and carries the parser\'s caret', () => {
+    const message = undispatchedDirectiveError('[tool: open_calculator count=abc]', none)!;
+    expect(message).toMatch(/^This \[tool: …\] line was not run: it does not parse\./);
+    expect(message).toContain('[tool: open_calculator count=abc]');
+    expect(message).toContain('^');
+    expect(message).toContain('In computer mode a tool line is never handed to the model');
+  });
+
+  it('with everything loaded, says the runner dropped it rather than blaming a directory', () => {
+    expect(undispatchedDirectiveError('[tool: x]', all)).toMatch(
+      /^\[tool: x\] was not run: the runner did not dispatch it as a tool call\./,
+    );
+    expect(undispatchedDirectiveError('[skill: login]', all)).toMatch(
+      /^\[skill: login\] was not run: skills are expanded into their steps before the run starts/,
+    );
+  });
+
+  it('names the missing skillsDir for a raw skill line', () => {
+    expect(undispatchedDirectiveError('[skill: auth/login]', none)).toMatch(
+      /^\[skill: auth\/login\] was not run: this request carried no skills directory \(skillsDir\)/,
+    );
+  });
+
+  it('refuses a whole-step bracket that names no directive, with §4.2\'s own message', () => {
+    expect(undispatchedDirectiveError('[calculator]', all)).toContain('`[calculator]` is not one');
+  });
+
+  it('lets prose and the directives the loop already dispatched through', () => {
+    for (const step of [
+      'Click the equals button',
+      'Verify the [optional] banner is gone',
+      'Check the [skillful] label',
+      '[use computer]',
+      '[input: code]',
+      '[interactive]',
+      'If the dialog is open, then return',
+    ]) {
+      expect(undispatchedDirectiveError(step, none), step).toBeNull();
+    }
   });
 });

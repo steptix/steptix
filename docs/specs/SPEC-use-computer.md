@@ -314,6 +314,20 @@ coordinates or with a `selector`. `keyboard` and `keypress` are aliased to
 a no-op that reports success (the defect SPEC-browser-history §4.1
 describes is worse here, where the alternative is a real click).
 
+**A directive nobody dispatched never reaches the model.** On the computer
+surface, a step that is a `[tool: …]` line the loop did not dispatch fails
+with a message naming the cause, without a capture or a model call. That
+happens when a Sessions API request carried no `toolsDir`, so no catalogue is
+loaded. The same goes for a raw `[skill: …]` line (skills are expanded before
+the loop, so a raw one means nothing expanded it) and for a whole-step
+bracket that §4.2 refuses. The page surface still hands those lines to the
+model as prose. Here that was measured live: handed `[tool: open_calculator]`,
+the model pressed Win+R, typed `calc` and launched the program itself. An
+unknown tool name with a catalogue loaded already failed on both surfaces
+with the catalogue's message. Both loops check this last, just before
+`executeComputerStep` (`undispatchedDirectiveError` in
+`src/runner/computer-step.ts`).
+
 ### 5.5 The loop
 
 The same turn loop as the page surface: capture → prompt → parse → execute
@@ -358,8 +372,24 @@ carries the step, the variable map, and the image.
 `mouse.config.autoDelayMs = 20`, `keyboard.config.autoDelayMs = 20`.
 `click` → `mouse.setPosition(point)` then `mouse.click(button)` /
 `doubleClick`; `drag` → `mouse.drag([from, to])`; `type` →
-`keyboard.type(text)`; `key` → `pressKey(...keys)` then `releaseKey(...)`
-in reverse; `scroll` → `mouse.setPosition` then `scrollDown/Up/Left/Right`.
+`keyboard.type(text)`; `key` → `pressKey(...keys)` then `releaseKey(...keys)`
+with the SAME list in the same order, modifiers first and the key last;
+`scroll` → `mouse.setPosition` then `scrollDown/Up/Left/Right`.
+The `key` order is libnut's rule, not a preference. Both `pressKey` and
+`releaseKey` reverse the list, take its last key as the key and the rest as
+modifier flags, and make one native `keyToggle(key, down|up, flags)` call;
+libnut silently drops a one-character flag name, and its native code refuses
+a flag it does not know. An earlier release passed the list reversed, meaning
+"let the key go before its modifier". That made libnut read the real key as a
+flag: `alt+f4` threw "Invalid key flag specified." (measured live), and
+`ctrl+l` / `win+r` released only the modifier and left L / R held down. The
+flag set is smaller than the key-name set. Measured on win32 (libnut-win32
+2.7.5), `alt`, `control`, `shift`, `win`, `meta`, their `right_` forms and
+`fn` are accepted, and `cmd` and `command` are not. So on Windows the adapter
+presses `LeftWin` for `cmd` (`chordKeyMembers` in `src/desktop/keys.ts`).
+`tests/desktop-nut-keyboard.test.ts` checks the adapter against an emulation
+of that libnut layer, read out of the installed source.
+
 Window operations use `getWindows()`, `getActiveWindow()` and
 `Window.getTitle()` / `getRegion()` / `focus()` / `move()` / `resize()`.
 Two facts shape them (measured, §14):

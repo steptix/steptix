@@ -467,9 +467,20 @@ function buildAdapter(nut: NutModule): DesktopAdapter {
         return value as Parameters<NutModule['keyboard']['pressKey']>[number];
       });
       await nut.keyboard.pressKey(...keys);
-      // Released in reverse, so a modifier is never let go before the key it
-      // qualifies (§5.8).
-      await nut.keyboard.releaseKey(...[...keys].reverse());
+      // Released with the SAME list, in the same order (§5.8). nut.js takes
+      // both calls in natural order — modifiers first, key last — and libnut
+      // reverses the list itself, keeps the last element as the key and hands
+      // the rest to its native `keyToggle` as modifier flags; one `up` call
+      // lifts the key and its modifiers together, in an order libnut picks.
+      //
+      // This line used to pass the list reversed, meaning "let the key go
+      // before its modifier". libnut then read the FIRST modifier as the key
+      // and the real key as a modifier flag: `alt+f4` became
+      // `keyToggle("alt", "up", ["f4"])` and threw "Invalid key flag
+      // specified." (measured live), and `ctrl+l` became
+      // `keyToggle("control", "up", [])` — libnut drops one-character flag
+      // names silently — so the L key was never released at all.
+      await nut.keyboard.releaseKey(...keys);
     },
 
     windows: listWindows,

@@ -853,3 +853,127 @@ describe('browser.launchArgs reaches the launch from the project (§5.10)', () =
     expect(launchConfig().launchArgs).toEqual(['--disable-print-preview']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// §5.4 — a bracket directive nobody dispatched never reaches the model
+// ---------------------------------------------------------------------------
+
+describe('an undispatched [tool:] / [skill:] line fails on the computer surface (§5.4)', () => {
+  /** Measured live: this exact step, with no `toolsDir`, was acted out by the
+   *  model — Win+R, `calc`, Enter — on the real desktop. */
+  const NO_TOOLS_MESSAGE =
+    '[tool: open_calculator] was not run: this request carried no tools directory (toolsDir), ' +
+    'so no tool is loaded';
+
+  /** Every model call the session could make, on the mocked client. */
+  function modelCalls(manager: SessionManager, id: string): number {
+    const ai = managed(manager, id).aiClient;
+    return ai.complete.mock.calls.length + ai.chat.mock.calls.length;
+  }
+
+  let toolsDir: string;
+  beforeEach(() => {
+    toolsDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-tools-'));
+    // A catalogue with something in it, and nothing named `open_calculator`.
+    writeFileSync(
+      path.join(toolsDir, 'echo.ts'),
+      "export default { name: 'echo', description: 'echo', parameters: {}, run() {} };\n",
+    );
+  });
+  afterEach(() => {
+    rmSync(toolsDir, { recursive: true, force: true });
+  });
+
+  it.each([
+    ['[tool: open_calculator]'],
+    ['Open the calculator [tool: open_calculator]'],
+  ])('%s with no toolsDir: fails with the message, and nothing is asked of the model', async (step) => {
+    const manager = makeManager();
+
+    const response = await manager.executeSteps('s-tool-none', {
+      steps: ['[use computer]', step, 'Click the equals button'],
+    });
+
+    expect(response.status).toBe('failed');
+    expect(response.error!.message).toContain(NO_TOOLS_MESSAGE);
+    expect(response.error!.message).toContain(
+      'In computer mode a tool line is never handed to the model, because it would act it out on the real screen.',
+    );
+    expect(response.results[1]!.status).toBe('failed');
+    expect(response.results[1]!.reasoning).toContain(NO_TOOLS_MESSAGE);
+    // The step after it never ran either: the refusal stops the batch.
+    expect(response.results).toHaveLength(2);
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(executeStepMock).not.toHaveBeenCalled();
+    expect(modelCalls(manager, 's-tool-none')).toBe(0);
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+  });
+
+  it('an unknown tool name with a catalogue loaded fails with the catalogue\'s message, not the model', async () => {
+    const manager = makeManager();
+
+    const response = await manager.executeSteps('s-tool-unknown', {
+      steps: ['[use computer]', '[tool: open_calculator]'],
+      toolsDir,
+    });
+
+    expect(response.status).toBe('failed');
+    expect(response.error!.message).toContain('Tool "open_calculator" not found in catalogue.');
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(modelCalls(manager, 's-tool-unknown')).toBe(0);
+  });
+
+  it('a raw [skill:] line with no skillsDir fails the same way', async () => {
+    const manager = makeManager();
+
+    const response = await manager.executeSteps('s-skill-raw', {
+      steps: ['[use computer]', '[skill: open-calculator]'],
+    });
+
+    expect(response.status).toBe('failed');
+    expect(response.error!.message).toContain(
+      '[skill: open-calculator] was not run: this request carried no skills directory (skillsDir)',
+    );
+    expect(response.error!.message).toContain(
+      'In computer mode a skill line is never handed to the model',
+    );
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(modelCalls(manager, 's-skill-raw')).toBe(0);
+  });
+
+  it('a whole-step bracket that names no directive is refused too (§4.2)', async () => {
+    const manager = makeManager();
+
+    const response = await manager.executeSteps('s-bracket', {
+      steps: ['[use computer]', '[calculator]'],
+    });
+
+    expect(response.status).toBe('failed');
+    expect(response.error!.message).toContain('`[calculator]` is not one');
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+  });
+
+  it('prose that merely mentions brackets still goes to the computer surface', async () => {
+    const manager = makeManager();
+
+    const response = await manager.executeSteps('s-prose', {
+      steps: ['[use computer]', 'Verify the [optional] banner is gone'],
+    });
+
+    expect(response.status).toBe('passed');
+    expect(executeComputerStepMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('the page surface is unchanged: with no toolsDir the line still goes to the model as prose', async () => {
+    const manager = makeManager();
+
+    const response = await manager.executeSteps('s-tool-page', {
+      steps: ['[tool: open_calculator]'],
+    });
+
+    expect(response.status).toBe('passed');
+    expect(executeStepMock).toHaveBeenCalledTimes(1);
+    expect(executeStepMock.mock.calls[0]![2]).toBe('[tool: open_calculator]');
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+  });
+});

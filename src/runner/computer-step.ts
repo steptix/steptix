@@ -82,6 +82,9 @@ import {
   type VisionRouteResult,
 } from '../desktop/vision-route.js';
 import type { DesktopConfig } from '../config/types.js';
+import { parseToolCall } from '../tools/tool-call-parser.js';
+import { parseSkillCall } from '../skills/skill-call-parser.js';
+import { unknownWholeStepBracketError } from '../parser/whole-step-bracket.js';
 
 /** Options for a computer-mode step: a step's ordinary options, with the
  *  surface's own context guaranteed present. */
@@ -294,6 +297,129 @@ export function modeStepResult(
  *  both use, written once so they cannot disagree. */
 export function modeMarkerText(surface: 'browser' | 'computer'): string {
   return `→ ${surface}`;
+}
+
+// ---------------------------------------------------------------------------
+// A bracket directive nobody dispatched never reaches the model (§5.4)
+// ---------------------------------------------------------------------------
+
+/** What the calling loop knows about why a directive went undispatched. */
+export interface DirectiveDispatchContext {
+  /** A tool catalogue is loaded, so the loop dispatches every `[tool:]` line
+   *  through it. False on a Sessions API request that carried no `toolsDir`. */
+  toolsLoaded: boolean;
+  /** A skills directory was supplied, so every `[skill:]` line should have been
+   *  expanded into its body before the loop ever saw it. */
+  skillsDirSupplied: boolean;
+}
+
+/** The sentence every refusal below ends with: why this surface refuses where
+ *  the page surface still hands the line to the model as prose. */
+function neverActedOut(kind: 'tool' | 'skill' | 'bracket'): string {
+  const what = kind === 'bracket' ? 'a bracket step nobody dispatched is' : `a ${kind} line is`;
+  return (
+    `In computer mode ${what} never handed to the model, because it would act it out ` +
+    'on the real screen.'
+  );
+}
+
+/** Run an invocation parser, keeping a syntax error as a value: a line that
+ *  names a tool but does not parse is still a tool line. */
+function tryParse<T>(parse: () => T | null): { value: T } | { error: Error } | null {
+  try {
+    const value = parse();
+    return value === null ? null : { value };
+  } catch (err) {
+    return { error: err instanceof Error ? err : new Error(String(err)) };
+  }
+}
+
+/**
+ * The failure for a step that is a bracket directive the loop did NOT
+ * dispatch, when it is about to be answered on the computer surface — or null
+ * for a step that is prose and may go to the model.
+ *
+ * Measured live: a Sessions API request with no `toolsDir` ran
+ * `[tool: open_calculator]` in computer mode. With no catalogue loaded the
+ * line fell through to the model as prose, and the model ACTED IT OUT — Win+R,
+ * `calc`, Enter — launching a program on the real desktop. On the page
+ * surface the same fall-through is legacy and mostly harmless; here it is the
+ * one thing computer mode must never let a model do.
+ *
+ * Detection is by the runner's own parsers, not a new pattern: `parseToolCall`
+ * and `parseSkillCall` are what decide elsewhere that a line IS a tool or a
+ * skill call (a label before the bracket included), and
+ * `unknownWholeStepBracketError` is §4.2's rule for a bracket step that names
+ * no directive. Both loops call this only once every other dispatch has
+ * passed the step by, immediately before `executeComputerStep`.
+ */
+export function undispatchedDirectiveError(
+  step: string,
+  context: DirectiveDispatchContext,
+): string | null {
+  const tool = tryParse(() => parseToolCall(step));
+  if (tool) {
+    if ('error' in tool) {
+      return (
+        `This [tool: …] line was not run: it does not parse. ${tool.error.message}\n` +
+        neverActedOut('tool')
+      );
+    }
+    const call = `[tool: ${tool.value.name}]`;
+    return context.toolsLoaded
+      ? `${call} was not run: the runner did not dispatch it as a tool call. ${neverActedOut('tool')}`
+      : `${call} was not run: this request carried no tools directory (toolsDir), so no tool ` +
+          `is loaded — declare tests.toolsDir in the project's aiui.config.json so the client ` +
+          `sends one. ${neverActedOut('tool')}`;
+  }
+
+  const skill = tryParse(() => parseSkillCall(step));
+  if (skill) {
+    if ('error' in skill) {
+      return (
+        `This [skill: …] line was not run: it does not parse. ${skill.error.message}\n` +
+        neverActedOut('skill')
+      );
+    }
+    const call = `[skill: ${skill.value.name}]`;
+    return context.skillsDirSupplied
+      ? `${call} was not run: skills are expanded into their steps before the run starts, and ` +
+          `this line reached the step loop unexpanded. ${neverActedOut('skill')}`
+      : `${call} was not run: this request carried no skills directory (skillsDir), so the ` +
+          `skill was never expanded into its steps — declare tests.skillsDir in the project's ` +
+          `aiui.config.json so the client sends one. ${neverActedOut('skill')}`;
+  }
+
+  // §4.2 is enforced where a FILE is parsed and where MCP assembles steps; a
+  // bare Sessions API batch reaches this loop without either. On the page
+  // surface that stays as it was. Here it would be a model improvising on the
+  // real screen from a word in brackets.
+  const bracket = unknownWholeStepBracketError(step);
+  if (bracket) return `${bracket} ${neverActedOut('bracket')}`;
+
+  return null;
+}
+
+/** The row a refused directive records: failed, zero turns, no model call, on
+ *  the computer surface it was refused on. The message is the explanation too,
+ *  as it is for the §5.1 refusals, so a client that shows `reasoning` rather
+ *  than `error` still says why. */
+export function undispatchedDirectiveResult(
+  index: number,
+  instruction: string,
+  error: string,
+): StepResult {
+  return {
+    index,
+    instruction,
+    status: 'failed',
+    surface: 'computer',
+    turns: [],
+    durationMs: 0,
+    retried: false,
+    error,
+    aiExplanation: error,
+  };
 }
 
 /**

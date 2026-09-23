@@ -54,6 +54,8 @@ import {
   modeMarkerText,
   modeStepResult,
   skillFrameChain,
+  undispatchedDirectiveError,
+  undispatchedDirectiveResult,
   type SurfaceState,
 } from '../runner/computer-step.js';
 import type { ComputerLockOptions, DesktopAdapter } from '../desktop/index.js';
@@ -6017,6 +6019,19 @@ export class SessionManager {
             : toolCatalogue
               ? parseToolCall(originalStep)
               : null;
+        // …except on the computer surface, where that legacy fall-through is
+        // refused (SPEC-use-computer.md §5.4): a model handed `[tool: x]` as
+        // prose acts it out on the real desktop. Same for a raw `[skill: x]`,
+        // which only survives to here when nothing expanded it. Computed for
+        // the steps the branches below would otherwise send to
+        // `executeComputerStep`, and nothing else.
+        const undispatchedDirective =
+          session.surface === 'computer' && !toolCall && !setStep && !unconditionalFlowControl
+            ? undispatchedDirectiveError(originalStep, {
+                toolsLoaded: toolCatalogue !== undefined,
+                skillsDirSupplied: !!request.skillsDir,
+              })
+            : null;
         let stepResult: StepResult;
         try {
           if (unconditionalFlowControl && unconditionalFlowControl.verb === 'fail') {
@@ -6202,6 +6217,15 @@ export class SessionManager {
                 source: 'toolOutput',
               });
             }
+          } else if (undispatchedDirective !== null) {
+            // A `[tool:]` / `[skill:]` line nothing above dispatched, on the
+            // computer surface: fail it here, before any capture or model call.
+            logger.error(undispatchedDirective);
+            stepResult = undispatchedDirectiveResult(
+              effectiveSourceLines?.[i] ?? i + 1,
+              originalStep,
+              undispatchedDirective,
+            );
           } else if (session.surface === 'computer' && session.computerAdapter) {
             // ── THE COMPUTER SURFACE (SPEC-use-computer.md §5.5) ──────────
             //

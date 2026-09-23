@@ -30,6 +30,8 @@ import {
   leaveComputerMode,
   modeStepResult,
   skillFrameChain,
+  undispatchedDirectiveError,
+  undispatchedDirectiveResult,
   type SurfaceState,
 } from './computer-step.js';
 import type { ComputerLockOptions, DesktopAdapter } from '../desktop/index.js';
@@ -101,7 +103,7 @@ import { ApiResponseStore } from '../api/response-store.js';
 import { StepCache, envCacheSegment, cacheDirName } from '../cache/step-cache.js';
 import { resolveProjectRoot } from '../server/project-root.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
-import { executeToolStep } from '../tools/executor.js';
+import { executeToolStep, type ExecuteToolStepOptions } from '../tools/executor.js';
 import type { ToolCall } from '../tools/types.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
 import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
@@ -889,11 +891,18 @@ export async function runTest(
       stepIndex: number,
     ): Promise<StepResult> => {
       const startedAt = Date.now();
-      const activePage = session.pageTracker.getActive();
+      // `session` is still unset on a computer-first run that has opened no
+      // browser (SPEC-use-computer.md §4.6), and a `[tool:]` step is dispatched
+      // on either surface. Read it the way the server's dispatch does, with
+      // `?.`: a tool that never touches the page then works, an unknown name
+      // fails with the catalogue's own message, and a tool that does need the
+      // page gets `undefined` and says so — instead of this line throwing a
+      // TypeError that ended the whole run.
+      const live = session as BrowserSession | undefined;
       const outcome = await executeToolStep(call, {
-        page: activePage,
-        context: session.context,
-        browser: session.browser,
+        page: live?.pageTracker.getActive() as ExecuteToolStepOptions['page'],
+        context: live?.context as ExecuteToolStepOptions['context'],
+        browser: live?.browser as ExecuteToolStepOptions['browser'],
         resolvedParameters,
         catalogue: toolCatalogue,
         ...(baseUrl !== undefined && { baseUrl }),
@@ -1815,6 +1824,16 @@ export async function runTest(
             (item) => forEachPassOf(controls, controlState, item),
             (text) => redact(text, secretsNow()),
           );
+      // Read only by the branch just ahead of the computer-surface dispatch, so
+      // every earlier branch — `Set`, `[input:]`, a dispatched `[tool:]` — has
+      // already taken the steps it owns. This runner always loads a catalogue
+      // and always parses with a skills directory, so a directive that reaches
+      // that branch was dropped by whatever built `test`, and the message says
+      // so rather than blaming a missing directory.
+      const undispatchedDirective =
+        surfaceState.surface === 'computer' && !setStep && !unconditionalFlowControl
+          ? undispatchedDirectiveError(rawInstruction, { toolsLoaded: true, skillsDirSupplied: true })
+          : null;
       let stepResult: StepResult;
       let interactiveResults: StepResult[] = [];
 
@@ -2084,6 +2103,13 @@ export async function runTest(
         // [tool: ...] step — dispatch deterministic code with live page/context/browser.
         // Same path the hook executor uses; see runToolStep above.
         stepResult = await runToolStep(test.toolCalls[i]!, instruction, i + 1);
+      } else if (undispatchedDirective !== null) {
+        // SPEC-use-computer.md §5.4: a `[tool:]` / `[skill:]` line that nothing
+        // above dispatched is never handed to the computer-surface model, which
+        // would act it out on the real screen. The server's loop refuses the
+        // same, at the same point in its chain.
+        logger.error(undispatchedDirective);
+        stepResult = undispatchedDirectiveResult(i + 1, instruction, undispatchedDirective);
       } else if (surfaceState.surface === 'computer' && surfaceState.adapter) {
         // ── THE COMPUTER SURFACE (SPEC-use-computer.md §5.5) ───────────────
         //

@@ -118,6 +118,19 @@ describe('chordKeyMembers — modifiers first, key last (§5.8)', () => {
     // not what any step means by it.
     expect(chordKeyMembers('ctrl+1')).toEqual(['LeftControl', 'Num1']);
   });
+
+  it('on win32, presses the Windows key for cmd — libnut refuses "cmd" as a modifier flag there', () => {
+    // Measured: `keyToggle(…, ["cmd"])` throws "Invalid key flag specified."
+    // on win32, `["win"]` does not. Bare or as a modifier, cmd is the same key.
+    expect(chordKeyMembers('cmd+shift+g', 'win32')).toEqual(['LeftWin', 'LeftShift', 'G']);
+    expect(chordKeyMembers('command+s', 'win32')).toEqual(['LeftWin', 'S']);
+    expect(chordKeyMembers('cmd', 'win32')).toEqual(['LeftWin']);
+  });
+
+  it('leaves cmd alone where nothing was measured', () => {
+    expect(chordKeyMembers('cmd+shift+g', 'darwin')).toEqual(['LeftCmd', 'LeftShift', 'G']);
+    expect(chordKeyMembers('cmd+s', 'linux')).toEqual(['LeftCmd', 'S']);
+  });
 });
 
 describe('the nut.js key table is current', () => {

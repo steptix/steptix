@@ -43,8 +43,9 @@ const KEY_MEMBERS: Readonly<Record<string, string>> = {
   win: 'LeftWin',
   super: 'LeftSuper',
   meta: 'LeftMeta',
-  // macOS command (§11). On Windows libnut maps "cmd" to the Windows key, so
-  // a chord written for a Mac does something defensible rather than throwing.
+  // macOS command (§11). On Windows `chordKeyMembers` swaps it for LeftWin:
+  // libnut refuses "cmd" as a modifier flag there (measured), so without the
+  // swap `cmd+s` threw rather than doing the defensible thing.
   cmd: 'LeftCmd',
 
   // Named keys.
@@ -175,15 +176,41 @@ export function parseChord(chord: string): ParsedChord {
 }
 
 /**
- * The nut.js `Key` member names a chord presses, modifiers first — exactly the
- * order §5.8 requires for `pressKey(...)`, and the reverse of which is the
- * release order.
+ * Members swapped for another on one platform, because libnut will not take
+ * the original as a MODIFIER there.
+ *
+ * libnut hands every key of a chord but the last to its native `keyToggle` as
+ * a modifier flag, and the flag names it accepts are a smaller set than its
+ * key names. Measured on win32 (2026-09-23, libnut-win32 2.7.5, by calling
+ * `keyToggle` with a bogus direction so no key event could be sent): `cmd`,
+ * `right_cmd` and `command` are refused with "Invalid key flag specified.",
+ * while `win`, `right_win`, `meta` and `right_meta` are accepted. So on
+ * Windows `cmd+shift+g` threw before anything was pressed. `LeftWin` is the
+ * key this table already promised `cmd` would mean there. macOS and Linux are
+ * NOT measured and get no swap.
  */
-export function chordKeyMembers(chord: string): string[] {
+const PLATFORM_MEMBER_SWAPS: Partial<Record<NodeJS.Platform, Readonly<Record<string, string>>>> = {
+  win32: { LeftCmd: 'LeftWin' },
+};
+
+/**
+ * The nut.js `Key` member names a chord presses, modifiers first and the key
+ * last. That is the order nut.js wants for BOTH `pressKey(...)` and
+ * `releaseKey(...)` (§5.8) — libnut reverses the list itself and treats the
+ * final element as the key and the rest as modifier flags.
+ *
+ * `platform` selects {@link PLATFORM_MEMBER_SWAPS}; it defaults to the running
+ * one and is a parameter so the swap can be tested from any machine.
+ */
+export function chordKeyMembers(
+  chord: string,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
   const parsed = parseChord(chord);
+  const swaps = PLATFORM_MEMBER_SWAPS[platform] ?? {};
   return [...parsed.modifiers, parsed.key].map((name) => {
     const member = nutKeyMember(name);
     if (member === undefined) throw unknownKeyNameError(name, parsed.raw);
-    return member;
+    return swaps[member] ?? member;
   });
 }
