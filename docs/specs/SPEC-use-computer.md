@@ -740,9 +740,11 @@ session `live-focus-1`, steps posted in three batches against
 | | the same verify step | holds |
 | | `[use browser]`, then `Verify the page URL ends with statement.pdf` | passed on the same tab |
 
-Not measured: a real second monitor (this box has one display), macOS and
-Linux helpers, and a foreground refusal strong enough to reach the
-minimise+restore fallback — Windows never refused in any run above.
+Not measured: a real second monitor (this box has one display), and the macOS
+and Linux helpers. Windows never refused in the runs above, but did in the
+Copilot run later the same day (§15.7): two focus calls refused with the
+Extension Development Host in front, and the minimise+restore fallback on
+attempt 3 brought the browser forward.
 
 ## 15. Over the Copilot bridge
 
@@ -865,3 +867,28 @@ a fake fetch; precondition order; the session and CLI wiring; the
 A live run over real Copilot needs the user: an Extension Development Host
 from this worktree, Copilot signed in, the bridge's one-time model-access
 consent, and the server started from their terminal.
+
+### 15.7 Live result (2026-09-23)
+
+Over real Copilot, VS Code 1.138, an Extension Development Host running this
+branch's TestBench 0.5.145 as the only VS Code window (see CLAUDE.md on the
+bridge port), the server started from a terminal, **TestBench: Use Copilot for
+AI** having written `AI_MODEL=gateway/copilot/gpt-6-luna`:
+
+- `GET /v1/models` answered `aiui_bridge: {"images":"forward"}`, and VS Code
+  exposed a capability for every model: 42 `true`, two `false`
+  (`copilot/gpt-4o-mini`, `copilot/copilot-utility-small`) — none `null`,
+  as §15.3 now says.
+- **`pdf-print-cancel.md` passed 10/10 in 67 s** with every model call going
+  to the bridge (14 `POST 127.0.0.1:18790/v1/chat/completions`). The
+  `[use computer]` check logged `the bridge forwards images;
+  copilot/gpt-6-luna image_input: true`. The bridge logged no image strip,
+  and the model clicked Print and Cancel from the pixels.
+- **A text-only model is refused at no cost.** `[use computer]` alone with
+  `AI_MODEL=gateway/copilot/gpt-4o-mini` failed in 0.2 s with the §15.4
+  message listing image-capable models on the same bridge — zero model
+  requests, no browser launched.
+- **The focus fallback ran for real** (§14): with the dev host window in
+  front, Windows refused the first two focus calls from the user-started
+  server; attempt 3, minimise + restore through the PowerShell helper, brought
+  the browser forward. The step then passed.
