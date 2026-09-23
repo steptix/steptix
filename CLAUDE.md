@@ -84,12 +84,33 @@ Development Host from that worktree instead:
 cd <worktree>\testbench-native
 npm run build
 & "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd" `
-    --extensionDevelopmentPath=.
+    --extensionDevelopmentPath="$PWD" <folder-to-open>
 ```
+
+**The path must be absolute.** Measured 2026-09-23: with VS Code already
+running, `--extensionDevelopmentPath=.` opened a window titled
+`[Extension Development Host]` that scanned the root of the C: drive for the
+extension (its renderer.log fills with `Unable to read file
+'\$Recycle.Bin\package.json'` from `scanExtensionsUnderDevelopment`) and then
+quietly ran the INSTALLED copy — Running Extensions showed 0.5.143 where the
+worktree was 0.5.145. The folder argument beside it resolved correctly; only
+the development path did not. `"$PWD"` expands to the absolute path before the
+shim sees it. Check Running Extensions for the worktree's version before
+trusting the window.
 
 The dev host loads from `--extensionDevelopmentPath` in place of the installed
 copy, for that window only, so two worktrees can drive their own builds at the
 same time without touching `~/.vscode/extensions/`.
+
+One thing it does NOT isolate: the Copilot bridge's port. Its setting is
+machine-scoped and one window per machine owns `127.0.0.1:18790`; the others
+stand by and claim it when the owner closes. So with ordinary windows open on
+the installed TestBench and `lmBridge.enabled` on, a dev host's bridge never
+serves — requests reach the installed copy's bridge instead. To exercise a
+worktree's bridge, close every other VS Code window first (and run anything
+that must survive that, such as the server, from a terminal outside VS Code).
+`GET /v1/models` on the port tells them apart once the bridge carries
+`aiui_bridge` (tb 0.5.145+).
 
 `npm run dev` is the same two steps, but shells out to plain `code`. Unlike
 `--install-extension`, the GUI exe does accept `--extensionDevelopmentPath` —
