@@ -732,3 +732,121 @@ session `live-focus-1`, steps posted in three batches against
 Not measured: a real second monitor (this box has one display), macOS and
 Linux helpers, and a foreground refusal strong enough to reach the
 minimise+restore fallback — Windows never refused in any run above.
+
+## 15. Over the Copilot bridge
+
+**Status:** spec, for build. Opened 2026-09-23.
+
+### 15.1 The problem
+
+TestBench's Copilot bridge (`testbench-native/src/extension/lm-bridge*.ts`,
+stories/copilot-lm-bridge.md) is a local OpenAI-compatible endpoint that the
+server reaches as `AI_MODEL=gateway/copilot/<model>` + `AI_GATEWAY_URL`. It
+carries text only: every `image_url` block is replaced with
+`[screenshot omitted — images unsupported over the bridge]` before the request
+reaches `vscode.lm`. Browser mode survives that — it has the DOM. Computer
+mode does not: the image is the whole of what the model sees, so over the
+bridge the model is asked to click by coordinates on a screen it was never
+shown, and the server cannot tell, because the stripping happens after the
+request leaves it. The likely outcomes are a guessed click on the real
+screen or a `noop` that passes a step that did nothing.
+
+Two changes, each useful without the other.
+
+### 15.2 The bridge forwards images
+
+- An `image_url` block whose URL is a `data:` URL is decoded and sent as
+  `vscode.LanguageModelDataPart.image(bytes, mime)` inside the same user
+  message, in order with its text parts.
+- **Feature-detected, not version-gated.** The extension keeps its `^1.90`
+  engine floor. When `vscode.LanguageModelDataPart?.image` is not a function
+  (an older VS Code), the bridge strips as today, with the same note and
+  once-per-window warning. The `@types/vscode` it compiles against (1.116)
+  already declares the class.
+- A non-`data:` image URL (`https://…`) cannot be fetched by the bridge and is
+  stripped with the note, as today.
+- Images in an assistant message are stripped (vscode.lm assistant messages
+  take no data parts); the server never sends one.
+- **A model that rejects images** — `sendRequest` throws for a request that
+  carried image parts — is answered with HTTP 400 and
+  `{"error":{"message":…,"type":"invalid_request_error","code":"image_input_unsupported"}}`,
+  the message naming the model and saying that computer mode and
+  `ai.sendScreenshots` need a model that accepts images. Never silently
+  retried without the image.
+- The body-size limit is raised if needed so a 1600-px PNG screenshot fits.
+- Token measurement (`countTokens`) counts the text parts; an image part is
+  not a string and must not make the measurement throw.
+
+### 15.3 The bridge says what it will do with images
+
+`GET /v1/models` gains, additively:
+
+```json
+{
+  "object": "list",
+  "aiui_bridge": { "name": "testbench-copilot-bridge", "images": "forward" },
+  "data": [
+    { "id": "copilot/gpt-5.6-luna", "object": "model", "owned_by": "copilot",
+      "family": "gpt-5.6-luna", "image_input": null }
+  ]
+}
+```
+
+- `aiui_bridge.images` is `"forward"` when §15.2's detection found the data
+  part, `"strip"` otherwise. Its presence is how the server knows the endpoint
+  is this bridge and not a corporate gateway.
+- `image_input` per model is `true` / `false` when the running VS Code exposes
+  the model's capabilities at runtime, and `null` when it does not — the
+  public `LanguageModelChat` type carries no capabilities (they are on the
+  provider-side `LanguageModelChatInformation`), so `null` is the normal
+  answer and means "forwarded; the model decides".
+
+### 15.4 Computer mode refuses a blind route
+
+A new precondition on `[use computer]`, after the project opt-in (§5.1 item
+1) and before nut.js loads, so it costs nothing on the machine:
+
+- Only for a gateway-routed model (`gateway/…`, `aibroker/…`) with a custom
+  gateway URL. Other routes are not asked: a direct provider or a real
+  gateway answers an image sent to a text-only model with an error, which is
+  loud rather than blind.
+- `GET {gatewayUrl}/v1/models` with the configured key, 3-second timeout.
+  - No `aiui_bridge` field, a non-200, or no answer → proceed (not the
+    bridge, or not reachable yet — the first real request will say so).
+  - `aiui_bridge.images === "strip"` → the step fails: *Computer mode needs
+    the model to see the screen, but the TestBench Copilot bridge drops
+    images on this VS Code (it has no image support for language models).
+    Update VS Code, or run computer-mode steps with a model that is not
+    routed through the bridge.*
+  - The selected model's entry has `image_input === false` → the step fails
+    naming the model and suggesting one whose entry is not `false`.
+  - Otherwise → proceed.
+- The check uses the session's effective AI configuration at the moment of
+  `[use computer]`. A model changed afterwards through run settings is not
+  re-checked; §15.2's 400 is the backstop.
+- A computer-mode request answered with `image_input_unsupported` fails the
+  step at once, with the bridge's message, and is not retried: retrying sends
+  the same image to the same model.
+
+### 15.5 Belt and braces in the prompt
+
+The computer-mode system prompt gains one rule: if a message carries no image,
+or says the screenshot was omitted, do not guess coordinates — answer
+`assert` with `"holds": false` and evidence *no screenshot was received*.
+That covers any stripping route §15.4 cannot see.
+
+### 15.6 Tests
+
+Bridge (runner-free `node --test` over `lm-bridge-core`, plus the fake-`vscode.lm`
+integration suite): data-URL decode to bytes + mime; order of text and image
+parts preserved; forward vs strip by feature detection; non-data URL
+stripped; assistant image stripped; model rejection → 400
+`image_input_unsupported`; `/v1/models` carries `aiui_bridge` and
+`image_input`; `countTokens` with an image part does not throw; body limit
+admits a realistic screenshot. Server (vitest): the §15.4 decision table with
+a fake fetch; precondition order; the session and CLI wiring; the
+`image_input_unsupported` step failure is not retried; the prompt rule.
+
+A live run over real Copilot needs the user: an Extension Development Host
+from this worktree, Copilot signed in, the bridge's one-time model-access
+consent, and the server started from their terminal.
