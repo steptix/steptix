@@ -612,6 +612,12 @@ export function createApiServer(
           viewport?: string;
           // Raw `## Config: unmask:` list, validated as a string just above.
           unmask?: string;
+          // Raw `## Config: tableStructure:` — `ask` or `strict`
+          // (docs/specs/SPEC-structured-table-reads.md §7.10). Cast like
+          // `viewport`: the session manager owns the one validator, which
+          // warns and falls back rather than refusing, so there is nothing
+          // for this layer to reject.
+          tableStructure?: string;
           // `profile` is a descriptive label only — `port` selects the browser.
           // Retained so `GET /sessions` can say which browser a session drives.
           cdp?: { port: number; tab?: string; profile?: string };

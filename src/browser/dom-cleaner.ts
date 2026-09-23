@@ -43,6 +43,13 @@ const ALLOWED_DOM_ATTRIBUTES: readonly string[] = [
   // Upload fields: `multiple` decides whether one step can send two files,
   // and `accept` tells the model which field wants which kind of file.
   'accept', 'multiple',
+  // The row numbering `readTable` leaves on a table it has read
+  // (SPEC-structured-table-reads §7.4): `data-aiui-row="7"` IS the framework's
+  // answer to "row 7 of the Orders table", and the allowlist would otherwise
+  // drop it with the rest of the `data-*` noise — leaving the model to count
+  // rows or, measured on RadGrid, to build an id from the number and act on
+  // the row below. The `expand` walk already emits every `data-*`.
+  'data-aiui-row',
 ];
 
 /**
@@ -966,14 +973,20 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
       // Walk all attributes once and pick up the prefix-match families:
       //   - aria-*  (full accessibility surface)
       //   - data-*  (test/state hooks; expand is zoomed-in so full fidelity)
-      // Skip data-testid since it's already in the named list above.
+      // Skip data-testid and data-aiui-row since both are already in the named
+      // list above — emitted here too, a row a readTable had numbered came out
+      // as data-aiui-row="8" data-aiui-row="8".
       const allAttrs = el.attributes;
       for (let i = 0; i < allAttrs.length; i++) {
         const a = allAttrs[i];
         if (a.value === '') continue;
         if (a.name.indexOf('aria-') === 0) {
           attrs.push(a.name + '="' + a.value + '"');
-        } else if (a.name.indexOf('data-') === 0 && a.name !== 'data-testid') {
+        } else if (
+          a.name.indexOf('data-') === 0
+          && a.name !== 'data-testid'
+          && a.name !== 'data-aiui-row'
+        ) {
           // A field whose \`value\` was just masked must not hand the same
           // string back in \`data-value\`: a page that mirrors its input into
           // an attribute would undo the mask on the very line that applied it

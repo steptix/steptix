@@ -402,6 +402,24 @@
               <td class="verdict"><span class="badge badge-v1">v1</span><span class="verdict-note">Frozen holdings is <span class="badge badge-rejected">rejected</span> on purpose</span></td>
               <td class="spec">§5.6, §7.2, §7.3a</td>
             </tr>
+            <tr>
+              <th scope="row"><a href="radgrid.html">radgrid.html</a></th>
+              <td class="what">Telerik RadGrid, walked from the live demo. Loan applications is the static-headers form: <strong>three</strong> tables in one wrapper — a header table, a data table and a pager table — a <strong>three-row</strong> header of band names, column names and a working filter row, a hidden spacer row in the header table's <code>&lt;tbody&gt;</code>, a hidden empty <code>&lt;thead&gt;</code> of the data table's own that <code>aria-owns</code> overrides, zero-based row ids renumbered from <code>__0</code> on every page, 26 records paged 10 at a time with two applicants called Sarah Mitchell, sortable Applicant, Amount and Status, and an expand arrow whose detail row carries no class and no id. Direct debit mandates is the non-scrolling form: one table with everything in the <code>&lt;thead&gt;</code> and the pager in the <code>&lt;tfoot&gt;</code>. Quarterly fees is the same banded header as a plain table, with <em>Fee</em> and <em>Rebate</em> each appearing twice.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span></td>
+              <td class="spec">§5.7, §7.3b, §7.4</td>
+            </tr>
+            <tr>
+              <th scope="row"><a href="aria-grid.html">aria-grid.html</a></th>
+              <td class="what">Two grids with <strong>no <code>&lt;table&gt;</code> in them at all</strong>. Accounts is a MUI DataGrid walked from the live docs: <code>role="grid"</code> two divs inside the id the author names, a <code>role="none"</code> filler at the start of every row and another at the end, a blank select-all checkbox column at <code>aria-colindex="1"</code>, eight accounts at <code>aria-rowindex</code> 2…9 with two of them owned by Sarah Mitchell, a Status filter that hides rows without renumbering them, and a per-row Freeze button. Trades is ag-Grid with the Symbol column <strong>pinned left</strong>, so every row exists twice — the pinned fragment and the centre fragment share <code>row-index</code>, <code>row-id</code> and <code>aria-rowindex</code>, and only that says they are one trade — plus a Show no trades toggle whose empty state is a bare <code>ag-overlay-no-rows-center</code> div.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span><span class="verdict-note">Read by the ARIA table model</span></td>
+              <td class="spec">§5.8, §7.9</td>
+            </tr>
+            <tr>
+              <th scope="row"><a href="odd-tables.html">odd-tables.html</a></th>
+              <td class="what">Four shapes no structural rule reads. Payees is a table with no <code>&lt;thead&gt;</code> and no <code>&lt;th&gt;</code>, its headings written as <code>&lt;td&gt;&lt;b&gt;</code> in the first body row; Account summary puts the rows table <em>first</em> and a header-only table after it with a Column key paragraph between, so the sibling pairing rule never fires; Accounts as cards is six repeated <code>div.account-card</code> of label/value spans with one card hidden; Payment property sheets is four records each drawn as its own two-column <code>&lt;th scope="row"&gt;</code> table. Each one is a shape refusal, and each is answered by one validated structure question to the model, then cached.</td>
+              <td class="verdict"><span class="badge badge-v1">v1</span><span class="verdict-note">Only via the structure question</span></td>
+              <td class="spec">§5.9, §7.10</td>
+            </tr>
           </tbody>
         </table>
       </div>

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Page, FrameLocator, Locator } from 'playwright';
-import type { AIAction, TableReadColumn } from '../ai/types.js';
+import type { AIAction, TableReadColumn, TableReadMapping } from '../ai/types.js';
 // §9.2: one validator for both paths into the table extractor. The dependency
 // points this way because the parser owns the §6.2 rules and their wording;
 // nothing in `action-parser.ts` reaches back here.
@@ -160,6 +160,25 @@ export interface ExecuteActionOptions {
    * absolute path can resolve.
    */
   uploadPaths?: UploadPathContext | undefined;
+  /**
+   * §7.6's secret set for THIS run, used for one thing: the cell text in a
+   * §7.10 sketch.
+   *
+   * The sketch is the only place the extractor quotes page content back out
+   * of the page, and it goes to a model call and the debug log, so it is
+   * masked where it is built rather than where it is printed. Nothing else in
+   * this file reads it; the records are masked at the surfaces that show them,
+   * as they always were.
+   */
+  maskValues?: string[] | undefined;
+  /**
+   * Which §7.10 layer produced the `mapping` this action carries — `model`,
+   * `memo` or `cache` — for the summary line's parenthetical alone. The
+   * caller is the only one that knows: by the time a mapping reaches the
+   * extractor, a fresh answer and a cached one are the same object. Absent
+   * means `model`, which is what a caller that never had a cache means.
+   */
+  structureSource?: TableStructureSource | undefined;
 }
 
 /** Result of executing a single Playwright action */
@@ -200,6 +219,18 @@ export interface ActionExecutionResult {
    *  type="file">`, or by answering the picker a control opened. Recorded so a
    *  compiled code-behind entry writes the shape that actually worked. */
   upload?: { via: UploadRoute };
+  /**
+   * What the region holds, on a `readTable` that failed for a SHAPE reason
+   * (§7.10) — nothing with data rows under it, two things with them, no
+   * header found by any path, two header-only candidates, or a pairing whose
+   * widths disagree.
+   *
+   * Its presence is the signal that the model may be asked ONE question about
+   * the structure. Absent on every other refusal, because asking about a
+   * header typo or a short row would be asking for permission to read a
+   * different column.
+   */
+  sketch?: TableSketch;
 }
 
 /** Which of the two upload routes ran. */
@@ -486,6 +517,14 @@ export async function executeAction(
           selector: requireSelector(eff),
           columns,
           ...(eff.limit !== undefined && { limit: eff.limit }),
+          // §7.10: a validated structure the runtime owns, replayed here. The
+          // action layer does not ASK the question — a shape refusal leaves
+          // here as a `TableShapeError` and the step executor decides — it
+          // only applies an answer that has already been through it.
+          ...(eff.mapping !== undefined && { mapping: eff.mapping }),
+          ...(options?.maskValues !== undefined && { maskValues: options.maskValues }),
+          ...(options?.structureSource !== undefined
+            && { structureSource: options.structureSource }),
         });
         logger.info(formatTableReadSummary(table, columns.length, eff.as, eff.limit));
         return { success: true, capturedRecords: table.records };
@@ -559,6 +598,12 @@ export async function executeAction(
     return {
       success: false,
       error: errorMessage,
+      // §7.10's sketch, carried on the RESULT and not only on the error: this
+      // catch turns every throw into a result, so a caller that only looked at
+      // what was thrown would never see one. The sketch rides along exactly
+      // when the refusal was a shape reason, which is what tells a caller it
+      // may spend a model call on the structure.
+      ...(err instanceof TableShapeError && err.sketch !== null && { sketch: err.sketch }),
       // A history move that did not happen cannot be fixed by re-planning,
       // so a retry only burns an AI turn — the upload path takes the same
       // flag for the same reason. Worse here: the re-ask hands the model a
@@ -2082,13 +2127,129 @@ async function executeReadMultiple(
 
 /** What a caller asks the extractor for. */
 export interface TableReadRequest {
-  /** CSS selector that must match exactly one visible native `<table>`. */
+  /** CSS selector that must match exactly one visible native `<table>`, ARIA
+   *  grid (§7.9) or grid wrapper. */
   selector: string;
   /** The columns to read, in the order they appear on every record. */
   columns: TableReadColumn[];
   /** At most this many visible data rows, in DOM order (§4.6). Omitted means
    *  all of them, subject to {@link READ_TABLE_MAX_ROWS}. */
   limit?: number | undefined;
+  /** A validated structure answer to replay (§7.10). With one, the search of
+   *  §7.2/§7.3/§7.3a does not run at all: the mapping names the parts, and
+   *  every count in it is checked against the page before a cell is read. */
+  mapping?: TableReadMapping | undefined;
+  /** §7.6's secret set, used for the SKETCH's cell text and nothing else. The
+   *  records themselves are masked where they are presented, as they always
+   *  were; the sketch is masked here because it is built in the page and goes
+   *  straight to a model call and the debug log. */
+  maskValues?: string[] | undefined;
+  /**
+   * Where {@link mapping} came from, for the summary line alone (§7.6).
+   *
+   * The extractor cannot tell: an answer the model gave a moment ago and one
+   * read back off disk are the same object by the time it sees them. So the
+   * caller says, and the line reads `structure from the model` / `from the
+   * run` / `from the cache` — which matters because the first of those claims
+   * a model call happened, and printing it over a cached replay is a run log
+   * that says money was spent when none was.
+   *
+   * Defaults to `model` when a mapping arrives with no source, which is what
+   * every pre-existing caller means.
+   */
+  structureSource?: TableStructureSource | undefined;
+}
+
+/**
+ * Which of §7.10's three layers produced the mapping being replayed:
+ * the one question to the model, this RUN's memo (`structure reused from step
+ * N`), or the step cache on disk.
+ */
+export type TableStructureSource = 'model' | 'memo' | 'cache';
+
+/**
+ * One row of a candidate, as the sketch describes it (§7.10).
+ *
+ * Text and counts, never markup: the question the model is asked is about
+ * SHAPE, and a page of HTML would invite it to answer about anything at all.
+ */
+export interface TableSketchRow {
+  /** `T1.r3` — the candidate's id, then the row's one-based position in it. */
+  id: string;
+  /**
+   * Which part of its candidate the row is in. What turns a model's "row 2 of
+   * T1" into a `header` mapping, so the two kinds of row have to be tellable
+   * apart here:
+   *
+   *   `thead` / `tbody` / `tfoot` — a `<tr>`, by the section it sits in.
+   *   `header` — an ARIA header row (§7.9), the grid's spelling of `thead`.
+   *   `row` — an ARIA data row.
+   *
+   * An ARIA heading row AFTER the data rows reads `tfoot`: §7.9 excludes it
+   * exactly as a `<tfoot>` is excluded, so it gets the word that earns it the
+   * footer refusal rather than a body-row number.
+   */
+  section: 'thead' | 'tbody' | 'tfoot' | 'header' | 'row';
+  /** How many cells the row has. */
+  cells: number;
+  /** `th×8`, `td×1+th×2`, `columnheader×3` — the composition, in
+   *  first-appearance order. */
+  tags: string;
+  /** `colspan 2,3,3; rowspan 2`, or `""`. */
+  spans: string;
+  rendered: boolean;
+  /** The first few cells' rendered text, masked and then cut. */
+  text: string[];
+}
+
+/** One table or ARIA grid the region holds (§7.10). */
+export interface TableSketchCandidate {
+  /** `T1`, `T2`, … — what a structure answer names. */
+  id: string;
+  /** CSS relative to the MAPPING ROOT, resolvable with `root.querySelector`;
+   *  `:scope` is that root. This is what a {@link TableReadMapping} carries,
+   *  so a caller translating the model's `T2` looks it up here. Never masked,
+   *  unlike the text beside it: it is machinery, and a `#***` would resolve
+   *  to nothing. */
+  selector: string;
+  kind: 'table' | 'grid';
+  label: string;
+  headerRowCount: number;
+  dataRowCount: number;
+  rows: TableSketchRow[];
+  /** Rows beyond the ones listed. Absent when all of them are. */
+  moreRows?: number;
+}
+
+/** What the region holds, for the one structure question of §7.10. */
+export interface TableSketch {
+  region: { selector: string; tag: string; id: string; label: string };
+  candidates: TableSketchCandidate[];
+  /** Candidates beyond the ones listed. Absent when all of them are. */
+  moreCandidates?: number;
+  /** Set when the sketch was shrunk to fit its size cap. */
+  truncated?: boolean;
+}
+
+/**
+ * A refusal §7.10 can answer: nothing with data rows under the region, two or
+ * more of them, no header found by any path, two header-only candidates, or a
+ * width mismatch in the pairing.
+ *
+ * It exists so the caller does not have to match on message text to decide
+ * whether to ask the model. Every OTHER refusal — a header typo, a short row,
+ * a merged cell, more than 500 rows, an ambiguous selector — is the author's
+ * own problem, arrives as a plain `Error`, and carries no sketch: asking the
+ * model about one would be asking for permission to read a different column.
+ */
+export class TableShapeError extends Error {
+  readonly sketch: TableSketch | null;
+
+  constructor(message: string, sketch: TableSketch | null) {
+    super(message);
+    this.name = 'TableShapeError';
+    this.sketch = sketch;
+  }
 }
 
 /** What one extraction found. */
@@ -2108,6 +2269,24 @@ export interface TableReadResult {
    *  (§7.6), because a wrong pairing produces records that look exactly like
    *  a correct read and is otherwise invisible in the log. */
   headerFromSeparateTable: boolean;
+  /** Present only when a {@link TableReadMapping} produced this read (§7.10).
+   *  `summary` is the phrase the log line puts in its parenthetical —
+   *  `rows in T2, header row 2 of T1`, or
+   *  `12 items by ".account-card"; 2 items missing balance`. `source` is
+   *  whichever layer the mapping came from, echoed back from the request.
+   *  `rowsElsewhere` says the rows came out of a table that is NOT the
+   *  element the author selected — legitimate under a wrapper, worth a warn
+   *  line either way. */
+  structure?: {
+    kind: 'table' | 'collection';
+    summary: string;
+    source: TableStructureSource;
+    rowsElsewhere?: boolean;
+  };
+  /** For a collection read: how many items each field was absent from, by
+   *  column key (§7.10). A field absent from EVERY item fails the read; one
+   *  absent from some reads `""` there and is counted here. */
+  fieldsMissing?: Record<string, number>;
 }
 
 /**
@@ -2140,8 +2319,15 @@ type TableReadOutcome =
       dataRowCount: number;
       label: string;
       headerFromSeparateTable: boolean;
+      structure?: {
+        kind: 'table' | 'collection';
+        summary: string;
+        source: TableStructureSource;
+        rowsElsewhere?: boolean;
+      };
+      fieldsMissing?: Record<string, number>;
     }
-  | { ok: false; error: string };
+  | { ok: false; error: string; shape: boolean; sketch?: TableSketch | null };
 
 /** What it is asked. */
 interface TableReadPageArgs {
@@ -2150,6 +2336,10 @@ interface TableReadPageArgs {
   limit: number | null;
   maxRows: number;
   rowKey: string;
+  mapping: TableReadMapping | null;
+  maskValues: string[];
+  sketchOnly: boolean;
+  structureSource: TableStructureSource;
 }
 
 /**
@@ -2193,6 +2383,11 @@ const readTableInPage = new Function(
  * Throws on every structural problem, with the message the author reads. The
  * caller's try/catch in {@link executeAction} turns that into a failed action,
  * which is what reaches the model and the report.
+ *
+ * A SHAPE problem (§7.10) throws {@link TableShapeError} instead, carrying the
+ * sketch built in the same evaluation — the caller decides whether to ask the
+ * model one structure question. Everything else throws a plain `Error` with
+ * the sentence it has always had.
  */
 export async function readTableRecords(
   root: Page | FrameLocator,
@@ -2209,12 +2404,13 @@ export async function readTableRecords(
   );
   logger.subAction(
     `readTable ${selector} ${columns.length} column${columns.length === 1 ? '' : 's'}`
-    + (limit !== undefined ? ` (limit ${limit})` : ''),
+    + (limit !== undefined ? ` (limit ${limit})` : '')
+    + (request.mapping !== undefined ? ` (structure: ${request.mapping.kind})` : ''),
   );
 
   const outcome = await root.locator(selector).evaluateAll(readTableInPage, {
     selector,
-    // Only the four fields the page needs. `mode` is phase 1's `'text'` by
+    // Only the fields the page needs. `mode` is phase 1's `'text'` by
     // definition (the parser refuses anything else), so it would be noise.
     columns: columns.map((c) => ({
       ...(c.header !== undefined && { header: c.header }),
@@ -2224,15 +2420,71 @@ export async function readTableRecords(
     limit: limit ?? null,
     maxRows: READ_TABLE_MAX_ROWS,
     rowKey: ROW_NUMBER_KEY,
+    mapping: request.mapping ?? null,
+    maskValues: request.maskValues ?? [],
+    sketchOnly: false,
+    structureSource: request.structureSource ?? 'model',
   });
-  if (!outcome.ok) throw new Error(outcome.error);
+  if (!outcome.ok) {
+    // A shape refusal is thrown as its own class rather than matched on by
+    // sentence: the sentences are the author's and will keep changing, and a
+    // caller deciding whether to spend a model call on string matching is one
+    // reworded message away from asking about a header typo (§7.10).
+    if (outcome.shape) throw new TableShapeError(outcome.error, outcome.sketch ?? null);
+    throw new Error(outcome.error);
+  }
+  // A structure answer that reads a table OTHER than the one the author's
+  // selector matched. Legitimate — a wrapper region's rows are always a table
+  // inside it — but it is the difference between reading what was asked for
+  // and reading something beside it, and the records look identical either
+  // way. WARN, so the line is in the log before anyone is puzzled by the
+  // values rather than only in the report afterwards.
+  if (outcome.structure?.rowsElsewhere) {
+    logger.warn(
+      `readTable: the structure given for "${selector}" reads a table that is not the element `
+      + `the selector matched (${outcome.structure.summary})`,
+    );
+  }
   return {
     records: outcome.records,
     placeholdersSkipped: outcome.placeholdersSkipped,
     dataRowCount: outcome.dataRowCount,
     label: outcome.label,
     headerFromSeparateTable: outcome.headerFromSeparateTable,
+    ...(outcome.structure !== undefined && { structure: outcome.structure }),
+    ...(outcome.fieldsMissing !== undefined && { fieldsMissing: outcome.fieldsMissing }),
   };
+}
+
+/**
+ * The sketch of a region, with nothing read (§7.10).
+ *
+ * The re-ask path's tool: a cached mapping that has stopped fitting the page
+ * fails validation rather than a shape check, so its refusal carries no
+ * sketch, and asking the model again needs one. Cheap on purpose — one
+ * evaluation, no extraction, no page mutation — and `null` when the selector
+ * matches nothing or several things, which is not a question about structure.
+ */
+export async function sketchTable(
+  root: Page | FrameLocator,
+  selector: string,
+  maskValues: string[] = [],
+): Promise<TableSketch | null> {
+  const outcome = await root.locator(selector).evaluateAll(readTableInPage, {
+    selector,
+    columns: [],
+    limit: null,
+    maxRows: READ_TABLE_MAX_ROWS,
+    rowKey: ROW_NUMBER_KEY,
+    mapping: null,
+    maskValues,
+    sketchOnly: true,
+    // Nothing is read, so nothing prints a summary line; the field is required
+    // by the page's argument shape and this is its inert value.
+    structureSource: 'model' as const,
+  });
+  if (outcome.ok) return null;
+  return outcome.sketch ?? null;
 }
 
 /**
@@ -2250,6 +2502,19 @@ export async function readTableRecords(
  * header was paired with the wrong rows returns records that look exactly like
  * a correct read, and this line is the only place the pairing is visible.
  */
+/**
+ * How the summary line names each source (§7.6).
+ *
+ * "the run" rather than "the memo": the reader of a run log has never heard of
+ * a memo, and what the phrase has to say is that an EARLIER STEP of this same
+ * run paid for the answer. The debug line beside it names the step.
+ */
+const STRUCTURE_SOURCE_WORDS: Record<TableStructureSource, string> = {
+  model: 'the model',
+  memo: 'the run',
+  cache: 'the cache',
+};
+
 export function formatTableReadSummary(
   result: TableReadResult,
   columnCount: number,
@@ -2265,6 +2530,23 @@ export function formatTableReadSummary(
     );
   }
   if (result.headerFromSeparateTable) notes.push('header from a separate table');
+  // §7.10's line: a read the model's structure answer produced looks exactly
+  // like a structural one in the records, so the log is the only place the
+  // difference is visible — and which table the rows came from is the first
+  // thing to check when the values are wrong.
+  //
+  // It names the SOURCE, not just the fact. "structure from the model" over a
+  // cached replay would say a model call happened on a run that made none,
+  // which is the one thing §7.10's cost argument rests on; a reader counting
+  // calls in the log would count wrong.
+  if (result.structure) {
+    notes.push(
+      result.structure.kind === 'collection'
+        ? `collection: ${result.structure.summary}`
+        : `structure from ${STRUCTURE_SOURCE_WORDS[result.structure.source]}: `
+          + `${result.structure.summary}`,
+    );
+  }
   return (
     `readTable captured ${rows} row${rows === 1 ? '' : 's'} `
     + `× ${columnCount} column${columnCount === 1 ? '' : 's'} as "{{${as ?? '(unnamed)'}}}"`

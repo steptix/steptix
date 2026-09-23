@@ -9,6 +9,8 @@ import {
   viewportCdpConflictError,
   type ViewportSize,
 } from '../config/viewport.js';
+import { withTableStructure } from '../config/table-structure.js';
+import { createStructureMemo } from './structure-memo.js';
 import type { ParsedTest, TestConfig, TestInstance } from '../parser/types.js';
 import type { TestReport, StepResult, RunSummary } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
@@ -469,6 +471,13 @@ export async function runTest(
   const baseDir = resolveTestCacheBase(config.cache.dir, effectiveEnv);
   const stepCache = await StepCache.initialize(baseDir, cacheDirName(test.filePath, projectRoot), test.steps);
 
+  // What this run learns about a region's structure, once
+  // (SPEC-structured-table-reads.md §7.10, src/runner/structure-memo.ts). One
+  // per `runTest`, which is one per DATA ROW — the memo is validated against
+  // the live page on every reuse, but a row that navigates somewhere else
+  // should not start out holding the previous row's answers.
+  const structureMemo = createStructureMemo();
+
   // Where a file named in an "Upload file ..." step lives: beside the test that
   // names it, fenced by the project root (stories/upload-action.md §3). The CLI
   // always has both, so an upload step works from a plain `aiui run`.
@@ -585,6 +594,12 @@ export async function runTest(
     // one row's viewport into the next test and into the caller's config.
     config = { ...config, browser: { ...config.browser, fixedViewport } };
   }
+  // `## Config: tableStructure: strict` over the project's `tables.structure`
+  // (SPEC-structured-table-reads.md §7.10). Rebinding `config` for the same
+  // reason the viewport above does: `executeStep` is handed this object at six
+  // call sites, and the switch has to reach every one of them. A fresh object,
+  // never a mutation — one data row's choice must not leak into the next.
+  config = withTableStructure(config, test.config.tableStructure);
   // Video recording (Tier 1 — main page only). Resolve the mode once and pass
   // the absolute videos/ dir so launchBrowser attaches recordVideo on the
   // non-CDP path; the .webm is finalised + named in the `finally` below.
@@ -1064,6 +1079,17 @@ export async function runTest(
             resolvedParameters,
             pageTracker: session.pageTracker,
             browserTracker,
+            // The run's structure memo, hooks included
+            // (SPEC-structured-table-reads.md §7.10: ONE question per
+            // structure per run). A `before` hook that reads a legacy grid to
+            // establish a starting state asks the same question step 2 then
+            // asks again — the memo is keyed by the region and the columns,
+            // not by where the read sits, so there is no reason for a hook to
+            // be the one caller that pays twice. It is the memo, never the
+            // step cache: a hook's result is page-state-dependent and is
+            // deliberately not replayed, while a memo entry is re-validated
+            // against the live page on every reuse.
+            structureMemo,
             dismissalGuidance: hooks.hasAny,
             ...placeholderOpts,
             // A CONDITIONAL `fail` hook. The claim is what lets the model's `fail`
@@ -1591,6 +1617,7 @@ export async function runTest(
           pageTracker: session.pageTracker,
           browserTracker,
           stepCache,
+          structureMemo,
           // A row run never uses the step cache: the cache is keyed per step
           // line and rewrites only an action`s `value`, so an assertion whose
           // expectation came from a row would replay row 1`s on every row
@@ -2005,6 +2032,7 @@ export async function runTest(
           pageTracker: session.pageTracker,
           browserTracker,
           stepCache,
+          structureMemo,
           cacheEnabled: cacheEnabledFor(i),
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
@@ -2103,6 +2131,7 @@ export async function runTest(
           pageTracker: session.pageTracker,
           browserTracker,
           stepCache,
+          structureMemo,
           cacheEnabled: cacheEnabledFor(i),
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,

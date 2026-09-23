@@ -93,4 +93,12 @@ export const DEFAULT_CONFIG: Config = {
     consoleLogLevel: 'info',
     serverFileLogLevel: 'compact',
   },
+  // Structured table reads (SPEC-structured-table-reads.md §7.10). `ask` is
+  // the default because the question is asked at most ONCE per step per
+  // structure and never on a cached run — the cost of the long tail of odd
+  // grids reading at all. `strict` turns it off for a run that must spend no
+  // unplanned model call.
+  tables: {
+    structure: 'ask',
+  },
 };

@@ -335,7 +335,7 @@ function tableReadFiles() {
 
 test('the acceptance corpus is present and actually dotted', () => {
   const files = tableReadFiles();
-  assert.equal(files.length, 9, 'expected the nine table-read acceptance tests');
+  assert.equal(files.length, 12, 'expected the twelve table-read acceptance tests');
   for (const file of files) {
     assert.ok(
       /\{\{\w+\.[A-Za-z_]\w*\}\}/.test(file.text),

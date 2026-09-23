@@ -60,6 +60,67 @@ describe('step prompt — readTable rule', () => {
     expect(prompt.indexOf('SPLIT GRIDS.')).toBeLessThan(prompt.indexOf('BOUNDED ROWS.'));
   });
 
+  it('names RadGrid in SPLIT GRIDS as the three-table form (§5.7)', () => {
+    // The box holds a header table, the row table AND a pager table, so the
+    // "two tables" wording above does not describe what the model is looking
+    // at — measured, the extractor saw three tables with rows before §7.2
+    // counted DATA rows.
+    expect(prompt).toMatch(/Telerik RadGrid \(ASP\.NET AJAX\) is the THREE-table form/);
+    expect(prompt).toMatch(/a header table, the row table and a pager table inside one box/);
+  });
+
+  it('carries the BANDED HEADERS clause, after SPLIT GRIDS (§6.3, §12.28)', () => {
+    // Without it the model copies the band ("GENERAL INFORMATION") or a
+    // filter's current value ("All") as a column name, and the read is refused
+    // for a reason the author cannot see in the step they wrote.
+    expect(prompt).toContain('BANDED HEADERS.');
+    expect(prompt).toMatch(/names each column by the LOWEST heading over it/);
+    expect(prompt).toMatch(/A filter row of inputs and selects inside the header names nothing/);
+    expect(prompt).toContain('{ "header": "Q1 > Fee", "key": "q1_fee" }');
+    expect(prompt.indexOf('SPLIT GRIDS.')).toBeLessThan(prompt.indexOf('BANDED HEADERS.'));
+    expect(prompt.indexOf('BANDED HEADERS.')).toBeLessThan(prompt.indexOf('BOUNDED ROWS.'));
+  });
+
+  it('says what "row 7" means and how to address it, beside the placeholder rule', () => {
+    // §12.28, rewritten after the live run: the clause has to cover the
+    // LITERAL form the model sees once the placeholder is gone — "row 7 of the
+    // Loan applications grid" — because that is what it read on pass 7 before
+    // it counted the rows itself and built `#RadGrid1_ctl00__7`, clicking row
+    // 8 and passing green. The row number is not arithmetic on an id: the read
+    // leaves `data-aiui-row` on the page and the selector uses that.
+    expect(prompt).toContain('ROW IDS.');
+    expect(prompt).toMatch(/means the SEVENTH DATA row of that table, counting from 1/);
+    expect(prompt).toMatch(
+      /Header rows, a filter row, hidden rows and an expanded detail row are not data rows/,
+    );
+    expect(prompt).toContain('carries data-aiui-row="N"');
+    expect(prompt).toContain('the row matching [data-aiui-row="7"] INSIDE that table');
+    expect(prompt).toContain('"#RadGrid1_ctl00__7" is row EIGHT');
+    // SCOPING is in the prose, not only in the example. Every read of this run
+    // leaves the same attribute on ITS table, so a selector that is just
+    // `[data-aiui-row="7"]` matches row 7 of the first table in the page —
+    // shown once in an example, the model wrote the bare attribute.
+    expect(prompt).toContain(
+      'the selector is ALWAYS the TABLE\'s own selector followed by [data-aiui-row="N"]',
+    );
+    expect(prompt).toContain(
+      'NEVER write the attribute on its own: it matches a row in EVERY table read this run',
+    );
+    expect(prompt).toMatch(/NEVER use "tr:nth-child\(7\)" either/);
+    // And what to do when the attribute is not there — an unread or
+    // re-rendered table — so the rule never leaves the model stuck.
+    expect(prompt).toMatch(/count the data rows in the snapshot yourself/);
+    // Beside 8a, and well before the table-reading rule it is the consequence
+    // of — a rule the model reads only when it is planning the read itself.
+    const clause = 'ROW IDS.';
+    expect(prompt.indexOf(clause)).toBeLessThan(prompt.indexOf('13d. READING A TABLE'));
+    expect(prompt.indexOf('8a. PLACEHOLDERS')).toBeLessThan(prompt.indexOf(clause));
+    const blocks = buildSystemPrompt('');
+    const rules = blocks.find((b) => b.type === 'text' && b.text.includes(clause));
+    expect(rules, 'the row-id clause should live in the rules block').toBeDefined();
+    expect(rules && 'cache' in rules ? rules.cache : false).toBe(true);
+  });
+
   it('keeps the SPLIT GRIDS clause inside the cacheable rules block', () => {
     const blocks = buildSystemPrompt('');
     const rules = blocks.find((b) => b.type === 'text' && b.text.includes('SPLIT GRIDS.'));

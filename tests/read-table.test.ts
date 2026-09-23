@@ -117,6 +117,17 @@ const ORDERS_COLUMNS: TableReadColumn[] = [
   { header: 'Status', key: 'status' },
 ];
 
+/** §5.3 verbatim: a band over two columns, and a heading spanning both header
+ *  rows beside it. Three columns, named ID, Customer and Status (§7.3b). */
+const BANDED_ORDERS_HTML = `
+<table id="t" aria-label="Orders">
+  <thead>
+    <tr><th colspan="2">Order</th><th rowspan="2">Status</th></tr>
+    <tr><th>ID</th><th>Customer</th></tr>
+  </thead>
+  <tbody><tr><td>ORD-1001</td><td>Alice Smith</td><td>Completed</td></tr></tbody>
+</table>`;
+
 describe('readTable — the checkbox-first fixture (§5.1)', () => {
   it('produces exactly the records the spec shows, _row first', async () => {
     await load(ORDERS_HTML);
@@ -1052,6 +1063,51 @@ describe('readTable — tables that silently read as []', () => {
       .toContain('it has no header row');
   });
 
+  it('takes a BLANK body-row header as the header, out of the data (§7.3, §7.3b.5)', async () => {
+    // §7.3b.5 — a header grid that names nothing is no header — is about a
+    // `<thead>`. A BODY row §7.3 has already taken as the header is a row of
+    // the table, and nothing else takes it out: treated as "no header" it
+    // stayed in the body, became record 1 with two empty values and left every
+    // `_row` below it one too high, which is §4.5's misalignment.
+    await load(`
+      <table id="t" aria-label="Orders">
+        <tbody>
+          <tr><th></th><th></th></tr>
+          <tr><td>O-1</td><td>Paid</td></tr>
+          <tr><td>O-2</td><td>Due</td></tr>
+        </tbody>
+      </table>`);
+    expect((await run({ selector: '#t', columns: [{ index: 1, key: 'id' }] })).capturedRecords)
+      .toEqual([{ _row: '1', id: 'O-1' }, { _row: '2', id: 'O-2' }]);
+    // Nothing is lost by keeping it: it names no column, so a read BY name is
+    // refused in the words of a header that has no headings in it.
+    expect(await refusal({ selector: '#t', columns: [{ header: 'Order ID', key: 'id' }] }))
+      .toBe(
+        'readTable cannot map table "Orders": no column is headed "Order ID" — its header row '
+        + 'has no non-empty headings',
+      );
+  });
+
+  it('does NOT take an unscoped row-header <th> as the header under a blank <thead> (§7.3b.5)', async () => {
+    // The other side of that line, and the shape issue 059 is about. The
+    // `<thead>` names nothing, so it is no header — and the search must not
+    // then walk into the body and take the first DATA row's own `<th>`:
+    // `<tr><th>O-1</th><td>Delete</td></tr>` is a ROW header (§7.3), and
+    // taken as the table's it deletes a data row from the middle of the read.
+    await load(`
+      <table id="t" aria-label="Orders">
+        <thead style="display:none"><tr><th></th></tr></thead>
+        <tbody>
+          <tr><th>O-1</th><td>Delete</td></tr>
+          <tr><th>O-2</th><td>Delete</td></tr>
+        </tbody>
+      </table>`);
+    expect((await run({ selector: '#t', columns: [{ index: 1, key: 'id' }] })).capturedRecords)
+      .toEqual([{ _row: '1', id: 'O-1' }, { _row: '2', id: 'O-2' }]);
+    expect(await refusal({ selector: '#t', columns: [{ header: 'O-1', key: 'id' }] }))
+      .toContain('it has no header row');
+  });
+
   it('reads a CSS-grid table, where every <tr> has display: contents (§7.4)', async () => {
     // `table{display:grid} thead,tbody,tr{display:contents}` is the standard
     // idiom for laying a semantic table out with grid. A `<tr>` with
@@ -1153,17 +1209,21 @@ describe('readTable — tables that silently read as []', () => {
 // ── structural refusals (§5.3, §7.2, §7.3, §7.4) ────────────────────────────
 
 describe('readTable — structural refusals', () => {
-  it('refuses a merged header rather than pretending Order is one column (§5.3)', async () => {
-    await load(`
-      <table id="t" aria-label="Orders">
-        <thead>
-          <tr><th colspan="2">Order</th><th rowspan="2">Status</th></tr>
-          <tr><th>ID</th><th>Customer</th></tr>
-        </thead>
-        <tbody><tr><td>ORD-1001</td><td>Alice Smith</td><td>Completed</td></tr></tbody>
-      </table>`);
-    expect(await refusal({ selector: '#t', columns: [{ header: 'Status', key: 'status' }] }))
-      .toBe('readTable cannot map table "Orders": merged headers or cells (rowspan/colspan > 1) are not supported');
+  it('refuses a request for a BAND and names the leaves under it (§5.3, §7.3b)', async () => {
+    // Retargeted from `refuses a merged header rather than pretending Order is
+    // one column`, which pinned the "merged headers or cells" sentence for a
+    // HEADER. §7.3b lays this header out instead — the read of its leaves is
+    // in the header-grid suite below — so the only thing left to refuse is a
+    // request for the band itself, which is not a column at all.
+    await load(BANDED_ORDERS_HTML);
+    expect(await refusal({ selector: '#t', columns: [{ header: 'Order', key: 'order' }] }))
+      .toBe(
+        // §5.3's sentence, with the headers as the suite's `<thead> th` style
+        // renders them: the author still writes "ID"/"Customer", and the fold
+        // is what matches them (§7.3).
+        'readTable cannot map table "Orders": no column is headed "Order" — available headers '
+        + 'are ID, CUSTOMER, STATUS ("Order" is a band over ID, CUSTOMER, not a column)',
+      );
   });
 
   it('refuses a body rowspan, which would shift the row below it', async () => {
@@ -1266,19 +1326,23 @@ describe('readTable — structural refusals', () => {
       .toBe('readTable could not find a visible table matching "#hidden-table" (1 match, none visible)');
   });
 
-  it('refuses a <div role="grid">, which is a v1 non-goal (§3)', async () => {
+  it('reads a <div role="grid">, which §7.9 made a table', async () => {
     await load(`
       <div id="grid" role="grid" aria-label="Cards">
         <div role="row"><span role="columnheader">Card</span></div>
         <div role="row"><span role="gridcell">Visa</span></div>
       </div>`);
-    // The outcome is what it always was — a div grid is not read — but the
-    // sentence changed with §7.2: a non-table match is now a grid WRAPPER
-    // (§5.6), looked inside for the table that holds the rows, so the refusal
-    // says what was looked for rather than what was matched. §10, "Wrapper is
-    // a `<div role="grid">` of `<div role="row">`s".
-    expect(await refusal({ selector: '#grid', columns: [{ header: 'Card', key: 'card' }] }))
-      .toBe('readTable found no table with rows under "#grid"');
+    // This shape used to be the "found no table with rows under" refusal, and
+    // §7.9 turned it into a read: the roles that make a div grid a table for a
+    // screen reader make it one here. The sentence is still the one a region
+    // holding NOTHING with rows gets, which `tests/read-table-aria.test.ts`
+    // and `tests/read-table-structure.test.ts` pin from the other side.
+    const result = await run({
+      selector: '#grid',
+      columns: [{ header: 'Card', key: 'card' }],
+    });
+    expect(result.success).toBe(true);
+    expect(result.capturedRecords).toEqual([{ _row: '1', card: 'Visa' }]);
   });
 });
 
@@ -2315,6 +2379,68 @@ describe('readTable — header and rows in separate tables (§5.6, §7.2, §7.3a
     ]);
   });
 
+  it('picks the DATA half of an EMPTIED grid by role="grid" (§7.2)', async () => {
+    // Kendo's shape with no rows left in it. No table under the wrapper has a
+    // DATA row, so the fallback counts tables with any body row — and counted
+    // flat that is the emptied body table AND the pager, which refused a grid
+    // that simply has no rows as frozen (locked) columns. `role="grid"` is
+    // the page saying which of the two is the grid; the header table, a
+    // `<thead>` with no `<tbody>` at all, is not in the running either way.
+    await load(`
+      <div id="k-grid">
+        <div class="k-grid-header"><table role="presentation">
+          <thead><tr><th>Payee</th><th>Amount</th></tr></thead>
+        </table></div>
+        <div class="k-grid-content"><table role="grid">
+          <tbody><tr><td colspan="2">No records available.</td></tr></tbody>
+        </table></div>
+        <div class="k-pager"><table role="presentation">
+          <tbody><tr><td colspan="2">0 - 0 of 0 items</td></tr></tbody>
+        </table></div>
+      </div>`);
+    const result = await readTableRecords(page, {
+      selector: '#k-grid',
+      columns: [{ header: 'Payee', key: 'payee' }, { header: 'Amount', key: 'amount' }],
+    });
+    expect(result.records).toEqual([]);
+    // The message row of the half that was picked, and the header it adopted
+    // — so the columns the author named resolved against the real headings.
+    expect(result.placeholdersSkipped).toBe(1);
+    expect(result.headerFromSeparateTable).toBe(true);
+  });
+
+  it('still refuses an emptied grid whose rows are split across two tables (§14)', async () => {
+    // Two row tables that each say `role="grid"`: frozen (locked) columns with
+    // the rows gone. Preferring one of them would be reading half a grid,
+    // which is the one outcome the count exists to prevent.
+    await load(`
+      <div id="frozen">
+        <table role="grid"><tbody><tr><td colspan="2">No records.</td></tr></tbody></table>
+        <table role="grid"><tbody><tr><td colspan="3">No records.</td></tr></tbody></table>
+      </div>`);
+    expect(await refusal({ selector: '#frozen', columns: [{ index: 1, key: 'a' }] }))
+      .toBe(
+        'readTable found 2 tables with rows under "#frozen" — it must be exactly one; a grid '
+        + 'with frozen (locked) columns splits its rows across two tables, which is not supported',
+      );
+  });
+
+  it('says "no table with rows" for a box holding only a header half (§7.2)', async () => {
+    // Every table under the wrapper is a header table — this one with the
+    // hidden spacer row RadGrid puts in its body — so there is no row table to
+    // read, and the sentence says which question was asked rather than
+    // answering [] from the header.
+    await load(`
+      <div id="box">
+        <table>
+          <thead><tr><th>Payee</th><th>Amount</th></tr></thead>
+          <tbody style="display:none"><tr><td colspan="2"></td></tr></tbody>
+        </table>
+      </div>`);
+    expect(await refusal({ selector: '#box', columns: [{ header: 'Payee', key: 'payee' }] }))
+      .toBe('readTable found no table with rows under "#box"');
+  });
+
   it('names the grid by the wrapper when neither table has a name of its own (§7.2)', async () => {
     // Kendo's and DevExpress's tables carry `role="none"`/`role="presentation"`
     // and nothing else, so without the wrapper's name a failure reads
@@ -2555,12 +2681,13 @@ describe('readTable — header and rows in separate tables (§5.6, §7.2, §7.3a
       );
   });
 
-  it('does not take a two-row header from the table beside it, but does through the wrapper', async () => {
-    // The two paths differ here on purpose (§7.3a): a table whose header §7.3
-    // REFUSES is evidence of nothing when the only thing suggesting a
-    // pairing is that it sits nearby, so the plain table after it is read as
-    // what it is — a headerless table. Named by a wrapper, the author has
-    // asserted the pairing, and the refusal is the answer.
+  it('adopts a TWO-ROW header from the table beside it, and through the wrapper', async () => {
+    // Retargeted from `does not take a two-row header from the table beside
+    // it, but does through the wrapper`, which pinned "its header has 2 rows,
+    // and v1 supports exactly one" and the split between the two paths that
+    // refusal created. §7.3b lays a two-row header out, so this header is no
+    // longer evidence of nothing: it names its columns by the LOWER row, the
+    // table beside it adopts it, and both paths answer the same thing.
     const markup = (wrapperId: string) => `
       <div id="${wrapperId}">
         <table><thead>
@@ -2569,18 +2696,24 @@ describe('readTable — header and rows in separate tables (§5.6, §7.2, §7.3a
         </thead></table>
         <table id="two-row-rows"><tbody><tr><td>2026-01-02</td><td>$12.00</td></tr></tbody></table>
       </div>`;
-    await load(markup('beside-two-row'));
-    expect((await run({ selector: '#two-row-rows', columns: [{ index: 1, key: 'date' }] })).capturedRecords)
-      .toEqual([{ _row: '1', date: '2026-01-02' }]);
-    expect(await refusal({ selector: '#two-row-rows', columns: [{ header: 'Date', key: 'date' }] }))
-      .toBe(
-        'readTable cannot map table "two-row-rows": it has no header row, so "Date" cannot be '
-        + 'matched — name columns by position ("the 1st column as date")',
-      );
-
-    await load(markup('wrapper-two-row'));
-    expect(await refusal({ selector: '#wrapper-two-row', columns: [{ header: 'Date', key: 'date' }] }))
-      .toBe('readTable cannot map table "wrapper-two-row": its header has 2 rows, and v1 supports exactly one');
+    for (const wrapperId of ['beside-two-row', 'wrapper-two-row']) {
+      await load(markup(wrapperId));
+      for (const selector of ['#two-row-rows', `#${wrapperId}`]) {
+        expect((await run({
+          selector,
+          columns: [{ header: '(AEST)', key: 'date' }, { header: '(AUD)', key: 'amount' }],
+        })).capturedRecords).toEqual([{ _row: '1', date: '2026-01-02', amount: '$12.00' }]);
+        // The upper row groups the two columns and names neither.
+        expect(await refusal({ selector, columns: [{ header: 'Date', key: 'date' }] }))
+          .toBe(
+            `readTable cannot map table "${wrapperId}": no column is headed "Date" — available `
+            + 'headers are (AEST), (AUD) ("Date" is a band over (AEST), not a column)',
+          );
+      }
+      // A positional read is untouched by any of it.
+      expect((await run({ selector: '#two-row-rows', columns: [{ index: 1, key: 'date' }] })).capturedRecords)
+        .toEqual([{ _row: '1', date: '2026-01-02' }]);
+    }
   });
 
   it('looks for no partner at all for a table that names itself (§7.3a)', async () => {
@@ -2599,6 +2732,984 @@ describe('readTable — header and rows in separate tables (§5.6, §7.2, §7.3a
     const result = await run({ selector: '#self-named-rows', columns: [{ index: 1, key: 'date' }] });
     expect(result.success).toBe(true);
     expect(result.capturedRecords).toEqual([{ _row: '1', date: '2026-01-02' }]);
+  });
+});
+
+// ── banded headers: the header grid (§5.3, §7.3b, §12.26) ──────────────────
+//
+// V1 read exactly ONE header row and refused every other shape as "merged
+// headers", which on the live RadGrid demo refused every read by header name.
+// §7.3b lays the header rows out the way the HTML table algorithm lays a table
+// out — each cell takes the first free column of its row and spans across and
+// down — and names a column by the LOWEST cell covering it that says anything.
+//
+// The `<thead> th` rule in TABLE_CSS upper-cases headings for looks (§7.3), so
+// the headers these messages list come back upper-cased; the author still
+// writes them in the case the page's source uses, and the fold matches them.
+
+describe('readTable — banded headers, the header grid (§7.3b)', () => {
+  it('names each column by the LOWEST heading over it (§5.3)', async () => {
+    // "Order" spans ID and Customer and names neither; "Status" spans both
+    // header rows and names its own column, because nothing sits below it.
+    await load(BANDED_ORDERS_HTML);
+    expect((await run({
+      selector: '#t',
+      columns: [
+        { header: 'ID', key: 'id' },
+        { header: 'Customer', key: 'customer' },
+        { header: 'Status', key: 'status' },
+      ],
+    })).capturedRecords).toEqual([
+      { _row: '1', id: 'ORD-1001', customer: 'Alice Smith', status: 'Completed' },
+    ]);
+  });
+
+  it('lets a blank corner cell spanning two rows make the grid wider than the name row', async () => {
+    // RadGrid's expand column: `<th rowspan="2">` with nothing in it, so the
+    // name row has TWO cells for a three-column grid. Read without the layout,
+    // the name row starts at column 0 and every column reads one cell left —
+    // `applicant` would come back as the expand cell's "+".
+    await load(`
+      <table id="t" aria-label="Loan applications">
+        <thead>
+          <tr><th rowspan="2"></th><th colspan="2">APPLICANT</th></tr>
+          <tr><th>Applicant</th><th>Type</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>+</td><td>Sarah Mitchell</td><td>Home</td></tr>
+          <tr><td colspan="3">No more applications.</td></tr>
+        </tbody>
+      </table>`);
+    const outcome = await readTableRecords(page, {
+      selector: '#t',
+      columns: [{ header: 'Applicant', key: 'applicant' }, { header: 'Type', key: 'type' }],
+    });
+    expect(outcome.records).toEqual([
+      { _row: '1', applicant: 'Sarah Mitchell', type: 'Home' },
+    ]);
+    // And the width every later rule uses is the GRID's three, not the name
+    // row's two: the message row spans three and is a placeholder (§4.8).
+    expect(outcome.placeholdersSkipped).toBe(1);
+
+    // The other side of that number, which is what makes it measurable: a lone
+    // cell spanning only TWO of the three columns is a merged grid and not a
+    // message (§10). Measured against a width of two — the name row's cell
+    // count — this row would have been skipped and the read would have
+    // succeeded on a table it could not map.
+    await load(`
+      <table id="t" aria-label="Loan applications">
+        <thead>
+          <tr><th rowspan="2"></th><th colspan="2">APPLICANT</th></tr>
+          <tr><th>Applicant</th><th>Type</th></tr>
+        </thead>
+        <tbody><tr><td colspan="2">Something merged</td></tr></tbody>
+      </table>`);
+    expect(await refusal({ selector: '#t', columns: [{ header: 'Applicant', key: 'applicant' }] }))
+      .toBe('readTable cannot map table "Loan applications": merged headers or cells (rowspan/colspan > 1) are not supported');
+  });
+
+  it('lays a filter row out, and lets it name nothing (§7.3b.3)', async () => {
+    // RadGrid's filter row is inside the `<thead>` and holds only inputs. It
+    // is laid out — it can widen the grid — but a blank cell names nothing, so
+    // the names still come from the row above. Counted as the lowest cell
+    // whatever it holds, every column would be nameless and every read by name
+    // would fail "no column is headed".
+    await load(`
+      <table id="t" aria-label="Loan applications">
+        <thead>
+          <tr><th rowspan="2"></th><th>Applicant</th><th>Status</th></tr>
+          <tr class="filter"><td><input aria-label="Filter applicant"></td><td><select aria-label="Filter status"><option>All</option></select></td></tr>
+        </thead>
+        <tbody><tr><td>+</td><td>Sarah Mitchell</td><td>Approved</td></tr></tbody>
+      </table>`);
+    expect((await run({
+      selector: '#t',
+      columns: [{ header: 'Applicant', key: 'applicant' }, { header: 'Status', key: 'status' }],
+    })).capturedRecords).toEqual([
+      { _row: '1', applicant: 'Sarah Mitchell', status: 'Approved' },
+    ]);
+  });
+
+  it('names a heading cell by its own rendered text, not by what a FIELD holds (§7.3b.3)', async () => {
+    // Measured: a cell holding a control used to switch to a raw text-node
+    // walk, which reads `display:none` text and concatenates with no spaces —
+    // `<th>Status<span style="display:none">SORTKEY</span><input
+    // type="hidden"></th>` was named `StatusSORTKEY`, so no read of that
+    // column matched and the available-headers list showed the run-on word.
+    // The heading is `innerText`, which never sees the hidden span, with each
+    // control's own `innerText` subtracted out of it. A `<button>` stays: a
+    // sortable header's title is routinely inside one.
+    await load(`
+      <table id="t" aria-label="Payments">
+        <thead><tr>
+          <th>Status<span style="display:none">SORTKEY</span><input type="hidden" name="sort"></th>
+          <th><button type="button">Amount</button></th>
+        </tr></thead>
+        <tbody><tr><td>Approved</td><td>$1.00</td></tr></tbody>
+      </table>`);
+    expect((await run({
+      selector: '#t',
+      columns: [{ header: 'Status', key: 'status' }, { header: 'Amount', key: 'amount' }],
+    })).capturedRecords).toEqual([{ _row: '1', status: 'Approved', amount: '$1.00' }]);
+    // `Amount` keeps its own case: a `<button>` does not inherit the `<th>`
+    // style's `text-transform`, which is one more reason the match folds case.
+    expect(await refusal({ selector: '#t', columns: [{ header: 'Sort', key: 'sort' }] }))
+      .toBe(
+        'readTable cannot map table "Payments": no column is headed "Sort" — available headers '
+        + 'are STATUS, Amount',
+      );
+  });
+
+  it('lets a filter cell name nothing even when it hides a label (§7.3b.3)', async () => {
+    // The other half of the same fix, and the one that decides where the
+    // accessible-name fallback stops. A filter cell is `<td><input><span
+    // style="display:none">Filter Name</span></td>`; the fallback read that
+    // hidden span as the column's name, one row BELOW the real heading, so it
+    // won and every read of the column failed "no column is headed". A cell
+    // holding a RENDERED control renders something — it is a field, not a
+    // heading — and a `<select>`'s options and a `<textarea>`'s text are
+    // values, not labels.
+    await load(`
+      <table id="t" aria-label="Orders">
+        <thead>
+          <tr><th>Name</th><th>Status</th><th>Notes</th></tr>
+          <tr class="filter">
+            <td><input aria-label="Filter name"><span style="display:none">Filter Name</span></td>
+            <td><select aria-label="Filter status"><option>All</option><option>Open</option></select></td>
+            <td><textarea aria-label="Filter notes">DRAFT</textarea></td>
+          </tr>
+        </thead>
+        <tbody><tr><td>Ada</td><td>Open</td><td>n1</td></tr></tbody>
+      </table>`);
+    expect((await run({
+      selector: '#t',
+      columns: [
+        { header: 'Name', key: 'name' },
+        { header: 'Status', key: 'status' },
+        { header: 'Notes', key: 'notes' },
+      ],
+    })).capturedRecords).toEqual([{ _row: '1', name: 'Ada', status: 'Open', notes: 'n1' }]);
+    // None of the three fields named anything: not the hidden span, not the
+    // select's "All", not the textarea's "DRAFT".
+    expect(await refusal({ selector: '#t', columns: [{ header: 'Filter Name', key: 'k' }] }))
+      .toBe(
+        'readTable cannot map table "Orders": no column is headed "Filter Name" — available '
+        + 'headers are NAME, STATUS, NOTES',
+      );
+  });
+
+  it('reads a visually-hidden heading past an UNRENDERED control, skipping its text (§7.3b.3)', async () => {
+    // Where the fallback still runs. An `<input type="hidden">` is not
+    // evidence that the cell renders anything, so a postback field beside
+    // RadGrid's `<span style="display:none">ExpandColumn</span>` must not cost
+    // that column its accessible name. What the fallback must NOT read is a
+    // control's own content: a `display:none` `<select>` answers `innerText`
+    // with its options — unrendered elements fall back to `textContent` — and
+    // would otherwise donate "All" as the heading of the column it sits in.
+    await load(`
+      <table id="t" aria-label="Orders">
+        <thead><tr>
+          <th><input type="hidden" name="sort"><span style="display:none">Select</span></th>
+          <th><select style="display:none"><option>All</option></select></th>
+          <th>Order ID</th>
+        </tr></thead>
+        <tbody><tr><td><input type="checkbox"></td><td>x</td><td>ORD-1001</td></tr></tbody>
+      </table>`);
+    expect((await run({ selector: '#t', columns: [{ header: 'Select', key: 'select' }] }))
+      .capturedRecords).toEqual([{ _row: '1', select: '' }]);
+    expect(await refusal({ selector: '#t', columns: [{ header: 'All', key: 'k' }] }))
+      .toBe(
+        'readTable cannot map table "Orders": no column is headed "All" — available headers '
+        + 'are Select, ORDER ID',
+      );
+  });
+
+  it('tells "Q1 > Fee" from "Q2 > Fee", and lists positions for the plain name', async () => {
+    // The Quarterly fees table of `radgrid.html`: the same two leaf names
+    // under two bands. The plain name is ambiguous and says where both are
+    // (§7.3), and the band written with the leaf picks one (§7.3b.4).
+    await load(QUARTERLY_FEES_HTML);
+    expect((await run({
+      selector: '#banded-table',
+      columns: [
+        { header: 'Account', key: 'account' },
+        { header: 'Q1 > Fee', key: 'q1_fee' },
+        { header: 'Q2 > Rebate', key: 'q2_rebate' },
+      ],
+    })).capturedRecords).toEqual([
+      { _row: '1', account: 'Everyday', q1_fee: '$4.00', q2_rebate: '$1.50' },
+      { _row: '2', account: 'Savings', q1_fee: '$0.00', q2_rebate: '$0.00' },
+    ]);
+    expect(await refusal({ selector: '#banded-table', columns: [{ header: 'Fee', key: 'fee' }] }))
+      .toBe(
+        'readTable cannot map table "Quarterly fees": "Fee" matches 2 columns (positions 2, 4) '
+        + '— name the one you mean by position',
+      );
+    // A band that is not over that leaf matches nothing at all.
+    expect(await refusal({ selector: '#banded-table', columns: [{ header: 'Q3 > Fee', key: 'fee' }] }))
+      .toBe(
+        'readTable cannot map table "Quarterly fees": no column is headed "Q3 > Fee" — '
+        + 'available headers are ACCOUNT, FEE, REBATE, FEE, REBATE',
+      );
+  });
+
+  it('accepts "Q1>Fee" however the separator was typed, plain reading first (§7.3b.4)', async () => {
+    // The segments are split on the `>` with ANY whitespace around it, none
+    // included. Split on the three-character `' > '` alone, `Q1>Fee` stayed
+    // ONE segment, matched no leaf and refused a column that is there.
+    await load(QUARTERLY_FEES_HTML);
+    for (const header of ['Q1>Fee', 'Q1 >Fee', 'Q1> Fee', 'Q1  >  Fee']) {
+      expect(
+        (await run({ selector: '#banded-table', columns: [{ header, key: 'fee' }] }))
+          .capturedRecords,
+        header,
+      ).toEqual([{ _row: '1', fee: '$4.00' }, { _row: '2', fee: '$0.00' }]);
+    }
+    // And the PLAIN reading is still tried first, over the whole string, so a
+    // heading that genuinely contains the separator stays reachable by typing
+    // it — split first, `A>B` would look for a column headed `B` under a band
+    // called `A` and refuse the column that is there.
+    await load(`
+      <table id="t" aria-label="Rules">
+        <thead><tr><th>A&gt;B</th><th>C</th></tr></thead>
+        <tbody><tr><td>allow</td><td>deny</td></tr></tbody>
+      </table>`);
+    expect((await run({ selector: '#t', columns: [{ header: 'A>B', key: 'rule' }] }))
+      .capturedRecords).toEqual([{ _row: '1', rule: 'allow' }]);
+  });
+
+  it('walks the bands TOP-DOWN, and lets a level be skipped (§7.3b.4)', async () => {
+    // Two levels of band over the same column. Every segment but the last
+    // names a band over it, consumed in the order they were typed against the
+    // bands taken from the top down — so the path has to be written the way
+    // the table reads, and a level in the middle may be left out.
+    await load(`
+      <table id="t" aria-label="Nested bands">
+        <thead>
+          <tr><th colspan="2">Top</th></tr>
+          <tr><th colspan="2">Mid</th></tr>
+          <tr><th>L1</th><th>L2</th></tr>
+        </thead>
+        <tbody><tr><td>one</td><td>two</td></tr></tbody>
+      </table>`);
+    expect((await run({ selector: '#t', columns: [{ header: 'Top > Mid > L1', key: 'k' }] }))
+      .capturedRecords).toEqual([{ _row: '1', k: 'one' }]);
+    expect((await run({ selector: '#t', columns: [{ header: 'Top > L1', key: 'k' }] }))
+      .capturedRecords).toEqual([{ _row: '1', k: 'one' }]);
+    // Written bottom-up it is not a path down this header and matches nothing.
+    expect(await refusal({ selector: '#t', columns: [{ header: 'Mid > Top > L1', key: 'k' }] }))
+      .toBe(
+        'readTable cannot map table "Nested bands": no column is headed "Mid > Top > L1" — '
+        + 'available headers are L1, L2',
+      );
+  });
+
+  it('lists a leaf spanning two columns ONCE under its band (§7.3b.4)', async () => {
+    // "Amount" is the name of BOTH columns, so the band above covers that one
+    // name twice; listed twice the sentence reads as a mistake in the table
+    // rather than a band over one column.
+    await load(`
+      <table id="t" aria-label="Quarterly totals">
+        <thead>
+          <tr><th colspan="2">Totals</th></tr>
+          <tr><th colspan="2">Amount</th></tr>
+        </thead>
+        <tbody><tr><td>$1.00</td><td>$2.00</td></tr></tbody>
+      </table>`);
+    expect(await refusal({ selector: '#t', columns: [{ header: 'Totals', key: 'k' }] }))
+      .toBe(
+        'readTable cannot map table "Quarterly totals": no column is headed "Totals" — available '
+        + 'headers are AMOUNT, AMOUNT ("Totals" is a band over AMOUNT, not a column)',
+      );
+  });
+
+  it('lets a band NAME the one column nothing below it names (§7.3b)', async () => {
+    // A cell is a BAND only when no column ends up taking its name. Here the
+    // name row leaves column 2 blank, so "Group" is the lowest non-blank
+    // heading over it and names it. Classed as a band whatever is below,
+    // column 2 would be nameless and the request would be refused as a group.
+    await load(`
+      <table id="t" aria-label="Ledger">
+        <thead>
+          <tr><th colspan="2">Group</th></tr>
+          <tr><th>Account</th><th></th></tr>
+        </thead>
+        <tbody><tr><td>Everyday</td><td>$1.00</td></tr></tbody>
+      </table>`);
+    expect((await run({
+      selector: '#t',
+      columns: [{ header: 'Account', key: 'account' }, { header: 'Group', key: 'group' }],
+    })).capturedRecords).toEqual([{ _row: '1', account: 'Everyday', group: '$1.00' }]);
+  });
+
+  it('names both columns from a leaf cell spanning two, and refuses the request', async () => {
+    // §7.3b.6: a leaf that spans names each column it covers, so asking for it
+    // is the ordinary duplicate refusal — and the positions it lists are the
+    // way in.
+    await load(`
+      <table id="t" aria-label="Regions">
+        <thead><tr><th>Region</th><th colspan="2">Amount</th></tr></thead>
+        <tbody><tr><td>NSW</td><td>$10.00</td><td>$20.00</td></tr></tbody>
+      </table>`);
+    expect(await refusal({ selector: '#t', columns: [{ header: 'Amount', key: 'amount' }] }))
+      .toBe(
+        'readTable cannot map table "Regions": "Amount" matches 2 columns (positions 2, 3) — '
+        + 'name the one you mean by position',
+      );
+    expect((await run({ selector: '#t', columns: [{ index: 3, key: 'amount' }] })).capturedRecords)
+      .toEqual([{ _row: '1', amount: '$20.00' }]);
+  });
+
+  it('runs a rowspan="0" header cell to the LAST header row (§4.8, §7.3b.2)', async () => {
+    // Legal HTML for "to the end of this row group", reported by the DOM as 0.
+    // Read as 1, the cell stops occupying the name row, "Bid" lands in column
+    // 1 under "Symbol" and takes the name off it — every read by name then
+    // fails or reads the wrong column.
+    await load(`
+      <table id="t" aria-label="Quotes">
+        <thead>
+          <tr><th rowspan="0">Symbol</th><th colspan="2">Price</th></tr>
+          <tr><th>Bid</th><th>Ask</th></tr>
+        </thead>
+        <tbody><tr><td>VAS</td><td>$95.10</td><td>$95.20</td></tr></tbody>
+      </table>`);
+    expect(await page.locator('#t thead th').first().evaluate(
+      (el: Element) => (el as HTMLTableCellElement).rowSpan,
+    )).toBe(0);
+    expect((await run({
+      selector: '#t',
+      columns: [
+        { header: 'Symbol', key: 'symbol' },
+        { header: 'Bid', key: 'bid' },
+        { header: 'Ask', key: 'ask' },
+      ],
+    })).capturedRecords).toEqual([
+      { _row: '1', symbol: 'VAS', bid: '$95.10', ask: '$95.20' },
+    ]);
+  });
+
+  it('takes no header from a <thead> whose grid names nothing, and uses the declared one', async () => {
+    // §7.3b.5, the RadGrid data table in miniature: its own `<thead>` is one
+    // hidden empty `<th>`. Taken as the header, every read by name failed
+    // "its header row has no non-empty headings" one table away from the
+    // headings that `aria-owns` names.
+    await load(`
+      <div id="grid">
+        <table id="head-half"><thead id="head-thead"><tr><th>Payee</th><th>Amount</th></tr></thead></table>
+        <table id="row-half" aria-owns="head-thead row-tbody">
+          <thead style="display:none"><tr><th></th></tr></thead>
+          <tbody id="row-tbody"><tr><td>Origin Energy</td><td>$140.00</td></tr></tbody>
+        </table>
+      </div>`);
+    const result = await readTableRecords(page, {
+      selector: '#row-half',
+      columns: [{ header: 'Payee', key: 'payee' }, { header: 'Amount', key: 'amount' }],
+    });
+    expect(result.records).toEqual([{ _row: '1', payee: 'Origin Energy', amount: '$140.00' }]);
+    expect(result.headerFromSeparateTable).toBe(true);
+  });
+
+  it('carries neither header refusal in the extractor any more (§7.3b.6)', async () => {
+    // The two sentences §7.3b deletes. The merged-cell sentence itself stays —
+    // a BODY cell that spans is still the §7.4 error, pinned above — so what is
+    // asserted is the half that named a HEADER.
+    const source = await fs.readFile(
+      new URL('../src/browser/scripts/read-table.js', import.meta.url),
+      'utf8',
+    );
+    expect(source).not.toContain('and v1 supports exactly one');
+    expect(source).not.toContain("refusal: 'merged'");
+    // The sentence itself stays, for the body cell it is now only about.
+    expect(source).toContain('merged headers or cells (rowspan/colspan > 1) are not supported');
+  });
+});
+
+// ── Telerik RadGrid: three tables, a banded header, a pager (§5.7, §12.27) ──
+//
+// Walked from the live ASP.NET AJAX demo on 2026-09-23 and matched by
+// `fixtures/test-app/radgrid.html`. What the extractor made of the real page
+// before §7.3b: the box refused "found 3 tables with rows" (the header
+// table's hidden spacer row and the pager's one row counted as rows), the data
+// table read by POSITION only (its own hidden empty `<thead>` won over the
+// `aria-owns` header), and the header table was refused as merged.
+
+/** Applicant, Type, Amount, Term, Rate, Status, Officer — plus the expand cell
+ *  and the Review button, nine columns in all. Page one of `radgrid.html`,
+ *  which pages 10/10/6: two rows for the same applicant, different amounts. */
+const LOANS: Array<[string, string, string, string, string, string, string]> = [
+  ['Sarah Mitchell', 'Home', '$420,000.00', '30 years', '5.89%', 'Approved', 'D. Okafor'],
+  ['Sarah Mitchell', 'Car', '$32,500.00', '5 years', '8.25%', 'Pending', 'L. Fontaine'],
+  ['James Whitfield', 'Home', '$615,000.00', '25 years', '5.74%', 'Approved', 'D. Okafor'],
+  ['Priya Raghunathan', 'Personal', '$12,000.00', '3 years', '11.20%', 'Declined', 'L. Fontaine'],
+  ['Tomas Iversen', 'Car', '$48,900.00', '7 years', '7.95%', 'Approved', 'M. Castillo'],
+  ['Grace Abernathy', 'Home', '$298,400.00', '20 years', '6.10%', 'Declined', 'D. Okafor'],
+  ['Kwame Boateng', 'Personal', '$7,500.00', '2 years', '12.40%', 'Pending', 'M. Castillo'],
+  ['Elena Vasquez', 'Home', '$505,000.00', '30 years', '5.99%', 'Approved', 'L. Fontaine'],
+  ['Hiroshi Tanaka', 'Car', '$26,750.00', '5 years', '8.40%', 'Pending', 'M. Castillo'],
+  ['Aoife Donnelly', 'Home', '$372,000.00', '25 years', '6.05%', 'Approved', 'D. Okafor'],
+];
+
+const loanRow = (
+  [applicant, type, amount, term, rate, status, officer]: (typeof LOANS)[number],
+  i: number,
+) => `
+        <tr id="RadGrid1_ctl00__${i}" class="${i % 2 === 0 ? 'rgRow' : 'rgAltRow'}" role="row">
+          <td class="rgExpandCol" role="gridcell"><button type="button" title="Expand" aria-label="Expand"></button></td>
+          <td role="gridcell">${applicant}</td><td role="gridcell">${type}</td>
+          <td role="gridcell">${amount}</td><td role="gridcell">${term}</td>
+          <td role="gridcell">${rate}</td>
+          <td role="gridcell"><span class="badge">${status}</span></td>
+          <td role="gridcell">${officer}</td>
+          <td role="gridcell"><input type="button" value="Review"></td>
+        </tr>`;
+
+/**
+ * The static-headers grid: a header table whose `<thead>` is a band row, a
+ * name row and a filter row and whose `<tbody>` holds one hidden spacer, the
+ * data table with an empty hidden `<thead>` of its own and `aria-owns`, and a
+ * pager table whose one row is a lone `<td colspan="9">` around nested tables.
+ */
+function radgrid(extraRows = '', owns = true): string {
+  return `
+<h2>Loan applications</h2>
+<div id="RadGrid1" class="RadGrid RadGrid_Silk rgMultiHeader" tabindex="0">
+  <div class="rgHeaderWrapper"><div class="rgHeaderDiv">
+    <table id="RadGrid1_ctl00_Header" class="rgMasterTable" role="presentation">
+      <thead id="RadGrid1_ctl00_Header_thead">
+        <tr class="rgMultiHeaderRow" role="row">
+          <th scope="col" class="rgHeader rgExpandCol" rowspan="2" aria-label="ExpandColumn"><span style="display:none">ExpandColumn</span></th>
+          <th scope="col" class="rgHeader" colspan="2">APPLICANT</th>
+          <th scope="col" class="rgHeader" colspan="3">LOAN</th>
+          <th scope="col" class="rgHeader" colspan="3">REVIEW</th>
+        </tr>
+        <tr class="rgMultiHeaderRow" role="row">
+          <th scope="col" class="rgHeader">Applicant</th><th scope="col" class="rgHeader">Type</th>
+          <th scope="col" class="rgHeader">Amount</th><th scope="col" class="rgHeader">Term</th>
+          <th scope="col" class="rgHeader">Rate</th><th scope="col" class="rgHeader">Status</th>
+          <th scope="col" class="rgHeader">Officer</th><th scope="col" class="rgHeader">Action</th>
+        </tr>
+        <tr class="rgFilterRow" role="presentation">
+          <td></td><td><input aria-label="Filter Applicant"></td><td></td><td></td><td></td><td></td>
+          <td><select aria-label="Filter Status"><option>All</option></select></td><td></td><td></td>
+        </tr>
+      </thead>
+      <tbody style="display:none"><tr role="presentation"><td colspan="9"></td></tr></tbody>
+    </table>
+  </div></div>
+  <div class="rgDataDiv">
+    <table id="RadGrid1_ctl00" class="rgMasterTable" role="grid"${
+      owns ? '\n           aria-owns="RadGrid1_ctl00_Header_thead RadGrid1_ctl00_tbody "' : ''}>
+      <thead style="display:none"><tr><th scope="col"></th></tr></thead>
+      <tbody id="RadGrid1_ctl00_tbody">${LOANS.map(loanRow).join('')}${extraRows}
+      </tbody>
+    </table>
+  </div>
+  <table id="RadGrid1_ctl00_Pager" class="rgMasterTable" role="presentation">
+    <thead><tr style="display:none"></tr></thead>
+    <tbody><tr class="rgPager"><td class="rgPagerCell" colspan="9">
+      <div class="rgWrap rgNumPart"><a href="#">1</a> <a href="#">2</a> <a href="#">3</a></div>
+      <div class="rgWrap rgInfoPart">26 items in 3 pages</div>
+    </td></tr></tbody>
+  </table>
+</div>`;
+}
+
+/**
+ * The same box with its data table EMPTIED to §4.8's message row — the shape
+ * a filter with no matches leaves behind. Three tables, and not one of them
+ * has a data row: the header table's hidden spacer, the message row, and the
+ * pager's row.
+ */
+const EMPTY_RADGRID = radgrid().replace(
+  LOANS.map(loanRow).join(''),
+  '\n        <tr role="row"><td colspan="9">No records available.</td></tr>',
+);
+
+const LOAN_COLUMNS: TableReadColumn[] = [
+  { header: 'Applicant', key: 'applicant' },
+  { header: 'Amount', key: 'amount' },
+  { header: 'Status', key: 'status' },
+];
+
+const LOAN_RECORDS = LOANS.map(([applicant, , amount, , , status], i) => ({
+  _row: String(i + 1),
+  applicant,
+  amount,
+  status,
+}));
+
+/** `#RadGrid2`: the non-scrolling form — ONE table with the same three header
+ *  rows and the pager in a `<tfoot>`. */
+const RADGRID2_HTML = `
+<h2>Direct debit mandates</h2>
+<div id="RadGrid2" class="RadGrid RadGrid_Silk rgMultiHeader">
+  <table id="RadGrid2_ctl00" class="rgMasterTable" role="grid"
+         aria-owns="RadGrid2_ctl00_thead RadGrid2_ctl00_tbody ">
+    <thead id="RadGrid2_ctl00_thead">
+      <tr class="rgMultiHeaderRow">
+        <th colspan="2">MANDATE</th><th colspan="2">PAYMENT</th><th colspan="2">STATE</th>
+      </tr>
+      <tr class="rgMultiHeaderRow">
+        <th>Payee</th><th>Reference</th><th>Amount</th><th>Frequency</th>
+        <th>Next date</th><th>Status</th>
+      </tr>
+      <tr class="rgFilterRow"><td></td><td></td><td></td><td></td><td></td><td><input aria-label="Filter Status"></td></tr>
+    </thead>
+    <tbody id="RadGrid2_ctl00_tbody">
+      <tr class="rgRow"><td>Origin Energy</td><td>DD-1</td><td>$140.00</td><td>Monthly</td><td>3 Oct 2026</td><td>Active</td></tr>
+      <tr class="rgAltRow"><td>Netflix Australia</td><td>DD-2</td><td>$22.99</td><td>Monthly</td><td>1 Oct 2026</td><td>Active</td></tr>
+    </tbody>
+    <tfoot><tr class="rgPager"><td colspan="6"><a href="#">1</a></td></tr></tfoot>
+  </table>
+</div>`;
+
+/** `#banded-table`, the Quarterly fees table: the same leaf name under two
+ *  bands (§5.3's last paragraph). */
+const QUARTERLY_FEES_HTML = `
+<table id="banded-table" aria-label="Quarterly fees">
+  <thead>
+    <tr><th rowspan="2">Account</th><th colspan="2">Q1</th><th colspan="2">Q2</th></tr>
+    <tr><th>Fee</th><th>Rebate</th><th>Fee</th><th>Rebate</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Everyday</td><td>$4.00</td><td>$1.00</td><td>$4.50</td><td>$1.50</td></tr>
+    <tr><td>Savings</td><td>$0.00</td><td>$0.00</td><td>$0.00</td><td>$0.00</td></tr>
+  </tbody>
+</table>`;
+
+describe('readTable — Telerik RadGrid (§5.7)', () => {
+  it('gives the same ten records through the box, the data table and by position', async () => {
+    await load(radgrid());
+    const viaBox = await readTableRecords(page, { selector: '#RadGrid1', columns: LOAN_COLUMNS });
+    expect(viaBox.records).toHaveLength(10);
+    expect(viaBox.records).toEqual(LOAN_RECORDS);
+    // The two rows for the same applicant are both there, with their own
+    // amounts and their own numbers — which is what `_row` is for (§4.5).
+    expect(viaBox.records.filter((r) => r.applicant === 'Sarah Mitchell')).toEqual([
+      { _row: '1', applicant: 'Sarah Mitchell', amount: '$420,000.00', status: 'Approved' },
+      { _row: '2', applicant: 'Sarah Mitchell', amount: '$32,500.00', status: 'Pending' },
+    ]);
+    // The spacer row in the header table and the pager row count for nothing:
+    // counted as rows, the box was "found 3 tables with rows" and counted as
+    // data they would be records of their own.
+    expect(viaBox.placeholdersSkipped).toBe(0);
+    expect(viaBox.headerFromSeparateTable).toBe(true);
+    expect(viaBox.label).toBe('RadGrid1');
+
+    // The row table's own `aria-owns` — with the TRAILING SPACE RadGrid emits,
+    // which a split on whitespace has to ignore rather than look up as an id.
+    expect(await page.locator('#RadGrid1_ctl00').getAttribute('aria-owns'))
+      .toBe('RadGrid1_ctl00_Header_thead RadGrid1_ctl00_tbody ');
+    const viaTable = await readTableRecords(page, {
+      selector: '#RadGrid1_ctl00',
+      columns: LOAN_COLUMNS,
+    });
+    expect(viaTable.records).toEqual(LOAN_RECORDS);
+    expect(viaTable.headerFromSeparateTable).toBe(true);
+
+    // And by position, which is what the data table could already do: column 2
+    // is Applicant because column 1 is the expand cell.
+    const byIndex = await readTableRecords(page, {
+      selector: '#RadGrid1_ctl00',
+      columns: [{ index: 2, key: 'applicant' }, { index: 4, key: 'amount' }],
+    });
+    expect(byIndex.records.map((r) => r.applicant)).toEqual(LOANS.map(([a]) => a));
+    expect(byIndex.records[0]).toEqual({ _row: '1', applicant: 'Sarah Mitchell', amount: '$420,000.00' });
+  });
+
+  it('refuses the header table and names the box (§7.3a.3)', async () => {
+    // The selector a model reaches for first — the table where it can SEE the
+    // words "Applicant" and "Status". Its hidden spacer row is a message, so
+    // it is still header-only and still refused, rather than storing [] green.
+    await load(radgrid());
+    expect(await refusal({ selector: '#RadGrid1_ctl00_Header', columns: LOAN_COLUMNS }))
+      .toBe(
+        'readTable cannot read table "RadGrid1": it holds only the header row; the rows are in '
+        + 'the table beside it — select the element that contains both ("#RadGrid1") or that table',
+      );
+  });
+
+  it('still pairs the halves with no aria-owns, past the hidden spacer row', async () => {
+    // §7.3a.2 with RadGrid's shape: "header-only" has to mean no DATA row, not
+    // no row at all, because the header table's body holds one hidden
+    // `<td colspan="9">` spacer. Counted as a row, this table is not a header
+    // half at all, the beside search finds no candidate and the grid reads as
+    // headerless — the §5.4 message for every column the author named.
+    await load(radgrid('', false));
+    expect(await page.locator('#RadGrid1_ctl00').getAttribute('aria-owns')).toBeNull();
+    expect(await page.locator('#RadGrid1_ctl00_Header tbody tr').count()).toBe(1);
+    for (const selector of ['#RadGrid1', '#RadGrid1_ctl00']) {
+      const result = await readTableRecords(page, { selector, columns: LOAN_COLUMNS });
+      expect(result.records).toEqual(LOAN_RECORDS);
+      expect(result.headerFromSeparateTable).toBe(true);
+    }
+  });
+
+  it('reads the pager table as an empty table, not as a row of anything', async () => {
+    await load(radgrid());
+    const pager = await readTableRecords(page, {
+      selector: '#RadGrid1_ctl00_Pager',
+      columns: [{ index: 1, key: 'page' }],
+    });
+    expect(pager.records).toEqual([]);
+    expect(pager.placeholdersSkipped).toBe(1);
+  });
+
+  it('skips an expanded DETAIL row and does not read its nested table (§7.4)', async () => {
+    // Measured: expanding a row inserts a row with no class and no id, of TWO
+    // cells — the expand column's own, and one spanning the other eight around
+    // a whole table of its own. Neither lone-cell rule sees it, so before this
+    // rule every read of the grid failed with the merged-cell refusal from the
+    // moment a user expanded anything. It is a message row: no `_row`, counted
+    // as a skip, and its nested rows belong to that table and not to this one.
+    await load(radgrid(`
+        <tr role="row"><td class="rgExpandCol">&nbsp;</td><td colspan="8">
+          <table class="loanInfo"><tbody>
+            <tr><td>Deposit:</td><td>$84,000.00</td></tr>
+            <tr><td>Lodged:</td><td>2026-02-11</td></tr>
+          </tbody></table>
+        </td></tr>`));
+    const outcome = await readTableRecords(page, { selector: '#RadGrid1', columns: LOAN_COLUMNS });
+    expect(outcome.records).toEqual(LOAN_RECORDS);
+    expect(outcome.placeholdersSkipped).toBe(1);
+    expect(JSON.stringify(outcome.records)).not.toContain('2026-02-11');
+    // Through the data table's own selector too — the skip is §7.4's, not the
+    // wrapper path's.
+    expect((await readTableRecords(page, {
+      selector: '#RadGrid1_ctl00',
+      columns: LOAN_COLUMNS,
+    })).records).toEqual(LOAN_RECORDS);
+  });
+
+  it('keeps refusing the two rows that only LOOK like a detail row (§7.4)', async () => {
+    // The line is drawn by what the cells cover, and both neighbours of the
+    // detail row are refusals a skip would turn into a silent misread.
+    //
+    // A cell spanning ROWS shifts every row below it, so skipping this one
+    // fixes nothing about the next.
+    await load(radgrid(`
+        <tr role="row"><td class="rgExpandCol" rowspan="2">&nbsp;</td><td colspan="8">Detail</td></tr>`));
+    expect(await refusal({ selector: '#RadGrid1', columns: LOAN_COLUMNS }))
+      .toBe('readTable cannot map table "RadGrid1": merged headers or cells (rowspan/colspan > 1) are not supported');
+
+    // And a row with as many cells as the grid is wide, one of which spans, is
+    // WIDER than the grid — a merged data row, not a message.
+    await load(radgrid(`
+        <tr role="row"><td>&nbsp;</td><td colspan="2">Merged</td><td>c</td><td>d</td><td>e</td><td>f</td><td>g</td><td>h</td><td>i</td></tr>`));
+    expect(await refusal({ selector: '#RadGrid1', columns: LOAN_COLUMNS }))
+      .toBe('readTable cannot map table "RadGrid1": merged headers or cells (rowspan/colspan > 1) are not supported');
+  });
+
+  it('reads the EMPTIED box as [], instead of "3 tables with rows" (§7.2, §5.7)', async () => {
+    // The measured refusal, with the loan rows replaced by §4.8's message
+    // row: nothing under the box has a DATA row, so the fallback counts body
+    // rows — and the header table's hidden `<td colspan="9">` spacer and the
+    // pager's own row are two of the three it found. `aria-owns` says which
+    // table is the row half, so the read answers [] for a grid that has no
+    // rows, and the column names still resolve against the header table.
+    await load(EMPTY_RADGRID);
+    const result = await readTableRecords(page, {
+      selector: '#RadGrid1',
+      columns: LOAN_COLUMNS,
+    });
+    expect(result.records).toEqual([]);
+    expect(result.placeholdersSkipped).toBe(1);
+    expect(result.headerFromSeparateTable).toBe(true);
+    // The header really is the one the box shows, not an empty stand-in.
+    expect(await refusal({ selector: '#RadGrid1', columns: [{ header: 'Borrower', key: 'x' }] }))
+      .toBe(
+        'readTable cannot map table "RadGrid1": no column is headed "Borrower" — available '
+        + 'headers are ExpandColumn, APPLICANT, TYPE, AMOUNT, TERM, RATE, STATUS, OFFICER, ACTION',
+      );
+    // The data table's own selector answers the same, so the fallback is not
+    // a wrapper-only rule.
+    expect((await readTableRecords(page, {
+      selector: '#RadGrid1_ctl00',
+      columns: LOAN_COLUMNS,
+    })).records).toEqual([]);
+  });
+
+  it('refuses a row ONE cell short of the width, and skips one TWO short (§7.4)', async () => {
+    // Where the detail-row skip stops. `<td>a2</td><td colspan="2">merged</td>`
+    // in a three-column table is §10's merged DATA row — two values where
+    // three columns are, and which of B and C the wide cell holds is exactly
+    // the guess this action exists not to make. Skipped as a detail row, that
+    // row vanished from the read and the count came back one short, green.
+    await load(`
+      <table id="t" aria-label="Orders">
+        <thead><tr><th>A</th><th>B</th><th>C</th></tr></thead>
+        <tbody>
+          <tr><td>a1</td><td>b1</td><td>c1</td></tr>
+          <tr><td>a2</td><td colspan="2">merged</td></tr>
+        </tbody>
+      </table>`);
+    expect(await refusal({
+      selector: '#t',
+      columns: [{ header: 'A', key: 'a' }, { header: 'B', key: 'b' }],
+    })).toBe(
+      'readTable cannot map table "Orders": merged headers or cells (rowspan/colspan > 1) are '
+      + 'not supported',
+    );
+
+    // A detail row is a row of a different SHAPE, not a row missing one cell:
+    // RadGrid's is 2 cells where the grid is 9 wide and Kendo's 2 where it is
+    // 6, so the line is `width - cells.length >= 2`.
+    await load(`
+      <table id="t2" aria-label="Loans">
+        <thead><tr><th>A</th><th>B</th><th>C</th><th>D</th></tr></thead>
+        <tbody>
+          <tr><td>a1</td><td>b1</td><td>c1</td><td>d1</td></tr>
+          <tr><td>&nbsp;</td><td colspan="3">Deposit: $84,000.00</td></tr>
+        </tbody>
+      </table>`);
+    const detail = await readTableRecords(page, {
+      selector: '#t2',
+      columns: [{ header: 'A', key: 'a' }],
+    });
+    expect(detail.records).toEqual([{ _row: '1', a: 'a1' }]);
+    expect(detail.placeholdersSkipped).toBe(1);
+  });
+
+  it('names the expand column by its visually-hidden text, and the leaf beats the band', async () => {
+    // Two measured details of the same header. The expand `<th>` renders
+    // nothing but carries `<span style="display:none">ExpandColumn</span>`, so
+    // §7.3's `textContent` fallback names column 1 — which is what an
+    // accessible name is for, and it is what the available-headers list shows.
+    //
+    // And "APPLICANT" is both the BAND over columns 2–3 and, once the header
+    // style has upper-cased it, column 2's own leaf. A request for it must
+    // match the LEAF: bands are consulted only when no leaf does, so this is
+    // one column, not the band refusal.
+    await load(radgrid());
+    expect((await readTableRecords(page, {
+      selector: '#RadGrid1',
+      columns: [{ header: 'Applicant', key: 'applicant' }],
+    })).records.map((r) => r.applicant)).toEqual(LOANS.map(([a]) => a));
+
+    expect(await refusal({ selector: '#RadGrid1', columns: [{ header: 'Borrower', key: 'x' }] }))
+      .toBe(
+        'readTable cannot map table "RadGrid1": no column is headed "Borrower" — available '
+        + 'headers are ExpandColumn, APPLICANT, TYPE, AMOUNT, TERM, RATE, STATUS, OFFICER, ACTION',
+      );
+    // The band above the leaves is still a band, and says what is under it.
+    expect(await refusal({ selector: '#RadGrid1', columns: [{ header: 'LOAN', key: 'loan' }] }))
+      .toBe(
+        'readTable cannot map table "RadGrid1": no column is headed "LOAN" — available headers '
+        + 'are ExpandColumn, APPLICANT, TYPE, AMOUNT, TERM, RATE, STATUS, OFFICER, ACTION '
+        + '("LOAN" is a band over AMOUNT, TERM, RATE, not a column)',
+      );
+  });
+
+  it('sees the hidden spacer row and the empty header row as unrendered', async () => {
+    // Both are hidden by `display:none` on the `<tbody>`/`<thead>` ELEMENT,
+    // not on the `<tr>`, which is how RadGrid writes them: a row-level test
+    // would have called them rendered, made the spacer a data row of the
+    // header table and the empty `<th>` row a header that names nothing.
+    await load(radgrid());
+    expect(await page.locator('#RadGrid1_ctl00_Header tbody tr').isVisible()).toBe(false);
+    expect(await page.locator('#RadGrid1_ctl00 thead tr').isVisible()).toBe(false);
+  });
+
+  it('reads the non-scrolling form as one table, with no pairing and no <tfoot>', async () => {
+    await load(RADGRID2_HTML);
+    const result = await readTableRecords(page, {
+      selector: '#RadGrid2_ctl00',
+      columns: [
+        { header: 'Payee', key: 'payee' },
+        { header: 'Amount', key: 'amount' },
+        { header: 'Status', key: 'status' },
+      ],
+    });
+    expect(result.records).toEqual([
+      { _row: '1', payee: 'Origin Energy', amount: '$140.00', status: 'Active' },
+      { _row: '2', payee: 'Netflix Australia', amount: '$22.99', status: 'Active' },
+    ]);
+    // Its header is its own, so nothing was adopted — and the `<tfoot>` pager
+    // is excluded as a footer always is (§7.4). The `aria-owns` this form
+    // carries names its OWN `<thead>` and `<tbody>`, which declares nothing:
+    // an owned element inside the same table is not another table's header.
+    expect(await page.locator('#RadGrid2_ctl00').getAttribute('aria-owns'))
+      .toBe('RadGrid2_ctl00_thead RadGrid2_ctl00_tbody ');
+    expect(result.headerFromSeparateTable).toBe(false);
+    expect(result.placeholdersSkipped).toBe(0);
+    // The box around it answers the same, through the one table with data.
+    expect((await readTableRecords(page, {
+      selector: '#RadGrid2',
+      columns: [{ header: 'Payee', key: 'payee' }],
+    })).records).toEqual([
+      { _row: '1', payee: 'Origin Energy' },
+      { _row: '2', payee: 'Netflix Australia' },
+    ]);
+  });
+});
+
+// ── the numbering the read leaves on the page (§4.5) ───────────────────────
+//
+// Measured on the live acceptance run: pass 7 of the loop over the RadGrid
+// records reached "Click Review in row 7 of the Loan applications grid", the
+// model counted the rows itself and emitted `#RadGrid1_ctl00__7` — ids that
+// run from ZERO — so it clicked row 8, Grace Abernathy, and the step passed.
+// The read now stamps its own numbering onto the rows it numbered, so "row 7"
+// is a selector rather than a sum.
+
+/** Every `<tr>` of a table, paired with its stamp (`null` when it has none). */
+async function stamps(selector: string): Promise<Array<[string, string | null]>> {
+  return page.locator(`${selector} tr`).evaluateAll((rows) =>
+    rows.map((row) => [
+      (row.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 24),
+      row.getAttribute('data-aiui-row'),
+    ] as [string, string | null]));
+}
+
+describe('readTable — data-aiui-row, the numbering left on the page', () => {
+  it('stamps the data rows 1..N and nothing else', async () => {
+    await load(`
+      <table id="t" aria-label="Orders">
+        <thead><tr><th>Order ID</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>O-1</td><td>Paid</td></tr>
+          <tr class="row-hidden"><td>O-H</td><td>Hidden</td></tr>
+          <tr><td colspan="2">No more orders today.</td></tr>
+          <tr><td>O-2</td><td>Due</td></tr>
+        </tbody>
+      </table>`);
+    const result = await readTableRecords(page, {
+      selector: '#t',
+      columns: [{ header: 'Order ID', key: 'id' }],
+    });
+    expect(result.records).toEqual([{ _row: '1', id: 'O-1' }, { _row: '2', id: 'O-2' }]);
+    // The header row, the hidden row and the message row take no number, and
+    // the numbers the data rows carry are the `_row` of their own record.
+    expect(await stamps('#t')).toEqual([
+      ['Order IDStatus', null],
+      ['O-1Paid', '1'],
+      ['O-HHidden', null],
+      ['No more orders today.', null],
+      ['O-2Due', '2'],
+    ]);
+  });
+
+  it('renumbers on a re-read and clears a row a filter has hidden', async () => {
+    await load(`
+      <table id="t" aria-label="Orders">
+        <thead><tr><th>Order ID</th></tr></thead>
+        <tbody>
+          <tr id="r1"><td>O-1</td></tr>
+          <tr id="r2"><td>O-2</td></tr>
+          <tr id="r3"><td>O-3</td></tr>
+        </tbody>
+      </table>`);
+    const columns: TableReadColumn[] = [{ header: 'Order ID', key: 'id' }];
+    await readTableRecords(page, { selector: '#t', columns });
+    expect((await stamps('#t')).map(([, n]) => n)).toEqual([null, '1', '2', '3']);
+
+    // A filter hides the first row. The second read must renumber the rest AND
+    // take the stale number off the hidden one — left there, "row 1" would
+    // address a row no record came from.
+    await page.locator('#r1').evaluate((el) => el.classList.add('row-hidden'));
+    const after = await readTableRecords(page, { selector: '#t', columns });
+    expect(after.records).toEqual([{ _row: '1', id: 'O-2' }, { _row: '2', id: 'O-3' }]);
+    expect(await stamps('#t')).toEqual([
+      ['Order ID', null],
+      ['O-1', null],
+      ['O-2', '1'],
+      ['O-3', '2'],
+    ]);
+  });
+
+  it('numbers ALL the data rows, not just the ones a limit selected', async () => {
+    // The numbering describes the table; a bounded read must not leave the
+    // rows past the bound unaddressable.
+    await load(`
+      <table id="t" aria-label="Orders">
+        <thead><tr><th>Order ID</th></tr></thead>
+        <tbody><tr><td>O-1</td></tr><tr><td>O-2</td></tr><tr><td>O-3</td></tr></tbody>
+      </table>`);
+    const result = await readTableRecords(page, {
+      selector: '#t',
+      columns: [{ header: 'Order ID', key: 'id' }],
+      limit: 2,
+    });
+    expect(result.records).toHaveLength(2);
+    expect((await stamps('#t')).map(([, n]) => n)).toEqual([null, '1', '2', '3']);
+  });
+
+  it('leaves NO stamp behind when the read REFUSES (§7.4)', async () => {
+    // The numbering is written LAST, after the row cap and after every cell of
+    // every selected row has been read. Written before that, a read that went
+    // on to refuse still numbered the rows, and the next step addressed rows
+    // of a table the framework had just said it could not map — a click that
+    // lands somewhere and a step that passes.
+    await load(`
+      <table id="t" aria-label="Orders">
+        <thead><tr><th>Order ID</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>O-1</td><td>Paid</td></tr>
+          <tr><td rowspan="2">O-2</td><td>Due</td></tr>
+          <tr><td>Overdue</td></tr>
+        </tbody>
+      </table>`);
+    expect(await refusal({ selector: '#t', columns: [{ header: 'Order ID', key: 'id' }] }))
+      .toContain('merged headers or cells');
+    expect(await page.locator('#t [data-aiui-row]').count()).toBe(0);
+  });
+
+  it('clears a stale stamp inside a NESTED table, and nothing outside this one', async () => {
+    // The clear runs over every descendant carrying the stamp, not over
+    // `table.rows` — a nested table's rows are not in `table.rows` at all, so
+    // a stamp an earlier read of THAT table left behind survived, and
+    // `#outer [data-aiui-row="2"]` matched the nested row as well as the real
+    // one. "Row 2 of the Outer table" was then two elements.
+    await load(`
+      <table id="outer" aria-label="Outer">
+        <thead><tr><th>A</th><th>B</th></tr></thead>
+        <tbody>
+          <tr><td>a1</td><td>
+            <table id="inner" aria-label="Inner">
+              <thead><tr><th>X</th></tr></thead>
+              <tbody><tr><td>x1</td></tr><tr><td>x2</td></tr></tbody>
+            </table>
+          </td></tr>
+          <tr><td>a2</td><td>b2</td></tr>
+        </tbody>
+      </table>
+      <table id="other" aria-label="Other">
+        <thead><tr><th>A</th></tr></thead><tbody><tr><td>z1</td></tr></tbody>
+      </table>`);
+    await readTableRecords(page, { selector: '#inner', columns: [{ header: 'X', key: 'x' }] });
+    await readTableRecords(page, { selector: '#other', columns: [{ header: 'A', key: 'a' }] });
+    expect(await page.locator('#inner [data-aiui-row]').count()).toBe(2);
+
+    await readTableRecords(page, { selector: '#outer', columns: [{ header: 'A', key: 'a' }] });
+    expect(await page.locator('#inner [data-aiui-row]').count()).toBe(0);
+    expect(await page.locator('#outer [data-aiui-row="2"]').count()).toBe(1);
+    expect(await page.locator('#outer [data-aiui-row="2"] td').first().innerText()).toBe('a2');
+    // A table that was not read keeps its own numbering: the clear is scoped
+    // to the table being read and reaches nothing above or beside it.
+    expect(await page.locator('#other [data-aiui-row]').count()).toBe(1);
+  });
+
+  it('numbers the RadGrid rows so __7 is row 8, detail row and all (§5.7)', async () => {
+    // The measured failure, in the markup it happened in: the row the model
+    // built `#RadGrid1_ctl00__7` for is row EIGHT, and it now says so itself.
+    await load(radgrid());
+    await readTableRecords(page, { selector: '#RadGrid1', columns: LOAN_COLUMNS });
+    expect(await page.locator('#RadGrid1_ctl00__7').getAttribute('data-aiui-row')).toBe('8');
+    expect(await page.locator('#RadGrid1_ctl00__0').getAttribute('data-aiui-row')).toBe('1');
+    // Nothing outside the table that was read, including the two tables in the
+    // same box: the header table's spacer row and the pager's row.
+    expect((await stamps('#RadGrid1_ctl00_Header')).map(([, n]) => n)).toEqual([null, null, null, null]);
+    expect((await stamps('#RadGrid1_ctl00_Pager')).map(([, n]) => n)).toEqual([null, null]);
+
+    // An expanded detail row takes no number and shifts none: the rows below
+    // it keep the numbers their records carry.
+    await load(radgrid(`
+        <tr role="row"><td class="rgExpandCol">&nbsp;</td><td colspan="8">Detail</td></tr>`));
+    const expanded = await readTableRecords(page, { selector: '#RadGrid1', columns: LOAN_COLUMNS });
+    expect(expanded.records).toEqual(LOAN_RECORDS);
+    expect(await page.locator('#RadGrid1_ctl00__7').getAttribute('data-aiui-row')).toBe('8');
+    expect(await page.locator('#RadGrid1_ctl00 tbody tr:not([id])').getAttribute('data-aiui-row'))
+      .toBeNull();
   });
 });
 

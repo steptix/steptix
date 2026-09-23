@@ -1,8 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   parseAIResponse,
   extractJson,
+  resetEmittedMappingWarning,
 } from '../src/ai/action-parser.js';
+import { logger } from '../src/utils/logger.js';
 
 describe('extractJson', () => {
   it('returns a bare JSON object unchanged', () => {
@@ -663,5 +665,77 @@ describe('parseAIResponse — readTable', () => {
       columns: [{ header: '{{status_column}}', key: 'status' }],
     })).actions[0]!;
     expect(action.columns?.[0]?.header).toBe('{{status_column}}');
+  });
+});
+
+/**
+ * `mapping` is runtime-owned (docs/specs/SPEC-structured-table-reads.md
+ * §6.1 / §7.10).
+ *
+ * The parser copies known fields one at a time, so an unknown one is already
+ * dropped — and that is exactly why this needs a test. Nothing here fails if
+ * someone later adds `if (obj['mapping']) action.mapping = …` to the list
+ * beside `columns` and `limit`, which reads like the obvious omission it is
+ * not: a mapping the model emitted has been validated against nothing, and
+ * copied through it would pin the read to a table the model believes is there
+ * and then be written into the step cache as if it had been proved.
+ */
+describe('parseAIResponse — mapping is never taken from the model', () => {
+  beforeEach(() => { resetEmittedMappingWarning(); });
+
+  function withMapping(mapping: unknown, actionType = 'readTable'): string {
+    return JSON.stringify({
+      actions: [
+        {
+          action: actionType,
+          selector: '#legacy-payees',
+          columns: [{ header: 'Payee', key: 'payee' }],
+          as: 'payees',
+          description: 'Read the payees table',
+          mapping,
+        },
+      ],
+      reasoning: '',
+    });
+  }
+
+  it('strips a table mapping from a readTable the model emitted', () => {
+    const action = parseAIResponse(
+      withMapping({ kind: 'table', rows: '#legacy-payees', header: { selector: '#legacy-payees', bodyRow: 1 } }),
+    ).actions[0]!;
+    expect(action.action).toBe('readTable');
+    // The rest of the action still parses — stripping one field is not a
+    // rejection, because a plan is not wrong for carrying a field the model
+    // was never shown.
+    expect(action.columns).toEqual([{ header: 'Payee', key: 'payee' }]);
+    expect((action as Record<string, unknown>)['mapping']).toBeUndefined();
+  });
+
+  it('strips a collection mapping too', () => {
+    const action = parseAIResponse(
+      withMapping({ kind: 'collection', item: '.account-card', fields: { balance: '.value' } }),
+    ).actions[0]!;
+    expect((action as Record<string, unknown>)['mapping']).toBeUndefined();
+  });
+
+  it('strips it from any action type, not just readTable', () => {
+    const action = parseAIResponse(withMapping({ kind: 'table', rows: '#x' }, 'click')).actions[0]!;
+    expect(action.action).toBe('click');
+    expect((action as Record<string, unknown>)['mapping']).toBeUndefined();
+  });
+
+  it('warns once per process, not once per action', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      parseAIResponse(withMapping({ kind: 'table', rows: '#a' }));
+      parseAIResponse(withMapping({ kind: 'table', rows: '#b' }));
+      const mappingWarnings = warn.mock.calls
+        .map((c) => String(c[0]))
+        .filter((line) => line.includes('"mapping"'));
+      expect(mappingWarnings).toHaveLength(1);
+      expect(mappingWarnings[0]).toContain('written by the runtime');
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

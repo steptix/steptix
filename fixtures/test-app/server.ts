@@ -1497,6 +1497,14 @@ async function handleRequest(
       '/table-edge-cases': 'table-edge-cases.html',
       // Component grids that split the header and the rows across two tables.
       '/split-grids': 'split-grids.html',
+      // Telerik RadGrid: three tables in one wrapper, a banded header with a
+      // filter row, and row ids that renumber on every page.
+      '/radgrid': 'radgrid.html',
+      // Grids with no <table> in them: MUI DataGrid and ag-Grid, where the
+      // structure is carried by role, aria-rowindex and aria-colindex alone.
+      '/aria-grid': 'aria-grid.html',
+      // Four shapes no structural rule reads, for the structure question.
+      '/odd-tables': 'odd-tables.html',
       // The one NON-html static asset (docs/specs/SPEC-use-computer.md §7).
       // It is in this map rather than reached by the `.html` fallback below
       // because that fallback is what keeps the static path from serving

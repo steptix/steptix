@@ -581,9 +581,11 @@ export function substituteAction(action: AIAction, values: PlaceholderValues): A
 export interface TurnReferenceContext {
   known: ReadonlySet<string>;
   definedLater?: ReadonlySet<string> | undefined;
-  /** `${…}` is only checked when the run HAS an environment. Without one
-   *  nothing resolved those references in the step text either, so refusing
-   *  here would fail a turn on text the model read off the page. */
+  /** An UNKNOWN `${…}` is only checked when the run HAS an environment.
+   *  Without one nothing resolved those references in the step text either, so
+   *  refusing here would fail a turn on text the model read off the page. A
+   *  `${…}` naming something in `known` is refused either way: that one is a
+   *  `{{…}}` spelled with the wrong braces. */
   envData?: EnvDataContext | undefined;
 }
 
@@ -657,9 +659,27 @@ function checkOneString(
     );
   }
 
-  if (ctx.envData) {
-    for (const ref of envRefs) {
-      if (resolveEnvDataRef(ref, ctx.envData) !== undefined) continue;
+  for (const ref of envRefs) {
+    // What the environment answers is answered and done with.
+    if (ctx.envData && resolveEnvDataRef(ref, ctx.envData) !== undefined) continue;
+    // A `${name}` whose name is a placeholder or loop binding this run HAS is
+    // the wrong brace, not a missing value — and it is checked whether or not
+    // the run has an environment, which is the half that was missing.
+    // Measured: a selector of `#RadGrid1_ctl00__${item._row} button` reached
+    // Playwright as written, because `${…}` was only ever checked against an
+    // environment and that test had none (§6.3, §10).
+    const key = ctx.known.has(ref) ? ref : nearMatch(ref, ctx.known);
+    if (key !== undefined) {
+      return (
+        `${where}wrote \`\${${ref}}\` in "${field}". \`\${…}\` names an environment ` +
+        `or data value; \`${key}\` is a parameter or captured variable of this run, ` +
+        `so write it as \`{{${key}}}\`.`
+      );
+    }
+    // Without an environment nothing resolved a `${…}` in the step text
+    // either, so a name this run does not know is text the model read off the
+    // page, not a reference to refuse.
+    if (ctx.envData) {
       return (
         `${where}references \`\${${ref}}\` in "${field}", which this run's ` +
         `environment and data files cannot resolve.`

@@ -147,6 +147,11 @@ The order of `## Config` and `## Parameters` does not matter.
   instruction the model must satisfy.
 - `{{name}}` is a placeholder only when written without spaces inside the
   braces; `{{ name }}` is refused.
+- `${name}` is the *environment* form and is not interchangeable with it.
+  Writing `${email}` where `email` is a captured value or a loop binding is
+  refused before the step runs, naming `{{email}}` as the correction — and
+  that holds even when the test declares no environment at all, which is how
+  the wrong braces used to reach the browser as written.
 
 ### Frontmatter
 
@@ -882,10 +887,29 @@ Holdings grid") and the framework reads the pair as one table: header names
 work exactly as above, the footer is ignored, and `_row` numbers the data
 rows. You do not have to switch to column positions because the rows carry no
 `<th>`, and you should not point a read at the header table — it has no rows,
-so that read is refused rather than quietly storing nothing. A grid with
-frozen (locked) columns is the one shape that is refused outright: it renders
-the same rows twice, split by column, and reading one half would misalign
-every record.
+so that read is refused rather than quietly storing nothing. Telerik RadGrid
+(the ASP.NET AJAX one) is the same thing in three tables — a header table, the
+rows, and a pager table in one box — and reads the same way: name the grid, or
+the table with the rows in it. A grid with frozen (locked) columns — two
+header tables and two row tables, the columns split between the pairs — is
+the one native shape no structural rule reads: each row is rendered twice,
+split by column, so the wrapper, both header tables and the locked row table
+are refused by name rather than half the record returned as the whole. That
+refusal is about the shape, so it is one of the cases the structure question
+below can settle: the model says which table holds the rows and where their
+names are, and the read goes ahead on that half. Pinned columns in an ARIA
+grid are a different thing and need no question at all — the two halves of a
+row share a row index and the runtime joins them into one record (below).
+
+**Headers of more than one row.** A grid widget's header is often a band row
+over groups of columns, then the column names, then a row of filter boxes. Use
+the name in the LOWEST heading over the column — `Amount`, not the `LOAN` band
+above it — because that is what names the column; a band names a group and is
+refused with the leaves under it listed, and a filter row names nothing at all
+(its `All` is the state of a dropdown, not a heading). Where the same leaf name
+sits under two bands — a `Fee` column under `Q1` and another under `Q2` — the
+plain name is ambiguous and the read is refused with both positions, so write
+the band with the leaf: `the "Q1 > Fee" column as q1_fee`.
 
 **Quote a placeholder that can be empty — in a step.** An empty cell is
 captured as the empty string, and the emptiness survives to somewhere it
@@ -993,6 +1017,13 @@ deletes or moves rows, every row below the change has a different number from
 that pass on — so for a table you change as you go, re-find by a value, or use
 `Repeat … until` so each pass reads the page as it is now.
 
+The read also leaves that numbering on the page: every data row of the table
+it read carries `data-aiui-row="N"`, the same N as the record's `_row`, and a
+later step's "row 7 of the …" resolves through that attribute rather than
+through counting or an element id. You never write it — it is there so that
+"row 7" means the seventh row of DATA and not the seventh `<tr>`, on a grid
+whose own row ids happen to start at zero.
+
 `_row` counts **data rows**: hidden rows and full-width message or group rows
 are excluded and consume no number. The model is told to count the same way
 when a step says "row 3", so on most tables the two agree — but one is a
@@ -1031,6 +1062,50 @@ has a trap in it — a "Loading…" row is such a message, so a read that lands 
 one truthfully stores `[]` and the test goes wrong later, somewhere else. The
 read does not wait; you do, on the line before it (§3.1).
 
+**Grids with no `<table>` in them.** A MUI DataGrid, an ag-Grid and most of
+what a modern component library calls a grid contain no `<table>`, `<tr>` or
+`<td>` at all — they are `<div>`s carrying `role="grid"`, `role="row"`,
+`role="columnheader"` and `role="gridcell"`, which is what makes them tables to
+a screen reader. `role="table"` and `role="treegrid"` read the same way; a
+`treegrid` reads flat, every rendered row a data row, with no notion of which
+rows are under which. They are tables here too, and you write exactly the same
+sentence for one as for a `<table>`: name the grid, name the columns by their
+heading text, and `_row` numbers the data rows as always. Two things that look
+like they should matter do not. `aria-rowindex` is *not* `_row` — it counts the
+header, and a filter that hides rows does not renumber it — so
+`row {{a._row}}` is still the position among the rows the read captured. And a
+**pinned** (frozen) column is not a column that renders first: it is a second
+`role="row"` element in another container holding that row's first cells, and
+the runtime joins the two halves back into one record by their shared row
+index. `table-aria-grid.md` is the worked example of both.
+
+**When the shape defeats the rules, the model is asked once.** There is a long
+tail no structural rule reads: headings written as `<td>` in the first body
+row, a header table sitting *after* its rows, a list of repeated cards with no
+rows or cells anywhere, one small key/value table per record. When a read fails
+for a **shape** reason — no table or grid with rows under the selector, two or
+more, or column names requested with no header found — the runtime shows the
+model a sketch of that region, asks one question about how it is laid out,
+validates the answer against the live page, and then reads deterministically.
+You write the ordinary sentence and it works; what it costs is one model call,
+once. Once means once: a structure is asked about at most once per run per
+table-and-columns, so a later step reading the same thing reuses the answer
+(`readTable: structure reused from step 2` in the log), and the answer is
+written onto the cached step as well, so later runs of the file ask nothing at
+all. In the run log the question is the line
+`readTable: structure asked of the model — …`, with the sketch and the answer
+beside it at debug level, and its absence on a repeat read is how you check the
+remembering is doing its job. Nothing is taken on trust either way: a
+remembered or cached mapping is checked against the live page before a cell is
+read, and a page that has changed falls back to asking again. Two things it deliberately is not: it is never asked
+about *your* mistakes — a header you spelled wrong, a short row, a selector
+matching several tables keep the refusals below — and it can be turned off
+entirely with `tableStructure: strict` in the `## Config` block (or
+`"tables": { "structure": "strict" }` in `aiui.config.json` for a whole
+project), which makes the shape refusal stand as the step failure. Use it when
+a run must never spend a model call nobody planned. `table-odd-shapes.md` is
+the worked example.
+
 **What is refused, loudly.** Each of these fails the step rather than
 returning plausible data. Most of the messages name the table — by its
 `aria-label` or `<caption>`, then the grid's name where the header and the
@@ -1041,14 +1116,14 @@ columns — the maximum is 20`, which are about the selector and the step:
 
 | The table | Why it is refused |
 | --- | --- |
-| A merged header or cell (`rowspan`/`colspan` > 1) | The logical grid would have to be guessed. The full-width message row above is the one exception. |
-| A `<thead>` with more than one row | Same reason, and it is usually the merged case dressed differently. v1 maps exactly one header row. |
-| Two columns with the same header, or a header you named that is not there | An ambiguous or missing match is never resolved by proximity; the message lists the headers the table does have. |
-| A selector matching more than one visible table, or none | Picking one of several would be the misalignment the action exists to prevent. Scope the selector. |
+| A merged DATA cell (`rowspan`/`colspan` > 1 in a body row) | The logical grid would have to be guessed. Headers are not this case: a header of several rows — a band row over groups of columns, a filter row — is laid out, and each column takes the lowest heading over it. Two body rows are exceptions: the full-width message row above, and the detail row a grid inserts under a record you expanded. |
+| Two columns with the same header, or a header you named that is absent from a header the table HAS | An ambiguous or missing match is never resolved by proximity; the message lists the headers the table does have. The structure question is never asked here: the shape was decided, and the name is yours. |
+| A header name against a table with no header anywhere — no header row of its own, and none in a table beside it | The one missing-header case that is a *shape* reason, so it is where the structure question fires. With the question turned off, the refusal tells you to name the columns by position instead. |
+| A selector matching more than one visible table, or none | Picking one of several would be the misalignment the action exists to prevent. Scope the selector — the structure question is not asked for this one either, since which element you meant is not something a sketch of it can answer. |
 | No cell at a column's resolved position, in a row the read returned | Dropping the row or shifting the values is how misalignment happens. Checked on the rows the read returns, so a ragged row past your first-N bound is a row nobody asked for and does not fail anything. |
 | More than 500 visible rows with no first-N bound | A silently truncated business table reads as a complete one. |
 | More than 20 columns in one step | Read what the test checks. |
-| `<div role="grid">`, ag-grid, a card list, a table that becomes cards at a phone viewport | Native `<table>` elements only. |
+| A region holding both a `<table>` with rows and an ARIA grid with rows | Two things with rows under one selector: which one you meant cannot be guessed. Scope the selector, or let the structure question above name the one you meant. |
 | A column read as a control's state (a checkbox's tick, an input's value) | Phase 2. Refused by name rather than storing the empty string such a cell renders as. |
 
 **Not yet.** Reading a cell's *control* rather than its text — a checkbox's
@@ -1079,16 +1154,21 @@ variables, and `{{order.address.city}}` is not a reference — one property
 segment, and no deeper. A dotted name with no value fails the step before the
 model is asked, and says which properties the record does have.
 
-Running versions of all of it ship in `templates/init/tests/`: the nine
+Running versions of all of it ship in `templates/init/tests/`: the twelve
 `table-*.md` files tagged `table-read` cover headers and reordering
 (`table-orders.md`), the first-N bound (`table-orders-limit.md`), positions,
 duplicates and `_row` (`table-payments-review.md`), pagination
 (`table-statements.md`), an empty body (`table-documents-empty.md`), the
-awkward shapes (`table-structures.md`) and a grid whose header and rows are
-separate tables (`table-split-grids.md`). Each navigates straight to the page
+awkward shapes (`table-structures.md`), a grid whose header and rows are
+separate tables (`table-split-grids.md`), a Telerik RadGrid — three
+tables in one box, a banded header with a filter row, and a pager
+(`table-radgrid.md`), two grids with no `<table>` in them, one of them with a
+pinned column (`table-aria-grid.md`), and the four shapes only the structure
+question reads (`table-odd-shapes.md`). Each navigates straight to the page
 it needs in the fixture app — `structured-orders.html` and
 `structured-orders-many.html`, `scheduled-payments.html`, `statements.html`,
-`documents.html`, `table-edge-cases.html`, `split-grids.html`.
+`documents.html`, `table-edge-cases.html`, `split-grids.html`,
+`radgrid.html`, `aria-grid.html`, `odd-tables.html`.
 `fixtures/test-app/tables.html`
 indexes them all and is the page to open by hand when you want to see what a
 test is reading.

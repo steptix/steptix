@@ -450,6 +450,35 @@ describe('hooks around a return', () => {
     expect(report.status).toBe('passed');
   });
 
+  // SPEC-structured-table-reads.md §7.10: ONE structure question per
+  // structure per RUN. The memo is the layer that makes that true across
+  // STEPS (the step cache is keyed per line and answers only for the same
+  // line of the same file), and it is keyed by the region and the columns
+  // asked of it — not by where the read sits. So a `before` hook that reads a
+  // legacy grid to establish a starting state, and step 1 that reads the same
+  // grid, are one structure and must cost one question; the hook call site
+  // was the one that passed no memo, so they cost two.
+  it('gives a hook step the same run-wide structure memo as an ordinary step', async () => {
+    hooksStub = {
+      ...emptyHooks(),
+      hasAny: true,
+      before: ['read the holdings grid'],
+      afterEach: ['snapshot the page'],
+      toolCalls: { before: [null], beforeEach: [], afterEach: [null], after: [] },
+      sourceSkills: { before: [null], beforeEach: [], afterEach: [null], after: [] },
+    };
+    respond({});
+
+    await runTest(await instanceOf('hookmemo.md', doc), makeConfig());
+
+    const memos = executeStepCalls.map((c) => c.opts['structureMemo']);
+    // Every call has one...
+    expect(memos.every((m) => m instanceof Map)).toBe(true);
+    // ...and it is the SAME one. A memo per call site would be a memo per
+    // step, which is what the cache already is.
+    expect(new Set(memos).size).toBe(1);
+  });
+
   it('fails the hook when a flow-control line reaches a hook scope anyway', async () => {
     // `## Hooks` and project `defaultHooks` are refused earlier; this is the
     // backstop for a hook that arrived some other way (decision 8).

@@ -174,6 +174,25 @@ function parseWithUploadPathRepair(jsonString: string): unknown {
   }
 }
 
+/**
+ * Has the "a model emitted `mapping`" warning been written this PROCESS?
+ *
+ * Per process, not per run, and the difference is real: a Sessions API server
+ * runs every test in one process, so the first emitted `mapping` uses the
+ * warning up for the life of that server. See the comment at the check itself
+ * for why that is accepted and what is logged per occurrence instead.
+ *
+ * Exported only so a test can reset it — there is no way to observe such a
+ * latch from outside otherwise, and a test that ran second would assert on a
+ * warning the first test had already used up.
+ */
+let warnedAboutEmittedMapping = false;
+
+/** Reset the once-per-process `mapping` warning. Tests only. */
+export function resetEmittedMappingWarning(): void {
+  warnedAboutEmittedMapping = false;
+}
+
 // ── readTable validation (SPEC-structured-table-reads.md §6.2) ──────────────
 //
 // Every rule here rejects the WHOLE action. That is the one design decision
@@ -620,6 +639,45 @@ function parseAction(raw: unknown, index: number): AIAction {
     action: actionType as ActionType,
     description,
   };
+
+  // `mapping` is RUNTIME-OWNED and is dropped here, whatever the model emits
+  // and on whatever action (SPEC-structured-table-reads.md §6.1/§7.10).
+  //
+  // Dropping it is not a courtesy: a mapping is only legal after the runtime
+  // has validated it against the live page, and one arriving from a plan has
+  // been validated against nothing. Copied through, it would pin a `readTable`
+  // to a table the model believes is there and then be written into the step
+  // cache as if it had been proved — a wrong read that replays forever with no
+  // model call left to notice it. The field never appears in any prompt, so an
+  // emitted one is a hallucination by construction.
+  //
+  // Nothing below copies it, so this is only the WARNING — and the latch on it
+  // is once per PROCESS, which is worth being honest about rather than calling
+  // it once per run.
+  //
+  // For the CLI the two are the same thing: one process runs one test. For the
+  // Sessions API server they are not. That process outlives every run on it,
+  // so the first model that emits a `mapping` uses the warning up and the
+  // hundredth run's is silent. That is accepted rather than unnoticed: the
+  // field appears in no prompt, so an emitted one is a hallucination by
+  // construction and nothing downstream is affected either way — the parser
+  // has already refused to copy it. Making it per-run would mean threading a
+  // run identity into a pure parser to improve a line nobody acts on.
+  //
+  // What the latch must not do is lose the EVIDENCE, so every occurrence is
+  // logged at debug, where a per-action line costs nothing and a test that
+  // reads a table in a loop is not buried.
+  if (obj['mapping'] !== undefined) {
+    const ignored =
+      `Ignoring "mapping" on a ${actionType} action at index ${index} — a table read's `
+      + 'mapping is written by the runtime after it has been validated against the page, '
+      + 'never by the model (SPEC-structured-table-reads.md §7.10).';
+    logger.debug(ignored);
+    if (!warnedAboutEmittedMapping) {
+      warnedAboutEmittedMapping = true;
+      logger.warn(ignored);
+    }
+  }
 
   // Optional fields — only add if present
   if (typeof obj['selector'] === 'string') action.selector = obj['selector'];

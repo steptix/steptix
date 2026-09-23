@@ -18,6 +18,8 @@ import {
   resolveViewportSpec,
   viewportCdpConflictError,
 } from '../config/viewport.js';
+import { resolveTableStructure, tableStructureOf } from '../config/table-structure.js';
+import { createStructureMemo } from '../runner/structure-memo.js';
 import type { LoopMarker, StepResult, TestReport } from '../report/types.js';
 // From report/TYPES, deliberately — not report/generator.js, which a dozen
 // api-server suites replace wholesale with a three-export `vi.mock`.
@@ -193,6 +195,13 @@ export interface StepRequest {
      *  Only the prompt's `## Values` block reads it; report and log masking are
      *  untouched. */
     unmask?: string;
+    /** Raw `## Config: tableStructure:` — `ask` (default) or `strict`
+     *  (docs/specs/SPEC-structured-table-reads.md §7.10). Read per BATCH, like
+     *  `unmask` and unlike `viewport`: it decides nothing about the browser,
+     *  so there is no launch to anchor it to, and layering it over the
+     *  project's `tables.structure` per batch is what makes a test's own key
+     *  win on a server serving several projects. */
+    tableStructure?: string;
     cdp?: { port: number; tab?: string; profile?: string };
   };
   steps: string[];
@@ -3338,12 +3347,24 @@ export class SessionManager {
     // never got a browser), so this cannot fail, and one source of truth beats
     // two fields that can drift.
     const sessionViewport = resolveViewportSpec(session.sessionConfig.viewport);
-    const runConfig = sessionViewport
-      ? {
-          ...resolvedSettings.config,
-          browser: { ...resolvedSettings.config.browser, fixedViewport: sessionViewport },
-        }
-      : resolvedSettings.config;
+    // Structured table reads (SPEC-structured-table-reads.md §7.10). The test's
+    // `## Config: tableStructure:` over the PROJECT's `tables.structure` —
+    // `projectConfig`, never `this.config`. `resolvedSettings.config` is spread
+    // from the SERVER's startup config, so reading `tables` off it would give
+    // every project the server's own answer and silently ignore the
+    // `aiui.config.json` sitting beside the test (the same trap `browserConfig`
+    // above is a note about).
+    const tableStructure = resolveTableStructure(
+      request.config?.tableStructure,
+      tableStructureOf(projectConfig),
+    );
+    const runConfig: Config = {
+      ...resolvedSettings.config,
+      ...(sessionViewport
+        ? { browser: { ...resolvedSettings.config.browser, fixedViewport: sessionViewport } }
+        : {}),
+      tables: { ...resolvedSettings.config.tables, structure: tableStructure },
+    };
     session.lastEffectiveSettings = resolvedSettings.effective;
     let envDataCtx: EnvDataContext | null = projectBundle.envBundle
       ? {
@@ -3946,6 +3967,18 @@ export class SessionManager {
     // `fullSteps`, so skill body steps lose per-step caching there too.
     const isSubsetBatch =
       request.fullSteps !== undefined && !arraysEqual(request.steps, request.fullSteps);
+    // What this run learns about a region's structure, once
+    // (SPEC-structured-table-reads.md §7.10, src/runner/structure-memo.ts).
+    // Per BATCH, the same lifetime `stepCache` has: a batch is what the server
+    // knows about, and a run split by a breakpoint or an `[input:]` simply
+    // asks once more on the far side rather than reusing an answer from
+    // before a pause the user may have spent editing the page.
+    //
+    // Deliberately NOT gated by `cacheEnabledForRequest`: that switch is about
+    // replaying a frozen action plan, and this is about not asking the same
+    // structural question twice in one run. A run with the cache off still
+    // asks once.
+    const structureMemo = createStructureMemo();
     let stepCache: StepCache | undefined;
     if (cacheEnabledForRequest && request.testFilePath) {
       // Reuse the project root already resolved for the env/data bundle (it was
@@ -5459,6 +5492,9 @@ export class SessionManager {
               // spread as the `evaluateGuard` call below.
               ...(envDataCtx && { envData: envDataCtx }),
               ...(unmaskNames.size > 0 && { unmask: unmaskNames }),
+              // The branch's matched step runs through `executeStep` like any
+              // other, so it shares this run's structure memo (§7.10).
+              structureMemo,
               ...(signal && { signal }),
             });
           } catch (err) {
@@ -6261,6 +6297,7 @@ export class SessionManager {
                 pageTracker: session.browserSession!.pageTracker,
                 browserTracker: session.browserTracker,
                 ...(stepCache && { stepCache }),
+                structureMemo,
                 cacheEnabled:
                   cacheEnabledForRequest &&
                   !!stepCache &&

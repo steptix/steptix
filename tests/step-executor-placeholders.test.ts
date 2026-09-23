@@ -998,6 +998,44 @@ describe('the walk and the copy', () => {
       ),
     ).toBeUndefined();
   });
+
+  it('refuses a `${name}` this run KNOWS, with no environment, as the wrong braces', () => {
+    // Measured (SPEC-structured-table-reads §6.3, §10): a click action with
+    // `selector: "#RadGrid1_ctl00__${item._row} input[value=Review]"` reached
+    // Playwright as written, because `${…}` was only ever checked against an
+    // environment and this test had none. The name is a loop binding, so the
+    // model meant `{{…}}` and the turn is refused with that correction.
+    expect(
+      checkTurnReferences(
+        [{
+          action: 'click',
+          selector: '#RadGrid1_ctl00__${item._row} input[value=Review]',
+          description: 'Click Review',
+        }],
+        { known: new Set(['item', 'item._row', 'item.applicant']) },
+      ),
+    ).toBe(
+      'Step refused before any action ran: the "click" action ("Click Review") wrote '
+      + '`${item._row}` in "selector". `${…}` names an environment or data value; '
+      + '`item._row` is a parameter or captured variable of this run, so write it as '
+      + '`{{item._row}}`.',
+    );
+    // The same, differing only in case — what `${Item._Row}` meant.
+    expect(
+      checkTurnReferences(
+        [{ action: 'type', value: '${Item._Row}', description: 'Type' }],
+        { known: new Set(['item._row']) },
+      ),
+    ).toContain('so write it as `{{item._row}}`.');
+    // And a name this run does not know is still left alone: a literal
+    // `${data.x}` typed into a code editor is a legitimate value.
+    expect(
+      checkTurnReferences(
+        [{ action: 'type', value: 'literally ${data.x}', description: 'Type' }],
+        { known: new Set(['item._row']) },
+      ),
+    ).toBeUndefined();
+  });
 });
 
 /**

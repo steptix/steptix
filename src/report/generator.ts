@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import Handlebars from 'handlebars';
 import type { TestReport, StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData, FailureDiagnosis, AssertionResult } from './types.js';
+import type { AIAction } from '../ai/types.js';
 import { getAllAiInteractions, isHealedStep } from './types.js';
 import { getReportTemplate } from './template.js';
 import { toDataUri } from '../browser/screenshot.js';
@@ -1123,8 +1124,16 @@ function renderSubAction(sub: SubActionResult): string {
       ? `<div class="sub-action-detail">${uploadPaths.length === 1 ? 'file' : 'files'}: `
         + `${escapeHtml(uploadPaths.join(', '))}</div>`
       : '';
+  // How a `readTable` was read when structure alone could not decide it
+  // (docs/specs/SPEC-structured-table-reads.md §7.10, "Log and report"). The
+  // mapping is the runtime's own answer, validated against the page and stored
+  // in the step cache — so without this line a report of a run over an odd
+  // grid shows a read that "just worked" and no way to see which table it
+  // actually read or which row it took the names from. The one place a stale
+  // cached mapping is visible after the fact.
+  const mappingHtml = describeTableMapping(sub.action.mapping);
   const hasBody = sub.screenshotBase64 || sub.domSnapshot || sub.aiReasoning || sub.error || sub.apiCallData
-    || uploadHtml !== '';
+    || uploadHtml !== '' || mappingHtml !== '';
 
   const subUrlHtml = sub.pageUrl ? `<div class="screenshot-url">${escapeHtml(sub.pageUrl)}</div>` : '';
   const screenshotHtml = sub.screenshotBase64
@@ -1168,8 +1177,38 @@ function renderSubAction(sub: SubActionResult): string {
     <span class="sub-action-desc">${escapeHtml(description)}</span>
     ${timeLabel}
   </div>
-  ${hasBody ? `<div class="sub-action-body">${uploadHtml}${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
+  ${hasBody ? `<div class="sub-action-body">${uploadHtml}${mappingHtml}${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
 </div>`;
+}
+
+/**
+ * The `mapping` a `readTable` carries, in one line.
+ *
+ * Deliberately the SHAPE, not the JSON: "rows `#late-header-rows`, header row
+ * 1 of `#late-header-head`" is what a reader can check against the page, and a
+ * pretty-printed object of the same three strings is not. Absent mapping —
+ * every ordinary read — renders nothing at all, so a report of a run that met
+ * no odd grid is byte-identical to one written before this existed.
+ */
+function describeTableMapping(mapping: AIAction['mapping']): string {
+  if (!mapping) return '';
+  const parts: string[] = [];
+  if (mapping.kind === 'table') {
+    parts.push(`rows: ${mapping.rows}`);
+    if (mapping.header) {
+      parts.push(
+        `header: ${mapping.header.selector}`
+        + (mapping.header.bodyRow !== undefined ? ` (body row ${mapping.header.bodyRow})` : ''),
+      );
+    }
+  } else {
+    parts.push(`item: ${mapping.item}`);
+    for (const [key, selector] of Object.entries(mapping.fields)) {
+      parts.push(`${key}: ${selector}`);
+    }
+  }
+  return `<div class="sub-action-detail">structure (${escapeHtml(mapping.kind)}) — `
+    + `${escapeHtml(parts.join('; '))}</div>`;
 }
 
 function renderApiCallData(data: ApiCallData): string {

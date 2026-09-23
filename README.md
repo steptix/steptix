@@ -471,6 +471,12 @@ since the bound and the row numbers are the record's own.)
 2. Verify the row for "{{order.id}}" shows "{{order.status}}"
 ```
 
+A grid built from `<div>`s with `role="grid"` reads exactly like a
+`<table>` — same sentence, same header names — and a layout no structural
+rule can read (headings written as ordinary cells, a card list, one small
+table per record) is settled by asking the model one question about the
+region's structure, which is then validated, cached and never asked again.
+
 Columns are located by header text, so reordering the table changes nothing;
 a table with no header names them by position instead (`the 1st column as
 payee`). Every record also carries `{{order._row}}`, its one-based row number,
