@@ -5,6 +5,18 @@ timeout: 600s
 
 # PDF — save it to a temp folder through the native Save As dialog
 
+> **Status: not yet passing live** (2026-09-23, spec §14). Two things about
+> Chrome stand in the way, neither of them about the computer surface. Under
+> a Playwright-launched Chromium the native Save As dialog can never appear,
+> because Playwright routes every download to its own folder with no file
+> chooser — so this test must run in a real Chrome attached over CDP
+> (session `config.cdp`, launched with `POST /cdp/browsers`). And even there,
+> with "Ask where to save each file before downloading" turned on (run
+> [chrome-ask-where-to-save.md](chrome-ask-where-to-save.md) first — it does
+> that on the computer surface), the viewer's "Save as..." still saved
+> silently in the measured run. The step list below is the intended shape;
+> steps 1–5 pass, step 6 is where it waits for a window that does not come.
+
 The second half of [docs/specs/SPEC-use-computer.md](../../../docs/specs/SPEC-use-computer.md)
 §7, and the harder one. Its sibling
 [pdf-print-cancel.md](pdf-print-cancel.md) opens a dialog and closes it again,

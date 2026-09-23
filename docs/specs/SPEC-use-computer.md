@@ -599,4 +599,61 @@ giving the one-shard command.
 
 ## 14. What the live run found
 
-(Filled in after §13.2.)
+Run 2026-09-23 on the Windows 11 box (3440×1440, one display), server
+started from the user's own terminal, model `openai/gpt-5.6-luna` via the
+broker, `maxImageWidth` 1600 (so the model saw 1600×670 images).
+
+**`pdf-print-cancel.md` passed, 10/10 steps, 101 s, ~101k tokens.** Every
+computer-mode step landed first time: `focus_window`, the toolbar Print click,
+the wait for the dialog, the Cancel click, the wait for it to close, then
+`[use browser]` and a DOM assertion on the same tab. `--disable-print-preview`
+reached the Playwright launch and the dialog that appeared was the OS print
+dialog.
+
+**Pointing accuracy** at 1600 px wide on a 3440 px screen was good enough on
+every target tried — toolbar button, context-menu item, dialog Cancel button,
+a settings toggle — with no zoom needed for those. The model reached for
+`zoom` twice on its own, both times to read small text (an address bar and a
+download bubble) while diagnosing why a dialog had not appeared.
+
+**A defect the first attempt found, fixed in 7494518:** after
+`focus_window` succeeded on turn 1 the next turn showed the same step and the
+same screen with no record of the action, so the model repeated it until the
+stall detector ended the step. Each attempt now carries an "Actions already
+performed for this step" section in the step message (§5.7), and a turn that
+repeats an already-satisfied window action completes the step.
+
+**`pdf-save-as.md` is NOT proven.** Two findings, both about Chrome rather
+than the framework:
+
+1. Under a Playwright-launched Chromium the native Save As dialog cannot
+   appear: Playwright sets `Browser.setDownloadBehavior` on the context and
+   every download, including the PDF viewer's "Save as..." and Ctrl+S, is
+   routed to its own folder with no file chooser. The step 5 clicks landed
+   (the log shows the right-click and the menu item), then `wait_window
+   "Save As"` timed out fifteen turns in a row, ~195k tokens. A computer-mode
+   Save As test therefore needs a real Chrome attached over CDP
+   (`config.cdp`), which the server can launch (`POST /cdp/browsers`).
+2. Against that real Chrome the dialog still did not appear, before AND after
+   the "Ask where to save each file before downloading" setting was turned
+   on. The setting was turned on by the framework itself:
+   `templates/init/tests/chrome-ask-where-to-save.md` ran 7/7 in 60 s on the
+   computer surface alone — no browser launched, Chrome focused by title,
+   Ctrl+L, the URL typed, the toggle judged off from the screenshot by an
+   `If … then` condition and clicked, the assertion held. Why the PDF viewer
+   still saved silently in a CDP-attached Chrome is not yet understood; the
+   run was stopped by the user once the surface itself was proven. Candidates
+   to measure next: whether the CDP attach path sets a download behaviour of
+   its own, and whether the viewer's "Save as..." honours the prompt setting
+   at all.
+
+**Cost.** A computer-mode turn is one image plus a short prompt; the two
+passing tests spent ~50–100k tokens each. A step that waits for something
+that never comes spends the whole turn cap (15 turns) doing so — the cap is
+the only bound, and a `wait_window` timeout of 15 s per turn makes that a
+five-minute step. Worth a tighter per-step budget in a later version.
+
+**Tool-sandbox finding**, recorded in §5.1 item 4: everything above needed a
+server started outside this tooling; from inside it, `[use computer]` failed
+at the capture probe with the message §5.1 specifies, which is the intended
+behaviour.
