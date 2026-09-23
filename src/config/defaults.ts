@@ -41,6 +41,15 @@ export const DEFAULT_CONFIG: Config = {
       dropUnstableIds: false,
     },
   },
+  // docs/specs/SPEC-use-computer.md §5.10. Off by default and deliberately so:
+  // this is the section that decides whether a test file may move this
+  // machine's mouse (§5.1 item 1).
+  desktop: {
+    enabled: false,
+    maxImageWidth: 1600,
+    settleMs: 300,
+    reportScreenshots: true,
+  },
   tests: {
     dir: './tests',
     dataDir: 'data',

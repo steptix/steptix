@@ -14,11 +14,34 @@ import { createStructureMemo } from './structure-memo.js';
 import type { ParsedTest, TestConfig, TestInstance } from '../parser/types.js';
 import type { TestReport, StepResult, RunSummary } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
-import { aiConfigured } from '../config/loader.js';
+import { aiConfigured, useStepInHookError } from '../config/loader.js';
 import { TokenTracker } from '../utils/tokens.js';
-import { launchBrowser, closeBrowser, BrowserTracker, resolveVideoMode, finalizeMainPageVideo, type CdpLaunchOptions } from '../browser/manager.js';
+import { launchBrowser, closeBrowser, BrowserTracker, resolveVideoMode, finalizeMainPageVideo, type BrowserSession, type CdpLaunchOptions } from '../browser/manager.js';
 import { executeStep, executeBranchedStep } from './step-executor.js';
 import type { StepExecutorOptions } from './step-executor.js';
+import { parseUseStep } from '../parser/use-step.js';
+import {
+  SkillSurfaceStack,
+  computerContextFor,
+  defaultLoadDesktopAdapter,
+  defaultProbeComputerCapture,
+  enterComputerMode,
+  ensureComputerLock,
+  executeComputerStep,
+  guardVisitReadsScreen,
+  leaveComputerMode,
+  modeStepResult,
+  releaseComputerLockAtRunEnd,
+  releaseComputerLockForPause,
+  restoreCallerSurface,
+  skillFrameChain,
+  stepReadsScreen,
+  undispatchedDirectiveError,
+  undispatchedDirectiveResult,
+  type SurfaceState,
+} from './computer-step.js';
+import type { ComputerLockOptions, DesktopAdapter } from '../desktop/index.js';
+import type { VisionRouteAi, VisionRouteResult } from '../desktop/vision-route.js';
 import { identifyStepGroups } from './step-grouper.js';
 import {
   createControlState,
@@ -86,7 +109,7 @@ import { ApiResponseStore } from '../api/response-store.js';
 import { StepCache, envCacheSegment, cacheDirName } from '../cache/step-cache.js';
 import { resolveProjectRoot } from '../server/project-root.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
-import { executeToolStep } from '../tools/executor.js';
+import { executeToolStep, type ExecuteToolStepOptions } from '../tools/executor.js';
 import type { ToolCall } from '../tools/types.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
 import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
@@ -360,6 +383,23 @@ export interface RunTestExtras {
   bypassAiPolicy?: boolean;
   /** Abort signal, threaded into every step. */
   signal?: AbortSignal;
+  /**
+   * How `[use computer]` gets its adapter (SPEC-use-computer.md §5.1 item 2).
+   *
+   * The seam exists so a unit test can drive the whole mode state machine with
+   * `FakeDesktopAdapter` and never import nut.js — which is the same reason
+   * the real load is lazy: a machine with no prebuilt binary must still run
+   * every browser test. Defaults to `loadNutAdapter`.
+   */
+  loadDesktopAdapter?: () => Promise<DesktopAdapter>;
+  /** §5.1 item 4 — the one capture probe. Defaults to `probeComputerCapture`. */
+  probeComputerCapture?: (adapter: DesktopAdapter) => Promise<void>;
+  /** §5.9 — where the machine-wide computer lock lives. Overridden by tests so
+   *  they never touch the real one in `os.tmpdir()`. */
+  computerLock?: ComputerLockOptions;
+  /** §5.1 item 1b / §15.4 — the vision-route check. Overridden by tests so
+   *  they never reach the network. Defaults to `checkVisionRoute`. */
+  checkVisionRoute?: (ai: VisionRouteAi) => Promise<VisionRouteResult>;
 }
 
 /**
@@ -577,20 +617,125 @@ export async function runTest(
   // non-CDP path; the .webm is finalised + named in the `finally` below.
   const videoMode = resolveVideoMode(config.browser.video);
   const videoDir = path.resolve(config.reports.outputDir, 'videos');
-  const initialSession = await launchBrowser(config.browser, cdpOptions, {
-    videoDir,
-    // §4's provenance half. Present whenever a size is in effect, so a
-    // project-wide pin (§8) is named as such rather than looking like the
-    // test's own choice.
-    ...(config.browser.fixedViewport
-      ? { viewportSource: describeViewportSource(test.config.viewport) }
-      : {}),
+  /**
+   * The surface the next step runs on (SPEC-use-computer.md §4.5), the CLI's
+   * copy of the session's. `browser` until a `[use computer]` step lands; the
+   * launch gate below reads it, and so does the step dispatch.
+   *
+   * An OBJECT rather than a `let`, because `enterComputerMode` /
+   * `leaveComputerMode` own the transitions for both runners and need
+   * somewhere to write. One state machine, two run loops.
+   */
+  const surfaceState: SurfaceState = { surface: 'browser' };
+  /**
+   * Who holds the machine-wide computer lock for this run (§5.9).
+   *
+   * The CLI has no session id, so the test's own FILE PATH is the identity —
+   * stable across the run, unique per test, and the thing a human reading
+   * `aiui-computer.lock` would want to see. `title` is the fallback for a test
+   * parsed from a string with no file behind it.
+   */
+  const computerLockId = `cli:${test.filePath || test.title}`;
+  /** §4.5 — a skill call restores the caller's surface on return; an inline
+   *  section does not. */
+  const skillSurfaces = new SkillSurfaceStack();
+  /**
+   * `[use computer]` for this run, with everything §5.1 reads — written once,
+   * because a `[use computer]` step and a skill returning to a computer-surface
+   * caller are the same entry (§4.5).
+   */
+  const enterComputerSurface = () =>
+    enterComputerMode({
+      lockId: computerLockId,
+      // The CLI's `config` IS the project's — it was loaded from the test
+      // file's own root — so the section comes straight off it.
+      desktop: config.desktop,
+      state: surfaceState,
+      loadDesktopAdapter: extras.loadDesktopAdapter ?? defaultLoadDesktopAdapter,
+      probeCapture: extras.probeComputerCapture ?? defaultProbeComputerCapture,
+      ...(extras.computerLock && { lock: extras.computerLock }),
+      // §15.4 — `config.ai` is the very object this run's `aiClient` was built
+      // from and holds by reference; the CLI resolves no run settings and
+      // never re-points the client, so it is the route every computer-mode
+      // request goes out on. Keyless skips the check.
+      ai: keyless ? undefined : config.ai,
+      ...(extras.checkVisionRoute && { checkVisionRoute: extras.checkVisionRoute }),
+    });
+  /** Put the caller back on its surface on return from a skill: `[use
+   *  browser]`'s transition, or `[use computer]`'s through
+   *  {@link enterComputerSurface}, which can fail (`restoreCallerSurface`). */
+  const restoreSurface = (to: 'browser' | 'computer') =>
+    restoreCallerSurface(to, surfaceState, computerLockId, extras.computerLock, enterComputerSurface);
+  /**
+   * The run is about to wait for a person (§5.9): give the lock back first. A
+   * no-op off the computer surface, or before the run's first computer step.
+   * The step boundary in the loop below takes it back.
+   */
+  const releaseLockForPause = (why: string): void =>
+    releaseComputerLockForPause(surfaceState, computerLockId, extras.computerLock, why);
+  /**
+   * The initial browser, once it exists. `undefined` before the first
+   * browser-surface step — the teardown below reads it and must tolerate a run
+   * that never launched one (a desktop-only test, or a test that timed out at
+   * step 0).
+   */
+  let initialSession: BrowserSession | undefined;
+  // THE LAUNCH IS DEFERRED (§4.6): the browser opens at the first step that
+  // runs while `surface` is `browser`, not here. Base-URL navigation moved
+  // into the closure with it — it needs a page, and a `goto` rejection must
+  // close the browser it just opened rather than leak the window past the
+  // `finally`, which cannot see a session the tracker never registered.
+  const browserTracker = BrowserTracker.deferred(async () => {
+    const launched = await launchBrowser(config.browser, cdpOptions, {
+      videoDir,
+      // §4's provenance half. Present whenever a size is in effect, so a
+      // project-wide pin (§8) is named as such rather than looking like the
+      // test's own choice.
+      ...(config.browser.fixedViewport
+        ? { viewportSource: describeViewportSource(test.config.viewport) }
+        : {}),
+    });
+    try {
+      if (baseUrl) {
+        logger.info(`Navigating to base URL: ${baseUrl}`);
+        await launched.page.goto(baseUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30_000,
+        });
+      }
+    } catch (err) {
+      try {
+        await closeBrowser(launched);
+      } catch {
+        // Best-effort; the original error is the one worth reporting.
+      }
+      throw err;
+    }
+    initialSession = launched;
+    return launched;
   });
-  const browserTracker = new BrowserTracker(initialSession);
   // `session` is a *snapshot* of the current active browser — re-read from
   // the tracker before/after each step so openBrowser/switchBrowser actions
   // can transparently shift which browser subsequent steps target.
-  let session = browserTracker.getActive();
+  //
+  // Definitely-assigned rather than optional: `ensureBrowser()` below fills it
+  // before anything reads it, and every one of the ~30 `session.page` reads in
+  // this function sits downstream of a call to it. Making it `| undefined`
+  // would put a `!` on all thirty and say nothing the comment does not.
+  let session!: BrowserSession;
+  /**
+   * Open the browser if this run has not yet, and refresh the `session`
+   * snapshot. The ONE place this runner launches one.
+   *
+   * Called at the top of each step (when the surface is `browser`) and at the
+   * top of a hook scope — a hook runs on the page surface by definition
+   * (§4.4), so a `before` hook is a page step for this purpose even though it
+   * is not in the step list.
+   */
+  const ensureBrowser = async (): Promise<BrowserSession> => {
+    session = await browserTracker.ensureLaunched();
+    return session;
+  };
 
   // Load the tool catalogue once per test. Node caches dynamic imports so
   // subsequent loads are cheap; failures are surfaced as a fatal startup
@@ -660,14 +805,8 @@ export async function runTest(
   let overallStatus: 'passed' | 'failed' = 'failed';
 
   try {
-    // Navigate to base URL if provided
-    if (baseUrl) {
-      logger.info(`Navigating to base URL: ${baseUrl}`);
-      await session.page.goto(baseUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30_000,
-      });
-    }
+    // (Base-URL navigation lives in the deferred launcher above — it needs a
+    // page, and there is none until the first browser-surface step.)
 
     const stepResults: StepResult[] = [];
     let timeoutDeadline = Date.now() + testTimeout;
@@ -784,11 +923,18 @@ export async function runTest(
       stepIndex: number,
     ): Promise<StepResult> => {
       const startedAt = Date.now();
-      const activePage = session.pageTracker.getActive();
+      // `session` is still unset on a computer-first run that has opened no
+      // browser (SPEC-use-computer.md §4.6), and a `[tool:]` step is dispatched
+      // on either surface. Read it the way the server's dispatch does, with
+      // `?.`: a tool that never touches the page then works, an unknown name
+      // fails with the catalogue's own message, and a tool that does need the
+      // page gets `undefined` and says so — instead of this line throwing a
+      // TypeError that ended the whole run.
+      const live = session as BrowserSession | undefined;
       const outcome = await executeToolStep(call, {
-        page: activePage,
-        context: session.context,
-        browser: session.browser,
+        page: live?.pageTracker.getActive() as ExecuteToolStepOptions['page'],
+        context: live?.context as ExecuteToolStepOptions['context'],
+        browser: live?.browser as ExecuteToolStepOptions['browser'],
         resolvedParameters,
         catalogue: toolCatalogue,
         ...(baseUrl !== undefined && { baseUrl }),
@@ -833,6 +979,13 @@ export async function runTest(
       sourceSkills: (string | null)[],
       hookIndex: number,
     ): Promise<{ failed: boolean; error?: string }> => {
+      // A hook runs on the PAGE surface by definition (SPEC-use-computer.md
+      // §4.4 refuses `[use computer]` in a hook), and `before` hooks run ahead
+      // of step 1 — so a run with hooks opens its browser here rather than at
+      // the first step. One `await` for a scope, not per hook line:
+      // `ensureLaunched` is idempotent, but saying it once is what makes the
+      // launch point readable.
+      if (instructions.length > 0) await ensureBrowser();
       for (let idx = 0; idx < instructions.length; idx++) {
         const raw = instructions[idx]!;
         const toolCall = toolCalls[idx] ?? null;
@@ -871,7 +1024,30 @@ export async function runTest(
         // flow-control line the config check never looked at. There is no flow
         // to leave from inside a hook, so the hook fails rather than guessing
         // whether it meant the hook scope, the step, or the run.
-        if (hookClaim && isReturnClaim(hookClaim)) {
+        if (parseUseStep(raw)) {
+          // SPEC-use-computer.md §4.4 — a hook runs on the page surface.
+          // Refused at parse for a `## Hooks` entry and at config load for a
+          // project default; this is the third way a hook line arrives, which
+          // neither of those sees: a `[skill: …]` named as a hook, whose body
+          // is read at run time.
+          //
+          // Read off `raw`, the AUTHORED line: `parseUseStep` normalises the
+          // `[no-hooks]` prefix itself, and an interpolated line is not one an
+          // author wrote (§4.1).
+          const error = useStepInHookError(raw, ` (${scope} hook)`);
+          logger.error(error);
+          result = {
+            index: hookIndex,
+            instruction: hookInstruction,
+            status: 'failed',
+            stepKind: 'mode',
+            turns: [],
+            durationMs: 0,
+            retried: false,
+            error,
+            aiExplanation: error,
+          };
+        } else if (hookClaim && isReturnClaim(hookClaim)) {
           const error = flowControlInHookError(hookInstruction, ` (${scope} hook)`);
           logger.error(error);
           result = {
@@ -1115,6 +1291,181 @@ export async function runTest(
         break;
       }
 
+      // ── A SKILL RETURNED: restore the caller's surface (§4.5) ───────────
+      //
+      // Before the dispatch and the launch gate both, because the surface it
+      // restores is what those two read. An inline section is deliberately
+      // absent from this: `skillFrameChain` keeps only `kind: 'skill'` frames.
+      //
+      // Going back to `computer` is `[use computer]` and can fail; that fails
+      // THIS step, the caller's first after the skill, before anything runs on
+      // it. Skipped when this step is itself a `[use …]` line, which sets the
+      // surface anyway — the server's rule, for the server's reason.
+      const restoreTo = skillSurfaces.enter(
+        skillFrameChain(test.expansion?.origins[i]?.frameId, test.expansion?.frames),
+        surfaceState.surface,
+      );
+      if (restoreTo !== null && !(restoreTo === 'computer' && parseUseStep(test.steps[i] ?? ''))) {
+        const restored = await restoreSurface(restoreTo);
+        if (!restored.ok) {
+          logger.error(`Step ${i + 1} FAILED: ${restored.error}`);
+          if (hasControls) flushSkips(i);
+          stepResults.push(
+            tagOrigin(
+              {
+                index: i + 1,
+                instruction: test.steps[i] ?? '',
+                status: 'failed',
+                turns: [],
+                durationMs: 0,
+                retried: false,
+                error: restored.error,
+                aiExplanation: restored.error,
+              },
+              i,
+            ),
+          );
+          bail = true;
+          break;
+        }
+      }
+
+      // ── THE SURFACE SWITCH (SPEC-use-computer.md §4.4, §5.1) ────────────
+      //
+      // Rung 1, with the other bracket directives, and AHEAD of the launch
+      // gate below: a test whose step 1 is `[use computer]` must not open a
+      // browser to be told it is switching away from one.
+      //
+      // Read off the AUTHORED line, before any interpolation — `parseUseStep`
+      // normalises a `[no-hooks]` prefix itself — so the surface a run drives
+      // is readable from the file.
+      const useStep = parseUseStep(test.steps[i] ?? '');
+      if (useStep) {
+        const instruction = test.steps[i] ?? '';
+        logger.step(i + 1, test.steps.length, instruction);
+        let modeResult: StepResult;
+        if (useStep.surface === 'computer') {
+          const entered = await enterComputerSurface();
+          modeResult = entered.ok
+            ? modeStepResult(i + 1, instruction, 'computer', entered.reentered)
+            : {
+                index: i + 1,
+                instruction,
+                status: 'failed',
+                stepKind: 'mode',
+                turns: [],
+                durationMs: 0,
+                retried: false,
+                error: entered.error,
+                aiExplanation: entered.error,
+              };
+          if (!entered.ok) logger.error(`Step ${i + 1} FAILED: ${entered.error}`);
+        } else {
+          const left = leaveComputerMode(surfaceState, computerLockId, extras.computerLock);
+          modeResult = modeStepResult(i + 1, instruction, 'browser', left.reentered);
+        }
+        recordLastRun(i, modeResult);
+        stepResults.push(tagOrigin(modeResult, i));
+        if (modeResult.status === 'failed') {
+          bail = true;
+          break;
+        }
+        logger.success(`Step ${i + 1} passed`);
+        tokenTracker.resetStep();
+        i = advanceAfter(i) - 1;
+        continue;
+      }
+
+      // ── THE BROWSER LAUNCH (SPEC-use-computer.md §4.6) ──────────────────
+      //
+      // Same rule as the Sessions API's: the browser opens at the first step
+      // that runs while the surface is `browser`, so a desktop-only test run
+      // from the CLI opens none. Ahead of the control-flow guard below, which
+      // reads `session.page` for its executor options — this is the earliest
+      // point in the iteration and every page read in the body is downstream
+      // of it.
+      //
+      // A launch failure is THIS STEP's failure: the run records a failed row
+      // and bails, exactly as a refused step does, rather than throwing out of
+      // `runTest` with no report.
+      if (surfaceState.surface === 'browser' && !browserTracker.hasActive()) {
+        try {
+          await ensureBrowser();
+        } catch (err) {
+          const error = `browser launch failed: ${(err as Error).message}`;
+          logger.error(error);
+          stepResults.push(
+            tagOrigin(
+              {
+                index: i + 1,
+                instruction: test.steps[i] ?? '',
+                status: 'failed',
+                turns: [],
+                durationMs: 0,
+                retried: false,
+                error,
+                aiExplanation: error,
+              },
+              i,
+            ),
+          );
+          bail = true;
+          break;
+        }
+      }
+
+      // ── THE COMPUTER LOCK (SPEC-use-computer.md §5.9) ───────────────────
+      //
+      // The server's step-boundary re-take, in the same place relative to the
+      // launch gate and the guard, through the same helpers. Within one
+      // `runTest`, being on the computer surface no longer implies holding the
+      // lock: every pause for a person — an `[input:]` prompt, an
+      // `[interactive]` or failure REPL — gives it back before it waits, and
+      // this is where the run takes it again, at the next step that reads or
+      // drives the screen. Ahead of the guard because the condition judge
+      // (§5.6) captures the screen; `stepReadsScreen` / `guardVisitReadsScreen`
+      // decide, so a `Set` or another prompt takes nothing, and a `[tool:]`
+      // line takes it — a tool can launch a program and take the front window.
+      //
+      // No opt-in check here, unlike the server's boundary: the CLI's config is
+      // loaded once per `runTest` and every run starts on the browser, so the
+      // `[use computer]` that put this run on the surface already asked it.
+      //
+      // A refusal is THIS step's failure with §5.9's message, and nothing is
+      // captured or asked of the model for it — the launch failure's shape.
+      if (
+        surfaceState.surface === 'computer' &&
+        !surfaceState.lockHeld &&
+        (hasControls && controls[i]
+          ? guardVisitReadsScreen(controls, i, controlState)
+          : stepReadsScreen(test.steps[i] ?? ''))
+      ) {
+        const taken = ensureComputerLock(surfaceState, computerLockId, extras.computerLock);
+        if (!taken.ok) {
+          const error = taken.error;
+          logger.error(`Step ${i + 1} FAILED: ${error}`);
+          if (hasControls) flushSkips(i);
+          stepResults.push(
+            tagOrigin(
+              {
+                index: i + 1,
+                instruction: test.steps[i] ?? '',
+                status: 'failed',
+                surface: 'computer',
+                turns: [],
+                durationMs: 0,
+                retried: false,
+                error,
+                aiExplanation: error,
+              },
+              i,
+            ),
+          );
+          bail = true;
+          break;
+        }
+      }
+
       // ── Control flow: a guard decides, and the planner says what follows ──
       //
       // Before the hooks, deliberately: a guard is not a page step. It never
@@ -1126,7 +1477,10 @@ export async function runTest(
       // they did not run at all.
       const controlRecord = hasControls ? (controls[i] ?? null) : null;
       if (controlRecord) {
-        session = browserTracker.getActive();
+        // Only when there IS one: on the computer surface a run may never have
+        // launched a browser (§4.6), and the judge below is handed the
+        // computer context instead of a page (§5.6).
+        if (browserTracker.hasActive()) session = browserTracker.getActive();
         const guardText = test.steps[i] ?? '';
         // `{{a.b.c}}` matches neither grammar, so it is neither substituted nor
         // warned about as unresolved — it simply reaches the judge as six
@@ -1163,7 +1517,10 @@ export async function runTest(
           // before it reaches the log or the report.
           redact: (text) => redact(text, secretsNow()),
           executorOptions: {
-            page: session.page,
+            // Absent in fact on the computer surface — see
+            // `StepExecutorOptions.page`; `evaluateConditions` branches on
+            // `computer` before it reads either of these (§5.6).
+            page: session?.page as StepExecutorOptions['page'],
             config,
             aiClient,
             contextContent,
@@ -1174,7 +1531,7 @@ export async function runTest(
             csrfTokens,
             uploadPaths,
             resolvedParameters,
-            pageTracker: session.pageTracker,
+            ...(session?.pageTracker && { pageTracker: session.pageTracker }),
             browserTracker,
             dismissalGuidance: hooks.hasAny,
             testSteps: test.steps,
@@ -1184,6 +1541,10 @@ export async function runTest(
             // prompt does (stories/placeholder-preserving-actions.md).
             ...(test.envData && { envData: test.envData }),
             ...(extras.signal && { signal: extras.signal }),
+            // §5.6 — judged from a capture of the screen, with no DOM.
+            ...(surfaceState.surface === 'computer' && surfaceState.adapter
+              ? { computer: computerContextFor(config.desktop, surfaceState.adapter) }
+              : {}),
           },
           });
         } catch (err) {
@@ -1320,6 +1681,34 @@ export async function runTest(
 
       // Check if this step is part of a conditional group
       const group = stepGroups.get(i);
+      if (group && i === group.conditionalSteps[0]!.index && surfaceState.surface === 'computer') {
+        // A watch group polls a PAGE until one of its outcomes matches, and
+        // there is no page here (§5.6 gives the computer surface the `If …
+        // then` judge and nothing else). Refused by name rather than run
+        // against `undefined`, which is what it would have been.
+        const error =
+          'a conditional watch group needs the page surface; put it before ' +
+          '`[use computer]`, or write the decision as an `If … then` line';
+        logger.error(`Step ${i + 1} FAILED: ${error}`);
+        stepResults.push(
+          tagOrigin(
+            {
+              index: i + 1,
+              instruction: test.steps[i] ?? '',
+              status: 'failed',
+              surface: 'computer',
+              turns: [],
+              durationMs: 0,
+              retried: false,
+              error,
+              aiExplanation: error,
+            },
+            i,
+          ),
+        );
+        bail = true;
+        break;
+      }
       if (group && i === group.conditionalSteps[0]!.index) {
         // Start of a conditional group — execute as branched step
         logger.info(`Conditional group detected at step ${i + 1}: ${group.conditionalSteps.length} conditional + 1 continuation`);
@@ -1431,7 +1820,10 @@ export async function runTest(
       // Refresh active session — a prior step may have switched browsers
       // via openBrowser/switchBrowser/closeBrowser. Single-browser tests
       // see exactly the same `default` session every iteration.
-      session = browserTracker.getActive();
+      //
+      // Guarded: a computer-surface run may have launched no browser at all
+      // (§4.6), and `getActive()` on an unlaunched tracker throws by design.
+      if (browserTracker.hasActive()) session = browserTracker.getActive();
 
       // The step as AUTHORED: expanded (skill renames applied) with `{{}}` and
       // `${}` tokens intact. `applyEnvDataInterpolation` validates rather than
@@ -1529,6 +1921,16 @@ export async function runTest(
             (item) => forEachPassOf(controls, controlState, item),
             (text) => redact(text, secretsNow()),
           );
+      // Read only by the branch just ahead of the computer-surface dispatch, so
+      // every earlier branch — `Set`, `[input:]`, a dispatched `[tool:]` — has
+      // already taken the steps it owns. This runner always loads a catalogue
+      // and always parses with a skills directory, so a directive that reaches
+      // that branch was dropped by whatever built `test`, and the message says
+      // so rather than blaming a missing directory.
+      const undispatchedDirective =
+        surfaceState.surface === 'computer' && !setStep && !unconditionalFlowControl
+          ? undispatchedDirectiveError(rawInstruction, { toolsLoaded: true, skillsDirSupplied: true })
+          : null;
       let stepResult: StepResult;
       let interactiveResults: StepResult[] = [];
 
@@ -1571,7 +1973,9 @@ export async function runTest(
         // The same shot a step that failed under the executor gets, on the same
         // config switch: no screenshot where every other failure has one would read
         // as a missing capture.
-        if (config.execution.screenshotOnFailure) {
+        // …when there is a page to shoot. A computer-surface run may have
+        // launched no browser at all (§4.6).
+        if (config.execution.screenshotOnFailure && browserTracker.hasActive()) {
           const shot = await captureScreenshot(session.page, config.browser.fullPageScreenshots);
           if (shot?.base64) stepResult.screenshotBase64 = shot.base64;
         }
@@ -1610,6 +2014,8 @@ export async function runTest(
         }
       } else if (inputStep) {
         const stepStartTime = Date.now();
+        // §5.9: a run waiting for a person holds no mouse lock.
+        releaseLockForPause(`[input: ${inputStep.variable}]`);
         const value = await promptUserForInput(inputStep.promptText);
         // Through the one helper, like every other write into this map: an
         // `[input: order]` after a `For each {{order}} …` is a rebind of that
@@ -1637,6 +2043,9 @@ export async function runTest(
         humanIntervened = true;
 
         const adHocResults: StepResult[] = [];
+        // §5.9: a run waiting for a person holds no mouse lock. The REPL's own
+        // commands drive the page, not the screen.
+        releaseLockForPause('[interactive]');
         const decision = await runInteractiveRepl({
           page: session.page,
           testSteps: test.steps,
@@ -1796,6 +2205,54 @@ export async function runTest(
         // [tool: ...] step — dispatch deterministic code with live page/context/browser.
         // Same path the hook executor uses; see runToolStep above.
         stepResult = await runToolStep(test.toolCalls[i]!, instruction, i + 1);
+      } else if (undispatchedDirective !== null) {
+        // SPEC-use-computer.md §5.4: a `[tool:]` / `[skill:]` line that nothing
+        // above dispatched is never handed to the computer-surface model, which
+        // would act it out on the real screen. The server's loop refuses the
+        // same, at the same point in its chain.
+        logger.error(undispatchedDirective);
+        stepResult = undispatchedDirectiveResult(i + 1, instruction, undispatchedDirective);
+      } else if (surfaceState.surface === 'computer' && surfaceState.adapter) {
+        // ── THE COMPUTER SURFACE (SPEC-use-computer.md §5.5) ───────────────
+        //
+        // Last of the dispatches, and that position is the rule: `Set`, a
+        // `[tool:]` call, a control line and an `If … then return` claim mean
+        // the same thing on either surface and keep their own branches above.
+        // What changes here is only how a PROSE step is answered — from a
+        // capture of the screen instead of a DOM.
+        //
+        // No `stepCache` and no `codeBehindOptionsFor(i)`: a cached coordinate
+        // has nothing to validate against at replay (§5.5), and a recorded one
+        // is not portable to another machine (§9).
+        stepResult = await executeComputerStep(
+          i + 1,
+          test.steps.length,
+          instruction,
+          {
+            // No browser on this surface, and possibly none in the run at all
+            // (§4.6) — see `StepExecutorOptions.page`.
+            page: undefined as never,
+            config,
+            aiClient,
+            contextContent,
+            testName: test.title,
+            ...(baseUrl !== undefined && { baseUrl }),
+            conversationHistory: [...conversationHistory],
+            apiResponseStore,
+            csrfTokens,
+            uploadPaths,
+            resolvedParameters,
+            browserTracker,
+            testSteps: test.steps,
+            ...placeholderOpts,
+            ...(test.envData && { envData: test.envData }),
+            ...(flowControlClaim && { flowControlClaim }),
+            ...(failureTail && { failureTail }),
+            ...(extras.signal && { signal: extras.signal }),
+            computer: computerContextFor(config.desktop, surfaceState.adapter),
+          },
+          rawInstruction,
+        );
       } else {
         stepResult = await executeStep(i + 1, test.steps.length, instruction, {
           page: session.page,
@@ -1869,8 +2326,10 @@ export async function runTest(
         stepResults.push(...interactiveResults);
       }
 
-      // Add to conversation history (text summary only)
-      const currentUrl = session.page.url();
+      // Add to conversation history (text summary only). Empty on the computer
+      // surface, where there is no page and often no browser (§4.6) — the
+      // history line then simply carries no URL.
+      const currentUrl = browserTracker.hasActive() ? session.page.url() : '';
       conversationHistory.push(
         formatStepHistoryEntry(
           i + 1,
@@ -1965,6 +2424,8 @@ export async function runTest(
             dismissalGuidance: hooks.hasAny,
           };
           const adHocResults: StepResult[] = [];
+          // §5.9 — the failure REPL waits for a person too.
+          releaseLockForPause('failure REPL');
           const decision = await runInteractiveRepl({
             page: session.page,
             testSteps: test.steps,
@@ -2252,7 +2713,11 @@ export async function runTest(
       !aborted &&
       !deliberateFailure &&
       config.ai.diagnoseFailures &&
-      !keyless
+      !keyless &&
+      // A diagnosis reads the page it failed on. A run that never launched a
+      // browser (§4.6) has none, and the one thing worse than no diagnosis is
+      // a crash inside the teardown that was about to write the report.
+      browserTracker.hasActive()
     ) {
       logger.info('Running failure diagnosis…');
       const diagnosis = await diagnoseFailure(report, session.page, aiClient, contextContent, {
@@ -2298,6 +2763,23 @@ export async function runTest(
 
     return report;
   } finally {
+    // The computer lock, before anything else in this teardown
+    // (SPEC-use-computer.md §5.9): held only while a run executes, so it is
+    // given back at the end of every `runTest` — pass, failure, bail, stop or
+    // throw — by the same function the server's step loop ends a batch with.
+    // First, because everything below can throw and a stranded lock stops the
+    // NEXT run on this machine dead — the one failure mode §5.9's stale-pid
+    // takeover exists to soften, not to excuse. A no-op for the runs that
+    // never took it.
+    //
+    // A data row is one `runTest`, so this releases once per row. The next
+    // row takes the lock again at its own `[use computer]`: `surfaceState` is
+    // local to this call, so every row starts on the browser surface and
+    // enters computer mode afresh. WITHIN a row the lock can still come and
+    // go — a pause for a person gives it back — and the step boundary in the
+    // loop takes it again, as the server's does.
+    releaseComputerLockAtRunEnd(surfaceState, computerLockId, extras.computerLock);
+
     // Close all tracked browsers in reverse creation order. For the
     // single-browser path (no openBrowser ever called), this is just the
     // initial session — same teardown as before. CDP sessions are handled
@@ -2310,8 +2792,13 @@ export async function runTest(
     // relative path is written back onto the hoisted `report` so the
     // already-`return`ed object carries `videoRelPath` (try/return/finally
     // same-object mutation). Recording failures never break teardown.
+    //
+    // `initialSession` is undefined when the run never launched a browser
+    // (§4.6) — a desktop-only test, or a failure before step 1. `closeAll()`
+    // over an unlaunched tracker is already a no-op, so the else arm is the
+    // right fallback, not a special case.
     const closeContext = async (): Promise<void> => {
-      if (initialSession.cdp) {
+      if (initialSession?.cdp) {
         await closeBrowser(initialSession);
       } else {
         await browserTracker.closeAll();
@@ -2319,7 +2806,10 @@ export async function runTest(
     };
     if (report) {
       const savedAbs = await finalizeMainPageVideo({
-        page: initialSession.page,
+        // `undefined` on a run that never launched (§4.6). The helper takes it
+        // optional and still runs `closeContext()`, so teardown is unchanged;
+        // there is simply no `.webm` to finalise.
+        page: initialSession?.page,
         mode: videoMode,
         passed: overallStatus === 'passed',
         videoDir,

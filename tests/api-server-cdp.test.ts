@@ -65,6 +65,16 @@ vi.mock('../src/browser/manager.js', async (importOriginal) => ({
   CdpTabNotFoundError: (await importOriginal<typeof import('../src/browser/manager.js')>())
     .CdpTabNotFoundError,
   PageTracker: vi.fn(),
+  // The 'no browser yet' sentinel (SPEC-use-computer.md §4.6). A mock of
+  // this module must export it: api-server and session-manager both do
+  // `instanceof` against it, and `instanceof undefined` throws.
+  NoBrowserLaunchedError: class NoBrowserLaunchedError extends Error {
+    constructor(message = 'no browser has been launched in this session') {
+      super(message);
+      this.name = 'NoBrowserLaunchedError';
+    }
+  },
+  NO_BROWSER_LAUNCHED_MESSAGE: 'no browser has been launched in this session',
   BrowserTracker: class {
     getActive = vi.fn();
     closeAll = vi.fn(async () => {});

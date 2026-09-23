@@ -9,6 +9,7 @@ import {
 import { isCodeStep } from '../parser/invocation-parser.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseControlLine } from '../parser/control-line.js';
+import { parseUseStep } from '../parser/use-step.js';
 import { logger } from '../utils/logger.js';
 import {
   actionsOf,
@@ -25,6 +26,7 @@ import {
   generateStepEntry,
   guardedValues,
   refuseReason,
+  SURFACE_SWITCH_NOT_COMPILED,
   stepEnvRefs,
   stepParameters,
   unresolvedRefsReason,
@@ -248,6 +250,22 @@ export const TOLERATED_CODE_BEHIND_REFUSAL =
   'the step ran as code and its failure was tolerated (otherwise continue) — the entry stands';
 
 /**
+ * A step that EXECUTED on the computer surface (SPEC-use-computer.md §9).
+ *
+ * The other half of {@link SURFACE_SWITCH_NOT_COMPILED}, and a different rule
+ * from it: that one is about the `[use …]` LINE, which performs nothing; this
+ * one is about an ordinary step that happened to run while the surface was
+ * `computer`. Its transcript is a list of screen coordinates, and a coordinate
+ * is specific to one machine's resolution, scaling and window layout — so it
+ * becomes an `ai: true` entry carrying this sentence rather than code that
+ * would click somewhere plausible and wrong on the next machine.
+ *
+ * Judged from the RUN, never from the file: a shared `### Section` or a skill
+ * body runs on whatever surface its caller was on.
+ */
+export const COMPUTER_MODE_STAYS_AI = 'computer-mode step; coordinates are not portable';
+
+/**
  * The unconditional `Return` / `Stop` / `Fail` — a line the run loops dispatch
  * with no model call at all, as they dispatch `Set`
  * (stories/step-flow-control.md, decision 3; stories/step-failure-outcomes.md,
@@ -330,6 +348,9 @@ export function generationRefusal(input: {
   deliberate?: boolean | undefined;
   fromCodeBehind?: boolean | undefined;
   codeBehindStale?: unknown;
+  /** `StepResult.surface` — which surface answered the step
+   *  (SPEC-use-computer.md §9). Absent means `browser`. */
+  surface?: 'browser' | 'computer' | undefined;
 }): string | undefined {
   // `[skill` / `[tool` calls only — `[input:]`, `[output:]` and
   // `[interactive]` DO reach generation and are declined there, with the
@@ -364,6 +385,20 @@ export function generationRefusal(input: {
   if (parseControlLine(input.text.trim())) {
     return 'a control line is dispatched, never generated';
   }
+  // A surface switch, for the third time and the same reason
+  // (SPEC-use-computer.md §9): `[use computer]` / `[use browser]` is a
+  // run-loop signal that performs nothing on any surface, so there is no
+  // transcript to generate an entry from. Belt and braces beside the two
+  // above — the run loops never offer one — but `offer` is public, and a
+  // generated entry for a `[use …]` line would replace the switch with code
+  // that acts on the surface the test was leaving.
+  if (parseUseStep(input.text)) {
+    return SURFACE_SWITCH_NOT_COMPILED;
+  }
+  // …and the other half of §9: an ORDINARY step that ran while the surface was
+  // `computer`. Ahead of the binding check, because the answer does not depend
+  // on there being a file to bind into — the step stays AI either way.
+  if (input.surface === 'computer') return COMPUTER_MODE_STAYS_AI;
   if (!input.binding) return 'the step has no code-behind file to bind into';
   if (input.status === 'skipped') return SKIPPED_BY_RETURN_REFUSAL;
   // Which of the two tolerated reasons depends on what ran it. An entry that ran
@@ -820,6 +855,7 @@ export class LiveCompiler {
       deliberate: input.result.deliberate,
       fromCodeBehind: input.result.fromCodeBehind,
       codeBehindStale: input.result.codeBehindStale,
+      surface: input.result.surface,
     });
     if (refusal !== undefined) {
       // Both "ran as code" reasons: the entry ran, so the step is one this

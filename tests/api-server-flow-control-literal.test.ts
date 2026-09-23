@@ -53,16 +53,38 @@ const mockBrowserSession = {
 
 vi.mock('../src/browser/manager.js', () => {
   class BrowserTracker {
-    getActive = () => mockBrowserSession;
+    launched: any = mockBrowserSession;
+    getActive = () => this.launched;
     getActivePage = () => mockPage;
     closeAll = async () => {};
     all = () => [];
     count = 1;
     list = () => [];
+    hasActive = () => this.launched !== undefined;
+    ensureLaunched = async () => (this.launched ??= await this.launch!());
+    launch: (() => Promise<any>) | undefined;
+    // Lazy twin of the real static (SPEC-use-computer.md §4.6): unlaunched
+    // until ensureLaunched(), which the step boundary calls.
+    static deferred(launch: () => Promise<any>): BrowserTracker {
+      const tracker = new BrowserTracker();
+      tracker.launched = undefined;
+      tracker.launch = launch;
+      return tracker;
+    }
   }
   return {
     launchBrowser: async () => ({ ...mockBrowserSession }),
     PageTracker: class {},
+    // The 'no browser yet' sentinel (SPEC-use-computer.md §4.6). A mock of
+    // this module must export it: api-server and session-manager both do
+    // `instanceof` against it, and `instanceof undefined` throws.
+    NoBrowserLaunchedError: class NoBrowserLaunchedError extends Error {
+      constructor(message = 'no browser has been launched in this session') {
+        super(message);
+        this.name = 'NoBrowserLaunchedError';
+      }
+    },
+    NO_BROWSER_LAUNCHED_MESSAGE: 'no browser has been launched in this session',
     BrowserTracker,
     briefly: async (p: Promise<unknown>, ms: number, fallback: unknown) =>
       Promise.race([p, new Promise((r) => setTimeout(() => r(fallback), ms))]),

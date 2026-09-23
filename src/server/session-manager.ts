@@ -27,10 +27,12 @@ import { isHealedStep } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
 import { aiConfigured } from '../config/loader.js';
 import { TokenTracker } from '../utils/tokens.js';
-import type { Page } from 'playwright';
+import type { Browser, BrowserContext, Page } from 'playwright';
 import {
   launchBrowser,
+  closeBrowser,
   BrowserTracker,
+  NoBrowserLaunchedError,
   resolveVideoMode,
   finalizeMainPageVideo,
   briefly,
@@ -38,7 +40,36 @@ import {
   type VideoMode,
 } from '../browser/manager.js';
 import { executeStep, executeBranchedStep } from '../runner/step-executor.js';
+import type { StepExecutorOptions } from '../runner/step-executor.js';
 import { identifyStepGroups } from '../runner/step-grouper.js';
+import { parseUseStep } from '../parser/use-step.js';
+import { matchText } from '../parser/section-match.js';
+import { parseSkillCall } from '../skills/skill-call-parser.js';
+import {
+  COMPUTER_DISABLED_MESSAGE,
+  SkillSurfaceStack,
+  computerContextFor,
+  defaultLoadDesktopAdapter,
+  defaultProbeComputerCapture,
+  enterComputerMode,
+  ensureComputerLock,
+  executeComputerStep,
+  guardVisitReadsScreen,
+  leaveComputerMode,
+  modeMarkerText,
+  modeStepResult,
+  releaseComputerLockAtRunEnd,
+  releaseComputerLockForPause,
+  restoreCallerSurface,
+  revokeComputerMode,
+  skillFrameChain,
+  stepReadsScreen,
+  undispatchedDirectiveError,
+  undispatchedDirectiveResult,
+  type SurfaceState,
+} from '../runner/computer-step.js';
+import type { ComputerLockOptions, DesktopAdapter } from '../desktop/index.js';
+import type { VisionRouteAi, VisionRouteResult } from '../desktop/vision-route.js';
 import {
   createControlState,
   firstLoopInRange,
@@ -121,6 +152,7 @@ import {
 } from '../utils/secrets.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { executeToolStep } from '../tools/executor.js';
+import type { ToolStepOutcome } from '../tools/types.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { captureScreenshot } from '../browser/screenshot.js';
@@ -545,6 +577,130 @@ export interface StepRequest {
    * `startAt`-only behaviour. Only meaningful alongside `startAt`.
    */
   endAt?: { uri: string; line: number };
+  /**
+   * This batch STARTS a run — rather than continuing one — and where in the
+   * file it starts (SPEC-use-computer.md §4.5).
+   *
+   * The server cannot tell the two apart by itself: a run reaches it as one
+   * batch or several (an `[input:]` split, a breakpoint that left Continue to
+   * send the rest), and every attempt to infer "first batch of a run" from the
+   * request's shape has been wrong (see `emitDeadSection`). Only the client
+   * knows whether Run was pressed or Continue was. And the session's surface
+   * depends on the answer: it outlives a batch so a desktop excursion survives
+   * a pause, but a run that failed or was stopped inside `[use computer]` never
+   * reached its `[use browser]` — so without this, the NEXT run's "Navigate to
+   * statement.pdf" went to the real mouse and keyboard.
+   *
+   * With it, the run starts on the surface its own file puts its first step
+   * on: the last top-level `[use …]` line in `fullSteps` above `stepIndex`
+   * (the 0-based position, in `fullSteps`, of the first step this run
+   * executes). No directive above it — which is every run from step 1 — means
+   * `browser`, and so does an absent or out-of-range `stepIndex`, or an absent
+   * `fullSteps`. The one surface this never ENTERS is `computer`: `[use
+   * computer]`'s preconditions belong to that step, so a run starting below
+   * one keeps the computer surface only if the session is already on it, and
+   * otherwise runs on the browser and says so.
+   *
+   * Absent means "this continues the run the session is in" — a Continue, a
+   * step command from a pause, the next block of a split run, a re-run of one
+   * skill step against the paused page — and every client that predates the
+   * field, and flick, whose every request continues one conversation. Those
+   * keep the surface exactly as before.
+   */
+  runStart?: { stepIndex?: number };
+}
+
+/**
+ * The surface a run that starts at `stepIndex` of `fullSteps` starts on
+ * (SPEC-use-computer.md §4.5; `StepRequest.runStart`): the surface the last
+ * line above it that switches surface leaves it on, or `browser` when there is
+ * none.
+ *
+ * Read backwards from the start step, each line in the order a step resolves
+ * (control-line.ts, "Resolution order"), asking what surface it leaves the run
+ * on ({@link surfaceEffectOf}):
+ *
+ *  - a `[use …]` line decides it;
+ *  - a section call is seen through: its body, from `sections`, read the same
+ *    way — so a desktop excursion that ends in `[use browser]` inside a
+ *    section puts the step after the call on the browser, where top-level
+ *    lines alone answered `computer` and sent that step to the real mouse;
+ *  - a skill call changes nothing: a skill hands its caller back the surface
+ *    it called from (§4.5), so the line after the call is on the caller's;
+ *  - a control line whose tail switches surface — directly or through a
+ *    section — may or may not have run. That is not guessed at: the run starts
+ *    on `browser`, and `unseen` names the line;
+ *  - anything else is prose and changes nothing.
+ *
+ * So every miss errs toward `browser`, where a desktop step can only fail. A
+ * bare-name section call arriving without `sections` cannot be told from
+ * prose, as it cannot anywhere else on the server.
+ *
+ * `directive` is the index of the line that decided it, for the log.
+ */
+export function surfaceAtRunStart(
+  fullSteps: readonly string[] | undefined,
+  stepIndex: number | undefined,
+  sections?: StepRequest['sections'],
+): { surface: SessionSurface; directive?: number; unseen?: number } {
+  if (!fullSteps || stepIndex === undefined || stepIndex <= 0 || stepIndex >= fullSteps.length) {
+    return { surface: 'browser' };
+  }
+  for (let i = stepIndex - 1; i >= 0; i--) {
+    const effect = surfaceEffectOf(fullSteps[i]!, sections, new Set());
+    if (effect === 'unknown') return { surface: 'browser', unseen: i };
+    if (effect !== 'none') return { surface: effect, directive: i };
+  }
+  return { surface: 'browser' };
+}
+
+/** How deep {@link surfaceEffectOf} follows section calls before giving up —
+ *  far past any real nesting, and a bound on a malformed request. */
+const SURFACE_SCAN_DEPTH = 32;
+
+/**
+ * The surface a line leaves a run on, for {@link surfaceAtRunStart}: the one it
+ * switches to, `none` when it cannot switch, or `unknown` when it may or may
+ * not have. `seen` holds the sections being read, so a cycle answers `unknown`
+ * rather than recursing.
+ */
+function surfaceEffectOf(
+  line: string,
+  sections: StepRequest['sections'],
+  seen: ReadonlySet<string>,
+): SessionSurface | 'none' | 'unknown' {
+  // Rung 1 — bracket directives.
+  const use = parseUseStep(line);
+  if (use) return use.surface;
+  if (isSkillCallLine(line)) return 'none';
+  // Rung 2 — the bare-name section match: the body, read backwards.
+  const key = matchText(line);
+  if (sections && Object.prototype.hasOwnProperty.call(sections, key)) {
+    if (seen.has(key) || seen.size >= SURFACE_SCAN_DEPTH) return 'unknown';
+    const inner = new Set(seen).add(key);
+    const body = sections[key]!.steps;
+    for (let i = body.length - 1; i >= 0; i--) {
+      const effect = surfaceEffectOf(body[i]!, sections, inner);
+      if (effect !== 'none') return effect;
+    }
+    return 'none';
+  }
+  // Rung 3 — a control line: its tail runs zero or more times.
+  const control = parseControlLine(line);
+  if (control) {
+    return surfaceEffectOf(control.tail, sections, seen) === 'none' ? 'none' : 'unknown';
+  }
+  return 'none';
+}
+
+/** A `[skill: …]` line, as the expander reads one — a line that names a skill
+ *  but does not parse is still one. */
+function isSkillCallLine(line: string): boolean {
+  try {
+    return parseSkillCall(line) !== null;
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -661,6 +817,22 @@ export type RunEvent =
       /** The entry threw and the step then passed under AI. Drives ⚠ and the
        *  "recompile" prompt; the file is what "Open Code-behind" opens. */
       codeBehindStale?: { file: string; error: string };
+      /**
+       * Which surface answered this step (SPEC-use-computer.md §4.5, §10.3).
+       *
+       * Additive, and safe for a client that does not know it: absence means
+       * `browser`, which is what every server said by saying nothing. A client
+       * that does know can paint a computer-mode step differently — the report
+       * does.
+       */
+      surface?: SessionSurface;
+      /**
+       * `'mode'` on a `[use …]` row (§10.1) — a step that switched surface and
+       * did nothing else: no model call, no page, no tokens. `surface` then
+       * names the surface it switched TO, and `output` carries the
+       * `→ computer` marker text a client can render as-is.
+       */
+      stepKind?: 'mode';
     }
   | {
       type: 'step:fail';
@@ -703,6 +875,12 @@ export type RunEvent =
        *  failed too. `error` is the AI failure; this is the crash that put
        *  the step on that path. */
       codeBehindStale?: { file: string; error: string };
+      /** Which surface the step was being answered from when it failed
+       *  (SPEC-use-computer.md §4.5). Additive; absence means `browser`. */
+      surface?: SessionSurface;
+      /** `'mode'` when the failing step was a `[use …]` directive — one of
+       *  §5.1's four preconditions said no, and `error` is its message. */
+      stepKind?: 'mode';
     }
   /**
    * A step that never ran because an earlier step ended the flow it was in
@@ -973,6 +1151,9 @@ export interface SessionState {
   screenshot: string;
   outputs: Record<string, string>;
   totalStepsExecuted: number;
+  /** Which surface the session's next step would be answered from
+   *  (SPEC-use-computer.md §4.5). Additive: a client that predates it ignores it. */
+  surface: SessionSurface;
 }
 
 export interface SessionListItem {
@@ -1142,22 +1323,137 @@ interface OpenCompile {
   anyFailed: boolean;
 }
 
+/**
+ * The surface a session's steps are answered from
+ * (SPEC-use-computer.md §4.5).
+ *
+ * Exported because it is the one piece of this state other layers need to
+ * name: the `[use computer]` / `[use browser]` directive sets it, the step
+ * boundary reads it to decide whether to launch a browser, and the report
+ * marks the steps that ran off-page with it.
+ */
+export type SessionSurface = 'browser' | 'computer';
+
+/**
+ * The computer surface's injectable seams (SPEC-use-computer.md §5.1, §5.9).
+ *
+ * Three things a unit test must be able to replace, and one reason for all
+ * three: none of them may touch the real machine. `loadDesktopAdapter` keeps
+ * nut.js out of the test process entirely — the same laziness §5.1 item 2
+ * requires of production, for the same reason — and `computerLock` keeps the
+ * lock file out of `os.tmpdir()`, where a stray one would break the NEXT
+ * computer-mode run on the developer's own machine.
+ */
+export interface SessionManagerDeps {
+  loadDesktopAdapter?: () => Promise<DesktopAdapter>;
+  probeComputerCapture?: (adapter: DesktopAdapter) => Promise<void>;
+  computerLock?: ComputerLockOptions;
+  /** §5.1 item 1b / §15.4 — the vision-route check, so a test never reaches
+   *  the network. Defaults to `checkVisionRoute` (src/desktop/vision-route.ts). */
+  checkVisionRoute?: (ai: VisionRouteAi) => Promise<VisionRouteResult>;
+}
+
+/**
+ * The session's surface fields, as the shared state machine reads and writes
+ * them (`SurfaceState`, src/runner/computer-step.ts).
+ *
+ * Accessors over the live session rather than a copy, and that is the whole
+ * point: `session.surface` stays the one authoritative field — the launch gate
+ * reads it, `getSession` reports it, the tests assert on it — while
+ * `enterComputerMode` / `leaveComputerMode` get something to write to. A
+ * snapshot object would have made the transition invisible to the gate two
+ * lines later.
+ */
+function surfaceStateOf(session: {
+  surface: SessionSurface;
+  computerAdapter?: DesktopAdapter | undefined;
+  computerLockHeld?: boolean | undefined;
+}): SurfaceState {
+  return {
+    get surface() { return session.surface; },
+    set surface(value) { session.surface = value; },
+    get adapter() { return session.computerAdapter; },
+    set adapter(value) { session.computerAdapter = value; },
+    get lockHeld() { return session.computerLockHeld; },
+    set lockHeld(value) { session.computerLockHeld = value; },
+  };
+}
+
 interface ManagedSession {
   id: string;
   /** The compile riding this session's run, when one is open. */
   liveCompile?: OpenCompile | undefined;
   /** Snapshot of the currently-active browser. Refreshed from `browserTracker`
    *  after every step so subsequent steps target whatever openBrowser /
-   *  switchBrowser / closeBrowser left as active. */
-  browserSession: BrowserSession;
+   *  switchBrowser / closeBrowser left as active.
+   *
+   *  `undefined` until the browser launches. The launch moved out of session
+   *  creation and onto the first step that runs while `surface` is `browser`
+   *  (SPEC-use-computer.md §4.6), so a session created for a test whose first
+   *  step is `[use computer]` holds none — and the out-of-band readers
+   *  (`getPageContent`, `activePageFor`, the listings) must answer that rather
+   *  than launch one. */
+  browserSession: BrowserSession | undefined;
   /** Owns every browser launched in this session — the initial one plus any
    *  added by `openBrowser`. Closing the session calls `closeAll()` so no
    *  named browser leaks. */
   browserTracker: BrowserTracker;
-  /** The MAIN page captured at session creation — needed to read its
+  /** The MAIN page captured at the browser launch — needed to read its
    *  `video()` handle at closeSession time, since the active page may have
-   *  shifted via openBrowser/switchBrowser. Tier 1 records the main page only. */
-  mainPage: Page;
+   *  shifted via openBrowser/switchBrowser. Tier 1 records the main page only.
+   *
+   *  `undefined` until the browser launches (§4.6); `finalizeMainPageVideo`
+   *  takes it optional for exactly that reason. */
+  mainPage: Page | undefined;
+  /**
+   * Which surface the next step is answered from (SPEC-use-computer.md §4.5):
+   * `browser` = DOM snapshot + Playwright, `computer` = a screenshot of the
+   * whole screen driven through nut.js.
+   *
+   * Session state, not file state: TestBench posts steps one request at a
+   * time, so `[use computer]` in step 1 of a file is a fact about the session
+   * from then on, not something the server could read off the document.
+   *
+   * Two things read it: the step boundary calls `ensureLaunched()` when, and
+   * only when, this says `browser` (§4.6), and the step dispatch sends a prose
+   * step to `executeComputerStep` when it says `computer` (§5.5).
+   */
+  surface: SessionSurface;
+  /**
+   * The desktop adapter this session loaded at its `[use computer]` step
+   * (SPEC-use-computer.md §5.1 item 2), for as long as it is on that surface.
+   *
+   * On the SESSION rather than on the run, for the reason `surface` is:
+   * TestBench posts steps one batch at a time, so a run that entered computer
+   * mode in batch 1 must still be on it — same adapter — when batch 2
+   * arrives. Dropped on the way back to `browser`, and at `closeSession`.
+   *
+   * The LOCK does not travel with it: see {@link computerLockHeld}.
+   */
+  computerAdapter?: DesktopAdapter | undefined;
+  /**
+   * Whether this session holds the machine-wide computer lock right now
+   * (SPEC-use-computer.md §5.9; `SurfaceState.lockHeld`).
+   *
+   * Held only while a run executes and is not waiting for a person. Released
+   * at the end of every batch — whatever ended it — in the step loop's
+   * `finally`, and taken again at the step boundary before the next step that
+   * reads or drives the screen. A session idling on the computer surface
+   * between batches (an MCP session waiting for its next call, a TestBench run
+   * stopped at a test-file breakpoint, which the client implements by ending
+   * the batch there) holds nothing, so it cannot refuse another session's
+   * computer-mode run.
+   *
+   * A pause that parks INSIDE a batch — a skill-file or section breakpoint,
+   * step mode, a tool or code-behind debugger attach — releases it too, just
+   * before it announces itself. The run is still in flight (`runsInFlight`
+   * counts it), but a run waiting for a person must not hold the machine-wide
+   * mouse lock for as long as the person takes. The cost is named: a user
+   * single-stepping a desktop test can have the lock taken by another session
+   * between two steps, and the next computer step then fails with §5.9's
+   * message rather than driving a mouse someone else is using.
+   */
+  computerLockHeld?: boolean | undefined;
   /** Resolved video-recording mode for this session (from the test's project
    *  `browser.video`). */
   videoMode: VideoMode;
@@ -1217,6 +1513,21 @@ interface ManagedSession {
    * SERVER's cleaner settings to every project but its own.
    */
   browserConfig: Config['browser'];
+  /**
+   * THIS project's `desktop` section, retained for the same reason
+   * `browserConfig` is and fixing a measured defect: `[use computer]` and the
+   * computer step's §5.10 values used to be read off `runConfig`, which
+   * `resolveRunSettings` rebuilds from the SERVER's startup config — so a
+   * project whose `aiui.config.json` said `desktop.enabled: true` was refused
+   * by a server whose own config said nothing.
+   *
+   * Seeded from the server's startup config (which carries the `enabled:
+   * false` default) so a session that never runs a batch — and a request with
+   * no `testFilePath`, whose bundle IS the server's config — behaves exactly
+   * as it did before. Overwritten with the project's values on the first
+   * batch, beside `browserConfig`.
+   */
+  desktopConfig: Config['desktop'];
   /** `cdp` is retained, not just consumed at launch: without it `list_sessions`
    *  cannot say which session is driving a persistent signed-in browser, and
    *  the answer is unrecoverable afterwards. It was always assigned here — the
@@ -1554,8 +1865,89 @@ export class SessionManager {
      *  caches — projects through the same instance. Defaulted so every existing
      *  caller keeps working unchanged. */
     private readonly projectBundles = new ProjectBundleResolver(config),
+    /** The computer surface's seams (SPEC-use-computer.md §5.1, §5.9).
+     *  Defaulted, so the only caller that passes anything is a test. */
+    private readonly deps: SessionManagerDeps = {},
   ) {
     this.config = config;
+  }
+
+  /** §5.1 item 2, with the default. */
+  private get loadDesktopAdapter(): () => Promise<DesktopAdapter> {
+    return this.deps.loadDesktopAdapter ?? defaultLoadDesktopAdapter;
+  }
+
+  /** §5.1 item 4, with the default. */
+  private get probeComputerCapture(): (adapter: DesktopAdapter) => Promise<void> {
+    return this.deps.probeComputerCapture ?? defaultProbeComputerCapture;
+  }
+
+  /**
+   * Put a session on the surface a NEW run starts on (SPEC-use-computer.md
+   * §4.5; `StepRequest.runStart`, `surfaceAtRunStart`).
+   *
+   * `browser` — every run from step 1, and every run whose file has no
+   * `[use computer]` above where it starts — leaves the computer surface the
+   * way `[use browser]` does: adapter dropped, lock released if held. The lock
+   * is not held here in practice (the last batch's `finally` gave it back), but
+   * `leaveComputerMode` releases it if so, which is what keeps "the surface
+   * went back to browser" and "the lock is free" one fact rather than two.
+   *
+   * `computer` is kept, never entered: a session already on the computer
+   * surface stays there, adapter and all, and takes the lock at its first
+   * screen step as a continuation would. A session on the browser surface
+   * stays on it — entering needs `[use computer]`'s preconditions, and they
+   * belong to that step — and the log says which line to run from instead.
+   */
+  private applyRunStartSurface(
+    session: ManagedSession,
+    sessionId: string,
+    request: StepRequest,
+  ): void {
+    const stepIndex = request.runStart?.stepIndex;
+    const start = surfaceAtRunStart(request.fullSteps, stepIndex, request.sections);
+    if (start.unseen !== undefined) {
+      logger.warn(
+        `[computer] Session "${sessionId}": this run starts at step ${stepIndex! + 1}, below step ` +
+          `${start.unseen + 1}, a control line that may switch surface — whether it did depends ` +
+          'on steps this run skips, so it starts on the browser surface',
+      );
+    }
+    if (start.surface === 'computer') {
+      if (session.surface === 'computer' && session.desktopConfig?.enabled !== true) {
+        // Kept is not re-entered, but it is not a pass either: the owner has
+        // switched computer mode off since the session got here (§5.1 item
+        // 1). The surface is left for the step boundary to give up, at this
+        // run's first step that would read or drive the screen, which it
+        // fails with the disabled message. Dropping it HERE would run that
+        // step on the browser instead, launching one for a step the file
+        // wrote for the desktop.
+        logger.warn(
+          `[computer] Session "${sessionId}": this run starts below the [use computer] at step ` +
+            `${start.directive! + 1}, but computer mode is now disabled for this project — its ` +
+            'first step that reads the screen fails, and the session goes back to the browser',
+        );
+      } else if (session.surface === 'computer') {
+        logger.debug(
+          `[computer] Session "${sessionId}": this run starts below the [use computer] at step ` +
+            `${start.directive! + 1} and stays on the computer surface`,
+        );
+      } else {
+        logger.warn(
+          `[computer] Session "${sessionId}": this run starts at step ${stepIndex! + 1}, below the ` +
+            `[use computer] at step ${start.directive! + 1}, but the session is on the browser ` +
+            `surface, so it runs there. Run from step ${start.directive! + 1} to enter computer mode.`,
+        );
+      }
+      return;
+    }
+    if (session.surface === 'computer') {
+      logger.info(
+        `[computer] Session "${sessionId}": a new run starts on the browser surface — the last ` +
+          'run ended on the computer surface without reaching a [use browser]',
+      );
+    }
+    leaveComputerMode(surfaceStateOf(session), session.id, this.deps.computerLock, { quiet: true });
   }
 
   /**
@@ -1931,12 +2323,17 @@ export class SessionManager {
       return null;
     }
 
-    const page = session.browserSession.pageTracker.getActive();
+    // A state read must not start a browser (§4.6). An unlaunched session is a
+    // real, listable session with no page — report it with empty url/title
+    // rather than throwing, which is what every other "page is in an
+    // intermediate state" case here already does.
+    const page = session.browserSession?.pageTracker.getActive();
     let currentUrl = '';
     let pageTitle = '';
     let screenshotBase64 = '';
 
     try {
+      if (!page) throw new NoBrowserLaunchedError();
       currentUrl = page.url();
       pageTitle = await page.title();
       const shot = await captureScreenshot(page);
@@ -1967,6 +2364,7 @@ export class SessionManager {
       screenshot: screenshotBase64,
       outputs: { ...session.outputs },
       totalStepsExecuted: session.totalStepsExecuted,
+      surface: session.surface,
     };
   }
 
@@ -1996,6 +2394,11 @@ export class SessionManager {
       return null;
     }
 
+    // Reading a page is not a reason to open a browser (§4.6). Distinct from
+    // the `null` above, which the route turns into a 404: "this session has no
+    // browser yet" and "this session does not exist" have opposite remedies.
+    if (!session.browserSession) throw new NoBrowserLaunchedError();
+
     const page = session.browserSession.pageTracker.getActive();
     const captured = await capturePageContent(page, session.browserConfig, opts);
 
@@ -2024,6 +2427,11 @@ export class SessionManager {
   activePageFor(sessionId: string): Page | null {
     const session = this.sessions.get(this.sessionKey(sessionId));
     if (!session || session.status === 'closed') return null;
+    // Throws rather than returning null: null already means "unknown or closed
+    // session" here, and the route answers that with a 404. A session that
+    // simply has not launched a browser yet is a different answer (§4.6) and
+    // gets its own status.
+    if (!session.browserSession) throw new NoBrowserLaunchedError();
     return session.browserSession.pageTracker.getActive();
   }
 
@@ -2187,12 +2595,14 @@ export class SessionManager {
     for (const [id, session] of this.sessions) {
       if (session.status === 'closed') continue;
 
-      const page = session.browserSession.pageTracker.getActive();
+      // `?.` — a session whose browser has not launched yet (§4.6) is still a
+      // session worth listing; it simply has no url to report.
+      const page = session.browserSession?.pageTracker.getActive();
       let currentUrl = '';
       let pageTitle = '';
 
       try {
-        currentUrl = page.url();
+        currentUrl = page?.url() ?? '';
         // page.title() is async but we need sync here; use URL as fallback
       } catch {
         // ignore
@@ -2231,10 +2641,12 @@ export class SessionManager {
 
     return Promise.all(
       live.map(async ([id, session]) => {
-        const page = session.browserSession.pageTracker.getActive();
+        // `?.` for the same reason as the sync listing above: a session that
+        // has not launched a browser yet (§4.6) still gets a row.
+        const page = session.browserSession?.pageTracker.getActive();
         let currentUrl = '';
         try {
-          currentUrl = page.url();
+          currentUrl = page?.url() ?? '';
         } catch {
           // ignore — a closed page still has a session row worth reporting
         }
@@ -2243,7 +2655,7 @@ export class SessionManager {
           briefly(
             (async () => {
               try {
-                return await page.title();
+                return page ? await page.title() : '';
               } catch {
                 return '';
               }
@@ -2254,7 +2666,7 @@ export class SessionManager {
           briefly(
             (async () => {
               try {
-                return await session.browserSession.pageTracker.activeTabRef();
+                return (await session.browserSession?.pageTracker.activeTabRef()) ?? null;
               } catch {
                 // A diagnostic field must never be the reason a listing fails.
                 return null;
@@ -2400,6 +2812,23 @@ export class SessionManager {
     // session is the only thing that still knows about it.
     await this.discardLiveCompile(session, 'the session is closing');
 
+    // §4.5 — "session close resets the surface and releases the lock". Ahead
+    // of the browser teardown, which can throw: a lock left behind refuses
+    // every computer-mode run on this machine until a stale-pid takeover or a
+    // human deletes the file, and this process is still alive, so the
+    // takeover would not fire.
+    //
+    // Usually there is no lock to release by now — every batch gives it back
+    // on its way out (§5.9) — and then this touches nothing: a closing session
+    // must not disturb a lock another session took while this one sat idle.
+    // It still matters for a close that lands while a batch is running.
+    leaveComputerMode(
+      surfaceStateOf(session),
+      session.id,
+      this.deps.computerLock,
+      { quiet: true },
+    );
+
     // closeAll covers every browser the tracker owns — the initial one plus
     // any added by openBrowser. Closing only browserSession would leak named
     // browsers from multi-browser tests.
@@ -2520,36 +2949,87 @@ export class SessionManager {
     // 'off'. Under CDP launchBrowser short-circuits before newContext, so
     // nothing records.
     const videoDir = pathJoin(reportOutputDir, 'videos');
-    // Override only `video` with the per-project record mode; the rest of the
-    // browser config stays server-global. videoDir is co-located with where
-    // reports are written (the project-anchored reportOutputDir) so the report's
-    // relative <video> link resolves.
-    const browserSession = await launchBrowser(
-      // `fixedViewport` is spread in ONLY when the test declared one, so a
-      // server (or project, §8) that pinned its own keeps it on the sessions
-      // that said nothing — which is the §1 precedence, test over project,
-      // expressed as an absence rather than an override.
-      { ...this.config.browser, video: videoMode, ...(fixedViewport ? { fixedViewport } : {}) },
-      sessionConfig?.cdp,
-      {
-        videoDir,
-        // §4's launch line: the size AND its source. Passed whenever a size is
-        // in effect at all, so a project-wide pin is named as such instead of
-        // reading like the test's own choice.
-        ...((fixedViewport ?? this.config.browser.fixedViewport)
-          ? { viewportSource: describeViewportSource(sessionConfig?.viewport) }
-          : {}),
-      },
-    );
-    const browserTracker = new BrowserTracker(browserSession);
 
-    // Everything past the browser launch can throw (notably an invalid baseUrl
-    // makes page.goto reject) — and the session isn't registered in
-    // `this.sessions` until the very end, so a throw here would orphan the
-    // just-launched browser: the caller's later closeSession(sessionId) finds
-    // nothing to close and the window leaks. Tear the browser down on any
-    // setup failure before re-throwing so the error still surfaces but no
-    // browser is left behind.
+    // THE LAUNCH IS DEFERRED (SPEC-use-computer.md §4.6). Everything the launch
+    // needs is computed HERE, at creation, and frozen into this closure — the
+    // viewport spec and its `cdp` conflict, the record mode, the videos dir.
+    // What moved is only *when* the browser appears: the first step that runs
+    // while `session.surface` is `browser`, which for every test written before
+    // computer mode is step 1. A test that opens with `[use computer]` never
+    // triggers it and never starts a browser at all.
+    //
+    // `session.browserSession` is assigned by the step boundary, not from
+    // here. What the closure DOES hold of the session is `created` below, and
+    // only to read a value that does not exist yet when this runs.
+    //
+    // `browser.launchArgs` is per PROJECT (§5.10: `--disable-print-preview` is
+    // how a test reaches the OS print dialog), and the project's config is not
+    // known at creation — the steps handler resolves the bundle and writes
+    // `session.browserConfig` before the first step, which is before this
+    // closure runs. So it is read LATE, off the session, rather than frozen
+    // from `this.config.browser` with everything else.
+    let created: ManagedSession | undefined;
+    const launcher = async (): Promise<BrowserSession> => {
+      const launchArgs = created?.browserConfig?.launchArgs ?? this.config.browser.launchArgs;
+      // Override only `video` with the per-project record mode; the rest of the
+      // browser config stays server-global. videoDir is co-located with where
+      // reports are written (the project-anchored reportOutputDir) so the
+      // report's relative <video> link resolves.
+      const launched = await launchBrowser(
+        // `fixedViewport` is spread in ONLY when the test declared one, so a
+        // server (or project, §8) that pinned its own keeps it on the sessions
+        // that said nothing — which is the §1 precedence, test over project,
+        // expressed as an absence rather than an override.
+        {
+          ...this.config.browser,
+          video: videoMode,
+          // Present only when someone configured it, so the server's own stays
+          // in force for a project that said nothing.
+          ...(launchArgs !== undefined && { launchArgs }),
+          ...(fixedViewport ? { fixedViewport } : {}),
+        },
+        sessionConfig?.cdp,
+        {
+          videoDir,
+          // §4's launch line: the size AND its source. Passed whenever a size is
+          // in effect at all, so a project-wide pin is named as such instead of
+          // reading like the test's own choice.
+          ...((fixedViewport ?? this.config.browser.fixedViewport)
+            ? { viewportSource: describeViewportSource(sessionConfig?.viewport) }
+            : {}),
+        },
+      );
+      // BASE-URL NAVIGATION MOVED HERE WITH THE LAUNCH, and so did the
+      // teardown around it. An invalid baseUrl makes `page.goto` reject, and
+      // the browser it just opened is not tracked anywhere yet — the tracker
+      // only registers the session this closure RESOLVES with — so a throw
+      // would leak the window. Close what we opened, then rethrow: the step
+      // boundary turns the rejection into that step's failure.
+      try {
+        if (sessionConfig?.baseUrl) {
+          logger.info(`Session "${sessionId}": navigating to base URL ${sessionConfig.baseUrl}`);
+          await launched.page.goto(sessionConfig.baseUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: 30_000,
+          });
+        }
+      } catch (err) {
+        try {
+          await closeBrowser(launched);
+        } catch {
+          // Best-effort cleanup; surface the ORIGINAL error to the caller.
+        }
+        throw err;
+      }
+      return launched;
+    };
+    const browserTracker = BrowserTracker.deferred(launcher);
+
+    // Nothing below launches a browser any more, so the orphaned-browser case
+    // this try/catch was written for (a throw between the launch and
+    // `this.sessions.set`) can no longer happen from the launch itself. It is
+    // kept because `closeAll()` over an unlaunched tracker is a no-op and an
+    // `openBrowser` inside a future setup step would put that case back.
     try {
       const tokenTracker = new TokenTracker();
       const aiClient = new AiClient(aiConfig, tokenTracker);
@@ -2561,26 +3041,25 @@ export class SessionManager {
         logger.info(`Session "${sessionId}": loaded ${context.files.length} context file(s)`);
       }
 
-      // Navigate to baseUrl if provided
-      if (sessionConfig?.baseUrl) {
-        logger.info(`Session "${sessionId}": navigating to base URL ${sessionConfig.baseUrl}`);
-        await browserSession.page.goto(sessionConfig.baseUrl, {
-          waitUntil: 'domcontentloaded',
-          timeout: 30_000,
-        });
-      }
+      // (baseUrl navigation lives in `launcher` above — it needs a page.)
 
       const session: ManagedSession = {
         id: sessionId,
-        browserSession,
+        // Both filled by the step boundary at the first browser-surface step.
+        browserSession: undefined,
         browserTracker,
-        mainPage: browserSession.page,
+        mainPage: undefined,
+        // Every session starts on the page (§4.5). `[use computer]` is the
+        // only thing that changes it, and it is a STEP, so it cannot have run
+        // yet.
+        surface: 'browser',
         videoMode,
         reportOutputDir,
         videoDir,
         status: 'active',
         // Startup defaults until the first batch resolves the project's own.
         browserConfig: this.config.browser,
+        desktopConfig: this.config.desktop,
         sessionConfig: sessionConfig ?? {},
         configSet: sessionConfig !== undefined,
         // Empty, not seeded from the server config: an override means "the
@@ -2604,11 +3083,16 @@ export class SessionManager {
         deadSectionsReported: new Set<string>(),
       };
 
+      // What the deferred launcher reads `launchArgs` off when it eventually
+      // runs. Assigned here rather than captured above because the closure is
+      // built before this object exists.
+      created = session;
+
       this.sessions.set(this.sessionKey(sessionId), session);
       return session;
     } catch (err) {
       logger.warn(
-        `Session "${sessionId}": creation failed after browser launch — closing the orphaned browser. ${err instanceof Error ? err.message : String(err)}`,
+        `Session "${sessionId}": creation failed — closing any browser it opened. ${err instanceof Error ? err.message : String(err)}`,
       );
       try {
         await browserTracker.closeAll();
@@ -2663,10 +3147,22 @@ export class SessionManager {
     // (stories/run-settings.md owns per-run knobs), so the `.env` value is the
     // whole story, and passing it every batch is what lets a corporate `.env`
     // edit re-point a live session instead of waiting for a recycle.
+    //
+    // `effectiveAiRoute` is the ONE object those three values are read from, so
+    // what `[use computer]` checks (SPEC-use-computer.md §15.4) is by
+    // construction what the client was just pointed at — and not
+    // `runConfig.ai`, whose `gatewayUrl` and `apiKey` are spread from the
+    // SERVER's startup config (`resolveRunSettings`) and so miss a project
+    // `.env` that routes through the Copilot bridge.
+    const effectiveAiRoute: VisionRouteAi = {
+      model: desiredModel,
+      gatewayUrl: desiredAi.gatewayUrl,
+      apiKey: desiredAi.apiKey,
+    };
     const aiChange = session.aiClient.syncAuth(
-      desiredModel,
-      desiredAi.apiKey,
-      desiredAi.gatewayUrl,
+      effectiveAiRoute.model,
+      effectiveAiRoute.apiKey,
+      effectiveAiRoute.gatewayUrl,
     );
     if (aiChange) {
       logger.info(
@@ -2991,7 +3487,23 @@ export class SessionManager {
     const projectConfig = projectBundle.config;
     // Retain the project's browser settings for out-of-band reads
     // (`getPageContent`), which have no test file to re-resolve a bundle from.
+    // It is also what the deferred launcher reads `browser.launchArgs` off at
+    // launch time — the launch happens at the first browser-surface step,
+    // which is after this line.
     session.browserConfig = projectConfig.browser;
+    // The computer surface's per-project section (§5.10), for the same reason
+    // and read by `[use computer]`, by the step boundary's opt-in check (so an
+    // owner switching `desktop.enabled` off stops a session already on the
+    // surface, §5.1 item 1) and by `computerContextFor` below. NOT off
+    // `runConfig`: that is the server's config with four values re-sourced.
+    session.desktopConfig = projectConfig.desktop ?? this.config.desktop;
+
+    // A NEW RUN STARTS ON THE SURFACE ITS FILE SAYS (SPEC-use-computer.md
+    // §4.5). Before anything reads `session.surface` — the launch gate and the
+    // step dispatch below both do — and only on a batch the client marked as
+    // the start of a run: a continuation keeps whatever surface the run it
+    // continues left it on.
+    if (request.runStart) this.applyRunStartSurface(session, sessionId, request);
 
     // This batch's run settings: server base → project bundle → the session's
     // retained overrides (stories/run-settings.md §2).
@@ -3862,6 +4374,61 @@ export class SessionManager {
     const loops = new LoopRuntime();
     const skipQueue = new SkipQueue();
     const skipReasons = new Map<number, string>();
+    /**
+     * §4.5 — a skill call restores the caller's surface on return.
+     *
+     * Per RUN rather than per session, and the corner that costs is named
+     * rather than hidden: a batch boundary INSIDE a skill body (TestBench
+     * splits a batch at an `[input:]` or a breakpoint) starts a new stack, so
+     * the surface the second batch reads as "the caller's" is whatever the
+     * skill left it on. Nothing is lost that `[use browser]` cannot restore,
+     * and the alternative — keeping the stack on the session — would key it on
+     * frame ids that are only stable while the expansion is.
+     */
+    const skillSurfaces = new SkillSurfaceStack();
+    /**
+     * `[use computer]` for this session, with everything §5.1 reads — written
+     * once, because a `[use computer]` step and a skill returning to a
+     * computer-surface caller are the same entry (§4.5).
+     */
+    const enterComputerSurface = () =>
+      enterComputerMode({
+        lockId: session.id,
+        // The PROJECT's section, stored above from the bundle this batch
+        // resolved — `runConfig.desktop` would be the server's.
+        desktop: session.desktopConfig,
+        state: surfaceStateOf(session),
+        loadDesktopAdapter: this.loadDesktopAdapter,
+        probeCapture: this.probeComputerCapture,
+        ...(this.deps.computerLock && { lock: this.deps.computerLock }),
+        // §15.4 — the route `session.aiClient` was pointed at for this batch
+        // (see `effectiveAiRoute` above). Keyless — no key, or AI forbidden by
+        // policy — skips the check: the first computer turn already fails with
+        // the message that fits the reason.
+        ai: runKeyless ? undefined : effectiveAiRoute,
+        ...(this.deps.checkVisionRoute && { checkVisionRoute: this.deps.checkVisionRoute }),
+      });
+    /** Put the caller back on its surface on return from a skill: `[use
+     *  browser]`'s transition, or `[use computer]`'s through
+     *  {@link enterComputerSurface}, which can fail (`restoreCallerSurface`). */
+    const restoreSurface = (to: 'browser' | 'computer') =>
+      restoreCallerSurface(
+        to,
+        surfaceStateOf(session),
+        session.id,
+        this.deps.computerLock,
+        enterComputerSurface,
+      );
+    /**
+     * The batch is about to wait for a person (SPEC-use-computer.md §5.9):
+     * give the computer lock back first. Called immediately before every
+     * `step:awaiting` / `*:awaiting-debugger` announcement, so by the time a
+     * client sees the pause the lock is free. Nothing is taken back on resume
+     * HERE — the step boundary below does that at the next step that reads or
+     * drives the screen. A no-op when the lock is not held.
+     */
+    const releaseLockForPause = (why: string): void =>
+      releaseComputerLockForPause(surfaceStateOf(session), session.id, this.deps.computerLock, why);
     /** Steps inside a loop body opt out of the per-step action cache: the
      *  cache rewrites one value per line and a pass is a different value
      *  (stories/control-flow.md, decision 12 — the rows story's reason). */
@@ -4710,6 +5277,218 @@ export class SessionManager {
           break;
         }
         const originalStep = effectiveSteps[i]!;
+
+        // ── A SKILL RETURNED: restore the caller's surface (§4.5) ─────────
+        //
+        // Ahead of the directive dispatch and the launch gate both, because
+        // the surface it restores is what those two read. Skill frames only:
+        // an inline section is inline by definition, and a section that
+        // switches surface is how an author writes a desktop excursion once
+        // and calls it by name.
+        //
+        // Going back to `computer` is `[use computer]` and can fail — the lock
+        // held elsewhere, the opt-in switched off. That fails THIS step, the
+        // caller's first after the skill, before anything runs on it. Skipped
+        // when this step is itself a `[use …]` line: that sets the surface
+        // anyway, and a `[use browser]` must not fail over a lock it would
+        // release on the spot.
+        const restoreTo = skillSurfaces.enter(
+          skillFrameChain(expansionOrigins?.[i]?.frameId, expandedFrames),
+          session.surface,
+        );
+        if (restoreTo !== null && !(restoreTo === 'computer' && parseUseStep(originalStep))) {
+          const restored = await restoreSurface(restoreTo);
+          if (!restored.ok) {
+            const error = restored.error;
+            const frame = frameInfoFor(i);
+            logger.error(`Session "${sessionId}" step ${i + 1} FAILED: ${error}`);
+            if (hasControls) flushSkips(i);
+            emit({ type: 'step:start', line: sourceLineFor(i), ...(frame && { frame }) });
+            emit({ type: 'step:fail', line: sourceLineFor(i), error, ...(frame && { frame }) });
+            results.push({
+              step: originalStep,
+              status: 'failed',
+              actions: [],
+              screenshot: '',
+              reasoning: error,
+              outputs: {},
+            });
+            fullStepResults.push({
+              index: i + 1,
+              instruction: originalStep,
+              status: 'failed',
+              turns: [],
+              durationMs: 0,
+              retried: false,
+              error,
+              aiExplanation: error,
+            });
+            overallStatus = 'failed';
+            errorInfo = { step: i, message: error };
+            break;
+          }
+        }
+
+        // ── THE SURFACE SWITCH (SPEC-use-computer.md §4.4, §5.1) ──────────
+        //
+        // Rung 1 with the other bracket directives, and BEFORE the launch
+        // gate below: a session whose first step is `[use computer]` must not
+        // open a browser in order to be told it is switching away from one.
+        // It never reaches a model, costs no tokens, and touches no page.
+        //
+        // Read off the AUTHORED line — `parseUseStep` normalises a
+        // `[no-hooks]` prefix itself — so the surface a run drives is
+        // readable from the file rather than assembled out of a substituted
+        // value (§4.1).
+        const useStep = parseUseStep(originalStep);
+        if (useStep) {
+          const frame = frameInfoFor(i);
+          const frameSpreadForUse: { frame?: FrameInfo } = frame ? { frame } : {};
+          if (hasControls) flushSkips(i);
+          transitionToFrame(emittedFrameId(i));
+          logger.step(
+            session.totalStepsExecuted + 1,
+            session.totalStepsExecuted + stepsTotal - i,
+            originalStep,
+          );
+          emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpreadForUse });
+
+          let modeResult: StepResult;
+          if (useStep.surface === 'computer') {
+            const entered = await enterComputerSurface();
+            modeResult = entered.ok
+              ? modeStepResult(i + 1, originalStep, 'computer', entered.reentered)
+              : {
+                  index: i + 1,
+                  instruction: originalStep,
+                  status: 'failed',
+                  stepKind: 'mode',
+                  turns: [],
+                  durationMs: 0,
+                  retried: false,
+                  error: entered.error,
+                  aiExplanation: entered.error,
+                };
+          } else {
+            const left = leaveComputerMode(
+              surfaceStateOf(session),
+              session.id,
+              this.deps.computerLock,
+            );
+            modeResult = modeStepResult(i + 1, originalStep, 'browser', left.reentered);
+          }
+
+          fullStepResults.push(modeResult);
+          results.push({
+            step: originalStep,
+            status: modeResult.status === 'failed' ? 'failed' : 'passed',
+            actions: [],
+            screenshot: '',
+            reasoning: modeResult.aiExplanation ?? '',
+            outputs: {},
+          });
+          session.conversationHistory.push(
+            formatStepHistoryEntry(
+              session.totalStepsExecuted + 1,
+              originalStep,
+              modeResult.status !== 'failed',
+              '',
+            ),
+          );
+          session.totalStepsExecuted++;
+          session.tokenTracker.resetStep();
+
+          if (modeResult.status === 'failed') {
+            logger.error(`Session "${sessionId}" step ${i + 1} FAILED: ${modeResult.error}`);
+            emit({
+              type: 'step:fail',
+              line: sourceLineFor(i),
+              error: modeResult.error ?? 'the surface switch failed',
+              stepKind: 'mode',
+              ...frameSpreadForUse,
+            });
+            overallStatus = 'failed';
+            errorInfo = { step: i, message: modeResult.error ?? 'the surface switch failed' };
+            break;
+          }
+
+          emit({
+            type: 'step:pass',
+            line: sourceLineFor(i),
+            output: modeMarkerText(useStep.surface),
+            stepKind: 'mode',
+            surface: useStep.surface,
+            ...frameSpreadForUse,
+          });
+          stepsCompleted++;
+          i = advanceAfter(i) - 1;
+          continue;
+        }
+
+        // ── THE BROWSER LAUNCH (SPEC-use-computer.md §4.6) ────────────────
+        //
+        // The one place in this server that opens a browser for a session. It
+        // is here, at the top of the step, because it must be ahead of every
+        // page capture and every `executeStep` call in this loop — and there
+        // are a dozen of those, down four branches.
+        //
+        // Deliberately NOT at session creation: TestBench posts steps one
+        // request at a time, so at creation the server cannot know whether
+        // step 1 is `[use computer]`. For every test written before computer
+        // mode this fires on step 1 and nothing observable changes but the
+        // timing of the launch.
+        //
+        // `session.surface` is always `browser` until the `[use …]` directive
+        // lands, so today this always launches — a test that never reaches a
+        // step (an empty batch) still never launches one.
+        //
+        // A failed launch is THIS STEP's failure, not a thrown batch: the
+        // author sees "step 1 failed: <the launch error>" where they used to
+        // see the same message from `POST /sessions`. `ensureLaunched` does not
+        // cache the rejection, so a retry genuinely retries.
+        //
+        // Every `session.browserSession!` in the rest of this loop body reads
+        // its non-null assertion from HERE: a browser-surface step cannot get
+        // past this block without one, and a step that failed to launch one
+        // `break`s out.
+        if (session.surface === 'browser' && !session.browserTracker.hasActive()) {
+          try {
+            const launched = await session.browserTracker.ensureLaunched();
+            session.browserSession = launched;
+            // The MAIN page is the one the FIRST launch produced — `??=`, not
+            // `=`, so a later relaunch (after `closeBrowser default`) cannot
+            // re-point the video handle at a different page.
+            session.mainPage ??= launched.page;
+          } catch (err) {
+            const error = err instanceof Error ? err.message : String(err);
+            const frame = frameInfoFor(i);
+            logger.error(`Session "${sessionId}" step ${i + 1}: browser launch failed — ${error}`);
+            emit({ type: 'step:start', line: sourceLineFor(i), ...(frame && { frame }) });
+            emit({ type: 'step:fail', line: sourceLineFor(i), error, ...(frame && { frame }) });
+            results.push({
+              step: originalStep,
+              status: 'failed',
+              actions: [],
+              screenshot: '',
+              reasoning: error,
+              outputs: {},
+            });
+            fullStepResults.push({
+              index: i + 1,
+              instruction: originalStep,
+              status: 'failed',
+              turns: [],
+              durationMs: 0,
+              retried: false,
+              error,
+              aiExplanation: error,
+            });
+            overallStatus = 'failed';
+            errorInfo = { step: i, message: error };
+            break;
+          }
+        }
+
         /** Set when this step ended its flow: the last index the return skips,
          *  which the loop tail resumes after (stories/step-flow-control.md). */
         let flowControlJumpTo: number | null = null;
@@ -4965,6 +5744,44 @@ export class SessionManager {
 
         // Check if this step is part of a conditional group
         const group = stepGroups.get(i);
+        if (
+          group &&
+          i === group.conditionalSteps[0]!.index &&
+          session.surface === 'computer'
+        ) {
+          // A watch group POLLS a page until one of its outcomes matches, and
+          // there is no page here — §5.6 gives the computer surface the
+          // `If … then` judge and nothing else. Refused by name rather than
+          // run against a `browserSession` that may not exist.
+          const error =
+            'a conditional watch group needs the page surface; put it before ' +
+            '`[use computer]`, or write the decision as an `If … then` line';
+          logger.error(`Session "${sessionId}" step ${i + 1}: ${error}`);
+          emit({ type: 'step:start', line: sourceLineFor(i) });
+          emit({ type: 'step:fail', line: sourceLineFor(i), error, surface: 'computer' });
+          results.push({
+            step: originalStep,
+            status: 'failed',
+            actions: [],
+            screenshot: '',
+            reasoning: error,
+            outputs: {},
+          });
+          fullStepResults.push({
+            index: i + 1,
+            instruction: originalStep,
+            status: 'failed',
+            surface: 'computer',
+            turns: [],
+            durationMs: 0,
+            retried: false,
+            error,
+            aiExplanation: error,
+          });
+          overallStatus = 'failed';
+          errorInfo = { step: i, message: error };
+          break;
+        }
         if (group && i === group.conditionalSteps[0]!.index) {
           logger.info(`Session "${sessionId}": conditional group at step ${i + 1}`);
 
@@ -4981,7 +5798,7 @@ export class SessionManager {
           let branchedResults: StepResult[];
           try {
             branchedResults = await executeBranchedStep(group, stepsTotal, {
-              page: session.browserSession.pageTracker.getActive(),
+              page: session.browserSession!.pageTracker.getActive(),
               // `runConfig`, not `this.config` — see the resolution above.
               config: runConfig,
               aiClient: session.aiClient,
@@ -4994,7 +5811,7 @@ export class SessionManager {
               apiResponseStore: session.apiResponseStore,
               csrfTokens: session.csrfTokens,
               resolvedParameters,
-              pageTracker: session.browserSession.pageTracker,
+              pageTracker: session.browserSession!.pageTracker,
               browserTracker: session.browserTracker,
               // The poller reads the page on every poll and sends the snapshot
               // to the model, so it needs the same secret set the step prompt
@@ -5062,7 +5879,7 @@ export class SessionManager {
 
             let currentUrl = '';
             try {
-              currentUrl = session.browserSession.pageTracker.getActive().url();
+              currentUrl = session.browserSession!.pageTracker.getActive().url();
             } catch { /* ignore */ }
 
             session.conversationHistory.push(
@@ -5161,6 +5978,9 @@ export class SessionManager {
             frameForStep.kind === 'test' && frameForStep.uri === request.testFilePath;
           if (!clientAlreadyTrimmed && stepUriBps?.has(stepLine)) {
             consumedBreakpoints.add(i);
+            // §5.9: a run parked at a breakpoint holds no mouse lock. The
+            // lock boundary just below takes it back once this step resumes.
+            releaseLockForPause(`breakpoint at line ${stepLine}`);
             emit({
               type: 'step:awaiting',
               line: stepLine,
@@ -5186,6 +6006,90 @@ export class SessionManager {
             });
             currentMode = newMode;
           }
+        }
+
+        // ── THE COMPUTER LOCK (SPEC-use-computer.md §5.9) ─────────────────
+        //
+        // The lazy twin of the browser launch above. The lock is held only
+        // while a run executes and nobody is being waited for: every batch
+        // gives it back in the `finally` below the loop, every pause for a
+        // person gives it back before it waits (`releaseLockForPause`), and
+        // the session — still on the computer surface, adapter and all — takes
+        // it again HERE, at the next step that reads or drives the screen,
+        // whether that is the first step of a later batch or the step a pause
+        // resumed on. After the breakpoint check, so a step that pauses first
+        // does not hold the mouse while it waits; ahead of the guard and every
+        // dispatch below, because the condition judge (§5.6) and
+        // `executeComputerStep` are where the screen is read. `[use computer]`
+        // re-entry takes it in `enterComputerMode`, above.
+        //
+        // What counts is `stepReadsScreen` / `guardVisitReadsScreen`: a `Set`,
+        // a whole-step `Return` / `Stop` / `Fail`, an `[input:]` /
+        // `[interactive]` line, and a guard visit that decides no condition
+        // touch no screen and take nothing. A `[tool:]` line takes it: a tool
+        // can launch a program and take the front window.
+        //
+        // The same step asks the project's opt-in first (§5.1 item 1), off
+        // `session.desktopConfig`, which this batch re-read above: an owner
+        // who switched computer mode off must stop a session already on the
+        // surface — a Continue, an MCP `run_steps`, a run started below a
+        // `[use computer]` — not only the next `[use computer]`. Refused, the
+        // session goes back to the browser (`revokeComputerMode`).
+        //
+        // A refusal is THIS step's failure with §5.1's or §5.9's message,
+        // built the way the launch failure is, and nothing is captured or
+        // asked of the model for it.
+        const readsScreenHere =
+          session.surface === 'computer' &&
+          (hasControls && controls[i]
+            ? guardVisitReadsScreen(controls, i, controlState)
+            : stepReadsScreen(originalStep));
+        let boundaryRefusal: string | undefined;
+        if (readsScreenHere && session.desktopConfig?.enabled !== true) {
+          revokeComputerMode(surfaceStateOf(session), session.id, this.deps.computerLock);
+          boundaryRefusal = COMPUTER_DISABLED_MESSAGE;
+        } else if (readsScreenHere && !session.computerLockHeld) {
+          const taken = ensureComputerLock(
+            surfaceStateOf(session),
+            session.id,
+            this.deps.computerLock,
+          );
+          if (!taken.ok) boundaryRefusal = taken.error;
+        }
+        if (boundaryRefusal !== undefined) {
+          const error = boundaryRefusal;
+          logger.error(`Session "${sessionId}" step ${i + 1}: ${error}`);
+          if (hasControls) flushSkips(i);
+          emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread });
+          emit({
+            type: 'step:fail',
+            line: sourceLineFor(i),
+            error,
+            surface: 'computer',
+            ...frameSpread,
+          });
+          results.push({
+            step: originalStep,
+            status: 'failed',
+            actions: [],
+            screenshot: '',
+            reasoning: error,
+            outputs: {},
+          });
+          fullStepResults.push({
+            index: i + 1,
+            instruction: originalStep,
+            status: 'failed',
+            surface: 'computer',
+            turns: [],
+            durationMs: 0,
+            retried: false,
+            error,
+            aiExplanation: error,
+          });
+          overallStatus = 'failed';
+          errorInfo = { step: i, message: error };
+          break;
         }
 
         // ── Control flow: the guard decides, the planner says what follows ──
@@ -5237,7 +6141,12 @@ export class SessionManager {
               // arrives as frame inputs.
               redact: (text) => redact(text, secretsNow()),
               executorOptions: {
-                page: session.browserSession.pageTracker.getActive(),
+                // Absent in fact on the computer surface, where the run may
+                // have launched no browser at all (§4.6) — see
+                // `StepExecutorOptions.page`. `evaluateConditions` branches on
+                // `computer` before it reads either of these (§5.6).
+                page: session.browserSession?.pageTracker.getActive() as
+                  StepExecutorOptions['page'],
                 config: runConfig,
                 aiClient: session.aiClient,
                 contextContent: session.contextContent,
@@ -5249,7 +6158,9 @@ export class SessionManager {
                 apiResponseStore: session.apiResponseStore,
                 csrfTokens: session.csrfTokens,
                 resolvedParameters,
-                pageTracker: session.browserSession.pageTracker,
+                ...(session.browserSession && {
+                  pageTracker: session.browserSession.pageTracker,
+                }),
                 browserTracker: session.browserTracker,
                 // The condition reaches the model AUTHORED, beside a `## Values`
                 // block, so the judge needs the same env context a step gets.
@@ -5257,6 +6168,10 @@ export class SessionManager {
                 ...(unmaskNames.size > 0 && { unmask: unmaskNames }),
                 nonInteractive: true,
                 ...(signal && { signal }),
+                // §5.6 — judged from a capture of the screen, with no DOM.
+                ...(session.surface === 'computer' && session.computerAdapter
+                  ? { computer: computerContextFor(session.desktopConfig, session.computerAdapter) }
+                  : {}),
               },
             });
           } catch (err) {
@@ -5497,6 +6412,19 @@ export class SessionManager {
             : toolCatalogue
               ? parseToolCall(originalStep)
               : null;
+        // …except on the computer surface, where that legacy fall-through is
+        // refused (SPEC-use-computer.md §5.4): a model handed `[tool: x]` as
+        // prose acts it out on the real desktop. Same for a raw `[skill: x]`,
+        // which only survives to here when nothing expanded it. Computed for
+        // the steps the branches below would otherwise send to
+        // `executeComputerStep`, and nothing else.
+        const undispatchedDirective =
+          session.surface === 'computer' && !toolCall && !setStep && !unconditionalFlowControl
+            ? undispatchedDirectiveError(originalStep, {
+                toolsLoaded: toolCatalogue !== undefined,
+                skillsDirSupplied: !!request.skillsDir,
+              })
+            : null;
         let stepResult: StepResult;
         try {
           if (unconditionalFlowControl && unconditionalFlowControl.verb === 'fail') {
@@ -5519,7 +6447,7 @@ export class SessionManager {
             if (runConfig.execution.screenshotOnFailure) {
               try {
                 const shot = await captureScreenshot(
-                  session.browserSession.pageTracker.getActive(),
+                  session.browserSession!.pageTracker.getActive(),
                   runConfig.browser.fullPageScreenshots,
                 );
                 if (shot?.base64) stepResult.screenshotBase64 = shot.base64;
@@ -5611,6 +6539,9 @@ export class SessionManager {
               // for the debugger-attach. Swallow failures — the imminent
               // executeToolStep will surface the real error as a failed step.
               const registered = await toolCatalogue.resolve(toolCall.name).catch(() => undefined);
+              // §5.9: waiting for a debugger to attach is waiting for a
+              // person. The tool takes the lock back below, before it runs.
+              releaseLockForPause(`tool debugger for ${toolCall.name}`);
               emit({
                 type: 'tool:awaiting-debugger',
                 toolName: toolCall.name,
@@ -5622,11 +6553,36 @@ export class SessionManager {
               // ack actually arrived (vs. abort) — see awaitDebuggerAck.
               pauseBeforeRun = await this.awaitDebuggerAck(session, signal);
             }
+            // §5.9 — on the computer surface a tool runs under the lock (it can
+            // launch a program and take the front window). The step boundary
+            // took it; a debugger pause just gave it back, so take it again
+            // here, and fail the step with §5.9's message rather than run the
+            // tool while another session drives the mouse.
+            const relock =
+              session.surface === 'computer'
+                ? ensureComputerLock(surfaceStateOf(session), session.id, this.deps.computerLock)
+                : { ok: true as const };
             const startedAt = Date.now();
-            const outcome = await executeToolStep(toolCall, {
-              page: session.browserSession.pageTracker.getActive(),
-              context: session.browserSession.context,
-              browser: session.browserSession.browser,
+            const outcome: ToolStepOutcome = !relock.ok ? {
+              toolName: toolCall.name,
+              args: {},
+              outputs: {},
+              durationMs: 0,
+              logs: [],
+              status: 'failed',
+              error: relock.error,
+            } : await executeToolStep(toolCall, {
+              // `?.`, not `!`: a `[tool:]` step is dispatched on either
+              // surface (§5.5 changes only how a PROSE step is answered), and
+              // a computer-mode run may have launched no browser at all
+              // (§4.6). A tool that never touches the page — the fixture
+              // `assert_file_exists` of §7, for one — then works there; a tool
+              // that does gets `undefined` and says so in its own words,
+              // rather than this line throwing a TypeError three frames away
+              // from the cause.
+              page: session.browserSession?.pageTracker.getActive() as Page,
+              context: session.browserSession?.context as BrowserContext,
+              browser: session.browserSession?.browser as Browser,
               resolvedParameters,
               catalogue: toolCatalogue,
               ...(session.sessionConfig.baseUrl !== undefined && {
@@ -5674,6 +6630,57 @@ export class SessionManager {
                 source: 'toolOutput',
               });
             }
+          } else if (undispatchedDirective !== null) {
+            // A `[tool:]` / `[skill:]` line nothing above dispatched, on the
+            // computer surface: fail it here, before any capture or model call.
+            logger.error(undispatchedDirective);
+            stepResult = undispatchedDirectiveResult(
+              effectiveSourceLines?.[i] ?? i + 1,
+              originalStep,
+              undispatchedDirective,
+            );
+          } else if (session.surface === 'computer' && session.computerAdapter) {
+            // ── THE COMPUTER SURFACE (SPEC-use-computer.md §5.5) ──────────
+            //
+            // Last of the dispatches, and that position is the rule: `Set`, a
+            // `[tool:]` call, a control line and an `If … then return` claim
+            // mean the same thing on either surface and took their own
+            // branches above. What changes here is only how a PROSE step is
+            // answered — from a capture of the screen instead of a DOM.
+            //
+            // No `stepCache` and no code-behind binding: a cached coordinate
+            // has nothing to validate against at replay (§5.5, §10.4), and a
+            // recorded one is not portable to another machine (§9).
+            stepResult = await executeComputerStep(
+              effectiveSourceLines?.[i] ?? i + 1,
+              stepsTotal,
+              stepInstruction,
+              {
+                // No page on this surface, and possibly no browser in the
+                // session at all (§4.6) — see `StepExecutorOptions.page`.
+                page: undefined as never,
+                config: runConfig,
+                aiClient: session.aiClient,
+                contextContent: session.contextContent,
+                testName: `session:${sessionId}`,
+                ...(session.sessionConfig.baseUrl !== undefined && {
+                  baseUrl: session.sessionConfig.baseUrl,
+                }),
+                conversationHistory: [...session.conversationHistory],
+                apiResponseStore: session.apiResponseStore,
+                csrfTokens: session.csrfTokens,
+                resolvedParameters,
+                browserTracker: session.browserTracker,
+                ...(envDataCtx && { envData: envDataCtx }),
+                ...(unmaskNames.size > 0 && { unmask: unmaskNames }),
+                nonInteractive: true,
+                ...(flowControlClaim && { flowControlClaim }),
+                ...(failureTail && { failureTail }),
+                ...(signal && { signal }),
+                computer: computerContextFor(session.desktopConfig, session.computerAdapter),
+              },
+              originalStep,
+            );
           } else {
             // Display/line identity: the source line in this step's own file
             // (test or skill). Drives StepResult.index and status events. NOT
@@ -5708,6 +6715,11 @@ export class SessionManager {
             // not rare: compile writes off every step it could not compile as
             // an `ai: true` entry, so real `.steps.ts` files are full of them.
             if (debugBinding?.entry && debugBinding.entry.ai !== true) {
+              // §5.9, for every wait for a person alike. A no-op today: this is
+              // the page surface's branch, and leaving the computer surface
+              // already released the lock — code-behind never binds a
+              // computer-mode step (§9).
+              releaseLockForPause('code-behind debugger');
               emit({
                 type: 'codebehind:awaiting-debugger',
                 file: debugBinding.file,
@@ -5721,7 +6733,7 @@ export class SessionManager {
               stepsTotal,
               stepInstruction,
               {
-                page: session.browserSession.pageTracker.getActive(),
+                page: session.browserSession!.pageTracker.getActive(),
                 // `runConfig`, not `this.config` — see the resolution above.
                 config: runConfig,
                 aiClient: session.aiClient,
@@ -5746,7 +6758,7 @@ export class SessionManager {
                   projectRoot: projectBundle.projectRoot,
                 },
                 resolvedParameters,
-                pageTracker: session.browserSession.pageTracker,
+                pageTracker: session.browserSession!.pageTracker,
                 browserTracker: session.browserTracker,
                 ...(stepCache && { stepCache }),
                 structureMemo,
@@ -5832,7 +6844,7 @@ export class SessionManager {
           let errorScreenshot = '';
           try {
             const shot = await captureScreenshot(
-              session.browserSession.pageTracker.getActive(),
+              session.browserSession!.pageTracker.getActive(),
             );
             errorScreenshot = shot?.base64
               ? `data:image/png;base64,${shot.base64}`
@@ -6051,7 +7063,7 @@ export class SessionManager {
         // Update conversation history
         let currentUrl = '';
         try {
-          currentUrl = session.browserSession.pageTracker.getActive().url();
+          currentUrl = session.browserSession!.pageTracker.getActive().url();
         } catch {
           // ignore
         }
@@ -6121,6 +7133,11 @@ export class SessionManager {
                 error: stepResult.codeBehindStale.error,
               },
             }),
+            // Which surface answered it (SPEC-use-computer.md §4.5, §10.3).
+            // Sent only when it was the computer, so a browser-only run's
+            // event stream is byte-identical to the one this server sent
+            // before computer mode existed.
+            ...(stepResult.surface === 'computer' && { surface: 'computer' as const }),
             ...tabAfterStep,
           });
 
@@ -6408,6 +7425,7 @@ export class SessionManager {
                 error: stepResult.codeBehindStale.error,
               },
             }),
+            ...(stepResult.surface === 'computer' && { surface: 'computer' as const }),
             ...tabAfterStep,
           });
           // The same scope snapshot the two other outcomes emit: a step that
@@ -6456,6 +7474,7 @@ export class SessionManager {
                 error: stepResult.codeBehindStale.error,
               },
             }),
+            ...(stepResult.surface === 'computer' && { surface: 'computer' as const }),
             ...tabAfterStep,
           });
           // Phase 4 — surface the scope at failure time too. The user
@@ -6532,6 +7551,10 @@ export class SessionManager {
             transitionToFrame(nextFrameId);
             const nextFrame = frameInfoFor(nextI);
             const nextLine = sourceLineFor(nextI);
+            // §5.9: a user single-stepping a desktop test holds no mouse lock
+            // between two steps. The next step takes it at the lock boundary
+            // if it reads the screen — and is refused if someone else took it.
+            releaseLockForPause(`step mode, before line ${nextLine}`);
             emit({
               type: 'step:awaiting',
               line: nextLine,
@@ -6564,17 +7587,25 @@ export class SessionManager {
         // active. If the tracker has no browsers left (closeBrowser closed
         // the only one) or the active one was disconnected by the step
         // (e.g. "Close the browser"), tear down the session.
-        let trackerEmpty = false;
-        try {
-          session.browserSession = session.browserTracker.getActive();
-        } catch {
-          trackerEmpty = true;
-        }
-        if (trackerEmpty || isBrowserClosed(session.browserSession)) {
-          logger.info(`Session "${sessionId}": browser closed by step, removing session`);
-          session.status = 'closed';
-          this.sessions.delete(this.sessionKey(sessionId));
-          break;
+        //
+        // Skipped entirely when the session has never had a browser (§4.6) —
+        // a computer-surface run that launched none. `getActive()` throws
+        // there too, but "no browser was ever opened" is not "the step closed
+        // the browser", and tearing the session down for it would end a
+        // desktop-only run at its first step.
+        if (session.browserTracker.hasActive() || session.browserSession) {
+          let trackerEmpty = false;
+          try {
+            session.browserSession = session.browserTracker.getActive();
+          } catch {
+            trackerEmpty = true;
+          }
+          if (trackerEmpty || !session.browserSession || isBrowserClosed(session.browserSession)) {
+            logger.info(`Session "${sessionId}": browser closed by step, removing session`);
+            session.status = 'closed';
+            this.sessions.delete(this.sessionKey(sessionId));
+            break;
+          }
         }
 
         // Where the run goes next, with both features' rules applied in the
@@ -6604,11 +7635,24 @@ export class SessionManager {
       // as decided-against would put words in the decision's mouth.
       if (hasControls && overallStatus !== 'aborted') flushSkips('all');
     } finally {
+      // The computer lock, first (SPEC-use-computer.md §5.9): the lock is held
+      // only while a run executes, never across the idle time between batches
+      // (nor across a pause inside one — `releaseLockForPause` saw to those).
+      // A `finally` so every ending gives it back — a pass, a failed step, a
+      // stop, a batch the client cut at a breakpoint, a throw — and FIRST
+      // because everything below awaits, and a lock kept through the report
+      // write is a lock another session is refused for. Only the lock: the
+      // session stays on the computer surface with its adapter, and its next
+      // computer step takes the lock again at the step boundary. Measured: an
+      // MCP `run_test_file` ending in computer mode left the lock held by an
+      // idle session, refusing every other computer-mode run on the machine.
+      releaseComputerLockAtRunEnd(surfaceStateOf(session), session.id, this.deps.computerLock);
       // The run's steps are done; everything from here is tail
-      // (stories/compile-tail-progress.md). Said HERE — the first statement
-      // after the step loop, ahead of the report, the recording write and the
-      // drain — because every one of those awaits is time the queue keeps
-      // spending, and a forecast issued after them is a report.
+      // (stories/compile-tail-progress.md). Said HERE — straight after the
+      // step loop (the release above does not await), ahead of the report, the
+      // recording write and the drain — because every one of those awaits is
+      // time the queue keeps spending, and a forecast issued after them is a
+      // report.
       liveCompile?.runStepsEnded();
       // Restore status unless session was closed
       if (session.status !== 'closed') {
@@ -6629,7 +7673,9 @@ export class SessionManager {
     let pageTitle = '';
     if (session.status !== 'closed') {
       try {
-        pageTitle = await session.browserSession.pageTracker.getActive().title();
+        // `?.` — a run that never launched a browser (§4.6) has no title, and
+        // that is a report with a blank title, not a failure.
+        pageTitle = (await session.browserSession?.pageTracker.getActive().title()) ?? '';
       } catch {
         // browser may be in an intermediate state
       }

@@ -11,6 +11,7 @@ import {
   composeEnv,
   extractSections,
   extractSteps,
+  runStartFor,
   danglingChainMemberError,
   resolveRunSelection,
   sectionBodyLinesAt,
@@ -670,6 +671,23 @@ export class RunController {
         bodySnapshot: Record<string, { steps: string[]; everyCall: boolean }> | undefined;
       }
     | null = null;
+
+  /**
+   * The PAUSED run is one the user started, and it parked before any batch of
+   * it reached the server — so the `runStart` its first batch would have
+   * carried (SPEC-use-computer.md §4.5) is still owed, and its Continue sends
+   * it.
+   *
+   * Without this a breakpoint on the first selected step, an `[input:]` before
+   * that breakpoint, or a run that opens with `[interactive]` sent the server
+   * nothing until the Continue — and a Continue is `isResume`, which sends no
+   * `runStart`, so the run executed on whatever surface the LAST run left. If
+   * that run failed inside `[use computer]`, this one drove the real mouse.
+   *
+   * Carried like `parkedNarrowing`: set by a run that parks with it unspent,
+   * kept across a run injected at the pause, dropped by anything else.
+   */
+  private parkedRunStartOwed = false;
 
   /** One warning per run about a server that ignored `runSteps`, not one per
    *  body step: like the `rowNumbers` warning, the fact is about the server. */
@@ -1684,6 +1702,9 @@ export class RunController {
     // narrowing it parked is spent. Leaving it would narrow the next run that
     // called itself a resume.
     this.parkedNarrowing = null;
+    // …and so is a `runStart` it never got to send. The next run the user
+    // starts computes its own.
+    this.parkedRunStartOwed = false;
     // A Stop while the loop is PARKED has no run to abort — the parked run
     // returned long ago — so nothing else here reaches the row it left
     // `running`. It is the one row with no result and no explanation, and the
@@ -2284,6 +2305,15 @@ export class RunController {
        */
       isResume?: boolean;
       /**
+       * This call STARTS a run, although it is shaped like an injected one
+       * (`isContinuation` + `rerun`). The skill-step picker's ▶ row sends it:
+       * a slice run against an IDLE session whose last run had nothing to do
+       * with this skill, so the surface that run left is not one this step
+       * should inherit (SPEC-use-computer.md §4.5). Its first block carries
+       * `runStart` at the call line, as Run Step Here's would.
+       */
+      startsRun?: boolean;
+      /**
        * Suppress the server-side breakpoint map for this run. The skill-file
        * single-step flows send it: a one-step slice pausing at its own
        * breakpoint runs (and, with compile, proposes) nothing.
@@ -2376,6 +2406,37 @@ export class RunController {
      *  narrowing is decided below there is no way left to tell. */
     const injectedAtPause = this.parkedAtPause && options.isResume !== true;
     this.parkedAtPause = false;
+
+    /**
+     * Did the user START this run — Run, Run From Here, Run Step Here, a step
+     * selection, Run & Compile, F11 from nothing, the skill picker's ▶ row —
+     * rather than continue one?
+     *
+     * The server needs to be told, because the session's surface outlives a
+     * batch (SPEC-use-computer.md §4.5): a run that failed or was stopped
+     * between `[use computer]` and `[use browser]` leaves the session on the
+     * computer surface, and this client reuses that session for the next Run.
+     * So the first block of a started run carries `runStart`, and the server
+     * puts the session on the surface the file says that block's first step is
+     * on. A Continue or step command (`isResume`), a re-run injected against the
+     * paused page (`isContinuation`, `rerun`) and the later blocks of a split
+     * run send nothing, and keep the surface the run left.
+     */
+    const startsRun =
+      options.startsRun === true ||
+      (options.isContinuation !== true && options.isResume !== true && options.rerun === undefined);
+    /**
+     * …or is this the Continue of a started run that paused before it sent
+     * anything? Then the `runStart` it never sent is still owed, and this call
+     * sends it — on its first block, from that block's own first step. Taken
+     * off the controller here so it can be spent once: the field is set again
+     * only if this call parks with it still unspent.
+     */
+    const inheritedRunStart = options.isResume === true && this.parkedRunStartOwed;
+    // Kept across an injected run, like `parkedNarrowing`: the paused run's
+    // Continue is still to come, and it still owes what it owed.
+    if (!injectedAtPause) this.parkedRunStartOwed = false;
+    const runStartOwedAtStart = startsRun || inheritedRunStart;
 
     // A new run — including a Resume — supersedes any paused state, so the
     // keep-alive that was pinning the server through the pause is done.
@@ -2689,6 +2750,11 @@ export class RunController {
       // outcome.
       if (pausedAt !== null) {
         this.parkedAtPause = true;
+        // Nothing went out, so a started run's `runStart` did not either — and
+        // its Continue (`isResume`) would otherwise send none, running on
+        // whatever surface the LAST run left: after a failure inside `[use
+        // computer]`, the real mouse. The Continue's first block carries it.
+        if (runStartOwedAtStart) this.parkedRunStartOwed = true;
         this.post({
           type: 'breakpointStop',
           line: pausedAt,
@@ -3173,6 +3239,28 @@ export class RunController {
     let pendingRerun = options.rerun;
 
     /**
+     * Does the next batch this call sends still owe `runStart`
+     * (`runStartOwedAtStart`, above)?
+     *
+     * Spent by the first batch that actually goes out — a step block or the
+     * first REPL turn of an `[interactive]` step — and by nothing else: an
+     * `[input:]` prompt or an `[interactive]` session the author leaves without
+     * typing a step sends nothing, so the block after it is still the one that
+     * starts the run on the server. Spent BEFORE the request is awaited, so a
+     * Pause that lands mid-block parks a run whose `runStart` is already out,
+     * and its Continue does not send a second one.
+     *
+     * Read again by the `finally`: a run that parks with it unspent hands it to
+     * its Continue (`parkedRunStartOwed`).
+     */
+    let runStartOwed = runStartOwedAtStart;
+    const takeRunStart = (): boolean => {
+      const owed = runStartOwed;
+      runStartOwed = false;
+      return owed;
+    };
+
+    /**
      * Why the row loop stopped early, when it did — the four exits that are
      * not "the last row finished".
      *
@@ -3266,6 +3354,9 @@ export class RunController {
         this.startRunRow(rowNumber);
       }
       const rowFailedAtStart = anyFailed;
+      // Per row: each row of a kept-session row loop starts the selection
+      // over, so it starts on the surface the file says, as row 1 did.
+      runStartOwed = runStartOwedAtStart;
       let i = 0;
       while (i < classified.length) {
         if (ac.signal.aborted) break;
@@ -3277,6 +3368,7 @@ export class RunController {
             block.push(classified[i]!);
             i++;
           }
+          const sendRunStart = takeRunStart();
           const ok = await this.runStepBlock({
             block,
             client,
@@ -3331,6 +3423,7 @@ export class RunController {
               withinCompileRun: compileMode,
             }),
             ...(options.suppressServerBreakpoints && { suppressServerBreakpoints: true }),
+            ...(sendRunStart && { runStart: true }),
           });
           compileBlocksSent++;
           pendingRerun = undefined;
@@ -3433,6 +3526,8 @@ export class RunController {
               logging,
               signal: ac.signal,
               log,
+              line: item.line,
+              takeRunStart,
             }),
           );
           // `/quit`, a cancelled prompt, or an abort. All three mean the
@@ -3684,6 +3779,17 @@ export class RunController {
           : injectedAtPause
             ? this.parkedNarrowing
             : null;
+      // Same handover, same precedence, for the one thing a run that paused
+      // before sending anything still owes the server: its `runStart`. An
+      // `[input:]` answered and then a breakpoint, an `[interactive]` session
+      // left without a step, a Pause pressed at a prompt — each parks a run
+      // the server has not heard begin.
+      this.parkedRunStartOwed =
+        endReason.kind === 'paused' && this.parkedAtPause
+          ? runStartOwed
+          : injectedAtPause
+            ? this.parkedRunStartOwed
+            : false;
       this.sectionRowsOfRun = undefined;
       this.sectionRowTotalsOfRun = undefined;
       this.sectionStepsOfRun = undefined;
@@ -4715,8 +4821,15 @@ export class RunController {
     /** Omit the per-URI breakpoint map from the request — a single-step
      *  slice pausing at its own breakpoint runs nothing. */
     suppressServerBreakpoints?: boolean;
+    /** This block is the first batch SENT by a run the user started — not a
+     *  later block of a split run or a re-run injected at a pause, and not a
+     *  Continue or step command unless the run parked before sending anything
+     *  (`parkedRunStartOwed`). The request carries `runStart`, and the server
+     *  puts the session on the surface the file says this block's first step
+     *  is on (SPEC-use-computer.md §4.5). */
+    runStart?: boolean;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, withinCompileRun, suppressServerBreakpoints } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, withinCompileRun, suppressServerBreakpoints, runStart } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -4833,6 +4946,14 @@ export class RunController {
         // here for the same reason `compileScope` is: this is the one place
         // that knows what actually goes on the wire.
         ...(compile === undefined && withinCompileRun !== undefined && { withinCompileRun }),
+        // Where this run starts, as a position in the `fullSteps` above —
+        // computed from the same buffer read, so the two cannot disagree.
+        // Without it the session keeps whatever surface the LAST run left: a
+        // run that failed inside `[use computer]` would hand this one the real
+        // mouse (SPEC-use-computer.md §4.5).
+        ...(runStart === true && block[0] && {
+          runStart: runStartFor(this.document.getText(), block[0].line),
+        }),
       },
       signal,
     );
@@ -5079,8 +5200,15 @@ export class RunController {
     logging?: LoggingOverride;
     signal: AbortSignal;
     log: (line: string) => void;
+    /** The `[interactive]` step's own line — where a run that starts here
+     *  starts, for `runStartFor`. */
+    line: number;
+    /** Hands back true, once, when the run still owes `runStart` — so the
+     *  first turn typed here is the batch that says the run began, and a
+     *  session left without typing one leaves it owed to the block after. */
+    takeRunStart: () => boolean;
   }): Promise<boolean> {
-    const { hint, client, sessionId, env, envName, params, sessionConfig, logging, signal, log } = args;
+    const { hint, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, line, takeRunStart } = args;
 
     const firstAnswer = await this.requestPrompt({ mode: 'interactive', message: hint });
     let answer: string | null = firstAnswer;
@@ -5110,12 +5238,24 @@ export class RunController {
       } else if (action.kind === 'send-step') {
         log(`interactive step: ${action.text}`);
         this.postOutput(`> ${action.text}`, 'info');
+        // A run that OPENS with `[interactive]` — or reaches it with nothing
+        // sent yet — reaches the server first through this turn, so this turn
+        // says the run began (SPEC-use-computer.md §4.5). Without it the
+        // typed step ran on whatever surface the last run left. `fullSteps`
+        // rides with it and only with it: `runStart.stepIndex` is a position
+        // in that list, and the server starts on `browser` without one.
+        const text = this.document.getText();
+        const runStart = takeRunStart() ? runStartFor(text, line) : undefined;
         try {
           const events = client.streamSteps(
             sessionId,
             {
               steps: [action.text],
               sourceLines: [0],
+              ...(runStart && {
+                runStart,
+                fullSteps: extractSteps(text).map((s) => s.instruction),
+              }),
               // Carry the test file path so the server resolves the SAME project
               // root (and thus the same per-project env/data/config) it used for
               // the run this interactive step continues.

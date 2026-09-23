@@ -215,6 +215,21 @@ export interface FoldInput {
    * long after the product default had moved.
    */
   screenshotsReturn: ScreenshotsReturn;
+  /**
+   * The project's `desktop.reportScreenshots` (`ProjectContext.desktopScreenshots`).
+   *
+   * False withholds every screenshot that rode an event marked `surface:
+   * 'computer'` — a capture of the whole desktop, not of a page — whatever
+   * `screenshotsReturn` asked for (SPEC-use-computer.md §10.1). The server
+   * already leaves such a capture off its events when the switch is off; this
+   * is the same rule applied where the image would enter the agent's context,
+   * so it holds against a server that attached one anyway. A page screenshot
+   * is unaffected.
+   *
+   * Absent reads as the config's own default, `true`: the errand path, which
+   * refuses computer mode outright, does not pass it.
+   */
+  desktopScreenshots?: boolean | undefined;
 }
 
 const MAX_MESSAGES = 50;
@@ -303,6 +318,16 @@ export function foldRun(input: FoldInput): FoldedRun {
    *  A passing step carries one only when per-action capture is on, which is
    *  what makes `final` depend on the capture setting. */
   let lastScreenshot: string | null = null;
+  /** `desktop.reportScreenshots: false` — see `FoldInput.desktopScreenshots`. */
+  const withholdDesktop = input.desktopScreenshots === false;
+  /** The last run-ending failure was a computer-mode step — the one case where
+   *  a missing `on-failure` screenshot is the privacy switch's doing, not the
+   *  capture setting's. */
+  let lastFailOnComputer = false;
+  /** The most recent terminal event that decides `final` was a computer-mode
+   *  step under the privacy switch, so its capture was withheld — here, or by
+   *  the server before sending — the same question for `final`. */
+  let lastShotWithheld = false;
   let sawFailure = false;
   let serverSettings: WireEffectiveSettings | null = null;
   let sawSkipped = false;
@@ -433,7 +458,20 @@ export function foldRun(input: FoldInput): FoldedRun {
         open.row.output = event.output ?? null;
         open.row.fromCache = event.fromCache ?? false;
         open.row.tab = event.tab ?? open.row.tab;
-        if (event.screenshot) lastScreenshot = event.screenshot;
+        if (withholdDesktop && event.surface === 'computer') {
+          // Withheld, and not an earlier picture left standing in its place:
+          // `final` would hand that back as how the run left the screen.
+          //
+          // Whether or not the event carried one — a current server strips it
+          // before sending, so acting only on a screenshot-bearing event left
+          // the page shot from BEFORE the excursion as `final`, with no
+          // warning. The step:fail branch below does the same.
+          lastShotWithheld = true;
+          lastScreenshot = null;
+        } else if (event.screenshot) {
+          lastShotWithheld = false;
+          lastScreenshot = event.screenshot;
+        }
         // `output: 'skipped'` is how the server reports a step that never ran
         // on the older of the two conventions. Calling that "passed" is a
         // false green on work that never happened.
@@ -530,8 +568,23 @@ export function foldRun(input: FoldInput): FoldedRun {
         } else {
           lastFailError = error;
           sawFailure = true;
+          lastFailOnComputer = event.surface === 'computer';
+          // A computer-mode failure under the privacy switch returns nothing —
+          // and not an earlier failure's page screenshot in its place, which
+          // an agent would read as a picture OF this failure. Whether or not
+          // the server attached one: a current server does not.
+          if (withholdDesktop && lastFailOnComputer) lastFailScreenshot = null;
         }
-        if (event.screenshot) {
+        if (withholdDesktop && event.surface === 'computer') {
+          // Tolerated or not, and with or without a screenshot on the event:
+          // neither `final` nor `on-failure` may fall back to an earlier
+          // picture — the page as it looked before the excursion, or an
+          // earlier failure's — as if it were this one.
+          lastShotWithheld = true;
+          lastFailScreenshot = null;
+          lastScreenshot = null;
+        } else if (event.screenshot) {
+          lastShotWithheld = false;
           lastFailScreenshot = event.screenshot;
           lastScreenshot = event.screenshot;
         }
@@ -643,6 +696,18 @@ export function foldRun(input: FoldInput): FoldedRun {
       } else {
         screenshotBase64 = stripped;
       }
+    } else if (
+      withholdDesktop &&
+      (screenshotsReturn === 'final' ? lastShotWithheld || lastFailOnComputer : lastFailOnComputer)
+    ) {
+      // The one missing screenshot that is nobody's capture setting: the step
+      // ran on the computer surface, where the picture is the whole desktop,
+      // and the project said to keep those out. Advising `capture` here would
+      // send the caller to change a setting that cannot bring it back.
+      warnings.push(
+        'No screenshot returned: the step ran in computer mode, where a screenshot is of the ' +
+          "whole desktop, and desktop.reportScreenshots is false in this project's aiui.config.json.",
+      );
     } else {
       // Nothing to return, and the cause is almost always the capture setting
       // rather than anything about this run: a passing step carries no

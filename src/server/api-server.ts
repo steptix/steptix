@@ -16,7 +16,12 @@ import {
   type StartResult,
 } from '../browser/cdp-registry.js';
 import { discoverCdpPorts, listPageTabs } from '../browser/cdp-discovery.js';
-import { CdpTabNotFoundError, closeBrowser, launchBrowser } from '../browser/manager.js';
+import {
+  CdpTabNotFoundError,
+  NoBrowserLaunchedError,
+  closeBrowser,
+  launchBrowser,
+} from '../browser/manager.js';
 import { userRootDir } from '../env/user-root.js';
 import { loadConfig } from '../config/loader.js';
 import fs from 'node:fs';
@@ -24,6 +29,7 @@ import {
   SessionManager,
   type RunEvent,
   type RunEventListener,
+  type SessionManagerDeps,
   type StepRequest,
 } from './session-manager.js';
 import { ErrandRunner, type ErrandRequest } from './errand-runner.js';
@@ -221,6 +227,28 @@ function goneTabMessage(port: number, targetId: string): string {
  * `if (respondToPageCaptureError(err, res)) return;` and passes anything else
  * to `next`.
  */
+/**
+ * The session exists but has not opened a browser yet
+ * (SPEC-use-computer.md §4.6) — answered by every route that READS a page.
+ *
+ * 409, not 404 and not 500. 404 is taken, and means something else here: "no
+ * such session". 500 would say the server is broken when what happened is
+ * that the caller asked for a page before the test asked for one — a run
+ * whose first step is `[use computer]` has no page to read until a
+ * `[use browser]` step arrives. 409 matches the other "right request, wrong
+ * moment" answer this file already gives (a read that lost to a navigation).
+ *
+ * These routes never launch a browser to satisfy themselves: a read is not a
+ * reason to open a window on the user's screen.
+ */
+function respondToNoBrowserLaunched(err: unknown, res: Response): boolean {
+  if (err instanceof NoBrowserLaunchedError) {
+    res.status(409).json({ error: err.message });
+    return true;
+  }
+  return false;
+}
+
 function respondToPageCaptureError(err: unknown, res: Response): boolean {
   // A read that lost to a navigation is the caller's to retry — it says
   // nothing about the session's health, so it must not read as a 500.
@@ -351,6 +379,10 @@ export function createApiServer(
   hooks?: ServerHooks,
   /** Injectable so tests can drive expiry with a fake clock. */
   idleMonitor: IdleMonitor = new IdleMonitor(config.server.idleTimeoutMinutes),
+  /** The computer surface's seams (SPEC-use-computer.md §5.1, §5.9), handed to
+   *  the session manager. Only a test passes them: a desktop test driven
+   *  through this entry must never load nut.js or touch the machine's lock. */
+  sessionManagerDeps: SessionManagerDeps = {},
 ): {
   app: express.Express;
   sessionManager: SessionManager;
@@ -372,7 +404,7 @@ export function createApiServer(
   // One resolver behind both, so an errand and a session running against the
   // same project read the same `.env` at the same moment.
   const projectBundles = new ProjectBundleResolver(config);
-  const sessionManager = new SessionManager(config, projectBundles);
+  const sessionManager = new SessionManager(config, projectBundles, sessionManagerDeps);
 
   /**
    * The credential broker, built on first use and then kept (SPEC 29 §10).
@@ -984,6 +1016,35 @@ export function createApiServer(
           request.endAt = { uri: ea.uri, line: ea.line };
         }
       }
+      // This batch starts a run, so the session's surface is reset to the one
+      // the file puts that run's first step on (SPEC-use-computer.md §4.5). On
+      // the allow-list because a field the list does not name is dropped,
+      // silently — and a dropped `runStart` is the defect it fixes: a run that
+      // failed inside `[use computer]` hands the next run the real mouse.
+      //
+      // A non-object is a 400, since a client that meant "new run" and was
+      // quietly treated as a continuation has no way to notice. A malformed
+      // `stepIndex` is dropped instead, keeping `runStart`: without a position
+      // the run starts on the browser surface, the safe direction.
+      if (body.runStart !== undefined) {
+        const rs = body.runStart as { stepIndex?: unknown } | null;
+        if (rs === null || typeof rs !== 'object' || Array.isArray(rs)) {
+          res.status(400).json({ error: '"runStart" must be an object: { stepIndex?: number }' });
+          return;
+        }
+        const index = rs.stepIndex;
+        if (typeof index === 'number' && Number.isInteger(index) && index >= 0) {
+          request.runStart = { stepIndex: index };
+        } else {
+          if (index !== undefined) {
+            logger.warn(
+              `Ignoring malformed "runStart.stepIndex" (${JSON.stringify(index)}): ` +
+                'the run starts on the browser surface.',
+            );
+          }
+          request.runStart = {};
+        }
+      }
       if (body.logging !== undefined && body.logging !== null && typeof body.logging === 'object') {
         const lg = body.logging as { consoleLogLevel?: unknown; serverFileLogLevel?: unknown };
         const validLevels = new Set(['silent', 'error', 'warn', 'info', 'debug']);
@@ -1307,6 +1368,7 @@ export function createApiServer(
       }
       res.status(200).json(content);
     } catch (err) {
+      if (respondToNoBrowserLaunched(err, res)) return;
       if (respondToPageCaptureError(err, res)) return;
       next(err);
     }
@@ -1371,6 +1433,11 @@ export function createApiServer(
       // layer applies to `isError`.
       res.status(200).json(result);
     } catch (err) {
+      // A login is a page action, so it needs a page. It does NOT get to open
+      // one: the broker types a password, and starting a browser to do that
+      // out of band is not something a caller should be able to trigger with
+      // a POST (§4.6).
+      if (respondToNoBrowserLaunched(err, res)) return;
       next(err);
     }
   });

@@ -100,7 +100,7 @@ describe('TestBench Copilot setup vs. the active env overlay', function () {
     assert.ok(hooks, '__testHooks not exposed');
 
     fake = new FakeLm();
-    hooks.configureLmBridge({ facade: fake, retryMs: 250 });
+    hooks.configureLmBridge({ lm: fake, retryMs: 250 });
     port = await freePort();
     const cfg = vscode.workspace.getConfiguration('testbench-native');
     await cfg.update('lmBridge.port', port, vscode.ConfigurationTarget.Global);

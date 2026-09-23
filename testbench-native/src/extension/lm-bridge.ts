@@ -7,10 +7,13 @@ import {
   ZERO_USAGE,
   bodyLimitError,
   chatCompletionBody,
+  imageBytes,
   isAuthorized,
   isTerminalError,
   lmUnavailableError,
+  mapCompletionError,
   mapLmError,
+  messageText,
   modelNotFoundError,
   modelSelectorAttempts,
   modelsListBody,
@@ -18,12 +21,14 @@ import {
   routeFor,
   streamFrames,
   stripJsonFence,
+  textProjection,
   translateBody,
   unauthorizedError,
   unknownRouteError,
   type BridgeError,
   type BridgeMessage,
   type BridgeUsage,
+  type ImageMode,
   type LmSelector,
 } from './lm-bridge-core.js';
 
@@ -83,13 +88,19 @@ export interface LmModelHandle {
   readonly vendor: string;
   readonly family: string;
   readonly name: string;
+  /**
+   * Whether the model takes image input, when the host says; `null` when it
+   * does not. Reported per model on `/v1/models` as `image_input` (§15.3).
+   */
+  readonly imageInput: boolean | null;
   /** Resolves to the response's text fragments; rejects the way `vscode.lm` does. */
   sendRequest(
     messages: BridgeMessage[],
     options: { modelOptions?: Record<string, unknown>; signal?: AbortSignal },
   ): Promise<AsyncIterable<string>>;
   /**
-   * Tokens in one message or string, by this model's own tokenizer.
+   * Tokens in one message's TEXT, or in a string, by this model's own
+   * tokenizer. Image parts are left out — see `textProjection`.
    *
    * Measured free of Copilot credits and local (~0.12 ms + 0.03 ms/KB), which
    * is why the bridge can afford to call it per message rather than shipping
@@ -99,61 +110,157 @@ export interface LmModelHandle {
 }
 
 /**
- * The seam the integration harness substitutes.
+ * The bridge's view of `vscode.lm`.
+ *
+ * Built by {@link lmFacadeOver} from a namespace, so the real adapter and the
+ * harness's run the SAME code between the namespace and the wire — message
+ * construction, data parts, capability reads, the counting projection.
+ */
+export interface LmFacade {
+  /** False on hosts older than the 1.90 floor, where `vscode.lm` is undefined. */
+  available(): boolean;
+  /** What happens to an image block on this host — see {@link detectImagePartFactory}. */
+  imageMode(): ImageMode;
+  selectChatModels(selector?: LmSelector): Promise<LmModelHandle[]>;
+}
+
+/**
+ * The slice of the `vscode.lm` namespace the bridge calls — the seam the
+ * integration harness substitutes.
  *
  * `vscode.lm` cannot be driven from a test — a real `selectChatModels` needs a
  * signed-in Copilot seat and a real `sendRequest` spends it — so the namespace
  * is injected exactly the way the run path injects `ApiClient`. Note the seam
  * is the NAMESPACE, not the translation: swapping in a fake must not swap out
- * a single rule about what goes on the wire.
+ * a single rule about what goes on the wire, which is why a fake receives real
+ * `vscode.LanguageModelChatMessage` objects built by {@link toLmMessage}.
  */
-export interface LmFacade {
-  /** False on hosts older than the 1.90 floor, where `vscode.lm` is undefined. */
-  available(): boolean;
-  selectChatModels(selector?: LmSelector): Promise<LmModelHandle[]>;
+export interface LmNamespace {
+  selectChatModels(
+    selector?: vscode.LanguageModelChatSelector,
+  ): Thenable<vscode.LanguageModelChat[]>;
+}
+
+/** `vscode.LanguageModelDataPart.image`, bound. */
+export type ImagePartFactory = (data: Uint8Array, mime: string) => vscode.LanguageModelDataPart;
+
+/**
+ * `LanguageModelDataPart.image` when this host has it, else `undefined`.
+ *
+ * Feature-detected, not version-gated (SPEC-use-computer §15.2): the engine
+ * floor stays ^1.90 and @types/vscode (1.116) declares the class, so the
+ * compiler believes it always exists. On a host that predates it the property
+ * is simply absent — the integration harness's 1.95 is one — and the bridge
+ * strips as it always did.
+ */
+export function detectImagePartFactory(): ImagePartFactory | undefined {
+  const DataPart = (vscode as Partial<typeof vscode>).LanguageModelDataPart;
+  if (typeof DataPart?.image !== 'function') return undefined;
+  return (data, mime) => DataPart.image(data, mime);
+}
+
+/** A facade over any namespace; see {@link LmFacade}. */
+export function lmFacadeOver(source: {
+  lm: () => LmNamespace | undefined;
+  imagePart: () => ImagePartFactory | undefined;
+}): LmFacade {
+  return {
+    available(): boolean {
+      // `engines.vscode` is ^1.90.0 and @types/vscode floats above it, so the
+      // compiler believes this is always defined. On a 1.85–1.89 host it is
+      // not, and every call here would be a TypeError instead of a clear
+      // message.
+      return typeof source.lm()?.selectChatModels === 'function';
+    },
+    imageMode(): ImageMode {
+      return source.imagePart() ? 'forward' : 'strip';
+    },
+    async selectChatModels(selector?: LmSelector): Promise<LmModelHandle[]> {
+      const models = await source.lm()!.selectChatModels(selector);
+      // Read once per listing, the same answer imageMode() gave: a message
+      // built with one factory and advertised under another cannot happen.
+      const imagePart = source.imagePart();
+      return models.map((m) => wrapModel(m, imagePart));
+    },
+  };
 }
 
 /** Adapter over the real namespace. */
-export const realLmFacade: LmFacade = {
-  available(): boolean {
-    // `engines.vscode` is ^1.90.0 and @types/vscode floats above it, so the
-    // compiler believes this is always defined. On a 1.85–1.89 host it is not,
-    // and every call here would be a TypeError instead of a clear message.
-    const lm = (vscode as Partial<typeof vscode>).lm;
-    return typeof lm?.selectChatModels === 'function';
-  },
-  async selectChatModels(selector?: LmSelector): Promise<LmModelHandle[]> {
-    const models = await vscode.lm.selectChatModels(selector);
-    return models.map(wrapModel);
-  },
-};
+export const realLmFacade: LmFacade = lmFacadeOver({
+  lm: () => (vscode as Partial<typeof vscode>).lm,
+  imagePart: detectImagePartFactory,
+});
 
 /**
  * `BridgeMessage` in the shape `vscode.lm` takes.
  *
+ * A message with no image part is a plain string, exactly as before image
+ * forwarding existed — so a text-only request is byte-for-byte what it was,
+ * on every host. Image parts only exist on the `forward` path and only in
+ * user messages (lm-bridge-core `translateRequest`), and become
+ * `LanguageModelDataPart.image(bytes, mime)` in place among their text parts.
+ *
  * Shared by `sendRequest` and `countTokens` on purpose: counting a different
  * object from the one sent would report tokens for a prompt that was never
- * issued. The overloads are not interchangeable either — a message counts the
- * role framing that a bare string does not, +4 tokens per message on both
- * models measured.
+ * issued. The one deliberate difference is that `countTokens` is handed the
+ * text projection, image parts removed (see `textProjection`). The overloads
+ * are not interchangeable either — a message counts the role framing that a
+ * bare string does not, +4 tokens per message on both models measured.
  */
-function toLmMessage(m: BridgeMessage): vscode.LanguageModelChatMessage {
-  return m.role === 'assistant'
-    ? vscode.LanguageModelChatMessage.Assistant(m.text)
-    : vscode.LanguageModelChatMessage.User(m.text);
+function toLmMessage(
+  m: BridgeMessage,
+  imagePart: ImagePartFactory | undefined,
+): vscode.LanguageModelChatMessage {
+  if (!m.parts.some((p) => p.kind === 'image')) {
+    const text = messageText(m);
+    return m.role === 'assistant'
+      ? vscode.LanguageModelChatMessage.Assistant(text)
+      : vscode.LanguageModelChatMessage.User(text);
+  }
+  if (!imagePart) {
+    // Unreachable while the facade computes imageMode() and the factory from
+    // the same source; said plainly in case that ever stops being true.
+    throw new Error('TestBench bridge: an image part reached a host without LanguageModelDataPart.');
+  }
+  const content = m.parts.map((p) =>
+    p.kind === 'text' ? new vscode.LanguageModelTextPart(p.text) : imagePart(imageBytes(p), p.mime),
+  );
+  return vscode.LanguageModelChatMessage.User(content);
 }
 
-function wrapModel(model: vscode.LanguageModelChat): LmModelHandle {
+/**
+ * What the host says about image input, or `null`.
+ *
+ * The public `LanguageModelChat` type has no capabilities (they are on the
+ * provider-side `LanguageModelChatInformation`), so this reads the runtime
+ * object defensively. Measured on VS Code 1.138: the consumer object carries
+ * `capabilities.supportsImageToText`, derived from the provider's `imageInput`
+ * and `false` when the provider declares none. 1.95 carries no capabilities
+ * at all, hence `null`.
+ */
+function imageInputOf(model: vscode.LanguageModelChat): boolean | null {
+  const caps = (model as unknown as { capabilities?: Record<string, unknown> }).capabilities;
+  const value = caps?.['imageInput'] ?? caps?.['supportsImageToText'];
+  return typeof value === 'boolean' ? value : null;
+}
+
+function wrapModel(
+  model: vscode.LanguageModelChat,
+  imagePart: ImagePartFactory | undefined,
+): LmModelHandle {
   return {
     id: model.id,
     vendor: model.vendor,
     family: model.family,
     name: model.name,
+    imageInput: imageInputOf(model),
     async countTokens(input) {
-      return await model.countTokens(typeof input === 'string' ? input : toLmMessage(input));
+      return await model.countTokens(
+        typeof input === 'string' ? input : toLmMessage(textProjection(input), imagePart),
+      );
     },
     async sendRequest(messages, options) {
-      const lmMessages = messages.map(toLmMessage);
+      const lmMessages = messages.map((m) => toLmMessage(m, imagePart));
       // The run's own abort (a user Stop, or the client's 120s timeout) closes
       // the HTTP response; without forwarding it, the model keeps generating
       // against a socket nobody is reading and the seat pays for it.
@@ -187,6 +294,13 @@ function wrapModel(model: vscode.LanguageModelChat): LmModelHandle {
 // ---------------------------------------------------------------------------
 
 export type BridgeState = 'off' | 'listening' | 'standby' | 'error';
+
+/** See {@link LmBridge.configureForTests}. */
+export interface LmBridgeTestOptions {
+  lm?: LmNamespace;
+  imagePart?: ImagePartFactory | null;
+  retryMs?: number;
+}
 
 export interface BridgeStatus {
   state: BridgeState;
@@ -293,9 +407,24 @@ export class LmBridge implements vscode.Disposable {
     await this.listen(port);
   }
 
-  /** Test seam: swap the `vscode.lm` namespace and the standby retry cadence. */
-  configureForTests(opts: { facade?: LmFacade; retryMs?: number }): void {
-    if (opts.facade) this.facade = opts.facade;
+  /**
+   * Test seam: swap the `vscode.lm` namespace, the image-part factory, and the
+   * standby retry cadence.
+   *
+   * `imagePart` left out means "detect on this host", as production does;
+   * `null` forces the `strip` path; a function forces `forward` with that
+   * factory — which is how the harness, on a VS Code that predates
+   * `LanguageModelDataPart`, still drives the forward path end to end.
+   */
+  configureForTests(opts: LmBridgeTestOptions): void {
+    if (opts.lm) {
+      const lm = opts.lm;
+      const forced = opts.imagePart;
+      this.facade = lmFacadeOver({
+        lm: () => lm,
+        imagePart: forced === undefined ? detectImagePartFactory : () => forced ?? undefined,
+      });
+    }
     if (opts.retryMs !== undefined) this.retryMs = opts.retryMs;
   }
 
@@ -530,7 +659,7 @@ export class LmBridge implements vscode.Disposable {
     this.writeJson(
       res,
       200,
-      modelsListBody(models, Math.floor(Date.now() / 1000)),
+      modelsListBody(models, Math.floor(Date.now() / 1000), this.facade.imageMode()),
     );
   }
 
@@ -541,14 +670,30 @@ export class LmBridge implements vscode.Disposable {
     const body = await readBody(req);
     if (!body.ok) return this.writeError(res, body.error);
 
-    const translated = translateBody(body.text);
+    const imageMode = this.facade.imageMode();
+    const translated = translateBody(body.text, { imageMode });
     if (!translated.ok) return this.writeError(res, translated.error);
     const request = translated.value;
 
-    if (request.imagesStripped > 0 && !this.imageWarningShown) {
-      this.imageWarningShown = true;
-      void vscode.window.showWarningMessage(IMAGE_STRIP_WARNING);
-      this.log(`stripped ${request.imagesStripped} image block(s) from a request`);
+    if (request.imagesStripped > 0) {
+      if (imageMode === 'strip') {
+        // The warning says "this VS Code cannot", which is only true here.
+        if (!this.imageWarningShown) {
+          this.imageWarningShown = true;
+          void vscode.window.showWarningMessage(IMAGE_STRIP_WARNING);
+          this.log(
+            `stripped ${request.imagesStripped} image block(s) from a request — this ` +
+              'VS Code has no LanguageModelDataPart',
+          );
+        }
+      } else {
+        // The server never sends these; a client that does is told in the
+        // prompt (the note) and here, not in a popup about VS Code's version.
+        this.log(
+          `stripped ${request.imagesStripped} image block(s) this bridge cannot forward ` +
+            '(not a data: URL, or in an assistant/system message)',
+        );
+      }
     }
 
     const model = await this.resolveModel(request.model);
@@ -580,8 +725,25 @@ export class LmBridge implements vscode.Disposable {
       });
       for await (const fragment of fragments) text += fragment;
     } catch (err) {
-      const mapped = mapLmError(asLmError(err), { model: request.model });
+      // Covers a throw from sendRequest AND a response stream that errors
+      // part-way: both land here. See mapCompletionError for when an
+      // image-carrying request becomes 400 image_input_unsupported.
+      const shape = asLmError(err);
+      const mapped = mapCompletionError(shape, {
+        model: request.model,
+        imagesForwarded: request.imagesForwarded,
+        imageInput: model.imageInput,
+        cancelled: abort.signal.aborted,
+      });
       this.log(`model request failed: ${mapped.body.error.code}`);
+      if (mapped.body.error.code === 'image_input_unsupported') {
+        // The 400's text is fixed by contract, so the provider's own words —
+        // the only evidence if the classification was wrong — live here.
+        this.log(
+          `  ${request.imagesForwarded} image(s) sent to ${qualifiedModelId(model)} ` +
+            `(image_input ${String(model.imageInput)}); provider said: ${shape.message || '(nothing)'}`,
+        );
+      }
       return this.writeError(res, mapped);
     }
 
@@ -663,6 +825,10 @@ export class LmBridge implements vscode.Disposable {
     text: string,
   ): Promise<BridgeUsage> {
     let prompt = 0;
+    // Text parts only: the handle counts each message's text projection, so an
+    // image part never reaches a tokenizer that may not know what to do with
+    // one. Image tokens are NOT measured — on a computer-mode turn the prompt
+    // count is a floor, not the bill.
     for (const message of messages) prompt += await model.countTokens(message);
     const completion = await model.countTokens(text);
 
@@ -673,7 +839,11 @@ export class LmBridge implements vscode.Disposable {
     // rather than leaving someone to wonder why a busy compile reports nothing
     // — once per bridge, like the image-strip warning above, because the cause
     // is a configured model and every later request would say the same thing.
-    if (prompt === 0 && !this.zeroUsageWarningShown && messages.some((m) => m.text.trim() !== '')) {
+    if (
+      prompt === 0 &&
+      !this.zeroUsageWarningShown &&
+      messages.some((m) => messageText(m).trim() !== '')
+    ) {
       this.zeroUsageWarningShown = true;
       this.log(
         `usage measured as 0 for a non-empty prompt — ${qualifiedModelId(model)} ` +

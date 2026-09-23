@@ -16,6 +16,7 @@ import {
   type EnvDataContext,
 } from '../parser/interpolate-env-data.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import { parseUseStep } from '../parser/use-step.js';
 import { WIDE_PLACEHOLDER_SOURCE, interpolate } from '../parser/parameters.js';
 import { boundValue } from '../runner/placeholder-substitution.js';
 import type { AssertionResult } from '../report/types.js';
@@ -77,6 +78,24 @@ const FRAMEWORK_ACTIONS: ReadonlySet<AIAction['action']> = new Set(['prompt', 'r
 const BRACKET_TOKEN_STEP = /^\[(skill|tool|input|output|interactive)\b/i;
 
 /**
+ * The one wording for a `[use computer]` / `[use browser]` line, used by all
+ * three classifiers (SPEC-use-computer.md §9).
+ *
+ * Defined HERE rather than beside `DISPATCHED_NOT_COMPILED` in
+ * `live-compile.ts` because `live-compile.ts` imports this module: the reason
+ * has to live in the deepest of the three, or the import graph gains a cycle.
+ *
+ * A surface switch is a run-loop signal, like flow control — it performs
+ * nothing on any surface, so there is no transcript to generate an entry from
+ * and nothing for an entry to replace. Note this is NOT the other half of §9,
+ * the rule that a step which EXECUTED in computer mode compiles to `ai: true`;
+ * that is judged from the run's recording, which knows the surface, rather
+ * than from the file, which cannot know what surface a shared section ran on.
+ */
+export const SURFACE_SWITCH_NOT_COMPILED =
+  'a [use ...] step is a surface switch, dispatched and never compiled';
+
+/**
  * Why a step can't be compiled, or undefined when it can.
  *
  * Checked before the model call so the compiler never pays for an answer it
@@ -87,6 +106,13 @@ export function refuseReason(
   source: string,
   actions: AIAction[],
 ): string | undefined {
+  // Ahead of {@link BRACKET_TOKEN_STEP}, which would otherwise claim it and
+  // blame "a bracket marker whose contract generated code cannot honour" — a
+  // sentence about captures and prompts that says nothing true about a
+  // surface switch.
+  if (parseUseStep(source)) {
+    return SURFACE_SWITCH_NOT_COMPILED;
+  }
   if (BRACKET_TOKEN_STEP.test(source.trim())) {
     return 'the step carries a bracket marker whose contract generated code cannot honour';
   }

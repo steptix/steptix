@@ -225,6 +225,24 @@ vi.mock('../src/browser/manager.js', () => {
       if (!entry) throw new Error('no active browser session');
       return entry.session;
     }
+    hasActive(): boolean {
+      return this.sessions[this.activeIndex] !== undefined;
+    }
+    /** Lazy twin of the real static (SPEC-use-computer.md §4.6): the deferred
+     *  tracker starts with NO session and launches on first use. */
+    static deferred(launch: () => Promise<any>): BrowserTracker {
+      const tracker = new BrowserTracker(undefined as any);
+      tracker.sessions.length = 0;
+      (tracker as any).launch = launch;
+      return tracker;
+    }
+    async ensureLaunched(): Promise<any> {
+      if (this.sessions.length > 0) return this.getActive();
+      const session = await (this as any).launch();
+      this.sessions.push({ label: 'default', session });
+      this.activeIndex = 0;
+      return session;
+    }
     getActivePage() {
       return this.getActive().pageTracker.getActive();
     }
@@ -263,6 +281,16 @@ vi.mock('../src/browser/manager.js', () => {
 
   return {
     PageTracker,
+    // The 'no browser yet' sentinel (SPEC-use-computer.md §4.6). A mock of
+    // this module must export it: api-server and session-manager both do
+    // `instanceof` against it, and `instanceof undefined` throws.
+    NoBrowserLaunchedError: class NoBrowserLaunchedError extends Error {
+      constructor(message = 'no browser has been launched in this session') {
+        super(message);
+        this.name = 'NoBrowserLaunchedError';
+      }
+    },
+    NO_BROWSER_LAUNCHED_MESSAGE: 'no browser has been launched in this session',
     BrowserTracker,
     closeBrowser,
     launchBrowser: vi.fn(async (_config: unknown, cdp?: { port: number; tab?: string }) => {
@@ -949,6 +977,25 @@ describe('POST /errands', () => {
     // The line is named back, so the caller can find it.
     expect(body.error.message).toContain(line);
     // Nothing was judged.
+    expect(seen).toEqual(['open the page']);
+  });
+
+  // docs/specs/SPEC-use-computer.md §4.4 — an errand is a browser errand, and
+  // §12 keeps `[use …]` in one for later. Refused by name at RUN time, which
+  // is the only place it can be: an errand's steps arrive straight off an MCP
+  // call with no validator in front of them.
+  it.each(['[use computer]', '[use browser]'])('refuses %s in an errand', async (line) => {
+    const seen = recordInstructions();
+    const { body } = await api(
+      'POST', '/errands', errandBody({ steps: ['open the page', line, 'never reached'] }),
+    );
+
+    expect(body.status).toBe('failed');
+    expect(body.error).toMatchObject({ step: 2 });
+    expect(body.error.message).toContain('cannot be used in an errand');
+    expect(body.error.message).toContain('an errand runs on the page surface');
+    // Never handed to a model as prose, which is the silent-`noop` failure the
+    // bracket spelling exists to prevent (§4.2).
     expect(seen).toEqual(['open the page']);
   });
 

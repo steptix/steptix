@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { getOutputChannel } from './output-channel.js';
 import { workspaceFolderFor } from './workspace.js';
-import { qualifiedModelId, mapLmError } from './lm-bridge-core.js';
+import { qualifiedModelId, mapLmError, textMessage } from './lm-bridge-core.js';
 import {
   LM_BRIDGE_ENABLED,
   type LmBridge,
@@ -239,7 +239,7 @@ async function warmUp(model: LmModelHandle): Promise<boolean> {
       { location: vscode.ProgressLocation.Notification, title: `Checking access to ${model.name}…` },
       async () => {
         const fragments = await model.sendRequest(
-          [{ role: 'user', text: 'Reply with the single word: ready' }],
+          [textMessage('user', 'Reply with the single word: ready')],
           {},
         );
         // Drained, not just started: consent is settled when the response

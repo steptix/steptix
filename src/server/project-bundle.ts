@@ -53,6 +53,18 @@ export interface ProjectBundle {
    * paths and works only under the CLI — see the implementation note in
    * stories/codebehind-selector-ambiguity.md.
    *
+   * The full list of per-project keys the server threads deliberately, so the
+   * next person does not have to rediscover it: `browser.video` (read at
+   * session creation by `resolveSessionOutput`), `browser.fixedViewport` (the
+   * per-test `## Config: viewport`), `browser.launchArgs` and the whole
+   * `desktop` section (both stored on the session by the steps handler from
+   * `projectBundle.config`, then read at LAUNCH time and at `[use computer]`
+   * respectively). Every other `browser.*` key on the server path is the
+   * SERVER's. `desktop` was the measured case: a project with
+   * `desktop.enabled: true` was refused because the server's own config —
+   * which is what `resolveRunSettings` spreads into `runConfig` — said
+   * nothing.
+   *
    * Always present: the null-project fallback resolves it from the server's
    * startup config, which carries the `'first'` default.
    */

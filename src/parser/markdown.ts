@@ -13,6 +13,8 @@ import {
 import { expandSkills } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { parseSetStep, setStepError, substitutePreservingSet } from './set-step.js';
+import { useStepError } from './use-step.js';
+import { unknownWholeStepBracketError } from './whole-step-bracket.js';
 import {
   parseFlowControlStep,
   flowControlInHookError,
@@ -772,6 +774,25 @@ function parseSections(rawContent: string, filePath: string): {
     const setError = setStepError(steps[i]!, where);
     if (setError) throw new Error(setError);
 
+    // `[use computer]` / `[use browser]` (SPEC-use-computer.md §4.1), in the
+    // same loop and for the same reason: it is the one loop every authored
+    // step line of every file — test or skill, main flow or section body —
+    // passes through, which is the scope §4.4 asks for.
+    //
+    // Asked BEFORE the whole-step bracket rule below, and the order is
+    // load-bearing: `[use]` and `[use phone]` are whole-step brackets too, and
+    // reported by both they would get the generic "not a directive" list
+    // instead of the sentence naming the two surfaces.
+    const useError = useStepError(steps[i]!, where);
+    if (useError) throw new Error(useError);
+
+    // §4.2 — a step that is nothing but a bracket token naming no directive.
+    // The rule this directive's bracket spelling was chosen for: without it
+    // `[computer]` parses as prose, reaches a model, and is answered with a
+    // silent `noop` that reports as a pass.
+    const bracketError = unknownWholeStepBracketError(steps[i]!, where);
+    if (bracketError) throw new Error(bracketError);
+
     // `[tool: foo] otherwise continue` and `[skill: foo] otherwise continue`
     // (stories/step-failure-outcomes.md, decision 12). Both are out of the tail's
     // scope, and until this refusal existed the line parsed, ran the call, and
@@ -928,7 +949,12 @@ function parseSections(rawContent: string, filePath: string): {
 /** `[input: name]` and `[interactive]` as every runner matches them. Neither
  *  may be a control line's tail: both hand the run back to a human, and the
  *  client splits a batch at them — so a chain with one inside it would have
- *  its halves in different requests, neither right on its own. */
+ *  its halves in different requests, neither right on its own.
+ *
+ *  `[use …]` is deliberately NOT on this list (SPEC-use-computer.md §4.3). It
+ *  hands nothing back to a human and splits no batch, so
+ *  `If a window titled "Save As" is open, then [use computer]` is a legal
+ *  control line whose tail is one ordinary step. */
 const INPUT_STEP_RE = /^\[input:\s*\w*\]/i;
 const INTERACTIVE_STEP_RE = /^\[interactive\]/i;
 
@@ -1052,6 +1078,14 @@ function validateControlFlow(
           `naming that section here.`,
       );
     }
+    // A `[use …]` tail is legal (§4.3), so it is validated rather than
+    // refused. Without this the step-level check above cannot see it: the
+    // whole step is `If …, then [use phone]`, which does not open `[use` and
+    // therefore never claims the form — so a malformed surface switch would
+    // reach a model as the tail's prose, which is exactly what §4.2 exists to
+    // stop one step earlier.
+    const useTailError = useStepError(tail, at);
+    if (useTailError) throw new Error(useTailError);
     if (INPUT_STEP_RE.test(tail) || INTERACTIVE_STEP_RE.test(tail)) {
       const token = INPUT_STEP_RE.test(tail) ? '[input: …]' : '[interactive]';
       throw new Error(

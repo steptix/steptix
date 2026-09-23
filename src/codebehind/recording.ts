@@ -147,6 +147,19 @@ export interface RecordedStep {
    * existed, which reads as "not deliberate" and is right.
    */
   deliberate?: boolean;
+  /**
+   * The surface this step ran on (SPEC-use-computer.md §9).
+   *
+   * The one fact the compile cannot read off the FILE: a shared `### Section`
+   * or a skill body runs on whatever surface its caller was on, so whether a
+   * given step's coordinates came from a screen or from a DOM is a fact about
+   * the RUN. Recorded here so `computer` can be answered with `ai: true` and
+   * the reason "coordinates are not portable".
+   *
+   * Absent means `browser`, which is every step of every recording written
+   * before computer mode and every page step after it.
+   */
+  surface?: 'browser' | 'computer';
   fromCodeBehind?: boolean;
   codeBehindStale?: { file: string; source: string; error: string };
   urlBefore?: string;
@@ -324,6 +337,10 @@ async function writeRecordedStep(
     // because the step is still COMPILABLE: the compile reads it to tell a
     // recording that ended as written from one that broke.
     ...(result.deliberate === true && { deliberate: true }),
+    // §9 — which surface answered it. Only `computer` is written: `browser`
+    // is what absence has always meant, and stamping it would churn every
+    // recording on disk for a field that says nothing new.
+    ...(result.surface === 'computer' && { surface: 'computer' as const }),
     ...(result.fromCodeBehind && { fromCodeBehind: true }),
     ...(result.codeBehindStale && { codeBehindStale: result.codeBehindStale }),
     ...(ctx?.urlBefore !== undefined && { urlBefore: ctx.urlBefore }),

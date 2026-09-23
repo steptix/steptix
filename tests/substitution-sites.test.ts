@@ -112,6 +112,15 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   // themselves, and the calls the last three make on the first two.
   'src/runner/placeholder-substitution.ts': { why: 'definition', calls: 6 },
   'src/runner/step-executor.ts': { why: 'not-step-text', calls: 2 },
+  // The computer surface's turn loop (docs/specs/SPEC-use-computer.md §5.5).
+  // One call, and it substitutes an ACTION the model emitted — an `api_call`'s
+  // url, headers and body — on its way to the same `executeApiCallAction` the
+  // page loop uses. Never step text: a `[use …]` line is dispatched by the run
+  // loop before this function is reached, the step's own text arrives here
+  // already read by `parseSetStep` and `parseFlowControlStep` upstream, and
+  // the instruction this loop shows the model is the AUTHORED one with its
+  // `{{…}}` intact (§5.7). Nothing here is ever handed back to `parseSetStep`.
+  'src/runner/computer-step.ts': { why: 'not-step-text', calls: 1 },
   'src/runner/test-runner.ts': { why: 'step-text/authored', calls: 3 },
   'src/server/errand-runner.ts': { why: 'step-text/authored', calls: 2 },
   'src/server/session-manager.ts': { why: 'step-text/authored', calls: 5 },

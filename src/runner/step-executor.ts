@@ -5,6 +5,7 @@ import type { Config } from '../config/types.js';
 import type { AIAction, BranchedAIResponse, TableReadMapping } from '../ai/types.js';
 import type { StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
+import type { CompleteResult } from '../ai/client.js';
 import {
   buildSystemPrompt,
   buildStepMessage,
@@ -75,6 +76,10 @@ import { makeBrowserApi, makeTabApi } from '../codebehind/tabs.js';
 import type { EnvDataContext } from '../parser/interpolate-env-data.js';
 import type { StepGroup } from './step-grouper.js';
 import type { AssertionResult } from '../report/types.js';
+import type { DesktopAdapter } from '../desktop/index.js';
+import { captureView } from '../desktop/index.js';
+import { buildComputerConditionJudgeMessages } from '../desktop/judge-prompt.js';
+import { imageInputUnsupportedMessage } from '../desktop/vision-route.js';
 
 /**
  * Actions that may mutate the page and therefore warrant a post-action settle
@@ -159,7 +164,44 @@ export const POLICY_HEAL_SKIPPED_ERROR =
   '(runSettings.ai: off, or ai.allowInRuns: false in aiui.config.json). ' +
   'Repair this step, or run again with AI allowed.';
 
+/**
+ * Everything the COMPUTER surface needs, in one field
+ * (docs/specs/SPEC-use-computer.md §5).
+ *
+ * Present on a step's options only while `surface === 'computer'`. Two
+ * consumers read it: `executeComputerStep` (src/runner/computer-step.ts),
+ * which is the whole turn loop for such a step, and {@link evaluateConditions},
+ * which judges an `If … then` from a capture instead of a DOM (§5.6).
+ *
+ * The adapter is the one the run's `[use computer]` step loaded and the
+ * session holds. It is passed rather than loaded here for the reason §5.1
+ * gives: the import is lazy, it happens once per session at the directive, and
+ * a load failure has a STEP to fail there rather than an executor to crash.
+ */
+export interface ComputerStepContext {
+  adapter: DesktopAdapter;
+  /** §5.5 — the pause after every action that touches the screen. */
+  settleMs: number;
+  /** §5.2 — the longer side of the image the model is shown. */
+  maxImageWidth: number;
+  /** §10.1 — embed the capture in the report. A desktop capture is the whole
+   *  screen and no redaction can mask pixels, so this is a privacy switch. */
+  reportScreenshots: boolean;
+}
+
 export interface StepExecutorOptions {
+  /**
+   * The page this step acts on.
+   *
+   * **Absent in fact, though not in type, on the computer surface**: a
+   * desktop-first test launches no browser (§4.6), so a caller in computer
+   * mode passes whatever `browserSession?.pageTracker.getActive()` gave it,
+   * which is `undefined`. Nothing on the computer path dereferences it —
+   * {@link evaluateConditions} branches on `opts.computer` before it reads a
+   * page, and `executeComputerStep` never touches this field at all. Typing it
+   * `Page | undefined` would put a `!` on ~200 page-surface reads and say
+   * nothing this comment does not.
+   */
   page: Page;
   config: Config;
   aiClient: AiClient;
@@ -348,6 +390,12 @@ export interface StepExecutorOptions {
    * that is not that line must not inherit either.
    */
   failureTail?: ParsedFailureTail | undefined;
+  /**
+   * The computer surface, when this run is on it
+   * (docs/specs/SPEC-use-computer.md §4.5). Absent on every browser-surface
+   * step, which is every step of every test written before computer mode.
+   */
+  computer?: ComputerStepContext | undefined;
 }
 
 /**
@@ -651,7 +699,7 @@ function resolvedTailMessage(
  * The original failure is never lost: a renamed one keeps it in the explanation,
  * and the log line at failure time printed it before this ran (decision 5).
  */
-function applyFailureTail(result: StepResult, opts: StepExecutorOptions): StepResult {
+export function applyFailureTail(result: StepResult, opts: StepExecutorOptions): StepResult {
   const tail = opts.failureTail;
   if (!tail) return result;
   if (result.status !== 'failed' || result.interrupted) return result;
@@ -1002,7 +1050,7 @@ export async function executeStep(
  * the condition was answered from this run's values. One function for both, so
  * the row a reader sees cannot depend on which judged it.
  */
-function composeDeliberateFailure(
+export function composeDeliberateFailure(
   claim: ParsedFlowControlStep,
   interpolatedLine: string,
   why: string,
@@ -1471,7 +1519,7 @@ const NOT_YET_CAPTURED = '(not yet captured)';
  *  shown a raw `[output: total]` prefix and no `[store as: total]` telling it
  *  to capture anything. Idempotent — an already-enriched string has no
  *  `[output:]` left to find. */
-function enrichAuthored(text: string): string {
+export function enrichAuthored(text: string): string {
   const { variables, cleanedInstruction } = parseOutputPrefixes(text);
   return variables.length > 0 ? buildEnrichedInstruction(cleanedInstruction, variables) : text;
 }
@@ -1492,7 +1540,7 @@ function enrichAuthored(text: string): string {
  * nothing, which is what keeps a plain step's prompt byte-identical to the one
  * built before this block existed.
  */
-function buildStepValues(authored: string, opts: StepExecutorOptions): StepValues | undefined {
+export function buildStepValues(authored: string, opts: StepExecutorOptions): StepValues | undefined {
   const params = opts.resolvedParameters ?? {};
   const { placeholders, captures } = referencedVariableNames(authored);
   const defined = new Set([...captures, ...inlineStoreAsNames(authored)]);
@@ -1550,7 +1598,7 @@ function buildStepValues(authored: string, opts: StepExecutorOptions): StepValue
  * secret typed into a text field reached the model masked on one path and raw
  * on the next turn (review 3, finding 2).
  */
-function secretsFor(opts: StepExecutorOptions): string[] {
+export function secretsFor(opts: StepExecutorOptions): string[] {
   return runSecrets({
     parameters: opts.resolvedParameters ?? {},
     ...(opts.envData !== undefined && { envData: opts.envData }),
@@ -3061,6 +3109,15 @@ async function executeStepAttempt(
           switchBrErr = 'switchBrowser failed: missing required "to" field';
         } else {
           try {
+            // `switchBrowser default` on a tracker that never launched
+            // (SPEC-use-computer.md §4.6): the default browser is the one the
+            // deferred launcher opens, so asking for it by name IS the
+            // request to open it. Only `default` — every other label names a
+            // browser an `openBrowser` created, and launching the default
+            // under that name would answer a question nobody asked.
+            if (action.browserLabel === 'default' && !opts.browserTracker.hasActive()) {
+              await opts.browserTracker.ensureLaunched();
+            }
             opts.browserTracker.switchTo(action.browserLabel);
             page = opts.browserTracker.getActivePage();
             logger.info(`Switched to browser "${action.browserLabel}" (${page.url()})`);
@@ -4045,9 +4102,21 @@ async function runAssertionCode(
  * Execute an api_call action using either the Playwright browser context or standalone fetch.
  * Stores the response in the provided ApiResponseStore for subsequent steps.
  */
-async function executeApiCallAction(
+export async function executeApiCallAction(
   action: AIAction,
-  page: Page,
+  /**
+   * The page, or `undefined` on the computer surface — where an `api_call` is
+   * still legal (§5.4: "as today — they touch no surface") and there may be no
+   * browser at all (§4.6).
+   *
+   * Two things degrade without one, and both degrade to "say so" rather than
+   * to a guess: a RELATIVE url has only `baseUrl` to resolve against, and the
+   * opportunistic CSRF pre-flight is skipped. `apiMode: 'browser'` needs a
+   * real browser context and is refused by name rather than silently
+   * downgraded to a standalone fetch that would carry none of the cookies the
+   * mode exists for.
+   */
+  page: Page | undefined,
   stepIndex: number,
   csrfTokens: Record<string, string>,
   requestTimeout: number | undefined,
@@ -4057,9 +4126,26 @@ async function executeApiCallAction(
   const method = (action.method ?? 'GET').toUpperCase();
   let url = action.url ?? '';
 
+  if (!page && action.apiMode === 'browser') {
+    return {
+      failed: true,
+      error:
+        'api_call with apiMode "browser" needs a browser context, and this run has no ' +
+        'browser open. Use the default standalone mode, or switch back with [use browser].',
+    };
+  }
+
   // Resolve relative URLs against baseUrl or the current page URL
   if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
-    const base = baseUrl ?? page.url();
+    const base = baseUrl ?? page?.url();
+    if (!base) {
+      return {
+        failed: true,
+        error:
+          `api_call url "${url}" is relative and there is nothing to resolve it against — ` +
+          'this run has no page and no baseUrl. Give the full URL.',
+      };
+    }
     if (base) {
       try {
         url = new URL(url, base).toString();
@@ -4090,7 +4176,7 @@ async function executeApiCallAction(
   // If no CSRF token has been captured yet, opportunistically try to extract one from
   // the current page.  This handles the case where the AI skips the navigate/wait steps
   // and goes straight to the api_call without an explicit extract_csrf action.
-  if (!csrfTokens['__latest__'] && !headers['x-csrf-token'] && !headers['X-CSRF-Token']) {
+  if (page && !csrfTokens['__latest__'] && !headers['x-csrf-token'] && !headers['X-CSRF-Token']) {
     const autoResult = await extractCsrfToken(page, '').catch(() => undefined);
     if (autoResult) {
       csrfTokens[autoResult.selector] = autoResult.token;
@@ -4116,8 +4202,10 @@ async function executeApiCallAction(
   logger.subAction(`API ${method} ${url}`);
 
   try {
+    // `page!` is safe: the `apiMode === 'browser'` + no-page combination is
+    // refused at the top of this function, so this branch only runs with one.
     const apiResult = action.apiMode === 'browser'
-      ? await callApiBrowserContext(page, callOpts)
+      ? await callApiBrowserContext(page!, callOpts)
       : await callApiStandalone(callOpts);
 
     // Store in response store for subsequent steps
@@ -4205,6 +4293,21 @@ export const CONDITION_JUDGE_BUDGET_MS = 30_000;
 /** Gap between re-asks inside that budget — the branched step's poll interval. */
 const CONDITION_JUDGE_POLL_MS = 3_000;
 
+/** A sleep that ends early when `signal` aborts, so a pause between polls does
+ *  not outlive the Stop button. Resolves either way; the caller checks. */
+function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) { resolve(); return; }
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
 /** What one judge call returned. */
 export interface ConditionVerdict {
   /** Index into the `conditions` array of the FIRST condition that held, or
@@ -4239,17 +4342,33 @@ export async function evaluateConditions(
   opts: StepExecutorOptions,
 ): Promise<ConditionVerdict> {
   const { config, aiClient, contextContent, testName, baseUrl, conversationHistory, pageTracker } = opts;
-  const page = pageTracker ? pageTracker.getActive() : opts.page;
+  /**
+   * The computer surface, when this run is on it (SPEC-use-computer.md §5.6).
+   *
+   * Everything below asks the SAME question of the model — which of these
+   * conditions holds right now — and differs only in what the evidence is: a
+   * DOM plus an optional page screenshot, or a capture of the machine's screen
+   * and no DOM. The predicate path never gets here (`decideLocally` in
+   * control-runtime.ts answers it first, on both surfaces), which is why §5.6
+   * says it is unchanged.
+   */
+  const computer = opts.computer;
+  const page = computer ? undefined : pageTracker ? pageTracker.getActive() : opts.page;
   const startTime = Date.now();
   const deadline = startTime + CONDITION_JUDGE_BUDGET_MS;
   const aiInteractions: AiInteraction[] = [];
 
   // The same gate the watch form opens with, and for the same reason: a page
   // that is still painting answers a different question from the one asked.
-  await waitForPageStability(page, {
-    timeoutMs: Math.min(10_000, config.execution.timeout * 1000),
-    quiesceMs: 1000,
-  });
+  // There is no such signal for a native window — `desktop.settleMs` is the
+  // whole of it, and the executor has already spent it after whatever action
+  // preceded this decision — so the computer surface simply does not wait.
+  if (page) {
+    await waitForPageStability(page, {
+      timeoutMs: Math.min(10_000, config.execution.timeout * 1000),
+      quiesceMs: 1000,
+    });
+  }
 
   // Every `{{name}}` and `${…}` any condition references, with what it holds
   // now — built off the joined authored text so one block covers the chain.
@@ -4262,67 +4381,111 @@ export async function evaluateConditions(
       throw new DOMException('Run aborted by client', 'AbortError');
     }
 
-    const domSnapshot = await captureDomSnapshot(page, {
-      ...config.browser.domNoiseReduction,
-      maxIframeDepth: config.browser.maxIframeDepth,
-      domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-    });
-    const screenshot = config.ai.sendScreenshots
-      ? await captureScreenshot(page, config.browser.fullPageScreenshots)
-      : null;
-    const screenshotBase64 = screenshot?.base64 ?? null;
+    let messages: ChatMessage[];
+    let screenshotBase64: string | null;
+    if (computer) {
+      // §5.6 — on the computer surface the evidence is a fresh capture of the
+      // whole screen, and the request is the short one
+      // src/desktop/judge-prompt.ts builds: what the image is and its size,
+      // the conditions, the masked `## Values`, and the page judge's response
+      // format — no DOM, no page action vocabulary, no API context. It used to
+      // be the page request with the DOM fence swapped for a sentence, which
+      // sent the whole browser system prompt beside every capture, on every
+      // re-ask of a `waiting` decision.
+      //
+      // The capture is ALWAYS attached, whatever `ai.sendScreenshots` says
+      // (§5.2): on this surface the image is the entire evidence, and the flag
+      // governs whether the model sees a PAGE's image beside a DOM.
+      const view = await captureView(computer.adapter, { maxImageWidth: computer.maxImageWidth });
+      screenshotBase64 = view.pngBase64;
+      messages = buildComputerConditionJudgeMessages({
+        conditions,
+        screenshotBase64: view.pngBase64,
+        imageWidth: view.imageWidth,
+        imageHeight: view.imageHeight,
+        conversationHistory,
+        contextContent,
+        values,
+      });
+    } else {
+      const domSnapshot = await captureDomSnapshot(page!, {
+        ...config.browser.domNoiseReduction,
+        maxIframeDepth: config.browser.maxIframeDepth,
+        domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+      });
+      const screenshot = config.ai.sendScreenshots
+        ? await captureScreenshot(page!, config.browser.fullPageScreenshots)
+        : null;
+      screenshotBase64 = screenshot?.base64 ?? null;
 
-    const openPages = pageTracker && pageTracker.count > 1
-      ? await pageTracker.getPageListWithTitles()
-      : undefined;
+      const openPages = pageTracker && pageTracker.count > 1
+        ? await pageTracker.getPageListWithTitles()
+        : undefined;
 
-    const userMessage = buildConditionJudgeMessage(
-      conditions,
-      // Masked for the MODEL only, the same one line the step prompt applies
-      // to the same string. The snapshot now carries LIVE form values, so a
-      // secret this run typed into an ordinary text field is in it — and the
-      // judge, one turn after a step that showed `••••`, would otherwise read
-      // it in full (review 3, finding 2). Nothing stored is redacted here:
-      // `redactReport` covers what is written.
-      redact(domSnapshot, secretsFor(opts)),
-      screenshotBase64,
-      conversationHistory,
-      openPages,
-      // No step numbers: a guard is not the Nth of N steps in any sense the
-      // model could use, and `formatTestInfo` omits the line when they are
-      // absent rather than printing "Step 0 of 0".
-      formatTestInfo(
-        testName,
-        baseUrl,
-        undefined,
-        undefined,
-        config.browser.headed ? config.browser.windowSize : config.browser.viewport,
-        buildActiveBrowserInfo(opts.browserTracker),
-      ),
-      values,
-    );
-    const messages: ChatMessage[] = [
-      {
-        role: 'system',
-        content: buildSystemPrompt(contextContent, undefined, {
-          dismissalGuidance: opts.dismissalGuidance ?? false,
-        }),
-      },
-      userMessage,
-    ];
+      const userMessage = buildConditionJudgeMessage(
+        conditions,
+        // Masked for the MODEL only, the same one line the step prompt applies
+        // to the same string. The snapshot now carries LIVE form values, so a
+        // secret this run typed into an ordinary text field is in it — and the
+        // judge, one turn after a step that showed `••••`, would otherwise read
+        // it in full (review 3, finding 2). Nothing stored is redacted here:
+        // `redactReport` covers what is written.
+        redact(domSnapshot, secretsFor(opts)),
+        screenshotBase64,
+        conversationHistory,
+        openPages,
+        // No step numbers: a guard is not the Nth of N steps in any sense the
+        // model could use, and `formatTestInfo` omits the line when they are
+        // absent rather than printing "Step 0 of 0".
+        formatTestInfo(
+          testName,
+          baseUrl,
+          undefined,
+          undefined,
+          config.browser.headed ? config.browser.windowSize : config.browser.viewport,
+          buildActiveBrowserInfo(opts.browserTracker),
+        ),
+        values,
+      );
+      messages = [
+        {
+          role: 'system',
+          content: buildSystemPrompt(contextContent, undefined, {
+            dismissalGuidance: opts.dismissalGuidance ?? false,
+          }),
+        },
+        userMessage,
+      ];
+    }
+    // `desktop.reportScreenshots: false` keeps a desktop capture out of the
+    // report (§10.1), and this interaction IS report data — a guard's row
+    // renders its judge's turns. The model still got the image above; only
+    // the stored copy is dropped. A page capture is not the switch's business.
+    const recordShot = computer ? computer.reportScreenshots : true;
 
     let currentUrl = '';
     try {
-      currentUrl = page.url();
+      currentUrl = page ? page.url() : '';
     } catch { /* a page mid-navigation still gets judged; the URL is a label */ }
 
-    const completion = await aiClient.complete(messages, opts.signal);
+    let completion: CompleteResult;
+    try {
+      completion = await aiClient.complete(messages, opts.signal);
+    } catch (err) {
+      // SPEC-use-computer.md §15.4 — the model rejected the screenshot. The
+      // guard fails with the bridge's own words rather than the SDK's
+      // `400 …` rendering of them, and is tagged unretryable for any caller
+      // that retries: re-asking sends the same image to the same model.
+      const blind = imageInputUnsupportedMessage(err);
+      if (blind === null) throw err;
+      throw Object.assign(new Error(blind), { retryable: false });
+    }
     aiInteractions.push({
-      purpose: 'condition-judge',
+      purpose: computer ? 'condition-judge [computer]' : 'condition-judge',
       requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
       response: completion.text,
       ...(completion.model !== undefined && { model: completion.model }),
-      ...(screenshotBase64 !== null && { screenshotBase64 }),
+      ...(screenshotBase64 !== null && recordShot && { screenshotBase64 }),
       pageUrl: currentUrl,
       timestamp: new Date().toISOString(),
     });
@@ -4363,15 +4526,24 @@ export async function evaluateConditions(
     }
 
     if (Date.now() + CONDITION_JUDGE_POLL_MS >= deadline) break;
-    await new Promise((resolve) => setTimeout(resolve, CONDITION_JUDGE_POLL_MS));
-    await waitForPageStability(page, {
-      timeoutMs: Math.max(0, Math.min(5000, deadline - Date.now())),
-      quiesceMs: 500,
-    });
+    // Gives way to Stop: a `Wait until` / `While` judge re-asking a `waiting`
+    // screen used to sit out the whole interval after the button was pressed.
+    // Checked again straight after, so a stopped run does not first wait for
+    // the page to settle.
+    await abortableSleep(CONDITION_JUDGE_POLL_MS, opts.signal);
+    if (opts.signal?.aborted) {
+      throw new DOMException('Run aborted by client', 'AbortError');
+    }
+    if (page) {
+      await waitForPageStability(page, {
+        timeoutMs: Math.max(0, Math.min(5000, deadline - Date.now())),
+        quiesceMs: 500,
+      });
+    }
   }
 
   throw new Error(
-    `could not decide: the page did not settle within ` +
+    `could not decide: the ${computer ? 'screen' : 'page'} did not settle within ` +
       `${Math.round(CONDITION_JUDGE_BUDGET_MS / 1000)}s while judging "${conditions[0] ?? ''}"`,
   );
 }

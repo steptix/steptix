@@ -17,7 +17,47 @@ export function registerInitCommand(program: Command): void {
     });
 }
 
-async function initCommand(targetDir: string, force: boolean): Promise<void> {
+/**
+ * The `aiui.config.json` a new project starts with.
+ *
+ * Written from here rather than copied from `templates/init/aiui.config.json`,
+ * because that file is not a starter config: `templates/init` is also the live
+ * integration suite's fixture workspace, and its config carries what the
+ * FIXTURES need — `desktop.enabled: true` for `pdf-dialog-cancel.md`,
+ * `browser.launchArgs: ["--disable-print-preview"]` for the same test, and a
+ * `tests.toolsDir` that climbs out to `../../fixtures/tools/src`. Copied, the
+ * first switched computer mode on in every project `aiui init` ever created,
+ * which is the opt-in SPEC-use-computer.md §5.1 item 1 exists to require: a
+ * test file in a shared project must not be able to move the mouse on a
+ * machine whose owner did not say so. The toolsDir pointed at a directory no
+ * new project has.
+ *
+ * So the two files are kept apart on purpose. This one names only what a new
+ * project has to decide — the model, the directories — and leaves everything
+ * else, `desktop` included, at its default. Exported for the test that pins
+ * that.
+ */
+export const SCAFFOLD_CONFIG = `{
+  "ai": {
+    "model": "openai/gpt-5.6-luna"
+  },
+  "browser": {
+    "headed": true
+  },
+  "tests": {
+    "dir": "./tests",
+    "dataDir": "./data",
+    "contextDir": "./context",
+    "skillsDir": "./skills",
+    "toolsDir": "./tools/src"
+  },
+  "reports": {
+    "outputDir": "./reports"
+  }
+}
+`;
+
+export async function initCommand(targetDir: string, force: boolean): Promise<void> {
   const absTarget = path.resolve(targetDir);
 
   console.log(chalk.bold(`\nInitialising aiui project in: ${chalk.cyan(absTarget)}\n`));
@@ -38,16 +78,16 @@ async function initCommand(targetDir: string, force: boolean): Promise<void> {
     console.log(chalk.green('  ✓') + ` Created ${dir}/`);
   }
 
-  // Copy template files
-  const templateFiles: Array<{ src: string; dest: string }> = [
-    { src: 'aiui.config.json', dest: 'aiui.config.json' },
+  // Copy template files. `aiui.config.json` is not among them: it is written
+  // from SCAFFOLD_CONFIG, never from the fixture workspace's own config.
+  const templateFiles: Array<{ src: string | null; dest: string }> = [
+    { src: null, dest: 'aiui.config.json' },
     { src: 'tests/example.md', dest: 'tests/example.md' },
     { src: 'tests/sections-demo.md', dest: 'tests/sections-demo.md' },
     { src: 'context/app.md', dest: 'context/app.md' },
   ];
 
   for (const { src, dest } of templateFiles) {
-    const srcPath = path.join(templatesDir, src);
     const destPath = path.join(absTarget, dest);
 
     // Check if destination exists
@@ -61,8 +101,13 @@ async function initCommand(targetDir: string, force: boolean): Promise<void> {
       }
     }
 
+    if (src === null) {
+      await writeDefaultTemplate(dest, destPath);
+      continue;
+    }
+
     try {
-      const content = await fs.readFile(srcPath, 'utf-8');
+      const content = await fs.readFile(path.join(templatesDir, src), 'utf-8');
       await fs.mkdir(path.dirname(destPath), { recursive: true });
       await fs.writeFile(destPath, content, 'utf-8');
       console.log(chalk.green('  ✓') + ` Created ${dest}`);
@@ -84,25 +129,7 @@ async function initCommand(targetDir: string, force: boolean): Promise<void> {
 
 async function writeDefaultTemplate(templateName: string, destPath: string): Promise<void> {
   const defaults: Record<string, string> = {
-    'aiui.config.json': `{
-  "ai": {
-    "model": "openai/gpt-5.6-luna"
-  },
-  "browser": {
-    "headed": true,
-    "video": "off"
-  },
-  "tests": {
-    "dir": "./tests",
-    "contextDir": "./context",
-    "skillsDir": "./skills",
-    "toolsDir": "./tools/src"
-  },
-  "reports": {
-    "outputDir": "./reports"
-  }
-}
-`,
+    'aiui.config.json': SCAFFOLD_CONFIG,
     'tests/example.md': `---
 tags: [smoke]
 ---

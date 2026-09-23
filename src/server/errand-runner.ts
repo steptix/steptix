@@ -20,6 +20,7 @@ import { captureScreenshot } from '../browser/screenshot.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
+import { parseUseStep } from '../parser/use-step.js';
 import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
 import {
   failureTailContradictionError,
@@ -710,6 +711,19 @@ export class ErrandRunner {
       const flowControlClaim = setStep ? null : parseFlowControlStep(originalStep);
       const unconditionalFlowControl =
         flowControlClaim && flowControlClaim.body === undefined ? flowControlClaim : null;
+      /**
+       * `[use computer]` / `[use browser]` in an errand — refused in v1
+       * (SPEC-use-computer.md §4.4: an errand is a browser errand, §12 defers
+       * it).
+       *
+       * At RUN time rather than at parse, and that is the only place it can
+       * be: an errand's steps arrive straight off an MCP call with no
+       * validator in front of them, which is the same reason the failure-tail
+       * contradiction is checked here. Read off the AUTHORED step, like every
+       * other claim on this line — `parseUseStep` normalises a `[no-hooks]`
+       * prefix itself.
+       */
+      const useStep = setStep ? null : parseUseStep(originalStep);
       // The `… otherwise fail …` / `… otherwise continue` tail, off the same
       // AUTHORED step (stories/step-failure-outcomes.md, decision 12). An errand is
       // a flat list of prose steps, so the only exclusions here are a `Set` and a
@@ -782,7 +796,28 @@ export class ErrandRunner {
       // it reports a capture. Emitted here rather than there so the `source`
       // can say `assignment`.
       let setAssigned: { name: string; value: string } | undefined;
-      if (failureTailContradiction) {
+      if (useStep) {
+        // SPEC-use-computer.md §4.4 — an errand runs on the page surface, and
+        // §12 keeps `[use …]` in errands for later. Refused by name, with the
+        // reason, rather than handed to a model as prose: a bracket step
+        // nobody parses gets answered with a silent `noop`, which is the whole
+        // failure the bracket spelling exists to prevent (§4.2).
+        const error =
+          `\`[use ${useStep.surface}]\` cannot be used in an errand — an errand runs on the ` +
+          'page surface, borrowing a browser tab. Switch surface inside a test file instead.';
+        logger.error(`Errand ${errandId} step ${line}: ${error}`);
+        stepResult = {
+          index: line,
+          instruction,
+          status: 'failed',
+          stepKind: 'mode',
+          turns: [],
+          durationMs: 0,
+          retried: false,
+          error,
+          aiExplanation: error,
+        };
+      } else if (failureTailContradiction) {
         // Decision 8, refused rather than resolved and with no model call: the
         // line asks to both end the flow and to tolerate its own failure. The
         // same sentence the validator and the session manager use.

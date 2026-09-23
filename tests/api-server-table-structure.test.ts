@@ -102,17 +102,47 @@ const mockBrowserSession = {
 
 vi.mock('../src/browser/manager.js', () => {
   class BrowserTracker {
-    getActive = () => mockBrowserSession;
+    getActive: () => unknown = () => mockBrowserSession;
     getActivePage = () => mockPage;
     closeAll = async () => {};
     all = () => [];
     count = 1;
     list = () => [];
+    hasActive = () => true;
+    ensureLaunched: () => Promise<unknown> = async () => mockBrowserSession;
+    /**
+     * Lazy twin of the real static (SPEC-use-computer.md §4.6), modelled as
+     * the other api-server suites model it: nothing launches until
+     * ensureLaunched(), and it launches at most once.
+     */
+    static deferred(launch: () => Promise<unknown>): BrowserTracker {
+      const tracker = new BrowserTracker();
+      let launched: unknown;
+      tracker.hasActive = () => launched !== undefined;
+      tracker.getActive = () => {
+        if (!launched) throw new Error('no browser has been launched in this session');
+        return launched;
+      };
+      tracker.ensureLaunched = async () => {
+        if (!launched) launched = await launch();
+        return launched;
+      };
+      return tracker;
+    }
   }
   return {
     launchBrowser: async () => ({ ...mockBrowserSession }),
     PageTracker: class {},
     BrowserTracker,
+    // api-server and session-manager do `instanceof` against this, and
+    // `instanceof undefined` throws, so a mock of this module must export it.
+    NoBrowserLaunchedError: class NoBrowserLaunchedError extends Error {
+      constructor(message = 'no browser has been launched in this session') {
+        super(message);
+        this.name = 'NoBrowserLaunchedError';
+      }
+    },
+    NO_BROWSER_LAUNCHED_MESSAGE: 'no browser has been launched in this session',
     briefly: async (p: Promise<unknown>, ms: number, fallback: unknown) =>
       Promise.race([p, new Promise((r) => setTimeout(() => r(fallback), ms))]),
     resolveVideoMode: () => 'off',

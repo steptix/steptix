@@ -246,10 +246,42 @@ function documentName(filename: string | undefined): string {
   return base || 'unnamed';
 }
 
+/**
+ * Extensions served as BYTES rather than text.
+ *
+ * The text branch below reads `utf-8`, which is right for the HTML/JS/CSS this
+ * app is made of and wrong for anything else: a `%PDF-…` file round-tripped
+ * through a utf-8 decode comes back with every byte above 0x7F replaced by
+ * U+FFFD, so the response is the right length in characters and the wrong file.
+ * Chromium's viewer then shows "Failed to load PDF document" and the
+ * computer-mode fixtures (templates/init/tests/pdf-*.md) have no toolbar to
+ * click. So the type map decides the READ MODE as well as the header.
+ */
+const binaryTypes: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+};
+
 function serveStatic(res: http.ServerResponse, filePath: string): void {
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
     const ext = path.extname(filePath).toLowerCase();
+
+    const binaryType = binaryTypes[ext];
+    if (binaryType) {
+      const bytes = fs.readFileSync(filePath);
+      res.writeHead(200, {
+        'Content-Type': binaryType,
+        'Content-Length': bytes.length,
+      });
+      res.end(bytes);
+      return;
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
     const contentType = ext === '.html' ? 'text/html; charset=utf-8'
       : ext === '.js' ? 'application/javascript'
         : ext === '.css' ? 'text/css'
@@ -1473,6 +1505,14 @@ async function handleRequest(
       '/aria-grid': 'aria-grid.html',
       // Four shapes no structural rule reads, for the structure question.
       '/odd-tables': 'odd-tables.html',
+      // The one NON-html static asset (docs/specs/SPEC-use-computer.md §7).
+      // It is in this map rather than reached by the `.html` fallback below
+      // because that fallback is what keeps the static path from serving
+      // arbitrary files out of __dirname; a named route adds one file without
+      // widening it. `serveStatic` reads it as bytes and answers
+      // `application/pdf`, so Chromium shows it in its built-in viewer — the
+      // toolbar the computer-mode fixtures click.
+      '/statement.pdf': 'statement.pdf',
     };
     const mappedFile = friendlyRoutes[pathname];
     if (mappedFile) {

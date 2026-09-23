@@ -705,6 +705,181 @@ describe('screenshots', () => {
     expect(result.screenshotBase64).toBe('B'.repeat(100));
   });
 
+  // SPEC-use-computer.md §10.1 — a computer-mode step's screenshot is the
+  // whole desktop, and `desktop.reportScreenshots: false` keeps it out of the
+  // agent's context as well as out of the report.
+  describe('a computer-mode capture and desktop.reportScreenshots', () => {
+    const desktop = `data:image/png;base64,${'D'.repeat(100)}`;
+    const computerFailure: RunEvent[] = [
+      { type: 'step:start', line: 10 },
+      { type: 'step:fail', line: 10, error: 'no Cancel button', screenshot: desktop, surface: 'computer' },
+      { type: 'done', status: 'failed' },
+    ];
+
+    it('returns it by default — the switch on is the current behaviour', () => {
+      const result = fold({ events: computerFailure, screenshotsReturn: 'on-failure', desktopScreenshots: true });
+      expect(result.screenshotBase64).toBe('D'.repeat(100));
+    });
+
+    it('withholds it when the switch is off, and says why', () => {
+      const result = fold({ events: computerFailure, screenshotsReturn: 'on-failure', desktopScreenshots: false });
+      expect(result.screenshotBase64).toBeNull();
+      expect(result.warnings.join(' ')).toContain('desktop.reportScreenshots is false');
+    });
+
+    it('withholds it under final too', () => {
+      const result = fold({ events: computerFailure, screenshotsReturn: 'final', desktopScreenshots: false });
+      expect(result.screenshotBase64).toBeNull();
+    });
+
+    it('does not hand back an earlier page screenshot in its place', () => {
+      const result = fold({
+        events: [
+          { type: 'step:start', line: 10 },
+          { type: 'step:fail', line: 10, error: 'minor', screenshot: png, tolerated: true },
+          { type: 'step:start', line: 11 },
+          { type: 'step:fail', line: 11, error: 'no Cancel button', screenshot: desktop, surface: 'computer' },
+          { type: 'done', status: 'failed' },
+        ],
+        screenshotsReturn: 'on-failure',
+        desktopScreenshots: false,
+      });
+      expect(result.screenshotBase64).toBeNull();
+    });
+
+    it('…nor when the server already left the desktop capture off (what a current server does)', () => {
+      const result = fold({
+        events: [
+          { type: 'step:start', line: 10 },
+          { type: 'step:fail', line: 10, error: 'minor', screenshot: png, tolerated: true },
+          { type: 'step:start', line: 11 },
+          { type: 'step:fail', line: 11, error: 'no Cancel button', surface: 'computer' },
+          { type: 'done', status: 'failed' },
+        ],
+        screenshotsReturn: 'on-failure',
+        desktopScreenshots: false,
+      });
+      expect(result.screenshotBase64).toBeNull();
+    });
+
+    it('under final, a withheld passing desktop capture is not replaced by the page shot before it', () => {
+      const result = fold({
+        events: [
+          { type: 'step:start', line: 10 },
+          { type: 'step:pass', line: 10, screenshot: png },
+          { type: 'step:start', line: 11 },
+          { type: 'step:pass', line: 11, screenshot: desktop, surface: 'computer' },
+          { type: 'done', status: 'passed' },
+        ],
+        screenshotsReturn: 'final',
+        desktopScreenshots: false,
+      });
+      expect(result.screenshotBase64).toBeNull();
+      expect(result.warnings.join(' ')).toContain('desktop.reportScreenshots is false');
+    });
+
+    // What a CURRENT server sends with the switch off: the computer step's
+    // event carries no screenshot at all. Acting only on an event that carried
+    // one left the page shot from before the excursion standing as `final`,
+    // with no warning — a picture of a screen the run had long since left.
+    it('under final, a passing computer step the server already stripped clears the page shot before it', () => {
+      const result = fold({
+        events: [
+          { type: 'step:start', line: 10 },
+          { type: 'step:pass', line: 10, screenshot: png },
+          { type: 'step:start', line: 11 },
+          { type: 'step:pass', line: 11, surface: 'computer' },
+          { type: 'done', status: 'passed' },
+        ],
+        screenshotsReturn: 'final',
+        desktopScreenshots: false,
+      });
+      expect(result.screenshotBase64).toBeNull();
+      expect(result.warnings.join(' ')).toContain('desktop.reportScreenshots is false');
+    });
+
+    it('…and so does a tolerated computer failure the server already stripped', () => {
+      const result = fold({
+        events: [
+          { type: 'step:start', line: 10 },
+          { type: 'step:pass', line: 10, screenshot: png },
+          { type: 'step:start', line: 11 },
+          { type: 'step:fail', line: 11, error: 'no toast', tolerated: true, surface: 'computer' },
+          { type: 'done', status: 'passed' },
+        ],
+        screenshotsReturn: 'final',
+        desktopScreenshots: false,
+      });
+      expect(result.screenshotBase64).toBeNull();
+      expect(result.warnings.join(' ')).toContain('desktop.reportScreenshots is false');
+    });
+
+    it('a page step after the excursion that brings its own screenshot is what final returns', () => {
+      const later = `data:image/png;base64,${'B'.repeat(100)}`;
+      const result = fold({
+        events: [
+          { type: 'step:start', line: 10 },
+          { type: 'step:pass', line: 10, screenshot: png },
+          { type: 'step:start', line: 11 },
+          { type: 'step:pass', line: 11, surface: 'computer' },
+          { type: 'step:start', line: 12 },
+          { type: 'step:pass', line: 12, screenshot: later },
+          { type: 'done', status: 'passed' },
+        ],
+        screenshotsReturn: 'final',
+        desktopScreenshots: false,
+      });
+      expect(result.screenshotBase64).toBe('B'.repeat(100));
+    });
+
+    it('with the switch ON, a computer step with no screenshot changes nothing', () => {
+      // The switch-on path is the current behaviour, and `final` there is "the
+      // last screenshot any step carried" for either surface.
+      const result = fold({
+        events: [
+          { type: 'step:start', line: 10 },
+          { type: 'step:pass', line: 10, screenshot: png },
+          { type: 'step:start', line: 11 },
+          { type: 'step:pass', line: 11, surface: 'computer' },
+          { type: 'done', status: 'passed' },
+        ],
+        screenshotsReturn: 'final',
+        desktopScreenshots: true,
+      });
+      expect(result.screenshotBase64).toBe('A'.repeat(100));
+    });
+
+    it('leaves a PAGE screenshot alone when the switch is off', () => {
+      const result = fold({
+        events: [
+          { type: 'step:start', line: 10 },
+          { type: 'step:fail', line: 10, error: 'x', screenshot: png },
+          { type: 'done', status: 'failed' },
+        ],
+        screenshotsReturn: 'on-failure',
+        desktopScreenshots: false,
+      });
+      expect(result.screenshotBase64).toBe('A'.repeat(100));
+    });
+
+    it('names the switch, not the capture setting, when the server already left it off', () => {
+      // What a current server sends with the switch off: the failure, marked
+      // computer, with no screenshot on it at all.
+      const result = fold({
+        events: [
+          { type: 'step:start', line: 10 },
+          { type: 'step:fail', line: 10, error: 'no Cancel button', surface: 'computer' },
+          { type: 'done', status: 'failed' },
+        ],
+        screenshotsReturn: 'on-failure',
+        desktopScreenshots: false,
+      });
+      const warnings = result.warnings.join(' ');
+      expect(warnings).toContain('desktop.reportScreenshots is false');
+      expect(warnings).not.toContain('capture');
+    });
+  });
+
   it('returns the failure shot under final when the run ended on a failure', () => {
     const result = fold({
       events: [

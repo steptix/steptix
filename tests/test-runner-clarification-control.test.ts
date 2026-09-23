@@ -39,18 +39,48 @@ vi.mock('../src/browser/manager.js', () => ({
   // being called for non-CDP teardown — but the multi-browser branch uses
   // tracker.closeAll, so we delegate). The two paths converge by having
   // closeAll call closeBrowserMock for the initial session.
-  BrowserTracker: class {
+  // The 'no browser yet' sentinel (SPEC-use-computer.md §4.6). A mock of
+  // this module must export it: api-server and session-manager both do
+  // `instanceof` against it, and `instanceof undefined` throws.
+  NoBrowserLaunchedError: class NoBrowserLaunchedError extends Error {
+    constructor(message = 'no browser has been launched in this session') {
+      super(message);
+      this.name = 'NoBrowserLaunchedError';
+    }
+  },
+  NO_BROWSER_LAUNCHED_MESSAGE: 'no browser has been launched in this session',
+  BrowserTracker: class BrowserTrackerStub {
     private session: unknown;
+    private launch: (() => Promise<unknown>) | undefined;
     constructor(initial: unknown) { this.session = initial; }
-    getActive() { return this.session; }
-    getActivePage() { return (this.session as { page: unknown }).page; }
+    getActive() {
+      if (this.session === undefined) {
+        throw new Error('no browser has been launched in this session');
+      }
+      return this.session;
+    }
+    getActivePage() { return (this.getActive() as { page: unknown }).page; }
     has() { return false; }
     add() {}
     switchTo() { return this.session; }
     async close() {}
-    async closeAll() { closeBrowserMock(this.session); }
+    async closeAll() { if (this.session !== undefined) closeBrowserMock(this.session); }
     list() { return []; }
-    get count() { return 1; }
+    get count() { return this.session === undefined ? 0 : 1; }
+    // ── Lazy launch (SPEC-use-computer.md §4.6) ──
+    // Modelled rather than stubbed: the deferred tracker starts EMPTY, so a
+    // runner that forgot to call ensureLaunched() fails here instead of
+    // quietly getting a browser it never asked for.
+    hasActive() { return this.session !== undefined; }
+    static deferred(launch: () => Promise<unknown>) {
+      const tracker = new BrowserTrackerStub(undefined);
+      tracker.launch = launch;
+      return tracker;
+    }
+    async ensureLaunched() {
+      if (this.session === undefined) this.session = await this.launch!();
+      return this.session;
+    }
   },
 }));
 

@@ -416,6 +416,21 @@ describe('aiui.config.json', () => {
     });
   });
 
+  it('reads desktopScreenshots from desktop.reportScreenshots, closed on anything but true or absent', async () => {
+    // SPEC-use-computer.md §10.1: the privacy switch decides whether a desktop
+    // capture may come back to the agent, so an ambiguous value withholds it.
+    const absent = seedProject(makeTmp(), { config: {} });
+    const on = seedProject(makeTmp(), { config: { desktop: { reportScreenshots: true } } });
+    const off = seedProject(makeTmp(), { config: { desktop: { reportScreenshots: false } } });
+    const garbled = seedProject(makeTmp(), { config: { desktop: { reportScreenshots: 'true' } } });
+    process.env['AIUI_MCP_ROOTS'] = [absent, on, off, garbled].join(path.delimiter);
+
+    expect((await resolveProject({ projectRoot: absent })).desktopScreenshots).toBe(true);
+    expect((await resolveProject({ projectRoot: on })).desktopScreenshots).toBe(true);
+    expect((await resolveProject({ projectRoot: off })).desktopScreenshots).toBe(false);
+    expect((await resolveProject({ projectRoot: garbled })).desktopScreenshots).toBe(false);
+  });
+
   it('refuses a config that is not readable JSON', async () => {
     const root = makeTmp();
     seedProject(root);

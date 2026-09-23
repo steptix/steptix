@@ -371,6 +371,247 @@ describe('TestBench debug state machine', function () {
     assert.equal(hooks.isRunning(), false);
   });
 
+  it('runStart: a started run sends it on its first block; a Continue does not (SPEC-use-computer §4.5)', async () => {
+    // The server resets the session's surface only on a batch that says it
+    // starts a run. A run that failed inside `[use computer]` leaves the
+    // reused session on the computer surface, so a started run that forgot to
+    // say so would hand its first step to the real mouse — and a Continue
+    // that DID say so would drop a paused desktop excursion back onto the page.
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(fixtureUri('test-with-steps.md'), new vscode.Position(9, 0)),
+        true,
+      ),
+    ]);
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(new vscode.Position(0, 0), new vscode.Position(0, 0));
+
+    // Run (the whole test): the first block starts at step 1 — index 0.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    assert.deepEqual(fake.requests[0].runStart, { stepIndex: 0 });
+    fake.push({ type: 'step:start', line: 8 });
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+    await waitFor('paused at line 10', () => hooks.tracker.snapshot().breakpointStop === 10);
+    await waitFor('idle while paused', () => !hooks.isRunning());
+
+    // Continue: the same run, so no runStart — the surface it paused on stays.
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('continuation requested', () => fake.requests.length > 1);
+    assert.deepEqual(fake.requests[1].sourceLines, [10]);
+    assert.equal(fake.requests[1].runStart, undefined, 'a Continue must not reset the surface');
+    fake.end();
+    await waitFor('idle after continue', () => !hooks.isRunning());
+    vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
+
+    // Run Step Here on step 2 (line 9): a started run, starting at index 1.
+    editor.selection = new vscode.Selection(new vscode.Position(8, 0), new vscode.Position(8, 5));
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('third run requested', () => fake.requests.length > 2);
+    assert.deepEqual(fake.requests[2].sourceLines, [9]);
+    assert.deepEqual(fake.requests[2].runStart, { stepIndex: 1 });
+    fake.end();
+    await waitFor('idle after the mid-file run', () => !hooks.isRunning());
+  });
+
+  // A started run that parks before ANY batch reaches the server still owes
+  // the server its `runStart`. The Continue is `isResume`, which never sends
+  // one — so before this, the whole run executed on whatever surface the LAST
+  // run left, and after a failure inside `[use computer]` that is the real
+  // mouse. The first batch the run does send carries it, from that batch's own
+  // first step, and only that one.
+  describe('runStart owed by a run that paused before sending anything (SPEC-use-computer §4.5)', () => {
+    /** Write a throwaway fixture, open it, and wait until TestBench owns it. */
+    async function openTempFixture(name, body) {
+      const fs = require('node:fs');
+      const file = path.resolve(FIXTURES_DIR, name);
+      fs.writeFileSync(file, body, 'utf-8');
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      const uri = vscode.Uri.file(file);
+      await vscode.commands.executeCommand('vscode.open', uri);
+      await waitFor('temp fixture active', () => {
+        const e = vscode.window.activeTextEditor;
+        return e && e.document.uri.toString() === uri.toString();
+      });
+      await waitFor('temp fixture detected as a test', () => hooks.tracker.snapshot().isTestFile === true);
+      const editor = vscode.window.activeTextEditor;
+      // Cursor only: runSelected reads that as "run the whole test".
+      editor.selection = new vscode.Selection(new vscode.Position(0, 0), new vscode.Position(0, 0));
+      return { file, uri };
+    }
+
+    afterEach(async () => {
+      // Releases a run a failed assertion left parked or prompting, so what it
+      // still owes cannot leak into the next test's run of the same file.
+      await vscode.commands.executeCommand('workbench.action.closeQuickOpen');
+      await vscode.commands.executeCommand('testbench-native.stop');
+      vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      const fs = require('node:fs');
+      for (const name of ['run-start-input.tmp.md', 'run-start-interactive.tmp.md']) {
+        fs.rmSync(path.resolve(FIXTURES_DIR, name), { force: true });
+      }
+    });
+
+    it('a breakpoint on step 1: the Continue carries it (stepIndex 0), and the Continue after that does not', async () => {
+      const uri = fixtureUri('test-with-steps.md');
+      vscode.debug.addBreakpoints([
+        new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(7, 0)), true), // step 1
+        new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(9, 0)), true), // step 3
+      ]);
+      const editor = vscode.window.activeTextEditor;
+      editor.selection = new vscode.Selection(new vscode.Position(0, 0), new vscode.Position(0, 0));
+
+      void vscode.commands.executeCommand('testbench-native.runSelected');
+      await waitFor('parked on step 1', () => hooks.tracker.snapshot().breakpointStop === 8);
+      await waitFor('idle while parked', () => !hooks.isRunning());
+      assert.equal(fake.requests.length, 0, 'precondition: the run parked having sent nothing');
+
+      // Continue: the first batch of the run the user started.
+      void vscode.commands.executeCommand('testbench-native.continueRun');
+      await waitFor('first block sent', () => fake.requests.length === 1);
+      assert.deepEqual(fake.requests[0].sourceLines, [8, 9]);
+      assert.deepEqual(
+        fake.requests[0].runStart,
+        { stepIndex: 0 },
+        'the run starts on the surface its file says, not the one the last run left',
+      );
+      fake.push({ type: 'step:start', line: 8 });
+      fake.push({ type: 'step:pass', line: 8 });
+      fake.push({ type: 'step:start', line: 9 });
+      fake.push({ type: 'step:pass', line: 9 });
+      fake.end();
+      await waitFor('parked on step 3', () => hooks.tracker.snapshot().breakpointStop === 10);
+      await waitFor('idle while parked again', () => !hooks.isRunning());
+
+      // A second Continue of the same run: it already said it began.
+      void vscode.commands.executeCommand('testbench-native.continueRun');
+      await waitFor('second block sent', () => fake.requests.length === 2);
+      assert.deepEqual(fake.requests[1].sourceLines, [10]);
+      assert.equal(fake.requests[1].runStart, undefined, 'never twice in one run');
+      fake.end();
+      await waitFor('idle after the run ends', () => !hooks.isRunning());
+    });
+
+    it('an [input:] then a breakpoint: the Continue carries it, from its own first step', async () => {
+      const { uri } = await openTempFixture(
+        'run-start-input.tmp.md',
+        [
+          '---',
+          'type: test',
+          '---',
+          '',
+          '# runStart after an input',
+          '',
+          '## Steps',
+          '1. [input: who] Who is signing in?',
+          '2. Navigate to https://example.com',
+          '3. Click the "Get started" button',
+          '',
+        ].join('\n'),
+      );
+      vscode.debug.addBreakpoints([
+        new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(8, 0)), true), // step 2
+      ]);
+
+      void vscode.commands.executeCommand('testbench-native.runSelected');
+      // `[input:]` prompts through VS Code's own InputBox. Accepting it empty
+      // answers `''`, which is an answer (a cancel would end the run). There
+      // is no hook for "the box is open", and accepting early is a no-op, so
+      // keep accepting until the run parks on the breakpoint behind it.
+      await waitFor(
+        'input answered and the run parked on step 2',
+        async () => {
+          if (hooks.tracker.snapshot().breakpointStop === 9) return true;
+          await vscode.commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
+          return hooks.tracker.snapshot().breakpointStop === 9;
+        },
+        10_000,
+      );
+      await waitFor('idle while parked', () => !hooks.isRunning());
+      assert.equal(fake.requests.length, 0, 'precondition: an [input:] sends nothing to the server');
+
+      void vscode.commands.executeCommand('testbench-native.continueRun');
+      await waitFor('first block sent', () => fake.requests.length === 1);
+      assert.deepEqual(fake.requests[0].sourceLines, [9, 10]);
+      assert.deepEqual(fake.requests[0].runStart, { stepIndex: 1 });
+      fake.end();
+      await waitFor('idle after the run ends', () => !hooks.isRunning());
+    });
+
+    it('[interactive] first: the first REPL turn carries it; a run left without a turn hands it to the next block', async () => {
+      await openTempFixture(
+        'run-start-interactive.tmp.md',
+        [
+          '---',
+          'type: test',
+          '---',
+          '',
+          '# runStart from an interactive start',
+          '',
+          '## Steps',
+          '1. [interactive] Look around first',
+          '2. Navigate to https://example.com',
+          '',
+        ].join('\n'),
+      );
+
+      // Run 1: type a step at the REPL, then /continue.
+      void vscode.commands.executeCommand('testbench-native.runSelected');
+      // The composer has no "prompt is open" hook, and answering early is a
+      // silent no-op, so keep answering until the turn goes out.
+      await waitFor(
+        'the REPL turn is sent',
+        async () => {
+          if (fake.requests.length >= 1) return true;
+          await hooks.dispatchWebviewMessage({ type: 'promptResponse', text: 'Scroll to the footer' });
+          return fake.requests.length >= 1;
+        },
+        10_000,
+      );
+      const turn = fake.requests[0];
+      assert.deepEqual(turn.steps, ['Scroll to the footer']);
+      assert.deepEqual(turn.runStart, { stepIndex: 0 }, 'the REPL turn is the batch that starts the run');
+      // `stepIndex` is a position in `fullSteps`; without the list the server
+      // starts on `browser` whatever the index says.
+      assert.deepEqual(turn.fullSteps, ['[interactive] Look around first', 'Navigate to https://example.com']);
+      fake.end();
+      await waitFor(
+        'the block after the REPL is sent',
+        async () => {
+          if (fake.requests.length >= 2) return true;
+          await hooks.dispatchWebviewMessage({ type: 'promptResponse', text: '/continue' });
+          return fake.requests.length >= 2;
+        },
+        10_000,
+      );
+      assert.deepEqual(fake.requests[1].sourceLines, [9]);
+      assert.equal(fake.requests[1].runStart, undefined, 'spent by the REPL turn — never twice');
+      fake.end();
+      await waitFor('run 1 idle', () => !hooks.isRunning());
+
+      // Run 2: leave the REPL without typing anything. Nothing went out, so
+      // the block after it is the batch that starts the run.
+      void vscode.commands.executeCommand('testbench-native.runSelected');
+      await waitFor(
+        'run 2: the block after the REPL is sent',
+        async () => {
+          if (fake.requests.length >= 3) return true;
+          await hooks.dispatchWebviewMessage({ type: 'promptResponse', text: '/continue' });
+          return fake.requests.length >= 3;
+        },
+        10_000,
+      );
+      assert.deepEqual(fake.requests[2].sourceLines, [9]);
+      assert.deepEqual(fake.requests[2].runStart, { stepIndex: 1 });
+      fake.end();
+      await waitFor('run 2 idle', () => !hooks.isRunning());
+    });
+  });
+
   it('running → idle (webview stop): webview-driven stop also marks in-flight step stopped', async () => {
     // Guards the two-handler regression class: testbench-native.stop and the
     // webview-message `{ type: 'stop' }` handler are separate code paths.

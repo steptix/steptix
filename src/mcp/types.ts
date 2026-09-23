@@ -161,6 +161,14 @@ export interface ProjectContext {
    * explicit act, so anything ambiguous stays closed.
    */
   cdpPermissions: { allowUnowned: boolean; ports: number[] | null };
+  /**
+   * `desktop.reportScreenshots` from `aiui.config.json`: false means a
+   * computer-mode capture is never handed back to the caller as an image
+   * (SPEC-use-computer.md §10.1). Read once, here, beside `cdpPermissions`, and
+   * for the same reason — it is a human's decision in a file an agent cannot
+   * write, so it is not a tool argument.
+   */
+  desktopScreenshots: boolean;
 }
 
 /** The body `POST /sessions/:id/steps` accepts. Mirrors the server's explicit
@@ -203,6 +211,15 @@ export interface McpStepRequest {
    * argument here cannot be mistaken for something a test file declared.
    */
   runSettings?: RunSettings;
+  /**
+   * This batch starts a run (SPEC-use-computer.md §4.5; `StepRequest.runStart`
+   * in src/server/session-manager.ts). `run_test_file` sends it on every call:
+   * each one runs the whole file from step 1 in the reused `mcp:<path>`
+   * session, so each one must start on the browser surface, whatever surface a
+   * previous call failed on. `run_steps` does not — its session carries on
+   * between calls, surface included, by design.
+   */
+  runStart?: { stepIndex?: number };
 }
 
 /**

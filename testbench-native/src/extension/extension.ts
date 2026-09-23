@@ -45,7 +45,7 @@ import {
 import { ServerStatusBar } from './server-status-bar.js';
 import { CompileTailSignals } from './compile-tail-signals.js';
 import { registerServerCommands } from './server-commands.js';
-import { LmBridge, type BridgeStatus, type LmFacade } from './lm-bridge.js';
+import { LmBridge, type BridgeStatus, type LmBridgeTestOptions } from './lm-bridge.js';
 import { registerLmBridgeCommands } from './lm-bridge-setup.js';
 import {
   AutoStartGuard,
@@ -1868,8 +1868,9 @@ export interface TestBenchTestHooks {
   /** Swap the `vscode.lm` namespace the bridge (and the setup command) calls,
    *  and shorten the EADDRINUSE standby retry so the adopt is observable inside
    *  a test's timeout. A real `vscode.lm` in the harness would need a signed-in
-   *  Copilot seat and would spend it. */
-  configureLmBridge: (opts: { facade?: LmFacade; retryMs?: number }) => void;
+   *  Copilot seat and would spend it. `imagePart` forces the image path; see
+   *  LmBridge.configureForTests. */
+  configureLmBridge: (opts: LmBridgeTestOptions) => void;
   /** The bridge token, so a test can present the header a real client would.
    *  Minting it here is not a side effect the suite has to undo: it is the same
    *  SecretStorage entry the extension would mint on first use, inside the

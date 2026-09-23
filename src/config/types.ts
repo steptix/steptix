@@ -225,6 +225,61 @@ export interface BrowserConfig {
    *  `UserConfig`) accepts `"video": true/false` instead of enum-rejecting it.
    *  Default 'off'. */
   video?: 'off' | 'on' | 'retain-on-failure' | boolean | undefined;
+  /** Extra Chromium command-line arguments, appended to the `--window-size`
+   *  the launcher already passes (docs/specs/SPEC-use-computer.md §5.10).
+   *
+   *  It exists for the two cases where what a test needs to drive is decided
+   *  by a browser flag rather than by anything in the page. The measured one:
+   *  `--disable-print-preview` makes Chromium's Print button open the
+   *  OPERATING SYSTEM's print dialog instead of its own preview, which is a
+   *  native window and therefore reachable from computer mode. The other is
+   *  `--ozone-platform=x11` on a Wayland desktop, without which the browser
+   *  and its GTK dialogs are not X11 windows and libnut cannot see them
+   *  (§11).
+   *
+   *  Chromium only, and applies at LAUNCH: a browser attached to over CDP is
+   *  the user's own and was started with whatever it was started with. */
+  launchArgs?: string[] | undefined;
+}
+
+/**
+ * The computer surface (docs/specs/SPEC-use-computer.md §5.10).
+ *
+ * Every key here is per project, in `aiui.config.json`, and `enabled` is the
+ * reason the section exists at all: a test file in a shared repository must
+ * not be able to move the mouse on a machine whose owner did not allow it
+ * (§5.1 item 1).
+ *
+ * Required on `Config`, with a `defaults.ts` entry, unlike `mcp` —
+ * `desktop.enabled` is read on every `[use computer]`, and a missing section
+ * must read as "off" rather than as `undefined`.
+ *
+ * The doc comment lives HERE and not on `Config.desktop`, which is not a
+ * style preference: `ts-json-schema-generator` names a REQUIRED property's
+ * type anonymously (`DeepPartial<def-interface-…-13661-15026-…>`) when the
+ * property itself carries a JSDoc, so the generated schema gains an unreadable
+ * definition key that churns on every edit to the file above it. Measured
+ * 2026-09-23 while adding this section; `mcp` does not show it because an
+ * OPTIONAL property takes a different path through the generator.
+ */
+export interface DesktopConfig {
+  /** Opt in to `[use computer]` for this project. Default false; with it off,
+   *  the directive fails the step and says so (§5.1 item 1). */
+  enabled: boolean;
+  /** The longer side, in pixels, of the screenshot the model is shown (§5.2).
+   *  A full-screen grab is downscaled to fit and never upscaled; a `zoom` is
+   *  scaled UP to this, which is what makes small print readable on a
+   *  downscaled 4K desktop. Default 1600. */
+  maxImageWidth: number;
+  /** Milliseconds to wait after any action that touches the screen, before
+   *  the next capture (§5.5). Native UIs redraw asynchronously and a dialog
+   *  takes a moment to appear. Default 300. */
+  settleMs: number;
+  /** Embed desktop captures in the HTML report (§10.1). A desktop capture is
+   *  the WHOLE SCREEN, including whatever else is on it, and the text
+   *  redaction in `src/utils/secrets.ts` cannot mask pixels — so this switch
+   *  is about privacy, not about report size. Default true. */
+  reportScreenshots: boolean;
 }
 
 export interface TestsConfig {
@@ -532,6 +587,7 @@ export interface EffectiveSettings {
 export interface Config {
   ai: AiConfig;
   browser: BrowserConfig;
+  desktop: DesktopConfig;
   tests: TestsConfig;
   execution: ExecutionConfig;
   reports: ReportsConfig;

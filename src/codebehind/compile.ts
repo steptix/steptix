@@ -6,6 +6,7 @@ import type { StepResult, TestReport } from '../report/types.js';
 import type { TokenTracker } from '../utils/tokens.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
+import { parseUseStep } from '../parser/use-step.js';
 import { loopCompileRefusal } from '../runner/control-flow.js';
 import { buildCodeBehindRegistry } from './loader.js';
 import {
@@ -16,6 +17,7 @@ import {
   guardedValues,
   stepEnvRefs,
   stepParameters,
+  SURFACE_SWITCH_NOT_COMPILED,
   valueMatchWarning,
   type GeneratedEntry,
 } from './generate.js';
@@ -28,6 +30,7 @@ import {
   clipLine,
   DISPATCHED_NOT_COMPILED,
   endedAsWrittenReason,
+  COMPUTER_MODE_STAYS_AI,
   TOLERATED_FAILURE_REFUSAL,
 } from './live-compile.js';
 import { clearStale, readLastRun } from './last-run.js';
@@ -683,6 +686,23 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       return finish('failed', { compiled: 0, kept: keptExisting, keptAi: keptAiExisting, written: [], error: 'aborted' }, 'Compile aborted.');
     }
     const result = record.steps[step.index];
+
+    // ── A step that EXECUTED in computer mode stays AI (§9) ──────────────
+    //
+    // Judged from the RUN's recording rather than from the file, and that is
+    // the whole reason it is here and not in `describeSteps`: a shared
+    // `### Section` or a skill body runs on whatever surface its caller was
+    // on, so the file cannot know. `ai: true` with the reason, and no model
+    // call — generation would be asked to write a `page.mouse.click(812, 544)`
+    // that means something else on the next machine.
+    if (result?.surface === 'computer') {
+      stepEvent('generate', step, COMPUTER_MODE_STAYS_AI);
+      await candidate.apply(step, aiEntryFor(step.text, COMPUTER_MODE_STAYS_AI));
+      await candidate.persist();
+      declined++;
+      continue;
+    }
+
     const generated = await generateStepEntry({
       binding: step.binding!,
       actions: actionsOf(result),
@@ -1485,6 +1505,15 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
       // rationale.
       : parseSetStep(text)
       ? 'a Set step is dispatched, not compiled'
+      // A `[use computer]` / `[use browser]` line, on the same terms as `Set`
+      // and the unconditional flow-control step: the loop dispatches it with
+      // no model call, so there is nothing recorded for an entry to replace
+      // (SPEC-use-computer.md §9). `parseUseStep` normalises the `[no-hooks]`
+      // marker itself, which matters here because `text` can be a RAW authored
+      // line still carrying one — the same reason `parseSetStep` is asked the
+      // raw text a line above.
+      : parseUseStep(text)
+      ? SURFACE_SWITCH_NOT_COMPILED
       : flowControl && flowControl.body === undefined
       ? DISPATCHED_NOT_COMPILED
       : !binding

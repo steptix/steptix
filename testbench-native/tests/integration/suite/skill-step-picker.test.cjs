@@ -181,6 +181,9 @@ describe('skill-file session picker', function () {
     assert.equal(req.endAt.line, 12, 'endAt equals startAt — a true single-step slice');
     assert.equal(req.compile, undefined, 'a run pick carries no compile mode');
     assert.equal(req.compileContinues, undefined, 'and never compileContinues');
+    // A ⏸ pick re-runs the failed step against what the failure left, surface
+    // included — the Variables panel's re-run, reached from the skill file.
+    assert.equal(req.runStart, undefined, 'a ⏸ pick keeps the surface the failure left');
     const sid = fake.streamSessionIds[fake.streamSessionIds.length - 1];
     assert.ok(
       sid.toLowerCase().includes('test-with-steps'),
@@ -271,6 +274,49 @@ describe('skill-file session picker', function () {
     fake.end();
     await waitFor('idle after compile slice', () => !hooks.isRunning());
     assert.equal(hooks.lastCompileError(), null, 'the compile pick completed cleanly');
+  });
+
+  it('a ▶ pick starts a run: its slice carries runStart at the call line (SPEC-use-computer §4.5)', async () => {
+    // A ▶ row is an idle session whose last run had nothing to do with this
+    // skill. It may have died inside some other `[use computer]`, and the
+    // session keeps that surface until a batch says a run begins — so without
+    // `runStart` the skill step went to the real mouse. The ⏸ and ⏹ rows are
+    // re-runs of what a run left inside THIS skill, and keep its surface (the
+    // ⏸ test above pins that).
+    //
+    // The row is built here rather than offered: `test-with-steps.md` has no
+    // `[skill:]` line for the caller scan to find, and what is under test is
+    // the routing of a ▶ pick, which the enumeration (skill-run-targets unit
+    // tests) does not decide.
+    const testUri = fixtureUri('test-with-steps.md');
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
+
+    await openSkillEditor();
+    hooks.setSkillSessionPicker(() => ({
+      kind: 'open',
+      id: testUri.toString(),
+      callLine: 9,
+      label: '▶ test-with-steps.md',
+      description: 'session open (calls fake_skill at line 9)',
+    }));
+
+    const before = fake.requests.length;
+    void vscode.commands.executeCommand('testbench-native.runStepHere', { lineNumber: 12 });
+    await waitFor('slice request issued', () => fake.requests.length > before);
+
+    const req = fake.requests[fake.requests.length - 1];
+    assert.equal(req.startAt.line, 12, 'precondition: it is the bounded skill slice');
+    assert.deepEqual(req.sourceLines, [9], 'precondition: it runs the call line');
+    // Line 9 is the file's second step, so index 1 of `fullSteps`.
+    assert.deepEqual(req.runStart, { stepIndex: 1 }, 'a ▶ pick starts on the surface its call line is on');
+    const sid = fake.streamSessionIds[fake.streamSessionIds.length - 1];
+    assert.ok(sid.toLowerCase().includes('test-with-steps'), 'in the TEST session');
+
+    fake.end();
+    await waitFor('idle', () => !hooks.isRunning());
   });
 
   it('the standalone row keeps today\'s behaviour: a plain run in the skill\'s own session', async () => {

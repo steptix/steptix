@@ -293,7 +293,10 @@ const screenshotsReturn = z
       'this conversation. `final` — the page as the run left it, pass or fail, ' +
       'which needs `capture: "every-step"` on a passing run. There is ' +
       'deliberately no every-step option. Bear in mind an image costs real ' +
-      'context and is a photograph of a live signed-in session. Per call — ' +
+      'context and is a photograph of a live signed-in session. A step that ' +
+      'failed in computer mode (after `[use computer]`) is photographed as the ' +
+      'WHOLE DESKTOP, every window on it, unless the project sets ' +
+      '`desktop.reportScreenshots: false` — then no image comes back for it. Per call — ' +
       'unlike the settings above, this one is not retained.',
   );
 

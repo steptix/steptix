@@ -84,12 +84,33 @@ Development Host from that worktree instead:
 cd <worktree>\testbench-native
 npm run build
 & "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd" `
-    --extensionDevelopmentPath=.
+    --extensionDevelopmentPath="$PWD" <folder-to-open>
 ```
+
+**The path must be absolute.** Measured 2026-09-23: with VS Code already
+running, `--extensionDevelopmentPath=.` opened a window titled
+`[Extension Development Host]` that scanned the root of the C: drive for the
+extension (its renderer.log fills with `Unable to read file
+'\$Recycle.Bin\package.json'` from `scanExtensionsUnderDevelopment`) and then
+quietly ran the INSTALLED copy — Running Extensions showed 0.5.143 where the
+worktree was 0.5.145. The folder argument beside it resolved correctly; only
+the development path did not. `"$PWD"` expands to the absolute path before the
+shim sees it. Check Running Extensions for the worktree's version before
+trusting the window.
 
 The dev host loads from `--extensionDevelopmentPath` in place of the installed
 copy, for that window only, so two worktrees can drive their own builds at the
 same time without touching `~/.vscode/extensions/`.
+
+One thing it does NOT isolate: the Copilot bridge's port. Its setting is
+machine-scoped and one window per machine owns `127.0.0.1:18790`; the others
+stand by and claim it when the owner closes. So with ordinary windows open on
+the installed TestBench and `lmBridge.enabled` on, a dev host's bridge never
+serves — requests reach the installed copy's bridge instead. To exercise a
+worktree's bridge, close every other VS Code window first (and run anything
+that must survive that, such as the server, from a terminal outside VS Code).
+`GET /v1/models` on the port tells them apart once the bridge carries
+`aiui_bridge` (tb 0.5.145+).
 
 `npm run dev` is the same two steps, but shells out to plain `code`. Unlike
 `--install-extension`, the GUI exe does accept `--extensionDevelopmentPath` —
@@ -372,6 +393,66 @@ empty after 86 s — so a flake there is not automatically a regression.
 
 Traced by reading, not proven by running two full suites at once. Within one
 worktree, four shards and two shards have both come back clean.
+
+### Computer-mode live test
+
+`computer-use.test.cjs` drives `templates/init/tests/pdf-dialog-cancel.md`,
+which leaves the browser at `[use computer]` and clicks a PDF toolbar and a
+print dialog with the **real mouse**
+([SPEC-use-computer.md](docs/specs/SPEC-use-computer.md) §13.3). It skips
+itself unless `TESTBENCH_LIVE_COMPUTER=1` is set, and the reason is the
+sharding section above: a default run is four shards on one box, and there is
+one pointer. Two shards moving it do not produce two flaky runs — they produce
+one run clicking where the other run's dialog used to be. The framework's lock
+(spec §5.9) refuses the second computer-mode session outright, which would
+turn the whole parallel suite red for a reason unrelated to the code under
+test. So the gate is in the suite, not in the runner: the file is discovered
+and scheduled like any other, costs a few seconds, and reports as a `pending`
+row (an `o`) rather than vanishing.
+
+Run it alone, one shard, against a server you started:
+
+```powershell
+cd <worktree>
+node dist/index.js serve -p <n> --idle-timeout 60
+```
+
+```powershell
+cd <worktree>\testbench-native
+$env:TESTBENCH_LIVE_COMPUTER = '1'
+npm run test:live -- --shards=1 --files=computer-use.test.cjs --server=http://localhost:<n>
+```
+
+`--server=<url>` is not optional here even though `--shards=1` defaults to
+`:3100`: the serial path is the one mode with two independent notions of where
+the server is (see above), so pass the same URL that this worktree's
+`templates/.env` carries as `SERVER_URL`.
+
+**Start that server from a normal terminal or from VS Code**, not from a
+sandboxed tool runner. Measured 2026-09-23: a process started by the Claude
+desktop app's tool runner can enumerate windows and get a screen DC but cannot
+blit from it — `screen.grab()` fails with BitBlt error 6, in and out of that
+tool's own sandbox flag, and a .NET `CopyFromScreen` fails identically from the
+same context. The server then boots fine and every computer-mode step is
+blind; the spec's §5.1 capture probe turns that into a named failure at
+`[use computer]` instead of a model that cannot find a button.
+
+While it runs: a visible, unlocked desktop, and nobody touching the mouse or
+the keyboard. A disconnected RDP session captures black. A stray click moves
+focus and the next screenshot is no longer of what the model was answering
+about. The test says so in its own header too, because the person who starts
+it is not always the person who wrote it.
+
+`computer-calc.test.cjs` sits beside it behind the same gate and runs the same
+way, with `--files=computer-calc.test.cjs`. It drives `calc-one-plus-one.md` —
+desktop only, no browser at all — twice in one TestBench session: once with a
+breakpoint on step 5, reading `aiui-computer.lock` itself while the run is
+parked to show the server gave the lock back, then Continue to 9/9; then a
+second Run All in the kept session. Every phase also watches the file while it
+runs and requires seeing the server's pid in it, so "not held" cannot pass by
+reading the wrong temp directory. Step 2 is `[tool: open_calculator]`, so the
+fixture tools must load (`fixtures/tools/node_modules`, a built `dist/`). A run
+that fails partway can leave Calculator open; close it before the next attempt.
 
 ### Why the junction repair matters
 

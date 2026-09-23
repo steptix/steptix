@@ -17,6 +17,9 @@ import {
   isTestFile,
   matchText,
   sectionNameError,
+  stepWrapsAt,
+  unknownWholeStepBracketError,
+  useStepError,
 } from 'ai-ui-automation-runner-core';
 
 /**
@@ -73,6 +76,51 @@ export function computeSectionDiagnostics(text: string): PlainDiagnostic[] {
         (owner ? ` ("${owner.name}", line ${owner.line})` : '') +
         " are ignored. Use '###' to define a section, then call it by name from " +
         'the main flow.',
+    });
+  }
+
+  // Surface switches, and bracket steps that name no directive at all
+  // (docs/specs/SPEC-use-computer.md §4.1 / §4.2, surfaced per §10.3).
+  //
+  // These are the first rows here that restate a STEP-GRAMMAR parse error
+  // rather than a section one, and they are here because this is the only
+  // while-typing diagnostics surface the extension has. The alternative —
+  // meeting `[use phone]` for the first time from a server that has already
+  // opened a browser — is the failure §4.2 exists to remove, so it should not
+  // be reintroduced one layer up.
+  //
+  // `[use …]` is asked FIRST: `[use]` and `[use phone]` are whole-step
+  // brackets too, and reported by the second rule they would get the generic
+  // directive list instead of the sentence naming the two surfaces. Same
+  // order the CLI parser uses (src/parser/markdown.ts).
+  const classifiedForSteps = classifyLines(text);
+  for (const entry of classifiedForSteps) {
+    if (entry.kind !== 'step' && entry.kind !== 'section-step') continue;
+    // A wrapped list item is ONE step whose text spans several lines, and the
+    // CLI judges the whole item. Reading only the first physical line would
+    // squiggle `[use computer]` on an item whose real text carries trailing
+    // words — a refusal the runtime does not make — so wrapped items are left
+    // to the run-time parse error, which sees the whole thing.
+    //
+    // Indexed by `entry.line - 1`, the idiom `buildSectionIndex` uses, rather
+    // than by the loop counter: the two are equal today because `classifyLines`
+    // emits one entry per line, and that is a property of the classifier rather
+    // than of its contract.
+    if (stepWrapsAt(lines, classifiedForSteps, entry.line - 1)) continue;
+    const raw = lines[entry.line - 1] ?? '';
+    const prefix = /^\s*\d+\.\s+/.exec(raw);
+    if (!prefix) continue;
+    const startCol = prefix[0].length;
+    const instruction = raw.slice(startCol);
+    const message =
+      useStepError(instruction) ?? unknownWholeStepBracketError(instruction);
+    if (message === null) continue;
+    out.push({
+      line: entry.line - 1,
+      startCol,
+      endCol: raw.length,
+      severity: 'error',
+      message,
     });
   }
 

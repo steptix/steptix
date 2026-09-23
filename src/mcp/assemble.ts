@@ -23,6 +23,8 @@ import path from 'node:path';
 import { interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { isCodeStep as isInvocationStep } from '../parser/invocation-parser.js';
 import { parseSetStep, setStepError } from '../parser/set-step.js';
+import { useStepError } from '../parser/use-step.js';
+import { unknownWholeStepBracketError } from '../parser/whole-step-bracket.js';
 import {
   PLACEHOLDER_SOURCE,
   placeholderProperty,
@@ -341,6 +343,11 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
     ...(args.runSettings !== undefined &&
       Object.keys(args.runSettings).length > 0 && { runSettings: args.runSettings }),
     ...projectFields(project, absPath, cacheEnabled(parsed, project)),
+    // Every call runs the file from step 1 in the SAME `mcp:<path>` session,
+    // so every call is a new run and starts on the browser surface — not on
+    // the computer surface a previous call failed or stopped on before its
+    // `[use browser]` (SPEC-use-computer.md §4.5).
+    runStart: { stepIndex: 0 },
   };
 
   return {
@@ -410,6 +417,18 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
     // than handed to a model as prose (stories/control-flow.md §Parser).
     const controlError = controlLineError(step, ` in step ${index + 1}`);
     if (controlError) throw new Error(controlError);
+    // Same gate again, for a malformed `[use computer]` / `[use browser]` and
+    // for §4.2's whole-step bracket that names no directive at all
+    // (SPEC-use-computer.md §4.4). An agent writing `[computer]` is exactly
+    // the caller §4.2 was written for: the step would otherwise be sent, read
+    // as prose, answered with a silent `noop`, and reported as passed.
+    //
+    // `[use …]` first, so `[use]` gets the message naming the two surfaces
+    // rather than the generic directive list — the order markdown.ts uses.
+    const useError = useStepError(step, ` in step ${index + 1}`);
+    if (useError) throw new Error(useError);
+    const bracketError = unknownWholeStepBracketError(step, ` in step ${index + 1}`);
+    if (bracketError) throw new Error(bracketError);
   }
 
   warnUnresolvablePlaceholders(project, args.steps, { ...config, ...parameters }, warnings);
