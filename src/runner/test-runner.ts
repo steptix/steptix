@@ -33,6 +33,7 @@ import {
   modeStepResult,
   releaseComputerLockAtRunEnd,
   releaseComputerLockForPause,
+  restoreCallerSurface,
   skillFrameChain,
   stepReadsScreen,
   undispatchedDirectiveError,
@@ -638,15 +639,33 @@ export async function runTest(
   /** §4.5 — a skill call restores the caller's surface on return; an inline
    *  section does not. */
   const skillSurfaces = new SkillSurfaceStack();
-  /** Restore a surface on return from a skill, releasing the lock when the
-   *  skill took it and the caller had not. */
-  const restoreSurface = (to: 'browser' | 'computer'): void => {
-    if (to === 'browser') leaveComputerMode(surfaceState, computerLockId, extras.computerLock);
-    // A caller that WAS in computer mode still is, adapter and all. Whether it
-    // holds the lock is the step boundary's question, not this one's: a pause
-    // inside the skill may have given it back, and the caller's next computer
-    // step takes it again there.
-  };
+  /**
+   * `[use computer]` for this run, with everything §5.1 reads — written once,
+   * because a `[use computer]` step and a skill returning to a computer-surface
+   * caller are the same entry (§4.5).
+   */
+  const enterComputerSurface = () =>
+    enterComputerMode({
+      lockId: computerLockId,
+      // The CLI's `config` IS the project's — it was loaded from the test
+      // file's own root — so the section comes straight off it.
+      desktop: config.desktop,
+      state: surfaceState,
+      loadDesktopAdapter: extras.loadDesktopAdapter ?? defaultLoadDesktopAdapter,
+      probeCapture: extras.probeComputerCapture ?? defaultProbeComputerCapture,
+      ...(extras.computerLock && { lock: extras.computerLock }),
+      // §15.4 — `config.ai` is the very object this run's `aiClient` was built
+      // from and holds by reference; the CLI resolves no run settings and
+      // never re-points the client, so it is the route every computer-mode
+      // request goes out on. Keyless skips the check.
+      ai: keyless ? undefined : config.ai,
+      ...(extras.checkVisionRoute && { checkVisionRoute: extras.checkVisionRoute }),
+    });
+  /** Put the caller back on its surface on return from a skill: `[use
+   *  browser]`'s transition, or `[use computer]`'s through
+   *  {@link enterComputerSurface}, which can fail (`restoreCallerSurface`). */
+  const restoreSurface = (to: 'browser' | 'computer') =>
+    restoreCallerSurface(to, surfaceState, computerLockId, extras.computerLock, enterComputerSurface);
   /**
    * The run is about to wait for a person (§5.9): give the lock back first. A
    * no-op off the computer surface, or before the run's first computer step.
@@ -1277,11 +1296,39 @@ export async function runTest(
       // Before the dispatch and the launch gate both, because the surface it
       // restores is what those two read. An inline section is deliberately
       // absent from this: `skillFrameChain` keeps only `kind: 'skill'` frames.
-      skillSurfaces.enter(
+      //
+      // Going back to `computer` is `[use computer]` and can fail; that fails
+      // THIS step, the caller's first after the skill, before anything runs on
+      // it. Skipped when this step is itself a `[use …]` line, which sets the
+      // surface anyway — the server's rule, for the server's reason.
+      const restoreTo = skillSurfaces.enter(
         skillFrameChain(test.expansion?.origins[i]?.frameId, test.expansion?.frames),
         surfaceState.surface,
-        restoreSurface,
       );
+      if (restoreTo !== null && !(restoreTo === 'computer' && parseUseStep(test.steps[i] ?? ''))) {
+        const restored = await restoreSurface(restoreTo);
+        if (!restored.ok) {
+          logger.error(`Step ${i + 1} FAILED: ${restored.error}`);
+          if (hasControls) flushSkips(i);
+          stepResults.push(
+            tagOrigin(
+              {
+                index: i + 1,
+                instruction: test.steps[i] ?? '',
+                status: 'failed',
+                turns: [],
+                durationMs: 0,
+                retried: false,
+                error: restored.error,
+                aiExplanation: restored.error,
+              },
+              i,
+            ),
+          );
+          bail = true;
+          break;
+        }
+      }
 
       // ── THE SURFACE SWITCH (SPEC-use-computer.md §4.4, §5.1) ────────────
       //
@@ -1298,22 +1345,7 @@ export async function runTest(
         logger.step(i + 1, test.steps.length, instruction);
         let modeResult: StepResult;
         if (useStep.surface === 'computer') {
-          const entered = await enterComputerMode({
-            lockId: computerLockId,
-            // The CLI's `config` IS the project's — it was loaded from the
-            // test file's own root — so the section comes straight off it.
-            desktop: config.desktop,
-            state: surfaceState,
-            loadDesktopAdapter: extras.loadDesktopAdapter ?? defaultLoadDesktopAdapter,
-            probeCapture: extras.probeComputerCapture ?? defaultProbeComputerCapture,
-            ...(extras.computerLock && { lock: extras.computerLock }),
-            // §15.4 — `config.ai` is the very object this run's `aiClient` was
-            // built from and holds by reference; the CLI resolves no run
-            // settings and never re-points the client, so it is the route
-            // every computer-mode request goes out on. Keyless skips the check.
-            ai: keyless ? undefined : config.ai,
-            ...(extras.checkVisionRoute && { checkVisionRoute: extras.checkVisionRoute }),
-          });
+          const entered = await enterComputerSurface();
           modeResult = entered.ok
             ? modeStepResult(i + 1, instruction, 'computer', entered.reentered)
             : {
@@ -1392,7 +1424,12 @@ export async function runTest(
       // this is where the run takes it again, at the next step that reads or
       // drives the screen. Ahead of the guard because the condition judge
       // (§5.6) captures the screen; `stepReadsScreen` / `guardVisitReadsScreen`
-      // decide, so a `Set`, a `[tool:]` line or another prompt takes nothing.
+      // decide, so a `Set` or another prompt takes nothing, and a `[tool:]`
+      // line takes it — a tool can launch a program and take the front window.
+      //
+      // No opt-in check here, unlike the server's boundary: the CLI's config is
+      // loaded once per `runTest` and every run starts on the browser, so the
+      // `[use computer]` that put this run on the surface already asked it.
       //
       // A refusal is THIS step's failure with §5.9's message, and nothing is
       // captured or asked of the model for it — the launch failure's shape.

@@ -855,6 +855,64 @@ describe('a skill call restores the caller\'s surface (acceptance 6)', () => {
     expect(existsSync(lockPath)).toBe(false);
   });
 
+  it('a COMPUTER caller is back on the computer after a skill that went to the browser', async () => {
+    // Review finding: this restore was a no-op, and step 4 went to the page.
+    const holders: Array<string | undefined> = [];
+    executeComputerStepMock.mockImplementation(async (_i: number, _n: number, instruction: string) => {
+      holders.push(readComputerLock({ lockPath })?.sessionId);
+      return passingResult(instruction, 'computer');
+    });
+    let loads = 0;
+    const steps = ['[use computer]', '[use browser]', 'Click the heading', 'Click Save in the dialog'];
+
+    const report = await runTest(
+      makeInstance(steps, {}, skillExpansion(steps, [1, 2], 'skill')),
+      makeConfig(),
+      '',
+      undefined,
+      extras({
+        loadDesktopAdapter: async () => {
+          loads++;
+          return adapter;
+        },
+      }),
+    );
+
+    expect(report.status).toBe('passed');
+    expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual(['Click the heading']);
+    expect(executeComputerStepMock.mock.calls.map((c) => c[2])).toEqual(['Click Save in the dialog']);
+    // Re-entered through `enterComputerMode`: §5.1 again, lock included.
+    expect(loads).toBe(2);
+    expect(holders).toEqual(['cli:/tmp/computer-mode-test.md']);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('a failed re-entry fails the step it was restoring for, with the enter error', async () => {
+    executeStepMock.mockImplementationOnce(async (_i: number, _n: number, instruction: string) => {
+      acquireComputerLock('mcp:another-session', { lockPath });
+      return passingResult(instruction);
+    });
+    const steps = ['[use computer]', '[use browser]', 'Click the heading', 'Click Save in the dialog'];
+
+    const report = await runTest(
+      makeInstance(steps, {}, skillExpansion(steps, [1, 2], 'skill')),
+      makeConfig(),
+      '',
+      undefined,
+      extras(),
+    );
+
+    const inUse = computerLockInUseMessage({ pid: process.pid, sessionId: 'mcp:another-session', since: '' });
+    expect(report.status).toBe('failed');
+    expect(report.steps).toHaveLength(4);
+    expect(report.steps[3]!.status).toBe('failed');
+    expect(report.steps[3]!.error).toContain(inUse);
+    expect(report.steps[3]!.error).toContain('returned from a skill');
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(executeStepMock).toHaveBeenCalledTimes(1);
+    expect(readComputerLock({ lockPath })!.sessionId).toBe('mcp:another-session');
+  });
+
   it('an inline SECTION does not restore — that is how a desktop excursion is written once', async () => {
     const steps = ['Click the heading', '[use computer]', 'Press Ctrl+S', 'Click the dialog'];
     const report = await runTest(
@@ -873,43 +931,53 @@ describe('a skill call restores the caller\'s surface (acceptance 6)', () => {
 });
 
 describe('SkillSurfaceStack — the shared push/pop both loops use', () => {
-  it('restores the surface in force when the skill was entered', () => {
+  it('answers the surface in force when the skill was entered', () => {
     const stack = new SkillSurfaceStack();
-    const restored: string[] = [];
-    const restore = (to: 'browser' | 'computer'): void => { restored.push(to); };
 
-    stack.enter([], 'browser', restore);       // caller, on the page
-    stack.enter(['f1'], 'browser', restore);   // into the skill
-    stack.enter(['f1'], 'computer', restore);  // the skill switched
-    stack.enter([], 'computer', restore);      // back out
-
-    expect(restored).toEqual(['browser']);
+    expect(stack.enter([], 'browser')).toBeNull();        // caller, on the page
+    expect(stack.enter(['f1'], 'browser')).toBeNull();    // into the skill
+    expect(stack.enter(['f1'], 'computer')).toBeNull();   // the skill switched
+    expect(stack.enter([], 'computer')).toBe('browser');  // back out
   });
 
-  it('leaves a caller that was ALREADY in computer mode where it was', () => {
+  it('asks nothing of a caller already on the surface it called from', () => {
     const stack = new SkillSurfaceStack();
-    const restored: string[] = [];
-    const restore = (to: 'browser' | 'computer'): void => { restored.push(to); };
 
-    stack.enter(['f1'], 'computer', restore);
-    stack.enter([], 'computer', restore);
-
-    expect(restored).toEqual([]);
+    expect(stack.enter(['f1'], 'computer')).toBeNull();
+    expect(stack.enter([], 'computer')).toBeNull();
   });
 
-  it('unwinds nested skills innermost first', () => {
+  it('answers computer for a computer caller whose skill went to the browser', () => {
     const stack = new SkillSurfaceStack();
-    const restored: string[] = [];
-    const restore = (to: 'browser' | 'computer'): void => { restored.push(to); };
 
-    stack.enter(['outer'], 'browser', restore);
-    stack.enter(['outer', 'inner'], 'browser', restore);
-    stack.enter(['outer', 'inner'], 'computer', restore);
-    stack.enter([], 'computer', restore);
+    expect(stack.enter(['f1'], 'computer')).toBeNull();
+    expect(stack.enter(['f1'], 'browser')).toBeNull();
+    expect(stack.enter([], 'browser')).toBe('computer');
+  });
 
-    // One restore, not two: the inner frame's caller was the outer frame, and
-    // both were entered on the browser.
-    expect(restored).toEqual(['browser']);
+  it('unwinds nested skills to the OUTERMOST caller in one answer', () => {
+    const stack = new SkillSurfaceStack();
+
+    expect(stack.enter(['outer'], 'browser')).toBeNull();
+    // The outer skill went to the computer, then called the inner one.
+    expect(stack.enter(['outer', 'inner'], 'computer')).toBeNull();
+    expect(stack.enter(['outer', 'inner'], 'browser')).toBeNull();
+    // Out of both at once: the inner caller's `computer` is skipped — it would
+    // take the lock and load an adapter only to be left again — and the
+    // outermost caller's `browser` is the answer.
+    expect(stack.enter([], 'browser')).toBeNull();
+  });
+
+  it('a frame entered on the step a restore is for is entered from the restored surface', () => {
+    const stack = new SkillSurfaceStack();
+
+    stack.enter(['a'], 'computer');
+    stack.enter(['a'], 'browser');
+    // Straight from skill A into skill B: the caller goes back to `computer`,
+    // and B's caller surface is that one, not the browser A left behind.
+    expect(stack.enter(['b'], 'browser')).toBe('computer');
+    expect(stack.enter(['b'], 'browser')).toBeNull();
+    expect(stack.enter([], 'browser')).toBe('computer');
   });
 });
 
@@ -989,6 +1057,37 @@ describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surf
     );
     expect(report.steps[1]!.error).toContain('In computer mode a skill line is never handed to the model');
     expect(executeComputerStepMock).not.toHaveBeenCalled();
+  });
+
+  it('a [tool:] line on the computer surface takes the lock: after a pause another session holds it, and the tool never runs', async () => {
+    // A tool that registers, and says whether it ran and who held the lock.
+    const markerPath = path.join(toolsDir, 'ran.txt');
+    const toolsIndex = path.resolve(__dirname, '..', 'src', 'tools', 'index.ts').replace(/\\/g, '/');
+    writeFileSync(
+      path.join(toolsDir, 'launch.ts'),
+      `import { defineTool } from '${toolsIndex}';\n` +
+        "import { existsSync, readFileSync, writeFileSync } from 'node:fs';\n" +
+        "export default defineTool({ name: 'launch', description: 'launch', parameters: {}, outputs: {},\n" +
+        '  async run() {\n' +
+        `    const lock = ${JSON.stringify(lockPath)};\n` +
+        `    writeFileSync(${JSON.stringify(markerPath)}, ` +
+        "existsSync(lock) ? JSON.parse(readFileSync(lock, 'utf8')).sessionId : 'none');\n" +
+        '  } });\n',
+    );
+    questionMock.mockImplementation(async () => {
+      acquireComputerLock('mcp:another-session', { lockPath });
+      return 'x';
+    });
+    const instance = makeInstance(['[use computer]', '[input: note] Anything?', '[tool: launch]']);
+    instance.test.toolCalls = [null, null, parseToolCall('[tool: launch]')];
+
+    const report = await runTest(instance, configWithTools(), '', undefined, extras());
+
+    expect(report.status).toBe('failed');
+    expect(report.steps[2]!.error).toBe(
+      computerLockInUseMessage({ pid: process.pid, sessionId: 'mcp:another-session', since: '' }),
+    );
+    expect(existsSync(markerPath)).toBe(false);
   });
 
   it('the page surface is unchanged: an undispatched tool line still goes to executeStep', async () => {

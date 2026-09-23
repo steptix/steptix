@@ -411,6 +411,46 @@ describe('the computer judge\'s recorded capture obeys desktop.reportScreenshots
 });
 
 // ---------------------------------------------------------------------------
+// §5.5 Stop — the judge's pause between polls gives way to Stop
+// ---------------------------------------------------------------------------
+
+describe('Stop reaches the condition judge between polls', () => {
+  it('a Stop during the 3 s wait after a `waiting` answer ends the judge promptly', async () => {
+    const adapter = new FakeDesktopAdapter({ width: 200, height: 150 });
+    const controller = new AbortController();
+    const client = scriptedClient([
+      JSON.stringify({ matched: 'waiting', actions: [], reasoning: 'the dialog is still opening' }),
+    ]);
+    setTimeout(() => controller.abort(), 100);
+    const started = Date.now();
+
+    const judged = evaluateConditions(
+      ['the Print dialog is open'],
+      computerOpts(client, adapter, { signal: controller.signal }),
+    );
+
+    await expect(judged).rejects.toMatchObject({ name: 'AbortError' });
+    // Measured before the fix: the full 3 s poll interval ran out first.
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect(client.requests).toHaveLength(1);
+  });
+
+  it('the page surface gives way too, without waiting for the page to settle', async () => {
+    const controller = new AbortController();
+    const client = scriptedClient([
+      JSON.stringify({ matched: 'waiting', actions: [], reasoning: 'still loading' }),
+    ]);
+    setTimeout(() => controller.abort(), 100);
+    const started = Date.now();
+
+    const judged = evaluateConditions(['the banner is visible'], pageOpts(client, { signal: controller.signal }));
+
+    await expect(judged).rejects.toMatchObject({ name: 'AbortError' });
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // §4.6 — switchBrowser default
 // ---------------------------------------------------------------------------
 

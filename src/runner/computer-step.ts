@@ -223,28 +223,38 @@ export interface EnterComputerModeInput {
  * it is to fail one step: the run carries on, the report shows the row, and
  * a later `[use browser]` step still works.
  *
- * Re-entering the surface already in force is a no-op with a log line (§4.5),
- * and it happens BEFORE the preconditions: a section that defensively opens
- * with `[use computer]` must not pay for a second adapter load or capture
- * probe. The one thing re-entry still does is take the lock when this run
- * does not hold it yet — the session came into this run on the computer
- * surface, and the previous run released the lock on its way out (§5.9).
+ * Re-entering the surface already in force is a no-op with a log line (§4.5):
+ * a section that defensively opens with `[use computer]` must not pay for a
+ * second adapter load or capture probe. The one thing re-entry still does is
+ * take the lock when this run does not hold it yet — the session came into
+ * this run on the computer surface, and the previous run released the lock on
+ * its way out (§5.9).
+ *
+ * The opt-in (1) is asked FIRST, re-entry included. The project's config is
+ * re-read every batch, and a session that entered while the owner allowed it
+ * must not carry on once they have switched it off: re-entry used to skip the
+ * check and take the lock. Refused on the computer surface, the session is put
+ * back on the browser — {@link leaveComputerMode}, lock and adapter dropped.
  */
 export async function enterComputerMode(
   input: EnterComputerModeInput,
 ): Promise<{ ok: true; reentered: boolean } | { ok: false; error: string }> {
   const { state } = input;
+
+  // 1. Project opt-in. A test file in a shared project must not be able to
+  //    move the mouse on a machine whose owner did not allow it.
+  if (input.desktop?.enabled !== true) {
+    if (state.surface === 'computer') {
+      revokeComputerMode(state, input.lockId, input.lock);
+    }
+    return { ok: false, error: COMPUTER_DISABLED_MESSAGE };
+  }
+
   if (state.surface === 'computer' && state.adapter) {
     const taken = ensureComputerLock(state, input.lockId, input.lock);
     if (!taken.ok) return taken;
     log('already on the computer surface — [use computer] is a no-op here');
     return { ok: true, reentered: true };
-  }
-
-  // 1. Project opt-in. A test file in a shared project must not be able to
-  //    move the mouse on a machine whose owner did not allow it.
-  if (input.desktop?.enabled !== true) {
-    return { ok: false, error: COMPUTER_DISABLED_MESSAGE };
   }
 
   // 1b. The model can see the screen (§15.4). Before nut.js loads, so a route
@@ -323,6 +333,30 @@ export function leaveComputerMode(
 }
 
 /**
+ * The project's owner switched computer mode off while this session sat on the
+ * computer surface (§5.1 item 1): back to the browser exactly as `[use
+ * browser]` goes — lock released if held, adapter dropped — with a WARN saying
+ * why. The caller fails the step it was about to run on the computer surface
+ * with {@link COMPUTER_DISABLED_MESSAGE}, before anything is captured.
+ *
+ * Called from `[use computer]` re-entry and from the step boundary of both
+ * loops, whichever meets the switched-off config first. A no-op off the
+ * computer surface.
+ */
+export function revokeComputerMode(
+  state: SurfaceState,
+  lockId: string,
+  lock?: ComputerLockOptions,
+): void {
+  if (state.surface !== 'computer') return;
+  logger.warn(
+    `[computer] ${COMPUTER_DISABLED_MESSAGE} — this session was on the computer surface and ` +
+      'goes back to the browser',
+  );
+  leaveComputerMode(state, lockId, lock, { quiet: true });
+}
+
+/**
  * The lazy re-take (§5.9): the lock for a step about to read or drive the
  * screen, when this session does not hold it already — because an earlier run
  * released it on the way out, or because this run released it at a pause.
@@ -390,7 +424,8 @@ export function releaseComputerLockAtRunEnd(
  * taken back here on resume: the next step that reads or drives the screen
  * takes it at the step boundary ({@link ensureComputerLock}), and fails with
  * §5.9's "in use" message if another session took it meanwhile. A step that
- * touches no screen (`Set`, `[tool:]`) never needed it.
+ * touches no screen (`Set`) never needed it; a `[tool:]` line does
+ * ({@link stepReadsScreen}).
  *
  * A no-op when the lock is not held, which is every pause off the computer
  * surface (`leaveComputerMode` released it on the way out) and every pause the
@@ -432,14 +467,15 @@ const PERSON_STEP_RES: readonly RegExp[] = [/^\[input:\s*\w+\]/, /^\[interactive
  * {@link guardVisitReadsScreen}. Read off the AUTHORED line, the same text
  * both loops dispatch on.
  *
- * No, for the steps both loops answer without a capture or a model call:
+ * No, for the steps both loops answer without a capture, a model call or a
+ * program of their own:
  *
  *  - `Set {{x}} to "…"` — an assignment;
  *  - a whole-step `Return` / `Stop running the remaining steps` / `Fail the
  *    test with error "…"` — nothing to judge;
- *  - a `[tool: …]` line — deterministic code, dispatched on either surface —
- *    and a raw `[skill: …]` line or a bracket §4.2 refuses, which fail with
- *    §5.4's message before anything is captured;
+ *  - a `[tool: …]` line that does not parse, a raw `[skill: …]` line, and a
+ *    bracket §4.2 refuses, which fail with §5.4's message before anything
+ *    runs;
  *  - a `[use …]` line, which the surface switch owns (`[use computer]`
  *    re-entry takes the lock itself, in {@link enterComputerMode});
  *  - an `[input: name] …` or `[interactive]` step, which waits for a person
@@ -453,6 +489,12 @@ const PERSON_STEP_RES: readonly RegExp[] = [/^\[input:\s*\w+\]/, /^\[interactive
  * condition is judged from the screen (§5.6). A step this list misses costs a
  * lock taken one step early inside a run that is executing anyway; a step it
  * wrongly excluded would drive the mouse unlocked.
+ *
+ * A `[tool: …]` line that parses is yes. It reads no screen, but it is code
+ * that can drive the machine: the fixture `open_calculator` launches a GUI
+ * program, and one run unlocked after a pause could take the front window from
+ * another session's computer-mode run. It takes the lock like a screen step,
+ * and only on this surface — both loops ask this only there.
  */
 export function stepReadsScreen(step: string): boolean {
   if (parseUseStep(step)) return false;
@@ -460,7 +502,8 @@ export function stepReadsScreen(step: string): boolean {
   if (parseSetStep(step)) return false;
   const claim = parseFlowControlStep(step);
   if (claim && claim.body === undefined) return false;
-  if (tryParse(() => parseToolCall(step)) !== null) return false;
+  const tool = tryParse(() => parseToolCall(step));
+  if (tool !== null) return 'value' in tool;
   if (tryParse(() => parseSkillCall(step)) !== null) return false;
   if (unknownWholeStepBracketError(step) !== null) return false;
   return true;
@@ -681,40 +724,82 @@ export function computerContextFor(
  * SKILL frames only, which is the whole distinction §4.5 draws: a section is
  * inline by definition, and a section that switches surface is how an author
  * writes a desktop excursion once and calls it by name.
+ *
+ * Bookkeeping only: it says which surface to go back to, and the caller does
+ * the going, because going back to `computer` is `[use computer]` — §5.1's
+ * preconditions, the lock, the opt-in — and can fail. See
+ * {@link restoreCallerSurface}.
  */
 export class SkillSurfaceStack {
   private readonly open: Array<{ frameId: string; surface: 'browser' | 'computer' }> = [];
 
   /**
-   * Move to the step whose skill-frame chain is `chain` (outermost first) and
-   * restore the caller's surface for every skill this move returns from.
+   * Move to the step whose skill-frame chain is `chain` (outermost first), and
+   * answer the surface the caller must be put back on — or `null` when this
+   * move returns from no skill, or the caller is already on the surface it was
+   * on when it made the call.
    *
-   * `restore` is called with the surface to go back to — the caller supplies
-   * it because the two runners release the lock through different state.
+   * Returning from several skills at once answers the OUTERMOST caller's
+   * surface: the ones in between would be put on their surface only to be
+   * taken off it again, and a `computer` in between would load an adapter and
+   * take the lock for nothing.
    */
-  enter(
-    chain: readonly string[],
-    current: 'browser' | 'computer',
-    restore: (to: 'browser' | 'computer') => void,
-  ): void {
+  enter(chain: readonly string[], current: 'browser' | 'computer'): 'browser' | 'computer' | null {
     // Everything on the stack this step is no longer inside: returned from,
-    // innermost first.
+    // innermost first — so the last one popped is the outermost caller.
+    let callerSurface: 'browser' | 'computer' | null = null;
     while (this.open.length > 0 && !chain.includes(this.open[this.open.length - 1]!.frameId)) {
-      const frame = this.open.pop()!;
-      if (frame.surface !== current) {
-        logger.info(
-          `[computer] restoring the caller's surface (${frame.surface}) on return from a skill`,
-        );
-        restore(frame.surface);
-        current = frame.surface;
-      }
+      callerSurface = this.open.pop()!.surface;
     }
-    // Everything this step is inside that the stack does not yet hold.
+    const restoreTo = callerSurface !== null && callerSurface !== current ? callerSurface : null;
+    // Everything this step is inside that the stack does not yet hold. A frame
+    // entered on this step is entered from the surface the caller is going
+    // back to.
     for (const frameId of chain) {
       if (this.open.some((f) => f.frameId === frameId)) continue;
-      this.open.push({ frameId, surface: current });
+      this.open.push({ frameId, surface: restoreTo ?? current });
     }
+    return restoreTo;
   }
+}
+
+/**
+ * Put a caller back on the surface it was on when it called a skill (§4.5), as
+ * {@link SkillSurfaceStack.enter} answered it. Shared by both loops so the two
+ * cannot disagree about what "restore" means.
+ *
+ * - `browser` is `[use browser]`'s transition, and cannot fail.
+ * - `computer` is `[use computer]`'s, through `enter` — the caller's own
+ *   {@link enterComputerMode} with the inputs its `[use computer]` step takes:
+ *   the opt-in, the vision route, the adapter load, the lock, the capture
+ *   probe. The skill's `[use browser]` dropped the adapter and released the
+ *   lock, so there is nothing to keep; this is a fresh entry. It used to be a
+ *   no-op, and the caller's next desktop step went to the page.
+ *
+ * A refusal comes back as the error for the step the restore was made for —
+ * the caller's first step after the skill — to fail with, before anything
+ * runs on it.
+ */
+export async function restoreCallerSurface(
+  to: 'browser' | 'computer',
+  state: SurfaceState,
+  lockId: string,
+  lock: ComputerLockOptions | undefined,
+  enter: () => Promise<{ ok: true; reentered: boolean } | { ok: false; error: string }>,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  log(`restoring the caller's surface (${to}) on return from a skill`);
+  if (to === 'browser') {
+    leaveComputerMode(state, lockId, lock);
+    return { ok: true };
+  }
+  const entered = await enter();
+  if (entered.ok) return { ok: true };
+  return {
+    ok: false,
+    error:
+      `The caller's computer surface could not be restored when it returned from a skill: ` +
+      entered.error,
+  };
 }
 
 /** The chain of SKILL frame ids a step runs in, outermost first — the input
@@ -874,6 +959,17 @@ const DROPPED_AFTER_SCREEN_CHANGE_NOTE =
   'only the first screen-changing action of a response is performed; the next screenshot ' +
   'shows its result. Choose again from what it shows.';
 
+/** What the model is told about a `noop` in front of a screen-changing action
+ *  (§5.5). The action behind it runs; the noop does not end the step. */
+const NOOP_BEFORE_ACTION_NOTE =
+  'a noop in front of another action does not end the step; that action was performed and ' +
+  'the next screenshot shows its result. If the step is then done, answer noop on its own.';
+
+/** What the model is told about the actions behind one that ended the turn — a
+ *  failed or refused action, or one that finished the step (§5.5). */
+const CUT_OFF_NOTE =
+  'an earlier action in the same answer ended the turn, so the rest of it was not performed.';
+
 /**
  * §5.5 — how long one step may spend in `wait` and `wait_window`, over all its
  * turns and attempts together.
@@ -946,14 +1042,36 @@ function leadingWindowRepeats(
  * it. Behind that action the model was reading a picture that no longer holds
  * — measured, `[click, assert holds:true]` passed on the pre-click image, and
  * `[zoom, click]` mapped a full-image point through the zoomed crop.
+ *
+ * `screenChange` is that action when there is one — always the last of `run`.
+ * An `assert` or `noop` in front of it does NOT end the step (see the loop):
+ * the model asked for the action too, and passing the step there was a pass
+ * with nothing done — measured, `[noop, click]` for "Click the Cancel button"
+ * passed after one model call with zero clicks.
  */
 function splitAtScreenChange(actions: readonly ComputerAction[]): {
   run: ComputerAction[];
   dropped: ComputerAction[];
+  screenChange: ComputerAction | undefined;
 } {
   const at = actions.findIndex((a) => SCREEN_CHANGING_ACTION_TYPES.has(a.action));
-  if (at === -1) return { run: [...actions], dropped: [] };
-  return { run: actions.slice(0, at + 1), dropped: actions.slice(at + 1) };
+  if (at === -1) return { run: [...actions], dropped: [], screenChange: undefined };
+  return {
+    run: actions.slice(0, at + 1),
+    dropped: actions.slice(at + 1),
+    screenChange: actions[at],
+  };
+}
+
+/** The report row for an action the model asked for that never ran. */
+function notPerformedSub(index: number, action: ComputerAction, why: string): SubActionResult {
+  return {
+    index,
+    action: reportAction(action),
+    durationMs: 0,
+    error: `not performed: ${why}`,
+    timestamp: new Date().toISOString(),
+  };
 }
 
 /** A short name for an action, for the model's "not performed" list. Never a
@@ -1440,12 +1558,36 @@ async function computerTurns(
     }
     lastReasoning = parsed.reasoning || lastReasoning;
 
+    // The safety net for a model that ignores the "already performed" list: a
+    // window action at the front of this answer that the previous turn already
+    // satisfied is not performed again, and the model is TOLD so. It used to
+    // pass the step — measured, "Focus Calculator and type 1+1" went green on
+    // the repeat with nothing typed.
+    const repeatCount = leadingWindowRepeats(parsed.actions, satisfiedWindowKeys);
+    const repeated = parsed.actions.slice(0, repeatCount);
+
+    // §5.5 — one screen-changing action per response.
+    const { run, dropped, screenChange } = splitAtScreenChange(parsed.actions.slice(repeatCount));
+
     // §5.5 — three turns whose capture AND actions are identical is a stall.
     // Measured over what the model was SHOWN and everything it ASKED for —
-    // before the net below answers any of it, so a model that repeats a
-    // satisfied window action for ever ends here, not at the turn cap. Not
-    // retried: the same screen gets the same answer.
-    if (stall.observe(shownView.pngBase64, parsed.actions.length > 0 ? parsed.actions : completion.text)) {
+    // before the net answers any of it, so a model that repeats a satisfied
+    // window action for ever ends here, not at the turn cap. Not retried: the
+    // same screen gets the same answer.
+    //
+    // A WAIT is not a stall. Waiting on an unchanging screen is what a slow
+    // "Wait until …" is, and three identical waits used to trip this at about
+    // 20–30 s — before the 60 s wait budget, which is the rule written for
+    // them. So a turn whose screen-changing action is a `wait` is not counted,
+    // and neither is one whose `wait_window` then times out: the budget bounds
+    // both, and the turn cap still applies. A `wait_window` that SUCCEEDS is
+    // counted, after it has run (it drives nothing, so running it first costs
+    // nothing) — which keeps "the repeat counts towards it" true for the net.
+    // An uncounted turn leaves the streak where it was rather than resetting
+    // it, so `[key, wait, key, wait, key]` on a frozen screen still stalls.
+    const stallKey = parsed.actions.length > 0 ? parsed.actions : completion.text;
+    const waitTurn = screenChange?.action === 'wait' || screenChange?.action === 'wait_window';
+    if (!waitTurn && stall.observe(shownView.pngBase64, stallKey)) {
       allTurns.push({
         turnNumber: currentTurn,
         attemptNumber,
@@ -1457,13 +1599,6 @@ async function computerTurns(
       throw new ComputerStepFailure(computerStallMessage(instruction), allTurns, false);
     }
 
-    // The safety net for a model that ignores the "already performed" list: a
-    // window action at the front of this answer that the previous turn already
-    // satisfied is not performed again, and the model is TOLD so. It used to
-    // pass the step — measured, "Focus Calculator and type 1+1" went green on
-    // the repeat with nothing typed.
-    const repeatCount = leadingWindowRepeats(parsed.actions, satisfiedWindowKeys);
-    const repeated = parsed.actions.slice(0, repeatCount);
     if (repeated.length > 0) {
       log(REPEATED_WINDOW_ACTION_MESSAGE);
       notPerformed.push(`${repeated.map(actionLabel).join(', ')} — ${REPEATED_WINDOW_ACTION_NOTE}`);
@@ -1479,9 +1614,6 @@ async function computerTurns(
         });
       }
     }
-
-    // §5.5 — one screen-changing action per response.
-    const { run, dropped } = splitAtScreenChange(parsed.actions.slice(repeatCount));
 
     // §5.4 — refusals are data the MODEL reads next turn, not failures.
     for (const refused of parsed.refused) {
@@ -1503,8 +1635,15 @@ async function computerTurns(
     /** Where the pointer went this turn, for the report ring (§10.1). */
     let imagePoint: { x: number; y: number } | undefined;
     let screenPoint: { x: number; y: number } | undefined;
+    /** How many of `run` the loop below reached. Whatever lies behind the one
+     *  that ended the turn with a `break` never ran, and is reported so. */
+    let reached = 0;
+    /** Set when this turn's `wait_window` succeeded: that turn counts towards
+     *  the stall after all (see the stall check above). */
+    let waitWindowSucceeded = false;
 
     for (const action of run) {
+      reached++;
       throwIfAborted();
       const subStartTime = Date.now();
       const aiReasoningVal = config.reports.includeAiReasoning ? parsed.reasoning : undefined;
@@ -1575,10 +1714,18 @@ async function computerTurns(
         });
         log(`assert "${action.condition}" → ${action.holds ? 'holds' : 'does NOT hold'}`);
         if (!action.holds) {
+          // A failed verdict fails the step wherever it stands in the answer;
+          // anything behind it is reported as not performed.
           turnFailed = true;
           turnError = `Assertion failed: ${action.condition}. ${action.evidence}`;
+          complete = true;
+          break;
         }
-        // Either way the step is over: an assertion is a verdict (§5.5).
+        // One that holds is the verdict only when nothing behind it changes
+        // the screen. In front of a click it is a note about the image the
+        // model was shown, not the end of the step: the click runs, and the
+        // step goes on to judge its result (§5.5).
+        if (screenChange !== undefined) continue;
         complete = true;
         break;
       }
@@ -1600,6 +1747,15 @@ async function computerTurns(
 
       // ── noop: the step is complete ────────────────────────────────────────
       if (action.action === 'noop') {
+        if (screenChange !== undefined) {
+          // "Done" in front of an action the model also asked for is refused:
+          // the action runs, and the step is over only when a noop is what the
+          // model answers after seeing its result (§5.5).
+          turnSubActions.push({ ...baseSub(), error: `not performed: ${NOOP_BEFORE_ACTION_NOTE}` });
+          notPerformed.push(`noop — ${NOOP_BEFORE_ACTION_NOTE}`);
+          log('noop in front of a screen-changing action — refused; the action runs');
+          continue;
+        }
         turnSubActions.push(baseSub());
         log(`noop: ${action.description || 'the step is already satisfied'}`);
         complete = true;
@@ -1730,6 +1886,8 @@ async function computerTurns(
         break;
       }
 
+      if (action.action === 'wait_window') waitWindowSucceeded = true;
+
       // It worked, and the screen may be about to show nothing of the sort —
       // a window that was already frontmost, a key that only changed state the
       // image does not carry. The record of it goes to the model on every
@@ -1750,6 +1908,20 @@ async function computerTurns(
       }
     }
 
+    // Behind an action that ended the turn — a failed or refused one, or one
+    // that finished the step — inside what `run` kept: on the report as not
+    // performed, and in front of the model next turn if there is one. They
+    // used to vanish from both, so a `[noop, click]` pass showed no click.
+    const cutOff = run.slice(reached);
+    if (cutOff.length > 0) {
+      const labels = cutOff.map(actionLabel).join(', ');
+      log(`not performed (behind an action that ended the turn): ${labels}`);
+      notPerformed.push(`${labels} — ${CUT_OFF_NOTE}`);
+      for (const action of cutOff) {
+        turnSubActions.push(notPerformedSub(++globalSubActionIndex, action, CUT_OFF_NOTE));
+      }
+    }
+
     // Behind the screen-changing action: on the report as not performed, and
     // in front of the model next turn with the reason.
     if (dropped.length > 0) {
@@ -1757,13 +1929,9 @@ async function computerTurns(
       log(`not performed (behind the first screen-changing action): ${labels}`);
       notPerformed.push(`${labels} — ${DROPPED_AFTER_SCREEN_CHANGE_NOTE}`);
       for (const action of dropped) {
-        turnSubActions.push({
-          index: ++globalSubActionIndex,
-          action: reportAction(action),
-          durationMs: 0,
-          error: `not performed: ${DROPPED_AFTER_SCREEN_CHANGE_NOTE}`,
-          timestamp: new Date().toISOString(),
-        });
+        turnSubActions.push(
+          notPerformedSub(++globalSubActionIndex, action, DROPPED_AFTER_SCREEN_CHANGE_NOTE),
+        );
       }
     }
 
@@ -1803,6 +1971,12 @@ async function computerTurns(
         deliberate,
         assertions,
       );
+    }
+
+    // The deferred half of the stall check: a `wait_window` that found its
+    // window counts, like any other turn that did what it was asked.
+    if (waitWindowSucceeded && stall.observe(shownView.pngBase64, stallKey)) {
+      throw new ComputerStepFailure(computerStallMessage(instruction), allTurns, false);
     }
 
     if (complete) break;

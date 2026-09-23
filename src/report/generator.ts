@@ -694,15 +694,31 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
        </details>`
     : '';
 
+  // A computer step's row screenshot is a desktop capture, and for a failure —
+  // or a step that ended on a turn with no actions — it is the very capture its
+  // last turn already shows (computer-step.ts). Rendered here too, each such
+  // step embedded the whole screen once more; so it renders only when no turn
+  // showed it, and a missing one says nothing here: the turns already name
+  // `desktop.reportScreenshots`, and the page-capture setting this placeholder
+  // names cannot bring a desktop capture back (SPEC-use-computer.md §10.1, A9).
+  const computerStep =
+    step.surface === 'computer' || step.turns.some((t) => t.computer !== undefined);
+  const endShot =
+    computerStep && step.turns.some((t) => t.computer?.screenshotBase64 === step.screenshotBase64)
+      ? undefined
+      : step.screenshotBase64;
+  const endSubject = computerStep ? 'Screen' : 'Page state';
   const endScreenshotLabel = step.interrupted
-    ? 'Page state when stopped'
-    : step.status === 'failed' ? 'Page state at failure' : 'Page state at step end';
+    ? `${endSubject} when stopped`
+    : step.status === 'failed' ? `${endSubject} at failure` : `${endSubject} at step end`;
   const endUrlHtml = step.pageUrl ? `<div class="screenshot-url">${escapeHtml(step.pageUrl)}</div>` : '';
-  const endScreenshotHtml = step.screenshotBase64
+  const endScreenshotHtml = computerStep && !endShot
+    ? ''
+    : endShot
     ? `<div class="screenshot-container step-end-screenshot">
         <div class="screenshot-label">${endScreenshotLabel}</div>
         ${endUrlHtml}
-        <img class="screenshot-img" src="${toDataUri(step.screenshotBase64)}" alt="Step end screenshot" loading="lazy">
+        <img class="screenshot-img" src="${toDataUri(endShot)}" alt="Step end screenshot" loading="lazy">
        </div>`
     : `<div class="screenshot-container step-end-screenshot screenshot-disabled">
         <div class="screenshot-label">${endScreenshotLabel}</div>
@@ -980,12 +996,30 @@ function renderTurn(turn: TurnResult, showTurnHeader: boolean, showAttempt: bool
     ? `<div class="turn-header">Turn ${turn.turnNumber}${attemptBadge} ${timeLabel}</div>`
     : '';
 
+  // A computer turn's capture has ONE place in the report: the turn's own
+  // frame, with the click ring (`renderComputerTurn`). Its AI interaction
+  // carries the same bytes, and its sub-actions carry none — so rendering
+  // either one's screenshot block embedded the whole screen twice per turn, and
+  // with `desktop.reportScreenshots` off printed the PAGE placeholder beside the
+  // desktop one, naming `browser.captureScreenshotsPerAction`: a setting that
+  // cannot bring a desktop capture back (SPEC-use-computer.md §10.1, audit A9).
+  const onComputerTurn = turn.computer !== undefined;
+
   // AI interactions (action-plan, clarification)
-  const aiHtml = turn.aiInteractions.map((ai) => renderAiInteraction(ai)).join('\n');
+  const aiHtml = turn.aiInteractions
+    .map((ai) => renderAiInteraction(ai, { onComputerTurn }))
+    .join('\n');
 
   // Sub-actions
   const subActionsHtml = turn.subActions.length > 0
-    ? `<div class="sub-actions">${turn.subActions.map(renderSubAction).join('\n')}</div>`
+    ? `<div class="sub-actions">${turn.subActions
+        .map((sub) =>
+          renderSubAction(
+            sub,
+            onComputerTurn ? { turnShot: turn.computer?.screenshotBase64 ?? null } : {},
+          ),
+        )
+        .join('\n')}</div>`
     : '';
 
   return `<div class="turn">
@@ -1050,7 +1084,10 @@ function renderComputerTurn(turn: TurnResult): string {
        </div>`;
 }
 
-function renderAiInteraction(ai: AiInteraction): string {
+function renderAiInteraction(
+  ai: AiInteraction,
+  opts: { onComputerTurn?: boolean } = {},
+): string {
   const label = escapeHtml(ai.purpose);
   const pretty = formatJson(tryParseJson(ai.response));
   const timeStr = formatTime(ai.timestamp);
@@ -1063,7 +1100,11 @@ function renderAiInteraction(ai: AiInteraction): string {
   // switch, as `renderComputerTurn` does, not the page-capture one.
   const desktopJudge = ai.purpose === 'condition-judge [computer]';
   const shotLabel = desktopJudge ? 'Screen at AI decision' : 'Page state at AI decision';
-  const screenshotHtml = ai.screenshotBase64
+  // On a computer turn the capture — or the placeholder saying why there is
+  // none — is the turn's, rendered once above this block (`renderTurn`).
+  const screenshotHtml = opts.onComputerTurn
+    ? ''
+    : ai.screenshotBase64
     ? `<div class="screenshot-container turn-screenshot">
         <div class="screenshot-label">${shotLabel}</div>
         ${urlHtml}
@@ -1118,7 +1159,17 @@ function renderAiInteraction(ai: AiInteraction): string {
 </details>`;
 }
 
-function renderSubAction(sub: SubActionResult): string {
+/**
+ * `turnShot` is set only on a COMPUTER turn: that turn's capture, or null when
+ * `desktop.reportScreenshots` left it out. A computer sub-action takes no
+ * picture of its own — the turn's frame already shows the screen the action
+ * was decided from — so it renders no "After action" block at all, image or
+ * placeholder, unless it somehow carries an image the turn does not.
+ */
+function renderSubAction(
+  sub: SubActionResult,
+  opts: { turnShot?: string | null } = {},
+): string {
   const actionName = sub.action.action;
   const description = sub.action.description;
   const timeStr = formatTime(sub.timestamp);
@@ -1143,15 +1194,21 @@ function renderSubAction(sub: SubActionResult): string {
   // actually read or which row it took the names from. The one place a stale
   // cached mapping is visible after the fact.
   const mappingHtml = describeTableMapping(sub.action.mapping);
-  const hasBody = sub.screenshotBase64 || sub.domSnapshot || sub.aiReasoning || sub.error || sub.apiCallData
+  const onComputerTurn = opts.turnShot !== undefined;
+  const ownShot = onComputerTurn && sub.screenshotBase64 === opts.turnShot
+    ? undefined
+    : sub.screenshotBase64;
+  const hasBody = ownShot || sub.domSnapshot || sub.aiReasoning || sub.error || sub.apiCallData
     || uploadHtml !== '' || mappingHtml !== '';
 
   const subUrlHtml = sub.pageUrl ? `<div class="screenshot-url">${escapeHtml(sub.pageUrl)}</div>` : '';
-  const screenshotHtml = sub.screenshotBase64
+  const screenshotHtml = onComputerTurn && !ownShot
+    ? ''
+    : ownShot
     ? `<div class="screenshot-container">
         <div class="screenshot-label">After action</div>
         ${subUrlHtml}
-        <img class="screenshot-img" src="${toDataUri(sub.screenshotBase64)}" alt="Sub-action screenshot" loading="lazy">
+        <img class="screenshot-img" src="${toDataUri(ownShot)}" alt="Sub-action screenshot" loading="lazy">
        </div>`
     : `<div class="screenshot-container screenshot-disabled">
         <div class="screenshot-label">After action</div>

@@ -525,6 +525,16 @@ export function registerCommands(
     // panel is re-synced after all of them, not just a ⏸ pick. Re-syncing (not
     // blanking) is what keeps another test's still-parked failure on screen.
     const settleConsumedAnchor = (): void => registry.refreshSkillRerunPanel();
+    // Does this pick START a run (SPEC-use-computer.md §4.5)? Every row here is
+    // an idle session — a parked one is refused above — but two of them are
+    // idle because a run failed (⏸) or was stopped (⏹) inside THIS skill, and
+    // the pick re-runs its steps against what that run left, surface included,
+    // exactly as the Variables panel's re-run from the failed step does. The ▶
+    // row is a session whose last run had nothing to do with this skill: it
+    // may have died inside some other `[use computer]`, and a skill step sent
+    // there without `runStart` would go to the real mouse. So it starts on the
+    // surface the test file says its call line is on.
+    const startsRun = picked.kind === 'open';
 
     if (mode === 'run') {
       registry.notifyRunning(true);
@@ -533,6 +543,7 @@ export function registerCommands(
           isContinuation: true,
           suppressServerBreakpoints: true,
           rerun,
+          ...(startsRun && { startsRun: true }),
         })
         .finally(() => registry.notifyRunning(false));
       settleConsumedAnchor();
@@ -557,6 +568,7 @@ export function registerCommands(
         suppressServerBreakpoints: true,
         rerun,
         compile: 'steps',
+        ...(startsRun && { startsRun: true }),
       });
     } finally {
       registry.notifyRunning(false);

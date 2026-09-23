@@ -324,8 +324,9 @@ export function foldRun(input: FoldInput): FoldedRun {
    *  a missing `on-failure` screenshot is the privacy switch's doing, not the
    *  capture setting's. */
   let lastFailOnComputer = false;
-  /** The most recent screenshot-bearing event carried a desktop capture that
-   *  was withheld — the same question for `final`. */
+  /** The most recent terminal event that decides `final` was a computer-mode
+   *  step under the privacy switch, so its capture was withheld — here, or by
+   *  the server before sending — the same question for `final`. */
   let lastShotWithheld = false;
   let sawFailure = false;
   let serverSettings: WireEffectiveSettings | null = null;
@@ -457,11 +458,19 @@ export function foldRun(input: FoldInput): FoldedRun {
         open.row.output = event.output ?? null;
         open.row.fromCache = event.fromCache ?? false;
         open.row.tab = event.tab ?? open.row.tab;
-        if (event.screenshot) {
+        if (withholdDesktop && event.surface === 'computer') {
           // Withheld, and not an earlier picture left standing in its place:
           // `final` would hand that back as how the run left the screen.
-          lastShotWithheld = withholdDesktop && event.surface === 'computer';
-          lastScreenshot = lastShotWithheld ? null : event.screenshot;
+          //
+          // Whether or not the event carried one — a current server strips it
+          // before sending, so acting only on a screenshot-bearing event left
+          // the page shot from BEFORE the excursion as `final`, with no
+          // warning. The step:fail branch below does the same.
+          lastShotWithheld = true;
+          lastScreenshot = null;
+        } else if (event.screenshot) {
+          lastShotWithheld = false;
+          lastScreenshot = event.screenshot;
         }
         // `output: 'skipped'` is how the server reports a step that never ran
         // on the older of the two conventions. Calling that "passed" is a
@@ -566,16 +575,18 @@ export function foldRun(input: FoldInput): FoldedRun {
           // the server attached one: a current server does not.
           if (withholdDesktop && lastFailOnComputer) lastFailScreenshot = null;
         }
-        if (event.screenshot) {
-          const withheld = withholdDesktop && event.surface === 'computer';
-          lastShotWithheld = withheld;
-          if (withheld) {
-            lastFailScreenshot = null;
-            lastScreenshot = null;
-          } else {
-            lastFailScreenshot = event.screenshot;
-            lastScreenshot = event.screenshot;
-          }
+        if (withholdDesktop && event.surface === 'computer') {
+          // Tolerated or not, and with or without a screenshot on the event:
+          // neither `final` nor `on-failure` may fall back to an earlier
+          // picture — the page as it looked before the excursion, or an
+          // earlier failure's — as if it were this one.
+          lastShotWithheld = true;
+          lastFailScreenshot = null;
+          lastScreenshot = null;
+        } else if (event.screenshot) {
+          lastShotWithheld = false;
+          lastFailScreenshot = event.screenshot;
+          lastScreenshot = event.screenshot;
         }
         closeRow('failed', at);
         break;

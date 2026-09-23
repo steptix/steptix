@@ -186,6 +186,32 @@ runner-core mirror (§10.3).
     detached has no such position and starts on `browser`. Never on a
     Continue or step command (`isResume`), a re-run injected at a pause
     (`isContinuation`, `rerun`), or the later blocks of a split run.
+
+    "The first block" means the first batch the run actually SENDS. A
+    started run can park before sending one — a breakpoint on its first
+    selected step, an `[input:]` answered and then a breakpoint, a Pause at
+    a prompt — and then its Continue, being `isResume`, would send no
+    `runStart`, and the whole run would execute on whatever surface the last
+    run left. So the run keeps "`runStart` owed" across the park
+    (`parkedRunStartOwed`, kept across a run injected at the pause and
+    dropped by Stop) and the Continue or step command's first block carries
+    it, with `stepIndex` from that block's own first step. It is spent when
+    a batch goes out, before the request is awaited, so a Pause mid-block
+    cannot make it ride twice, and a Continue of a run that already sent it
+    sends none. An `[interactive]` step counts: the first REPL turn typed
+    there is a batch, so it carries `runStart` for the `[interactive]`
+    line, with `fullSteps` beside it (the REPL sends none otherwise, and the
+    server starts on `browser` without one); a REPL left without a turn
+    leaves it owed to the block after.
+
+    The skill-file picker (Run Step Here / Compile This Step in a skill)
+    sends its slice as `isContinuation` + `rerun`, but its rows are not all
+    re-runs. The ⏸ and ⏹ rows re-run the steps of a run that failed or was
+    stopped inside THIS skill, against what it left — surface included, as
+    the Variables panel's re-run from the failed step does — and send
+    nothing. The ▶ row is an idle session whose last run had nothing to do
+    with the skill, so it is a run the user started: it sends `runStart` at
+    the test's call line (`startsRun`).
   - **MCP `run_test_file`** sends `{ stepIndex: 0 }` on every call: each one
     runs the whole file from step 1.
   - **The CLI** needs nothing: its surface state is local to one `runTest`,
@@ -193,15 +219,38 @@ runner-core mirror (§10.3).
   - **Everything else** — MCP `run_steps`, flick, a client that predates the
     field — sends nothing and keeps the session's surface, as below.
 
-  Limitation, by design: only top-level lines are read. A section body or a
-  skill that switches surface, or a `[use …]` in a control-line tail, is not
-  seen, so a run started below one begins on whatever the top-level lines
-  say. The miss errs toward `browser`, where a desktop step can only fail.
+  The lines above `stepIndex` are read backwards, each resolved as a step is
+  (`surfaceAtRunStart`, src/server/session-manager.ts). A `[use …]` line
+  decides. A section call is seen through: its body, from the request's
+  `sections`, read the same way, nested calls included — so a desktop
+  excursion that ends in `[use browser]` inside a section puts the step after
+  the call on `browser`. (Top-level lines alone answered `computer` there, and
+  Run From Here sent that step to the real mouse.) A skill call changes
+  nothing, because a skill hands its caller back the surface it called from
+  (below). A control line whose tail switches surface, directly or through a
+  section, may or may not have run; that is not guessed at, and the run
+  starts on `browser` with a WARN naming the line. So every miss errs toward
+  `browser`, where a desktop step can only fail. The one thing not seen is a
+  bare-name section call sent without `sections`, which the server cannot
+  tell from prose anywhere.
+
+  A kept `computer` surface is not kept past the project's opt-in: when
+  `desktop.enabled` is no longer `true`, the run's first step that reads or
+  drives the screen fails with §5.1's message and the session goes back to
+  `browser` (§5.1 item 1).
   `GET /sessions/:id` reports the session's current `surface`.
 - **A skill call restores the caller's surface on return**, whatever the
   skill's body did. An **inline section does not** — it is inline by
   definition, and a section that switches is the way an author writes a
-  desktop excursion once and calls it by name.
+  desktop excursion once and calls it by name. Going back to `browser` is
+  `[use browser]`'s transition. Going back to `computer` is `[use computer]`:
+  the skill's `[use browser]` dropped the adapter and the lock, so the caller
+  re-enters through §5.1 — opt-in, vision route, adapter, lock, probe — at its
+  first step after the skill, and a refusal fails that step with the entry's
+  message before anything runs on it. (An earlier release left the caller on
+  `browser` here, and its next desktop step went to the page.) Returning from
+  nested skills at once restores the outermost caller's surface only. Skipped
+  when that step is itself a `[use …]` line, which sets the surface anyway.
 - **Session close resets** the surface, and releases the lock if the session
   holds it — which, since every run gives it back, it does only when the
   close lands mid-run.
@@ -261,6 +310,19 @@ On `[use computer]`, in order, each failing the STEP with the message given:
    project; set `desktop.enabled: true` in aiui.config.json. A test file in
    a shared project must not be able to move the mouse on a machine whose
    owner did not allow it.
+
+   The server re-reads the project config every batch, and the opt-in is
+   asked wherever a session would touch the screen, not only at its first
+   `[use computer]`: at `[use computer]` re-entry (ahead of the no-op), at
+   the step boundary before a step that reads or drives the screen (§5.9's
+   list), and so for a Continue, an MCP `run_steps` and a `runStart` that
+   kept the computer surface alike. Switched off, that step fails with this
+   message, nothing is captured or asked of the model, and the session goes
+   back to `browser` — lock released, adapter dropped (`revokeComputerMode`).
+   A session that entered while the owner allowed it used to keep driving
+   the mouse after they switched it off. The CLI loads the config once per
+   run and starts every run on `browser`, so only the re-entry check applies
+   there.
 
    Only the JSON boolean `true` opts in. The config loader types the
    `desktop` section at load and refuses anything else — the string
@@ -430,9 +492,34 @@ cap. Differences:
   says the step is done. Measured before this rule: `[click, assert
   holds:true]` passed on the pre-click image, and in `[zoom, click]` a point
   chosen on the full image was mapped through the zoomed crop.
+
+  In front of the screen-changing action, neither `assert` nor `noop` ends
+  the step. An `assert` that holds is recorded (it is the model's reading of
+  the image it was shown), the action behind it runs, and the loop goes on
+  to judge the result; one that does not hold fails the step as it would
+  anywhere, and the action behind it is not performed. A `noop` there is
+  refused — the model is told under *Not performed* that a noop in front of
+  another action does not end the step — and the action runs. Both used to
+  end the step at once: measured, `[noop, click]` and `[assert holds:true,
+  click]` for "Click the Cancel button" passed after one model call with
+  zero clicks, and the click was not even listed as not performed. `noop`
+  and a holding `assert` end the step only when nothing behind them changes
+  the screen.
+
+  Whatever ends a turn early — a failed `assert`, a claimed `return` or
+  `fail`, a refused one, a failed action, a spent wait budget — leaves the
+  actions behind it unperformed, and those are listed exactly as the
+  dropped ones are: on the report, and to the model under *Not performed*
+  when there is a next turn.
 - **Stall.** The page loop's stall detection reads the DOM; here, three
   consecutive turns whose captures are pixel-identical AND whose actions
-  were identical is a stall, and the step fails naming it.
+  were identical is a stall, and the step fails naming it. A turn whose
+  screen-changing action is a `wait`, or a `wait_window` that times out, is
+  not counted — it leaves the streak where it was — because waiting on an
+  unchanging screen is what a slow "Wait until …" is: three identical waits
+  used to trip the stall at 20–30 s, before the wait budget below ever
+  applied. The wait budget and the turn cap bound those turns instead. A
+  `wait_window` that finds its window is counted, after it has run.
 - **A repeated window action is not repeated.** When the previous turn asked
   for `focus_window` / `wait_window` and nothing else, and every one
   succeeded, the same window action at the front of the next answer is not
@@ -450,7 +537,10 @@ cap. Differences:
   something that never comes cost 15 turns of 15 s (§14).
 - **Stop.** The run's abort signal is checked before every capture, every
   model call and every action, and `wait_window` checks it at every look; a
-  stopped step reports *Aborted by client*, as a page step does.
+  stopped step reports *Aborted by client*, as a page step does. The §5.6
+  condition judge's 3 s pause between re-asks of a `waiting` answer gives way
+  to it too, on either surface, so a Stop during a `Wait until` / `While`
+  judge ends it at once rather than after the pause.
 - **No action cache.** Computer-mode steps neither read nor write the step
   cache. A cached selector is validated against a DOM at replay; a cached
   coordinate has nothing to validate against and would replay blind.
@@ -584,14 +674,21 @@ and a data row is one of each.
   the first after a pause. That is the same spot and pattern as the lazy
   browser launch (§4.6), in both loops. It covers a computer-mode step (an
   `If … then return` claim included), a §5.6 condition judge (an `If`
-  chain, or a `While` / `Repeat … until` check), and a `[use computer]`
-  re-entry. A `Set`, a `[tool: …]` line, a whole-step `Return` / `Stop` /
-  `Fail the test …`, an `[input: …]` or `[interactive]` step, a raw
-  `[skill: …]` or refused bracket, and a guard visit that decides no
-  condition (a `For each` reading its list or revisiting, a `Repeat`'s first
-  pass) touch no screen and take nothing. A condition decided from its own
-  values (literal-decision) still takes it, because telling the two apart at
-  the boundary would be a second copy of that rule.
+  chain, or a `While` / `Repeat … until` check), a `[use computer]`
+  re-entry, and a `[tool: …]` line: a tool reads no screen, but it can
+  drive the machine — the fixture `open_calculator` launches a GUI program —
+  and one run unlocked after a pause could take the front window from
+  another session's computer-mode run. A tool that waited for a debugger to
+  attach takes the lock again after the attach, before it runs. A `Set`, a
+  whole-step `Return` / `Stop` / `Fail the test …`, an `[input: …]` or
+  `[interactive]` step, a raw `[skill: …]`, a `[tool: …]` line that does
+  not parse, a refused bracket, and a guard visit that decides no condition
+  (a `For each` reading its list or revisiting, a `Repeat`'s first pass)
+  touch no screen and take nothing. A condition decided from its own values
+  (literal-decision) still takes it, because telling the two apart at the
+  boundary would be a second copy of that rule. On the browser surface
+  nothing takes the lock, a `[tool: …]` line included. The same boundary
+  asks the project's opt-in first (§5.1 item 1).
 - **Released** at the end of every run, whatever ends it: a pass, a failed
   step, a stop, a batch the client cut at a breakpoint, a thrown error. On
   the server this is the step loop's `finally`, and it releases only the
@@ -743,7 +840,17 @@ portable.*
 A `[use …]` step renders as a MODE MARKER row ("→ computer" / "→ browser"),
 not as a step that did nothing. Computer-mode steps show the downscaled
 capture the model saw, per turn, when `desktop.reportScreenshots` is true;
-when false, no desktop image is embedded and the row says so. The report's
+when false, no desktop image is embedded and the row says so. Each capture
+is embedded ONCE, in the turn's own frame with the click ring: the turn's AI
+interaction carries the same bytes and its sub-actions carry none, so on a
+computer turn neither renders a screenshot block — image or placeholder —
+and the row's step-end image renders only when no turn showed it (a
+failure's row screenshot is its last turn's capture; a pass's is the screen
+after its last action, labelled "Screen", not "Page state"). With the switch
+off, the only placeholder on a computer step is the turn's, and it names
+`desktop.reportScreenshots`, never `browser.captureScreenshotsPerAction`,
+which cannot bring a desktop capture back. Page-surface rows are unchanged.
+The report's
 click marker: for a `click` / `drag` the capture is annotated with a small
 ring where the pointer went, because debugging a coordinate click without
 one is guesswork. Desktop captures include the whole screen, so the
@@ -760,7 +867,7 @@ model always gets the capture it is asked about — that is the surface. With
 | A computer step's row screenshot (`StepResult.screenshotBase64`, pass or fail) — the report's step-end image, `results[].screenshot` in the JSON response, a recording's `<step>.failure.png` | not recorded, so none of them has one |
 | The same, on the SSE `step:pass` / `step:fail` event — TestBench, and the MCP server | not sent: the event's `screenshot` comes from the row |
 | A §5.6 condition judge's AI interaction — the guard row's turn in the report | not recorded (`evaluateConditions`); the row says the capture was left out by this switch |
-| MCP `run_test_file` / `run_steps` result image | not returned: the MCP server reads the switch from the project's `aiui.config.json` and drops any screenshot on an event marked `surface: 'computer'`, whatever the server sent, and says why instead of advising `capture` |
+| MCP `run_test_file` / `run_steps` result image | not returned: the MCP server reads the switch from the project's `aiui.config.json` and drops any screenshot on an event marked `surface: 'computer'`, whatever the server sent, and says why instead of advising `capture`. A computer step's `step:pass` or `step:fail` also clears the picture before it whether or not it carried one — a current server strips it before sending — so `final` never hands back the page as it looked before the excursion |
 
 A page capture taken while the run is on the computer surface — the error
 screenshot of a step that threw, an unconditional `Fail the test …` — is of

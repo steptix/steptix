@@ -43,7 +43,10 @@ import { executeStep, executeBranchedStep } from '../runner/step-executor.js';
 import type { StepExecutorOptions } from '../runner/step-executor.js';
 import { identifyStepGroups } from '../runner/step-grouper.js';
 import { parseUseStep } from '../parser/use-step.js';
+import { matchText } from '../parser/section-match.js';
+import { parseSkillCall } from '../skills/skill-call-parser.js';
 import {
+  COMPUTER_DISABLED_MESSAGE,
   SkillSurfaceStack,
   computerContextFor,
   defaultLoadDesktopAdapter,
@@ -57,6 +60,8 @@ import {
   modeStepResult,
   releaseComputerLockAtRunEnd,
   releaseComputerLockForPause,
+  restoreCallerSurface,
+  revokeComputerMode,
   skillFrameChain,
   stepReadsScreen,
   undispatchedDirectiveError,
@@ -147,6 +152,7 @@ import {
 } from '../utils/secrets.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { executeToolStep } from '../tools/executor.js';
+import type { ToolStepOutcome } from '../tools/types.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
 import { captureScreenshot } from '../browser/screenshot.js';
@@ -606,29 +612,95 @@ export interface StepRequest {
 
 /**
  * The surface a run that starts at `stepIndex` of `fullSteps` starts on
- * (SPEC-use-computer.md §4.5; `StepRequest.runStart`): the target of the last
- * top-level `[use …]` line above it, or `browser` when there is none.
+ * (SPEC-use-computer.md §4.5; `StepRequest.runStart`): the surface the last
+ * line above it that switches surface leaves it on, or `browser` when there is
+ * none.
  *
- * Top-level lines only — a section body or skill that switches surface is not
- * seen, and neither is a `[use …]` in a control-line tail. The miss is in the
- * safe direction for the case that matters: a run whose file says `browser`
- * but whose skipped steps would have left it on `computer` starts on the
- * browser, where the worst a desktop step can do is fail.
+ * Read backwards from the start step, each line in the order a step resolves
+ * (control-line.ts, "Resolution order"), asking what surface it leaves the run
+ * on ({@link surfaceEffectOf}):
+ *
+ *  - a `[use …]` line decides it;
+ *  - a section call is seen through: its body, from `sections`, read the same
+ *    way — so a desktop excursion that ends in `[use browser]` inside a
+ *    section puts the step after the call on the browser, where top-level
+ *    lines alone answered `computer` and sent that step to the real mouse;
+ *  - a skill call changes nothing: a skill hands its caller back the surface
+ *    it called from (§4.5), so the line after the call is on the caller's;
+ *  - a control line whose tail switches surface — directly or through a
+ *    section — may or may not have run. That is not guessed at: the run starts
+ *    on `browser`, and `unseen` names the line;
+ *  - anything else is prose and changes nothing.
+ *
+ * So every miss errs toward `browser`, where a desktop step can only fail. A
+ * bare-name section call arriving without `sections` cannot be told from
+ * prose, as it cannot anywhere else on the server.
  *
  * `directive` is the index of the line that decided it, for the log.
  */
 export function surfaceAtRunStart(
   fullSteps: readonly string[] | undefined,
   stepIndex: number | undefined,
-): { surface: SessionSurface; directive?: number } {
+  sections?: StepRequest['sections'],
+): { surface: SessionSurface; directive?: number; unseen?: number } {
   if (!fullSteps || stepIndex === undefined || stepIndex <= 0 || stepIndex >= fullSteps.length) {
     return { surface: 'browser' };
   }
   for (let i = stepIndex - 1; i >= 0; i--) {
-    const use = parseUseStep(fullSteps[i]!);
-    if (use) return { surface: use.surface, directive: i };
+    const effect = surfaceEffectOf(fullSteps[i]!, sections, new Set());
+    if (effect === 'unknown') return { surface: 'browser', unseen: i };
+    if (effect !== 'none') return { surface: effect, directive: i };
   }
   return { surface: 'browser' };
+}
+
+/** How deep {@link surfaceEffectOf} follows section calls before giving up —
+ *  far past any real nesting, and a bound on a malformed request. */
+const SURFACE_SCAN_DEPTH = 32;
+
+/**
+ * The surface a line leaves a run on, for {@link surfaceAtRunStart}: the one it
+ * switches to, `none` when it cannot switch, or `unknown` when it may or may
+ * not have. `seen` holds the sections being read, so a cycle answers `unknown`
+ * rather than recursing.
+ */
+function surfaceEffectOf(
+  line: string,
+  sections: StepRequest['sections'],
+  seen: ReadonlySet<string>,
+): SessionSurface | 'none' | 'unknown' {
+  // Rung 1 — bracket directives.
+  const use = parseUseStep(line);
+  if (use) return use.surface;
+  if (isSkillCallLine(line)) return 'none';
+  // Rung 2 — the bare-name section match: the body, read backwards.
+  const key = matchText(line);
+  if (sections && Object.prototype.hasOwnProperty.call(sections, key)) {
+    if (seen.has(key) || seen.size >= SURFACE_SCAN_DEPTH) return 'unknown';
+    const inner = new Set(seen).add(key);
+    const body = sections[key]!.steps;
+    for (let i = body.length - 1; i >= 0; i--) {
+      const effect = surfaceEffectOf(body[i]!, sections, inner);
+      if (effect !== 'none') return effect;
+    }
+    return 'none';
+  }
+  // Rung 3 — a control line: its tail runs zero or more times.
+  const control = parseControlLine(line);
+  if (control) {
+    return surfaceEffectOf(control.tail, sections, seen) === 'none' ? 'none' : 'unknown';
+  }
+  return 'none';
+}
+
+/** A `[skill: …]` line, as the expander reads one — a line that names a skill
+ *  but does not parse is still one. */
+function isSkillCallLine(line: string): boolean {
+  try {
+    return parseSkillCall(line) !== null;
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -1833,9 +1905,29 @@ export class SessionManager {
     request: StepRequest,
   ): void {
     const stepIndex = request.runStart?.stepIndex;
-    const start = surfaceAtRunStart(request.fullSteps, stepIndex);
+    const start = surfaceAtRunStart(request.fullSteps, stepIndex, request.sections);
+    if (start.unseen !== undefined) {
+      logger.warn(
+        `[computer] Session "${sessionId}": this run starts at step ${stepIndex! + 1}, below step ` +
+          `${start.unseen + 1}, a control line that may switch surface — whether it did depends ` +
+          'on steps this run skips, so it starts on the browser surface',
+      );
+    }
     if (start.surface === 'computer') {
-      if (session.surface === 'computer') {
+      if (session.surface === 'computer' && session.desktopConfig?.enabled !== true) {
+        // Kept is not re-entered, but it is not a pass either: the owner has
+        // switched computer mode off since the session got here (§5.1 item
+        // 1). The surface is left for the step boundary to give up, at this
+        // run's first step that would read or drive the screen, which it
+        // fails with the disabled message. Dropping it HERE would run that
+        // step on the browser instead, launching one for a step the file
+        // wrote for the desktop.
+        logger.warn(
+          `[computer] Session "${sessionId}": this run starts below the [use computer] at step ` +
+            `${start.directive! + 1}, but computer mode is now disabled for this project — its ` +
+            'first step that reads the screen fails, and the session goes back to the browser',
+        );
+      } else if (session.surface === 'computer') {
         logger.debug(
           `[computer] Session "${sessionId}": this run starts below the [use computer] at step ` +
             `${start.directive! + 1} and stays on the computer surface`,
@@ -3400,7 +3492,9 @@ export class SessionManager {
     // which is after this line.
     session.browserConfig = projectConfig.browser;
     // The computer surface's per-project section (§5.10), for the same reason
-    // and read by `[use computer]` and by `computerContextFor` below. NOT off
+    // and read by `[use computer]`, by the step boundary's opt-in check (so an
+    // owner switching `desktop.enabled` off stops a session already on the
+    // surface, §5.1 item 1) and by `computerContextFor` below. NOT off
     // `runConfig`: that is the server's config with four values re-sourced.
     session.desktopConfig = projectConfig.desktop ?? this.config.desktop;
 
@@ -4292,16 +4386,39 @@ export class SessionManager {
      * frame ids that are only stable while the expansion is.
      */
     const skillSurfaces = new SkillSurfaceStack();
-    /** Restore a surface on return from a skill, releasing the lock when the
-     *  SKILL took it and the caller had not. A caller already in computer mode
-     *  stays there with its adapter; if a pause inside the skill gave the lock
-     *  back, the step boundary takes it again at the caller's next computer
-     *  step. */
-    const restoreSurface = (to: 'browser' | 'computer'): void => {
-      if (to === 'browser') {
-        leaveComputerMode(surfaceStateOf(session), session.id, this.deps.computerLock);
-      }
-    };
+    /**
+     * `[use computer]` for this session, with everything §5.1 reads — written
+     * once, because a `[use computer]` step and a skill returning to a
+     * computer-surface caller are the same entry (§4.5).
+     */
+    const enterComputerSurface = () =>
+      enterComputerMode({
+        lockId: session.id,
+        // The PROJECT's section, stored above from the bundle this batch
+        // resolved — `runConfig.desktop` would be the server's.
+        desktop: session.desktopConfig,
+        state: surfaceStateOf(session),
+        loadDesktopAdapter: this.loadDesktopAdapter,
+        probeCapture: this.probeComputerCapture,
+        ...(this.deps.computerLock && { lock: this.deps.computerLock }),
+        // §15.4 — the route `session.aiClient` was pointed at for this batch
+        // (see `effectiveAiRoute` above). Keyless — no key, or AI forbidden by
+        // policy — skips the check: the first computer turn already fails with
+        // the message that fits the reason.
+        ai: runKeyless ? undefined : effectiveAiRoute,
+        ...(this.deps.checkVisionRoute && { checkVisionRoute: this.deps.checkVisionRoute }),
+      });
+    /** Put the caller back on its surface on return from a skill: `[use
+     *  browser]`'s transition, or `[use computer]`'s through
+     *  {@link enterComputerSurface}, which can fail (`restoreCallerSurface`). */
+    const restoreSurface = (to: 'browser' | 'computer') =>
+      restoreCallerSurface(
+        to,
+        surfaceStateOf(session),
+        session.id,
+        this.deps.computerLock,
+        enterComputerSurface,
+      );
     /**
      * The batch is about to wait for a person (SPEC-use-computer.md §5.9):
      * give the computer lock back first. Called immediately before every
@@ -5168,11 +5285,49 @@ export class SessionManager {
         // an inline section is inline by definition, and a section that
         // switches surface is how an author writes a desktop excursion once
         // and calls it by name.
-        skillSurfaces.enter(
+        //
+        // Going back to `computer` is `[use computer]` and can fail — the lock
+        // held elsewhere, the opt-in switched off. That fails THIS step, the
+        // caller's first after the skill, before anything runs on it. Skipped
+        // when this step is itself a `[use …]` line: that sets the surface
+        // anyway, and a `[use browser]` must not fail over a lock it would
+        // release on the spot.
+        const restoreTo = skillSurfaces.enter(
           skillFrameChain(expansionOrigins?.[i]?.frameId, expandedFrames),
           session.surface,
-          restoreSurface,
         );
+        if (restoreTo !== null && !(restoreTo === 'computer' && parseUseStep(originalStep))) {
+          const restored = await restoreSurface(restoreTo);
+          if (!restored.ok) {
+            const error = restored.error;
+            const frame = frameInfoFor(i);
+            logger.error(`Session "${sessionId}" step ${i + 1} FAILED: ${error}`);
+            if (hasControls) flushSkips(i);
+            emit({ type: 'step:start', line: sourceLineFor(i), ...(frame && { frame }) });
+            emit({ type: 'step:fail', line: sourceLineFor(i), error, ...(frame && { frame }) });
+            results.push({
+              step: originalStep,
+              status: 'failed',
+              actions: [],
+              screenshot: '',
+              reasoning: error,
+              outputs: {},
+            });
+            fullStepResults.push({
+              index: i + 1,
+              instruction: originalStep,
+              status: 'failed',
+              turns: [],
+              durationMs: 0,
+              retried: false,
+              error,
+              aiExplanation: error,
+            });
+            overallStatus = 'failed';
+            errorInfo = { step: i, message: error };
+            break;
+          }
+        }
 
         // ── THE SURFACE SWITCH (SPEC-use-computer.md §4.4, §5.1) ──────────
         //
@@ -5200,22 +5355,7 @@ export class SessionManager {
 
           let modeResult: StepResult;
           if (useStep.surface === 'computer') {
-            const entered = await enterComputerMode({
-              lockId: session.id,
-              // The PROJECT's section, stored above from the bundle this batch
-              // resolved — `runConfig.desktop` would be the server's.
-              desktop: session.desktopConfig,
-              state: surfaceStateOf(session),
-              loadDesktopAdapter: this.loadDesktopAdapter,
-              probeCapture: this.probeComputerCapture,
-              ...(this.deps.computerLock && { lock: this.deps.computerLock }),
-              // §15.4 — the route `session.aiClient` was pointed at for this
-              // batch (see `effectiveAiRoute` above). Keyless — no key, or AI
-              // forbidden by policy — skips the check: the first computer turn
-              // already fails with the message that fits the reason.
-              ai: runKeyless ? undefined : effectiveAiRoute,
-              ...(this.deps.checkVisionRoute && { checkVisionRoute: this.deps.checkVisionRoute }),
-            });
+            const entered = await enterComputerSurface();
             modeResult = entered.ok
               ? modeStepResult(i + 1, originalStep, 'computer', entered.reentered)
               : {
@@ -5884,60 +6024,72 @@ export class SessionManager {
         // re-entry takes it in `enterComputerMode`, above.
         //
         // What counts is `stepReadsScreen` / `guardVisitReadsScreen`: a `Set`,
-        // a `[tool:]` line, a whole-step `Return` / `Stop` / `Fail`, an
-        // `[input:]` / `[interactive]` line, and a guard visit that decides no
-        // condition touch no screen and take nothing.
+        // a whole-step `Return` / `Stop` / `Fail`, an `[input:]` /
+        // `[interactive]` line, and a guard visit that decides no condition
+        // touch no screen and take nothing. A `[tool:]` line takes it: a tool
+        // can launch a program and take the front window.
         //
-        // A refusal is THIS step's failure with §5.9's message, built the way
-        // the launch failure is, and nothing is captured or asked of the model
-        // for it.
-        if (
+        // The same step asks the project's opt-in first (§5.1 item 1), off
+        // `session.desktopConfig`, which this batch re-read above: an owner
+        // who switched computer mode off must stop a session already on the
+        // surface — a Continue, an MCP `run_steps`, a run started below a
+        // `[use computer]` — not only the next `[use computer]`. Refused, the
+        // session goes back to the browser (`revokeComputerMode`).
+        //
+        // A refusal is THIS step's failure with §5.1's or §5.9's message,
+        // built the way the launch failure is, and nothing is captured or
+        // asked of the model for it.
+        const readsScreenHere =
           session.surface === 'computer' &&
-          !session.computerLockHeld &&
           (hasControls && controls[i]
             ? guardVisitReadsScreen(controls, i, controlState)
-            : stepReadsScreen(originalStep))
-        ) {
+            : stepReadsScreen(originalStep));
+        let boundaryRefusal: string | undefined;
+        if (readsScreenHere && session.desktopConfig?.enabled !== true) {
+          revokeComputerMode(surfaceStateOf(session), session.id, this.deps.computerLock);
+          boundaryRefusal = COMPUTER_DISABLED_MESSAGE;
+        } else if (readsScreenHere && !session.computerLockHeld) {
           const taken = ensureComputerLock(
             surfaceStateOf(session),
             session.id,
             this.deps.computerLock,
           );
-          if (!taken.ok) {
-            const error = taken.error;
-            logger.error(`Session "${sessionId}" step ${i + 1}: ${error}`);
-            if (hasControls) flushSkips(i);
-            emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread });
-            emit({
-              type: 'step:fail',
-              line: sourceLineFor(i),
-              error,
-              surface: 'computer',
-              ...frameSpread,
-            });
-            results.push({
-              step: originalStep,
-              status: 'failed',
-              actions: [],
-              screenshot: '',
-              reasoning: error,
-              outputs: {},
-            });
-            fullStepResults.push({
-              index: i + 1,
-              instruction: originalStep,
-              status: 'failed',
-              surface: 'computer',
-              turns: [],
-              durationMs: 0,
-              retried: false,
-              error,
-              aiExplanation: error,
-            });
-            overallStatus = 'failed';
-            errorInfo = { step: i, message: error };
-            break;
-          }
+          if (!taken.ok) boundaryRefusal = taken.error;
+        }
+        if (boundaryRefusal !== undefined) {
+          const error = boundaryRefusal;
+          logger.error(`Session "${sessionId}" step ${i + 1}: ${error}`);
+          if (hasControls) flushSkips(i);
+          emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread });
+          emit({
+            type: 'step:fail',
+            line: sourceLineFor(i),
+            error,
+            surface: 'computer',
+            ...frameSpread,
+          });
+          results.push({
+            step: originalStep,
+            status: 'failed',
+            actions: [],
+            screenshot: '',
+            reasoning: error,
+            outputs: {},
+          });
+          fullStepResults.push({
+            index: i + 1,
+            instruction: originalStep,
+            status: 'failed',
+            surface: 'computer',
+            turns: [],
+            durationMs: 0,
+            retried: false,
+            error,
+            aiExplanation: error,
+          });
+          overallStatus = 'failed';
+          errorInfo = { step: i, message: error };
+          break;
         }
 
         // ── Control flow: the guard decides, the planner says what follows ──
@@ -6388,7 +6540,7 @@ export class SessionManager {
               // executeToolStep will surface the real error as a failed step.
               const registered = await toolCatalogue.resolve(toolCall.name).catch(() => undefined);
               // §5.9: waiting for a debugger to attach is waiting for a
-              // person. The tool itself needs no lock (`stepReadsScreen`).
+              // person. The tool takes the lock back below, before it runs.
               releaseLockForPause(`tool debugger for ${toolCall.name}`);
               emit({
                 type: 'tool:awaiting-debugger',
@@ -6401,8 +6553,25 @@ export class SessionManager {
               // ack actually arrived (vs. abort) — see awaitDebuggerAck.
               pauseBeforeRun = await this.awaitDebuggerAck(session, signal);
             }
+            // §5.9 — on the computer surface a tool runs under the lock (it can
+            // launch a program and take the front window). The step boundary
+            // took it; a debugger pause just gave it back, so take it again
+            // here, and fail the step with §5.9's message rather than run the
+            // tool while another session drives the mouse.
+            const relock =
+              session.surface === 'computer'
+                ? ensureComputerLock(surfaceStateOf(session), session.id, this.deps.computerLock)
+                : { ok: true as const };
             const startedAt = Date.now();
-            const outcome = await executeToolStep(toolCall, {
+            const outcome: ToolStepOutcome = !relock.ok ? {
+              toolName: toolCall.name,
+              args: {},
+              outputs: {},
+              durationMs: 0,
+              logs: [],
+              status: 'failed',
+              error: relock.error,
+            } : await executeToolStep(toolCall, {
               // `?.`, not `!`: a `[tool:]` step is dispatched on either
               // surface (§5.5 changes only how a PROSE step is answered), and
               // a computer-mode run may have launched no browser at all

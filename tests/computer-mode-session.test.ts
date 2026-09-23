@@ -14,7 +14,7 @@
  * second and imports half of the first.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../src/config/types.js';
@@ -1574,5 +1574,307 @@ describe('a pause inside a batch gives the lock back (§5.9)', () => {
       expect(holders).toEqual(['s-tool', 's-tool']);
       expect(existsSync(lockPath)).toBe(false);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §5.1 item 1 — the opt-in is read at every step that would touch the screen,
+// not only at the first `[use computer]`
+//
+// Review finding: a session already on the computer surface kept driving the
+// mouse after its project's owner set `desktop.enabled: false`. The project
+// config is re-read every batch; three places skipped it — `[use computer]`
+// re-entry, the step-boundary lock re-take, and a `runStart` that kept the
+// computer surface.
+// ---------------------------------------------------------------------------
+
+describe('switching desktop.enabled off stops a session already on the computer surface', () => {
+  /** Rewrite a project's config in place and move its mtime on, so the
+   *  mtime-cached bundle re-reads it on the next batch. */
+  function setDesktopEnabled(testFilePath: string, enabled: boolean): void {
+    const configPath = path.join(path.dirname(path.dirname(testFilePath)), 'aiui.config.json');
+    writeFileSync(configPath, JSON.stringify({ desktop: { enabled } }));
+    const later = new Date(Date.now() + (enabled ? 10_000 : 5_000));
+    utimesSync(configPath, later, later);
+  }
+
+  /** A session left on the computer surface by a passing batch, and then the
+   *  owner switches computer mode off. */
+  async function onComputerThenDisabled(manager: SessionManager, id: string): Promise<string> {
+    const testFilePath = writeProject({ desktop: { enabled: true } });
+    const first = await manager.executeSteps(id, {
+      steps: ['[use computer]', 'Click A'],
+      testFilePath,
+    });
+    expect(first.status).toBe('passed');
+    expect(managed(manager, id).surface).toBe('computer');
+    setDesktopEnabled(testFilePath, false);
+    executeComputerStepMock.mockClear();
+    return testFilePath;
+  }
+
+  function expectDroppedToBrowser(manager: SessionManager, id: string): void {
+    const session = managed(manager, id);
+    expect(session.surface).toBe('browser');
+    expect(session.computerAdapter).toBeUndefined();
+    expect(session.computerLockHeld).toBeFalsy();
+    expect(existsSync(lockPath)).toBe(false);
+  }
+
+  it('a Continue: the next computer step fails with the disabled message, and the session drops to the browser', async () => {
+    const manager = makeManager();
+    const testFilePath = await onComputerThenDisabled(manager, 's-off-continue');
+    const events: RunEvent[] = [];
+
+    const response = await manager.executeSteps(
+      's-off-continue',
+      { steps: ['Click B', 'Click C'], testFilePath },
+      (e) => events.push(e),
+    );
+
+    expect(response.status).toBe('failed');
+    expect(response.error!.message).toBe(COMPUTER_DISABLED_MESSAGE);
+    expect(response.results).toHaveLength(1);
+    const fail = events.find((e) => e.type === 'step:fail') as Extract<RunEvent, { type: 'step:fail' }>;
+    expect(fail.error).toBe(COMPUTER_DISABLED_MESSAGE);
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+    expectDroppedToBrowser(manager, 's-off-continue');
+  });
+
+  it('[use computer] re-entry fails with the disabled message rather than taking the lock', async () => {
+    const manager = makeManager();
+    const testFilePath = await onComputerThenDisabled(manager, 's-off-reentry');
+
+    const response = await manager.executeSteps('s-off-reentry', {
+      steps: ['[use computer]', 'Click B'],
+      testFilePath,
+    });
+
+    expect(response.status).toBe('failed');
+    expect(response.results[0]!.reasoning).toBe(COMPUTER_DISABLED_MESSAGE);
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expectDroppedToBrowser(manager, 's-off-reentry');
+  });
+
+  it('a runStart below [use computer] does not keep the surface past the first computer step', async () => {
+    const manager = makeManager();
+    const testFilePath = await onComputerThenDisabled(manager, 's-off-runstart');
+
+    const response = await manager.executeSteps('s-off-runstart', {
+      steps: ['Click B'],
+      fullSteps: ['[use computer]', 'Click A', 'Click B'],
+      runStart: { stepIndex: 2 },
+      testFilePath,
+    });
+
+    expect(response.status).toBe('failed');
+    expect(response.error!.message).toBe(COMPUTER_DISABLED_MESSAGE);
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+    expectDroppedToBrowser(manager, 's-off-runstart');
+  });
+
+  it('a condition judge on the computer surface is refused the same way, before it is asked', async () => {
+    const manager = makeManager();
+    const testFilePath = await onComputerThenDisabled(manager, 's-off-judge');
+
+    const response = await manager.executeSteps('s-off-judge', {
+      steps: ['If the Save dialog is open, then Click Save'],
+      testFilePath,
+    });
+
+    expect(response.status).toBe('failed');
+    expect(response.error!.message).toBe(COMPUTER_DISABLED_MESSAGE);
+    expect(evaluateConditionsMock).not.toHaveBeenCalled();
+    expectDroppedToBrowser(manager, 's-off-judge');
+  });
+
+  it('switched back on, the session enters again through [use computer]', async () => {
+    const manager = makeManager();
+    const testFilePath = await onComputerThenDisabled(manager, 's-off-on');
+    await manager.executeSteps('s-off-on', { steps: ['Click B'], testFilePath });
+    setDesktopEnabled(testFilePath, true);
+
+    const response = await manager.executeSteps('s-off-on', {
+      steps: ['[use computer]', 'Click C'],
+      testFilePath,
+    });
+
+    expect(response.status).toBe('passed');
+    expect(executeComputerStepMock.mock.calls.map((c) => c[2])).toEqual(['Click C']);
+    // A fresh entry: the adapter was dropped, so it loaded again.
+    expect(loadDesktopAdapter).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §5.9 — a `[tool:]` line on the computer surface takes the lock
+//
+// Review finding: tools like the fixture `open_calculator` launch GUI
+// programs. After a pause (or in a later batch) a `[tool:]` line ran without
+// the lock and could take the front window from another session's
+// computer-mode run.
+// ---------------------------------------------------------------------------
+
+describe('a [tool:] line on the computer surface takes the lock (§5.9)', () => {
+  let toolsDir: string;
+  /** What the tool saw of the lock file when it ran; absent if it never ran. */
+  let markerPath: string;
+  beforeEach(() => {
+    toolsDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-tool-lock-'));
+    markerPath = path.join(toolsDir, 'ran.txt');
+    const toolsIndex = path.resolve(__dirname, '..', 'src', 'tools', 'index.ts').replace(/\\/g, '/');
+    writeFileSync(
+      path.join(toolsDir, 'launch.ts'),
+      `import { defineTool } from '${toolsIndex}';\n` +
+        "import { existsSync, readFileSync, writeFileSync } from 'node:fs';\n" +
+        "export default defineTool({ name: 'launch', description: 'launch', parameters: {}, outputs: {},\n" +
+        '  async run() {\n' +
+        `    const lock = ${JSON.stringify(lockPath)};\n` +
+        `    writeFileSync(${JSON.stringify(markerPath)}, ` +
+        "existsSync(lock) ? JSON.parse(readFileSync(lock, 'utf8')).sessionId : 'none');\n" +
+        '  } });\n',
+    );
+  });
+  afterEach(() => {
+    rmSync(toolsDir, { recursive: true, force: true });
+  });
+
+  it('the lock is held while the tool runs, in a batch after the one that entered computer mode', async () => {
+    const manager = makeManager();
+    await manager.executeSteps('s-tool-held', { steps: ['[use computer]'] });
+    expect(existsSync(lockPath)).toBe(false);
+
+    const response = await manager.executeSteps('s-tool-held', { steps: ['[tool: launch]'], toolsDir });
+
+    expect(response.error?.message).toBeUndefined();
+    expect(response.status).toBe('passed');
+    expect(readFileSync(markerPath, 'utf8')).toBe('s-tool-held');
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('another session holds the lock: the tool step fails with §5.9 and the tool never runs', async () => {
+    const manager = makeManager();
+    await manager.executeSteps('s-tool-busy', { steps: ['[use computer]'] });
+    acquireComputerLock('s-busy', { lockPath });
+
+    const response = await manager.executeSteps('s-tool-busy', { steps: ['[tool: launch]'], toolsDir });
+
+    expect(response.status).toBe('failed');
+    expect(response.error!.message).toBe(
+      computerLockInUseMessage({ pid: process.pid, sessionId: 's-busy', since: '' }),
+    );
+    expect(existsSync(markerPath)).toBe(false);
+    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-busy');
+  });
+
+  it('after a tool-debugger pause the tool runs under the lock again', async () => {
+    const manager = makeManager();
+    let lockAtAttach: boolean | undefined;
+    executeComputerStepMock.mockImplementation(async (index, n, instruction) => {
+      if (instruction === 'Click A') manager.setPauseAtNextTool('s-tool-debug', true);
+      return passComputerStep(index, n, instruction);
+    });
+
+    const response = await manager.executeSteps(
+      's-tool-debug',
+      { steps: ['[use computer]', 'Click A', '[tool: launch]'], toolsDir },
+      (e) => {
+        if (e.type !== 'tool:awaiting-debugger') return;
+        lockAtAttach = existsSync(lockPath);
+        setImmediate(() => manager.submitDebuggerAck('s-tool-debug'));
+      },
+    );
+
+    expect(response.error?.message).toBeUndefined();
+    expect(response.status).toBe('passed');
+    expect(lockAtAttach).toBe(false);
+    expect(readFileSync(markerPath, 'utf8')).toBe('s-tool-debug');
+  });
+
+  it('the browser surface is unchanged: a tool runs while another session holds the lock', async () => {
+    acquireComputerLock('s-busy', { lockPath });
+    const manager = makeManager();
+
+    const response = await manager.executeSteps('s-tool-page', { steps: ['[tool: launch]'], toolsDir });
+
+    expect(response.status).toBe('passed');
+    expect(readFileSync(markerPath, 'utf8')).toBe('s-busy');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §4.5 — a skill call restores the caller's surface on return, `computer`
+// included
+//
+// Review finding: restoring a computer-surface caller was a no-op. A caller in
+// computer mode whose skill ran `[use browser]` came back on the browser, and
+// its next desktop step went to the page.
+// ---------------------------------------------------------------------------
+
+describe('a skill that leaves computer mode hands the caller back its computer surface (§4.5)', () => {
+  let skillsDir: string;
+  beforeEach(() => {
+    skillsDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-skills-'));
+    writeFileSync(
+      path.join(skillsDir, 'check-page.md'),
+      ['---', 'type: skill', '---', '# check-page', '', '## Steps', '1. [use browser]', '2. Click the heading', ''].join('\n'),
+    );
+  });
+  afterEach(() => {
+    rmSync(skillsDir, { recursive: true, force: true });
+  });
+
+  const STEPS = ['[use computer]', '[skill: check-page]', 'Click Save in the dialog'];
+
+  it('re-enters computer mode through [use computer]: the next caller step runs on the computer, under the lock', async () => {
+    const holders = recordLockHolders();
+    const manager = makeManager();
+    const testFilePath = writeProject({ desktop: { enabled: true } });
+
+    const response = await manager.executeSteps('s-skill-back', { steps: STEPS, skillsDir, testFilePath });
+
+    expect(response.error?.message).toBeUndefined();
+    expect(response.status).toBe('passed');
+    // The skill body ran on the page…
+    expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual(['Click the heading']);
+    // …and the caller's next step on the computer, holding the lock.
+    expect(executeComputerStepMock.mock.calls.map((c) => c[2])).toEqual(['Click Save in the dialog']);
+    expect(holders).toEqual(['s-skill-back']);
+    // A full entry — the skill's [use browser] dropped the adapter — so §5.1's
+    // preconditions ran again.
+    expect(loadDesktopAdapter).toHaveBeenCalledTimes(2);
+    expect(probeComputerCapture).toHaveBeenCalledTimes(2);
+    expect(managed(manager, 's-skill-back').surface).toBe('computer');
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('when the re-entry fails, the step it was restoring for fails with the enter error and nothing runs on it', async () => {
+    const manager = makeManager();
+    const testFilePath = writeProject({ desktop: { enabled: true } });
+    // Another session takes the lock while the skill is on the browser.
+    executeStepMock.mockImplementationOnce(async (_i, _n, instruction) => {
+      acquireComputerLock('s-other', { lockPath });
+      return { index: 1, instruction, status: 'passed', turns: [], durationMs: 1, retried: false };
+    });
+    const events: RunEvent[] = [];
+
+    const response = await manager.executeSteps(
+      's-skill-busy',
+      { steps: STEPS, skillsDir, testFilePath },
+      (e) => events.push(e),
+    );
+
+    const inUse = computerLockInUseMessage({ pid: process.pid, sessionId: 's-other', since: '' });
+    expect(response.status).toBe('failed');
+    expect(response.error!.message).toContain(inUse);
+    expect(response.error!.message).toContain('returned from a skill');
+    const fail = events.find((e) => e.type === 'step:fail') as Extract<RunEvent, { type: 'step:fail' }>;
+    expect(fail.error).toContain(inUse);
+    // The caller's step went nowhere: not to the computer, not to the page.
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(executeStepMock.mock.calls.map((c) => c[2])).toEqual(['Click the heading']);
+    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-other');
   });
 });

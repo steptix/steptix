@@ -314,6 +314,12 @@ export interface StreamStepsRequest {
    * or a re-run injected against the paused page: those continue the surface
    * the run left. Without it, a run that failed inside `[use computer]` hands
    * the next Run the real mouse.
+   *
+   * "First block" is the first batch the run SENDS, so a started run that
+   * parked before sending one (a breakpoint on its first step, an `[input:]`
+   * then a breakpoint) owes it to its Continue's first block — the one
+   * Continue that does carry it — and an `[interactive]` REPL turn is a batch
+   * like any other.
    */
   runStart?: { stepIndex?: number };
 }

@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import type { AiClient } from '../src/ai/client.js';
 import type { ChatMessage } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
-import type { StepResult, TurnResult } from '../src/report/types.js';
+import type { StepResult, SubActionResult, TurnResult } from '../src/report/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { parseTestFile } from '../src/parser/markdown.js';
 import { clearSkillCache } from '../src/skills/expander.js';
@@ -167,6 +167,150 @@ describe('a computer-mode turn shows what the model saw (§10.1, §10.2)', () =>
 
     expect(html).not.toContain('computer-screenshot');
     expect(html).not.toContain('computer-click-ring');
+  });
+});
+
+// Audit item A9. A computer step reaches the renderer with the SAME capture in
+// up to three places — the turn's record, the turn's AI interaction, and (for a
+// failure, or a step that ended on a turn with no actions) the row's end
+// screenshot — and each of them used to render: a whole-screen PNG embedded two
+// or three times per turn. With the switch off, each also printed the
+// page-capture placeholder, naming `browser.captureScreenshotsPerAction` — a
+// setting that cannot bring a desktop capture back.
+describe('a computer step embeds each capture once and names the right switch (§10.1, A9)', () => {
+  // Distinct strings, so each capture can be counted on its own. They are never
+  // decoded — the assertions are about how many times the renderer writes one.
+  const SHOT_1 = `${PNG}AAA1`;
+  const SHOT_2 = `${PNG}AAA2`;
+  const SHOT_END = `${PNG}AAA3`;
+  const count = (html: string, base64: string): number =>
+    html.split(`data:image/png;base64,${base64}`).length - 1;
+
+  /** A computer turn in the shape `runComputerStep` records it. */
+  const computerTurn = (turnNumber: number, shot: string | undefined): TurnResult => ({
+    turnNumber,
+    attemptNumber: 1,
+    timestamp: new Date().toISOString(),
+    aiInteractions: [
+      {
+        purpose: 'computer-action-plan',
+        attemptNumber: 1,
+        response: '{"actions":[]}',
+        ...(shot !== undefined && { screenshotBase64: shot }),
+      },
+    ],
+    subActions: [
+      {
+        index: turnNumber,
+        action: { action: 'click', description: 'Click Cancel' } as SubActionResult['action'],
+        aiReasoning: 'The Cancel button is at the bottom right of the dialog.',
+        durationMs: 3,
+      },
+    ],
+    computer: {
+      ...(shot !== undefined && { screenshotBase64: shot }),
+      imageWidth: 1600,
+      imageHeight: 900,
+      kind: 'full',
+      imagePoint: { x: 800, y: 450 },
+    },
+  });
+
+  const computerStep = (overrides: Partial<StepResult>): StepResult => ({
+    index: 4,
+    instruction: 'Click the Cancel button in the Print dialog',
+    status: 'passed',
+    surface: 'computer',
+    turns: [],
+    durationMs: 12,
+    retried: false,
+    ...overrides,
+  });
+
+  it('with the switch on: one image per turn, and the row does not repeat the last one', () => {
+    // A failure's row screenshot IS its last turn's capture (computer-step.ts).
+    const html = renderStep(
+      computerStep({
+        status: 'failed',
+        error: 'no Cancel button',
+        turns: [computerTurn(1, SHOT_1), computerTurn(2, SHOT_2)],
+        screenshotBase64: SHOT_2,
+      }),
+    );
+
+    expect(count(html, SHOT_1)).toBe(1);
+    expect(count(html, SHOT_2)).toBe(1);
+    // Where the one copy lives: on the turn, with its click ring.
+    expect(html.split('computer-click-ring').length - 1).toBe(2);
+    expect(html).not.toContain('captureScreenshotsPerAction');
+  });
+
+  it('keeps a row screenshot no turn showed — the screen after the last action', () => {
+    const html = renderStep(
+      computerStep({
+        turns: [computerTurn(1, SHOT_1)],
+        screenshotBase64: SHOT_END,
+      }),
+    );
+
+    expect(count(html, SHOT_1)).toBe(1);
+    expect(count(html, SHOT_END)).toBe(1);
+    // A whole-screen capture, so not labelled as the page.
+    expect(html).toContain('Screen at step end');
+    expect(html).not.toContain('Page state at step end');
+  });
+
+  it('with the switch off: says desktop.reportScreenshots, never the page-capture setting', () => {
+    const html = renderStep(
+      computerStep({ turns: [computerTurn(1, undefined), computerTurn(2, undefined)] }),
+    );
+
+    expect(html).toContain('desktop.reportScreenshots');
+    expect(html).not.toContain('captureScreenshotsPerAction');
+    expect(html).not.toContain('data:image/png');
+    // Once per turn — the turn is where the image would have been.
+    expect(html.split('desktop.reportScreenshots').length - 1).toBe(2);
+  });
+
+  it('a page step is unchanged: each image once, and the page-capture placeholder where one is missing', () => {
+    const pageTurn: TurnResult = {
+      turnNumber: 1,
+      attemptNumber: 1,
+      timestamp: new Date().toISOString(),
+      aiInteractions: [{ purpose: 'action-plan', response: '{}', screenshotBase64: SHOT_1 }],
+      subActions: [
+        {
+          index: 1,
+          action: { action: 'click', description: 'Click Save' } as SubActionResult['action'],
+          screenshotBase64: SHOT_2,
+          durationMs: 3,
+        },
+        {
+          index: 2,
+          action: { action: 'click', description: 'Click Close' } as SubActionResult['action'],
+          aiReasoning: 'Close the dialog.',
+          durationMs: 3,
+        },
+      ],
+    };
+    const html = renderStep({
+      index: 2,
+      instruction: 'Save and close',
+      status: 'passed',
+      turns: [pageTurn],
+      durationMs: 5,
+      retried: false,
+      screenshotBase64: SHOT_END,
+    });
+
+    expect(count(html, SHOT_1)).toBe(1);
+    expect(count(html, SHOT_2)).toBe(1);
+    expect(count(html, SHOT_END)).toBe(1);
+    expect(html).toContain('Page state at AI decision');
+    expect(html).toContain('Page state at step end');
+    // The sub-action that carried no screenshot still says which setting to turn on.
+    expect(html).toContain('browser.captureScreenshotsPerAction');
+    expect(html).not.toContain('desktop.reportScreenshots');
   });
 });
 

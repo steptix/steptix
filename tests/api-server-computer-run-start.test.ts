@@ -459,6 +459,156 @@ describe('a run that starts mid-file (Run From Here / Run Step Here)', () => {
   });
 });
 
+// ── What lies between the [use computer] and the start step ──────────────
+//
+// Review finding: `surfaceAtRunStart` read top-level lines only, so a section
+// call between the `[use computer]` and the start step was invisible — and
+// with a section body that ends in `[use browser]`, Run From Here on the step
+// after the call answered `computer`. §4.5 claimed the miss always erred
+// toward `browser`; here it erred toward the real mouse.
+
+describe('a run that starts below a section call, a control line or a skill call', () => {
+  /** A file whose desktop excursion ends inside a section. */
+  const STEPS = [
+    '[use computer]',
+    'Click Print',
+    'Close the dialog',
+    'Navigate to the account page',
+  ];
+  const LINES = [10, 11, 12, 13];
+  function sectionsWith(body: string[]): Record<string, unknown> {
+    return {
+      'close the dialog': {
+        name: 'Close the dialog',
+        headingLine: 20,
+        steps: body,
+        stepLines: body.map((_, i) => 21 + i),
+      },
+    };
+  }
+
+  /** POST `[from, to)` of `steps` as one batch. */
+  async function post(
+    sessionId: string,
+    steps: string[],
+    opts: { from: number; to: number; runStart?: unknown; sections?: Record<string, unknown> },
+  ): Promise<Array<{ type: string; [k: string]: any }>> {
+    const res = await fetch(`${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`, {
+      method: 'POST',
+      headers: { ...headers, Accept: 'text/event-stream' },
+      body: JSON.stringify({
+        steps: steps.slice(opts.from, opts.to),
+        fullSteps: steps,
+        sourceLines: LINES.slice(opts.from, opts.to),
+        testFilePath: testFile,
+        ...(opts.sections && { sections: opts.sections }),
+        ...(opts.runStart !== undefined && { runStart: opts.runStart }),
+      }),
+    });
+    const text = await res.text();
+    return text
+      .split('\n\n')
+      .map((chunk) => chunk.split('\n').find((l) => l.startsWith('data: ')))
+      .filter((l): l is string => l !== undefined)
+      .map((l) => JSON.parse(l.slice(6)));
+  }
+
+  /** A session left on the computer surface by the first two steps. */
+  async function onComputer(sessionId: string, steps: string[], sections?: Record<string, unknown>): Promise<void> {
+    const events = await post(sessionId, steps, { from: 0, to: 2, runStart: { stepIndex: 0 }, ...(sections && { sections }) });
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+    expect(await surfaceOf(sessionId)).toBe('computer');
+    ran.length = 0;
+  }
+
+  it('Run From Here after a call to a section that ends in [use browser] starts on the browser', async () => {
+    const sessionId = newSessionId();
+    const sections = sectionsWith(['Click Cancel', '[use browser]']);
+    await onComputer(sessionId, STEPS, sections);
+
+    await post(sessionId, STEPS, { from: 3, to: 4, runStart: { stepIndex: 3 }, sections });
+
+    // Measured before the fix: `computer:Navigate to the account page`.
+    expect(ran).toEqual([
+      expect.objectContaining({ surface: 'browser', instruction: 'Navigate to the account page' }),
+    ]);
+    expect(await surfaceOf(sessionId)).toBe('browser');
+    expect(readComputerLock({ lockPath })).toBeNull();
+  });
+
+  it('a section that never switches surface is seen through: the run stays on the computer surface', async () => {
+    const sessionId = newSessionId();
+    const sections = sectionsWith(['Click Cancel', 'Press Escape']);
+    await onComputer(sessionId, STEPS, sections);
+
+    await post(sessionId, STEPS, { from: 3, to: 4, runStart: { stepIndex: 3 }, sections });
+
+    expect(ran).toEqual([
+      expect.objectContaining({ surface: 'computer', instruction: 'Navigate to the account page' }),
+    ]);
+  });
+
+  it('a section that calls a section that switches is seen through to the switch', async () => {
+    const sessionId = newSessionId();
+    const sections = {
+      ...sectionsWith(['Click Cancel', 'Leave the desktop']),
+      'leave the desktop': {
+        name: 'Leave the desktop',
+        headingLine: 30,
+        steps: ['[use browser]'],
+        stepLines: [31],
+      },
+    };
+    await onComputer(sessionId, STEPS, sections);
+
+    await post(sessionId, STEPS, { from: 3, to: 4, runStart: { stepIndex: 3 }, sections });
+
+    expect(ran[0]).toMatchObject({ surface: 'browser', instruction: 'Navigate to the account page' });
+  });
+
+  it('a control line whose tail switches surface is not guessed at: the run starts on the browser', async () => {
+    const steps = [
+      '[use computer]',
+      'Click Print',
+      'If a window titled "Print" is open, then [use browser]',
+      'Navigate to the account page',
+    ];
+    const sessionId = newSessionId();
+    await onComputer(sessionId, steps);
+
+    await post(sessionId, steps, { from: 3, to: 4, runStart: { stepIndex: 3 } });
+
+    expect(ran[0]).toMatchObject({ surface: 'browser', instruction: 'Navigate to the account page' });
+    const warned = (logger.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]));
+    expect(warned.some((m) => m.includes('step 3') && m.includes('may switch surface'))).toBe(true);
+  });
+
+  it('a control line whose tail is prose does not count: the run stays on the computer surface', async () => {
+    const steps = [
+      '[use computer]',
+      'Click Print',
+      'If a window titled "Print" is open, then Press Escape',
+      'Click OK',
+    ];
+    const sessionId = newSessionId();
+    await onComputer(sessionId, steps);
+
+    await post(sessionId, steps, { from: 3, to: 4, runStart: { stepIndex: 3 } });
+
+    expect(ran).toEqual([expect.objectContaining({ surface: 'computer', instruction: 'Click OK' })]);
+  });
+
+  it('a skill call is seen through: a skill hands its caller back the surface it called from (§4.5)', async () => {
+    const steps = ['[use computer]', 'Click Print', '[skill: check-page]', 'Click OK'];
+    const sessionId = newSessionId();
+    await onComputer(sessionId, steps);
+
+    await post(sessionId, steps, { from: 3, to: 4, runStart: { stepIndex: 3 } });
+
+    expect(ran).toEqual([expect.objectContaining({ surface: 'computer', instruction: 'Click OK' })]);
+  });
+});
+
 // ── The wire ─────────────────────────────────────────────────────────────
 
 describe('runStart on the wire', () => {

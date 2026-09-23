@@ -4293,6 +4293,21 @@ export const CONDITION_JUDGE_BUDGET_MS = 30_000;
 /** Gap between re-asks inside that budget — the branched step's poll interval. */
 const CONDITION_JUDGE_POLL_MS = 3_000;
 
+/** A sleep that ends early when `signal` aborts, so a pause between polls does
+ *  not outlive the Stop button. Resolves either way; the caller checks. */
+function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) { resolve(); return; }
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
 /** What one judge call returned. */
 export interface ConditionVerdict {
   /** Index into the `conditions` array of the FIRST condition that held, or
@@ -4511,7 +4526,14 @@ export async function evaluateConditions(
     }
 
     if (Date.now() + CONDITION_JUDGE_POLL_MS >= deadline) break;
-    await new Promise((resolve) => setTimeout(resolve, CONDITION_JUDGE_POLL_MS));
+    // Gives way to Stop: a `Wait until` / `While` judge re-asking a `waiting`
+    // screen used to sit out the whole interval after the button was pressed.
+    // Checked again straight after, so a stopped run does not first wait for
+    // the page to settle.
+    await abortableSleep(CONDITION_JUDGE_POLL_MS, opts.signal);
+    if (opts.signal?.aborted) {
+      throw new DOMException('Run aborted by client', 'AbortError');
+    }
     if (page) {
       await waitForPageStability(page, {
         timeoutMs: Math.max(0, Math.min(5000, deadline - Date.now())),
