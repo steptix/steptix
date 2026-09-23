@@ -146,14 +146,24 @@ runner-core mirror (§10.3).
 
 - The session holds `surface: 'browser' | 'computer'`, default `browser`.
 - `[use computer]` → §5.1 preconditions, then `surface = 'computer'`.
-  `[use browser]` → `surface = 'browser'`, computer lock released.
+  `[use browser]` → `surface = 'browser'`, computer lock released if this
+  session holds it.
 - **Re-entering the mode you are in is a no-op** with a log line, not an
   error. Sections and skills will open with `[use computer]` defensively.
+  The one thing a re-entry still does is take the lock (§5.9) when the
+  session does not hold it, which is the normal case at the start of a
+  later run.
+- **The surface outlives a run; the lock does not.** A session that ends a
+  run on the computer surface is still on it, adapter loaded, when its next
+  run starts. The lock was released when the last run ended, and is taken
+  again at the next step that reads or drives the screen (§5.9).
 - **A skill call restores the caller's surface on return**, whatever the
   skill's body did. An **inline section does not** — it is inline by
   definition, and a section that switches is the way an author writes a
   desktop excursion once and calls it by name.
-- **Session close resets** the surface and releases the lock.
+- **Session close resets** the surface, and releases the lock if the session
+  holds it — which, since every run gives it back, it does only when the
+  close lands mid-run.
 - The surface applies to MCP `run_steps` and to steps posted to the Sessions
   API alike: it is the session's, not the file's.
 
@@ -417,12 +427,49 @@ primitives together is `bring-to-front.ts`.
 
 One computer-mode session per machine: two would fight over the mouse. A
 lock file at `path.join(os.tmpdir(), 'aiui-computer.lock')` holding
-`{ pid, sessionId, since }`. Taken on `[use computer]`, released on
-`[use browser]` and on session close. Held by a LIVE pid → the step fails:
-*computer mode is in use by session <id> (pid <n>) — one computer-mode run
-per machine.* Held by a dead pid → stale, taken over with a WARN. This is
-also why the parallel live suite must not include computer-mode tests
-(§13.3).
+`{ pid, sessionId, since }`.
+
+**The lock is held only while a run is executing, never across the idle
+time between runs.** A run is one Sessions API batch on the server and one
+`runTest` in the CLI, and a data row is one of each.
+
+- **Taken** on `[use computer]` (§5.1 item 3), and taken again lazily at
+  the step boundary, before the first step of a later run that reads or
+  drives the screen, when the session does not hold it. That is the same
+  spot and pattern as the lazy browser launch (§4.6). It covers a
+  computer-mode step (an `If … then return` claim included), a §5.6
+  condition judge (an `If` chain, or a `While` / `Repeat … until` check),
+  and a `[use computer]` re-entry. A `Set`, a `[tool: …]` line, a whole-step
+  `Return` / `Stop` / `Fail the test …`, a raw `[skill: …]` or refused
+  bracket, and a guard visit that decides no condition (a `For each` reading
+  its list or revisiting, a `Repeat`'s first pass) touch no screen and take
+  nothing. A condition decided from its own values (literal-decision) still
+  takes it, because telling the two apart at the boundary would be a second
+  copy of that rule.
+- **Released** at the end of every run, whatever ends it: a pass, a failed
+  step, a stop, a batch the client cut at a breakpoint, a thrown error. On
+  the server this is the step loop's `finally`, and it releases only the
+  lock: `surface` stays `computer` and the adapter stays loaded. Also
+  released on `[use browser]` and on session close, both a no-op when the
+  session does not hold it. A pause that parks inside a batch (step mode, a
+  skill-file breakpoint) keeps the lock, because the run is still executing.
+- The session tracks whether it holds the lock rather than reading the file
+  at every step. Release deletes the file only when both the pid and the
+  session match, so a session never releases another session's lock.
+
+Held by a LIVE pid under another session → that step fails with nothing
+captured or asked of the model: *computer mode is in use by session <id>
+(pid <n>) — one computer-mode run per machine.* The check is on the session
+as well as the pid, so two sessions in one server process are refused
+exactly as two processes are. Held by a dead pid → stale, taken over with a
+WARN. This is also why the parallel live suite must not include
+computer-mode tests (§13.3).
+
+Why only while a run executes: an MCP `run_test_file` of
+`calc-one-plus-one.md`, which ends in computer mode with no `[use browser]`,
+passed on 2026-09-23 and left `aiui-computer.lock` held by its idle session,
+because MCP keeps a session open between calls. That would have refused
+every other computer-mode session on the machine until something closed it.
 
 ### 5.10 Config
 
@@ -622,7 +669,11 @@ and measured on.
    downscale, and after a zoom.
 4. Page actions in computer mode are refused with a message; unknown action
    types are refused, not run as no-ops.
-5. The lock refuses a second live holder and takes over a dead one.
+5. The lock refuses a second live holder and takes over a dead one. It is
+   released at the end of every run, whatever ends it, while the session
+   stays on the computer surface. The session's next computer step takes it
+   again, or fails with §5.9's message if another session took it in
+   between.
 6. Skill calls restore the caller's surface; sections do not; session close
    resets.
 7. `desktop.enabled: false` refuses `[use computer]` with the §5.1 message.

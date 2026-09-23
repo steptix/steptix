@@ -43,7 +43,7 @@ import type {
 import { formatTestInfo, maskValueForPrompt } from '../ai/prompts.js';
 import { isSecretParameterName, isSecretRef, redact } from '../utils/secrets.js';
 import { bindVariable } from '../parser/parameters.js';
-import { isReturnClaim } from '../parser/flow-control-step.js';
+import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
 import { logger } from '../utils/logger.js';
 import { withRetry } from './retry.js';
 import { substituteAction } from './placeholder-substitution.js';
@@ -85,6 +85,9 @@ import type { DesktopConfig } from '../config/types.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { parseSkillCall } from '../skills/skill-call-parser.js';
 import { unknownWholeStepBracketError } from '../parser/whole-step-bracket.js';
+import { parseUseStep } from '../parser/use-step.js';
+import { parseSetStep } from '../parser/set-step.js';
+import { planAtGuard, type ControlRecord, type ControlState } from './control-flow.js';
 
 /** Options for a computer-mode step: a step's ordinary options, with the
  *  surface's own context guaranteed present. */
@@ -111,6 +114,26 @@ export interface SurfaceState {
   /** The adapter this run loaded, while it is in computer mode. Dropped on the
    *  way back to `browser` so nothing can drive the mouse off-surface. */
   adapter?: DesktopAdapter | undefined;
+  /**
+   * Whether this session holds the machine-wide computer lock RIGHT NOW
+   * (§5.9) — which is not the same question as whether it is on the computer
+   * surface.
+   *
+   * The surface outlives a run; the lock does not. A session's surface stays
+   * `computer` across a batch boundary (TestBench posts one batch at a time,
+   * MCP keeps a session open between calls), but the lock is released at the
+   * end of every run and taken again, lazily, at the next step that reads or
+   * drives the screen. Measured: an MCP `run_test_file` that ended in computer
+   * mode left `aiui-computer.lock` held by an idle session, which would have
+   * refused every other computer-mode run on the machine until something
+   * closed it.
+   *
+   * Tracked here rather than read off the file each step, so the per-step
+   * gate costs nothing when the session already holds it. Every write goes
+   * through {@link enterComputerMode}, {@link ensureComputerLock},
+   * {@link releaseComputerLockAtRunEnd} and {@link leaveComputerMode}.
+   */
+  lockHeld?: boolean | undefined;
 }
 
 /**
@@ -185,14 +208,18 @@ export interface EnterComputerModeInput {
  *
  * Re-entering the surface already in force is a no-op with a log line (§4.5),
  * and it happens BEFORE the preconditions: a section that defensively opens
- * with `[use computer]` must not re-take a lock it holds or pay for a second
- * capture probe.
+ * with `[use computer]` must not pay for a second adapter load or capture
+ * probe. The one thing re-entry still does is take the lock when this run
+ * does not hold it yet — the session came into this run on the computer
+ * surface, and the previous run released the lock on its way out (§5.9).
  */
 export async function enterComputerMode(
   input: EnterComputerModeInput,
 ): Promise<{ ok: true; reentered: boolean } | { ok: false; error: string }> {
   const { state } = input;
   if (state.surface === 'computer' && state.adapter) {
+    const taken = ensureComputerLock(state, input.lockId, input.lock);
+    if (!taken.ok) return taken;
     log('already on the computer surface — [use computer] is a no-op here');
     return { ok: true, reentered: true };
   }
@@ -240,6 +267,7 @@ export async function enterComputerMode(
 
   state.surface = 'computer';
   state.adapter = adapter;
+  state.lockHeld = true;
   log('surface → computer');
   return { ok: true, reentered: false };
 }
@@ -248,6 +276,12 @@ export async function enterComputerMode(
  * `[use browser]` — release the lock, drop the adapter, go back to the page
  * (§4.5). Nothing can fail here: the browser launches at the NEXT step, under
  * the launch gate, and its failure is that step's (§4.6).
+ *
+ * Touches the lock file only when this session holds the lock. A session that
+ * sits on the computer surface between runs holds nothing, and the lock may
+ * meanwhile belong to another session — `releaseComputerLock` would refuse to
+ * delete that record anyway, but not reading it at all is what "a no-op when
+ * the lock is not held" means.
  */
 export function leaveComputerMode(
   state: SurfaceState,
@@ -263,11 +297,127 @@ export function leaveComputerMode(
     else log('already on the browser surface — [use browser] is a no-op here');
     return { reentered: true };
   }
-  releaseComputerLock(lockId, lock ?? {});
+  if (state.lockHeld) releaseComputerLock(lockId, lock ?? {});
+  state.lockHeld = false;
   state.surface = 'browser';
   state.adapter = undefined;
   log('surface → browser');
   return { reentered: false };
+}
+
+/**
+ * The lazy re-take (§5.9): the lock for a step about to read or drive the
+ * screen, when this session does not hold it already.
+ *
+ * Called at the step boundary by the server's loop, in the same spot and on
+ * the same terms as the lazy browser launch (§4.6), and by `[use computer]`
+ * re-entry. A refusal is §5.9's message, returned rather than thrown for the
+ * reason {@link enterComputerMode} gives: the caller's job with it is to fail
+ * one step, before anything is captured or asked of the model.
+ *
+ * `acquireComputerLock` compares the holder's SESSION as well as its pid, so a
+ * second session in the same server process is refused while the first holds
+ * the lock, exactly as a session in another process would be.
+ */
+export function ensureComputerLock(
+  state: SurfaceState,
+  lockId: string,
+  lock?: ComputerLockOptions,
+): { ok: true } | { ok: false; error: string } {
+  if (state.lockHeld) return { ok: true };
+  try {
+    acquireComputerLock(lockId, lock ?? {});
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  state.lockHeld = true;
+  logger.debug(`[computer] lock taken for session ${lockId}: the next step reads or drives the screen`);
+  return { ok: true };
+}
+
+/**
+ * Release the lock at the end of a run, whatever ended it (§5.9) — and ONLY
+ * the lock. The surface stays `computer` and the adapter stays loaded, so the
+ * session's next run carries on where this one stopped and takes the lock back
+ * at its first computer step ({@link ensureComputerLock}).
+ *
+ * A no-op when the lock is not held: a browser-only run, a run that never
+ * reached a computer step, or one whose re-take was refused.
+ */
+export function releaseComputerLockAtRunEnd(
+  state: SurfaceState,
+  lockId: string,
+  lock?: ComputerLockOptions,
+): void {
+  if (!state.lockHeld) return;
+  releaseComputerLock(lockId, lock ?? {});
+  state.lockHeld = false;
+  logger.debug(
+    `[computer] run ended: lock released for session ${lockId}; the session stays on the ` +
+      `${state.surface} surface and takes the lock again at its next computer step`,
+  );
+}
+
+/**
+ * Does this step read or drive the screen when it runs on the computer
+ * surface — and so need the lock (§5.9)?
+ *
+ * For a step that is NOT a control-flow guard; a guard asks
+ * {@link guardVisitReadsScreen}. Read off the AUTHORED line, the same text
+ * both loops dispatch on.
+ *
+ * No, for the steps both loops answer without a capture or a model call:
+ *
+ *  - `Set {{x}} to "…"` — an assignment;
+ *  - a whole-step `Return` / `Stop running the remaining steps` / `Fail the
+ *    test with error "…"` — nothing to judge;
+ *  - a `[tool: …]` line — deterministic code, dispatched on either surface —
+ *    and a raw `[skill: …]` line or a bracket §4.2 refuses, which fail with
+ *    §5.4's message before anything is captured;
+ *  - a `[use …]` line, which the surface switch owns (`[use computer]`
+ *    re-entry takes the lock itself, in {@link enterComputerMode}).
+ *
+ * Everything else is yes, and deliberately so: a prose step goes to
+ * `executeComputerStep`, and that includes an `If … then return` claim, whose
+ * condition is judged from the screen (§5.6). A step this list misses costs a
+ * lock taken one step early inside a run that is executing anyway; a step it
+ * wrongly excluded would drive the mouse unlocked.
+ */
+export function stepReadsScreen(step: string): boolean {
+  if (parseUseStep(step)) return false;
+  if (parseSetStep(step)) return false;
+  const claim = parseFlowControlStep(step);
+  if (claim && claim.body === undefined) return false;
+  if (tryParse(() => parseToolCall(step)) !== null) return false;
+  if (tryParse(() => parseSkillCall(step)) !== null) return false;
+  if (unknownWholeStepBracketError(step) !== null) return false;
+  return true;
+}
+
+/**
+ * Does the control-flow guard visit about to happen at `index` read the screen
+ * on the computer surface (§5.6)?
+ *
+ * Yes when the visit decides a CONDITION — an `If` chain, or a `While` /
+ * `Repeat … until` check — because that is what reaches the condition judge,
+ * which captures the screen. No for a visit that asks nobody (a `Repeat`'s
+ * first pass, a `For each` revisit) and for a `For each` reading its list,
+ * which is a variable, not a screen.
+ *
+ * A condition that turns out to be decidable from its own values
+ * (src/runner/literal-decision.ts) never reaches the judge, and still counts
+ * here. Telling the two apart at the boundary would be a second copy of
+ * `decideLocally`, and a copy that drifted would let the judge capture the
+ * screen unlocked; the cost of NOT telling them apart is a lock taken one step
+ * early inside a run that is executing anyway.
+ */
+export function guardVisitReadsScreen(
+  controls: readonly (ControlRecord | null)[],
+  index: number,
+  state: ControlState,
+): boolean {
+  const ask = planAtGuard(controls, index, state).ask;
+  return ask === 'chain' || ask === 'condition';
 }
 
 /** The `'mode'` row a `[use …]` step records (§10.1): passed, zero tokens, no

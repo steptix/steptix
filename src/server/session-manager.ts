@@ -49,11 +49,15 @@ import {
   defaultLoadDesktopAdapter,
   defaultProbeComputerCapture,
   enterComputerMode,
+  ensureComputerLock,
   executeComputerStep,
+  guardVisitReadsScreen,
   leaveComputerMode,
   modeMarkerText,
   modeStepResult,
+  releaseComputerLockAtRunEnd,
   skillFrameChain,
+  stepReadsScreen,
   undispatchedDirectiveError,
   undispatchedDirectiveResult,
   type SurfaceState,
@@ -1229,12 +1233,15 @@ export interface SessionManagerDeps {
 function surfaceStateOf(session: {
   surface: SessionSurface;
   computerAdapter?: DesktopAdapter | undefined;
+  computerLockHeld?: boolean | undefined;
 }): SurfaceState {
   return {
     get surface() { return session.surface; },
     set surface(value) { session.surface = value; },
     get adapter() { return session.computerAdapter; },
     set adapter(value) { session.computerAdapter = value; },
+    get lockHeld() { return session.computerLockHeld; },
+    set lockHeld(value) { session.computerLockHeld = value; },
   };
 }
 
@@ -1284,11 +1291,30 @@ interface ManagedSession {
    *
    * On the SESSION rather than on the run, for the reason `surface` is:
    * TestBench posts steps one batch at a time, so a run that entered computer
-   * mode in batch 1 must still be on it — same adapter, same held lock — when
-   * batch 2 arrives. Dropped on the way back to `browser`, and at
-   * `closeSession`, which is also where the lock is released.
+   * mode in batch 1 must still be on it — same adapter — when batch 2
+   * arrives. Dropped on the way back to `browser`, and at `closeSession`.
+   *
+   * The LOCK does not travel with it: see {@link computerLockHeld}.
    */
   computerAdapter?: DesktopAdapter | undefined;
+  /**
+   * Whether this session holds the machine-wide computer lock right now
+   * (SPEC-use-computer.md §5.9; `SurfaceState.lockHeld`).
+   *
+   * Held only while a run executes. Released at the end of every batch —
+   * whatever ended it — in the step loop's `finally`, and taken again at the
+   * step boundary before the next step that reads or drives the screen. A
+   * session idling on the computer surface between batches (an MCP session
+   * waiting for its next call, a TestBench run stopped at a test-file
+   * breakpoint, which the client implements by ending the batch there) holds
+   * nothing, so it cannot refuse another session's computer-mode run.
+   *
+   * A pause that parks INSIDE a batch — step mode, a skill-file breakpoint —
+   * keeps it: the run is still executing (`runsInFlight` counts it), and a
+   * user single-stepping a desktop test must not have the mouse taken between
+   * two steps they are stepping through.
+   */
+  computerLockHeld?: boolean | undefined;
   /** Resolved video-recording mode for this session (from the test's project
    *  `browser.video`). */
   videoMode: VideoMode;
@@ -2583,6 +2609,11 @@ export class SessionManager {
     // every computer-mode run on this machine until a stale-pid takeover or a
     // human deletes the file, and this process is still alive, so the
     // takeover would not fire.
+    //
+    // Usually there is no lock to release by now — every batch gives it back
+    // on its way out (§5.9) — and then this touches nothing: a closing session
+    // must not disturb a lock another session took while this one sat idle.
+    // It still matters for a close that lands while a batch is running.
     leaveComputerMode(
       surfaceStateOf(session),
       session.id,
@@ -5699,6 +5730,76 @@ export class SessionManager {
           }
         }
 
+        // ── THE COMPUTER LOCK (SPEC-use-computer.md §5.9) ─────────────────
+        //
+        // The lazy twin of the browser launch above. The lock is held only
+        // while a run executes: every batch gives it back in the `finally`
+        // below the loop, and the session — still on the computer surface,
+        // adapter and all — takes it again HERE, at the first step of a later
+        // batch that reads or drives the screen. After the breakpoint check,
+        // so a batch that opens by pausing does not hold the mouse while it
+        // waits; ahead of the guard and every dispatch below, because the
+        // condition judge (§5.6) and `executeComputerStep` are where the
+        // screen is read. `[use computer]` re-entry takes it in
+        // `enterComputerMode`, above.
+        //
+        // What counts is `stepReadsScreen` / `guardVisitReadsScreen`: a `Set`,
+        // a `[tool:]` line, a whole-step `Return` / `Stop` / `Fail`, and a
+        // guard visit that decides no condition touch no screen and take
+        // nothing.
+        //
+        // A refusal is THIS step's failure with §5.9's message, built the way
+        // the launch failure is, and nothing is captured or asked of the model
+        // for it.
+        if (
+          session.surface === 'computer' &&
+          !session.computerLockHeld &&
+          (hasControls && controls[i]
+            ? guardVisitReadsScreen(controls, i, controlState)
+            : stepReadsScreen(originalStep))
+        ) {
+          const taken = ensureComputerLock(
+            surfaceStateOf(session),
+            session.id,
+            this.deps.computerLock,
+          );
+          if (!taken.ok) {
+            const error = taken.error;
+            logger.error(`Session "${sessionId}" step ${i + 1}: ${error}`);
+            if (hasControls) flushSkips(i);
+            emit({ type: 'step:start', line: sourceLineFor(i), ...frameSpread });
+            emit({
+              type: 'step:fail',
+              line: sourceLineFor(i),
+              error,
+              surface: 'computer',
+              ...frameSpread,
+            });
+            results.push({
+              step: originalStep,
+              status: 'failed',
+              actions: [],
+              screenshot: '',
+              reasoning: error,
+              outputs: {},
+            });
+            fullStepResults.push({
+              index: i + 1,
+              instruction: originalStep,
+              status: 'failed',
+              surface: 'computer',
+              turns: [],
+              durationMs: 0,
+              retried: false,
+              error,
+              aiExplanation: error,
+            });
+            overallStatus = 'failed';
+            errorInfo = { step: i, message: error };
+            break;
+          }
+        }
+
         // ── Control flow: the guard decides, the planner says what follows ──
         //
         // After the breakpoint check, so a breakpoint on a guard line pauses
@@ -7213,11 +7314,23 @@ export class SessionManager {
       // as decided-against would put words in the decision's mouth.
       if (hasControls && overallStatus !== 'aborted') flushSkips('all');
     } finally {
+      // The computer lock, first (SPEC-use-computer.md §5.9): the lock is held
+      // only while a run executes, never across the idle time between batches.
+      // A `finally` so every ending gives it back — a pass, a failed step, a
+      // stop, a batch the client cut at a breakpoint, a throw — and FIRST
+      // because everything below awaits, and a lock kept through the report
+      // write is a lock another session is refused for. Only the lock: the
+      // session stays on the computer surface with its adapter, and its next
+      // computer step takes the lock again at the step boundary. Measured: an
+      // MCP `run_test_file` ending in computer mode left the lock held by an
+      // idle session, refusing every other computer-mode run on the machine.
+      releaseComputerLockAtRunEnd(surfaceStateOf(session), session.id, this.deps.computerLock);
       // The run's steps are done; everything from here is tail
-      // (stories/compile-tail-progress.md). Said HERE — the first statement
-      // after the step loop, ahead of the report, the recording write and the
-      // drain — because every one of those awaits is time the queue keeps
-      // spending, and a forecast issued after them is a report.
+      // (stories/compile-tail-progress.md). Said HERE — straight after the
+      // step loop (the release above does not await), ahead of the report, the
+      // recording write and the drain — because every one of those awaits is
+      // time the queue keeps spending, and a forecast issued after them is a
+      // report.
       liveCompile?.runStepsEnded();
       // Restore status unless session was closed
       if (session.status !== 'closed') {

@@ -17,7 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../src/config/types.js';
 import type { ParsedTest, TestConfig, TestInstance } from '../src/parser/types.js';
-import type { StepResult } from '../src/report/types.js';
+import type { StepResult, TestReport } from '../src/report/types.js';
 import type { ExpandedFrame, ExpandedStepOrigin } from '../src/skills/expander.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 
@@ -118,9 +118,15 @@ vi.mock('../src/report/history-appender.js', () => ({
   appendRunHistory: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { runTest, type RunTestExtras } from '../src/runner/test-runner.js';
+import { runTest, runTests, type RunTestExtras } from '../src/runner/test-runner.js';
 import { FakeDesktopAdapter } from '../src/desktop/fake-adapter.js';
-import { readComputerLock } from '../src/desktop/lock.js';
+import {
+  acquireComputerLock,
+  computerLockInUseMessage,
+  readComputerLock,
+  releaseComputerLock,
+} from '../src/desktop/lock.js';
+import { parseTestContent } from '../src/parser/markdown.js';
 import { COMPUTER_DISABLED_MESSAGE, SkillSurfaceStack } from '../src/runner/computer-step.js';
 import { parseToolCall } from '../src/tools/tool-call-parser.js';
 
@@ -274,6 +280,105 @@ describe('a desktop-first test launches no browser (acceptance 2)', () => {
 
     expect(heldDuringStep).toBe('cli:/tmp/computer-mode-test.md');
     expect(existsSync(lockPath)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §5.9 — the lock is held only while a run executes: one `runTest`, one row
+// ---------------------------------------------------------------------------
+
+describe('the CLI gives the lock back at the end of every runTest (§5.9)', () => {
+  it('a run that fails on the computer surface releases it', async () => {
+    executeComputerStepMock.mockImplementationOnce(async (_i: number, _n: number, instruction: string) => ({
+      ...passingResult(instruction, 'computer'),
+      status: 'failed',
+      error: 'the Save button was not found',
+    }));
+
+    const report = await runTest(
+      makeInstance(['[use computer]', 'Click Save', 'Click Close']),
+      makeConfig(),
+      '',
+      undefined,
+      extras(),
+    );
+
+    expect(report.status).toBe('failed');
+    expect(executeComputerStepMock).toHaveBeenCalledTimes(1);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('a step that throws out of runTest still releases it', async () => {
+    executeComputerStepMock.mockImplementationOnce(async () => {
+      throw new Error('nut.js exploded');
+    });
+
+    let thrown: unknown;
+    try {
+      await runTest(makeInstance(['[use computer]', 'Click Save']), makeConfig(), '', undefined, extras());
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect((thrown as Error | undefined)?.message).toBe('nut.js exploded');
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('data rows: each row releases at its end and takes the lock again at its own [use computer]', async () => {
+    const outputDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-cli-rows-'));
+    try {
+      const config = makeConfig();
+      config.reports = {
+        ...config.reports,
+        outputDir,
+        appendRunHistoryToTestFile: false,
+        openInBrowserAfterRun: false,
+      };
+      config.tests = { ...config.tests, contextDir: path.join(outputDir, 'no-context') };
+      const filePath = path.join(outputDir, 'rows.md');
+      const test = parseTestContent(
+        '# Rows\n\n## Steps\n| file |\n|------|\n| a.pdf |\n| b.pdf |\n| c.pdf |\n\n' +
+          '1. [use computer]\n2. Type {{file}} into the File name box\n',
+        filePath,
+      );
+      const lockId = `cli:${filePath}`;
+
+      const heldDuringStep: Array<string | undefined> = [];
+      executeComputerStepMock.mockImplementation(async (_i: number, _n: number, instruction: string) => {
+        heldDuringStep.push(readComputerLock({ lockPath })?.sessionId);
+        return passingResult(instruction, 'computer');
+      });
+
+      // Between rows: what the lock file says, and — after row 1 — another
+      // session takes the lock for the length of row 2, which proves both that
+      // row 1 gave it back and that row 2 asks for it again.
+      const betweenRows: boolean[] = [];
+      const rowReports: TestReport[] = [];
+      const summary = await runTests([test], config, {
+        runTestFn: (async (...args: Parameters<typeof runTest>) => {
+          const row = rowReports.length + 1;
+          if (row === 2) acquireComputerLock('mcp:another-session', { lockPath });
+          const report = await runTest(args[0], args[1], args[2], args[3], extras());
+          if (row === 2) releaseComputerLock('mcp:another-session', { lockPath });
+          betweenRows.push(existsSync(lockPath));
+          rowReports.push(report);
+          return report;
+        }) as typeof runTest,
+      });
+
+      expect(summary.reports[0]!.rows!.map((r) => r.status)).toEqual(['passed', 'failed', 'passed']);
+      // Row 2's `[use computer]` was refused by name, and nothing ran on the
+      // screen for it.
+      expect(rowReports[1]!.steps[0]!.stepKind).toBe('mode');
+      expect(rowReports[1]!.steps[0]!.error).toBe(
+        computerLockInUseMessage({ pid: process.pid, sessionId: 'mcp:another-session', since: '' }),
+      );
+      expect(heldDuringStep).toEqual([lockId, lockId]);
+      // No row left the lock behind.
+      expect(betweenRows).toEqual([false, false, false]);
+    } finally {
+      rmSync(outputDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -37,8 +37,10 @@ vocabulary can look at the file system; the page never sees it.
   context menu in step 5 and the Save As window in steps 6–9 are native
   windows; neither is in the page, and neither is reachable from browser mode.
 - Steps 10–11 — browser again. The tool in step 11 runs server-side and
-  touches no surface, but it is written after `[use browser]` so the session
-  does not end holding the computer lock.
+  touches no surface; it sits after `[use browser]` only so the test ends back
+  on the page. The computer lock is released at the end of every run either
+  way (spec §5.9), so the order does not decide whether an idle session
+  blocks another one.
 
 **Step 4 matters more than it looks.** `[use computer]` does nothing to
 arrange the screen — it changes what the model is shown and how the answer is

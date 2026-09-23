@@ -20,10 +20,13 @@ import { FakeDesktopAdapter, fakeWindow, makeFakeGrab } from '../src/desktop/fak
 import { mapToScreen, viewFromGrab } from '../src/desktop/index.js';
 import {
   executeComputerStep,
+  guardVisitReadsScreen,
   resetComputerScreenshotNotice,
+  stepReadsScreen,
   undispatchedDirectiveError,
   type ComputerStepOptions,
 } from '../src/runner/computer-step.js';
+import { createControlState, type ControlRecord } from '../src/runner/control-flow.js';
 import { logger } from '../src/utils/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -1036,5 +1039,59 @@ describe('undispatchedDirectiveError — what may not reach the computer-surface
     ]) {
       expect(undispatchedDirectiveError(step, none), step).toBeNull();
     }
+  });
+});
+
+describe('which steps read the screen, and so take the lock (§5.9)', () => {
+  it('prose — including an `If … then return` claim, judged from the screen — reads it', () => {
+    for (const step of [
+      'Click Save in the dialog',
+      'Verify the [optional] banner is gone',
+      'If the Save dialog is open, then return',
+      '[output: total] Read the total from the status bar',
+    ]) {
+      expect(stepReadsScreen(step), step).toBe(true);
+    }
+  });
+
+  it('assignments, whole-step flow control, directives and surface switches do not', () => {
+    for (const step of [
+      'Set {{file_name}} to "statement.pdf"',
+      'Return',
+      'Stop running the remaining steps',
+      'Fail the test with error "no dialog"',
+      '[tool: assert_file_exists]',
+      'Check the file [tool: assert_file_exists]',
+      '[skill: open-calculator]',
+      '[calculator]',
+      '[use computer]',
+      '[use browser]',
+    ]) {
+      expect(stepReadsScreen(step), step).toBe(false);
+    }
+  });
+
+  it('a guard reads it when the visit decides a condition, and not otherwise', () => {
+    const controls: (ControlRecord | null)[] = [
+      { kind: 'if', chainId: 'c1', condition: 'the dialog is open', bodyStart: 1, bodyEnd: 1, chainEnd: 1 },
+      null,
+      { kind: 'repeat', condition: 'the dialog is gone', bodyStart: 3, bodyEnd: 3, label: 'Press Escape' },
+      null,
+      { kind: 'foreach', item: 'file', list: 'files', bodyStart: 5, bodyEnd: 5, label: 'Open {{file}}' },
+      null,
+      { kind: 'while', condition: 'a dialog is open', bodyStart: 7, bodyEnd: 7, label: 'Press Escape' },
+      null,
+    ];
+    const state = createControlState();
+
+    expect(guardVisitReadsScreen(controls, 0, state)).toBe(true);
+    expect(guardVisitReadsScreen(controls, 6, state)).toBe(true);
+    // `Repeat` runs its body before there is anything to decide…
+    expect(guardVisitReadsScreen(controls, 2, state)).toBe(false);
+    // …and decides from the second visit on.
+    state.passes.set(2, 1);
+    expect(guardVisitReadsScreen(controls, 2, state)).toBe(true);
+    // `For each` reads a variable, not the screen.
+    expect(guardVisitReadsScreen(controls, 4, state)).toBe(false);
   });
 });

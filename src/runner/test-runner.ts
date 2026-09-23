@@ -29,6 +29,7 @@ import {
   executeComputerStep,
   leaveComputerMode,
   modeStepResult,
+  releaseComputerLockAtRunEnd,
   skillFrameChain,
   undispatchedDirectiveError,
   undispatchedDirectiveResult,
@@ -2660,13 +2661,21 @@ export async function runTest(
     return report;
   } finally {
     // The computer lock, before anything else in this teardown
-    // (SPEC-use-computer.md §4.5, §5.9): the CLI's counterpart of
-    // `closeSession` releasing it. First, because everything below can throw
-    // and a stranded lock stops the NEXT run on this machine dead — the one
-    // failure mode §5.9's stale-pid takeover exists to soften, not to excuse.
-    // A no-op for the runs that never took it: `releaseComputerLock` refuses
-    // to delete a record it does not own.
-    leaveComputerMode(surfaceState, computerLockId, extras.computerLock, { quiet: true });
+    // (SPEC-use-computer.md §5.9): held only while a run executes, so it is
+    // given back at the end of every `runTest` — pass, failure, bail, stop or
+    // throw — by the same function the server's step loop ends a batch with.
+    // First, because everything below can throw and a stranded lock stops the
+    // NEXT run on this machine dead — the one failure mode §5.9's stale-pid
+    // takeover exists to soften, not to excuse. A no-op for the runs that
+    // never took it.
+    //
+    // A data row is one `runTest`, so this releases once per row. The next
+    // row takes the lock again at its own `[use computer]`: `surfaceState` is
+    // local to this call, so every row starts on the browser surface and
+    // enters computer mode afresh. That is also why this loop needs no lazy
+    // re-take at the step boundary the way the server's does — within one
+    // `runTest`, being on the computer surface implies holding the lock.
+    releaseComputerLockAtRunEnd(surfaceState, computerLockId, extras.computerLock);
 
     // Close all tracked browsers in reverse creation order. For the
     // single-browser path (no openBrowser ever called), this is just the

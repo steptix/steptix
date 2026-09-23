@@ -122,16 +122,24 @@ const executeStepMock = vi.fn(
     aiExplanation: 'ok',
   }),
 );
+/** The §5.6 condition judge, which on the computer surface captures the
+ *  screen. Proven in `computer-conditions.test.ts`; here it only has to say
+ *  what it saw of the lock when it was asked. */
+async function judgeHolds(_conditions: string[], _opts: unknown) {
+  return { selected: 0 as number | null, reasoning: 'the dialog is open', aiInteractions: [] };
+}
+const evaluateConditionsMock = vi.fn(judgeHolds);
 vi.mock('../src/runner/step-executor.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/runner/step-executor.js')>()),
   executeStep: (...args: unknown[]) => (executeStepMock as any)(...args),
   executeBranchedStep: vi.fn(async (): Promise<StepResult[]> => []),
+  evaluateConditions: (...args: unknown[]) => (evaluateConditionsMock as any)(...args),
 }));
 
 /** The computer-mode turn loop is proven in `computer-step.test.ts`; here it
  *  only has to report which surface it ran on and not call a model. */
-const executeComputerStepMock = vi.fn(
-  async (index: number, _n: number, instruction: string): Promise<StepResult> => ({
+async function passComputerStep(index: number, _n: number, instruction: string): Promise<StepResult> {
+  return {
     index,
     instruction,
     status: 'passed',
@@ -140,8 +148,9 @@ const executeComputerStepMock = vi.fn(
     durationMs: 5,
     retried: false,
     aiExplanation: 'computer step ok',
-  }),
-);
+  };
+}
+const executeComputerStepMock = vi.fn(passComputerStep);
 vi.mock('../src/runner/computer-step.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/runner/computer-step.js')>()),
   executeComputerStep: (...args: unknown[]) => (executeComputerStepMock as any)(...args),
@@ -196,7 +205,11 @@ vi.mock('../src/browser/screenshot.js', () => ({
 
 import { SessionManager, type RunEvent } from '../src/server/session-manager.js';
 import { FakeDesktopAdapter } from '../src/desktop/fake-adapter.js';
-import { readComputerLock } from '../src/desktop/lock.js';
+import {
+  acquireComputerLock,
+  computerLockInUseMessage,
+  readComputerLock,
+} from '../src/desktop/lock.js';
 import { COMPUTER_DISABLED_MESSAGE } from '../src/runner/computer-step.js';
 
 // ---------------------------------------------------------------------------
@@ -267,9 +280,28 @@ function makeManager(config: Config = baseConfig): SessionManager {
   });
 }
 
+/**
+ * Record who held the lock each time a computer step ran.
+ *
+ * The lock is held only while a run executes (§5.9), so after `executeSteps`
+ * resolves there is nothing left to read — "the run held it" has to be asked
+ * DURING the run, from inside the step.
+ */
+function recordLockHolders(): Array<string | undefined> {
+  const holders: Array<string | undefined> = [];
+  executeComputerStepMock.mockImplementation(async (index, n, instruction) => {
+    holders.push(readComputerLock({ lockPath })?.sessionId);
+    return passComputerStep(index, n, instruction);
+  });
+  return holders;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   launchBrowserMock.mockImplementation(async () => ({ ...mockBrowserSession }));
+  // `clearAllMocks` keeps implementations, and a test below installs its own.
+  executeComputerStepMock.mockImplementation(passComputerStep);
+  evaluateConditionsMock.mockImplementation(judgeHolds);
   lockDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-test-'));
   lockPath = path.join(lockDir, 'aiui-computer.lock');
   adapter = new FakeDesktopAdapter({ width: 200, height: 150 });
@@ -286,7 +318,8 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('[use computer] as step 1 (acceptance 2)', () => {
-  it('launches no browser, flips the surface and takes the lock', async () => {
+  it('launches no browser, flips the surface and holds the lock for the run', async () => {
+    const holders = recordLockHolders();
     const manager = makeManager();
 
     const response = await manager.executeSteps('s-enter', {
@@ -296,8 +329,9 @@ describe('[use computer] as step 1 (acceptance 2)', () => {
     expect(launchBrowserMock).not.toHaveBeenCalled();
     expect(response.status).toBe('passed');
     expect(managed(manager, 's-enter').surface).toBe('computer');
-    expect(existsSync(lockPath)).toBe(true);
-    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-enter');
+    // Held while the step ran, and given back when the batch ended (§5.9).
+    expect(holders).toEqual(['s-enter']);
+    expect(existsSync(lockPath)).toBe(false);
     // The step after it ran on the computer surface, not through executeStep.
     expect(executeComputerStepMock).toHaveBeenCalledTimes(1);
     expect(executeStepMock).not.toHaveBeenCalled();
@@ -373,17 +407,21 @@ describe('the four preconditions each fail the step with their own message', () 
     expect(existsSync(lockPath)).toBe(false);
   });
 
-  it('a lock held by a live holder refuses the second session (§5.9)', async () => {
-    const first = makeManager();
-    await first.executeSteps('s-holder', { steps: ['[use computer]'] });
-    expect(existsSync(lockPath)).toBe(true);
+  it('a lock held by another live session refuses the step (§5.9) — even one in this process', async () => {
+    // Another session of THIS server holds it: the same pid, a different
+    // session. The check is on the session as well as the pid, so it refuses.
+    acquireComputerLock('s-holder', { lockPath });
 
     const second = makeManager();
     const response = await second.executeSteps('s-second', { steps: ['[use computer]'] });
 
     expect(response.status).toBe('failed');
-    expect(response.results[0]!.reasoning).toContain('computer mode is in use by session s-holder');
+    expect(response.results[0]!.reasoning).toBe(
+      computerLockInUseMessage({ pid: process.pid, sessionId: 's-holder', since: '' }),
+    );
     expect(managed(second, 's-second').surface).toBe('browser');
+    // …and its batch end did not release the holder's lock on the way out.
+    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-holder');
   });
 });
 
@@ -552,6 +590,7 @@ describe('[use browser] goes back (acceptance 2)', () => {
 
 describe('re-entering the surface you are on is a no-op (§4.5)', () => {
   it('passes, keeps the lock, and does not load a second adapter', async () => {
+    const holders = recordLockHolders();
     const manager = makeManager();
 
     const response = await manager.executeSteps('s-reenter', {
@@ -561,7 +600,7 @@ describe('re-entering the surface you are on is a no-op (§4.5)', () => {
     expect(response.status).toBe('passed');
     expect(loadDesktopAdapter).toHaveBeenCalledTimes(1);
     expect(probeComputerCapture).toHaveBeenCalledTimes(1);
-    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-reenter');
+    expect(holders).toEqual(['s-reenter']);
   });
 
   it('[use browser] on the browser surface is a no-op too', async () => {
@@ -585,6 +624,297 @@ describe('the surface survives a batch boundary (§4.5)', () => {
     expect(launchBrowserMock).not.toHaveBeenCalled();
     expect(executeComputerStepMock).toHaveBeenCalledTimes(1);
     expect(managed(manager, 's-batch').surface).toBe('computer');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §5.9 — the lock is held only while a run executes
+//
+// Measured defect: an MCP `run_test_file` of a test that ended in computer
+// mode passed, and afterwards `aiui-computer.lock` was still held by that
+// session — MCP keeps a session open between calls — so every other
+// computer-mode session on the machine would have been refused until
+// something closed it. The surface outlives a batch; the lock must not.
+// ---------------------------------------------------------------------------
+
+describe('the lock is held only while a run executes (§5.9)', () => {
+  /** Every model call the session could make, on the mocked client. */
+  function modelCalls(manager: SessionManager, id: string): number {
+    const ai = managed(manager, id).aiClient;
+    return ai.complete.mock.calls.length + ai.chat.mock.calls.length;
+  }
+
+  it('run end: a batch that ends on the computer surface leaves no lock, and the surface and adapter stay', async () => {
+    const manager = makeManager();
+
+    const response = await manager.executeSteps('s-end', {
+      steps: ['[use computer]', 'Click Save'],
+    });
+
+    expect(response.status).toBe('passed');
+    expect(existsSync(lockPath)).toBe(false);
+    const session = managed(manager, 's-end');
+    expect(session.surface).toBe('computer');
+    expect(session.computerAdapter).toBe(adapter);
+    expect(session.computerLockHeld).toBe(false);
+  });
+
+  it('next batch: the session\'s first computer step takes the lock again and passes', async () => {
+    const holders = recordLockHolders();
+    const manager = makeManager();
+
+    await manager.executeSteps('s-next', { steps: ['[use computer]', 'Click Save'] });
+    expect(existsSync(lockPath)).toBe(false);
+
+    const second = await manager.executeSteps('s-next', { steps: ['Click the dialog'] });
+
+    expect(second.status).toBe('passed');
+    // Held during both batches' computer steps, and between them by nobody.
+    expect(holders).toEqual(['s-next', 's-next']);
+    expect(existsSync(lockPath)).toBe(false);
+    // The surface carried over: no second adapter load, no second probe.
+    expect(loadDesktopAdapter).toHaveBeenCalledTimes(1);
+    expect(probeComputerCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it('between batches: another session takes the lock, and the first session\'s next computer step fails with §5.9 and asks no model', async () => {
+    const manager = makeManager();
+    await manager.executeSteps('s-first', { steps: ['[use computer]', 'Click A'] });
+    expect(existsSync(lockPath)).toBe(false);
+
+    // `s-second` enters computer mode and, WHILE ITS STEP RUNS — holding the
+    // lock — `s-first`'s next batch arrives. Two sessions of one server: the
+    // same pid, so only the session check can refuse.
+    const firstEvents: RunEvent[] = [];
+    let firstBatch2: Awaited<ReturnType<SessionManager['executeSteps']>> | undefined;
+    executeComputerStepMock.mockImplementation(async (index, n, instruction) => {
+      if (instruction === 'Click in the second session') {
+        firstBatch2 = await manager.executeSteps(
+          's-first',
+          { steps: ['Click B', 'Click C'] },
+          (e) => firstEvents.push(e),
+        );
+      }
+      return passComputerStep(index, n, instruction);
+    });
+
+    const second = await manager.executeSteps('s-second', {
+      steps: ['[use computer]', 'Click in the second session'],
+    });
+
+    expect(second.status).toBe('passed');
+    const message = computerLockInUseMessage({
+      pid: process.pid,
+      sessionId: 's-second',
+      since: '',
+    });
+    expect(firstBatch2!.status).toBe('failed');
+    expect(firstBatch2!.error!.message).toBe(message);
+    expect(firstBatch2!.results).toHaveLength(1);
+    expect(firstBatch2!.results[0]!.reasoning).toBe(message);
+    const fail = firstEvents.find((e) => e.type === 'step:fail') as Extract<RunEvent, { type: 'step:fail' }>;
+    expect(fail.error).toBe(message);
+    expect(fail.surface).toBe('computer');
+    // Nothing was captured or asked for the refused step, nor for the one
+    // after it.
+    const ran = executeComputerStepMock.mock.calls.map((call) => call[2]);
+    expect(ran).toEqual(['Click A', 'Click in the second session']);
+    expect(modelCalls(manager, 's-first')).toBe(0);
+    // Still on the computer surface — only the lock was refused.
+    expect(managed(manager, 's-first').surface).toBe('computer');
+    // The second session gave it back at its own batch end, and the first
+    // never held it to release.
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('re-entry: [use computer] in a later batch takes the lock when it is not held', async () => {
+    const manager = makeManager();
+    await manager.executeSteps('s-reentry', { steps: ['[use computer]'] });
+    expect(existsSync(lockPath)).toBe(false);
+
+    let holderAtModeRow: string | undefined;
+    const response = await manager.executeSteps('s-reentry', { steps: ['[use computer]'] }, (e) => {
+      if (e.type === 'step:pass' && e.stepKind === 'mode') {
+        holderAtModeRow = readComputerLock({ lockPath })?.sessionId;
+      }
+    });
+
+    expect(response.status).toBe('passed');
+    expect(holderAtModeRow).toBe('s-reentry');
+    // Still a re-entry: no second adapter, no second probe.
+    expect(loadDesktopAdapter).toHaveBeenCalledTimes(1);
+    expect(probeComputerCapture).toHaveBeenCalledTimes(1);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('re-entry refused: another session holds the lock, so the [use computer] row fails with §5.9', async () => {
+    const manager = makeManager();
+    await manager.executeSteps('s-reentry-busy', { steps: ['[use computer]'] });
+    acquireComputerLock('s-busy', { lockPath });
+
+    const response = await manager.executeSteps('s-reentry-busy', {
+      steps: ['[use computer]', 'Click Save'],
+    });
+
+    expect(response.status).toBe('failed');
+    expect(response.results[0]!.reasoning).toBe(
+      computerLockInUseMessage({ pid: process.pid, sessionId: 's-busy', since: '' }),
+    );
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(managed(manager, 's-reentry-busy').surface).toBe('computer');
+    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-busy');
+  });
+
+  it('other endings: a batch that fails, an aborted batch and a throwing step all release', async () => {
+    const manager = makeManager();
+
+    // A failed computer step ends the batch.
+    executeComputerStepMock.mockImplementationOnce(async (index, _n, instruction) => ({
+      index,
+      instruction,
+      status: 'failed',
+      surface: 'computer',
+      turns: [],
+      durationMs: 5,
+      retried: false,
+      error: 'the Save button was not found',
+    }));
+    const failed = await manager.executeSteps('s-endings', {
+      steps: ['[use computer]', 'Click Save', 'Click Close'],
+    });
+    expect(failed.status).toBe('failed');
+    expect(existsSync(lockPath)).toBe(false);
+
+    // A stop lands while a computer step runs; the loop halts at the next
+    // step boundary.
+    const controller = new AbortController();
+    let heldWhenStopped: string | undefined;
+    executeComputerStepMock.mockImplementationOnce(async (index, n, instruction) => {
+      heldWhenStopped = readComputerLock({ lockPath })?.sessionId;
+      controller.abort();
+      return passComputerStep(index, n, instruction);
+    });
+    const aborted = await manager.executeSteps(
+      's-endings',
+      { steps: ['Click Save', 'Click Close'] },
+      undefined,
+      controller.signal,
+    );
+    expect(aborted.status).toBe('aborted');
+    expect(heldWhenStopped).toBe('s-endings');
+    expect(existsSync(lockPath)).toBe(false);
+
+    // A step that throws out of the executor.
+    executeComputerStepMock.mockImplementationOnce(async () => {
+      throw new Error('nut.js exploded');
+    });
+    const errored = await manager.executeSteps('s-endings', { steps: ['Click Save'] });
+    expect(errored.status).toBe('error');
+    expect(existsSync(lockPath)).toBe(false);
+
+    expect(managed(manager, 's-endings').surface).toBe('computer');
+    expect(executeComputerStepMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('condition judge: a computer-surface `If … then` as the first step of a batch takes the lock before it is asked', async () => {
+    const manager = makeManager();
+    await manager.executeSteps('s-judge', { steps: ['[use computer]'] });
+    expect(existsSync(lockPath)).toBe(false);
+
+    let holderWhenJudged: string | undefined;
+    let judgedOnComputer = false;
+    evaluateConditionsMock.mockImplementation(async (conditions, opts) => {
+      holderWhenJudged = readComputerLock({ lockPath })?.sessionId;
+      judgedOnComputer = (opts as { computer?: unknown }).computer !== undefined;
+      return judgeHolds(conditions, opts);
+    });
+
+    const response = await manager.executeSteps('s-judge', {
+      steps: ['If the Save dialog is open, then Click Save'],
+    });
+
+    expect(response.status).toBe('passed');
+    expect(evaluateConditionsMock).toHaveBeenCalledTimes(1);
+    expect(judgedOnComputer).toBe(true);
+    expect(holderWhenJudged).toBe('s-judge');
+    // The tail ran on the computer surface, under the lock the guard took.
+    expect(executeComputerStepMock).toHaveBeenCalledTimes(1);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('condition judge refused: with the lock held elsewhere the guard fails with §5.9 and the judge is never asked', async () => {
+    const manager = makeManager();
+    await manager.executeSteps('s-judge-busy', { steps: ['[use computer]'] });
+    acquireComputerLock('s-busy', { lockPath });
+
+    const response = await manager.executeSteps('s-judge-busy', {
+      steps: ['If the Save dialog is open, then Click Save'],
+    });
+
+    expect(response.status).toBe('failed');
+    expect(response.error!.message).toBe(
+      computerLockInUseMessage({ pid: process.pid, sessionId: 's-busy', since: '' }),
+    );
+    expect(evaluateConditionsMock).not.toHaveBeenCalled();
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-busy');
+  });
+
+  it('a step that touches no screen takes no lock: `Set` runs while another session holds it', async () => {
+    const manager = makeManager();
+    await manager.executeSteps('s-set', { steps: ['[use computer]'] });
+    acquireComputerLock('s-busy', { lockPath });
+
+    const response = await manager.executeSteps('s-set', {
+      steps: ['Set {{file_name}} to "statement.pdf"'],
+    });
+
+    expect(response.status).toBe('passed');
+    expect(response.outputs.file_name).toBe('statement.pdf');
+    expect(managed(manager, 's-set').computerLockHeld).toBeFalsy();
+    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-busy');
+  });
+
+  it('release is safe: [use browser] releases at the step, and the page step after it runs unlocked', async () => {
+    const holders = recordLockHolders();
+    let lockWhenPageStepRan: boolean | undefined;
+    executeStepMock.mockImplementationOnce(async (_i, _n, instruction) => {
+      lockWhenPageStepRan = existsSync(lockPath);
+      return { index: 1, instruction, status: 'passed', turns: [], durationMs: 1, retried: false };
+    });
+    const manager = makeManager();
+
+    await manager.executeSteps('s-back-lock', {
+      steps: ['[use computer]', 'Click in the dialog', '[use browser]', 'Click the heading'],
+    });
+
+    expect(holders).toEqual(['s-back-lock']);
+    expect(lockWhenPageStepRan).toBe(false);
+    expect(managed(manager, 's-back-lock').surface).toBe('browser');
+    expect(managed(manager, 's-back-lock').computerLockHeld).toBe(false);
+  });
+
+  it('release is safe: [use browser] in a later batch does not touch a lock another session took meanwhile', async () => {
+    const manager = makeManager();
+    await manager.executeSteps('s-back-idle', { steps: ['[use computer]'] });
+    acquireComputerLock('s-busy', { lockPath });
+
+    const response = await manager.executeSteps('s-back-idle', { steps: ['[use browser]'] });
+
+    expect(response.status).toBe('passed');
+    expect(managed(manager, 's-back-idle').surface).toBe('browser');
+    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-busy');
+  });
+
+  it('release is safe: closing a session idle on the computer surface does not touch a lock another session took meanwhile', async () => {
+    const manager = makeManager();
+    await manager.executeSteps('s-close-busy', { steps: ['[use computer]'] });
+    acquireComputerLock('s-busy', { lockPath });
+
+    await manager.closeSession('s-close-busy');
+
+    expect(managed(manager, 's-close-busy')).toBeUndefined();
+    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-busy');
   });
 });
 
@@ -635,20 +965,36 @@ describe('a computer-mode `read` reaches the session outputs (§5.4)', () => {
 });
 
 describe('closeSession resets the surface and releases the lock (acceptance 6)', () => {
-  it('removes the lock file and the session', async () => {
+  it('releases a lock the session holds — a close that lands mid-run', async () => {
     const manager = makeManager();
-    await manager.executeSteps('s-close', { steps: ['[use computer]'] });
-    expect(existsSync(lockPath)).toBe(true);
+    let heldBeforeClose: string | undefined;
+    let lockFileAfterClose: boolean | undefined;
+    executeComputerStepMock.mockImplementation(async (index, n, instruction) => {
+      heldBeforeClose = readComputerLock({ lockPath })?.sessionId;
+      await manager.closeSession('s-close');
+      lockFileAfterClose = existsSync(lockPath);
+      return passComputerStep(index, n, instruction);
+    });
 
-    await manager.closeSession('s-close');
+    await manager.executeSteps('s-close', { steps: ['[use computer]', 'Click'] });
 
-    expect(existsSync(lockPath)).toBe(false);
+    expect(heldBeforeClose).toBe('s-close');
+    expect(lockFileAfterClose).toBe(false);
     expect(managed(manager, 's-close')).toBeUndefined();
   });
 
+  it('removes a session idling on the computer surface, with no lock left behind', async () => {
+    const manager = makeManager();
+    await manager.executeSteps('s-close-idle', { steps: ['[use computer]'] });
+
+    await manager.closeSession('s-close-idle');
+
+    expect(existsSync(lockPath)).toBe(false);
+    expect(managed(manager, 's-close-idle')).toBeUndefined();
+  });
+
   it('does not release a lock this session never took', async () => {
-    const holder = makeManager();
-    await holder.executeSteps('s-owner', { steps: ['[use computer]'] });
+    acquireComputerLock('s-owner', { lockPath });
 
     const other = makeManager();
     await other.executeSteps('s-other', { steps: ['Click something'] });
@@ -706,6 +1052,7 @@ afterEach(() => {
 
 describe('desktop.enabled comes from the test file project, not the server', () => {
   it('a project that opted in is allowed by a server that did not', async () => {
+    const holders = recordLockHolders();
     // The server's own config is the shipped default: desktop off.
     const manager = makeManager(configWith({ enabled: false }));
     const testFilePath = writeProject({ desktop: { enabled: true } });
@@ -720,7 +1067,7 @@ describe('desktop.enabled comes from the test file project, not the server', () 
     expect(managed(manager, 's-project-on').surface).toBe('computer');
     // Past precondition 1: the adapter loaded and the lock was taken.
     expect(loadDesktopAdapter).toHaveBeenCalledTimes(1);
-    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-project-on');
+    expect(holders).toEqual(['s-project-on']);
   });
 
   it('a project that did NOT opt in is refused by a server that did', async () => {
