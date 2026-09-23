@@ -62,8 +62,18 @@ export interface ScreenGrab {
   rgba: Buffer;
 }
 
-/** A window's position and size, in logical screen coordinates. Field names
- *  match nut.js's `Region` so the adapter can hand one straight through. */
+/**
+ * A window's position and size, in logical screen coordinates. Field names
+ * match nut.js's `Region` so the adapter can hand one straight through.
+ *
+ * Every region an adapter RETURNS is clipped to the main display on all four
+ * sides, because that is what nut.js's `Window.getRegion()` does (measured,
+ * §14 "focus_window: measured Win32 behaviour"): a window entirely on another
+ * monitor reads width or height 0, one hanging off the left edge reads
+ * `left: 0` with the hidden part subtracted, and a minimised one reads
+ * (0,0 0×0). Neither a window's true size nor its true off-screen position can
+ * be read back. `bring-to-front.ts` is written against exactly that.
+ */
 export interface WindowRegion {
   left: number;
   top: number;
@@ -78,6 +88,39 @@ export interface WindowRegion {
 export interface WindowInfo {
   title: string;
   region: WindowRegion;
+}
+
+/**
+ * An opaque reference to one top-level window, meaningful only to the adapter
+ * that handed it out. On the nut adapter it is the OS handle nut.js keeps as
+ * `Window.windowHandle` — an HWND on Windows, an X11 window id on Linux, a
+ * CGWindowID on macOS; on the fake it is a counter. Nothing outside an adapter
+ * does arithmetic on it or keeps it past the action that looked it up: a
+ * handle outlives its window.
+ */
+export type WindowHandle = number;
+
+/** A window found by {@link DesktopAdapter.findWindow} or
+ *  {@link DesktopAdapter.activeWindow}: its list entry plus the handle every
+ *  window primitive takes. */
+export interface WindowRef extends WindowInfo {
+  handle: WindowHandle;
+}
+
+/** A window size for {@link DesktopAdapter.resizeWindow}, in logical screen
+ *  units. */
+export interface WindowSize {
+  width: number;
+  height: number;
+}
+
+/**
+ * The one title rule `focus_window` and `wait_window` share (§5.4): the title
+ * CONTAINS the text, ignoring case. Named once so the two actions and both
+ * adapters cannot come to disagree about what "matches" means.
+ */
+export function titleContains(title: string, text: string): boolean {
+  return title.toLowerCase().includes(text.toLowerCase());
 }
 
 /** Options for {@link DesktopAdapter.click}. */
@@ -112,9 +155,38 @@ export interface DesktopAdapter {
   type(text: string): Promise<void>;
   /** Press a chord in the §5.4 grammar (`enter`, `ctrl+s`, `cmd+shift+g`). */
   key(chord: string): Promise<void>;
-  /** Every top-level window, newest-first ordering not guaranteed. */
+  /** Every top-level window, newest-first ordering not guaranteed. Regions are
+   *  clipped to the main display (see {@link WindowRegion}). */
   windows(): Promise<WindowInfo[]>;
-  /** Bring the FIRST window whose title contains `titleSubstring`
-   *  (case-insensitive) to the front. `false` when none matched. */
-  focusWindow(titleSubstring: string): Promise<boolean>;
+
+  // ── Window primitives ────────────────────────────────────────────────────
+  // Mechanism only. The POLICY that strings them together — focus, check the
+  // geometry, restore, move, verify, fall back — is `bring-to-front.ts`, so
+  // it is written once and proved against the fake rather than once per
+  // adapter.
+
+  /** The FIRST window whose title contains `titleSubstring` (case-insensitive,
+   *  {@link titleContains}), or `null` when none does. */
+  findWindow(titleSubstring: string): Promise<WindowRef | null>;
+  /** The window the OS currently has in the foreground, or `null` when it
+   *  reports none. */
+  activeWindow(): Promise<WindowRef | null>;
+  /** The window's region, clipped to the main display (see {@link WindowRegion}). */
+  windowRegion(handle: WindowHandle): Promise<WindowRegion>;
+  /** Move the window's top-left corner to `origin`. Works on a window that is
+   *  entirely off the main display. */
+  moveWindow(handle: WindowHandle, origin: Point): Promise<void>;
+  /** Set the window's outer size. */
+  resizeWindow(handle: WindowHandle, size: WindowSize): Promise<void>;
+  /** Ask the OS to bring the window to the front — nut.js `Window.focus()`.
+   *  Measured on Windows to restore a minimised window too, but NOT guaranteed
+   *  to activate it: a background process can be refused the foreground. Only
+   *  {@link activeWindow} says whether it worked. */
+  focusWindowHandle(handle: WindowHandle): Promise<void>;
+  /** Un-minimise the window through a per-OS helper OUTSIDE libnut, which has
+   *  no minimise or restore of its own (§5.8). Throws a message naming the
+   *  missing tool when the helper is not installed. */
+  restoreWindow(handle: WindowHandle): Promise<void>;
+  /** Minimise the window, through the same per-OS helper. */
+  minimiseWindow(handle: WindowHandle): Promise<void>;
 }

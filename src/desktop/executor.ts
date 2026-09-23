@@ -18,7 +18,12 @@
  * (§5.3: "after any real action the next capture is a fresh full screenshot").
  */
 import { logger } from '../utils/logger.js';
-import type { DesktopAdapter, Point } from './adapter.js';
+import { titleContains, type DesktopAdapter, type Point } from './adapter.js';
+import {
+  DEFAULT_BRING_TO_FRONT_SETTLE_MS,
+  bringWindowToFront,
+  describeBringToFront,
+} from './bring-to-front.js';
 import { DEFAULT_MAX_IMAGE_WIDTH, mapToScreen, zoomView, type ImageView } from './capture.js';
 import { SCREEN_ACTION_TYPES, type ComputerAction } from './actions.js';
 
@@ -55,6 +60,10 @@ export interface ComputerExecutionResult {
   screenPoint?: Point;
   /** Human- and model-readable detail. Present on every failure. */
   message?: string;
+  /** On a successful `focus_window`, what it took — `restored from minimised,
+   *  now in front`, `already in front` — so the step's "Actions already
+   *  performed" line says the same as the log line. */
+  detail?: string;
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -168,9 +177,34 @@ export async function executeComputerAction(
     }
 
     case 'focus_window': {
-      emit(`focus_window "${action.title}"`);
-      const found = await adapter.focusWindow(action.title);
-      if (!found) {
+      // The whole policy — focus, restore, move onto the main display, verify,
+      // fall back — is `bring-to-front.ts`. Its step-by-step trace goes to
+      // debug; the one line that says what it came to goes to info, here.
+      let outcome;
+      try {
+        outcome = await bringWindowToFront(adapter, action.title, {
+          sleep,
+          // Its own short settle between window operations, never longer than
+          // the project's — so `desktop.settleMs: 0` means no waiting here
+          // either.
+          settleMs: Math.min(ctx.settleMs, DEFAULT_BRING_TO_FRONT_SETTLE_MS),
+          trace: (line) => logger.debug(`[computer] focus_window: ${line}`),
+        });
+      } catch (err) {
+        // A window that closed mid-way, a native call that threw. The model
+        // hears about it and can choose differently; the step is not over.
+        const reason = err instanceof Error ? err.message : String(err);
+        emit(`focus_window "${action.title}" → FAILED: ${reason}`);
+        return {
+          view,
+          performed: true,
+          ok: false,
+          message: `focus_window "${action.title}" failed: ${reason}`,
+        };
+      }
+
+      if (!outcome.found) {
+        emit(`focus_window "${action.title}" → no window matches`);
         const titles = (await adapter.windows()).map((w) => w.title).filter((t) => t.trim() !== '');
         const shown = titles.slice(0, 10);
         const suffix =
@@ -185,17 +219,31 @@ export async function executeComputerAction(
           message: `No window's title contains "${action.title}". ${suffix}`,
         };
       }
+
+      if (!outcome.frontmost || !outcome.onMainDisplay) {
+        // Found but not verified in front (or not visible): a failure the
+        // model reads next turn as `priorFailure`, so it can click the window
+        // in the screenshot instead of trusting a focus that did not land.
+        const message = outcome.message ?? `"${action.title}" could not be brought to the front.`;
+        emit(
+          `focus_window "${action.title}" → FAILED after ${outcome.attempts} ` +
+            `attempt${outcome.attempts === 1 ? '' : 's'}: ${message}`,
+        );
+        return { view, performed: true, ok: false, message };
+      }
+
+      const detail = describeBringToFront(outcome);
+      emit(`focus_window "${action.title}" → ok (${detail})`);
       await settle();
-      return { view, performed: true, ok: true };
+      return { view, performed: true, ok: true, detail };
     }
 
     case 'wait_window': {
       emit(`wait_window "${action.title}" ${action.state} (${action.timeoutMs}ms)`);
-      const needle = action.title.toLowerCase();
       const deadline = now() + action.timeoutMs;
       for (;;) {
         const windows = await adapter.windows();
-        const present = windows.some((w) => w.title.toLowerCase().includes(needle));
+        const present = windows.some((w) => titleContains(w.title, action.title));
         if (present === (action.state === 'open')) {
           await settle();
           return {

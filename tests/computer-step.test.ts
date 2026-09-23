@@ -253,10 +253,8 @@ describe('window actions go through the window list', () => {
     );
 
     expect(result.status).toBe('passed');
-    expect(adapter.callsOf('focusWindow')[0]!.args).toMatchObject({
-      titleSubstring: 'Save As',
-      found: true,
-    });
+    expect(adapter.callsOf('findWindow')[0]!.args).toMatchObject({ titleSubstring: 'Save As' });
+    expect(adapter.callsOf('focusWindowHandle')).toHaveLength(1);
   });
 
   it('a title nothing matches comes back to the model as prior failure, not as a red step', async () => {
@@ -644,7 +642,7 @@ describe('the actions a step has already performed go back to the model', () => 
     const second = textIn(sent[1]!);
     expect(second).toContain('## Actions already performed for this step');
     expect(second).toContain(
-      '- turn 1: focus_window "statement.pdf" → ok (window found and brought to the front)',
+      '- turn 1: focus_window "statement.pdf" → ok (now in front)',
     );
     expect(second).toContain(
       'If the step is now satisfied, answer with `noop`. Do not repeat an action that already ' +
@@ -693,7 +691,8 @@ describe('the actions a step has already performed go back to the model', () => 
     expect(result.error).toBeUndefined();
     // Turn 2 answered it; the screen was touched exactly once.
     expect(result.turns).toHaveLength(2);
-    expect(adapter.callsOf('focusWindow')).toHaveLength(1);
+    expect(adapter.callsOf('findWindow')).toHaveLength(1);
+    expect(adapter.callsOf('focusWindowHandle')).toHaveLength(1);
     expect(
       info.mock.calls
         .map((c) => String(c[0]))
@@ -738,11 +737,63 @@ describe('the actions a step has already performed go back to the model', () => 
     const result = await executeComputerStep(1, 1, 'Focus Save As', makeOpts(adapter, client));
 
     expect(result.status).toBe('passed');
-    expect(adapter.callsOf('focusWindow')).toHaveLength(2);
+    expect(adapter.callsOf('findWindow')).toHaveLength(2);
     // A failure is not a performed action: it goes through priorFailure only.
     expect(textIn(sent[1]!)).toContain('The last action did not succeed');
     expect(textIn(sent[1]!)).not.toContain('## Actions already performed for this step');
     expect(textIn(sent[2]!)).not.toContain('## Actions already performed for this step');
+  });
+
+  it('says "already in front" when the window was, so the model knows the screen will not change', async () => {
+    const adapter = new FakeDesktopAdapter({
+      ...GRAB,
+      windows: [fakeWindow('statement.pdf - Chrome')],
+      activeTitle: 'statement.pdf',
+    });
+    const { client, sent } = scripted(
+      '{"action":"focus_window","title":"statement.pdf","description":"Focus the PDF window"}',
+      '{"action":"noop","description":"already at the front"}',
+    );
+
+    await executeComputerStep(1, 1, 'Focus the PDF window', makeOpts(adapter, client));
+
+    expect(textIn(sent[1]!)).toContain(
+      '- turn 1: focus_window "statement.pdf" → ok (already in front)',
+    );
+  });
+
+  it('a focus the OS refuses goes back to the model as priorFailure, and its repeat is NOT netted', async () => {
+    // Measured on Windows: a background process can be refused the
+    // foreground, and the window then comes back BEHIND the front app. That
+    // is now a failure the model reads next turn — so it can click the
+    // window in the screenshot — rather than a success it has to disbelieve.
+    const adapter = new FakeDesktopAdapter({
+      ...GRAB,
+      windows: [fakeWindow('statement.pdf - Chrome'), fakeWindow('Claude')],
+      activeTitle: 'Claude',
+      refuseForeground: 'always',
+    });
+    const { client, sent } = scripted(
+      '{"action":"focus_window","title":"statement.pdf","description":"Focus the PDF window"}',
+      '{"action":"focus_window","title":"statement.pdf","description":"Try again"}',
+      '{"action":"noop","description":"giving up on focus"}',
+    );
+
+    const result = await executeComputerStep(1, 1, 'Focus the PDF window', makeOpts(adapter, client));
+
+    expect(result.status).toBe('passed');
+    const second = textIn(sent[1]!);
+    expect(second).toContain('The last action did not succeed');
+    expect(second).toMatch(
+      /did not bring "statement\.pdf - Chrome" to the front; the front window is "Claude"\. A background process is often refused the foreground; click the window in the screenshot/,
+    );
+    // A failure is not a performed action.
+    expect(second).not.toContain('## Actions already performed for this step');
+    // The identical second turn reached the adapter: a failed focus disarms
+    // the repeat net.
+    expect(adapter.callsOf('findWindow')).toHaveLength(2);
+    // The report row carries the failure too.
+    expect(result.turns[0]!.subActions[0]!.error).toMatch(/did not bring/);
   });
 
   it('starts a retry attempt with an empty list', async () => {

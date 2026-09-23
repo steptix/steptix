@@ -16,17 +16,28 @@
  * names the measured Windows cause — a sandboxed spawner whose window station
  * has no read-screen right, which produces a BitBlt error 6 through a handle
  * that otherwise works.
+ *
+ * It also holds the per-OS window helpers ({@link runOsWindowCommand}) that
+ * minimise and restore a window. libnut has neither: `Window.minimize()` and
+ * `restore()` throw "Method not implemented in libnut." (§5.8), so they are
+ * never called here.
  */
+import { execFile } from 'node:child_process';
 import { logger } from '../utils/logger.js';
 import { chordKeyMembers } from './keys.js';
-import type {
-  ClickOptions,
-  DesktopAdapter,
-  MouseButton,
-  Point,
-  ScreenGrab,
-  ScrollDirection,
-  WindowInfo,
+import {
+  titleContains,
+  type ClickOptions,
+  type DesktopAdapter,
+  type MouseButton,
+  type Point,
+  type ScreenGrab,
+  type ScrollDirection,
+  type WindowHandle,
+  type WindowInfo,
+  type WindowRef,
+  type WindowRegion,
+  type WindowSize,
 } from './adapter.js';
 
 /** Named once so both messages and the docs agree on the spelling. */
@@ -115,6 +126,190 @@ function toRgba(
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Per-OS window helpers: minimise and restore, OUTSIDE libnut
+// ---------------------------------------------------------------------------
+
+/** What a helper does to a window. */
+export type OsWindowOp = 'restore' | 'minimise';
+
+/** How long a helper may take before it is abandoned. The Windows one spawns
+ *  PowerShell, measured at ~0.5–1 s, so this is several times that. */
+export const OS_WINDOW_HELPER_TIMEOUT_MS = 5_000;
+
+/** user32 `ShowWindow` commands: SW_MINIMIZE and SW_RESTORE. */
+export const SHOW_WINDOW_COMMAND: Record<OsWindowOp, number> = { minimise: 6, restore: 9 };
+
+/** One helper invocation, as `execFile` takes it — no shell in between. */
+export interface OsWindowCommand {
+  file: string;
+  args: string[];
+  /** The tool's name, for the "not installed" message. */
+  tool: string;
+  /** How to get it, when it is the kind of thing a machine can lack. */
+  install?: string;
+}
+
+/** The window a helper acts on. `title` is needed on macOS only, where System
+ *  Events addresses windows by name rather than by CGWindowID. */
+export interface OsWindowTarget {
+  handle: WindowHandle;
+  title?: string;
+}
+
+/**
+ * The PowerShell script that calls user32 `ShowWindow(hwnd, command)`.
+ *
+ * Measured on Windows 11 (§14): SW_RESTORE from a separate PowerShell process
+ * restored a minimised window AND activated it. The handle is interpolated,
+ * so it is checked to be a positive integer first — it comes from libnut as a
+ * number, and this is the one place a number becomes code.
+ */
+export function win32ShowWindowScript(handle: WindowHandle, command: number): string {
+  if (!Number.isSafeInteger(handle) || handle <= 0) {
+    throw new Error(`not a window handle: ${String(handle)}`);
+  }
+  return (
+    `Add-Type -Namespace W -Name U -MemberDefinition ` +
+    `'[DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int c);'; ` +
+    `[void][W.U]::ShowWindow([System.IntPtr]${handle}, ${command})`
+  );
+}
+
+/**
+ * The AppleScript that un-minimises (and raises) or minimises the first window
+ * named exactly `argv[1]`, across every foreground process, through System
+ * Events. The title is passed as an ARGUMENT rather than spliced into the
+ * script, so no title can break out of a string literal.
+ *
+ * NOT measured: this was built on Windows. libnut's macOS window list may not
+ * even include a minimised window, and System Events needs Accessibility
+ * permission for node.
+ */
+function darwinScript(op: OsWindowOp): string {
+  const act =
+    op === 'restore'
+      ? [
+          '          set value of attribute "AXMinimized" of w to false',
+          '          perform action "AXRaise" of w',
+          '          set frontmost of p to true',
+        ]
+      : ['          set value of attribute "AXMinimized" of w to true'];
+  return [
+    'on run argv',
+    '  set wanted to item 1 of argv',
+    '  tell application "System Events"',
+    '    repeat with p in (every process whose background only is false)',
+    '      repeat with w in (every window of p)',
+    '        if name of w is wanted then',
+    ...act,
+    '          return',
+    '        end if',
+    '      end repeat',
+    '    end repeat',
+    '  end tell',
+    '  error "System Events lists no window named " & wanted',
+    'end run',
+  ].join('\n');
+}
+
+/**
+ * The command that performs `op` on `target` on `platform`.
+ *
+ * Only the win32 path has been measured (§14). macOS goes through osascript
+ * and System Events; Linux through xdotool, which is X11 like libnut itself.
+ */
+export function osWindowCommand(
+  op: OsWindowOp,
+  target: OsWindowTarget,
+  platform: NodeJS.Platform = process.platform,
+): OsWindowCommand {
+  if (platform === 'win32') {
+    return {
+      file: 'powershell.exe',
+      args: [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        win32ShowWindowScript(target.handle, SHOW_WINDOW_COMMAND[op]),
+      ],
+      tool: 'powershell.exe',
+    };
+  }
+  if (platform === 'darwin') {
+    if (!target.title) {
+      throw new Error(`cannot ${op} a window on macOS without its title (handle ${target.handle})`);
+    }
+    return { file: 'osascript', args: ['-e', darwinScript(op), target.title], tool: 'osascript' };
+  }
+  return {
+    file: 'xdotool',
+    args: [op === 'restore' ? 'windowactivate' : 'windowminimize', String(target.handle)],
+    tool: 'xdotool',
+    install: 'install it with your package manager, e.g. `sudo apt install xdotool`',
+  };
+}
+
+/** `execFile`, promised, with the output attached to the error. Written out
+ *  rather than `util.promisify`d so a test's mock of `node:child_process` is
+ *  an ordinary callback function. */
+function execFileAsync(
+  file: string,
+  args: string[],
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      file,
+      args,
+      // `windowsHide`: no console window flashes up — which could itself take
+      // the foreground from the very window being restored.
+      { timeout: OS_WINDOW_HELPER_TIMEOUT_MS, windowsHide: true },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(Object.assign(error, { stdout: String(stdout ?? ''), stderr: String(stderr ?? '') }));
+        } else {
+          resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
+        }
+      },
+    );
+  });
+}
+
+/**
+ * Minimise or restore a window through the platform's helper, with a
+ * {@link OS_WINDOW_HELPER_TIMEOUT_MS} budget. A missing tool, a timeout and a
+ * failed run each throw a message that says which.
+ */
+export async function runOsWindowCommand(
+  op: OsWindowOp,
+  target: OsWindowTarget,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  const command = osWindowCommand(op, target, platform);
+  const verb = op === 'restore' ? 'restoring' : 'minimising';
+  try {
+    await execFileAsync(command.file, command.args);
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: string; stderr?: string };
+    if (e.code === 'ENOENT') {
+      throw new Error(
+        `${verb} a window needs ${command.tool} on ${platform}, and it was not found` +
+          (command.install ? ` — ${command.install}` : '') +
+          '. libnut has no minimise or restore of its own.',
+      );
+    }
+    if (e.killed || e.signal === 'SIGTERM') {
+      throw new Error(
+        `${verb} a window with ${command.tool} did not finish within ${OS_WINDOW_HELPER_TIMEOUT_MS} ms.`,
+      );
+    }
+    const stderr = (e.stderr ?? '').trim();
+    throw new Error(
+      `${verb} a window with ${command.tool} failed: ${e.message}` + (stderr ? ` — ${stderr}` : ''),
+    );
+  }
+}
+
 /** A straight path from `from` to `to`, inclusive of both ends. */
 function dragPath(from: Point, to: Point): Point[] {
   const path: Point[] = [];
@@ -140,6 +335,32 @@ function buildAdapter(nut: NutModule): DesktopAdapter {
 
   const point = (p: Point): InstanceType<NutModule['Point']> =>
     new nut.Point(Math.round(p.x), Math.round(p.y));
+
+  type NutWindow = InstanceType<NutModule['Window']>;
+
+  /** nut.js keeps the OS handle in a field its typings mark private. It is the
+   *  HWND as a number on Windows (measured: e.g. 11799974), which is exactly
+   *  what the ShowWindow helper takes. */
+  const handleOf = (window: NutWindow): WindowHandle =>
+    (window as unknown as { windowHandle: number }).windowHandle;
+
+  /** A nut.js `Window` for a handle, built the way `getWindows()` builds them. */
+  const windowFor = (handle: WindowHandle): NutWindow =>
+    new nut.Window(nut.providerRegistry, handle);
+
+  /** `getRegion()`, which nut.js clips to the main display (see
+   *  `WindowRegion`), copied out of its `Region` class. */
+  async function regionOf(window: NutWindow): Promise<WindowRegion> {
+    const r = await window.getRegion();
+    return { left: r.left, top: r.top, width: r.width, height: r.height };
+  }
+
+  /** The helper's target. The title is read only where the helper needs it
+   *  (macOS), so Windows pays for no extra native call. */
+  async function osTarget(handle: WindowHandle): Promise<OsWindowTarget> {
+    if (process.platform !== 'darwin') return { handle };
+    return { handle, title: await windowFor(handle).getTitle() };
+  }
 
   async function listWindows(): Promise<WindowInfo[]> {
     const windows = await nut.getWindows();
@@ -253,22 +474,78 @@ function buildAdapter(nut: NutModule): DesktopAdapter {
 
     windows: listWindows,
 
-    async focusWindow(titleSubstring: string): Promise<boolean> {
-      const needle = titleSubstring.toLowerCase();
-      const windows = await nut.getWindows();
-      for (const window of windows) {
+    async findWindow(titleSubstring: string): Promise<WindowRef | null> {
+      for (const window of await nut.getWindows()) {
         let title = '';
         try {
           title = await window.getTitle();
         } catch {
           continue;
         }
-        if (title.toLowerCase().includes(needle)) {
-          await window.focus();
-          return true;
+        if (titleContains(title, titleSubstring)) {
+          let region: WindowRegion = { left: 0, top: 0, width: 0, height: 0 };
+          try {
+            region = await regionOf(window);
+          } catch {
+            // Closing as we look. The policy re-reads it after the focus anyway.
+          }
+          return { title, handle: handleOf(window), region };
         }
       }
-      return false;
+      return null;
+    },
+
+    async activeWindow(): Promise<WindowRef | null> {
+      let window: NutWindow;
+      try {
+        window = await nut.getActiveWindow();
+      } catch {
+        return null;
+      }
+      const handle = handleOf(window);
+      // GetForegroundWindow answers NULL while the foreground is changing
+      // hands, or on a locked desktop.
+      if (!handle) return null;
+      let title = '';
+      try {
+        title = await window.getTitle();
+      } catch {
+        // A title that cannot be read matches nothing, which is the honest
+        // answer to "is the target in front".
+      }
+      let region: WindowRegion = { left: 0, top: 0, width: 0, height: 0 };
+      try {
+        region = await regionOf(window);
+      } catch {
+        // Nothing reads the active window's geometry.
+      }
+      return { title, handle, region };
+    },
+
+    async windowRegion(handle: WindowHandle): Promise<WindowRegion> {
+      return regionOf(windowFor(handle));
+    },
+
+    async moveWindow(handle: WindowHandle, origin: Point): Promise<void> {
+      await windowFor(handle).move(point(origin));
+    },
+
+    async resizeWindow(handle: WindowHandle, size: WindowSize): Promise<void> {
+      await windowFor(handle).resize(
+        new nut.Size(Math.max(1, Math.round(size.width)), Math.max(1, Math.round(size.height))),
+      );
+    },
+
+    async focusWindowHandle(handle: WindowHandle): Promise<void> {
+      await windowFor(handle).focus();
+    },
+
+    async restoreWindow(handle: WindowHandle): Promise<void> {
+      await runOsWindowCommand('restore', await osTarget(handle));
+    },
+
+    async minimiseWindow(handle: WindowHandle): Promise<void> {
+      await runOsWindowCommand('minimise', await osTarget(handle));
     },
   };
 }

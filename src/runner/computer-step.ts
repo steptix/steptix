@@ -426,7 +426,7 @@ function log(message: string): void {
 function performedLine(
   turn: number,
   action: ComputerAction,
-  outcome: { screenPoint?: { x: number; y: number } },
+  outcome: { screenPoint?: { x: number; y: number }; detail?: string },
   elapsedMs: number,
 ): string {
   const at = (p?: { x: number; y: number }): string => (p ? ` → screen(${p.x},${p.y})` : '');
@@ -463,7 +463,11 @@ function performedLine(
         `${action.region.width},${action.region.height}) → shown`
       );
     case 'focus_window':
-      return `${head}focus_window "${action.title}" → ok (window found and brought to the front)`;
+      // The executor's own account — `already in front`, `restored from
+      // minimised, moved onto the main display, now in front` — which is also
+      // what its log line says. "Already in front" is the one the model most
+      // needs: it is the case where the screen shows no change at all.
+      return `${head}focus_window "${action.title}" → ok (${outcome.detail ?? 'now in front'})`;
     case 'wait_window':
       return (
         `${head}wait_window "${action.title}" ${action.state} → ok after ` +
@@ -491,6 +495,11 @@ export const REPEATED_WINDOW_ACTION_MESSAGE =
  * worked" — which {@link computerAttempt} answers by completing the step
  * rather than by acting again. `timeoutMs` is in the key because it is an
  * argument the model chose.
+ *
+ * A `focus_window` only counts as a success once `bring-to-front.ts` has read
+ * the target back as the OS's active window. One the OS refused comes back as
+ * a failure, which disarms this net, so the model's retry (or its click on the
+ * window instead) reaches the screen.
  */
 function windowOnlyKey(actions: readonly ComputerAction[]): string | null {
   if (actions.length === 0) return null;

@@ -70,7 +70,9 @@ const ACTION_EXAMPLES: Readonly<Record<ComputerActionType, { performs: string; j
     json: '{"action":"zoom","region":{"x":900,"y":400,"width":420,"height":180},"description":"Read the dialog\'s small print"}',
   },
   focus_window: {
-    performs: 'bring the first window whose title contains this text to the front',
+    performs:
+      'bring the first window whose title contains this text to the front; it also restores a ' +
+      'minimised window and moves a window from another screen onto the one you can see',
     json: '{"action":"focus_window","title":"Save As","description":"Focus the Save As dialog"}',
   },
   wait_window: {

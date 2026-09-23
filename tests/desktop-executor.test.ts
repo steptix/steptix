@@ -266,17 +266,89 @@ describe('executeComputerAction — zoom (§5.3)', () => {
 });
 
 describe('executeComputerAction — windows (§5.4)', () => {
-  it('focus_window succeeds when a title matches', async () => {
+  it('focus_window succeeds when a title matches and the window is verified in front', async () => {
     const adapter = new FakeDesktopAdapter({ windows: [fakeWindow('Save As')] });
     const harness = ctx(adapter, view({}, 100, 100));
     const result = await executeComputerAction(
       { action: 'focus_window', title: 'save as', description: '' },
       harness.context,
     );
-    expect(result).toMatchObject({ performed: true, ok: true });
-    expect(adapter.callsOf('focusWindow')).toEqual([
-      { name: 'focusWindow', args: { titleSubstring: 'save as', found: true } },
-    ]);
+    expect(result).toMatchObject({ performed: true, ok: true, detail: 'now in front' });
+    expect(adapter.callsOf('findWindow')[0]!.args).toMatchObject({ titleSubstring: 'save as' });
+    expect(adapter.callsOf('focusWindowHandle')).toHaveLength(1);
+    expect(harness.lines).toContain('[computer] focus_window "save as" → ok (now in front)');
+    // bring-to-front's own settle (min(settleMs, 150)), then the action's.
+    expect(harness.clock.slept).toEqual([150, 300]);
+  });
+
+  it('focus_window says "already in front" when it was', async () => {
+    const adapter = new FakeDesktopAdapter({ windows: [fakeWindow('Save As')], activeTitle: 'Save As' });
+    const harness = ctx(adapter, view({}, 100, 100));
+    const result = await executeComputerAction(
+      { action: 'focus_window', title: 'Save As', description: '' },
+      harness.context,
+    );
+    expect(result).toMatchObject({ ok: true, detail: 'already in front' });
+    expect(harness.lines).toContain('[computer] focus_window "Save As" → ok (already in front)');
+  });
+
+  it('focus_window logs what it took: restored from minimised, moved onto the main display', async () => {
+    // Minimised to a spot on a monitor to the right of the main one.
+    const adapter = new FakeDesktopAdapter({
+      windows: [
+        {
+          title: 'statement.pdf - Google Chrome',
+          region: { left: 4000, top: 200, width: 1600, height: 1000 },
+          minimised: true,
+        },
+      ],
+    });
+    const harness = ctx(adapter, view({}, 100, 100));
+    const result = await executeComputerAction(
+      { action: 'focus_window', title: 'statement.pdf', description: '' },
+      harness.context,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.detail).toBe('restored from minimised, moved onto the main display, now in front');
+    expect(harness.lines).toContain(
+      '[computer] focus_window "statement.pdf" → ok (restored from minimised, moved onto the main display, now in front)',
+    );
+  });
+
+  it('focus_window FAILS when the OS will not put the window in front, and says which one is', async () => {
+    const adapter = new FakeDesktopAdapter({
+      windows: [fakeWindow('statement.pdf - Google Chrome'), fakeWindow('Claude')],
+      activeTitle: 'Claude',
+      refuseForeground: 'always',
+    });
+    const harness = ctx(adapter, view({}, 100, 100));
+    const result = await executeComputerAction(
+      { action: 'focus_window', title: 'statement.pdf', description: '' },
+      harness.context,
+    );
+    expect(result).toMatchObject({ performed: true, ok: false });
+    expect(result.detail).toBeUndefined();
+    expect(result.message).toMatch(
+      /did not bring "statement\.pdf - Google Chrome" to the front; the front window is "Claude"\. A background process is often refused the foreground; click the window in the screenshot/,
+    );
+    expect(harness.lines.some((l) => l.startsWith('[computer] focus_window "statement.pdf" → FAILED after 3 attempts:'))).toBe(true);
+  });
+
+  it('focus_window turns an adapter error into a failure the model can read', async () => {
+    const adapter = new FakeDesktopAdapter({ windows: [fakeWindow('Save As')] });
+    adapter.focusWindowHandle = async () => {
+      throw new Error('the window closed');
+    };
+    const harness = ctx(adapter, view({}, 100, 100));
+    const result = await executeComputerAction(
+      { action: 'focus_window', title: 'Save As', description: '' },
+      harness.context,
+    );
+    expect(result).toMatchObject({
+      performed: true,
+      ok: false,
+      message: 'focus_window "Save As" failed: the window closed',
+    });
   });
 
   it('focus_window FAILS when nothing matches, and names what is open', async () => {
@@ -294,6 +366,8 @@ describe('executeComputerAction — windows (§5.4)', () => {
     // Listing them is the difference between a model that guesses again and
     // one that picks the right title on its next turn.
     expect(result.message).toContain('statement.pdf — Chromium');
+    expect(harness.lines).toContain('[computer] focus_window "Save As" → no window matches');
+    expect(adapter.callsOf('focusWindowHandle')).toEqual([]);
   });
 
   it('wait_window open: satisfied as soon as the window appears', async () => {

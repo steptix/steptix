@@ -60,6 +60,15 @@ describe('buildComputerSystemPrompt — §5.7', () => {
     expect(text).toMatch(/wait_window/);
   });
 
+  it('says focus_window also restores a minimised window and fetches one from another screen', () => {
+    // Without this the model hunts the taskbar for a minimised window, or
+    // concludes a window on a second monitor is not open, when one
+    // `focus_window` would bring it onto the screen it can see.
+    expect(systemText()).toContain(
+      'it also restores a minimised window and moves a window from another screen onto the one you can see',
+    );
+  });
+
   it('says zoom is for anything too small to read', () => {
     expect(systemText()).toMatch(/too small to be sure of/);
   });
@@ -169,14 +178,14 @@ describe('buildComputerStepMessage — §5.7', () => {
       buildComputerStepMessage({
         ...base,
         performed: [
-          'turn 1: focus_window "statement.pdf" → ok (window found and brought to the front)',
+          'turn 1: focus_window "statement.pdf" → ok (already in front)',
           'turn 2: click image(812,544) → screen(1624,1088) ok',
         ],
       }).content,
     );
     expect(text).toContain('## Actions already performed for this step');
     expect(text).toContain(
-      '- turn 1: focus_window "statement.pdf" → ok (window found and brought to the front)',
+      '- turn 1: focus_window "statement.pdf" → ok (already in front)',
     );
     expect(text).toContain('- turn 2: click image(812,544) → screen(1624,1088) ok');
     expect(text).toContain(

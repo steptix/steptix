@@ -71,8 +71,11 @@ rather than accessibility-tree-first (§12 records the tree as deferred).
   window titles only in v1.
 - **No code-behind for computer steps.** Recorded coordinates are specific to
   one machine's resolution, scaling and window layout; §9 excludes them.
-- **No multi-monitor.** nut.js grabs the primary display; the test must keep
-  what it drives on that screen.
+- **No multi-monitor capture.** nut.js grabs and clicks the primary display
+  only (libnut rejects a point past its edge). What a test drives must be on
+  that screen — but `focus_window` now puts it there: a window wholly or
+  mostly on another monitor is moved onto the main display (§5.4). A window
+  with a usable part already on the main display is left where it is.
 - **No Wayland.** libnut is X11 on Linux.
 - **Not a way to run two computer-mode tests at once** on one machine (§5.9).
 
@@ -275,7 +278,7 @@ pixel space (§5.2, §5.3). Every action carries `description` as today.
 | `key` | `key` | a key or chord: `enter`, `escape`, `tab`, `ctrl+s`, `alt+f4`, `win+r`, `cmd+shift+g`, `f5`. Names are xdotool-style, lower-case, `+`-joined; the adapter maps them to nut.js `Key`s and refuses an unknown name with the list |
 | `wait` | `seconds` (≤ 10) | sleep |
 | `zoom` | `region` | §5.3 |
-| `focus_window` | `title` | bring the first window whose title contains `title` (case-insensitive) to the front; fails if none |
+| `focus_window` | `title` | bring the first window whose title contains `title` (case-insensitive) to the front, un-minimised and on the main display, and VERIFY it is the OS's active window (`src/desktop/bring-to-front.ts`). Focus; if less than 100 px of it is visible across or down, restore it if it reads 0×0, move it to (40, 40), and if it then runs off the right or bottom edge resize it to the display less 80 px each way. Not in front → focus again → minimise + restore via the per-OS helper (§5.8). Fails if no title matches, and fails with the front window's title if the OS will not put it in front, so the model can click it instead. Never sends a keystroke |
 | `wait_window` | `title`, `state` (`open` / `gone`), `timeoutMs?` (default 15000) | poll the window list until a matching window exists / no longer does |
 | `read` | `as`, `value` | the model transcribes what it sees into variable `as` |
 | `assert` | `condition`, `holds` (boolean), `evidence` | the model's own judgment of the screen; `holds: false` fails the step with `evidence` as the actual |
@@ -346,10 +349,28 @@ carries the step, the variable map, and the image.
 `doubleClick`; `drag` → `mouse.drag([from, to])`; `type` →
 `keyboard.type(text)`; `key` → `pressKey(...keys)` then `releaseKey(...)`
 in reverse; `scroll` → `mouse.setPosition` then `scrollDown/Up/Left/Right`.
-Window operations use `getWindows()` and `Window.getTitle()` /
-`Window.focus()`. All behind `src/desktop/adapter.ts`, an interface with a
-nut.js implementation (`nut-adapter.ts`) and a fake for tests; nothing else
-imports nut.js.
+Window operations use `getWindows()`, `getActiveWindow()` and
+`Window.getTitle()` / `getRegion()` / `focus()` / `move()` / `resize()`.
+Two facts shape them (measured, §14):
+
+- **libnut has no minimise or restore.** `Window.minimize()` and `restore()`
+  throw "Method not implemented in libnut.", so they are never called. The
+  adapter's `minimiseWindow` / `restoreWindow` use a per-OS helper outside
+  it, spawned through `execFile` with a 5 s timeout and no console window: on
+  Windows, PowerShell calling user32 `ShowWindow(hwnd, 6 | 9)` with the HWND
+  nut.js keeps as `windowHandle`; on macOS, `osascript` through System Events
+  (by title); on Linux, `xdotool windowminimize | windowactivate`. A missing
+  tool is a clear error naming it. Only the Windows helper has been measured.
+- **`getRegion()` is clipped to the main display on every side.** A window's
+  true size and off-screen position cannot be read back — only how much of it
+  is visible. A window wholly on another monitor reads 0 wide (or high), a
+  minimised one reads (0,0 0×0). The `focus_window` policy is written against
+  that, and the fake adapter clips identically.
+
+All behind `src/desktop/adapter.ts`, an interface with a nut.js
+implementation (`nut-adapter.ts`) and a fake for tests; nothing else imports
+nut.js. The adapter is mechanism only; the policy that strings the window
+primitives together is `bring-to-front.ts`.
 
 ### 5.9 The lock
 
@@ -657,3 +678,35 @@ five-minute step. Worth a tighter per-step budget in a later version.
 server started outside this tooling; from inside it, `[use computer]` failed
 at the capture probe with the message §5.1 specifies, which is the intended
 behaviour.
+
+### focus_window: measured Win32 behaviour (2026-09-23)
+
+Measured on the same box with a throwaway WinForms window, from processes
+spawned by the tool runner (which cannot capture the screen, but whose window
+calls work). These are what `src/desktop/bring-to-front.ts` is built on:
+
+1. **libnut cannot minimise or restore.** `Window.minimize()` / `restore()`
+   throw "Method not implemented in libnut."; the native module exports only
+   getWindows, getActiveWindow, getWindowRect, getWindowTitle, focusWindow,
+   resizeWindow and moveWindow.
+2. **nut.js `focus()` restores a minimised window** (4 of 4), but **does not
+   always activate it**: once it came back while another app stayed in front.
+   A normal window behind the foreground app came to the front 3 of 3 times.
+   So focus is the first move, and it is always verified.
+3. **user32 `ShowWindow(hwnd, SW_RESTORE)` from a separate PowerShell process
+   restored a minimised window and activated it.** nut.js's `windowHandle` is
+   the HWND as a number. It costs ~0.5–1 s a spawn, so it is the fallback.
+4. **`getRegion()` is clipped to the main display on every side**: minimised
+   reads (0,0 0×0); moved to 3000,200 reads (3000,200 440×1240); to 3400,200,
+   (3400,200 40×1240); to -300,200, (0,200 2234×1240); to -2000,200,
+   (0,200 534×1240); to 300,1300, (300,1300 2534×140); to 300,-200,
+   (300,0 2534×1199); resized to 5000×2000 at 300,200, (300,200 3140×1240);
+   maximised, (0,0 2527×1399); a normal 640×400 at 300,200 reads exactly
+   that. Hence the "less than 100 px visible" rule, and the fake adapter's
+   `clipToDisplay`, which reproduces every row.
+5. `move()` and `resize()` work, including moving a window back from
+   off-screen.
+
+Foreground rules may differ for a server a user starts from their own
+terminal, since these processes descend from the foreground app; the
+verify-and-fall-back chain is there so the result holds either way.

@@ -16,9 +16,28 @@ export type {
   Point,
   ScreenGrab,
   ScrollDirection,
+  WindowHandle,
   WindowInfo,
+  WindowRef,
   WindowRegion,
+  WindowSize,
 } from './adapter.js';
+
+export { titleContains } from './adapter.js';
+
+export {
+  DEFAULT_BRING_TO_FRONT_SETTLE_MS,
+  FIT_MARGIN_PX,
+  MIN_VISIBLE_PX,
+  SAFE_ORIGIN,
+  bringWindowToFront,
+  describeBringToFront,
+  isEmptyRegion,
+  isOffMainDisplay,
+  touchesRightOrBottom,
+  type BringToFrontOptions,
+  type BringToFrontResult,
+} from './bring-to-front.js';
 
 export {
   DEFAULT_MAX_IMAGE_WIDTH,
