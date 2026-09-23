@@ -1324,3 +1324,255 @@ describe('an undispatched [tool:] / [skill:] line fails on the computer surface 
     expect(executeComputerStepMock).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// §5.9 — a run that pauses for a person gives the lock back
+//
+// The user's decision: a run waiting for a person must not hold the
+// machine-wide mouse lock. Every pause inside a batch releases immediately
+// before it announces itself, and nothing is taken back on resume except by
+// the step boundary, at the next step that reads or drives the screen.
+// ---------------------------------------------------------------------------
+
+describe('a pause inside a batch gives the lock back (§5.9)', () => {
+  /** Every model call the session could make, on the mocked client. */
+  function modelCalls(manager: SessionManager, id: string): number {
+    const ai = managed(manager, id).aiClient;
+    return ai.complete.mock.calls.length + ai.chat.mock.calls.length;
+  }
+
+  /** The lock as a paused run left it, read when the pause was announced. */
+  interface PauseSnapshot {
+    event: RunEvent['type'];
+    line: number;
+    lockFile: boolean;
+    holder: string | undefined;
+    held: boolean | undefined;
+  }
+
+  /**
+   * An event listener that records the lock at every pause announcement and
+   * then resumes the run. The resume goes out on the next turn of the event
+   * loop, because the run parks on its promise only after the event has been
+   * emitted. `beforeResume` runs in between — another session taking the
+   * lock while this one waits.
+   */
+  function resumeEveryPause(
+    manager: SessionManager,
+    sessionId: string,
+    snapshots: PauseSnapshot[],
+    opts: { mode?: 'continue' | 'into'; beforeResume?: () => void } = {},
+  ): (e: RunEvent) => void {
+    return (e) => {
+      if (
+        e.type !== 'step:awaiting' &&
+        e.type !== 'tool:awaiting-debugger' &&
+        e.type !== 'codebehind:awaiting-debugger'
+      ) {
+        return;
+      }
+      snapshots.push({
+        event: e.type,
+        line: e.line,
+        lockFile: existsSync(lockPath),
+        holder: readComputerLock({ lockPath })?.sessionId,
+        held: managed(manager, sessionId).computerLockHeld,
+      });
+      setImmediate(() => {
+        opts.beforeResume?.();
+        if (e.type === 'step:awaiting') manager.submitRunControl(sessionId, opts.mode ?? 'continue');
+        else manager.submitDebuggerAck(sessionId);
+      });
+    };
+  }
+
+  /**
+   * A batch whose third step calls a section, with a breakpoint on a body
+   * line. A section body lives in the test file but only exists after
+   * expansion, so the client cannot trim at it and the SERVER pauses there —
+   * the same server-side pause a skill-file breakpoint takes.
+   *
+   *     3. <main[0]>        10. Click Save    <- breakpoint
+   *     4. <main[1]>        11. Click Close
+   *     5. Save it
+   */
+  function sectionBatch(
+    testFilePath: string,
+    main: string[] = ['[use computer]', 'Click A', 'Save it'],
+  ): Parameters<SessionManager['executeSteps']>[1] {
+    return {
+      steps: main,
+      sourceLines: main.map((_, i) => i + 3),
+      testFilePath,
+      sections: {
+        'save it': {
+          name: 'Save it',
+          headingLine: 9,
+          steps: ['Click Save', 'Click Close'],
+          stepLines: [10, 11],
+        },
+      },
+      breakpointsByUri: { [testFilePath]: [10] },
+    };
+  }
+
+  it('breakpoint: the lock file is absent while the run is parked, and the step it resumes on takes it back and passes', async () => {
+    const holders = recordLockHolders();
+    const manager = makeManager();
+    const testFilePath = writeProject({ desktop: { enabled: true } });
+    const snapshots: PauseSnapshot[] = [];
+
+    const response = await manager.executeSteps(
+      's-bp',
+      sectionBatch(testFilePath),
+      resumeEveryPause(manager, 's-bp', snapshots),
+    );
+
+    expect(response.status).toBe('passed');
+    // Parked at line 10 with nothing held — `Click A` had held it a step ago.
+    expect(snapshots).toEqual([
+      { event: 'step:awaiting', line: 10, lockFile: false, holder: undefined, held: false },
+    ]);
+    // Held for every computer step: before the pause, the resumed step, and
+    // the one after it.
+    expect(holders).toEqual(['s-bp', 's-bp', 's-bp']);
+    expect(executeComputerStepMock.mock.calls.map((call) => call[2])).toEqual([
+      'Click A',
+      'Click Save',
+      'Click Close',
+    ]);
+    // Still on the surface, same adapter — the pause touched only the lock.
+    expect(managed(manager, 's-bp').surface).toBe('computer');
+    expect(loadDesktopAdapter).toHaveBeenCalledTimes(1);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('breakpoint: another session takes the lock during the pause, and the resumed step fails with §5.9 naming it, asking nothing of the model', async () => {
+    const manager = makeManager();
+    const testFilePath = writeProject({ desktop: { enabled: true } });
+    const snapshots: PauseSnapshot[] = [];
+    const events: RunEvent[] = [];
+    const pauses = resumeEveryPause(manager, 's-bp-stolen', snapshots, {
+      beforeResume: () => acquireComputerLock('s-other', { lockPath }),
+    });
+
+    const response = await manager.executeSteps('s-bp-stolen', sectionBatch(testFilePath), (e) => {
+      events.push(e);
+      pauses(e);
+    });
+
+    const message = computerLockInUseMessage({ pid: process.pid, sessionId: 's-other', since: '' });
+    expect(snapshots).toHaveLength(1);
+    expect(response.status).toBe('failed');
+    expect(response.error!.message).toBe(message);
+    const fail = events.find((e) => e.type === 'step:fail') as Extract<RunEvent, { type: 'step:fail' }>;
+    expect(fail.line).toBe(10);
+    expect(fail.error).toBe(message);
+    expect(fail.surface).toBe('computer');
+    // `Click A` ran before the pause; nothing ran after it — not the refused
+    // step, and not the one behind it.
+    expect(executeComputerStepMock.mock.calls.map((call) => call[2])).toEqual(['Click A']);
+    expect(modelCalls(manager, 's-bp-stolen')).toBe(0);
+    // The other session's lock is still its own.
+    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-other');
+    expect(managed(manager, 's-bp-stolen').surface).toBe('computer');
+  });
+
+  it('breakpoint off the computer surface: paused with no lock held, nothing is touched and nothing throws', async () => {
+    // Another session holds the lock the whole time; a page-surface pause must
+    // not so much as read it.
+    acquireComputerLock('s-other', { lockPath });
+    const manager = makeManager();
+    const testFilePath = writeProject({ desktop: { enabled: true } });
+    const snapshots: PauseSnapshot[] = [];
+
+    const response = await manager.executeSteps(
+      's-bp-page',
+      sectionBatch(testFilePath, ['Open the shop', 'Click A', 'Save it']),
+      resumeEveryPause(manager, 's-bp-page', snapshots),
+    );
+
+    expect(response.status).toBe('passed');
+    expect(snapshots).toEqual([
+      { event: 'step:awaiting', line: 10, lockFile: true, holder: 's-other', held: undefined },
+    ]);
+    expect(executeStepMock.mock.calls.map((call) => call[2])).toEqual([
+      'Open the shop',
+      'Click A',
+      'Click Save',
+      'Click Close',
+    ]);
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(readComputerLock({ lockPath })!.sessionId).toBe('s-other');
+  });
+
+  it('step mode: each after-step pause releases, a `Set` between takes nothing, and the next computer step takes it back', async () => {
+    const holders = recordLockHolders();
+    const manager = makeManager();
+    const snapshots: PauseSnapshot[] = [];
+
+    const response = await manager.executeSteps(
+      's-step',
+      {
+        steps: ['[use computer]', 'Click A', 'Set {{file}} to "a.pdf"', 'Click B'],
+        stepMode: 'into',
+      },
+      resumeEveryPause(manager, 's-step', snapshots, { mode: 'into' }),
+    );
+
+    expect(response.status).toBe('passed');
+    // Paused before the `Set` (after `Click A`, which held the lock) and
+    // before `Click B` (after the `Set`, which took none): free both times.
+    expect(snapshots.map(({ lockFile, held }) => ({ lockFile, held }))).toEqual([
+      { lockFile: false, held: false },
+      { lockFile: false, held: false },
+    ]);
+    expect(holders).toEqual(['s-step', 's-step']);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  describe('the tool debugger', () => {
+    let toolsDir: string;
+    beforeEach(() => {
+      toolsDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-tool-debugger-'));
+      // A tool that REGISTERS — `defineTool`, by absolute path — because this
+      // one has to run, not merely sit in the catalogue.
+      const toolsIndex = path.resolve(__dirname, '..', 'src', 'tools', 'index.ts').replace(/\\/g, '/');
+      writeFileSync(
+        path.join(toolsDir, 'echo.ts'),
+        `import { defineTool } from '${toolsIndex}';\n` +
+          "export default defineTool({ name: 'echo', description: 'echo', parameters: {}, outputs: {}, async run() {} });\n",
+      );
+    });
+    afterEach(() => {
+      rmSync(toolsDir, { recursive: true, force: true });
+    });
+
+    it('waiting for the debugger to attach releases, and the computer step after the tool takes it back', async () => {
+      const holders: Array<string | undefined> = [];
+      const manager = makeManager();
+      executeComputerStepMock.mockImplementation(async (index, n, instruction) => {
+        holders.push(readComputerLock({ lockPath })?.sessionId);
+        // F11 onto the next line, delivered while this step runs — the
+        // one-shot flag is read at the top of the NEXT iteration.
+        if (instruction === 'Click A') manager.setPauseAtNextTool('s-tool', true);
+        return passComputerStep(index, n, instruction);
+      });
+      const snapshots: PauseSnapshot[] = [];
+
+      const response = await manager.executeSteps(
+        's-tool',
+        { steps: ['[use computer]', 'Click A', '[tool: echo]', 'Click B'], toolsDir },
+        resumeEveryPause(manager, 's-tool', snapshots),
+      );
+
+      expect(response.error?.message).toBeUndefined();
+      expect(response.status).toBe('passed');
+      expect(snapshots).toEqual([
+        { event: 'tool:awaiting-debugger', line: 3, lockFile: false, holder: undefined, held: false },
+      ]);
+      expect(holders).toEqual(['s-tool', 's-tool']);
+      expect(existsSync(lockPath)).toBe(false);
+    });
+  });
+});

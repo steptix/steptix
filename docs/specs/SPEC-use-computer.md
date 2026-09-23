@@ -152,11 +152,12 @@ runner-core mirror (§10.3).
   error. Sections and skills will open with `[use computer]` defensively.
   The one thing a re-entry still does is take the lock (§5.9) when the
   session does not hold it, which is the normal case at the start of a
-  later run.
-- **The surface outlives a run; the lock does not.** A session that ends a
-  run on the computer surface is still on it, adapter loaded, when its next
-  run starts. The lock was released when the last run ended, and is taken
-  again at the next step that reads or drives the screen (§5.9).
+  later run or after a pause.
+- **The surface outlives a run, and a pause; the lock does not.** A session
+  that ends a run on the computer surface is still on it, adapter loaded,
+  when its next run starts. The lock was released when the last run ended,
+  or when the run paused for a person, and is taken again at the next step
+  that reads or drives the screen (§5.9).
 - **A skill call restores the caller's surface on return**, whatever the
   skill's body did. An **inline section does not** — it is inline by
   definition, and a section that switches is the way an author writes a
@@ -429,30 +430,46 @@ One computer-mode session per machine: two would fight over the mouse. A
 lock file at `path.join(os.tmpdir(), 'aiui-computer.lock')` holding
 `{ pid, sessionId, since }`.
 
-**The lock is held only while a run is executing, never across the idle
-time between runs.** A run is one Sessions API batch on the server and one
-`runTest` in the CLI, and a data row is one of each.
+**The lock is held only while a run is executing and not waiting for a
+person: never across the idle time between runs, and never across a pause.**
+A run is one Sessions API batch on the server and one `runTest` in the CLI,
+and a data row is one of each.
 
 - **Taken** on `[use computer]` (§5.1 item 3), and taken again lazily at
-  the step boundary, before the first step of a later run that reads or
-  drives the screen, when the session does not hold it. That is the same
-  spot and pattern as the lazy browser launch (§4.6). It covers a
-  computer-mode step (an `If … then return` claim included), a §5.6
-  condition judge (an `If` chain, or a `While` / `Repeat … until` check),
-  and a `[use computer]` re-entry. A `Set`, a `[tool: …]` line, a whole-step
-  `Return` / `Stop` / `Fail the test …`, a raw `[skill: …]` or refused
-  bracket, and a guard visit that decides no condition (a `For each` reading
-  its list or revisiting, a `Repeat`'s first pass) touch no screen and take
-  nothing. A condition decided from its own values (literal-decision) still
-  takes it, because telling the two apart at the boundary would be a second
-  copy of that rule.
+  the step boundary, before the next step that reads or drives the screen,
+  when the session does not hold it — the first such step of a later run, or
+  the first after a pause. That is the same spot and pattern as the lazy
+  browser launch (§4.6), in both loops. It covers a computer-mode step (an
+  `If … then return` claim included), a §5.6 condition judge (an `If`
+  chain, or a `While` / `Repeat … until` check), and a `[use computer]`
+  re-entry. A `Set`, a `[tool: …]` line, a whole-step `Return` / `Stop` /
+  `Fail the test …`, an `[input: …]` or `[interactive]` step, a raw
+  `[skill: …]` or refused bracket, and a guard visit that decides no
+  condition (a `For each` reading its list or revisiting, a `Repeat`'s first
+  pass) touch no screen and take nothing. A condition decided from its own
+  values (literal-decision) still takes it, because telling the two apart at
+  the boundary would be a second copy of that rule.
 - **Released** at the end of every run, whatever ends it: a pass, a failed
   step, a stop, a batch the client cut at a breakpoint, a thrown error. On
   the server this is the step loop's `finally`, and it releases only the
   lock: `surface` stays `computer` and the adapter stays loaded. Also
   released on `[use browser]` and on session close, both a no-op when the
-  session does not hold it. A pause that parks inside a batch (step mode, a
-  skill-file breakpoint) keeps the lock, because the run is still executing.
+  session does not hold it.
+- **Released whenever a run pauses for a person**, immediately before the
+  wait begins, and again only the lock. On the server: a skill-file or
+  section-body breakpoint, a step-mode (F10/F11) pause, and a tool or
+  code-behind debugger attach — released before the `step:awaiting` /
+  `*:awaiting-debugger` event, so a client that sees the pause sees the lock
+  free. In the CLI: an `[input: …]` prompt, an `[interactive]` REPL, and the
+  failure REPL. (The AI clarification prompt is not on the list because it
+  never pauses a computer-mode step: a `prompt` action there fails the step
+  with its question, and on the page surface no lock is held.) Nothing is
+  taken back on resume; the step boundary does that, and a step whose lock
+  another session took during the pause fails with the "in use" message
+  below, asking nothing of the model. The reason
+  is the user's decision: a run waiting for a person must not hold the
+  machine-wide mouse lock for as long as that person takes. The cost is that
+  a user single-stepping a desktop test can lose the lock between two steps.
 - The session tracks whether it holds the lock rather than reading the file
   at every step. Release deletes the file only when both the pid and the
   session match, so a session never releases another session's lock.
@@ -670,10 +687,10 @@ and measured on.
 4. Page actions in computer mode are refused with a message; unknown action
    types are refused, not run as no-ops.
 5. The lock refuses a second live holder and takes over a dead one. It is
-   released at the end of every run, whatever ends it, while the session
-   stays on the computer surface. The session's next computer step takes it
-   again, or fails with §5.9's message if another session took it in
-   between.
+   released at the end of every run, whatever ends it, and whenever a run
+   pauses for a person, while the session stays on the computer surface.
+   The session's next computer step takes it again, or fails with §5.9's
+   message if another session took it in between.
 6. Skill calls restore the caller's surface; sections do not; session close
    resets.
 7. `desktop.enabled: false` refuses `[use computer]` with the §5.1 message.

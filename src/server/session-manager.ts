@@ -56,6 +56,7 @@ import {
   modeMarkerText,
   modeStepResult,
   releaseComputerLockAtRunEnd,
+  releaseComputerLockForPause,
   skillFrameChain,
   stepReadsScreen,
   undispatchedDirectiveError,
@@ -1301,18 +1302,23 @@ interface ManagedSession {
    * Whether this session holds the machine-wide computer lock right now
    * (SPEC-use-computer.md §5.9; `SurfaceState.lockHeld`).
    *
-   * Held only while a run executes. Released at the end of every batch —
-   * whatever ended it — in the step loop's `finally`, and taken again at the
-   * step boundary before the next step that reads or drives the screen. A
-   * session idling on the computer surface between batches (an MCP session
-   * waiting for its next call, a TestBench run stopped at a test-file
-   * breakpoint, which the client implements by ending the batch there) holds
-   * nothing, so it cannot refuse another session's computer-mode run.
+   * Held only while a run executes and is not waiting for a person. Released
+   * at the end of every batch — whatever ended it — in the step loop's
+   * `finally`, and taken again at the step boundary before the next step that
+   * reads or drives the screen. A session idling on the computer surface
+   * between batches (an MCP session waiting for its next call, a TestBench run
+   * stopped at a test-file breakpoint, which the client implements by ending
+   * the batch there) holds nothing, so it cannot refuse another session's
+   * computer-mode run.
    *
-   * A pause that parks INSIDE a batch — step mode, a skill-file breakpoint —
-   * keeps it: the run is still executing (`runsInFlight` counts it), and a
-   * user single-stepping a desktop test must not have the mouse taken between
-   * two steps they are stepping through.
+   * A pause that parks INSIDE a batch — a skill-file or section breakpoint,
+   * step mode, a tool or code-behind debugger attach — releases it too, just
+   * before it announces itself. The run is still in flight (`runsInFlight`
+   * counts it), but a run waiting for a person must not hold the machine-wide
+   * mouse lock for as long as the person takes. The cost is named: a user
+   * single-stepping a desktop test can have the lock taken by another session
+   * between two steps, and the next computer step then fails with §5.9's
+   * message rather than driving a mouse someone else is using.
    */
   computerLockHeld?: boolean | undefined;
   /** Resolved video-recording mode for this session (from the test's project
@@ -4171,12 +4177,24 @@ export class SessionManager {
     const skillSurfaces = new SkillSurfaceStack();
     /** Restore a surface on return from a skill, releasing the lock when the
      *  SKILL took it and the caller had not. A caller already in computer mode
-     *  keeps it: the lock was never released and the adapter is still there. */
+     *  stays there with its adapter; if a pause inside the skill gave the lock
+     *  back, the step boundary takes it again at the caller's next computer
+     *  step. */
     const restoreSurface = (to: 'browser' | 'computer'): void => {
       if (to === 'browser') {
         leaveComputerMode(surfaceStateOf(session), session.id, this.deps.computerLock);
       }
     };
+    /**
+     * The batch is about to wait for a person (SPEC-use-computer.md §5.9):
+     * give the computer lock back first. Called immediately before every
+     * `step:awaiting` / `*:awaiting-debugger` announcement, so by the time a
+     * client sees the pause the lock is free. Nothing is taken back on resume
+     * HERE — the step boundary below does that at the next step that reads or
+     * drives the screen. A no-op when the lock is not held.
+     */
+    const releaseLockForPause = (why: string): void =>
+      releaseComputerLockForPause(surfaceStateOf(session), session.id, this.deps.computerLock, why);
     /** Steps inside a loop body opt out of the per-step action cache: the
      *  cache rewrites one value per line and a pass is a different value
      *  (stories/control-flow.md, decision 12 — the rows story's reason). */
@@ -5703,6 +5721,9 @@ export class SessionManager {
             frameForStep.kind === 'test' && frameForStep.uri === request.testFilePath;
           if (!clientAlreadyTrimmed && stepUriBps?.has(stepLine)) {
             consumedBreakpoints.add(i);
+            // §5.9: a run parked at a breakpoint holds no mouse lock. The
+            // lock boundary just below takes it back once this step resumes.
+            releaseLockForPause(`breakpoint at line ${stepLine}`);
             emit({
               type: 'step:awaiting',
               line: stepLine,
@@ -5733,20 +5754,22 @@ export class SessionManager {
         // ── THE COMPUTER LOCK (SPEC-use-computer.md §5.9) ─────────────────
         //
         // The lazy twin of the browser launch above. The lock is held only
-        // while a run executes: every batch gives it back in the `finally`
-        // below the loop, and the session — still on the computer surface,
-        // adapter and all — takes it again HERE, at the first step of a later
-        // batch that reads or drives the screen. After the breakpoint check,
-        // so a batch that opens by pausing does not hold the mouse while it
-        // waits; ahead of the guard and every dispatch below, because the
-        // condition judge (§5.6) and `executeComputerStep` are where the
-        // screen is read. `[use computer]` re-entry takes it in
-        // `enterComputerMode`, above.
+        // while a run executes and nobody is being waited for: every batch
+        // gives it back in the `finally` below the loop, every pause for a
+        // person gives it back before it waits (`releaseLockForPause`), and
+        // the session — still on the computer surface, adapter and all — takes
+        // it again HERE, at the next step that reads or drives the screen,
+        // whether that is the first step of a later batch or the step a pause
+        // resumed on. After the breakpoint check, so a step that pauses first
+        // does not hold the mouse while it waits; ahead of the guard and every
+        // dispatch below, because the condition judge (§5.6) and
+        // `executeComputerStep` are where the screen is read. `[use computer]`
+        // re-entry takes it in `enterComputerMode`, above.
         //
         // What counts is `stepReadsScreen` / `guardVisitReadsScreen`: a `Set`,
-        // a `[tool:]` line, a whole-step `Return` / `Stop` / `Fail`, and a
-        // guard visit that decides no condition touch no screen and take
-        // nothing.
+        // a `[tool:]` line, a whole-step `Return` / `Stop` / `Fail`, an
+        // `[input:]` / `[interactive]` line, and a guard visit that decides no
+        // condition touch no screen and take nothing.
         //
         // A refusal is THIS step's failure with §5.9's message, built the way
         // the launch failure is, and nothing is captured or asked of the model
@@ -6247,6 +6270,9 @@ export class SessionManager {
               // for the debugger-attach. Swallow failures — the imminent
               // executeToolStep will surface the real error as a failed step.
               const registered = await toolCatalogue.resolve(toolCall.name).catch(() => undefined);
+              // §5.9: waiting for a debugger to attach is waiting for a
+              // person. The tool itself needs no lock (`stepReadsScreen`).
+              releaseLockForPause(`tool debugger for ${toolCall.name}`);
               emit({
                 type: 'tool:awaiting-debugger',
                 toolName: toolCall.name,
@@ -6403,6 +6429,11 @@ export class SessionManager {
             // not rare: compile writes off every step it could not compile as
             // an `ai: true` entry, so real `.steps.ts` files are full of them.
             if (debugBinding?.entry && debugBinding.entry.ai !== true) {
+              // §5.9, for every wait for a person alike. A no-op today: this is
+              // the page surface's branch, and leaving the computer surface
+              // already released the lock — code-behind never binds a
+              // computer-mode step (§9).
+              releaseLockForPause('code-behind debugger');
               emit({
                 type: 'codebehind:awaiting-debugger',
                 file: debugBinding.file,
@@ -7234,6 +7265,10 @@ export class SessionManager {
             transitionToFrame(nextFrameId);
             const nextFrame = frameInfoFor(nextI);
             const nextLine = sourceLineFor(nextI);
+            // §5.9: a user single-stepping a desktop test holds no mouse lock
+            // between two steps. The next step takes it at the lock boundary
+            // if it reads the screen — and is refused if someone else took it.
+            releaseLockForPause(`step mode, before line ${nextLine}`);
             emit({
               type: 'step:awaiting',
               line: nextLine,
@@ -7315,7 +7350,8 @@ export class SessionManager {
       if (hasControls && overallStatus !== 'aborted') flushSkips('all');
     } finally {
       // The computer lock, first (SPEC-use-computer.md §5.9): the lock is held
-      // only while a run executes, never across the idle time between batches.
+      // only while a run executes, never across the idle time between batches
+      // (nor across a pause inside one — `releaseLockForPause` saw to those).
       // A `finally` so every ending gives it back — a pass, a failed step, a
       // stop, a batch the client cut at a breakpoint, a throw — and FIRST
       // because everything below awaits, and a lock kept through the report

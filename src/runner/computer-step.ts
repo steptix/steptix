@@ -128,10 +128,15 @@ export interface SurfaceState {
    * refused every other computer-mode run on the machine until something
    * closed it.
    *
+   * The same goes for a pause inside a run: a run waiting for a person — a
+   * breakpoint, step mode, a debugger attach, an `[input:]` prompt — gives the
+   * lock back before it waits, and takes it again the same lazy way.
+   *
    * Tracked here rather than read off the file each step, so the per-step
    * gate costs nothing when the session already holds it. Every write goes
    * through {@link enterComputerMode}, {@link ensureComputerLock},
-   * {@link releaseComputerLockAtRunEnd} and {@link leaveComputerMode}.
+   * {@link releaseComputerLockAtRunEnd}, {@link releaseComputerLockForPause}
+   * and {@link leaveComputerMode}.
    */
   lockHeld?: boolean | undefined;
 }
@@ -307,11 +312,12 @@ export function leaveComputerMode(
 
 /**
  * The lazy re-take (§5.9): the lock for a step about to read or drive the
- * screen, when this session does not hold it already.
+ * screen, when this session does not hold it already — because an earlier run
+ * released it on the way out, or because this run released it at a pause.
  *
- * Called at the step boundary by the server's loop, in the same spot and on
- * the same terms as the lazy browser launch (§4.6), and by `[use computer]`
- * re-entry. A refusal is §5.9's message, returned rather than thrown for the
+ * Called at the step boundary by both loops, in the same spot and on the same
+ * terms as the lazy browser launch (§4.6), and by `[use computer]` re-entry.
+ * A refusal is §5.9's message, returned rather than thrown for the
  * reason {@link enterComputerMode} gives: the caller's job with it is to fail
  * one step, before anything is captured or asked of the model.
  *
@@ -359,6 +365,54 @@ export function releaseComputerLockAtRunEnd(
 }
 
 /**
+ * Release the lock because the run is about to wait for a person (§5.9): a
+ * breakpoint, a step-mode pause, a debugger attach, an `[input:]` prompt, an
+ * `[interactive]` or failure REPL. Called immediately BEFORE the wait begins,
+ * at every place either loop parks for someone.
+ *
+ * A run waiting for a person must not hold the machine-wide mouse lock: that
+ * wait can last as long as the person likes, and another session refused the
+ * whole time is exactly what the run-end release exists to prevent.
+ *
+ * Only the lock, as at run end — the surface and the adapter stay. Nothing is
+ * taken back here on resume: the next step that reads or drives the screen
+ * takes it at the step boundary ({@link ensureComputerLock}), and fails with
+ * §5.9's "in use" message if another session took it meanwhile. A step that
+ * touches no screen (`Set`, `[tool:]`) never needed it.
+ *
+ * A no-op when the lock is not held, which is every pause off the computer
+ * surface (`leaveComputerMode` released it on the way out) and every pause the
+ * run reaches before its first computer step.
+ */
+export function releaseComputerLockForPause(
+  state: SurfaceState,
+  lockId: string,
+  lock: ComputerLockOptions | undefined,
+  /** What the run is waiting for, for the log line. */
+  why: string,
+): void {
+  if (!state.lockHeld) return;
+  releaseComputerLock(lockId, lock ?? {});
+  state.lockHeld = false;
+  logger.debug(
+    `[computer] paused (${why}): lock released for session ${lockId}; the next step that ` +
+      'reads or drives the screen takes it again',
+  );
+}
+
+/**
+ * The two steps that wait for a person, as the CLI recognises them
+ * (`INPUT_STEP_PATTERN` / `INTERACTIVE_STEP_PATTERN` in test-runner.ts).
+ *
+ * The CLI's spelling rather than the server's `isSkippableStep`, whose
+ * `[input:` match ignores case: `[INPUT: x]` is prose to the CLI, so the CLI
+ * hands it to `executeComputerStep`, and excluding it here would drive the
+ * mouse unlocked. The narrower match errs the safe way — on the server that
+ * line is skipped, and counting it costs a lock taken one step early.
+ */
+const PERSON_STEP_RES: readonly RegExp[] = [/^\[input:\s*\w+\]/, /^\[interactive\]/i];
+
+/**
  * Does this step read or drive the screen when it runs on the computer
  * surface — and so need the lock (§5.9)?
  *
@@ -375,7 +429,12 @@ export function releaseComputerLockAtRunEnd(
  *    and a raw `[skill: …]` line or a bracket §4.2 refuses, which fail with
  *    §5.4's message before anything is captured;
  *  - a `[use …]` line, which the surface switch owns (`[use computer]`
- *    re-entry takes the lock itself, in {@link enterComputerMode}).
+ *    re-entry takes the lock itself, in {@link enterComputerMode});
+ *  - an `[input: name] …` or `[interactive]` step, which waits for a person
+ *    (the CLI prompts, and its REPL drives the page; the server skips both).
+ *    Counting them would take the lock at the boundary only for the pause to
+ *    give it back a line later ({@link releaseComputerLockForPause}), and would
+ *    fail the prompt with §5.9's message when another session holds it.
  *
  * Everything else is yes, and deliberately so: a prose step goes to
  * `executeComputerStep`, and that includes an `If … then return` claim, whose
@@ -385,6 +444,7 @@ export function releaseComputerLockAtRunEnd(
  */
 export function stepReadsScreen(step: string): boolean {
   if (parseUseStep(step)) return false;
+  if (PERSON_STEP_RES.some((re) => re.test(step))) return false;
   if (parseSetStep(step)) return false;
   const claim = parseFlowControlStep(step);
   if (claim && claim.body === undefined) return false;

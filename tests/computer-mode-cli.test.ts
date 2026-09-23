@@ -118,6 +118,30 @@ vi.mock('../src/report/history-appender.js', () => ({
   appendRunHistory: vi.fn().mockResolvedValue(undefined),
 }));
 
+/** The console an `[input:]` step prompts on: `promptUserForInput` asks
+ *  `readline`, so the question is answered here — and can say what the lock
+ *  looked like while the run waited for it. */
+const questionMock = vi.fn();
+vi.mock('node:readline/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:readline/promises')>();
+  const createInterface = () => ({
+    question: (query: string) => questionMock(query),
+    close: () => {},
+  });
+  return {
+    ...real,
+    createInterface,
+    default: { ...(real as unknown as { default: object }).default, createInterface },
+  };
+});
+
+/** The `[interactive]` and failure REPL, answered without a console. */
+const runInteractiveReplMock = vi.fn();
+vi.mock('../src/runner/interactive-repl.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/runner/interactive-repl.js')>()),
+  runInteractiveRepl: (...args: unknown[]) => runInteractiveReplMock(...args),
+}));
+
 import { runTest, runTests, type RunTestExtras } from '../src/runner/test-runner.js';
 import { FakeDesktopAdapter } from '../src/desktop/fake-adapter.js';
 import {
@@ -207,6 +231,10 @@ beforeEach(() => {
   executeStepMock.mockReset();
   executeComputerStepMock.mockReset();
   resolveHooksMock.mockReset();
+  questionMock.mockReset();
+  questionMock.mockResolvedValue('statement.pdf');
+  runInteractiveReplMock.mockReset();
+  runInteractiveReplMock.mockResolvedValue({ kind: 'continue' });
 
   lockDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-cli-'));
   lockPath = path.join(lockDir, 'aiui-computer.lock');
@@ -376,6 +404,238 @@ describe('the CLI gives the lock back at the end of every runTest (§5.9)', () =
       expect(heldDuringStep).toEqual([lockId, lockId]);
       // No row left the lock behind.
       expect(betweenRows).toEqual([false, false, false]);
+    } finally {
+      rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §5.9 — a pause for a person gives the lock back, and the step boundary
+// takes it again. Within one `runTest` the computer surface no longer implies
+// the lock, which is why the CLI loop now has the server's boundary re-take.
+// ---------------------------------------------------------------------------
+
+describe('a CLI pause for a person gives the lock back (§5.9)', () => {
+  const LOCK_ID = 'cli:/tmp/computer-mode-test.md';
+  const OTHER_IN_USE = computerLockInUseMessage({
+    pid: process.pid,
+    sessionId: 'mcp:another-session',
+    since: '',
+  });
+
+  /** Who held the lock each time a computer step ran. */
+  function recordHolders(): Array<string | undefined> {
+    const holders: Array<string | undefined> = [];
+    executeComputerStepMock.mockImplementation(async (_i: number, _n: number, instruction: string) => {
+      holders.push(readComputerLock({ lockPath })?.sessionId);
+      return passingResult(instruction, 'computer');
+    });
+    return holders;
+  }
+
+  it('[input:]: the prompt waits with the lock free, and the next computer step takes it back', async () => {
+    const holders = recordHolders();
+    const whilePrompting: boolean[] = [];
+    questionMock.mockImplementation(async () => {
+      whilePrompting.push(existsSync(lockPath));
+      return 'statement.pdf';
+    });
+
+    const report = await runTest(
+      makeInstance([
+        '[use computer]',
+        'Click the File name box',
+        '[input: file_name] Which file?',
+        'Type {{file_name}} into the box',
+      ]),
+      makeConfig(),
+      '',
+      undefined,
+      extras(),
+    );
+
+    expect(report.status).toBe('passed');
+    expect(whilePrompting).toEqual([false]);
+    // Held before the prompt, and again after it — by the boundary, since
+    // nothing else in the loop would take it back.
+    expect(holders).toEqual([LOCK_ID, LOCK_ID]);
+    expect(executeComputerStepMock.mock.calls[1]![2]).toBe('Type statement.pdf into the box');
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('[input:]: another session takes the lock during the prompt, and the next computer step fails with §5.9 without running', async () => {
+    const holders = recordHolders();
+    questionMock.mockImplementation(async () => {
+      acquireComputerLock('mcp:another-session', { lockPath });
+      return 'statement.pdf';
+    });
+
+    const report = await runTest(
+      makeInstance([
+        '[use computer]',
+        'Click the File name box',
+        '[input: file_name] Which file?',
+        'Type {{file_name}} into the box',
+        'Click Save',
+      ]),
+      makeConfig(),
+      '',
+      undefined,
+      extras(),
+    );
+
+    expect(report.status).toBe('failed');
+    expect(report.steps[3]!.status).toBe('failed');
+    expect(report.steps[3]!.error).toBe(OTHER_IN_USE);
+    expect(report.steps[3]!.surface).toBe('computer');
+    expect(report.steps[3]!.turns).toHaveLength(0);
+    // Only the step before the prompt ran on the screen.
+    expect(holders).toEqual([LOCK_ID]);
+    expect(report.steps).toHaveLength(4);
+    expect(readComputerLock({ lockPath })!.sessionId).toBe('mcp:another-session');
+  });
+
+  it('[input:] takes no lock of its own: a second prompt still asks while another session holds it', async () => {
+    recordHolders();
+    let asked = 0;
+    questionMock.mockImplementation(async () => {
+      asked++;
+      if (asked === 1) acquireComputerLock('mcp:another-session', { lockPath });
+      return 'statement.pdf';
+    });
+
+    const report = await runTest(
+      makeInstance([
+        '[use computer]',
+        'Click the File name box',
+        '[input: first] First?',
+        '[input: second] Second?',
+        'Set {{file}} to "{{first}}"',
+        'Click Save',
+      ]),
+      makeConfig(),
+      '',
+      undefined,
+      extras(),
+    );
+
+    // Both prompts asked and the `Set` ran; only the computer step was refused.
+    expect(asked).toBe(2);
+    expect(report.steps.map((s) => s.status)).toEqual([
+      'passed',
+      'passed',
+      'passed',
+      'passed',
+      'passed',
+      'failed',
+    ]);
+    expect(report.steps[5]!.error).toBe(OTHER_IN_USE);
+  });
+
+  it('[interactive]: the REPL waits with the lock free, and the next computer step takes it back', async () => {
+    const holders = recordHolders();
+    const whileInRepl: boolean[] = [];
+    runInteractiveReplMock.mockImplementation(async () => {
+      whileInRepl.push(existsSync(lockPath));
+      return { kind: 'continue' };
+    });
+
+    // A page step first: the REPL is handed the run's page, so this run has
+    // one to hand it.
+    const report = await runTest(
+      makeInstance(['Open the page', '[use computer]', 'Click Save', '[interactive]', 'Click Close']),
+      makeConfig(),
+      '',
+      undefined,
+      extras(),
+    );
+
+    expect(report.status).toBe('passed');
+    expect(runInteractiveReplMock).toHaveBeenCalledTimes(1);
+    expect(whileInRepl).toEqual([false]);
+    expect(holders).toEqual([LOCK_ID, LOCK_ID]);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('the failure REPL waits with the lock free, and a `continue` takes it back at the next computer step', async () => {
+    const holders: Array<string | undefined> = [];
+    executeComputerStepMock.mockImplementation(async (_i: number, _n: number, instruction: string) => {
+      holders.push(readComputerLock({ lockPath })?.sessionId);
+      return instruction === 'Click Save'
+        ? { ...passingResult(instruction, 'computer'), status: 'failed', error: 'no Save button' }
+        : passingResult(instruction, 'computer');
+    });
+    const whileInRepl: boolean[] = [];
+    runInteractiveReplMock.mockImplementation(async () => {
+      whileInRepl.push(existsSync(lockPath));
+      return { kind: 'continue' };
+    });
+    // The failure REPL opens only for a headed run on a TTY.
+    const config = makeConfig();
+    config.browser = { ...config.browser, headed: true };
+    config.execution = { ...config.execution, interactiveOnFailure: true };
+    const isTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+    try {
+      await runTest(
+        makeInstance(['Open the page', '[use computer]', 'Click Save', 'Click Close']),
+        config,
+        '',
+        undefined,
+        extras(),
+      );
+    } finally {
+      if (isTTY) Object.defineProperty(process.stdout, 'isTTY', isTTY);
+      else delete (process.stdout as { isTTY?: boolean }).isTTY;
+    }
+
+    expect(runInteractiveReplMock).toHaveBeenCalledTimes(1);
+    expect(runInteractiveReplMock.mock.calls[0]![0]).toMatchObject({ entryReason: 'failure' });
+    expect(whileInRepl).toEqual([false]);
+    expect(holders).toEqual([LOCK_ID, LOCK_ID]);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('data rows: a pause inside each row releases, the row takes the lock back, and every row still gives it back at its end', async () => {
+    const outputDir = mkdtempSync(path.join(os.tmpdir(), 'aiui-computer-cli-rows-pause-'));
+    try {
+      const config = makeConfig();
+      config.reports = {
+        ...config.reports,
+        outputDir,
+        appendRunHistoryToTestFile: false,
+        openInBrowserAfterRun: false,
+      };
+      config.tests = { ...config.tests, contextDir: path.join(outputDir, 'no-context') };
+      const filePath = path.join(outputDir, 'rows.md');
+      const test = parseTestContent(
+        '# Rows\n\n## Steps\n| file |\n|------|\n| a.pdf |\n| b.pdf |\n\n' +
+          '1. [use computer]\n2. Click the File name box\n3. [input: note] Anything to add?\n' +
+          '4. Type {{file}} into the File name box\n',
+        filePath,
+      );
+      const lockId = `cli:${filePath}`;
+      const holders = recordHolders();
+      const whilePrompting: boolean[] = [];
+      questionMock.mockImplementation(async () => {
+        whilePrompting.push(existsSync(lockPath));
+        return 'nothing';
+      });
+
+      const betweenRows: boolean[] = [];
+      const summary = await runTests([test], config, {
+        runTestFn: (async (...args: Parameters<typeof runTest>) => {
+          const report = await runTest(args[0], args[1], args[2], args[3], extras());
+          betweenRows.push(existsSync(lockPath));
+          return report;
+        }) as typeof runTest,
+      });
+
+      expect(summary.reports[0]!.rows!.map((r) => r.status)).toEqual(['passed', 'passed']);
+      expect(whilePrompting).toEqual([false, false]);
+      expect(holders).toEqual([lockId, lockId, lockId, lockId]);
+      expect(betweenRows).toEqual([false, false]);
     } finally {
       rmSync(outputDir, { recursive: true, force: true });
     }

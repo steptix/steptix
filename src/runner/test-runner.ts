@@ -26,11 +26,15 @@ import {
   defaultLoadDesktopAdapter,
   defaultProbeComputerCapture,
   enterComputerMode,
+  ensureComputerLock,
   executeComputerStep,
+  guardVisitReadsScreen,
   leaveComputerMode,
   modeStepResult,
   releaseComputerLockAtRunEnd,
+  releaseComputerLockForPause,
   skillFrameChain,
+  stepReadsScreen,
   undispatchedDirectiveError,
   undispatchedDirectiveResult,
   type SurfaceState,
@@ -638,10 +642,18 @@ export async function runTest(
    *  skill took it and the caller had not. */
   const restoreSurface = (to: 'browser' | 'computer'): void => {
     if (to === 'browser') leaveComputerMode(surfaceState, computerLockId, extras.computerLock);
-    // A caller that WAS in computer mode still is: the lock was never
-    // released, and the adapter is still on the state. There is nothing to do
-    // but say so, which `leaveComputerMode`'s counterpart would only repeat.
+    // A caller that WAS in computer mode still is, adapter and all. Whether it
+    // holds the lock is the step boundary's question, not this one's: a pause
+    // inside the skill may have given it back, and the caller's next computer
+    // step takes it again there.
   };
+  /**
+   * The run is about to wait for a person (§5.9): give the lock back first. A
+   * no-op off the computer surface, or before the run's first computer step.
+   * The step boundary in the loop below takes it back.
+   */
+  const releaseLockForPause = (why: string): void =>
+    releaseComputerLockForPause(surfaceState, computerLockId, extras.computerLock, why);
   /**
    * The initial browser, once it exists. `undefined` before the first
    * browser-surface step — the teardown below reads it and must tolerate a run
@@ -1370,6 +1382,53 @@ export async function runTest(
         }
       }
 
+      // ── THE COMPUTER LOCK (SPEC-use-computer.md §5.9) ───────────────────
+      //
+      // The server's step-boundary re-take, in the same place relative to the
+      // launch gate and the guard, through the same helpers. Within one
+      // `runTest`, being on the computer surface no longer implies holding the
+      // lock: every pause for a person — an `[input:]` prompt, an
+      // `[interactive]` or failure REPL — gives it back before it waits, and
+      // this is where the run takes it again, at the next step that reads or
+      // drives the screen. Ahead of the guard because the condition judge
+      // (§5.6) captures the screen; `stepReadsScreen` / `guardVisitReadsScreen`
+      // decide, so a `Set`, a `[tool:]` line or another prompt takes nothing.
+      //
+      // A refusal is THIS step's failure with §5.9's message, and nothing is
+      // captured or asked of the model for it — the launch failure's shape.
+      if (
+        surfaceState.surface === 'computer' &&
+        !surfaceState.lockHeld &&
+        (hasControls && controls[i]
+          ? guardVisitReadsScreen(controls, i, controlState)
+          : stepReadsScreen(test.steps[i] ?? ''))
+      ) {
+        const taken = ensureComputerLock(surfaceState, computerLockId, extras.computerLock);
+        if (!taken.ok) {
+          const error = taken.error;
+          logger.error(`Step ${i + 1} FAILED: ${error}`);
+          if (hasControls) flushSkips(i);
+          stepResults.push(
+            tagOrigin(
+              {
+                index: i + 1,
+                instruction: test.steps[i] ?? '',
+                status: 'failed',
+                surface: 'computer',
+                turns: [],
+                durationMs: 0,
+                retried: false,
+                error,
+                aiExplanation: error,
+              },
+              i,
+            ),
+          );
+          bail = true;
+          break;
+        }
+      }
+
       // ── Control flow: a guard decides, and the planner says what follows ──
       //
       // Before the hooks, deliberately: a guard is not a page step. It never
@@ -1918,6 +1977,8 @@ export async function runTest(
         }
       } else if (inputStep) {
         const stepStartTime = Date.now();
+        // §5.9: a run waiting for a person holds no mouse lock.
+        releaseLockForPause(`[input: ${inputStep.variable}]`);
         const value = await promptUserForInput(inputStep.promptText);
         // Through the one helper, like every other write into this map: an
         // `[input: order]` after a `For each {{order}} …` is a rebind of that
@@ -1945,6 +2006,9 @@ export async function runTest(
         humanIntervened = true;
 
         const adHocResults: StepResult[] = [];
+        // §5.9: a run waiting for a person holds no mouse lock. The REPL's own
+        // commands drive the page, not the screen.
+        releaseLockForPause('[interactive]');
         const decision = await runInteractiveRepl({
           page: session.page,
           testSteps: test.steps,
@@ -2323,6 +2387,8 @@ export async function runTest(
             dismissalGuidance: hooks.hasAny,
           };
           const adHocResults: StepResult[] = [];
+          // §5.9 — the failure REPL waits for a person too.
+          releaseLockForPause('failure REPL');
           const decision = await runInteractiveRepl({
             page: session.page,
             testSteps: test.steps,
@@ -2672,9 +2738,9 @@ export async function runTest(
     // A data row is one `runTest`, so this releases once per row. The next
     // row takes the lock again at its own `[use computer]`: `surfaceState` is
     // local to this call, so every row starts on the browser surface and
-    // enters computer mode afresh. That is also why this loop needs no lazy
-    // re-take at the step boundary the way the server's does — within one
-    // `runTest`, being on the computer surface implies holding the lock.
+    // enters computer mode afresh. WITHIN a row the lock can still come and
+    // go — a pause for a person gives it back — and the step boundary in the
+    // loop takes it again, as the server's does.
     releaseComputerLockAtRunEnd(surfaceState, computerLockId, extras.computerLock);
 
     // Close all tracked browsers in reverse creation order. For the
