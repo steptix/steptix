@@ -29,6 +29,7 @@ import {
   DEFAULT_SCROLL_TICKS,
   DEFAULT_WAIT_WINDOW_TIMEOUT_MS,
   MAX_WAIT_SECONDS,
+  MAX_WAIT_WINDOW_TIMEOUT_MS,
   type ComputerAction,
 } from './actions.js';
 
@@ -62,8 +63,6 @@ interface AliasTarget {
   button?: MouseButton;
   count?: ClickCount;
   direction?: ScrollDirection;
-  /** Recorded on the built action, for the model and the log. */
-  note?: string;
 }
 
 const ALIASES: Readonly<Record<string, AliasTarget>> = {
@@ -94,21 +93,6 @@ const ALIASES: Readonly<Record<string, AliasTarget>> = {
   typetext: { type: 'type' },
   sleep: { type: 'wait' },
 
-  // A capture is taken before every turn (§5.2), so asking for one is not an
-  // error — it is a turn spent learning that. Say so in the no-op's reason.
-  screenshot: {
-    type: 'noop',
-    note: 'A fresh screenshot is captured automatically before every turn — you do not need to ask for one. Use "zoom" to see a region more closely.',
-  },
-  takescreenshot: {
-    type: 'noop',
-    note: 'A fresh screenshot is captured automatically before every turn — you do not need to ask for one. Use "zoom" to see a region more closely.',
-  },
-  capturescreen: {
-    type: 'noop',
-    note: 'A fresh screenshot is captured automatically before every turn — you do not need to ask for one. Use "zoom" to see a region more closely.',
-  },
-
   waitforwindow: { type: 'waitwindow' },
   activatewindow: { type: 'focuswindow' },
   raisewindow: { type: 'focuswindow' },
@@ -122,6 +106,21 @@ const ALIASES: Readonly<Record<string, AliasTarget>> = {
   httprequest: { type: 'apicall' },
   fetch: { type: 'apicall' },
 };
+
+/**
+ * A request for a capture, folded. REFUSED rather than aliased to `noop`: a
+ * capture is taken before every turn (§5.2), and `noop` means "the step is
+ * done" — measured, "Click Print" passed with zero clicks on a model that
+ * asked to look first.
+ */
+const SCREENSHOT_NAMES: ReadonlySet<string> = new Set([
+  'screenshot', 'takescreenshot', 'capturescreen', 'getscreenshot',
+]);
+
+const SCREENSHOT_REFUSAL =
+  'There is no screenshot action — every turn already carries a fresh screenshot. Choose an ' +
+  'action that performs the step (use "zoom" to see a region more closely), or "noop" only if ' +
+  'the step is already done.';
 
 /**
  * Every PAGE action name §5.4 refuses on this surface, folded — including the
@@ -288,6 +287,7 @@ function buildAction(raw: unknown): Built {
   const alias = ALIASES[folded];
   const type = alias?.type ?? folded;
 
+  if (SCREENSHOT_NAMES.has(type)) return refuse(SCREENSHOT_REFUSAL);
   if (PAGE_ACTION_NAMES.has(type)) return refuse(pageActionRefusal(rawType));
   if (!COMPUTER_NAMES.has(type)) return refuse(unknownActionRefusal(rawType));
 
@@ -453,16 +453,19 @@ function buildAction(raw: unknown): Built {
         return refuse('"wait_window" needs a "state" of "open" or "gone".');
       }
       const timeout = numberField(raw, 'timeoutMs', 'timeout_ms', 'timeout');
+      const asked =
+        timeout !== undefined && timeout > 0 ? Math.round(timeout) : DEFAULT_WAIT_WINDOW_TIMEOUT_MS;
+      // Clamped, like `wait`, not refused — but the model is told (the
+      // executor's message and the performed line both carry the asked value).
+      const timeoutMs = Math.min(asked, MAX_WAIT_WINDOW_TIMEOUT_MS);
       return {
         action: {
           ...base,
           action: 'wait_window',
           title: title.trim(),
           state,
-          timeoutMs:
-            timeout !== undefined && timeout > 0
-              ? Math.round(timeout)
-              : DEFAULT_WAIT_WINDOW_TIMEOUT_MS,
+          timeoutMs,
+          ...(asked > timeoutMs && { requestedTimeoutMs: asked }),
         },
       };
     }
@@ -510,7 +513,7 @@ function buildAction(raw: unknown): Built {
     }
 
     case 'noop': {
-      const reason = alias?.note ?? stringField(raw, 'reason');
+      const reason = stringField(raw, 'reason');
       return { action: { ...base, action: 'noop', ...(reason !== undefined && { reason }) } };
     }
 

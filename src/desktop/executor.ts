@@ -43,6 +43,9 @@ export interface ComputerExecutionContext {
   /** Injectable for tests, which must not spend real seconds proving a poll. */
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /** The run's Stop. `wait_window` gives up at its next look once it fires;
+   *  the caller's `sleep` should give up too. */
+  signal?: AbortSignal;
 }
 
 export interface ComputerExecutionResult {
@@ -239,9 +242,26 @@ export async function executeComputerAction(
     }
 
     case 'wait_window': {
-      emit(`wait_window "${action.title}" ${action.state} (${action.timeoutMs}ms)`);
+      const capped =
+        action.requestedTimeoutMs !== undefined
+          ? ` (the most wait_window allows; you asked for ${action.requestedTimeoutMs}ms)`
+          : '';
+      emit(`wait_window "${action.title}" ${action.state} (${action.timeoutMs}ms${capped})`);
       const deadline = now() + action.timeoutMs;
-      for (;;) {
+      // One look per interval and never more. The count is the bound, not the
+      // clock: after Stop the run's sleep returns at once, and a loop bounded
+      // only by the deadline asked for the window list 6.6 million times.
+      const maxLooks = Math.ceil(action.timeoutMs / WINDOW_POLL_INTERVAL_MS) + 1;
+      for (let look = 1; ; look++) {
+        if (ctx.signal?.aborted) {
+          emit(`wait_window "${action.title}" → stopped`);
+          return {
+            view,
+            performed: true,
+            ok: false,
+            message: `wait_window "${action.title}" stopped: the run was stopped.`,
+          };
+        }
         const windows = await adapter.windows();
         const present = windows.some((w) => titleContains(w.title, action.title));
         if (present === (action.state === 'open')) {
@@ -253,17 +273,17 @@ export async function executeComputerAction(
             message: `Window matching "${action.title}" is ${action.state}.`,
           };
         }
-        if (now() >= deadline) {
+        if (now() >= deadline || look >= maxLooks) {
           return {
             view,
             performed: true,
             ok: false,
             message:
-              `Timed out after ${action.timeoutMs}ms waiting for a window whose title contains ` +
-              `"${action.title}" to be ${action.state}.`,
+              `Timed out after ${action.timeoutMs}ms${capped} waiting for a window whose title ` +
+              `contains "${action.title}" to be ${action.state}.`,
           };
         }
-        await sleep(WINDOW_POLL_INTERVAL_MS);
+        await sleep(Math.min(WINDOW_POLL_INTERVAL_MS, Math.max(0, deadline - now())));
       }
     }
 

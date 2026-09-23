@@ -113,6 +113,18 @@ describe('buildComputerSystemPrompt — §5.7', () => {
     expect(text).toContain('answer `assert` with "holds": false and "evidence": "no screenshot was received"');
   });
 
+  it('says only the first screen-changing action of a response is performed (§5.5)', () => {
+    const text = systemText();
+    expect(text).toMatch(/only the first that changes the screen or the image .* is performed/);
+    expect(text).toMatch(/anything after it is dropped/);
+  });
+
+  it('says there is no screenshot action, and caps wait_window at 30 s', () => {
+    const text = systemText();
+    expect(text).toContain('There is no screenshot action');
+    expect(text).toContain('"timeoutMs" at most 30000');
+  });
+
   it('says never to type a credential', () => {
     const text = systemText();
     expect(text).toMatch(/Never type a password, passphrase, PIN, API key, card number/);
@@ -221,6 +233,20 @@ describe('buildComputerStepMessage — §5.7', () => {
     );
     expect(text).toContain('## Your last answer was refused');
     expect(text).toContain('"hover" is a page action');
+  });
+
+  it('lists what the last answer asked for and did not get, under its own heading (§5.5)', () => {
+    const text = contentBlocksToText(
+      buildComputerStepMessage({
+        ...base,
+        notPerformed: ['noop — only the first screen-changing action of a response is performed'],
+      }).content,
+    );
+    expect(text).toContain(
+      '## Not performed from your last answer\n' +
+        '- noop — only the first screen-changing action of a response is performed',
+    );
+    expect(text).not.toContain('refused');
   });
 
   it('puts a failed action\'s message in front of it too', () => {

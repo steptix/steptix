@@ -24,7 +24,9 @@
  *  - `executeApiCallAction`, so `api_call` on this surface is the same call it
  *    is on the other one (§5.4: "as today — they touch no surface").
  *  - `applyFailureTail`, so an `… otherwise continue` tail means the same
- *    thing on either surface.
+ *    thing on either surface — and `stripFailureTail` + `enrichAuthored`, so
+ *    the model reads the step as the page model does: no tail, and
+ *    `[output: x]` as `[store as: x]`.
  *
  * Everything that touches the screen is behind `src/desktop/` and is not
  * re-implemented here: this file decides WHICH action to take and what to do
@@ -54,14 +56,18 @@ import {
   applyFailureTail,
   buildStepValues,
   composeDeliberateFailure,
+  enrichAuthored,
   executeApiCallAction,
   secretsFor,
   type ComputerStepContext,
   type StepExecutorOptions,
 } from './step-executor.js';
+import { stripFailureTail } from '../parser/failure-tail.js';
 import {
   ComputerStallDetector,
   DEFAULT_MAX_IMAGE_WIDTH,
+  INPUT_ACTION_TYPES,
+  SCREEN_CHANGING_ACTION_TYPES,
   acquireComputerLock,
   buildComputerStepMessage,
   buildComputerSystemPrompt,
@@ -91,7 +97,13 @@ import { planAtGuard, type ControlRecord, type ControlState } from './control-fl
 
 /** Options for a computer-mode step: a step's ordinary options, with the
  *  surface's own context guaranteed present. */
-export type ComputerStepOptions = StepExecutorOptions & { computer: ComputerStepContext };
+export type ComputerStepOptions = StepExecutorOptions & {
+  computer: ComputerStepContext & {
+    /** §5.5 — the step's wait budget. The runners leave it out and get
+     *  {@link COMPUTER_WAIT_BUDGET_MS}; a test passes a small one. */
+    waitBudgetMs?: number | undefined;
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Entering and leaving the surface (§5.1, §4.5)
@@ -231,7 +243,7 @@ export async function enterComputerMode(
 
   // 1. Project opt-in. A test file in a shared project must not be able to
   //    move the mouse on a machine whose owner did not allow it.
-  if (!input.desktop?.enabled) {
+  if (input.desktop?.enabled !== true) {
     return { ok: false, error: COMPUTER_DISABLED_MESSAGE };
   }
 
@@ -837,7 +849,10 @@ function performedLine(
     case 'wait_window':
       return (
         `${head}wait_window "${action.title}" ${action.state} → ok after ` +
-        `${(elapsedMs / 1000).toFixed(1)}s`
+        `${(elapsedMs / 1000).toFixed(1)}s` +
+        (action.requestedTimeoutMs !== undefined
+          ? ` (timeoutMs capped at ${action.timeoutMs}ms; you asked for ${action.requestedTimeoutMs}ms)`
+          : '')
       );
     default:
       return `${head}${action.action} → ok`;
@@ -846,37 +861,127 @@ function performedLine(
 
 /** The log line the safety net writes when it answers a repeat itself. */
 export const REPEATED_WINDOW_ACTION_MESSAGE =
-  'repeated an already-satisfied window action — step complete';
+  'repeated an already-satisfied window action — not performed again; the model is told so';
+
+/** What the model is told about a window action the net did not repeat. */
+const REPEATED_WINDOW_ACTION_NOTE =
+  'that window action already succeeded in this step. If the step asks for nothing more, ' +
+  'answer noop; otherwise do the rest of it.';
+
+/** What the model is told about the actions behind the first screen-changing
+ *  one (§5.5). */
+const DROPPED_AFTER_SCREEN_CHANGE_NOTE =
+  'only the first screen-changing action of a response is performed; the next screenshot ' +
+  'shows its result. Choose again from what it shows.';
 
 /**
- * The turn's DETERMINISTIC window actions as one key — or `null` the moment it
- * asks for anything else.
+ * §5.5 — how long one step may spend in `wait` and `wait_window`, over all its
+ * turns and attempts together.
+ *
+ * The turn cap alone let a wait for something that never comes cost 15 turns
+ * of 15 s each — measured, a five-minute step and 15 image requests. A minute
+ * of waiting is already generous for a native dialog.
+ */
+export const COMPUTER_WAIT_BUDGET_MS = 60_000;
+
+/** `60s`, `0.3s`. */
+function seconds(ms: number): string {
+  return `${Number((ms / 1000).toFixed(1))}s`;
+}
+
+function waitBudgetMessage(budgetMs: number, spentMs: number, last?: string): string {
+  return (
+    `Step failed: the step's wait budget is used up — wait and wait_window may take at most ` +
+    `${seconds(budgetMs)} in one computer-mode step, and this one has waited ${seconds(spentMs)}.` +
+    (last ? `\nLast action reported: ${last}` : '')
+  );
+}
+
+/**
+ * A DETERMINISTIC window action as a key — or `null` for any other action.
  *
  * `focus_window` and `wait_window` are the two actions whose success the screen
  * may not show: focusing a window that was already frontmost changes no pixel,
  * and waiting for a window that is already open returns at once. They are also
  * the two answered by the operating system's window list rather than by the
- * model's reading of the image, so a turn that repeats one that has just
- * succeeded, unchanged, cannot mean anything but "I did not notice that it
- * worked" — which {@link computerAttempt} answers by completing the step
- * rather than by acting again. `timeoutMs` is in the key because it is an
- * argument the model chose.
+ * model's reading of the image, so repeating one that succeeded on the
+ * previous turn, unchanged, cannot mean anything but "I did not notice that it
+ * worked" — which {@link computerTurns} answers with a note rather than by
+ * acting again. `timeoutMs` is in the key because it is an argument the model
+ * chose.
  *
  * A `focus_window` only counts as a success once `bring-to-front.ts` has read
  * the target back as the OS's active window. One the OS refused comes back as
  * a failure, which disarms this net, so the model's retry (or its click on the
  * window instead) reaches the screen.
  */
-function windowOnlyKey(actions: readonly ComputerAction[]): string | null {
-  if (actions.length === 0) return null;
-  const parts: string[] = [];
-  for (const action of actions) {
-    if (action.action === 'focus_window') parts.push(`focus_window:${action.title}`);
-    else if (action.action === 'wait_window') {
-      parts.push(`wait_window:${action.title}:${action.state}:${action.timeoutMs}`);
-    } else return null;
+function windowActionKey(action: ComputerAction): string | null {
+  if (action.action === 'focus_window') return `focus_window:${action.title}`;
+  if (action.action === 'wait_window') {
+    return `wait_window:${action.title}:${action.state}:${action.timeoutMs}`;
   }
-  return parts.join('|');
+  return null;
+}
+
+/** How many actions at the FRONT of a response repeat a window action the
+ *  previous turn already satisfied. Only the front: behind a repeat, the rest
+ *  of the answer is what the model actually wants done next. */
+function leadingWindowRepeats(
+  actions: readonly ComputerAction[],
+  satisfied: ReadonlySet<string> | null,
+): number {
+  if (!satisfied) return 0;
+  let count = 0;
+  while (count < actions.length) {
+    const key = windowActionKey(actions[count]!);
+    if (key === null || !satisfied.has(key)) break;
+    count++;
+  }
+  return count;
+}
+
+/**
+ * §5.5 — the actions of one response that may run: everything up to and
+ * including the FIRST that changes the screen or the image, and nothing after
+ * it. Behind that action the model was reading a picture that no longer holds
+ * — measured, `[click, assert holds:true]` passed on the pre-click image, and
+ * `[zoom, click]` mapped a full-image point through the zoomed crop.
+ */
+function splitAtScreenChange(actions: readonly ComputerAction[]): {
+  run: ComputerAction[];
+  dropped: ComputerAction[];
+} {
+  const at = actions.findIndex((a) => SCREEN_CHANGING_ACTION_TYPES.has(a.action));
+  if (at === -1) return { run: [...actions], dropped: [] };
+  return { run: actions.slice(0, at + 1), dropped: actions.slice(at + 1) };
+}
+
+/** A short name for an action, for the model's "not performed" list. Never a
+ *  `type`'s text or a `read`'s value — either may be a secret. */
+function actionLabel(action: ComputerAction): string {
+  switch (action.action) {
+    case 'click':
+    case 'move':
+    case 'scroll':
+      return `${action.action} (${action.x},${action.y})`;
+    case 'drag':
+      return `drag (${action.from.x},${action.from.y})→(${action.to.x},${action.to.y})`;
+    case 'type':
+      return `type (${action.text.length} chars)`;
+    case 'key':
+      return `key ${action.key}`;
+    case 'wait':
+      return `wait ${action.seconds}s`;
+    case 'focus_window':
+    case 'wait_window':
+      return `${action.action} "${action.title}"`;
+    case 'read':
+      return `read {{${action.as}}}`;
+    case 'assert':
+      return `assert "${action.condition}"`;
+    default:
+      return action.action;
+  }
 }
 
 /**
@@ -968,6 +1073,11 @@ export async function executeComputerStep(
   let priorAssertions: AssertionResult[] = [];
   let mergedFailure: unknown;
   let attemptsMade = 0;
+  // Per STEP, not per attempt: a retry does not buy another minute of waiting.
+  const waits: WaitBudget = {
+    budgetMs: opts.computer.waitBudgetMs ?? COMPUTER_WAIT_BUDGET_MS,
+    spentMs: 0,
+  };
 
   const attempt = async (attemptNumber: number): Promise<StepResult> => {
     attemptsMade = attemptNumber;
@@ -980,6 +1090,7 @@ export async function executeComputerStep(
       startTime,
       retried,
       attemptNumber,
+      waits,
       authoredInstruction,
     );
   };
@@ -1064,7 +1175,52 @@ export async function executeComputerStep(
   }
 }
 
-// eslint-disable-next-line complexity
+/** A step's wait budget and what its `wait` / `wait_window` actions have spent
+ *  of it — one object for the whole step, handed to every attempt (§5.5). */
+interface WaitBudget {
+  budgetMs: number;
+  spentMs: number;
+}
+
+/** What an attempt has done so far, as {@link finalAttemptError} needs it. */
+interface AttemptProgress {
+  /** Whether this attempt has driven the real pointer, keyboard or windows. */
+  touchedScreen: boolean;
+  /** The attempt's turns, pushed as each one is recorded. */
+  turns: TurnResult[];
+}
+
+/**
+ * The error an attempt ends with, as `withRetry` is to see it (§5.5).
+ *
+ * Every failure leaves as a `ComputerStepFailure` carrying the attempt's turns,
+ * so a model call that throws on turn 3 still leaves turns 1 and 2 on the
+ * report. And once the attempt has driven the real pointer, keyboard or windows
+ * the failure is final: a retry starts the step over and would type, click or
+ * submit a second time — measured, an attempt that typed `1+1` and then stalled
+ * was retried and typed it again. A Stop passes through untouched.
+ */
+function finalAttemptError(
+  err: unknown,
+  progress: AttemptProgress,
+  signal: AbortSignal | undefined,
+): unknown {
+  if (signal?.aborted) return err;
+  const failure =
+    err instanceof ComputerStepFailure
+      ? err
+      : new ComputerStepFailure(
+          err instanceof Error ? err.message : String(err),
+          progress.turns,
+          (err as { retryable?: unknown } | null)?.retryable !== false,
+        );
+  if (failure.retryable && progress.touchedScreen) {
+    failure.retryable = false;
+    log('not retrying: this attempt already acted on the real screen, and a retry would do it again');
+  }
+  return failure;
+}
+
 async function computerAttempt(
   stepIndex: number,
   totalSteps: number,
@@ -1073,15 +1229,59 @@ async function computerAttempt(
   startTime: number,
   retried: boolean,
   attemptNumber: number,
+  waits: WaitBudget,
+  authoredInstruction?: string,
+): Promise<StepResult> {
+  const progress: AttemptProgress = { touchedScreen: false, turns: [] };
+  try {
+    return await computerTurns(
+      stepIndex,
+      totalSteps,
+      instruction,
+      opts,
+      startTime,
+      retried,
+      attemptNumber,
+      waits,
+      progress,
+      authoredInstruction,
+    );
+  } catch (err) {
+    throw finalAttemptError(err, progress, opts.signal);
+  }
+}
+
+// eslint-disable-next-line complexity
+async function computerTurns(
+  stepIndex: number,
+  totalSteps: number,
+  instruction: string,
+  opts: ComputerStepOptions,
+  startTime: number,
+  retried: boolean,
+  attemptNumber: number,
+  waits: WaitBudget,
+  progress: AttemptProgress,
   authoredInstruction?: string,
 ): Promise<StepResult> {
   const { config, aiClient, contextContent, testName, baseUrl, conversationHistory } = opts;
   const computer = opts.computer;
   const maxTurns = config.execution.maxTurns;
-  const promptAuthored = authoredInstruction ?? instruction;
+  // The step as the page model reads it (`executeStepAttempt`): the `otherwise
+  // …` tail OFF, because applying it is the framework's job and a model that
+  // reads "otherwise continue" answers `noop`; and `[output: x]` as
+  // `[store as: x]`, or the model names the capture itself and `{{x}}` stays
+  // empty (measured: `{"result":"2"}`). Stripped before the enrichment, for the
+  // reason given there.
+  const promptAuthored = enrichAuthored(stripFailureTail(authoredInstruction ?? instruction));
   const placeholderValues: PlaceholderValues = {
     parameters: opts.resolvedParameters ?? {},
     ...(opts.envData !== undefined && { envData: opts.envData }),
+  };
+  /** Stop, checked before every capture, model call and action. The catch in
+   *  `executeComputerStep` reports it the way the page surface does. */
+  const throwIfAborted = (): void => {
+    if (opts.signal?.aborted) throw new DOMException('Run aborted by client', 'AbortError');
   };
 
   // §5.2 — the image always goes, whatever `ai.sendScreenshots` says, because
@@ -1094,14 +1294,16 @@ async function computerAttempt(
     );
   }
 
-  const allTurns: TurnResult[] = [];
+  const allTurns = progress.turns;
   const assertions: AssertionResult[] = [];
   const stall = new ComputerStallDetector();
 
+  throwIfAborted();
   let view: ImageView = await captureView(computer.adapter, {
     maxImageWidth: computer.maxImageWidth,
   });
   let refusals: Refusal[] = [];
+  let notPerformed: string[] = [];
   let priorFailure: string | undefined;
   /**
    * What this attempt has already done, one line per successful action.
@@ -1110,12 +1312,14 @@ async function computerAttempt(
    * over: the screen is re-read, the turn count starts at 1, and a list of
    * actions from the attempt that failed would tell the model not to redo the
    * very thing the retry exists to redo. The page path resets per attempt for
-   * the same reason.
+   * the same reason. (Only an attempt that drove no input is retried at all,
+   * so what this list loses is waits and zooms.)
    */
   const performed: string[] = [];
-  /** The window-only key of the previous turn, when every one of its actions
-   *  succeeded. The safety net below is the only reader. */
-  let satisfiedWindowKey: string | null = null;
+  /** The window actions the previous turn satisfied, when it asked for window
+   *  actions and nothing else and every one succeeded. The safety net below is
+   *  the only reader. */
+  let satisfiedWindowKeys: Set<string> | null = null;
   let lastReasoning = '';
   let flowControlSignal: StepResult['flowControl'] | undefined;
   let flowControlDetail: string | undefined;
@@ -1124,7 +1328,7 @@ async function computerAttempt(
   let assertCounter = 0;
 
   for (let currentTurn = 1; currentTurn <= maxTurns; currentTurn++) {
-    if (opts.signal?.aborted) throw new DOMException('Run aborted by client', 'AbortError');
+    throwIfAborted();
 
     const turnTimestamp = new Date().toISOString();
     const turnAiInteractions: AiInteraction[] = [];
@@ -1155,15 +1359,12 @@ async function computerAttempt(
         ...(variables && { variables }),
         ...(performed.length > 0 && { performed }),
         conversationHistory,
-        testInfoSection: formatTestInfo(
-          testName,
-          baseUrl,
-          stepIndex,
-          totalSteps,
-          config.browser.headed ? config.browser.windowSize : config.browser.viewport,
-        ),
+        // No viewport: the browser's size is not this surface's, and a second
+        // pair of numbers beside the image's is a second coordinate space.
+        testInfoSection: formatTestInfo(testName, baseUrl, stepIndex, totalSteps),
         ...(shownView.requestedRegion && { zoomRegion: shownView.requestedRegion }),
         ...(refusals.length > 0 && { refusals }),
+        ...(notPerformed.length > 0 && { notPerformed }),
         ...(priorFailure !== undefined && { priorFailure }),
       }),
     ];
@@ -1172,11 +1373,13 @@ async function computerAttempt(
     // `performed` is NOT consumed — it is the step's running record, and a
     // model that is told once and then not told again is back where it started.
     refusals = [];
+    notPerformed = [];
     priorFailure = undefined;
 
     const recordShot = computer.reportScreenshots;
     let completion: CompleteResult;
     try {
+      throwIfAborted();
       completion = await aiClient.complete(messages, opts.signal);
     } catch (err) {
       // §15.4 — the model rejected the screenshot. Not retried: a retry sends
@@ -1203,6 +1406,9 @@ async function computerAttempt(
       });
       throw new ComputerStepFailure(blind, allTurns, false);
     }
+    // A Stop that landed while the model was answering: nothing it asked for
+    // runs.
+    throwIfAborted();
     turnAiInteractions.push({
       purpose: 'computer-action-plan',
       attemptNumber,
@@ -1234,38 +1440,11 @@ async function computerAttempt(
     }
     lastReasoning = parsed.reasoning || lastReasoning;
 
-    // The safety net for a model that ignores the list above: a turn whose
-    // ONLY actions are window actions that all succeeded, followed by a turn
-    // asking for exactly the same ones, is a step that is already done. It is
-    // answered here rather than by executing it again — and BEFORE the stall
-    // detector observes the turn, so a repeat that the step survives does not
-    // also count towards a stall.
-    const windowKey = windowOnlyKey(parsed.actions);
-    if (windowKey !== null && windowKey === satisfiedWindowKey && parsed.refused.length === 0) {
-      log(REPEATED_WINDOW_ACTION_MESSAGE);
-      turnSubActions.push({
-        index: ++globalSubActionIndex,
-        action: {
-          action: 'noop',
-          description: 'This window action already succeeded on the previous turn.',
-        } as AIAction,
-        durationMs: 0,
-        timestamp: new Date().toISOString(),
-      });
-      allTurns.push({
-        turnNumber: currentTurn,
-        attemptNumber,
-        timestamp: turnTimestamp,
-        aiInteractions: turnAiInteractions,
-        subActions: turnSubActions,
-        computer: computerTurnRecord(shownView, recordShot),
-      });
-      break;
-    }
-
     // §5.5 — three turns whose capture AND actions are identical is a stall.
-    // Measured over what the model was SHOWN and what it asked for, which is
-    // why it is observed here rather than after the actions run.
+    // Measured over what the model was SHOWN and everything it ASKED for —
+    // before the net below answers any of it, so a model that repeats a
+    // satisfied window action for ever ends here, not at the turn cap. Not
+    // retried: the same screen gets the same answer.
     if (stall.observe(shownView.pngBase64, parsed.actions.length > 0 ? parsed.actions : completion.text)) {
       allTurns.push({
         turnNumber: currentTurn,
@@ -1275,8 +1454,34 @@ async function computerAttempt(
         subActions: turnSubActions,
         computer: computerTurnRecord(shownView, recordShot),
       });
-      throw new ComputerStepFailure(computerStallMessage(instruction), allTurns);
+      throw new ComputerStepFailure(computerStallMessage(instruction), allTurns, false);
     }
+
+    // The safety net for a model that ignores the "already performed" list: a
+    // window action at the front of this answer that the previous turn already
+    // satisfied is not performed again, and the model is TOLD so. It used to
+    // pass the step — measured, "Focus Calculator and type 1+1" went green on
+    // the repeat with nothing typed.
+    const repeatCount = leadingWindowRepeats(parsed.actions, satisfiedWindowKeys);
+    const repeated = parsed.actions.slice(0, repeatCount);
+    if (repeated.length > 0) {
+      log(REPEATED_WINDOW_ACTION_MESSAGE);
+      notPerformed.push(`${repeated.map(actionLabel).join(', ')} — ${REPEATED_WINDOW_ACTION_NOTE}`);
+      for (let i = 0; i < repeated.length; i++) {
+        turnSubActions.push({
+          index: ++globalSubActionIndex,
+          action: {
+            action: 'noop',
+            description: 'This window action already succeeded on the previous turn.',
+          } as AIAction,
+          durationMs: 0,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+
+    // §5.5 — one screen-changing action per response.
+    const { run, dropped } = splitAtScreenChange(parsed.actions.slice(repeatCount));
 
     // §5.4 — refusals are data the MODEL reads next turn, not failures.
     for (const refused of parsed.refused) {
@@ -1299,7 +1504,8 @@ async function computerAttempt(
     let imagePoint: { x: number; y: number } | undefined;
     let screenPoint: { x: number; y: number } | undefined;
 
-    for (const action of parsed.actions) {
+    for (const action of run) {
+      throwIfAborted();
       const subStartTime = Date.now();
       const aiReasoningVal = config.reports.includeAiReasoning ? parsed.reasoning : undefined;
       const baseSub = (): SubActionResult => ({
@@ -1458,14 +1664,47 @@ async function computerAttempt(
         continue;
       }
 
+      // ── wait / wait_window: inside the step's wait budget (§5.5) ──────────
+      // What runs is cut to what is left, so the budget is a real bound rather
+      // than a check between waits.
+      let toRun: ComputerAction = action;
+      let cutByBudget = false;
+      if (action.action === 'wait' || action.action === 'wait_window') {
+        const remaining = waits.budgetMs - waits.spentMs;
+        if (remaining <= 0) {
+          turnFailed = true;
+          turnNonRetryable = true;
+          turnError = waitBudgetMessage(waits.budgetMs, waits.spentMs);
+          turnSubActions.push({ ...baseSub(), error: turnError });
+          break;
+        }
+        if (action.action === 'wait' && action.seconds * 1000 > remaining) {
+          toRun = { ...action, seconds: remaining / 1000 };
+          cutByBudget = true;
+        } else if (action.action === 'wait_window' && action.timeoutMs > remaining) {
+          // The model's own cap note would now be untrue: the budget, not the
+          // 30 s maximum, is what shortened it.
+          const { requestedTimeoutMs: _asked, ...rest } = action;
+          toRun = { ...rest, timeoutMs: remaining };
+          cutByBudget = true;
+        }
+      }
+
       // ── everything that touches the screen ────────────────────────────────
-      const outcome = await executeComputerAction(action, {
+      if (INPUT_ACTION_TYPES.has(action.action)) progress.touchedScreen = true;
+      const outcome = await executeComputerAction(toRun, {
         adapter: computer.adapter,
         view,
         settleMs: computer.settleMs,
         maxImageWidth: computer.maxImageWidth,
-        ...(opts.signal && { sleep: interruptibleSleep(opts.signal) }),
+        ...(opts.signal && { signal: opts.signal, sleep: interruptibleSleep(opts.signal) }),
       });
+      if (action.action === 'wait' || action.action === 'wait_window') {
+        waits.spentMs += Date.now() - subStartTime;
+      }
+      // A Stop during the action — a wait_window cut short only says that it
+      // stopped — ends the step here, before anything more is captured.
+      throwIfAborted();
       if (outcome.screenPoint) {
         screenPoint = outcome.screenPoint;
         imagePoint = imagePointOf(action);
@@ -1476,6 +1715,14 @@ async function computerAttempt(
       });
 
       if (!outcome.ok) {
+        if (cutByBudget) {
+          // The budget, not the model's timeout, ended this wait, and any
+          // further wait would be refused: the step is over.
+          turnFailed = true;
+          turnNonRetryable = true;
+          turnError = waitBudgetMessage(waits.budgetMs, waits.spentMs, outcome.message);
+          break;
+        }
         // A window that never appeared, a title that matched nothing: the
         // model gets the message next turn and can choose differently. This
         // is what `priorFailure` in the step message is for.
@@ -1488,7 +1735,7 @@ async function computerAttempt(
       // image does not carry. The record of it goes to the model on every
       // remaining turn of this step.
       if (outcome.performed) {
-        performed.push(performedLine(currentTurn, action, outcome, Date.now() - subStartTime));
+        performed.push(performedLine(currentTurn, toRun, outcome, Date.now() - subStartTime));
       }
 
       if (action.action === 'zoom') {
@@ -1503,15 +1750,36 @@ async function computerAttempt(
       }
     }
 
-    // Armed only by a turn that asked for window actions and nothing else, and
-    // got them all. A refusal, a failure or a deliberate end disarms it, so the
-    // next turn's repeat is a real repeat of a real success.
-    satisfiedWindowKey =
-      windowKey !== null &&
+    // Behind the screen-changing action: on the report as not performed, and
+    // in front of the model next turn with the reason.
+    if (dropped.length > 0) {
+      const labels = dropped.map(actionLabel).join(', ');
+      log(`not performed (behind the first screen-changing action): ${labels}`);
+      notPerformed.push(`${labels} — ${DROPPED_AFTER_SCREEN_CHANGE_NOTE}`);
+      for (const action of dropped) {
+        turnSubActions.push({
+          index: ++globalSubActionIndex,
+          action: reportAction(action),
+          durationMs: 0,
+          error: `not performed: ${DROPPED_AFTER_SCREEN_CHANGE_NOTE}`,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+
+    // Armed only by a turn whose actions were window actions and nothing else,
+    // each one satisfied — performed now, or repeated from the turn before.
+    // Actions dropped behind it never ran and do not count. A refusal, a
+    // failure or a deliberate end disarms it, so the next turn's repeat is a
+    // real repeat of a real success.
+    const windowKeys = [...repeated, ...run].map(windowActionKey);
+    satisfiedWindowKeys =
+      windowKeys.length > 0 &&
+      windowKeys.every((key) => key !== null) &&
       !turnFailed &&
       priorFailure === undefined &&
       parsed.refused.length === 0
-        ? windowKey
+        ? new Set(windowKeys as string[])
         : null;
 
     allTurns.push({
@@ -1540,10 +1808,14 @@ async function computerAttempt(
     if (complete) break;
 
     if (currentTurn === maxTurns) {
+      // Not retried (§5.5): fifteen turns that did not finish the step will
+      // not finish it on a second fifteen, and a wait for something that never
+      // comes would cost twice the image requests.
       throw new ComputerStepFailure(
         `Step failed: multi-turn limit reached (${maxTurns} turns) on the computer surface.` +
           (priorFailure ? `\nLast action reported: ${priorFailure}` : ''),
         allTurns,
+        false,
       );
     }
   }

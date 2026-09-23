@@ -27,6 +27,7 @@ import {
   type ComputerStepOptions,
 } from '../src/runner/computer-step.js';
 import { createControlState, type ControlRecord } from '../src/runner/control-flow.js';
+import { parseFailureTail } from '../src/parser/failure-tail.js';
 import { logger } from '../src/utils/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -44,16 +45,18 @@ interface Scripted {
 }
 
 /** A model that answers from a script; the last entry repeats for ever, which
- *  is what lets the stall test hand it one answer and get three turns. */
-function scripted(...responses: string[]): Scripted {
+ *  is what lets the stall test hand it one answer and get three turns. An
+ *  `Error` entry is thrown instead of answered — a failed model call. */
+function scripted(...responses: Array<string | Error>): Scripted {
   const sent: ChatMessage[][] = [];
   let at = 0;
   const client = {
     complete: async (messages: ChatMessage[]) => {
       sent.push(messages);
-      const text = responses[Math.min(at, responses.length - 1)] ?? '{"action":"noop"}';
+      const entry = responses[Math.min(at, responses.length - 1)] ?? '{"action":"noop"}';
       at++;
-      return { text, model: 'fake-model' };
+      if (entry instanceof Error) throw entry;
+      return { text: entry, model: 'fake-model' };
     },
   };
   return { client: client as unknown as AiClient, sent };
@@ -73,6 +76,19 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     },
     logging: { ...DEFAULT_CONFIG.logging, consoleLogLevel: 'silent', serverFileLogLevel: 'off' },
   } as Config;
+}
+
+/** A config with these `execution` values over the harness defaults. */
+function execWith(overrides: Partial<Config['execution']>): Config {
+  return makeConfig({
+    execution: {
+      ...DEFAULT_CONFIG.execution,
+      retries: 0,
+      maxTurns: 6,
+      promptOnAmbiguity: true,
+      ...overrides,
+    } as Config['execution'],
+  });
 }
 
 function makeOpts(
@@ -613,7 +629,7 @@ describe('a clarification with nobody to answer fails fast (issues/014)', () => 
 // What the step has already done is fed back to the model
 //
 // The measured defect (live, 2026-09-23): step 4 of
-// templates/init/tests/pdf-print-cancel.md focused a window that was already
+// templates/init/tests/pdf-dialog-cancel.md focused a window that was already
 // frontmost, so the screen did not change and turn 2 was shown the same step
 // and the same pixels with no record that anything had happened. The model
 // answered with the same action three more times and the stall detector ended
@@ -673,12 +689,47 @@ describe('the actions a step has already performed go back to the model', () => 
     expect(last).toContain('turn 3: key enter → ok');
   });
 
-  it('completes the step when the model repeats the same window action (the safety net)', async () => {
+  it('does not repeat a window action the last turn satisfied, and tells the model (the safety net)', async () => {
     const adapter = new FakeDesktopAdapter({
       ...GRAB,
       windows: [fakeWindow('statement.pdf - Chrome')],
     });
     const info = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    const { client, sent } = scripted(
+      '{"action":"focus_window","title":"statement.pdf","description":"Focus the PDF window"}',
+      '{"action":"focus_window","title":"statement.pdf","description":"Focus the PDF window"}',
+      '{"action":"noop","description":"it is in front"}',
+    );
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Focus the window whose title contains "statement.pdf"',
+      makeOpts(adapter, client),
+    );
+
+    expect(result.status).toBe('passed');
+    // The repeat is answered with a note, not with "step complete" (A3): the
+    // model's noop on turn 3 is what ends the step.
+    expect(result.turns).toHaveLength(3);
+    expect(adapter.callsOf('findWindow')).toHaveLength(1);
+    expect(adapter.callsOf('focusWindowHandle')).toHaveLength(1);
+    expect(textIn(sent[2]!)).toContain(
+      '- focus_window "statement.pdf" — that window action already succeeded in this step. ' +
+        'If the step asks for nothing more, answer noop; otherwise do the rest of it.',
+    );
+    expect(
+      info.mock.calls
+        .map((c) => String(c[0]))
+        .filter((line) => line.includes('repeated an already-satisfied window action')),
+    ).toHaveLength(1);
+  });
+
+  it('a model that repeats it for ever ends in a stall, having focused once', async () => {
+    const adapter = new FakeDesktopAdapter({
+      ...GRAB,
+      windows: [fakeWindow('statement.pdf - Chrome')],
+    });
     // ONE answer, repeated for ever — the live failure exactly.
     const { client } = scripted(
       '{"action":"focus_window","title":"statement.pdf","description":"Focus the PDF window"}',
@@ -691,23 +742,18 @@ describe('the actions a step has already performed go back to the model', () => 
       makeOpts(adapter, client),
     );
 
-    expect(result.status).toBe('passed');
-    expect(result.error).toBeUndefined();
-    // Turn 2 answered it; the screen was touched exactly once.
-    expect(result.turns).toHaveLength(2);
-    expect(adapter.callsOf('findWindow')).toHaveLength(1);
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('Computer mode stalled');
+    expect(result.turns).toHaveLength(3);
     expect(adapter.callsOf('focusWindowHandle')).toHaveLength(1);
-    expect(
-      info.mock.calls
-        .map((c) => String(c[0]))
-        .filter((line) => line.includes('repeated an already-satisfied window action')),
-    ).toHaveLength(1);
   });
 
   it('nets a repeated wait_window too, and leaves an honest report row', async () => {
     const adapter = new FakeDesktopAdapter({ ...GRAB, windows: [fakeWindow('Print')] });
     const { client } = scripted(
       '{"action":"wait_window","title":"Print","state":"open","timeoutMs":5000,"description":"Wait for Print"}',
+      '{"action":"wait_window","title":"Print","state":"open","timeoutMs":5000,"description":"Wait for Print"}',
+      '{"action":"noop","description":"it is open"}',
     );
 
     const result = await executeComputerStep(
@@ -718,11 +764,34 @@ describe('the actions a step has already performed go back to the model', () => 
     );
 
     expect(result.status).toBe('passed');
-    expect(result.turns).toHaveLength(2);
+    expect(result.turns).toHaveLength(3);
+    expect(adapter.callsOf('windows')).toHaveLength(1);
     const second = result.turns[1]!.subActions;
     expect(second).toHaveLength(1);
     expect(second[0]!.action.action).toBe('noop');
     expect(second[0]!.error).toBeUndefined();
+  });
+
+  it('a repeat in front of the rest of the answer is skipped, and the rest runs', async () => {
+    // [focus, type] is dropped behind the focus on turn 1; sent again, the
+    // satisfied focus is skipped and the type is what runs.
+    const adapter = new FakeDesktopAdapter({ ...GRAB, windows: [fakeWindow('Calculator')] });
+    const { client } = scripted(
+      '[{"action":"focus_window","title":"Calculator"},{"action":"type","text":"1+1"}]',
+      '[{"action":"focus_window","title":"Calculator"},{"action":"type","text":"1+1"}]',
+      '{"action":"noop","description":"typed"}',
+    );
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Focus Calculator and type 1+1',
+      makeOpts(adapter, client),
+    );
+
+    expect(result.status).toBe('passed');
+    expect(adapter.callsOf('focusWindowHandle')).toHaveLength(1);
+    expect(adapter.callsOf('type').map((c) => c.args.text)).toEqual(['1+1']);
   });
 
   it('does not net a repeat that follows a FAILED window action', async () => {
@@ -800,31 +869,467 @@ describe('the actions a step has already performed go back to the model', () => 
     expect(result.turns[0]!.subActions[0]!.error).toMatch(/did not bring/);
   });
 
-  it('starts a retry attempt with an empty list', async () => {
+  // A retry's empty list is proved under A6 below: only an attempt that drove
+  // no input is retried at all now.
+});
+
+// ---------------------------------------------------------------------------
+// The turn rules (§5.5) — each block below is a defect an audit of the loop
+// found by probing dist/ with this fake adapter and a scripted model.
+// ---------------------------------------------------------------------------
+
+describe('a screenshot request is refused, not taken as "done" (A1)', () => {
+  it('goes back to the model as a refusal and does not end the step', async () => {
     const adapter = new FakeDesktopAdapter(GRAB);
-    const { client, sent } = scripted('{"action":"click","x":10,"y":10,"description":"Click"}');
-    const opts = makeOpts(adapter, client, {
-      config: makeConfig({
-        execution: {
-          ...DEFAULT_CONFIG.execution,
-          retries: 1,
-          maxTurns: 2,
-          promptOnAmbiguity: true,
-        } as Config['execution'],
-      }),
-    });
+    const { client, sent } = scripted(
+      '{"action":"screenshot","description":"Look at the screen"}',
+      '{"action":"click","x":10,"y":10,"description":"Click Print"}',
+      '{"action":"noop","description":"done"}',
+    );
 
-    const result = await executeComputerStep(1, 1, 'Click', opts);
+    const result = await executeComputerStep(1, 1, 'Click Print', makeOpts(adapter, client));
 
-    // Attempt 1 ran out of turns, attempt 2 started over.
+    // Measured before the fix: passed after ONE model call with zero clicks.
+    expect(result.status).toBe('passed');
+    expect(sent).toHaveLength(3);
+    expect(adapter.callsOf('click')).toHaveLength(1);
+    const second = textIn(sent[1]!);
+    expect(second).toContain('## Your last answer was refused');
+    expect(second).toContain('There is no screenshot action');
+  });
+
+  it('a model that only ever asks for one stalls instead of passing', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client } = scripted('{"action":"screenshot","description":"Look"}');
+
+    const result = await executeComputerStep(1, 1, 'Click Print', makeOpts(adapter, client));
+
     expect(result.status).toBe('failed');
-    expect(sent).toHaveLength(4);
-    expect(textIn(sent[0]!)).not.toContain('## Actions already performed for this step');
-    expect(textIn(sent[1]!)).toContain('turn 1: click image(10,10)');
+    expect(result.error).toContain('Computer mode stalled');
+    expect(adapter.callsOf('click')).toHaveLength(0);
+  });
+});
+
+describe('one screen-changing action per response (A2)', () => {
+  it('does not judge an assert against the image from before the click', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client, sent } = scripted(
+      '[{"action":"click","x":10,"y":10,"description":"Click Print"},' +
+        '{"action":"assert","condition":"the Print dialog is open","holds":true,"evidence":"It is","description":"Verify"}]',
+      '{"action":"assert","condition":"the Print dialog is open","holds":true,' +
+        '"evidence":"A Print window is on screen","description":"Verify"}',
+    );
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Click Print and verify the dialog opens',
+      makeOpts(adapter, client),
+    );
+
+    expect(result.status).toBe('passed');
+    expect(sent).toHaveLength(2);
+    expect(adapter.callsOf('click')).toHaveLength(1);
+    // The verdict that counts is the one given LOOKING AT the click's result.
+    expect(result.assertions).toHaveLength(1);
+    expect(result.assertions![0]!.actual).toBe('A Print window is on screen');
+    const second = textIn(sent[1]!);
+    expect(second).toContain('## Not performed from your last answer');
+    expect(second).toContain('assert "the Print dialog is open"');
+    expect(second).toContain('only the first screen-changing action of a response is performed');
+    // …and the report says what was dropped, on the turn that asked for it.
+    const dropped = result.turns[0]!.subActions.find((s) => s.action.action === 'assert');
+    expect(dropped!.error).toMatch(/not performed/);
+  });
+
+  it('does not map a click chosen on the full image through the zoom in front of it', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client, sent } = scripted(
+      '{"actions":[{"action":"zoom","region":{"x":100,"y":100,"width":100,"height":75},"description":"Zoom"},' +
+        '{"action":"click","x":250,"y":180,"description":"Click OK"}]}',
+      '{"action":"noop","description":"done"}',
+    );
+
+    await executeComputerStep(1, 1, 'Click OK', makeOpts(adapter, client));
+
+    // Measured before the fix: image(250,180) was clicked at screen(325,290),
+    // through the crop, where the model meant screen(500,360).
+    expect(adapter.callsOf('click')).toHaveLength(0);
+    const second = textIn(sent[1]!);
+    expect(second).toContain('ZOOMED');
+    expect(second).toContain('## Not performed from your last answer');
+    expect(second).toContain('click (250,180)');
+  });
+
+  it('drops a noop that follows a click: the model must see the result first', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client, sent } = scripted(
+      '[{"action":"click","x":10,"y":10,"description":"Click Print"},{"action":"noop","description":"done"}]',
+      '{"action":"noop","description":"the dialog is open"}',
+    );
+
+    const result = await executeComputerStep(1, 1, 'Click Print', makeOpts(adapter, client));
+
+    expect(result.status).toBe('passed');
+    expect(sent).toHaveLength(2);
+    expect(adapter.callsOf('click')).toHaveLength(1);
+    expect(textIn(sent[1]!)).toContain('- noop');
+  });
+
+  it('still runs the reads in front of the screen-changing action', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client, sent } = scripted(
+      '[{"action":"read","as":"field","value":"statement.pdf","description":"Read"},' +
+        '{"action":"click","x":10,"y":10,"description":"Click Save"}]',
+      '{"action":"noop","description":"done"}',
+    );
+    const resolvedParameters: Record<string, string> = {};
+
+    await executeComputerStep(1, 1, 'Read the name, then Save', makeOpts(adapter, client, { resolvedParameters }));
+
+    expect(resolvedParameters.field).toBe('statement.pdf');
+    expect(adapter.callsOf('click')).toHaveLength(1);
+    expect(textIn(sent[1]!)).not.toContain('## Not performed from your last answer');
+  });
+});
+
+describe('a repeated window action is answered with a note, not a pass (A3)', () => {
+  it('"Focus Calculator and type 1+1" still types after the model repeats the focus', async () => {
+    const adapter = new FakeDesktopAdapter({ ...GRAB, windows: [fakeWindow('Calculator')] });
+    const { client, sent } = scripted(
+      '{"action":"focus_window","title":"Calculator","description":"Focus Calculator"}',
+      '{"action":"focus_window","title":"Calculator","description":"Focus Calculator"}',
+      '{"action":"type","text":"1+1","description":"Type the sum"}',
+      '{"action":"noop","description":"typed"}',
+    );
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Focus Calculator and type 1+1',
+      makeOpts(adapter, client),
+    );
+
+    // Measured before the fix: passed at turn 2 with nothing typed.
+    expect(result.status).toBe('passed');
+    expect(adapter.callsOf('type').map((c) => c.args.text)).toEqual(['1+1']);
+    expect(adapter.callsOf('focusWindowHandle')).toHaveLength(1);
+    const third = textIn(sent[2]!);
+    expect(third).toContain('## Not performed from your last answer');
+    expect(third).toContain('already succeeded in this step');
+  });
+});
+
+describe('Stop reaches a computer step (A5)', () => {
+  it('ends a wait_window promptly, without spinning on the window list', async () => {
+    const adapter = new FakeDesktopAdapter({ ...GRAB, windows: [] });
+    const controller = new AbortController();
+    const { client } = scripted(
+      '{"action":"wait_window","title":"Never","state":"open","timeoutMs":1500,"description":"Wait"}',
+    );
+    setTimeout(() => controller.abort(), 100);
+    const started = Date.now();
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Wait for the Never window',
+      makeOpts(adapter, client, { signal: controller.signal }),
+    );
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toBe('Aborted by client');
+    expect(Date.now() - started).toBeLessThan(900);
+    // Measured before the fix: millions of window-list calls, spun until the
+    // model's own timeout ran out.
+    expect(adapter.callsOf('windows').length).toBeLessThanOrEqual(3);
+  });
+
+  it('performs nothing the model answered after Stop was pressed', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const controller = new AbortController();
+    const client = {
+      complete: async () => {
+        controller.abort();
+        return { text: '{"action":"click","x":10,"y":10,"description":"Click"}', model: 'fake' };
+      },
+    } as unknown as AiClient;
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Click',
+      makeOpts(adapter, client, { signal: controller.signal }),
+    );
+
+    expect(result.error).toBe('Aborted by client');
+    expect(adapter.callsOf('click')).toHaveLength(0);
+  });
+
+  it('tells the model when its wait_window timeout was capped', async () => {
+    const adapter = new FakeDesktopAdapter({ ...GRAB, windows: [fakeWindow('Print')] });
+    const { client, sent } = scripted(
+      '{"action":"wait_window","title":"Print","state":"open","timeoutMs":120000,"description":"Wait"}',
+      '{"action":"noop","description":"open"}',
+    );
+
+    await executeComputerStep(1, 1, 'Wait for Print', makeOpts(adapter, client));
+
+    expect(textIn(sent[1]!)).toMatch(/wait_window "Print" open → ok .*capped at 30000ms; you asked for 120000ms/);
+  });
+});
+
+describe('an attempt that acted on the screen is never replayed (A6)', () => {
+  it('does not type twice when the attempt that typed then failed', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client, sent } = scripted(
+      '{"action":"type","text":"1+1","description":"Type the sum"}',
+      'I am not sure what to do next',
+      '{"action":"type","text":"1+1","description":"Type the sum"}',
+      'I am not sure what to do next',
+    );
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Type 1+1',
+      makeOpts(adapter, client, { config: execWith({ retries: 1 }) }),
+    );
+
+    // Measured before the fix: typed ['1+1', '1+1'].
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('No JSON object or array found');
+    expect(adapter.callsOf('type').map((c) => c.args.text)).toEqual(['1+1']);
+    expect(sent).toHaveLength(2);
+    expect(result.retried).toBe(false);
+  });
+
+  it('does not click twice when the model call after the click fails', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client, sent } = scripted(
+      '{"action":"click","x":10,"y":10,"description":"Click Submit"}',
+      new Error('503 upstream unavailable'),
+      '{"action":"click","x":10,"y":10,"description":"Click Submit"}',
+      new Error('503 upstream unavailable'),
+    );
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Click Submit',
+      makeOpts(adapter, client, { config: execWith({ retries: 1 }) }),
+    );
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('503 upstream unavailable');
+    expect(adapter.callsOf('click')).toHaveLength(1);
+    expect(sent).toHaveLength(2);
+    // The attempt's turns are on the report, not lost with the raw error.
+    expect(result.turns).toHaveLength(1);
+  });
+
+  it('an attempt that touched nothing is still retried, and starts with an empty list', async () => {
+    const adapter = new FakeDesktopAdapter({ ...GRAB, windows: [fakeWindow('Print')] });
+    const { client, sent } = scripted(
+      '{"action":"wait_window","title":"Print","state":"open","timeoutMs":5000,"description":"Wait"}',
+      new Error('503 upstream unavailable'),
+      '{"action":"noop","description":"the dialog is open"}',
+    );
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Wait for Print',
+      makeOpts(adapter, client, { config: execWith({ retries: 1 }) }),
+    );
+
+    expect(result.status).toBe('passed');
+    expect(result.retried).toBe(true);
+    expect(sent).toHaveLength(3);
+    expect(textIn(sent[1]!)).toContain('turn 1: wait_window "Print" open → ok');
     // The retry's first turn is a fresh step, not a continuation of the one
-    // that failed — the same reset the stall detector gets.
+    // that failed.
     expect(textIn(sent[2]!)).not.toContain('## Actions already performed for this step');
-    expect(textIn(sent[3]!)).toContain('turn 1: click image(10,10)');
+  });
+});
+
+describe('a wait that never comes costs one attempt, within a budget (D2)', () => {
+  it('a stall is not retried', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client, sent } = scripted('{"action":"wait","seconds":0.01,"description":"Wait"}');
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Wait for the dialog',
+      makeOpts(adapter, client, { config: execWith({ retries: 1 }) }),
+    );
+
+    expect(result.error).toContain('Computer mode stalled');
+    expect(sent).toHaveLength(3);
+    expect(result.retried).toBe(false);
+  });
+
+  it('the turn cap is not retried', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client, sent } = scripted(
+      '{"action":"wait","seconds":0.01,"description":"Wait"}',
+      '{"action":"wait","seconds":0.02,"description":"Wait longer"}',
+    );
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Wait for the dialog',
+      makeOpts(adapter, client, { config: execWith({ retries: 1, maxTurns: 2 }) }),
+    );
+
+    expect(result.error).toContain('multi-turn limit');
+    expect(sent).toHaveLength(2);
+    expect(result.retried).toBe(false);
+  });
+
+  it('fails the step once wait_window has spent the wait budget, naming it', async () => {
+    const adapter = new FakeDesktopAdapter({ ...GRAB, windows: [] });
+    const { client, sent } = scripted(
+      '{"action":"wait_window","title":"Never","state":"open","timeoutMs":200,"description":"Wait"}',
+      '{"action":"wait_window","title":"Never","state":"open","timeoutMs":201,"description":"Wait again"}',
+    );
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Wait for the Never window',
+      makeOpts(adapter, client, {
+        computer: {
+          adapter,
+          settleMs: 0,
+          maxImageWidth: MAX_IMAGE_WIDTH,
+          reportScreenshots: true,
+          waitBudgetMs: 300,
+        } as ComputerStepOptions['computer'],
+      }),
+    );
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toMatch(/wait budget/);
+    expect(result.error).toContain('Timed out');
+    expect(sent).toHaveLength(2);
+  });
+
+  it('counts plain waits against the same budget', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client, sent } = scripted(
+      '{"action":"wait","seconds":0.2,"description":"Wait"}',
+      '{"action":"wait","seconds":0.21,"description":"Wait more"}',
+      '{"action":"wait","seconds":0.22,"description":"Wait more still"}',
+    );
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Wait for the dialog',
+      makeOpts(adapter, client, {
+        computer: {
+          adapter,
+          settleMs: 0,
+          maxImageWidth: MAX_IMAGE_WIDTH,
+          reportScreenshots: true,
+          waitBudgetMs: 300,
+        } as ComputerStepOptions['computer'],
+      }),
+    );
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toMatch(/wait budget/);
+    expect(sent).toHaveLength(3);
+  });
+});
+
+describe('the step reaches the model as the page surface sends it (A7)', () => {
+  it('[output: total] is asked for as [store as: total], and the read lands in {{total}}', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client, sent } = scripted(
+      '{"action":"read","as":"total","value":"2","description":"Read the display"}',
+      '{"action":"noop","description":"read"}',
+    );
+    const resolvedParameters: Record<string, string> = {};
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      'Read the result shown in Calculator [store as: total]',
+      makeOpts(adapter, client, { resolvedParameters }),
+      '[output: total] Read the result shown in Calculator',
+    );
+
+    expect(result.status).toBe('passed');
+    const text = textIn(sent[0]!);
+    expect(text).toContain('## Current Step\nRead the result shown in Calculator [store as: total]\n');
+    expect(text).not.toContain('[output: total]');
+    expect(resolvedParameters.total).toBe('2');
+  });
+
+  it('the model never sees the failure tail, and the tail still decides the outcome', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client, sent } = scripted(
+      '{"action":"assert","condition":"the Print dialog is open","holds":false,"evidence":"No dialog","description":"Verify"}',
+    );
+    const authored = 'Verify the Print dialog is open, otherwise continue with warning "no dialog"';
+
+    const result = await executeComputerStep(
+      1,
+      1,
+      authored,
+      makeOpts(adapter, client, { failureTail: parseFailureTail(authored)! }),
+      authored,
+    );
+
+    const text = textIn(sent[0]!);
+    expect(text).toContain('## Current Step\nVerify the Print dialog is open\n');
+    expect(text).not.toContain('otherwise');
+    expect(result.status).toBe('failed');
+    expect(result.tolerated).toBe(true);
+    expect(result.warning).toBe('no dialog');
+  });
+
+  it('strips the tail before the enrichment, so both apply to one line', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client, sent } = scripted('{"action":"noop","description":"done"}');
+    const authored = '[output: total] Read the result, otherwise continue';
+
+    await executeComputerStep(
+      1,
+      1,
+      'Read the result, otherwise continue [store as: total]',
+      makeOpts(adapter, client, { failureTail: parseFailureTail(authored)! }),
+      authored,
+    );
+
+    expect(textIn(sent[0]!)).toContain('## Current Step\nRead the result [store as: total]\n');
+  });
+});
+
+describe('the model is given one coordinate space: the image (B5)', () => {
+  it('carries no browser viewport line, and keeps the test name, base URL and step n of m', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    const { client, sent } = scripted('{"action":"noop","description":"done"}');
+    const opts = makeOpts(adapter, client, {
+      testName: 'Calculator sums',
+      baseUrl: 'http://localhost:8787',
+    });
+    // Both sizes the page surface could report, so neither can slip through.
+    expect(opts.config.browser.viewport).toBeDefined();
+
+    await executeComputerStep(2, 3, 'Look at the display', opts);
+
+    const text = textIn(sent[0]!);
+    expect(text).not.toMatch(/Viewport/i);
+    expect(text).toContain('Calculator sums');
+    expect(text).toContain('- Base URL: http://localhost:8787');
+    expect(text).toContain('- Current Step: 2 of 3');
+    // The one size the model is told is the image's.
+    expect(text).toContain(`The attached image is the current screen, ${MAX_IMAGE_WIDTH}×300 pixels.`);
   });
 });
 

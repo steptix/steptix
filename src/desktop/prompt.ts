@@ -76,7 +76,9 @@ const ACTION_EXAMPLES: Readonly<Record<ComputerActionType, { performs: string; j
     json: '{"action":"focus_window","title":"Save As","description":"Focus the Save As dialog"}',
   },
   wait_window: {
-    performs: 'poll the window list until such a window exists ("open") or no longer does ("gone")',
+    performs:
+      'poll the window list until such a window exists ("open") or no longer does ("gone"); ' +
+      '"timeoutMs" at most 30000',
     json: '{"action":"wait_window","title":"Print","state":"open","timeoutMs":15000,"description":"Wait for the Print dialog"}',
   },
   read: {
@@ -145,6 +147,11 @@ export const NO_REPEAT_SENTENCE =
   'If the step is now satisfied, answer with `noop`. Do not repeat an action that already ' +
   'succeeded unless the screen shows it did not take effect.';
 
+/** The heading over the actions of the last answer the loop did not perform
+ *  (§5.5). Distinct from the refusal heading: nothing here was malformed, and
+ *  a model told "refused" about a click that DID happen would redo it. */
+export const NOT_PERFORMED_HEADING = '## Not performed from your last answer';
+
 /** The evidence a blind turn answers with (§15.5) — the words a report reader
  *  searches for when a computer step failed without a click. */
 export const NO_SCREENSHOT_EVIDENCE = 'no screenshot was received';
@@ -206,7 +213,7 @@ A browser may well be visible. While you are on this surface it is pixels like e
 Coordinates are in the pixel space of the image attached to the CURRENT message, with (0, 0) at its top-left. The image's size is given in every message — read it there, and answer in it. Do not convert to anything, and do not assume the image is the screen's real resolution; it usually is not.
 
 ## Actions
-Return ONE action per response, as JSON. Every action carries a "description".
+Return ONE action per response, as JSON. Every action carries a "description". If you return several, only the first that changes the screen or the image (a click, drag, move, scroll, type, key, wait, wait_window, focus_window or zoom) is performed; anything after it is dropped, because it was chosen from a screenshot that is now out of date. There is no screenshot action: every message already carries a fresh one.
 
 ${actionTable()}
 
@@ -287,6 +294,11 @@ export interface ComputerStepMessageInput {
   /** §5.4 — refusals from the previous turn, put in front of the model so it
    *  can choose differently rather than repeating itself into a stall. */
   refusals?: string[];
+  /** §5.5 — well-formed actions from the previous turn that the loop chose
+   *  not to perform, each with why: the ones behind the first screen-changing
+   *  action, or a window action repeated after it had already succeeded.
+   *  Consumed per turn, like {@link refusals}. */
+  notPerformed?: string[];
   /** A failed action's message from the previous turn (a window that never
    *  appeared, a title that matched nothing). */
   priorFailure?: string;
@@ -323,6 +335,11 @@ export function buildComputerStepMessage(input: ComputerStepMessageInput): ChatM
   if (input.refusals && input.refusals.length > 0) {
     sections.push(
       `## Your last answer was refused\n${input.refusals.map((r) => `- ${r}`).join('\n')}`,
+    );
+  }
+  if (input.notPerformed && input.notPerformed.length > 0) {
+    sections.push(
+      `${NOT_PERFORMED_HEADING}\n${input.notPerformed.map((r) => `- ${r}`).join('\n')}`,
     );
   }
   if (input.priorFailure && input.priorFailure.trim() !== '') {

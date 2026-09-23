@@ -105,6 +105,17 @@ describe('parseComputerActions — every §5.4 action', () => {
     });
   });
 
+  it('wait_window clamps a timeout over 30 s, and remembers what was asked (A5)', () => {
+    const action = one('{"action":"wait_window","title":"Print","state":"open","timeoutMs":120000}');
+    expect(action).toMatchObject({ timeoutMs: 30_000, requestedTimeoutMs: 120_000 });
+  });
+
+  it('wait_window keeps a timeout within the cap as asked', () => {
+    const action = one('{"action":"wait_window","title":"Print","state":"open","timeoutMs":30000}');
+    expect(action).toMatchObject({ timeoutMs: 30_000 });
+    expect(action).not.toHaveProperty('requestedTimeoutMs');
+  });
+
   it('read', () => {
     expect(one('{"action":"read","as":"file_name","value":"statement.pdf"}')).toMatchObject({
       action: 'read',
@@ -219,11 +230,15 @@ describe('parseComputerActions — aliases (§5.4)', () => {
     expect(one('{"action":"mouse_move","x":3,"y":4}')).toMatchObject({ action: 'move' });
   });
 
-  it('screenshot becomes a noop that says captures are automatic', () => {
-    const action = one('{"action":"screenshot"}');
-    expect(action.action).toBe('noop');
-    expect((action as { reason?: string }).reason).toMatch(/captured automatically before every turn/);
-  });
+  it.each(['screenshot', 'take_screenshot', 'captureScreen'])(
+    '"%s" is refused, never a noop — a noop would pass the step (A1)',
+    (name) => {
+      const parsed = parseComputerActions(`{"action":"${name}"}`);
+      expect(parsed.actions).toEqual([]);
+      expect(parsed.refused[0]!.reason).toContain('There is no screenshot action');
+      expect(parsed.refused[0]!.reason).toContain('every turn already carries a fresh screenshot');
+    },
+  );
 
   it('an explicit field beats the alias it came with', () => {
     // `double_click` implies count 2; a model that then says count 3 means 3.

@@ -91,7 +91,11 @@ export interface ComputerWaitWindowAction extends ComputerActionBase {
   action: 'wait_window';
   title: string;
   state: 'open' | 'gone';
+  /** At most {@link MAX_WAIT_WINDOW_TIMEOUT_MS}. */
   timeoutMs: number;
+  /** The model's own `timeoutMs`, present only when it asked for more than
+   *  the cap and was clamped — so the result it reads can say so. */
+  requestedTimeoutMs?: number;
 }
 
 export interface ComputerReadAction extends ComputerActionBase {
@@ -109,9 +113,7 @@ export interface ComputerAssertAction extends ComputerActionBase {
 
 export interface ComputerNoopAction extends ComputerActionBase {
   action: 'noop';
-  /** Present when the parser turned something else into a no-op — a
-   *  `screenshot` request, for instance, whose reason tells the model that
-   *  captures are automatic. */
+  /** The model's own `reason`, when it gave one. */
   reason?: string;
 }
 
@@ -194,6 +196,11 @@ export const DEFAULT_SCROLL_TICKS = 3;
 /** §5.4 — `wait_window`'s default budget. */
 export const DEFAULT_WAIT_WINDOW_TIMEOUT_MS = 15_000;
 
+/** §5.4 — `wait_window`'s longest timeout. The model chooses `timeoutMs`, and
+ *  one uncapped answer could hold the step (and the machine lock) for as long
+ *  as it liked. */
+export const MAX_WAIT_WINDOW_TIMEOUT_MS = 30_000;
+
 /** The actions this surface performs itself. The rest (`read`, `assert`,
  *  `noop`, `prompt`, `return`, `fail`, `api_call`, `extract_value`) are the
  *  run loop's business, and the executor says so by answering
@@ -208,4 +215,29 @@ export const SCREEN_ACTION_TYPES: ReadonlySet<ComputerActionType> = new Set<Comp
   'wait',
   'focus_window',
   'wait_window',
+]);
+
+/**
+ * The actions after which the image the model chose from no longer holds:
+ * every one that touches the screen or lets time pass, and `zoom`, which
+ * replaces the image and its mapping. Only the FIRST of these in a response is
+ * performed (§5.5) — anything after it was chosen from a picture that is now
+ * out of date.
+ */
+export const SCREEN_CHANGING_ACTION_TYPES: ReadonlySet<ComputerActionType> =
+  new Set<ComputerActionType>([...SCREEN_ACTION_TYPES, 'zoom']);
+
+/**
+ * The actions that drive the real pointer, keyboard or windows. An attempt
+ * that performed one is never retried (§5.5): a retry starts the step over and
+ * would type, click or submit a second time.
+ */
+export const INPUT_ACTION_TYPES: ReadonlySet<ComputerActionType> = new Set<ComputerActionType>([
+  'click',
+  'drag',
+  'move',
+  'scroll',
+  'type',
+  'key',
+  'focus_window',
 ]);

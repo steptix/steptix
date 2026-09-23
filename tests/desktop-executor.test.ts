@@ -427,6 +427,70 @@ describe('executeComputerAction — windows (§5.4)', () => {
     expect(adapter.callsOf('windows')).toHaveLength(5);
   });
 
+  it('wait_window stops at the next look once the run is stopped (A5)', async () => {
+    const adapter = new FakeDesktopAdapter({ windows: [] });
+    const controller = new AbortController();
+    const harness = ctx(adapter, view({}, 100, 100));
+    const sleep = harness.context.sleep;
+    const result = await executeComputerAction(
+      { action: 'wait_window', title: 'Never', state: 'open', timeoutMs: 1000, description: '' },
+      {
+        ...harness.context,
+        signal: controller.signal,
+        // Stop is pressed during the first poll's sleep.
+        sleep: async (ms: number) => {
+          controller.abort();
+          await sleep(ms);
+        },
+      },
+    );
+    expect(result).toMatchObject({ performed: true, ok: false });
+    expect(result.message).toMatch(/stopped/);
+    expect(adapter.callsOf('windows')).toHaveLength(1);
+  });
+
+  it('wait_window looks at most once per poll interval, even when a sleep returns early (A5)', async () => {
+    // The measured spin: after Stop, the run's interruptible sleep resolves at
+    // once, and the loop asked for the window list 6.6 million times.
+    const adapter = new FakeDesktopAdapter({ windows: [] });
+    const harness = ctx(adapter, view({}, 100, 100));
+    const result = await executeComputerAction(
+      { action: 'wait_window', title: 'Never', state: 'open', timeoutMs: 100, description: '' },
+      { ...harness.context, now: Date.now, sleep: async () => {} },
+    );
+    expect(result.ok).toBe(false);
+    // ceil(100 / 250) + 1: the first look, and one at the deadline.
+    expect(adapter.callsOf('windows')).toHaveLength(2);
+  });
+
+  it('wait_window sleeps no further than its deadline', async () => {
+    const adapter = new FakeDesktopAdapter({ windows: [] });
+    const harness = ctx(adapter, view({}, 100, 100));
+    await executeComputerAction(
+      { action: 'wait_window', title: 'Never', state: 'open', timeoutMs: 600, description: '' },
+      harness.context,
+    );
+    expect(harness.clock.slept).toEqual([WINDOW_POLL_INTERVAL_MS, WINDOW_POLL_INTERVAL_MS, 100]);
+  });
+
+  it('wait_window says when the model\'s timeout was capped (A5)', async () => {
+    const adapter = new FakeDesktopAdapter({ windows: [] });
+    const harness = ctx(adapter, view({}, 100, 100));
+    const result = await executeComputerAction(
+      {
+        action: 'wait_window',
+        title: 'Never',
+        state: 'open',
+        timeoutMs: 30_000,
+        requestedTimeoutMs: 120_000,
+        description: '',
+      },
+      harness.context,
+    );
+    expect(result.message).toMatch(/Timed out after 30000ms/);
+    expect(result.message).toContain('you asked for 120000ms');
+  });
+
   it('matches a title case-insensitively, as a substring', async () => {
     const adapter = new FakeDesktopAdapter({ windows: [fakeWindow('Confirm Save As')] });
     const harness = ctx(adapter, view({}, 100, 100));
