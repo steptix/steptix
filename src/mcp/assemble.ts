@@ -343,6 +343,11 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
     ...(args.runSettings !== undefined &&
       Object.keys(args.runSettings).length > 0 && { runSettings: args.runSettings }),
     ...projectFields(project, absPath, cacheEnabled(parsed, project)),
+    // Every call runs the file from step 1 in the SAME `mcp:<path>` session,
+    // so every call is a new run and starts on the browser surface — not on
+    // the computer surface a previous call failed or stopped on before its
+    // `[use browser]` (SPEC-use-computer.md §4.5).
+    runStart: { stepIndex: 0 },
   };
 
   return {

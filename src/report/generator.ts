@@ -1057,13 +1057,24 @@ function renderAiInteraction(ai: AiInteraction): string {
   const timeLabel = timeStr ? ` <span class="event-time">${timeStr}</span>` : '';
 
   const urlHtml = ai.pageUrl ? `<div class="screenshot-url">${escapeHtml(ai.pageUrl)}</div>` : '';
+  // A condition judged on the computer surface (SPEC-use-computer.md §5.6)
+  // decided from a capture of the whole SCREEN, and that capture is left out
+  // only by `desktop.reportScreenshots: false` — so its absence names that
+  // switch, as `renderComputerTurn` does, not the page-capture one.
+  const desktopJudge = ai.purpose === 'condition-judge [computer]';
+  const shotLabel = desktopJudge ? 'Screen at AI decision' : 'Page state at AI decision';
   const screenshotHtml = ai.screenshotBase64
     ? `<div class="screenshot-container turn-screenshot">
-        <div class="screenshot-label">Page state at AI decision</div>
+        <div class="screenshot-label">${shotLabel}</div>
         ${urlHtml}
         <img class="screenshot-img" src="${toDataUri(ai.screenshotBase64)}" alt="AI decision screenshot" loading="lazy">
        </div>`
-    : `<div class="screenshot-container turn-screenshot screenshot-disabled">
+    : desktopJudge
+      ? `<div class="screenshot-container turn-screenshot screenshot-disabled">
+        <div class="screenshot-label">${shotLabel}</div>
+        <div class="screenshot-placeholder">Desktop capture not embedded — set <code>desktop.reportScreenshots: true</code> to include it. A desktop capture is the whole screen, so this is off-by-choice, not a missing file.</div>
+       </div>`
+      : `<div class="screenshot-container turn-screenshot screenshot-disabled">
         <div class="screenshot-label">Page state at AI decision</div>
         ${urlHtml}
         <div class="screenshot-placeholder">Screenshot not captured — set <code>browser.captureScreenshotsPerAction: true</code> to enable.</div>

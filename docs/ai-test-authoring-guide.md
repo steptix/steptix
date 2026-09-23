@@ -145,10 +145,10 @@ Rules the generated file must respect:
 - **Switching surface arranges nothing.** It changes what the model is shown and how its answer is performed, and nothing else — so when a run starts from an editor, the first computer-mode screenshot is of that editor. Write a step that brings the target window forward. Two phrasings are answered from the OS window list rather than from pixels: `Focus the window whose title contains "Save As"`, and `Wait until a window titled "Save As" is open` / `… is gone`.
 - **A test whose first step is `[use computer]` launches no browser at all.** That is how a native application is tested here.
 - **The person at the machine must not touch the mouse or the keyboard** while a computer-mode step runs, and the desktop must be visible and unlocked. Only one computer-mode run per machine — the framework takes a lock and refuses a second. Say this in the test's prose header; do not generate a computer-mode test as if it were an ordinary unattended one.
-- **Captures are of the whole screen**, including whatever else is on the desktop, and they go into the report. Text redaction cannot mask pixels. `desktop.reportScreenshots: false` keeps desktop captures out of the report.
+- **Captures are of the whole screen**, including whatever else is on the desktop, and they go into the report. Text redaction cannot mask pixels. `desktop.reportScreenshots: false` keeps desktop captures out of the report, and stops the MCP server returning a whole-desktop screenshot of a failed computer-mode step to the agent.
 - **No cache and no code-behind for these steps.** A recorded coordinate has nothing to re-validate against on a machine whose resolution or window layout has moved, so a step that ran in computer mode stays AI-driven when the file is compiled.
 
-Worked examples: `templates/init/tests/pdf-print-cancel.md` (open a print dialog and cancel it) and `templates/init/tests/calc-one-plus-one.md` (start Calculator with a tool, type a sum, click the "=" button and read the answer, with no browser launched at all).
+Worked examples: `templates/init/tests/pdf-dialog-cancel.md` (open a print dialog and cancel it) and `templates/init/tests/calc-one-plus-one.md` (start Calculator with a tool, type a sum, click the "=" button and read the answer, with no browser launched at all).
 
 ## Waits and assertions
 

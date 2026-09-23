@@ -1295,7 +1295,9 @@ the report, which means the report can carry whatever else was on your desktop
 — other windows, a file listing, a notification. Redaction cannot help here;
 `src/utils/secrets.ts` masks text and there is no text to mask. Set
 `desktop.reportScreenshots: false` to keep desktop captures out of the report
-entirely.
+entirely. The same switch covers the MCP server: by default a failed
+computer-mode step hands the agent a screenshot of the whole desktop, and with
+the switch off it hands back none.
 
 **Two things computer-mode steps do not get.** They are never replayed from
 the step cache and never compiled to code-behind: a cached selector is
@@ -1305,7 +1307,7 @@ scaling or window layout has moved. A compiled step that ran in computer mode
 stays AI-driven, and the compile report says so.
 
 Worked examples:
-[`templates/init/tests/pdf-print-cancel.md`](../templates/init/tests/pdf-print-cancel.md)
+[`templates/init/tests/pdf-dialog-cancel.md`](../templates/init/tests/pdf-dialog-cancel.md)
 opens a print dialog from the fixture app's PDF and cancels it, and
 [`templates/init/tests/calc-one-plus-one.md`](../templates/init/tests/calc-one-plus-one.md)
 starts Calculator with a tool, types a sum, clicks the "=" button and reads

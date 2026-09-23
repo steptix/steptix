@@ -396,7 +396,7 @@ worktree, four shards and two shards have both come back clean.
 
 ### Computer-mode live test
 
-`computer-use.test.cjs` drives `templates/init/tests/pdf-print-cancel.md`,
+`computer-use.test.cjs` drives `templates/init/tests/pdf-dialog-cancel.md`,
 which leaves the browser at `[use computer]` and clicks a PDF toolbar and a
 print dialog with the **real mouse**
 ([SPEC-use-computer.md](docs/specs/SPEC-use-computer.md) §13.3). It skips

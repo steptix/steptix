@@ -23,6 +23,9 @@
  * never called here.
  */
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { logger } from '../utils/logger.js';
 import { chordKeyMembers } from './keys.js';
 import {
@@ -53,12 +56,73 @@ const DRAG_STEPS = 20;
 
 type NutModule = typeof import('@nut-tree-fork/nut-js');
 
-/** §5.1 item 2 — the message when nut.js will not load. */
+/**
+ * The package root this server runs from — the directory `npm install` has to
+ * be run in for a dependency to be found.
+ *
+ * Walked up from THIS module rather than read off `process.cwd()`, because the
+ * two differ exactly when it matters: a server started from a worktree, or by
+ * TestBench's auto-start from whatever directory `serverAutoStart.cwd` names,
+ * resolves its imports from where its own `dist/` lives, not from its cwd. The
+ * first directory with a `package.json` is the answer from `src/desktop/` and
+ * from `dist/desktop/` alike.
+ */
+export function serverPackageRoot(): string {
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    if (existsSync(path.join(dir, 'package.json'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return process.cwd();
+    dir = parent;
+  }
+}
+
+/**
+ * The module a module-not-found error could not find, or null when `err` is
+ * some other load failure.
+ *
+ * Both spellings: `ERR_MODULE_NOT_FOUND` is what the dynamic `import()` below
+ * throws when the package itself is absent ("Cannot find package
+ * '@nut-tree-fork/nut-js' imported from …"), and `MODULE_NOT_FOUND` is what a
+ * `require` INSIDE nut.js throws when one of its own dependencies is — the
+ * per-platform `libnut` binary package, typically. Either way `npm install` is
+ * the fix; the name decides which sentence says so.
+ */
+function missingModuleOf(err: unknown): string | null {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  if (code !== 'ERR_MODULE_NOT_FOUND' && code !== 'MODULE_NOT_FOUND') return null;
+  const message = err instanceof Error ? err.message : String(err);
+  return /Cannot find (?:package|module) '([^']+)'/.exec(message)?.[1] ?? NUT_PACKAGE;
+}
+
+/**
+ * §5.1 item 2 — the message when nut.js will not load.
+ *
+ * A module-not-found says so and says where to install, because that is the
+ * one load failure with a one-line fix, and the one a checkout that predates
+ * computer mode hits on its first `[use computer]`: the dependency is in
+ * `package.json`, but nobody has run `npm install` there since it was added.
+ * Every other failure — a binary for the wrong architecture, a missing
+ * permission — keeps the prebuilt-binary message, with the error beneath it.
+ */
 export function nutLoadFailureMessage(
   err: unknown,
   platform: NodeJS.Platform = process.platform,
+  packageRoot: string = serverPackageRoot(),
 ): string {
   const detail = err instanceof Error ? err.message : String(err);
+  const missing = missingModuleOf(err);
+  if (missing !== null) {
+    const what =
+      missing === NUT_PACKAGE
+        ? `${NUT_PACKAGE} is not installed`
+        : `${NUT_PACKAGE} is installed but a package it needs (${missing}) is not`;
+    return (
+      `computer mode is unavailable: ${what} in the checkout this server runs from. ` +
+      `Run \`npm install\` in ${packageRoot}, then restart the server. ` +
+      `Underlying error: ${detail}`
+    );
+  }
   const permissions =
     platform === 'darwin'
       ? ' On macOS, node also needs Screen Recording AND Accessibility permission ' +
@@ -563,22 +627,32 @@ function buildAdapter(nut: NutModule): DesktopAdapter {
 
 let cached: Promise<DesktopAdapter> | null = null;
 
+/** The one import of the package in the repo, and a dynamic one (§5.1 item 2). */
+async function importNutModule(): Promise<unknown> {
+  return await import('@nut-tree-fork/nut-js');
+}
+
 /**
  * Load nut.js and build the adapter, once per process.
  *
  * Throws {@link nutLoadFailureMessage} when the package will not load. The
  * cached promise is cleared on failure so a later session can try again —
  * caching a rejection would make one bad moment permanent for the life of the
- * server.
+ * server — which is also what lets an `npm install` run mid-session take
+ * effect at the next `[use computer]` once the server has restarted.
+ *
+ * `importNut` is the test seam for the failure message: a test hands it an
+ * import that rejects the way Node's does, so no test ever loads the real
+ * package to prove what happens when it is missing.
  */
-export async function loadNutAdapter(): Promise<DesktopAdapter> {
+export async function loadNutAdapter(
+  importNut: () => Promise<unknown> = importNutModule,
+): Promise<DesktopAdapter> {
   if (cached) return cached;
   cached = (async () => {
     let nut: NutModule;
     try {
-      const imported = (await import('@nut-tree-fork/nut-js')) as NutModule & {
-        default?: NutModule;
-      };
+      const imported = (await importNut()) as NutModule & { default?: NutModule };
       nut = imported.default ?? imported;
     } catch (err) {
       throw new Error(nutLoadFailureMessage(err));

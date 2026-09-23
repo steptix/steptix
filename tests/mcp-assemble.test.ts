@@ -421,6 +421,20 @@ describe('interpolation', () => {
   });
 });
 
+describe('runStart — which MCP runs start on the browser surface (SPEC-use-computer.md §4.5)', () => {
+  it('run_test_file marks every call as a new run from step 1', async () => {
+    // Each call reuses `mcp:<path>`, so without this a call that failed inside
+    // `[use computer]` left the next call's first step on the real mouse.
+    const run = await assemble('simple.md');
+    expect(run.request.runStart).toEqual({ stepIndex: 0 });
+  });
+
+  it('run_steps does not: its session carries on between calls, surface included', async () => {
+    const run = await assembleSteps({ steps: ['Open the home page'], resolveProject, projectRoot: root });
+    expect(run.request.runStart).toBeUndefined();
+  });
+});
+
 describe('assembleSteps', () => {
   it('synthesises a test file path and 1..n source lines without touching the disk', async () => {
     const run = await assembleSteps({

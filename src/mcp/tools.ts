@@ -343,9 +343,10 @@ function readRunSettings(args: {
   if (args.full_page !== undefined) runSettings.fullPage = args.full_page;
   if (args.send_screenshots !== undefined) runSettings.sendScreenshots = args.send_screenshots;
   if (args.ai !== undefined) runSettings.ai = args.ai;
-  // `default` is `none`: no image comes back unless it was asked for. A
-  // screenshot is a picture of a live signed-in session, and it is charged to
-  // the caller's context — neither is a cost to incur by default.
+  // `default` is `on-failure` (DEFAULT_SCREENSHOTS_RETURN): an image comes
+  // back only for a failed step. A screenshot is a picture of a live signed-in
+  // session — of the whole desktop on the computer surface — and it is charged
+  // to the caller's context, so a passing run returns none.
   // `'default'` and an absent argument are the same thing here — unlike the four
   // above, this one is not retained, so there is no override to clear. It exists
   // for symmetry, so a model that has learned `default` on `capture` is not
@@ -531,6 +532,9 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
       testFilePath: request.testFilePath ?? project.projectRoot,
       expansionPossible: request.skillsDir !== undefined || request.sections !== undefined,
       screenshotsReturn: ctx.screenshotsReturn,
+      // A computer-mode capture is the whole desktop; the project's privacy
+      // switch decides whether one may come back here (SPEC-use-computer.md §10.1).
+      desktopScreenshots: project.desktopScreenshots,
     });
 
     return {
@@ -1903,6 +1907,9 @@ Screenshots come back to you on a FAILURE by default — a picture of the page a
 it broke, which is usually the fastest way to see why. Nothing comes back on a
 passing run. Pass screenshots_return: "none" to suppress it, and do so when the
 page under test holds something the user would not want in this conversation.
+A step that failed in computer mode (after [use computer]) returns a screenshot
+of the WHOLE DESKTOP — every window on the screen, not just the page — unless
+the project sets desktop.reportScreenshots: false, in which case none comes back.
 
 Two settings interact, and both surprise people:
   - capture happens BEFORE return. screenshots_return can only hand you a

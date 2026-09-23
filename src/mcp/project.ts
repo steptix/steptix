@@ -233,6 +233,7 @@ interface RawProjectConfig {
   tests?: { dir?: unknown; pattern?: unknown; skillsDir?: unknown; toolsDir?: unknown };
   cache?: { enabled?: unknown };
   mcp?: { cdp?: { allowUnowned?: unknown; ports?: unknown } };
+  desktop?: { reportScreenshots?: unknown };
 }
 
 /**
@@ -357,6 +358,26 @@ function readMcpCdpConfig(config: RawProjectConfig): {
     allowUnowned: cdp?.allowUnowned === true,
     ports: ports && ports.length > 0 ? ports : null,
   };
+}
+
+/**
+ * `desktop.reportScreenshots` from `aiui.config.json` — whether a computer-mode
+ * capture may leave the run (docs/specs/SPEC-use-computer.md §10.1).
+ *
+ * The switch is written for the report, and this module applies it to the one
+ * other place a capture can go: back to the agent as an image. A desktop
+ * capture is the whole screen — whatever else is open on it — and the tool
+ * result puts it in a conversation transcript, so the author who kept it out
+ * of the report has kept it out of here too.
+ *
+ * Only the JSON boolean `true` or an absent key allows it. Anything else —
+ * `false`, or a value of the wrong type, which the server's loader refuses
+ * outright — withholds it: this is a privacy switch, and the ambiguous reading
+ * is the closed one.
+ */
+function readDesktopScreenshots(config: RawProjectConfig): boolean {
+  const value = config.desktop?.reportScreenshots;
+  return value === undefined || value === true;
 }
 
 export function resolveTestsGlob(project: ProjectContext): { dir: string; pattern: string } {
@@ -524,6 +545,7 @@ async function resolveUserScope(
     cacheEnabled: config.cache?.enabled === true,
     envFilesConsulted: [path.join(userRoot, '.env')],
     cdpPermissions: readMcpCdpConfig(config),
+    desktopScreenshots: readDesktopScreenshots(config),
   };
 
   if (args.envName !== undefined && args.envName !== '') {
@@ -697,6 +719,7 @@ export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectC
     cacheEnabled: config.cache?.enabled === true,
     envFilesConsulted: [baseEnvPath],
     cdpPermissions: readMcpCdpConfig(config),
+    desktopScreenshots: readDesktopScreenshots(config),
   };
 
   // Step 10 for a tool-supplied name — before the server URL is read, so an

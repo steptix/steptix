@@ -371,6 +371,52 @@ describe('TestBench debug state machine', function () {
     assert.equal(hooks.isRunning(), false);
   });
 
+  it('runStart: a started run sends it on its first block; a Continue does not (SPEC-use-computer §4.5)', async () => {
+    // The server resets the session's surface only on a batch that says it
+    // starts a run. A run that failed inside `[use computer]` leaves the
+    // reused session on the computer surface, so a started run that forgot to
+    // say so would hand its first step to the real mouse — and a Continue
+    // that DID say so would drop a paused desktop excursion back onto the page.
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(
+        new vscode.Location(fixtureUri('test-with-steps.md'), new vscode.Position(9, 0)),
+        true,
+      ),
+    ]);
+    const editor = vscode.window.activeTextEditor;
+    editor.selection = new vscode.Selection(new vscode.Position(0, 0), new vscode.Position(0, 0));
+
+    // Run (the whole test): the first block starts at step 1 — index 0.
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    assert.deepEqual(fake.requests[0].runStart, { stepIndex: 0 });
+    fake.push({ type: 'step:start', line: 8 });
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.end();
+    await waitFor('paused at line 10', () => hooks.tracker.snapshot().breakpointStop === 10);
+    await waitFor('idle while paused', () => !hooks.isRunning());
+
+    // Continue: the same run, so no runStart — the surface it paused on stays.
+    void vscode.commands.executeCommand('testbench-native.continueRun');
+    await waitFor('continuation requested', () => fake.requests.length > 1);
+    assert.deepEqual(fake.requests[1].sourceLines, [10]);
+    assert.equal(fake.requests[1].runStart, undefined, 'a Continue must not reset the surface');
+    fake.end();
+    await waitFor('idle after continue', () => !hooks.isRunning());
+    vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
+
+    // Run Step Here on step 2 (line 9): a started run, starting at index 1.
+    editor.selection = new vscode.Selection(new vscode.Position(8, 0), new vscode.Position(8, 5));
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('third run requested', () => fake.requests.length > 2);
+    assert.deepEqual(fake.requests[2].sourceLines, [9]);
+    assert.deepEqual(fake.requests[2].runStart, { stepIndex: 1 });
+    fake.end();
+    await waitFor('idle after the mid-file run', () => !hooks.isRunning());
+  });
+
   it('running → idle (webview stop): webview-driven stop also marks in-flight step stopped', async () => {
     // Guards the two-handler regression class: testbench-native.stop and the
     // webview-message `{ type: 'stop' }` handler are separate code paths.

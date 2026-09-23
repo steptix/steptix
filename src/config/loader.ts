@@ -338,6 +338,9 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
   // `$schema` is an editor-only hint (autocomplete/validation), not a Config
   // field — strip it before merging so it never reaches the resolved config.
   const { $schema: _schema, ...userConfig } = parsed;
+  // Before the merge, on the file's own values: after it, a key the file left
+  // out and a key the file got right are indistinguishable.
+  assertDesktopSection(userConfig['desktop'], resolvedPath);
   const typed = userConfig as UserConfig;
   const merged = withMachineAiFloor(
     withEnvDefaults(mergeConfig(baseDefaults, typed)),
@@ -345,6 +348,62 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
   );
   assertNoFlowControlInDefaultHooks(merged, resolvedPath);
   return merged;
+}
+
+/** How a wrong-typed config value is named in a refusal. */
+function describeValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'an array';
+  if (typeof value === 'string') return `the string ${JSON.stringify(value)}`;
+  if (typeof value === 'object') return 'an object';
+  return `the ${typeof value} ${String(value)}`;
+}
+
+/**
+ * The `desktop` section's value types, checked at LOAD
+ * (docs/specs/SPEC-use-computer.md §5.1 item 1, §5.10).
+ *
+ * The one section of this file that the loader types, and for the reason the
+ * hook check below gives — a typo in the sole config source fails loudly
+ * rather than silently changing how every test runs — made sharper by what
+ * two of these keys guard. `desktop.enabled` is the opt-in that lets a test
+ * file move the mouse on this machine, and the gate reads it as truthy: the
+ * string `"false"` is truthy, so without this it SWITCHED COMPUTER MODE ON.
+ * `desktop.reportScreenshots` is the privacy switch, read as `!== false`, so
+ * the string `"false"` left whole-screen captures in the report. Neither may
+ * fall through to a guess, in either direction: a refusal naming the file,
+ * the key and the value costs one edit, where treating `"true"` as off would
+ * answer "computer mode is disabled; set desktop.enabled: true" to someone
+ * who has.
+ *
+ * The generated schema already rejects all four in the editor; this is the
+ * same rule for a file edited anywhere else.
+ */
+function assertDesktopSection(desktop: unknown, configPath: string): void {
+  if (desktop === undefined) return;
+  if (!isPlainObject(desktop)) {
+    throw new Error(
+      `Invalid "desktop" in ${configPath}: expected an object, got ${describeValue(desktop)}.`,
+    );
+  }
+  for (const key of ['enabled', 'reportScreenshots'] as const) {
+    const value = desktop[key];
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new Error(
+        `Invalid desktop.${key} in ${configPath}: expected true or false, got ${describeValue(value)}. ` +
+          'Write the JSON boolean, without quotes' +
+          (key === 'enabled' ? ' — only `true` switches computer mode on.' : '.'),
+      );
+    }
+  }
+  for (const key of ['maxImageWidth', 'settleMs'] as const) {
+    const value = desktop[key];
+    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value))) {
+      throw new Error(
+        `Invalid desktop.${key} in ${configPath}: expected a number, got ${describeValue(value)}.`,
+      );
+    }
+  }
 }
 
 /**

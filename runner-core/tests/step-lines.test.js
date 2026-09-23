@@ -10,6 +10,7 @@ import {
   nearestStepAtOrAbove,
   nearestStepAtOrBelow,
   resolveRunLines,
+  runStartFor,
 } from '../dist/step-lines.js';
 
 test('isTestFile: detects ## Steps', () => {
@@ -573,4 +574,36 @@ test('danglingChainMemberError: an ordinary step between them reopens nothing', 
     danglingChainMemberError(text) ?? '',
     /"Otherwise, Sec3" has no decision to be the alternative of/,
   );
+});
+
+// runStartFor — SPEC-use-computer.md §4.5. The server reads `stepIndex` as a
+// position in `fullSteps`, which is extractSteps(text); these pin that the two
+// number the same lines.
+const PDF = [
+  '# PDF', //                                         1
+  '', //                                              2
+  '## Steps', //                                      3
+  '1. Navigate to statement.pdf', //                  4
+  '2. [use computer]', //                             5
+  '3. Click the Cancel button in the Print dialog', // 6
+  '4. [use browser]', //                              7
+  '5. Verify the page URL ends with statement.pdf', // 8
+  '',
+  '### Close',
+  '1. Click Close', //                               11
+].join('\n');
+
+test('runStartFor: a run from step 1 starts at index 0', () => {
+  assert.deepEqual(runStartFor(PDF, 4), { stepIndex: 0 });
+});
+
+test("runStartFor: a mid-file start is the step's position in extractSteps", () => {
+  assert.deepEqual(runStartFor(PDF, 6), { stepIndex: 2 });
+  assert.equal(extractSteps(PDF)[2].instruction, 'Click the Cancel button in the Print dialog');
+  assert.deepEqual(runStartFor(PDF, 8), { stepIndex: 4 });
+});
+
+test('runStartFor: a section body line has no main-flow position, so no stepIndex', () => {
+  // The server starts such a run on the browser surface — the safe direction.
+  assert.deepEqual(runStartFor(PDF, 11), {});
 });

@@ -13,7 +13,7 @@
  * turns every browser test on a binary-less machine red.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -24,11 +24,14 @@ vi.mock('node:child_process', () => ({ execFile: execFileMock }));
 
 import {
   captureFailureMessage,
+  loadNutAdapter,
   NUT_PACKAGE,
   nutLoadFailureMessage,
   OS_WINDOW_HELPER_TIMEOUT_MS,
   osWindowCommand,
+  resetNutAdapter,
   runOsWindowCommand,
+  serverPackageRoot,
 } from '../src/desktop/nut-adapter.js';
 import {
   clipToDisplay,
@@ -55,6 +58,79 @@ describe('nutLoadFailureMessage — §5.1 item 2', () => {
 
   it('does not mention macOS permissions anywhere else', () => {
     expect(nutLoadFailureMessage(new Error('boom'), 'linux')).not.toContain('Screen Recording');
+  });
+});
+
+/** An error shaped the way Node's module loader throws one. */
+function notFound(code: 'ERR_MODULE_NOT_FOUND' | 'MODULE_NOT_FOUND', message: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+describe('nutLoadFailureMessage — a package that is not installed says where to install it', () => {
+  // The case a checkout that predates computer mode hits: the dependency is in
+  // package.json and nobody has run `npm install` there since. The text is
+  // what Node 22 prints for a dynamic import of an absent package.
+  const absent = notFound(
+    'ERR_MODULE_NOT_FOUND',
+    "Cannot find package '@nut-tree-fork/nut-js' imported from C:\\repo\\dist\\desktop\\nut-adapter.js",
+  );
+
+  it('names the package as not installed and the directory to run npm install in', () => {
+    const message = nutLoadFailureMessage(absent, 'win32', 'C:\\repo');
+    expect(message).toContain(`${NUT_PACKAGE} is not installed`);
+    expect(message).toContain('Run `npm install` in C:\\repo');
+    expect(message).toContain('restart the server');
+    // The loader's own words stay underneath, as for every other failure.
+    expect(message).toContain("Cannot find package '@nut-tree-fork/nut-js'");
+    // Not the prebuilt-binary diagnosis — that would send someone hunting for
+    // a native build problem that is not there.
+    expect(message).not.toContain('prebuilt native binary');
+  });
+
+  it('names a missing dependency of nut.js by its own name', () => {
+    const message = nutLoadFailureMessage(
+      notFound('MODULE_NOT_FOUND', "Cannot find module '@nut-tree-fork/libnut-win32'\nRequire stack: …"),
+      'win32',
+      '/srv/aiui',
+    );
+    expect(message).toContain('a package it needs (@nut-tree-fork/libnut-win32) is not');
+    expect(message).toContain('Run `npm install` in /srv/aiui');
+  });
+
+  it('keeps the prebuilt-binary message for every other load failure', () => {
+    const message = nutLoadFailureMessage(
+      new Error('libnut.node is not a valid Win32 application'),
+      'win32',
+      'C:\\repo',
+    );
+    expect(message).toContain('prebuilt native binary');
+    expect(message).not.toContain('npm install');
+  });
+
+  it('defaults the directory to the package root this module lives under', () => {
+    // The worktree (or checkout) holding this test — the directory whose
+    // package.json names the dependency, which is where the install has to run.
+    const root = serverPackageRoot();
+    expect(existsSync(path.join(root, 'package.json'))).toBe(true);
+    expect(root).toBe(path.resolve(desktopDir, '..', '..'));
+  });
+
+  it('loadNutAdapter throws it when the import itself fails with module-not-found', async () => {
+    // The injected import rejects the way Node's does; the real package is
+    // never loaded by this file (see the lazy-import block below).
+    resetNutAdapter();
+    const load = loadNutAdapter(async () => {
+      throw absent;
+    });
+    await expect(load).rejects.toThrow(`${NUT_PACKAGE} is not installed`);
+    await expect(load).rejects.toThrow(`Run \`npm install\` in ${serverPackageRoot()}`);
+    // A rejection is not cached: the next call tries the import again.
+    const again = vi.fn(async () => {
+      throw new Error('still broken');
+    });
+    await expect(loadNutAdapter(again)).rejects.toThrow('prebuilt native binary');
+    expect(again).toHaveBeenCalledTimes(1);
+    resetNutAdapter();
   });
 });
 

@@ -571,6 +571,64 @@ export interface StepRequest {
    * `startAt`-only behaviour. Only meaningful alongside `startAt`.
    */
   endAt?: { uri: string; line: number };
+  /**
+   * This batch STARTS a run — rather than continuing one — and where in the
+   * file it starts (SPEC-use-computer.md §4.5).
+   *
+   * The server cannot tell the two apart by itself: a run reaches it as one
+   * batch or several (an `[input:]` split, a breakpoint that left Continue to
+   * send the rest), and every attempt to infer "first batch of a run" from the
+   * request's shape has been wrong (see `emitDeadSection`). Only the client
+   * knows whether Run was pressed or Continue was. And the session's surface
+   * depends on the answer: it outlives a batch so a desktop excursion survives
+   * a pause, but a run that failed or was stopped inside `[use computer]` never
+   * reached its `[use browser]` — so without this, the NEXT run's "Navigate to
+   * statement.pdf" went to the real mouse and keyboard.
+   *
+   * With it, the run starts on the surface its own file puts its first step
+   * on: the last top-level `[use …]` line in `fullSteps` above `stepIndex`
+   * (the 0-based position, in `fullSteps`, of the first step this run
+   * executes). No directive above it — which is every run from step 1 — means
+   * `browser`, and so does an absent or out-of-range `stepIndex`, or an absent
+   * `fullSteps`. The one surface this never ENTERS is `computer`: `[use
+   * computer]`'s preconditions belong to that step, so a run starting below
+   * one keeps the computer surface only if the session is already on it, and
+   * otherwise runs on the browser and says so.
+   *
+   * Absent means "this continues the run the session is in" — a Continue, a
+   * step command from a pause, the next block of a split run, a re-run of one
+   * skill step against the paused page — and every client that predates the
+   * field, and flick, whose every request continues one conversation. Those
+   * keep the surface exactly as before.
+   */
+  runStart?: { stepIndex?: number };
+}
+
+/**
+ * The surface a run that starts at `stepIndex` of `fullSteps` starts on
+ * (SPEC-use-computer.md §4.5; `StepRequest.runStart`): the target of the last
+ * top-level `[use …]` line above it, or `browser` when there is none.
+ *
+ * Top-level lines only — a section body or skill that switches surface is not
+ * seen, and neither is a `[use …]` in a control-line tail. The miss is in the
+ * safe direction for the case that matters: a run whose file says `browser`
+ * but whose skipped steps would have left it on `computer` starts on the
+ * browser, where the worst a desktop step can do is fail.
+ *
+ * `directive` is the index of the line that decided it, for the log.
+ */
+export function surfaceAtRunStart(
+  fullSteps: readonly string[] | undefined,
+  stepIndex: number | undefined,
+): { surface: SessionSurface; directive?: number } {
+  if (!fullSteps || stepIndex === undefined || stepIndex <= 0 || stepIndex >= fullSteps.length) {
+    return { surface: 'browser' };
+  }
+  for (let i = stepIndex - 1; i >= 0; i--) {
+    const use = parseUseStep(fullSteps[i]!);
+    if (use) return { surface: use.surface, directive: i };
+  }
+  return { surface: 'browser' };
 }
 
 /**
@@ -1021,6 +1079,9 @@ export interface SessionState {
   screenshot: string;
   outputs: Record<string, string>;
   totalStepsExecuted: number;
+  /** Which surface the session's next step would be answered from
+   *  (SPEC-use-computer.md §4.5). Additive: a client that predates it ignores it. */
+  surface: SessionSurface;
 }
 
 export interface SessionListItem {
@@ -1750,6 +1811,54 @@ export class SessionManager {
   }
 
   /**
+   * Put a session on the surface a NEW run starts on (SPEC-use-computer.md
+   * §4.5; `StepRequest.runStart`, `surfaceAtRunStart`).
+   *
+   * `browser` — every run from step 1, and every run whose file has no
+   * `[use computer]` above where it starts — leaves the computer surface the
+   * way `[use browser]` does: adapter dropped, lock released if held. The lock
+   * is not held here in practice (the last batch's `finally` gave it back), but
+   * `leaveComputerMode` releases it if so, which is what keeps "the surface
+   * went back to browser" and "the lock is free" one fact rather than two.
+   *
+   * `computer` is kept, never entered: a session already on the computer
+   * surface stays there, adapter and all, and takes the lock at its first
+   * screen step as a continuation would. A session on the browser surface
+   * stays on it — entering needs `[use computer]`'s preconditions, and they
+   * belong to that step — and the log says which line to run from instead.
+   */
+  private applyRunStartSurface(
+    session: ManagedSession,
+    sessionId: string,
+    request: StepRequest,
+  ): void {
+    const stepIndex = request.runStart?.stepIndex;
+    const start = surfaceAtRunStart(request.fullSteps, stepIndex);
+    if (start.surface === 'computer') {
+      if (session.surface === 'computer') {
+        logger.debug(
+          `[computer] Session "${sessionId}": this run starts below the [use computer] at step ` +
+            `${start.directive! + 1} and stays on the computer surface`,
+        );
+      } else {
+        logger.warn(
+          `[computer] Session "${sessionId}": this run starts at step ${stepIndex! + 1}, below the ` +
+            `[use computer] at step ${start.directive! + 1}, but the session is on the browser ` +
+            `surface, so it runs there. Run from step ${start.directive! + 1} to enter computer mode.`,
+        );
+      }
+      return;
+    }
+    if (session.surface === 'computer') {
+      logger.info(
+        `[computer] Session "${sessionId}": a new run starts on the browser surface — the last ` +
+          'run ended on the computer surface without reaching a [use browser]',
+      );
+    }
+    leaveComputerMode(surfaceStateOf(session), session.id, this.deps.computerLock, { quiet: true });
+  }
+
+  /**
    * Count work this manager does not own as a run in flight, and hand back the
    * release.
    *
@@ -2163,6 +2272,7 @@ export class SessionManager {
       screenshot: screenshotBase64,
       outputs: { ...session.outputs },
       totalStepsExecuted: session.totalStepsExecuted,
+      surface: session.surface,
     };
   }
 
@@ -3293,6 +3403,13 @@ export class SessionManager {
     // and read by `[use computer]` and by `computerContextFor` below. NOT off
     // `runConfig`: that is the server's config with four values re-sourced.
     session.desktopConfig = projectConfig.desktop ?? this.config.desktop;
+
+    // A NEW RUN STARTS ON THE SURFACE ITS FILE SAYS (SPEC-use-computer.md
+    // §4.5). Before anything reads `session.surface` — the launch gate and the
+    // step dispatch below both do — and only on a batch the client marked as
+    // the start of a run: a continuation keeps whatever surface the run it
+    // continues left it on.
+    if (request.runStart) this.applyRunStartSurface(session, sessionId, request);
 
     // This batch's run settings: server base → project bundle → the session's
     // retained overrides (stories/run-settings.md §2).

@@ -153,11 +153,51 @@ runner-core mirror (§10.3).
   The one thing a re-entry still does is take the lock (§5.9) when the
   session does not hold it, which is the normal case at the start of a
   later run or after a pause.
-- **The surface outlives a run, and a pause; the lock does not.** A session
-  that ends a run on the computer surface is still on it, adapter loaded,
-  when its next run starts. The lock was released when the last run ended,
-  or when the run paused for a person, and is taken again at the next step
-  that reads or drives the screen (§5.9).
+- **The surface outlives a batch and a pause; the lock does not.** A session
+  that ends a batch on the computer surface is still on it, adapter loaded,
+  when the next batch of the same run arrives — a Continue after a
+  breakpoint, a step command, the block after an `[input:]` split. The lock
+  was released when the last batch ended, or when the run paused for a
+  person, and is taken again at the next step that reads or drives the
+  screen (§5.9).
+- **A new run starts on the surface its file says.** A batch that STARTS a
+  run carries `runStart: { stepIndex }` (`StepRequest.runStart`), and before
+  its first step the session is put on the surface of the last top-level
+  `[use …]` line in `fullSteps` above `stepIndex` — `browser` when there is
+  none, which is every run from step 1, and `browser` again when `stepIndex`
+  or `fullSteps` is absent or out of range. Going to `browser` is
+  `[use browser]`'s transition: adapter dropped, lock released if held. A
+  run that starts below a `[use computer]` keeps the computer surface only
+  if the session is already on it; on a browser-surface session it runs on
+  the browser and the log names the `[use computer]` line to run from,
+  because entering computer mode is that step's job, preconditions and row
+  included. Why: TestBench reuses one session per test file and MCP's
+  `run_test_file` reuses `mcp:<path>`, and a run that failed or was stopped
+  between `[use computer]` and `[use browser]` used to hand the next run the
+  computer surface — its "Navigate to statement.pdf" went to the real mouse
+  and keyboard with VS Code in front. The server cannot infer a run's start
+  from the request's shape (a Run From Here and a Continue both send a
+  tail), so the client says it:
+  - **TestBench** sends it on the first block of every run the user started
+    — Run, Run From Here, Run Step Here, a selection, Run & Compile, and each
+    row of a kept-session row loop — with `stepIndex` from runner-core's
+    `runStartFor`, the block's first step's position in `extractSteps`,
+    which is the list it sends as `fullSteps`. A section body line run
+    detached has no such position and starts on `browser`. Never on a
+    Continue or step command (`isResume`), a re-run injected at a pause
+    (`isContinuation`, `rerun`), or the later blocks of a split run.
+  - **MCP `run_test_file`** sends `{ stepIndex: 0 }` on every call: each one
+    runs the whole file from step 1.
+  - **The CLI** needs nothing: its surface state is local to one `runTest`,
+    so every run, and every data row, starts on `browser`.
+  - **Everything else** — MCP `run_steps`, flick, a client that predates the
+    field — sends nothing and keeps the session's surface, as below.
+
+  Limitation, by design: only top-level lines are read. A section body or a
+  skill that switches surface, or a `[use …]` in a control-line tail, is not
+  seen, so a run started below one begins on whatever the top-level lines
+  say. The miss errs toward `browser`, where a desktop step can only fail.
+  `GET /sessions/:id` reports the session's current `surface`.
 - **A skill call restores the caller's surface on return**, whatever the
   skill's body did. An **inline section does not** — it is inline by
   definition, and a section that switches is the way an author writes a
@@ -166,7 +206,8 @@ runner-core mirror (§10.3).
   holds it — which, since every run gives it back, it does only when the
   close lands mid-run.
 - The surface applies to MCP `run_steps` and to steps posted to the Sessions
-  API alike: it is the session's, not the file's.
+  API alike: it is the session's, not the file's. A request without
+  `runStart` continues whatever surface the session is on.
 
 ### 4.6 The browser launches lazily
 
@@ -221,6 +262,24 @@ On `[use computer]`, in order, each failing the STEP with the message given:
    a shared project must not be able to move the mouse on a machine whose
    owner did not allow it.
 
+   Only the JSON boolean `true` opts in. The config loader types the
+   `desktop` section at load and refuses anything else — the string
+   `"false"`, which the truthy gate used to read as ON, the string `"true"`,
+   a number — with *Invalid desktop.enabled in <file>: expected true or
+   false, got the string "false"*. On the server that fails the batch that
+   resolved the project, with the message on the stream; nut.js is never
+   loaded. (`reportScreenshots` is typed the same way, for the same reason
+   in the other direction: the string `"false"` kept captures in the report.
+   `maxImageWidth` and `settleMs` must be numbers.)
+
+   And nothing switches it on for a project that did not: `aiui init`
+   writes its own starter `aiui.config.json` (`SCAFFOLD_CONFIG`,
+   src/cli/commands/init.ts) and never copies `templates/init/aiui.config.json`,
+   which is the live suite's fixture workspace config and carries
+   `desktop.enabled: true`, `browser.launchArgs: ["--disable-print-preview"]`
+   and a `toolsDir` into `fixtures/`. It used to be copied verbatim into every
+   new project.
+
 1b. **The model can see the screen** (§15.4). For a gateway-routed model
    (`gateway/…`, `aibroker/…`) with a custom gateway URL, `GET
    {gatewayUrl}/v1/models` (3 s) is asked whether the route is the TestBench
@@ -234,7 +293,14 @@ On `[use computer]`, in order, each failing the STEP with the message given:
 2. **nut.js loads.** `@nut-tree-fork/nut-js` is imported lazily HERE and
    never at server start, so a machine with no prebuilt binary, or no
    permission, still runs every browser test. Message names the package
-   and the platform, and for macOS adds the two permissions (§11).
+   and the platform, and for macOS adds the two permissions (§11). A
+   module-not-found (`ERR_MODULE_NOT_FOUND` / `MODULE_NOT_FOUND`) says instead
+   that the package — or the dependency of it that is missing, by name — is
+   not installed in the checkout this server runs from, and to run `npm
+   install` in that package root (found by walking up from the adapter's own
+   file, not from the cwd) and restart the server. That is what a checkout
+   whose `node_modules` predates computer mode hits on its first
+   `[use computer]`.
 3. **The lock** (§5.9) is free or stale.
 4. **A capture succeeds.** One grab is taken as a probe. On failure the
    message includes the measured cause on Windows: *screen capture failed
@@ -301,7 +367,7 @@ pixel space (§5.2, §5.3). Every action carries `description` as today.
 | `wait` | `seconds` (≤ 10) | sleep |
 | `zoom` | `region` | §5.3 |
 | `focus_window` | `title` | bring the first window whose title contains `title` (case-insensitive) to the front, un-minimised and on the main display, and VERIFY it is the OS's active window (`src/desktop/bring-to-front.ts`). Focus; if less than 100 px of it is visible across or down, restore it if it reads 0×0, move it to (40, 40), and if it then runs off the right or bottom edge resize it to the display less 80 px each way. Not in front → focus again → minimise + restore via the per-OS helper (§5.8). Fails if no title matches, and fails with the front window's title if the OS will not put it in front, so the model can click it instead. Never sends a keystroke |
-| `wait_window` | `title`, `state` (`open` / `gone`), `timeoutMs?` (default 15000) | poll the window list until a matching window exists / no longer does |
+| `wait_window` | `title`, `state` (`open` / `gone`), `timeoutMs?` (default 15000, at most 30000) | poll the window list every 250 ms until a matching window exists / no longer does. A larger `timeoutMs` is clamped to 30000 and the result the model reads says so. Gives up at its next look when the run is stopped |
 | `read` | `as`, `value` | the model transcribes what it sees into variable `as` |
 | `assert` | `condition`, `holds` (boolean), `evidence` | the model's own judgment of the screen; `holds: false` fails the step with `evidence` as the actual |
 | `noop` | | the step is complete |
@@ -323,7 +389,11 @@ turn: every page action — `navigate`, `select`, `upload`, `hover`, `dismiss`,
 coordinates or with a `selector`. `keyboard` and `keypress` are aliased to
 `key`. An unrecognised action type is REFUSED in computer mode, not kept as
 a no-op that reports success (the defect SPEC-browser-history §4.1
-describes is worse here, where the alternative is a real click).
+describes is worse here, where the alternative is a real click). So is
+`screenshot` (and `take_screenshot`, `capture_screen`): every turn already
+carries a fresh capture, and an earlier release aliased it to `noop`, which
+ends the step — measured, "Click Print" passed with zero clicks after one
+model call.
 
 **A directive nobody dispatched never reaches the model.** On the computer
 surface, a step that is a `[tool: …]` line the loop did not dispatch fails
@@ -348,23 +418,87 @@ cap. Differences:
 - **Settle.** After every action that touches the screen, wait
   `desktop.settleMs` (default 300) before the next capture: native UIs
   redraw asynchronously and a dialog takes a moment to appear.
+- **One screen-changing action per response.** A response may hold several
+  actions; they run in order up to and including the FIRST that changes the
+  screen or the image — `click`, `drag`, `move`, `scroll`, `type`, `key`,
+  `wait`, `wait_window`, `focus_window`, `zoom` — and everything after it is
+  dropped. The model is told next turn, under *Not performed from your last
+  answer*, which actions were dropped and why, and the report lists them as
+  not performed. Actions that only read the current image (`read`, `assert`)
+  or touch no surface (`api_call`, `extract_value`) may run before it. A
+  trailing `noop` is dropped too: the model must see the result before it
+  says the step is done. Measured before this rule: `[click, assert
+  holds:true]` passed on the pre-click image, and in `[zoom, click]` a point
+  chosen on the full image was mapped through the zoomed crop.
 - **Stall.** The page loop's stall detection reads the DOM; here, three
   consecutive turns whose captures are pixel-identical AND whose actions
   were identical is a stall, and the step fails naming it.
+- **A repeated window action is not repeated.** When the previous turn asked
+  for `focus_window` / `wait_window` and nothing else, and every one
+  succeeded, the same window action at the front of the next answer is not
+  performed again. The model is told it already succeeded ("if the step asks
+  for nothing more, answer noop; otherwise do the rest of it") and the rest
+  of that answer runs. It does NOT pass the step: an earlier release did, and
+  "Focus Calculator and type 1+1" went green with nothing typed. A model that
+  repeats it for ever still ends in the stall above; the repeat counts
+  towards it.
+- **Wait budget.** The time one step spends in `wait` and `wait_window`, over
+  all its turns and attempts, is capped at 60 s (`COMPUTER_WAIT_BUDGET_MS` in
+  `src/runner/computer-step.ts`). A wait that would overrun is cut to what is
+  left; once the budget is used up the step fails with a message naming it,
+  and is not retried. Without it the turn cap was the only bound: a wait for
+  something that never comes cost 15 turns of 15 s (§14).
+- **Stop.** The run's abort signal is checked before every capture, every
+  model call and every action, and `wait_window` checks it at every look; a
+  stopped step reports *Aborted by client*, as a page step does.
 - **No action cache.** Computer-mode steps neither read nor write the step
   cache. A cached selector is validated against a DOM at replay; a cached
   coordinate has nothing to validate against and would replay blind.
-- **Retry** works as today (`withRetry`), with the prior failure context.
+- **Retry** uses `withRetry`, with two exceptions. An attempt that has driven
+  the real pointer, keyboard or windows (`click`, `drag`, `move`, `scroll`,
+  `type`, `key`, `focus_window`) is never retried, whatever it failed with: a
+  retry starts the step over and would type, click or submit a second time —
+  measured, an attempt that typed `1+1` and then stalled was retried and
+  typed it again. And a stall or the turn cap is never retried: the same
+  screen gets the same answers, and a wait that never comes would cost twice
+  the image requests. What may retry is an attempt that performed nothing but
+  waits and zooms — a model or network error on the first turn, say.
 
 ### 5.6 Conditions
 
 `If … then` conditions on the computer surface are judged from the capture,
-not from a DOM: the condition judge (`buildConditionJudgeMessage`) receives
-the screenshot and no DOM. The predicate path — a condition whose two sides
-are literals — stays as it is (it needs neither). A condition that names a
+not from a DOM. The predicate path — a condition whose two sides are
+literals — stays as it is (it needs neither). A condition that names a
 window title, `If a window titled "Confirm Save As" is open`, is still
 judged by the model from the screenshot in v1; a deterministic window-list
 condition is deferred (§12).
+
+**The judge's request on this surface is its own short one**
+(`buildComputerConditionJudgeMessages`, `src/desktop/judge-prompt.ts`), not
+the page judge's. It says the image is a screenshot of the WHOLE screen and
+gives its pixel size; lists the conditions A, B, C… as authored; carries the
+`## Values` block built by the page judge's own formatter from the same
+`StepValues`, so secrets are masked by the same rules; carries the prior
+steps and the project context, as both other prompts do; and asks for the
+page judge's response format unchanged (`{"matched": "<label | none |
+waiting>", "actions": [], "reasoning"}`), so `parseBranchedResponse` and the
+label handling read it as they read the other. No guessing: a condition the
+screenshot does not show — off-screen, hidden, unreadable, or false — is
+`none`, with the reason; `waiting` only for a screen visibly mid-transition.
+No DOM, no page action vocabulary, no API context, no tab list, no viewport.
+It used to be the page request with the DOM fence swapped for a sentence —
+the whole browser system prompt beside every capture, re-sent on every
+3-second re-ask of a `waiting` decision. Measured in
+`tests/computer-conditions.test.ts` for one condition with a one-line
+context and one prior step: 46,503 characters of text before, 2,098 after
+(the page judge's request for the same condition is 46,256). The page
+judge's request is unchanged, byte for byte, and a test pins that. A model
+that rejects the image still fails the guard with the bridge's words,
+unretryable (§15.4).
+
+The judge's capture goes to the model whatever `desktop.reportScreenshots`
+says; the copy recorded on the guard's AI interaction — which the report
+renders — obeys it (§10.1).
 
 ### 5.7 Prompt
 
@@ -375,8 +509,17 @@ with one example each; that `focus_window` / `wait_window` are for steps
 that name a window; that `zoom` is for anything too small to read; that
 page actions do not exist here; that a step asking to change surface is not
 its job and must be reported as unachievable rather than `noop`; and that
-nothing may be typed into a password or credential field. The user message
-carries the step, the variable map, and the image.
+nothing may be typed into a password or credential field. It also says that
+only the first screen-changing action of a response is performed (§5.5),
+that there is no screenshot action, and that `wait_window`'s `timeoutMs` is at
+most 30000. The user message carries the step, the variable map, and the
+image. The step is the one the page model would read: its failure tail
+(`… otherwise continue`) stripped and `[output: x]` rewritten as
+`[store as: x]`, by the same `stripFailureTail` and `enrichAuthored` the page
+path uses — before that, the model named its own capture and `{{x}}` stayed
+empty. Its test-information block carries the test name, base URL and step
+*n* of *m* but no browser viewport: the only coordinate space the model is
+given is the image's.
 
 ### 5.8 Execution details (nut.js)
 
@@ -453,8 +596,11 @@ and a data row is one of each.
   step, a stop, a batch the client cut at a breakpoint, a thrown error. On
   the server this is the step loop's `finally`, and it releases only the
   lock: `surface` stays `computer` and the adapter stays loaded. Also
-  released on `[use browser]` and on session close, both a no-op when the
-  session does not hold it.
+  released on `[use browser]`, on a batch whose `runStart` puts the session
+  back on the browser surface (§4.5 — the same transition), and on session
+  close, each a no-op when the session does not hold it. So a session reset
+  to `browser` never keeps the lock, and a session kept on `computer` by a
+  `runStart` takes it again lazily, like any later batch.
 - **Released whenever a run pauses for a person**, immediately before the
   wait begins, and again only the lock. On the server: a skill-file or
   section-body breakpoint, a step-mode (F10/F11) pause, and a tool or
@@ -499,13 +645,18 @@ every other computer-mode session on the machine until something closed it.
 }
 ```
 
-Added to `Config`, the defaults, the loader, and the generated schema.
+Added to `Config`, the defaults, the loader, and the generated schema. The
+loader types this section at load and refuses a wrong-typed value, naming
+the file, the key and the value (§5.1 item 1); the schema rejects the same
+values in the editor.
 Also: `browser.launchArgs?: string[]` — extra Chromium launch arguments,
 appended to the `--window-size` the launcher already passes. Needed so the
 fixture workspace can pass `--disable-print-preview`, which makes Chromium's
 Print button open the OPERATING SYSTEM's print dialog instead of its own
 preview. Both are dialogs outside the page and both have a Cancel button;
-the test in §13.2 is written to pass against either.
+the test in §13.2 is written to pass against either. Both it and
+`desktop.enabled: true` live in the FIXTURE workspace's config only — `aiui
+init` does not copy that file (§5.1 item 1).
 
 ## 6. Browser mode, unchanged
 
@@ -514,10 +665,16 @@ Nothing about a browser-mode step changes except when the browser launches
 
 ## 7. Authoring
 
-Two fixture tests, both against `fixtures/test-app`, which gains a static
+The fixture test against `fixtures/test-app`, which gains a static
 `statement.pdf` served at `/statement.pdf` with `application/pdf`.
+(`calc-one-plus-one.md`, a desktop-first test that launches no browser, came
+later; see §14.)
 
-`templates/init/tests/pdf-print-cancel.md`:
+`templates/init/tests/pdf-dialog-cancel.md` (named `pdf-print-cancel.md`
+until 2026-09-23; window titles match by case-insensitive substring, so with
+that file open in VS Code the editor's own window title contained "print" and
+satisfied `wait_window "Print"`, and a wait for the dialog to close could
+never end. The §14 and §15.7 runs were made under the old name):
 
 ```markdown
 ---
@@ -545,48 +702,19 @@ timeout: 600s
 10. Verify the page URL ends with statement.pdf
 ```
 
-`templates/init/tests/pdf-save-as.md`:
-
-```markdown
----
-tags: [computer, pdf]
-timeout: 600s
----
-
-# PDF — save it to a temp folder through the native Save As dialog
-
-## Config
-- baseUrl: http://localhost:8787/
-- consoleLogLevel: debug
-- serverFileLogLevel: off
-
-## Parameters
-- save_dir: $TEMP
-
-## Steps
-1. Navigate to statement.pdf
-2. Wait for the PDF to finish loading
-3. [use computer]
-4. Focus the window whose title contains "statement.pdf"
-5. Right-click in the middle of the PDF page and choose "Save as..." from the context menu
-6. Wait until a window titled "Save As" is open
-7. Type "{{save_dir}}\aiui-statement.pdf" into the File name field and click Save
-8. If a window titled "Confirm Save As" is open, then Click the Yes button
-9. Wait until the window titled "Save As" is gone
-10. [use browser]
-11. [tool: assert_file_exists path="{{save_dir}}\aiui-statement.pdf"]
-```
-
-`assert_file_exists` is a fixture tool in `fixtures/tools/src`, a few lines;
-`$TEMP` resolves from the server's environment like `$TEST_PASSWORD` does.
 Step 4 matters more than it looks: when a run starts from TestBench, VS Code
 is frontmost and the browser is behind it; this is the step that brings it
 forward. The docs say plainly that `[use computer]` does nothing to arrange
 the screen, and that the user must not touch the mouse during a computer
 step.
 
-Both files carry a prose header (like the other fixtures) saying what they
-prove and what the machine must look like to run them.
+The file carries a prose header (like the other fixtures) saying what it
+proves and what the machine must look like to run it.
+
+A second fixture, `pdf-save-as.md`, drove the viewer's native Save As dialog
+to completion and checked the saved file with a fixture tool,
+`assert_file_exists`. It never passed (§14) and was removed on 2026-09-23;
+the tool stays in `fixtures/tools/src`.
 
 ## 8. Prompt
 
@@ -621,6 +749,33 @@ ring where the pointer went, because debugging a coordinate click without
 one is guesswork. Desktop captures include the whole screen, so the
 `reportScreenshots` switch exists for privacy; the text redaction in
 `src/utils/secrets.ts` cannot mask pixels, and the docs say so.
+
+**Where a desktop capture can go, and what the switch does to each.** The
+model always gets the capture it is asked about — that is the surface. With
+`reportScreenshots: false`, no other copy leaves the run:
+
+| Path | With the switch off |
+| --- | --- |
+| A computer step's turn image (`TurnResult.computer.screenshotBase64`) and its AI interaction's screenshot — report turn blocks | not recorded (`computer-step.ts`) |
+| A computer step's row screenshot (`StepResult.screenshotBase64`, pass or fail) — the report's step-end image, `results[].screenshot` in the JSON response, a recording's `<step>.failure.png` | not recorded, so none of them has one |
+| The same, on the SSE `step:pass` / `step:fail` event — TestBench, and the MCP server | not sent: the event's `screenshot` comes from the row |
+| A §5.6 condition judge's AI interaction — the guard row's turn in the report | not recorded (`evaluateConditions`); the row says the capture was left out by this switch |
+| MCP `run_test_file` / `run_steps` result image | not returned: the MCP server reads the switch from the project's `aiui.config.json` and drops any screenshot on an event marked `surface: 'computer'`, whatever the server sent, and says why instead of advising `capture` |
+
+A page capture taken while the run is on the computer surface — the error
+screenshot of a step that threw, an unconditional `Fail the test …` — is of
+the page, not the screen, and is not this switch's business. The failure
+diagnosis pass (CLI, `ai.diagnoseFailures`) sends the model a fresh page
+capture, or the failed row's own screenshot, which the switch already
+governs.
+
+**The MCP default returns a desktop capture.** With the switch on (the
+default), a step that FAILS in computer mode hands the agent a screenshot of
+the whole desktop — every window on the screen, not the page — under the
+default `screenshots_return: "on-failure"`, and under `final` whatever
+screenshot came last. The tool descriptions say so; `screenshots_return:
+"none"` or `reportScreenshots: false` is how to keep it out of the
+conversation.
 
 ### 10.2 Log
 
@@ -709,19 +864,20 @@ runner-core mirror paired test; TestBench completion and paint.
 
 ### 13.2 Live
 
-The two §7 tests, run through a server started OUTSIDE any tool sandbox
+The §7 tests, run through a server started OUTSIDE any tool sandbox
 (§5.1 item 4), with the desktop visible and the mouse untouched. Expected
 observations to record in §14: which print dialog appeared (preview or
 OS) and whether `--disable-print-preview` was needed; whether Chromium's
 context-menu "Save as..." raised the native dialog under Playwright's
-download handling or whether a CDP-launched Chrome was needed; the model's
+download handling or whether a CDP-launched Chrome was needed (asked of the
+since-removed `pdf-save-as.md`); the model's
 pointing accuracy at `maxImageWidth` 1600 on a 3440×1440 display; and
 whether zoom was used.
 
 ### 13.3 Live suite
 
 A `computer-use.test.cjs` under `testbench-native/tests/integration/live`
-drives `pdf-print-cancel.md` through the extension, and is **gated by
+drives `pdf-dialog-cancel.md` through the extension, and is **gated by
 `TESTBENCH_LIVE_COMPUTER=1`**: it skips itself otherwise, because the
 parallel shards cannot share a mouse and the default run must stay
 parallel. CLAUDE.md gains a "computer-mode live test" section saying so and
@@ -733,7 +889,7 @@ Run 2026-09-23 on the Windows 11 box (3440×1440, one display), server
 started from the user's own terminal, model `openai/gpt-5.6-luna` via the
 broker, `maxImageWidth` 1600 (so the model saw 1600×670 images).
 
-**`pdf-print-cancel.md` passed, 10/10 steps, 101 s, ~101k tokens.** Every
+**`pdf-dialog-cancel.md` passed, 10/10 steps, 101 s, ~101k tokens.** Every
 computer-mode step landed first time: `focus_window`, the toolbar Print click,
 the wait for the dialog, the Cancel click, the wait for it to close, then
 `[use browser]` and a DOM assertion on the same tab. `--disable-print-preview`
@@ -750,11 +906,14 @@ download bubble) while diagnosing why a dialog had not appeared.
 `focus_window` succeeded on turn 1 the next turn showed the same step and the
 same screen with no record of the action, so the model repeated it until the
 stall detector ended the step. Each attempt now carries an "Actions already
-performed for this step" section in the step message (§5.7), and a turn that
-repeats an already-satisfied window action completes the step.
+performed for this step" section in the step message (§5.7). A turn that
+repeated an already-satisfied window action at first completed the step; that
+passed compound steps with the rest undone, so the repeat is now answered with
+a note instead (§5.5).
 
-**`pdf-save-as.md` is NOT proven.** Two findings, both about Chrome rather
-than the framework:
+**`pdf-save-as.md` was NOT proven, and was removed on 2026-09-23** because
+it could not do what it was written for. Two findings, both about Chrome
+rather than the framework:
 
 1. Under a Playwright-launched Chromium the native Save As dialog cannot
    appear: Playwright sets `Browser.setDownloadBehavior` on the context and
@@ -781,7 +940,9 @@ than the framework:
 passing tests spent ~50–100k tokens each. A step that waits for something
 that never comes spends the whole turn cap (15 turns) doing so — the cap is
 the only bound, and a `wait_window` timeout of 15 s per turn makes that a
-five-minute step. Worth a tighter per-step budget in a later version.
+five-minute step — and, since a turn-cap failure was then retried, up to ten
+minutes and 30 image requests. §5.5 now caps a step's waiting at 60 s and
+never retries a turn-cap or stall failure.
 
 **Tool-sandbox finding**, recorded in §5.1 item 4: everything above needed a
 server started outside this tooling; from inside it, `[use computer]` failed
@@ -828,7 +989,7 @@ cases were moved to (40,40); the fallback chain was never needed.
 
 **End to end through a user-started server** (the context that counts),
 session `live-focus-1`, steps posted in three batches against
-`pdf-print-cancel.md`'s project so `desktop.enabled` applied:
+`pdf-dialog-cancel.md`'s project so `desktop.enabled` applied:
 
 | Setup between batches | Step | Result |
 | --- | --- | --- |
@@ -977,7 +1138,7 @@ AI** having written `AI_MODEL=gateway/copilot/gpt-6-luna`:
   exposed a capability for every model: 42 `true`, two `false`
   (`copilot/gpt-4o-mini`, `copilot/copilot-utility-small`) — none `null`,
   as §15.3 now says.
-- **`pdf-print-cancel.md` passed 10/10 in 67 s** with every model call going
+- **`pdf-dialog-cancel.md` passed 10/10 in 67 s** with every model call going
   to the bridge (14 `POST 127.0.0.1:18790/v1/chat/completions`). The
   `[use computer]` check logged `the bridge forwards images;
   copilot/gpt-6-luna image_input: true`. The bridge logged no image strip,

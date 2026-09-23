@@ -29,6 +29,7 @@ import {
   SessionManager,
   type RunEvent,
   type RunEventListener,
+  type SessionManagerDeps,
   type StepRequest,
 } from './session-manager.js';
 import { ErrandRunner, type ErrandRequest } from './errand-runner.js';
@@ -378,6 +379,10 @@ export function createApiServer(
   hooks?: ServerHooks,
   /** Injectable so tests can drive expiry with a fake clock. */
   idleMonitor: IdleMonitor = new IdleMonitor(config.server.idleTimeoutMinutes),
+  /** The computer surface's seams (SPEC-use-computer.md §5.1, §5.9), handed to
+   *  the session manager. Only a test passes them: a desktop test driven
+   *  through this entry must never load nut.js or touch the machine's lock. */
+  sessionManagerDeps: SessionManagerDeps = {},
 ): {
   app: express.Express;
   sessionManager: SessionManager;
@@ -399,7 +404,7 @@ export function createApiServer(
   // One resolver behind both, so an errand and a session running against the
   // same project read the same `.env` at the same moment.
   const projectBundles = new ProjectBundleResolver(config);
-  const sessionManager = new SessionManager(config, projectBundles);
+  const sessionManager = new SessionManager(config, projectBundles, sessionManagerDeps);
 
   /**
    * The credential broker, built on first use and then kept (SPEC 29 §10).
@@ -1009,6 +1014,35 @@ export function createApiServer(
         const ea = body.endAt as { uri?: unknown; line?: unknown };
         if (typeof ea.uri === 'string' && typeof ea.line === 'number') {
           request.endAt = { uri: ea.uri, line: ea.line };
+        }
+      }
+      // This batch starts a run, so the session's surface is reset to the one
+      // the file puts that run's first step on (SPEC-use-computer.md §4.5). On
+      // the allow-list because a field the list does not name is dropped,
+      // silently — and a dropped `runStart` is the defect it fixes: a run that
+      // failed inside `[use computer]` hands the next run the real mouse.
+      //
+      // A non-object is a 400, since a client that meant "new run" and was
+      // quietly treated as a continuation has no way to notice. A malformed
+      // `stepIndex` is dropped instead, keeping `runStart`: without a position
+      // the run starts on the browser surface, the safe direction.
+      if (body.runStart !== undefined) {
+        const rs = body.runStart as { stepIndex?: unknown } | null;
+        if (rs === null || typeof rs !== 'object' || Array.isArray(rs)) {
+          res.status(400).json({ error: '"runStart" must be an object: { stepIndex?: number }' });
+          return;
+        }
+        const index = rs.stepIndex;
+        if (typeof index === 'number' && Number.isInteger(index) && index >= 0) {
+          request.runStart = { stepIndex: index };
+        } else {
+          if (index !== undefined) {
+            logger.warn(
+              `Ignoring malformed "runStart.stepIndex" (${JSON.stringify(index)}): ` +
+                'the run starts on the browser surface.',
+            );
+          }
+          request.runStart = {};
         }
       }
       if (body.logging !== undefined && body.logging !== null && typeof body.logging === 'object') {

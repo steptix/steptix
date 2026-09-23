@@ -298,6 +298,24 @@ export interface StreamStepsRequest {
    * resolve. `__skill*`-namespaced internals are ignored server-side.
    */
   seedScope?: Record<string, string>;
+  /**
+   * This batch STARTS a run rather than continuing one, and where in the file
+   * it starts (SPEC-use-computer.md §4.5; `StepRequest.runStart` in
+   * src/server/session-manager.ts, which this mirrors — nothing links the two
+   * copies, so change both together).
+   *
+   * The server resets the session's surface to the one the run's first step
+   * is on: the last top-level `[use …]` line in `fullSteps` above
+   * `stepIndex` (the 0-based position, in `fullSteps`, of the first step this
+   * run executes — see `runStartFor`), or `browser` when there is none. Sent
+   * on the first block of every run the user started — Run, Run From Here,
+   * Run Step Here, each row of a kept-session row loop — and NEVER on a
+   * Continue, a step command from a pause, the later blocks of a split run,
+   * or a re-run injected against the paused page: those continue the surface
+   * the run left. Without it, a run that failed inside `[use computer]` hands
+   * the next Run the real mouse.
+   */
+  runStart?: { stepIndex?: number };
 }
 
 export type ApiErrorKind =

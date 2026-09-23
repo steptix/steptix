@@ -238,6 +238,23 @@ export function extractSteps(text: string): { line: number; instruction: string 
 }
 
 /**
+ * The `runStart` for a batch that starts a new run at `firstLine` — the
+ * 1-based document line of the first step it sends (SPEC-use-computer.md
+ * §4.5; `StreamStepsRequest.runStart`).
+ *
+ * `stepIndex` is that step's position in {@link extractSteps}, which is the
+ * list a client sends as `fullSteps` — so the server's "last `[use …]` above
+ * `stepIndex`" reads the same lines the client numbered. A first line that is
+ * not a main-flow step (a `### Section` body line run detached) has no
+ * position there, and gets no `stepIndex`: the server then starts the run on
+ * the browser surface, which is the safe direction.
+ */
+export function runStartFor(text: string, firstLine: number): { stepIndex?: number } {
+  const index = extractSteps(text).findIndex((s) => s.line === firstLine);
+  return index >= 0 ? { stepIndex: index } : {};
+}
+
+/**
  * The inline sections defined in `text`, in document order, each with its
  * body steps attached.
  *

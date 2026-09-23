@@ -78,6 +78,7 @@ import type { StepGroup } from './step-grouper.js';
 import type { AssertionResult } from '../report/types.js';
 import type { DesktopAdapter } from '../desktop/index.js';
 import { captureView } from '../desktop/index.js';
+import { buildComputerConditionJudgeMessages } from '../desktop/judge-prompt.js';
 import { imageInputUnsupportedMessage } from '../desktop/vision-route.js';
 
 /**
@@ -1518,7 +1519,7 @@ const NOT_YET_CAPTURED = '(not yet captured)';
  *  shown a raw `[output: total]` prefix and no `[store as: total]` telling it
  *  to capture anything. Idempotent — an already-enriched string has no
  *  `[output:]` left to find. */
-function enrichAuthored(text: string): string {
+export function enrichAuthored(text: string): string {
   const { variables, cleanedInstruction } = parseOutputPrefixes(text);
   return variables.length > 0 ? buildEnrichedInstruction(cleanedInstruction, variables) : text;
 }
@@ -4305,24 +4306,6 @@ export interface ConditionVerdict {
 }
 
 /**
- * What stands in the condition judge's `## DOM Snapshot` fence on the computer
- * surface (docs/specs/SPEC-use-computer.md §5.6).
- *
- * The fence is part of a prompt shared with the page surface, and it cannot be
- * left empty: an empty `html` block reads as "the page is blank", which is an
- * assertion about a page and would answer "is the Save As dialog open" no, for
- * a reason that has nothing to do with the screen. So it says what is true —
- * there is no DOM here, judge the image — in one sentence.
- *
- * Exported so the test that proves §5.6 can assert on the one thing that
- * matters: an image went, and no markup did.
- */
-export const COMPUTER_CONDITION_NO_DOM =
-  'There is no DOM: this decision is being judged on the COMPUTER surface, ' +
-  'where the evidence is the attached screenshot of the whole screen — ' +
-  "operating-system windows, dialogs and menus included — and nothing else.";
-
-/**
  * Ask the model which of `conditions` holds on the page now
  * (stories/control-flow.md §"Condition evaluation").
  *
@@ -4383,70 +4366,87 @@ export async function evaluateConditions(
       throw new DOMException('Run aborted by client', 'AbortError');
     }
 
-    // §5.6 — on the computer surface the evidence is a fresh capture and the
-    // DOM block says, in words, that there is no DOM. It is not left empty:
-    // an empty ```html``` fence reads to a model as "the page is blank",
-    // which is a fact about a page, and the answer to "is the Save As dialog
-    // open" would then be no for the wrong reason.
-    //
-    // The capture is ALWAYS attached, whatever `ai.sendScreenshots` says
-    // (§5.2): on this surface the image is the entire evidence, and the flag
-    // governs whether the model sees a PAGE's image beside a DOM.
-    const desktopView = computer
-      ? await captureView(computer.adapter, { maxImageWidth: computer.maxImageWidth })
-      : undefined;
-    const domSnapshot = computer
-      ? COMPUTER_CONDITION_NO_DOM
-      : await captureDomSnapshot(page!, {
-          ...config.browser.domNoiseReduction,
-          maxIframeDepth: config.browser.maxIframeDepth,
-          domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-        });
-    const screenshot = computer || config.ai.sendScreenshots
-      ? computer
-        ? { base64: desktopView!.pngBase64 }
-        : await captureScreenshot(page!, config.browser.fullPageScreenshots)
-      : null;
-    const screenshotBase64 = screenshot?.base64 ?? null;
+    let messages: ChatMessage[];
+    let screenshotBase64: string | null;
+    if (computer) {
+      // §5.6 — on the computer surface the evidence is a fresh capture of the
+      // whole screen, and the request is the short one
+      // src/desktop/judge-prompt.ts builds: what the image is and its size,
+      // the conditions, the masked `## Values`, and the page judge's response
+      // format — no DOM, no page action vocabulary, no API context. It used to
+      // be the page request with the DOM fence swapped for a sentence, which
+      // sent the whole browser system prompt beside every capture, on every
+      // re-ask of a `waiting` decision.
+      //
+      // The capture is ALWAYS attached, whatever `ai.sendScreenshots` says
+      // (§5.2): on this surface the image is the entire evidence, and the flag
+      // governs whether the model sees a PAGE's image beside a DOM.
+      const view = await captureView(computer.adapter, { maxImageWidth: computer.maxImageWidth });
+      screenshotBase64 = view.pngBase64;
+      messages = buildComputerConditionJudgeMessages({
+        conditions,
+        screenshotBase64: view.pngBase64,
+        imageWidth: view.imageWidth,
+        imageHeight: view.imageHeight,
+        conversationHistory,
+        contextContent,
+        values,
+      });
+    } else {
+      const domSnapshot = await captureDomSnapshot(page!, {
+        ...config.browser.domNoiseReduction,
+        maxIframeDepth: config.browser.maxIframeDepth,
+        domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+      });
+      const screenshot = config.ai.sendScreenshots
+        ? await captureScreenshot(page!, config.browser.fullPageScreenshots)
+        : null;
+      screenshotBase64 = screenshot?.base64 ?? null;
 
-    const openPages = !computer && pageTracker && pageTracker.count > 1
-      ? await pageTracker.getPageListWithTitles()
-      : undefined;
+      const openPages = pageTracker && pageTracker.count > 1
+        ? await pageTracker.getPageListWithTitles()
+        : undefined;
 
-    const userMessage = buildConditionJudgeMessage(
-      conditions,
-      // Masked for the MODEL only, the same one line the step prompt applies
-      // to the same string. The snapshot now carries LIVE form values, so a
-      // secret this run typed into an ordinary text field is in it — and the
-      // judge, one turn after a step that showed `••••`, would otherwise read
-      // it in full (review 3, finding 2). Nothing stored is redacted here:
-      // `redactReport` covers what is written.
-      redact(domSnapshot, secretsFor(opts)),
-      screenshotBase64,
-      conversationHistory,
-      openPages,
-      // No step numbers: a guard is not the Nth of N steps in any sense the
-      // model could use, and `formatTestInfo` omits the line when they are
-      // absent rather than printing "Step 0 of 0".
-      formatTestInfo(
-        testName,
-        baseUrl,
-        undefined,
-        undefined,
-        config.browser.headed ? config.browser.windowSize : config.browser.viewport,
-        buildActiveBrowserInfo(opts.browserTracker),
-      ),
-      values,
-    );
-    const messages: ChatMessage[] = [
-      {
-        role: 'system',
-        content: buildSystemPrompt(contextContent, undefined, {
-          dismissalGuidance: opts.dismissalGuidance ?? false,
-        }),
-      },
-      userMessage,
-    ];
+      const userMessage = buildConditionJudgeMessage(
+        conditions,
+        // Masked for the MODEL only, the same one line the step prompt applies
+        // to the same string. The snapshot now carries LIVE form values, so a
+        // secret this run typed into an ordinary text field is in it — and the
+        // judge, one turn after a step that showed `••••`, would otherwise read
+        // it in full (review 3, finding 2). Nothing stored is redacted here:
+        // `redactReport` covers what is written.
+        redact(domSnapshot, secretsFor(opts)),
+        screenshotBase64,
+        conversationHistory,
+        openPages,
+        // No step numbers: a guard is not the Nth of N steps in any sense the
+        // model could use, and `formatTestInfo` omits the line when they are
+        // absent rather than printing "Step 0 of 0".
+        formatTestInfo(
+          testName,
+          baseUrl,
+          undefined,
+          undefined,
+          config.browser.headed ? config.browser.windowSize : config.browser.viewport,
+          buildActiveBrowserInfo(opts.browserTracker),
+        ),
+        values,
+      );
+      messages = [
+        {
+          role: 'system',
+          content: buildSystemPrompt(contextContent, undefined, {
+            dismissalGuidance: opts.dismissalGuidance ?? false,
+          }),
+        },
+        userMessage,
+      ];
+    }
+    // `desktop.reportScreenshots: false` keeps a desktop capture out of the
+    // report (§10.1), and this interaction IS report data — a guard's row
+    // renders its judge's turns. The model still got the image above; only
+    // the stored copy is dropped. A page capture is not the switch's business.
+    const recordShot = computer ? computer.reportScreenshots : true;
 
     let currentUrl = '';
     try {
@@ -4470,7 +4470,7 @@ export async function evaluateConditions(
       requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
       response: completion.text,
       ...(completion.model !== undefined && { model: completion.model }),
-      ...(screenshotBase64 !== null && { screenshotBase64 }),
+      ...(screenshotBase64 !== null && recordShot && { screenshotBase64 }),
       pageUrl: currentUrl,
       timestamp: new Date().toISOString(),
     });

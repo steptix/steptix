@@ -227,7 +227,7 @@ describe('TestBench live — computer mode opens and cancels the print dialog', 
       'It drives the real mouse, so it cannot share a box with the parallel shards; ' +
       'run it alone with --shards=1 --files=computer-use.test.cjs (see this file\'s header).';
     console.log(`[live] ${why}`);
-    it.skip('drives pdf-print-cancel.md across the browser/computer surface boundary', () => {});
+    it.skip('drives pdf-dialog-cancel.md across the browser/computer surface boundary', () => {});
     return;
   }
 
@@ -242,7 +242,7 @@ describe('TestBench live — computer mode opens and cancels the print dialog', 
     await assertFixturePdfIsServed();
     workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     assert.ok(workspaceRoot, 'no workspace folder — the live runner must pass templates/');
-    const opened = await openTestFile(hooks, workspaceRoot, 'pdf-print-cancel.md');
+    const opened = await openTestFile(hooks, workspaceRoot, 'pdf-dialog-cancel.md');
     uri = opened.uri;
     steps = stepLines(opened.file, 10);
     await vscode.commands.executeCommand('testbench-native.clearStatuses');
@@ -261,10 +261,10 @@ describe('TestBench live — computer mode opens and cancels the print dialog', 
     }
   });
 
-  it('drives pdf-print-cancel.md across the browser/computer surface boundary', async function () {
+  it('drives pdf-dialog-cancel.md across the browser/computer surface boundary', async function () {
     this.timeout(900_000);
 
-    say('Run All on pdf-print-cancel.md — DO NOT TOUCH THE MOUSE OR KEYBOARD');
+    say('Run All on pdf-dialog-cancel.md — DO NOT TOUCH THE MOUSE OR KEYBOARD');
     void vscode.commands.executeCommand('testbench-native.runAll');
     await waitFor('run started', () => hooks.isRunning(), 60_000);
     await waitFor('run finished', () => hooks.isRunning() === false, 880_000);
@@ -280,7 +280,7 @@ describe('TestBench live — computer mode opens and cancels the print dialog', 
     assert.equal(
       done,
       'passed',
-      `pdf-print-cancel.md must pass end to end; got '${done}'. Statuses: ${JSON.stringify(marks)}. ` +
+      `pdf-dialog-cancel.md must pass end to end; got '${done}'. Statuses: ${JSON.stringify(marks)}. ` +
         `A refusal at step 3 is usually a precondition rather than a bug: ` +
         `desktop.enabled false in templates/init/aiui.config.json, nut.js failing to ` +
         `load, the computer lock held by another session, or a server that cannot read ` +
@@ -297,7 +297,7 @@ describe('TestBench live — computer mode opens and cancels the print dialog', 
     assert.equal(
       directives.length,
       2,
-      `pdf-print-cancel.md must carry both directives; found ${JSON.stringify(
+      `pdf-dialog-cancel.md must carry both directives; found ${JSON.stringify(
         directives.map((d) => d.text),
       )}`,
     );

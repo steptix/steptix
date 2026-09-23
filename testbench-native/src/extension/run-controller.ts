@@ -11,6 +11,7 @@ import {
   composeEnv,
   extractSections,
   extractSteps,
+  runStartFor,
   danglingChainMemberError,
   resolveRunSelection,
   sectionBodyLinesAt,
@@ -3173,6 +3174,23 @@ export class RunController {
     let pendingRerun = options.rerun;
 
     /**
+     * Did the user START this run — Run, Run From Here, Run Step Here, a step
+     * selection, Run & Compile, F11 from nothing — rather than continue one?
+     *
+     * The server needs to be told, because the session's surface outlives a
+     * batch (SPEC-use-computer.md §4.5): a run that failed or was stopped
+     * between `[use computer]` and `[use browser]` leaves the session on the
+     * computer surface, and this client reuses that session for the next Run.
+     * So the first block of a started run carries `runStart`, and the server
+     * puts the session on the surface the file says that block's first step is
+     * on. A Continue or step command (`isResume`), a re-run injected against the
+     * paused page (`isContinuation`, `rerun`) and the later blocks of a split
+     * run send nothing, and keep the surface the run left.
+     */
+    const startsRun =
+      options.isContinuation !== true && options.isResume !== true && options.rerun === undefined;
+
+    /**
      * Why the row loop stopped early, when it did — the four exits that are
      * not "the last row finished".
      *
@@ -3266,6 +3284,9 @@ export class RunController {
         this.startRunRow(rowNumber);
       }
       const rowFailedAtStart = anyFailed;
+      // Per row: each row of a kept-session row loop starts the selection
+      // over, so it starts on the surface the file says, as row 1 did.
+      let runStartOwed = startsRun;
       let i = 0;
       while (i < classified.length) {
         if (ac.signal.aborted) break;
@@ -3331,9 +3352,11 @@ export class RunController {
               withinCompileRun: compileMode,
             }),
             ...(options.suppressServerBreakpoints && { suppressServerBreakpoints: true }),
+            ...(runStartOwed && { runStart: true }),
           });
           compileBlocksSent++;
           pendingRerun = undefined;
+          runStartOwed = false;
           if (!ok) {
             anyFailed = true;
             // A stale narrowing is not this row's failure — it is a fact about
@@ -4715,8 +4738,14 @@ export class RunController {
     /** Omit the per-URI breakpoint map from the request — a single-step
      *  slice pausing at its own breakpoint runs nothing. */
     suppressServerBreakpoints?: boolean;
+    /** This block is the first of a run the user STARTED — not a Continue, a
+     *  step command, a later block of a split run, or a re-run injected at a
+     *  pause. The request carries `runStart`, and the server puts the session
+     *  on the surface the file says this block's first step is on
+     *  (SPEC-use-computer.md §4.5). */
+    runStart?: boolean;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, withinCompileRun, suppressServerBreakpoints } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, withinCompileRun, suppressServerBreakpoints, runStart } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
@@ -4833,6 +4862,14 @@ export class RunController {
         // here for the same reason `compileScope` is: this is the one place
         // that knows what actually goes on the wire.
         ...(compile === undefined && withinCompileRun !== undefined && { withinCompileRun }),
+        // Where this run starts, as a position in the `fullSteps` above —
+        // computed from the same buffer read, so the two cannot disagree.
+        // Without it the session keeps whatever surface the LAST run left: a
+        // run that failed inside `[use computer]` would hand this one the real
+        // mouse (SPEC-use-computer.md §4.5).
+        ...(runStart === true && block[0] && {
+          runStart: runStartFor(this.document.getText(), block[0].line),
+        }),
       },
       signal,
     );
