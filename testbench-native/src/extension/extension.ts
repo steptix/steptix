@@ -15,7 +15,12 @@ import { staleHoverMessage } from './failure-hover-core.js';
 import { skipPaintsOver } from './step-skip-core.js';
 import { passPaintsOver, toleratedPaintsOver } from './failure-outcome-core.js';
 import { lineStatusFromRowStatus, rowHeaderSummary } from './row-summary-core.js';
-import { allRowsOfTable, buildRowsMessage, rowSelectionRefusal } from './row-selection-core.js';
+import {
+  allRowsOfTable,
+  buildRowsMessage,
+  rowSelectionRefusal,
+  splitRowSelection,
+} from './row-selection-core.js';
 import { TestBenchRunnerView } from './runner-view.js';
 import { RunController, defaultApiClientFactory } from './run-controller.js';
 import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
@@ -2379,10 +2384,25 @@ async function handleWebviewMessage(
     case 'run': {
       const controller = registry.active();
       if (!controller) return notifyNoActive();
+      // With nothing picked in the panel, `lines` is the EDITOR highlight
+      // (`snapshot.selectedLines`), data-row lines included. Split them the
+      // way `runSelected` does, or the rows are dropped as non-steps and the
+      // highlighted steps run for every row of the table.
+      const text = controller.document.getText();
+      const split = splitRowSelection(text, msg.lines);
+      const refusal = rowSelectionRefusal(text, split);
+      if (refusal) {
+        void vscode.window.showWarningMessage(refusal);
+        return;
+      }
       const breakpoints = tracker.breakpoints(controller.document.uri);
       registry.notifyRunning(true);
       void controller
-        .runLines(msg.lines, { breakpoints })
+        .runLines(split.lines, {
+          breakpoints,
+          ...(split.rows && { rows: split.rows }),
+          ...(split.sectionRows && { sectionRows: split.sectionRows }),
+        })
         .finally(() => registry.notifyRunning(false));
       return;
     }

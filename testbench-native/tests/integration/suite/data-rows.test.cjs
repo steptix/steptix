@@ -1278,6 +1278,66 @@ describe('TestBench data-row selection', function () {
     );
   });
 
+  /**
+   * Highlight rows 1 and 3 and step 2 in the EDITOR — two highlights, the
+   * table rows and the step — and run. Only step 2, only rows 1 and 3.
+   */
+  function highlightRowsAndStep() {
+    const editor = vscode.window.activeTextEditor;
+    editor.selections = [
+      new vscode.Selection(
+        new vscode.Position(ROW_LINES[0] - 1, 0),
+        new vscode.Position(ROW_LINES[0] - 1, 5),
+      ),
+      new vscode.Selection(
+        new vscode.Position(ROW_LINES[2] - 1, 0),
+        new vscode.Position(ROW_LINES[2] - 1, 5),
+      ),
+      new vscode.Selection(
+        new vscode.Position(STEP_LINES[1] - 1, 0),
+        new vscode.Position(STEP_LINES[1] - 1, 5),
+      ),
+    ];
+  }
+
+  function assertHighlightedRowsAndStep(sent) {
+    assert.deepEqual(sent.map((r) => r.dataRow), [1, 3], 'only the highlighted rows');
+    for (const request of sent) {
+      assert.deepEqual(request.sourceLines, [STEP_LINES[1]], 'only the highlighted step');
+    }
+  }
+
+  it('F5 on highlighted rows and steps runs only those steps, only for those rows', async () => {
+    await open('data-rows-3.tmp.md');
+    highlightRowsAndStep();
+    const before = fake.requests.length;
+    queueScripts((f) => f.end(), (f) => f.end(), (f) => f.end());
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('run started', () => fake.requests.length > before);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+    assertHighlightedRowsAndStep(fake.requests.slice(before));
+  });
+
+  it('…and so does the Runner panel’s Run button, which reads the editor highlight', async () => {
+    // The panel's Run posts `{ type: 'run', lines: snapshot.selectedLines }`
+    // when nothing is picked in the panel itself — the editor highlight, row
+    // lines included. The host used to hand those straight to `runLines` with
+    // no `rows`, so the row lines were dropped as non-steps and the step ran
+    // for EVERY row.
+    await open('data-rows-3.tmp.md');
+    highlightRowsAndStep();
+    await waitFor('snapshot carries the highlight', () =>
+      hooks.tracker.snapshot().selectedLines.includes(STEP_LINES[1]),
+    );
+    const lines = hooks.tracker.snapshot().selectedLines;
+    const before = fake.requests.length;
+    queueScripts((f) => f.end(), (f) => f.end(), (f) => f.end());
+    void hooks.dispatchWebviewMessage({ type: 'run', lines });
+    await waitFor('run started', () => fake.requests.length > before);
+    await waitFor('run finished', () => hooks.isRunning() === false);
+    assertHighlightedRowsAndStep(fake.requests.slice(before));
+  });
+
   it('prints a line per row and the CLI rows summary', async () => {
     await open('data-rows-3.tmp.md');
     const mark = hooks.hostMessageCount();
