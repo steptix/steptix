@@ -148,7 +148,7 @@ Rules the generated file must respect:
 - **Captures are of the whole screen**, including whatever else is on the desktop, and they go into the report. Text redaction cannot mask pixels. `desktop.reportScreenshots: false` keeps desktop captures out of the report.
 - **No cache and no code-behind for these steps.** A recorded coordinate has nothing to re-validate against on a machine whose resolution or window layout has moved, so a step that ran in computer mode stays AI-driven when the file is compiled.
 
-Worked examples: `templates/init/tests/pdf-print-cancel.md` (open a print dialog and cancel it) and `templates/init/tests/pdf-save-as.md` (save through the native Save As dialog, then confirm the file landed with `[tool: assert_file_exists]`, because nothing in the browser vocabulary can look at a file system).
+Worked examples: `templates/init/tests/pdf-print-cancel.md` (open a print dialog and cancel it) and `templates/init/tests/calc-one-plus-one.md` (start Calculator with a tool, type a sum, click the "=" button and read the answer, with no browser launched at all).
 
 ## Waits and assertions
 

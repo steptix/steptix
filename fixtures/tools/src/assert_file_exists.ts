@@ -5,11 +5,12 @@ import { defineTool } from 'ai-ui-automation/tools';
  * Assert that a file exists on the machine running the SERVER, and capture its
  * size.
  *
- * Written for the computer-mode fixtures (docs/specs/SPEC-use-computer.md §7):
- * `templates/init/tests/pdf-save-as.md` drives a native Save As dialog with a
- * real mouse and keyboard, and the only evidence that the dialog actually
- * saved anything is a file on disk. Nothing in the browser vocabulary can look
- * at one — the page never sees the file system — so this is a tool.
+ * Written for computer-mode tests (docs/specs/SPEC-use-computer.md): when a
+ * test drives a native Save As dialog with a real mouse and keyboard, the only
+ * evidence that the dialog actually saved anything is a file on disk. Nothing
+ * in the browser vocabulary can look at one — the page never sees the file
+ * system — so this is a tool. (Its first user, `pdf-save-as.md`, never passed
+ * and was removed; see the spec's §14.)
  *
  * Deliberately server-side, and deliberately not clever:
  *

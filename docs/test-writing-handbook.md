@@ -1304,13 +1304,12 @@ validate against — it would replay blind on a machine whose resolution,
 scaling or window layout has moved. A compiled step that ran in computer mode
 stays AI-driven, and the compile report says so.
 
-Worked examples, both against the fixture app:
+Worked examples:
 [`templates/init/tests/pdf-print-cancel.md`](../templates/init/tests/pdf-print-cancel.md)
-opens a print dialog and cancels it, and
-[`templates/init/tests/pdf-save-as.md`](../templates/init/tests/pdf-save-as.md)
-saves the PDF through the native Save As dialog and then checks the file
-landed with `[tool: assert_file_exists]` — because nothing in the browser
-vocabulary can look at a file system.
+opens a print dialog from the fixture app's PDF and cancels it, and
+[`templates/init/tests/calc-one-plus-one.md`](../templates/init/tests/calc-one-plus-one.md)
+starts Calculator with a tool, types a sum, clicks the "=" button and reads
+the answer, with no browser launched at all.
 
 ## 4. Variables and data
 

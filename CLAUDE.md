@@ -443,11 +443,6 @@ focus and the next screenshot is no longer of what the model was answering
 about. The test says so in its own header too, because the person who starts
 it is not always the person who wrote it.
 
-The sibling fixture `pdf-save-as.md` has no live test of its own — it drives a
-native Save As dialog to completion and is run by hand (spec §13.2). It reads
-`$AIUI_SAVE_DIR` from `templates/.env`, which is gitignored, so a fresh
-checkout has to add that line before running it.
-
 ### Why the junction repair matters
 
 `testbench-native/node_modules/ai-ui-automation-runner-core` is the

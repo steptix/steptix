@@ -5,19 +5,19 @@ timeout: 600s
 
 # Chrome — turn on "Ask where to save each file before downloading"
 
-A one-off setup step for [pdf-save-as.md](pdf-save-as.md), run once per
-Chrome profile. Chrome's PDF viewer saves a document through the download
-system, and with this setting off (the default) a "Save as..." from the
-viewer's context menu downloads silently to the Downloads folder — no dialog
-ever appears, and a test waiting for a window titled "Save As" waits for
-nothing. Measured live on 2026-09-23 (docs/specs/SPEC-use-computer.md §14).
+An example of a desktop-first test: it drives a Chrome window that is already
+open, without launching a browser of its own. It was written as setup for a
+Save As test that has since been removed (docs/specs/SPEC-use-computer.md §14),
+and stays as a worked example of reading and flipping a setting from the
+screenshot alone. Note that it changes a real setting in whichever Chrome
+profile is on screen.
 
 The whole test runs on the computer surface, so it never asks Playwright to
 navigate a `chrome://` page: it focuses the Chrome window, types the settings
 URL into the address bar, and flips the toggle from the screenshot. Because
 the first step is `[use computer]`, no browser is launched — the test drives
-whichever Chrome is on screen. Run it against the CDP profile the Save As
-test will use, with that Chrome already open and on the primary display.
+whichever Chrome is on screen, so have Chrome open on the primary display
+before running it.
 
 Machine requirements are the same as every computer-mode test: a visible,
 unlocked desktop, and hands off the mouse while it runs.
