@@ -101,7 +101,8 @@ and hit its limits; that is the user's quota to spend and the docs say so.
 
 - `GET /v1/models` — the result of `vscode.lm.selectChatModels()` mapped to
   OpenAI's list shape (`{data: [{id, owned_by: vendor}]}`), so a user can see
-  valid ids without guessing.
+  valid ids without guessing. Additively, `aiui_bridge: {name, images}` and a
+  per-model `image_input` ([SPEC-use-computer §15.3](../docs/specs/SPEC-use-computer.md#153-the-bridge-says-what-it-will-do-with-images)).
 - `POST /v1/chat/completions` — non-streaming and `stream: true` (SSE,
   OpenAI delta framing, terminated by `data: [DONE]`).
 
@@ -118,12 +119,12 @@ The mappings, exhaustively:
 | `role: "system"` | — (only User/Assistant exist) | fold: prepend to the first user message |
 | `role: "user"/"assistant"` | `LanguageModelChatMessage.User/Assistant` | 1:1 |
 | `content` text blocks | joined text | 1:1 |
-| `content` `image_url` blocks | — | **strip**, substituting an inline `[screenshot omitted — images unsupported over the bridge]` note; a once-per-session warning names both possible sources (`ai.sendScreenshots`, the diagnosis pass's own capture) — the wire carries nothing to tell them apart (see non-goals) |
+| `content` `image_url` blocks | `LanguageModelDataPart.image(bytes, mime)` | **forward** a `data:image/…;base64,` URL in a user message, in order with its text parts, when the host has `LanguageModelDataPart.image` (feature-detected; the `^1.90` floor stays). Otherwise **strip**, substituting an inline `[screenshot omitted — images unsupported over the bridge]` note: every image on a host without data parts (plus a once-per-window warning saying this VS Code has no image support for language models), and on any host a non-`data:` URL, or an image in an assistant or system message. A model that rejects the image gets a 400 `image_input_unsupported`, never a silent retry without it. [SPEC-use-computer §15](../docs/specs/SPEC-use-computer.md#15-over-the-copilot-bridge) |
 | `max_completion_tokens` | `modelOptions` where supported | the cap arrives under this name — the routing lib maps `maxTokens` to it; `max_tokens` never appears on this wire |
 | `reasoning_effort`, `stream_options`, `temperature`, unknowns | — | drop silently, never error — the `retry`/`authoring` profiles send effort, streams carry `stream_options: {include_usage: true}`, and both must keep working |
 | `response_format: json_object` | — | best-effort emulation, below |
 | response fragments | `for await (…of res.text)` | concatenate (non-stream) or re-emit as SSE deltas (stream) |
-| usage | `countTokens` per prompt message + the raw response | measured on the wire (resolved question 3 below, which carries the numbers). Per message because the message overload counts role framing a bare string does not — +4 tokens per message on both models measured. The response is counted BEFORE the fence strip: what the model generated is what it spent. Bounded and skipped on a dead socket: counting is capped at 2 s and not attempted at all once the client has hung up, because `countTokens` takes no cancellation token and a completion the seat already paid for must not be discarded waiting on a number. A count that fails, times out or is skipped degrades to zeros — which on the DEFAULT non-streaming path (`streamResponses: false`) `completeOnce` records as literal 0/0, and only on the streaming path become `completeStream`'s `ceil(len/4)` output estimate |
+| usage | `countTokens` per prompt message + the raw response | measured on the wire (resolved question 3 below, which carries the numbers). Text parts only — an image part is never handed to the tokenizer, so image tokens are not measured and an image-carrying prompt's count is a floor. Per message because the message overload counts role framing a bare string does not — +4 tokens per message on both models measured. The response is counted BEFORE the fence strip: what the model generated is what it spent. Bounded and skipped on a dead socket: counting is capped at 2 s and not attempted at all once the client has hung up, because `countTokens` takes no cancellation token and a completion the seat already paid for must not be discarded waiting on a number. A count that fails, times out or is skipped degrades to zeros — which on the DEFAULT non-streaming path (`streamResponses: false`) `completeOnce` records as literal 0/0, and only on the streaming path become `completeStream`'s `ceil(len/4)` output estimate |
 
 **`json_object` emulation.** `AiClient` sends
 `response_format: {type: "json_object"}` on **every** request — both
@@ -242,14 +243,19 @@ Costs to document rather than change:
 
 - **Per-step run execution over Copilot.** Works, unadvised, undocumented as a
   workflow; the quota math is the reason this story is compile/repair-shaped.
-- **Screenshots/vision.** `LanguageModelDataPart` postdates even the `^1.90`
-  floor Part A sets — the 1.90 bump buys the chat API, not image parts;
-  `ai.sendScreenshots` defaults false so the default path never sends images.
-  The bridge strips image blocks rather than erroring, because the diagnosis
-  pass captures and attaches its own screenshot regardless of
-  `sendScreenshots` ([diagnose.ts:46](../src/ai/diagnose.ts)) — a hard
-  refusal would break diagnosis on every failed keyed run. Raising the floor
-  further for real vision is its own small story when someone needs it.
+- **Screenshots/vision — no longer a non-goal.** Computer mode needed it: its
+  model sees nothing but the screenshot, so a stripped image meant clicking
+  blind. [SPEC-use-computer §15](../docs/specs/SPEC-use-computer.md#15-over-the-copilot-bridge)
+  is that story. `LanguageModelDataPart` still postdates the `^1.90` floor,
+  and the floor stays: the bridge feature-detects `LanguageModelDataPart.image`
+  and forwards `data:` images when the running VS Code has it, and strips as
+  before when it does not — stripping rather than erroring for the same reason
+  as always, that the diagnosis pass attaches its own screenshot regardless of
+  `sendScreenshots` ([diagnose.ts:46](../src/ai/diagnose.ts)) and a hard
+  refusal would break diagnosis on every failed keyed run on an older VS Code.
+  `GET /v1/models` now says which it does (`aiui_bridge.images`) and what each
+  model accepts (`image_input`), so the server can refuse computer mode up
+  front on a route that would drop the screen (§15.4).
 - **CLI / CI / MCP-from-another-host.** No extension host, no bridge. Green
   compiled runs still replay with zero AI calls — but with the bridge trio in
   `.env`, such a run is keyed-with-unreachable-endpoint, not keyless: a stale

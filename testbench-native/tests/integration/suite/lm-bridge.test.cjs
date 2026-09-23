@@ -11,13 +11,18 @@
  * a real HTTP request rather than out of a function call.
  *
  * `vscode.lm` itself is faked (tests/integration/fakes/fake-lm.cjs) — a real
- * one needs a signed-in Copilot seat and spends it.
+ * one needs a signed-in Copilot seat and spends it. Only the namespace: the
+ * bridge's own `vscode` layer still builds real `LanguageModelChatMessage`s,
+ * so the image cases (SPEC-use-computer §15.2–15.3) see the text and data
+ * parts exactly as a real model would. This harness runs VS Code 1.95, which
+ * has no `LanguageModelDataPart`: feature detection says `strip` here, and the
+ * forward path is driven by injecting a stand-in factory.
  */
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const net = require('node:net');
 const vscode = require('vscode');
-const { FakeLm } = require('../fakes/fake-lm.cjs');
+const { FakeLm, FakeDataPart } = require('../fakes/fake-lm.cjs');
 
 const EXT_ID = 'pkent.testbench-native';
 
@@ -112,8 +117,9 @@ describe('TestBench Copilot LM bridge', function () {
   beforeEach(async () => {
     fake = new FakeLm();
     // 250ms rather than the real 15s, so the standby→adopt transition happens
-    // inside a test's timeout instead of outliving the suite.
-    hooks.configureLmBridge({ facade: fake, retryMs: 250 });
+    // inside a test's timeout instead of outliving the suite. No `imagePart`:
+    // image support is detected on this host, as in production.
+    hooks.configureLmBridge({ lm: fake, retryMs: 250 });
     port = await freePort();
     await setBridge({ enabled: true, at: port });
     await waitFor('bridge listening', () => hooks.lmBridgeStatus().state === 'listening');
@@ -196,9 +202,12 @@ describe('TestBench Copilot LM bridge', function () {
     // this wire uses.
     assert.equal(fake.requests.length, 1);
     const sent = fake.requests[0];
-    assert.deepEqual(sent.messages, [
+    assert.deepEqual(fake.sentMessages(), [
       { role: 'user', text: 'You compile test steps.\n\nCompile step 1.' },
     ]);
+    // A text-only message still goes out as the plain-string overload — one
+    // text part — on every host, image support or not.
+    assert.equal(sent.messages[0].content.length, 1);
     assert.deepEqual(sent.options.modelOptions, { max_tokens: 4096 });
   });
 
@@ -314,6 +323,156 @@ describe('TestBench Copilot LM bridge', function () {
     for (const input of promptInputs) assert.equal(typeof input, 'object');
     // The response is counted as a plain string — it has no role to frame.
     assert.equal(typeof fake.counted[fake.counted.length - 1], 'string');
+  });
+
+  // -- images (SPEC-use-computer §15.2–15.3) --------------------------------
+
+  /** A real PNG header, so the bytes a test compares are not all one value. */
+  const PNG_B64 = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  ]).toString('base64');
+  /** A literal: IMAGE_OMITTED_NOTE lives in a .ts module this .cjs suite cannot import. */
+  const NOTE = '[screenshot omitted — images unsupported over the bridge]';
+  const IMAGE_400 = {
+    error: {
+      message:
+        'copilot/gpt-4.1 does not accept images. Computer mode and ai.sendScreenshots ' +
+        'need a model that does — pick another Copilot model.',
+      type: 'invalid_request_error',
+      code: 'image_input_unsupported',
+    },
+  };
+
+  /** The shape a computer-mode turn sends (src/desktop/prompt.ts): system, then [text, image]. */
+  const screenshotRequest = (over = {}) =>
+    completionRequest({
+      messages: [
+        { role: 'system', content: 'You drive the desktop.' },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '## Screen' },
+            { type: 'image_url', image_url: { url: `data:image/png;base64,${PNG_B64}` } },
+          ],
+        },
+      ],
+      ...over,
+    });
+
+  const hostForwards = () => typeof vscode.LanguageModelDataPart?.image === 'function';
+
+  it('GET /v1/models says what this bridge does with images, and what each model accepts', async () => {
+    fake.models = [
+      // The consumer object VS Code 1.138 hands out carries supportsImageToText.
+      { id: 'gpt-5.6-luna', vendor: 'copilot', family: 'gpt-5.6-luna', name: 'Luna', capabilities: { supportsImageToText: true } },
+      // The provider-side spelling, in case a host ever exposes that instead.
+      { id: 'text-only', vendor: 'copilot', family: 'text-only', name: 'Text', capabilities: { imageInput: false } },
+      // No capabilities at all — the 1.95 shape, and the public type's.
+      { id: 'gpt-4.1', vendor: 'copilot', family: 'gpt-4.1', name: 'GPT-4.1' },
+    ];
+    const body = json(await call('/v1/models'));
+    for (const m of body.data) {
+      assert.equal(typeof m.created, 'number');
+      delete m.created;
+    }
+    // Detected on THIS host, not assumed: the harness's 1.95 has no
+    // LanguageModelDataPart, so today this reads "strip".
+    assert.deepEqual(body, {
+      object: 'list',
+      aiui_bridge: { name: 'testbench-copilot-bridge', images: hostForwards() ? 'forward' : 'strip' },
+      data: [
+        { id: 'copilot/gpt-5.6-luna', object: 'model', owned_by: 'copilot', family: 'gpt-5.6-luna', image_input: true },
+        { id: 'copilot/text-only', object: 'model', owned_by: 'copilot', family: 'text-only', image_input: false },
+        { id: 'copilot/gpt-4.1', object: 'model', owned_by: 'copilot', family: 'gpt-4.1', image_input: null },
+      ],
+    });
+  });
+
+  it('decides forward or strip by feature detection on this host', async () => {
+    const result = await call('/v1/chat/completions', { method: 'POST', body: screenshotRequest() });
+    assert.equal(result.status, 200);
+    const sent = fake.requests[0].messages;
+    if (hostForwards()) {
+      assert.ok(sent[0].content[1] instanceof vscode.LanguageModelDataPart, 'a real data part');
+      assert.deepEqual(fake.sentMessages()[0].parts[1], { image: { mime: 'image/png', base64: PNG_B64 } });
+    } else {
+      // No LanguageModelDataPart here: stripped, with the note in place of the
+      // image, exactly as the text-only bridge always did.
+      assert.deepEqual(fake.sentMessages(), [
+        { role: 'user', text: `You drive the desktop.\n\n## Screen\n${NOTE}` },
+      ]);
+    }
+  });
+
+  it('forwards a screenshot as a data part, in order with its text, and counts only the text', async () => {
+    // FakeDataPart stands in for LanguageModelDataPart, which 1.95 lacks; the
+    // bridge's own vscode layer builds the message around it.
+    hooks.configureLmBridge({ lm: fake, imagePart: FakeDataPart.image });
+    fake.reply = ['{"action":"click"}'];
+    const result = await call('/v1/chat/completions', { method: 'POST', body: screenshotRequest() });
+    assert.equal(result.status, 200);
+
+    const [message] = fake.requests[0].messages;
+    assert.equal(message.role, vscode.LanguageModelChatMessageRole.User);
+    assert.ok(message.content[0] instanceof vscode.LanguageModelTextPart);
+    assert.ok(message.content[1] instanceof FakeDataPart);
+    assert.deepEqual(fake.sentMessages(), [
+      {
+        role: 'user',
+        parts: [
+          { text: 'You drive the desktop.\n\n## Screen' },
+          { image: { mime: 'image/png', base64: PNG_B64 } },
+        ],
+      },
+    ]);
+
+    // The fake tokenizer throws on a data part, so measured usage is the proof
+    // the image never reached countTokens. With ceil(len/4) + 4 framing:
+    //   'You drive the desktop.\n\n## Screen'  33 chars -> 9 + 4 = 13
+    //   '{"action":"click"}'                   18 chars -> 5
+    assert.deepEqual(json(result).usage, { prompt_tokens: 13, completion_tokens: 5, total_tokens: 18 });
+    assert.ok(fake.counted[0].content.every((p) => p instanceof vscode.LanguageModelTextPart));
+
+    assert.equal(json(await call('/v1/models')).aiui_bridge.images, 'forward');
+  });
+
+  it('strips with the note when the host has no image support, and says so on /v1/models', async () => {
+    hooks.configureLmBridge({ lm: fake, imagePart: null });
+    const result = await call('/v1/chat/completions', { method: 'POST', body: screenshotRequest() });
+    assert.equal(result.status, 200);
+    assert.deepEqual(fake.sentMessages(), [
+      { role: 'user', text: `You drive the desktop.\n\n## Screen\n${NOTE}` },
+    ]);
+    assert.equal(json(await call('/v1/models')).aiui_bridge.images, 'strip');
+  });
+
+  for (const when of ['send', 'stream']) {
+    it(`answers a model that refuses the image (${when}) with 400 image_input_unsupported`, async () => {
+      hooks.configureLmBridge({ lm: fake, imagePart: FakeDataPart.image });
+      fake.rejectImages = when;
+      const result = await call('/v1/chat/completions', { method: 'POST', body: screenshotRequest() });
+      assert.equal(result.status, 400);
+      assert.deepEqual(json(result), IMAGE_400);
+      // Never silently retried without the image — one call, and the client
+      // is told not to retry it either.
+      assert.equal(fake.requests.length, 1);
+      assert.equal(result.headers.get('x-should-retry'), 'false');
+    });
+  }
+
+  it('keeps the consent 403 for an image-carrying request — the image is not the cause', async () => {
+    hooks.configureLmBridge({ lm: fake, imagePart: FakeDataPart.image });
+    fake.denyConsent('Permission denied by the user');
+    const result = await call('/v1/chat/completions', { method: 'POST', body: screenshotRequest() });
+    assert.equal(result.status, 403);
+    assert.equal(json(result).error.code, 'no_permissions');
+  });
+
+  it('the same refusing model still answers text-only requests', async () => {
+    hooks.configureLmBridge({ lm: fake, imagePart: FakeDataPart.image });
+    fake.rejectImages = 'send';
+    const result = await call('/v1/chat/completions', { method: 'POST', body: completionRequest() });
+    assert.equal(result.status, 200);
   });
 
   it('resolves a vendor-qualified model by splitting it when the exact id misses', async () => {

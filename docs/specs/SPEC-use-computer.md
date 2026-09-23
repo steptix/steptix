@@ -807,10 +807,14 @@ Two changes, each useful without the other.
   part, `"strip"` otherwise. Its presence is how the server knows the endpoint
   is this bridge and not a corporate gateway.
 - `image_input` per model is `true` / `false` when the running VS Code exposes
-  the model's capabilities at runtime, and `null` when it does not — the
-  public `LanguageModelChat` type carries no capabilities (they are on the
-  provider-side `LanguageModelChatInformation`), so `null` is the normal
-  answer and means "forwarded; the model decides".
+  the model's capabilities at runtime, and `null` when it does not. The
+  public `LanguageModelChat` type declares no capabilities (they are on the
+  provider-side `LanguageModelChatInformation`), but VS Code 1.138's extension
+  host sets `capabilities.supportsImageToText` on the object a caller gets
+  back, from the provider's `vision` metadata (read in its extension-host
+  code, 2026-09-23). So on current VS Code the answer is `true` or `false`,
+  and a provider that declares no vision reads `false` — which §15.4 refuses.
+  `null` is left for older builds, and means "forwarded; the model decides".
 
 ### 15.4 Computer mode refuses a blind route
 

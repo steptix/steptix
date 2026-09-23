@@ -2,7 +2,8 @@
  * The Copilot bridge's translation table (stories/copilot-lm-bridge.md §Part A).
  *
  * Every row of that table is a rule about bytes, and every one of them is
- * here: system folding, the image strip, the `max_completion_tokens` spelling,
+ * here: system folding, image forwarding and stripping (SPEC-use-computer
+ * §15.2–15.3), the `max_completion_tokens` spelling,
  * the fields that must be dropped SILENTLY, the fence strip, the single-delta
  * SSE framing, model-id fallback, and the error texts — which are not
  * decoration, since PR #110 carries `error.message` verbatim into step hovers
@@ -17,27 +18,39 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
+  BRIDGE_NAME,
   IMAGE_OMITTED_NOTE,
+  IMAGE_STRIP_WARNING,
   MAX_BODY_BYTES,
   ZERO_USAGE,
   bodyLimitError,
   chatCompletionBody,
+  imageBytes,
+  imageInputUnsupportedError,
   isAuthorized,
   isTerminalError,
   lmUnavailableError,
+  mapCompletionError,
   mapLmError,
+  messageText,
   modelNotFoundError,
   modelSelectorAttempts,
   modelsListBody,
+  parseImageDataUrl,
   qualifiedModelId,
   routeFor,
   streamFrames,
   stripJsonFence,
+  textMessage,
+  textProjection,
   translateBody,
   translateRequest,
   unauthorizedError,
   unknownRouteError,
 } from '../src/extension/lm-bridge-core.ts';
+
+/** A text-only message: exactly one text part, as the translation coalesces it. */
+const msg = (role, text) => ({ role, parts: [{ kind: 'text', text }] });
 
 /** A request in the shape `@pkent/aigateway` actually builds. */
 const request = (over = {}) => ({
@@ -143,7 +156,7 @@ test('a system message folds into the first user message — vscode.lm has no sy
     }),
   );
   assert.deepEqual(value.messages, [
-    { role: 'user', text: 'You are a test compiler.\n\nCompile step 3.' },
+    msg('user', 'You are a test compiler.\n\nCompile step 3.'),
   ]);
 });
 
@@ -160,15 +173,15 @@ test('several system messages join in order, ahead of the first user message onl
     }),
   );
   assert.deepEqual(value.messages, [
-    { role: 'user', text: 'One.\n\nTwo.\n\nFirst user.' },
-    { role: 'assistant', text: 'An answer.' },
-    { role: 'user', text: 'Second user.' },
+    msg('user', 'One.\n\nTwo.\n\nFirst user.'),
+    msg('assistant', 'An answer.'),
+    msg('user', 'Second user.'),
   ]);
 });
 
 test('a request with only a system message still arrives as a user message', () => {
   const value = ok(request({ messages: [{ role: 'system', content: 'Just this.' }] }));
-  assert.deepEqual(value.messages, [{ role: 'user', text: 'Just this.' }]);
+  assert.deepEqual(value.messages, [msg('user', 'Just this.')]);
 });
 
 test('"developer" folds like "system" — the same role under OpenAI\'s newer name', () => {
@@ -180,12 +193,12 @@ test('"developer" folds like "system" — the same role under OpenAI\'s newer na
       ],
     }),
   );
-  assert.deepEqual(value.messages, [{ role: 'user', text: 'Rules.\n\nGo.' }]);
+  assert.deepEqual(value.messages, [msg('user', 'Rules.\n\nGo.')]);
 });
 
 test('an unrecognised role lands as user rather than being dropped', () => {
   const value = ok(request({ messages: [{ role: 'tool', content: 'tool output' }] }));
-  assert.deepEqual(value.messages, [{ role: 'user', text: 'tool output' }]);
+  assert.deepEqual(value.messages, [msg('user', 'tool output')]);
 });
 
 test('text blocks are joined', () => {
@@ -202,7 +215,7 @@ test('text blocks are joined', () => {
       ],
     }),
   );
-  assert.deepEqual(value.messages, [{ role: 'user', text: 'first\nsecond' }]);
+  assert.deepEqual(value.messages, [msg('user', 'first\nsecond')]);
 });
 
 test('image blocks are stripped, leaving an inline note and a count for the warning', () => {
@@ -220,7 +233,7 @@ test('image blocks are stripped, leaving an inline note and a count for the warn
     }),
   );
   assert.deepEqual(value.messages, [
-    { role: 'user', text: `Why did this fail?\n${IMAGE_OMITTED_NOTE}` },
+    msg('user', `Why did this fail?\n${IMAGE_OMITTED_NOTE}`),
   ]);
   assert.equal(value.imagesStripped, 1);
 });
@@ -231,12 +244,233 @@ test('an image-only message is not dropped — the note keeps the turn alive', (
       messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'x' } }] }],
     }),
   );
-  assert.deepEqual(value.messages, [{ role: 'user', text: IMAGE_OMITTED_NOTE }]);
+  assert.deepEqual(value.messages, [msg('user', IMAGE_OMITTED_NOTE)]);
   assert.equal(value.imagesStripped, 1);
 });
 
 test('a request with no images reports none, so the warning stays quiet', () => {
   assert.equal(ok(request()).imagesStripped, 0);
+  assert.equal(ok(request()).imagesForwarded, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Image forwarding (SPEC-use-computer §15.2)
+// ---------------------------------------------------------------------------
+
+/** Real PNG bytes: the 8-byte signature, then the start of an IHDR chunk. */
+const PNG_BYTES = Uint8Array.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  0xff, 0xfe, 0xfd, 0x00,
+]);
+const PNG_B64 = Buffer.from(PNG_BYTES).toString('base64');
+const PNG_URL = `data:image/png;base64,${PNG_B64}`;
+const imageBlock = (url = PNG_URL) => ({ type: 'image_url', image_url: { url } });
+const forward = (raw) => {
+  const result = translateRequest(raw, { imageMode: 'forward' });
+  assert.equal(result.ok, true, `expected a translated request, got ${JSON.stringify(result)}`);
+  return result.value;
+};
+
+test('a data: URL decodes to the exact bytes and mime it encoded', () => {
+  const parsed = parseImageDataUrl(PNG_URL);
+  assert.deepEqual(parsed, { mime: 'image/png', base64: PNG_B64 });
+  const bytes = imageBytes({ kind: 'image', ...parsed });
+  assert.ok(bytes instanceof Uint8Array);
+  assert.deepEqual([...bytes], [...PNG_BYTES]);
+  // Its own buffer, not a view into Node's shared pool: a consumer that reads
+  // `.buffer` without the offset must still see only these bytes.
+  assert.equal(bytes.byteOffset, 0);
+  assert.equal(bytes.buffer.byteLength, PNG_BYTES.length);
+});
+
+test('the data: URL parser lower-cases the mime, tolerates parameters, and refuses the rest', () => {
+  assert.equal(parseImageDataUrl(`data:IMAGE/JPEG;base64,${PNG_B64}`).mime, 'image/jpeg');
+  assert.equal(parseImageDataUrl(`data:image/png;name=a.png;base64,${PNG_B64}`).base64, PNG_B64);
+  assert.equal(parseImageDataUrl('https://example.test/shot.png'), null, 'not fetched');
+  assert.equal(parseImageDataUrl(`data:text/plain;base64,${PNG_B64}`), null, 'not an image');
+  assert.equal(parseImageDataUrl('data:image/png,rawbytes'), null, 'not base64');
+  assert.equal(parseImageDataUrl('data:image/png;base64,'), null, 'empty');
+  // Buffer.from would quietly skip the bad characters and decode a different image.
+  assert.equal(parseImageDataUrl('data:image/png;base64,iVBO$$RK'), null, 'corrupt payload');
+});
+
+test('forward: text and image parts keep their order inside one user message', () => {
+  const value = forward(
+    request({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Before.' },
+            imageBlock(),
+            { type: 'text', text: 'After, line 1.' },
+            { type: 'text', text: 'After, line 2.' },
+            imageBlock(`data:image/jpeg;base64,${PNG_B64}`),
+          ],
+        },
+      ],
+    }),
+  );
+  assert.deepEqual(value.messages, [
+    {
+      role: 'user',
+      parts: [
+        { kind: 'text', text: 'Before.' },
+        { kind: 'image', mime: 'image/png', base64: PNG_B64 },
+        // Adjacent text still coalesces with \n — only an image splits a run.
+        { kind: 'text', text: 'After, line 1.\nAfter, line 2.' },
+        { kind: 'image', mime: 'image/jpeg', base64: PNG_B64 },
+      ],
+    },
+  ]);
+  assert.equal(value.imagesForwarded, 2);
+  assert.equal(value.imagesStripped, 0);
+});
+
+test('forward: the shape the computer-mode turn sends — system folded ahead of text + screenshot', () => {
+  // src/desktop/prompt.ts: one user message, [text, image_url], after a system prompt.
+  const value = forward(
+    request({
+      messages: [
+        { role: 'system', content: 'You drive the desktop.' },
+        { role: 'user', content: [{ type: 'text', text: '## Screen' }, imageBlock()] },
+      ],
+    }),
+  );
+  assert.deepEqual(value.messages, [
+    {
+      role: 'user',
+      parts: [
+        { kind: 'text', text: 'You drive the desktop.\n\n## Screen' },
+        { kind: 'image', mime: 'image/png', base64: PNG_B64 },
+      ],
+    },
+  ]);
+});
+
+test('forward: an image-first user message gets the folded system text as a part in front', () => {
+  const value = forward(
+    request({
+      messages: [
+        { role: 'system', content: 'Rules.' },
+        { role: 'user', content: [imageBlock(), { type: 'text', text: 'What is this?' }] },
+      ],
+    }),
+  );
+  assert.deepEqual(value.messages[0].parts.map((p) => p.kind), ['text', 'image', 'text']);
+  assert.equal(value.messages[0].parts[0].text, 'Rules.');
+});
+
+test('forward: an image-only user message is kept, as a single image part', () => {
+  const value = forward(request({ messages: [{ role: 'user', content: [imageBlock()] }] }));
+  assert.deepEqual(value.messages, [
+    { role: 'user', parts: [{ kind: 'image', mime: 'image/png', base64: PNG_B64 }] },
+  ]);
+});
+
+test('strip is the default and is byte-for-byte the text-only bridge', () => {
+  const raw = request({
+    messages: [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'Why did this fail?' }, imageBlock(), { type: 'text', text: 'Thanks.' }],
+      },
+    ],
+  });
+  const expected = [msg('user', `Why did this fail?\n${IMAGE_OMITTED_NOTE}\nThanks.`)];
+  assert.deepEqual(ok(raw).messages, expected, 'no options: strip');
+  const explicit = translateRequest(raw, { imageMode: 'strip' }).value;
+  assert.deepEqual(explicit.messages, expected);
+  assert.equal(explicit.imagesStripped, 1);
+  assert.equal(explicit.imagesForwarded, 0);
+});
+
+test('forward: a non-data URL is stripped with the note — the bridge fetches nothing', () => {
+  const value = forward(
+    request({
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Look:' }, imageBlock('https://example.test/shot.png')],
+        },
+      ],
+    }),
+  );
+  assert.deepEqual(value.messages, [msg('user', `Look:\n${IMAGE_OMITTED_NOTE}`)]);
+  assert.equal(value.imagesStripped, 1);
+  assert.equal(value.imagesForwarded, 0);
+});
+
+test('forward: an image in an assistant message is stripped; the user image beside it is not', () => {
+  const value = forward(
+    request({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'Q' }, imageBlock()] },
+        { role: 'assistant', content: [{ type: 'text', text: 'A' }, imageBlock()] },
+      ],
+    }),
+  );
+  assert.deepEqual(value.messages[1], msg('assistant', `A\n${IMAGE_OMITTED_NOTE}`));
+  assert.equal(value.messages[0].parts[1].kind, 'image');
+  assert.equal(value.imagesStripped, 1);
+  assert.equal(value.imagesForwarded, 1);
+});
+
+test('forward: an image in a system message strips — the fold is a text join, unchanged', () => {
+  const value = forward(
+    request({
+      messages: [
+        { role: 'system', content: [{ type: 'text', text: 'Sys' }, imageBlock()] },
+        { role: 'user', content: 'Go.' },
+      ],
+    }),
+  );
+  assert.deepEqual(value.messages, [msg('user', `Sys\n${IMAGE_OMITTED_NOTE}\n\nGo.`)]);
+  assert.equal(value.imagesStripped, 1);
+});
+
+test('the strip count counts every image dropped, across messages and modes', () => {
+  const raw = request({
+    messages: [
+      { role: 'system', content: [imageBlock()] },
+      { role: 'user', content: [imageBlock(), imageBlock('https://x.test/a.png')] },
+      { role: 'assistant', content: [imageBlock()] },
+      { role: 'user', content: [{ type: 'input_image', image_url: PNG_URL }] },
+    ],
+  });
+  const stripped = ok(raw);
+  assert.equal(stripped.imagesStripped, 5);
+  assert.equal(stripped.imagesForwarded, 0);
+  const forwarded = forward(raw);
+  // Forwarded: the user data: URL and the input_image string form. Stripped:
+  // the system one, the https one, the assistant one.
+  assert.equal(forwarded.imagesForwarded, 2);
+  assert.equal(forwarded.imagesStripped, 3);
+});
+
+test('the strip warning says why: this VS Code, not the model', () => {
+  assert.match(IMAGE_STRIP_WARNING, /this VS Code has no image support for language models/);
+  assert.match(IMAGE_STRIP_WARNING, /computer-mode/);
+  assert.match(IMAGE_STRIP_WARNING, /ai\.sendScreenshots/);
+  assert.match(IMAGE_STRIP_WARNING, /diagnosis/);
+});
+
+test('counting sees text only: the projection drops images and keeps the role', () => {
+  const withImage = {
+    role: 'user',
+    parts: [
+      { kind: 'text', text: 'a' },
+      { kind: 'image', mime: 'image/png', base64: PNG_B64 },
+      { kind: 'text', text: 'b' },
+    ],
+  };
+  assert.deepEqual(textProjection(withImage), msg('user', 'a\nb'));
+  assert.equal(messageText(withImage), 'a\nb');
+  const imageOnly = { role: 'user', parts: [{ kind: 'image', mime: 'image/png', base64: PNG_B64 }] };
+  assert.deepEqual(textProjection(imageOnly), msg('user', ''));
+  // A text-only message is passed through untouched.
+  const plain = textMessage('assistant', 'x');
+  assert.equal(textProjection(plain), plain);
 });
 
 // ---------------------------------------------------------------------------
@@ -440,6 +674,7 @@ test('/v1/models advertises the vendor-qualified id, ready to paste after gatewa
       { id: 'claude-sonnet-4', vendor: 'copilot', family: 'claude-sonnet-4' },
     ],
     1_700_000_000,
+    'forward',
   );
   assert.equal(body.object, 'list');
   assert.deepEqual(
@@ -448,6 +683,35 @@ test('/v1/models advertises the vendor-qualified id, ready to paste after gatewa
   );
   assert.equal(body.data[0].owned_by, 'copilot');
   assert.equal(body.data[0].object, 'model');
+});
+
+test('/v1/models carries aiui_bridge and a per-model image_input, exactly as §15.3', () => {
+  const models = [
+    { id: 'gpt-5.6-luna', vendor: 'copilot', family: 'gpt-5.6-luna', imageInput: true },
+    { id: 'text-only', vendor: 'copilot', family: 'text-only', imageInput: false },
+    { id: 'unknown', vendor: 'copilot', family: 'unknown', imageInput: null },
+    { id: 'no-field', vendor: 'copilot', family: 'no-field' },
+  ];
+  const body = modelsListBody(models, 1_700_000_000, 'forward');
+  assert.deepEqual(body.aiui_bridge, { name: 'testbench-copilot-bridge', images: 'forward' });
+  assert.equal(BRIDGE_NAME, 'testbench-copilot-bridge');
+  assert.deepEqual(
+    body.data.map((m) => m.image_input),
+    [true, false, null, null],
+    'absent is reported as null — "forwarded; the model decides"',
+  );
+  assert.deepEqual(body.data[0], {
+    id: 'copilot/gpt-5.6-luna',
+    object: 'model',
+    created: 1_700_000_000,
+    owned_by: 'copilot',
+    family: 'gpt-5.6-luna',
+    image_input: true,
+  });
+  assert.deepEqual(modelsListBody(models, 0, 'strip').aiui_bridge, {
+    name: 'testbench-copilot-bridge',
+    images: 'strip',
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -536,6 +800,79 @@ test('a bad request is not marked terminal — nothing was spent and nothing is 
   assert.equal(isTerminalError(unknownRouteError('GET', '/nope')), false);
 });
 
+// --- a model that rejects images (§15.2) -----------------------------------
+
+test('the image 400 is exactly the contract the server codes against', () => {
+  const err = imageInputUnsupportedError('copilot/gpt-4.1');
+  assert.equal(err.status, 400);
+  assert.equal(
+    JSON.stringify(err.body),
+    '{"error":{"message":"copilot/gpt-4.1 does not accept images. Computer mode and ' +
+      'ai.sendScreenshots need a model that does — pick another Copilot model.",' +
+      '"type":"invalid_request_error","code":"image_input_unsupported"}}',
+  );
+  // The model WAS called: a retry would send the same image to the same model.
+  assert.equal(isTerminalError(err), true);
+});
+
+const imageCtx = (over = {}) => ({
+  model: 'copilot/gpt-4.1',
+  imagesForwarded: 1,
+  imageInput: null,
+  cancelled: false,
+  ...over,
+});
+
+test('an unclassified failure of an image-carrying request is image_input_unsupported', () => {
+  const unclassified = { name: 'Error', message: 'Request Failed: 400 bad request' };
+  for (const imageInput of [null, false]) {
+    const err = mapCompletionError(unclassified, imageCtx({ imageInput }));
+    assert.equal(err.status, 400, `imageInput ${imageInput}`);
+    assert.equal(err.body.error.code, 'image_input_unsupported');
+    assert.match(err.body.error.message, /^copilot\/gpt-4\.1 does not accept images\./);
+  }
+  // The same failure with no image in the request is the ordinary 502.
+  const plain = mapCompletionError(unclassified, imageCtx({ imagesForwarded: 0 }));
+  assert.equal(plain.status, 502);
+  assert.equal(plain.body.error.code, 'lm_error');
+});
+
+test('consent, quota and a vanished model keep their mapping, images or not', () => {
+  // Each names a cause that is not the image and a fix that is not "pick
+  // another model"; relabelling would send the user to the wrong fix.
+  const cases = [
+    [{ code: 'NoPermissions', message: 'denied' }, 403, 'no_permissions'],
+    [{ code: 'Blocked', message: 'quota' }, 429, 'quota_exhausted'],
+    [{ code: 'Unknown', message: 'You have exhausted your premium requests.' }, 429, 'quota_exhausted'],
+    [{ code: 'NotFound', message: 'gone' }, 404, 'model_not_found'],
+  ];
+  for (const [shape, status, code] of cases) {
+    for (const imageInput of [null, false, true]) {
+      const err = mapCompletionError(shape, imageCtx({ imageInput }));
+      assert.equal(err.status, status, `${shape.code} with an image`);
+      assert.equal(err.body.error.code, code);
+    }
+  }
+});
+
+test('a cancelled image request is not blamed on the model', () => {
+  const byFlag = mapCompletionError({ name: 'Error', message: 'x' }, imageCtx({ cancelled: true }));
+  assert.equal(byFlag.body.error.code, 'lm_error');
+  // vscode.CancellationError is named "Canceled"; an AbortSignal's is AbortError.
+  for (const name of ['Canceled', 'AbortError']) {
+    const err = mapCompletionError({ name, message: name }, imageCtx());
+    assert.notEqual(err.body.error.code, 'image_input_unsupported', name);
+  }
+});
+
+test('a model that advertises image input keeps the provider\'s own failure', () => {
+  // Its capabilities contradict "does not accept images", so the 502 with the
+  // provider text is the more truthful answer.
+  const err = mapCompletionError({ message: 'socket hang up' }, imageCtx({ imageInput: true }));
+  assert.equal(err.status, 502);
+  assert.match(err.body.error.message, /socket hang up/);
+});
+
 // --- the two refusals that happen before translateRequest ever sees a value --
 
 test('a body that is not JSON is a 400 carrying the parser\'s own complaint', () => {
@@ -589,4 +926,37 @@ test('the body cap allows exactly the cap and refuses one byte past it', () => {
 
 test('the 413 is not terminal — the caller may legitimately retry a smaller prompt', () => {
   assert.equal(isTerminalError(bodyLimitError(MAX_BODY_BYTES + 1)), false);
+});
+
+test('the body cap admits a realistic screenshot turn, and translates it', () => {
+  // ~800 KB of base64 — past the few hundred KB a 1600×670 PNG measures — plus
+  // a system prompt and a 200 KB page snapshot, serialized the way the OpenAI
+  // SDK sends it.
+  const pngBase64 = Buffer.alloc(600 * 1024, 0xa5).toString('base64');
+  assert.ok(pngBase64.length >= 800 * 1024);
+  const body = JSON.stringify(
+    request({
+      messages: [
+        { role: 'system', content: 'You drive the desktop. '.repeat(400) },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'x'.repeat(200 * 1024) },
+            { type: 'image_url', image_url: { url: `data:image/png;base64,${pngBase64}` } },
+          ],
+        },
+      ],
+    }),
+  );
+  const size = Buffer.byteLength(body);
+  assert.equal(bodyLimitError(size), null, `${size} bytes refused`);
+  // And the worst case the cap comment claims: a 1600×1600 RGBA PNG that does
+  // not compress at all, as base64, beside a 1 MB snapshot.
+  assert.equal(bodyLimitError(Math.ceil((1600 * 1600 * 4) / 3) * 4 + 1024 * 1024), null);
+
+  const result = translateBody(body, { imageMode: 'forward' });
+  assert.equal(result.ok, true);
+  const image = result.value.messages[0].parts[1];
+  assert.equal(image.kind, 'image');
+  assert.equal(image.base64, pngBase64, 'the payload survives intact');
 });
