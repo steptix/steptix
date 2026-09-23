@@ -101,6 +101,18 @@ describe('buildComputerSystemPrompt — §5.7', () => {
     expect(text).toMatch(/unless the screen shows it did not take effect/);
   });
 
+  it('tells a model with no screenshot not to guess — assert holds:false (§15.5)', () => {
+    // The rule for a route §15.4 cannot see: the Copilot bridge on an older
+    // VS Code swaps the image for "[screenshot omitted …]" after the request
+    // has left the server, and a model left to it guesses a click on the real
+    // screen or `noop`s a step that did nothing.
+    const text = systemText();
+    expect(text).toContain(
+      'If a message carries no image, or says the screenshot was omitted, do not guess coordinates',
+    );
+    expect(text).toContain('answer `assert` with "holds": false and "evidence": "no screenshot was received"');
+  });
+
   it('says never to type a credential', () => {
     const text = systemText();
     expect(text).toMatch(/Never type a password, passphrase, PIN, API key, card number/);

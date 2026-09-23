@@ -388,6 +388,149 @@ describe('the four preconditions each fail the step with their own message', () 
 });
 
 // ---------------------------------------------------------------------------
+// §5.1 item 1b / §15.4 — the model must be able to see the screen
+// ---------------------------------------------------------------------------
+
+describe('§5.1 item 1b — the vision route (§15.4)', () => {
+  /** A config with a key, so the run is not keyless and the check is asked. */
+  function keyed(desktop: Partial<Config['desktop']> = {}): Config {
+    return {
+      ...configWith(desktop),
+      ai: { ...baseConfig.ai, apiKey: 'server-key' },
+    } as Config;
+  }
+
+  function managerWith(config: Config, checkVisionRoute: ReturnType<typeof vi.fn>): SessionManager {
+    return new SessionManager(config, undefined, {
+      loadDesktopAdapter: loadDesktopAdapter as never,
+      probeComputerCapture: probeComputerCapture as never,
+      computerLock: { lockPath },
+      checkVisionRoute: checkVisionRoute as never,
+    });
+  }
+
+  const REFUSAL =
+    'Computer mode needs the model to see the screen, but the TestBench Copilot bridge drops ' +
+    'images on this VS Code (it has no image support for language models). Update VS Code, or ' +
+    'run computer-mode steps with a model that is not routed through the bridge.';
+
+  it('runs after the opt-in and before the adapter loads', async () => {
+    const order: string[] = [];
+    const check = vi.fn(async () => {
+      order.push('vision');
+      return { ok: true };
+    });
+    loadDesktopAdapter.mockImplementation(async () => {
+      order.push('adapter');
+      return adapter;
+    });
+    probeComputerCapture.mockImplementation(async () => {
+      order.push('probe');
+    });
+    const manager = managerWith(keyed(), check);
+
+    const response = await manager.executeSteps('s-vision-order', { steps: ['[use computer]'] });
+
+    expect(response.status).toBe('passed');
+    expect(order).toEqual(['vision', 'adapter', 'probe']);
+  });
+
+  it('is not asked when the project has not opted in — the opt-in is first', async () => {
+    const check = vi.fn(async () => ({ ok: true }));
+    const manager = managerWith(keyed({ enabled: false }), check);
+
+    const response = await manager.executeSteps('s-vision-off', { steps: ['[use computer]'] });
+
+    expect(response.results[0]!.reasoning).toBe(COMPUTER_DISABLED_MESSAGE);
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it('a refusal fails the step with its message: surface stays browser, no adapter, no lock', async () => {
+    const check = vi.fn(async () => ({ ok: false, error: REFUSAL }));
+    const manager = managerWith(keyed(), check);
+    const events: RunEvent[] = [];
+
+    const response = await manager.executeSteps(
+      's-vision-refused',
+      { steps: ['[use computer]', 'Click Save'] },
+      (e) => events.push(e),
+    );
+
+    expect(response.status).toBe('failed');
+    expect(response.results[0]!.reasoning).toBe(REFUSAL);
+    const fail = events.find((e) => e.type === 'step:fail') as Extract<RunEvent, { type: 'step:fail' }>;
+    expect(fail.error).toBe(REFUSAL);
+    expect(managed(manager, 's-vision-refused').surface).toBe('browser');
+    expect(loadDesktopAdapter).not.toHaveBeenCalled();
+    expect(probeComputerCapture).not.toHaveBeenCalled();
+    expect(existsSync(lockPath)).toBe(false);
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+  });
+
+  it('checks the EFFECTIVE route: run-settings model, and the .env gateway and key over the server\'s', async () => {
+    const check = vi.fn(async () => ({ ok: true }));
+    const manager = managerWith(keyed(), check);
+
+    await manager.executeSteps('s-vision-effective', {
+      steps: ['[use computer]'],
+      // The project's .env routes through the bridge; the server's startup
+      // config does not — `runConfig.ai` would have reported the server's.
+      env: {
+        AI_MODEL: 'gateway/copilot/from-dotenv',
+        AI_GATEWAY_URL: 'http://127.0.0.1:4891',
+        AI_API_KEY: 'bridge-key',
+      },
+      // …and the agent overrode the model for this session.
+      runSettings: { model: 'gateway/copilot/from-run-settings' },
+    });
+
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(check).toHaveBeenCalledWith({
+      model: 'gateway/copilot/from-run-settings',
+      gatewayUrl: 'http://127.0.0.1:4891',
+      apiKey: 'bridge-key',
+    });
+  });
+
+  it('without a run-settings override, the .env model is the one checked', async () => {
+    const check = vi.fn(async () => ({ ok: true }));
+    const manager = managerWith(keyed(), check);
+
+    await manager.executeSteps('s-vision-dotenv', {
+      steps: ['[use computer]'],
+      env: { AI_MODEL: 'gateway/copilot/from-dotenv', AI_GATEWAY_URL: 'http://127.0.0.1:4891' },
+    });
+
+    expect(check).toHaveBeenCalledWith({
+      model: 'gateway/copilot/from-dotenv',
+      gatewayUrl: 'http://127.0.0.1:4891',
+      apiKey: 'server-key',
+    });
+  });
+
+  it('a keyless run is not asked — the first computer turn reports the missing model', async () => {
+    const check = vi.fn(async () => ({ ok: false, error: 'must not be asked' }));
+    // `baseConfig` carries no key.
+    const manager = managerWith(baseConfig, check);
+
+    const response = await manager.executeSteps('s-vision-keyless', { steps: ['[use computer]'] });
+
+    expect(response.status).toBe('passed');
+    expect(check).not.toHaveBeenCalled();
+    expect(managed(manager, 's-vision-keyless').surface).toBe('computer');
+  });
+
+  it('re-entering the surface does not ask again', async () => {
+    const check = vi.fn(async () => ({ ok: true }));
+    const manager = managerWith(keyed(), check);
+
+    await manager.executeSteps('s-vision-reenter', { steps: ['[use computer]', '[use computer]'] });
+
+    expect(check).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // §4.5 — the rest of the state machine
 // ---------------------------------------------------------------------------
 

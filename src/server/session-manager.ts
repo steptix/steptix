@@ -57,6 +57,7 @@ import {
   type SurfaceState,
 } from '../runner/computer-step.js';
 import type { ComputerLockOptions, DesktopAdapter } from '../desktop/index.js';
+import type { VisionRouteAi, VisionRouteResult } from '../desktop/vision-route.js';
 import {
   createControlState,
   firstLoopInRange,
@@ -1207,6 +1208,9 @@ export interface SessionManagerDeps {
   loadDesktopAdapter?: () => Promise<DesktopAdapter>;
   probeComputerCapture?: (adapter: DesktopAdapter) => Promise<void>;
   computerLock?: ComputerLockOptions;
+  /** §5.1 item 1b / §15.4 — the vision-route check, so a test never reaches
+   *  the network. Defaults to `checkVisionRoute` (src/desktop/vision-route.ts). */
+  checkVisionRoute?: (ai: VisionRouteAi) => Promise<VisionRouteResult>;
 }
 
 /**
@@ -2902,10 +2906,22 @@ export class SessionManager {
     // (stories/run-settings.md owns per-run knobs), so the `.env` value is the
     // whole story, and passing it every batch is what lets a corporate `.env`
     // edit re-point a live session instead of waiting for a recycle.
+    //
+    // `effectiveAiRoute` is the ONE object those three values are read from, so
+    // what `[use computer]` checks (SPEC-use-computer.md §15.4) is by
+    // construction what the client was just pointed at — and not
+    // `runConfig.ai`, whose `gatewayUrl` and `apiKey` are spread from the
+    // SERVER's startup config (`resolveRunSettings`) and so miss a project
+    // `.env` that routes through the Copilot bridge.
+    const effectiveAiRoute: VisionRouteAi = {
+      model: desiredModel,
+      gatewayUrl: desiredAi.gatewayUrl,
+      apiKey: desiredAi.apiKey,
+    };
     const aiChange = session.aiClient.syncAuth(
-      desiredModel,
-      desiredAi.apiKey,
-      desiredAi.gatewayUrl,
+      effectiveAiRoute.model,
+      effectiveAiRoute.apiKey,
+      effectiveAiRoute.gatewayUrl,
     );
     if (aiChange) {
       logger.info(
@@ -5025,6 +5041,12 @@ export class SessionManager {
               loadDesktopAdapter: this.loadDesktopAdapter,
               probeCapture: this.probeComputerCapture,
               ...(this.deps.computerLock && { lock: this.deps.computerLock }),
+              // §15.4 — the route `session.aiClient` was pointed at for this
+              // batch (see `effectiveAiRoute` above). Keyless — no key, or AI
+              // forbidden by policy — skips the check: the first computer turn
+              // already fails with the message that fits the reason.
+              ai: runKeyless ? undefined : effectiveAiRoute,
+              ...(this.deps.checkVisionRoute && { checkVisionRoute: this.deps.checkVisionRoute }),
             });
             modeResult = entered.ok
               ? modeStepResult(i + 1, originalStep, 'computer', entered.reentered)

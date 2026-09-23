@@ -311,6 +311,121 @@ describe('§5.1 refusals on the CLI path', () => {
   });
 });
 
+describe('§5.1 item 1b — the vision route on the CLI path (§15.4)', () => {
+  /** The route the CLI would send computer-mode requests on: a keyed
+   *  gateway model on a custom URL — the Copilot bridge's shape. */
+  function bridgeConfig(desktop: Partial<Config['desktop']> = {}): Config {
+    const config = makeConfig(desktop);
+    return {
+      ...config,
+      ai: {
+        ...config.ai,
+        model: 'gateway/copilot/gpt-5.6-luna',
+        gatewayUrl: 'http://127.0.0.1:4891',
+        apiKey: 'bridge-key',
+      },
+    };
+  }
+
+  const REFUSAL =
+    'Computer mode needs the model to see the screen, but the TestBench Copilot bridge ' +
+    'reports that gateway/copilot/gpt-5.6-luna does not accept images.';
+
+  it('runs after the opt-in and before the adapter loads, and checks config.ai', async () => {
+    const order: string[] = [];
+    const check = vi.fn(async () => {
+      order.push('vision');
+      return { ok: true as const };
+    });
+    const config = bridgeConfig();
+
+    const report = await runTest(
+      makeInstance(['[use computer]', 'Click Save']),
+      config,
+      '',
+      undefined,
+      extras({
+        checkVisionRoute: check,
+        loadDesktopAdapter: async () => {
+          order.push('adapter');
+          return adapter;
+        },
+        probeComputerCapture: async () => {
+          order.push('probe');
+        },
+      }),
+    );
+
+    expect(report.status).toBe('passed');
+    expect(order).toEqual(['vision', 'adapter', 'probe']);
+    // The effective route IS the run's `config.ai` — the object its AiClient
+    // was built from.
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(check.mock.calls[0]![0]).toMatchObject({
+      model: 'gateway/copilot/gpt-5.6-luna',
+      gatewayUrl: 'http://127.0.0.1:4891',
+      apiKey: 'bridge-key',
+    });
+  });
+
+  it('is not asked when the project has not opted in', async () => {
+    const check = vi.fn(async () => ({ ok: true as const }));
+
+    const report = await runTest(
+      makeInstance(['[use computer]']),
+      bridgeConfig({ enabled: false }),
+      '',
+      undefined,
+      extras({ checkVisionRoute: check }),
+    );
+
+    expect(report.steps[0]!.error).toBe(COMPUTER_DISABLED_MESSAGE);
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it('a refusal fails the step with its message and takes no lock', async () => {
+    let loaded = false;
+    const report = await runTest(
+      makeInstance(['[use computer]', 'Click Save']),
+      bridgeConfig(),
+      '',
+      undefined,
+      extras({
+        checkVisionRoute: async () => ({ ok: false, error: REFUSAL }),
+        loadDesktopAdapter: async () => {
+          loaded = true;
+          return adapter;
+        },
+      }),
+    );
+
+    expect(report.status).toBe('failed');
+    expect(report.steps[0]!.stepKind).toBe('mode');
+    expect(report.steps[0]!.error).toBe(REFUSAL);
+    expect(loaded).toBe(false);
+    expect(existsSync(lockPath)).toBe(false);
+    expect(executeComputerStepMock).not.toHaveBeenCalled();
+    expect(launchBrowserMock).not.toHaveBeenCalled();
+  });
+
+  it('a keyless run is not asked', async () => {
+    const check = vi.fn(async () => ({ ok: false as const, error: 'must not be asked' }));
+    const config = bridgeConfig();
+    config.ai = { ...config.ai, apiKey: '' };
+
+    const report = await runTest(
+      makeInstance(['[use computer]']),
+      config,
+      '',
+      undefined,
+      extras({ checkVisionRoute: check }),
+    );
+
+    expect(report.status).toBe('passed');
+    expect(check).not.toHaveBeenCalled();
+  });
+});
+
 describe('a [use …] line in a hook is refused (§4.4)', () => {
   it('fails the hook rather than switching surface underneath the test', async () => {
     resolveHooksMock.mockResolvedValue({

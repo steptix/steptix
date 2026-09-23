@@ -32,6 +32,7 @@
  */
 import type { AIAction } from '../ai/types.js';
 import type { ChatMessage } from '../ai/types.js';
+import type { CompleteResult } from '../ai/client.js';
 import type {
   AiInteraction,
   AssertionResult,
@@ -74,6 +75,12 @@ import {
   type DesktopAdapter,
   type ImageView,
 } from '../desktop/index.js';
+import {
+  checkVisionRoute,
+  imageInputUnsupportedMessage,
+  type VisionRouteAi,
+  type VisionRouteResult,
+} from '../desktop/vision-route.js';
 import type { DesktopConfig } from '../config/types.js';
 
 /** Options for a computer-mode step: a step's ordinary options, with the
@@ -150,11 +157,24 @@ export interface EnterComputerModeInput {
   probeCapture: (adapter: DesktopAdapter) => Promise<void>;
   /** Test seam for the lock file. */
   lock?: ComputerLockOptions | undefined;
+  /**
+   * §5.1 item 1b / §15.4 — the AI route the NEXT computer-mode request would
+   * go out on: the model, gateway URL and key the run's AI client holds at the
+   * moment of `[use computer]`. Each caller says which object that is.
+   *
+   * `undefined` on a keyless run (no key, or AI forbidden by policy), and the
+   * check is then skipped: computer mode needs a model whatever the route, and
+   * the step's first turn already says so in the words that fit the reason.
+   */
+  ai?: VisionRouteAi | undefined;
+  /** §15.4's check, injectable so no test reaches the network. Defaults to
+   *  {@link checkVisionRoute}. */
+  checkVisionRoute?: ((ai: VisionRouteAi) => Promise<VisionRouteResult>) | undefined;
 }
 
 /**
- * `[use computer]` — §5.1's four preconditions, in order, each failing the
- * step with the message the spec gives.
+ * `[use computer]` — §5.1's preconditions (1, 1b, 2, 3, 4), in order, each
+ * failing the step with the message the spec gives.
  *
  * Returns an error STRING rather than throwing, because the caller's job with
  * it is to fail one step: the run carries on, the report shows the row, and
@@ -178,6 +198,16 @@ export async function enterComputerMode(
   //    move the mouse on a machine whose owner did not allow it.
   if (!input.desktop?.enabled) {
     return { ok: false, error: COMPUTER_DISABLED_MESSAGE };
+  }
+
+  // 1b. The model can see the screen (§15.4). Before nut.js loads, so a route
+  //     known to drop images costs nothing on the machine: no native binary,
+  //     no lock, no capture. Checked once, here — a model changed afterwards
+  //     through run settings is caught by the bridge's 400 instead.
+  if (input.ai) {
+    const route = await (input.checkVisionRoute ?? checkVisionRoute)(input.ai);
+    if (!route.ok) return { ok: false, error: route.error };
+    if (route.note) logger.debug(`[computer] vision route: ${route.note}`);
   }
 
   // 2. nut.js loads — here and never at server start.
@@ -808,8 +838,35 @@ async function computerAttempt(
     refusals = [];
     priorFailure = undefined;
 
-    const completion = await aiClient.complete(messages, opts.signal);
     const recordShot = computer.reportScreenshots;
+    let completion: CompleteResult;
+    try {
+      completion = await aiClient.complete(messages, opts.signal);
+    } catch (err) {
+      // §15.4 — the model rejected the screenshot. Not retried: a retry sends
+      // the same image to the same model and gets the same 400, and on this
+      // surface the image cannot be left out. The bridge's own words are the
+      // step's error — they name the model and say what computer mode needs.
+      const blind = imageInputUnsupportedMessage(err);
+      if (blind === null) throw err;
+      turnAiInteractions.push({
+        purpose: 'computer-action-plan',
+        attemptNumber,
+        requestMessages: messages.map((m) => ({ role: m.role, content: textOf(m) })),
+        response: '',
+        ...(recordShot && { screenshotBase64: shownView.pngBase64 }),
+        timestamp: turnTimestamp,
+      });
+      allTurns.push({
+        turnNumber: currentTurn,
+        attemptNumber,
+        timestamp: turnTimestamp,
+        aiInteractions: turnAiInteractions,
+        subActions: turnSubActions,
+        computer: computerTurnRecord(shownView, recordShot),
+      });
+      throw new ComputerStepFailure(blind, allTurns, false);
+    }
     turnAiInteractions.push({
       purpose: 'computer-action-plan',
       attemptNumber,

@@ -33,6 +33,7 @@ import {
   type SurfaceState,
 } from './computer-step.js';
 import type { ComputerLockOptions, DesktopAdapter } from '../desktop/index.js';
+import type { VisionRouteAi, VisionRouteResult } from '../desktop/vision-route.js';
 import { identifyStepGroups } from './step-grouper.js';
 import {
   createControlState,
@@ -388,6 +389,9 @@ export interface RunTestExtras {
   /** §5.9 — where the machine-wide computer lock lives. Overridden by tests so
    *  they never touch the real one in `os.tmpdir()`. */
   computerLock?: ComputerLockOptions;
+  /** §5.1 item 1b / §15.4 — the vision-route check. Overridden by tests so
+   *  they never reach the network. Defaults to `checkVisionRoute`. */
+  checkVisionRoute?: (ai: VisionRouteAi) => Promise<VisionRouteResult>;
 }
 
 /**
@@ -1281,6 +1285,12 @@ export async function runTest(
             loadDesktopAdapter: extras.loadDesktopAdapter ?? defaultLoadDesktopAdapter,
             probeCapture: extras.probeComputerCapture ?? defaultProbeComputerCapture,
             ...(extras.computerLock && { lock: extras.computerLock }),
+            // §15.4 — `config.ai` is the very object this run's `aiClient` was
+            // built from and holds by reference; the CLI resolves no run
+            // settings and never re-points the client, so it is the route
+            // every computer-mode request goes out on. Keyless skips the check.
+            ai: keyless ? undefined : config.ai,
+            ...(extras.checkVisionRoute && { checkVisionRoute: extras.checkVisionRoute }),
           });
           modeResult = entered.ok
             ? modeStepResult(i + 1, instruction, 'computer', entered.reentered)

@@ -178,6 +178,32 @@ export class AiForbiddenByPolicyError extends Error {
   }
 }
 
+/**
+ * Did someone actually choose this gateway URL, or is it just the built-in?
+ *
+ * The one definition of "a custom gateway URL", exported so the computer-mode
+ * vision check (src/desktop/vision-route.ts, SPEC-use-computer.md §15.4) asks
+ * the question the client asks rather than a copy of it. See
+ * {@link AiClient}'s `hasCustomGatewayUrl` for why it is a comparison against
+ * `DEFAULT_CONFIG` rather than against `undefined`.
+ */
+export function isCustomGatewayUrl(gatewayUrl: string): boolean {
+  const trim = (url: string): string => url.trim().replace(/\/+$/, '');
+  return trim(gatewayUrl) !== trim(DEFAULT_CONFIG.ai.gatewayUrl);
+}
+
+/**
+ * The prefix that makes `model` gateway-routed — sent to `AI_GATEWAY_URL`'s
+ * `/v1` surface rather than to a provider's own endpoint — or `null` for a
+ * direct model. Two spellings route (see `buildGateway`); the library strips
+ * whichever one it was given and forwards the rest as the upstream model id.
+ */
+export function gatewayRoutePrefix(model: string): 'gateway/' | 'aibroker/' | null {
+  if (model.startsWith('gateway/')) return 'gateway/';
+  if (model.startsWith('aibroker/')) return 'aibroker/';
+  return null;
+}
+
 /** Per-call knobs beyond the messages themselves. */
 export interface CompleteOptions {
   /** Defaults to `routine` — today's behavior. */
@@ -240,8 +266,7 @@ export class AiClient {
    * string goes across verbatim either way.
    */
   private buildGateway(): AIGateway {
-    const viaGateway =
-      this.config.model.startsWith('gateway/') || this.config.model.startsWith('aibroker/');
+    const viaGateway = gatewayRoutePrefix(this.config.model) !== null;
     // Refused before anything is built or sent. The loader keeps no provenance —
     // an explicitly-set URL and the built-in default are indistinguishable on
     // the result — so this is the same value comparison `hasCustomGatewayUrl`
@@ -299,8 +324,7 @@ export class AiClient {
    * chosen at all.
    */
   private hasCustomGatewayUrl(): boolean {
-    const trim = (url: string): string => url.trim().replace(/\/+$/, '');
-    return trim(this.config.gatewayUrl) !== trim(DEFAULT_CONFIG.ai.gatewayUrl);
+    return isCustomGatewayUrl(this.config.gatewayUrl);
   }
 
   /**

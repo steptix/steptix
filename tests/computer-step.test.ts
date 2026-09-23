@@ -823,3 +823,151 @@ describe('the actions a step has already performed go back to the model', () => 
     expect(textIn(sent[3]!)).toContain('turn 1: click image(10,10)');
   });
 });
+
+// ---------------------------------------------------------------------------
+// §15.4 — a model that rejects the screenshot fails the step at once
+//
+// The backstop behind the `[use computer]` vision check: a model changed after
+// the check (run settings), or a bridge that could not say in advance, answers
+// the first request that carries an image with a 400 `image_input_unsupported`.
+// Retrying sends the same image to the same model, so the step fails on
+// attempt 1 with the bridge's own words.
+// ---------------------------------------------------------------------------
+
+/** The OpenAI SDK's `BadRequestError` for the bridge's 400, as
+ *  `APIError.generate` builds it: the message is `"400 <error.message>"` and
+ *  the code lives on `.code` / `.error.code`, never in the message. */
+function bridgeRejection(message: string): Error {
+  const body = { message, type: 'invalid_request_error', code: 'image_input_unsupported' };
+  return Object.assign(new Error(`400 ${message}`), {
+    name: 'BadRequestError',
+    status: 400,
+    error: body,
+    code: body.code,
+    type: body.type,
+  });
+}
+
+const BRIDGE_REJECTION =
+  'copilot/o3-mini does not accept images. Computer mode and ai.sendScreenshots need a ' +
+  'model that does — pick another Copilot model.';
+
+describe('image_input_unsupported fails the step at once (§15.4)', () => {
+  it('fails on attempt 1 with the bridge\'s message, and is not retried', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    let calls = 0;
+    const client = {
+      complete: async () => {
+        calls++;
+        throw bridgeRejection(BRIDGE_REJECTION);
+      },
+    } as unknown as AiClient;
+    const opts = makeOpts(adapter, client, {
+      config: makeConfig({
+        execution: {
+          ...DEFAULT_CONFIG.execution,
+          retries: 2,
+          maxTurns: 4,
+          promptOnAmbiguity: true,
+        } as Config['execution'],
+      }),
+    });
+
+    const result = await executeComputerStep(1, 1, 'Click Save', opts);
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toBe(BRIDGE_REJECTION);
+    expect(result.retried).toBe(false);
+    // One request: no second turn, no retry attempt.
+    expect(calls).toBe(1);
+    // The turn that was refused is on the report, with what the model would
+    // have been shown.
+    expect(result.turns).toHaveLength(1);
+    expect(result.turns[0]!.attemptNumber).toBe(1);
+    expect(result.turns[0]!.computer?.screenshotBase64).toBeDefined();
+    expect(adapter.callsOf('click')).toHaveLength(0);
+  });
+
+  it('any other AI error is still retried as before', async () => {
+    const adapter = new FakeDesktopAdapter(GRAB);
+    let calls = 0;
+    const client = {
+      complete: async () => {
+        calls++;
+        throw Object.assign(new Error('400 context_length_exceeded'), { status: 400 });
+      },
+    } as unknown as AiClient;
+    const opts = makeOpts(adapter, client, {
+      config: makeConfig({
+        execution: {
+          ...DEFAULT_CONFIG.execution,
+          retries: 1,
+          maxTurns: 4,
+          promptOnAmbiguity: true,
+        } as Config['execution'],
+      }),
+    });
+
+    const result = await executeComputerStep(1, 1, 'Click Save', opts);
+
+    expect(result.status).toBe('failed');
+    expect(calls).toBe(2);
+  });
+
+  it('the §5.6 condition judge fails the same way: the bridge\'s message, one call', async () => {
+    const { evaluateConditions } = await import('../src/runner/step-executor.js');
+    const adapter = new FakeDesktopAdapter(GRAB);
+    let calls = 0;
+    const client = {
+      complete: async () => {
+        calls++;
+        throw bridgeRejection(BRIDGE_REJECTION);
+      },
+    } as unknown as AiClient;
+
+    const judged = evaluateConditions(['a window titled "Save As" is open'], makeOpts(adapter, client));
+
+    await expect(judged).rejects.toThrow(BRIDGE_REJECTION);
+    await judged.catch((err: unknown) => {
+      expect((err as Error).message).toBe(BRIDGE_REJECTION);
+      expect((err as { retryable?: boolean }).retryable).toBe(false);
+    });
+    expect(calls).toBe(1);
+  });
+
+  it('an `If` guard on the computer surface fails with the bridge\'s message', async () => {
+    // The layer every run loop shares: `evaluateGuard` turns a judge throw
+    // into a failed guard carrying the judge's words, with no re-ask.
+    const { evaluateGuard } = await import('../src/runner/control-runtime.js');
+    const { createControlState } = await import('../src/runner/control-flow.js');
+    const adapter = new FakeDesktopAdapter(GRAB);
+    let calls = 0;
+    const client = {
+      complete: async () => {
+        calls++;
+        throw bridgeRejection(BRIDGE_REJECTION);
+      },
+    } as unknown as AiClient;
+
+    const evaluation = await evaluateGuard({
+      controls: [
+        {
+          kind: 'if',
+          chainId: 'c1',
+          condition: 'a window titled "Save As" is open',
+          bodyStart: 1,
+          bodyEnd: 1,
+          chainEnd: 1,
+        },
+        null,
+      ],
+      index: 0,
+      state: createControlState(),
+      resolvedParameters: {},
+      executorOptions: makeOpts(adapter, client),
+    });
+
+    expect(evaluation.error).toBe(BRIDGE_REJECTION);
+    expect(calls).toBe(1);
+  });
+});

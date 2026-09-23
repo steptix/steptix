@@ -209,6 +209,17 @@ On `[use computer]`, in order, each failing the STEP with the message given:
    project; set `desktop.enabled: true` in aiui.config.json. A test file in
    a shared project must not be able to move the mouse on a machine whose
    owner did not allow it.
+
+1b. **The model can see the screen** (§15.4). For a gateway-routed model
+   (`gateway/…`, `aibroker/…`) with a custom gateway URL, `GET
+   {gatewayUrl}/v1/models` (3 s) is asked whether the route is the TestBench
+   Copilot bridge and what it does with images; a bridge that strips images,
+   or that marks the selected model `image_input: false`, fails the step with
+   §15.4's message. Any other answer, or none, proceeds. Checked against the
+   AI route in force at the `[use computer]` step, and skipped on a keyless
+   run. Before nut.js loads, so it costs nothing on the machine
+   (`src/desktop/vision-route.ts`).
+
 2. **nut.js loads.** `@nut-tree-fork/nut-js` is imported lazily HERE and
    never at server start, so a machine with no prebuilt binary, or no
    permission, still runs every browser test. Message names the package

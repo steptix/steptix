@@ -5,6 +5,7 @@ import type { Config } from '../config/types.js';
 import type { AIAction, BranchedAIResponse, TableReadMapping } from '../ai/types.js';
 import type { StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData } from '../report/types.js';
 import { AiClient } from '../ai/client.js';
+import type { CompleteResult } from '../ai/client.js';
 import {
   buildSystemPrompt,
   buildStepMessage,
@@ -77,6 +78,7 @@ import type { StepGroup } from './step-grouper.js';
 import type { AssertionResult } from '../report/types.js';
 import type { DesktopAdapter } from '../desktop/index.js';
 import { captureView } from '../desktop/index.js';
+import { imageInputUnsupportedMessage } from '../desktop/vision-route.js';
 
 /**
  * Actions that may mutate the page and therefore warrant a post-action settle
@@ -4451,7 +4453,18 @@ export async function evaluateConditions(
       currentUrl = page ? page.url() : '';
     } catch { /* a page mid-navigation still gets judged; the URL is a label */ }
 
-    const completion = await aiClient.complete(messages, opts.signal);
+    let completion: CompleteResult;
+    try {
+      completion = await aiClient.complete(messages, opts.signal);
+    } catch (err) {
+      // SPEC-use-computer.md §15.4 — the model rejected the screenshot. The
+      // guard fails with the bridge's own words rather than the SDK's
+      // `400 …` rendering of them, and is tagged unretryable for any caller
+      // that retries: re-asking sends the same image to the same model.
+      const blind = imageInputUnsupportedMessage(err);
+      if (blind === null) throw err;
+      throw Object.assign(new Error(blind), { retryable: false });
+    }
     aiInteractions.push({
       purpose: computer ? 'condition-judge [computer]' : 'condition-judge',
       requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),

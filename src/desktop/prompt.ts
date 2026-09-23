@@ -145,6 +145,22 @@ export const NO_REPEAT_SENTENCE =
   'If the step is now satisfied, answer with `noop`. Do not repeat an action that already ' +
   'succeeded unless the screen shows it did not take effect.';
 
+/** The evidence a blind turn answers with (§15.5) — the words a report reader
+ *  searches for when a computer step failed without a click. */
+export const NO_SCREENSHOT_EVIDENCE = 'no screenshot was received';
+
+/**
+ * §15.5 — belt and braces for a route that drops the image without the server
+ * finding out (§15.1: the Copilot bridge on an older VS Code replaces it with
+ * a "[screenshot omitted …]" note). §15.4 refuses the routes it can see; this
+ * covers the ones it cannot, where the alternative is a guessed click on the
+ * real screen or a `noop` that passes a step that did nothing.
+ */
+export const NO_SCREENSHOT_RULE =
+  'If a message carries no image, or says the screenshot was omitted, do not guess coordinates ' +
+  'and do not answer `noop`: answer `assert` with "holds": false and "evidence": ' +
+  `"${NO_SCREENSHOT_EVIDENCE}".`;
+
 /** §5.3's note, quoted back in the model's own numbers. */
 export function zoomNote(region: ImageRegion): string {
   return (
@@ -217,7 +233,8 @@ Never type a password, passphrase, PIN, API key, card number or other credential
 5. Native windows redraw slowly. If the screenshot shows a dialog still opening or a control mid-repaint, answer with a short \`wait\` rather than clicking into it.
 6. Only answer \`assert\` when the step's intent is verification. A click's result will be visible in the next screenshot; you do not need to assert it succeeded.
 7. When the step is done, answer \`noop\`.
-8. Every action you have already performed for this step is listed in the message under "${PERFORMED_HEADING}": do not repeat one that already succeeded unless the screen shows it did not take effect — if the step is now satisfied, answer \`noop\`.`,
+8. Every action you have already performed for this step is listed in the message under "${PERFORMED_HEADING}": do not repeat one that already succeeded unless the screen shows it did not take effect — if the step is now satisfied, answer \`noop\`.
+9. ${NO_SCREENSHOT_RULE}`,
     },
   ];
 
