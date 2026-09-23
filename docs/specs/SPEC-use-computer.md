@@ -883,6 +883,15 @@ parallel shards cannot share a mouse and the default run must stay
 parallel. CLAUDE.md gains a "computer-mode live test" section saying so and
 giving the one-shard command.
 
+Beside it, behind the same gate, `computer-calc.test.cjs` drives
+`calc-one-plus-one.md` through the extension twice in one kept session: Run
+All with a breakpoint on step 5, then Continue, then a second Run All. It
+reads the §5.9 lock file from outside the server and requires it free of the
+server's pid while TestBench is parked at the breakpoint and after each run,
+and held by that pid at some point during each run phase — the positive
+control that makes the "free" readings mean something. After the second run it
+checks `GET /sessions/:id` reports `surface` (§4.5).
+
 ## 14. What the live run found
 
 Run 2026-09-23 on the Windows 11 box (3440×1440, one display), server

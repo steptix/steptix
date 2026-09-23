@@ -443,6 +443,17 @@ focus and the next screenshot is no longer of what the model was answering
 about. The test says so in its own header too, because the person who starts
 it is not always the person who wrote it.
 
+`computer-calc.test.cjs` sits beside it behind the same gate and runs the same
+way, with `--files=computer-calc.test.cjs`. It drives `calc-one-plus-one.md` —
+desktop only, no browser at all — twice in one TestBench session: once with a
+breakpoint on step 5, reading `aiui-computer.lock` itself while the run is
+parked to show the server gave the lock back, then Continue to 9/9; then a
+second Run All in the kept session. Every phase also watches the file while it
+runs and requires seeing the server's pid in it, so "not held" cannot pass by
+reading the wrong temp directory. Step 2 is `[tool: open_calculator]`, so the
+fixture tools must load (`fixtures/tools/node_modules`, a built `dist/`). A run
+that fails partway can leave Calculator open; close it before the next attempt.
+
 ### Why the junction repair matters
 
 `testbench-native/node_modules/ai-ui-automation-runner-core` is the

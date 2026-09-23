@@ -252,9 +252,14 @@ describe('TestBench live — computer mode opens and cancels the print dialog', 
   after(async () => {
     try {
       await vscode.commands.executeCommand('testbench-native.stop');
-      // Closes the session, which is what releases the computer lock
-      // (spec §5.9) and resets the surface. Leaving it held would refuse the
-      // next computer-mode run on this machine until the pid died.
+      // Closes the session for the BROWSER it holds, not for the lock or the
+      // surface. Neither needs it any more: the server releases the computer
+      // lock at the end of every run, a stopped one included (spec §5.9), and
+      // the next run of this file resets the surface itself through the
+      // `runStart` its first block carries (§4.5). What a kept session still
+      // holds is the Chromium this fixture opened the PDF in — headed, per the
+      // workspace config — which would otherwise stay on screen for whatever
+      // runs next.
       await vscode.commands.executeCommand('testbench-native.restartSession');
     } catch {
       /* teardown is best-effort */
