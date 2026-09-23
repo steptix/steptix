@@ -321,7 +321,7 @@ test('a loop in a section body still binds — that is the ordinary case', () =>
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// The eight acceptance files, end to end
+// The twelve acceptance files, end to end
 // ───────────────────────────────────────────────────────────────────────────
 
 /** The `table-read`-tagged acceptance tests (the `table-baseline-*` four are
