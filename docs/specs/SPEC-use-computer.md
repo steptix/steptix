@@ -710,3 +710,25 @@ calls work). These are what `src/desktop/bring-to-front.ts` is built on:
 Foreground rules may differ for a server a user starts from their own
 terminal, since these processes descend from the foreground app; the
 verify-and-fall-back chain is there so the result holds either way.
+
+**Built policy, checked from dist against real windows** (tool-spawned, a
+second throwaway window holding the foreground): behind another window,
+minimised, off the screen at x=4200, minimised and off the screen, and
+already in front — all five ended in front on attempt 1; the off-screen
+cases were moved to (40,40); the fallback chain was never needed.
+
+**End to end through a user-started server** (the context that counts),
+session `live-focus-1`, steps posted in three batches against
+`pdf-print-cancel.md`'s project so `desktop.enabled` applied:
+
+| Setup between batches | Step | Result |
+| --- | --- | --- |
+| browser minimised from outside (`(0,0 0×0)`, Claude app in front) | `Focus the window whose title contains "statement.pdf"` | `→ ok (restored from minimised, now in front)`, attempt 1 |
+| | `Verify the statement PDF is showing on the screen` | holds, judged from the capture |
+| browser moved to x=4200 (`(4200,150 0×900)`, a stand-in for a second monitor) | the same focus step | `→ ok (moved onto the main display, already in front)`, now `(40,40 1440×900)` |
+| | the same verify step | holds |
+| | `[use browser]`, then `Verify the page URL ends with statement.pdf` | passed on the same tab |
+
+Not measured: a real second monitor (this box has one display), macOS and
+Linux helpers, and a foreground refusal strong enough to reach the
+minimise+restore fallback — Windows never refused in any run above.
