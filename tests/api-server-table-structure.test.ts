@@ -7,8 +7,8 @@
  * carry one, what the validation refuses — is `tests/read-table-structure.test.ts`
  * against a real page. This file is about the other half, and it is a
  * different question: who calls the model, how many times, what is recorded,
- * and what the cache does with the answer. None of that is visible from
- * inside the extractor, and none of it is exercised by a suite that mocks
+ * and what the run remembers of the answer for a later step. None of that is
+ * visible from inside the extractor, and none of it is exercised by a suite that mocks
  * `executeStep` — which is every other `api-server-*.test.ts` — so the
  * executor here is REAL and only its edges are stubbed: no browser, no
  * network, a scripted AI client that counts what it was asked.
@@ -16,8 +16,9 @@
  * The fake extractor answers whatever the test tells it to. That is not a
  * weaker proof than a real page would be: what is being proved is that ONE
  * question is asked for a shape refusal and NONE for anything else, that the
- * validated mapping reaches the recorded action and the cache, and that a
- * replay applies it before anything else is tried.
+ * validated mapping reaches the recorded action and the run's structure memo,
+ * and that a later step in the same run applies it before anything else is
+ * tried.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
@@ -66,19 +67,14 @@ const extractor = vi.hoisted(() => ({
   throwRaw: false,
   /** Every non-readTable action, so a test can see the loop still works. */
   other: [] as AIAction[],
-  /** `options.structureSource` as each read was given it — `cache`, `memo`,
-   *  `model` or undefined. The summary line's parenthetical is built from it
-   *  (§7.6), and only the CALLER knows which of the three a mapping came
-   *  from. */
+  /** `options.structureSource` as each read was given it — `memo`, `model`
+   *  or undefined. The summary line's parenthetical is built from it (§7.6),
+   *  and only the CALLER knows which of the two a mapping came from. */
   sources: [] as Array<string | undefined>,
   /** What `expandDomSubtree` answers for the region with no candidates. Set
    *  per test; a test about masking puts a secret in it. */
   subtree:
     '<div id="account-cards"><div class="account-card"><h3 class="card-title">Everyday</h3></div></div>',
-  /** How many times the re-ask path asked for a fresh sketch. */
-  sketchCalls: 0,
-  /** What `sketchTable()` answers. */
-  sketchResult: null as unknown,
 }));
 
 const mockPage = {
@@ -186,14 +182,6 @@ vi.mock('../src/browser/actions.js', async (importOriginal) => {
         };
       }
     }),
-    // The re-ask path's tool (§7.10, "asked from ONCE more"). The real one
-    // evaluates in a page and there is no page here, so it is scripted — and
-    // a test below asserts it was CALLED, which is the half that was missing:
-    // until then nothing in the suite reached it and it was dead code.
-    sketchTable: vi.fn(async () => {
-      extractor.sketchCalls += 1;
-      return extractor.sketchResult;
-    }),
   };
 });
 
@@ -299,7 +287,6 @@ function testConfig(): Config {
     },
     api: { specsDir: './specs', requestTimeout: 30_000, redactSensitive: true },
     server: { host: '127.0.0.1', port: 0, apiKey: API_KEY },
-    cache: { enabled: false, dir: '.cache' },
     logging: { consoleLogLevel: 'silent', serverFileLogLevel: 'off' },
     tables: { structure: 'ask' },
   } as unknown as Config;
@@ -332,7 +319,8 @@ async function api(
   }
 }
 
-/** A fresh test file, so no two tests share a step cache. */
+/** A fresh test file per test, so nothing keyed on the file carries from one
+ *  test to the next. */
 function newTestFile(root = projectRoot): string {
   fileCounter += 1;
   const file = path.join(root, 'tests', `odd-${fileCounter}.md`);
@@ -379,8 +367,6 @@ beforeEach(() => {
   extractor.throwRaw = false;
   extractor.subtree =
     '<div id="account-cards"><div class="account-card"><h3 class="card-title">Everyday</h3></div></div>';
-  extractor.sketchCalls = 0;
-  extractor.sketchResult = null;
 });
 
 // ── Fixtures: the §5.9 shapes, as the extractor would report them ───────────
@@ -460,7 +446,8 @@ const STEP_AGAIN = 'Read the Payee column as payee and the Amount column as amou
 /** The same region, DIFFERENT columns — a different structure to answer. */
 const STEP_OTHER_COLUMNS = 'Read the Payee column as payee and the Reference column as reference from every row in the legacy payees table [store as: refs]';
 
-/** One batch. `cache: true` turns the step cache on for this test file. */
+/** One batch holding `STEP` alone — one run, so nothing is remembered from a
+ *  previous call. */
 async function run(
   sessionId: string,
   testFilePath: string,
@@ -603,101 +590,6 @@ describe('the structure question through the real Sessions API entry', () => {
     await api('DELETE', `/sessions/ts-none`);
   });
 
-  it('replays the cached mapping on the next run with no question at all', async () => {
-    const file = newTestFile();
-    ai.plans = [readTablePlan()];
-    ai.structures = [JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 1 } })];
-    extractor.handle = (action) => {
-      if (!action.mapping) throw shapeRefusal(TD_REFUSAL, TD_SKETCH);
-      return PAYEE_RECORDS;
-    };
-
-    const first = await run('ts-cache', file, { cacheEnabled: true });
-    expect(first.body.status).toBe('passed');
-    expect(ai.structureCalls).toBe(1);
-
-    const second = await run('ts-cache', file, { cacheEnabled: true });
-    expect(second.body.status).toBe('passed');
-    // No question — and no action plan either: the whole turn came from the
-    // cache, mapping and all.
-    expect(ai.structureCalls).toBe(1);
-    expect(ai.planCalls).toBe(1);
-    // The replay's read carried the mapping on its FIRST attempt, so nothing
-    // refused and nothing was asked.
-    expect(extractor.reads).toHaveLength(3);
-    expect(extractor.reads[2]!.mapping).toEqual(TD_MAPPING);
-
-    await api('DELETE', `/sessions/ts-cache`);
-  });
-
-  it('asks once more when a cached mapping no longer fits, and rewrites the cache', async () => {
-    const file = newTestFile();
-    const NEW_MAPPING = {
-      kind: 'table',
-      rows: '#legacy-payees',
-      header: { selector: '#legacy-payees', bodyRow: 2 },
-    };
-    ai.plans = [readTablePlan()];
-    ai.structures = [JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 1 } })];
-    extractor.handle = (action) => {
-      if (!action.mapping) throw shapeRefusal(TD_REFUSAL, TD_SKETCH);
-      return PAYEE_RECORDS;
-    };
-
-    const first = await run('ts-rewrite', file, { cacheEnabled: true });
-    expect(first.body.status).toBe('passed');
-    expect(ai.structureCalls).toBe(1);
-
-    // The page changed: the old mapping is refused, and so is a bare read.
-    ai.structures.push(JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 2 } }));
-    extractor.handle = (action) => {
-      if (JSON.stringify(action.mapping) === JSON.stringify(NEW_MAPPING)) return PAYEE_RECORDS;
-      throw shapeRefusal(TD_REFUSAL, TD_SKETCH);
-    };
-    const second = await run('ts-rewrite', file, { cacheEnabled: true });
-    expect(second.body.status).toBe('passed');
-    expect(ai.structureCalls).toBe(2);
-    expect(recordedAction(second.body).mapping).toEqual(NEW_MAPPING);
-
-    // Third run: the rewritten cache fits, so nothing is asked again. Without
-    // the rewrite this would be a third question, every run, for ever.
-    const before = ai.structureCalls;
-    const third = await run('ts-rewrite', file, { cacheEnabled: true });
-    expect(third.body.status).toBe('passed');
-    expect(ai.structureCalls).toBe(before);
-    expect(extractor.reads.at(-1)!.mapping).toEqual(NEW_MAPPING);
-
-    await api('DELETE', `/sessions/ts-rewrite`);
-  });
-
-  it('fails with BOTH answers when the second question misses too', async () => {
-    const file = newTestFile();
-    ai.plans = [readTablePlan()];
-    ai.structures = [JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 1 } })];
-    extractor.handle = (action) => {
-      if (!action.mapping) throw shapeRefusal(TD_REFUSAL, TD_SKETCH);
-      return PAYEE_RECORDS;
-    };
-    const first = await run('ts-both', file, { cacheEnabled: true });
-    expect(first.body.status).toBe('passed');
-
-    // Nothing fits any more, and the model's second answer does not either.
-    ai.structures.push(JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 2 } }));
-    extractor.handle = () => { throw shapeRefusal(TD_REFUSAL, TD_SKETCH); };
-
-    const second = await run('ts-both', file, { cacheEnabled: true });
-    expect(second.body.results[0].status).toBe('failed');
-    const message: string = second.body.error.message;
-    // The cached mapping that stopped fitting...
-    expect(message).toContain('The cached structure mapping was rows in #legacy-payees');
-    // ...and the answer that did not fit either.
-    expect(message).toContain('"row":2');
-    // Exactly one further question, not a loop.
-    expect(ai.structureCalls).toBe(2);
-
-    await api('DELETE', `/sessions/ts-both`);
-  });
-
   it('asks nothing under `## Config: tableStructure: strict`', async () => {
     ai.plans = [readTablePlan()];
     ai.structures = [JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 1 } })];
@@ -777,10 +669,9 @@ describe('the structure question through the real Sessions API entry', () => {
 
 
   it('asks ONCE for a structure two steps in the same run read', async () => {
-    // The gap the step cache cannot close: it is keyed per STEP, so step 2 and
-    // step 10 reading the same table are two entries and — before the memo —
-    // two questions. Measured on `table-odd-shapes.md`: four shapes, five
-    // reads, five questions.
+    // Before the memo, step 2 and step 10 reading the same table were two
+    // questions. Measured on `table-odd-shapes.md`: four shapes, five reads,
+    // five questions.
     const info = vi.spyOn(logger, 'info');
     ai.plans = [readTablePlan(), readTablePlan({ as: 'payees_again' })];
     ai.structures = [JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 1 } })];
@@ -801,7 +692,8 @@ describe('the structure question through the real Sessions API entry', () => {
     info.mockRestore();
 
     // Reused, not assumed: it went through the extractor like any mapping, and
-    // it is on step 2's recorded action, so that step's cache gets it too.
+    // it is on step 2's recorded action, so what the run records for that step
+    // is the mapping that actually read the table.
     expect(extractor.reads.at(-1)!.mapping).toEqual(TD_MAPPING);
     expect(res.body.results[1].actions[0].mapping).toEqual(TD_MAPPING);
 
@@ -865,6 +757,43 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(res.body.results[1].actions[0].mapping).toEqual(LATER_MAPPING);
 
     await api('DELETE', `/sessions/ts-memo-stale`);
+  });
+
+  it('fails with BOTH answers when a remembered structure and the new answer both miss', async () => {
+    // A second failure names both attempts: the mapping an earlier step of
+    // this run was told, which has stopped fitting, and what the model said
+    // when it was asked again. Either one alone describes a page the reader
+    // is no longer looking at.
+    ai.plans = [readTablePlan(), readTablePlan({ as: 'payees_again' })];
+    ai.structures = [
+      JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 1 } }),
+      JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 2 } }),
+    ];
+    // Step 1 reads with the model's first answer; after that the page has
+    // moved past anything either answer describes.
+    let moved = false;
+    extractor.handle = (action) => {
+      if (!moved && JSON.stringify(action.mapping ?? null) === JSON.stringify(TD_MAPPING)) {
+        moved = true;
+        return PAYEE_RECORDS;
+      }
+      throw shapeRefusal(TD_REFUSAL, TD_SKETCH);
+    };
+
+    const res = await runAll('ts-both', newTestFile(), [STEP, STEP_AGAIN]);
+    expect(res.body.results[0].status).toBe('passed');
+    expect(res.body.results[1].status).toBe('failed');
+    const message: string = res.body.error.message;
+    // The remembered mapping that stopped fitting...
+    expect(message).toContain('The remembered structure mapping was rows in #legacy-payees');
+    // ...and the answer that did not fit either.
+    expect(message).toContain('"row":2');
+    // Exactly one further question, not a loop.
+    expect(ai.structureCalls).toBe(2);
+    // Step 2 tried the memo before it asked, and asked once.
+    expect(extractor.sources).toEqual([undefined, 'model', undefined, 'memo', 'model']);
+
+    await api('DELETE', `/sessions/ts-both`);
   });
 
   it('strips a mapping the model emitted before the read ever sees it', async () => {
@@ -1118,158 +1047,15 @@ describe('turning a structure answer into a mapping (§7.10)', () => {
   });
 });
 
-// ── §7.10: the second question always has a sketch ──────────────────────────
-
-describe('the re-ask path', () => {
-  it('sketches the region when the unmapped re-read fails for a non-shape reason', async () => {
-    // §7.10: "the read is first repeated WITHOUT the mapping … if it fails
-    // too, its refusal is what the question is asked from ONCE more". That
-    // refusal need not be a shape one — and when it is not, it carries no
-    // sketch, so there was nothing to ask FROM and the branch gave up. The
-    // page HAS changed (the step passed last run off a mapping this runtime
-    // wrote), so the question is owed; `sketchTable()` is what pays for it.
-    const file = newTestFile();
-    const NEW_MAPPING = {
-      kind: 'table',
-      rows: '#legacy-payees',
-      header: { selector: '#legacy-payees', bodyRow: 2 },
-    };
-    ai.plans = [readTablePlan()];
-    ai.structures = [JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 1 } })];
-    extractor.handle = (action) => {
-      if (!action.mapping) throw shapeRefusal(TD_REFUSAL, TD_SKETCH);
-      return PAYEE_RECORDS;
-    };
-    const first = await run('ts-reask', file, { cacheEnabled: true });
-    expect(first.body.status).toBe('passed');
-    expect(ai.structureCalls).toBe(1);
-
-    // Now the page changes. The cached mapping fails, and so does the bare
-    // read — but with an AUTHOR-shaped sentence carrying no sketch.
-    const AUTHOR_REFUSAL =
-      'readTable cannot map table "Payees": it has no column named "Payee" — the headers are '
-      + 'Beneficiary, Amount';
-    ai.structures.push(JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 2 } }));
-    extractor.sketchResult = TD_SKETCH;
-    extractor.handle = (action) => {
-      if (JSON.stringify(action.mapping) === JSON.stringify(NEW_MAPPING)) return PAYEE_RECORDS;
-      throw new Error(AUTHOR_REFUSAL);
-    };
-
-    const second = await run('ts-reask', file, { cacheEnabled: true });
-    expect(second.body.status).toBe('passed');
-    expect(ai.structureCalls).toBe(2);
-    expect(extractor.sketchCalls).toBe(1);
-    // The question was asked from the FRESH sketch, and from the sentence the
-    // unmapped read actually produced.
-    const asked = ai.sent.filter((t) => t.includes(STRUCTURE_MARKER)).at(-1)!;
-    expect(asked).toContain(AUTHOR_REFUSAL);
-    expect(asked).toContain('"T1.r1"');
-    expect(recordedAction(second.body).mapping).toEqual(NEW_MAPPING);
-
-    await api('DELETE', `/sessions/ts-reask`);
-  });
-
-  it('still asks nothing when a read that never had a mapping fails that way', async () => {
-    // The rule as written (§7.10: "NEVER for the author's own problems") is
-    // untouched. Only a run whose own cached mapping has just been dropped
-    // earns the second question.
-    ai.plans = [readTablePlan()];
-    ai.structures = [JSON.stringify({ kind: 'table', rows: 'T1' })];
-    extractor.sketchResult = TD_SKETCH;
-    extractor.handle = () => {
-      throw new Error('readTable cannot map table "Payees": it has no column named "Payee"');
-    };
-
-    const res = await run('ts-no-reask', newTestFile());
-    expect(res.body.status).toBe('failed');
-    expect(ai.structureCalls).toBe(0);
-    expect(extractor.sketchCalls).toBe(0);
-
-    await api('DELETE', `/sessions/ts-no-reask`);
-  });
-});
-
 // ── §7.6: the summary line names where the structure came from ──────────────
 
-describe('which layer the read is told it is replaying', () => {
-  it('says cache for a replay, memo for a reuse and model for a fresh answer', async () => {
-    // The extractor cannot tell the three apart — a fresh answer and a cached
-    // one are the same object by then — so the caller passes the word, and
-    // `formatTableReadSummary` prints it. Without this, a cached run's log
-    // said "structure from the model" and a reader counting model calls in
-    // the log counted wrong.
-    const file = newTestFile();
-    ai.plans = [readTablePlan()];
-    ai.structures = [JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 1 } })];
-    extractor.handle = (action) => {
-      if (!action.mapping) throw shapeRefusal(TD_REFUSAL, TD_SKETCH);
-      return PAYEE_RECORDS;
-    };
-
-    // Run 1: an unmapped read (no source), then the model's answer.
-    await run('ts-source', file, { cacheEnabled: true });
-    expect(extractor.sources).toEqual([undefined, 'model']);
-
-    // Run 2, the same step: the mapping now comes off disk.
-    extractor.sources = [];
-    await run('ts-source', file, { cacheEnabled: true });
-    expect(extractor.sources).toEqual(['cache']);
-
-    await api('DELETE', `/sessions/ts-source`);
-  });
-
-  it('drops a cached mapping that no longer fits even when the read still fails', async () => {
-    // The record site that replaces the action's SLOT in the plan array —
-    // `mapping: null` removes the field — runs on a failed read too, and the
-    // failure branch a few lines later slices that same array to say which
-    // actions had succeeded. It used to find the index with
-    // `indexOf(emitted)`, and after the replacement the emitted object is no
-    // longer in the array at all: `indexOf` answers -1, and `slice(0, -1)`
-    // means "everything but the last action" rather than "everything before
-    // this one" — the read that had just failed, listed as one that
-    // succeeded. The loop's own counter is the index; looking it up again was
-    // the mistake.
-    //
-    // What this test can reach is the path itself. The list `slice` produces
-    // here is deliberately thrown away one frame up ("Do NOT propagate
-    // failure context — give AI a clean slate", the cached-replay catch in
-    // executeStep), so no prompt renders it and no assertion can read it
-    // back. What IS observable is that this path runs, drops the mapping, and
-    // fails with the read's own sentence.
-    const file = newTestFile();
-    ai.plans = [readTablePlan()];
-    ai.structures = [JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 1 } })];
-    extractor.handle = (action) => {
-      if (!action.mapping) throw shapeRefusal(TD_REFUSAL, TD_SKETCH);
-      return PAYEE_RECORDS;
-    };
-    const first = await run('ts-slice', file, { cacheEnabled: true });
-    expect(first.body.status).toBe('passed');
-    expect(recordedAction(first.body).mapping).toEqual(TD_MAPPING);
-
-    // The page changed past what any structure can read, and no sketch comes
-    // back for the second question either.
-    const GONE = 'readTable cannot map table "Payees": it has no column named "Payee"';
-    extractor.sketchResult = null;
-    extractor.handle = () => { throw new Error(GONE); };
-
-    const second = await run('ts-slice', file, { cacheEnabled: true });
-    expect(second.body.status).toBe('failed');
-    expect(second.body.error.message as string).toContain(GONE);
-    // The cached mapping was tried, then dropped, and the read repeated
-    // without it — which is the branch that replaces the slot.
-    expect(extractor.reads[2]!.mapping).toEqual(TD_MAPPING);
-    expect(extractor.reads[3]!.mapping).toBeUndefined();
-    // And no question was asked: a non-shape refusal with no sketch behind it
-    // is still not a question (§7.10).
-    expect(ai.structureCalls).toBe(1);
-    expect(extractor.sketchCalls).toBeGreaterThan(0);
-
-    await api('DELETE', `/sessions/ts-slice`);
-  });
-
-  it('says memo when a later step reuses what the run already learned', async () => {
+describe('which source the read is told its mapping came from', () => {
+  it('says model for a fresh answer and memo when a later step reuses it', async () => {
+    // The extractor cannot tell the two apart — a fresh answer and a
+    // remembered one are the same object by then — so the caller passes the
+    // word, and `formatTableReadSummary` prints it. Without it, a memo reuse
+    // would log "structure from the model" and a reader counting model calls
+    // in the log would count wrong.
     ai.plans = [readTablePlan()];
     ai.structures = [JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 1 } })];
     extractor.handle = (action) => {

@@ -38,9 +38,8 @@ test('a skipped step counts in the total but not as a pass', () => {
 });
 
 test('every flavour of pass is a pass, and none of them is a skip', () => {
-  const counts = summaryOf('pass', 'pass-cached', 'pass-code-behind', 'pass-stale');
+  const counts = summaryOf('pass', 'pass', 'pass-code-behind', 'pass-stale');
   assert.equal(counts.passed, 4);
-  assert.equal(counts.passedCached, 1);
   assert.equal(counts.passedCodeBehind, 1);
   assert.equal(counts.stale, 1);
   assert.equal(counts.skipped, 0);
@@ -80,8 +79,8 @@ test('a run that skipped nothing reads exactly as it always did', () => {
 });
 
 test('a run that skipped nothing keeps its breakdown parenthesis, unchanged', () => {
-  const counts = summaryOf('pass', 'pass-code-behind', 'pass-stale', 'pass-cached');
-  assert.equal(stepsSummaryText(counts), '4/4 passed (1 code-behind, 1 stale, 1 cached)');
+  const counts = summaryOf('pass', 'pass-code-behind', 'pass-stale', 'pass');
+  assert.equal(stepsSummaryText(counts), '4/4 passed (1 code-behind, 1 stale)');
 });
 
 test('a return says how many steps it left behind', () => {

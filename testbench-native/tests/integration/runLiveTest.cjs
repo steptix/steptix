@@ -18,7 +18,7 @@
 //   npm run test:live -- --shards=1      # serial: one VS Code, one launch
 //   npm run test:live -- --server=http://localhost:3103
 //                                        # share a server you started
-//   TESTBENCH_LIVE_GREP='step cache replay' npm run test:live
+//   TESTBENCH_LIVE_GREP='verify steps' npm run test:live
 //                                        # mocha --grep, as before
 //
 // Prereq: with --shards=1 or --server=<url>, an ai-ui-automation Sessions API
@@ -367,8 +367,7 @@ async function main() {
   //
   //  - Workspace copy. Five of the compile suites `rmSync` the SAME
   //    `templates/init/tests/.aiui-codebehind-cache`, two of them compile the
-  //    same `compile-codebehind.md`, cache-replay wipes the project-wide
-  //    `templates/init/.cache`, and templates/.env turns on
+  //    same `compile-codebehind.md`, and templates/.env turns on
   //    APPEND_RUN_HISTORY_TO_TEST_FILE — which rewrites the fixture `.md` a
   //    run just used. Grouping the conflicts into one shard would put the five
   //    slowest suites back on one worker; a copy each removes the question.

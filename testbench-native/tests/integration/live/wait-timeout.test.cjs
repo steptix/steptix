@@ -133,7 +133,7 @@ describe('TestBench live wait timeout-hint + abort-aware waits (issue 022)', fun
   }
 
   const statusOf = (line) => Object.fromEntries(hooks.tracker.snapshot().statuses)[line];
-  const SETTLED = new Set(['pass', 'pass-cached', 'fail', 'stopped']);
+  const SETTLED = new Set(['pass', 'fail', 'stopped']);
 
   /** Run to natural completion, timing the wait step from running→settled. */
   async function timeWaitStep(uri, waitLine) {
@@ -261,7 +261,7 @@ describe('TestBench live wait timeout-hint + abort-aware waits (issue 022)', fun
     const { waitMs, status } = await timeWaitStep(uri, waitLine);
     console.log(`[live] slow-success wait ran ${waitMs}ms, status=${status}`);
 
-    assert.ok(status === 'pass' || status === 'pass-cached', `expected the wait to succeed once the element appears (got ${status})`);
+    assert.ok(status === 'pass', `expected the wait to succeed once the element appears (got ${status})`);
     assert.ok(waitMs > 12_000, `wait resolved in ${waitMs}ms — element appears ~35s after load, so a pass this fast means it didn't wait past the 10s default`);
     assert.ok(waitMs < 50_000, `wait took ${waitMs}ms — longer than expected`);
   });

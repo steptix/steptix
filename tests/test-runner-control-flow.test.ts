@@ -91,18 +91,6 @@ vi.mock('../src/runner/hooks.js', () => ({
   resolveHooks: (...args: unknown[]) => resolveHooksMock(...args),
 }));
 
-vi.mock('../src/cache/step-cache.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/cache/step-cache.js')>()),
-  StepCache: {
-    initialize: vi.fn(async () => ({
-      read: () => null,
-      write: vi.fn(),
-      readAssertion: () => null,
-      invalidateStep: vi.fn(),
-    })),
-  },
-}));
-
 vi.mock('../src/ai/diagnose.js', () => ({ diagnoseFailure: vi.fn(async () => null) }));
 vi.mock('../src/ai/client.js', () => ({
   AiClient: class { setAiPolicy = vi.fn(); syncAuth = vi.fn(() => null); },
@@ -1254,7 +1242,7 @@ describe('stopping the run mid-decision', () => {
       throw new DOMException('Run aborted by client', 'AbortError');
     });
 
-    const report = await runTest(await instance(CHAIN, {}, 'chain-abort.md'), makeConfig(), '', undefined, {
+    const report = await runTest(await instance(CHAIN, {}, 'chain-abort.md'), makeConfig(), '', {
       signal: controller.signal,
     });
 
@@ -1284,7 +1272,6 @@ describe('stopping the run mid-decision', () => {
       await instance(CHAIN, {}, 'chain-abort-count.md'),
       makeConfig(),
       '',
-      undefined,
       { signal: controller.signal },
     );
 
@@ -1298,7 +1285,7 @@ describe('stopping the run mid-decision', () => {
 
 // ─── Hooks ──────────────────────────────────────────────────────────────────
 
-describe('hooks and the step cache', () => {
+describe('hooks around control flow', () => {
   it('does not wrap a guard or a skipped step in beforeEach / afterEach', async () => {
     resolveHooksMock.mockResolvedValue({
       before: [], beforeEach: ['Dismiss any banner'], afterEach: ['Check for errors'], after: [],
@@ -1315,22 +1302,6 @@ describe('hooks and the step cache', () => {
     const hookRuns = report.steps.filter((s) => s.hookScope !== undefined);
     expect(hookRuns.filter((s) => s.hookScope === 'beforeEach')).toHaveLength(4);
     expect(hookRuns.filter((s) => s.hookScope === 'afterEach')).toHaveLength(4);
-  });
-
-  it('turns the step cache off inside a loop body and leaves it on outside', async () => {
-    judgeAnswers(0, null);
-    const config = makeConfig();
-    config.cache = { ...config.cache, enabled: true };
-    await runTest(await instance(WHILE, {}, 'while-cache.md'), config, '');
-
-    const byInstruction = new Map<string, boolean>();
-    for (const call of executeStepMock.mock.calls) {
-      byInstruction.set(call[2] as string, (call[3] as { cacheEnabled?: boolean }).cacheEnabled === true);
-    }
-    expect(byInstruction.get('Open the statements page')).toBe(true);
-    // Inside the loop body: one plan per line cannot serve three passes
-    // (stories/control-flow.md, decision 12).
-    expect(byInstruction.get('Click Next')).toBe(false);
   });
 });
 

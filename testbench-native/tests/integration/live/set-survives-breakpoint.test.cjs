@@ -120,8 +120,8 @@ describe('TestBench live — Set assignments survive a breakpoint pause', functi
       pausedStatuses[STEP_2_LINE],
       'pass',
       `Step 2 (line ${STEP_2_LINE}) should have passed before the pause, got ` +
-        `'${pausedStatuses[STEP_2_LINE]}'. A Set step never replays from cache, so ` +
-        `'pass-cached' here would mean it took a path it should not have.`,
+        `'${pausedStatuses[STEP_2_LINE]}'. A Set step runs no model and no compiled ` +
+        `entry, so any other pass flavour here would mean it took a path it should not have.`,
     );
 
     console.log('[live] Resuming through breakpoint');

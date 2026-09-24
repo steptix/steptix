@@ -96,10 +96,10 @@ async function waitFor(label, predicate, timeoutMs = 60_000) {
   );
 }
 
-/** Any flavour of pass: the step cache paints ⚡ (`pass-cached`) and a compiled
- *  entry `</>`, and which one a run produces is not what this suite is about.
+/** Any flavour of pass: a compiled entry paints `</>` and a stale one ⚠, and
+ *  which one a run produces is not what this suite is about.
  *  (flow-control.test.cjs's `isPass`, spelled as control-flow.test.cjs's set.) */
-const PASSED = new Set(['pass', 'pass-cached', 'pass-code-behind', 'pass-stale']);
+const PASSED = new Set(['pass', 'pass-code-behind', 'pass-stale']);
 const passed = (status) => PASSED.has(status);
 
 async function up(url) {
@@ -425,7 +425,7 @@ describe('TestBench live — failure outcomes: a tail that does nothing, one tha
       );
 
       // The closing tally counts the tolerated failure apart from the passes; the
-      // parenthesis is optional because a cache replay would add `(7 cached)`.
+      // parenthesis is optional because a compiled entry would add `(7 code-behind)`.
       assert.match(
         thisRun,
         /✓ 7 passed[^\n]*, 1 tolerated/,

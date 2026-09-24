@@ -59,7 +59,7 @@ import type {
 
 /**
  * `run_steps` has no file, but the server derives the project root, the
- * env/data bundle, the report directory and the cache anchor entirely from
+ * env/data bundle and the report directory entirely from
  * `testFilePath` — so it gets a synthetic one. It is never realpath'd and
  * never existence-checked: it does not exist, and running it through the
  * missing-file detector would refuse every `run_steps` call.
@@ -342,7 +342,7 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
     // request to clear the session's retained settings.
     ...(args.runSettings !== undefined &&
       Object.keys(args.runSettings).length > 0 && { runSettings: args.runSettings }),
-    ...projectFields(project, absPath, cacheEnabled(parsed, project)),
+    ...projectFields(project, absPath),
     // Every call runs the file from step 1 in the SAME `mcp:<path>` session,
     // so every call is a new run and starts on the browser surface — not on
     // the computer surface a previous call failed or stopped on before its
@@ -457,7 +457,7 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
     // settings alone", so an empty object must not be sent.
     ...(args.runSettings !== undefined &&
       Object.keys(args.runSettings).length > 0 && { runSettings: args.runSettings }),
-    ...projectFields(project, testFilePath, project.cacheEnabled),
+    ...projectFields(project, testFilePath),
   };
 
   return {
@@ -478,19 +478,12 @@ export async function assembleSteps(args: AssembleStepsArgs): Promise<AssembledR
 function projectFields(
   project: ProjectContext,
   testFilePath: string,
-  cache: boolean,
-): Pick<
-  McpStepRequest,
-  'env' | 'envName' | 'skillsDir' | 'toolsDir' | 'cacheEnabled' | 'testFilePath'
-> {
+): Pick<McpStepRequest, 'env' | 'envName' | 'skillsDir' | 'toolsDir' | 'testFilePath'> {
   return {
     env: project.env,
     ...(project.envName !== null && { envName: project.envName }),
     ...(project.skillsDir !== null && { skillsDir: project.skillsDir }),
     ...(project.toolsDir !== null && { toolsDir: project.toolsDir }),
-    // Omitted when off: caching is opt-in server-side, so an absent flag and an
-    // explicit `false` mean the same thing.
-    ...(cache && { cacheEnabled: true }),
     testFilePath,
   };
 }
@@ -722,21 +715,6 @@ function projectConfig(
   }
 
   return { config: out, cdpSource };
-}
-
-/**
- * Whether the step cache is on for this run.
- *
- * Mirrors TestBench's `resolveCacheOverride` **including its full value set** —
- * `on|true|yes|enabled` / `off|false|no|disabled`. Accepting only `on|off`
- * would let a test that says `cache: false` be served from cache.
- */
-function cacheEnabled(parsed: ParsedTest, project: ProjectContext): boolean {
-  const declared = (parsed.config as Record<string, string | undefined>)['cache'];
-  const value = (declared ?? '').trim().toLowerCase();
-  if (value === 'on' || value === 'true' || value === 'yes' || value === 'enabled') return true;
-  if (value === 'off' || value === 'false' || value === 'no' || value === 'disabled') return false;
-  return project.cacheEnabled;
 }
 
 /**

@@ -140,7 +140,7 @@ Stores a value built from values the run already holds. The right-hand side is a
 2. Set {{summary}} to "{{username}} had {{balance}} available"
 ```
 
-Runs as code: no AI call, no page interaction, no action-cache entry. The value is text only — nothing inside the quotes is evaluated beyond substitution, and it may not contain a double quote.
+Runs as code: no AI call and no page interaction. The value is text only — nothing inside the quotes is evaluated beyond substitution, and it may not contain a double quote.
 
 A `{{name}}` the run cannot resolve fails the step, naming it, rather than storing the literal. `Set {{name}} to` claims the line, so a malformed one (no quotes, or text after the closing quote) is a parse error rather than prose sent to the model; `Set the filter to Recent` names no variable and remains an ordinary AI step.
 
@@ -157,7 +157,7 @@ Sends the rest of the step, with its placeholders filled in, to the model **on i
 3. Type "{{random_name}}" into the Name field
 ```
 
-- **Asked on every run.** Never read from or written to the action cache, never compiled into code-behind, and a hand-written `.steps.ts` entry for its text is never run. A value that must be the same every time is a tool's job.
+- **Asked on every run.** Never compiled into code-behind, and a hand-written `.steps.ts` entry for its text is never run. A value that must be the same every time is a tool's job.
 - **The step text is everything the model knows.** Put the date, or anything else it needs, in the step. A secret-named value that fills a placeholder reaches the model as `***` (by the `## Values` block's rule, `## Config: unmask:` included), and an unresolved `{{name}}` or `${…}` fails the step before any model call.
 - **A poor source of randomness.** "Random" may repeat between runs.
 - **The name.** `[store as: x]`, `[as: x]`, `[output: x]` or prose `store as {{x}}` pins it, and the model's own name is then ignored. With none, the model's name is used only if the step says it as a whole word (case-insensitive); otherwise the step fails, naming both fixes. The check rules out invented names, not unnamed steps: a step that never names its value can be stored under any word of its sentence. More than one name is refused. Inside a skill the name must be `[store as: x]` or `store as {{x}}`.

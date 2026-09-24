@@ -553,9 +553,11 @@ cap. Differences:
   condition judge's 3 s pause between re-asks of a `waiting` answer gives way
   to it too, on either surface, so a Stop during a `Wait until` / `While`
   judge ends it at once rather than after the pause.
-- **No action cache.** Computer-mode steps neither read nor write the step
-  cache. A cached selector is validated against a DOM at replay; a cached
-  coordinate has nothing to validate against and would replay blind.
+- **No replay.** A computer-mode step always runs under the model. It is
+  never compiled to code-behind (§9): a compiled selector is checked against
+  a DOM when it replays, while a recorded coordinate has nothing to validate
+  against and would replay blind. (There was also a step cache, which
+  computer mode bypassed; it has since been removed.)
 - **Retry** uses `withRetry`, with two exceptions. An attempt that has driven
   the real pointer, keyboard or windows (`click`, `drag`, `move`, `scroll`,
   `type`, `key`, `focus_window`) is never retried, whatever it failed with: a
@@ -845,7 +847,7 @@ the file, which cannot know what surface a shared section ran on. The
 compile report says why: *computer-mode step; coordinates are not
 portable.*
 
-## 10. Report, log, cache
+## 10. Report and log
 
 ### 10.1 Report
 
@@ -913,7 +915,8 @@ mirrors have.
 
 ### 10.4 Cache
 
-§5.5: none in computer mode.
+(Removed with the step cache. §5.5 and §9 cover why a computer-mode step
+never replays.)
 
 ## 11. Platforms
 
@@ -978,7 +981,7 @@ lazy launch with a mocked `launchBrowser` (no call for a desktop-first
 opening; one call at the first page step; baseUrl navigated there; endpoint
 answers when unlaunched); `mapToScreen` table; computer action parser;
 executor with the fake adapter; lock; config defaults and schema; prompt
-states image size; report marker; cache bypass; compile classification;
+states image size; report marker; compile classification;
 runner-core mirror paired test; TestBench completion and paint.
 
 ### 13.2 Live

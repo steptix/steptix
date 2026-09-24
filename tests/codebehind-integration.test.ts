@@ -411,18 +411,14 @@ export default defineSteps([
     expect(html).toContain('/p/tests/booking.steps.ts');
     expect(html).toContain('<summary>Step code</summary>');
     expect(html).toContain('[info] confirming');
-    // The cache's own glyph stays the cache's.
-    expect(html).not.toContain('⚡');
   });
 
-  it('renders the cache\'s ⚡ for a cached step and nothing for a plain one', () => {
-    const base = {
-      index: 1, instruction: 'x', status: 'passed' as const, turns: [], durationMs: 1, retried: false,
-    };
-    expect(renderStep({ ...base, fromCache: true })).toContain('⚡ cached');
-    const plain = renderStep(base);
-    expect(plain).not.toContain('⚡');
+  it('renders no origin badge for a plain AI step', () => {
+    const plain = renderStep({
+      index: 1, instruction: 'x', status: 'passed', turns: [], durationMs: 1, retried: false,
+    });
     expect(plain).not.toContain('cb-mark');
+    expect(plain).not.toContain('Code-behind');
   });
 
   it('leaves an `ai: true` step to the AI, and never rewrites the file', async () => {

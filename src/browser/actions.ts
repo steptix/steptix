@@ -109,8 +109,7 @@ export interface ActionTargeting {
    * generation has a rule that turns on it: a positional path pins THIS run's
    * row number into a committed file, so when the step or a parameter names
    * what distinguishes the element the entry must build its locator from
-   * `step.getVar(...)` instead (issue 024's defect, in the one place it
-   * outlives the cache). "Does it contain `nth-of-type`" is not that question
+   * `step.getVar(...)` instead. "Does it contain `nth-of-type`" is not that question
    * — an author's own selector can, and a scoped handle never does.
    *
    * Travels with `resolvedSelector`: both present, or neither.
@@ -172,11 +171,10 @@ export interface ExecuteActionOptions {
    */
   maskValues?: string[] | undefined;
   /**
-   * Which §7.10 layer produced the `mapping` this action carries — `model`,
-   * `memo` or `cache` — for the summary line's parenthetical alone. The
-   * caller is the only one that knows: by the time a mapping reaches the
-   * extractor, a fresh answer and a cached one are the same object. Absent
-   * means `model`, which is what a caller that never had a cache means.
+   * Which §7.10 layer produced the `mapping` this action carries — `model`
+   * or `memo` — for the summary line's parenthetical alone. The caller is the
+   * only one that knows: by the time a mapping reaches the extractor, a fresh
+   * answer and a remembered one are the same object. Absent means `model`.
    */
   structureSource?: TableStructureSource | undefined;
 }
@@ -2148,11 +2146,11 @@ export interface TableReadRequest {
    * Where {@link mapping} came from, for the summary line alone (§7.6).
    *
    * The extractor cannot tell: an answer the model gave a moment ago and one
-   * read back off disk are the same object by the time it sees them. So the
-   * caller says, and the line reads `structure from the model` / `from the
-   * run` / `from the cache` — which matters because the first of those claims
-   * a model call happened, and printing it over a cached replay is a run log
-   * that says money was spent when none was.
+   * remembered from an earlier step are the same object by the time it sees
+   * them. So the caller says, and the line reads `structure from the model` /
+   * `from the run` — which matters because the first of those claims a model
+   * call happened, and printing it over a reused mapping is a run log that
+   * says money was spent when none was.
    *
    * Defaults to `model` when a mapping arrives with no source, which is what
    * every pre-existing caller means.
@@ -2161,11 +2159,10 @@ export interface TableReadRequest {
 }
 
 /**
- * Which of §7.10's three layers produced the mapping being replayed:
- * the one question to the model, this RUN's memo (`structure reused from step
- * N`), or the step cache on disk.
+ * Which of §7.10's layers produced the mapping being applied: the one
+ * question to the model, or this RUN's memo (`structure reused from step N`).
  */
-export type TableStructureSource = 'model' | 'memo' | 'cache';
+export type TableStructureSource = 'model' | 'memo';
 
 /**
  * One row of a candidate, as the sketch describes it (§7.10).
@@ -2459,9 +2456,11 @@ export async function readTableRecords(
 /**
  * The sketch of a region, with nothing read (§7.10).
  *
- * The re-ask path's tool: a cached mapping that has stopped fitting the page
- * fails validation rather than a shape check, so its refusal carries no
- * sketch, and asking the model again needs one. Cheap on purpose — one
+ * The same sketch a shape refusal carries, built without attempting a read.
+ * No runtime path calls it since the step cache (and its re-ask of a cached
+ * mapping) was removed; it stays as the direct seam onto the sketch builder
+ * that tests/read-table-structure.test.ts exercises — the builder itself is
+ * live, since every shape refusal produces one. Cheap on purpose — one
  * evaluation, no extraction, no page mutation — and `null` when the selector
  * matches nothing or several things, which is not a question about structure.
  */
@@ -2512,7 +2511,6 @@ export async function sketchTable(
 const STRUCTURE_SOURCE_WORDS: Record<TableStructureSource, string> = {
   model: 'the model',
   memo: 'the run',
-  cache: 'the cache',
 };
 
 export function formatTableReadSummary(
@@ -2536,9 +2534,9 @@ export function formatTableReadSummary(
   // thing to check when the values are wrong.
   //
   // It names the SOURCE, not just the fact. "structure from the model" over a
-  // cached replay would say a model call happened on a run that made none,
-  // which is the one thing §7.10's cost argument rests on; a reader counting
-  // calls in the log would count wrong.
+  // mapping reused from an earlier step would say a model call happened where
+  // none did, which is the one thing §7.10's cost argument rests on; a reader
+  // counting calls in the log would count wrong.
   if (result.structure) {
     notes.push(
       result.structure.kind === 'collection'

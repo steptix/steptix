@@ -62,11 +62,10 @@ type: skill
   });
 
   it('mints a distinct frame per invocation when one skill is used twice (issue 016 / Bug 1)', async () => {
-    // Foundation of the Bug 1 cache-key fix: each [skill: ...] invocation must
-    // get its own frame, so two invocations of one skill — whose body steps
-    // share the same skill-file line — are distinguishable downstream. If the
-    // expander reused a frame id here, the frame-scoped cache key would collide
-    // again and the second invocation would replay the first's cached actions.
+    // Each [skill: ...] invocation must get its own frame, so two invocations
+    // of one skill — whose body steps share the same skill-file line — are
+    // distinguishable downstream (report rows, call stack, `[store as:]`
+    // namespacing).
     await writeSkill(
       'echo',
       `---

@@ -231,7 +231,6 @@ export function canonicalTestFilePath(target: string): string {
  *  is a user-authored file, not a validated `Config`. */
 interface RawProjectConfig {
   tests?: { dir?: unknown; pattern?: unknown; skillsDir?: unknown; toolsDir?: unknown };
-  cache?: { enabled?: unknown };
   mcp?: { cdp?: { allowUnowned?: unknown; ports?: unknown } };
   desktop?: { reportScreenshots?: unknown };
 }
@@ -542,7 +541,6 @@ async function resolveUserScope(
     envName: null,
     skillsDir: null,
     toolsDir: null,
-    cacheEnabled: config.cache?.enabled === true,
     envFilesConsulted: [path.join(userRoot, '.env')],
     cdpPermissions: readMcpCdpConfig(config),
     desktopScreenshots: readDesktopScreenshots(config),
@@ -716,7 +714,6 @@ export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectC
     envName: null,
     skillsDir,
     toolsDir,
-    cacheEnabled: config.cache?.enabled === true,
     envFilesConsulted: [baseEnvPath],
     cdpPermissions: readMcpCdpConfig(config),
     desktopScreenshots: readDesktopScreenshots(config),

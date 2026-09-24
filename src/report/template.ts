@@ -203,14 +203,13 @@ export function getReportTemplate(): string {
        from .badge-skill because the prefix below is baked into the rule. */
     .badge-section { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
     .badge-section::before { content: 'section: '; opacity: 0.6; }
-    /* How a step avoided the model: the code mark for its own code-behind, ⚡ the action
-       cache. Same shape as the provenance chips beside them. */
+    /* How a step avoided the model: the code mark for its own code-behind. Same
+       shape as the provenance chips beside it. */
     .badge-codebehind { background: #fef9c3; color: #854d0e; border: 1px solid #fde68a; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
     .cb-mark { vertical-align: -0.15em; margin-right: 1px; }
     .badge-codebehind-stale { background: #ffedd5; color: #9a3412; border: 1px solid #fdba74; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
     .stat-codebehind { color: #854d0e; }
     .stat-stale { color: #9a3412; }
-    .badge-cached { background: #e0f2fe; color: #075985; border: 1px solid #bae6fd; font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; }
     /* Which tab a step drove. Deliberately quiet — it is on every step, so a
        loud colour would compete with the pass/fail badge for attention. The
        unexpected variant is the one meant to catch the eye. */

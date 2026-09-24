@@ -407,8 +407,9 @@ export interface TablesConfig {
    * card list, one key/value table per record (§5.9).
    *
    *   - `'ask'` (default): the runtime shows the model a sketch of the region
-   *     ONCE, validates the answer against the page, reads deterministically
-   *     and caches the mapping. Every later run replays it with no model call.
+   *     ONCE, validates the answer against the page and reads
+   *     deterministically. A later read of the same region in the same run
+   *     reuses the mapping with no model call.
    *   - `'strict'`: no question. The shape refusal stands as the step failure,
    *     so a run that must be deterministic never spends an unplanned model
    *     call (§7.10 "Cost and control").
@@ -419,13 +420,6 @@ export interface TablesConfig {
    * refused as before, whatever this says.
    */
   structure: 'ask' | 'strict';
-}
-
-export interface CacheConfig {
-  /** Enable AI response caching for test steps */
-  enabled: boolean;
-  /** Directory for cache storage (relative to project root) */
-  dir: string;
 }
 
 /**
@@ -593,7 +587,6 @@ export interface Config {
   reports: ReportsConfig;
   api: ApiConfig;
   server: ServerConfig;
-  cache: CacheConfig;
   logging: LoggingConfig;
   /** Structured table reads (§7.10). */
   tables: TablesConfig;

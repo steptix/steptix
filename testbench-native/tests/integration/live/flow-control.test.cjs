@@ -80,10 +80,9 @@ async function waitFor(label, predicate, timeoutMs = 60_000) {
 }
 
 /**
- * Any flavour of pass. A step served from the step cache paints ⚡
- * (`pass-cached`) and one served by a compiled entry paints `</>`; both ARE
- * passes, and which one a given run produces is not what these assertions are
- * about. The two places the exact flavour matters say so themselves.
+ * Any flavour of pass. A step served by a compiled entry paints `</>` and one
+ * whose entry threw paints ⚠; both ARE passes, and which one a given run
+ * produces is not what these assertions are about. The two places the exact flavour matters say so themselves.
  */
 const isPass = (status) => typeof status === 'string' && status.startsWith('pass');
 

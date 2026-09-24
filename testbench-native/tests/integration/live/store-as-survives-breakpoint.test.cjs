@@ -13,8 +13,8 @@
  *
  * The fast integration tests use a FakeApiClient and can't exercise
  * the real expander → step-executor → session-manager loop end-to-end.
- * The vitest layer mocks executeStep so the cache-write hook is also
- * mocked away. This live test wires the whole stack: real expansion,
+ * The vitest layer mocks executeStep, so the capture path is mocked
+ * away with it. This live test wires the whole stack: real expansion,
  * real `[store as: X]` capture, real session.outputs persistence,
  * real {{X}} interpolation in batch 2.
  *
@@ -136,13 +136,12 @@ describe('TestBench live — [store as: X] survives a breakpoint pause', functio
     await waitFor('isRunning false while paused', () => !hooks.isRunning(), 15_000);
     console.log('[live] Paused at breakpoint after step 1 ✓');
 
-    // Sanity: step 1 should be pass (or pass-cached on a warm-cache run).
-    // Either is fine — what matters is that the skill ran to completion
-    // and target_url got captured.
+    // Sanity: step 1 should be pass — what matters is that the skill ran
+    // to completion and target_url got captured.
     const pausedStatuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
     const step1Status = pausedStatuses[STEP_1_LINE];
     assert.ok(
-      step1Status === 'pass' || step1Status === 'pass-cached',
+      step1Status === 'pass',
       `Step 1 (line ${STEP_1_LINE}) should be passed before resume, got '${step1Status}'`,
     );
 
@@ -159,14 +158,14 @@ describe('TestBench live — [store as: X] survives a breakpoint pause', functio
       180_000,
     );
 
-    // The whole point: step 2 must be 'pass' (or pass-cached). The bug
+    // The whole point: step 2 must be 'pass'. The bug
     // path makes it 'fail' because {{target_url}} stays literal and
     // Playwright throws "Cannot navigate to invalid URL".
     const finalStatuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
     console.log('[live] Final statuses:', finalStatuses);
     const step2Status = finalStatuses[STEP_2_LINE];
     assert.ok(
-      step2Status === 'pass' || step2Status === 'pass-cached',
+      step2Status === 'pass',
       `Step 2 (line ${STEP_2_LINE}) must pass — proves {{target_url}} interpolated from ` +
         `session.outputs across the batch boundary. Got '${step2Status}'. ` +
         `If 'fail', the [store as: X] → session.outputs sync regressed.`,
@@ -177,7 +176,7 @@ describe('TestBench live — [store as: X] survives a breakpoint pause', functio
     // regression).
     const step1AfterResume = finalStatuses[STEP_1_LINE];
     assert.ok(
-      step1AfterResume === 'pass' || step1AfterResume === 'pass-cached',
+      step1AfterResume === 'pass',
       `Step 1 status must survive resume — got '${step1AfterResume}'. ` +
         `If undefined, the wiped-pass-marks regression returned.`,
     );

@@ -184,7 +184,6 @@ function testConfig(): Config {
     },
     api: { specsDir: './specs', requestTimeout: 30_000, redactSensitive: true },
     server: { host: '127.0.0.1', port: 0, apiKey: API_KEY },
-    cache: { enabled: false, dir: '.cache' },
     logging: { consoleLogLevel: 'silent', serverFileLogLevel: 'off' },
   } as unknown as Config;
 }

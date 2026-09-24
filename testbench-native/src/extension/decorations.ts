@@ -62,7 +62,6 @@ export class DecorationManager implements vscode.Disposable {
 
   private readonly breakpointStopped: vscode.TextEditorDecorationType;
   private readonly statusPass: vscode.TextEditorDecorationType;
-  private readonly statusPassCached: vscode.TextEditorDecorationType;
   private readonly statusCodeBehind: vscode.TextEditorDecorationType;
   private readonly statusStale: vscode.TextEditorDecorationType;
   private readonly statusFail: vscode.TextEditorDecorationType;
@@ -98,9 +97,6 @@ export class DecorationManager implements vscode.Disposable {
     });
     this.statusPass = vscode.window.createTextEditorDecorationType(
       statusIcon('status-pass.svg'),
-    );
-    this.statusPassCached = vscode.window.createTextEditorDecorationType(
-      statusIcon('status-pass-cached.svg'),
     );
     this.statusCodeBehind = vscode.window.createTextEditorDecorationType(
       statusIcon('status-code-behind.svg'),
@@ -188,7 +184,6 @@ export class DecorationManager implements vscode.Disposable {
     this.subs.forEach((s) => s.dispose());
     this.breakpointStopped.dispose();
     this.statusPass.dispose();
-    this.statusPassCached.dispose();
     this.statusCodeBehind.dispose();
     this.statusStale.dispose();
     this.statusFail.dispose();
@@ -241,7 +236,6 @@ export class DecorationManager implements vscode.Disposable {
   private clear(editor: vscode.TextEditor): void {
     editor.setDecorations(this.breakpointStopped, []);
     editor.setDecorations(this.statusPass, []);
-    editor.setDecorations(this.statusPassCached, []);
     editor.setDecorations(this.statusCodeBehind, []);
     editor.setDecorations(this.statusStale, []);
     editor.setDecorations(this.statusFail, []);
@@ -284,7 +278,6 @@ export class DecorationManager implements vscode.Disposable {
     // Statuses — running supersedes pass/fail/skip if both happen to land
     // on the same line during a re-run.
     const passRanges: vscode.Range[] = [];
-    const passCachedRanges: vscode.Range[] = [];
     const codeBehindRanges: vscode.Range[] = [];
     // Options rather than bare Ranges: ⚠ and ✗ carry a hover — the ⚠ names
     // the action that fixes it, the ✗ says what the step died of, and both
@@ -316,7 +309,6 @@ export class DecorationManager implements vscode.Disposable {
       const failure = failures.get(line);
       switch (status) {
         case 'pass': passRanges.push(r); break;
-        case 'pass-cached': passCachedRanges.push(r); break;
         case 'pass-code-behind': codeBehindRanges.push(r); break;
         case 'pass-stale':
           staleRanges.push({ range: r, hoverMessage: staleHoverMessage(failure) });
@@ -385,7 +377,7 @@ export class DecorationManager implements vscode.Disposable {
     }
 
     // Paintable lines: main flow AND section bodies, so body steps get the
-    // same ✓ / ✗ / ⚡ / ▶ treatment. This is where sections beat skills
+    // same ✓ / ✗ / ▶ treatment. This is where sections beat skills
     // ergonomically — the whole run paints in one editor.
     // The data rows of every table join the paintable set: they wear the same
     // status vocabulary as the steps and are the control surface the author
@@ -414,7 +406,7 @@ export class DecorationManager implements vscode.Disposable {
     // "0/4 passed" while it's still executing, and a skill the user
     // never wrote a test for shouldn't carry a passed-count signal at
     // all. Phase 2.1 cleanup.
-    // "12/12 passed (7 code-behind, 1 stale, 2 cached), 1 skipped" — the
+    // "12/12 passed (7 code-behind, 1 stale), 1 skipped" — the
     // wording lives in steps-summary-core.ts so the fast suite can pin it.
     const summaryText = stepsSummaryText(summary);
     const summaryRanges: vscode.DecorationOptions[] =
@@ -463,7 +455,6 @@ export class DecorationManager implements vscode.Disposable {
 
     editor.setDecorations(this.breakpointStopped, stopped);
     editor.setDecorations(this.statusPass, passRanges);
-    editor.setDecorations(this.statusPassCached, passCachedRanges);
     editor.setDecorations(this.statusCodeBehind, codeBehindRanges);
     editor.setDecorations(this.statusStale, staleRanges);
     editor.setDecorations(this.statusFail, failRanges);

@@ -13,7 +13,8 @@ import type { StepCodeEntry } from './types.js';
  *
  * Everything here runs once at test load, after skill/section expansion,
  * where both the authored raw text and the origin frames are still in hand.
- * The result is a registry carried into the executor like `stepCache`.
+ * The result is a registry carried into the executor alongside the other
+ * per-run state (`structureMemo`, `uploadPaths`).
  */
 
 /** Name of the temp-module cache directory created beside a `.steps.ts`. */

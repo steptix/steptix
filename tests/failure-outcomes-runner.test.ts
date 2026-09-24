@@ -104,18 +104,6 @@ vi.mock('../src/runner/hooks.js', () => ({
   resolveHooks: vi.fn(async () => hooksStub),
 }));
 
-vi.mock('../src/cache/step-cache.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/cache/step-cache.js')>()),
-  StepCache: {
-    initialize: vi.fn(async () => ({
-      read: () => null,
-      write: vi.fn(),
-      readAssertion: () => null,
-      invalidateStep: vi.fn(),
-    })),
-  },
-}));
-
 const diagnoseMock = vi.fn(async () => null);
 vi.mock('../src/ai/diagnose.js', () => ({ diagnoseFailure: (...a: unknown[]) => diagnoseMock(...(a as [])) }));
 vi.mock('../src/ai/client.js', () => ({

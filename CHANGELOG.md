@@ -6,6 +6,35 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Removed — the step cache; code-behind is now the one way a step replays
+
+The step cache is gone. With `cache.enabled` on in `aiui.config.json`, or
+`## Config: cache: on` in a test, a passing step's AI actions — its CSS
+selectors — and the JavaScript generated for its assertions were saved under
+`<project>/.cache/<env>/<test>/` and replayed on the next run without a model
+call, painted ⚡ in the report and in TestBench. What it replayed was a recorded
+transcript nobody reviewed, and several of its known bugs replayed the wrong
+action without saying so. Code-behind does the same job with code you can
+read: `aiui compile` writes a `.steps.ts` beside the test, and a compiled step
+runs as code, marked `</>`. It is now the only replay mechanism.
+
+In a project that used the cache, delete the `cache` block from
+`aiui.config.json` — a leftover one is ignored, with a warning when the config
+is loaded. Delete any `## Config: cache:` lines from your tests; `cache` is now
+an unrecognised key, which is ignored. And delete the project's `.cache/`
+directory, which nothing reads any more. The "TestBench: Clear Cache for This
+Test" command and the ⚡ status are gone with it.
+
+What changes for a run: every step without a code-behind entry calls the model
+on every run, and that includes the code for its assertions, which was cached
+too. A test that relied on cache hits will now take longer and cost more per
+run until you compile it. A table read whose structure the model had to name
+(`readTable`'s structure question) is still asked at most once per structure
+per run, and later reads in the same run reuse the answer, but the answer is no
+longer kept between runs, and code-behind does not compile a table read yet.
+`aiui compile` always records from a live AI run now; before, a step it recorded
+could be a replay from the cache.
+
 ### Added — a step can fail in the author's words, and fail without stopping the run
 
 A step failed when the model or the code-behind could not do what the line said,

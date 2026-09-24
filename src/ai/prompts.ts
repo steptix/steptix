@@ -272,7 +272,7 @@ Plan your next action based on the observed result — do not batch multiple act
    ROW NUMBERS. Never request "_row" as a column — the runtime writes it on every record. A later step may use {{item._row}} freely, as "row 3 of the … table". When a step names a row by number, count DATA rows: "_row" skips hidden rows and full-width placeholder or group rows, so on a table with those, row 3 is the third row that holds DATA, not the third <tr>
    BOUNDED ROWS. When the author asks for the first / up to / at most N rows ("Read the Order ID column as id from the first 10 visible rows in the Orders table"), emit "readTable" even if only one column is named, and put that positive whole number in "limit": { "action": "readTable", "selector": "table[aria-label=\\"Orders\\"]", "columns": [ { "header": "Order ID", "key": "id" } ], "limit": 10, "as": "orders", "description": "Read IDs from the first 10 visible Orders table rows" }. Do NOT encode the bound as ":nth-child(-n+10)" or any other positional selector, and emit "limit" ONLY when the author explicitly asked for a bound. "limit" addresses the first N visible rows of the CURRENTLY rendered page and nothing else — do not use it to imply pagination, scrolling, last N, a starting row, a range, sorting, or an exact row-count assertion. For any of those, return a "prompt" explaining the v1 restriction rather than silently changing the meaning
    ARIA GRIDS. Some grids contain no <table> at all — MUI DataGrid, ag-Grid and anything else built from <div role="grid"> (or role="table" / role="treegrid") with role="row", role="columnheader" and role="gridcell" inside. Read one exactly as a table: name it in "selector" the same way you would name a <table>, and name its columns by the text of their "columnheader" cells. Do NOT fall back to "index" because there are no <th> elements, and do NOT treat the grid's own header row as a data row — the runtime knows the ARIA table model and maps the names onto the cells for you
-   NEVER HAND-BUILD A TABLE READ. When a table or grid looks unusual — headings written as <td>, a header table sitting after the rows, repeated cards instead of rows, one small key/value table per record — still emit ONE "readTable" against the region and let it fail. The runtime asks a separate question about the structure, once, validates the answer against the page and caches it, so every later run reads it deterministically. Never substitute a set of "read" actions, an nth-child selector per column, or a per-row selector you worked out yourself: those produce parallel arrays with no row alignment and a shape nobody can cache
+   NEVER HAND-BUILD A TABLE READ. When a table or grid looks unusual — headings written as <td>, a header table sitting after the rows, repeated cards instead of rows, one small key/value table per record — still emit ONE "readTable" against the region and let it fail. The runtime asks a separate question about the structure, once, validates the answer against the page and reads deterministically from it — and later reads of the same region in the run reuse it. Never substitute a set of "read" actions, an nth-child selector per column, or a per-row selector you worked out yourself: those produce parallel arrays with no row alignment and a shape nobody can validate
    WHAT NOT TO GUESS. If the step asks for all rows but names no columns, return a "prompt" asking which columns are required. If the table is not in the snapshot, use "find"/"expand" and reevaluate rather than guessing a selector. Reading a checkbox's ticked state, an input's value or an attribute is not supported yet — a step asking for those is refused by name, so return a "prompt" rather than requesting the column as text. Set "needs_reeval": false: the action is observational and completes the read
 14. For "count" actions, set "selector" to the CSS selector to count and "as" to a snake_case variable name. Use "count" when a step asks how many elements exist (e.g. "how many accounts", "count the rows"). The result is stored as a string (e.g. "3") and available as {{variable_name}} in later steps
 15. Set "needs_reeval": true if the current step instruction is NOT yet fully satisfied after this action. Set false (or omit) when the step instruction IS satisfied. IMPORTANT: only consider the current step instruction — do NOT continue into actions that belong to subsequent steps. For example, if the step says "Enter username and password", set needs_reeval: true after entering the username (you still need to enter the password), but set needs_reeval: false after entering the password — do NOT proceed to click Login unless the step says to
@@ -499,8 +499,8 @@ export function buildClarificationMessage(
  * single `assert` action's condition + expected against the current page DOM
  * (and/or prior API responses, depending on `against`).
  *
- * The returned code is cached keyed on (stepIndex, assertIndex, fingerprint),
- * so subsequent runs execute it directly with no AI call.
+ * The code is generated afresh on every run; a step that should check without
+ * a model call is one to compile to code-behind.
  */
 export function buildAssertionCodePrompt(
   assertDescription: string,
@@ -1134,8 +1134,8 @@ export interface StepCodePromptInput {
    * is as much a literal to keep out of the file as a parameter's.
    */
   envRefs?: Array<{ ref: string; value: string }>;
-  /** The successful run's action transcript — the same actions the step cache
-   *  stores, selectors included, each carrying the `targeting` the runtime
+  /** The successful run's action transcript — the actions the model emitted,
+   *  selectors included, each carrying the `targeting` the runtime
    *  measured for it when there was one. */
   actions: TranscriptAction[];
   /** Assertions the step evaluated, with what they saw. */

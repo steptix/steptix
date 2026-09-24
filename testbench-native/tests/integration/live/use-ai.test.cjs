@@ -3,8 +3,8 @@
  * Tests → Live): a step whose text goes to the model with no page, whose reply
  * is stored as a variable, and which is asked again on EVERY run.
  *
- * The fixture (templates/init/tests/use-ai-live.md) runs twice with the step
- * cache ON. What only a live run can say, with the real model behind it:
+ * The fixture (templates/init/tests/use-ai-live.md) runs twice. What only a
+ * live run can say, with the real model behind it:
  *
  *  - a value named in the author's prose ("…and store it in random_name") and
  *    one pinned by `[store as: days_from_now]` both reach later steps: a `Set`
@@ -14,11 +14,10 @@
  *    `source: 'generated'`, and the report shows them in each row's ◆ Captured
  *    box;
  *  - the second run asks the model again. The `[use ai]` lines paint a plain
- *    ✓ both times, never ⚡ (`pass-cached`) or </> (`pass-code-behind`), their
- *    report rows carry a fresh `use-ai` model call, and no cache file is ever
- *    written for them. The control is what makes that mean anything: the
- *    navigate step and the closing title check DO replay ⚡ on the second run,
- *    so the cache really was on;
+ *    ✓ both times, never </> (`pass-code-behind`) or ⚠ (`pass-stale`), and
+ *    their report rows carry a fresh `use-ai` model call on EACH run — nothing
+ *    the first run left behind turns the step into anything but a question to
+ *    the model;
  *  - a `[use ai]` step with a `{{placeholder}}` nothing set fails before any
  *    model call (no turn in its report row), its `otherwise continue` tail
  *    makes the failure amber, and the run carries on to a green end.
@@ -31,7 +30,7 @@
  * Why live: the vitest layer drives the shared runner with a fake AiClient and
  * the server at the HTTP seam, which proves the wiring but not that a real
  * model's reply lands in a real variable that a real browser then types, nor
- * that two real runs through TestBench's cache switch behave as the story
+ * that a second real run through TestBench asks the model again, as the story
  * promises.
  *
  * Prereq: the API server on $LIVE_SERVER_URL (the parallel runner starts one
@@ -56,41 +55,44 @@ const EXT_ID = 'pkent.testbench-native';
 const TEST_APP_PORT = 8787;
 const FIXTURE = 'use-ai-live.md';
 
-// templates/init/tests/use-ai-live.md. Line numbers are hardcoded — the tracker,
-// the capture events, the run log and the cache files are all keyed on LINE, not
-// step number — and PINNED to the file by `pinFixture` below, which is the only
-// reason hardcoding is safe here. (failure-outcomes.test.cjs's convention.)
+// templates/init/tests/use-ai-live.md, by exact step text. The tracker, the
+// capture events and the run log are all keyed on LINE, not step number, so each
+// step's line is looked up in the file by `pinFixture` below — exact equality,
+// exactly once, in order — rather than hardcoded: the prose and `## Config`
+// above the steps can change without every assertion here drifting onto a
+// neighbour. A reworded step still fails there, by name.
 const STEPS = [
-  { n: 1, line: 31, text: '1. Navigate to the baseUrl' },
+  { n: 1, text: '1. Navigate to the baseUrl' },
   {
     n: 2,
-    line: 32,
     text:
       '2. [use ai] Create a name starting with "AUTO" and ending with a random 4 ' +
       'digit number and store it in random_name',
   },
   {
     n: 3,
-    line: 33,
     text:
       '3. [use ai] Today is {{today}}. Give the date 3 days later formatted as ' +
       'yyyymmdd [store as: days_from_now]',
   },
-  { n: 4, line: 34, text: '4. Set {{login_name}} to "{{random_name}}-{{days_from_now}}@example.com"' },
-  { n: 5, line: 35, text: '5. Enter {{login_name}} in the Email address field' },
-  { n: 6, line: 36, text: '6. Read the value of the Email address field [store as: typed_back]' },
+  { n: 4, text: '4. Set {{login_name}} to "{{random_name}}-{{days_from_now}}@example.com"' },
+  { n: 5, text: '5. Enter {{login_name}} in the Email address field' },
+  { n: 6, text: '6. Read the value of the Email address field [store as: typed_back]' },
   {
     n: 7,
-    line: 42,
     text:
       '7. [use ai] Greet {{nobody_set_this}} and store it in greeting otherwise ' +
       'continue with warning "no greeting"',
   },
-  { n: 8, line: 43, text: '8. Verify the page title contains "Sign In"' },
+  { n: 8, text: '8. Verify the page title contains "Sign In"' },
 ];
 
-/** The line a 1-based step number sits on. */
-const lineOf = (n) => STEPS[n - 1].line;
+/** The line a 1-based step number sits on. Set by `pinFixture`, in `before`. */
+const lineOf = (n) => {
+  const line = STEPS[n - 1].line;
+  if (line === undefined) throw new Error(`step ${n}'s line is not resolved — pinFixture has not run`);
+  return line;
+};
 
 /** The two `[use ai]` steps that must ask the model and store a value. */
 const GENERATED = [
@@ -100,21 +102,8 @@ const GENERATED = [
 /** The `[use ai]` step with a placeholder nothing sets. */
 const UNRESOLVED = { n: 7, ref: 'nobody_set_this', prose: 'greeting', rowFragment: 'Greet' };
 const TOLERATED_WARNING = 'no greeting';
-/** Every `[use ai]` line — none may ever have a cache file. */
-const USE_AI_STEPS = [2, 3, 7];
-/** Ordinary page steps: the model plans them on run 1, the cache may serve run 2. */
+/** Ordinary page steps: the model plans them on every run. */
 const PAGE_STEPS = [1, 5, 6, 8];
-/**
- * The cache control. Constant text, no placeholders, the same two shapes
- * cache-replay.test.cjs proves replay (a navigate and a verify), so a ⚡ on
- * both is what shows the cache was ON for run 2 — without it a plain ✓ on the
- * `[use ai]` lines proves nothing. Step 8 also sits AFTER every `[use ai]`
- * step, so its ⚡ says they did not disturb the cache for their neighbours.
- */
-const CACHE_CONTROL = [
-  { n: 1, rowFragment: 'Navigate to the baseUrl' },
-  { n: 8, rowFragment: 'page title contains "Sign In"' },
-];
 /** The date step 3 asks for, given `today: 2026-09-24`. Logged, never asserted. */
 const EXPECTED_DATE = '20260927';
 
@@ -150,10 +139,9 @@ async function waitFor(label, predicate, timeoutMs = 60_000) {
   );
 }
 
-/** Any flavour of pass — for the page steps, whose flavour is not the claim
- *  (except where CACHE_CONTROL says it is). The `[use ai]` lines are held to
- *  exactly `'pass'` instead. */
-const PASSED = new Set(['pass', 'pass-cached', 'pass-code-behind', 'pass-stale']);
+/** Any flavour of pass — for the page steps, whose flavour is not the claim.
+ *  The `[use ai]` lines are held to exactly `'pass'` instead. */
+const PASSED = new Set(['pass', 'pass-code-behind', 'pass-stale']);
 const passed = (status) => PASSED.has(status);
 
 async function up(url) {
@@ -208,7 +196,7 @@ function reportStats(html) {
  *  - `instruction` as the report prints it (SUBSTITUTED), so rows are matched
  *    below on fragments that survive substitution, never on a placeholder;
  *  - `status`, the last badge before the chevron (failure-outcomes.test.cjs);
- *  - `origin`, the ⚡ / </> / ⚠ badge when the step avoided or healed the model;
+ *  - `origin`, the </> / ⚠ badge when the step avoided or healed the model;
  *  - `captures`, the ◆ Captured box's name → value pairs (src/report/generator.ts,
  *    `capturesHtml`);
  *  - `turns`, how many `<div class="turn">` the row renders — zero means the step
@@ -233,7 +221,7 @@ function reportRows(html) {
     ].map((b) => ({ classes: b[1].trim().split(/\s+/), text: decodeHtml(b[2]) }));
     const statusBadge = badges[badges.length - 1];
     const originBadge = badges.find((b) =>
-      b.classes.some((c) => c === 'badge-cached' || c === 'badge-codebehind' || c === 'badge-codebehind-stale'),
+      b.classes.some((c) => c === 'badge-codebehind' || c === 'badge-codebehind-stale'),
     );
     const body = chunk.slice(head[0].length);
 
@@ -288,62 +276,32 @@ function rowFor(rows, fragment, label) {
   return found[0];
 }
 
-/** Pin the constants above to the fixture on disk. Exact equality, not a fragment
- *  match: a reworded step fails HERE, by name, rather than drifting onto its
- *  neighbour and quietly passing. */
+/** Pin the constants above to the fixture on disk, and resolve each step's line.
+ *  Exact equality, not a fragment match: a reworded step fails HERE, by name,
+ *  rather than drifting onto its neighbour and quietly passing. */
 function pinFixture(file) {
   const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+  let previous = 0;
   for (const s of STEPS) {
+    const at = [];
+    lines.forEach((l, i) => {
+      if (l === s.text) at.push(i + 1);
+    });
     assert.equal(
-      lines[s.line - 1],
-      s.text,
-      `${FIXTURE} line ${s.line} should be step ${s.n} — expected "${s.text}", found ` +
-        `"${lines[s.line - 1]}". The line numbers in this test are what the tracker, ` +
-        `the capture events and the cache files are keyed by; if the fixture moved, ` +
-        `move them deliberately.`,
+      at.length,
+      1,
+      `${FIXTURE} must carry step ${s.n} exactly once, as "${s.text}"; found it on ` +
+        `line(s) ${JSON.stringify(at)}. The assertions in this test are keyed by that ` +
+        `step's line; if the step was reworded, reword it here deliberately.`,
     );
+    assert.ok(
+      at[0] > previous,
+      `${FIXTURE}: step ${s.n} (line ${at[0]}) must come after step ${s.n - 1} (line ${previous})`,
+    );
+    s.line = at[0];
+    previous = at[0];
   }
-}
-
-/**
- * This fixture's step-cache directories: `<project>/.cache/<env>/use-ai-live-<hash>`
- * (`cacheDirName` + `envCacheSegment`, src/cache/step-cache.ts). Globbed over the
- * env segment rather than assuming `default`, so a run under a named env is still
- * found.
- */
-function fixtureCacheDirs(projectRoot) {
-  const base = path.join(projectRoot, '.cache');
-  if (!fs.existsSync(base)) return [];
-  const out = [];
-  for (const env of fs.readdirSync(base, { withFileTypes: true })) {
-    if (!env.isDirectory()) continue;
-    const envDir = path.join(base, env.name);
-    for (const d of fs.readdirSync(envDir, { withFileTypes: true })) {
-      if (d.isDirectory() && d.name.startsWith('use-ai-live-')) out.push(path.join(envDir, d.name));
-    }
-  }
-  return out;
-}
-
-/** Every file in this fixture's cache directories, as `<dir-name>/<file>`. */
-function fixtureCacheFiles(projectRoot) {
-  return fixtureCacheDirs(projectRoot).flatMap((dir) =>
-    fs.readdirSync(dir).map((f) => `${path.basename(dir)}/${f}`),
-  );
-}
-
-/**
- * Cache files keyed to a line that is not a page step. An inline step's entry is
- * `step-<line>.json` (plus `step-<line>-asserts.json` for a verify), per
- * `frameScopedStepKey` in session-manager.ts — so an ALLOW-list of the page
- * steps' lines catches a `[use ai]` entry (or a `Set` one) under any key.
- */
-function nonPageCacheFiles(files) {
-  const allowed = new Set(PAGE_STEPS.map(lineOf));
-  return files.filter((f) => {
-    const m = /\/step-(\d+)(?:-asserts)?\.json$/.exec(f);
-    return m !== null && !allowed.has(Number(m[1]));
-  });
+  say(`${FIXTURE} step lines: ${STEPS.map((s) => `${s.n}@${s.line}`).join(' ')}`);
 }
 
 /**
@@ -379,9 +337,8 @@ function startRunTap(hooks, uri) {
 /** The last `capture` event for `name`, or undefined. */
 const lastCapture = (obs, name) => [...obs.captures].reverse().find((c) => c.name === name);
 
-describe('TestBench live — [use ai]: generated values reach later steps and are never cached', function () {
-  // Two runs. Run 1 is five page-model turns plus two `[use ai]` calls; run 2
-  // should be two `[use ai]` calls and cache replays.
+describe('TestBench live — [use ai]: generated values reach later steps and are asked for on every run', function () {
+  // Two runs, each five page-model turns plus two `[use ai]` calls.
   this.timeout(1_200_000);
 
   /** @type {import('../../../dist/extension/extension').TestBenchTestHooks} */
@@ -438,31 +395,22 @@ describe('TestBench live — [use ai]: generated values reach later steps and ar
 
     workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     assert.ok(workspaceRoot, 'no workspace folder — the live runner must pass templates/');
-    // templates/init/aiui.config.json is the project marker, so the server keeps
-    // this fixture's cache under templates/init/.cache.
+    // templates/init/ is the project: its aiui.config.json is the marker.
     projectRoot = path.resolve(workspaceRoot, 'init');
     testFile = path.resolve(projectRoot, 'tests', FIXTURE);
     assert.ok(fs.existsSync(testFile), `${FIXTURE} not found at ${testFile}`);
     pinFixture(testFile);
 
-    // A code-behind file beside the fixture would make the PAGE steps paint
-    // </>, and the cache control below would then read as a cache failure.
-    // (Whether a `.steps.ts` entry for a `[use ai]` text is ignored is a unit
-    // test's job — stories/use-ai-step.md, Tests → Cache and compile.)
+    // A leftover code-behind file beside the fixture would put compiled code in
+    // this run where the story describes the model. (Whether a `.steps.ts` entry
+    // for a `[use ai]` text is ignored is a unit test's job — stories/use-ai-step.md,
+    // Tests → Cache and compile.)
     const codeBehind = testFile.replace(/\.md$/, '.steps.ts');
     assert.ok(
       !fs.existsSync(codeBehind),
       `${codeBehind} exists — delete it: this test needs every page step to run under ` +
-        `the model on run 1 and from the cache on run 2`,
+        `the model, on both runs`,
     );
-
-    // A cold cache for THIS fixture only, so the ⚡ on run 2 can only have come
-    // from run 1. A parallel shard's workspace copy has no cache at all; this
-    // matters for `--shards=1`, which runs in the real templates/.
-    for (const dir of fixtureCacheDirs(projectRoot)) {
-      fs.rmSync(dir, { recursive: true, force: true });
-      say(`cleared ${dir}`);
-    }
   });
 
   after(async () => {
@@ -507,7 +455,7 @@ describe('TestBench live — [use ai]: generated values reach later steps and ar
     }
     await vscode.commands.executeCommand('testbench-native.clearStatuses');
     hooks.clearRunError?.();
-    // A fresh browser, as a user re-running would have (cache-replay.test.cjs).
+    // A fresh session and browser, as a user re-running would have.
     await vscode.commands.executeCommand('testbench-native.restartSession');
     await sleep(1_000);
 
@@ -563,7 +511,7 @@ describe('TestBench live — [use ai]: generated values reach later steps and ar
       const p = passes[s.line];
       say(
         `${label}: step ${s.n} (line ${s.line}) -> ${statuses[s.line] ?? '(no status)'}` +
-          (p ? `  [pass event: fromCache=${!!p.fromCache} fromCodeBehind=${!!p.fromCodeBehind}]` : '') +
+          (p ? `  [pass event: fromCodeBehind=${!!p.fromCodeBehind} stale=${!!p.codeBehindStale}]` : '') +
           (failures[s.line] ? `  error: ${JSON.stringify(failures[s.line].error)}` : ''),
       );
     }
@@ -587,7 +535,6 @@ describe('TestBench live — [use ai]: generated values reach later steps and ar
           )
           .join('\n'),
     );
-    say(`${label}: cache files now: ${JSON.stringify(fixtureCacheFiles(projectRoot))}`);
     return obs;
   }
 
@@ -619,10 +566,10 @@ describe('TestBench live — [use ai]: generated values reach later steps and ar
       );
     }
 
-    // ── THE claim: the `[use ai]` steps are a plain ✓, never ⚡ or </> ──
+    // ── THE claim: the `[use ai]` steps are a plain ✓, never </> or ⚠ ──
     //
-    // Exactly 'pass'. `pass-cached` would mean the step cache served a model reply
-    // (decision 1), `pass-code-behind` that compiled code ran instead of the model.
+    // Exactly 'pass'. `pass-code-behind` would mean compiled code ran instead of
+    // the model, `pass-stale` that a compiled entry existed for the step at all.
     // The pass event's own flags are checked too, so a failure says which side lied.
     for (const g of GENERATED) {
       const line = lineOf(g.n);
@@ -630,12 +577,12 @@ describe('TestBench live — [use ai]: generated values reach later steps and ar
         statuses[line],
         'pass',
         `${label}: [use ai] step ${g.n} (line ${line}) must paint a PLAIN pass — the model ` +
-          `is asked on every run and the step is never cached or compiled. Got ` +
+          `is asked on every run and the step is never compiled. Got ` +
           `"${statuses[line]}".`,
       );
       assert.ok(
-        passes[line] && !passes[line].fromCache && !passes[line].fromCodeBehind && !passes[line].codeBehindStale,
-        `${label}: the step:pass event for line ${line} must carry no fromCache / ` +
+        passes[line] && !passes[line].fromCodeBehind && !passes[line].codeBehindStale,
+        `${label}: the step:pass event for line ${line} must carry no ` +
           `fromCodeBehind / codeBehindStale; got ${JSON.stringify(passes[line] ?? null)}`,
       );
     }
@@ -785,12 +732,11 @@ describe('TestBench live — [use ai]: generated values reach later steps and ar
         `${label}: step ${g.n}'s row must carry its model call, rendered "AI — use-ai"; ` +
           `its AI summaries are ${JSON.stringify(row.aiPurposes)} over ${row.turns} turn(s)`,
       );
-      // A replayed turn renders `AI — action-plan (cached)` under a ⚡ badge
-      // (measured on a cache-replay report), so both are ruled out.
-      assert.ok(
-        row.origin === null && !row.aiPurposes.some((p) => p.includes('(cached)')),
-        `${label}: step ${g.n}'s row must wear no ⚡ / </> / ⚠ origin badge and no cached ` +
-          `model call; origin ${JSON.stringify(row.origin)}, AI summaries ${JSON.stringify(row.aiPurposes)}`,
+      assert.equal(
+        row.origin,
+        null,
+        `${label}: step ${g.n}'s row must wear no </> / ⚠ origin badge; got ` +
+          `${JSON.stringify(row.origin)}, AI summaries ${JSON.stringify(row.aiPurposes)}`,
       );
 
       // Verification rule 1, where the report carries the request: one system and
@@ -852,7 +798,7 @@ describe('TestBench live — [use ai]: generated values reach later steps and ar
         assert.match(
           obs.logSlice,
           new RegExp(`✓ step ${line} passed[ \\t]*\\r?$`, 'm'),
-          `${label}: the run log must say line ${line} passed with no (cached) / (code-behind) ` +
+          `${label}: the run log must say line ${line} passed with no (code-behind) ` +
             `suffix; got:\n${obs.logSlice}`,
         );
       }
@@ -868,89 +814,22 @@ describe('TestBench live — [use ai]: generated values reach later steps and ar
     return values;
   }
 
-  it('asks the model on both runs, stores what it says, and never caches it', async function () {
+  it('asks the model on both runs and stores what it says', async function () {
     this.timeout(1_200_000);
     uri = vscode.Uri.file(testFile);
 
-    // ===== Run 1: cold cache =====
+    // ===== Run 1 =====
     const run1 = await runFixture('run 1');
     const values1 = assertEveryRun(run1);
 
-    // The cache was cold, so nothing can have replayed. This is what makes run 2's
-    // ⚡ on the control steps evidence that run 1 wrote them.
-    for (const n of PAGE_STEPS) {
-      assert.equal(
-        run1.statuses[lineOf(n)],
-        'pass',
-        `run 1: page step ${n} (line ${lineOf(n)}) must be a plain pass on a cold cache; ` +
-          `got "${run1.statuses[lineOf(n)]}"`,
-      );
-    }
-
-    // The cache is on for this file, and it holds the page steps — never a
-    // `[use ai]` step (decision 1: "never reads or writes the step cache").
-    const files1 = fixtureCacheFiles(projectRoot);
-    assert.ok(
-      files1.some((f) => f.endsWith(`/step-${lineOf(1)}.json`)),
-      `run 1 must write a cache entry for the navigate step (step-${lineOf(1)}.json) — ` +
-        `without one, \`## Config: cache: on\` did not reach the server and nothing below ` +
-        `about the cache means anything. Cache files: ${JSON.stringify(files1)}`,
-    );
-    assert.deepEqual(
-      nonPageCacheFiles(files1),
-      [],
-      `run 1 wrote cache files for lines that are not page steps — the [use ai] steps are ` +
-        `lines ${USE_AI_STEPS.map(lineOf).join(', ')}, and none of them may ever have one. ` +
-        `All cache files: ${JSON.stringify(files1)}`,
-    );
-
-    // ===== Run 2: warm cache =====
+    // ===== Run 2 =====
+    // The same file again. `assertEveryRun` holds run 2 to everything run 1 was
+    // held to, and the part of that only a SECOND run can say is the model call
+    // in each `[use ai]` row: whatever run 1 left behind on disk — a report, a
+    // last-run sidecar, anything a later feature adds — must not turn the step
+    // into anything but a fresh question to the model.
     const run2 = await runFixture('run 2');
     const values2 = assertEveryRun(run2);
-
-    // The control. Without it a plain ✓ on the `[use ai]` lines would be equally
-    // well explained by the cache being off.
-    for (const c of CACHE_CONTROL) {
-      assert.equal(
-        run2.statuses[lineOf(c.n)],
-        'pass-cached',
-        `run 2: control step ${c.n} (line ${lineOf(c.n)}) must replay from the cache (⚡) — ` +
-          `it is what proves the cache was ON for this run. Got "${run2.statuses[lineOf(c.n)]}". ` +
-          `If this fails, the [use ai] assertions above prove nothing about caching.`,
-      );
-      const row = rowFor(run2.rows, c.rowFragment, 'run 2');
-      assert.ok(
-        row.origin && row.origin.includes('cached'),
-        `run 2: control step ${c.n}'s report row must wear the ⚡ cached badge; got ${JSON.stringify(row.origin)}`,
-      );
-    }
-    // The other page steps carry the generated values, so whether they replay is
-    // reported rather than asserted: the cache templates a typed value back into
-    // {{login_name}}, and that is the cache's claim, not this story's.
-    for (const n of [5, 6]) {
-      say(`run 2: page step ${n} (line ${lineOf(n)}) -> ${run2.statuses[lineOf(n)]}`);
-    }
-
-    // The model really was asked, and paid for. A fully replayed run reports
-    // Total Tokens 0 (measured on a cache-replay report), so with the page steps
-    // replaying, the `[use ai]` calls are what this run spent tokens on. Weaker if
-    // steps 5-6 missed the cache (they then spend too), never wrong.
-    say(`run 2: report Total Tokens = ${run2.stats['Total Tokens']}`);
-    assert.ok(
-      run2.stats['Total Tokens'] > 0,
-      `run 2: the report must count tokens for the two [use ai] model calls — a 0 on a ` +
-        `run whose page steps replayed means the calls were not made or not accounted ` +
-        `(decision 11). Header: ${JSON.stringify(run2.stats)}`,
-    );
-
-    // Still no cache file for any `[use ai]` line after a run that READ the cache.
-    const files2 = fixtureCacheFiles(projectRoot);
-    assert.deepEqual(
-      nonPageCacheFiles(files2),
-      [],
-      `run 2 left cache files for lines that are not page steps (the [use ai] steps are ` +
-        `lines ${USE_AI_STEPS.map(lineOf).join(', ')}). All cache files: ${JSON.stringify(files2)}`,
-    );
 
     // Models are poor random-number generators, so the same value coming back is
     // not a failure (the story says so). Logged so a reader can see it happen.

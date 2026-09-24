@@ -300,7 +300,7 @@ parameter names what distinguishes the element ("click the row for
 `step.getVar(...)` instead of pinning this run's row number. Pinning it compiles
 this run's *data* into a file that gets committed and runs for years, which is
 exactly the defect
-[issue 024](../issues/024-cache-value-driven-element-targeting-rides-cache.md)
+[issue 024](../issues/024-cache-value-driven-element-targeting-rides-cache.md) (since removed)
 documents for the step cache: "the frozen selector is often perfectly
 well-formed — it just points at the wrong thing." Code-behind is more exposed
 than the cache, because the file outlives the cache entry.

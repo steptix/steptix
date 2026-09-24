@@ -117,7 +117,7 @@ Rejection is the site's call; the next step asserts on it.
 | [actions.ts:532](../src/browser/actions.ts) | `executeUpload`: `filePath ?? value`, then `locator(sel).locator('visible=true').first().setInputFiles(path)`, 10 s budget |
 | [actions.ts:601](../src/browser/actions.ts) | measurement hoist waits for the target with state `visible`; the whole prelude (sanitise, iframe promotion, frame checks, hoisted wait, ambiguity gate — lines 188-284) runs before the action switch |
 | [step-executor.ts:53](../src/runner/step-executor.ts) | `upload` in `MUTATING_ACTIONS`; one `executeAction` call site (line 1683), which cache replay also goes through |
-| [step-cache.ts:327](../src/cache/step-cache.ts) | actions stored as the AI returned them; `reverseInterpolate` touches **`value` only**, by literal `replaceAll` of the raw parameter value |
+| [step-cache.ts:327](../src/cache/step-cache.ts) (since removed) | actions stored as the AI returned them; `reverseInterpolate` touches **`value` only**, by literal `replaceAll` of the raw parameter value |
 | [prompts.ts](../src/ai/prompts.ts) | no rule names `upload`; the word appears once, as an example of a slow `wait` (line 186). There is no action vocabulary list anywhere — the model learns action names only from the per-action rules. Rule 4 (line 163) says hidden placeholders have "their attributes dropped — never target those" |
 | [capture-dom.js:232](../src/browser/scripts/capture-dom.js) | a hidden element becomes `<input> <!-- hidden: display:none -->` — every attribute dropped, no exception list; `getAttributes` is never called on that path. `hideReason` (76-87) fires for `input[type=hidden]`, `aria-hidden="true"` and computed `display:none` |
 | [dom-cleaner.ts:865](../src/browser/dom-cleaner.ts) | `expandDomSubtree` drops a hidden element entirely (`if (!isVisible(el)) return ''`) — an `expand` on an uploader card shows no input at all |
@@ -618,7 +618,7 @@ tightening that is a separate, wider change.
 
 ### 6. Step cache
 
-Actions are cached as the AI returned them ([step-cache.ts:29-39](../src/cache/step-cache.ts)),
+Actions are cached as the AI returned them ([step-cache.ts:29-39](../src/cache/step-cache.ts) (since removed)),
 so `filePath`/`filePaths` are stored verbatim — normalised, relative,
 machine-independent — with no change. Three things do change:
 

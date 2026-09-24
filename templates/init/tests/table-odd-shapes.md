@@ -11,7 +11,7 @@ against `fixtures/test-app/odd-tables.html`. Everything else in the table-read
 suite is decided by structure alone and costs no model call at all. These four
 cannot be, and each is read here by asking the model ONE question about the
 region's layout, validating the answer against the page, and then reading
-deterministically — this run and every run after.
+deterministically for the rest of the run.
 
 The four:
 
@@ -42,13 +42,11 @@ The four:
   is a collection whose ITEM is a table and whose fields are its rows, and the
   read returns **4 records**.
 
-Then the remembering, which has two layers and they answer different
-questions. Step 14 reads `#legacy-payees` **again**, with the same columns, in
-the same run — and the step cache cannot help, because it is keyed per STEP
-and step 14 is a different line with a cache file of its own. What answers it
-is the run's **structure memo**: keyed by the region and the columns asked of
-it, so any later step reading the same thing applies the same mapping. The run
-log shows step 14 writing
+Then the remembering. Step 14 reads `#legacy-payees` **again**, with the same
+columns, in the same run. What answers it is the run's **structure memo**:
+keyed by the region and the columns asked of it, not by the step, so any later
+step reading the same thing applies the same mapping. The run log shows step 14
+writing
 
 ```
 readTable: structure reused from step 2
@@ -56,24 +54,18 @@ readTable: structure reused from step 2
 
 and no question. It is applied, not assumed — the extractor validates it
 against the live page like any other mapping, so a page that changed between
-the two steps falls back to asking rather than reading the wrong table. The
-mapping is then recorded on step 14's action as well, so the second layer —
-the step cache on disk — carries both steps across runs and a second run of
-this file asks nothing at all. One question per structure per run; none after
-that.
+the two steps falls back to asking rather than reading the wrong table. The memo
+lives for one run only, so the next run of this file asks its four questions
+again. One question per structure per run.
 
 **Requires phase 1 of the spec.** What the proving run must show, beyond
-green, on a **cold cache** — the first run of this file, or one after the
-project's `.cache/` has been cleared: **exactly four**
+green, on every run: **exactly four**
 `readTable: structure asked of the model — …` lines in the whole run, one per
 shape, each with a `readTable structure sketch` and a
 `readTable structure answer` beside it at debug level and a summary line
 naming where the structure came from; and for the **repeat read in step 14,
 none of those three lines** — `readTable: structure reused from step 2`
-instead, and the record counts above for free. A SECOND run of the file asks
-nothing at all: all four mappings are on their steps in the cache by then, and
-the summary lines say `structure from the cache` where the cold run said
-`structure from the model`. The four sketches are also
+instead, and the record counts above for free. The four sketches are also
 where to check §7.6: nothing in them is a secret, but the masking that would
 hide one runs on them the same way it runs on the DOM snapshot beside them.
 

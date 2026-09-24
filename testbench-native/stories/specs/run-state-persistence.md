@@ -1,6 +1,6 @@
 # TestBench Run-State Persistence Spec
 
-Defines how a test's gutter run decorations — the per-step ✓ pass / ⚡ cached /
+Defines how a test's gutter run decorations — the per-step ✓ pass /
 ✗ fail / skip icons, the inline error band, and the `N/M passed` summary — are
 stored so they outlive the editor session, and how a skill file shared by
 multiple tests avoids showing a misleading mix of marks from different runs.
@@ -98,11 +98,15 @@ identical, so the marks still match after the folder moves.
 
 | Field | Persisted? |
 |---|---|
-| `pass`, `pass-cached`, `fail`, `skip`, `stopped` | yes |
+| `pass`, `fail`, `skip`, `stopped` | yes |
 | `errors` (per-line error payloads) | yes |
 | `running` | **no** — filtered out on both read and write |
 | `breakpointStop` (pause arrow) | **no** — not a field in the stored shape |
 | breakpoints | n/a — owned by `vscode.debug.breakpoints` |
+
+A file written before the step cache was removed can still carry `pass-cached`
+(its ⚡ mark). It restores as a plain `pass` — the step did pass — rather than as
+a status no decoration paints (`restoredStatuses`, run-state-core.ts).
 
 ### 3.4 Drift guard (signature)
 
@@ -126,13 +130,13 @@ lies.
 | Close / reopen the `.md` | marks survive |
 | Restart VS Code | marks survive (hydrated from file at activation) |
 | Zip / copy folder to another machine | marks **travel** |
-| `Clear Cache for This Test` (StepCache) | marks **untouched** |
-| `rm -rf .cache` | marks **untouched** |
 | `Clear Run Statuses` command | marks cleared (the explicit intent) |
 | Edit a step while the file was closed | that file's marks dropped on reopen (§3.4) |
 
-The independence from `.cache` is deliberate: "clear the AI cache" and "forget
-my run results" are different intents and must not be coupled.
+(Two more rows used to say the step cache's `Clear Cache for This Test` command
+and deleting its `.cache/` directory left marks untouched — "clear the AI cache"
+and "forget my run results" being different intents. The step cache has since
+been removed.)
 
 `.testbench/` is added to `.gitignore` (matches at any depth, so test-fixture
 copies are ignored too). It is **not** excluded by `docs/zip-project-prompt.md`,

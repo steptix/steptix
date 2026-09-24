@@ -207,7 +207,6 @@ const cfg = {
   reports: { outputDir: './reports', includeScreenshots: false, includeDomSnapshots: false, includeAiReasoning: false, embedScreenshots: false },
   api: { specsDir: './specs', requestTimeout: 30000, redactSensitive: true },
   server: { host: '127.0.0.1', port: 0, apiKey: API_KEY },
-  cache: { enabled: false, dir: '.cache' },
   logging: { consoleLogLevel: 'silent', serverFileLogLevel: 'off' },
   // The SERVER's own config does not opt in: the project's must, which is
   // the per-project read §5.1 item 1 requires.

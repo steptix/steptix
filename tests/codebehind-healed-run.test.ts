@@ -114,18 +114,6 @@ vi.mock('../src/runner/hooks.js', () => ({
   })),
 }));
 
-vi.mock('../src/cache/step-cache.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/cache/step-cache.js')>()),
-  StepCache: {
-    initialize: vi.fn(async () => ({
-      read: () => null,
-      write: vi.fn(),
-      readAssertion: () => null,
-      invalidateStep: vi.fn(),
-    })),
-  },
-}));
-
 vi.mock('../src/ai/diagnose.js', () => ({ diagnoseFailure: vi.fn(async () => null) }));
 vi.mock('../src/ai/client.js', () => ({ AiClient: class { setAiPolicy = vi.fn(); syncAuth = vi.fn(() => null); } }));
 vi.mock('../src/utils/run-log.js', () => ({

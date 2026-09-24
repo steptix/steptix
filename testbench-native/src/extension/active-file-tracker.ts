@@ -11,6 +11,7 @@ import type { ErrorPayload, StepFailureDetail } from 'ai-ui-automation-runner-co
 import { extractStepLineIds, shiftAnchorForChanges } from './step-lines.js';
 import { selectionLinesFrom } from './selection-lines-core.js';
 import { dataTablesOf } from './data-tables-core.js';
+import { restoredStatuses } from './run-state-core.js';
 
 /**
  * What the gutter says about one step line.
@@ -28,7 +29,6 @@ import { dataTablesOf } from './data-tables-core.js';
 export type LineStatus =
   | 'running'
   | 'pass'
-  | 'pass-cached'
   | 'pass-code-behind'
   | 'pass-stale'
   | 'fail'
@@ -38,7 +38,7 @@ export type LineStatus =
 
 /**
  * Run statuses + errors are persisted to a `.testbench/run-state.json` file
- * at the workspace-folder root so the gutter ✓/✗/⚡ marks survive closing the
+ * at the workspace-folder root so the gutter ✓/✗ marks survive closing the
  * `.md`, restarting VS Code, AND being zipped/copied to another machine.
  * Entries are keyed by the file's path RELATIVE to the workspace folder
  * (forward-slashed) so they still match after the project moves to a
@@ -806,10 +806,10 @@ export class ActiveFileTracker {
         // `LineStatus`, which is what makes the union safe to widen: a file written
         // before `fail-tolerated` has no entry carrying it, and one written after is
         // readable by an older build too (which paints nothing for a status it does
-        // not know). Only `running` is dropped — no run is in flight after a reload.
-        const statuses = new Map<number, LineStatus>(
-          persisted.statuses.filter(([, s]) => s !== 'running'),
-        );
+        // not know). `running` is dropped — no run is in flight after a reload — and
+        // a status this build retired (the step cache's `pass-cached`) is mapped to
+        // what it reads as now; `restoredStatuses` (run-state-core.ts) owns both.
+        const statuses = new Map<number, LineStatus>(restoredStatuses(persisted.statuses));
         const errors = new Map<number, ErrorPayload>(persisted.errors);
         const failures = new Map<number, StepFailureDetail>(persisted.failures ?? []);
         if (statuses.size === 0 && errors.size === 0) continue;

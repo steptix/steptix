@@ -252,12 +252,6 @@ export interface StreamStepsRequest {
     serverFileLogLevel?: LogFileMode;
   };
   /**
-   * Step-cache control. Opt-in: the server only caches when this is
-   * explicitly `true` (and a `testFilePath` is present). Absent
-   * (`undefined`) or `false` means every step goes through the AI.
-   */
-  cacheEnabled?: boolean;
-  /**
    * Which data row of a data-driven run this batch is, 1-based
    * (stories/data-driven-rows.md, part A). The client owns the loop; the
    * server owns the report.
@@ -276,10 +270,13 @@ export interface StreamStepsRequest {
    */
   dataRowValues?: Record<string, string>;
   /**
-   * Full post-expansion step list for the test. Required for multi-batch
-   * runs (breakpoint pause + Continue) so the server's cache-bundle hash
-   * stays stable across batches. Single-batch runs can omit it; the
-   * server falls back to hashing `steps` directly.
+   * Full post-expansion step list for the test. A multi-batch run
+   * (breakpoint pause + Continue, an `[input:]` split, a subset run) sends
+   * only a slice in `steps`, and the server still needs the whole document:
+   * `runStart` resolves the surface the run starts on from it, dead-section
+   * liveness scans it rather than the slice, and comparing it with `steps`
+   * is how the server tells a subset batch from a full-document one.
+   * Single-batch runs can omit it; the server falls back to `steps`.
    */
   fullSteps?: string[];
   /**
@@ -287,8 +284,7 @@ export interface StreamStepsRequest {
    * after Stop"). `startAt` skips every expanded step before the first in file
    * `startAt.uri` at/after `startAt.line`; `endAt` stops after the last step in
    * `endAt.uri` at/before `endAt.line` (omit ⇒ run to the end of the skill body).
-   * Both are qualified by `uri` so a recurring line can't false-match. Sending
-   * `startAt` forces the per-step cache off server-side.
+   * Both are qualified by `uri` so a recurring line can't false-match.
    */
   startAt?: { uri: string; line: number };
   endAt?: { uri: string; line: number };

@@ -211,8 +211,8 @@ server is yours, started from a checkout this runner should not compile.
 ```powershell
 npm run test:live -- --shards=6        # a bigger box
 npm run test:live -- --shards=1        # serial: one VS Code, one launch
-npm run test:live -- --files=cache-replay.test.cjs,sections.test.cjs
-$env:TESTBENCH_LIVE_GREP = "step cache replay"   # mocha --grep, as before
+npm run test:live -- --files=data-rows.test.cjs,sections.test.cjs
+$env:TESTBENCH_LIVE_GREP = "inline sections"   # mocha --grep, as before
 ```
 
 Measured on this machine (12 cores, 32 GB): 17 files, 1881 s of serial work,
@@ -237,8 +237,7 @@ Three things are per shard, and each one is load-bearing rather than tidy:
 
 - **Workspace.** Five compile suites `rmSync` the *same*
   `templates/init/tests/.aiui-codebehind-cache`, two of them compile the same
-  `compile-codebehind.md`, `cache-replay` wipes the project-wide
-  `templates/init/.cache`, and `templates/.env` sets
+  `compile-codebehind.md`, and `templates/.env` sets
   `APPEND_RUN_HISTORY_TO_TEST_FILE`, which rewrites the fixture `.md` a run
   just used. Grouping those conflicts onto one worker would put the five
   slowest suites back in a queue. So each worker copies `templates/` to

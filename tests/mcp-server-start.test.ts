@@ -125,7 +125,6 @@ function makeProject(overrides: Record<string, unknown> = {}): any {
     apiKey: 'project-key',
     skillsDir: null,
     toolsDir: null,
-    cacheEnabled: false,
     envFilesConsulted: [path.join(root, '.env')],
     ...overrides,
   };

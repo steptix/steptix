@@ -574,7 +574,7 @@ export class ErrandRunner {
    *
    * The session loop's core, minus everything that is session state: no skill
    * or section expansion, no frames, no conditional-group lookahead, no
-   * breakpoints or step-mode pauses, no per-step cache, no video, no report.
+   * breakpoints or step-mode pauses, no video, no report.
    * What is left is what an errand is for — plain steps, waits, assertions and
    * captures, through the same `executeStep` and the same AI resolution.
    */
@@ -632,9 +632,6 @@ export class ErrandRunner {
      * one here it asked the model twice. A *second* errand starts with an
      * empty memo, as it starts with an empty scope — it may be pointed at a
      * different page entirely.
-     *
-     * There is no step cache to pair it with: an errand has no file and no
-     * step lines, so the memo is the only layer it has.
      */
     const structureMemo = createStructureMemo();
 

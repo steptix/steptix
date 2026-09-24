@@ -58,11 +58,11 @@
     // §7.10: the validated structure, when this read is replaying one. Absent
     // on an ordinary read, which searches for the table itself.
     mapping,
-    // Where that mapping came from — `model`, `memo` or `cache` — so the one
-    // summary line §7.6 writes can say it. The extractor cannot know: a
-    // mapping the model answered a moment ago and one read back off disk are
+    // Where that mapping came from — `model` or `memo` — so the one summary
+    // line §7.6 writes can say it. The extractor cannot know: a mapping the
+    // model answered a moment ago and one remembered from an earlier step are
     // the same object by the time they get here, and "structure from the
-    // model" printed over a cached replay is a line that says a model call
+    // model" printed over a reused mapping is a line that says a model call
     // happened when none did.
     structureSource,
     // §7.6's secret set, for the sketch's cell text ONLY. The sketch is the
@@ -70,7 +70,7 @@
     // goes to a model and to the debug log.
     maskValues,
     // Build the sketch and answer with it, reading nothing. What
-    // `sketchTable()` calls for the re-ask path (§7.10's "asked once more").
+    // `sketchTable()` calls.
     sketchOnly,
   } = args;
 
@@ -2102,7 +2102,7 @@
     // columns, and the two line up. All of it is deterministic — the model
     // said where to look, never what is there — so a mapping that has stopped
     // fitting the page fails with a sentence about the page rather than
-    // reading the wrong columns (§7.10, "a cached mapping no longer fits").
+    // reading the wrong columns (§7.10).
     //
     // `bodyRowsOf` for a table, NOT `classify`: §7.3's header search must not
     // run here at all. A §5.9.1 table's headings are in its first body row,

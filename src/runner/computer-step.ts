@@ -6,8 +6,8 @@
  * SEPARATE function rather than a branch inside it. The two loops share a
  * shape — capture, prompt, parse, act, settle, capture — and share nothing
  * else: there is no DOM to snapshot, no selector to resolve, no page to
- * settle, no step cache to read (§5.5: a cached coordinate has nothing to
- * validate against and would replay blind), and the action vocabulary is a
+ * settle, nothing recorded to replay (§5.5: a recorded coordinate has nothing
+ * to validate against and would replay blind), and the action vocabulary is a
  * different union. A branch inside `executeStepAttempt` would have had to
  * guard every one of its ~1400 lines.
  *

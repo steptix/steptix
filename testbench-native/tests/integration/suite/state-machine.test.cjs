@@ -123,43 +123,18 @@ describe('TestBench debug state machine', function () {
     assert.equal(hooks.tracker.snapshot().breakpointStop, null);
   });
 
-  it('step:pass with fromCache: true paints pass-cached status (⚡ glyph), not the standard pass', async () => {
-    // The server-side StepCache wiring tags step:pass events with
-    // fromCache: true when the AI plan replayed from cache. The client
-    // must translate that into a distinct LineStatus ('pass-cached') so
-    // the gutter painter can render ⚡ instead of ✓. Without this, every
-    // cache hit would look identical to a fresh AI run.
+  it('step:pass from an older server tagged fromCache: true still paints a plain pass', async () => {
+    // A server from before the step cache was removed tags a replayed step
+    // `fromCache: true`. The server ships by restart and the extension by
+    // install, so the two can be out of step for a while. The field must be
+    // ignored: the step passed, and a status the gutter no longer has an
+    // icon for would leave the line blank — a pass the run really had,
+    // painted as nothing.
     void vscode.commands.executeCommand('testbench-native.runSelected');
     await waitFor('stream active', () => fake.hasActiveStream);
 
     fake.push({ type: 'step:start', line: 9 });
     fake.push({ type: 'step:pass', line: 9, fromCache: true });
-    await waitFor('status pass-cached on line 9', () => {
-      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
-      return statuses[9] === 'pass-cached';
-    });
-
-    fake.end();
-    await waitFor('idle', () => !hooks.isRunning());
-
-    const finalStatuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
-    assert.equal(
-      finalStatuses[9],
-      'pass-cached',
-      'cached step must keep its pass-cached status after the run completes',
-    );
-  });
-
-  it('step:pass without fromCache uses standard pass status (backwards compatible)', async () => {
-    // Servers older than the cache rewiring don't emit fromCache. The
-    // client must treat absent fromCache exactly as fromCache: false —
-    // standard ✓ path. This guards against a future bug where an
-    // overzealous default flips legacy server responses to ⚡.
-    void vscode.commands.executeCommand('testbench-native.runSelected');
-    await waitFor('stream active', () => fake.hasActiveStream);
-
-    fake.push({ type: 'step:start', line: 9 });
-    fake.push({ type: 'step:pass', line: 9 }); // no fromCache field
     await waitFor('status pass on line 9', () => {
       const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
       return statuses[9] === 'pass';
@@ -169,7 +144,7 @@ describe('TestBench debug state machine', function () {
     await waitFor('idle', () => !hooks.isRunning());
 
     const finalStatuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
-    assert.equal(finalStatuses[9], 'pass', 'plain pass step must stay as pass, not pass-cached');
+    assert.equal(finalStatuses[9], 'pass', "an old server's fromCache must not change the mark");
   });
 
   it('done event with reportPath updates lastReportPath on the controller', async () => {

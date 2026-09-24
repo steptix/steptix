@@ -794,8 +794,8 @@ export class LiveCompiler {
    * breakpoint drains its queue at the end of each block, so each block has its
    * own tail and its own forecast.
    *
-   * Silent when there is no tail to forecast — an all-cached run that enqueued
-   * nothing and owes no Review has nothing to wait for, and saying "0 entries
+   * Silent when there is no tail to forecast — a run that enqueued nothing
+   * and owes no Review has nothing to wait for, and saying "0 entries
    * still to generate" would be noise.
    *
    * A run stopped before its last step is the other wording: what is queued

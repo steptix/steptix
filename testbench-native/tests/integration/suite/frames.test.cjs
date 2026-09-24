@@ -879,117 +879,6 @@ describe('TestBench frame events (Phase 2)', function () {
     );
   });
 
-  // ── Step-cache opt-in (per-project aiui.config.json) ──────────────────
-  //
-  // The step cache is opt-in per project: the run sends `cacheEnabled: true`
-  // only when the test's nearest aiui.config.json declares
-  // `cache.enabled: true`. Each test writes its own aiui.config.json + test
-  // .md into a fresh temp dir *inside* the fixtures tree. The nearer config
-  // wins config resolution (so it overrides the repo-root config regardless
-  // of that file's `cache.enabled`), while staying inside the repo so the
-  // run's `.env` walk-up still finds SERVER_URL and the stream opens.
-
-  /**
-   * Create a temp project { aiui.config.json, test.md } under the fixtures
-   * dir, open the .md, select its single step line, run it, and return the
-   * request the fake captured. Cleans up the temp dir before returning.
-   */
-  async function runWithConfig(cacheBlock, perTestCache) {
-    const fs = require('node:fs');
-    const dir = fs.mkdtempSync(path.join(FIXTURES_DIR, 'tb-cache-'));
-    try {
-      fs.writeFileSync(
-        path.join(dir, 'aiui.config.json'),
-        JSON.stringify(cacheBlock === undefined ? {} : { cache: cacheBlock }),
-      );
-      const mdPath = path.join(dir, 'cache-test.md');
-      // A per-test `## Config: cache:` block (when provided) goes BEFORE the
-      // steps — the conventional order. The step line is located dynamically
-      // below so the selection survives that shift.
-      const mdLines = ['# Cache test', ''];
-      if (perTestCache !== undefined) mdLines.push('## Config', `- cache: ${perTestCache}`, '');
-      mdLines.push('## Steps', '1. do a thing', '');
-      fs.writeFileSync(mdPath, mdLines.join('\n'));
-
-      const uri = vscode.Uri.file(mdPath);
-      await vscode.commands.executeCommand('vscode.open', uri);
-      await waitFor('temp fixture editor active', () => {
-        const ed = vscode.window.activeTextEditor;
-        return ed && ed.document.uri.toString() === uri.toString();
-      });
-      // Select the step line (0-based index of the "1. ..." line) so
-      // runSelected scopes to it, regardless of the Config block above.
-      const stepLine = mdLines.findIndex((l) => /^\d+\.\s/.test(l));
-      vscode.window.activeTextEditor.selection = new vscode.Selection(
-        new vscode.Position(stepLine, 0),
-        new vscode.Position(stepLine, 5),
-      );
-      await waitFor('temp file detected as test file', () => hooks.tracker.snapshot().isTestFile === true);
-
-      void vscode.commands.executeCommand('testbench-native.runSelected');
-      await waitFor('stream active', () => fake.hasActiveStream);
-      const request = fake.requests[0];
-
-      fake.end();
-      await waitFor('idle after stream ends', () => !hooks.isRunning());
-      return request;
-    } finally {
-      // Close the editor first so Windows releases its handle on the temp
-      // .md, then remove the dir with a short retry — rmSync can race a
-      // not-yet-released file lock (ENOTEMPTY/EBUSY/EPERM) on Windows.
-      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
-      const fsMod = require('node:fs');
-      for (let attempt = 0; ; attempt++) {
-        try {
-          fsMod.rmSync(dir, { recursive: true, force: true });
-          break;
-        } catch (err) {
-          if (attempt >= 10) throw err;
-          await sleep(50);
-        }
-      }
-    }
-  }
-
-  it("sends cacheEnabled:true when the test's aiui.config.json sets cache.enabled true", async () => {
-    const request = await runWithConfig({ enabled: true });
-    assert.equal(request.cacheEnabled, true, 'cache.enabled:true must opt the run into caching');
-  });
-
-  it('omits cacheEnabled when cache.enabled is false (opt-in default: off)', async () => {
-    const request = await runWithConfig({ enabled: false });
-    assert.equal(
-      request.cacheEnabled,
-      undefined,
-      'an explicit cache.enabled:false must leave the flag off the request',
-    );
-  });
-
-  it('omits cacheEnabled when the config declares no cache block', async () => {
-    const request = await runWithConfig(undefined);
-    assert.equal(
-      request.cacheEnabled,
-      undefined,
-      'no cache block means no opt-in — the flag is omitted',
-    );
-  });
-
-  it('per-test "## Config: cache: on" overrides a project config that disables caching', async () => {
-    // Project says off; the test opts itself in. The per-test override wins.
-    const request = await runWithConfig({ enabled: false }, 'on');
-    assert.equal(request.cacheEnabled, true, '## Config cache:on must override cache.enabled:false');
-  });
-
-  it('per-test "## Config: cache: off" overrides a project config that enables caching', async () => {
-    // Project says on; the test opts itself out. The per-test override wins.
-    const request = await runWithConfig({ enabled: true }, 'off');
-    assert.equal(
-      request.cacheEnabled,
-      undefined,
-      '## Config cache:off must override cache.enabled:true (flag omitted)',
-    );
-  });
-
   // ── Resume position-anchor: second consumer (dispatchStep / Step Into) ──
   //
   // continueRun and dispatchStep share the identical `breakpointStop` filter,
@@ -1093,7 +982,6 @@ describe('TestBench frame events (Phase 2)', function () {
     assert.equal(req.seedScope.query, 'cats', 'seeds the captured value');
     assert.equal(req.seedScope.first_result_url, 'http://edited', 'applies the user edit');
     assert.ok(!('__skill1_tmp' in req.seedScope), '__skill* internals are never seeded');
-    assert.notEqual(req.cacheEnabled, true, 'a seeded re-run must not enable the cache');
     assert.ok(fake.isSessionAliveCalls.length >= 1, 'must probe session liveness first');
 
     await waitFor('idle after re-run', () => !hooks.isRunning());

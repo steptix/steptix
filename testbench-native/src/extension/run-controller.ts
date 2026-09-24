@@ -268,9 +268,7 @@ export function compileLogLine(event: CompileEvent): string | null {
           ? ` ⚠ under AI — code-behind failed: ${inner.codeBehindStale.error}`
           : inner.fromCodeBehind
             ? ' (code-behind)'
-            : inner.fromCache
-              ? ' (cached)'
-              : '';
+            : '';
         return `  ${' '.repeat(11)} ✓ step on line ${inner.line}${how}`;
       }
       if (inner.type === 'step:fail') {
@@ -2323,8 +2321,7 @@ export class RunController {
        *  `rerunSkillStepFromFailure`). When set, the single step in `lines` is
        *  the failed `[skill: …]` invocation; the server re-expands it, starts
        *  at `startAt` (the failed body step), and seeds `seedScope` into the
-       *  run. Triggers a server liveness pre-flight and forces the per-step
-       *  cache off for this run. */
+       *  run. Triggers a server liveness pre-flight. */
       rerun?: {
         startAt: { uri: string; line: number };
         /** Upper bound for a bounded re-run ("run selected skill steps on a
@@ -3378,7 +3375,6 @@ export class RunController {
             params,
             sessionConfig,
             logging,
-            cacheOverride: rawConfig['cache'],
             ...(row !== null && {
               dataRow: { row: rowNumber, count: rowCount, values: row },
             }),
@@ -4774,10 +4770,6 @@ export class RunController {
     logging?: LoggingOverride;
     signal: AbortSignal;
     log: (line: string) => void;
-    /** Raw per-test `## Config: cache:` value (e.g. "on" / "off"), if the
-     *  test declared one. Overrides the project's aiui.config.json
-     *  `cache.enabled` for this run; see `resolveCacheOverride`. */
-    cacheOverride?: string;
     /** Which data row this batch runs, when the test has a data table. The
      *  server accumulates such a batch instead of writing it a report. */
     dataRow?: { row: number; count: number; values: Record<string, string> };
@@ -4794,10 +4786,7 @@ export class RunController {
      *  (stories/codebehind-debugging.md). */
     pauseAtNextCodeBehind?: boolean;
     /** "Re-run a skill step with its variables": start the (re-expanded)
-     *  invocation partway in at `startAt` and seed `seedScope` before running.
-     *  Forces the per-step cache off for this request (the server also does,
-     *  defensively) so an edited value re-plans instead of replaying a frozen
-     *  cached action list. */
+     *  invocation partway in at `startAt` and seed `seedScope` before running. */
     rerun?: {
       startAt: { uri: string; line: number };
       endAt?: { uri: string; line: number };
@@ -4829,17 +4818,18 @@ export class RunController {
      *  is on (SPEC-use-computer.md §4.5). */
     runStart?: boolean;
   }): Promise<boolean> {
-    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, cacheOverride, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, withinCompileRun, suppressServerBreakpoints, runStart } = args;
+    const { block, client, sessionId, env, envName, params, sessionConfig, logging, signal, log, dataRow, stepMode, pauseAtNextTool, pauseAtNextCodeBehind, rerun, compile, compileContinues, compileScope, withinCompileRun, suppressServerBreakpoints, runStart } = args;
     const includeConfig = !this.configSentForSession;
     const stepInstructions = block.map((b) => (b.kind === 'step' ? b.instruction : ''));
     const stepLines = block.map((b) => b.line);
-    // Full step list (live document buffer) for cache-hash stability across
-    // multi-batch runs. When the user pauses at a breakpoint and resumes,
-    // batch 1 has steps 1..N-1 and batch 2 has steps N..end. The server
-    // hashes `fullSteps` to keep the cache identity stable across both.
-    // We use the live buffer (not disk) so unsaved edits invalidate cache
-    // correctly — otherwise an edit-but-don't-save followed by Continue
-    // would replay a stale plan.
+    // Full step list (live document buffer). A run split into batches — a
+    // breakpoint pause and Continue, an `[input:]` split, a subset run —
+    // sends only this batch's slice in `steps`, but the server still needs
+    // the whole document: `runStart` resolves the surface the run starts on
+    // from it, dead-section liveness scans it rather than the slice, and
+    // comparing it with `steps` is how the server tells a subset batch from
+    // a full-document one. The live buffer (not disk), so the server sees
+    // the same text this batch's `steps` were extracted from.
     const fullStepInstructions = extractSteps(this.document.getText())
       .map((s) => s.instruction);
 
@@ -4847,8 +4837,8 @@ export class RunController {
     // request — initial runs, breakpoint continuations and partial re-runs
     // alike. The server holds no cross-batch document state, so a
     // continuation that omitted these would expand differently from the
-    // batch before it and hash differently too. Same reason `fullSteps` is
-    // re-sent, and same reason it reads the buffer rather than disk.
+    // batch before it. Same reason `fullSteps` is re-sent, and same reason
+    // it reads the buffer rather than disk.
     // …which is exactly why a BODY narrowing has to be re-checked here.
     // `runSteps` is a list of positions, and the buffer this rebuild reads may
     // have been edited since the run decided them. Refused, not repaired:
@@ -4880,11 +4870,6 @@ export class RunController {
     const projectDirs = resolveProjectDirs(this.document.uri);
     const skillsDir = projectDirs?.skillsDir ?? null;
     const toolsDir = projectDirs?.toolsDir ?? null;
-    // Step cache is opt-in. Baseline is the project's nearest aiui.config.json
-    // `cache.enabled`; a per-test `## Config: cache: on|off` overrides it for
-    // this run. No config + no override leaves it off (flag omitted; server
-    // defaults off).
-    const cacheEnabled = resolveCacheOverride(cacheOverride, projectDirs?.cacheEnabled === true);
     const testFilePath = this.document.uri.fsPath;
     // The test's frontmatter dataSources (name → path) so the server can
     // resolve `${<name>.X}` test-level named sources on its side too.
@@ -4910,13 +4895,6 @@ export class RunController {
         // several server gates would read it as "this run has sections",
         // moving every sectionless run onto the expansion path.
         ...(sections && { sections }),
-        // A re-run forces the cache off (see `rerun` doc) so an edited value
-        // re-plans rather than replaying a frozen cached action list. So does
-        // a data-driven row: the cache is keyed per step line and rewrites
-        // only an action's `value`, so an assertion whose expectation came
-        // from a row would replay row 1's on every row
-        // (stories/data-driven-rows.md, decision 8).
-        ...(cacheEnabled && !rerun && dataRow === undefined && { cacheEnabled: true }),
         // A batch carrying `dataRow` writes no report: its results join the
         // server's row accumulator, and `finalizeRowReport` renders the one
         // report when the loop ends.
@@ -4959,7 +4937,6 @@ export class RunController {
     );
 
     let sawFail = false;
-    let cachedCount = 0;
     let codeBehindCount = 0;
     let staleCount = 0;
     /** Server-attributed cost of the steps that healed; 0 when unattributed. */
@@ -5051,8 +5028,8 @@ export class RunController {
         continue;
       }
       // How the step passed — the textual half of what the gutter glyphs say.
-      // ⚡ replayed a recorded transcript, </> ran compiled code, ⚠ healed under
-      // AI because the compiled entry threw.
+      // </> ran compiled code, ⚠ healed under AI because the compiled entry
+      // threw.
       if (event.type === 'step:pass') {
         // A step the run decided not to take rides the pass event (the older
         // of the two skip conventions) but did not run, so the log says so
@@ -5082,9 +5059,6 @@ export class RunController {
           } else if (event.fromCodeBehind) {
             codeBehindCount += 1;
             log(`✓ step ${event.line} passed (code-behind)`);
-          } else if (event.fromCache) {
-            cachedCount += 1;
-            log(`✓ step ${event.line} passed (cached)`);
           } else {
             log(`✓ step ${event.line} passed`);
           }
@@ -5167,7 +5141,6 @@ export class RunController {
           passed: passCount,
           skipped: skipCount,
           tolerated: toleratedCount,
-          cached: cachedCount,
           codeBehind: codeBehindCount,
           stale: staleCount,
         }),
@@ -5485,21 +5458,6 @@ function resolveLoggingOverride(
     out.serverFileLogLevel = fileRaw as LogFileMode;
   }
   return (out.consoleLogLevel || out.serverFileLogLevel) ? out : undefined;
-}
-
-/**
- * Resolve whether the step cache is on for this run. A per-test
- * `## Config: cache: <value>` wins when it parses to a clear boolean
- * (on/true/yes/enabled or off/false/no/disabled, case-insensitive); anything
- * else (absent, blank, unrecognized) falls back to the project's
- * aiui.config.json `cache.enabled` (`fallback`). Keeps the per-test escape
- * hatch decoupled from the project default in both directions.
- */
-function resolveCacheOverride(raw: string | undefined, fallback: boolean): boolean {
-  const v = (raw ?? '').trim().toLowerCase();
-  if (v === 'on' || v === 'true' || v === 'yes' || v === 'enabled') return true;
-  if (v === 'off' || v === 'false' || v === 'no' || v === 'disabled') return false;
-  return fallback;
 }
 
 // `rowValuesText` — the one masked `k=v, k=v` text every surface shows — now

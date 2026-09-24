@@ -254,10 +254,11 @@ export interface AIAction {
    *
    * A field the RUNTIME owns, not the model. The parser strips it from
    * anything the model emits — a mapping the runtime never validated would
-   * pin the read to whatever selectors a hallucination produced — the step
-   * cache stores it, and the report shows it. It is written only after a
-   * shape refusal, one structure question and a validation pass against the
-   * page, and a cached run applies it without asking anything.
+   * pin the read to whatever selectors a hallucination produced — and the
+   * report shows it. It is written only after a shape refusal, one structure
+   * question and a validation pass against the page; a later step of the same
+   * run reading the same region applies it without asking anything
+   * (src/runner/structure-memo.ts).
    */
   mapping?: TableReadMapping;
   /**
@@ -298,7 +299,7 @@ export interface AIAction {
   description: string;
   /**
    * For "assert" actions: bounded polling on the assertion JS code. When set,
-   * the framework re-evaluates the cached/generated code in a loop until
+   * the framework re-evaluates the generated code in a loop until
    * `pass: true` or the timeout is hit. Used for eventual-consistency cases
    * (e.g. "the toast eventually shows Saved") where no deterministic Playwright
    * wait primitive fits. Defaults: timeoutMs 5000, intervalMs 250.
@@ -352,8 +353,6 @@ export interface AssertionEvaluation {
   actual: string;
   /** Explanation of why the assertion passed or failed */
   explanation: string;
-  /** Whether this result was served from the assertion code cache (no AI call made) */
-  fromCache?: boolean | undefined;
 }
 
 /** A single content block in a multimodal message */

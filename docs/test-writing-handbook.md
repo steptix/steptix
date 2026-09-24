@@ -62,8 +62,9 @@ capped at 15 turns.
 A failed action is retried once, and the retry prompt says which selector
 failed, how many elements it matched, and why. A `Verify` or `Assert` step is
 turned into a JavaScript check that runs in the page (or a pure value
-comparison when no page is involved), the check is cached for the next run,
-and the step fails when it returns false.
+comparison when no page is involved), and the step fails when it returns
+false. The check is generated afresh on every run unless the step has been
+compiled to code-behind (§10).
 
 Six consequences for how you write:
 
@@ -176,7 +177,6 @@ YAML number is dropped without a warning.
 | `consoleLogLevel` | `silent` … `debug` | Console verbosity for the run. |
 | `serverFileLogLevel` | `off`, `compact`, `full` | Server-side log file detail. |
 | `unmask` | comma-separated names | Stop masking a value whose name merely looks secret. |
-| `cache` | `on` / `off` | Per-test action-cache switch on the TestBench and MCP paths. |
 
 Unrecognised keys are stored and never read, with no warning. A `## Config`
 key is not a test variable; declare inputs under `## Parameters`.
@@ -308,9 +308,9 @@ with `[use ai]` and the model produces it.
 The step's text, placeholders filled in, goes to the model **on its own**.
 Four things follow, and each is on purpose:
 
-- **The model is asked on every run.** A `[use ai]` step is never cached and
-  never compiled; a compiled test still makes one model call per `[use ai]`
-  step. For a value that must be the same every time, write a tool (§7).
+- **The model is asked on every run.** A `[use ai]` step is never compiled;
+  a compiled test still makes one model call per `[use ai]` step. For a value
+  that must be the same every time, write a tool (§7).
 - **It sees only the step text** — no page, no earlier steps, no date. If
   "today" matters, put today in the step, from a parameter or a tool's output.
   Asked for "3 days from today" with no date given, the model is told to fail
@@ -344,8 +344,9 @@ Any step whose intent is to check something becomes an assertion: `Verify`,
 `Assert that`, `Check that it says`, `Confirm the page has finished loading`.
 The model generates a JavaScript check against the DOM (or against earlier API
 responses, or a pure comparison of values), the framework runs it, and a false
-result fails the step. The generated check is cached, so re-running an unchanged
-assertion skips the code-generation call.
+result fails the step. The check is generated on every run, so each assertion
+costs a code-generation call until the test is compiled (§10); a compiled
+assertion carries its check as code and asks nothing.
 
 Shapes that are known to pass and, with a wrong expectation, known to fail:
 
@@ -1128,7 +1129,7 @@ header, and a filter that hides rows does not renumber it — so
 the runtime joins the two halves back into one record by their shared row
 index. `table-aria-grid.md` is the worked example of both.
 
-**When the shape defeats the rules, the model is asked once.** There is a long
+**When the shape defeats the rules, the model is asked once per run.** There is a long
 tail no structural rule reads: headings written as `<td>` in the first body
 row, a header table sitting *after* its rows, a list of repeated cards with no
 rows or cells anywhere, one small key/value table per record. When a read fails
@@ -1136,17 +1137,18 @@ for a **shape** reason — no table or grid with rows under the selector, two or
 more, or column names requested with no header found — the runtime shows the
 model a sketch of that region, asks one question about how it is laid out,
 validates the answer against the live page, and then reads deterministically.
-You write the ordinary sentence and it works; what it costs is one model call,
-once. Once means once: a structure is asked about at most once per run per
+You write the ordinary sentence and it works; what it costs is one model call
+per run. A structure is asked about at most once per run per
 table-and-columns, so a later step reading the same thing reuses the answer
-(`readTable: structure reused from step 2` in the log), and the answer is
-written onto the cached step as well, so later runs of the file ask nothing at
-all. In the run log the question is the line
+(`readTable: structure reused from step 2` in the log). The answer is not kept
+between runs: the next run of the file asks once again, and compiling the test
+does not change that, because a table read is not compiled to code-behind. In
+the run log the question is the line
 `readTable: structure asked of the model — …`, with the sketch and the answer
 beside it at debug level, and its absence on a repeat read is how you check the
-remembering is doing its job. Nothing is taken on trust either way: a
-remembered or cached mapping is checked against the live page before a cell is
-read, and a page that has changed falls back to asking again. Two things it deliberately is not: it is never asked
+remembering is doing its job. Nothing is taken on trust: a remembered mapping
+is checked against the live page before a cell is read, and a page that has
+changed falls back to asking again. Two things it deliberately is not: it is never asked
 about *your* mistakes — a header you spelled wrong, a short row, a selector
 matching several tables keep the refusals below — and it can be turned off
 entirely with `tableStructure: strict` in the `## Config` block (or
@@ -1352,10 +1354,10 @@ entirely. The same switch covers the MCP server: by default a failed
 computer-mode step hands the agent a screenshot of the whole desktop, and with
 the switch off it hands back none.
 
-**Two things computer-mode steps do not get.** They are never replayed from
-the step cache and never compiled to code-behind: a cached selector is
-re-validated against a DOM at replay, and a recorded coordinate has nothing to
-validate against — it would replay blind on a machine whose resolution,
+**What computer-mode steps do not get.** They are never compiled to
+code-behind: a compiled selector is checked against the live DOM when it
+replays, and a recorded coordinate has nothing to validate against — it would
+replay blind on a machine whose resolution,
 scaling or window layout has moved. A compiled step that ran in computer mode
 stays AI-driven, and the compile report says so.
 

@@ -75,7 +75,6 @@ type Classification =
   | 'definition';
 
 const INVENTORY: Record<string, { why: Classification; calls: number }> = {
-  'src/cache/step-cache.ts': { why: 'not-step-text', calls: 2 },
   'src/codebehind/execute.ts': { why: 'not-step-text', calls: 2 },
   'src/codebehind/generate.ts': { why: 'not-step-text', calls: 2 },
   'src/mcp/assemble.ts': { why: 'not-step-text', calls: 1 },
@@ -108,14 +107,15 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   // makes adding an eighth trip this test.
   'src/parser/markdown.ts': { why: 'step-text/guarded', calls: 8 },
   'src/parser/parameters.ts': { why: 'definition', calls: 1 },
-  // Six: `substituteText`, `substituteAction` and `substituteAsLiterals`
-  // themselves, and the calls the last three make on the first two.
+  // Five: `substituteText`, `substituteAction` and `substituteAsLiterals`
+  // themselves, and the calls `substituteAction` and `resolveSetTemplate`
+  // make on `substituteText`.
   // `resolveUseAiText` substitutes too, through its own `.replace` over the
   // same grammar — which this detector does not count, so it is named here
   // instead: it builds the MASKED text a `[use ai]` step sends to the model,
   // from a line `parseUseAiStep` has already read, and nothing it returns is
   // ever handed to `parseSetStep` (stories/use-ai-step.md, decision 4).
-  'src/runner/placeholder-substitution.ts': { why: 'definition', calls: 6 },
+  'src/runner/placeholder-substitution.ts': { why: 'definition', calls: 5 },
   // The `[use ai]` runner. One call, and it substitutes the `… otherwise …`
   // tail's MESSAGE — the author's warning or error text, resolved for the
   // report — never step text: the step itself was read by `parseUseAiStep`
@@ -134,7 +134,7 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   'src/runner/computer-step.ts': { why: 'not-step-text', calls: 1 },
   'src/runner/test-runner.ts': { why: 'step-text/authored', calls: 3 },
   'src/server/errand-runner.ts': { why: 'step-text/authored', calls: 2 },
-  'src/server/session-manager.ts': { why: 'step-text/authored', calls: 5 },
+  'src/server/session-manager.ts': { why: 'step-text/authored', calls: 4 },
   'src/skills/expander.ts': { why: 'step-text/guarded', calls: 4 },
   'src/tools/executor.ts': { why: 'not-step-text', calls: 1 },
   // The Electron loop. Absent from the first version of this table, which is

@@ -112,7 +112,7 @@ export function countStepLineStatuses(statuses, stepLineIds) {
   return {
     // Every 'pass*' is a passed step; what differs is what it cost, which is
     // what the breakdown beside it says.
-    pass: count("pass", "pass-cached", "pass-code-behind", "pass-stale"),
+    pass: count("pass", "pass-code-behind", "pass-stale"),
     codeBehind: count("pass-code-behind"),
     stale: count("pass-stale"),
     fail: count("fail"),

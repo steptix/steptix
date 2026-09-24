@@ -25,9 +25,8 @@ import { logger } from '../utils/logger.js';
  *
  * What it deliberately does not have, and why each absence is the feature:
  *
- *  - **No cache and no code-behind.** It is dispatched where `Set` is, before
- *    `executeStep`, which is the only reader and writer of the step cache and
- *    the only thing that runs a `.steps.ts` entry. The model answers on every
+ *  - **No code-behind.** It is dispatched where `Set` is, before
+ *    `executeStep`, which is the only thing that runs a `.steps.ts` entry. The model answers on every
  *    run; an author who wants the same value every time writes a `[tool:]`.
  *  - **No page, and no import of the executor.** Nothing here can reach a
  *    browser, and the computer lock is never taken for it (`stepReadsScreen`

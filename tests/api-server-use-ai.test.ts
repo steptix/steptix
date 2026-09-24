@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { Express } from 'express';
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Config } from '../src/config/types.js';
@@ -9,15 +9,15 @@ import type { AIAction, ChatMessage } from '../src/ai/types.js';
 
 /**
  * `[use ai] <step>` through the real Sessions API entry
- * (stories/use-ai-step.md §Tests, "Per loop" and "Cache and compile").
+ * (stories/use-ai-step.md §Tests, "Per loop" and the code-behind half of
+ * "Cache and compile").
  *
  * The executor is REAL, as in `api-server-values-block.test.ts`, and only its
  * edges are stubbed — no browser, no network, a scripted AI client that
- * records what it was sent. That is what lets three claims be made here that a
+ * records what it was sent. That is what lets two claims be made here that a
  * mocked executor could not: the page step after a `[use ai]` step types the
- * generated value; the step cache, turned on, is written for the page step and
- * never for the `[use ai]` one; and a hand-written `.steps.ts` entry whose
- * source IS the `[use ai]` step's text is never run.
+ * generated value; and a hand-written `.steps.ts` entry whose source IS the
+ * `[use ai]` step's text is never run.
  */
 
 const ai = vi.hoisted(() => ({ requests: [] as ChatMessage[][], responses: [] as string[] }));
@@ -170,7 +170,6 @@ function testConfig(): Config {
     },
     api: { specsDir: './specs', requestTimeout: 30_000, redactSensitive: true },
     server: { host: '127.0.0.1', port: 0, apiKey: API_KEY },
-    cache: { enabled: false, dir: '.cache' },
     logging: { consoleLogLevel: 'silent', serverFileLogLevel: 'off' },
   } as unknown as Config;
 }
@@ -223,20 +222,8 @@ async function streamed(route: string, body: unknown): Promise<Array<{ event: st
   return events;
 }
 
-/** Every file under `dir` whose name matches. */
-function filesUnder(dir: string, match: RegExp): string[] {
-  if (!existsSync(dir)) return [];
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = path.join(dir, entry);
-    if (statSync(full).isDirectory()) out.push(...filesUnder(full, match));
-    else if (match.test(entry)) out.push(entry);
-  }
-  return out;
-}
-
 /** A fresh test file (and optional code-behind) in its own folder, so one
- *  case's cache or entries can never answer another's. */
+ *  case's code-behind entries can never answer another's. */
 function testFile(name: string, stepsTs?: string): string {
   const folder = path.join(projectRoot, 'tests', name);
   mkdirSync(folder, { recursive: true });
@@ -317,30 +304,6 @@ describe('[use ai] through the real Sessions API entry', () => {
     expect(run.body.results[0].actions).toEqual([]);
 
     await api('DELETE', '/sessions/use-ai-json');
-  });
-
-  it('with the step cache on, writes an entry for the page step and none for the [use ai] step — and asks again next run', async () => {
-    const file = testFile('cached');
-    for (const value of ['AUTO1111', 'AUTO2222']) {
-      ai.responses = [`{"as": "random_name", "value": "${value}"}`, TYPE_ACTION];
-      const run = await api('POST', `/sessions/use-ai-cache-${value}/steps`, {
-        steps: [GENERATE, TYPE_IT],
-        sourceLines: [4, 5],
-        testFilePath: file,
-        cacheEnabled: true,
-      });
-      expect(run.body.status).toBe('passed');
-      expect(run.body.outputs).toMatchObject({ random_name: value });
-      await api('DELETE', `/sessions/use-ai-cache-${value}`);
-    }
-    // Asked on BOTH runs. The page step's second run was a cache hit, so the
-    // only model calls it made were on the first run.
-    const useAiCalls = ai.requests.filter((r) => r.length === 2 && r[1]!.content === GENERATE.replace('[use ai] ', ''));
-    expect(useAiCalls).toHaveLength(2);
-    // The positive control is what makes the absence mean something.
-    const cacheFiles = filesUnder(path.join(projectRoot, '.cache'), /^step-.*\.json$/);
-    expect(cacheFiles).toContain('step-5.json');
-    expect(cacheFiles).not.toContain('step-4.json');
   });
 
   it('never runs a hand-written .steps.ts entry for the [use ai] step\'s text', async () => {

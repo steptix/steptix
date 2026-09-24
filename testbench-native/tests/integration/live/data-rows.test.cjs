@@ -448,7 +448,7 @@ describe('TestBench live — a run-level data table', function () {
     const stepMark = statusesOn(hooks, uri, [MATRIX_STEPS[1]])[0];
     say(`step 2 mark: ${stepMark}`);
     assert.ok(
-      stepMark === 'pass' || stepMark === 'fail' || stepMark === 'pass-cached',
+      stepMark === 'pass' || stepMark === 'fail',
       `step 2 must have run and ended; got ${stepMark}`,
     );
 
@@ -554,7 +554,7 @@ describe('TestBench live — a section-level data table', function () {
     assert.equal(tableSummary(hooks, uri), '3 rows · 3 passed');
     // Step 6 counts the rows the loop left behind: three files, three rows.
     assert.ok(
-      stepMarks[5] === 'pass' || stepMarks[5] === 'pass-cached',
+      stepMarks[5] === 'pass',
       `step 6 must pass on a full loop; got ${stepMarks[5]}`,
     );
 
@@ -732,9 +732,9 @@ describe('TestBench live — a selection narrows a section\'s body', function ()
       `Log In lines:\n${tap.output.filter((l) => l.startsWith('Log In —')).join('\n')}`,
     );
 
-    // The three main-flow steps ran, the call among them. `pass-cached` and
-    // `pass-code-behind` are how a step passed, not whether — the live suite
-    // shares one workspace and one cache dir with everything else in it.
+    // The three main-flow steps ran, the call among them. `pass-code-behind`
+    // and `pass-stale` are how a step passed, not whether — the live suite
+    // shares one workspace with everything else in it.
     for (const [i, mark] of stepMarks.entries()) {
       assert.ok(
         typeof mark === 'string' && mark.startsWith('pass'),

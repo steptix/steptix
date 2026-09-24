@@ -18,12 +18,6 @@ export interface ProjectDirs {
   /** Raw `tests.dataDir` string (relative to the config dir, or absolute), or
    *  null if undeclared. The caller applies the `data` default. */
   dataDir: string | null;
-  /**
-   * Whether the step cache is opted in via `cache.enabled === true` in the
-   * config. Defaults false — absent config, a missing `cache` block, or any
-   * non-`true` value leaves the cache off (the run sends no `cacheEnabled`).
-   */
-  cacheEnabled: boolean;
 }
 
 const CONFIG_FILENAMES = ['aiui.config.json'];

@@ -111,7 +111,7 @@ So: **no server work.** Both gaps are runner-core + testbench-native.
   [issues/036](../../../issues/036-wrapped-main-flow-steps-truncated-on-the-testbench-path.md),
   not here.
 - **Restoring per-step cache hits on a section resume.** §7 explains the cost
-  we accept instead.
+  we accept instead. (The step cache this referred to was removed.)
 
 ## 4. Design — running a body step
 
@@ -227,7 +227,7 @@ frame in the Call Stack, and it costs more than that is worth:
   **both** invocations for a one-line range, so "run this one step" would run
   it twice;
 - `startAt` forces the per-step cache off for the whole request (§7), which
-  the detached path does not need.
+  the detached path does not need. (The step cache this referred to was removed.)
 
 The visible cost of going detached is that the Call Stack shows no section
 frame for such a run, and the Variables panel shows the test scope rather than
@@ -248,7 +248,9 @@ the method as it is. Specifically unchanged:
   *is* a root-frame step, so there is no double trigger;
 - `fullSteps`, which stays main-flow (`extractSteps`) so the cache bundle hash
   keeps its identity across every batch of the document. A detached run is
-  therefore a subset batch, which is what it is.
+  therefore a subset batch, which is what it is. (The step cache and its
+  bundle hash were removed; `fullSteps` still stays main-flow, and the server
+  still reads a detached run as a subset batch.)
 
 ### 4.4 TB025's new wording
 
@@ -476,7 +478,8 @@ cache hit would replay a frozen plan and ignore them. A Continue carries no
 edits, so the disable is stricter than necessary — but the alternative is a
 new "anchored but not edited" mode on a public field, for a run that is
 already the slow path by definition (something just failed). Revisit only if
-resume latency becomes a complaint.
+resume latency becomes a complaint. (The step cache this referred to was
+removed, so this cost no longer exists.)
 
 **A detached body run gets no section frame.** No Call Stack row, no
 `section:` heading in Variables. Nothing invoked the section, so inventing a
@@ -489,6 +492,7 @@ full run writes `f2-17`. They never collide, and they never share — a detached
 run cannot hit an entry a full run wrote, or vice versa. That is a miss, not a
 correctness problem, and it is the same shape as
 [issues/037](../../../issues/037-per-step-cache-key-shifts-between-full-and-subset-batches.md).
+(The step cache this referred to was removed, so this cost no longer exists.)
 
 ## 8. Testing
 

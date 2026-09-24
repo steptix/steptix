@@ -3,6 +3,8 @@ dist/
 dist-ui/
 reports/
 memory/
+# Written by the step cache, which was removed. Still ignored so a checkout
+# that has an old one never stages it — it is safe to delete.
 .cache/
 # Temp tool modules written by the server's hot-reload (issue 033). Created
 # inside the tools dir as a dot-dir; files are deleted right after import, so

@@ -67,12 +67,12 @@ test('one row is a row, not "1 rows"', () => {
 });
 
 test('a pass origin still counts as a pass', () => {
-  // A row should never wear `pass-cached` / `pass-code-behind` / `pass-stale`
+  // A row should never wear `pass-code-behind` / `pass-stale`
   // — they are step facts. Counting them anyway means a caller reading
   // straight off the tracker can never produce a summary that hides a pass.
   assert.equal(
-    rowHeaderSummary(['pass-cached', 'pass-code-behind', 'pass-stale']),
-    '3 rows · 3 passed',
+    rowHeaderSummary(['pass-code-behind', 'pass-stale']),
+    '2 rows · 2 passed',
   );
 });
 

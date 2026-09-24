@@ -5,7 +5,7 @@
  * 30).
  *
  * Nothing here calls a model. The question itself — the prompt, the answer,
- * the cache — is `tests/api-server-table-structure.test.ts`'s and
+ * the run's memo — is `tests/api-server-table-structure.test.ts`'s and
  * `tests/prompts-grid-structure.test.ts`'s; this file pins what the extractor
  * hands that machinery and what it does with the answer it gets back.
  *
@@ -483,15 +483,16 @@ describe('readTable — a { kind: "table" } mapping (§7.10)', () => {
 
   it('names the layer the structure came from, not always "the model"', async () => {
     // §7.6's line is the only place a reader can see whether a model call was
-    // spent. "structure from the model" over a cached replay says one was
-    // when none was, and a reader counting calls in the log counts wrong.
+    // spent. "structure from the model" over a mapping reused from an earlier
+    // step says one was when none was, and a reader counting calls in the log
+    // counts wrong.
     // "the run" rather than "the memo": a run log's reader has never heard of
     // a memo, and what the phrase has to say is that an earlier step paid.
     await load(TD_HEADED);
     const mapping: TableReadMapping = {
       kind: 'table', rows: ':scope', header: { selector: ':scope', bodyRow: 1 },
     };
-    for (const [source, word] of [['cache', 'the cache'], ['memo', 'the run']] as const) {
+    for (const [source, word] of [['model', 'the model'], ['memo', 'the run']] as const) {
       const result = await readTableRecords(page, {
         selector: '#orders', columns: NAME_AND_AMOUNT, mapping, structureSource: source,
       });

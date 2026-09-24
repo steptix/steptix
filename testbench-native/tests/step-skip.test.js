@@ -37,7 +37,7 @@ test('a skip paints over a blank line', () => {
 test('a skip paints over every flavour of pass', () => {
   // The second call of a twice-called section is exactly this: the body lines
   // passed on the first call, and the second call did not run them.
-  for (const status of ['pass', 'pass-cached', 'pass-code-behind', 'pass-stale']) {
+  for (const status of ['pass', 'pass-code-behind', 'pass-stale']) {
     assert.equal(skipPaintsOver(status), true, `${status} should be overwritten`);
   }
 });
@@ -230,19 +230,19 @@ test('a blank reason opens no hover box at all', () => {
 
 test('the run log tally counts a skipped step as skipped, not as a pass', () => {
   assert.equal(
-    runLogTallyLine({ passed: 9, skipped: 3, cached: 0, codeBehind: 0, stale: 0 }),
+    runLogTallyLine({ passed: 9, skipped: 3, codeBehind: 0, stale: 0 }),
     '✓ 9 passed, 3 skipped',
   );
 });
 
 test('a run that skipped nothing renders the string it always did', () => {
   assert.equal(
-    runLogTallyLine({ passed: 12, skipped: 0, cached: 0, codeBehind: 0, stale: 0 }),
+    runLogTallyLine({ passed: 12, skipped: 0, codeBehind: 0, stale: 0 }),
     '✓ 12 passed',
   );
   assert.equal(
-    runLogTallyLine({ passed: 12, skipped: 0, cached: 2, codeBehind: 7, stale: 1 }),
-    '✓ 12 passed (7 code-behind, 1 stale, 2 cached)',
+    runLogTallyLine({ passed: 12, skipped: 0, codeBehind: 7, stale: 1 }),
+    '✓ 12 passed (7 code-behind, 1 stale)',
   );
 });
 
@@ -250,7 +250,7 @@ test('the parenthesis breaks down the PASSES; the skip clause sits after it', ()
   // A skip is not a kind of pass, so it never joins the breakdown — the same
   // rule `stepsSummaryText` follows for the `## Steps` heading.
   assert.equal(
-    runLogTallyLine({ passed: 9, skipped: 3, cached: 0, codeBehind: 4, stale: 0 }),
+    runLogTallyLine({ passed: 9, skipped: 3, codeBehind: 4, stale: 0 }),
     '✓ 9 passed (4 code-behind), 3 skipped',
   );
 });
@@ -260,7 +260,7 @@ test('a run that ONLY skipped still says so', () => {
   // branch is empty. The caller guards on `passed > 0 || skipped > 0`, so this
   // line is what such a run prints.
   assert.equal(
-    runLogTallyLine({ passed: 0, skipped: 5, cached: 0, codeBehind: 0, stale: 0 }),
+    runLogTallyLine({ passed: 0, skipped: 5, codeBehind: 0, stale: 0 }),
     '✓ 0 passed, 5 skipped',
   );
 });

@@ -239,7 +239,6 @@ const testConfig: Config = {
   },
   api: { specsDir: './specs', requestTimeout: 30_000, redactSensitive: true },
   server: { host: '127.0.0.1', port: 3100, apiKey: 'test-api-key' },
-  cache: { enabled: false, dir: '.cache' },
   logging: { consoleLogLevel: 'silent', serverFileLogLevel: 'off' },
 } as unknown as Config;
 

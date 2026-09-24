@@ -144,7 +144,7 @@ test("copyWorkspace: brings the fixtures, leaves the per-run leftovers", () => {
   write(path.join(src, "init", "skills", "flows", "enter_email.md"), "skill\n");
   // Leftovers a previous local run would have left behind.
   write(path.join(src, "init", "reports", "old-run.html"), "<html>");
-  write(path.join(src, "init", ".cache", "step.json"), "{}");
+  write(path.join(src, "init", ".aiui", "cdp-profiles", "chromium-default", "Local State"), "{}");
   write(path.join(src, "init", "tests", ".aiui-codebehind-cache", "x.candidate"), "x");
   write(path.join(src, "init", "tests", "example.steps.ts"), "export default {}");
 
@@ -156,7 +156,7 @@ test("copyWorkspace: brings the fixtures, leaves the per-run leftovers", () => {
   assert.ok(fs.existsSync(path.join(dest, "init", "skills", "flows", "enter_email.md")));
 
   assert.equal(fs.existsSync(path.join(dest, "init", "reports")), false, "reports/");
-  assert.equal(fs.existsSync(path.join(dest, "init", ".cache")), false, ".cache/");
+  assert.equal(fs.existsSync(path.join(dest, "init", ".aiui")), false, ".aiui/");
   assert.equal(
     fs.existsSync(path.join(dest, "init", "tests", ".aiui-codebehind-cache")),
     false,

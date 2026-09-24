@@ -26,7 +26,7 @@ describe('TokenTracker per-run accounting', () => {
     // First run: real AI calls.
     t.addUsage(400_000, 1_200);
     t.markRunStart();
-    // Second run: fully cache-served — no AI calls, so no usage added.
+    // Second run: fully compiled to code-behind — no AI calls, so no usage added.
     expect(t.runInputTotal).toBe(0);
     expect(t.runOutputTotal).toBe(0);
     expect(t.runTotal).toBe(0);
@@ -38,12 +38,12 @@ describe('TokenTracker per-run accounting', () => {
 
   it('counts only post-mark usage when a run adds some tokens after the mark', () => {
     // The realistic server shape: run 1 spent real tokens, then markRunStart,
-    // then run 2 spends *some* (e.g. a few uncached steps). The report for
+    // then run 2 spends *some* (e.g. a few steps not yet compiled). The report for
     // run 2 must show run 2's usage only, not the session-cumulative figure.
     const t = new TokenTracker();
     t.addUsage(400_000, 1_200); // run 1 (cold)
     t.markRunStart();
-    t.addUsage(2_000, 40); // run 2 (mostly cached, two live steps)
+    t.addUsage(2_000, 40); // run 2 (mostly code-behind, two AI steps)
     expect(t.runInputTotal).toBe(2_000);
     expect(t.runOutputTotal).toBe(40);
     expect(t.runTotal).toBe(2_040);

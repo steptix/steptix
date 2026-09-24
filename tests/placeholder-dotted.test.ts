@@ -221,7 +221,7 @@ describe('the MCP pre-flight knows a dotted reference comes from a loop', () => 
     created.push(root);
     writeFileSync(
       path.join(root, 'aiui.config.json'),
-      JSON.stringify({ cache: { enabled: true } }),
+      JSON.stringify({}),
     );
     writeFileSync(path.join(root, '.env'), 'SERVER_URL=http://127.0.0.1:3100\n');
     process.env['AIUI_MCP_ROOTS'] = root;

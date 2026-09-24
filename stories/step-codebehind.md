@@ -51,16 +51,16 @@ git — none of which is true of `.cache/`.
 
 ## Context — why the action cache isn't enough
 
-The step cache ([src/cache/step-cache.ts](../src/cache/step-cache.ts)) stores
+The step cache ([src/cache/step-cache.ts](../src/cache/step-cache.ts) (since removed)) stores
 the AI's parsed action plan — literal selectors and literal values — and
 replays it with the model bypassed. That already gives "zero AI on run 2",
 but a flat action list cannot express *compute this at runtime*, and its only
 notion of variable data is reverse-interpolating `{{param}}` values back into
 strings, which has known failure modes:
 
-- [issue 023](../issues/023-cache-reverse-interpolation-substring-collision.md) —
+- [issue 023](../issues/023-cache-reverse-interpolation-substring-collision.md) (since removed) —
   blind `replaceAll` corrupts incidental substrings.
-- [issue 024](../issues/024-cache-value-driven-element-targeting-rides-cache.md) —
+- [issue 024](../issues/024-cache-value-driven-element-targeting-rides-cache.md) (since removed) —
   a param that should change *which element* is targeted replays the frozen
   selector from run 1.
 - Derived values (dates, computed codes, anything the AI worked out) are
@@ -459,7 +459,7 @@ Modified code:
   esbuild-validation failure restores the original.
 - `tests/codebehind-generate.test.ts` — prompt parse, and the guard: code
   containing a resolved param value (e.g. a password) is rejected.
-- Integration fixtures (pattern of `fixtures/tests/assertion-cache.md`):
+- Integration fixtures (pattern of `fixtures/tests/assertion-cache.md`, since removed):
   - a test with a complete hand-written `.steps.ts` runs with **zero AI
     calls**;
   - an entry that throws falls through to AI and the test still passes;

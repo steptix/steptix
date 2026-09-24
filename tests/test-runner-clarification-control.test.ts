@@ -101,17 +101,6 @@ vi.mock('../src/runner/hooks.js', () => ({
   resolveHooks: (...args: unknown[]) => resolveHooksMock(...args),
 }));
 
-const stepCacheInitMock = vi.fn();
-// Spread the real module so the pure path helpers (envCacheSegment,
-// cacheDirName) the runner now imports stay real; only StepCache.initialize
-// is replaced with the spy this suite asserts on.
-vi.mock('../src/cache/step-cache.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/cache/step-cache.js')>()),
-  StepCache: {
-    initialize: (...args: unknown[]) => stepCacheInitMock(...args),
-  },
-}));
-
 const diagnoseFailureMock = vi.fn();
 vi.mock('../src/ai/diagnose.js', () => ({
   diagnoseFailure: (...args: unknown[]) => diagnoseFailureMock(...args),
@@ -212,7 +201,7 @@ describe('test-runner runnerControl handling', () => {
   beforeEach(() => {
     // Reset only the executeStep / runInteractiveRepl mocks — clearing
     // queued mockResolvedValueOnce responses between tests so they don't
-    // leak. The persistent mocks (browser, hooks, cache, etc.) are
+    // leak. The persistent mocks (browser, hooks, etc.) are
     // re-established below.
     executeStepMock.mockReset();
     executeBranchedStepMock.mockReset();
@@ -220,7 +209,6 @@ describe('test-runner runnerControl handling', () => {
     launchBrowserMock.mockReset();
     closeBrowserMock.mockReset();
     resolveHooksMock.mockReset();
-    stepCacheInitMock.mockReset();
     diagnoseFailureMock.mockReset();
 
     launchBrowserMock.mockResolvedValue(makeSession());
@@ -231,12 +219,6 @@ describe('test-runner runnerControl handling', () => {
       afterEach: [],
       after: [],
       hasAny: false,
-    });
-    stepCacheInitMock.mockResolvedValue({
-      read: () => null,
-      write: vi.fn(),
-      readAssertion: () => null,
-      invalidateStep: vi.fn(),
     });
     diagnoseFailureMock.mockResolvedValue(null);
 
@@ -392,16 +374,12 @@ describe('test-runner — captured `as` values reach the report', () => {
     launchBrowserMock.mockReset();
     closeBrowserMock.mockReset();
     resolveHooksMock.mockReset();
-    stepCacheInitMock.mockReset();
     diagnoseFailureMock.mockReset();
 
     launchBrowserMock.mockResolvedValue(makeSession());
     closeBrowserMock.mockResolvedValue(undefined);
     resolveHooksMock.mockResolvedValue({
       before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
-    });
-    stepCacheInitMock.mockResolvedValue({
-      read: () => null, write: vi.fn(), readAssertion: () => null, invalidateStep: vi.fn(),
     });
     diagnoseFailureMock.mockResolvedValue(null);
   });
@@ -636,16 +614,12 @@ describe('test-runner — stopAfterStep runs a prefix as a passed run', () => {
     launchBrowserMock.mockReset();
     closeBrowserMock.mockReset();
     resolveHooksMock.mockReset();
-    stepCacheInitMock.mockReset();
     diagnoseFailureMock.mockReset();
 
     launchBrowserMock.mockResolvedValue(makeSession());
     closeBrowserMock.mockResolvedValue(undefined);
     resolveHooksMock.mockResolvedValue({
       before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
-    });
-    stepCacheInitMock.mockResolvedValue({
-      read: () => null, write: vi.fn(), readAssertion: () => null, invalidateStep: vi.fn(),
     });
     diagnoseFailureMock.mockResolvedValue(null);
   });
@@ -663,7 +637,6 @@ describe('test-runner — stopAfterStep runs a prefix as a passed run', () => {
       makeInstance(['step one', 'step two', 'step three']),
       makeConfig(),
       '',
-      undefined,
       { stopAfterStep: 2 },
     );
 
@@ -684,16 +657,12 @@ describe('test-runner — the recording', () => {
     launchBrowserMock.mockReset();
     closeBrowserMock.mockReset();
     resolveHooksMock.mockReset();
-    stepCacheInitMock.mockReset();
     diagnoseFailureMock.mockReset();
 
     launchBrowserMock.mockResolvedValue(makeSession());
     closeBrowserMock.mockResolvedValue(undefined);
     resolveHooksMock.mockResolvedValue({
       before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
-    });
-    stepCacheInitMock.mockResolvedValue({
-      read: () => null, write: vi.fn(), readAssertion: () => null, invalidateStep: vi.fn(),
     });
     diagnoseFailureMock.mockResolvedValue(null);
   });
@@ -717,7 +686,7 @@ describe('test-runner — the recording', () => {
     await runTest(instance, makeConfig(), '');
     await expect(fsp.access(recordingDirFor(testPath))).rejects.toThrow();
 
-    await runTest(instance, makeConfig(), '', undefined, { captureStepContext: true });
+    await runTest(instance, makeConfig(), '', { captureStepContext: true });
     const files = (await fsp.readdir(recordingDirFor(testPath))).sort();
     expect(files).toEqual([
       'recording.json', 'step-01.after.html', 'step-01.before.html', 'step-01.json',
@@ -737,16 +706,12 @@ describe('test-runner — a strict run whose code-behind did not load', () => {
     launchBrowserMock.mockReset();
     closeBrowserMock.mockReset();
     resolveHooksMock.mockReset();
-    stepCacheInitMock.mockReset();
     diagnoseFailureMock.mockReset();
 
     launchBrowserMock.mockResolvedValue(makeSession());
     closeBrowserMock.mockResolvedValue(undefined);
     resolveHooksMock.mockResolvedValue({
       before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
-    });
-    stepCacheInitMock.mockResolvedValue({
-      read: () => null, write: vi.fn(), readAssertion: () => null, invalidateStep: vi.fn(),
     });
     diagnoseFailureMock.mockResolvedValue(null);
   });
@@ -777,7 +742,7 @@ export default defineSteps([{ source: 'step one', async run() { const x = ; } }]
     expect(executeStepMock).toHaveBeenCalledTimes(2);
 
     executeStepMock.mockClear();
-    const strict = await runTest({ test: parsed, resolvedParameters: {} }, makeConfig(), '', undefined, {
+    const strict = await runTest({ test: parsed, resolvedParameters: {} }, makeConfig(), '', {
       codeBehindStrict: true,
     });
     expect(strict.status).toBe('failed');
@@ -796,16 +761,12 @@ describe('test-runner — the env/data context reaches the step', () => {
     launchBrowserMock.mockReset();
     closeBrowserMock.mockReset();
     resolveHooksMock.mockReset();
-    stepCacheInitMock.mockReset();
     diagnoseFailureMock.mockReset();
 
     launchBrowserMock.mockResolvedValue(makeSession());
     closeBrowserMock.mockResolvedValue(undefined);
     resolveHooksMock.mockResolvedValue({
       before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
-    });
-    stepCacheInitMock.mockResolvedValue({
-      read: () => null, write: vi.fn(), readAssertion: () => null, invalidateStep: vi.fn(),
     });
     diagnoseFailureMock.mockResolvedValue(null);
   });
@@ -857,16 +818,12 @@ describe('test-runner — secrets stay out of what the run writes (stories/secre
     launchBrowserMock.mockReset();
     closeBrowserMock.mockReset();
     resolveHooksMock.mockReset();
-    stepCacheInitMock.mockReset();
     diagnoseFailureMock.mockReset();
 
     launchBrowserMock.mockResolvedValue(makeSession());
     closeBrowserMock.mockResolvedValue(undefined);
     resolveHooksMock.mockResolvedValue({
       before: [], beforeEach: [], afterEach: [], after: [], hasAny: false,
-    });
-    stepCacheInitMock.mockResolvedValue({
-      read: () => null, write: vi.fn(), readAssertion: () => null, invalidateStep: vi.fn(),
     });
     diagnoseFailureMock.mockResolvedValue(null);
   });

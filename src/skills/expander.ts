@@ -561,8 +561,8 @@ export async function expandSkills(
     rawSteps?: string[] | undefined;
     /**
      * Emit a warning for each section defined but never invoked. Defaults to
-     * true. The server passes false on its cache-hash expansion, which exists
-     * only to produce a hash and would otherwise double every message.
+     * true. The server passes false on a targeted re-run (`startAt`), where
+     * the user is looking at one step, not auditing the file.
      */
     warnDeadSections?: boolean | undefined;
     /**

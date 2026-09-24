@@ -201,7 +201,7 @@ const summaryOf = (...statuses) =>
 
 /** A run's counters, with every one a case does not name left at zero. */
 const tally = (over) =>
-  runLogTallyLine({ passed: 0, skipped: 0, tolerated: 0, cached: 0, codeBehind: 0, stale: 0, ...over });
+  runLogTallyLine({ passed: 0, skipped: 0, tolerated: 0, codeBehind: 0, stale: 0, ...over });
 
 test('a tolerated step is counted as neither a pass nor a skip', () => {
   const counts = summaryOf('pass', 'fail-tolerated', 'pass');

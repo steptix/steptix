@@ -229,9 +229,7 @@ const model = z
       'effect on the very next run with no browser restart — same page, same ' +
       'captured variables. Passed through as given; the gateway decides what ' +
       'exists. null clears the override and goes back to the project/server ' +
-      'model. Note that the step cache does NOT key on the model, so with caching ' +
-      'on a switched model can be served the previous one\'s cached plans — turn ' +
-      'the cache off if you are comparing models.',
+      'model.',
   );
 
 const capture = z
@@ -1193,7 +1191,6 @@ const foldedStep = z.object({
     ),
   output: z.string().nullable(),
   error: z.string().nullable(),
-  fromCache: z.boolean(),
   durationMs: z.number().nullable(),
   // Which tab the step actually drove. `.nullable()` and not optional: a
   // missing required key is fatal to `validateToolOutput`, where a null is

@@ -476,7 +476,7 @@ gets *typed* replays unchanged. This is the fact the story leans on.
 **The step cache is not part of this story.** It is being removed
 (decided 2026-09-03; the retirement is its own story, not yet written).
 Worth recording why rows would have forced the question anyway:
-[`reverseInterpolate`](../src/cache/step-cache.ts) swaps parameter values
+[`reverseInterpolate`](../src/cache/step-cache.ts) (since removed) swaps parameter values
 back to `{{name}}` only in an action's `value` field; an `assert` action
 carries its expectation in `condition` and `expected`
 ([ai/types.ts](../src/ai/types.ts)), untouched on write or read; the cache

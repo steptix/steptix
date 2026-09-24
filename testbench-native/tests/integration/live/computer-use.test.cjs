@@ -95,7 +95,7 @@ async function waitFor(label, predicate, timeoutMs = 60_000) {
   throw new Error(`timeout waiting for: ${label}${last ? ` (last error: ${last.message})` : ''}`);
 }
 
-const PASSED = new Set(['pass', 'pass-cached', 'pass-code-behind', 'pass-stale']);
+const PASSED = new Set(['pass', 'pass-code-behind', 'pass-stale']);
 const passed = (status) => PASSED.has(status);
 
 const serverUrl = () => process.env.LIVE_SERVER_URL || 'http://localhost:3100';

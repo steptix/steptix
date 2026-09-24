@@ -573,23 +573,6 @@ async function executeRun(ctx: RunContext): Promise<RunOutcome> {
     ];
   }
 
-  // A model override running against a live step cache.
-  //
-  // The cache keys on step text and identity, NOT the model, so a switched model
-  // can be served plans the previous one produced — which bites hardest in the
-  // case you would switch for, comparing models. Warned rather than solved:
-  // adding the model to the key would invalidate every cached entry in every
-  // project for that one case.
-  if (request.runSettings?.model !== undefined && request.cacheEnabled === true) {
-    outcome.warnings = [
-      ...outcome.warnings,
-      'A model override ran with the step cache on. The cache does not key on ' +
-        'the model, so some steps may have replayed plans made by the previous ' +
-        'model rather than asking this one. Turn caching off for this project (or ' +
-        'set `cache: off` in the test) if you are evaluating the model itself.',
-    ];
-  }
-
   // W2 — a fresh, signed-out, disposable browser was launched while a
   // persistent one sat idle.
   //
@@ -1004,7 +987,7 @@ function outcomeToResult(outcome: RunOutcome): ToolResult {
  * `run_steps` has `.aiui-mcp-steps.md`; an errand has this.
  *
  * Load-bearing rather than cosmetic: the server resolves the project root, the
- * env/data bundle and the step-plan cache anchor entirely from `testFilePath`,
+ * env/data bundle entirely from `testFilePath`,
  * so without one the project layer of `effectiveSettings` falls back to server
  * defaults with nothing saying so. It is never read from disk and never exists.
  */
@@ -1117,8 +1100,8 @@ async function runErrand(
     scope: project.scope,
     env: project.env,
     ...(project.envName !== null && { envName: project.envName }),
-    // Omitted when off, like `cacheEnabled` on a step request: an absent flag
-    // and an explicit `false` mean the same thing server-side.
+    // Omitted when off: an absent flag and an explicit `false` mean the same
+    // thing server-side.
     ...(args.keep_open === true && { keepOpen: true }),
   };
 

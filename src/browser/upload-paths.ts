@@ -9,8 +9,8 @@
  * it to someone else, and the same step still finds the same file.
  *
  * This module is pure — no Playwright, no AI types — so the executor, the
- * parser, the step cache and code-behind's `step.filePath` can all share one
- * definition of "what does this path mean".
+ * parser and code-behind's `step.filePath` can all share one definition of
+ * "what does this path mean".
  */
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
@@ -27,8 +27,8 @@ export interface UploadPathFields {
 
 /**
  * Read an upload action's paths as one shape. `filePaths` wins when both are
- * present — the parser drops the loser, but replaying a cache entry written by
- * an older build could still hand us both.
+ * present — the parser drops the loser, so this only matters for an action
+ * that did not come through it.
  */
 export function uploadPathsOf(action: UploadPathFields): string[] {
   if (action.filePaths !== undefined && action.filePaths.length > 0) return action.filePaths;

@@ -104,9 +104,9 @@ export interface AssertionResult extends AssertionEvaluation {
    *  Result" vs "Expected / Actual" row labels. Optional for backwards
    *  compatibility with reports written before the predicate mode existed. */
   against?: 'dom' | 'api' | 'both' | 'predicate';
-  /** The cached JS code used to evaluate this assertion */
+  /** The generated JS code used to evaluate this assertion */
   assertionCode?: string | undefined;
-  /** AI interaction that generated the JS code (only when not from cache) */
+  /** AI interaction that generated the JS code */
   aiInteraction?: AiInteraction | undefined;
 }
 
@@ -250,15 +250,10 @@ export interface StepResult {
   error?: string;
   /** AI explanation of what it was attempting (shown on failure) */
   aiExplanation?: string;
-  /** True when every AI turn for this step was served from `StepCache` —
-   *  no AI call was made. Surfaces in the step:pass event so clients can
-   *  paint a distinct glyph and log the run line as `(cached)`. */
-  fromCache?: boolean;
   /**
    * True when this step ran its **code-behind** — the committed `.steps.ts`
-   * entry beside the test — instead of calling the AI. Sibling of
-   * `fromCache`, rendered with its own glyph (the `</>` code mark next to the cache's ⚡).
-   * See stories/step-codebehind.md.
+   * entry beside the test — instead of calling the AI. Rendered with its own
+   * glyph (the `</>` code mark). See stories/step-codebehind.md.
    */
   fromCodeBehind?: boolean;
   /** The code-behind entry that ran, for the report's collapsed code block.

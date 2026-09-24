@@ -243,12 +243,10 @@ describe('TestBench live — [skill:] line gets painted at breakpoint pause', fu
     console.log('[live] clean-exit final statuses:', finalStatuses);
 
     // The whole point of this test: frame:pop with no failures must
-    // paint pass on the [skill:] aggregate row. Cached replay is also
-    // acceptable (the cache test runs first; if its writes survive,
-    // we'd see pass-cached here too).
+    // paint pass on the [skill:] aggregate row.
     const skillLineStatus = finalStatuses[SKILL_INVOCATION_LINE];
     assert.ok(
-      skillLineStatus === 'pass' || skillLineStatus === 'pass-cached',
+      skillLineStatus === 'pass',
       `[skill:] line ${SKILL_INVOCATION_LINE} must show pass after clean exit, ` +
         `got '${skillLineStatus}'. If 'running', frame:pop didn't paint. ` +
         `If undefined, the row never got painted at all.`,
@@ -256,7 +254,7 @@ describe('TestBench live — [skill:] line gets painted at breakpoint pause', fu
 
     const trailingStatus = finalStatuses[TRAILING_STEP_LINE];
     assert.ok(
-      trailingStatus === 'pass' || trailingStatus === 'pass-cached',
+      trailingStatus === 'pass',
       `Trailing step on line ${TRAILING_STEP_LINE} must also be passed; ` +
         `got '${trailingStatus}'.`,
     );

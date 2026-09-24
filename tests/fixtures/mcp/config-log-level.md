@@ -1,8 +1,7 @@
-# Cache on, in the long spelling
+# Log levels in `## Config`
 
 ## Config
 
-- cache: enabled
 - consoleLogLevel: debug
 
 ## Steps

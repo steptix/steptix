@@ -19,7 +19,6 @@ import { fileURLToPath } from 'node:url';
 import type { Page } from 'playwright';
 import type { Config } from '../src/config/types.js';
 import type { AiClient } from '../src/ai/client.js';
-import type { StepCache } from '../src/cache/step-cache.js';
 import type { StepResult } from '../src/report/types.js';
 import { DEFAULT_BROWSER_DIMENSIONS } from '../src/config/browser-dimensions.js';
 import { executeStep } from '../src/runner/step-executor.js';
@@ -212,45 +211,6 @@ describe('the measurement rides the sub-action record', () => {
     expect(result.status).toBe('failed');
     expect(result.error).toContain('3 visible elements matched');
     expect(mock.clicks).toBe(0);
-  });
-
-  // Nothing new is measured on a cache replay: `cachedTurnForCapture` already
-  // skips the DOM capture there because nothing consumes it, and the same rule
-  // applies — a cache hit generates nothing.
-  it('measures nothing on a cache replay, even in a compile mode', async () => {
-    const mock = makeMeasuredPage({ matchCount: 2, visibleMatchCount: 1, resolved: { selector: '#x', by: 'attribute' } });
-    const cached = {
-      read: async () => [
-        {
-          rawResponse: CLICK_TURN,
-          actions: [{ action: 'click', selector: '#login', description: 'Click sign in' }],
-          reasoning: 'cached',
-        },
-      ],
-      write: async () => {},
-      invalidateStep: async () => {},
-    } as unknown as StepCache;
-
-    const result = await executeStep(1, 1, 'sign in', {
-      page: mock.page,
-      config: makeConfig(),
-      aiClient: {
-        complete: async () => { throw new Error('a cache hit must not call the AI'); },
-      } as unknown as AiClient,
-      contextContent: '',
-      testName: 'test',
-      conversationHistory: [],
-      csrfTokens: {},
-      stepCache: cached,
-      cacheEnabled: true,
-      cacheKey: 1,
-      captureStepContext: true,
-    });
-
-    expect(result.status).toBe('passed');
-    expect(result.fromCache).toBe(true);
-    expect(mock.clicks).toBe(1);
-    expect(result.turns[0]!.subActions[0]!.targeting).toBeUndefined();
   });
 
   it("proceeds under ambiguousTarget: 'first'", async () => {

@@ -147,7 +147,6 @@ export interface ProjectContext {
   /** Absolute, confined, and known to exist — or null to omit from the wire. */
   skillsDir: string | null;
   toolsDir: string | null;
-  cacheEnabled: boolean;
   /** Env files actually consulted, for error messages that name them. */
   envFilesConsulted: string[];
   /**
@@ -200,7 +199,6 @@ export interface McpStepRequest {
   dataSources?: Record<string, string>;
   skillsDir?: string;
   toolsDir?: string;
-  cacheEnabled?: boolean;
   testFilePath?: string;
   /**
    * Per-session run settings (stories/run-settings.md §1).

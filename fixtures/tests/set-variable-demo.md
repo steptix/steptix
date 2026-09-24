@@ -9,7 +9,7 @@ Every other way a variable gets a value reads it from somewhere outside the
 test — the page, a tool, a parameter, an environment file. `Set {{name}} to
 "…"` is the one that builds a value out of values the run already holds.
 
-It runs as **code**: no AI call, no page interaction, no cache entry. This
+It runs as **code**: no AI call and no page interaction. This
 whole file costs zero tokens, which is why it is also the cheapest end-to-end
 check that the framework's variable plumbing works — it passes with no API key
 configured at all.

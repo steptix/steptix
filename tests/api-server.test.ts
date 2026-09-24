@@ -225,10 +225,6 @@ const testConfig: Config = {
     port: 0, // Will be overridden by random port
     apiKey: API_KEY,
   },
-  cache: {
-    enabled: false,
-    dir: '.cache',
-  },
   logging: {
     consoleLogLevel: 'silent',
     serverFileLogLevel: 'off',

@@ -6,8 +6,8 @@ invocation, against the still-live browser session, after optionally editing the
 runtime variables in scope.
 
 Companion to [debugging-ux.md](debugging-ux.md) (run / pause / resume / stop and
-the paused-on-error state this builds on), [step-cache-server.md](step-cache-server.md)
-(skill expansion, `frame:scope`, the steps request), and
+the paused-on-error state this builds on), the step-cache spec, since removed with
+the step cache (skill expansion, `frame:scope`, the steps request), and
 [run-state-persistence.md](run-state-persistence.md) (per-controller run state).
 
 ## 1. Background
@@ -181,6 +181,10 @@ the slice over the expanded list from the matching step to the end of that
 frame's body. This is the largest piece of the feature, not a field rename.
 
 ### 4.3.1 The seeded tail must NOT replay a stale cached plan
+
+> The step cache this section guards against has since been removed, so there is
+> no cached plan to replay; the requirement below, and the cache-bypass items in
+> the test and delivery lists, are kept as history.
 
 For a subset run with skills, the bundle hash is computed over the *expanded
 full document* (`chooseCacheHashSource` → `'expand-full'`,

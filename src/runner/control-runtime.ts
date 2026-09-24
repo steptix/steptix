@@ -703,12 +703,6 @@ export class LoopRuntime {
     return undefined;
   }
 
-  // (There was an `insideLoopBody` here. It had no caller, and its docstring
-  //  claimed to drive the step-cache opt-out — which is really the
-  //  `loopBodySteps` set each loop builds from the records once, up front
-  //  (test-runner.ts, session-manager.ts). Two answers to one question, one of
-  //  them unreachable, is worse than none.)
-
   // ── Frame aliases (the Sessions API's half) ───────────────────────────────
 
   /** Record that `original` is running as `clone` for the current pass. */

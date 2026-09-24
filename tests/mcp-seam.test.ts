@@ -34,7 +34,6 @@ function fakeProject(overrides: Partial<ProjectContext> = {}): ProjectContext {
     apiKey: 'server-key',
     skillsDir: null,
     toolsDir: null,
-    cacheEnabled: false,
     envFilesConsulted: [`${PROJECT_ROOT}/.env`],
     cdpPermissions: { allowUnowned: false, ports: null },
     ...overrides,
@@ -1378,29 +1377,6 @@ describe('run settings on the wire', () => {
     expect((suppressed.content as { type: string }[]).some((b) => b.type === 'image')).toBe(false);
     const settings = (suppressed.structuredContent as Record<string, any>).effectiveSettings;
     expect(settings.screenshotsReturn).toBe('none');
-  });
-
-  it('warns when a model override runs against the step cache', async () => {
-    // The cache keys on step text, not the model, so a switched model can be
-    // served the previous one's plans — worst exactly when you switched to
-    // compare them.
-    const { client } = await connect({
-      project: fakeProject({ cacheEnabled: true }),
-      script: { events: [{ type: 'done', status: 'passed' }] },
-    });
-
-    const res = await client.callTool({
-      name: 'run_steps',
-      arguments: {
-        steps: ['do a thing'],
-        project_root: PROJECT_ROOT,
-        model: 'override/model',
-      },
-    });
-
-    const warnings = (res.structuredContent as { warnings: string[] }).warnings.join(' ');
-    expect(warnings).toContain('cache');
-    expect(warnings).toContain('model');
   });
 });
 

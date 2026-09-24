@@ -3,18 +3,17 @@ import type { Page } from 'playwright';
 import type { AiClient } from '../src/ai/client.js';
 import type { Config } from '../src/config/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
-import type { StepCache } from '../src/cache/step-cache.js';
 
 /**
- * A cache hit captures step context when asked
+ * An AI step captures step context when asked
  * (stories/codebehind-compile-as-a-run.md §Ordinary runs capture what a
  * compile needs).
  *
- * A replay from the action cache skips the turn-1 DOM snapshot — no AI call,
- * no consumer, and the biggest wall-clock win a cached step has. But the
- * snapshot is `domBefore`, the compile's generation input, and a cached step
- * is by definition an uncompiled one. So with `captureStepContext` on, the
- * snapshot is taken after all; without it, nothing changes.
+ * `stepContext` is the compile's generation input: the DOM and URL either
+ * side of the step. `domBefore` is the turn-1 snapshot the model was shown;
+ * `domAfter` is one extra capture taken only because the caller asked. Without
+ * `captureStepContext` the result carries no context and the extra capture is
+ * not paid for.
  */
 
 const domCleaner = vi.hoisted(() => ({ captures: 0 }));
@@ -51,66 +50,57 @@ const CONFIG: Config = {
   execution: { ...DEFAULT_CONFIG.execution, retries: 0, maxTurns: 2, promptOnAmbiguity: false },
 };
 
-/** A cache that always hits with a one-turn, no-op plan. */
-function hittingCache(): StepCache {
+/** A model that answers every turn with the same one-turn, no-op plan. */
+function noopClient(): AiClient {
   return {
-    read: async () => [
-      {
-        rawResponse: '{"reasoning":"cached","actions":[{"action":"noop","description":"nothing"}]}',
-        actions: [{ action: 'noop', description: 'nothing' }],
-        reasoning: 'cached',
-      },
-    ],
-    write: async () => {},
-    invalidateStep: async () => {},
-  } as unknown as StepCache;
+    complete: async () => ({
+      text: '{"reasoning":"nothing to do","actions":[{"action":"noop","description":"nothing"}]}',
+      model: 'stub',
+    }),
+  } as unknown as AiClient;
 }
-
-const forbiddenClient = {
-  complete: async () => { throw new Error('a cache hit must not call the AI'); },
-} as unknown as AiClient;
 
 beforeEach(() => {
   domCleaner.captures = 0;
 });
 
-async function runCachedStep(captureStepContext: boolean | undefined) {
+async function runStep(captureStepContext: boolean | undefined) {
   return executeStep(1, 1, 'Open the dashboard', {
     page: fakePage(),
     config: CONFIG,
-    aiClient: forbiddenClient,
+    aiClient: noopClient(),
     contextContent: '',
     testName: 'dashboard',
     conversationHistory: [],
     csrfTokens: {},
     resolvedParameters: {},
-    stepCache: hittingCache(),
-    cacheEnabled: true,
-    cacheKey: 1,
     ...(captureStepContext !== undefined && { captureStepContext }),
   });
 }
 
-describe('a cache hit and step context', () => {
-  it('takes the turn-1 snapshot — and the post-step one — when context is asked for', async () => {
-    const result = await runCachedStep(true);
+describe('an AI step and step context', () => {
+  it('records the turn-1 snapshot and a post-step one when context is asked for', async () => {
+    const result = await runStep(true);
     expect(result.status).toBe('passed');
-    expect(result.fromCache).toBe(true);
-    // Two captures: `domBefore` at turn 1, `domAfter` at the end.
-    expect(domCleaner.captures).toBe(2);
+    // `domBefore` is the first capture — the one the model saw on turn 1 —
+    // and `domAfter` the last, taken after the step's own post-action one.
     expect(result.stepContext).toEqual({
       domBefore: '<dom snapshot 1>',
       urlBefore: 'https://app.test/dashboard',
-      domAfter: '<dom snapshot 2>',
+      domAfter: `<dom snapshot ${domCleaner.captures}>`,
       urlAfter: 'https://app.test/dashboard',
     });
+    expect(domCleaner.captures).toBeGreaterThan(1);
   });
 
-  it('still skips every snapshot when context is not asked for', async () => {
-    const result = await runCachedStep(undefined);
+  it('carries no context, and pays for exactly one capture less, when it is not asked for', async () => {
+    await runStep(true);
+    const withContext = domCleaner.captures;
+    domCleaner.captures = 0;
+
+    const result = await runStep(undefined);
     expect(result.status).toBe('passed');
-    expect(result.fromCache).toBe(true);
-    expect(domCleaner.captures).toBe(0);
     expect(result.stepContext).toBeUndefined();
+    expect(domCleaner.captures).toBe(withContext - 1);
   });
 });

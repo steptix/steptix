@@ -145,16 +145,10 @@ export interface StepPassEvent {
   /** data:image/png;base64 URI, may be empty. */
   screenshot?: string;
   frame?: FrameInfo;
-  /** True when every AI turn for this step was served from `StepCache` —
-   *  no AI call was made. Absent / false means the AI was called. The
-   *  client uses this to paint a ⚡ glyph instead of the standard ✓ and
-   *  to mark the run-log line as `(cached)`. */
-  fromCache?: boolean;
   /**
    * True when the step ran its code-behind entry instead of calling the AI
    * (stories/codebehind-compile.md §What the author sees). Painted with the code mark, logged
-   * `(code-behind)`. Distinct from `fromCache`: that one replays a recorded AI
-   * transcript, this one runs TypeScript the author can read.
+   * `(code-behind)`. Absent / false means the step ran under AI.
    */
   fromCodeBehind?: boolean;
   /**
@@ -860,7 +854,6 @@ export interface FileStateSnapshot {
       number,
       | 'running'
       | 'pass'
-      | 'pass-cached'
       /** Passed by running its code-behind entry — the `</>` code mark. */
       | 'pass-code-behind'
       /** Passed under AI after its entry threw — ⚠, recompile. */

@@ -118,7 +118,7 @@ describe('TestBench live STOP → report recovery against real server', function
     // pair to a string and could never match — this wait always timed out.
     await waitFor(
       'at least one step passes',
-      () => hooks.tracker.snapshot().statuses.some(([, s]) => s === 'pass' || s === 'pass-cached'),
+      () => hooks.tracker.snapshot().statuses.some(([, s]) => s === 'pass'),
       120_000,
     );
     // Wait until a subsequent step is actually running, so STOP lands mid-step.

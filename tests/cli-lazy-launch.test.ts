@@ -86,18 +86,6 @@ vi.mock('../src/runner/hooks.js', () => ({
   resolveHooks: (...args: unknown[]) => resolveHooksMock(...args),
 }));
 
-vi.mock('../src/cache/step-cache.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/cache/step-cache.js')>()),
-  StepCache: {
-    initialize: async () => ({
-      read: () => null,
-      write: vi.fn(),
-      readAssertion: () => null,
-      invalidateStep: vi.fn(),
-    }),
-  },
-}));
-
 vi.mock('../src/ai/diagnose.js', () => ({
   diagnoseFailure: vi.fn(async () => null),
 }));
