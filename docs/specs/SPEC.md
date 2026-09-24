@@ -146,6 +146,24 @@ A `{{name}}` the run cannot resolve fails the step, naming it, rather than stori
 
 The target must be a runtime variable. A skill's own `## Parameters`, and the columns of a table under a `### Section`, are interpolated into the step text at expansion time rather than kept as variables, so assigning to one is refused at parse time. A test's `## Parameters` and the columns of a table under `## Steps` are runtime values and may be assigned freely.
 
+#### `[use ai] <step>` — Ask the Model for a Value
+
+Sends the rest of the step, with its placeholders filled in, to the model **on its own** — no page, no DOM, no screenshot, no earlier steps, no date — and stores the value it answers with (stories/use-ai-step.md).
+
+```markdown
+## Steps
+1. [use ai] Create a name starting with "AUTO" and ending with a random 4 digit number and store it in random_name
+2. [use ai] Today is {{today}}. Give the date 3 days later as yyyymmdd [store as: days_from_now]
+3. Type "{{random_name}}" into the Name field
+```
+
+- **Asked on every run.** Never read from or written to the action cache, never compiled into code-behind, and a hand-written `.steps.ts` entry for its text is never run. A value that must be the same every time is a tool's job.
+- **The step text is everything the model knows.** Put the date, or anything else it needs, in the step. A secret-named value that fills a placeholder reaches the model as `***` (by the `## Values` block's rule, `## Config: unmask:` included), and an unresolved `{{name}}` or `${…}` fails the step before any model call.
+- **A poor source of randomness.** "Random" may repeat between runs.
+- **The name.** `[store as: x]`, `[as: x]`, `[output: x]` or prose `store as {{x}}` pins it, and the model's own name is then ignored. With none, the model's name is used only if the step says it as a whole word (case-insensitive); otherwise the step fails, naming both fixes. The check rules out invented names, not unnamed steps: a step that never names its value can be stored under any word of its sentence. More than one name is refused. Inside a skill the name must be `[store as: x]` or `store as {{x}}`.
+- **The reply.** The model answers `{"as": name, "value": v}` or `{"error": reason}`. An `error` fails the step with the reason and is not retried; any other shape, an empty value, or a list or object is retried within `execution.retries`.
+- `[use ai]` must open the step (after an optional `[no-hooks]`), takes no arguments, and cannot be a control line's tail. The `capture` event for its value carries `source: "generated"`.
+
 #### `[input: variable_name]` — Pause for User Input
 
 Pauses test execution and prompts the user to enter a value in the terminal. The value is stored as a named parameter that can be referenced in subsequent steps using `{{variable_name}}` interpolation. This is useful for values that cannot be known ahead of time, such as OTP codes, CAPTCHAs, or approval codes.

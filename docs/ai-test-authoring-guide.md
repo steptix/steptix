@@ -112,6 +112,7 @@ These are natural-language examples, not literal command keywords. The model cho
 | Switch browser session | `Switch to the default browser` |
 | Read or count | `Count the rows in the Orders table [store as: order_count]` |
 | Verification | `Verify the status of order {{order_id}} is Shipped` |
+| A made-up value (no page) | `[use ai] Create a customer name starting with AUTO [store as: customer]` — see "Capture and reuse" |
 
 Text entry normally replaces a field's contents; say explicitly when you need a different keyboard interaction. A key press is sent to the page, not to a named field, so type into the field in the same step first. Scope repeated labels to their form, dialog, section, or row. For example, `Click Save in the Shipping address dialog` is more reliable than `Click Save`.
 
@@ -149,6 +150,8 @@ Rules the generated file must respect:
 - **No cache and no code-behind for these steps.** A recorded coordinate has nothing to re-validate against on a machine whose resolution or window layout has moved, so a step that ran in computer mode stays AI-driven when the file is compiled.
 
 Worked examples: `templates/init/tests/pdf-dialog-cancel.md` (open a print dialog and cancel it) and `templates/init/tests/calc-one-plus-one.md` (start Calculator with a tool, type a sum, click the "=" button and read the answer, with no browser launched at all).
+
+The family has a third member that switches nothing: `[use ai] <step>` opens a step whose text goes to the model on its own, with no page and no screen, and stores the value it answers with (see "Capture and reuse"). Unlike the two switches it is a prefix, not a whole step, and it takes no computer lock in computer mode.
 
 ## Waits and assertions
 
@@ -211,6 +214,17 @@ Placeholders reach the model as tokens, not values: the step is shown as written
 Reading link text and reading its `href` are different operations. Say which one you need. List captures are stored as JSON-encoded arrays. A read can extract a substring with a regex; describe the desired substring precisely, or use a tool for deterministic parsing. Do not rely on the AI remembering a value that was never captured.
 
 `Set {{name}} to "template"` is a deterministic string assignment with no AI call. It resolves existing placeholders, fails for unresolved references, and can store an empty string. It performs no arithmetic or expression evaluation: `"{{count}} + 1"` stores text. The authored template must be double-quoted with no embedded double quotes or trailing instruction. Use a tool for calculations and transformations.
+
+`[use ai] <step>` asks the model for a value that is not on any page — a test customer's name, filler text, a date worked out from one the step gives — and stores it:
+
+```markdown
+## Steps
+1. [use ai] Create a name starting with "AUTO" and ending with a random 4 digit number and store it in random_name
+2. [use ai] Today is {{today}}. Give the date 3 days later as yyyymmdd [store as: days_from_now]
+3. Type "{{random_name}}" into the Name field
+```
+
+Generate these knowing four things. **The model is asked on every run** — the step is never cached and never compiled. **It sees only the step text**, placeholders filled in: no page, no earlier steps, no date, so put today's date (or anything else it needs) in the step from a parameter or a tool. **It is a poor source of randomness**: "random" can repeat between runs. **For a value that must be the same every time, write a tool.** Name the value with `[store as: name]`, which is authoritative; without an explicit name the model's name must appear in the step as a whole word, or the step fails. That only rules out invented names: a step that never names its value can be stored under any word of its sentence, so always name it. In a skill the name must be `[store as: name]` or `store as {{name}}`. The step fails, rather than storing anything, when the model says the step cannot be done (for example it needs a date it was not given), when its answer is empty, or when a `{{name}}` / `${…}` in the step does not resolve. Secret-named values reach the model as `***`. `[use ai]` must open the step, and it cannot be a control line's tail.
 
 ### Reading a table into row records
 
@@ -456,6 +470,8 @@ Ensure `tests.toolsDir` points to the module directory (default `./tools/src`) a
 | `out.total` | Keep the declared output name `total`. |
 | `out.total="expected_total"` | Rename declared output `total` to caller variable `expected_total`. |
 
+`[use ai]` is not an invocation and takes no arguments: `[use ai timeout=30] …` is a parse error. The step it asks goes after the `]`, and the name it stores under goes in `[store as: name]`.
+
 Use lowercase `[skill: ...]` and `[tool: ...]` (the keyword is case-sensitive), one invocation per step. The colon is optional for these two forms, but including it makes malformed calls fail clearly; without it, a malformed call silently becomes prose for the model. Separate arguments with spaces, not commas. String values require double quotes; `email=alice`, `email='alice'`, and `email={{email}}` are not supported string forms. There is no embedded-double-quote escape mechanism for the quoted scalar form; pass complex values through a variable or fixture instead. Do not append another action after the closing bracket. A leading descriptive label is allowed but is metadata, not an extra executable instruction.
 
 Tool paths differ from skill paths:
@@ -592,6 +608,7 @@ CDP uses persistent browser state. Configure `cdp` and an appropriate `cdpTab` (
 - Waits name observable states; assertions can fail when the requirement is violated.
 - Unattended tests contain no unresolved human dependencies. A `[use computer]` test says in its prose what the machine must look like — visible unlocked desktop, mouse untouched, `desktop.enabled: true` — and brings its target window forward itself.
 - Specialised or external operations use implemented tools, not invented natural-language capabilities.
+- Every `[use ai]` step names its value, carries in its own text everything the model needs (the date included), and is not a value that must repeat run to run — that is a tool.
 - The delivery distinguishes “written”, “parser-checked”, and “executed successfully”.
 
 ## Implementation references

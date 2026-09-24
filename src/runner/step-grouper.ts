@@ -10,7 +10,7 @@ import { parseSetStep } from '../parser/set-step.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseFailureTail } from '../parser/failure-tail.js';
 import { isControlLineClaim } from '../parser/control-line.js';
-import { parseUseStep } from '../parser/use-step.js';
+import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 
 /** A single step reference within a group */
 export interface GroupedStep {
@@ -50,6 +50,12 @@ export interface StepGroup {
  * (stories/control-flow.md §Grouper).
  */
 export function isConditionalStep(instruction: string): boolean {
+  // A `[use ai]` step is never a watch, however its question opens: the strip
+  // just below would read `[use ai] If the name is empty, …` as `If …`, and a
+  // watch group would hand the whole line to a page model to poll for — the
+  // question never asked of the model it was written for
+  // (stories/use-ai-step.md, decision 8).
+  if (parseUseAiStep(instruction)) return false;
   // Strip leading [prefix] markers
   const stripped = instruction.replace(/^\[.*?\]\s*/gi, '').trim();
   // A flow-control step is never a conditional, even though it opens `If`
@@ -158,6 +164,12 @@ export function identifyStepGroups(steps: string[]): Map<number, StepGroup> {
     // just left, which on the computer surface means real clicks at
     // coordinates chosen for a page.
     if (i < steps.length && parseUseStep(steps[i]!)) continue;
+    // The sixth, `[use ai] <step>` (stories/use-ai-step.md, decision 8), and
+    // `Set`'s shape exactly: a step with no page half, which the model the
+    // watch polls could only perform as prose — the value never stored, and
+    // `i = group.continuationStep.index` jumping past the step that should
+    // have stored it.
+    if (i < steps.length && parseUseAiStep(steps[i]!)) continue;
     // The fourth member of the same exemption, and the quietest: swallowed as the
     // continuation, a tail step is performed by `executeBranchedStep` with the tail
     // in its prose and its own `failureTail` never computed — so an `otherwise

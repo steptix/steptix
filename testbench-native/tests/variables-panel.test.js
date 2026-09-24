@@ -138,6 +138,29 @@ test("classifyCaptureSource: 'capture' passes through", () => {
   assert.equal(classifyCaptureSource("capture"), "capture");
 });
 
+test("classifyCaptureSource: 'generated' passes through — a [use ai] value", () => {
+  assert.equal(classifyCaptureSource("generated"), "generated");
+  assert.equal(classifyCaptureSource("assignment"), "assignment");
+});
+
+test("collectVariables: seeds a row for a [use ai] step's explicit name, source 'generated'", () => {
+  const text = [
+    "## Steps",
+    "1. [use ai] Today is {{today}}. Give the date 3 days later [store as: days_from_now]",
+    "2. [no-hooks] [use: ai] Pick a colour and store it as {{colour}}",
+    // An `[output:]` on a [use ai] line is the model's value too, not a page read.
+    "3. [use ai] [output: motto] Write a motto",
+    // No explicit name: the model names it at run time, so no row until then.
+    "4. [use ai] Create a name and store it in random_name",
+  ].join("\n");
+  const got = collectVariables(text, {}, { days_from_now: "20260927" }, { days_from_now: "generated" });
+  assert.deepEqual(got, [
+    { name: "days_from_now", source: "generated", line: 2, value: "20260927", captureSource: "generated" },
+    { name: "colour", source: "generated", line: 3, value: undefined },
+    { name: "motto", source: "generated", line: 4, value: undefined },
+  ]);
+});
+
 test("classifyCaptureSource: absent source defaults to 'capture' (back-compat)", () => {
   assert.equal(classifyCaptureSource(undefined), "capture");
 });

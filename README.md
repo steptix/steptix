@@ -424,6 +424,7 @@ mobile user agent, or devicePixelRatio emulation); see
 ### Special step prefixes
 
 - `Set {{name}} to "text"` -- assigns a variable from other variables, with no AI call (see [Variables](#setting-a-variable))
+- `[use ai] step text` -- asks the model for a value from the step text alone (no page, no earlier steps, no date) and stores it: `[use ai] Create a customer name starting with AUTO [store as: customer]`. Asked again on every run and never cached or compiled; it is a poor source of randomness, so put any date it needs in the step and write a tool for a value that must be the same every time
 - `[input: variable_name] prompt text` -- pauses for user input, stores as `{{variable_name}}`
 - `[interactive] optional hint` -- opens an interactive REPL (commands are `/`-prefixed: `/continue` advance, `/resume` jump to any step, `/screenshot` capture, `/help` for the full list)
 - `[skill: name args]` -- inline a reusable named sequence of steps from your `skills/` directory; `[skill: subfolder/name args]` for a skill in a subfolder (see [Skills](#skills))

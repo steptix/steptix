@@ -749,49 +749,135 @@ export function resolveSetTemplate(
   values: PlaceholderValues,
   definedLater?: ReadonlySet<string> | undefined,
 ): { value: string } | { error: string } {
-  const where = `Set {{${name}}}: the template`;
+  const error = unresolvedReferenceError(`Set {{${name}}}: the template`, template, values, {
+    definedLater,
+  });
+  if (error !== undefined) return { error };
+  return { value: substituteText(template, values) };
+}
+
+/**
+ * The refusal for the first reference in `text` this run cannot answer, or
+ * undefined when every one resolves — the check {@link resolveSetTemplate}
+ * and {@link resolveUseAiText} share, so a `Set` template and a `[use ai]`
+ * step refuse in the same words (stories/use-ai-step.md, verification
+ * rule 5). `where` is the subject the sentences open with.
+ *
+ * `defines` are names the text DEFINES rather than reads (`store as {{x}}`)
+ * and are skipped outright. `envAlways` checks a `${…}` even when the run has
+ * no environment: a `Set` leaves one it cannot answer to match every other
+ * step's text, while a `[use ai]` step must not hand the model a literal
+ * `${…}` to invent a value for.
+ */
+function unresolvedReferenceError(
+  where: string,
+  text: string,
+  values: PlaceholderValues,
+  opts: {
+    definedLater?: ReadonlySet<string> | undefined;
+    defines?: ReadonlySet<string> | undefined;
+    envAlways?: boolean | undefined;
+  } = {},
+): string | undefined {
   const known = new Set(Object.keys(values.parameters));
-  const { placeholders, envRefs } = collectReferences(template);
+  const { placeholders, envRefs } = collectReferences(text);
 
   for (const { name: ref, raw } of placeholders) {
+    if (opts.defines?.has(ref)) continue;
     const canonical = `{{${ref}}}`;
     if (raw !== canonical) {
       const key = known.has(ref) ? ref : (nearMatch(ref, known) ?? ref);
-      return { error: `${where} wrote \`${raw}\`. ${NO_SPACES_SENTENCE(key)}` };
+      return `${where} wrote \`${raw}\`. ${NO_SPACES_SENTENCE(key)}`;
     }
     if (known.has(ref)) continue;
     const near = nearMatch(ref, known);
     if (near !== undefined) {
-      return {
-        error:
-          `${where} references \`${canonical}\`, which is not a parameter or ` +
-          `captured variable of this run — did you mean \`{{${near}}}\`?`,
-      };
-    }
-    if (definedLater?.has(ref)) {
-      return {
-        error:
-          `${where} references \`${canonical}\`, which has no value yet: it is ` +
-          `captured later in this test, or by a step this run skipped.`,
-      };
-    }
-    return {
-      error:
+      return (
         `${where} references \`${canonical}\`, which is not a parameter or ` +
-        `captured variable of this run.`,
-    };
+        `captured variable of this run — did you mean \`{{${near}}}\`?`
+      );
+    }
+    if (opts.definedLater?.has(ref)) {
+      return (
+        `${where} references \`${canonical}\`, which has no value yet: it is ` +
+        `captured later in this test, or by a step this run skipped.`
+      );
+    }
+    return (
+      `${where} references \`${canonical}\`, which is not a parameter or ` +
+      `captured variable of this run.`
+    );
   }
 
-  if (values.envData) {
+  if (values.envData || opts.envAlways) {
     for (const ref of envRefs) {
-      if (resolveEnvDataRef(ref, values.envData) !== undefined) continue;
-      return {
-        error:
-          `${where} references \`\${${ref}}\`, which this run's environment ` +
-          `and data files cannot resolve.`,
-      };
+      if (values.envData && resolveEnvDataRef(ref, values.envData) !== undefined) continue;
+      return (
+        `${where} references \`\${${ref}}\`, which this run's environment ` +
+        `and data files cannot resolve.`
+      );
     }
   }
+  return undefined;
+}
 
-  return { value: substituteText(template, values) };
+/**
+ * What a `[use ai]` step's text says once its references are filled in, as
+ * the MODEL may read it — or the reference it cannot fill
+ * (stories/use-ai-step.md, decision 4).
+ *
+ * Every `{{name}}` and `${…}` is resolved in ONE pass — the grammar
+ * {@link substituteText} uses, so a value holding `{{` is inserted verbatim —
+ * and each value goes in through `show`, which is how the caller masks it:
+ * the runner passes the `## Values` block's own membership rule
+ * (`maskValueForPrompt`, src/ai/prompts.ts), so a secret-named value reaches
+ * the model as `***` exactly where the page model's block would say `***`,
+ * and a `## Config: unmask:` name reaches it as itself. The real resolved
+ * text is never built: nothing downstream needs it, and a string that only
+ * exists masked cannot leak unmasked.
+ *
+ * An unresolved reference is a refusal here, not a warning. An ordinary step
+ * passes one to the model with a warning; here a literal `{{today}}` would
+ * invite the model to invent a date, which is the silent wrong value this
+ * codebase treats as the worst failure. The refusal is {@link
+ * resolveSetTemplate}'s, in its words, with `where` naming the step.
+ *
+ * `defines` — the names the step writes in prose (`store as {{x}}`) — are
+ * definitions: neither refused nor filled, so a second pass through a loop
+ * does not hand the model the value the first pass stored.
+ */
+export function resolveUseAiText(
+  text: string,
+  values: PlaceholderValues,
+  opts: {
+    defines?: ReadonlySet<string> | undefined;
+    definedLater?: ReadonlySet<string> | undefined;
+    /** The value as the model may see it. `kind` says which syntax named it,
+     *  because the two are masked by different rules (by name, by path). */
+    show: (kind: 'placeholder' | 'env', name: string, value: string) => string;
+  },
+): { text: string } | { error: string } {
+  const error = unresolvedReferenceError('The [use ai] step', text, values, {
+    defines: opts.defines,
+    definedLater: opts.definedLater,
+    envAlways: true,
+  });
+  if (error !== undefined) return { error };
+  if (!text.includes('{{') && !text.includes('${')) return { text };
+  const filled = text.replace(
+    SUBSTITUTE_RE,
+    (match: string, name: string | undefined, ref: string | undefined) => {
+      if (name !== undefined) {
+        if (opts.defines?.has(name)) return match;
+        const value = boundValue(values.parameters, name);
+        return value === undefined ? match : opts.show('placeholder', name, value);
+      }
+      if (ref !== undefined && values.envData) {
+        const value = resolveEnvDataRef(ref, values.envData);
+        return value === undefined ? match : opts.show('env', ref, value);
+      }
+      return match;
+    },
+  );
+  return { text: filled };
 }

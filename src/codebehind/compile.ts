@@ -6,7 +6,7 @@ import type { StepResult, TestReport } from '../report/types.js';
 import type { TokenTracker } from '../utils/tokens.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
-import { parseUseStep } from '../parser/use-step.js';
+import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import { loopCompileRefusal } from '../runner/control-flow.js';
 import { buildCodeBehindRegistry } from './loader.js';
 import {
@@ -17,7 +17,9 @@ import {
   guardedValues,
   stepEnvRefs,
   stepParameters,
+  SET_STEP_NOT_COMPILED,
   SURFACE_SWITCH_NOT_COMPILED,
+  USE_AI_NOT_COMPILED,
   valueMatchWarning,
   type GeneratedEntry,
 } from './generate.js';
@@ -1504,7 +1506,12 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
       // parser, and the line survived as dead code defended by a false
       // rationale.
       : parseSetStep(text)
-      ? 'a Set step is dispatched, not compiled'
+      ? SET_STEP_NOT_COMPILED
+      // A `[use ai]` step, beside `Set` where the loops dispatch it — but for
+      // the opposite reason: not because it costs nothing, but because the
+      // model is to be asked on every run (stories/use-ai-step.md, decision 1).
+      : parseUseAiStep(text)
+      ? USE_AI_NOT_COMPILED
       // A `[use computer]` / `[use browser]` line, on the same terms as `Set`
       // and the unconditional flow-control step: the loop dispatches it with
       // no model call, so there is nothing recorded for an entry to replace

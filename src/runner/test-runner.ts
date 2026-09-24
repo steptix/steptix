@@ -19,7 +19,7 @@ import { TokenTracker } from '../utils/tokens.js';
 import { launchBrowser, closeBrowser, BrowserTracker, resolveVideoMode, finalizeMainPageVideo, type BrowserSession, type CdpLaunchOptions } from '../browser/manager.js';
 import { executeStep, executeBranchedStep } from './step-executor.js';
 import type { StepExecutorOptions } from './step-executor.js';
-import { parseUseStep } from '../parser/use-step.js';
+import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import {
   SkillSurfaceStack,
   computerContextFor,
@@ -98,6 +98,7 @@ import {
   toleratedLogLine,
 } from './flow-control.js';
 import { runSetStep } from './set-step-runner.js';
+import { runUseAiStep } from './use-ai-step-runner.js';
 import { generateReport, getPrimaryModel, videoBaseNameFor, countStepOrigins } from '../report/generator.js';
 import { mergeRowReports, type RowReport } from '../report/merge-rows.js';
 import { appendRunHistory } from '../report/history-appender.js';
@@ -999,12 +1000,18 @@ export async function runTest(
         // redundant — which would have led anyone trimming it to reinstate a
         // silent failure (stories/variable-assignment.md).
         const hookSetStep = parseSetStep(raw);
-        const hookInstruction = hookSetStep ? raw : interpolate(raw, resolvedParameters);
+        // `[use ai]` as a hook line (stories/use-ai-step.md, verification rule
+        // 7): authored text, like `Set` — its runner fills and masks the
+        // placeholders itself, and `applyEnvDataInterpolation` leaves its
+        // `${…}` intact for the same reason.
+        const hookUseAiStep = hookSetStep ? null : parseUseAiStep(raw);
+        const hookInstruction =
+          hookSetStep || hookUseAiStep ? raw : interpolate(raw, resolvedParameters);
 
         // A hook line's claim, read off the same text the refusal names. Split out
         // of the `if` below because three things read it: the refusal, the
         // unconditional `Fail` dispatch, and the CONDITIONAL `fail` hook's claim.
-        const hookClaim = parseFlowControlStep(hookInstruction);
+        const hookClaim = hookUseAiStep ? null : parseFlowControlStep(hookInstruction);
         // A hook's own `… otherwise …` tail. A hook step is a prose step like
         // any other (stories/step-failure-outcomes.md, decision 7), so it takes
         // one — except where the line is a claim or an assignment, which have
@@ -1103,6 +1110,30 @@ export async function runTest(
           if (outcome.assigned) {
             logger.info(
               `[set] ${outcome.assigned.name} = "${redact(outcome.assigned.value, secretsNow())}"`,
+            );
+          }
+        } else if (hookUseAiStep) {
+          // The hook half of verification rule 7, through the same runner as the
+          // main flow. No cache here either — hooks never had one.
+          logger.info(`Running ${scope} hook: ${redact(hookInstruction, secretsNow())}`);
+          const aiOutcome = await runUseAiStep({
+            parsed: hookUseAiStep,
+            index: hookIndex,
+            instruction: hookInstruction,
+            scope: resolvedParameters,
+            envData: test.envData,
+            secrets: secretsNow(),
+            unmask: unmaskNames,
+            aiClient,
+            retries: config.execution.retries,
+            signal: extras.signal,
+            failureTail: hookFailureTail,
+          });
+          result = aiOutcome.result;
+          if (aiOutcome.name !== undefined) {
+            logger.info(
+              `[ai] ${aiOutcome.name} = ` +
+                `"${redact(maskRecordSecrets(aiOutcome.value ?? ''), secretsNow())}"`,
             );
           }
         } else if (toolCall) {
@@ -1837,13 +1868,19 @@ export async function runTest(
       // (stories/variable-assignment.md §Locked, "Recognised on the authored
       // line"). Its own template is resolved inside the branch instead.
       const setStep = parseSetStep(rawInstruction);
+      // `[use ai] <step>` (stories/use-ai-step.md), read off the AUTHORED line
+      // for `Set`'s reason and dispatched beside it: never interpolated here —
+      // the runner fills and masks the placeholders itself, and a prose
+      // `store as {{x}}` is a definition that interpolation would overwrite on
+      // a second pass.
+      const useAiStep = setStep ? null : parseUseAiStep(rawInstruction);
       // `If … then return` / `… then stop`, likewise read off the AUTHORED
       // line (stories/step-flow-control.md, decision 2). The claim is textual
       // and is the same answer in every runner; the model only judges the
       // condition, and only on the conditional form. The line is still
       // interpolated below — a body may reference `{{…}}`, and it is the whole
       // line the model reads.
-      const flowControlClaim = setStep ? null : parseFlowControlStep(rawInstruction);
+      const flowControlClaim = setStep || useAiStep ? null : parseFlowControlStep(rawInstruction);
       // Env/data first (parse-time semantics: fixed for the whole run), then
       // runtime `{{...}}` — the server's order, now the CLI's too.
       // `controlLineDefines` is the third argument, and it is not optional in
@@ -1852,7 +1889,7 @@ export async function runTest(
       // `Unresolved placeholder: {{payment}}` on every visit to every correct
       // table loop — noise in the one output that reads like a diagnosis.
       // Every run loop passes it; that is the whole point of the helper.
-      const instruction = setStep
+      const instruction = setStep || useAiStep
         ? rawInstruction
         : interpolate(
             test.envData ? interpolateEnvData(rawInstruction, test.envData) : rawInstruction,
@@ -1879,13 +1916,14 @@ export async function runTest(
         flowControlClaim && flowControlClaim.body === undefined ? flowControlClaim : null;
 
       // Handle [input: variable_name] steps — pause for user input
-      const inputStep = setStep || unconditionalFlowControl ? null : parseInputStep(instruction);
+      const inputStep =
+        setStep || useAiStep || unconditionalFlowControl ? null : parseInputStep(instruction);
       const interactiveStep =
-        !inputStep && !setStep && !unconditionalFlowControl
+        !inputStep && !setStep && !useAiStep && !unconditionalFlowControl
           ? parseInteractiveStep(instruction)
           : null;
       const outputStep =
-        !inputStep && !interactiveStep && !setStep && !unconditionalFlowControl
+        !inputStep && !interactiveStep && !setStep && !useAiStep && !unconditionalFlowControl
           ? parseOutputStep(instruction)
           : null;
       // The `… otherwise fail …` / `… otherwise continue` tail, computed beside the
@@ -1913,7 +1951,10 @@ export async function runTest(
       // refusal is written from the run's own values — the properties the row
       // does hold, the keys the loop dropped — and it reaches the console, the
       // report and the run log verbatim.
-      const dottedRefError = setStep
+      // Not for a `[use ai]` step either: its runner refuses every reference it
+      // cannot fill, dotted or flat, in `Set`'s words (stories/use-ai-step.md,
+      // verification rule 5).
+      const dottedRefError = setStep || useAiStep
         ? undefined
         : dottedReferenceError(
             rawInstruction,
@@ -1928,7 +1969,7 @@ export async function runTest(
       // that branch was dropped by whatever built `test`, and the message says
       // so rather than blaming a missing directory.
       const undispatchedDirective =
-        surfaceState.surface === 'computer' && !setStep && !unconditionalFlowControl
+        surfaceState.surface === 'computer' && !setStep && !useAiStep && !unconditionalFlowControl
           ? undispatchedDirectiveError(rawInstruction, { toolsLoaded: true, skillsDirSupplied: true })
           : null;
       let stepResult: StepResult;
@@ -2010,6 +2051,34 @@ export async function runTest(
           logger.info(
             `[set] ${setOutcome.assigned.name} = ` +
               `"${redact(maskRecordSecrets(setOutcome.assigned.value), secretsNow())}"`,
+          );
+        }
+      } else if (useAiStep) {
+        // `[use ai] <step>` (stories/use-ai-step.md): the step's text alone goes
+        // to the model, and the value it answers with is stored. Beside `Set`
+        // and for `Set`'s reasons — no `stepCache`, no `codeBehindOptionsFor(i)`,
+        // no page: `executeStep` is the only reader of either, and this never
+        // reaches it, so the model answers on every run.
+        const aiOutcome = await runUseAiStep({
+          parsed: useAiStep,
+          index: i + 1,
+          instruction,
+          scope: resolvedParameters,
+          envData: test.envData,
+          secrets: secretsNow(),
+          unmask: unmaskNames,
+          aiClient,
+          retries: config.execution.retries,
+          signal: extras.signal,
+          failureTail,
+        });
+        stepResult = aiOutcome.result;
+        if (aiOutcome.name !== undefined) {
+          // Read AFTER the write, so a secret-named target's own value is in
+          // the mask set this line is printed through.
+          logger.info(
+            `[ai] ${aiOutcome.name} = ` +
+              `"${redact(maskRecordSecrets(aiOutcome.value ?? ''), secretsNow())}"`,
           );
         }
       } else if (inputStep) {

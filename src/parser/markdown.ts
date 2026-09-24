@@ -13,7 +13,7 @@ import {
 import { expandSkills } from '../skills/expander.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { parseSetStep, setStepError, substitutePreservingSet } from './set-step.js';
-import { useStepError } from './use-step.js';
+import { parseUseAiStep, useStepError } from './use-step.js';
 import { unknownWholeStepBracketError } from './whole-step-bracket.js';
 import {
   parseFlowControlStep,
@@ -309,8 +309,14 @@ function applyEnvDataInterpolation(parsed: ParsedTest, ctx: EnvDataContext): voi
   // Not the shared guard: a hook Set is not BROKEN by baking, it is simply
   // better resolved per run (the hook path passes envData to runSetStep), so
   // the token is preserved rather than the substitution refused.
+  //
+  // A `[use ai]` hook keeps its tokens for a stronger reason: it IS shown to a
+  // model, and its runner masks each value it fills in by the `## Values`
+  // rule (stories/use-ai-step.md, decision 4). Baked here, a
+  // `${env.PASSWORD}` would already be plain text by then, and would reach
+  // the model in clear.
   const hookEnvData = (s: string): string =>
-    parseSetStep(s) ? s : interpolateEnvData(s, ctx);
+    parseSetStep(s) || parseUseAiStep(s) ? s : interpolateEnvData(s, ctx);
   parsed.hooks = {
     before: parsed.hooks.before.map(hookEnvData),
     beforeEach: parsed.hooks.beforeEach.map(hookEnvData),
@@ -542,6 +548,45 @@ function parseSkillContent(rawContent: string, filePath: string): ParsedSkill {
               `name.`,
           );
         }
+      }
+    }
+  }
+
+  // A `[use ai]` step in a skill must NAME its value, and name it in a spelling
+  // the skill's scoping rewrites (stories/use-ai-step.md, decision 7). A skill
+  // keeps its variables apart from its caller's by rewriting names in the step
+  // TEXT at expansion — `{{x}}` and `[store as: x]` become `__skill<N>_x`, a
+  // declared output its caller's alias — and a name the model makes up at run
+  // time never passes through that rewrite, so it would land in the caller's
+  // scope unrenamed. `[as: x]` and `[output: x]` are not rewritten either
+  // (`renameVar`, src/skills/expander.ts), so they would leak the same way.
+  // `### Section` bodies of a TEST share the test's scope and need no such
+  // rule; a skill's own sections are checked here with its main flow.
+  const skillBodies = [
+    sections.steps,
+    ...Object.values(sections.sectionDefs).map((s) => s.steps),
+  ];
+  for (const body of skillBodies) {
+    for (const step of body) {
+      const useAi = parseUseAiStep(step);
+      if (!useAi) continue;
+      if (useAi.explicitNames.length === 0) {
+        throw new Error(
+          `Cannot run "${step.trim()}" in ${filePath}: a [use ai] step inside a ` +
+            `skill must name the value it stores. A skill renames its variables ` +
+            `per call, and a name the model chooses at run time is never renamed, ` +
+            `so it would land in the caller's variables. Add \`[store as: name]\` ` +
+            `to the step.`,
+        );
+      }
+      if (/\[(?:as|output)[ \t]*:/i.test(step)) {
+        throw new Error(
+          `Cannot run "${step.trim()}" in ${filePath}: inside a skill, name a ` +
+            `[use ai] value with \`[store as: name]\` or \`store as {{name}}\`. ` +
+            `A skill renames its variables per call, and \`[as: …]\` / ` +
+            `\`[output: …]\` are not renamed, so the value would land in the ` +
+            `caller's variables.`,
+        );
       }
     }
   }
@@ -819,6 +864,22 @@ function parseSections(rawContent: string, filePath: string): {
           `table under "### ${target.name}", and a looped section's row values ` +
           `are written into its step text rather than kept as variables. ` +
           `Assign to a different name.`,
+      );
+    }
+    // The same refusal for the name a `[use ai]` step stores under
+    // (stories/use-ai-step.md): a prose `store as {{column}}` would be baked
+    // over with the row's value, and a bracket-named one would be written
+    // while every later `{{column}}` in the body already held the row's.
+    const useAiStep = parseUseAiStep(steps[i]!);
+    const bakedName = useAiStep?.explicitNames.find(
+      (name) => columns !== undefined && Object.hasOwn(columns, name),
+    );
+    if (bakedName !== undefined) {
+      throw new Error(
+        `Cannot store a [use ai] value as {{${bakedName}}}${where}: it is a ` +
+          `column of the table under "### ${target!.name}", and a looped ` +
+          `section's row values are written into its step text rather than ` +
+          `kept as variables. Store it under a different name.`,
       );
     }
 

@@ -27,6 +27,7 @@ import { loadContextFiles } from '../../context/loader.js';
 import { bindVariable, interpolate } from '../../parser/parameters.js';
 import { interpolateEnvData, type EnvDataContext } from '../../parser/interpolate-env-data.js';
 import { parseSetStep } from '../../parser/set-step.js';
+import { parseUseAiStep } from '../../parser/use-step.js';
 import { controlLineDefines } from '../../parser/control-line.js';
 import { isReturnClaim, parseFlowControlStep } from '../../parser/flow-control-step.js';
 import {
@@ -45,6 +46,7 @@ import {
 } from '../../runner/flow-control.js';
 import { resolveEnvBundle } from '../../env/resolve-bundle.js';
 import { runSetStep } from '../../runner/set-step-runner.js';
+import { runUseAiStep } from '../../runner/use-ai-step-runner.js';
 import { createStructureMemo, type StructureMemo } from '../../runner/structure-memo.js';
 import {
   createControlState,
@@ -673,9 +675,12 @@ export class UIRunnerAdapter {
       // would replace the TARGET with its own value once it holds one
       // (stories/variable-assignment.md §Locked).
       const setStep = parseSetStep(rawInstruction);
+      // `[use ai] <step>` (stories/use-ai-step.md), off the AUTHORED line and
+      // never interpolated, for `Set`'s reasons.
+      const useAiStep = setStep ? null : parseUseAiStep(rawInstruction);
       // The flow-control claim, read off the AUTHORED line like `Set`
       // (stories/step-flow-control.md, decision 2).
-      const flowControlClaim = setStep ? null : parseFlowControlStep(rawInstruction);
+      const flowControlClaim = setStep || useAiStep ? null : parseFlowControlStep(rawInstruction);
       // The `… otherwise fail …` / `… otherwise continue` tail, off the same
       // AUTHORED line and with the exclusions the other three loops apply
       // (stories/step-failure-outcomes.md, decision 12). `[input:]` and
@@ -687,7 +692,8 @@ export class UIRunnerAdapter {
       // run time never passed it.
       const failureTailContradiction =
         setStep || flowControlClaim ? false : isFailureTailContradiction(rawInstruction);
-      const instruction = setStep ? rawInstruction : this.resolveStepText(rawInstruction);
+      const instruction =
+        setStep || useAiStep ? rawInstruction : this.resolveStepText(rawInstruction);
       /**
        * The same line as everything OUTSIDE the run may see it.
        *
@@ -952,6 +958,55 @@ export class UIRunnerAdapter {
           this.emit('runner:error', { message: outcome.result.error ?? 'Set step failed' });
           break;
         }
+        i = advance(i);
+        continue;
+      }
+
+      // --- Handle `[use ai] <step>` steps (stories/use-ai-step.md) ---
+      // Beside `Set` and with its bookkeeping. There is no variables event on
+      // this runner, so nothing is emitted for the value itself; the report
+      // row carries it. Unlike `Set`, the step takes an `… otherwise …` tail
+      // (decision 10), so a tolerated failure carries on as it does below.
+      if (useAiStep) {
+        flushSkips(i);
+        this.emit('runner:step-start', { stepIndex, instruction: shown(instruction), totalSteps });
+        const outcome = await runUseAiStep({
+          parsed: useAiStep,
+          index: stepIndex,
+          instruction,
+          scope: this.resolvedParameters,
+          envData: parsedTest.envData,
+          secrets: runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData }),
+          aiClient: this.aiClient!,
+          retries: this.config.execution.retries,
+          failureTail,
+        });
+        const result = outcome.result;
+        const stepLoop = loops.markerFor(i);
+        if (stepLoop) result.loop = stepLoop;
+        this.stepResults.push(result);
+        this.emit('runner:step-complete', {
+          stepIndex,
+          status: result.status === 'passed' ? 'passed' : 'failed',
+          durationMs: result.durationMs,
+          ...(result.error !== undefined && { error: result.error }),
+          ...(result.tolerated && { tolerated: true }),
+          ...(result.warning !== undefined && { warning: result.warning }),
+        });
+        this.conversationHistory.push(
+          formatStepHistoryEntry(
+            stepIndex,
+            shown(instruction),
+            result.status === 'passed',
+            this.page?.url(),
+          ),
+        );
+        if (result.tolerated) this.conversationHistory.push(toleratedHistoryLine(stepIndex));
+        if (result.status === 'failed' && !result.tolerated) {
+          this.emit('runner:error', { message: result.error ?? '[use ai] step failed' });
+          break;
+        }
+        this.tokenTracker?.resetStep();
         i = advance(i);
         continue;
       }

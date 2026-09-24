@@ -260,11 +260,14 @@ export class SectionCompletionProvider implements vscode.CompletionItemProvider 
     // two of these, and a run that never leaves the browser needs neither.
     // They carry no `$0`: the directive is the whole step and takes no
     // arguments, so there is nowhere for a caret to usefully land.
+    //
+    // `[use ai]` rides the same list and carries its own snippet: it is a
+    // PREFIX, so the caret lands after it, where the step is written.
     for (const [order, row] of useDirectiveCompletions().entries()) {
       const item = new vscode.CompletionItem(row.token, vscode.CompletionItemKind.Keyword);
       item.detail = row.detail;
       item.documentation = new vscode.MarkdownString(row.documentation);
-      item.insertText = row.token;
+      item.insertText = row.insert !== undefined ? new vscode.SnippetString(row.insert) : row.token;
       item.range = tokenRange;
       item.sortText = `2_${order}`;
       items.push(item);

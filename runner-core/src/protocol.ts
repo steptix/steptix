@@ -350,17 +350,20 @@ export interface CaptureEvent {
   name: string;
   value: string;
   /**
-   * Where this variable came from. Three values flow through this event:
+   * Where this variable came from. Four values flow through this event:
    * `'capture'` (an `[output:]`/`[store as:]` extraction from the page),
-   * `'toolOutput'` (a `[tool:]`/`[skill:]` return) and `'assignment'` (a
-   * `Set {{name}} to "…"` step — stories/variable-assignment.md).
+   * `'toolOutput'` (a `[tool:]`/`[skill:]` return), `'assignment'` (a
+   * `Set {{name}} to "…"` step — stories/variable-assignment.md) and
+   * `'generated'` (a `[use ai] <step>`, whose value the model made up from
+   * the step text alone — stories/use-ai-step.md).
    * `'parameter'` values arrive via the separate `parametersResolved` event,
    * which already tags them by event type, so it is intentionally absent
    * here. Required on new emitters; consumers talking to a not-yet-upgraded
    * server must treat an absent — or unrecognised — `source` as `'capture'`
-   * (the conservative default, and what makes adding this third value safe).
+   * (the conservative default, and what makes adding a value safe: an older
+   * client shows a generated value as a plain capture rather than failing).
    */
-  source: 'capture' | 'toolOutput' | 'assignment';
+  source: 'capture' | 'toolOutput' | 'assignment' | 'generated';
 }
 
 export interface DoneEvent {

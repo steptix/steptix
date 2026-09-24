@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   isUseStepClaim,
+  parseUseAiStep,
   parseUseStep,
   USE_SURFACES,
   useStepError,
@@ -437,5 +438,159 @@ describe('§9 a surface switch is never compiled', () => {
         status: 'passed',
       }),
     ).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `[use ai] <step>` (stories/use-ai-step.md §Design, "Parser")
+// ---------------------------------------------------------------------------
+
+describe('[use ai] <step> — the forms that parse', () => {
+  const ACCEPTED: [string, { text: string; explicitNames: string[]; defines: string[] }][] = [
+    [
+      '[use ai] Create a name starting with "AUTO" and store it in random_name',
+      {
+        text: 'Create a name starting with "AUTO" and store it in random_name',
+        explicitNames: [],
+        defines: [],
+      },
+    ],
+    // Case, colon and whitespace, as the rest of the family.
+    ['[USE AI] Write a line', { text: 'Write a line', explicitNames: [], defines: [] }],
+    ['[use: ai] Write a line', { text: 'Write a line', explicitNames: [], defines: [] }],
+    ['[use:ai]Write a line', { text: 'Write a line', explicitNames: [], defines: [] }],
+    ['[use\tai ]   Write a line  ', { text: 'Write a line', explicitNames: [], defines: [] }],
+    // The `[no-hooks]` marker, stripped by the parser itself for the reason
+    // `set-step.ts` gives.
+    ['[no-hooks] [use ai] Write a line', { text: 'Write a line', explicitNames: [], defines: [] }],
+    // Each explicit-name spelling. The bracket markers leave the text the
+    // model sees; the prose form stays, because it is the author's sentence.
+    [
+      '[use ai] Today is {{today}}. Give the date 3 days later as yyyymmdd [store as: days_from_now]',
+      {
+        text: 'Today is {{today}}. Give the date 3 days later as yyyymmdd',
+        explicitNames: ['days_from_now'],
+        defines: [],
+      },
+    ],
+    ['[use ai] Pick a colour [as: colour]', { text: 'Pick a colour', explicitNames: ['colour'], defines: [] }],
+    ['[use ai] [output: colour] Pick a colour', { text: 'Pick a colour', explicitNames: ['colour'], defines: [] }],
+    [
+      '[use ai] Pick a colour and store it as {{colour}}',
+      { text: 'Pick a colour and store it as {{colour}}', explicitNames: ['colour'], defines: ['colour'] },
+    ],
+    [
+      '[use ai] Pick a colour, save as {{colour}} [store as: colour]',
+      { text: 'Pick a colour, save as {{colour}}', explicitNames: ['colour'], defines: ['colour'] },
+    ],
+  ];
+
+  it.each(ACCEPTED)('%s', (line, parsed) => {
+    expect(parseUseAiStep(line)).toEqual(parsed);
+    expect(useStepError(line)).toBeNull();
+    expect(isUseStepClaim(line)).toBe(true);
+    // Not a surface switch: every existing caller of `parseUseStep` keeps its
+    // meaning.
+    expect(parseUseStep(line)).toBeNull();
+  });
+
+  it('is not a whole-step bracket the §4.2 rule refuses', () => {
+    expect(unknownWholeStepBracketError('[use ai] Write a line')).toBeNull();
+    expect(unknownWholeStepBracketError('[use ai]')).toBeNull();
+  });
+
+  it('prose that merely mentions the family stays prose', () => {
+    for (const line of ['Verify the [use of ai] banner', 'Click the "use AI" toggle', '[user ai] x']) {
+      expect(parseUseAiStep(line), line).toBeNull();
+      expect(useStepError(line), line).toBeNull();
+    }
+  });
+});
+
+describe('[use ai] <step> — every misuse is refused with its own message', () => {
+  /** The column the caret points at, as in the §4.1 block above. */
+  function caretColumn(message: string): number {
+    const [, source, caret] = message.split('\n');
+    expect(source).toMatch(/^ {2}/);
+    expect(caret).toMatch(/^ *\^$/);
+    return caret!.length - 1 - 2;
+  }
+
+  it('[use ai] alone — needs a step after it', () => {
+    for (const line of ['[use ai]', '[use ai]   ', '[use ai] [store as: x]']) {
+      const message = useStepError(line, ' in tests/t.md at line 3')!;
+      expect(message, line).toContain('in tests/t.md at line 3');
+      expect(message, line).toContain(
+        '`[use ai]` needs a step after it: what should the model produce?',
+      );
+    }
+  });
+
+  it('[use ai timeout=30] … — arguments inside the bracket', () => {
+    const message = useStepError('[use ai timeout=30] Write a line')!;
+    expect(message).toContain('`[use ai]` takes no arguments');
+    expect(message).toContain('remove `timeout=30`');
+    expect(caretColumn(message)).toBe('[use ai '.length);
+  });
+
+  it('[use ai] not at the start of the step — and says where it goes', () => {
+    const line = 'Write a random paragraph about Australia [use ai] [store as: text]';
+    const message = useStepError(line)!;
+    expect(message).toContain('Put `[use ai]` at the start of the step');
+    expect(message).toContain(
+      '`[use ai] Write a random paragraph about Australia [store as: text]`',
+    );
+    expect(caretColumn(message)).toBe(line.indexOf('[use ai]'));
+    // It never claimed the form — the refusal is a separate rule.
+    expect(isUseStepClaim(line)).toBe(false);
+    expect(parseUseAiStep(line)).toBeNull();
+  });
+
+  it('[use ai] as a control line tail — refused, with a message saying so', () => {
+    for (const line of [
+      'If the name is empty, then [use ai] Make up a name [store as: name]',
+      'While the list is short, [use ai] Add an item',
+      'Otherwise, [use ai] Write a line',
+    ]) {
+      const message = useStepError(line)!;
+      expect(message, line).toContain('cannot be the step a control line runs');
+      expect(message, line).toContain('### Section');
+    }
+  });
+
+  it('more than one explicit name — refused, naming them', () => {
+    for (const [line, names] of [
+      ['[use ai] Pick a colour [store as: a] [as: b]', '`a`, `b`'],
+      ['[use ai] Pick a colour and store it as {{a}} [output: b]', '`a`, `b`'],
+      ['[use ai] Pick two colours [store as: a, b]', '`a`, `b`'],
+    ] as const) {
+      const message = useStepError(line)!;
+      expect(message, line).toContain(
+        'A `[use ai]` step produces one value, and this one names 2',
+      );
+      expect(message, line).toContain(names);
+      // Still a `[use ai]` step to a runtime: the runner refuses it with this
+      // same message rather than handing it to a page model as prose.
+      expect(parseUseAiStep(line)!.explicitNames).toHaveLength(2);
+    }
+    // One name written twice is one name.
+    expect(useStepError('[use ai] Pick a colour, save as {{c}} [store as: c]')).toBeNull();
+  });
+
+  it('[use phone] — the message describes the family as it is', () => {
+    const message = useStepError('[use phone]')!;
+    expect(message).toContain('`phone` is not a surface');
+    expect(message).toContain('`[use computer]`');
+    expect(message).toContain('`[use browser]`');
+    expect(message).toContain('switch the surface as whole steps');
+    expect(message).toContain('`[use ai] <step>` asks the model for a value');
+  });
+
+  it('[use computer] and click Save — keeps its whole-step refusal', () => {
+    expect(useStepError('[use computer] and click Save')).toContain('is the whole step');
+  });
+
+  it('the §4.2 directive list names the new form too', () => {
+    expect(unknownWholeStepBracketError('[dekstop]')).toContain('`[use ai] <step>`');
   });
 });

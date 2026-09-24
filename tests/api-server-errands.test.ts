@@ -353,11 +353,22 @@ vi.mock('../src/context/loader.js', () => ({
   loadContextFiles: vi.fn(async () => ({ files: [], combined: '' })),
 }));
 
+/** What a `[use ai]` step's model answers, and what it was sent — the only
+ *  model call an errand makes outside the (mocked) executor
+ *  (stories/use-ai-step.md). */
+const useAiModel = vi.hoisted(() => ({ replies: [] as string[], requests: [] as unknown[][] }));
+
 vi.mock('../src/ai/client.js', () => ({
   AiClient: class {
     chat = vi.fn(async () => '{}');
     setAiPolicy = vi.fn();
     syncAuth = vi.fn(() => null);
+    async complete(messages: unknown[]): Promise<{ text: string; model: string }> {
+      useAiModel.requests.push(messages);
+      const text = useAiModel.replies.shift();
+      if (text === undefined) throw new Error('the model was asked more times than scripted');
+      return { text, model: 'stub' };
+    }
   },
 }));
 
@@ -799,6 +810,43 @@ describe('POST /errands', () => {
       step: 'Set {{ref}} to "Ref: {{order}}"',
       status: 'passed',
       outputs: { ref: 'Ref: ORD-42' },
+    });
+  });
+
+  it('a [use ai] step is allowed, asks the model the step alone, and lands in the receipt', async () => {
+    // Errands refuse `[use computer]` / `[use browser]` as surface switches;
+    // `[use ai]` switches nothing and runs (stories/use-ai-step.md, decision 8).
+    const seen = recordInstructions();
+    useAiModel.replies = ['{"as": "promo_code", "value": "SAVE-42"}'];
+    useAiModel.requests = [];
+
+    const { status, body } = await api('POST', '/errands', {
+      ...errandBody({
+        steps: [
+          '[use ai] Make up a promo code starting SAVE and store it in promo_code',
+          'Type {{promo_code}} into the coupon box',
+        ],
+      }),
+    });
+
+    expect(status).toBe(200);
+    expect(body.status).toBe('passed');
+    // One model call for the [use ai] step, with the step's own text alone…
+    expect(useAiModel.requests).toHaveLength(1);
+    expect((useAiModel.requests[0] as Array<{ role: string; content: string }>).map((m) => m.role)).toEqual([
+      'system',
+      'user',
+    ]);
+    expect((useAiModel.requests[0] as Array<{ content: string }>)[1]!.content).toBe(
+      'Make up a promo code starting SAVE and store it in promo_code',
+    );
+    // …no executor call for it, and the next step read the value.
+    expect(seen).toEqual(['Type SAVE-42 into the coupon box']);
+    expect(body.captures).toEqual({ promo_code: 'SAVE-42' });
+    expect(body.results[0]).toMatchObject({
+      step: '[use ai] Make up a promo code starting SAVE and store it in promo_code',
+      status: 'passed',
+      outputs: { promo_code: 'SAVE-42' },
     });
   });
 

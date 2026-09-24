@@ -34,7 +34,7 @@ import * as path from 'node:path';
 // A bare package import stays loadable under `node --test`'s direct-.ts
 // loading (env-data-completion-core.ts set the precedent) — it resolves
 // through node_modules to runner-core's built JS either way.
-import { parseParameters, parseUseStep, USE_SURFACES } from 'ai-ui-automation-runner-core';
+import { parseParameters, parseUseAiStep, parseUseStep, USE_SURFACES } from 'ai-ui-automation-runner-core';
 
 /**
  * Extensions a tool file may carry, in the order the registry probes them.
@@ -605,33 +605,59 @@ export function skillIoFor(skillsDir: string, name: string): SkillIo | null {
  * `node --test`, which cannot load the `vscode` module.
  */
 export interface DirectiveCompletion {
-  /** The text inserted, which is also the label. */
+  /** The label, and the text inserted unless {@link insert} says otherwise. */
   token: string;
   detail: string;
   documentation: string;
+  /**
+   * What to insert when it differs from the label, as a VS Code snippet
+   * (`$0` is where the caret lands). Only `[use ai]` needs one: it is a
+   * prefix, so the caret belongs after it, where the step is written.
+   */
+  insert?: string;
 }
+
+/** The token that opens a `[use ai]` step, as the completion offers it. */
+export const USE_AI_TOKEN = '[use ai]';
 
 /**
  * `[use computer]` and `[use browser]`, in that order
- * (docs/specs/SPEC-use-computer.md §10.3).
+ * (docs/specs/SPEC-use-computer.md §10.3), then `[use ai]`
+ * (stories/use-ai-step.md).
  *
- * Derived from runner-core's `USE_SURFACES` rather than typed out, so the
- * dropdown cannot offer a spelling the grammar refuses — the property every
- * other mirror in this file is written for. §4.2 makes that matter more than
- * it used to: a near miss like `[computer]` is now a parse ERROR rather than
- * prose, so the list is what stops an author guessing.
+ * The surfaces are derived from runner-core's `USE_SURFACES` rather than typed
+ * out, so the dropdown cannot offer a spelling the grammar refuses — the
+ * property every other mirror in this file is written for. §4.2 makes that
+ * matter more than it used to: a near miss like `[computer]` is now a parse
+ * ERROR rather than prose, so the list is what stops an author guessing.
+ *
+ * `[use ai]` is last and labelled for what it does — it switches nothing, so
+ * "surface switch" would be a false thing to tell an author about it.
  */
 export function useDirectiveCompletions(): DirectiveCompletion[] {
-  return USE_SURFACES.map((surface) => ({
-    token: `[use ${surface}]`,
-    detail: 'surface switch',
-    documentation:
-      surface === 'computer'
-        ? "Drive the operating system's screen from here on — windows, dialogs " +
-          'and menus — answered from a screenshot rather than the page.'
-        : 'Return to the page: DOM snapshots and Playwright, on the tab the ' +
-          'test left.',
-  }));
+  return [
+    ...USE_SURFACES.map((surface) => ({
+      token: `[use ${surface}]`,
+      detail: 'surface switch',
+      documentation:
+        surface === 'computer'
+          ? "Drive the operating system's screen from here on — windows, dialogs " +
+            'and menus — answered from a screenshot rather than the page.'
+          : 'Return to the page: DOM snapshots and Playwright, on the tab the ' +
+            'test left.',
+    })),
+    {
+      token: USE_AI_TOKEN,
+      detail: 'ask the model for a value',
+      documentation:
+        'Ask the model for a value and store it: `[use ai] Create a name starting ' +
+        'with AUTO [store as: name]`. The model sees the step text and nothing ' +
+        'else — no page, no earlier steps, no date — so put what it needs in the ' +
+        'step. It is asked again on every run and never cached or compiled; for a ' +
+        'value that must be the same every time, write a `[tool:]`.',
+      insert: `${USE_AI_TOKEN} $0`,
+    },
+  ];
 }
 
 /**
@@ -658,11 +684,20 @@ export function useDirectiveCompletions(): DirectiveCompletion[] {
  * `'plain'` the flag was harmless but misleading — F11 degraded silently to an
  * ordinary step pause.
  *
+ * A `[use ai] <step>` line is `'use'` too (stories/use-ai-step.md): it asks
+ * the model and nothing else, is never compiled, so there is no code-behind
+ * entry for Step Into to pause in — and under `'plain'` F11 would arm exactly
+ * that flag, on a line that can never have one. Asked before the invocation
+ * parser for a second reason: `parseInvocation` reads text in front of a token
+ * as a LABEL, so `[use ai] Pick a name [tool: x]`-shaped prose could otherwise
+ * classify as a tool line the runner never dispatches.
+ *
  * The text arrives with its `N. ` ordinal still on it (every caller reads it
  * straight off the editor), so the prefix is stripped here. `parseUseStep`
- * normalises the `[no-hooks]` marker itself.
+ * and `parseUseAiStep` normalise the `[no-hooks]` marker themselves.
  */
 export function classifyDebuggableLine(text: string): 'tool' | 'skill' | 'plain' | 'use' {
-  if (parseUseStep(text.replace(/^\s*\d+\.\s+/, ''))) return 'use';
+  const instruction = text.replace(/^\s*\d+\.\s+/, '');
+  if (parseUseStep(instruction) || parseUseAiStep(instruction)) return 'use';
   return parseInvocationLine(text)?.kind ?? 'plain';
 }

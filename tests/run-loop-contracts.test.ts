@@ -157,6 +157,9 @@ describe('no run loop writes the live variable map by bare assignment', () => {
     'src/runner/step-executor.ts',
     'src/runner/test-runner.ts',
     'src/runner/set-step-runner.ts',
+    // The `[use ai]` runner writes the value it was given through the same
+    // helper `runSetStep` uses (stories/use-ai-step.md).
+    'src/runner/use-ai-step-runner.ts',
     'src/runner/control-runtime.ts',
     'src/server/session-manager.ts',
     'src/server/errand-runner.ts',
@@ -234,6 +237,31 @@ describe('every run loop writes a pass"s bindings through the helper', () => {
  * would lose the local decision AND the model-judged return together, and the
  * step would quietly run as ordinary prose.
  */
+/**
+ * `[use ai] <step>` is dispatched by ONE runner in all four loops
+ * (stories/use-ai-step.md, decision 8), read off the AUTHORED line — the
+ * `Set` rule — and never interpolated first. Each loop's own suite asserts the
+ * behaviour; this asserts none of them grew a private copy or dropped the
+ * branch, which is the four-loop feature's recurring failure.
+ */
+describe('every run loop dispatches [use ai] through the one runner', () => {
+  const USE_AI_SITES = [...RUN_LOOPS, 'src/server/errand-runner.ts'] as const;
+
+  it.each(USE_AI_SITES)('%s reads it off the authored line and calls runUseAiStep', (file) => {
+    const body = source(file);
+    expect(body).toMatch(/parseUseAiStep\((raw|original)[A-Za-z]*\)/);
+    expect(body).toContain('runUseAiStep({');
+    // Beside `Set`, which is what keeps it out of the interpolation.
+    expect(body).toMatch(/setStep \|\| useAiStep\s*\?\s*(raw|original)[A-Za-z]*/);
+  });
+
+  it('the CLI dispatches it in the hook scope too', () => {
+    const body = source('src/runner/test-runner.ts');
+    expect(body.match(/runUseAiStep\(\{/g)).toHaveLength(2);
+    expect(body).toContain('hookUseAiStep');
+  });
+});
+
 describe('every run loop hands its flow-control claim to the executor', () => {
   // The errand runner is the fourth, and gets the same decision for free —
   // it is listed here so a reader looking for "all the loops" finds it.

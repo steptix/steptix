@@ -904,6 +904,97 @@ export function parseStepCode(rawResponse: string): string {
   return decoded.entry;
 }
 
+/**
+ * A `[use ai]` step's answer (stories/use-ai-step.md, decision 5), read three
+ * ways because the runner treats them three ways:
+ *
+ *  - `value` — the answer. `as` is the model's name for it, present only when
+ *    it wrote a non-empty string there; the runner decides whether to believe
+ *    it.
+ *  - `error` — the model saying the step cannot be done as written. A real
+ *    outcome, not a formatting slip: the step fails with the reason and is
+ *    NOT retried, because asking again until the model stops refusing is how
+ *    a guess gets stored.
+ *  - `malformed` — anything else, with `why` written for two readers at once:
+ *    the step's error, and the retry prompt that tells the model what to fix.
+ */
+export type UseAiReply =
+  | { kind: 'value'; as?: string; value: string }
+  | { kind: 'error'; reason: string }
+  | { kind: 'malformed'; why: string };
+
+/**
+ * Parse a `[use ai]` reply: `{"as": name, "value": v}` or `{"error": reason}`
+ * and nothing else.
+ *
+ * On top of {@link extractJson}, so a fence or prose around the object is
+ * tolerated the way every other reply parser here tolerates it — the value
+ * inside is still the only thing stored, which is the property that matters:
+ * nothing conversational ever reaches a variable.
+ *
+ * `value` is a string, or a number or boolean stored as its string form (`42`
+ * → `"42"`, as a `count` stores). An object or an array is refused — lists
+ * are not in this story — and so is a value that is empty once trimmed, which
+ * would otherwise store `""` and pass green. The value is TRIMMED: the model
+ * is asked for the value alone, and leading or trailing whitespace is never
+ * part of what an author asked for.
+ */
+export function parseUseAiReply(rawResponse: string): UseAiReply {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(extractJson(rawResponse));
+  } catch {
+    return { kind: 'malformed', why: 'the reply was not a JSON object' };
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { kind: 'malformed', why: 'the reply was not a JSON object' };
+  }
+  const obj = parsed as Record<string, unknown>;
+  const hasValue = Object.hasOwn(obj, 'value');
+  const hasError = Object.hasOwn(obj, 'error');
+  if (hasValue && hasError) {
+    return {
+      kind: 'malformed',
+      why: 'the reply had both "value" and "error"; send exactly one of them',
+    };
+  }
+  if (!hasValue && !hasError) {
+    return { kind: 'malformed', why: 'the reply had neither "value" nor "error"' };
+  }
+
+  if (hasError) {
+    const reason = obj['error'];
+    if (typeof reason !== 'string' || reason.trim() === '') {
+      return {
+        kind: 'malformed',
+        why: '"error" must be a sentence saying why the step cannot be done',
+      };
+    }
+    return { kind: 'error', reason: reason.trim() };
+  }
+
+  const raw = obj['value'];
+  let value: string;
+  if (typeof raw === 'string') value = raw.trim();
+  else if (typeof raw === 'number' && Number.isFinite(raw)) value = String(raw);
+  else if (typeof raw === 'boolean') value = String(raw);
+  else if (Array.isArray(raw)) {
+    return { kind: 'malformed', why: '"value" was a list; this step stores one piece of text' };
+  } else if (raw !== null && typeof raw === 'object') {
+    return { kind: 'malformed', why: '"value" was an object; this step stores one piece of text' };
+  } else {
+    return { kind: 'malformed', why: '"value" was not text' };
+  }
+  if (value === '') return { kind: 'malformed', why: '"value" was empty' };
+
+  const as = obj['as'];
+  return {
+    kind: 'value',
+    value,
+    ...(typeof as === 'string' && as.trim() !== '' && { as: as.trim() }),
+  };
+}
+
 /** A generation answer: code, or a reasoned refusal. */
 export type StepCodeAnswer =
   | { kind: 'entry'; entry: string }

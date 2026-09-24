@@ -7,6 +7,8 @@
  *   1. Declared `## Parameters`            (source: 'param')
  *   2. `[input: var]` markers in steps     (source: 'input')
  *   3. `[output: var]` markers in steps    (source: 'output')
+ *   4. `Set {{var}} to "…"` steps          (source: 'set')
+ *   5. `[use ai]` steps naming one value   (source: 'generated')
  *
  * Inputs:
  *   text             — full markdown source of the test file.
@@ -16,7 +18,7 @@
  *                      collected via the composer + [output:] captures
  *                      arriving as `capture` events.
  *   runtimeSources   — optional map {name → 'capture' | 'toolOutput' |
- *                      'assignment'} carrying the `source` discriminator from
+ *                      'assignment' | 'generated'} carrying the `source` discriminator from
  *                      each `capture` event (see runner-core CaptureEvent).
  *                      Lets the panel tell a value a skill/tool returned, or
  *                      one a `Set` step assigned, apart from one extracted
@@ -29,7 +31,7 @@
  * with duplicates removed (param > input > output > set if a name appears in
  * more than one place). `captureSource` is only set on rows whose runtime
  * value arrived via a `capture` event; it is the wire `source` discriminator
- * (`'capture'` | `'toolOutput'` | `'assignment'`), classified by
+ * (`'capture'` | `'toolOutput'` | `'assignment'` | `'generated'`), classified by
  * `classifyCaptureSource`.
  */
 
@@ -57,11 +59,37 @@ const SET_STEP_RE = /^set\s+\{\{(\w+)\}\}\s+to\s+(?="[^"]*"\s*$)/i;
  *  `extractSteps` before a step reaches `parseSetStep`, so stripping only the
  *  ordinal here made `[no-hooks] Set {{x}} to "…"` invisible to the panel. */
 const STEP_PREFIX_RE = /^\s*\d+\.\s+(?:\[no-hooks\]\s*)?/i;
+/**
+ * `[use ai] <step>` (stories/use-ai-step.md) and the names such a step can
+ * pin — the runtime grammar's (`parseUseAiStep`, runner-core/src/use-step.ts),
+ * copied because the webview cannot import runner-core (see
+ * `parseParametersInline` below). A row is seeded only for a step that names
+ * exactly one value: with none, the model names it at run time and the row
+ * arrives with the `capture` event; with two, the runtime refuses the line.
+ */
+const USE_AI_PREFIX_RE = /^\[use(?:[ \t]*:[ \t]*|[ \t]+)ai[ \t]*\]/i;
+const USE_AI_NAME_MARKER_RE =
+  /\[(?:store[ \t]+as|as|output)[ \t]*:[ \t]*(\w+(?:[ \t]*,[ \t]*\w+)*)[ \t]*\]/gi;
+const USE_AI_PROSE_NAME_RE = /\b(?:store|save)\s+(?:it\s+)?as\s+\{\{\s*(\w+)\s*\}\}/gi;
+
+/** The one name a `[use ai]` instruction pins, or null — none, several, or not
+ *  a `[use ai]` step at all. */
+function useAiExplicitName(instruction) {
+  if (!USE_AI_PREFIX_RE.test(instruction)) return null;
+  const names = new Set();
+  for (const m of instruction.matchAll(USE_AI_NAME_MARKER_RE)) {
+    for (const name of m[1].split(",")) names.add(name.trim());
+  }
+  for (const m of instruction.matchAll(USE_AI_PROSE_NAME_RE)) names.add(m[1]);
+  return names.size === 1 ? [...names][0] : null;
+}
 
 /**
  * Map a `capture` event's wire `source` discriminator onto the value the
  * panel renders. Closed union per the protocol: `'capture'` (extracted from
- * the page) or `'toolOutput'` (returned by a `[tool:]` / `[skill:]` call).
+ * the page), `'toolOutput'` (returned by a `[tool:]` / `[skill:]` call),
+ * `'assignment'` (a `Set` step) or `'generated'` (a `[use ai]` step — made
+ * up by the model from the step text alone).
  *
  * Back-compat: a server that predates the field omits `source`, so an
  * `undefined` / unrecognised value collapses to `'capture'` — the
@@ -70,6 +98,7 @@ const STEP_PREFIX_RE = /^\s*\d+\.\s+(?:\[no-hooks\]\s*)?/i;
 export function classifyCaptureSource(source) {
   if (source === "toolOutput") return "toolOutput";
   if (source === "assignment") return "assignment";
+  if (source === "generated") return "generated";
   return "capture";
 }
 
@@ -108,6 +137,24 @@ export function collectVariables(text, parameterValues, runtimeValues, runtimeSo
   for (let i = stepsSpan.start; i <= stepsSpan.end; i++) {
     const raw = lines[i] || "";
     if (!STEP_LINE_RE.test(raw)) continue;
+    // `[use ai] … [store as: name]` — FIRST on the line, so an `[output: x]`
+    // inside one is labelled for what fills it (the model, via the runner)
+    // rather than as a page capture. Row source `generated`; the capture
+    // event, when it lands, carries the same word.
+    const useAiName = useAiExplicitName(raw.replace(STEP_PREFIX_RE, ""));
+    if (useAiName !== null) {
+      if (!seen.has(useAiName)) {
+        out.push({
+          name: useAiName,
+          source: "generated",
+          line: i + 1,
+          value: runtime[useAiName],
+          ...captureSourceFor(useAiName),
+        });
+        seen.add(useAiName);
+      }
+      continue;
+    }
     const inputMatch = raw.match(INPUT_PATTERN);
     if (inputMatch && !seen.has(inputMatch[1])) {
       out.push({

@@ -18,10 +18,13 @@ every TypeScript example is a tool the registry loads. Each is introduced by a
 ## 1. How a step is executed
 
 A test is a Markdown file. The numbered lines under `## Steps` are the
-instructions. Six kinds of line are handled by the framework itself rather
+instructions. Seven kinds of line are handled by the framework itself rather
 than performed by a model:
 
 - `Set {{name}} to "…"` assigns a variable.
+- `[use ai] <step>` asks the model for a value and stores it (§3.2). The
+  model sees the step text and nothing else — no page, no earlier steps, no
+  date — and is asked again on every run.
 - `[skill: name …]` inlines a reusable step sequence from another file.
 - `[tool: name …]` runs a TypeScript function.
 - `[use computer]` / `[use browser]` switch which *surface* the following
@@ -215,6 +218,7 @@ to an action.
 | Close session | `Close the reviewer browser` | |
 | Wait | `…and wait for the Saved message` | See the next subsection. |
 | Capture | `Read the order number from the confirmation panel [store as: order_id]` | A `read` action into the variable. |
+| Make up a value | `[use ai] Create a customer name starting with AUTO [store as: customer]` | One model call with the step text alone, no page; asked again every run (§3.2). |
 | Count | `Count the rows in the Orders table [store as: row_count]` | A `count` action; the value is a number stored as text. |
 | Verify | `Verify the status of order {{order_id}} is Shipped` | An assertion. See §3.3. |
 
@@ -288,6 +292,51 @@ Say precisely what to read:
   stores `"4"`.
 
 A value that was displayed but never captured does not exist in later steps.
+
+#### A value the model makes up: `[use ai]`
+
+Not every value is on a page. A customer name for a sign-up form, a paragraph
+of filler text, a date worked out from one you already have: open the step
+with `[use ai]` and the model produces it.
+
+```markdown
+5. [use ai] Create a name starting with "AUTO" and ending with a random 4 digit number and store it in random_name
+6. [use ai] Today is {{today}}. Give the date 3 days later as yyyymmdd [store as: days_from_now]
+7. Type {{random_name}} into the Name field
+```
+
+The step's text, placeholders filled in, goes to the model **on its own**.
+Four things follow, and each is on purpose:
+
+- **The model is asked on every run.** A `[use ai]` step is never cached and
+  never compiled; a compiled test still makes one model call per `[use ai]`
+  step. For a value that must be the same every time, write a tool (§7).
+- **It sees only the step text** — no page, no earlier steps, no date. If
+  "today" matters, put today in the step, from a parameter or a tool's output.
+  Asked for "3 days from today" with no date given, the model is told to fail
+  the step saying what is missing, rather than guess.
+- **It is a poor source of randomness.** "A random number" may well come back
+  the same on two runs. Ask a tool when it matters.
+- **Only the value is stored.** The model replies in a fixed JSON shape, so no
+  preamble ever reaches the variable; an empty answer or a refusal fails the
+  step with the model's reason.
+
+Name the value in the step. `[store as: name]` is authoritative — the value is
+stored under that name whatever the model calls it — and is the spelling to
+use. Without one, the model names the value, and the name it gives must appear
+in your step as a whole word ("…and store it in random_name"); a name you never
+wrote fails the step, because no later step can be relying on it. That check
+rules out invented names, not unnamed steps: a step that never says what to
+call its value can be stored under any word of its sentence (`Write a paragraph
+about Australia` may become `{{paragraph}}`), so always name it. Inside a
+skill the name must be `[store as: name]` or `store as {{name}}`, which the
+skill's scoping renames per call. A secret-named value filled into the step
+reaches the model as `***`, exactly as in the `## Values` block (§4.4), so a
+step cannot compute from a secret.
+
+`[use ai]` goes at the start of the step; anywhere else is a parse error, and
+so is `[use ai]` as the step a control line runs (put it in a `### Section`
+and name the section instead).
 
 ### 3.3 Assertions
 
@@ -1178,8 +1227,10 @@ test is reading.
 - No selector language in prose beyond what the model infers. A test id can
   be mentioned when you know it exists.
 - No arithmetic or string functions inside step text. `Set` concatenates text
-  and `For each` loops over a list a step already captured (§3.5); computing
-  anything from a value is a tool's job.
+  and `For each` loops over a list a step already captured (§3.5). A
+  `[use ai]` step can ask the model to work a value out or make one up (§3.2),
+  but it answers afresh on every run and is no calculator, so a value that
+  must be exact, or the same every time, is a tool's job.
 - No indexing and no deeper paths in a placeholder. A record from a table read
   exposes one property segment — `{{order.id}}`, `{{order._row}}` (§3.8) — and
   that is the whole grammar: `{{orders[1].id}}`, `{{order.address.city}}` and
@@ -1203,7 +1254,9 @@ test is reading.
   no switch that turns the whole run into a survey of everything that broke.
 - No implicit variables. `baseUrl` from `## Config` is available to `[tool:]`
   arguments as a convenience, but `{{baseUrl}}` in a prose step is just the
-  model reading the test information block.
+  model reading the test information block. There is no built-in date, time
+  or random value either — not even in a `[use ai]` step, whose model is told
+  nothing the step does not say.
 - No native OS dialogs, no drag-and-drop choreography, no file downloads, no
   visual-regression comparison as built-in vocabulary **in browser mode**. A
   native dialog is reachable by switching surface (§3.10); the rest want a
@@ -1318,10 +1371,15 @@ the answer, with no browser launched at all.
 ### 4.1 Where `{{name}}` values come from
 
 `## Parameters`, the current data-table row (which overrides a same-named
-parameter), captures from earlier steps, `Set` assignments, tool and skill
-outputs, `[input:]` answers, and the bindings a `For each` pass makes (§3.5,
-§3.8) all write into one variable map, and the latest write wins. All values
-are strings; lists are JSON text.
+parameter), captures from earlier steps, `Set` assignments, `[use ai]` values
+(§3.2), tool and skill outputs, `[input:]` answers, and the bindings a
+`For each` pass makes (§3.5, §3.8) all write into one variable map, and the
+latest write wins. All values are strings; lists are JSON text.
+
+A `[use ai]` step is the strictest reader of the map: a `{{name}}` or `${…}`
+in it that the run cannot resolve fails the step before the model is asked,
+in the words a `Set` uses — a literal `{{today}}` handed to a model is an
+invitation to invent a date.
 
 When a `{{name}}` is unresolved: the step text keeps the literal with a
 warning, the `## Values` block lists it as "not yet captured", and if the model
@@ -2109,6 +2167,11 @@ report's skipped steps and warnings, not just the summary.
 | `Note the order number` | `Read the order number [store as: order_id]` | Nothing is stored without a name. |
 | `Read the order number [as: order_id]` | `[store as: order_id]` | `[as:]` has no parser and is renamed wrongly inside skills. |
 | `Set {{total}} to "{{a}} + {{b}}"` | A `defineTool` with number parameters | `Set` is text only. |
+| `Make up a customer name and remember it` | `[use ai] Make up a customer name [store as: customer]` | A plain step goes to the page model, whose only way to store anything is to read it off the page. |
+| `[use ai] Give the date 3 days from today as yyyymmdd [store as: due]` | `[use ai] Today is {{today}}. Give the date 3 days later as yyyymmdd [store as: due]` | The model sees the step text and nothing else — no date. |
+| `[use ai] Write a paragraph about Australia` | `…and store it in text`, or add `[store as: text]` | A name the step never says fails the step; no later step can rely on it. |
+| `Write a paragraph [use ai] [store as: text]` | `[use ai] Write a paragraph [store as: text]` | `[use ai]` opens the step; anywhere else is a parse error. |
+| `[use ai] Pick a random order number` where the number must repeat | A tool | The model is asked on every run and may or may not answer the same. |
 | `If the Cash checkbox is ticked, run the Pay with cash section` | `If the Cash checkbox is ticked, then Pay with cash` | Without `then` the line is a watch, and the section name in it is prose. |
 | `If the total is more than $100 then apply the discount, then Verify it` | Reword the condition | The **first** ` then ` ends the condition. |
 | `For each {{account}} in {{names}}` where `names` came from a `Set` | Capture it with a plural read | `For each` takes a JSON array, and no delimiter is guessed. |
@@ -2136,7 +2199,10 @@ report's skipped steps and warnings, not just the summary.
 
 - Title, `## Steps` spelled exactly, one instruction per physical line.
 - Every `{{name}}` is supplied by a parameter, a row, a capture with
-  `[store as:]`, a `Set`, or a skill or tool output that runs first.
+  `[store as:]`, a `Set`, a `[use ai]` step that names it, or a skill or tool
+  output that runs first.
+- Every `[use ai]` step carries in its own text everything the model needs —
+  the date included — and none of them is a value that must repeat run to run.
 - Every `${…}` reference has an environment that defines it, and the test says
   which (`env:` in frontmatter or a documented `--env`).
 - Every skill call passes every declared parameter and aliases outputs that

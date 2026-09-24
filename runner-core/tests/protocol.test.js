@@ -153,7 +153,9 @@ test('isRunEvent: a skip event narrows with its line, frame and reason', () => {
 });
 
 test('isRunEvent: capture event narrows with a source discriminator', () => {
-  for (const source of ['capture', 'toolOutput']) {
+  // All four members of the union, `generated` being a `[use ai]` step's value
+  // (stories/use-ai-step.md, decision 9).
+  for (const source of ['capture', 'toolOutput', 'assignment', 'generated']) {
     assert.equal(
       isRunEvent({ type: 'capture', line: 7, name: 'x', value: 'v', source }),
       true,
