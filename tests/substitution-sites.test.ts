@@ -110,7 +110,18 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   'src/parser/parameters.ts': { why: 'definition', calls: 1 },
   // Six: `substituteText`, `substituteAction` and `substituteAsLiterals`
   // themselves, and the calls the last three make on the first two.
+  // `resolveUseAiText` substitutes too, through its own `.replace` over the
+  // same grammar — which this detector does not count, so it is named here
+  // instead: it builds the MASKED text a `[use ai]` step sends to the model,
+  // from a line `parseUseAiStep` has already read, and nothing it returns is
+  // ever handed to `parseSetStep` (stories/use-ai-step.md, decision 4).
   'src/runner/placeholder-substitution.ts': { why: 'definition', calls: 6 },
+  // The `[use ai]` runner. One call, and it substitutes the `… otherwise …`
+  // tail's MESSAGE — the author's warning or error text, resolved for the
+  // report — never step text: the step itself was read by `parseUseAiStep`
+  // upstream and is filled by `resolveUseAiText` (stories/use-ai-step.md,
+  // decision 10).
+  'src/runner/use-ai-step-runner.ts': { why: 'not-step-text', calls: 1 },
   'src/runner/step-executor.ts': { why: 'not-step-text', calls: 2 },
   // The computer surface's turn loop (docs/specs/SPEC-use-computer.md §5.5).
   // One call, and it substitutes an ACTION the model emitted — an `api_call`'s

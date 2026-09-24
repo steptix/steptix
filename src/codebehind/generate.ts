@@ -16,7 +16,7 @@ import {
   type EnvDataContext,
 } from '../parser/interpolate-env-data.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
-import { parseUseStep } from '../parser/use-step.js';
+import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import { WIDE_PLACEHOLDER_SOURCE, interpolate } from '../parser/parameters.js';
 import { boundValue } from '../runner/placeholder-substitution.js';
 import type { AssertionResult } from '../report/types.js';
@@ -96,6 +96,26 @@ export const SURFACE_SWITCH_NOT_COMPILED =
   'a [use ...] step is a surface switch, dispatched and never compiled';
 
 /**
+ * The one wording for a `[use ai] <step>` line, used by all three classifiers
+ * (stories/use-ai-step.md, decision 1) and defined here for the reason
+ * {@link SURFACE_SWITCH_NOT_COMPILED} is.
+ *
+ * Not "dispatched, not compiled" like a `Set`: the difference is the point.
+ * A `Set` has nothing to compile because it costs nothing; a `[use ai]` step
+ * costs a model call on every run and is kept that way ON PURPOSE — whether a
+ * value should be the same every time is the author's decision, and an
+ * author who wants that writes a `[tool:]`.
+ */
+export const USE_AI_NOT_COMPILED = 'a [use ai] step asks the model on every run';
+
+/**
+ * A `Set {{name}} to "…"` step's wording, shared by the boxed classifier
+ * (`describeSteps`) and the live one (`generationRefusal`), which did not
+ * have it — see the latter.
+ */
+export const SET_STEP_NOT_COMPILED = 'a Set step is dispatched, not compiled';
+
+/**
  * Why a step can't be compiled, or undefined when it can.
  *
  * Checked before the model call so the compiler never pays for an answer it
@@ -112,6 +132,12 @@ export function refuseReason(
   // surface switch.
   if (parseUseStep(source)) {
     return SURFACE_SWITCH_NOT_COMPILED;
+  }
+  // …and a `[use ai]` step, for the same ordering reason and before the
+  // "no page actions" rule below, which would be true and beside the point:
+  // the step is never compiled because the author wants the model asked.
+  if (parseUseAiStep(source)) {
+    return USE_AI_NOT_COMPILED;
   }
   if (BRACKET_TOKEN_STEP.test(source.trim())) {
     return 'the step carries a bracket marker whose contract generated code cannot honour';

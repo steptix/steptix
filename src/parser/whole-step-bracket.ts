@@ -57,8 +57,9 @@ const NO_HOOKS_PREFIX = /^\[no-hooks\]\s*/i;
  * for a line that names no skill.
  *
  * `use` admits `]` as well, so the bare `[use]` is NOT reported here: it is a
- * `[use` claim, and `useStepError` owns it with a message that names the two
- * surfaces. Every caller asks `useStepError` first for that reason.
+ * `[use` claim, and `useStepError` owns it with a message that names the
+ * family. Every caller asks `useStepError` first for that reason — and the
+ * same holds for a bare `[use ai]`, which is told it needs a step after it.
  */
 const KNOWN_DIRECTIVE_RES: readonly RegExp[] = [
   /^\[(?:skill|tool|input)(?=[ \t:])/i,
@@ -129,10 +130,13 @@ export function closestDirective(token: string): string | null {
   return bestDistance <= DID_YOU_MEAN_MAX_DISTANCE ? best : null;
 }
 
-/** The directive list as one phrase, written once. */
+/** The directive list as one phrase, written once. `[use ai] <step>` is on it
+ *  as a form rather than a token — it is never a whole step on its own, so it
+ *  is not a did-you-mean candidate ({@link KNOWN_WHOLE_STEP_DIRECTIVES}), but
+ *  an author told "the directives are…" should be told all of them. */
 const DIRECTIVE_LIST =
   '`[skill: name]`, `[tool: name]`, `[input: name]`, `[interactive]`, ' +
-  '`[use computer]` and `[use browser]`';
+  '`[use computer]`, `[use browser]` and `[use ai] <step>`';
 
 /**
  * The parse error for a whole-step bracket token that is no directive, or

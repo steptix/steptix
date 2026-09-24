@@ -23,7 +23,7 @@ import path from 'node:path';
 import { interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { isCodeStep as isInvocationStep } from '../parser/invocation-parser.js';
 import { parseSetStep, setStepError } from '../parser/set-step.js';
-import { useStepError } from '../parser/use-step.js';
+import { parseUseAiStep, useStepError } from '../parser/use-step.js';
 import { unknownWholeStepBracketError } from '../parser/whole-step-bracket.js';
 import {
   PLACEHOLDER_SOURCE,
@@ -867,16 +867,36 @@ function missingParameters(
   const assigned = new Set<string>();
   /** Names a `For each` in this same list binds one item at a time. */
   const boundByLoop = new Set<string>();
-  for (const step of steps) {
+  /**
+   * The text of each `[use ai]` step that names no value itself, by index. A
+   * later `{{x}}` is answered by one of them when `x` appears in its words as
+   * a whole word, case-insensitive — the rule the runner applies to the
+   * model's `as` (stories/use-ai-step.md, decision 6), so this pre-flight
+   * warns exactly when the run would fail rather than guessing either way.
+   */
+  const unnamedUseAi: Array<{ index: number; text: string }> = [];
+  for (const [index, step] of steps.entries()) {
     const setStep = parseSetStep(step);
     if (setStep) assigned.add(setStep.name);
+    const useAi = parseUseAiStep(step);
+    if (useAi) {
+      // An explicit name is authoritative, and so is a definition: its own
+      // `store as {{x}}` is not a read of `x`.
+      for (const name of useAi.explicitNames) assigned.add(name);
+      if (useAi.explicitNames.length === 0) unnamedUseAi.push({ index, text: useAi.text });
+    }
     const control = parseControlLine(step);
     if (control?.kind === 'foreach') boundByLoop.add(control.item);
   }
+  const namedByEarlierUseAi = (name: string, at: number): boolean =>
+    unnamedUseAi.some(
+      (u) => u.index < at && new RegExp(`\\b${name}\\b`, 'i').test(u.text),
+    );
   const missing = new Set<string>();
-  for (const step of steps) {
+  for (const [index, step] of steps.entries()) {
     for (const match of step.matchAll(PARAM_PLACEHOLDER)) {
       const name = match[1]!;
+      if (placeholderProperty(name) === undefined && namedByEarlierUseAi(name, index)) continue;
       // A DOTTED reference reads one property of an object a `For each` binds
       // per pass (SPEC-structured-table-reads.md §8.2). Nothing can put it in
       // the parameter map — there is no pass yet — so measuring it against the

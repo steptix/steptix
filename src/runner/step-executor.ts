@@ -37,6 +37,7 @@ import { structureMemoKey, type StructureMemo } from './structure-memo.js';
 import type { UploadPathContext } from '../browser/upload-paths.js';
 import { launchBrowser, type PageTracker, type BrowserTracker, type LaunchOverrides } from '../browser/manager.js';
 import { withRetry } from './retry.js';
+import { applyTailOutcome } from './failure-tail-outcome.js';
 import { runInteractiveRepl } from './interactive-repl.js';
 import type { InteractiveReader } from './interactive-repl.js';
 import { logger, traceOp } from '../utils/logger.js';
@@ -704,37 +705,20 @@ export function applyFailureTail(result: StepResult, opts: StepExecutorOptions):
   if (!tail) return result;
   if (result.status !== 'failed' || result.interrupted) return result;
 
-  const original = result.error ?? 'the step failed';
   // Interpolated, not authored — see {@link resolvedTailMessage}. Read once for
   // both outcomes so neither branch can be the one that forgets.
   const message = resolvedTailMessage(result, tail);
-
-  if (tail.outcome === 'fail') {
-    if (!message) return result;
-    return {
-      ...result,
-      // The author's words, masked here because this is where they first become
-      // the thing the wire, the report and the log carry (decision 3) — which is
-      // why resolution happens BEFORE the redact: a `{{password}}` still in
-      // braces would be masked as the token, not as the secret it resolves to.
-      error: redact(message, secretsFor(opts)),
-      aiExplanation: `Failed as the step says. What failed: ${original}`,
-    };
-  }
-
-  const warning = message ? redact(message, secretsFor(opts)) : undefined;
-  return {
-    ...result,
-    tolerated: true,
-    // Structural as well as folded into the explanation, for the reason the
-    // docblock on `StepResult.warning` gives: the explanation does not travel on
-    // the `step:fail` wire event and the warning has to — it is the first line of
-    // the TestBench hover and the MCP row's reason.
-    ...(warning !== undefined && { warning }),
-    aiExplanation: warning
-      ? `${warning}. The run continued past this step (otherwise continue). What failed: ${original}`
-      : `The run continued past this step (otherwise continue). What failed: ${original}`,
-  };
+  // The author's words, masked here because this is where they first become
+  // the thing the wire, the report and the log carry (decision 3) — which is
+  // why resolution happens BEFORE the redact: a `{{password}}` still in
+  // braces would be masked as the token, not as the secret it resolves to.
+  // The rule itself is `applyTailOutcome`'s, shared with the `[use ai]`
+  // runner (src/runner/failure-tail-outcome.ts).
+  return applyTailOutcome(
+    result,
+    tail,
+    message ? redact(message, secretsFor(opts)) : undefined,
+  );
 }
 
 /**

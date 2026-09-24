@@ -91,7 +91,7 @@ import type { DesktopConfig } from '../config/types.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { parseSkillCall } from '../skills/skill-call-parser.js';
 import { unknownWholeStepBracketError } from '../parser/whole-step-bracket.js';
-import { parseUseStep } from '../parser/use-step.js';
+import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { planAtGuard, type ControlRecord, type ControlState } from './control-flow.js';
 
@@ -471,6 +471,8 @@ const PERSON_STEP_RES: readonly RegExp[] = [/^\[input:\s*\w+\]/, /^\[interactive
  * program of their own:
  *
  *  - `Set {{x}} to "…"` — an assignment;
+ *  - `[use ai] <step>` — one model call about the step's own text, with no
+ *    capture of anything (stories/use-ai-step.md);
  *  - a whole-step `Return` / `Stop running the remaining steps` / `Fail the
  *    test with error "…"` — nothing to judge;
  *  - a `[tool: …]` line that does not parse, a raw `[skill: …]` line, and a
@@ -498,6 +500,10 @@ const PERSON_STEP_RES: readonly RegExp[] = [/^\[input:\s*\w+\]/, /^\[interactive
  */
 export function stepReadsScreen(step: string): boolean {
   if (parseUseStep(step)) return false;
+  // `[use ai] <step>`: one model call with no capture and no program — the
+  // step text is everything the model sees (stories/use-ai-step.md, decision
+  // 8) — so it takes no lock, on this surface or any.
+  if (parseUseAiStep(step)) return false;
   if (PERSON_STEP_RES.some((re) => re.test(step))) return false;
   if (parseSetStep(step)) return false;
   const claim = parseFlowControlStep(step);

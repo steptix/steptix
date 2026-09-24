@@ -28,7 +28,7 @@ const WHOLE_STEP_BRACKET_RE = /^\[[^\]]*\]$/;
 const NO_HOOKS_PREFIX = /^\[no-hooks\]\s*/i;
 
 /** The tokens that ARE directives. `use` admits `]` so the bare `[use]` falls
- *  to `useStepError`, which names the two surfaces; `skill` / `tool` / `input`
+ *  to `useStepError`, which names the family; `skill` / `tool` / `input`
  *  do not, so a bare `[skill]` is told what the form is. */
 const KNOWN_DIRECTIVE_RES: readonly RegExp[] = [
   /^\[(?:skill|tool|input)(?=[ \t:])/i,
@@ -85,10 +85,12 @@ export function closestDirective(token: string): string | null {
   return bestDistance <= DID_YOU_MEAN_MAX_DISTANCE ? best : null;
 }
 
-/** The directive list as one phrase, written once. */
+/** The directive list as one phrase, written once. `[use ai] <step>` is a
+ *  form rather than a whole-step token, so it is listed here and is not a
+ *  did-you-mean candidate — see the original. */
 const DIRECTIVE_LIST =
   '`[skill: name]`, `[tool: name]`, `[input: name]`, `[interactive]`, ' +
-  '`[use computer]` and `[use browser]`';
+  '`[use computer]`, `[use browser]` and `[use ai] <step>`';
 
 /**
  * The parse error for a whole-step bracket token that is no directive, or

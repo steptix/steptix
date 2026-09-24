@@ -1823,6 +1823,11 @@ Step syntax: plain English, one action per step. Also supported:
   [input: label]            needs a human — SKIPPED in an unattended run
   Set {{name}} to "text"    assign a variable from ones you already have,
                             no AI call: Set {{ref}} to "Ref: {{order_id}}"
+  [use ai] <step>           ask the model for a value, stored under the name
+                            the step gives: [use ai] Make a name starting
+                            AUTO [store as: name]. No page, no memory, no
+                            date: put what it needs in the step. Asked on
+                            every run; for a fixed value, use a tool.
   Section Name              call an inline "### Section Name" from the same file
   \${env.VAR} / \${data.key} substituted from the selected environment
   {{param}}                 substituted from ## Parameters
@@ -1883,6 +1888,11 @@ Step syntax: plain English, one action per step. Also supported:
                             errand; never from a previous one
   Set {{name}} to "text"    assign a variable from ones you already have,
                             no AI call: Set {{ref}} to "Ref: {{order_id}}"
+  [use ai] <step>           ask the model for a value, stored under the name
+                            the step gives: [use ai] Make a name starting
+                            AUTO [store as: name]. No page, no memory, no
+                            date: put what it needs in the step. Asked on
+                            every run; for a fixed value, use a tool.
   Upload file attachments/x.png   a file path is relative to the project root
 [skill: ...] and [tool: ...] are refused here — those need run_steps in a
 project, which is what carries the skills and tools directories.`.trim();

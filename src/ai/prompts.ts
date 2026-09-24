@@ -2010,3 +2010,66 @@ Answer with ONE JSON object of one of the three kinds. Nothing else.`;
     { role: 'user', content: userText },
   ];
 }
+
+// ---------------------------------------------------------------------------
+// `[use ai] <step>` (stories/use-ai-step.md)
+// ---------------------------------------------------------------------------
+
+/** The paragraph about `"as"` when the step names no variable itself. */
+const USE_AI_AS_ASKED =
+  '"as" is the variable name the step asks for, spelled as the step spells it.';
+
+/** …and when it does, so the framework already holds the name. */
+const USE_AI_AS_KNOWN = 'The framework already knows the variable\'s name; omit "as".';
+
+/**
+ * The messages for one `[use ai]` step: exactly one system message and one
+ * user message, and the user message is `text` and nothing else
+ * (stories/use-ai-step.md, decision 2 and verification rule 1).
+ *
+ * `text` arrives already resolved and already masked — the runner builds it
+ * with `resolveUseAiText` — so nothing here reads a variable, a page, the
+ * conversation or the clock. That absence IS the feature: the step text is
+ * everything the model knows, and an author who needs today's date puts it in
+ * the step.
+ *
+ * `explicitName` swaps the `"as"` paragraph: with a `[store as:]` (or any
+ * other explicit name) the framework binds that name whatever the model says,
+ * so asking for one would only invite a disagreement nobody reads.
+ *
+ * `retryNote` is why the previous reply could not be used. It rides in the
+ * SYSTEM message, not as a third message, so a retry is still one system and
+ * one user message — the shape rule 1 promises for every call this step makes
+ * — and the user message is still the step's own text, byte for byte.
+ */
+export function buildUseAiPrompt(
+  text: string,
+  explicitName?: string | undefined,
+  retryNote?: string | undefined,
+): ChatMessage[] {
+  const system = [
+    'You produce the value of one variable in an automated test. There is no ' +
+      'web page, no screen and no earlier conversation: the step below is ' +
+      'everything you know.',
+    'Reply with a JSON object and nothing else, in one of two shapes: ' +
+      '{"as": "<variable name>", "value": "<the value>"} or ' +
+      '{"error": "<why the step cannot be done as written>"}.',
+    '"value" is stored exactly as you write it and used by later steps. Put ' +
+      'only the requested content in it: no preamble, no explanation, no ' +
+      'surrounding quotes, and no Markdown unless the step asks for it.',
+    explicitName !== undefined ? USE_AI_AS_KNOWN : USE_AI_AS_ASKED,
+    'If the step cannot be done from its own words (for example, it needs ' +
+      "today's date and does not give it), reply with \"error\" and say what is " +
+      'missing. Do not guess to fill the gap.',
+    ...(retryNote !== undefined
+      ? [
+          `Your previous reply could not be used: ${retryNote}. Reply again ` +
+            'with one JSON object in one of the two shapes.',
+        ]
+      : []),
+  ].join('\n\n');
+  return [
+    { role: 'system', content: system },
+    { role: 'user', content: text },
+  ];
+}

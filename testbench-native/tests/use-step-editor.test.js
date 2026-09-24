@@ -127,19 +127,72 @@ test('a non-test document gets nothing', () => {
 // The bracket completion
 // ---------------------------------------------------------------------------
 
-test('the completion offers both tokens, computer first, each a legal step', () => {
-  const rows = useDirectiveCompletions();
+test('the completion offers both surface tokens, computer first, each a legal step', () => {
+  const rows = useDirectiveCompletions().filter((r) => r.detail === 'surface switch');
   assert.deepEqual(
     rows.map((r) => r.token),
     ['[use computer]', '[use browser]'],
   );
   for (const row of rows) {
-    assert.equal(row.detail, 'surface switch');
     assert.ok(row.documentation.length > 0, row.token);
     // The point of deriving the rows from `USE_SURFACES`: what is offered is
     // what the grammar accepts, so an accepted completion can never be a
     // §4.1 refusal.
     assert.deepEqual(errors(doc('# T', '', '## Steps', `1. ${row.token}`)), [], row.token);
+  }
+});
+
+test('…and `[use ai]` last, labelled for what it does, inserting a prefix', () => {
+  // stories/use-ai-step.md §Design, "runner-core and TestBench": the detail
+  // says "ask the model for a value", not "surface switch", because it
+  // switches nothing.
+  const rows = useDirectiveCompletions();
+  assert.deepEqual(
+    rows.map((r) => r.token),
+    ['[use computer]', '[use browser]', '[use ai]'],
+  );
+  const ai = rows.at(-1);
+  assert.equal(ai.detail, 'ask the model for a value');
+  assert.ok(ai.documentation.includes('every run'), ai.documentation);
+  // A prefix: the caret lands after it, where the step is written.
+  assert.equal(ai.insert, '[use ai] $0');
+  // Accepted and completed with a step, it is a legal line…
+  assert.deepEqual(errors(doc('# T', '', '## Steps', '1. [use ai] Make up a name [store as: n]')), []);
+  // …and left bare, it is the refusal that says what is missing.
+  const [bare] = errors(doc('# T', '', '## Steps', '1. [use ai]'));
+  assert.ok(bare.message.includes('needs a step after it'), bare.message);
+});
+
+// ---------------------------------------------------------------------------
+// `[use ai]` as squiggles (stories/use-ai-step.md, verification rule 9)
+// ---------------------------------------------------------------------------
+
+test('a valid [use ai] line is silent, in the main flow and a section body', () => {
+  const text = doc(
+    '# T',
+    '',
+    '## Steps',
+    '1. [use ai] Create a name starting with "AUTO" and store it in random_name',
+    '2. [no-hooks] [use: ai] Pick a colour and store it as {{colour}}',
+    '3. Describe it',
+    '',
+    '### Describe it',
+    '1. [use ai] Write a line about {{colour}} [store as: line]',
+  );
+  assert.deepEqual(errors(text), []);
+});
+
+test('each [use ai] refusal reaches the editor, with the runtime wording', () => {
+  for (const [instruction, phrase] of [
+    ['[use ai]', 'needs a step after it'],
+    ['[use ai timeout=30] Write a line', '`[use ai]` takes no arguments'],
+    ['[use ai] Pick one [store as: a] [as: b]', 'produces one value'],
+    ['Write a paragraph about Australia [use ai] [store as: t]', 'Put `[use ai]` at the start of the step'],
+    ['If the name is empty, then [use ai] Make one up', 'cannot be the step a control line runs'],
+  ]) {
+    const rows = errors(doc('# T', '', '## Steps', `1. ${instruction}`));
+    assert.equal(rows.length, 1, instruction);
+    assert.ok(rows[0].message.includes(phrase), `${instruction}: ${rows[0].message}`);
   }
 });
 
@@ -157,6 +210,19 @@ test('a surface switch is a non-steppable line for F11', () => {
     '  4. [use: computer]',
     '5. [no-hooks] [use computer]',
     '[use computer]',
+  ]) {
+    assert.equal(classifyDebuggableLine(line), 'use', line);
+  }
+});
+
+test('a [use ai] line is non-steppable too — it never has code-behind to step into', () => {
+  for (const line of [
+    '3. [use ai] Make up a name [store as: name]',
+    '  4. [use: ai] Pick a colour and store it as {{colour}}',
+    '5. [no-hooks] [use ai] Write a line',
+    // A token in front of a `[tool:]`-looking word would otherwise be read as
+    // a labelled tool call by the invocation parser.
+    '6. [use ai] Give a name for the [tool: seed] button [store as: n]',
   ]) {
     assert.equal(classifyDebuggableLine(line), 'use', line);
   }

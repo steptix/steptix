@@ -42,7 +42,7 @@ import {
 import { executeStep, executeBranchedStep } from '../runner/step-executor.js';
 import type { StepExecutorOptions } from '../runner/step-executor.js';
 import { identifyStepGroups } from '../runner/step-grouper.js';
-import { parseUseStep } from '../parser/use-step.js';
+import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import { matchText } from '../parser/section-match.js';
 import { parseSkillCall } from '../skills/skill-call-parser.js';
 import {
@@ -102,6 +102,7 @@ import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { runSetStep } from '../runner/set-step-runner.js';
+import { runUseAiStep } from '../runner/use-ai-step-runner.js';
 import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
 import {
   failureTailContradictionError,
@@ -900,7 +901,7 @@ export type RunEvent =
    */
   | { type: 'step:skip'; line: number; frame?: FrameInfo; reason: string }
   | { type: 'output'; msg: string; kind: 'info' | 'warn' | 'error' }
-  | { type: 'capture'; line: number; name: string; value: string; source: 'capture' | 'toolOutput' | 'assignment' }
+  | { type: 'capture'; line: number; name: string; value: string; source: 'capture' | 'toolOutput' | 'assignment' | 'generated' }
   | {
       type: 'done';
       status: 'passed' | 'failed' | 'error' | 'aborted';
@@ -1138,7 +1139,7 @@ export interface StepResponse {
   outputs: Record<string, string>;
   /** Per-key provenance for `outputs`, same keys. Additive: older clients
    *  ignore it. See `ManagedSession.outputSources` for the labelling rules. */
-  outputSources: Record<string, 'parameter' | 'capture' | 'toolOutput' | 'assignment'>;
+  outputSources: Record<string, 'parameter' | 'capture' | 'toolOutput' | 'assignment' | 'generated'>;
   error: { step: number; message: string } | null;
   pageTitle: string;
 }
@@ -1571,7 +1572,7 @@ interface ManagedSession {
    * the variable's original identity rather than hiding it behind the latest
    * source.
    */
-  outputSources: Record<string, 'parameter' | 'capture' | 'toolOutput' | 'assignment'>;
+  outputSources: Record<string, 'parameter' | 'capture' | 'toolOutput' | 'assignment' | 'generated'>;
   totalStepsExecuted: number;
   conversationHistory: string[];
   aiClient: AiClient;
@@ -5507,6 +5508,12 @@ export class SessionManager {
         // value on a re-run (stories/variable-assignment.md §Locked). Its
         // template is resolved inside the branch, below.
         const setStep = parseSetStep(originalStep);
+        // `[use ai] <step>` (stories/use-ai-step.md), off the AUTHORED step and
+        // never interpolated, for `Set`'s reasons: its runner fills and masks
+        // the placeholders itself, and `interpolateEnvData` would throw on an
+        // unknown `${…}` out of a loop with no catch instead of failing the
+        // step in `Set`'s words.
+        const useAiStep = setStep ? null : parseUseAiStep(originalStep);
         // `If … then return` / `… then stop`, read off `originalStep` — before
         // the runtime `{{…}}` and `${…}` substitution two lines down
         // (stories/step-flow-control.md, decision 2). The claim is textual and
@@ -5526,7 +5533,8 @@ export class SessionManager {
         // `rawSteps` for a looped section body (contract §3.2) and reading the
         // claim there would make the server disagree with the CLI for exactly
         // that shape.
-        const flowControlClaim = setStep ? null : parseFlowControlStep(originalStep);
+        const flowControlClaim =
+          setStep || useAiStep ? null : parseFlowControlStep(originalStep);
         // The unconditional form — a step whose WHOLE text is the tail, so
         // `Stop running the remaining steps` as much as `Return` — has no
         // condition to judge, so it is dispatched below beside `Set`: no model
@@ -5557,13 +5565,15 @@ export class SessionManager {
         // refusal — which names the reference and fails just that step — the
         // reachable path.
         const envInterpolated =
-          setStep || !envDataCtx ? originalStep : interpolateEnvData(originalStep, envDataCtx);
+          setStep || useAiStep || !envDataCtx
+            ? originalStep
+            : interpolateEnvData(originalStep, envDataCtx);
         // This loop interpolates EVERY step before it reaches the control
         // dispatch, guard lines included — so a `For each {{payment}} in
         // {{payments}}` header asks for the item name it is about to define.
         // `controlLineDefines` is what stops that being warned about
         // (src/parser/control-line.ts).
-        const interpolated = setStep
+        const interpolated = setStep || useAiStep
           ? originalStep
           : interpolate(envInterpolated, resolvedParameters, controlLineDefines(originalStep));
 
@@ -5579,8 +5589,17 @@ export class SessionManager {
         // target is what this step writes, so it is unresolved by definition
         // and would trip the guard on every partial re-run
         // (stories/variable-assignment.md §What was measured).
-        const partialRerunSubject = setStep
-          ? interpolate(setStep.template, resolvedParameters)
+        // A `[use ai]` step's prose `store as {{x}}` is its target, not a read,
+        // and for the Set target's reason it is left out of the subject.
+        const partialRerunSubject = setStep || useAiStep
+          ? interpolate(
+              setStep
+                ? setStep.template
+                : useAiStep!.text.replace(/\{\{(\w+)\}\}/g, (m, name: string) =>
+                    useAiStep!.defines.includes(name) ? '' : m,
+                  ),
+              resolvedParameters,
+            )
           : interpolated;
         if (isPartialRerun && /\{\{__skill\w*\}\}/.test(partialRerunSubject)) {
           const frame = frameInfoFor(i);
@@ -5658,8 +5677,10 @@ export class SessionManager {
         // the run's own values (the properties the row holds, the keys the
         // loop dropped) and goes out on the `step:fail` wire payload as well
         // as into the run log and the report.
+        // A `[use ai]` step is skipped too: its runner refuses every reference
+        // it cannot fill, dotted or flat, in `Set`'s words.
         const dottedRefError =
-          setStep || (hasControls && controls[i])
+          setStep || useAiStep || (hasControls && controls[i])
             ? undefined
             : dottedReferenceError(
                 originalStep,
@@ -6368,8 +6389,14 @@ export class SessionManager {
           continue;
         }
 
-        // Parse [output: var] prefixes
-        const { variables: outputVars, cleanedInstruction } = parseOutputPrefixes(interpolated);
+        // Parse [output: var] prefixes. Not on a `[use ai]` step: an
+        // `[output: x]` there names the value the RUNNER stores, and its
+        // `capture` event goes out from the dispatch below with
+        // `source: 'generated'` — swept here too, it would be sent a second
+        // time labelled as a page capture.
+        const { variables: outputVars, cleanedInstruction } = useAiStep
+          ? { variables: [] as string[], cleanedInstruction: interpolated }
+          : parseOutputPrefixes(interpolated);
 
         // Build the instruction to send to executeStep
         let stepInstruction: string;
@@ -6407,7 +6434,7 @@ export class SessionManager {
         // a catalogue, fall through to `executeStep` and let the AI loop
         // see the raw `[tool: ...]` text (legacy behaviour).
         const toolCall =
-          setStep || unconditionalFlowControl
+          setStep || useAiStep || unconditionalFlowControl
             ? null
             : toolCatalogue
               ? parseToolCall(originalStep)
@@ -6419,13 +6446,22 @@ export class SessionManager {
         // the steps the branches below would otherwise send to
         // `executeComputerStep`, and nothing else.
         const undispatchedDirective =
-          session.surface === 'computer' && !toolCall && !setStep && !unconditionalFlowControl
+          session.surface === 'computer' &&
+          !toolCall &&
+          !setStep &&
+          !useAiStep &&
+          !unconditionalFlowControl
             ? undispatchedDirectiveError(originalStep, {
                 toolsLoaded: toolCatalogue !== undefined,
                 skillsDirSupplied: !!request.skillsDir,
               })
             : null;
         let stepResult: StepResult;
+        /** What a `[use ai]` step stored, for the per-step `outputs` below. Its
+         *  `capture` event has already gone out, labelled `generated`; this is
+         *  the HTTP result's and the report row's copy
+         *  (stories/use-ai-step.md, verification rule 8). */
+        let useAiGenerated: { name: string; value: string } | undefined;
         try {
           if (unconditionalFlowControl && unconditionalFlowControl.verb === 'fail') {
             // `Fail the test with error "…"` as a whole step: no condition, so no
@@ -6520,6 +6556,48 @@ export class SessionManager {
                 name,
                 value,
                 source: 'assignment',
+              });
+            }
+          } else if (useAiStep) {
+            // `[use ai] <step>` (stories/use-ai-step.md): the step's text alone
+            // goes to the model and the value it answers with is stored. Beside
+            // `Set`, inside the same `try`, and with `Set`'s bookkeeping — only
+            // the source differs. No cache, no code-behind binding, no page:
+            // `executeStep` is the only reader of any of them.
+            const outcome = await runUseAiStep({
+              parsed: useAiStep,
+              index: i + 1,
+              instruction: originalStep,
+              scope: resolvedParameters,
+              envData: envDataCtx,
+              secrets: secretsNow(),
+              unmask: unmaskNames,
+              aiClient: session.aiClient,
+              retries: runConfig.execution.retries,
+              signal,
+              failureTail,
+            });
+            stepResult = outcome.result;
+            if (outcome.name !== undefined && outcome.value !== undefined) {
+              const { name, value } = outcome;
+              useAiGenerated = { name, value };
+              // `defineProperty` and first-write-wins, exactly as the `Set`
+              // branch above does and for its two reasons.
+              Object.defineProperty(session.outputs, name, {
+                value,
+                writable: true,
+                enumerable: true,
+                configurable: true,
+              });
+              if (!(name in session.outputSources)) {
+                session.outputSources[name] = 'generated';
+              }
+              emit({
+                type: 'capture',
+                line: sourceLineFor(i),
+                name,
+                value,
+                source: 'generated',
               });
             }
           } else if (toolCall && toolCatalogue) {
@@ -6920,6 +6998,19 @@ export class SessionManager {
         const captureVars = new Set([...outputVars, ...autoCapturedNames(stepResult)]);
 
         const stepOutputs: Record<string, string> = {};
+        // A `[use ai]` step's own write. Its `capture` event went out from the
+        // dispatch with `source: 'generated'`; the sweep below would find
+        // nothing to say about it (no `read` action, no `[output:]` it parsed),
+        // so without this the HTTP result's `outputs` came back `{}` while the
+        // report row kept the value — the shape a `Set` row has today.
+        if (useAiGenerated) {
+          Object.defineProperty(stepOutputs, useAiGenerated.name, {
+            value: useAiGenerated.value,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          });
+        }
         for (const varName of captureVars) {
           // `hasOwn`, not `in`: `in` walks the prototype chain, so an
           // `[output: constructor]` — or an `as` name the model chose — was

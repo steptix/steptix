@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import {
   isUseStepClaim,
+  parseUseAiStep,
   parseUseStep,
   useStepError,
   USE_SURFACES,
@@ -140,4 +141,46 @@ test('§4.2 says nothing rather than guessing wrongly', () => {
   assert.ok(message);
   assert.ok(!message.includes('Did you mean'), message);
   assert.ok(message.includes('`[use browser]`'), message);
+});
+
+// ---------------------------------------------------------------------------
+// `[use ai] <step>` (stories/use-ai-step.md)
+// ---------------------------------------------------------------------------
+
+test('[use ai] <step> parses, is not a surface switch, and names what it stores', () => {
+  for (const [line, parsed] of [
+    [
+      '[use ai] Create a name and store it in random_name',
+      { text: 'Create a name and store it in random_name', explicitNames: [], defines: [] },
+    ],
+    ['[USE: AI] Write a line', { text: 'Write a line', explicitNames: [], defines: [] }],
+    ['[no-hooks] [use ai] Write a line [store as: l]', { text: 'Write a line', explicitNames: ['l'], defines: [] }],
+    ['[use ai] Pick one [as: c]', { text: 'Pick one', explicitNames: ['c'], defines: [] }],
+    ['[use ai] [output: c] Pick one', { text: 'Pick one', explicitNames: ['c'], defines: [] }],
+    [
+      '[use ai] Pick one and store it as {{c}}',
+      { text: 'Pick one and store it as {{c}}', explicitNames: ['c'], defines: ['c'] },
+    ],
+  ]) {
+    assert.deepEqual(parseUseAiStep(line), parsed, line);
+    assert.equal(parseUseStep(line), null, line);
+    assert.equal(useStepError(line), null, line);
+  }
+});
+
+test('[use ai] misuse is refused, each with its own message', () => {
+  for (const [line, phrase] of [
+    ['[use ai]', 'needs a step after it'],
+    ['[use ai timeout=30] Write a line', '`[use ai]` takes no arguments'],
+    ['[use ai] Pick one [store as: a] [as: b]', 'produces one value'],
+    ['Write a paragraph [use ai] [store as: t]', 'Put `[use ai]` at the start of the step'],
+    ['If the name is empty, then [use ai] Make one up', 'cannot be the step a control line runs'],
+  ]) {
+    const message = useStepError(line, ' at line 3');
+    assert.ok(message, line);
+    assert.ok(message.includes(phrase), `${line}: ${message}`);
+    assert.ok(message.includes(' at line 3'), line);
+  }
+  // The unknown-target refusal now describes the family, `[use ai]` included.
+  assert.ok(useStepError('[use phone]').includes('`[use ai] <step>` asks the model for a value'));
 });

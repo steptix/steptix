@@ -108,6 +108,18 @@ The directive is matched on the AUTHORED line, before `{{…}}` interpolation,
 and strips a leading `[no-hooks]` marker itself, for the reason
 `set-step.ts` gives (runner-core keeps the marker on the wire).
 
+> **Note (stories/use-ai-step.md).** The family now has one PER-STEP member,
+> `[use ai] <step>`: a prefix rather than a whole step, which sends the rest
+> of the line to the model on its own — no page, no screen — and stores the
+> value it answers with. It is not a surface and has no mode form, so it
+> switches nothing, takes no computer lock, and is allowed in hooks and
+> errands where the two switches are not. It is the first of the per-step
+> forms §12 deferred; `[use computer] Click Save` remains deferred. The
+> refusal messages above now describe the family as it is (two switches as
+> whole steps, and `[use ai] <step>`), and `[use ai]` adds refusals of its
+> own: nothing after the token, arguments inside the bracket, more than one
+> name, and the token anywhere but the start of the step.
+
 ### 4.2 Unknown whole-step brackets are errors
 
 New rule, and the reason the bracket form was chosen over a sentence: **a

@@ -308,7 +308,9 @@ export const runStepsInput = toolSchema({
       'Natural-language steps, one per entry. Supports the same syntax as a ' +
         'test file: `[skill: name]` (`sub/name` for a skill in a subfolder), ' +
         '`[tool: name]`, `[input: ...]`, section calls, and ${env.X} ' +
-        'substitution.',
+        'substitution. `[use ai] <step>` asks the model for a value from the ' +
+        'step text alone (no page, no date) and stores it under the name the ' +
+        'step gives, e.g. `[use ai] Make a name starting AUTO [store as: name]`.',
     ),
   session_id: sessionId,
   project_root: projectRoot,
@@ -387,8 +389,9 @@ export const runErrandInput = toolSchema({
     .min(1)
     .describe(
       'Natural-language steps, one per entry — the same step language as ' +
-        'run_steps, and `store as` captures and `Set` assignments come back in ' +
-        'the receipt. ' +
+        'run_steps, and `store as` captures, `Set` assignments and ' +
+        '`[use ai] <step>` values (asked of the model from the step text alone) ' +
+        'come back in the receipt. ' +
         '`[skill: ...]` and `[tool: ...]` are refused: an errand carries no ' +
         'project skills or tools directory, so those need run_steps.',
     ),

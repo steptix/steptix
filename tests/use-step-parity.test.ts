@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   isUseStepClaim as cliClaims,
+  parseUseAiStep as cliParseAi,
   parseUseStep as cliParse,
   useStepError as cliError,
   USE_SURFACES as cliSurfaces,
@@ -15,6 +16,7 @@ import {
 } from '../src/parser/whole-step-bracket.js';
 import {
   isUseStepClaim as coreClaims,
+  parseUseAiStep as coreParseAi,
   parseUseStep as coreParse,
   useStepError as coreError,
   USE_SURFACES as coreSurfaces,
@@ -120,6 +122,39 @@ const CORPUS = [
   'If a dialog is open, then [use computer]',
   '',
   '   ',
+
+  // ── `[use ai] <step>` (stories/use-ai-step.md) ───────────────────────
+  // The accepted forms: case, colon, whitespace, the marker, and each
+  // explicit-name spelling — the fields are compared, not just the verdict.
+  '[use ai] Create a name starting with "AUTO" and store it in random_name',
+  '[USE AI] Write a line',
+  '[use: ai] Write a line',
+  '[use:ai]Write a line',
+  '[use\tai ]  Write a line  ',
+  '[no-hooks] [use ai] Write a line',
+  '[NO-HOOKS][Use Ai] Write a line [store as: x]',
+  '[use ai] Today is {{today}}. Give the date 3 days later as yyyymmdd [store as: days_from_now]',
+  '[use ai] Pick a colour [as: colour]',
+  '[use ai] [output: colour] Pick a colour',
+  '[use ai] Pick a colour and store it as {{colour}}',
+  '[use ai] Pick a colour, save as {{colour}} [store as: colour]',
+  // Its refusals: nothing after it, arguments, more than one name, not at
+  // the start, a control line's tail, unclosed.
+  '[use ai]',
+  '[use ai]   ',
+  '[use ai] [store as: x]',
+  '[use ai timeout=30] Write a line',
+  '[use ai',
+  '[use ai] Pick a colour [store as: a] [as: b]',
+  '[use ai] Pick two colours [store as: a, b]',
+  '[use ai] Pick a colour and store it as {{a}} [output: b]',
+  'Write a random paragraph about Australia [use ai] [store as: text]',
+  'If the name is empty, then [use ai] Make up a name [store as: name]',
+  'Otherwise, [use: ai] Write a line',
+  // Near misses that stay prose.
+  'Verify the [use of ai] banner',
+  '[user ai] x',
+  '[use aim] x',
 ];
 
 describe('src/parser/use-step.ts and runner-core/src/use-step.ts agree', () => {
@@ -127,6 +162,9 @@ describe('src/parser/use-step.ts and runner-core/src/use-step.ts agree', () => {
     for (const line of CORPUS) {
       expect(coreClaims(line), line).toBe(cliClaims(line));
       expect(coreParse(line), line).toEqual(cliParse(line));
+      // `[use ai]`, field for field: the text the model would read, the names
+      // the step pins, and the names it defines in prose.
+      expect(coreParseAi(line), line).toEqual(cliParseAi(line));
     }
   });
 
@@ -173,6 +211,25 @@ describe('src/parser/use-step.ts and runner-core/src/use-step.ts agree', () => {
     // …and non-space whitespace at the separator, the one class that is `[ \t]`
     // rather than `\s` and would read identically if a copy widened it.
     if (!CORPUS.some((l) => l.includes('\t') && cliParse(l) !== null)) missing.push('no tab');
+    // `[use ai]`: a parse with and without each kind of name, and every one of
+    // its refusals by the phrase that identifies it.
+    if (!CORPUS.some((l) => cliParseAi(l) !== null && cliError(l) === null)) missing.push('no ai parse');
+    if (!CORPUS.some((l) => cliParseAi(l) !== null && cliParseAi(l)!.explicitNames.length === 0)) {
+      missing.push('no unnamed ai');
+    }
+    if (!CORPUS.some((l) => (cliParseAi(l)?.defines.length ?? 0) > 0)) missing.push('no prose name');
+    if (!CORPUS.some((l) => /\[(?:as|output):/.test(l) && cliParseAi(l)?.explicitNames.length === 1)) {
+      missing.push('no bracket name');
+    }
+    for (const phrase of [
+      'needs a step after it',
+      '`[use ai]` takes no arguments',
+      'produces one value',
+      'Put `[use ai]` at the start of the step',
+      'cannot be the step a control line runs',
+    ]) {
+      if (!CORPUS.some((l) => cliError(l)?.includes(phrase))) missing.push(`no "${phrase}"`);
+    }
     // …and the NBSP line, which must be prose on BOTH sides. If a copy widens
     // the class to `\s` this row starts claiming, which is the drift the line
     // is in the corpus for.

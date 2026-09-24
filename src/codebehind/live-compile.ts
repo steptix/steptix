@@ -9,7 +9,8 @@ import {
 import { isCodeStep } from '../parser/invocation-parser.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseControlLine } from '../parser/control-line.js';
-import { parseUseStep } from '../parser/use-step.js';
+import { parseSetStep } from '../parser/set-step.js';
+import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import { logger } from '../utils/logger.js';
 import {
   actionsOf,
@@ -26,7 +27,9 @@ import {
   generateStepEntry,
   guardedValues,
   refuseReason,
+  SET_STEP_NOT_COMPILED,
   SURFACE_SWITCH_NOT_COMPILED,
+  USE_AI_NOT_COMPILED,
   stepEnvRefs,
   stepParameters,
   unresolvedRefsReason,
@@ -318,6 +321,11 @@ export function endedAsWrittenReason(subject: 'run' | 'replay', step: number): s
  *   stories/step-failure-outcomes.md, decision 10). The CONDITIONAL form of
  *   either is not refused: it compiles to `if (…) step.exit()` or
  *   `if (…) step.fail('…')`.
+ * - **a `Set` step, and a `[use ai]` step** — both dispatched beside each
+ *   other before the AI loop. `Set` has nothing to compile; `[use ai]` asks
+ *   the model on every run by the author's choice (stories/use-ai-step.md,
+ *   decision 1). Neither may become an `ai: true` entry, which is what the
+ *   generator's "no page actions" decline would write.
  * - **skipped** — a return ended its flow before it ran, so there is no
  *   transcript to generate from.
  * - **tolerated** — it failed and its `otherwise continue` tail let the run
@@ -394,6 +402,23 @@ export function generationRefusal(input: {
   // that acts on the surface the test was leaving.
   if (parseUseStep(input.text)) {
     return SURFACE_SWITCH_NOT_COMPILED;
+  }
+  // A `[use ai]` step asks the model on every run, by the author's choice
+  // (stories/use-ai-step.md, decision 1). Refused here, where it matters on
+  // its own terms: past this function the step would reach `refuseReason`,
+  // whose "no page actions" answer is DECLINED — written into the file as an
+  // `ai: true` entry for a step that must never have one.
+  if (parseUseAiStep(input.text)) {
+    return USE_AI_NOT_COMPILED;
+  }
+  // …and `Set`, which was missing here and is the same missing check. The
+  // boxed classifier (`describeSteps`) has always refused it; this one let a
+  // passed Set step through to generation, where the transcript's empty
+  // action list was declined and written as an `ai: true` entry — a
+  // write-off for a step that costs nothing and never had a model call to
+  // save (stories/variable-assignment.md, rule 8).
+  if (parseSetStep(input.text)) {
+    return SET_STEP_NOT_COMPILED;
   }
   // …and the other half of §9: an ORDINARY step that ran while the surface was
   // `computer`. Ahead of the binding check, because the answer does not depend

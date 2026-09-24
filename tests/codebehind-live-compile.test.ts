@@ -240,6 +240,50 @@ function compilerFor(
   });
 }
 
+describe('a Set step and a [use ai] step are never written into the file', () => {
+  /** What `runSetStep` / `runUseAiStep` return: a pass with no actions — the
+   *  shape generation's "no page actions" rule would DECLINE, which is what
+   *  writes an `ai: true` entry. */
+  const dispatched = (index: number, instruction: string): StepResult => ({
+    index,
+    instruction,
+    status: 'passed',
+    turns: [],
+    durationMs: 1,
+    retried: false,
+  });
+
+  it('offered by the run loop, neither reaches generation, and neither becomes ai: true', async () => {
+    // stories/use-ai-step.md, decision 1 and its open question: before this
+    // story a passed Set step went through `generationRefusal` unrefused, and
+    // `refuseReason`'s decline was spliced into the candidate as an `ai: true`
+    // entry. The file below is the measurement: with the check removed from
+    // `generationRefusal`, it carries `ai: true` for the Set line.
+    const SET = 'Set {{ref}} to "Ref: {{order}}"';
+    const USE_AI = '[use ai] Make up a promo code [store as: code]';
+    const { client, prompts } = fakeClient();
+    const compiler = compilerFor([SET, USE_AI, 'Sign in'], { client });
+
+    compiler.offer({ index: 0, binding: binding(SET), result: dispatched(1, SET), resolvedParameters: {} });
+    compiler.offer({ index: 1, binding: binding(USE_AI), result: dispatched(2, USE_AI), resolvedParameters: {} });
+    compiler.offer({ index: 2, binding: binding('Sign in'), result: result(3, 'Sign in'), resolvedParameters: {} });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    // Measured without the Set check: this file held
+    //   { // Kept as AI by `aiui compile`: the recorded run performed no page
+    //     // actions for this step
+    //     source: 'Set {{ref}} to "Ref: {{order}}"', ai: true },
+    const file = outcome.files[stepsFile] ?? '';
+    expect(file).toContain("source: 'Sign in'");
+    expect(file).not.toContain('Set {{ref}}');
+    expect(file).not.toContain('[use ai]');
+    expect(file).not.toContain('ai: true');
+    // One generation prompt (plus the review), for the one step that has a
+    // transcript.
+    expect(prompts.filter((p) => !/Review a generated/.test(p))).toHaveLength(1);
+  });
+});
+
 describe('the trailing generation queue', () => {
   it('generates an entry per eligible step and proposes one file', async () => {
     const events: LiveCompileEvent[] = [];

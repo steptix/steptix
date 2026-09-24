@@ -20,7 +20,7 @@ import { captureScreenshot } from '../browser/screenshot.js';
 import { loadContextFiles } from '../context/loader.js';
 import { interpolate } from '../parser/parameters.js';
 import { parseSetStep } from '../parser/set-step.js';
-import { parseUseStep } from '../parser/use-step.js';
+import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
 import {
   failureTailContradictionError,
@@ -35,6 +35,7 @@ import {
   toleratedLogLine,
 } from '../runner/flow-control.js';
 import { runSetStep } from '../runner/set-step-runner.js';
+import { runUseAiStep } from '../runner/use-ai-step-runner.js';
 import { createStructureMemo } from '../runner/structure-memo.js';
 import { redact, runSecrets } from '../utils/secrets.js';
 import { interpolateEnvData, type EnvDataContext } from '../parser/interpolate-env-data.js';
@@ -703,12 +704,15 @@ export class ErrandRunner {
       // would replace the TARGET with its own value once it holds one
       // (stories/variable-assignment.md §Locked).
       const setStep = parseSetStep(originalStep);
+      // `[use ai] <step>` (stories/use-ai-step.md), off the AUTHORED step and
+      // never interpolated, for `Set`'s reasons.
+      const useAiStep = setStep ? null : parseUseAiStep(originalStep);
       // `If … then return` / `… then stop`, off the AUTHORED step for the same
       // reason `Set` is (stories/step-flow-control.md, decision 2). An errand
       // is a flat list with no expansion, so the only flow there is to leave is
       // the errand itself — `frameExitIndex`'s no-expansion answer, applied
       // directly: everything after this step.
-      const flowControlClaim = setStep ? null : parseFlowControlStep(originalStep);
+      const flowControlClaim = setStep || useAiStep ? null : parseFlowControlStep(originalStep);
       const unconditionalFlowControl =
         flowControlClaim && flowControlClaim.body === undefined ? flowControlClaim : null;
       /**
@@ -722,6 +726,11 @@ export class ErrandRunner {
        * contradiction is checked here. Read off the AUTHORED step, like every
        * other claim on this line — `parseUseStep` normalises a `[no-hooks]`
        * prefix itself.
+       *
+       * `[use ai] <step>` is NOT refused here: it switches no surface, it only
+       * asks the model for a value, and an errand is as good a place to want
+       * one as a test (stories/use-ai-step.md, decision 8). `parseUseStep`
+       * answers null for it, which is what lets it through to its own branch.
        */
       const useStep = setStep ? null : parseUseStep(originalStep);
       // The `… otherwise fail …` / `… otherwise continue` tail, off the same
@@ -740,10 +749,10 @@ export class ErrandRunner {
         // of `resolveSetTemplate`'s per-step refusal. Same reason as the
         // session manager, where the throw was worse still.
         const envInterpolated =
-          setStep || !args.envDataCtx
+          setStep || useAiStep || !args.envDataCtx
             ? originalStep
             : interpolateEnvData(originalStep, args.envDataCtx);
-        interpolated = setStep ? originalStep : interpolate(envInterpolated, scope);
+        interpolated = setStep || useAiStep ? originalStep : interpolate(envInterpolated, scope);
       } catch (err) {
         emit({ type: 'step:start', line, ...(await tabSpread()) });
         recordThrow(line, originalStep, err, '');
@@ -776,7 +785,12 @@ export class ErrandRunner {
         continue;
       }
 
-      const { variables: outputVars, cleanedInstruction } = parseOutputPrefixes(interpolated);
+      // Not on a `[use ai]` step: an `[output: x]` there names the value its
+      // runner stores, whose `capture` event goes out below labelled
+      // `generated` — swept here as well, it would go out twice.
+      const { variables: outputVars, cleanedInstruction } = useAiStep
+        ? { variables: [] as string[], cleanedInstruction: interpolated }
+        : parseOutputPrefixes(interpolated);
       const instruction =
         outputVars.length > 0
           ? buildEnrichedInstruction(cleanedInstruction, outputVars)
@@ -796,6 +810,8 @@ export class ErrandRunner {
       // it reports a capture. Emitted here rather than there so the `source`
       // can say `assignment`.
       let setAssigned: { name: string; value: string } | undefined;
+      /** …and what a `[use ai]` step stored, on the same terms. */
+      let useAiGenerated: { name: string; value: string } | undefined;
       if (useStep) {
         // SPEC-use-computer.md §4.4 — an errand runs on the page surface, and
         // §12 keeps `[use …]` in errands for later. Refused by name, with the
@@ -896,6 +912,41 @@ export class ErrandRunner {
             source: 'assignment',
           });
         }
+      } else if (useAiStep) {
+        // `[use ai] <step>`: the model and nothing else — no page, no tabs to
+        // reclaim — so it sits outside the try/finally beside `Set`. Its
+        // runner never throws past a model failure: every failure, the stop
+        // included, comes back as a failed result.
+        const aiOutcome = await runUseAiStep({
+          parsed: useAiStep,
+          index: line,
+          instruction: originalStep,
+          scope,
+          envData: args.envDataCtx,
+          secrets: runSecrets({ parameters: scope, envData: args.envDataCtx }),
+          aiClient: args.aiClient,
+          retries: args.runConfig.execution.retries,
+          signal,
+          failureTail,
+        });
+        stepResult = aiOutcome.result;
+        if (aiOutcome.name !== undefined && aiOutcome.value !== undefined) {
+          useAiGenerated = { name: aiOutcome.name, value: aiOutcome.value };
+          // `defineProperty`, for the `__proto__` hazard the Set branch names.
+          Object.defineProperty(captures, useAiGenerated.name, {
+            value: useAiGenerated.value,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          });
+          emit({
+            type: 'capture',
+            line,
+            name: useAiGenerated.name,
+            value: useAiGenerated.value,
+            source: 'generated',
+          });
+        }
       } else {
         try {
           stepResult = await executeStep(line, steps.length, instruction, {
@@ -988,6 +1039,15 @@ export class ErrandRunner {
         // two came to be missed.
         Object.defineProperty(stepOutputs, setAssigned.name, {
           value: setAssigned.value,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      }
+      // A `[use ai]` step's, the same way and for the same reason.
+      if (useAiGenerated) {
+        Object.defineProperty(stepOutputs, useAiGenerated.name, {
+          value: useAiGenerated.value,
           writable: true,
           enumerable: true,
           configurable: true,
