@@ -34,7 +34,10 @@ export function restoredStatuses<S extends string>(
   const out: Array<[number, S]> = [];
   for (const [line, status] of persisted) {
     if (status === 'running') continue;
-    out.push([line, (RETIRED_STATUSES[status] ?? status) as S]);
+    // Own keys only: a plain lookup would answer a status spelled like an
+    // `Object.prototype` member (`constructor`, `toString`) with a function.
+    const replacement = Object.hasOwn(RETIRED_STATUSES, status) ? RETIRED_STATUSES[status] : undefined;
+    out.push([line, (replacement ?? status) as S]);
   }
   return out;
 }

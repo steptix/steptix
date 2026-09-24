@@ -194,7 +194,7 @@ describe('no run loop writes the live variable map by bare assignment', () => {
   /**
    * …and the helper lives somewhere a `Set` step can reach.
    *
-   * `runSetStep` is the "no page, no model, no cache" module all four run
+   * `runSetStep` is the "no page, no model" module all four run
    * loops share. Importing the helper from `control-runtime.ts` pulled
    * `step-executor.ts` in with it — Playwright, the AI client, the DOM
    * cleaner — into a module whose whole claim is that it needs none of them.

@@ -73,11 +73,10 @@ describe('renderStep — captured variables (issue 042)', () => {
 // ── §7.10's report line (SPEC-structured-table-reads.md, "Log and report") ──
 //
 // A `readTable` the runtime had to ask the model about reads exactly like a
-// structural one in the records, and the mapping it used rides in the step
-// cache from then on. Without this line a report of a run over an odd grid
-// shows a read that "just worked" — and a stale cached mapping is invisible
-// after the fact, which is the one thing a reader needs when the values look
-// wrong.
+// structural one in the records. Without this line a report of a run over an
+// odd grid shows a read that "just worked", and which table it actually read
+// is invisible after the fact — the one thing a reader needs when the values
+// look wrong.
 describe('renderStep — the structure a readTable was read with', () => {
   function stepWithAction(action: Record<string, unknown>): StepResult {
     return {

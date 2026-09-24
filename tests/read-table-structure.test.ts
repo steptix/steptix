@@ -17,7 +17,6 @@ import { chromium, type Browser, type Page } from 'playwright';
 import {
   executeAction,
   readTableRecords,
-  sketchTable,
   formatTableReadSummary,
   TableShapeError,
   type TableSketch,
@@ -201,12 +200,20 @@ describe('readTable — the §7.10 sketch', () => {
             <div role="gridcell" aria-colindex="2">$1</div>
           </div>
         </div>
+        <div role="grid">
+          <div role="row"><div role="gridcell">b</div></div>
+        </div>
       </div>`);
-    const sketch = await sketchTable(page, '#box');
-    expect(sketch).not.toBeNull();
+    // The second grid is what makes this a SHAPE refusal, so the sketch is the
+    // one a real read carries. It also makes the first grid's path an
+    // `:nth-of-type(1)` — alone in `#box` it would be `:scope > div`.
+    const result = await run({ selector: '#box', columns: [{ index: 1, key: 'a' }] });
+    expect(result.error).toContain('found 2 ARIA grids with rows under');
+    const sketch = result.sketch as TableSketch | undefined;
+    expect(sketch).toBeDefined();
     expect(sketch?.candidates[0]).toMatchObject({
       id: 'T1',
-      selector: ':scope > div',
+      selector: ':scope > div:nth-of-type(1)',
       kind: 'grid',
       label: 'Fees',
       headerRowCount: 2,
@@ -229,22 +236,41 @@ describe('readTable — the §7.10 sketch', () => {
     // body rows", and `tfoot` is refused. §7.9 says a heading row AFTER the
     // data is the ARIA spelling of `<tfoot>` and is excluded the same way, so
     // it gets the word that earns it the same refusal.
+    //
+    // Each is read through a wrapper that also holds a plain table, which is
+    // what makes the read a SHAPE refusal and so puts the sketch on it; the
+    // candidate under test comes first, so it is T1.
+    const OTHER = '<table><tbody><tr><td>b</td></tr></tbody></table>';
     await load(`
-      <table id="totals">
-        <thead><tr><th>Payee</th><th>Amount</th></tr></thead>
-        <tbody><tr><td>Origin</td><td>$1</td></tr></tbody>
-        <tfoot><tr><td>Total</td><td>$1</td></tr></tfoot>
-      </table>`);
-    expect((await sketchTable(page, '#totals'))?.candidates[0]?.rows.map((r) => r.section))
+      <div id="wrap">
+        <table id="totals">
+          <thead><tr><th>Payee</th><th>Amount</th></tr></thead>
+          <tbody><tr><td>Origin</td><td>$1</td></tr></tbody>
+          <tfoot><tr><td>Total</td><td>$1</td></tr></tfoot>
+        </table>
+        ${OTHER}
+      </div>`);
+    const totals = await run({ selector: '#wrap', columns: [{ index: 1, key: 'a' }] });
+    expect(totals.error).toContain('found 2 tables with rows under');
+    const totalsSketch = totals.sketch as TableSketch | undefined;
+    expect(totalsSketch?.candidates[0]?.selector).toBe('#totals');
+    expect(totalsSketch?.candidates[0]?.rows.map((r) => r.section))
       .toEqual(['thead', 'tbody', 'tfoot']);
 
     await load(`
-      <div id="g" role="grid">
-        <div role="row"><div role="columnheader">A</div></div>
-        <div role="row"><div role="gridcell">a1</div></div>
-        <div role="row"><div role="columnheader">Z</div></div>
+      <div id="wrap">
+        <div id="g" role="grid">
+          <div role="row"><div role="columnheader">A</div></div>
+          <div role="row"><div role="gridcell">a1</div></div>
+          <div role="row"><div role="columnheader">Z</div></div>
+        </div>
+        ${OTHER}
       </div>`);
-    expect((await sketchTable(page, '#g'))?.candidates[0]?.rows.map((r) => r.section))
+    const grid = await run({ selector: '#wrap', columns: [{ index: 1, key: 'a' }] });
+    expect(grid.error).toContain('found a table and an ARIA grid with rows under');
+    const gridSketch = grid.sketch as TableSketch | undefined;
+    expect(gridSketch?.candidates[0]?.selector).toBe('#g');
+    expect(gridSketch?.candidates[0]?.rows.map((r) => r.section))
       .toEqual(['header', 'row', 'tfoot']);
   });
 
@@ -258,7 +284,14 @@ describe('readTable — the §7.10 sketch', () => {
       <div id="box-hunter2" aria-label="Account hunter2">
         <table id="inner"><tbody><tr><td>a</td></tr></tbody></table>
       </div>`);
-    const sketch = await sketchTable(page, '#box-hunter2', ['hunter2']);
+    // A header asked of a table that has none: a shape refusal, so a sketch.
+    const result = await run(
+      { selector: '#box-hunter2', columns: [{ header: 'User', key: 'user' }] },
+      ['hunter2'],
+    );
+    expect(result.error).toContain('it has no header row');
+    const sketch = result.sketch as TableSketch | undefined;
+    expect(sketch).toBeDefined();
     expect(sketch?.region.selector).toBe('#box-***');
     expect(sketch?.region.id).toBe('box-***');
     expect(sketch?.region.label).toBe('Account ***');
@@ -298,8 +331,10 @@ describe('readTable — the §7.10 sketch', () => {
           `<td>t${n} row ${i} cell ${c} ${'x'.repeat(120)}</td>`).join('')}</tr>`).join('')
     }</tbody></table>`;
     await load(`<div id="big">${Array.from({ length: 12 }, (_, n) => table(n)).join('')}</div>`);
-    const sketch = await sketchTable(page, '#big');
-    expect(sketch).not.toBeNull();
+    const big = await run({ selector: '#big', columns: [{ index: 1, key: 'a' }] });
+    expect(big.error).toContain('found 12 tables with rows under');
+    const sketch = big.sketch as TableSketch | undefined;
+    expect(sketch).toBeDefined();
     expect(JSON.stringify(sketch).length).toBeLessThanOrEqual(6144);
     expect(sketch?.truncated).toBe(true);
     // The counts survive whatever the cap does to the contents.
@@ -310,8 +345,12 @@ describe('readTable — the §7.10 sketch', () => {
 
     // A region that fits is not marked truncated and keeps its full budget:
     // six cells of text per row, cut at 40 characters.
+    // Refused for its missing header row: a shape refusal, so it carries one.
     await load(`<div id="small">${table(0)}</div>`);
-    const small = await sketchTable(page, '#small');
+    const one = await run({ selector: '#small', columns: [{ header: 'Name', key: 'name' }] });
+    expect(one.error).toContain('it has no header row');
+    const small = one.sketch as TableSketch | undefined;
+    expect(small).toBeDefined();
     expect(small?.truncated).toBeUndefined();
     expect(small?.candidates[0]?.rows).toHaveLength(8);
     expect(small?.candidates[0]?.moreRows).toBe(12);
@@ -442,15 +481,6 @@ describe('readTable — the §7.10 sketch', () => {
     expect(err).toBeInstanceOf(TableShapeError);
     expect((err as TableShapeError).sketch?.candidates).toHaveLength(1);
   });
-
-  it('sketches without reading, and answers null for a selector that is not one thing', async () => {
-    await load(TD_HEADED);
-    expect((await sketchTable(page, '#orders'))?.candidates[0]?.id).toBe('T1');
-    // Nothing was read, so nothing was stamped: the re-ask path must not
-    // change the page it is describing.
-    expect(await page.evaluate(() => document.querySelectorAll('[data-aiui-row]').length)).toBe(0);
-    expect(await sketchTable(page, '#nothing')).toBeNull();
-  });
 });
 
 // ── kind: 'table' ───────────────────────────────────────────────────────────
@@ -492,14 +522,13 @@ describe('readTable — a { kind: "table" } mapping (§7.10)', () => {
     const mapping: TableReadMapping = {
       kind: 'table', rows: ':scope', header: { selector: ':scope', bodyRow: 1 },
     };
-    for (const [source, word] of [['model', 'the model'], ['memo', 'the run']] as const) {
-      const result = await readTableRecords(page, {
-        selector: '#orders', columns: NAME_AND_AMOUNT, mapping, structureSource: source,
-      });
-      expect(result.structure?.source).toBe(source);
-      expect(formatTableReadSummary(result, 2, 'orders', undefined))
-        .toContain(`(structure from ${word}: rows in T1`);
-    }
+    // The `model` side is the test above's summary line.
+    const result = await readTableRecords(page, {
+      selector: '#orders', columns: NAME_AND_AMOUNT, mapping, structureSource: 'memo',
+    });
+    expect(result.structure?.source).toBe('memo');
+    expect(formatTableReadSummary(result, 2, 'orders', undefined))
+      .toContain('(structure from the run: rows in T1');
   });
 
   it('stamps the rows it numbered, as a structural read does', async () => {

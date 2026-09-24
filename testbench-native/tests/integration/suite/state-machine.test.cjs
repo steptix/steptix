@@ -123,30 +123,6 @@ describe('TestBench debug state machine', function () {
     assert.equal(hooks.tracker.snapshot().breakpointStop, null);
   });
 
-  it('step:pass from an older server tagged fromCache: true still paints a plain pass', async () => {
-    // A server from before the step cache was removed tags a replayed step
-    // `fromCache: true`. The server ships by restart and the extension by
-    // install, so the two can be out of step for a while. The field must be
-    // ignored: the step passed, and a status the gutter no longer has an
-    // icon for would leave the line blank — a pass the run really had,
-    // painted as nothing.
-    void vscode.commands.executeCommand('testbench-native.runSelected');
-    await waitFor('stream active', () => fake.hasActiveStream);
-
-    fake.push({ type: 'step:start', line: 9 });
-    fake.push({ type: 'step:pass', line: 9, fromCache: true });
-    await waitFor('status pass on line 9', () => {
-      const statuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
-      return statuses[9] === 'pass';
-    });
-
-    fake.end();
-    await waitFor('idle', () => !hooks.isRunning());
-
-    const finalStatuses = Object.fromEntries(hooks.tracker.snapshot().statuses);
-    assert.equal(finalStatuses[9], 'pass', "an old server's fromCache must not change the mark");
-  });
-
   it('done event with reportPath updates lastReportPath on the controller', async () => {
     // Open Last Report wiring: server emits the absolute HTML report
     // path via DoneEvent.reportPath. The controller captures it so the

@@ -691,6 +691,13 @@ describe('the structure question through the real Sessions API entry', () => {
     expect(lines.filter((l) => l.includes('structure asked of the model'))).toHaveLength(1);
     info.mockRestore();
 
+    // …and the extractor was told which, for the §7.6 summary line: it cannot
+    // tell a fresh answer from a remembered one (they are the same object by
+    // then), so without the word a memo reuse would log "structure from the
+    // model" and a reader counting model calls in the log would count wrong.
+    // Step 2's unmapped first read is here too; the memo attempt succeeded.
+    expect(extractor.sources).toEqual([undefined, 'model', undefined, 'memo']);
+
     // Reused, not assumed: it went through the extractor like any mapping, and
     // it is on step 2's recorded action, so what the run records for that step
     // is the mapping that actually read the table.
@@ -1044,32 +1051,5 @@ describe('turning a structure answer into a mapping (§7.10)', () => {
       '"header.row": 9 is past the end of T1, which has 3 rows in the sketch',
     );
     expect(extractor.reads).toHaveLength(1);
-  });
-});
-
-// ── §7.6: the summary line names where the structure came from ──────────────
-
-describe('which source the read is told its mapping came from', () => {
-  it('says model for a fresh answer and memo when a later step reuses it', async () => {
-    // The extractor cannot tell the two apart — a fresh answer and a
-    // remembered one are the same object by then — so the caller passes the
-    // word, and `formatTableReadSummary` prints it. Without it, a memo reuse
-    // would log "structure from the model" and a reader counting model calls
-    // in the log would count wrong.
-    ai.plans = [readTablePlan()];
-    ai.structures = [JSON.stringify({ kind: 'table', rows: 'T1', header: { table: 'T1', row: 1 } })];
-    extractor.handle = (action) => {
-      if (!action.mapping) throw shapeRefusal(TD_REFUSAL, TD_SKETCH);
-      return PAYEE_RECORDS;
-    };
-
-    const res = await runAll('ts-source-memo', newTestFile(), [STEP, STEP_AGAIN]);
-    expect(res.body.status).toBe('passed');
-    // Step 1 asks; step 2 reuses. Both the unmapped first read of step 2 and
-    // the memo attempt are here, and the memo one is what succeeded.
-    expect(ai.structureCalls).toBe(1);
-    expect(extractor.sources).toEqual([undefined, 'model', undefined, 'memo']);
-
-    await api('DELETE', `/sessions/ts-source-memo`);
   });
 });

@@ -61,7 +61,7 @@ type: skill
     expect(result.sourceSkills).toEqual(['search', 'search', null]);
   });
 
-  it('mints a distinct frame per invocation when one skill is used twice (issue 016 / Bug 1)', async () => {
+  it('mints a distinct frame per invocation when one skill is used twice', async () => {
     // Each [skill: ...] invocation must get its own frame, so two invocations
     // of one skill — whose body steps share the same skill-file line — are
     // distinguishable downstream (report rows, call stack, `[store as:]`

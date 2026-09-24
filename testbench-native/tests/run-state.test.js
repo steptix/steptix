@@ -41,6 +41,15 @@ test('a status this build does not know is kept as written, not dropped', () => 
   assert.deepEqual(restoredStatuses([[9, 'pass-from-the-future']]), [[9, 'pass-from-the-future']]);
 });
 
+test('a status spelled like an Object.prototype member is kept as written too', () => {
+  // A plain `map[status]` lookup answers these with inherited functions, which
+  // then serialise as null and lose the line on the next save.
+  assert.deepEqual(
+    restoredStatuses([[1, 'constructor'], [2, 'toString'], [3, '__proto__']]),
+    [[1, 'constructor'], [2, 'toString'], [3, '__proto__']],
+  );
+});
+
 test('a mixed legacy file keeps its lines and maps only the retired status', () => {
   assert.deepEqual(
     restoredStatuses([

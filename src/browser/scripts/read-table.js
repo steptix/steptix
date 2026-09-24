@@ -17,7 +17,7 @@
 // The file is ONE expression — an arrow function of (matches, args):
 //   matches — the elements Playwright's locator matched, in DOM order.
 //   args    — { selector, columns, limit, maxRows, rowKey, mapping,
-//               maskValues, sketchOnly }.
+//               structureSource, maskValues }.
 // It answers
 // { ok: true, records, placeholdersSkipped, dataRowCount, label,
 //   headerFromSeparateTable, structure, fieldsMissing }
@@ -69,9 +69,6 @@
     // one place this extractor quotes page CONTENT back to the caller, and it
     // goes to a model and to the debug log.
     maskValues,
-    // Build the sketch and answer with it, reading nothing. What
-    // `sketchTable()` calls.
-    sketchOnly,
   } = args;
 
   // ── page-context helpers ─────────────────────────────────────────────────
@@ -1586,16 +1583,6 @@
   // matched, which is what a sketch describes and what a `mapping`'s selectors
   // are resolved against.
   sketchRegion = el;
-  if (sketchOnly) {
-    // `sketchTable()`'s call: describe the region and read nothing. Not an
-    // `ok: true`, because nothing was read — the caller reads `.sketch`.
-    return {
-      ok: false,
-      error: `readTable described "${sel}" without reading it`,
-      shape: true,
-      sketch: buildSketch(el),
-    };
-  }
 
   // ── the validated structure, replayed (§7.10) ────────────────────────────
   //

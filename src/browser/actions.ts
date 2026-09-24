@@ -2335,7 +2335,6 @@ interface TableReadPageArgs {
   rowKey: string;
   mapping: TableReadMapping | null;
   maskValues: string[];
-  sketchOnly: boolean;
   structureSource: TableStructureSource;
 }
 
@@ -2419,7 +2418,6 @@ export async function readTableRecords(
     rowKey: ROW_NUMBER_KEY,
     mapping: request.mapping ?? null,
     maskValues: request.maskValues ?? [],
-    sketchOnly: false,
     structureSource: request.structureSource ?? 'model',
   });
   if (!outcome.ok) {
@@ -2451,39 +2449,6 @@ export async function readTableRecords(
     ...(outcome.structure !== undefined && { structure: outcome.structure }),
     ...(outcome.fieldsMissing !== undefined && { fieldsMissing: outcome.fieldsMissing }),
   };
-}
-
-/**
- * The sketch of a region, with nothing read (§7.10).
- *
- * The same sketch a shape refusal carries, built without attempting a read.
- * No runtime path calls it since the step cache (and its re-ask of a cached
- * mapping) was removed; it stays as the direct seam onto the sketch builder
- * that tests/read-table-structure.test.ts exercises — the builder itself is
- * live, since every shape refusal produces one. Cheap on purpose — one
- * evaluation, no extraction, no page mutation — and `null` when the selector
- * matches nothing or several things, which is not a question about structure.
- */
-export async function sketchTable(
-  root: Page | FrameLocator,
-  selector: string,
-  maskValues: string[] = [],
-): Promise<TableSketch | null> {
-  const outcome = await root.locator(selector).evaluateAll(readTableInPage, {
-    selector,
-    columns: [],
-    limit: null,
-    maxRows: READ_TABLE_MAX_ROWS,
-    rowKey: ROW_NUMBER_KEY,
-    mapping: null,
-    maskValues,
-    sketchOnly: true,
-    // Nothing is read, so nothing prints a summary line; the field is required
-    // by the page's argument shape and this is its inert value.
-    structureSource: 'model' as const,
-  });
-  if (outcome.ok) return null;
-  return outcome.sketch ?? null;
 }
 
 /**
