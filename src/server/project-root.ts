@@ -22,9 +22,9 @@ export function comparable(target: string): string {
  * absolute path of the first directory containing one, or `null` if the
  * walk hits the filesystem root without finding one.
  *
- * Used by the server-side StepCache wiring to anchor `<project-root>/.cache`
- * against the test's project — NOT against the server's CWD, which may be
- * elsewhere (testbench-native embeds the server and launches it from the
+ * Used to anchor per-project resolution — config, env/data, the upload
+ * fence — against the test's project, NOT against the server's CWD, which may
+ * be elsewhere (testbench-native embeds the server and launches it from the
  * user's workspace, but third-party callers may invoke it from anywhere).
  *
  * **The machine-wide user root is a boundary** (stories/mcp-no-project.md):
@@ -36,9 +36,9 @@ export function comparable(target: string): string {
  * anywhere up there would silently become the "project" whose `.env` and
  * report directory a project-less run uses.
  *
- * Falls back to `null` rather than throwing. Callers should disable the
- * cache for that request with a one-time log warning rather than writing
- * to a phantom `.cache` next to the server process.
+ * Falls back to `null` rather than throwing, so a caller can decide what a
+ * project-less request means rather than guessing at a phantom root next to
+ * the server process.
  */
 export async function resolveProjectRoot(testFilePath: string): Promise<string | null> {
   const userRoot = comparable(userRootDir());

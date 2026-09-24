@@ -46,7 +46,6 @@ function makeConfig(): Config {
     reports: { outputDir: './reports', includeScreenshots: false, includeDomSnapshots: false, includeAiReasoning: false, embedScreenshots: false },
     api: { specsDir: './specs', requestTimeout: 30000, redactSensitive: true },
     server: { host: '127.0.0.1', port: 0, apiKey: 'k' },
-    cache: { enabled: false, dir: '.cache' },
     logging: { consoleLogLevel: 'silent', serverFileLogLevel: 'off' },
   };
 }

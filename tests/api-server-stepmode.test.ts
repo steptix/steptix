@@ -172,7 +172,6 @@ const cfg: Config = {
   reports: { outputDir: './reports', includeScreenshots: false, includeDomSnapshots: false, includeAiReasoning: false, embedScreenshots: false },
   api: { specsDir: './specs', requestTimeout: 30000, redactSensitive: true },
   server: { host: '127.0.0.1', port: 0, apiKey: API_KEY },
-  cache: { enabled: false, dir: '.cache' },
   logging: { consoleLogLevel: 'silent', serverFileLogLevel: 'off' },
 };
 
@@ -524,93 +523,24 @@ type: skill
     await fs.rm(skillPath);
   });
 
-  describe('step cache wiring', () => {
+  describe('project-root wiring', () => {
     // The api-server-stepmode test infrastructure puts its skillsDir at
-    // `os.tmpdir()/stepmode-skills-XXXX`, NOT inside a real project. For
-    // cache tests we need a directory tree the project-root resolver can
-    // find an aiui.config marker in, so we set one up per-test.
-    let cacheRoot: string;
-    let cacheTestFile: string;
+    // `os.tmpdir()/stepmode-skills-XXXX`, NOT inside a real project. These
+    // tests need a directory tree the project-root resolver can find an
+    // aiui.config marker in (code-behind, recordings, env/data files), so we
+    // set one up per-test.
+    let projectRoot: string;
+    let testFile: string;
 
     beforeEach(async () => {
-      cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'stepmode-cache-'));
-      await fs.writeFile(path.join(cacheRoot, 'aiui.config.json'), '{}\n');
-      cacheTestFile = path.join(cacheRoot, 'test.md');
-      await fs.writeFile(cacheTestFile, '# test\n');
+      projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'stepmode-project-'));
+      await fs.writeFile(path.join(projectRoot, 'aiui.config.json'), '{}\n');
+      testFile = path.join(projectRoot, 'test.md');
+      await fs.writeFile(testFile, '# test\n');
     });
 
     afterEach(async () => {
-      await fs.rm(cacheRoot, { recursive: true, force: true }).catch(() => undefined);
-    });
-
-    it('wires stepCache into executeStep when cacheEnabled is true and testFilePath resolves a project root', async () => {
-      // The simplest wiring assertion: when `cacheEnabled: true` is sent AND a
-      // testFilePath is supplied AND a project marker (aiui.config.json) exists
-      // above it, executeStep receives a non-undefined `stepCache` with
-      // `cacheEnabled: true`. Caching is opt-in, so the flag must be explicit.
-      const { executeStep } = await import('../src/runner/step-executor.js');
-      const exec = vi.mocked(executeStep);
-      const defaultImpl = exec.getMockImplementation();
-
-      let observedOpts: any;
-      exec.mockImplementation(async (idx, _total, instr, opts: any) => {
-        observedOpts = opts;
-        return {
-          index: idx, instruction: instr, status: 'passed',
-          turns: [], durationMs: 1, retried: false, aiExplanation: 'ok',
-        };
-      });
-
-      const sessionId = 'cache-wiring-' + Date.now();
-      const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
-      for await (const ev of sseEvents(url, {
-        steps: ['just one step'],
-        sourceLines: [1],
-        testFilePath: cacheTestFile,
-        cacheEnabled: true,
-      })) {
-        if (ev.type === 'done') break;
-      }
-
-      expect(observedOpts).toBeDefined();
-      expect(observedOpts.stepCache).toBeDefined();
-      expect(observedOpts.cacheEnabled).toBe(true);
-
-      exec.mockReset();
-      if (defaultImpl) exec.mockImplementation(defaultImpl);
-    });
-
-    it('cacheEnabled: false on the request disables cache wiring even with testFilePath', async () => {
-      // Opt-out should propagate. Useful for "debug this run, ignore the
-      // cache entirely" workflows.
-      const { executeStep } = await import('../src/runner/step-executor.js');
-      const exec = vi.mocked(executeStep);
-      const defaultImpl = exec.getMockImplementation();
-
-      let observedOpts: any;
-      exec.mockImplementation(async (idx, _total, instr, opts: any) => {
-        observedOpts = opts;
-        return {
-          index: idx, instruction: instr, status: 'passed',
-          turns: [], durationMs: 1, retried: false, aiExplanation: 'ok',
-        };
-      });
-
-      const sessionId = 'cache-disable-' + Date.now();
-      const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
-      for await (const ev of sseEvents(url, {
-        steps: ['just one step'],
-        sourceLines: [1],
-        testFilePath: cacheTestFile,
-        cacheEnabled: false,
-      })) {
-        if (ev.type === 'done') break;
-      }
-
-      expect(observedOpts.cacheEnabled).toBe(false);
-
-      exec.mockReset();
-      if (defaultImpl) exec.mockImplementation(defaultImpl);
+      await fs.rm(projectRoot, { recursive: true, force: true }).catch(() => undefined);
     });
 
     it('a strict run refuses before its first step when the code-behind file does not load', async () => {
@@ -626,7 +556,7 @@ type: skill
         index: idx, instruction: instr, status: 'passed',
         turns: [], durationMs: 1, retried: false, aiExplanation: 'ok',
       }));
-      const stepsFile = cacheTestFile.replace(/.md$/, '.steps.ts');
+      const stepsFile = testFile.replace(/.md$/, '.steps.ts');
       await fs.writeFile(
         stepsFile,
         [
@@ -639,7 +569,7 @@ type: skill
         const events: any[] = [];
         const response = await sessionManager.executeSteps(
           'strict-load-' + Date.now(),
-          { steps: ['just one step'], sourceLines: [1], testFilePath: cacheTestFile },
+          { steps: ['just one step'], sourceLines: [1], testFilePath: testFile },
           (e) => events.push(e),
           undefined,
           { codeBehind: { strict: true } },
@@ -682,7 +612,7 @@ type: skill
         for await (const ev of sseEvents(url, {
           steps: ['just one step'],
           sourceLines: [1],
-          testFilePath: cacheTestFile,
+          testFilePath: testFile,
           ...(captureStepContext !== undefined && { captureStepContext }),
         })) {
           if (ev.type === 'done') break;
@@ -697,7 +627,7 @@ type: skill
       // (stories/codebehind-recording-on-disk.md); the server keeps none of it.
       const { recordingDirFor } = await import('../src/codebehind/recording.js');
       const manifest = JSON.parse(
-        await fs.readFile(path.join(recordingDirFor(cacheTestFile), 'recording.json'), 'utf-8'),
+        await fs.readFile(path.join(recordingDirFor(testFile), 'recording.json'), 'utf-8'),
       );
       expect(manifest).toMatchObject({ status: 'passed', steps: 1, source: 'server' });
 
@@ -716,12 +646,12 @@ type: skill
       const defaultImpl = exec.getMockImplementation();
 
       await fs.writeFile(
-        path.join(cacheRoot, '.env.uat'),
+        path.join(projectRoot, '.env.uat'),
         ['GITHUB_USERNAME=octocat', 'GITHUB_PASSWORD=hunter2-uat-secret', ''].join('\n'),
       );
-      await fs.mkdir(path.join(cacheRoot, 'data'), { recursive: true });
+      await fs.mkdir(path.join(projectRoot, 'data'), { recursive: true });
       await fs.writeFile(
-        path.join(cacheRoot, 'data', 'uat.json'),
+        path.join(projectRoot, 'data', 'uat.json'),
         JSON.stringify({ url: 'https://uat.example/', users: { admin: { password: '$GITHUB_PASSWORD' } } }),
       );
 
@@ -748,7 +678,7 @@ type: skill
         for await (const ev of sseEvents(url, {
           steps: ['Navigate to ${data.url}'],
           sourceLines: [1],
-          testFilePath: cacheTestFile,
+          testFilePath: testFile,
           envName: 'uat',
           captureStepContext: true,
         })) {
@@ -766,8 +696,8 @@ type: skill
         // The recording beside the test carries neither the env var's value
         // nor the data leaf's — same value here, secret by both names.
         const { recordingDirFor } = await import('../src/codebehind/recording.js');
-        const before = await fs.readFile(path.join(recordingDirFor(cacheTestFile), 'step-01.before.html'), 'utf-8');
-        const after = await fs.readFile(path.join(recordingDirFor(cacheTestFile), 'step-01.after.html'), 'utf-8');
+        const before = await fs.readFile(path.join(recordingDirFor(testFile), 'step-01.before.html'), 'utf-8');
+        const after = await fs.readFile(path.join(recordingDirFor(testFile), 'step-01.after.html'), 'utf-8');
         expect(before).toBe('<input value="***">');
         expect(after).toBe('<p>signed in as octocat</p>');
       } finally {
@@ -788,7 +718,7 @@ type: skill
       try {
         const sessionId = 'env-data-none-' + Date.now();
         const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
-        for await (const ev of sseEvents(url, { steps: ['just one step'], sourceLines: [1], testFilePath: cacheTestFile })) {
+        for await (const ev of sseEvents(url, { steps: ['just one step'], sourceLines: [1], testFilePath: testFile })) {
           if (ev.type === 'done') break;
         }
         expect(observedOpts.envData).toBeUndefined();
@@ -796,166 +726,6 @@ type: skill
         exec.mockReset();
         if (defaultImpl) exec.mockImplementation(defaultImpl);
       }
-    });
-
-    it('absent cacheEnabled with testFilePath leaves the cache OFF (opt-in default)', async () => {
-      // Caching is opt-in: a request that says nothing about caching gets
-      // none, even with a resolvable testFilePath. This is the default that
-      // testbench-native relies on until it explicitly opts a run in.
-      const { executeStep } = await import('../src/runner/step-executor.js');
-      const exec = vi.mocked(executeStep);
-      const defaultImpl = exec.getMockImplementation();
-
-      let observedOpts: any;
-      exec.mockImplementation(async (idx, _total, instr, opts: any) => {
-        observedOpts = opts;
-        return {
-          index: idx, instruction: instr, status: 'passed',
-          turns: [], durationMs: 1, retried: false, aiExplanation: 'ok',
-        };
-      });
-
-      const sessionId = 'cache-default-off-' + Date.now();
-      const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
-      for await (const ev of sseEvents(url, {
-        steps: ['just one step'],
-        sourceLines: [1],
-        testFilePath: cacheTestFile,
-      })) {
-        if (ev.type === 'done') break;
-      }
-
-      expect(observedOpts.stepCache).toBeUndefined();
-      expect(observedOpts.cacheEnabled).toBe(false);
-
-      exec.mockReset();
-      if (defaultImpl) exec.mockImplementation(defaultImpl);
-    });
-
-    it('no testFilePath: cache wiring is silently disabled (no errors)', async () => {
-      // Sanity: requests without testFilePath (legacy clients, headless
-      // callers) skip cache initialization without exploding.
-      const { executeStep } = await import('../src/runner/step-executor.js');
-      const exec = vi.mocked(executeStep);
-      const defaultImpl = exec.getMockImplementation();
-
-      let observedOpts: any;
-      exec.mockImplementation(async (idx, _total, instr, opts: any) => {
-        observedOpts = opts;
-        return {
-          index: idx, instruction: instr, status: 'passed',
-          turns: [], durationMs: 1, retried: false, aiExplanation: 'ok',
-        };
-      });
-
-      const sessionId = 'cache-no-testfile-' + Date.now();
-      const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
-      let sawError = false;
-      for await (const ev of sseEvents(url, {
-        steps: ['just one step'],
-        sourceLines: [1],
-      })) {
-        if (ev.type === 'output' && ev.kind === 'error') sawError = true;
-        if (ev.type === 'done') break;
-      }
-
-      expect(sawError).toBe(false);
-      expect(observedOpts.stepCache).toBeUndefined();
-      expect(observedOpts.cacheEnabled).toBe(false);
-
-      exec.mockReset();
-      if (defaultImpl) exec.mockImplementation(defaultImpl);
-    });
-
-    it('step:pass events carry fromCache: true when executeStep returns fromCache', async () => {
-      // The wire format: step:pass event must carry through the fromCache
-      // flag from StepResult so the client can paint the ⚡ glyph and log
-      // the (cached) marker. Mocks executeStep to return fromCache: true.
-      const { executeStep } = await import('../src/runner/step-executor.js');
-      const exec = vi.mocked(executeStep);
-      const defaultImpl = exec.getMockImplementation();
-
-      exec.mockImplementation(async (idx, _total, instr) => ({
-        index: idx, instruction: instr, status: 'passed',
-        turns: [], durationMs: 1, retried: false, aiExplanation: 'ok',
-        fromCache: true,
-      }));
-
-      const sessionId = 'cache-fromcache-' + Date.now();
-      const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
-      const passEvents: any[] = [];
-      for await (const ev of sseEvents(url, {
-        steps: ['Step A', 'Step B'],
-        sourceLines: [1, 2],
-        testFilePath: cacheTestFile,
-      })) {
-        if (ev.type === 'step:pass') passEvents.push(ev);
-        if (ev.type === 'done') break;
-      }
-
-      expect(passEvents.length).toBe(2);
-      for (const ev of passEvents) {
-        expect(ev.fromCache).toBe(true);
-      }
-
-      exec.mockReset();
-      if (defaultImpl) exec.mockImplementation(defaultImpl);
-    });
-
-    it('fullSteps stabilises the cache hash across batched runs (same hash, different batch slices)', async () => {
-      // The breakpoint batch-split case. Without fullSteps, batch 1 hashes
-      // [stepA, stepB] and batch 2 hashes [stepC, stepD] — different hash
-      // dirs, no cache hit possible. With fullSteps = [stepA, stepB,
-      // stepC, stepD] on both, the hash dirs match and a second run can
-      // hit cache entries written by the first.
-      const { executeStep } = await import('../src/runner/step-executor.js');
-      const exec = vi.mocked(executeStep);
-      const defaultImpl = exec.getMockImplementation();
-
-      const cacheRoots: string[] = [];
-      exec.mockImplementation(async (idx, _total, instr, opts: any) => {
-        // Capture the cache directory each call sees so we can compare
-        // namespaces across the two batches.
-        if (opts?.stepCache) {
-          cacheRoots.push((opts.stepCache as any).cacheDir);
-        }
-        return {
-          index: idx, instruction: instr, status: 'passed',
-          turns: [], durationMs: 1, retried: false, aiExplanation: 'ok',
-        };
-      });
-
-      const sessionId = 'cache-fullsteps-' + Date.now();
-      const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/steps?stream=1`;
-      // Batch 1 — first half of the run.
-      for await (const ev of sseEvents(url, {
-        steps: ['stepA', 'stepB'],
-        sourceLines: [1, 2],
-        fullSteps: ['stepA', 'stepB', 'stepC', 'stepD'],
-        testFilePath: cacheTestFile,
-        cacheEnabled: true,
-      })) {
-        if (ev.type === 'done') break;
-      }
-      // Batch 2 — second half of the same logical run.
-      for await (const ev of sseEvents(url, {
-        steps: ['stepC', 'stepD'],
-        sourceLines: [3, 4],
-        fullSteps: ['stepA', 'stepB', 'stepC', 'stepD'],
-        testFilePath: cacheTestFile,
-        cacheEnabled: true,
-      })) {
-        if (ev.type === 'done') break;
-      }
-
-      // Every call should have seen the same cache directory — proves
-      // the bundle hash is stable across batches.
-      expect(cacheRoots.length).toBe(4);
-      const unique = new Set(cacheRoots);
-      expect(unique.size).toBe(1);
-
-      exec.mockReset();
-      if (defaultImpl) exec.mockImplementation(defaultImpl);
     });
   });
 

@@ -4,7 +4,6 @@ import type { AiClient } from '../src/ai/client.js';
 import type { AIAction, ChatMessage } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
-import type { StepCache } from '../src/cache/step-cache.js';
 import type { EnvDataContext } from '../src/parser/interpolate-env-data.js';
 import type { StepGroup } from '../src/runner/step-grouper.js';
 
@@ -12,7 +11,7 @@ import type { StepGroup } from '../src/runner/step-grouper.js';
  * The model names the value it used; the executor puts the value in
  * (stories/placeholder-preserving-actions.md).
  *
- * Built on the `tests/step-context-cache-hit.test.ts` harness — fake page, stub
+ * Built on the `tests/step-context-capture.test.ts` harness — fake page, stub
  * client, the real `executeStep` — with `../src/browser/actions.js` mocked, so
  * every assertion here is about what actually reached `executeAction` versus
  * what the transcript kept. Those two diverging is the whole feature: the page
@@ -159,7 +158,6 @@ interface RunOptions {
   envData?: EnvDataContext;
   authored?: string;
   testSteps?: string[];
-  stepCache?: StepCache;
   unmask?: ReadonlySet<string>;
 }
 
@@ -180,7 +178,6 @@ async function runStep(instruction: string, responses: string[], opts: RunOption
       resolvedParameters: opts.parameters ?? {},
       ...(opts.envData && { envData: opts.envData }),
       ...(opts.testSteps && { testSteps: opts.testSteps }),
-      ...(opts.stepCache && { stepCache: opts.stepCache, cacheEnabled: true, cacheKey: 1 }),
       ...(opts.unmask && { unmask: opts.unmask }),
     },
     opts.authored,
@@ -691,29 +688,6 @@ describe('an unknown reference fails the turn before any of its actions run', ()
 // ── The other callers ───────────────────────────────────────────────────────
 
 describe('every path through the executor substitutes', () => {
-  it('a cached turn', async () => {
-    const cached: StepCache = {
-      read: async () => [
-        {
-          rawResponse: plan([{ action: 'type', selector: '#email', value: '{{email}}', description: 'Email' }]),
-          actions: [{ action: 'type', selector: '#email', value: '{{email}}', description: 'Email' }],
-          reasoning: 'cached',
-        },
-      ],
-      write: async () => {},
-      invalidateStep: async () => {},
-      readAssertion: async () => null,
-    } as unknown as StepCache;
-
-    const { result } = await runStep(
-      'Enter the email',
-      ['(the AI must not be called on a cache hit)'],
-      { parameters: { email: 'demo@securebank.com' }, stepCache: cached },
-    );
-    expect(result.status).toBe('passed');
-    expect(actions.received[0]!.value).toBe('demo@securebank.com');
-  });
-
   it('a branched step — which used to type the placeholder literally', async () => {
     const group: StepGroup = {
       conditionalSteps: [{ index: 1, instruction: 'If asked for a code, enter {{otp}}' }],

@@ -57,7 +57,7 @@ Two runs of the same file produce reports that differ by **timestamp** (`2026-�
 | [test-controller.ts](../testbench-native/src/extension/test-controller.ts) | Removed the old cancellation-path `closeSession()` — batch session teardown is now owned by `runLines`, so the test loop does nothing extra. |
 | [session-manager.ts](../src/server/session-manager.ts) | Report `testName`, `report.filePath`, and the run-log name use `request.testFilePath ?? sessionId`. |
 
-**Not touched:** the **cache** is keyed by `testFilePath` (not session id), so unique session ids do **not** break cache replay — a batch re-run of a file still hits its cache.
+**Not touched:** code-behind is keyed by the test file (not session id), so unique session ids do **not** break code-behind replay — a batch re-run of a file still uses its compiled steps. (When this was written the step cache was also keyed by `testFilePath`; it has since been removed.)
 
 ## Tests
 

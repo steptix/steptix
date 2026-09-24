@@ -97,9 +97,6 @@ vi.mock('../src/browser/manager.js', () => {
 
 /** Records the instruction text of every step the runner actually executes. */
 const executedSteps: string[] = [];
-/** Records `[instruction, cacheEnabled]` per step, at the seam where the
- *  per-step cache is actually consulted. */
-const cacheFlags: [string, boolean][] = [];
 
 vi.mock('../src/runner/step-executor.js', () => ({
   // Signature: (stepIndex, totalSteps, instruction, opts) — `instruction` is
@@ -108,10 +105,8 @@ vi.mock('../src/runner/step-executor.js', () => ({
     _stepIndex: number,
     _totalSteps: number,
     instruction: string,
-    opts?: { cacheEnabled?: boolean },
   ): Promise<StepResult> => {
     executedSteps.push(instruction);
-    cacheFlags.push([instruction, opts?.cacheEnabled === true]);
     return {
       index: 1,
       instruction: 'mock step',
@@ -194,7 +189,6 @@ const cfg: Config = {
   reports: { outputDir: './reports', includeScreenshots: false, includeDomSnapshots: false, includeAiReasoning: false, embedScreenshots: false },
   api: { specsDir: './specs', requestTimeout: 30000, redactSensitive: true },
   server: { host: '127.0.0.1', port: 0, apiKey: API_KEY },
-  cache: { enabled: false, dir: '.cache' },
   logging: { consoleLogLevel: 'silent', serverFileLogLevel: 'off' },
 };
 
@@ -1627,121 +1621,5 @@ describe('startAt on a sectioned document', () => {
     });
     expect(res.status).toBe(200);
     expect(executedSteps).toEqual(['A one', 'A two', 'Middle', 'A one']);
-  });
-});
-
-// ── Cache ────────────────────────────────────────────────────────────
-
-describe('cache hashing on a sectioned document', () => {
-  it('a subset batch hashes the full expansion, matching a full run', async () => {
-    // Sections bake into step text exactly as skill bodies do. Without the
-    // widened `hasSkillsOrSections` argument a subset batch chooses
-    // `raw-full` and hashes the UNEXPANDED document, so its bundle hash never
-    // matches the one a full run wrote — `StepCache.initialize` sees a stale
-    // bundle, wipes it, and a breakpoint resume can never hit the cache.
-    //
-    // Asserted end to end, over HTTP, by reading the hash the run actually
-    // wrote. An earlier version of this test imported `chooseCacheHashSource`
-    // and asserted the two-line pure function against itself — which passes
-    // even with the CALL SITE reverted to skills-only, i.e. with the entire
-    // change undone. It was also the only test in this file not POSTing
-    // through the HTTP entry, which the file header calls a hard rule.
-    const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sections-cache-'));
-    const projectFile = path.join(cacheRoot, 'checkout.md');
-    await fs.writeFile(path.join(cacheRoot, 'aiui.config.json'), JSON.stringify({}));
-    await fs.writeFile(projectFile, '# placeholder\n');
-
-    const full = ['Open the shop', 'Sign in', 'Check out'];
-    // A sections-only project: no skillsDir at all, which is the case the
-    // widened argument exists for.
-    const body = (steps: string[], extra: Record<string, unknown> = {}) => ({
-      steps,
-      sourceLines: steps.length === full.length ? [3, 4, 5] : [5],
-      testFilePath: projectFile,
-      cacheEnabled: true,
-      sections: {
-        'sign in': { name: 'Sign in', headingLine: 7, steps: ['Type creds'], stepLines: [8] },
-      },
-      ...extra,
-    });
-
-    const readHash = async (): Promise<string | null> => {
-      const found: string[] = [];
-      const walk = async (dir: string): Promise<void> => {
-        for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
-          const full_ = path.join(dir, entry.name);
-          if (entry.isDirectory()) await walk(full_);
-          else if (entry.name === 'meta.json') found.push(full_);
-        }
-      };
-      try {
-        await walk(cacheRoot);
-      } catch {
-        return null;
-      }
-      if (found.length === 0) return null;
-      const meta = JSON.parse(await fs.readFile(found[0]!, 'utf-8'));
-      return meta.stepsHash ?? null;
-    };
-
-    await postSteps(body(full, { fullSteps: full }));
-    const fullHash = await readHash();
-    expect(fullHash).toBeTruthy();
-
-    // A subset batch — the resume after a breakpoint.
-    await postSteps(body(['Check out'], { fullSteps: full }));
-    const subsetHash = await readHash();
-
-    expect(subsetHash).toBe(fullHash);
-
-    await fs.rm(cacheRoot, { recursive: true, force: true });
-  });
-
-  it('a subset batch does not read a per-step cache entry for a non-root frame', async () => {
-    // Per-step keys are `${frameId}-${line}` and frame ids are minted per
-    // BATCH, so a subset batch's `f1` names a different invocation than the
-    // full run's `f1`. With a section body and a skill body both on line 7 of
-    // their own files, the resumed batch read the entry the full run wrote
-    // for the SKILL step and replayed its action plan — silently, green.
-    //
-    // The rule (runtime spec §4.3) is to skip per-step cache for non-root
-    // frames on a subset batch. Asserted at the `executeStep` seam, which is
-    // where the cache is actually consulted.
-    cacheFlags.length = 0;
-    const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sections-key-'));
-    const projectFile = path.join(cacheRoot, 'checkout.md');
-    await fs.writeFile(path.join(cacheRoot, 'aiui.config.json'), JSON.stringify({}));
-    await fs.writeFile(projectFile, '# placeholder\n');
-
-    const full = ['Open the shop', 'Sign in', 'Check out'];
-    const lineOf: Record<string, number> = { 'Open the shop': 3, 'Sign in': 4, 'Check out': 5 };
-    const body = (steps: string[]) => ({
-      steps,
-      sourceLines: steps.map((s) => lineOf[s]!),
-      testFilePath: projectFile,
-      cacheEnabled: true,
-      fullSteps: full,
-      sections: {
-        'sign in': { name: 'Sign in', headingLine: 7, steps: ['Type creds'], stepLines: [8] },
-      },
-    });
-
-    // Full run: every step may use the cache, body steps included.
-    await postSteps(body(full));
-    expect(cacheFlags.find(([i]) => i === 'Type creds')?.[1]).toBe(true);
-    expect(cacheFlags.find(([i]) => i === 'Check out')?.[1]).toBe(true);
-
-    // Subset batch that CONTAINS the section call — otherwise no non-root
-    // step executes and the assertion is vacuous. (My first version of this
-    // test resumed from 'Check out' alone and passed with the rule removed.)
-    cacheFlags.length = 0;
-    await postSteps(body(['Sign in', 'Check out']));
-    expect(cacheFlags.map(([i]) => i)).toEqual(['Type creds', 'Check out']);
-    // The section-body step is in a non-root frame: no read, no write.
-    expect(cacheFlags.find(([i]) => i === 'Type creds')?.[1]).toBe(false);
-    // The root-frame step keeps its stable key and stays cached.
-    expect(cacheFlags.find(([i]) => i === 'Check out')?.[1]).toBe(true);
-
-    await fs.rm(cacheRoot, { recursive: true, force: true });
   });
 });

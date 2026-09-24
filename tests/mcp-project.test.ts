@@ -403,19 +403,6 @@ describe('aiui.config.json', () => {
     expect(text).toContain('outside every allowed root');
   });
 
-  it('reads cacheEnabled from cache.enabled === true', async () => {
-    const on = seedProject(makeTmp(), { config: { cache: { enabled: true } } });
-    const off = seedProject(makeTmp(), { config: { cache: { enabled: 'yes' } } });
-    process.env['AIUI_MCP_ROOTS'] = [on, off].join(path.delimiter);
-
-    await expect(resolveProject({ projectRoot: on })).resolves.toMatchObject({
-      cacheEnabled: true,
-    });
-    await expect(resolveProject({ projectRoot: off })).resolves.toMatchObject({
-      cacheEnabled: false,
-    });
-  });
-
   it('reads desktopScreenshots from desktop.reportScreenshots, closed on anything but true or absent', async () => {
     // SPEC-use-computer.md §10.1: the privacy switch decides whether a desktop
     // capture may come back to the agent, so an ambiguous value withholds it.
@@ -649,7 +636,7 @@ describe('user scope (stories/mcp-no-project.md)', () => {
     expect(project.configPath).toBe(path.join(testUserRoot(), 'aiui.config.json'));
     // Rule 7's raw material: the walk that found nothing is on the result.
     expect(project.configSearch).toContain(root);
-    // Rule 6's floor: never a skills or tools directory, and nothing to cache.
+    // Rule 6's floor: never a skills or tools directory.
     expect(project.skillsDir).toBeNull();
     expect(project.toolsDir).toBeNull();
   });
@@ -685,14 +672,12 @@ describe('user scope (stories/mcp-no-project.md)', () => {
   it('honours the user root aiui.config.json when present, defaults when absent', async () => {
     noProjectCwd();
     expect((await resolveProject({})).cdpPermissions.allowUnowned).toBe(false);
-    expect((await resolveProject({})).cacheEnabled).toBe(false);
 
     seedUserRoot({
-      config: { mcp: { cdp: { allowUnowned: true } }, cache: { enabled: true } },
+      config: { mcp: { cdp: { allowUnowned: true } } },
     });
     const project = await resolveProject({});
     expect(project.cdpPermissions.allowUnowned).toBe(true);
-    expect(project.cacheEnabled).toBe(true);
   });
 
   it('rule 8: allowUnowned in a project does not widen project-less calls, and vice versa', async () => {

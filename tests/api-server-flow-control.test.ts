@@ -211,7 +211,6 @@ const cfg: Config = {
   reports: { outputDir: './reports', includeScreenshots: false, includeDomSnapshots: false, includeAiReasoning: false, embedScreenshots: false },
   api: { specsDir: './specs', requestTimeout: 30000, redactSensitive: true },
   server: { host: '127.0.0.1', port: 0, apiKey: API_KEY },
-  cache: { enabled: false, dir: '.cache' },
   logging: { consoleLogLevel: 'silent', serverFileLogLevel: 'off' },
 };
 
@@ -924,8 +923,8 @@ describe('the claim the server hands the executor', () => {
       testFilePath,
     });
 
-    // `Return` never reaches the executor: no model call, no page snapshot, no
-    // cache entry — dispatched by the loop the way `Set` is (decision 3).
+    // `Return` never reaches the executor: no model call, no page snapshot —
+    // dispatched by the loop the way `Set` is (decision 3).
     expect(claims.map(([text]) => text)).toEqual(['Open the shop']);
     expect(executeStep).toHaveBeenCalledTimes(1);
     expect(body.results.map((r: any) => r.status)).toEqual(['passed', 'passed', 'skipped']);

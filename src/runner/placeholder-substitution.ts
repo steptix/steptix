@@ -28,9 +28,9 @@ import { MASK, redact, runSecrets } from '../utils/secrets.js';
  *    answer. Per turn, not per step: a `needs_reeval` second turn is checked
  *    when it arrives and the first turn's actions stand.
  *  - {@link substituteAction} returns a COPY with every string leaf resolved.
- *    The emitted object is never written to — the transcript, the recording
- *    and the cache keep it exactly as the model wrote it, which is the whole
- *    point of asking for the placeholder in the first place.
+ *    The emitted object is never written to — the transcript and the recording
+ *    keep it exactly as the model wrote it, which is the whole point of asking
+ *    for the placeholder in the first place.
  *
  * Pure functions with no page, no config and no logger, so the rules can be
  * tested without a browser.
@@ -565,8 +565,8 @@ export function substituteAsLiterals(
 
 /**
  * The action to act with: a copy of what the model emitted, with every string
- * leaf substituted. Never mutates its input — the recording, the transcript and
- * the cache keep the placeholder-bearing original (stories/upload-action.md
+ * leaf substituted. Never mutates its input — the recording and the transcript
+ * keep the placeholder-bearing original (stories/upload-action.md
  * locked "the action object is never written to").
  */
 export function substituteAction(action: AIAction, values: PlaceholderValues): AIAction {
@@ -701,26 +701,6 @@ function nearMatch(name: string, known: ReadonlySet<string>): string | undefined
     if (candidate.toLowerCase() === lower) return candidate;
   }
   return undefined;
-}
-
-/**
- * Replace `{{placeholder}}` tokens in an action with resolved parameter values.
- *
- * Lifted out of the step cache (which is being retired) and generalised from
- * the `value`/upload-path pair to the same deep walk the executor uses, because
- * a cached action can now carry a placeholder in any field the model chose to
- * name one in — `selector: "text={{plan}}"` most obviously.
- *
- * A path restored here is the parameter's RAW spelling, backslashes and all;
- * the executor and `step.filePath` normalise at the point of use, so both
- * spellings resolve to the same file.
- */
-export function forwardInterpolate(
-  actions: AIAction[],
-  params: Record<string, string>,
-): AIAction[] {
-  if (Object.keys(params).length === 0) return actions;
-  return actions.map((action) => substituteAction(action, { parameters: params }));
 }
 
 /**

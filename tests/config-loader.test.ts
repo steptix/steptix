@@ -3,13 +3,14 @@
  * specifically that INTERACTIVE_ON_FAILURE threads through to
  * execution.interactiveOnFailure.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv from 'ajv';
 import { loadConfig } from '../src/config/loader.js';
+import { logger } from '../src/utils/logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -183,6 +184,34 @@ describe('loadConfig — aiui.config.json loading + deep merge', () => {
     // Siblings under browser are untouched by the merge.
     expect(config.browser.headed).toBe(true);
     expect(config.browser.domNoiseReduction?.collapseRepetitiveDom).toBe(true);
+  });
+
+  it('drops a leftover top-level `cache` section and warns once per file', async () => {
+    // The step cache is gone. A project that still carries the section keeps
+    // loading — refusing it would break a working project over a key that
+    // changes nothing — but it is told, once, rather than left believing the
+    // setting does something.
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const file = await writeConfig({ cache: { enabled: true, dir: '.cache' }, server: { port: 4242 } });
+
+      const config = await loadConfig(file);
+      expect('cache' in config).toBe(false);
+      // The rest of the file still merges.
+      expect(config.server.port).toBe(4242);
+      const said = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('"cache"'));
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain(file);
+      expect(said[0]).toContain('step cache was removed');
+
+      // A second read of the same file — a server re-reading after an edit —
+      // drops it again and says nothing more.
+      warn.mockClear();
+      expect('cache' in (await loadConfig(file))).toBe(false);
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('"cache"'))).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('replaces arrays wholesale (does not concatenate)', async () => {

@@ -498,7 +498,7 @@ describe('the stall detector (§5.5)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// §5.2, §10.1, §10.4 — the image, the report copy, and the cache
+// §5.2, §10.1 — the image and the report copy
 // ---------------------------------------------------------------------------
 
 describe('the capture always reaches the model (§5.2)', () => {
@@ -560,35 +560,6 @@ describe('desktop.reportScreenshots (§10.1)', () => {
     expect(result.turns[0]!.aiInteractions[0]!.screenshotBase64).toBeUndefined();
     // …and the MODEL still saw it. The switch is about the report only.
     expect(imagesIn(sent[0]!)).toHaveLength(1);
-  });
-});
-
-describe('no step cache in computer mode (§5.5, §10.4)', () => {
-  it('neither reads nor writes it, even when one is handed over', async () => {
-    const adapter = new FakeDesktopAdapter(GRAB);
-    const { client } = scripted(
-      '{"action":"click","x":10,"y":10,"description":"Click"}',
-      '{"action":"noop","description":"done"}',
-    );
-    const stepCache = {
-      read: vi.fn(async () => null),
-      write: vi.fn(async () => {}),
-      invalidateStep: vi.fn(async () => {}),
-      readAssertion: vi.fn(async () => null),
-    };
-
-    await executeComputerStep(
-      1,
-      1,
-      'Click',
-      makeOpts(adapter, client, {
-        stepCache: stepCache as unknown as ComputerStepOptions['stepCache'],
-        cacheEnabled: true,
-      }),
-    );
-
-    expect(stepCache.read).not.toHaveBeenCalled();
-    expect(stepCache.write).not.toHaveBeenCalled();
   });
 });
 

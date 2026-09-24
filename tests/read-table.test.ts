@@ -15,12 +15,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import fs from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright';
 import { executeAction, readTableRecords, formatTableReadSummary } from '../src/browser/actions.js';
 import { parseAIResponse } from '../src/ai/action-parser.js';
-import { StepCache } from '../src/cache/step-cache.js';
 import type { AIAction, TableReadColumn } from '../src/ai/types.js';
 
 let browser: Browser;
@@ -3759,86 +3756,5 @@ describe('formatTableReadSummary', () => {
       .toBe('readTable captured 6 rows × 3 columns as "{{holdings}}" (header from a separate table)');
     expect(formatTableReadSummary(result(2, 1, true), 3, 'holdings', 5))
       .toBe('readTable captured 2 rows × 3 columns as "{{holdings}}" (limit 5, 1 placeholder row skipped, header from a separate table)');
-  });
-});
-
-// ── cache replay (§9.1) ─────────────────────────────────────────────────────
-
-describe('readTable — cached actions replay against the current DOM (§9.1)', () => {
-  it('keeps index, header and limit through a cache round-trip and rereads the page', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-readtable-cache-'));
-    try {
-      const cache = await StepCache.initialize(dir, 'read table', ['Read the payments table']);
-      const action = parseAIResponse(JSON.stringify({
-        actions: [{
-          action: 'readTable',
-          selector: '#t',
-          columns: [{ index: 1, key: 'payee' }, { header: 'Status', key: 'status' }],
-          limit: 2,
-          as: 'payments',
-          description: 'Read the payments table',
-        }],
-        reasoning: '',
-      })).actions[0]!;
-
-      await cache.write(1, [{ rawResponse: '{}', actions: [action], reasoning: '' }], {});
-      const replayed = (await cache.read(1, {}))![0]!.actions[0]!;
-
-      // Cache the SHAPE, never the captured rows (§9.1).
-      expect(replayed.columns).toEqual([
-        { index: 1, key: 'payee' },
-        { header: 'Status', key: 'status' },
-      ]);
-      expect(replayed.limit).toBe(2);
-
-      const table = (payee: string, status: string) => `
-        <table id="t" aria-label="Payments">
-          <thead><tr><th>Payee</th><th>Status</th></tr></thead>
-          <tbody>
-            <tr><td>${payee}</td><td>${status}</td></tr>
-            <tr><td>Netflix Australia</td><td>Scheduled</td></tr>
-            <tr><td>City of Sydney Rates</td><td>Overdue</td></tr>
-          </tbody>
-        </table>`;
-
-      await load(table('Origin Energy', 'Scheduled'));
-      const first = await executeAction(page, replayed);
-      expect(first.capturedRecords).toEqual([
-        { _row: '1', payee: 'Origin Energy', status: 'Scheduled' },
-        { _row: '2', payee: 'Netflix Australia', status: 'Scheduled' },
-      ]);
-
-      // The same cached plan against changed data reads the new values —
-      // a cached readTable is a plan, not a stored answer.
-      await load(table('Origin Energy', 'Paused'));
-      const second = await executeAction(page, replayed);
-      expect(second.capturedRecords?.[0]).toEqual({ _row: '1', payee: 'Origin Energy', status: 'Paused' });
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('substitutes a parameterised header but never a column key', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-readtable-cache-'));
-    try {
-      const cache = await StepCache.initialize(dir, 'read table params', ['Read a column']);
-      const action: AIAction = {
-        action: 'readTable',
-        selector: '#t',
-        columns: [{ header: '{{column_name}}', key: 'the_{{column_name}}_cell' }],
-        as: 'rows',
-        description: 'Read a column',
-      };
-      await cache.write(1, [{ rawResponse: '{}', actions: [action], reasoning: '' }], {});
-      const replayed = (await cache.read(1, { column_name: 'Status' }))![0]!.actions[0]!;
-      expect(replayed.columns?.[0]?.header).toBe('Status');
-      // `key` is a definition, not a reference — it names the property later
-      // steps read, and must survive interpolation untouched (§9.1). The key
-      // carries a placeholder of its own precisely so this cannot pass by
-      // identity: a substitution that walked it would make it `the_Status_cell`.
-      expect(replayed.columns?.[0]?.key).toBe('the_{{column_name}}_cell');
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
   });
 });

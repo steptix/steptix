@@ -977,14 +977,13 @@ tags: [codebehind]
     await waitFor('idle', () => !hooks.isRunning());
   });
 
-  it('a stale entry outranks the cache flag — the mark asks for a recompile', async () => {
+  it('a stale entry outranks the code-behind flag — the mark asks for a recompile', async () => {
     void vscode.commands.executeCommand('testbench-native.runAll');
     await waitFor('stream active', () => fake.hasActiveStream);
 
     fake.push({
       type: 'step:pass',
       line: 8,
-      fromCache: true,
       fromCodeBehind: true,
       codeBehindStale: { file: '/x/compile-me.steps.ts', error: 'boom' },
     });

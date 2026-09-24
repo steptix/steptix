@@ -81,10 +81,6 @@ export const DEFAULT_CONFIG: Config = {
     port: 3100,
     apiKey: 'dev-api-key',
   },
-  cache: {
-    enabled: false,
-    dir: '.cache',
-  },
   // Code-behind has no config section. Execution needs no flag — a `.steps.ts`
   // beside a test is the author's intent, like a `tools/` directory — and
   // generation is no longer something a run does, so there is nothing left to
@@ -94,8 +90,8 @@ export const DEFAULT_CONFIG: Config = {
     serverFileLogLevel: 'compact',
   },
   // Structured table reads (SPEC-structured-table-reads.md §7.10). `ask` is
-  // the default because the question is asked at most ONCE per step per
-  // structure and never on a cached run — the cost of the long tail of odd
+  // the default because the question is asked at most ONCE per structure per
+  // run — the cost of the long tail of odd
   // grids reading at all. `strict` turns it off for a run that must spend no
   // unplanned model call.
   tables: {

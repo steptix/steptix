@@ -1,6 +1,4 @@
 import { basename, dirname, join as pathJoin, relative as pathRelative, resolve as pathResolve, sep } from 'node:path';
-import { StepCache, frameScopedStepKey, cacheDirName, envCacheSegment } from '../cache/step-cache.js';
-import { arraysEqual, chooseCacheHashSource } from './cache-hash-source.js';
 import { ProjectBundleResolver, type ProjectBundle } from './project-bundle.js';
 import {
   applyEnvToAiConfig,
@@ -303,8 +301,7 @@ export interface StepRequest {
    * recording beside the test when it ends
    * (stories/codebehind-recording-on-disk.md). How a compile's own Record
    * asks for its input; nothing sends it on an ordinary run, and nothing of
-   * it is kept on the session. One extra DOM snapshot per step; a cache hit
-   * also takes the turn-1 snapshot it would otherwise skip. The only one of
+   * it is kept on the session. One extra DOM snapshot per step. The only one of
    * compile's run knobs on the wire, because it only records — the ones that
    * change what executes stay in `InternalRunOptions`.
    */
@@ -524,26 +521,13 @@ export interface StepRequest {
    */
   runSettings?: RunSettings;
   /**
-   * Enable / disable the per-step AI response cache for this request. When
-   * true (and `testFilePath` is present so a project root can be resolved),
-   * the server reads cached AI plans from `<project-root>/.cache/<test>/`
-   * before calling the AI, and writes successful plans back. Cache hits
-   * surface to clients via `step:pass.fromCache = true`.
-   *
-   * Opt-in: caching only happens when this is explicitly `true` (and a
-   * `testFilePath` is present). An absent flag (`undefined`) or `false`
-   * means no cache — every step goes through the AI.
-   */
-  cacheEnabled?: boolean;
-  /**
-   * Full post-expansion step list for the test. When a run is split into
-   * multiple HTTP batches (e.g. paused at a breakpoint), each batch's
-   * `steps` field carries only the trimmed slice this batch executes.
-   * The cache's bundle-hash needs to be stable across batches of the
-   * *same* test, so callers send the full list here. The server hashes
-   * `fullSteps ?? steps` — omitting it works for single-batch runs and
-   * misbehaves only on multi-batch runs (where the hash would differ
-   * between batches and prevent any cache hit).
+   * The test's whole step list. When a run is split into multiple HTTP
+   * batches (paused at a breakpoint, an `[input:]` split, a run selection),
+   * each batch's `steps` carries only the slice it executes, and three things
+   * need the whole document: the surface a mid-document start begins on
+   * (`surfaceAtRunStart`), the dead-section liveness scan, and telling a
+   * subset batch from a whole run (the code-behind last-run sidecar is only
+   * written for the latter). Omitting it reads the batch as the whole test.
    */
   fullSteps?: string[];
   /**
@@ -555,9 +539,7 @@ export interface StepRequest {
    * user saw, and optionally edited, in the Variables panel.
    *
    * `__skill*`-namespaced names are server-owned internals and are ignored if
-   * present. When `seedScope` is set the per-step cache is force-disabled for
-   * the run (see `cacheEnabled` handling) so an edited value re-plans instead
-   * of replaying a frozen cached action list.
+   * present.
    */
   seedScope?: Record<string, string>;
   /**
@@ -694,6 +676,15 @@ function surfaceEffectOf(
   return 'none';
 }
 
+/** Element-wise equality for two string arrays. */
+function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 /** A `[skill: …]` line, as the expander reads one — a line that names a skill
  *  but does not parse is still one. */
 function isSkillCallLine(line: string): boolean {
@@ -810,7 +801,6 @@ export type RunEvent =
       skipKind?: 'unattended' | 'not-taken';
       screenshot?: string;
       frame?: FrameInfo;
-      fromCache?: boolean;
       tab?: TabInfo;
       /** The step ran its code-behind entry instead of calling the AI
        *  (stories/codebehind-compile.md §What the author sees). Drives the code mark. */
@@ -2247,7 +2237,7 @@ export class SessionManager {
       // (`reports.outputDir`, anchored at the project root) must come from the
       // TEST's own aiui.config.json, resolved up front here — not the server's
       // startup config. This makes both take effect on the server/TestBench
-      // path, matching how cache/env/data are already per-project, and the CLI
+      // path, matching how env/data are already per-project, and the CLI
       // runner. (Props consumed at session creation read this.config unless
       // threaded — see feedback_thread_new_config_to_server_bundle.)
       const { videoMode, reportOutputDir } = await this.resolveSessionOutput(request);
@@ -3175,9 +3165,9 @@ export class SessionManager {
     const runStartTime = Date.now();
     // The session's TokenTracker lives for the whole session, accumulating
     // across every run. Snapshot here so this run's report counts only the
-    // tokens spent during this run — otherwise a re-run (especially a fully
-    // cache-served one that makes no AI calls) would inherit the prior run's
-    // total. See src/utils/tokens.ts.
+    // tokens spent during this run — otherwise a re-run (especially one served
+    // wholly by code-behind, which makes no AI calls) would inherit the prior
+    // run's total. See src/utils/tokens.ts.
     session.tokenTracker.markRunStart();
     // Invalidate any prior run's finalized last-run record NOW, at the start of
     // THIS run — mirroring markRunStart above, which guards the same "a re-run
@@ -3943,9 +3933,9 @@ export class SessionManager {
     // — a `.steps.ts` sits beside the markdown, so it rides the same
     // per-request project resolution as `aiui.config.json` and `.env`.
     //
-    // Unlike the action cache, this is safe on a subset batch: an entry is
-    // bound by the step's authored text within its frame INSTANCE, so it does
-    // not depend on which frame counter a batch happened to mint (issue 037).
+    // This is safe on a subset batch: an entry is bound by the step's authored
+    // text within its frame INSTANCE, so it does not depend on which frame
+    // counter a batch happened to mint.
     //
     // A compile-driven run overrides all of it: `disabled` for the Record (an
     // entry that serves its step leaves no transcript to generate from), and a
@@ -4187,161 +4177,21 @@ export class SessionManager {
       };
     }
 
-    // ─── StepCache initialization ────────────────────────────────────────
-    //
-    // Per-request: clear the skill cache (already done at the top of
-    // executeSteps), then build a fresh StepCache anchored at the test's
-    // project root. The cache key is (testFilePath, hash(fullSteps)). The
-    // hash uses `fullSteps` when the client supplies it (multi-batch runs
-    // trim `steps` to a slice; without `fullSteps` the hash would differ
-    // between batches of the same test and no cache hit would ever land).
-    //
-    // Project root is resolved from `testFilePath`, NOT from the server's
-    // CWD — testbench-native may launch the server from anywhere. If no
-    // project marker is found by walking up from the test file, the cache
-    // is disabled for this request with a one-time warning rather than
-    // writing to a phantom `.cache` next to the server process.
-    // Cache is opt-in: the client must explicitly send `cacheEnabled: true`.
-    // An absent flag (`undefined`) means OFF, so a caller that says nothing
-    // about caching gets none. (Previously `undefined` meant ON, which made
-    // the cache impossible to turn off from clients that never set the flag.)
-    // A partial re-run (`startAt`) seeds scope and may carry edited values, but
-    // its per-step cache keys are identical to the full run's (same expanded
-    // bundle hash + frame-scoped keys), so a cache HIT would replay the frozen
-    // action plan and silently ignore an edit meant to change behaviour. Force
-    // the cache OFF for any partial re-run regardless of what the client sent.
+    // A partial re-run: `startAt` names where in the document this batch begins.
     const isPartialRerun = request.startAt !== undefined;
-    const cacheEnabledForRequest =
-      request.cacheEnabled === true && !!request.testFilePath && !isPartialRerun;
-
-    // Per-step cache keys are `${frameId}-${line}`, and frame ids are minted
-    // by walking THIS batch (`f1`, `f2`, …). A subset batch expands only its
-    // slice, so its ids restart from f1 and can name a different invocation
-    // than the full run that wrote the entry — replaying a frozen action plan
-    // against the wrong step. Verified: a full run writes `f2-7` for a section
-    // body step and `f1-7` for a skill body step in another file; the resumed
-    // batch then reads `f1-7` and gets the skill's plan.
-    //
-    // v1 rule (runtime spec §4.3): on a subset batch, skip per-step cache
-    // reads AND writes for steps in non-root frames. Root-frame steps keep
-    // their stable `frameId === ''` keys and stay cached. This trades some
-    // hits for guaranteed-correct misses; aligning batch frame ids to the
-    // full-document expansion would restore them and is future work
-    // (issues/037).
-    //
-    // Subset batches are not only breakpoint continuations — `[input:]` /
-    // `[interactive]` splits and run-selection also send `steps` ≠
-    // `fullSteps`, so skill body steps lose per-step caching there too.
+    // A batch that is not the whole test — a breakpoint continuation, an
+    // `[input:]` / `[interactive]` split, a run selection, a partial re-run —
+    // sends `steps` ≠ `fullSteps`. What it knows about is some of the steps,
+    // which is why the code-behind last-run sidecar is not written for it.
     const isSubsetBatch =
       request.fullSteps !== undefined && !arraysEqual(request.steps, request.fullSteps);
     // What this run learns about a region's structure, once
     // (SPEC-structured-table-reads.md §7.10, src/runner/structure-memo.ts).
-    // Per BATCH, the same lifetime `stepCache` has: a batch is what the server
-    // knows about, and a run split by a breakpoint or an `[input:]` simply
-    // asks once more on the far side rather than reusing an answer from
-    // before a pause the user may have spent editing the page.
-    //
-    // Deliberately NOT gated by `cacheEnabledForRequest`: that switch is about
-    // replaying a frozen action plan, and this is about not asking the same
-    // structural question twice in one run. A run with the cache off still
-    // asks once.
+    // Per BATCH: a batch is what the server knows about, and a run split by a
+    // breakpoint or an `[input:]` simply asks once more on the far side rather
+    // than reusing an answer from before a pause the user may have spent
+    // editing the page.
     const structureMemo = createStructureMemo();
-    let stepCache: StepCache | undefined;
-    if (cacheEnabledForRequest && request.testFilePath) {
-      // Reuse the project root already resolved for the env/data bundle (it was
-      // hoisted out of this branch — it now runs for every request).
-      const projectRoot = projectBundle.projectRoot;
-      if (projectRoot) {
-        const cacheDir = pathJoin(projectRoot, projectConfig.cache.dir, envCacheSegment(requestedEnvName ?? undefined));
-        // Bundle-hash source (issue 016 Bug 2). The hash must change when a
-        // skill body changes AND be stable across every batch of one document.
-        // `effectiveSteps` (the expansion of this batch) is the right source
-        // only when the batch IS the whole document; a subset batch must hash
-        // the expansion of the FULL document so it matches a full run's hash.
-        let cacheHashSource: string[];
-        const choice = chooseCacheHashSource(
-          request.steps,
-          request.fullSteps,
-          // Sections bake into the step text exactly as skill bodies do, so a
-          // subset batch of a sectioned document must hash the FULL expansion
-          // or it can never hit the cache a full run wrote.
-          !!request.skillsDir || hasSections(request),
-        );
-        if (choice === 'raw-full') {
-          cacheHashSource = request.fullSteps!;
-        } else if (choice === 'expand-full') {
-          // Subset batch with skills: expand the full document for the hash.
-          // Own try/catch — a skill referenced only outside this batch may be
-          // mid-edit/broken; fall back to the raw full list rather than fail an
-          // otherwise-valid batch (the broken skill aborts the run elsewhere if
-          // the user resumes into it).
-          try {
-            const fullExpansion = await expandSkills(
-              request.fullSteps!,
-              request.skillsDir,
-              envDataCtx ?? undefined,
-              request.testFilePath,
-              request.sourceLines,
-              {
-                ...(request.sections && { sections: request.sections }),
-                // This expansion exists only to compute a hash; its dead-
-                // section warnings would be byte-identical to the ones the
-                // execution expansion already emitted. Without this the user
-                // sees every "defined but never invoked" warning twice on any
-                // subset batch — and once more per resumed batch after a
-                // breakpoint.
-                warnDeadSections: false,
-              },
-            );
-            cacheHashSource = fullExpansion.steps;
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            logger.warn(
-              `Session "${sessionId}": cache-hash full-document expansion failed (${msg}); falling back to raw fullSteps`,
-            );
-            cacheHashSource = request.fullSteps!;
-          }
-        } else {
-          // 'effective': batch == fullSteps (or legacy no-fullSteps caller).
-          // effectiveSteps already IS the expanded full document — or the raw
-          // steps when no skillsDir — so it bakes in skill bodies for the hash.
-          cacheHashSource = effectiveSteps;
-        }
-        // issue 018: fold resolved env/data values into the hash source so a
-        // data-file edit invalidates the cache exactly like a step-text edit.
-        // Without this the hash sees the RAW `${data.x}` / `${source.x}`
-        // placeholder, so changing the value behind it leaves the hash (and
-        // every positional per-step key) unchanged and a cache HIT replays the
-        // frozen action with the stale value. `{{params}}` are intentionally
-        // left intact — interpolateEnvData ignores them, so the read-time param
-        // interpolation still lets one cached plan serve many param values
-        // (params ride the cache; data busts it). Applied to whichever branch
-        // produced cacheHashSource, so full / subset / expanded hashes stay
-        // mutually consistent. A bad ref throws here; fall back to the raw line
-        // — a bad ref in this batch resurfaces at the real interpolation site
-        // (the `interpolatedSteps` map below) with a precise file/line error.
-        if (envDataCtx) {
-          cacheHashSource = cacheHashSource.map((s) => {
-            try {
-              return interpolateEnvData(s, envDataCtx);
-            } catch {
-              return s;
-            }
-          });
-        }
-        try {
-          stepCache = await StepCache.initialize(cacheDir, cacheDirName(request.testFilePath, projectRoot), cacheHashSource);
-        } catch (err) {
-          logger.warn(
-            `Session "${sessionId}": failed to initialize step cache: ${(err as Error).message} — proceeding without cache`,
-          );
-        }
-      } else {
-        logger.warn(
-          `Session "${sessionId}": no project root found for ${request.testFilePath} — cache disabled`,
-        );
-      }
-    }
 
     // Detect conditional step groups for multi-outcome branching — interpolate
     // env/data substitutions first so grouping looks at the final step text
@@ -4430,14 +4280,6 @@ export class SessionManager {
      */
     const releaseLockForPause = (why: string): void =>
       releaseComputerLockForPause(surfaceStateOf(session), session.id, this.deps.computerLock, why);
-    /** Steps inside a loop body opt out of the per-step action cache: the
-     *  cache rewrites one value per line and a pass is a different value
-     *  (stories/control-flow.md, decision 12 — the rows story's reason). */
-    const loopBodySteps = new Set<number>();
-    for (const record of controls) {
-      if (!record || !isLoopRecord(record)) continue;
-      for (let k = record.bodyStart; k <= record.bodyEnd; k++) loopBodySteps.add(k);
-    }
 
     // ─── Frame stack ────────────────────────────────────────────────────────
     //
@@ -5538,7 +5380,7 @@ export class SessionManager {
         // The unconditional form — a step whose WHOLE text is the tail, so
         // `Stop running the remaining steps` as much as `Return` — has no
         // condition to judge, so it is dispatched below beside `Set`: no model
-        // call, no page snapshot, no cache entry (decision 3). The test is the
+        // call, no page snapshot (decision 3). The test is the
         // absent `body`, never the length of the line.
         const unconditionalFlowControl =
           flowControlClaim && flowControlClaim.body === undefined ? flowControlClaim : null;
@@ -6117,7 +5959,7 @@ export class SessionManager {
         //
         // After the breakpoint check, so a breakpoint on a guard line pauses
         // BEFORE the decision. Before everything else: a guard is not a page
-        // step — no cache, no code-behind, no compile, no `executeStep`
+        // step — no code-behind, no compile, no `executeStep`
         // (stories/control-flow.md §"What is deliberately unchanged").
         //
         // A breakpoint pauses on the guard's first visit whatever that visit
@@ -6515,7 +6357,7 @@ export class SessionManager {
               }),
             };
           } else if (setStep) {
-            // Assignment: no model, no page, no cache. The capture event is
+            // Assignment: no model, no page. The capture event is
             // emitted here rather than by the common sweep below so its
             // `source` can say `assignment` — the sweep labels everything it
             // finds `capture` (stories/variable-assignment.md §Locked).
@@ -6562,8 +6404,8 @@ export class SessionManager {
             // `[use ai] <step>` (stories/use-ai-step.md): the step's text alone
             // goes to the model and the value it answers with is stored. Beside
             // `Set`, inside the same `try`, and with `Set`'s bookkeeping — only
-            // the source differs. No cache, no code-behind binding, no page:
-            // `executeStep` is the only reader of any of them.
+            // the source differs. No code-behind binding, no page:
+            // `executeStep` is the only reader of either.
             const outcome = await runUseAiStep({
               parsed: useAiStep,
               index: i + 1,
@@ -6726,9 +6568,9 @@ export class SessionManager {
             // branches above. What changes here is only how a PROSE step is
             // answered — from a capture of the screen instead of a DOM.
             //
-            // No `stepCache` and no code-behind binding: a cached coordinate
-            // has nothing to validate against at replay (§5.5, §10.4), and a
-            // recorded one is not portable to another machine (§9).
+            // No code-behind binding: a recorded coordinate has nothing to
+            // validate against at replay (§5.5), and is not portable to
+            // another machine (§9).
             stepResult = await executeComputerStep(
               effectiveSourceLines?.[i] ?? i + 1,
               stepsTotal,
@@ -6765,15 +6607,6 @@ export class SessionManager {
             // unique across files — a skill-body step and a test step (or two
             // invocations of one skill) can share a line number.
             const stepSourceLine = effectiveSourceLines?.[i] ?? i + 1;
-            // Cache filename identity: qualify the line with the invocation's
-            // frame (`f1-17`) so skill-body steps and repeated invocations get
-            // distinct cache files instead of colliding on a shared source line
-            // (issue 016). Inline test steps have an empty frame and keep the
-            // bare line (`step-17.json`); the no-skills path leaves origins null.
-            const stepCacheKey = frameScopedStepKey(
-              expansionOrigins?.[i]?.frameId,
-              stepSourceLine,
-            );
             // Code-behind step-into: only a step with a bound entry pauses.
             // Emit the awaiting event, park for the debugger-attach ack,
             // then arm the cooperative `debugger;` that sits immediately
@@ -6838,19 +6671,7 @@ export class SessionManager {
                 resolvedParameters,
                 pageTracker: session.browserSession!.pageTracker,
                 browserTracker: session.browserTracker,
-                ...(stepCache && { stepCache }),
                 structureMemo,
-                cacheEnabled:
-                  cacheEnabledForRequest &&
-                  !!stepCache &&
-                  // See `isSubsetBatch`: a non-root frame's key is not stable
-                  // across batches, so neither read nor write is safe here.
-                  !(isSubsetBatch && (expansionOrigins?.[i]?.frameId ?? '') !== '') &&
-                  // A step inside a loop body runs several times with several
-                  // values, and the cache holds one plan per line
-                  // (stories/control-flow.md, decision 12).
-                  !loopBodySteps.has(i),
-                cacheKey: stepCacheKey,
                 ...(codeBehind.bindingFor(i) && { codeBehind: codeBehind.bindingFor(i)! }),
                 ...(codeBehindPause && { codeBehindPauseBeforeRun: true }),
                 // What `${data.url}` in the step text was resolved against,
@@ -7065,9 +6886,8 @@ export class SessionManager {
         // report renders identically:
         //
         //   index        — ordinal in the post-expansion step list
-        //                  (1-based). The cache uses source line as
-        //                  its identity (so step-<line>.json reads
-        //                  human-meaningfully) but the report header
+        //                  (1-based). Step events carry the source
+        //                  line, but the report header
         //                  must show "Step 1, Step 2, …" not
         //                  "Step 17, Step 18, …" because the latter
         //                  leaks the skill-file line number into the
@@ -7213,7 +7033,6 @@ export class SessionManager {
             ...(stepResult.aiExplanation && { output: stepResult.aiExplanation }),
             ...(screenshotValue && { screenshot: screenshotValue }),
             ...frameSpread,
-            ...(stepResult.fromCache && { fromCache: true }),
             // How the step passed, for the gutter: as code (the code mark), or under AI
             // after its entry threw (⚠). Both ride the pass event because a
             // stale step DID pass — the entry is what failed.

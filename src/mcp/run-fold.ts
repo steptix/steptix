@@ -73,7 +73,6 @@ export interface FoldedStep {
   warning?: string;
   output: string | null;
   error: string | null;
-  fromCache: boolean;
   durationMs: number | null;
   /**
    * Which tab this step ran in, or null when the server did not report one
@@ -404,7 +403,6 @@ export function foldRun(input: FoldInput): FoldedRun {
       status: 'unknown',
       output: null,
       error: null,
-      fromCache: false,
       durationMs: null,
       tab: null,
     };
@@ -456,7 +454,6 @@ export function foldRun(input: FoldInput): FoldedRun {
       case 'step:pass': {
         if (!open) open = beginRow(event.line, event.frame, at);
         open.row.output = event.output ?? null;
-        open.row.fromCache = event.fromCache ?? false;
         open.row.tab = event.tab ?? open.row.tab;
         if (withholdDesktop && event.surface === 'computer') {
           // Withheld, and not an earlier picture left standing in its place:
@@ -971,7 +968,6 @@ function mergeSyntheticRows(args: {
       status: stepStatus,
       output: null,
       error: null,
-      fromCache: false,
       durationMs: null,
       tab: null,
     };

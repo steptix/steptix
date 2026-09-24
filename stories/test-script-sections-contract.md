@@ -674,8 +674,8 @@ way before comparing.
 ### Resolution paths
 
 Resolve from `import.meta.url`, never `process.cwd()` — follow the
-[tests/cache-dir-parity.test.ts](../tests/cache-dir-parity.test.ts) ↔
-[testbench-native/tests/cache-dir-parity.test.js](../testbench-native/tests/cache-dir-parity.test.js)
+[tests/cache-dir-parity.test.ts](../tests/cache-dir-parity.test.ts) (since removed) ↔
+[testbench-native/tests/cache-dir-parity.test.js](../testbench-native/tests/cache-dir-parity.test.js) (since removed)
 precedent:
 
 | Consumer | Path from its own directory |

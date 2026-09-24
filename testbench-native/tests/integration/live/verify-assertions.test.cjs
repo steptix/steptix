@@ -2,11 +2,11 @@
  * Live end-to-end coverage for VERIFY steps.
  *
  * Before this suite the live tier had almost no verification coverage. Two
- * steps existed — `cache-replay.md`'s "Verify the page URL is exactly
- * about:blank" and `sections-live.md`'s DOM-free "Confirm the browser is
- * showing a page" — and neither suite asserted anything about the
- * verification itself: cache-replay asserts the ⚡ cache glyph, sections
- * asserts section expansion. Nothing read a real value off a real page, and
+ * steps existed — the since-removed step-cache suite's "Verify the page URL is
+ * exactly about:blank" and `sections-live.md`'s DOM-free "Confirm the browser
+ * is showing a page" — and neither suite asserted anything about the
+ * verification itself: the cache suite asserted replay, sections asserts
+ * section expansion. Nothing read a real value off a real page, and
  * nothing proved a verify could go red.
  *
  * Why the red case is the load-bearing half
@@ -59,10 +59,9 @@ const TEST_APP_URL = 'http://127.0.0.1:8787';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Every status the gutter treats as green. A run may legitimately replay
- *  from cache (⚡) or from a compiled entry (</>), so pinning to plain 'pass'
- *  would make this suite fail for a reason that has nothing to do with
- *  verification. */
-const PASS_STATUSES = new Set(['pass', 'pass-cached', 'pass-code-behind', 'pass-stale']);
+ *  from a compiled entry (</>), so pinning to plain 'pass' would make this
+ *  suite fail for a reason that has nothing to do with verification. */
+const PASS_STATUSES = new Set(['pass', 'pass-code-behind', 'pass-stale']);
 
 async function waitFor(label, predicate, timeoutMs = 60_000) {
   const start = Date.now();

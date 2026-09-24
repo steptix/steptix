@@ -653,7 +653,7 @@ export function useDirectiveCompletions(): DirectiveCompletion[] {
         'Ask the model for a value and store it: `[use ai] Create a name starting ' +
         'with AUTO [store as: name]`. The model sees the step text and nothing ' +
         'else — no page, no earlier steps, no date — so put what it needs in the ' +
-        'step. It is asked again on every run and never cached or compiled; for a ' +
+        'step. It is asked again on every run and never compiled; for a ' +
         'value that must be the same every time, write a `[tool:]`.',
       insert: `${USE_AI_TOKEN} $0`,
     },

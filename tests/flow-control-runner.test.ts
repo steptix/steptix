@@ -103,18 +103,6 @@ vi.mock('../src/runner/hooks.js', () => ({
   resolveHooks: vi.fn(async () => hooksStub),
 }));
 
-vi.mock('../src/cache/step-cache.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/cache/step-cache.js')>()),
-  StepCache: {
-    initialize: vi.fn(async () => ({
-      read: () => null,
-      write: vi.fn(),
-      readAssertion: () => null,
-      invalidateStep: vi.fn(),
-    })),
-  },
-}));
-
 vi.mock('../src/ai/diagnose.js', () => ({ diagnoseFailure: vi.fn(async () => null) }));
 vi.mock('../src/ai/client.js', () => ({
   AiClient: class { setAiPolicy = vi.fn(); syncAuth = vi.fn(() => null); },
@@ -452,9 +440,8 @@ describe('hooks around a return', () => {
 
   // SPEC-structured-table-reads.md §7.10: ONE structure question per
   // structure per RUN. The memo is the layer that makes that true across
-  // STEPS (the step cache is keyed per line and answers only for the same
-  // line of the same file), and it is keyed by the region and the columns
-  // asked of it — not by where the read sits. So a `before` hook that reads a
+  // STEPS, and it is keyed by the region and the columns asked of it — not
+  // by where the read sits. So a `before` hook that reads a
   // legacy grid to establish a starting state, and step 1 that reads the same
   // grid, are one structure and must cost one question; the hook call site
   // was the one that passed no memo, so they cost two.
@@ -475,7 +462,7 @@ describe('hooks around a return', () => {
     // Every call has one...
     expect(memos.every((m) => m instanceof Map)).toBe(true);
     // ...and it is the SAME one. A memo per call site would be a memo per
-    // step, which is what the cache already is.
+    // step, and ask the same structure question again at every one.
     expect(new Set(memos).size).toBe(1);
   });
 
@@ -654,7 +641,6 @@ describe('the jump respects the run`s own bounds', () => {
 5. Close the browser
 `),
       makeConfig(),
-      undefined,
       undefined,
       { stopAfterStep: 3 },
     );

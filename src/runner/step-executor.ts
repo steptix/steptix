@@ -26,7 +26,7 @@ import type { ChatMessage } from '../ai/types.js';
 import { parseAIResponse, parseAssertionCode, parseBranchedResponse, extractJson } from '../ai/action-parser.js';
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
-import { executeAction, sketchTable } from '../browser/actions.js';
+import { executeAction } from '../browser/actions.js';
 import type {
   ActionExecutionResult,
   ExecuteActionOptions,
@@ -44,8 +44,6 @@ import { logger, traceOp } from '../utils/logger.js';
 import { callApiStandalone, callApiBrowserContext } from '../api/client.js';
 import { extractCsrfToken } from '../api/csrf-handler.js';
 import type { ApiResponseStore } from '../api/response-store.js';
-import type { StepCache, CachedStepData, StepCacheKey } from '../cache/step-cache.js';
-import { fingerprintAssertion } from '../cache/step-cache.js';
 import type { StepValues } from '../ai/prompts.js';
 import {
   boundValue,
@@ -108,25 +106,6 @@ const MUTATING_ACTIONS: ReadonlySet<AIAction['action']> = new Set([
 
 function isMutatingAction(action: AIAction): boolean {
   return MUTATING_ACTIONS.has(action.action);
-}
-
-/** Mutable ref for capturing all AI turns for cache writing. */
-export interface CacheCapture {
-  turns: CachedStepData[];
-  /**
-   * Set when a turn's actions were CHANGED after the model emitted them — in
-   * practice only by a `readTable`'s structure mapping
-   * (SPEC-structured-table-reads.md §7.10, "Caching").
-   *
-   * It exists for the replay path. An ordinary AI run writes the cache on
-   * success anyway, so the mapping rides along with everything else; a CACHED
-   * run writes nothing, because re-writing a file with the same contents it
-   * was read from buys nothing and risks the reverse-interpolation round trip
-   * for free. A mapping that had to be asked again is the one thing a replay
-   * learns that is worth keeping, so this flag — and only this flag — turns
-   * that one write back on.
-   */
-  rewrite?: boolean;
 }
 
 /**
@@ -221,27 +200,13 @@ export interface StepExecutorOptions {
    *  closeBrowser actions. When undefined, only the single browser passed via
    *  `page`/`pageTracker` is in play (back-compat with single-browser tests). */
   browserTracker?: BrowserTracker;
-  /** Pre-initialized step cache — always present; action caching gated by cacheEnabled */
-  stepCache?: StepCache;
-  /** When true, step action responses are read from / written to the step cache */
-  cacheEnabled?: boolean;
-  /** On-disk cache identity for this step's files (`step-<cacheKey>.json`). The
-   *  server passes a frame-scoped key (`f1-17`) so skill-body steps and repeated
-   *  invocations don't collide on a shared source line (issue 016). When absent
-   *  (CLI path), the cache falls back to `stepIndex` — the legacy behaviour. */
-  cacheKey?: StepCacheKey;
   /**
    * What this RUN has already learned about a region's structure
    * (docs/specs/SPEC-structured-table-reads.md §7.10,
-   * src/runner/structure-memo.ts). Created once per run and threaded exactly
-   * as `stepCache` is — the CLI's `runTest` makes one, the server makes one
-   * per batch.
-   *
-   * Unlike `stepCache` it is NOT gated by `cacheEnabled`: that switch is
-   * about replaying a frozen action PLAN, which a row run and a loop body
-   * must not do, and this is about not asking the same structural question
-   * twice inside one run. A loop body that reads a table on every pass is
-   * exactly the case the memo is for.
+   * src/runner/structure-memo.ts). Created once per run — the CLI's `runTest`
+   * makes one, the server makes one per batch — so the same structural
+   * question is not asked twice inside one run. A loop body that reads a
+   * table on every pass is exactly the case the memo is for.
    */
   structureMemo?: StructureMemo;
   /** When true, include dismissal-related guidance in the system prompt and
@@ -616,35 +581,6 @@ export function isExtractionStep(instruction: string): boolean {
 }
 
 /**
- * The action cache, minus the one step it must never touch.
- *
- * A flow-control step's whole job is to JUDGE a condition against the live page
- * (stories/step-flow-control.md, decision 2): the model answers `return` when
- * it holds and `noop` when it does not. The cache replays turn 1 verbatim, so a
- * cached `return` is a decision taken against a page that is no longer there —
- * run 1 signs in and the condition holds, run 2 lands on a different page and
- * the cache HITs anyway, with no model call and no page read. The rest of the
- * flow is skipped and the run reports green for work nobody did, which is the
- * failure direction this codebase treats as worst.
- *
- * Read AND write, at one seam so all four loops are covered: withholding the
- * read alone would leave run 1 writing an entry that a later run with the
- * feature disabled would replay. `cacheEnabledForRun` in test-runner.ts and the
- * server's equivalent already exempt data rows for the neighbouring reason;
- * this is the same exemption, taken where the claim is known.
- *
- * A FUNCTION rather than a local const because "one seam" has to mean it: the
- * assertion cache is read and written from `executeStepAttempt`, a different
- * module-level function, and it spent this feature's first round consulting
- * `opts.cacheEnabled` directly — so a flow-control step whose model emitted an
- * `assert` sub-action still cached a judgement about a live page, under a
- * comment saying it could not.
- */
-function cacheEnabledFor(opts: StepExecutorOptions): boolean {
-  return opts.cacheEnabled === true && opts.flowControlClaim === undefined;
-}
-
-/**
  * The tail's message with its `{{name}}` and `${env.X}` tokens RESOLVED
  * (decision 3), or undefined when the tail named none.
  *
@@ -655,8 +591,8 @@ function cacheEnabledFor(opts: StepExecutorOptions): boolean {
  * the run log with the braces in it.
  *
  * `result.instruction` IS the interpolated line on every path through the one
- * seam below — the AI flow's outer catch, the cached-fatal throw it shares, the
- * code-behind replay, and the unanswerable-clarification return — enrichment
+ * seam below — the AI flow's outer catch, the code-behind replay, and the
+ * unanswerable-clarification return — enrichment
  * included, since the grammar already holds a trailing run of markers back. So
  * the resolved message is in that text and reading the same grammar off it is
  * how to get it out: one parser read twice, exactly as `deliberateFailError`
@@ -682,8 +618,8 @@ function resolvedTailMessage(
  * (stories/step-failure-outcomes.md, decisions 5 and 6).
  *
  * ONE seam, deliberately: every failed `StepResult` leaving `executeStep` passes
- * through here — the AI flow's outer catch, the cached-fatal path it shares, and
- * the code-behind path, whose replay failure has to be renamed and tolerated
+ * through here — the AI flow's outer catch and the code-behind path, whose
+ * replay failure has to be renamed and tolerated
  * exactly as the AI one is. A forgotten `tolerated` is a run that stops when the
  * author said to carry on.
  *
@@ -726,7 +662,7 @@ export function applyFailureTail(result: StepResult, opts: StepExecutorOptions):
  * Returns a StepResult regardless of pass/fail.
  *
  * `instruction` is the SUBSTITUTED text — what the report's instruction line,
- * the console line, the run log and the cache key are built from, and what
+ * the console line and the run log are built from, and what
  * every text-reading heuristic here (`isExtractionStep`, the `[output:]` parse)
  * has always seen.
  *
@@ -747,30 +683,23 @@ export async function executeStep(
   const startTime = Date.now();
   let retried = false;
   let priorFailures: PriorFailureContext[] = [];
-  /** A cached replay that failed for a reason re-planning cannot fix. Thrown
-   *  from the first attempt so the shared failure handler builds the result. */
-  let cachedFatal: StepFailureError | undefined;
   let priorAttemptTurns: TurnResult[] = [];
   /**
    * The failure whose turns `onFailure` has already merged.
    *
    * `withRetry` hands the FINAL attempt to `onFailure` as well when it declines
    * to retry — every deliberate `fail` (stories/step-failure-outcomes.md,
-   * decision 2), every cached upload whose file is missing — and the catch below
+   * decision 2), every upload whose file is missing — and the catch below
    * would then add that attempt's turns a second time, rendering one turn twice
    * in the report. A retryable failure that exhausts its attempts does NOT come
    * through `onFailure`, so the catch is still where those turns arrive.
    */
   let mergedFailure: unknown;
-  // Cache files are named by the frame-scoped key when the server supplies one
-  // (skill-body steps, repeated invocations); otherwise by stepIndex (CLI path).
-  const cacheKey: StepCacheKey = opts.cacheKey ?? stepIndex;
 
-  // --- Code-behind attempt (ahead of the cache) ---
+  // --- Code-behind attempt (ahead of the AI flow) ---
   //
   // Order matters and is the story's: a step with an entry runs as code with
-  // no model call, no DOM snapshot and no stall detection — the same bypasses
-  // a cache hit gets — and it neither reads nor writes the action cache.
+  // no model call, no DOM snapshot and no stall detection.
   const binding = opts.codeBehind;
   /** Set when an entry threw and was discarded — the step then heals under AI
    *  and the result is flagged for the next compile. */
@@ -783,8 +712,7 @@ export async function executeStep(
     if (codeResult.result) return applyFailureTail(codeResult.result, opts);
     staleAfterHeal = codeResult.stale;
     // Fell through: the entry threw and has been discarded for this run. The
-    // page is already in the right state, so the AI flow below starts clean —
-    // exactly the contract the cache's invalidate-and-fall-through has.
+    // page is already in the right state, so the AI flow below starts clean.
   }
   /** Attach the stale flag to whatever the AI flow produces. Runs no longer
    *  rewrite the file (stories/codebehind-compile.md), so this flag is the only
@@ -795,81 +723,15 @@ export async function executeStep(
   // --- A flow-control condition this run's values already answer ---
   //
   // `If {{payment.status}} is "Overdue", then return` and its two siblings
-  // (docs/specs/SPEC-structured-table-reads.md §8.3a). Ahead of the cache for
-  // the reason code-behind is — no model call, no DOM snapshot, and here no
-  // `settle` wait either — and BEHIND code-behind, because a compiled entry is
-  // the author's own code for this step and `step.exit()` is its way of
+  // (docs/specs/SPEC-structured-table-reads.md §8.3a). Ahead of the AI flow
+  // for the reason code-behind is — no model call, no DOM snapshot, and here
+  // no `settle` wait either — and BEHIND code-behind, because a compiled entry
+  // is the author's own code for this step and `step.exit()` is its way of
   // saying the same thing.
-  //
-  // The cache is not a consideration either way: `cacheEnabledFor` already
-  // returns false for any step carrying a claim.
   const locallyDecided = await decideFlowControlLocally(stepIndex, instruction, opts, startTime);
   if (locallyDecided) return applyFailureTail(withStale(locallyDecided), opts);
 
-  const cacheEnabled = cacheEnabledFor(opts);
-
-  // --- Cache attempt (before normal AI flow) ---
-  if (opts.stepCache && cacheEnabled) {
-    const cached = await opts.stepCache.read(cacheKey, opts.resolvedParameters ?? {});
-    if (cached) {
-      logger.info(`Cache HIT for step ${stepIndex} — replaying ${cached.length} cached turn(s)`);
-      // A capture on the REPLAY path, which never had one. It is written back
-      // only when something asked for it (`rewrite`), which today means one
-      // thing: a `readTable`'s cached structure mapping stopped fitting the
-      // page, the model was asked once more, and the new mapping must outlive
-      // this run or every future run pays the same model call
-      // (SPEC-structured-table-reads.md §7.10, "Caching").
-      const replayCapture: CacheCapture = { turns: [] };
-      try {
-        const result = await executeStepAttempt(
-          stepIndex,
-          totalSteps,
-          instruction,
-          opts,
-          startTime,
-          false,
-          [],
-          1,
-          cached,
-          replayCapture,
-          authoredInstruction,
-        );
-        if (replayCapture.rewrite && replayCapture.turns.length > 0) {
-          await opts.stepCache.write(
-            cacheKey,
-            replayCapture.turns,
-            opts.resolvedParameters ?? {},
-          );
-          logger.info(`Step ${stepIndex}: cached table structure rewritten`);
-        }
-        logger.success(`Step ${stepIndex} passed (from cache)`);
-        // Mark the result so the server's RunEvent emitter can attach
-        // `fromCache: true` to the step:pass wire event. Without this,
-        // every cache-hit step would look identical to an AI-run step on
-        // the client side — and the ⚡ glyph / `(cached)` log marker
-        // wouldn't render.
-        return withStale({ ...result, fromCache: true });
-      } catch (err) {
-        if (err instanceof StepFailureError && !err.retryable) {
-          // The cached plan is fine — the file it names is missing. Invalidating
-          // would discard a good entry, and re-running under AI would spend a
-          // turn on a failure no re-planning can fix. Fail the step instead,
-          // through the shared handler below so it still gets a screenshot and
-          // a proper StepResult.
-          cachedFatal = err;
-        } else {
-          logger.warn(`Cached actions failed for step ${stepIndex} — invalidating and falling through to AI`);
-          await opts.stepCache.invalidateStep(cacheKey);
-          // Do NOT propagate failure context — give AI a clean slate
-        }
-      }
-    } else {
-      logger.debug(`Cache MISS for step ${stepIndex}`);
-    }
-  }
-
-  // --- Normal AI flow (with cache-write on success) ---
-  const cacheCapture: CacheCapture = { turns: [] };
+  // --- Normal AI flow ---
 
   /** Attempts actually made — NOT what `execution.retries` allows. A
    *  non-retryable failure ends after the first, and reporting the allowance
@@ -877,7 +739,6 @@ export async function executeStep(
    *  to make sure it is tried once. */
   let attemptsMade = 0;
   const attempt = async (attemptNumber: number): Promise<StepResult> => {
-    if (cachedFatal) throw cachedFatal;
     attemptsMade = attemptNumber;
     if (attemptNumber === 2) retried = true;
 
@@ -890,8 +751,6 @@ export async function executeStep(
       retried,
       priorFailures,
       attemptNumber,
-      undefined,
-      cacheCapture,
       authoredInstruction,
     );
   };
@@ -910,15 +769,6 @@ export async function executeStep(
         }
       },
     });
-
-    // Write all turns to cache on success (non-assertion steps only)
-    if (opts.stepCache && cacheEnabled && cacheCapture.turns.length > 0) {
-      await opts.stepCache.write(
-        cacheKey,
-        cacheCapture.turns,
-        opts.resolvedParameters ?? {},
-      );
-    }
 
     // No generation hook here any more. Generation is `aiui compile` — a
     // deliberate act with whole-test context, a review pass and replay-to-green
@@ -1200,7 +1050,7 @@ function tryGetActiveSession(
  * AI, which discards the entry for the rest of the run and hands the step to
  * the AI flow with a clean slate.
  *
- * The `expect` distinction is the assertion code cache's rule, lifted: broken
+ * The `expect` distinction is the inline assertion's rule, lifted: broken
  * code heals, a failed assertion fails. Two things suspend the healing half.
  * Strict mode, because compile's replay has to see broken code as a red step,
  * not a slow one. And a keyless run, because there is no AI to heal with —
@@ -1668,13 +1518,6 @@ function shapeRefusalOf(
   return undefined;
 }
 
-/** The message a non-shape failure carries out of `executeAction`. */
-function failureTextOf(thrown: unknown, result?: { error?: string | undefined }): string {
-  if (thrown instanceof Error) return thrown.message;
-  if (thrown !== undefined && thrown !== null) return String(thrown);
-  return result?.error ?? 'readTable failed';
-}
-
 /**
  * Read the model's answer, refusing anything that is not one of the three
  * kinds §7.10 defines.
@@ -1902,16 +1745,16 @@ function describeMapping(mapping: TableReadMapping): string {
 interface ReadTableOutcome {
   result: ActionExecutionResult;
   /**
-   * The mapping the RECORDED copy of the action should carry from now on, or
-   * `null` to drop the one it arrived with. `undefined` means "leave it as it
-   * is" — every read that needed no question.
+   * The mapping the RECORDED copy of the action should carry, so the report
+   * can show how the region was read. `undefined` means "leave it as it is" —
+   * every read that needed no question.
    */
-  mapping?: TableReadMapping | null;
+  mapping?: TableReadMapping;
 }
 
 interface ReadTableArgs {
   page: Page;
-  /** The substituted action, carrying a cached `mapping` when there is one. */
+  /** The substituted action, as the model emitted it. */
   action: AIAction;
   baseUrl: string | undefined;
   execOptions: ExecuteActionOptions;
@@ -1949,16 +1792,13 @@ const GRID_STRUCTURE_SNAPSHOT_CHARS = 6000;
  *
  * The order is the specification's, and each step of it is load-bearing:
  *
- *  1. Read, with the cached `mapping` first when the action carries one. A
- *     cached run therefore costs no model call at all, which is the whole
- *     point of storing the answer.
- *  2. A cached mapping that no longer fits is not by itself a failure: the
- *     read is repeated WITHOUT it, which either succeeds (the page's structure
- *     decides again, and the stale mapping is dropped) or produces the
- *     refusal — and the sketch — that the second question is asked from.
- *  3. Only a SHAPE refusal may be asked about, and only when
+ *  1. Read, letting the page's own structure decide. Most regions need
+ *     nothing more, and cost no model call.
+ *  2. Only a SHAPE refusal may be asked about, and only when
  *     `tables.structure` is `ask`. An author's own mistake keeps the sentence
  *     it has, whatever the setting.
+ *  3. A mapping this run already learned for the same region is tried before
+ *     the model is asked (src/runner/structure-memo.ts).
  *  4. The answer is translated to a mapping and the read is repeated with it.
  *     Every validation is the extractor's, against the live page, so a wrong
  *     answer costs a failed step with the answer in the message — never a
@@ -1973,7 +1813,7 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
    *
    *  `source` says where the `mapping` on `candidate` came from, for the
    *  summary line alone (§7.6) — the extractor cannot tell a fresh answer from
-   *  a cached one, and "structure from the model" over a cached replay claims
+   *  a remembered one, and "structure from the model" over a memo reuse claims
    *  a model call that never happened. */
   const attempt = async (
     candidate: AIAction,
@@ -1997,72 +1837,15 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
 
   const { memo, stepIndex } = args;
   const memoKey = structureMemoKey(action);
-  const cachedMapping = action.mapping;
-  // The action arrives carrying a mapping only when the step cache put one on
-  // it, so that first read is the `cache` source by construction.
-  let first = await attempt(action, cachedMapping ? 'cache' : undefined);
-  if (first.result.success) {
-    // A mapping that worked belongs in the memo whether it came from the step
-    // cache or from a question — this is the cached-step half of "one
-    // question per structure per run". Without it, step 2 replaying its own
-    // cached mapping leaves step 10 with nothing to reuse, and step 10 asks.
-    if (cachedMapping && memo) memo.set(memoKey, { mapping: cachedMapping, stepIndex });
-    return { result: first.result };
-  }
+  const first = await attempt(action);
+  if (first.result.success) return { result: first.result };
 
-  /** Set when a cached mapping was dropped on the way here. */
-  let droppedCachedMapping = false;
-  if (cachedMapping) {
-    // Step 2. The mapping in the cache was validated against the page as it
-    // was, not as it is. Repeating the read without it is free — no model call
-    // — and it is the only way to tell "the page changed and structure can
-    // read it now" from "the page changed and the model must look again".
-    logger.debug(
-      `readTable: the cached mapping no longer fits (${describeMapping(cachedMapping)}) — `
-      + `re-reading without it. Refusal: ${first.result.error ?? '(none)'}`,
-    );
-    const { mapping: _dropped, ...withoutMapping } = action;
-    const retry = await attempt(withoutMapping);
-    if (retry.result.success) {
-      logger.info(
-        'readTable: the cached structure mapping is no longer needed — the page\'s own '
-        + 'structure decides it now, so the mapping has been dropped from the cache.',
-      );
-      return { result: retry.result, mapping: null };
-    }
-    droppedCachedMapping = true;
-    first = retry;
-  }
-
-  let refusal = shapeRefusalOf(first.thrown, first.result);
-  if (!refusal && droppedCachedMapping) {
-    // §7.10's re-ask, in full: "if it fails too, its refusal is what the
-    // question is asked from ONCE more". The unmapped re-read above failed for
-    // a reason that carries no sketch — a header the page no longer has, a
-    // short row — and without one there is nothing to ask FROM, so the branch
-    // used to give up here and the step died with a cached mapping's ghost and
-    // no second question. That is the one situation `sketchTable()` exists for
-    // (it was, until this line, dead code).
-    //
-    // This is not the "never for an author's own problem" rule being bent. The
-    // step was passing on the last run, off a mapping this runtime wrote — so
-    // the page has CHANGED, which is a question about shape whatever sentence
-    // the extractor reached for. A read that never had a mapping still gets
-    // the rule as written: no sketch, no question.
-    const sketch = await sketchTable(page, action.selector ?? '', maskValues).catch(() => null);
-    if (sketch) {
-      refusal = { message: failureTextOf(first.thrown, first.result), sketch };
-      logger.debug(
-        'readTable: the re-read without the cached mapping failed for a non-shape reason — '
-        + 'sketching the region so the second question has something to answer from.',
-      );
-    }
-  }
+  const refusal = shapeRefusalOf(first.thrown, first.result);
   if (!refusal) {
     // Not a shape reason: an author's own problem (a header that is not there,
     // a short row, a selector matching several elements). §7.10 is explicit
     // that these are never a model question.
-    return { result: first.result, ...(droppedCachedMapping ? { mapping: null } : {}) };
+    return { result: first.result };
   }
 
   if (tableStructureOf(config) === 'strict') {
@@ -2070,28 +1853,22 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
       'readTable: the read failed for a shape reason and `tableStructure: strict` is set, '
       + 'so the model was not asked about the structure.',
     );
-    return { result: first.result, ...(droppedCachedMapping ? { mapping: null } : {}) };
+    return { result: first.result };
   }
 
   // Step 3. Has THIS RUN already been told how this region is laid out? One
-  // question per structure per run (§7.10): the step cache answers only for
-  // the same line of the same file, so a test that reads a table in step 2 and
-  // again in step 10 would otherwise pay twice — measured at five questions
-  // for the four shapes of `table-odd-shapes.md`.
+  // question per structure per run (§7.10), so a test that reads a table in
+  // step 2 and again in step 10 does not pay twice — measured at five
+  // questions for the four shapes of `table-odd-shapes.md` without it.
   //
   // Applied, never assumed: the extractor validates a remembered mapping
   // against the live page exactly as it validates a fresh answer, so a page
   // that changed between the two steps falls through to the question below
-  // instead of reading the wrong table. A mapping identical to the one that
-  // just failed is skipped rather than tried twice.
+  // instead of reading the wrong table.
   /** A mapping already tried and refused, named in a second failure. */
-  let priorMapping: { mapping: TableReadMapping; source: string } | undefined =
-    cachedMapping ? { mapping: cachedMapping, source: 'cached' } : undefined;
+  let priorMapping: { mapping: TableReadMapping; source: string } | undefined;
   const remembered = memo?.get(memoKey);
-  if (
-    remembered
-    && JSON.stringify(remembered.mapping) !== JSON.stringify(cachedMapping)
-  ) {
+  if (remembered) {
     const reused = await attempt({ ...action, mapping: remembered.mapping }, 'memo');
     if (reused.result.success) {
       logger.info(`readTable: structure reused from step ${remembered.stepIndex}`);
@@ -2158,9 +1935,7 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
    * Every failure below this point is NON-RETRYABLE, and the reason is the
    * budget §7.10 sets: ONE model call per step per structure.
    *
-   * Without the flag a failed step is retried — and a cached replay that
-   * fails is worse still, because `executeStep` invalidates the entry and
-   * runs the whole step again under AI. Either way the second pass meets the
+   * Without the flag a failed step is retried, and the second pass meets the
    * same refusal, asks the same question, and gets the same answer, so the
    * step that §7.10 budgets one call for spends two or three and fails
    * identically. Re-planning cannot conjure a structure the model has just
@@ -2168,7 +1943,7 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
    *
    * It is also what makes "a second failure is the refusal with both answers"
    * true: a retryable failure discards this message and re-runs from the top,
-   * where there is no cached mapping left to name.
+   * where the remembered mapping it names may already be gone.
    */
   const spent = (result: ActionExecutionResult, error: string): ActionExecutionResult => ({
     ...result,
@@ -2177,8 +1952,8 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
   });
 
   /** What a second failure has to say, so the reader sees both attempts —
-   *  whichever mapping was tried first, from the cache or from this run's
-   *  memo, and then what the model said when it was asked again. */
+   *  the mapping remembered from earlier in this run, when one was tried, and
+   *  then what the model said when it was asked. */
   const bothAnswers = (secondAnswer: string): string =>
     (priorMapping
       ? `The ${priorMapping.source} structure mapping was ${describeMapping(priorMapping.mapping)}. `
@@ -2191,7 +1966,6 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
   } catch (err) {
     return {
       result: spent(first.result, `${refusal.message} ${bothAnswers((err as Error).message)}`),
-      ...(droppedCachedMapping ? { mapping: null } : {}),
     };
   }
 
@@ -2201,7 +1975,6 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
     );
     return {
       result: spent(first.result, `${refusal.message} ${bothAnswers(`none — ${answer.reason}`)}`),
-      ...(droppedCachedMapping ? { mapping: null } : {}),
     };
   }
 
@@ -2214,7 +1987,6 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
         first.result,
         `${refusal.message} ${bothAnswers(`${JSON.stringify(answer)} — ${(err as Error).message}`)}`,
       ),
-      ...(droppedCachedMapping ? { mapping: null } : {}),
     };
   }
 
@@ -2233,7 +2005,6 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
         second.result,
         `${second.result.error ?? refusal.message} ` + bothAnswers(JSON.stringify(answer)),
       ),
-      ...(droppedCachedMapping ? { mapping: null } : {}),
     };
   }
   // Validated against the live page, so the rest of this run may reuse it —
@@ -2253,8 +2024,6 @@ async function executeStepAttempt(
   retried: boolean,
   priorFailures: PriorFailureContext[] = [],
   attemptNumber: number = 1,
-  cachedTurns?: CachedStepData[],
-  cacheCapture?: CacheCapture,
   authoredInstruction?: string,
 ): Promise<StepResult> {
   const { config, aiClient, contextContent, testName, baseUrl, conversationHistory, apiResponseStore, csrfTokens, pageTracker } = opts;
@@ -2267,8 +2036,8 @@ async function executeStepAttempt(
   //
   // And the `otherwise …` tail comes OFF, here and nowhere else
   // (stories/step-failure-outcomes.md, decision 4). Everything else keeps the
-  // line the author wrote — `instruction`, the console line, the cache key, the
-  // run log — because hiding the tail is about what the model is asked to decide,
+  // line the author wrote — `instruction`, the console line, the run log —
+  // because hiding the tail is about what the model is asked to decide,
   // not about what a reader is shown.
   //
   // Stripped BEFORE the enrichment: `enrichAuthored` appends `[store as: …]` to
@@ -2421,37 +2190,19 @@ async function executeStepAttempt(
       }
     }
 
-    // 2. Capture current page state. The DOM snapshot is *only* AI input —
-    // once a turn is served from cache, the snapshot has no consumer (the
-    // cached action plan was already decided, and cached assertions run
-    // against the live DOM via Playwright, not against the snapshot string).
-    // Skipping the snapshot on cache hits is the single biggest wall-clock
-    // win for cached replays — captureDomSnapshot is typically 200ms–2s.
-    //
-    // Screenshots are kept on cache hits when the user has opted into the
-    // per-action filmstrip (`captureScreenshotsPerAction`). The `sendScreenshots`
-    // setting only feeds the AI, so it's irrelevant when we're not calling AI.
+    // 2. Capture current page state — the model's input for this turn.
+    // Screenshots are taken when they feed the model (`sendScreenshots`) or
+    // the per-action filmstrip (`captureScreenshotsPerAction`).
     const turnTimestamp = new Date().toISOString();
-    const cachedTurnForCapture = cachedTurns?.[currentTurn - 1];
-    // Compile's Record input (stories/codebehind-compile-as-a-run.md §Ordinary
-    // runs capture what a compile needs): when the caller asked for step
-    // context, a cache hit still takes the turn-1 snapshot — it is `domBefore`.
-    // Code-behind executes ahead of the cache, so a cached step is by
-    // definition an uncompiled one, and the cost ends when it is compiled.
-    const wantTurnDom =
-      !cachedTurnForCapture || (opts.captureStepContext === true && currentTurn === 1);
-    const domSnapshot = !wantTurnDom
-      ? ''
-      : await traceOp(`captureDomSnapshot (turn ${currentTurn})`, () =>
-          captureDomSnapshot(page, {
-            ...config.browser.domNoiseReduction,
-            maxIframeDepth: config.browser.maxIframeDepth,
-            domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-          }),
-        );
-    const wantPreTurnShot = cachedTurnForCapture
-      ? config.browser.captureScreenshotsPerAction !== false
-      : config.ai.sendScreenshots || config.browser.captureScreenshotsPerAction !== false;
+    const domSnapshot = await traceOp(`captureDomSnapshot (turn ${currentTurn})`, () =>
+      captureDomSnapshot(page, {
+        ...config.browser.domNoiseReduction,
+        maxIframeDepth: config.browser.maxIframeDepth,
+        domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+      }),
+    );
+    const wantPreTurnShot =
+      config.ai.sendScreenshots || config.browser.captureScreenshotsPerAction !== false;
     const screenshot = wantPreTurnShot
       ? await traceOp(`captureScreenshot (turn ${currentTurn})`, () =>
           captureScreenshot(page, config.browser.fullPageScreenshots),
@@ -2462,13 +2213,10 @@ async function executeStepAttempt(
     // Where the viewport actually is, in text. The DOM snapshot carries no
     // coordinates, so this is the model's only evidence that a scroll landed
     // when screenshots are off — or when they're full-page, and therefore
-    // identical at every scroll position. Skipped on cache hits for the same
-    // reason as the DOM snapshot: no AI call, so no consumer.
-    const scrollPosition = cachedTurnForCapture
-      ? undefined
-      : await traceOp(`captureScrollPosition (turn ${currentTurn})`, () =>
-          captureScrollPosition(page),
-        );
+    // identical at every scroll position.
+    const scrollPosition = await traceOp(`captureScrollPosition (turn ${currentTurn})`, () =>
+      captureScrollPosition(page),
+    );
 
     if (currentTurn === 1) {
       firstTurnDomSnapshot = domSnapshot;
@@ -2478,32 +2226,28 @@ async function executeStepAttempt(
     // Stall detection: if the prior turn's action was a "wait" and neither the
     // page (URL + DOM) nor the network moved since then, the preceding click
     // (or whatever triggered the wait) likely didn't register. Bail out instead
-    // of burning more turns. Skipped on cached turns — the cached action plan
-    // is deterministic, "wait" decisions are not in play, and we don't have a
-    // DOM snapshot to fingerprint against anyway.
-    if (!cachedTurnForCapture) {
-      const pageFingerprint = `${currentUrl}\n${domSnapshot}`;
-      if (currentTurn > 1 && lastActionWasWait) {
-        const unchanged = pageFingerprint === prevPageFingerprint;
-        const networkIdle = tracker.isIdle();
-        if (unchanged && networkIdle) {
-          stallCount++;
-          logger.warn(
-            `Stall detected (${stallCount}/${STALL_LIMIT}): page unchanged since last turn, network idle, last action was "wait" — prior action may not have registered`,
+    // of burning more turns.
+    const pageFingerprint = `${currentUrl}\n${domSnapshot}`;
+    if (currentTurn > 1 && lastActionWasWait) {
+      const unchanged = pageFingerprint === prevPageFingerprint;
+      const networkIdle = tracker.isIdle();
+      if (unchanged && networkIdle) {
+        stallCount++;
+        logger.warn(
+          `Stall detected (${stallCount}/${STALL_LIMIT}): page unchanged since last turn, network idle, last action was "wait" — prior action may not have registered`,
+        );
+        if (stallCount >= STALL_LIMIT) {
+          throw new StepFailureError(
+            `Step stalled: page did not advance after prior action across ${stallCount + 1} turns (URL, DOM, and network all quiet). The preceding action may not have registered — check selector targeting and element interactability.`,
+            [],
+            allTurns,
           );
-          if (stallCount >= STALL_LIMIT) {
-            throw new StepFailureError(
-              `Step stalled: page did not advance after prior action across ${stallCount + 1} turns (URL, DOM, and network all quiet). The preceding action may not have registered — check selector targeting and element interactability.`,
-              [],
-              allTurns,
-            );
-          }
-        } else {
-          stallCount = 0;
         }
+      } else {
+        stallCount = 0;
       }
-      prevPageFingerprint = pageFingerprint;
     }
+    prevPageFingerprint = pageFingerprint;
 
     // Per-turn accumulators
     const turnAiInteractions: AiInteraction[] = [];
@@ -2600,53 +2344,21 @@ async function executeStepAttempt(
       userMessage,
     ];
 
-    // 6. Get AI action plan (from cache on turn 1 if available, otherwise call AI)
-    let rawResponse: string;
-    let aiResponse: ReturnType<typeof parseAIResponse>;
+    // 6. Get the AI action plan
+    const completion = await traceOp(`ai.complete (turn ${currentTurn})`, () => aiClient.complete(messages, opts.signal));
+    const rawResponse = completion.text;
+    let aiResponse = parseAIResponse(rawResponse);
 
-    const cachedTurn = cachedTurns?.[currentTurn - 1];
-    if (cachedTurn) {
-      rawResponse = cachedTurn.rawResponse;
-      aiResponse = {
-        actions: cachedTurn.actions,
-        reasoning: cachedTurn.reasoning,
-        ...(cachedTurn.needs_reeval !== undefined && { needs_reeval: cachedTurn.needs_reeval }),
-      };
-      turnAiInteractions.push({
-        purpose: 'action-plan (cached)',
-        attemptNumber,
-        requestMessages: [],
-        response: rawResponse,
-        ...(screenshotBase64 !== undefined && { screenshotBase64 }),
-        pageUrl: currentUrl,
-        timestamp: turnTimestamp,
-      });
-    } else {
-      const completion = await traceOp(`ai.complete (turn ${currentTurn})`, () => aiClient.complete(messages, opts.signal));
-      rawResponse = completion.text;
-      aiResponse = parseAIResponse(rawResponse);
-
-      turnAiInteractions.push({
-        purpose: 'action-plan',
-        attemptNumber,
-        requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
-        response: rawResponse,
-        model: completion.model,
-        ...(screenshotBase64 !== undefined && { screenshotBase64 }),
-        pageUrl: currentUrl,
-        timestamp: turnTimestamp,
-      });
-    }
-
-    // Capture this turn for cache writing
-    if (cacheCapture) {
-      cacheCapture.turns.push({
-        rawResponse,
-        actions: aiResponse.actions,
-        reasoning: aiResponse.reasoning,
-        ...(aiResponse.needs_reeval !== undefined && { needs_reeval: aiResponse.needs_reeval }),
-      });
-    }
+    turnAiInteractions.push({
+      purpose: 'action-plan',
+      attemptNumber,
+      requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
+      response: rawResponse,
+      model: completion.model,
+      ...(screenshotBase64 !== undefined && { screenshotBase64 }),
+      pageUrl: currentUrl,
+      timestamp: turnTimestamp,
+    });
 
     lastAiResponse = aiResponse;
 
@@ -2759,23 +2471,22 @@ async function executeStepAttempt(
 
     for (const [emittedIndex, emitted] of (refusal === undefined ? aiResponse.actions : []).entries()) {
       // What the page gets: a COPY with `{{name}}` and `${…}` resolved. The
-      // emitted object is never written to — the transcript, the recording and
-      // the cache keep it as the model wrote it, which is the whole point of
-      // asking for the placeholder (decision 3). Every consumer below reads
-      // `action`; the three record sites read `recordedEmitted`.
+      // emitted object is never written to — the transcript and the recording
+      // keep it as the model wrote it, which is the whole point of asking for
+      // the placeholder (decision 3). Every consumer below reads `action`; the
+      // record sites read `recordedEmitted`.
       const action = substituteAction(emitted, placeholderValues);
       /**
-       * What the three record sites write: `emitted` itself for every action
-       * ever emitted, and a COPY carrying `mapping` for a `readTable` whose
+       * What the record sites write: `emitted` itself for every action ever
+       * emitted, and a COPY carrying `mapping` for a `readTable` whose
        * structure the model had to name (SPEC-structured-table-reads.md
-       * §7.10, "Caching").
+       * §7.10).
        *
        * A copy, never a write through `emitted`: the model's object is what
        * the transcript quotes and what `rawResponse` says it emitted, and a
        * field appearing on it that the model never wrote would make the two
        * disagree. The replacement is pushed back into `aiResponse.actions`
-       * below, which is the array `cacheCapture` is holding — so the cache,
-       * the recording and the report all see the mapping without three
+       * below, so the recording and the report both see the mapping without
        * separate assignments that could drift apart.
        */
       let recordedEmitted = emitted;
@@ -2883,8 +2594,8 @@ async function executeStepAttempt(
       if (action.action === 'assert') {
         const myAssertIndex = assertCounter++;
         const condition = action.condition ?? '';
-        // Preserve `undefined` for predicate mode — the fingerprint, cache,
-        // and code generator all distinguish "no expected" from "expected: ''".
+        // Preserve `undefined` for predicate mode — the code generator
+        // distinguishes "no expected" from "expected: ''".
         const against = action.against ?? 'dom';
         const expected = against === 'predicate' ? undefined : (action.expected ?? '');
         const description = action.description;
@@ -2892,7 +2603,6 @@ async function executeStepAttempt(
         const assertResult = await evaluateAssertion({
           page,
           stepIndex,
-          cacheKey: opts.cacheKey ?? stepIndex,
           assertIndex: myAssertIndex,
           turnNumber: currentTurn,
           subActionIndex: ++globalSubActionIndex,
@@ -2905,10 +2615,6 @@ async function executeStepAttempt(
           testName,
           baseUrl,
           aiClient,
-          stepCache: opts.stepCache,
-          // The same gate the action cache is under — see `cacheEnabledFor`.
-          cacheEnabled: cacheEnabledFor(opts),
-          resolvedParams: opts.resolvedParameters ?? {},
           apiResponseStore,
           attemptNumber,
           dismissalGuidance: opts.dismissalGuidance ?? false,
@@ -3424,13 +3130,12 @@ async function executeStepAttempt(
       // Selector measurement (stories/codebehind-selector-ambiguity.md) rides
       // the same gate as `captureStepContext`: generation is its only consumer,
       // so an ordinary run must not pay two CDP round-trips per
-      // element-targeting action for data nobody reads. A cache replay is
-      // excluded for the same reason the DOM capture is — a cache hit
-      // generates nothing. `browser.ambiguousTarget: 'fail'` is the stated
-      // exception: it decides by reading the visible count, so it turns that
-      // one call on whatever the mode.
+      // element-targeting action for data nobody reads.
+      // `browser.ambiguousTarget: 'fail'` is the stated exception: it decides
+      // by reading the visible count, so it turns that one call on whatever
+      // the mode.
       const execOptions: ExecuteActionOptions = {
-        measure: opts.captureStepContext === true && !cachedTurnForCapture,
+        measure: opts.captureStepContext === true,
         ambiguousTarget: config.browser.ambiguousTarget,
         ...(opts.uploadPaths !== undefined && { uploadPaths: opts.uploadPaths }),
       };
@@ -3440,8 +3145,7 @@ async function executeStepAttempt(
         }
         // Structured table reads carry a structure question of their own
         // (SPEC-structured-table-reads.md §7.10) — at most one model call,
-        // only on a SHAPE refusal, and never on a run whose cached mapping
-        // still fits. `secretsNow()` is the same set the DOM snapshot is
+        // and only on a SHAPE refusal. `secretsNow()` is the same set the DOM snapshot is
         // redacted with, so a secret column is masked in the sketch before it
         // reaches the model, exactly as it is masked in the page the model is
         // shown one message earlier (§7.6).
@@ -3462,22 +3166,11 @@ async function executeStepAttempt(
           },
         });
         if (outcome.mapping !== undefined) {
-          // Record site 1 of 3: the array `cacheCapture` is holding. Replacing
-          // the SLOT rather than writing through the object keeps `emitted`
-          // as the model wrote it, and carries the mapping into the cache file
-          // the moment this step passes.
-          //
-          // `null` REMOVES the field rather than setting it to `undefined`:
-          // the recorded action is read back in-process by the report and by
-          // generation, and a `mapping: undefined` there would render as a
-          // structure note for a read that had none.
-          const { mapping: _dropped, ...withoutMapping } = emitted;
-          recordedEmitted =
-            outcome.mapping === null
-              ? withoutMapping
-              : { ...emitted, mapping: outcome.mapping };
+          // Record site 1: the turn's action list. Replacing the SLOT rather
+          // than writing through the object keeps `emitted` as the model
+          // wrote it.
+          recordedEmitted = { ...emitted, mapping: outcome.mapping };
           aiResponse.actions[emittedIndex] = recordedEmitted;
-          if (cacheCapture) cacheCapture.rewrite = true;
         }
         return outcome.result;
       });
@@ -3558,20 +3251,13 @@ async function executeStepAttempt(
       }
 
       // Capture state after action (full-page for report visibility).
-      // Skipped on cache replay — the per-action DOM is only consumed by
-      // the report's sub-action filmstrip, and matches the pre-turn rule:
-      // when the AI plan came from cache, we don't pay for DOM serialisation.
-      // The post-action screenshot below still runs when the user has opted
-      // into the filmstrip, since that's the cheap-and-useful half.
-      const postDom = cachedTurnForCapture
-        ? ''
-        : await traceOp(`captureDomSnapshot (post-${action.action})`, () =>
-            captureDomSnapshot(page, {
-              ...config.browser.domNoiseReduction,
-              maxIframeDepth: config.browser.maxIframeDepth,
-              domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
-            }),
-          ).catch(() => '');
+      const postDom = await traceOp(`captureDomSnapshot (post-${action.action})`, () =>
+        captureDomSnapshot(page, {
+          ...config.browser.domNoiseReduction,
+          maxIframeDepth: config.browser.maxIframeDepth,
+          domSnapshotCharLimit: config.browser.domSnapshotCharLimit,
+        }),
+      ).catch(() => '');
       // The post-action shot is only consumed by the report filmstrip — the AI
       // sees the next pre-turn capture rather than this one — so it gates only
       // on captureScreenshotsPerAction, not on ai.sendScreenshots.
@@ -3875,10 +3561,6 @@ interface ApiCallSubResult {
 interface EvaluateAssertionParams {
   page: Page;
   stepIndex: number;
-  /** Frame-scoped on-disk cache id for this step's assertion files
-   *  (`step-<cacheKey>-asserts.json`); see `StepExecutorOptions.cacheKey`.
-   *  Distinct from `stepIndex`, which is the display/source line. */
-  cacheKey: StepCacheKey;
   assertIndex: number;
   turnNumber: number;
   subActionIndex: number;
@@ -3891,9 +3573,6 @@ interface EvaluateAssertionParams {
   testName: string;
   baseUrl: string | undefined;
   aiClient: AiClient;
-  stepCache: StepCache | undefined;
-  cacheEnabled: boolean;
-  resolvedParams: Record<string, string>;
   apiResponseStore: ApiResponseStore | undefined;
   attemptNumber: number;
   dismissalGuidance: boolean;
@@ -3910,31 +3589,20 @@ const MAX_ASSERTION_CODE_ATTEMPTS = 2;
 /**
  * Evaluate a single `assert` action inline against the current page state.
  *
- * Cache-first: looks up cached JS code by (stepIndex, assertIndex, fingerprint).
- * On a cache hit, runs `page.evaluate(code)` directly — zero AI calls.
- * On a miss, asks the AI for evaluation code, caches it, runs it.
+ * Asks the AI for evaluation code and runs it with `page.evaluate(code)`.
  *
  * If `poll` is set, the JS code is re-run in a loop until `pass: true` or the
- * timeout. If the JS throws or returns the wrong shape, the cached code is
- * invalidated and regenerated — up to 2 attempts.
+ * timeout. If the JS throws or returns the wrong shape, the code is
+ * regenerated — up to 2 attempts.
  */
 async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionResult> {
-  const fingerprint = fingerprintAssertion(p.condition, p.expected, p.assertIndex);
-
-  // 1. Try cache
   let assertionCode: string | null = null;
-  let fromCache = false;
-  if (p.stepCache && p.cacheEnabled) {
-    assertionCode = await p.stepCache.readAssertion(p.cacheKey, p.assertIndex, fingerprint, p.resolvedParams);
-    fromCache = assertionCode !== null;
-  }
-
   let aiInteraction: AiInteraction | undefined;
   let evalResult: { pass: boolean; actual: string } | null = null;
   let lastErr: string | undefined;
 
   for (let attempt = 1; attempt <= MAX_ASSERTION_CODE_ATTEMPTS; attempt++) {
-    // 2. Generate code on cache miss / regenerate on failure
+    // 1. Generate code (or regenerate it after a failure)
     if (!assertionCode) {
       // Predicate mode: nothing in the DOM or API needs to be fetched —
       // both sides of the comparison are already in `condition`. Skip
@@ -4003,19 +3671,9 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
         lastErr = `Could not parse assertion code: ${String(parseErr)}`;
         continue;
       }
-
-      if (p.stepCache && p.cacheEnabled) {
-        await p.stepCache.writeAssertion(
-          p.cacheKey,
-          p.assertIndex,
-          fingerprint,
-          assertionCode,
-          p.resolvedParams,
-        );
-      }
     }
 
-    // 3. Run the JS — with optional polling
+    // 2. Run the JS — with optional polling
     try {
       evalResult = await runAssertionCode(p.page, assertionCode, p.poll);
       if (!evalResult || typeof evalResult.pass !== 'boolean' || typeof evalResult.actual !== 'string') {
@@ -4025,9 +3683,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
     } catch (codeErr) {
       lastErr = String(codeErr);
       logger.warn(`Assertion code failed (attempt ${attempt}/${MAX_ASSERTION_CODE_ATTEMPTS}): ${lastErr}`);
-      if (p.stepCache) await p.stepCache.invalidateAssertion(p.cacheKey, p.assertIndex);
       assertionCode = null; // force regeneration on next loop iteration
-      fromCache = false;
     }
   }
 
@@ -4054,7 +3710,6 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
     actual: evalResult.actual,
     pass: evalResult.pass,
     explanation: evalResult.pass ? 'Assertion passed' : failureExplanation,
-    fromCache,
     ...(assertionCode !== null && { assertionCode }),
     ...(aiInteraction !== undefined && { aiInteraction }),
   };
@@ -4728,12 +4383,6 @@ export async function executeBranchedStep(
       matchedOutcome.index,
       totalSteps,
       substituteBranchInstruction(matchedOutcome.instruction, opts),
-      // Cache by the 1-based step identity (issue 017). `matchedOutcome.index`
-      // is the group's 0-based array index, but the normal step loop keys the
-      // cache as `executeStep(i + 1, …)`; without this override a branched step
-      // and a normal step one position apart would share `step-<n>.json`.
-      // `result.index` stays 0-based for the skip/display logic below.
-      //
       // `flowControlClaim` is cleared for the reason it is cleared at the REPL
       // seam: a claim is read off ONE authored line, and the line running here
       // is a group member, not the line the claim was parsed from. The grouper
@@ -4742,7 +4391,6 @@ export async function executeBranchedStep(
       // `failureTail` (stories/step-failure-outcomes.md, decision 4).
       {
         ...opts,
-        cacheKey: matchedOutcome.index + 1,
         flowControlClaim: undefined,
         failureTail: undefined,
       },
@@ -4787,11 +4435,9 @@ export async function executeBranchedStep(
       group.continuationStep.index,
       totalSteps,
       substituteBranchInstruction(group.continuationStep.instruction, opts),
-      // 1-based cache identity, matching the normal step loop (issue 017).
       // No claim and no tail: see the matched-step call above.
       {
         ...opts,
-        cacheKey: group.continuationStep.index + 1,
         flowControlClaim: undefined,
         failureTail: undefined,
       },

@@ -280,7 +280,7 @@ used to load config.
 
 **`testbench-native/src/extension/cache-paths.ts`**
 
-- `PROJECT_MARKERS` ([cache-paths.ts:4-9](../testbench-native/src/extension/cache-paths.ts#L4-L9)):
+- `PROJECT_MARKERS` ([cache-paths.ts:4-9](../testbench-native/src/extension/cache-paths.ts#L4-L9) (since removed)):
   reduce to `['aiui.config.json']` (it already includes it; drop the TS/JS
   variants).
 

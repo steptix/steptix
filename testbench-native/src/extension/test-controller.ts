@@ -504,7 +504,7 @@ export class TestBenchTestController implements vscode.Disposable {
           } else {
             emit(
               `✓ step on line ${event.line}${whereOf(event)} passed` +
-                (event.fromCodeBehind ? '  (code-behind)' : event.fromCache ? '  (cached)' : ''),
+                (event.fromCodeBehind ? '  (code-behind)' : ''),
             );
           }
           if (event.output) emit(`  ${event.output}`);

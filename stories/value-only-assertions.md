@@ -199,7 +199,7 @@ runs this verbatim — no executor changes needed.
 
 ### Cache fingerprint
 
-[src/cache/step-cache.ts](../src/cache/step-cache.ts) computes
+[src/cache/step-cache.ts](../src/cache/step-cache.ts) (since removed) computes
 `fingerprintAssertion(condition, expected, assertIndex)`. Today `expected`
 is always defined; for predicate mode it'll be undefined. The
 fingerprint must remain stable and collision-free:
@@ -277,7 +277,7 @@ gate at line 1286.
 4. Add `'predicate'` branch to `buildAssertionCodePrompt`'s `contextNote`,
    skip DOM/API context blocks for that mode.
 5. Update `fingerprintAssertion` in
-   [src/cache/step-cache.ts](../src/cache/step-cache.ts) to handle
+   [src/cache/step-cache.ts](../src/cache/step-cache.ts) (since removed) to handle
    `expected: undefined`.
 6. Skip DOM + screenshot capture for predicate mode in
    [src/runner/step-executor.ts:1275-1289](../src/runner/step-executor.ts#L1275).

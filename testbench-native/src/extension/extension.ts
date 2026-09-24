@@ -848,17 +848,14 @@ class RunControllerRegistry implements vscode.Disposable {
           //
           // Then `codeBehindStale`: the step DID pass, but its compiled entry
           // threw and the AI covered for it, and ⚠ is the only mark that asks
-          // for a recompile. Then the code mark (ran as code), then ⚡ (every AI
-          // turn served from StepCache), then the plain ✓.
+          // for a recompile. Then the code mark (ran as code), then the plain ✓.
           const status = isSkippedPass(ev)
             ? 'skip'
             : ev.codeBehindStale
             ? 'pass-stale'
             : ev.fromCodeBehind
               ? 'pass-code-behind'
-              : ev.fromCache
-                ? 'pass-cached'
-                : 'pass';
+              : 'pass';
           // The same precedence a `step:skip` gets, and for the same reason:
           // a ✗ is the one status a run must not lose, and the two producers
           // of a skipped step must not disagree about that
@@ -1116,7 +1113,7 @@ class RunControllerRegistry implements vscode.Disposable {
     }
     // A compile's runs paint the gutter the way a run does
     // (stories/codebehind-compile-as-a-run.md §Every run is on the stream):
-    // ▶ while a step runs, then ✓ / ⚡ / </> / ⚠ / ✗ by how it ended. What they
+    // ▶ while a step runs, then ✓ / </> / ⚠ / ✗ by how it ended. What they
     // do NOT do is park a breakpoint stop on a failure or capture a skill
     // failure for re-run: a Replay's session is the compile's own and is
     // closed after the round, so there is nothing to continue into. The
@@ -1140,9 +1137,7 @@ class RunControllerRegistry implements vscode.Disposable {
               ? 'pass-stale'
               : ev.fromCodeBehind
                 ? 'pass-code-behind'
-                : ev.fromCache
-                  ? 'pass-cached'
-                  : 'pass';
+                : 'pass';
           const current = this.tracker.state(uri).statuses.get(ev.line);
           if (status === 'skip' && !skipPaintsOver(current)) {
             break;

@@ -14,8 +14,6 @@ npm run dev -- run tests/integration
 
 # Run one
 npm run dev -- run tests/integration/assertion-confirm-is-not-assert.md
-
-# Run twice in a row to verify cache-hit behaviour (zero AI calls on the second run)
 ```
 
 ## What each test verifies

@@ -151,7 +151,7 @@ calls are real and are billed. Useful variants:
 ```bash
 npm run test:live -- --shards=2                       # fewer workers
 npm run test:live -- --shards=1 --server=<url>        # serial, against your own server
-npm run test:live -- --files=cache-replay.test.cjs    # one file
+npm run test:live -- --files=sections.test.cjs        # one file
 ```
 
 A run can pass with tests *skipped* rather than failed — the report counts
@@ -167,8 +167,8 @@ and read structured results back.
 
 It speaks stdio and is spawned by the agent host — you do not run it by hand.
 Under the covers it is an HTTP client of the same Sessions API that TestBench
-uses, so agent sessions and editor sessions share one server, one browser pool
-and one cache. If no server is running it starts one for you.
+uses, so agent sessions and editor sessions share one server and one browser
+pool. If no server is running it starts one for you.
 
 ### Tools
 
@@ -424,7 +424,7 @@ mobile user agent, or devicePixelRatio emulation); see
 ### Special step prefixes
 
 - `Set {{name}} to "text"` -- assigns a variable from other variables, with no AI call (see [Variables](#setting-a-variable))
-- `[use ai] step text` -- asks the model for a value from the step text alone (no page, no earlier steps, no date) and stores it: `[use ai] Create a customer name starting with AUTO [store as: customer]`. Asked again on every run and never cached or compiled; it is a poor source of randomness, so put any date it needs in the step and write a tool for a value that must be the same every time
+- `[use ai] step text` -- asks the model for a value from the step text alone (no page, no earlier steps, no date) and stores it: `[use ai] Create a customer name starting with AUTO [store as: customer]`. Asked again on every run and never compiled; it is a poor source of randomness, so put any date it needs in the step and write a tool for a value that must be the same every time
 - `[input: variable_name] prompt text` -- pauses for user input, stores as `{{variable_name}}`
 - `[interactive] optional hint` -- opens an interactive REPL (commands are `/`-prefixed: `/continue` advance, `/resume` jump to any step, `/screenshot` capture, `/help` for the full list)
 - `[skill: name args]` -- inline a reusable named sequence of steps from your `skills/` directory; `[skill: subfolder/name args]` for a skill in a subfolder (see [Skills](#skills))
@@ -447,7 +447,7 @@ Every other way a variable gets a value reads it from somewhere outside the test
 
 The right-hand side is always a double-quoted string. Every `{{name}}` and `${env.X}` / `${data.x}` inside it resolves against the run as it stands at that step, and the result is stored under the target name. Copying one variable to another is just `Set {{backup}} to "{{original}}"`, and `Set {{x}} to ""` clears one.
 
-It costs nothing: no AI call, no page interaction, no action-cache entry. Notes:
+It costs nothing: no AI call and no page interaction. Notes:
 
 - The value is text, and only text. `"{{n}} + 1"` stores those characters — arithmetic and string surgery belong in a [tool](#tools), where `regex_extract` and friends already live.
 - A `{{name}}` the run cannot resolve **fails the step**, naming it. Storing the literal `{{typo}}` would pass green and break a later step instead.
@@ -476,7 +476,10 @@ A grid built from `<div>`s with `role="grid"` reads exactly like a
 `<table>` — same sentence, same header names — and a layout no structural
 rule can read (headings written as ordinary cells, a card list, one small
 table per record) is settled by asking the model one question about the
-region's structure, which is then validated, cached and never asked again.
+region's structure. The answer is validated and remembered for the rest of
+that run, so each structure is asked about at most once per run; the next run
+asks again. (Code-behind does not compile a table read yet, so there is no
+way to keep the answer between runs.)
 
 Columns are located by header text, so reordering the table changes nothing;
 a table with no header names them by position instead (`the 1st column as

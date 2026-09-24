@@ -139,8 +139,8 @@ describe('TestBench inline sections', function () {
 
   it('a breakpoint continuation re-sends the sections map', async () => {
     // The server holds no cross-batch document state, so a continuation that
-    // omitted these would expand differently from the batch before it — and
-    // hash differently, wiping the cache at every Continue.
+    // omitted these would expand differently from the batch before it: its
+    // section calls would reach the server with no definitions to expand.
     vscode.debug.addBreakpoints([
       new vscode.SourceBreakpoint(new vscode.Location(testUri, new vscode.Position(11, 0))),
     ]);

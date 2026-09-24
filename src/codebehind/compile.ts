@@ -1800,7 +1800,6 @@ export function createTestFileRunner(options: CompileOptions): CompileRunner {
       },
       options.config,
       options.contextContent,
-      undefined,
       {
         ...(request.candidateFiles && { codeBehindCandidates: request.candidateFiles }),
         ...(request.disableCodeBehind && { codeBehindDisabled: true }),

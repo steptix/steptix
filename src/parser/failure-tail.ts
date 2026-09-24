@@ -5,7 +5,7 @@
  *
  * A tail is a property of an ORDINARY step, not a flow-control form: nothing
  * here claims a step, so nothing here changes whether a model turn happens,
- * whether the step caches, or whether the grouper may fold the line in.
+ * or whether the grouper may fold the line in.
  *
  * The model never sees the tail of the step it is being asked to do —
  * {@link stripFailureTail} is what the executor hands the two prompt builders

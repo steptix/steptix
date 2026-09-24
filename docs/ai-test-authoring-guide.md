@@ -27,7 +27,7 @@ The output is a Markdown test file, optionally accompanied by reusable Markdown 
 | `context/**/*.md` | Application knowledge supplied to the execution AI: terminology, page descriptions, workflows, and constraints. These files do not execute as skills. |
 | `.env`, `.env.<name>` | Environment settings and secret values. |
 | `data/<name>.json` | Structured data selected by the environment name. |
-| `aiui.config.json` | Browser, AI, execution, directory, reporting, and cache settings. |
+| `aiui.config.json` | Browser, AI, execution, directory, and reporting settings. |
 | `reports/` | Generated HTML reports by default. |
 
 Framework skills and tools are project files. They are separate from skills/plugins installed in the authoring AI's host. A host tool such as an email connector is not automatically available inside an `aiui` test.
@@ -78,7 +78,7 @@ Later examples illustrate individual features. Supply their application-specific
 | Location | Supported settings relevant to authors |
 | --- | --- |
 | YAML frontmatter | `tags: [smoke, login]`, `timeout: 90s`, `env: staging`, `dataFile: data/cases.json`, `dataSources:` mapping, and `type: skill` for library files. |
-| `## Config` bullet list | `baseUrl`, `timeout`, `viewport`, `cdp`, `cdpTab`, `consoleLogLevel`, `serverFileLogLevel`, `unmask`, and `cache` (`on`/`off`, honoured on the TestBench and MCP paths). Unrecognised keys are kept and never read, with no warning. |
+| `## Config` bullet list | `baseUrl`, `timeout`, `viewport`, `cdp`, `cdpTab`, `consoleLogLevel`, `serverFileLogLevel`, and `unmask`. Unrecognised keys are kept and never read, with no warning. |
 | `## Parameters` bullet list | `- name: value`, referenced in steps as `{{name}}`. |
 
 `viewport` accepts `mobile` (390×844), `tablet` (768×1024), `desktop` (1440×900), or a size such as `1280x720`. It changes page dimensions, not touch support, user agent, or full mobile-device emulation. Do not combine a per-test viewport with `cdp`.
@@ -147,7 +147,7 @@ Rules the generated file must respect:
 - **A test whose first step is `[use computer]` launches no browser at all.** That is how a native application is tested here.
 - **The person at the machine must not touch the mouse or the keyboard** while a computer-mode step runs, and the desktop must be visible and unlocked. Only one computer-mode run per machine — the framework takes a lock and refuses a second. Say this in the test's prose header; do not generate a computer-mode test as if it were an ordinary unattended one.
 - **Captures are of the whole screen**, including whatever else is on the desktop, and they go into the report. Text redaction cannot mask pixels. `desktop.reportScreenshots: false` keeps desktop captures out of the report, and stops the MCP server returning a whole-desktop screenshot of a failed computer-mode step to the agent.
-- **No cache and no code-behind for these steps.** A recorded coordinate has nothing to re-validate against on a machine whose resolution or window layout has moved, so a step that ran in computer mode stays AI-driven when the file is compiled.
+- **No code-behind for these steps.** A recorded coordinate has nothing to re-validate against on a machine whose resolution or window layout has moved, so a step that ran in computer mode stays AI-driven when the file is compiled.
 
 Worked examples: `templates/init/tests/pdf-dialog-cancel.md` (open a print dialog and cancel it) and `templates/init/tests/calc-one-plus-one.md` (start Calculator with a tool, type a sum, click the "=" button and read the answer, with no browser launched at all).
 
@@ -176,7 +176,7 @@ Useful assertions include:
 - `Assert that "{{actual_email}}" equals "{{expected_email}}"`.
 - `Assert that "{{summary}}" contains "{{order_id}}"`.
 
-Use exact text, contains, starts-with, counts, and numeric comparisons intentionally. State the relevant currency, format, or tolerance if it affects the result. Value-only assertions can compare captured variables without querying the DOM. Assertion checks use generated/cached checking code; a completed action or a model's narrative is not itself an assertion. Failed assertions fail the step.
+Use exact text, contains, starts-with, counts, and numeric comparisons intentionally. State the relevant currency, format, or tolerance if it affects the result. Value-only assertions can compare captured variables without querying the DOM. Assertion checks run generated checking code, generated afresh on every run unless the step is compiled to code-behind; a completed action or a model's narrative is not itself an assertion. Failed assertions fail the step.
 
 `Confirm by clicking Submit` and `Check the box` express actions. They do not request verification just because they contain words that can also mean “assert”.
 
@@ -224,7 +224,7 @@ Reading link text and reading its `href` are different operations. Say which one
 3. Type "{{random_name}}" into the Name field
 ```
 
-Generate these knowing four things. **The model is asked on every run** — the step is never cached and never compiled. **It sees only the step text**, placeholders filled in: no page, no earlier steps, no date, so put today's date (or anything else it needs) in the step from a parameter or a tool. **It is a poor source of randomness**: "random" can repeat between runs. **For a value that must be the same every time, write a tool.** Name the value with `[store as: name]`, which is authoritative; without an explicit name the model's name must appear in the step as a whole word, or the step fails. That only rules out invented names: a step that never names its value can be stored under any word of its sentence, so always name it. In a skill the name must be `[store as: name]` or `store as {{name}}`. The step fails, rather than storing anything, when the model says the step cannot be done (for example it needs a date it was not given), when its answer is empty, or when a `{{name}}` / `${…}` in the step does not resolve. Secret-named values reach the model as `***`. `[use ai]` must open the step, and it cannot be a control line's tail.
+Generate these knowing four things. **The model is asked on every run** — the step is never compiled. **It sees only the step text**, placeholders filled in: no page, no earlier steps, no date, so put today's date (or anything else it needs) in the step from a parameter or a tool. **It is a poor source of randomness**: "random" can repeat between runs. **For a value that must be the same every time, write a tool.** Name the value with `[store as: name]`, which is authoritative; without an explicit name the model's name must appear in the step as a whole word, or the step fails. That only rules out invented names: a step that never names its value can be stored under any word of its sentence, so always name it. In a skill the name must be `[store as: name]` or `store as {{name}}`. The step fails, rather than storing anything, when the model says the step cannot be done (for example it needs a date it was not given), when its answer is empty, or when a `{{name}}` / `${…}` in the step does not resolve. Secret-named values reach the model as `***`. `[use ai]` must open the step, and it cannot be a control line's tail.
 
 ### Reading a table into row records
 

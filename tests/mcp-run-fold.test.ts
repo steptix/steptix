@@ -509,20 +509,6 @@ describe('step outcomes', () => {
 
     expect(result.steps[0]?.durationMs).toBeNull();
   });
-
-  it('carries fromCache through', () => {
-    const result = fold({
-      events: [
-        { type: 'step:start', line: 10 },
-        { type: 'step:pass', line: 10, fromCache: true },
-        { type: 'done', status: 'passed' },
-      ],
-      sentSteps: ['step one'],
-      sourceLines: [10],
-    });
-
-    expect(result.steps[0]?.fromCache).toBe(true);
-  });
 });
 
 describe('run-level reporting', () => {

@@ -236,7 +236,8 @@ What the existing machinery already gives this for free:
 - **Cache off**: any `startAt` request bypasses the per-step cache
   ([session-manager.ts:2803](../../../src/server/session-manager.ts#L2803)),
   so an edited step re-plans — and, for compile, so the transcript is
-  fresh.
+  fresh. (The step cache this referred to was removed; every step now
+  re-plans anyway.)
 - **Variables** resolve from the live `session.outputs` (no `seedScope`);
   captures written by this run sweep back, accumulating.
 - **Guards**: the `{{__skill*}}` internal-var refusal (a single step that

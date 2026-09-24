@@ -381,14 +381,10 @@ interactive run uses the stable `<file path>` session id while a batch run
 uses a unique `<file path>::run-N` id (issue 032), so even the same file
 running in both surfaces targets two distinct server **sessions**.
 
-One shared resource remains: the server-side step **cache** is keyed by
-`testFilePath`, not by session id, so two concurrent runs of the same file
-(interactive + batch) read/write the same cache namespace. This is benign —
-the cache is opt-in (off by default), and the key is content-hashed on the
-step text, so identical files only ever collide on identical entries (a
-redundant write of the same value, never cross-contamination). If a future
-feature makes concurrent same-file runs with *different* step content
-common, the cache key would need a session/run qualifier.
+One shared resource used to remain: the server-side step cache, keyed by
+`testFilePath` rather than session id, so two concurrent runs of the same
+file read and wrote one cache namespace. The step cache has since been
+removed.
 
 ## 9. Result mapping
 

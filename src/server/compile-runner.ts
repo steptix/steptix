@@ -359,12 +359,6 @@ export class CodeBehindCompiler {
         sourceLines: test.stepLines.slice(0, count),
         ...(envName && { envName }),
         ...(bundle.envBundle && { env: bundle.envBundle.env }),
-        // A Record in the caller's session is an ordinary run, cache as the
-        // project has it: a cached transcript is the model's own actions,
-        // recorded earlier, and with `captureStepContext` it comes with the
-        // DOM either side. A Replay wants the entry to run, so the cache is
-        // off; so is a Record in a throwaway session, as it always was.
-        cacheEnabled: inCallerSession && bundle.config.cache.enabled,
         captureStepContext: run.captureContext,
         // Config belongs to a session's first request only. A caller's session
         // that already exists has one; a fresh one — compile's own, or the

@@ -77,10 +77,6 @@ const STATUS = {
   IDLE: "idle",
   RUNNING: "running",
   PASS: "pass",
-  // Server emitted step:pass with fromCache=true → AI plan replayed
-  // from disk. Painted ⚡ instead of ✓ but counted as a pass for the
-  // run-summary tally and rendered with the same green color.
-  PASS_CACHED: "pass-cached",
   // Ran its compiled code-behind entry — no model call at all. Painted
   // with the code mark (`CodeBehindIcon`, the gutter's status-code-behind.svg).
   PASS_CODE_BEHIND: "pass-code-behind",
@@ -1579,10 +1575,6 @@ function TestBenchRunner() {
             const cls = [
               "tb-step",
               status === STATUS.PASS ? "tb-step--pass" : "",
-              // Cache replays share the green pass color — the ⚡ glyph
-              // is the only visual difference. Counted as pass in the
-              // run summary too (see `countStepLineStatuses` above).
-              status === STATUS.PASS_CACHED ? "tb-step--pass" : "",
               // Code-behind and stale are passes too — the glyph carries the
               // difference, the colour stays green.
               status === STATUS.PASS_CODE_BEHIND ? "tb-step--pass" : "",
@@ -1636,7 +1628,7 @@ function TestBenchRunner() {
                     {/* A tolerated failure keeps the ✗ — the step failed —
                         and says so in amber via `tb-step--tolerated`. A
                         different glyph would read as a pass with a caveat. */}
-                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.PASS_CACHED ? "⚡︎" : status === STATUS.PASS_CODE_BEHIND ? <CodeBehindIcon /> : status === STATUS.PASS_STALE ? "⚠" : status === STATUS.FAIL || status === STATUS.FAIL_TOLERATED ? "✗" : status === STATUS.RUNNING ? "…" : status === STATUS.SKIP ? "◌" : status === STATUS.STOPPED ? "■" : ""}
+                    {isPaused ? "▶" : status === STATUS.PASS ? "✓" : status === STATUS.PASS_CODE_BEHIND ? <CodeBehindIcon /> : status === STATUS.PASS_STALE ? "⚠" : status === STATUS.FAIL || status === STATUS.FAIL_TOLERATED ? "✗" : status === STATUS.RUNNING ? "…" : status === STATUS.SKIP ? "◌" : status === STATUS.STOPPED ? "■" : ""}
                   </span>
                   <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
                   <span style={{ opacity: 0.5, fontSize: "0.85em" }}>{lineNumber}</span>

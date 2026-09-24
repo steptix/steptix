@@ -13,16 +13,15 @@ uses a placeholder nothing ever sets, so it fails before any model call, and
 its `otherwise continue` tail makes that failure amber. Step 8 is there to
 prove the run carried on.
 
-The cache is on and the live test runs this file twice. The page steps replay
-from the cache on the second run. The `[use ai]` steps ask the model again,
-every time, and never touch the cache.
+The live test runs this file twice. The `[use ai]` steps ask the model again
+on the second run, as on the first: nothing a run leaves behind turns them into
+anything but a question to the model.
 
 Today's date comes from `{{today}}` on purpose: the model is told nothing the
 step does not say, so the step has to say what today is.
 
 ## Config
 - baseUrl: http://localhost:8787/
-- cache: on
 
 ## Parameters
 - today: 2026-09-24

@@ -1,23 +1,17 @@
 /**
  * What this RUN has already learned about a region's structure
  * (docs/specs/SPEC-structured-table-reads.md §7.10: one question per
- * structure per run; the step cache carries it across runs).
+ * structure per run).
  *
- * The step cache is keyed per STEP, so it answers "have I read this before?"
- * only for the same line of the same file. A test that reads one table in step
- * 2 and reads it again in step 10 — to check the page after a click, or to
- * prove the cache works — has two steps and two cache files, and without this
- * memo the second one asks the model all over again. Measured on
- * `table-odd-shapes.md`: four shapes, five reads, five questions.
+ * A test that reads one table in step 2 and reads it again in step 10 — to
+ * check the page after a click — would otherwise ask the model all over again.
+ * Measured on `table-odd-shapes.md`: four shapes, five reads, five questions.
  *
- * So there are two layers, and they answer different questions:
+ * The memo is alive for one run and keyed by the REGION and the columns asked
+ * of it, so any later step reading the same thing reuses the answer. Nothing
+ * carries it across runs.
  *
- *   - the MEMO, alive for one run, keyed by the REGION and the columns asked
- *     of it, so any later step reading the same thing reuses the answer;
- *   - the step CACHE, alive on disk, keyed by the step, so the next run of
- *     that step needs no question at all.
- *
- * Neither is trusted blind. A memo hit is applied through the extractor like
+ * It is not trusted blind. A memo hit is applied through the extractor like
  * any other mapping and validated against the live page before a cell is read,
  * so a page that changed between step 2 and step 10 falls through to the
  * question rather than reading the wrong table.
@@ -34,7 +28,7 @@ export interface StructureMemoEntry {
   stepIndex: number;
 }
 
-/** The run's memo. Created once per run and threaded like the step cache. */
+/** The run's memo. Created once per run and threaded into every step. */
 export type StructureMemo = Map<string, StructureMemoEntry>;
 
 /** A fresh, empty memo. One per run — never per step, and never global. */

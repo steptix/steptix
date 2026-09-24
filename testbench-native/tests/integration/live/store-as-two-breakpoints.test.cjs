@@ -91,7 +91,7 @@ async function waitFor(label, predicate, timeoutMs = 60_000) {
   throw new Error(`timeout waiting for: ${label}`);
 }
 
-const passed = (status) => status === 'pass' || status === 'pass-cached';
+const passed = (status) => status === 'pass';
 
 function statuses(hooks) {
   return Object.fromEntries(hooks.tracker.snapshot().statuses);

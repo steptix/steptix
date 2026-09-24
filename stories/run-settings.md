@@ -201,7 +201,7 @@ They are dead, and exposing them would be shipping a lie.
 
 - **A model change warns about the cache; it does not change the cache key.**
   The step cache keys on step text and identity, not the model
-  ([step-cache.ts:319](../src/cache/step-cache.ts)), and this project runs with
+  ([step-cache.ts:319](../src/cache/step-cache.ts) (since removed)), and this project runs with
   caching on. So switching models can serve the previous model's plans — which
   matters most in the case you would switch for, evaluating a different model.
   Adding the model to the key would invalidate every cached entry in every

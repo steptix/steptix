@@ -2,9 +2,9 @@
  * `[use ai] <step>` in the CLI run loop (stories/use-ai-step.md §Tests, "Per
  * loop"), main flow and hook scope, with the executor MOCKED on purpose: every
  * claim here is about the LOOP — that it dispatches the step beside `Set`,
- * that the step never reaches `executeStep` (the only reader and writer of the
- * step cache, and the only thing that runs a `.steps.ts` entry), that the value
- * reaches the next step and the report, and that a second run asks again.
+ * that the step never reaches `executeStep` (the only thing that runs a
+ * `.steps.ts` entry), that the value reaches the next step and the report, and
+ * that a second run asks again.
  *
  * The model is a scripted `AiClient.complete` that records what it was sent.
  */
@@ -87,21 +87,6 @@ vi.mock('../src/browser/screenshot.js', () => ({ captureScreenshot: async () => 
 let hooksStub: ResolvedHooks;
 vi.mock('../src/runner/hooks.js', () => ({ resolveHooks: vi.fn(async () => hooksStub) }));
 
-/** The step cache, turned ON for the run below, with its reads and writes
- *  recorded. */
-const cacheCalls: string[] = [];
-vi.mock('../src/cache/step-cache.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/cache/step-cache.js')>()),
-  StepCache: {
-    initialize: vi.fn(async () => ({
-      read: (...a: unknown[]) => { cacheCalls.push(`read ${JSON.stringify(a[0])}`); return null; },
-      write: (...a: unknown[]) => { cacheCalls.push(`write ${JSON.stringify(a[0])}`); },
-      readAssertion: () => null,
-      invalidateStep: vi.fn(),
-    })),
-  },
-}));
-
 /** The model: a queue of replies, and every request it was sent. */
 const model = vi.hoisted(() => ({ replies: [] as string[], requests: [] as ChatMessage[][] }));
 vi.mock('../src/ai/client.js', () => ({
@@ -160,7 +145,6 @@ function config(): Config {
     ai: { ...DEFAULT_CONFIG.ai, apiKey: 'test-key' },
     browser: { ...DEFAULT_CONFIG.browser, headed: false },
     execution: { ...DEFAULT_CONFIG.execution, retries: 1 },
-    cache: { ...DEFAULT_CONFIG.cache, enabled: true },
   };
 }
 
@@ -187,7 +171,6 @@ async function logged<T>(fn: () => Promise<T>): Promise<{ value: T; lines: strin
 
 beforeEach(async () => {
   executeStepCalls.length = 0;
-  cacheCalls.length = 0;
   model.replies = [];
   model.requests = [];
   hooksStub = hooks();
@@ -235,7 +218,7 @@ describe('the CLI main flow', () => {
     expect(lines).toContain('[ai] random_name = "AUTO4821"');
   });
 
-  it('never reads or writes the step cache, and a second run asks the model again', async () => {
+  it('asks the model again on a second run, and never reaches the executor', async () => {
     const md = stepsDoc(GENERATE, 'Type {{random_name}} into the name field');
     model.replies = ['{"as": "random_name", "value": "AUTO1111"}', '{"as": "random_name", "value": "AUTO2222"}'];
 
@@ -245,14 +228,12 @@ describe('the CLI main flow', () => {
     expect(model.requests).toHaveLength(2);
     expect(first.steps[0]!.outputs).toEqual({ random_name: 'AUTO1111' });
     expect(second.steps[0]!.outputs).toEqual({ random_name: 'AUTO2222' });
-    // The cache WAS on for the run — the ordinary step was handed it both
-    // times — and the [use ai] step reached neither the executor nor the cache.
+    // Only the ordinary step reached the executor, once per run; the [use ai]
+    // step never did.
     expect(executeStepCalls).toHaveLength(2);
     for (const call of executeStepCalls) {
-      expect(call.opts['cacheEnabled']).toBe(true);
       expect(call.instruction).not.toContain('[use ai]');
     }
-    expect(cacheCalls).toEqual([]);
   });
 
   it('masks a secret-named target on the step line, and the value is still stored', async () => {

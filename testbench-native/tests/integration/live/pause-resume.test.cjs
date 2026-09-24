@@ -203,7 +203,7 @@ describe('TestBench live pause/resume against real server', function () {
     // from the gutter when the user hit Continue.
     const statusesAtPause1 = new Map(hooks.tracker.snapshot().statuses);
     const passedAtPause1 = [...statusesAtPause1.entries()]
-      .filter(([, s]) => s === 'pass' || s === 'pass-cached')
+      .filter(([, s]) => s === 'pass')
       .map(([line]) => line);
     console.log(`[live] At pause #1, passed lines = ${JSON.stringify(passedAtPause1)}`);
 
@@ -232,7 +232,7 @@ describe('TestBench live pause/resume against real server', function () {
     for (const line of passedAtPause1) {
       const s = statusesAfterResumeStart[line];
       assert.ok(
-        s === 'pass' || s === 'pass-cached',
+        s === 'pass',
         `Line ${line} must keep its passed status across resume — ` +
           `got '${s}'. If undefined, the wiped-pass-marks regression returned.`,
       );

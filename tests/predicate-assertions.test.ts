@@ -7,9 +7,7 @@
  *                      expected → still rejected.
  *   2. prompts:        rule 8 mentions the predicate shape; the code-gen
  *                      prompt for predicate mode skips DOM/API context.
- *   3. step-cache:     fingerprint distinct between predicate and dom modes
- *                      with the same condition.
- *   4. report renderer: predicate result renders "Predicate / Result" rows
+ *   3. report renderer: predicate result renders "Predicate / Result" rows
  *                       and skips the empty Expected row.
  *
  * The end-to-end CLI flow against the live test-app is verified separately
@@ -22,7 +20,6 @@ import {
   buildAssertionCodePrompt,
   buildSystemPrompt,
 } from '../src/ai/prompts.js';
-import { fingerprintAssertion } from '../src/cache/step-cache.js';
 import { renderStep } from '../src/report/generator.js';
 import type { StepResult } from '../src/report/types.js';
 
@@ -205,45 +202,7 @@ describe('prompts — predicate guidance', () => {
   });
 });
 
-// ─── Layer 3: cache fingerprint ─────────────────────────────────────────
-
-describe('fingerprintAssertion — predicate vs DOM', () => {
-  it('predicate (undefined expected) and DOM (empty expected) hash to different keys', () => {
-    const predFp = fingerprintAssertion('8 is at least 5', undefined, 0);
-    const domFp = fingerprintAssertion('8 is at least 5', '', 0);
-    expect(predFp).not.toBe(domFp);
-  });
-
-  it('two predicate asserts with the same condition + index hash to the same key (cache hit on rerun)', () => {
-    const a = fingerprintAssertion('8 is at least 5', undefined, 0);
-    const b = fingerprintAssertion('8 is at least 5', undefined, 0);
-    expect(a).toBe(b);
-  });
-
-  it('changing the condition invalidates the predicate cache key', () => {
-    const a = fingerprintAssertion('8 is at least 5', undefined, 0);
-    const b = fingerprintAssertion('8 is at least 6', undefined, 0);
-    expect(a).not.toBe(b);
-  });
-
-  it('changing the assertIndex still keys distinctly even for predicate mode', () => {
-    const a = fingerprintAssertion('p', undefined, 0);
-    const b = fingerprintAssertion('p', undefined, 1);
-    expect(a).not.toBe(b);
-  });
-
-  it('back-compat: DOM fingerprint is byte-identical to before the change', () => {
-    // The change preserved the existing template `${i} ${cond} ${expected}`
-    // for non-undefined `expected`. This test pins that contract: any
-    // refactor that rebuilds the hash differently (e.g. JSON, separator
-    // change) would invalidate every cached assertion in existing reports.
-    const fp = fingerprintAssertion('visible title', 'Done', 2);
-    expect(fp).toMatch(/^[0-9a-f]{16}$/);
-    expect(fp).toBe(fingerprintAssertion('visible title', 'Done', 2));
-  });
-});
-
-// ─── Layer 4: report renderer ───────────────────────────────────────────
+// ─── Layer 3: report renderer ───────────────────────────────────────────
 
 describe('renderStep — predicate result', () => {
   function makeStep(opts: {

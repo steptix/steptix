@@ -337,7 +337,8 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
 
   // `$schema` is an editor-only hint (autocomplete/validation), not a Config
   // field — strip it before merging so it never reaches the resolved config.
-  const { $schema: _schema, ...userConfig } = parsed;
+  const { $schema: _schema, ...withRetired } = parsed;
+  const userConfig = dropRetiredSections(withRetired, resolvedPath);
   // Before the merge, on the file's own values: after it, a key the file left
   // out and a key the file got right are indistinguishable.
   assertDesktopSection(userConfig['desktop'], resolvedPath);
@@ -348,6 +349,42 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
   );
   assertNoFlowControlInDefaultHooks(merged, resolvedPath);
   return merged;
+}
+
+/**
+ * Top-level sections the framework used to read and no longer does, with what
+ * to tell the project that still carries one.
+ *
+ * Dropped with a warning rather than merged or refused: merged, the section
+ * would ride along in the resolved config where nothing reads it, so a project
+ * would never learn its setting does nothing; refused, a working project would
+ * stop loading over a key that changes nothing.
+ */
+const RETIRED_SECTIONS: Readonly<Record<string, string>> = {
+  cache:
+    'the step cache was removed, so "cache" in aiui.config.json does nothing — '
+    + 'delete it, and the project\'s .cache/ directory. Code-behind (`aiui compile`) '
+    + 'is how a step replays without a model call now.',
+};
+
+/** Config files already warned about, so a server re-reading one after every
+ *  edit says it once rather than on each read. */
+const warnedRetired = new Set<string>();
+
+/** `userConfig` without its {@link RETIRED_SECTIONS}, warning once per file. */
+function dropRetiredSections(
+  userConfig: Record<string, unknown>,
+  configPath: string,
+): Record<string, unknown> {
+  const retired = Object.keys(userConfig).filter((key) => key in RETIRED_SECTIONS);
+  if (retired.length === 0) return userConfig;
+  if (!warnedRetired.has(configPath)) {
+    warnedRetired.add(configPath);
+    for (const key of retired) logger.warn(`${configPath}: ${RETIRED_SECTIONS[key]}`);
+  }
+  const kept = { ...userConfig };
+  for (const key of retired) delete kept[key];
+  return kept;
 }
 
 /** How a wrong-typed config value is named in a refusal. */

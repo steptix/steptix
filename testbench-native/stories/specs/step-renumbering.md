@@ -65,8 +65,8 @@ sequential. Two modes, chosen by the editor selection:
   are.
 - Any change to how steps are *matched* or *run*. Ordinals are presentation:
   `extractSteps` strips the `N. ` prefix before anything reaches the wire, so
-  renumbering changes no instruction text, invalidates no step cache, and
-  breaks no code-behind recording.
+  renumbering changes no instruction text and breaks no code-behind
+  recording.
 
 ## 2. What counts as a step
 

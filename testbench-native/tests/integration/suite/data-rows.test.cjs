@@ -214,14 +214,6 @@ describe('TestBench data-row loop', function () {
     assert.equal(fake.streamSessionIds[0], fake.streamSessionIds[1]);
   });
 
-  it('never lets a row batch enable the step cache', async () => {
-    await open('data-rows.tmp.md');
-    await runAllRows(2);
-    for (const [index, request] of fake.requests.entries()) {
-      assert.ok(!request.cacheEnabled, `row ${index + 1} must not enable the cache`);
-    }
-  });
-
   it('finalises the run once, and that is where the report path comes from', async () => {
     await open('data-rows.tmp.md');
     await runAllRows(2);

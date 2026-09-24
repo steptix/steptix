@@ -104,8 +104,9 @@ export interface TestConfig {
   unmask?: string;
   /** What a `readTable` does when the page's structure cannot decide how to
    *  read it (docs/specs/SPEC-structured-table-reads.md §7.10): `ask` — the
-   *  default — shows the model a sketch of the region once and caches the
-   *  answer; `strict` asks nothing and lets the shape refusal stand.
+   *  default — shows the model a sketch of the region once and reuses the
+   *  answer for the rest of the run; `strict` asks nothing and lets the shape
+   *  refusal stand.
    *
    *  Overrides the project's `tables.structure` in `aiui.config.json`. Held as
    *  the raw string, like `viewport` and `unmask`: one validator

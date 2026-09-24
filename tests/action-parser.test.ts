@@ -678,7 +678,8 @@ describe('parseAIResponse — readTable', () => {
  * beside `columns` and `limit`, which reads like the obvious omission it is
  * not: a mapping the model emitted has been validated against nothing, and
  * copied through it would pin the read to a table the model believes is there
- * and then be written into the step cache as if it had been proved.
+ * and then be recorded on the step's transcript — the compile's input — as if
+ * it had been proved.
  */
 describe('parseAIResponse — mapping is never taken from the model', () => {
   beforeEach(() => { resetEmittedMappingWarning(); });

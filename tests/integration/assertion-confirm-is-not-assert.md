@@ -12,9 +12,9 @@ generate or run any assertion JS for this step.
 After the click, a separate verify step explicitly asks for verification — that
 step should produce one `assert`.
 
-Expected cache state after first run:
-- `step-2-asserts.json` should NOT exist (the confirm-by-clicking step has zero asserts)
-- `step-3-asserts.json` SHOULD exist with one entry (the explicit verify step)
+Expected in the report after a run:
+- step 1 (the confirm-by-clicking step) shows a click and no assertion block
+- step 2 (the explicit verify step) shows exactly one assertion block
 
 ## Config
 - baseUrl: http://localhost:8787/confirm-action

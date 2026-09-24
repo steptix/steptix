@@ -249,7 +249,6 @@ const baseConfig = {
   },
   api: { specsDir: './specs', requestTimeout: 30_000, redactSensitive: true },
   server: { host: '127.0.0.1', port: 3100, apiKey: 'test-api-key' },
-  cache: { enabled: false, dir: '.cache' },
   logging: { consoleLogLevel: 'silent', serverFileLogLevel: 'off' },
   desktop: { enabled: true, maxImageWidth: 400, settleMs: 0, reportScreenshots: true },
 } as unknown as Config;

@@ -1,40 +1,34 @@
-# 061 — `[use ai]` review: twelve user-facing findings, not yet fixed
+# 061 — `[use ai]` review: eleven user-facing findings, not yet fixed
 
 **Status:** open / known issues. Found by a review of PR #157 on 2026-09-24;
 the user decided they are not a priority to fix now.
 **Area:** the `[use ai]` step ([stories/use-ai-step.md](../stories/use-ai-step.md))
 and the paths around it.
 **Related:** [060](060-use-ai-step-stores-a-masked-secret-and-passes.md)
-(a secret masked as `***` is stored), [023](023-cache-reverse-interpolation-substring-collision.md)
-(cache reverse-interpolation).
+(a secret masked as `***` is stored).
 **Opened:** 2026-09-24
 
 ## Summary
 
 A review of PR #157 looked only for problems a test author or maintainer
-would hit. Ten findings were confirmed by a seam test, a probe of
-the built code, or a real-model call. Two are plausible, and each says what
-would confirm it. The full write-up, with raw evidence for each, is the
-triage page the review produced
+would hit. It made twelve findings, and eleven are still open. Nine of those
+were confirmed by a seam test, a probe of the built code, or a real-model
+call. Two are plausible, and each says what would confirm it. The full
+write-up, with raw evidence for each, is the triage page the review produced
 (<https://claude.ai/artifact/MEzm8QWUhyEAX4yG3XRUUY>, private to the owner).
 This file keeps the list in the repo.
 
-**Direction that changes the ranking:** step caching for selectors is going
-to be removed, and only code-behind will replay in future. Finding 1 is a
-step-cache bug, so it goes away with the cache. It is kept below for the
-record, not for fixing.
+Finding 1 was a step-cache bug: a short generated value rewrote later steps'
+cached text. It was dropped when the step cache was removed. Code-behind, now
+the only replay mechanism, only uses the names a step references
+(`generate.ts:901`). The other findings keep their numbers so they still match
+the triage page.
 
 ## The findings
 
 Ranked by user impact. Line references are as of commit 197c50c.
 
-1. **The step cache rewrites later steps' text when a generated value is
-   short** (high; moot once the step cache is removed). With the cache on,
-   `[use ai] … [store as: qty]` answering `5` makes a later
-   `Type "15.50"` cache as `1{{qty}}.{{qty}}0`, and the next run types
-   `13.30`, green. This is issue 023, made routine by values that change on
-   every run. `src/cache/step-cache.ts:114-123`. Code-behind is not affected:
-   it only uses the names a step references (`generate.ts:901`).
+1. *(Dropped with the step cache — see the summary.)*
 
 2. **A misplaced or misspelled `[use ai]` passes green and stores nothing**
    (high). This happens when `… [use ai] [store as: text]` is run from
@@ -102,7 +96,7 @@ Ranked by user impact. Line references are as of commit 197c50c.
 
 ## Revisit when
 
-- The step cache is removed. At that point, close finding 1 and re-check
-  finding 2's old-server case against whatever replaces it.
+- Someone picks up finding 2. Re-check its old-server case first against the
+  server as it stands after the step-cache removal.
 - Anyone reports a green step that stored nothing, or a secret in a TestBench
   log. Findings 2 and 3 are the likely cause.

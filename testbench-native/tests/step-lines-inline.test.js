@@ -114,7 +114,7 @@ test("countStepLineStatuses: a section body line is a step line, and counts", ()
 
 test("countStepLineStatuses: every pass flavour is a pass, and is broken down", () => {
   const counts = countStepLineStatuses(
-    { 3: "pass-code-behind", 4: "pass-stale", 12: "pass-cached" },
+    { 3: "pass-code-behind", 4: "pass-stale", 12: "pass" },
     extractStepLineIds(WITH_ROWS),
   );
   assert.deepEqual(

@@ -18,7 +18,6 @@
 export type StepLineStatus =
   | 'running'
   | 'pass'
-  | 'pass-cached'
   | 'pass-code-behind'
   | 'pass-stale'
   | 'fail'
@@ -29,7 +28,6 @@ export type StepLineStatus =
 /** What the heading says, as numbers. */
 export interface StepsSummaryCounts {
   passed: number;
-  passedCached: number;
   /** Passed by running compiled code — no model call. */
   passedCodeBehind: number;
   /** Passed under AI after the compiled entry threw. */
@@ -77,12 +75,12 @@ export function countMainFlowStatuses(
   const mainFlow = new Set(mainFlowLines);
   const count = (...wanted: StepLineStatus[]): number =>
     statuses.filter(([line, status]) => wanted.includes(status) && mainFlow.has(line)).length;
-  // Every 'pass*' counts as passed — a cache hit, a code-behind entry and a
-  // step that healed under AI are all successful steps. What differs is what
-  // it cost and whether it needs attention, which is what the breakdown says.
+  // Every 'pass*' counts as passed — a step the AI drove, a code-behind entry
+  // and a step that healed under AI are all successful steps. What differs is
+  // what it cost and whether it needs attention, which is what the breakdown
+  // says.
   return {
-    passed: count('pass', 'pass-cached', 'pass-code-behind', 'pass-stale'),
-    passedCached: count('pass-cached'),
+    passed: count('pass', 'pass-code-behind', 'pass-stale'),
     passedCodeBehind: count('pass-code-behind'),
     stale: count('pass-stale'),
     skipped: count('skip'),
@@ -94,7 +92,7 @@ export function countMainFlowStatuses(
 /**
  * The after-text itself.
  *
- * "12/12 passed (7 code-behind, 1 stale, 2 cached)" — one parenthesis listing
+ * "12/12 passed (7 code-behind, 1 stale)" — one parenthesis listing
  * only what actually happened, so an ordinary all-AI run reads exactly as it
  * did before any of these features existed. The parenthesis breaks down the
  * PASSES; a skip is not one, so it is its own clause after it, and it appears
@@ -111,7 +109,6 @@ export function stepsSummaryText(counts: StepsSummaryCounts): string {
   const notes = [
     counts.passedCodeBehind > 0 ? `${counts.passedCodeBehind} code-behind` : '',
     counts.stale > 0 ? `${counts.stale} stale` : '',
-    counts.passedCached > 0 ? `${counts.passedCached} cached` : '',
   ].filter((n) => n !== '');
   const head =
     notes.length > 0
@@ -146,7 +143,6 @@ export interface RunLogTallyCounts {
    * so once the per-step lines have scrolled.
    */
   tolerated: number;
-  cached: number;
   codeBehind: number;
   stale: number;
 }
@@ -167,7 +163,6 @@ export function runLogTallyLine(counts: RunLogTallyCounts): string {
   const notes = [
     counts.codeBehind > 0 ? `${counts.codeBehind} code-behind` : '',
     counts.stale > 0 ? `${counts.stale} stale` : '',
-    counts.cached > 0 ? `${counts.cached} cached` : '',
   ].filter((n) => n !== '');
   const suffix = notes.length > 0 ? ` (${notes.join(', ')})` : '';
   const clauses = [

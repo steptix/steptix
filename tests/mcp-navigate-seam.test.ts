@@ -36,7 +36,6 @@ function fakeProject(overrides: Partial<ProjectContext> = {}): ProjectContext {
     apiKey: 'server-key',
     skillsDir: null,
     toolsDir: null,
-    cacheEnabled: false,
     envFilesConsulted: [`${PROJECT_ROOT}/.env`],
     cdpPermissions: { allowUnowned: false, ports: null },
     ...overrides,

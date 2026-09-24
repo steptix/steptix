@@ -10,8 +10,8 @@ Sibling of [skill-step-rerun-with-variables.md](skill-step-rerun-with-variables.
 spec reuses that feature's machinery (frame-qualified slice, per-step cache
 bypass, the `isSessionAlive` liveness pre-flight) and adds the **Stop** path it
 deliberately excluded. Also see [debugging-ux.md](debugging-ux.md) (run / pause /
-resume / stop) and [step-cache-server.md](step-cache-server.md) (skill expansion,
-`frame:scope`, the steps request).
+resume / stop) and the step-cache spec, since removed with the step cache (skill
+expansion, `frame:scope`, the steps request).
 
 ## 1. Background — why Stop is the gap, and what survives it
 
@@ -155,7 +155,7 @@ mid-group `startIndex` **up** to the group's first member
 [:1112-1114](../../../src/server/session-manager.ts#L1112)). Every request here
 sends `startAt` (whole-body uses `body.first`), so the slice always bypasses the
 per-step cache — required so an edited skill re-plans instead of replaying a
-frozen action list.
+frozen action list. (The step cache this referred to was removed; there is no cache to bypass now.)
 
 **Client threading:** `endAt` must be added to the `rerun` option type
 ([run-controller.ts:714-717](../../src/extension/run-controller.ts#L714)), the

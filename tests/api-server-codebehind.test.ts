@@ -653,7 +653,6 @@ describe('recording in the caller\'s session', () => {
     const [sessionId, request, , , internal] = run.mock.calls[0]!;
     expect(sessionId).toBe('editor-session');
     expect(request.captureStepContext).toBe(true);
-    expect(request.cacheEnabled).toBe(testConfig.cache.enabled);
     expect(request.config).toBeDefined();
     expect(internal?.codeBehind?.disabled).toBeUndefined();
     expect(internal?.codeBehind?.strict).toBe(false);
@@ -721,7 +720,6 @@ describe('recording in the caller\'s session', () => {
     expect(replay[0]).toMatch(/^compile:/);
     expect(replay[1].steps).toHaveLength(2);
     expect(replay[1].sourceLines).toEqual([11, 12]);
-    expect(replay[1].cacheEnabled).toBe(false);
     expect(replay[1].captureStepContext).toBe(false);
     expect(replay[4]?.codeBehind?.strict).toBe(true);
     expect(close).toHaveBeenCalledWith(replay[0]);
@@ -765,7 +763,6 @@ describe('recording in the caller\'s session', () => {
 
     const [sessionId, request] = run.mock.calls[0]!;
     expect(sessionId).toMatch(/^compile:/);
-    expect(request.cacheEnabled).toBe(false);
     expect(request.captureStepContext).toBe(true);
     expect(close).toHaveBeenCalledWith(sessionId);
     run.mockRestore();

@@ -83,7 +83,7 @@ beforeEach(() => {
   delete process.env['SERVER_URL'];
   delete process.env['AIUI_SERVER_API_KEY'];
   root = makeProject(
-    { tests: { skillsDir: './skills', toolsDir: './tools/src' }, cache: { enabled: true } },
+    { tests: { skillsDir: './skills', toolsDir: './tools/src' } },
     ['skills', 'tools/src', 'data'],
   );
 });
@@ -121,7 +121,6 @@ describe('assembleTestFile — goldens', () => {
     expect(run.request.testFilePath).toBe(testFile('env-frontmatter.md'));
     expect(run.request.skillsDir).toBe(path.join(root, 'skills'));
     expect(run.request.toolsDir).toBe(path.join(root, 'tools', 'src'));
-    expect(run.request.cacheEnabled).toBe(true);
     expect(run.sentSteps).toBe(run.request.steps);
     expect(run.warnings).toEqual([]);
   });
@@ -293,24 +292,8 @@ describe('assembleTestFile — goldens', () => {
     expect(run.warnings).toEqual([]);
   });
 
-  it('honours the whole `cache:` value set in both directions', async () => {
-    // Project default is on.
-    expect((await assemble('simple.md')).request.cacheEnabled).toBe(true);
-    expect((await assemble('cache-disabled.md')).request.cacheEnabled).toBeUndefined();
-
-    const off = makeProject({ cache: { enabled: false } });
-    expect(
-      (await assembleTestFile({ path: testFile('simple.md', off), resolveProject })).request
-        .cacheEnabled,
-    ).toBeUndefined();
-    expect(
-      (await assembleTestFile({ path: testFile('cache-enabled.md', off), resolveProject }))
-        .request.cacheEnabled,
-    ).toBe(true);
-  });
-
   it('warns that `## Config` log levels are not forwarded', async () => {
-    const run = await assemble('cache-enabled.md');
+    const run = await assemble('config-log-level.md');
     expect(run.warnings.join('\n')).toContain('consoleLogLevel');
     expect(run.request.config).toBeUndefined();
   });
@@ -453,7 +436,6 @@ describe('assembleSteps', () => {
     expect(run.request.env?.['BASE_URL']).toBe('https://uat.example.com');
     expect(run.request.skillsDir).toBe(path.join(root, 'skills'));
     expect(run.request.toolsDir).toBe(path.join(root, 'tools', 'src'));
-    expect(run.request.cacheEnabled).toBe(true);
     expect(run.sentSteps).toEqual(run.request.steps);
   });
 

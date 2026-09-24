@@ -8,7 +8,6 @@ import * as fs from 'node:fs';
  * @property {string | null} skillsDir  Absolute path to the skills directory, or null if undeclared.
  * @property {string | null} toolsDir   Absolute path to the tools directory, or null if undeclared.
  * @property {string | null} dataDir    Raw `tests.dataDir` string (relative to the config dir, or absolute), or null if undeclared. The caller applies the `data` default.
- * @property {boolean} cacheEnabled  Whether the step cache is opted in via `cache.enabled === true`. Defaults false (absent / non-boolean / false → off).
  */
 
 /**
@@ -64,9 +63,6 @@ export function parseProjectDirs(text, configPath) {
     skillsDir: resolveDir(parsed?.tests?.skillsDir, configDir),
     toolsDir: resolveDir(parsed?.tests?.toolsDir, configDir),
     dataDir: typeof rawDataDir === 'string' && rawDataDir.trim() !== '' ? rawDataDir.trim() : null,
-    // Opt-in: only an explicit `cache.enabled: true` turns the step cache on.
-    // Absent config, a missing `cache` block, or any non-`true` value → off.
-    cacheEnabled: parsed?.cache?.enabled === true,
   };
 }
 

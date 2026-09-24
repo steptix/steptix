@@ -95,8 +95,6 @@ vi.mock('../src/browser/manager.js', () => {
 
 /** Instruction text of every step the runner actually executed. */
 const executedSteps: string[] = [];
-/** `[instruction, cacheEnabled]` at the seam where the cache is consulted. */
-const cacheFlags: [string, boolean][] = [];
 /** The `## Prior Steps` lines each executed step was handed. */
 const historyPerStep: string[][] = [];
 /** Verdicts the judge will hand back, in order. `null` is "none held". */
@@ -122,10 +120,9 @@ vi.mock('../src/runner/step-executor.js', () => ({
     _stepIndex: number,
     _totalSteps: number,
     instruction: string,
-    opts?: { cacheEnabled?: boolean; conversationHistory?: string[] },
+    opts?: { conversationHistory?: string[] },
   ): Promise<StepResult> => {
     executedSteps.push(instruction);
-    cacheFlags.push([instruction, opts?.cacheEnabled === true]);
     historyPerStep.push([...(opts?.conversationHistory ?? [])]);
     const flowControl = flowControlFor(instruction);
     return {
@@ -226,7 +223,6 @@ const cfg: Config = {
   reports: { outputDir: './reports', includeScreenshots: false, includeDomSnapshots: false, includeAiReasoning: false, embedScreenshots: false },
   api: { specsDir: './specs', requestTimeout: 30000, redactSensitive: true },
   server: { host: '127.0.0.1', port: 0, apiKey: API_KEY },
-  cache: { enabled: false, dir: '.cache' },
   logging: { consoleLogLevel: 'silent', serverFileLogLevel: 'off' },
 };
 
@@ -277,7 +273,6 @@ afterAll(async () => {
 
 beforeEach(() => {
   executedSteps.length = 0;
-  cacheFlags.length = 0;
   historyPerStep.length = 0;
   judgeCalls.length = 0;
   generatedReports.length = 0;
@@ -659,13 +654,6 @@ describe('a loop clones its tail frames per pass', () => {
     const guards = steps.filter((s) => s.instruction.startsWith('While '));
     expect(guards).toHaveLength(4);
     expect(guards.every((s) => s.status === 'passed')).toBe(true);
-  });
-
-  it('turns the step cache off inside the loop body', async () => {
-    judgeScript = [0, null];
-    await collect(whileBody({ cacheEnabled: true }));
-    const flags = new Map(cacheFlags);
-    expect(flags.get('Click Next')).toBe(false);
   });
 
   it('gives a nested loop its OWN frame per pass, stamped with its iteration', async () => {

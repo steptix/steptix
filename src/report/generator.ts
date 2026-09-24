@@ -743,10 +743,10 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
     ? `<span class="badge badge-skill" title="Step expanded from skill ${escapeHtml(step.sourceSkill)}">${escapeHtml(step.sourceSkill)}</span>`
     : '';
 
-  // The code mark for code-behind, ⚡ for the action cache — two different
-  // ways a step avoided the model, and which one it was is the first thing
-  // you want to know when the step did something surprising.
-  // ⚠ outranks both: the step ran under AI *because* its committed code broke,
+  // The code mark for code-behind — the one way a step avoids the model, and
+  // whether it did is the first thing you want to know when the step did
+  // something surprising.
+  // ⚠ outranks it: the step ran under AI *because* its committed code broke,
   // and that is the one thing about the step's origin worth acting on.
   //
   // Two ⚠ wordings, because `codeBehindStale` only says the ENTRY broke. When
@@ -759,9 +759,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
       : '<span class="badge badge-codebehind-stale" title="Its code-behind entry failed, and the AI attempt that took over failed too — recompile">⚠ code-behind failed</span>'
     : step.fromCodeBehind
       ? `<span class="badge badge-codebehind" title="Ran this step's code-behind — no AI call">${CODE_BEHIND_MARK} code</span>`
-      : step.fromCache
-        ? '<span class="badge badge-cached" title="Replayed from the action cache — no AI call">⚡ cached</span>'
-        : '';
+      : '';
 
   // Alongside the skill chip, not instead of it: a skill invoked from inside
   // a section carries both.
@@ -1188,11 +1186,10 @@ function renderSubAction(
       : '';
   // How a `readTable` was read when structure alone could not decide it
   // (docs/specs/SPEC-structured-table-reads.md §7.10, "Log and report"). The
-  // mapping is the runtime's own answer, validated against the page and stored
-  // in the step cache — so without this line a report of a run over an odd
-  // grid shows a read that "just worked" and no way to see which table it
-  // actually read or which row it took the names from. The one place a stale
-  // cached mapping is visible after the fact.
+  // mapping is the runtime's own answer, validated against the page — so
+  // without this line a report of a run over an odd grid shows a read that
+  // "just worked" and no way to see which table it actually read or which row
+  // it took the names from.
   const mappingHtml = describeTableMapping(sub.action.mapping);
   const onComputerTurn = opts.turnShot !== undefined;
   const ownShot = onComputerTurn && sub.screenshotBase64 === opts.turnShot
@@ -1348,13 +1345,6 @@ function renderAssertion(assertion: AssertionResult): string {
     ? renderAiInteraction(assertion.aiInteraction)
     : '';
 
-  const cacheIndicator = assertion.fromCache !== undefined
-    ? `<div class="assertion-row">
-    <span class="assertion-key">Source:</span>
-    <span>${assertion.fromCache ? '⚡ cached (no AI call)' : '🤖 AI generated'}</span>
-  </div>`
-    : '';
-
   const codeBlock = assertion.assertionCode
     ? `<details class="assertion-code">
     <summary>Assertion code</summary>
@@ -1400,7 +1390,6 @@ function renderAssertion(assertion: AssertionResult): string {
     <span class="assertion-key">Turn / sub-action:</span>
     <span>turn ${assertion.turnNumber}, sub-action ${assertion.subActionIndex}</span>
   </div>
-  ${cacheIndicator}
   ${codeBlock}
   ${aiHtml}
 </div>`;

@@ -4,7 +4,7 @@ import type { EnvDataContext } from '../parser/interpolate-env-data.js';
 import { resolveSetTemplate } from './placeholder-substitution.js';
 // From the PARSER's light module, not from `control-runtime.ts`: that import
 // dragged the step executor — and with it Playwright and the AI client — into
-// a "no page, no model, no cache" module's graph.
+// a "no page, no model" module's graph.
 import { bindVariable } from '../parser/parameters.js';
 
 /**
@@ -17,7 +17,7 @@ import { bindVariable } from '../parser/parameters.js';
  * identically. A second copy is how one of them starts disagreeing about what
  * an assignment costs or what it reports.
  *
- * No page, no model, no cache: the only inputs are the template and the scope,
+ * No page, no model: the only inputs are the template and the scope,
  * and the only effect is one key written into that scope.
  */
 export interface SetStepOutcome {

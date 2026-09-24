@@ -107,7 +107,6 @@ import { diagnoseFailure } from '../ai/diagnose.js';
 import { logger, setLogLevel, getLogLevel, type ConsoleLogLevel } from '../utils/logger.js';
 import { openRunLogFile, attachRunLogBridges } from '../utils/run-log.js';
 import { ApiResponseStore } from '../api/response-store.js';
-import { StepCache, envCacheSegment, cacheDirName } from '../cache/step-cache.js';
 import { resolveProjectRoot } from '../server/project-root.js';
 import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { executeToolStep, type ExecuteToolStepOptions } from '../tools/executor.js';
@@ -284,53 +283,6 @@ function parseViewportFromTestConfig(testConfig: TestConfig): ViewportSize | und
 }
 
 /**
- * The env a test ACTUALLY runs under, used to namespace its cache (issue 012).
- *
- * A run-wide `--env`/`AUTOMATION_ENV` (`runEnvName`) WINS over the test's
- * frontmatter `env:`. This mirrors run.ts's precedence: the CLI flag is honoured
- * unconditionally, and a test's frontmatter env is consulted ONLY when no
- * run-wide env is set. Keying the cache by anything else would read entries
- * written under the env the test did not run under. Returns `undefined` when
- * neither is set (callers fall back to the `default` env segment).
- *
- * Pure and browser-free so the CLI cache seam is unit-testable.
- */
-export function resolveEffectiveEnv(
-  runEnvName: string | undefined,
-  frontmatterEnv: string | undefined,
-): string | undefined {
-  return runEnvName || frontmatterEnv?.trim() || undefined;
-}
-
-/**
- * Env-namespaced cache base directory: `<cacheBaseDir>/<env-segment>` (issue
- * 012). Pure and browser-free so the CLI cache seam is unit-testable.
- */
-export function resolveTestCacheBase(cacheBaseDir: string, effectiveEnv?: string): string {
-  return path.join(cacheBaseDir, envCacheSegment(effectiveEnv));
-}
-
-/**
- * Full per-run cache directory: `<cacheBaseDir>/<env-segment>/<basename>-<hash>`
- * (issues 012/027/028). This is the directory `runTest` actually writes to —
- * `StepCache.initialize(resolveTestCacheBase(...), cacheDirName(...))` yields
- * exactly this path because `cacheDirName` is idempotent under the
- * `sanitizeTestName` that `initialize` applies to its `testName` argument.
- * Exposed purely so tests can assert the path without driving a browser.
- */
-export function cacheDirForRun(
-  cacheBaseDir: string,
-  effectiveEnv: string | undefined,
-  testFilePath: string,
-  projectRoot?: string | null,
-): string {
-  return path.join(
-    resolveTestCacheBase(cacheBaseDir, effectiveEnv),
-    cacheDirName(testFilePath, projectRoot),
-  );
-}
-
-/**
  * The code-behind knobs `aiui compile` needs from a run, and nothing else.
  *
  * Kept off the positional parameters so ordinary callers are unaffected, and
@@ -411,7 +363,6 @@ export async function runTest(
   instance: TestInstance,
   config: Config,
   contextContent: string,
-  runEnvName?: string,
   extras: RunTestExtras = {},
 ): Promise<TestReport> {
   const { test, resolvedParameters, dataRowIndex } = instance;
@@ -470,19 +421,7 @@ export async function runTest(
   const conversationHistory: string[] = [];
   const csrfTokens: Record<string, string> = {};
 
-  // Always initialize cache — used for assertion code even when action caching is off.
-  // StepCache.initialize is idempotent (creates dir, writes meta). The stepCache
-  // reference is passed to all steps; action caching is further gated by config.cache.enabled.
-  //
-  // Cache layout is env-namespaced (issue 012) and keyed by a stable path-derived
-  // directory name rather than the test title (issues 027/028). The env the test
-  // ACTUALLY runs under wins: a run-wide --env/AUTOMATION_ENV (runEnvName) overrides
-  // the test's frontmatter env, matching run.ts's precedence (frontmatter only when
-  // no run-wide env is set). Final dir: <cache.dir>/<env-segment>/<basename>-<hash>/.
-  const effectiveEnv = resolveEffectiveEnv(runEnvName, test.frontmatter.env);
   const projectRoot = await resolveProjectRoot(test.filePath);
-  const baseDir = resolveTestCacheBase(config.cache.dir, effectiveEnv);
-  const stepCache = await StepCache.initialize(baseDir, cacheDirName(test.filePath, projectRoot), test.steps);
 
   // What this run learns about a region's structure, once
   // (SPEC-structured-table-reads.md §7.10, src/runner/structure-memo.ts). One
@@ -495,30 +434,6 @@ export async function runTest(
   // names it, fenced by the project root (stories/upload-action.md §3). The CLI
   // always has both, so an upload step works from a plain `aiui run`.
   const uploadPaths = { baseDir: path.dirname(test.filePath), projectRoot };
-
-  /**
-   * May this run read and write the step cache?
-   *
-   * Computed once and passed to every `executeStep` call, because there are
-   * three of them (main flow, hooks, and the interactive ad-hoc path) and a
-   * guard applied to only one of them is not a guard — the first cut of this
-   * changed the main-flow site alone, and a five-row live run still replayed
-   * four rows from cache.
-   *
-   * A row run never uses it (stories/data-driven-rows.md, decision 8): the
-   * cache is keyed per step line and reverse-interpolates only an action's
-   * `value`, so an assertion whose expectation came from a row would replay
-   * row 1's on every row. The cache is being retired; until then rows opt out.
-   */
-  const cacheEnabledForRun =
-    config.cache.enabled &&
-    dataRowIndex === undefined &&
-    // A compile records row 1 through an instance it builds itself, with no
-    // index — the live run showed that path writing and replaying a per-line
-    // cache on a matrix test. Rows force the cache off for the TEST, not just
-    // for an instance that happens to carry a row number.
-    !test.dataRows &&
-    !test.frontmatter.dataFile;
 
   // Determine timeout: frontmatter > config section > global default
   const testTimeout = parseTimeoutMs(test.frontmatter.timeout ?? test.config.timeout)
@@ -752,7 +667,7 @@ export async function runTest(
   }
 
   // Code-behind: resolve each expanded step to its `.steps.ts` entry once, up
-  // front, and carry the result into the executor like `stepCache`. A missing
+  // front, and carry the result into the executor like `structureMemo`. A missing
   // or broken file is a warning and an empty registry — the test then runs
   // exactly as it did before this feature existed.
   const codeBehind =
@@ -1114,7 +1029,7 @@ export async function runTest(
           }
         } else if (hookUseAiStep) {
           // The hook half of verification rule 7, through the same runner as the
-          // main flow. No cache here either — hooks never had one.
+          // main flow.
           logger.info(`Running ${scope} hook: ${redact(hookInstruction, secretsNow())}`);
           const aiOutcome = await runUseAiStep({
             parsed: hookUseAiStep,
@@ -1161,9 +1076,7 @@ export async function runTest(
             // establish a starting state asks the same question step 2 then
             // asks again — the memo is keyed by the region and the columns,
             // not by where the read sits, so there is no reason for a hook to
-            // be the one caller that pays twice. It is the memo, never the
-            // step cache: a hook's result is page-state-dependent and is
-            // deliberately not replayed, while a memo entry is re-validated
+            // be the one caller that pays twice. A memo entry is re-validated
             // against the live page on every reuse.
             structureMemo,
             dismissalGuidance: hooks.hasAny,
@@ -1177,8 +1090,6 @@ export async function runTest(
             // fail the hook scope, so it does not abort the run — see the
             // `!result.tolerated` on the scope's own failure check below.
             ...(hookFailureTail && { failureTail: hookFailureTail }),
-            // No stepCache — hook results are usually page-state-dependent
-            // (e.g., "accept cookie banner if visible") and shouldn't be replayed blindly.
           },
           // A hook's authored form is `raw`: its `${…}` was substituted at
           // parse (hooks are not shown to the model as authored text the way
@@ -1252,16 +1163,6 @@ export async function runTest(
     const controlState = createControlState(config.execution.maxLoopIterations);
     const loops = new LoopRuntime();
     const skipQueue = new SkipQueue();
-    /** Steps inside any loop body: they opt out of the step cache, because the
-     *  cache rewrites one value per line and a pass is a different value
-     *  (stories/data-driven-rows.md, decision 8 — same reason as a row run). */
-    const loopBodySteps = new Set<number>();
-    for (const record of controls) {
-      if (!record || !isLoopRecord(record)) continue;
-      for (let k = record.bodyStart; k <= record.bodyEnd; k++) loopBodySteps.add(k);
-    }
-    const cacheEnabledFor = (i: number): boolean =>
-      cacheEnabledForRun && !loopBodySteps.has(i);
 
     /** Tag a result with the skill / section it came from, as the main loop
      *  does — guard and skipped rows are steps like any other in the report. */
@@ -1500,7 +1401,7 @@ export async function runTest(
       // ── Control flow: a guard decides, and the planner says what follows ──
       //
       // Before the hooks, deliberately: a guard is not a page step. It never
-      // reaches `executeStep`, it is never cached and never compiled, and
+      // reaches `executeStep`, it is never compiled, and
       // wrapping it in `beforeEach` / `afterEach` would run the test's plumbing
       // twice around one line — once for the decision and once for the step the
       // decision chose (stories/control-flow.md §"What is deliberately
@@ -1763,16 +1664,7 @@ export async function runTest(
           resolvedParameters,
           pageTracker: session.pageTracker,
           browserTracker,
-          stepCache,
           structureMemo,
-          // A row run never uses the step cache: the cache is keyed per step
-          // line and rewrites only an action`s `value`, so an assertion whose
-          // expectation came from a row would replay row 1`s on every row
-          // (stories/data-driven-rows.md, decision 8). The cache is being
-          // retired; until then rows simply opt out — and so, for the same
-          // reason, does every step inside a loop body
-          // (stories/control-flow.md, decision 12).
-          cacheEnabled: cacheEnabledFor(i),
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
           ...placeholderOpts,
@@ -1910,7 +1802,7 @@ export async function runTest(
       // The unconditional form — a step whose WHOLE text is the tail, so
       // `Stop running the remaining steps` as much as `Return` — has no
       // condition to judge, so it is dispatched here beside `Set`: no model
-      // call, no page snapshot, no cache entry (story decision 3). The test is
+      // call, no page snapshot (story decision 3). The test is
       // the absent `body`, never the length of the line.
       const unconditionalFlowControl =
         flowControlClaim && flowControlClaim.body === undefined ? flowControlClaim : null;
@@ -2056,8 +1948,8 @@ export async function runTest(
       } else if (useAiStep) {
         // `[use ai] <step>` (stories/use-ai-step.md): the step's text alone goes
         // to the model, and the value it answers with is stored. Beside `Set`
-        // and for `Set`'s reasons — no `stepCache`, no `codeBehindOptionsFor(i)`,
-        // no page: `executeStep` is the only reader of either, and this never
+        // and for `Set`'s reasons — no `codeBehindOptionsFor(i)`, no page:
+        // `executeStep` is the only reader of code-behind, and this never
         // reaches it, so the model answers on every run.
         const aiOutcome = await runUseAiStep({
           parsed: useAiStep,
@@ -2231,9 +2123,7 @@ export async function runTest(
           resolvedParameters,
           pageTracker: session.pageTracker,
           browserTracker,
-          stepCache,
           structureMemo,
-          cacheEnabled: cacheEnabledFor(i),
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
           ...placeholderOpts,
@@ -2290,9 +2180,9 @@ export async function runTest(
         // What changes here is only how a PROSE step is answered — from a
         // capture of the screen instead of a DOM.
         //
-        // No `stepCache` and no `codeBehindOptionsFor(i)`: a cached coordinate
-        // has nothing to validate against at replay (§5.5), and a recorded one
-        // is not portable to another machine (§9).
+        // No `codeBehindOptionsFor(i)`: a recorded coordinate has nothing to
+        // validate against at replay (§5.5), and is not portable to another
+        // machine (§9).
         stepResult = await executeComputerStep(
           i + 1,
           test.steps.length,
@@ -2337,9 +2227,7 @@ export async function runTest(
           resolvedParameters,
           pageTracker: session.pageTracker,
           browserTracker,
-          stepCache,
           structureMemo,
-          cacheEnabled: cacheEnabledFor(i),
           dismissalGuidance: hooks.hasAny,
           testSteps: test.steps,
           ...placeholderOpts,
@@ -2986,7 +2874,6 @@ export async function runTests(
   options: {
     bail?: boolean;
     verbose?: boolean;
-    runEnvName?: string;
     /** 1-based: run only this data row. */
     row?: number;
     /**
@@ -3036,7 +2923,7 @@ export async function runTests(
         continue;
       }
 
-      const report = await runOne(instance, config, context.combined, options.runEnvName);
+      const report = await runOne(instance, config, context.combined);
       rowReports.push({
         report,
         ...(instance.dataRowIndex !== undefined && {

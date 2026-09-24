@@ -4,8 +4,8 @@ Companion to the language story
 [stories/test-script-sections.md](../../../stories/test-script-sections.md)
 (syntax, parser, expander — read it first; this spec assumes its grammar,
 including the single match-text derivation) and to
-[debugging-ux.md](debugging-ux.md), [step-cache-server.md](step-cache-server.md),
-and [skill-step-rerun-with-variables.md](skill-step-rerun-with-variables.md),
+[debugging-ux.md](debugging-ux.md), the step-cache spec (since removed with the
+step cache), and [skill-step-rerun-with-variables.md](skill-step-rerun-with-variables.md),
 whose machinery sections plug into. The authoring affordances (definition,
 completion, diagnostics) are split into
 [inline-sections-authoring.md](inline-sections-authoring.md).
@@ -244,6 +244,10 @@ Semantics section calls out).
 
 ### 4.3 Caching: bundle hash, per-step keys, and warning dedup
 
+> The step cache this section was written for has since been removed; only
+> code-behind replays now. The bundle-hash and per-step-key rules below, and
+> every "per-step cache" mention elsewhere in this spec, are kept as history.
+
 Two cache paths must become sections-aware or multi-batch runs misbehave:
 
 - **Bundle hash source.** `chooseCacheHashSource(steps, fullSteps,
@@ -328,7 +332,7 @@ runs anyway with last-definition-wins" from ever happening.
 - **Decorations** ([src/extension/decorations.ts](../../src/extension/decorations.ts)):
   placeholder cells and status icons extend to `section-step` lines (via
   the §3 `extractStepLineIds` contract). Body steps get the same
-  ✓ / ✗ / ⚡ / ▶ treatment as main steps — this is where sections beat
+  ✓ / ✗ / ▶ treatment as main steps — this is where sections beat
   skills ergonomically: the whole run paints in one editor.
 - **Invocation-line aggregates** come free (Goal 3): `applyToTracker`
   paints `running` on the top-level frame's invocation line at
@@ -641,8 +645,8 @@ implementations.
 
 ## 11. Companion-doc updates (contracts this spec changes)
 
-- [step-cache-server.md](step-cache-server.md) — request-field table
-  (`sections`), the expansion gate, and the §4.3 subset-batch per-step
+- step-cache-server.md (since removed with the step cache) — request-field
+  table (`sections`), the expansion gate, and the §4.3 subset-batch per-step
   cache rule.
 - [skill-step-rerun-with-variables.md](skill-step-rerun-with-variables.md)
   — §2's "params are read-only" table and the edge-case row "User edits a

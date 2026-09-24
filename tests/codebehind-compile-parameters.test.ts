@@ -125,7 +125,7 @@ describe("the default runner — the CLI's", () => {
     });
 
     expect(runTestMock).toHaveBeenCalledTimes(1);
-    const [instance, , , , extras] = runTestMock.mock.calls[0]!;
+    const [instance, , , extras] = runTestMock.mock.calls[0]!;
     expect(instance.resolvedParameters).toEqual({ username: 'octocat' });
     expect(extras).toMatchObject({ codeBehindStrict: true, stopAfterStep: 1 });
   });

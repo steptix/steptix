@@ -90,7 +90,6 @@ function fakeProject(): ProjectContext {
     apiKey: 'server-key',
     skillsDir: null,
     toolsDir: null,
-    cacheEnabled: false,
     envFilesConsulted: [path.join(tmpDir, '.env')],
     cdpPermissions: { allowUnowned: false, ports: null },
   };

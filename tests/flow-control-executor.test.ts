@@ -19,7 +19,6 @@ import type { Page } from 'playwright';
 import type { AiClient } from '../src/ai/client.js';
 import type { AIAction, ChatMessage } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
-import type { StepCache } from '../src/cache/step-cache.js';
 import type { StepResult } from '../src/report/types.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 import { parseFlowControlStep } from '../src/parser/flow-control-step.js';
@@ -158,8 +157,6 @@ async function runStep(
   opts: {
     claim?: boolean;
     config?: Config;
-    stepCache?: StepCache;
-    cacheEnabled?: boolean;
     adHocResults?: StepResult[];
     /** The run's parameter map — `runSecrets` reads the SECRET-NAMED values out
      *  of it, and those are what a composed error must come back without. */
@@ -191,57 +188,11 @@ async function runStep(
       resolvedParameters: opts.parameters ?? {},
       testSteps: [instruction],
       ...(claim && { flowControlClaim: claim }),
-      ...(opts.stepCache && { stepCache: opts.stepCache }),
-      ...(opts.cacheEnabled !== undefined && { cacheEnabled: opts.cacheEnabled }),
     },
     authored,
   ).catch((err: unknown) => err as Error);
   return { result, client };
 }
-
-/** One cached turn, in the shape `StepCache.read` answers with. */
-function cachedTurn(action: AIAction) {
-  return {
-    rawResponse: JSON.stringify({ actions: [action], reasoning: 'cached' }),
-    actions: [action],
-    reasoning: 'cached',
-  };
-}
-
-/** A `StepCache` that counts what the executor asked of it. `hit` is the turn
- *  list a read answers with, or null for a miss.
- *
- * The ASSERTION half is counted separately because it is a separate seam: it
- * is read and written from `executeStepAttempt`, several hundred lines and one
- * function away from the action cache, and it consulted `opts.cacheEnabled`
- * raw until this round. */
-function recordingCache(hit: ReturnType<typeof cachedTurn>[] | null) {
-  const seen = { reads: 0, writes: 0, assertionReads: 0, assertionWrites: 0 };
-  const cache = {
-    read: async () => {
-      seen.reads++;
-      return hit;
-    },
-    write: async () => {
-      seen.writes++;
-    },
-    readAssertion: async () => {
-      seen.assertionReads++;
-      return null;
-    },
-    writeAssertion: async () => {
-      seen.assertionWrites++;
-    },
-    invalidateAssertion: async () => {},
-    invalidateStep: async () => {},
-  } as unknown as StepCache;
-  return { cache, seen };
-}
-
-/** The two AI turns an `assert` sub-action costs: the plan, then the assertion
- *  code. `fakePage.evaluate` answers a string with `{pass:true}`, so the code
- *  itself only has to parse. */
-const ASSERTION_CODE = JSON.stringify({ code: '() => ({ pass: true, actual: "ok" })' });
 
 beforeEach(() => {
   actions.received = [];
@@ -428,130 +379,6 @@ describe('the settle gate before the judgement', () => {
       plan([{ action: 'click', selector: '#details', description: 'Click details' }]),
     ]);
     expect(settles.calls).toEqual([]);
-  });
-});
-
-// ── The action cache ────────────────────────────────────────────────────────
-
-describe('the action cache and a flow-control step', () => {
-  const line = 'If the page title contains "Dashboard" then return';
-
-  it('never reads a cached turn for a claiming step — the condition is re-judged', async () => {
-    // The scenario the exemption exists for. Run 1 signs in, the condition
-    // holds, and a `return` turn lands in `step-N.json`. Run 2 lands on a
-    // different page. Replayed, the cache would end the flow with no model
-    // call and no page read, and the report would be green for work nobody
-    // did. So: the model IS asked, and when it says the condition does not
-    // hold, nothing is returned.
-    const { cache, seen } = recordingCache([
-      cachedTurn({ action: 'return', description: 'the title read Dashboard last time' }),
-    ]);
-    const { result, client } = await runStep(
-      line,
-      [plan([{ action: 'noop', description: 'the title reads Sign In today' }])],
-      { claim: true, stepCache: cache, cacheEnabled: true },
-    );
-
-    expect(client.requests.length).toBeGreaterThanOrEqual(1);
-    expect(seen.reads).toBe(0);
-    const passed = result as { status: string; flowControl?: unknown; fromCache?: boolean };
-    expect(passed.status).toBe('passed');
-    expect(passed.flowControl).toBeUndefined();
-    expect(passed.fromCache).toBeUndefined();
-  });
-
-  it('still replays that very cache for an ordinary step — the fake is not the reason', async () => {
-    // The control the test above needs to mean anything: the same cache, the
-    // same `cacheEnabled: true`, and a step with no claim. If this one also
-    // called the model, the assertion above would pass for the wrong reason.
-    const { cache, seen } = recordingCache([
-      cachedTurn({ action: 'noop', description: 'nothing to do' }),
-    ]);
-    const { result, client } = await runStep(
-      'Open the dashboard',
-      [plan([{ action: 'click', selector: '#never', description: 'must not be asked for' }])],
-      { stepCache: cache, cacheEnabled: true },
-    );
-
-    expect(seen.reads).toBe(1);
-    expect(client.requests).toHaveLength(0);
-    expect((result as { fromCache?: boolean }).fromCache).toBe(true);
-  });
-
-  it('writes no cache entry after a claiming step runs', async () => {
-    // Read AND write, or the exemption leaks across runs: run 1 with the
-    // feature on would leave the `return` on disk for run 2 to replay.
-    const { cache, seen } = recordingCache(null);
-    const { result } = await runStep(
-      line,
-      [plan([{ action: 'return', description: 'the title reads Dashboard' }])],
-      { claim: true, stepCache: cache, cacheEnabled: true },
-    );
-
-    expect((result as { flowControl?: unknown }).flowControl).toEqual({
-      kind: 'return',
-      verb: 'return',
-    });
-    expect(seen.reads).toBe(0);
-    expect(seen.writes).toBe(0);
-  });
-
-  it('still writes for an ordinary step under the same cache', async () => {
-    const { cache, seen } = recordingCache(null);
-    const { result } = await runStep(
-      'Click the details link',
-      [plan([{ action: 'click', selector: '#details', description: 'Click details' }])],
-      { stepCache: cache, cacheEnabled: true },
-    );
-    expect((result as { status: string }).status).toBe('passed');
-    expect(seen.reads).toBe(1);
-    expect(seen.writes).toBe(1);
-  });
-
-  it('touches the ASSERTION cache no more than the action cache, on a claiming step', async () => {
-    // "Read AND write, at one seam" was not true of the assertion cache: it
-    // lives in a different function and consulted `opts.cacheEnabled` directly,
-    // so a compound flow-control step (`If the Save button is visible, click it
-    // and return`) whose model emitted an `assert` cached a judgement about a
-    // live page under a comment saying it could not — and replayed it on the
-    // next run without looking.
-    const { cache, seen } = recordingCache(null);
-    const { result } = await runStep(
-      line,
-      [
-        plan([
-          { action: 'assert', condition: 'document.title', expected: 'Dashboard', description: 'the title reads Dashboard' },
-          { action: 'return', description: 'so we are done here' },
-        ]),
-        ASSERTION_CODE,
-      ],
-      { claim: true, stepCache: cache, cacheEnabled: true },
-    );
-
-    expect((result as { flowControl?: unknown }).flowControl).toEqual({
-      kind: 'return',
-      verb: 'return',
-    });
-    expect(seen).toMatchObject({ reads: 0, writes: 0, assertionReads: 0, assertionWrites: 0 });
-  });
-
-  it('still uses the assertion cache for an ordinary step with the same action', async () => {
-    // The control: same cache, same `assert`, no claim. Without it the
-    // assertion above would pass for a fake that simply never gets there.
-    const { cache, seen } = recordingCache(null);
-    const { result } = await runStep(
-      'Check the dashboard title',
-      [
-        plan([
-          { action: 'assert', condition: 'document.title', expected: 'Dashboard', description: 'the title reads Dashboard' },
-        ]),
-        ASSERTION_CODE,
-      ],
-      { stepCache: cache, cacheEnabled: true },
-    );
-
-    expect((result as { status: string }).status).toBe('passed');
-    expect(seen).toMatchObject({ assertionReads: 1, assertionWrites: 1 });
   });
 });
 

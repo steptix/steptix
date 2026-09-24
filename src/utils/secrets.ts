@@ -8,8 +8,8 @@
  * can disagree about what to hide.
  *
  * Masking is applied at the outputs only. The run keeps its real values: the
- * step types the real password, the action cache stores the real action, a
- * captured `[as: token]` flows to later steps unchanged.
+ * step types the real password, a captured `[as: token]` flows to later
+ * steps unchanged.
  */
 import { isSecretName } from '../parser/parameters.js';
 import {

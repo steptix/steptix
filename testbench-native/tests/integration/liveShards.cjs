@@ -13,17 +13,16 @@ const cp = require('node:child_process');
  * Paths inside a copied workspace that must NOT come along.
  *
  * `reports/` is 4.7 MB of run history that no test reads (video-recording
- * snapshots the dir first and diffs, so an empty one suits it). The cache and
- * dot-dirs are per-run output — copying a previous run's would hand a shard a
- * warm cache the test believes it cleared. `*.steps.ts` is the sharpest of
- * them: no compiled step file is tracked in this repo, so any that exists is
- * a leftover, and a shard that starts with one would prove nothing when it
- * asserts the compile wrote it.
+ * snapshots the dir first and diffs, so an empty one suits it). The dot-dirs
+ * are per-run output — copying a previous run's would hand a shard a warm
+ * code-behind or tool cache the test believes it cleared. `*.steps.ts` is the
+ * sharpest of them: no compiled step file is tracked in this repo, so any that
+ * exists is a leftover, and a shard that starts with one would prove nothing
+ * when it asserts the compile wrote it.
  */
 const WORKSPACE_COPY_SKIP = new Set([
   'reports',
   'node_modules',
-  '.cache',
   '.aiui',
   '.aiui-codebehind-cache',
   '.aiui-tool-cache',
@@ -67,7 +66,6 @@ const CONFIG_PATH_KEYS = [
   ['tests', 'toolsDir'],
   ['reports', 'outputDir'],
   ['api', 'specsDir'],
-  ['cache', 'dir'],
 ];
 
 /** Every aiui.config.json under `root`, as absolute paths. */

@@ -22,8 +22,8 @@ import { fenced } from './failure-hover-core.ts';
 export type RowTableKind = 'run' | 'section';
 
 /** The status vocabulary a row line can wear in the gutter. A subset of the
- *  tracker's `LineStatus`: the `pass-*` origins are step facts (a cache hit, a
- *  code-behind entry) and never land on a row — a row is pass or fail. */
+ *  tracker's `LineStatus`: the `pass-*` origins are step facts (a code-behind
+ *  entry, a stale one) and never land on a row — a row is pass or fail. */
 export type RowLineStatus = 'running' | 'pass' | 'fail' | 'skip' | 'stopped';
 
 /** The word for one row of this kind of table, capitalised for a hover. */
@@ -100,7 +100,7 @@ export function rowHeaderSummary(
     statuses.filter((s) => s !== undefined && wanted.includes(s)).length;
   // `pass-*` are counted as passes for the same reason `computeStepsSummary`
   // does it: they are all successful. A row should never carry one.
-  const passed = count('pass', 'pass-cached', 'pass-code-behind', 'pass-stale');
+  const passed = count('pass', 'pass-code-behind', 'pass-stale');
   const failed = count('fail');
   const stopped = count('stopped');
   const notRun = count('skip');

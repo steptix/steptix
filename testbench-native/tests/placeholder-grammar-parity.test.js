@@ -6,8 +6,8 @@
  * TestBench cannot import `src/`: `src/parser/parameters.ts` pulls in the
  * logger and the whole server-side tree, so `env-data-definition-core.ts`
  * carries `PLACEHOLDER_SOURCE` by hand. That is the drift this file exists to
- * catch, and it catches it the way `cache-dir-parity.test.js` does — one
- * agreed artefact, asserted from both sides. Here the artefact is the runtime
+ * catch, and it catches it the one way a copy across that boundary can be
+ * caught — one agreed artefact, asserted from both sides. Here the artefact is the runtime
  * module's own text: the root suite (`tests/placeholder-dotted.test.ts`) pins
  * what the constant IS and what every `src/` reader DOES with it, and this
  * file pins that the extension's copy is that same literal.

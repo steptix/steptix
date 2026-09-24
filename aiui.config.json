@@ -35,6 +35,5 @@
     "includeAiReasoning": true,
     "embedScreenshots": true
   },
-  "server": { "host": "127.0.0.1", "port": 3100 },
-  "cache": { "enabled": true, "dir": ".cache" }
+  "server": { "host": "127.0.0.1", "port": 3100 }
 }

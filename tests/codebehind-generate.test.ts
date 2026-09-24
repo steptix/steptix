@@ -393,8 +393,8 @@ describe('buildStepCodePrompt — the measurement', () => {
         ],
       }).content,
     );
-    // Pinning row 42 compiles this run's DATA into a committed file — issue
-    // 024's defect, in the one place it outlives the cache entry.
+    // Pinning row 42 compiles this run's DATA into a committed file, so the
+    // entry must name the customer through the step's variable instead.
     expect(positional).toContain("step.getVar('customer')");
     expect(positional).toContain("instead of pinning this run's index");
     // And the model is told to read `resolvedBy`, never to sniff the string.

@@ -88,18 +88,6 @@ vi.mock('../src/runner/hooks.js', () => ({
   resolveHooks: (...args: unknown[]) => resolveHooksMock(...args),
 }));
 
-vi.mock('../src/cache/step-cache.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/cache/step-cache.js')>()),
-  StepCache: {
-    initialize: async () => ({
-      read: () => null,
-      write: vi.fn(),
-      readAssertion: () => null,
-      invalidateStep: vi.fn(),
-    }),
-  },
-}));
-
 vi.mock('../src/ai/diagnose.js', () => ({ diagnoseFailure: vi.fn(async () => null) }));
 vi.mock('../src/ai/client.js', () => ({
   AiClient: class { setAiPolicy = vi.fn(); syncAuth = vi.fn(() => null); },
@@ -265,7 +253,6 @@ describe('a desktop-first test launches no browser (acceptance 2)', () => {
       makeInstance(['[use computer]', 'Click Save in the dialog']),
       makeConfig(),
       '',
-      undefined,
       extras(),
     );
 
@@ -284,7 +271,6 @@ describe('a desktop-first test launches no browser (acceptance 2)', () => {
       makeInstance(['[use computer]', 'Press Ctrl+S', '[use browser]', 'Click the heading']),
       makeConfig(),
       '',
-      undefined,
       extras(),
     );
 
@@ -304,7 +290,7 @@ describe('a desktop-first test launches no browser (acceptance 2)', () => {
       return passingResult(instruction, 'computer');
     });
 
-    await runTest(makeInstance(['[use computer]', 'Click']), makeConfig(), '', undefined, extras());
+    await runTest(makeInstance(['[use computer]', 'Click']), makeConfig(), '', extras());
 
     expect(heldDuringStep).toBe('cli:/tmp/computer-mode-test.md');
     expect(existsSync(lockPath)).toBe(false);
@@ -327,7 +313,6 @@ describe('the CLI gives the lock back at the end of every runTest (§5.9)', () =
       makeInstance(['[use computer]', 'Click Save', 'Click Close']),
       makeConfig(),
       '',
-      undefined,
       extras(),
     );
 
@@ -343,7 +328,7 @@ describe('the CLI gives the lock back at the end of every runTest (§5.9)', () =
 
     let thrown: unknown;
     try {
-      await runTest(makeInstance(['[use computer]', 'Click Save']), makeConfig(), '', undefined, extras());
+      await runTest(makeInstance(['[use computer]', 'Click Save']), makeConfig(), '', extras());
     } catch (err) {
       thrown = err;
     }
@@ -386,7 +371,7 @@ describe('the CLI gives the lock back at the end of every runTest (§5.9)', () =
         runTestFn: (async (...args: Parameters<typeof runTest>) => {
           const row = rowReports.length + 1;
           if (row === 2) acquireComputerLock('mcp:another-session', { lockPath });
-          const report = await runTest(args[0], args[1], args[2], args[3], extras());
+          const report = await runTest(args[0], args[1], args[2], extras());
           if (row === 2) releaseComputerLock('mcp:another-session', { lockPath });
           betweenRows.push(existsSync(lockPath));
           rowReports.push(report);
@@ -451,7 +436,6 @@ describe('a CLI pause for a person gives the lock back (§5.9)', () => {
       ]),
       makeConfig(),
       '',
-      undefined,
       extras(),
     );
 
@@ -481,7 +465,6 @@ describe('a CLI pause for a person gives the lock back (§5.9)', () => {
       ]),
       makeConfig(),
       '',
-      undefined,
       extras(),
     );
 
@@ -516,7 +499,6 @@ describe('a CLI pause for a person gives the lock back (§5.9)', () => {
       ]),
       makeConfig(),
       '',
-      undefined,
       extras(),
     );
 
@@ -547,7 +529,6 @@ describe('a CLI pause for a person gives the lock back (§5.9)', () => {
       makeInstance(['Open the page', '[use computer]', 'Click Save', '[interactive]', 'Click Close']),
       makeConfig(),
       '',
-      undefined,
       extras(),
     );
 
@@ -582,7 +563,6 @@ describe('a CLI pause for a person gives the lock back (§5.9)', () => {
         makeInstance(['Open the page', '[use computer]', 'Click Save', 'Click Close']),
         config,
         '',
-        undefined,
         extras(),
       );
     } finally {
@@ -626,7 +606,7 @@ describe('a CLI pause for a person gives the lock back (§5.9)', () => {
       const betweenRows: boolean[] = [];
       const summary = await runTests([test], config, {
         runTestFn: (async (...args: Parameters<typeof runTest>) => {
-          const report = await runTest(args[0], args[1], args[2], args[3], extras());
+          const report = await runTest(args[0], args[1], args[2], extras());
           betweenRows.push(existsSync(lockPath));
           return report;
         }) as typeof runTest,
@@ -648,7 +628,6 @@ describe('§5.1 refusals on the CLI path', () => {
       makeInstance(['[use computer]', 'Click Save']),
       makeConfig({ enabled: false }),
       '',
-      undefined,
       extras(),
     );
 
@@ -663,7 +642,6 @@ describe('§5.1 refusals on the CLI path', () => {
       makeInstance(['[use computer]']),
       makeConfig(),
       '',
-      undefined,
       extras({
         probeComputerCapture: async () => {
           throw new Error('screen capture failed (BitBlt error 6)');
@@ -709,7 +687,6 @@ describe('§5.1 item 1b — the vision route on the CLI path (§15.4)', () => {
       makeInstance(['[use computer]', 'Click Save']),
       config,
       '',
-      undefined,
       extras({
         checkVisionRoute: check,
         loadDesktopAdapter: async () => {
@@ -741,7 +718,6 @@ describe('§5.1 item 1b — the vision route on the CLI path (§15.4)', () => {
       makeInstance(['[use computer]']),
       bridgeConfig({ enabled: false }),
       '',
-      undefined,
       extras({ checkVisionRoute: check }),
     );
 
@@ -755,7 +731,6 @@ describe('§5.1 item 1b — the vision route on the CLI path (§15.4)', () => {
       makeInstance(['[use computer]', 'Click Save']),
       bridgeConfig(),
       '',
-      undefined,
       extras({
         checkVisionRoute: async () => ({ ok: false, error: REFUSAL }),
         loadDesktopAdapter: async () => {
@@ -783,7 +758,6 @@ describe('§5.1 item 1b — the vision route on the CLI path (§15.4)', () => {
       makeInstance(['[use computer]']),
       config,
       '',
-      undefined,
       extras({ checkVisionRoute: check }),
     );
 
@@ -808,7 +782,6 @@ describe('a [use …] line in a hook is refused (§4.4)', () => {
       makeInstance(['Click the heading']),
       makeConfig(),
       '',
-      undefined,
       extras(),
     );
 
@@ -843,7 +816,6 @@ describe('a skill call restores the caller\'s surface (acceptance 6)', () => {
       makeInstance(steps, {}, skillExpansion(steps, [1, 2], 'skill')),
       makeConfig(),
       '',
-      undefined,
       extras(),
     );
 
@@ -869,7 +841,6 @@ describe('a skill call restores the caller\'s surface (acceptance 6)', () => {
       makeInstance(steps, {}, skillExpansion(steps, [1, 2], 'skill')),
       makeConfig(),
       '',
-      undefined,
       extras({
         loadDesktopAdapter: async () => {
           loads++;
@@ -898,7 +869,6 @@ describe('a skill call restores the caller\'s surface (acceptance 6)', () => {
       makeInstance(steps, {}, skillExpansion(steps, [1, 2], 'skill')),
       makeConfig(),
       '',
-      undefined,
       extras(),
     );
 
@@ -919,7 +889,6 @@ describe('a skill call restores the caller\'s surface (acceptance 6)', () => {
       makeInstance(steps, {}, skillExpansion(steps, [1, 2], 'section')),
       makeConfig(),
       '',
-      undefined,
       extras(),
     );
 
@@ -1014,7 +983,6 @@ describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surf
       makeInstance(['[use computer]', '[tool: open_calculator]', 'Click equals']),
       configWithTools(),
       '',
-      undefined,
       extras(),
     );
 
@@ -1034,7 +1002,7 @@ describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surf
     const instance = makeInstance(['[use computer]', '[tool: open_calculator]']);
     instance.test.toolCalls = [null, parseToolCall('[tool: open_calculator]')];
 
-    const report = await runTest(instance, configWithTools(), '', undefined, extras());
+    const report = await runTest(instance, configWithTools(), '', extras());
 
     expect(report.status).toBe('failed');
     expect(report.steps[1]!.error).toContain('Tool "open_calculator" not found in catalogue.');
@@ -1047,7 +1015,6 @@ describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surf
       makeInstance(['[use computer]', '[skill: open-calculator]']),
       configWithTools(),
       '',
-      undefined,
       extras(),
     );
 
@@ -1081,7 +1048,7 @@ describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surf
     const instance = makeInstance(['[use computer]', '[input: note] Anything?', '[tool: launch]']);
     instance.test.toolCalls = [null, null, parseToolCall('[tool: launch]')];
 
-    const report = await runTest(instance, configWithTools(), '', undefined, extras());
+    const report = await runTest(instance, configWithTools(), '', extras());
 
     expect(report.status).toBe('failed');
     expect(report.steps[2]!.error).toBe(
@@ -1095,7 +1062,6 @@ describe('an undispatched [tool:] / [skill:] line fails on the CLI computer surf
       makeInstance(['[tool: open_calculator]']),
       configWithTools(),
       '',
-      undefined,
       extras(),
     );
 

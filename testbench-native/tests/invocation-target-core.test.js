@@ -19,7 +19,7 @@
  *
  * Direct `.ts` specifier: the module is node builtins only (fs + path, no
  * vscode), so Node strips the types and loads it — same convention as
- * cache-dir-parity.test.js.
+ * steps-summary.test.js and the other `*-core.ts` suites.
  */
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';

@@ -845,17 +845,10 @@ export function createApiServer(
       if (body.pauseAtNextCodeBehind === true) {
         request.pauseAtNextCodeBehind = true;
       }
-      // Step-cache control fields. Caching is opt-in: the server enables it
-      // only when `cacheEnabled: true` is sent explicitly (and a testFilePath
-      // is present). An absent flag means off. We pass through whichever
-      // explicit boolean the client sent. `fullSteps` lets multi-batch runs
-      // share a stable bundle hash so cache hits survive paused-and-resumed
-      // runs.
-      if (body.cacheEnabled === false) {
-        request.cacheEnabled = false;
-      } else if (body.cacheEnabled === true) {
-        request.cacheEnabled = true;
-      }
+      // The test's whole step list, when this batch is a slice of it (see
+      // `StepRequest.fullSteps`). A `cacheEnabled` an older client still sends
+      // is not on this list and is dropped: the step cache it asked for was
+      // removed.
       if (
         Array.isArray(body.fullSteps) &&
         body.fullSteps.every((s: unknown) => typeof s === 'string')

@@ -83,12 +83,12 @@ headers while deterministic runtime code owns alignment. Object-aware
 later without changing its contract.
 
 §7.10 does ask for exactly that item selector and those field selectors — but
-once, as a separate question about STRUCTURE, validated against the live page
-before a cell is read, and then cached, so the selectors are chosen once and
-the reading stays deterministic on this run and every run after. What the
-argument above is against is a model inventing one selector per field on every
-read, per row, with nothing checking that they line up; asking once, checking
-the answer, and never asking again is the opposite of that.
+once per run, as a separate question about STRUCTURE, validated against the
+live page before a cell is read, and then remembered for the rest of that run,
+so the selectors are chosen once and the reading stays deterministic from then
+on. What the argument above is against is a model inventing one selector per
+field on every read, per row, with nothing checking that they line up; asking
+once, checking the answer, and reusing it is the opposite of that.
 
 ### 1.3 Phases
 
@@ -134,7 +134,7 @@ Everything §14 lists is outside all three.
   the model N times.
 - Iterate those objects with the existing `For each` grammar.
 - Resolve direct property placeholders such as `{{order.status}}` in step text,
-  cached actions, generated code-behind, reports, and every run surface.
+  generated code-behind, reports, and every run surface.
 - Behave the same through the CLI, Sessions API, MCP-backed test runs, Electron
   runner, and TestBench.
 - Fail loudly on ambiguous or unsupported table structure instead of returning
@@ -970,7 +970,7 @@ limit?: number;
   about (§7.10);
 - `mapping`: runtime-owned (§7.10). Never emitted by the model — the parser
   strips it — written by the runtime after a validated structure answer,
-  stored in the step cache and shown in the report;
+  remembered for the rest of the run (§7.10) and shown in the report;
 - `frame`: optional existing iframe selector;
 - `as`: destination variable name;
 - `description`: model-authored description.
@@ -2097,14 +2097,14 @@ Five refinements, each measured on the way in:
   a row header is that row's cell at its position); only a row with no cells
   is skipped and counted.
 
-### 7.10 When structure cannot decide: the model names the parts, once
+### 7.10 When structure cannot decide: the model names the parts, once per run
 
 Everything above is structural and free. What is left is the long tail —
 headings written as `<td>`, a header table after the rows, card lists,
 key/value tables per record, widgets nobody has measured — and it is read
 by asking the model ONE question about structure, validating the answer
-against the page, and then reading deterministically, on this run and on
-every run after.
+against the page, and then reading deterministically for the rest of that
+run.
 
 **When.** Only when a read fails for a SHAPE reason: no table or grid with
 data rows under the matched element (§7.2); two or more with data rows
@@ -2239,7 +2239,7 @@ by an internal `mapping` argument rather than searched for — §7.3b, §7.4,
 item in document order, `_row` first, each field the rendered text of its
 element (§7.4's text rule), `""` when the field is absent from that item.
 
-**Caching.** Within one run, a validated mapping is remembered in a **memo**
+**Remembering.** Within one run, a validated mapping is remembered in a **memo**
 (`src/runner/structure-memo.ts`), so a later step that reads the same region —
 the next page of a legacy table in a `While` loop, a second read after an
 action — reuses it (validated against the page as always) and logs
@@ -2265,8 +2265,7 @@ own run ends:
 - the CLI makes one per `runTest`, which is one per **data row** — a row
   that navigates somewhere else should not start out holding the previous
   row's answers;
-- the server makes one per **batch**, the lifetime `stepCache` already has:
-  a batch is what the server knows about, and a run split by a breakpoint or
+- the server makes one per **batch**: a batch is what the server knows about, and a run split by a breakpoint or
   an `[input:]` simply asks once more on the far side rather than reusing an
   answer from before a pause the user may have spent editing the page;
 - the errand runner (`src/server/errand-runner.ts`) and the Electron runner
@@ -2276,46 +2275,39 @@ own run ends:
 - a caller that keeps no run state at all — the REPL — passes none and
   behaves as it did before the memo existed: one question per step.
 
-The memo is deliberately **not gated by the step cache**. That switch is
-about replaying a frozen action plan; this is about not asking the same
-structural question twice in one run, and the two do not answer to each
-other. A run with the cache off still asks once — and a loop body, which
-never uses the cache at all, is precisely the shape the memo exists for: a
-`While` that re-reads one legacy table every pass asks on the first pass and
-on no other.
+A loop body is precisely the shape the memo exists for: a `While` that
+re-reads one legacy table every pass asks on the first pass and on no other.
 
-Across runs, the validated mapping is written onto the cached `readTable`
-action as `mapping` — a field the RUNTIME owns: the parser strips it from
-anything the model emits, the step cache stores it, the report shows it.
-A cached run applies the mapping first and validates it against the page
-as above (the header texts are still there, the counts agree, the item
-selector still matches). When that fails, the read is first repeated
-WITHOUT the mapping — free, no model call — and if that succeeds the
-mapping was simply no longer needed and is dropped from the cache; if it
-fails too, the question is asked ONCE more, the cache rewritten with the new
-answer, and a second failure is the refusal with both answers in the log.
-That second question is asked from a **fresh sketch of the region**
-(`sketchTable`, `src/browser/actions.ts`) rather than from the re-read's
-refusal, because the re-read need not have failed for a shape reason at all:
-a mapping that no longer fits can leave the unmapped read failing for any
-reason the page now has, and a refusal that is not a shape one carries no
-sketch. Sketching the region again is what keeps "asked once more" true in
-the case the sentence was written for. Every failure that follows a question is
-non-retryable: retried, a failing cached replay would be invalidated and
-re-run under AI, asking the same question a second and a third time, and
-the "both answers" sentence would be lost with the cache that held the
-first. Code-behind: readTable stays an AI-only framework
-action (§9.2); the mapping rides in the cache until phase 3's `tables.read`
-writes it into the generated call.
+The validated mapping is also written onto the step's `readTable` action as
+`mapping` — a field the RUNTIME owns: the parser strips it from anything the
+model emits, and the report shows it. The memo is the only place it is
+reused. The read is always tried without a mapping first, so a remembered one
+is consulted only after the page's own structure has refused for a shape
+reason; it is then validated against the page as above (the header texts are
+still there, the counts agree, the item selector still matches) before the
+model is asked anything. When it no longer fits, the question is asked from
+that first refusal's sketch, and a failure after the answer is the refusal
+with both the remembered mapping and the model's answer in it. Every failure
+that follows a question is non-retryable: retried, the step would re-run from
+the top and ask the same question a second and a third time, for the same
+answer.
 
-**Log and report.** Four lines at info, quoted here because they are what a
+**Nothing is kept across runs.** Each run starts with an empty memo, so the
+first read of an odd shape asks again on every run. Code-behind does not
+compile a `readTable` step yet: it is in `FRAMEWORK_ACTIONS`
+(`src/codebehind/generate.ts`) until phase 3's `tables.read` (§9.2) writes
+the mapping into the generated call, so a compiled test still makes that one
+call. (Until the step cache was removed, the mapping rode in it across runs,
+with a re-ask path for a cached mapping that had stopped fitting. Both are
+gone.)
+
+**Log and report.** Three lines at info, quoted here because they are what a
 reader greps for (`src/runner/step-executor.ts`):
 
 ```text
 readTable: structure asked of the model — <summary>
 readTable: structure reused from step N
 readTable: the read failed for a shape reason and `tableStructure: strict` is set, so the model was not asked about the structure.
-readTable: the cached structure mapping is no longer needed — the page's own structure decides it now, so the mapping has been dropped from the cache.
 ```
 
 An answer of `none` writes the first of them as
@@ -2323,9 +2315,9 @@ An answer of `none` writes the first of them as
 
 The read's own summary line (§7.6) then says where the structure came from,
 as its last parenthesised note — `structure from the model: …` when this
-step asked, `structure from the run: …` when the memo answered, and
-`structure from the cache: …` when the cached mapping did, so a green read
-says which of the three paid for it. That phrase leads a TABLE mapping,
+step asked and `structure from the run: …` when the memo answered, so a
+green read says which of the two paid for it. That phrase leads a TABLE
+mapping,
 and what follows names each candidate by the id the model used AND by its
 selector, because the id alone means nothing once the sketch has scrolled
 out of the log. A COLLECTION's note is the bare `collection: ` form — the
@@ -2341,8 +2333,8 @@ readTable captured 5 rows × 3 columns as "{{cards}}" (collection: 5 items by ".
 The sketch, the question and the answer go to the debug log; the report's
 action carries `mapping`.
 
-**Cost and control.** One model call per structure per run, and none on a
-cached run. `## Config` `tableStructure: strict` (and `"tables": { "structure": "strict" }` in
+**Cost and control.** One model call per structure per run, on every run.
+`## Config` `tableStructure: strict` (and `"tables": { "structure": "strict" }` in
 `aiui.config.json`) turns the question off for a test or a project, so a
 run that must be deterministic gets the refusal instead. TestBench's own
 client does not forward `tableStructure` (its per-session config carries
@@ -2659,14 +2651,12 @@ root no loop binds, still warns.
 
 ---
 
-## 9. Code-behind and cache behavior
+## 9. Code-behind and placeholders
 
-### 9.1 Cached AI actions
+### 9.1 Placeholders in a `readTable` action
 
-A cached `readTable` plan must execute against the current DOM and capture fresh
-records, exactly as a cached `read multiple` action does. Cache only the action
-shape (`selector`, headers or indexes, keys, modes, and optional `limit`),
-never captured row data.
+(This section also covered replaying a `readTable` from the step cache. The
+step cache has been removed; code-behind, §9.2, is the only replay.)
 
 Placeholder substitution must walk header strings if an author parameterized a
 header name, while `columns[].key` remains a definition/name and must never be
@@ -2833,12 +2823,12 @@ root or a literal value that can be inlined into generated source.
 | ARIA grid with several header rows | The header grid of §7.3b over `aria-colspan`/`aria-rowspan`. |
 | `<table role="grid">` | A table (the tag wins). |
 | A `<table>` with data rows and an ARIA grid with data rows under one wrapper | Two things with rows: refused, then the model may be asked (§7.10). |
-| Headings as `<td>` in the first body row, no `<th>` | No structural header; the model names the row once (§7.10); cached. |
-| Header table after the rows with a paragraph between | Not paired structurally (§7.3a); the model pairs them (§7.10); cached. |
+| Headings as `<td>` in the first body row, no `<th>` | No structural header; the model names the row once per run (§7.10). |
+| Header table after the rows with a paragraph between | Not paired structurally (§7.3a); the model pairs them once per run (§7.10). |
 | Repeated cards, no rows or cells | The model answers a collection (§7.10): item selector plus a field selector per column. |
 | One key/value table per record | A collection whose item is the table (§7.10). |
 | The model answers `none` | The read fails with the original refusal and the model's reason. |
-| A cached mapping no longer fits the page (header renamed, cards restyled) | Asked once more, cache rewritten; a second miss fails with both answers logged. |
+| A mapping remembered earlier in the run no longer fits the page (header renamed, cards restyled) | Asked again from the refusal's sketch; a miss after that fails with both the remembered mapping and the answer in the message. |
 | `## Config: tableStructure: strict` | No model question: the shape refusal stands. |
 | A named header absent from a header that exists | Still the §7.3 refusal listing the available headers; never a model question. |
 
@@ -2870,11 +2860,10 @@ The implementing agent should inspect and update at least these areas:
   the pinned `mapping` path (§7.10).
 - `src/runner/step-executor.ts` — the structure question (§7.10): on a
   shape refusal, the sketch → `buildGridStructurePrompt` → one model call →
-  validation → the pinned read → `mapping` on the cached action; the
-  once-more rule on a cached mapping that no longer fits.
+  validation → the pinned read → `mapping` on the recorded action; a
+  remembered mapping that no longer fits falls through to the question.
 - `src/ai/prompts.ts` — `buildGridStructurePrompt`; `src/ai/action-parser.ts`
-  strips `mapping` from model output. The step cache keeps `mapping` with no
-  edit of its own: it rides on the recorded action like any other field.
+  strips `mapping` from model output.
 - `src/config/table-structure.ts` — `tableStructureOf`, the one place
   `## Config: tableStructure:` and `aiui.config.json`'s `tables.structure`
   are resolved into one answer.
@@ -3133,9 +3122,10 @@ states the rule. Two entries predate the review rounds and say so.
     body produces `[]` with the skip logged; a placeholder among data rows is
     skipped; a `colspan` narrower than the table still fails.
 13. Step executor JSON-encodes records into the named variable.
-14. Cached actions preserve `index` and `limit` and reread changed DOM data
-    rather than replaying old records. (Phase 3) The same of a *generated*
-    action, which does not exist until `tables.read` is emitted.
+14. (The cached-action half was removed with the step cache.) (Phase 3) A
+    *generated* action preserves `index` and `limit` and rereads changed DOM
+    data rather than replaying old records; it does not exist until
+    `tables.read` is emitted.
 15. Scalar `For each` regression suite stays green.
 16. Object `For each` binds the base JSON and all direct properties in order.
 17. A missing object property fails before any model call; a key no
@@ -3301,12 +3291,10 @@ states the rule. Two entries predate the review rounds and say so.
     more than 500, refuses a field matching two elements in an item, reads
     `""` and counts a field missing in some items, fails one missing in all;
     a `none` answer fails with the reason; the validated `mapping` is on the
-    cached action and a second run through the api-server makes NO model
-    call; a mapping that no longer fits asks once more and rewrites the
-    cache, and a second miss fails with both answers; two steps reading the
+    recorded action; two steps reading the
     same region in one run ask exactly once (the memo), a third with other
     columns asks again, and a memo entry that no longer validates is
-    re-asked; `mapping` emitted by
+    re-asked, a miss after that failing with both answers; `mapping` emitted by
     the model is stripped by the parser; `tableStructure: strict` in
     `## Config` and `tables.structure` in `aiui.config.json` turns the question off.
 31. The structure prompt (`tests/prompts-grid-structure.test.ts`) carries the
@@ -3455,9 +3443,9 @@ The feature is complete only when:
    first column without changing the test.
 4. (Phase 1) No supported structural error can silently misalign fields across
    rows.
-5. `{{item.property}}` works consistently in authored step text, cached
-   actions and reports (phase 1), and in generated code-behind and editor
-   runtime scope (phase 3).
+5. `{{item.property}}` works consistently in authored step text and
+   reports (phase 1), and in generated code-behind and editor runtime scope
+   (phase 3).
 6. (Phase 1) Existing flat plural reads and scalar `For each` tests remain
    unchanged and green.
 7. (Phase 3) Code-behind replay uses the same extractor as the AI action.
@@ -3497,7 +3485,8 @@ The feature is complete only when:
     shapes are in the fixture app and the acceptance suite.
 19. (Phase 1) A read that fails for a shape reason asks the model once for
     the structure, validates the answer against the page, reads
-    deterministically, caches the mapping, and never asks on a cached run;
+    deterministically, and asks at most once per structure per run (the
+    memo);
     the four §5.9 shapes read; `tableStructure: strict` turns it off;
     a named-header typo is never a model question (§7.10).
 20. (Phase 1) A collection answer reads repeated elements with one field
@@ -3608,7 +3597,7 @@ Moved out of v1 after review, each with why and what would bring it back:
 - **Indexing the captured list** (`{{payments[5].status}}`). One index
   segment, one-based to match `_row`, and stale by design. Page reads cover
   the real cases so far (§4.5).
-- **Loop bodies are uncompiled and uncached.** Every step in a `For each` body
+- **Loop bodies are uncompiled.** Every step in a `For each` body
   goes to the model on every pass, so a 40-row table with three steps per row
   is 120 model calls a run. `readTable` compiles; the body does not. Once
   tables loop properly this is the cost felt first, and it needs its own story

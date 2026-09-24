@@ -18,8 +18,7 @@ import { expandSkills, clearSkillCache } from '../src/skills/expander.js';
  *
  *  1. the nested frame was overwritten in the shared `frames` map, so its
  *     steps reported a frame belonging to an unrelated skill (wrong
- *     `sourceSkill` in reports, wrong `frameScopedStepKey` cache entries,
- *     wrong call-stack rows);
+ *     `sourceSkill` in reports, wrong call-stack rows);
  *  2. both instances shared one `__skill<N>_` prefix, so one skill's
  *     `[store as:]` clobbered the other's value in session scope — the exact
  *     cross-instance leak the namespacing exists to prevent.

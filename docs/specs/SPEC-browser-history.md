@@ -201,7 +201,7 @@ model writes the call from the recorded action as it does for `navigate`.
 A generated entry is not required to reproduce §4.3's message — §11.7 pins
 only that the entry navigates.
 
-## 8. Report, log, cache
+## 8. Report and log
 
 - **Log line:** the ordinary `action.back` / `action.forward` trace line
   carrying the description, and nothing else. A first cut added a second,
@@ -209,11 +209,9 @@ only that the entry navigates.
   information the two existing lines did not, and it is gone. The URL moved to
   is visible in the next step's context as it is after any navigation.
 - **Report:** an ordinary action row. No new field.
-- **Step cache:** cacheable, like `navigate`. The actions carry no
-  parameters, so there is nothing to substitute and nothing to reverse —
-  `reverseInterpolate`/`forwardInterpolate` see no values. A cached `back`
-  replays as a `back`, which is correct: the history it moves through is
-  the one the replay itself built.
+- **Step cache:** none. `back`/`forward` were cacheable like `navigate`
+  while the step cache existed; it has since been removed, and code-behind
+  (§7) is the only replay.
 - **Secrets:** nothing to mask. The actions carry no value; the
   `description` is the model's own sentence and goes through the same
   redaction as every other description.
@@ -277,7 +275,7 @@ passthrough the other template tests need.
    moved through the history and NOT for one that did not (the rule is
    conditional, like the tab rule beside it), and the action is absent from
    the refusal list so the compile is not declined.
-8. The step cache round-trips a `back` action unchanged.
+8. (Removed with the step cache.)
 9. End to end through the api-server entry: a step whose recorded action is
    `back` runs and emits the ordinary step events.
 10. Acceptance: §10's file passes against the fixture app.

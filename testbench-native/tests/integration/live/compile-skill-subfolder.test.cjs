@@ -284,7 +284,7 @@ describe('TestBench live — compile to code through a subfolder skill', functio
     );
     const aggregate = testStatuses[SKILL_INVOCATION_LINE];
     assert.ok(
-      aggregate === 'pass' || aggregate === 'pass-cached' || aggregate === 'pass-code-behind' || aggregate === 'pass-stale',
+      aggregate === 'pass' || aggregate === 'pass-code-behind' || aggregate === 'pass-stale',
       `the [skill:] aggregate row (line ${SKILL_INVOCATION_LINE}) must show a passing state, got "${aggregate}"`,
     );
 

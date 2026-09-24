@@ -12,7 +12,6 @@ import type { Page } from 'playwright';
 import type { AiClient } from '../src/ai/client.js';
 import type { AIAction, ChatMessage } from '../src/ai/types.js';
 import type { Config } from '../src/config/types.js';
-import type { StepCache } from '../src/cache/step-cache.js';
 import type { StepResult } from '../src/report/types.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
@@ -20,22 +19,14 @@ import { parseFailureTail } from '../src/parser/failure-tail.js';
 
 const actions = vi.hoisted(() => ({ received: [] as AIAction[] }));
 
-// `#missing…` is an ordinary failure a re-plan could fix; `#fatal…` is one the
-// action layer tagged non-retryable (a missing upload file — upload-action.md,
-// decision 8). Everything else works, so one harness drives both directions.
+// `#missing…` is an ordinary failure a re-plan could fix. Everything else
+// works, so one harness drives both directions.
 vi.mock('../src/browser/actions.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/browser/actions.js')>();
   return {
     ...actual,
     executeAction: vi.fn(async (_page: unknown, action: AIAction) => {
       actions.received.push(action);
-      if (action.selector?.startsWith('#fatal')) {
-        return {
-          success: false,
-          error: `Upload file not found: ${action.filePath ?? action.selector}`,
-          retryable: false,
-        };
-      }
       return action.selector?.startsWith('#missing')
         ? { success: false, error: `Element not found: ${action.selector}` }
         : { success: true };
@@ -130,30 +121,6 @@ const failing = (selector: string, action: AIAction['action'] = 'click'): string
   turn(action, selector),
 ];
 
-/** A cache that replays one turn: the action is the whole point. */
-function cacheOf(action: AIAction): StepCache {
-  const cached = { rawResponse: plan([action]), actions: [action], reasoning: 'cached' };
-  return {
-    read: async () => [cached],
-    write: async () => {},
-    invalidateStep: async () => {},
-    readAssertion: async () => null,
-    writeAssertion: async () => {},
-    invalidateAssertion: async () => {},
-  } as unknown as StepCache;
-}
-
-/** A cached upload whose file is missing — the non-retryable replay. */
-const CACHED_FATAL: RunOpts = {
-  stepCache: cacheOf({
-    action: 'upload',
-    selector: '#fatal-statement-file',
-    filePath: 'attachments/nope.png',
-    description: 'Upload the statement',
-  }),
-  cacheEnabled: true,
-};
-
 const ASK = plan([{ action: 'prompt', description: 'which banner?', question: 'which banner?' }]);
 
 /** A binding with an entry written in-line: `runCodeBehindEntry` needs the entry
@@ -192,8 +159,6 @@ function textOf(messages: ChatMessage[]): string {
 
 type RunOpts = {
   config?: Config;
-  stepCache?: StepCache;
-  cacheEnabled?: boolean;
   codeBehind?: CodeBehindBinding;
   /** No console to answer an AI question on. */
   nonInteractive?: boolean;
@@ -229,8 +194,6 @@ async function runStep(
     resolvedParameters: opts.parameters ?? {},
     testSteps: [instruction],
     ...(tail && { failureTail: tail }),
-    ...(opts.stepCache && { stepCache: opts.stepCache }),
-    ...(opts.cacheEnabled !== undefined && { cacheEnabled: opts.cacheEnabled }),
     ...(opts.codeBehind && { codeBehind: opts.codeBehind }),
     ...(opts.nonInteractive && { nonInteractive: true }),
   }, authored);
@@ -253,7 +216,7 @@ beforeEach(() => {
 
 /**
  * The tail is stripped from the two prompt texts and NOTHING else, so the report
- * row, the console line, the cache key and the run log keep the line the author
+ * row, the console line and the run log keep the line the author
  * wrote (decision 4). A model shown "otherwise continue" would answer `noop`; one
  * shown "otherwise fail with message" would answer `fail`.
  */
@@ -268,7 +231,7 @@ const HIDING: Array<{
   hidden: string[];
   /** Defaults to a pass: only the enriched row below fails. */
   status?: StepResult['status'];
-  /** Exact `result.instruction` — what the row, log and cache key are built from. */
+  /** Exact `result.instruction` — what the row and log are built from. */
   instructionKept?: string;
   tolerated?: true;
 }> = [
@@ -342,7 +305,7 @@ describe('the prompt texts', () => {
   });
 });
 
-// ── The four paths into a failed result ────────────────────────────────────
+// ── The three paths into a failed result ───────────────────────────────────
 
 /**
  * Every failed result leaving `executeStep` passes through `applyFailureTail`
@@ -374,18 +337,6 @@ const PATHS: FailingPath[] = [
     error: 'Element not found: #missing-title',
     untouched: 'Failed to execute step. Last error:',
     fail: (line, opts) => runStep(line, failing('#missing-title'), opts),
-  },
-  {
-    // A cached upload with no file fails NON-retryably and never reaches the AI
-    // flow: it is re-thrown from the first attempt into the shared handler.
-    path: 'a replayed cached action no re-planning could fix',
-    body: 'Upload the statement',
-    message: 'No statement to upload',
-    error: 'Upload file not found: attachments/nope.png',
-    untouched: 'Failed to execute step. Last error:',
-    noModel: true,
-    // The scripted turn is there to be left unused: `noModel` proves it was.
-    fail: (line, opts) => runStep(line, [noopTurn()], { ...CACHED_FATAL, ...opts }),
   },
   {
     // The one failed result that leaves `executeStepAttempt` by RETURNING, so the

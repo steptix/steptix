@@ -197,7 +197,7 @@ Everything below is read out of the current tree.
   primitive for a `Set` template than chaining `interpolateEnvData` then
   `interpolate` by hand: one call, one grammar, already used by every AI
   action's own act-time substitution, and it sidesteps the very
-  re-scan hazard [issue 023](../issues/023-cache-reverse-interpolation-substring-collision.md)
+  re-scan hazard [issue 023](../issues/023-cache-reverse-interpolation-substring-collision.md) (since removed)
   is about (there, for a different write path — the cache's blind
   `replaceAll`). `substituteText` itself leaves an unresolved reference as
   written rather than failing — its callers already refused the turn by the
@@ -320,7 +320,7 @@ Everything below is read out of the current tree.
   but its neighbours are.** A cached plan for the *next* AI step
   reverse-interpolates every parameter value into `{{name}}` tokens
   (`src/cache/step-cache.ts`), and
-  [issue 023](../issues/023-cache-reverse-interpolation-substring-collision.md)
+  [issue 023](../issues/023-cache-reverse-interpolation-substring-collision.md) (since removed)
   is that a short value collides with unrelated text. A `Set` that produces
   `"1"` or `"Ref"` widens that surface. Not this story's bug; named so a
   collision after adding a `Set` is recognised for what it is.

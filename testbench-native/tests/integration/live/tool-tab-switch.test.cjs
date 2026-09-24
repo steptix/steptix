@@ -53,10 +53,10 @@ const MAIN_TOOL_STEP = 11;
 const MAIN_ASSERT_STEP = 12;
 
 /** Every status the gutter treats as green. A tool step reports a plain
- *  `pass`, but the AI steps around it may legitimately replay from cache (⚡)
- *  or from a compiled entry (</>), so pinning to 'pass' would fail this suite
- *  for a reason unrelated to which tab anything ran in. */
-const PASS_STATUSES = new Set(['pass', 'pass-cached', 'pass-code-behind', 'pass-stale']);
+ *  `pass`, but the AI steps around it may legitimately run from a compiled
+ *  entry (</>), so pinning to 'pass' would fail this suite for a reason
+ *  unrelated to which tab anything ran in. */
+const PASS_STATUSES = new Set(['pass', 'pass-code-behind', 'pass-stale']);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
