@@ -469,6 +469,26 @@ List all active sessions.
 
 ---
 
+### POST /sessions/:id/record-steps
+
+Start recording the author's actions in the session's browser (TestBench's
+**Record Steps**). Always a Server-Sent Events response: `record:action`
+frames as the author works, then — after a `stop` control — the steps a model
+wrote from them. Creates the session when absent, accepting `config` on that
+first request only, as `POST /sessions/:id/steps` does; launches the browser
+when there is none. Holds the session's queue until the recording ends.
+Refused with `409` while a run holds the queue, and with `400` on a headless
+server. Body, frames and statuses: [SPEC-record-steps.md §9](SPEC-record-steps.md#9-on-the-wire).
+
+### POST /sessions/:id/record-steps/control
+
+Steer a running recording: `stop` (with the ids of any actions to drop),
+`check` / `cancel-check` (pick mode for a check step), `cancel`. `202`
+accepted, `404` when no recording is running.
+[SPEC-record-steps.md §9.3](SPEC-record-steps.md#93-post-sessionsidrecord-stepscontrol).
+
+---
+
 ## Session Lifecycle
 
 ```
