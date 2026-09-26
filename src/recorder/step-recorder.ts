@@ -1,7 +1,7 @@
 import type { BrowserContext, CDPSession, Frame, Page } from 'playwright';
 import { briefly, type BrowserSession } from '../browser/manager.js';
 import { logger } from '../utils/logger.js';
-import { MASK, redact, redactDeep } from '../utils/secrets.js';
+import { MASK, RECORD_SECRET_MIN_LENGTH, redact, redactDeep } from '../utils/secrets.js';
 import { cropAround } from './crop.js';
 import { RECORD_BINDING_NAME, RECORD_CONTROL_NAME, recordStepsPageScript } from './page-script.js';
 import { ACTION_KINDS } from './types.js';
@@ -178,16 +178,46 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * A page string, whitespace-folded, MASKED, then clipped — in that order. The
- * page sends its text long for exactly this reason (record-steps.js,
- * `PAGE_CLIP_FLOOR`): clipped first, a secret that crossed the cut would
- * arrive as a prefix no mask could match (review, finding 8).
+ * A page string MASKED, then whitespace-folded, then clipped — in that order.
+ * The page sends its text long and unfolded for exactly this reason
+ * (record-steps.js, `clip`): clipped first, a secret that crossed the cut
+ * would arrive as a prefix no mask could match (review, finding 8); folded
+ * first, a secret holding a double space or a line break would arrive in a
+ * spelling no mask could match (review 2, finding 9).
  */
 function str(value: unknown, max: number, secrets: readonly string[] = []): string | undefined {
   if (typeof value !== 'string') return undefined;
-  const s = redact(value.replace(/\s+/g, ' ').trim(), [...secrets]);
+  const s = redact(value, [...secrets]).replace(/\s+/g, ' ').trim();
   if (s === '') return undefined;
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+/**
+ * Every spelling of a secret the recording masks: as typed; as it reads
+ * inside a JSON string (`pa"ss` is `pa\\"ss` there); and as it reads in a URL
+ * — `encodeURIComponent`'s, a form's (`+` for a space) and `encodeURI`'s —
+ * because a link's `href`, a tab's address and a typed navigation carry a
+ * token in whichever one the page or the browser used (review 2, finding 9).
+ */
+export function secretSpellings(values: readonly string[]): string[] {
+  const out = new Set<string>();
+  const add = (v: string): void => {
+    if (v !== '') out.add(v);
+  };
+  for (const value of values) {
+    if (value === '') continue;
+    add(value);
+    add(JSON.stringify(value).slice(1, -1));
+    try {
+      const component = encodeURIComponent(value);
+      add(component);
+      add(component.replace(/%20/g, '+'));
+      add(encodeURI(value));
+    } catch {
+      // A lone surrogate cannot be URL-encoded; nothing can carry it that way.
+    }
+  }
+  return [...out];
 }
 
 /**
@@ -243,6 +273,10 @@ function sanitizeDescription(raw: unknown, secrets: readonly string[] = []): Ele
     const v = str(raw[key], max, secrets);
     if (v !== undefined) (d as unknown as Record<string, unknown>)[key] = v;
   }
+  // The page no longer folds its whitespace, so a text that differs from the
+  // name only in spacing arrives as a field of its own; folded, it says
+  // nothing the name does not.
+  if (d.text !== undefined && d.text === d.name) delete d.text;
   // The name and text without their decoration; the raw name kept beside it
   // when that changed something, for a model that needs to know it was there.
   for (const key of ['name', 'text'] as const) {
@@ -277,7 +311,11 @@ function strings(
   if (!Array.isArray(value)) return undefined;
   const out: string[] = [];
   for (const item of value.slice(0, maxItems)) {
-    const s = typeof item === 'string' ? redact(item, [...secrets]).slice(0, maxLen) : undefined;
+    // Masked, then folded (the page sends it unfolded — see `str`), then cut.
+    const s =
+      typeof item === 'string'
+        ? redact(item, [...secrets]).replace(/\s+/g, ' ').trim().slice(0, maxLen)
+        : undefined;
     if (s !== undefined) out.push(s);
   }
   return out;
@@ -425,6 +463,49 @@ function pathOnlyHash(a: string, b: string): boolean {
 
 function isWebUrl(url: string): boolean {
   return /^(https?|file):/i.test(url);
+}
+
+/** A frame round-trip that did not answer in time. */
+const TIMED_OUT = Symbol('timed out');
+/** A frame round-trip that failed (detached, navigating, closed). */
+const GONE = Symbol('gone');
+
+/**
+ * Where a child frame's document starts on the page: the frame element's
+ * CONTENT box — its border box moved in by the border and the padding. The
+ * border box alone put everything inside a bordered or padded iframe off by
+ * that much (review 2, finding 4): the painted box missed the field, and the
+ * outline missed the target. Null when the frame element has no box (hidden:
+ * nothing of it is on screen); {@link TIMED_OUT} or {@link GONE} when it
+ * could not answer.
+ */
+async function frameContentOrigin(
+  frame: Frame,
+  ms: number,
+): Promise<{ x: number; y: number } | null | typeof TIMED_OUT | typeof GONE> {
+  const work = (async (): Promise<{ x: number; y: number } | null> => {
+    const element = await frame.frameElement();
+    const at = await element.boundingBox();
+    if (!at) return null;
+    // Runs in the page, where `globalThis` is the frame element's window (no
+    // DOM types in this project, so the one call is typed by hand).
+    const inset = await element.evaluate((e: unknown) => {
+      const view = globalThis as unknown as {
+        getComputedStyle(el: unknown): Record<'borderLeftWidth' | 'paddingLeft' | 'borderTopWidth' | 'paddingTop', string>;
+      };
+      const cs = view.getComputedStyle(e);
+      const n = (v: string): number => {
+        const f = parseFloat(v);
+        return Number.isFinite(f) ? f : 0;
+      };
+      return {
+        x: n(cs.borderLeftWidth) + n(cs.paddingLeft),
+        y: n(cs.borderTopWidth) + n(cs.paddingTop),
+      };
+    });
+    return { x: at.x + inset.x, y: at.y + inset.y };
+  })().catch((): typeof GONE => GONE);
+  return briefly<{ x: number; y: number } | null | typeof TIMED_OUT | typeof GONE>(work, ms, TIMED_OUT);
 }
 
 export class StepRecorder {
@@ -614,12 +695,28 @@ export class StepRecorder {
 
   private enqueue(work: () => Promise<void>): void {
     this.chain = this.chain.then(work).catch((err: unknown) => {
-      logger.debug(`[record-steps] action dropped: ${err instanceof Error ? err.message : String(err)}`);
+      this.debug(`[record-steps] action dropped: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
 
+  /** Every known secret, in every spelling it is masked in. */
   private secretValuesNow(): string[] {
-    return this.secretsNow().map((s) => s.value);
+    return secretSpellings(this.secretsNow().map((s) => s.value));
+  }
+
+  /** Does a value the page reported hold a secret the run knows (in any
+   *  spelling)? Such a value is withheld WHOLE, like a secret field's. Only a
+   *  secret of {@link RECORD_SECRET_MIN_LENGTH} characters or more counts
+   *  here — a shorter one withholds a value that IS it (`matchKnownSecret`),
+   *  not every value it happens to sit inside. */
+  private holdsKnownSecret(value: string, secrets: readonly string[]): boolean {
+    return secrets.some((s) => s.length >= RECORD_SECRET_MIN_LENGTH && value.includes(s));
+  }
+
+  /** A debug line with the recording's secrets masked — a frame's address or
+   *  a page's error message can carry one (review 2, finding 10). */
+  private debug(message: string): void {
+    logger.debug(redact(message, this.secretValuesNow()));
   }
 
   private secretsNow(): KnownSecret[] {
@@ -710,11 +807,15 @@ export class StepRecorder {
         if (known) {
           partial.secret = true;
           if (known.name) partial.knownSecret = known.name;
+        } else if (this.holdsKnownSecret(value, secrets)) {
+          // A value that CONTAINS a known secret ("Bearer sk_…") is withheld
+          // whole too (review 2, finding 2). Spliced — "Bearer ***" — it
+          // became a parameter holding a mask, and a short secret spliced
+          // ordinary values apart ("1300", with a secret "30" known, was
+          // recorded as "1***0").
+          partial.secret = true;
         } else {
-          // A value that CONTAINS a known secret ("Bearer sk_…") keeps its
-          // words and loses the secret — masked first, THEN cut to length,
-          // so a secret across the cut cannot leave its first half behind.
-          partial.value = redact(value, secrets).slice(0, MAX_TYPED_VALUE);
+          partial.value = value.slice(0, MAX_TYPED_VALUE);
         }
       }
     }
@@ -763,8 +864,9 @@ export class StepRecorder {
       check.secret = true;
     } else if (typeof raw['value'] === 'string') {
       const value = raw['value'];
-      if (this.matchKnownSecret(value)) check.secret = true;
-      else check.value = redact(value, secrets).slice(0, 300);
+      // Holding a known secret anywhere: withheld whole, as typing is.
+      if (this.matchKnownSecret(value) || this.holdsKnownSecret(value, secrets)) check.secret = true;
+      else check.value = value.slice(0, 300);
     }
     if (typeof raw['checked'] === 'boolean') check.checked = raw['checked'];
     const selected = strings(raw['selected'], 20, 150, secrets);
@@ -835,11 +937,12 @@ export class StepRecorder {
     const pending = (async (): Promise<ActionCrop | null> => {
       const pageBox = { ...target };
       if (source.frame !== source.page.mainFrame()) {
-        const element = await source.frame.frameElement();
-        const offset = await element.boundingBox();
-        if (!offset) return null;
-        pageBox.x += offset.x;
-        pageBox.y += offset.y;
+        // Where the frame's DOCUMENT starts: inside its border and padding.
+        const origin = await frameContentOrigin(source.frame, PAGE_CALL_MS);
+        if (origin === null) return null;
+        if (origin === TIMED_OUT || origin === GONE) throw new Error('the frame could not say where it is');
+        pageBox.x += origin.x;
+        pageBox.y += origin.y;
       }
       const [png, paintOut] = await Promise.all([
         source.page.screenshot({ type: 'png', scale: 'css', timeout: 5_000 }),
@@ -847,7 +950,7 @@ export class StepRecorder {
       ]);
       return cropAround(png, pageBox, paintOut);
     })().catch((err: unknown) => {
-      logger.debug(`[record-steps] no crop for ${mark}: ${err instanceof Error ? err.message : String(err)}`);
+      this.debug(`[record-steps] no crop for ${mark}: ${err instanceof Error ? err.message : String(err)}`);
       return null;
     });
     this.crops.set(mark, pending);
@@ -855,25 +958,36 @@ export class StepRecorder {
 
   /**
    * Where secrets are on screen, in page coordinates, across every frame of
-   * the page: every field the page script calls secret (remembered, so a
-   * password box its eye has flipped to text is included), and every other
-   * field whose value contains a secret the run knows. The page reports field
-   * boxes and the non-secret values; the comparison happens here, so the known
-   * secrets never go into the page.
+   * the page:
    *
-   * Fails CLOSED: a frame that does not answer within {@link FIELD_RECTS_MS}
-   * throws, and the crop is not kept — a picture whose secret fields could
-   * not be located is not sent. A frame whose evaluate REJECTS (detached, or
-   * mid-navigation) is showing nothing of its old document, and one with no
-   * script to ask (`null`) has no fields this recording knows about; both
-   * paint nothing.
+   * - every field the page script calls secret (remembered, so a password box
+   *   its eye has flipped to text is included; and one whose value holds a
+   *   secret typed on that page, so a toggle that REPLACES the box is too);
+   * - every element whose text shows a secret typed on that page;
+   * - every other field whose value holds a secret the run knows, and every
+   *   run of text on screen that does (the page sends its text only when the
+   *   run knows secrets to look for).
+   *
+   * The page reports boxes, the non-secret field values and the text; the
+   * comparison with the known secrets happens here, so they never go into the
+   * page.
+   *
+   * Fails CLOSED (review 2, finding 5): the crop is not kept — this throws —
+   * when any frame does not answer within {@link FIELD_RECTS_MS}, when its
+   * evaluate REJECTS (mid-navigation it may still be showing the old
+   * document), when it has no script to ask, when its page is too big to
+   * report whole, and when the frame element cannot say where it is in time.
+   * A picture whose secrets could not all be located is not sent. Only a frame
+   * whose element has no box at all — hidden, so nothing of it is on screen —
+   * is passed over.
    */
   private async secretBoxes(page: Page): Promise<Box[]> {
     const known = this.secretValuesNow().filter((v) => v.length >= 3);
     const ctl = JSON.stringify(RECORD_CONTROL_NAME);
-    const GONE = Symbol('gone');
-    const TIMED_OUT = Symbol('timed out');
+    // Text is asked for only when there is something to look for in it.
+    const ask = JSON.stringify({ text: known.length > 0 });
     const out: Box[] = [];
+    const holds = (value: string): boolean => known.some((k) => value.includes(k));
     const grow = (b: Box, dx: number, dy: number): Box => ({
       x: b.x + dx - PAINT_MARGIN_PX,
       y: b.y + dy - PAINT_MARGIN_PX,
@@ -884,21 +998,26 @@ export class StepRecorder {
       page.frames().map(async (frame) => {
         const found = await briefly<unknown>(
           frame
-            .evaluate(`(window[${ctl}] && window[${ctl}].fieldRects && window[${ctl}].fieldRects()) || null`)
+            .evaluate(`(window[${ctl}] && window[${ctl}].fieldRects && window[${ctl}].fieldRects(${ask})) || null`)
             .catch(() => GONE),
           FIELD_RECTS_MS,
           TIMED_OUT,
         );
         if (found === TIMED_OUT) throw new Error(`a frame (${frame.url()}) did not say where its secret fields are`);
-        if (!isRecord(found)) return;
+        if (found === GONE) throw new Error(`a frame (${frame.url()}) could not be asked where its secret fields are`);
+        if (!isRecord(found)) throw new Error(`a frame (${frame.url()}) has no recording script to ask`);
+        if (found['truncated'] === true) throw new Error(`a frame (${frame.url()}) is too big to check for secrets`);
         let dx = 0;
         let dy = 0;
         if (frame !== page.mainFrame()) {
-          const element = await briefly(frame.frameElement(), FIELD_RECTS_MS, null);
-          const at = element ? await briefly(element.boundingBox(), FIELD_RECTS_MS, null) : null;
-          if (!at) return;
-          dx = at.x;
-          dy = at.y;
+          const origin = await frameContentOrigin(frame, FIELD_RECTS_MS);
+          if (origin === TIMED_OUT || origin === GONE) {
+            throw new Error(`a frame (${frame.url()}) could not say where it is on the page`);
+          }
+          // Hidden: nothing of it is on screen.
+          if (origin === null) return;
+          dx = origin.x;
+          dy = origin.y;
         }
         const secretList = Array.isArray(found['secret']) ? found['secret'] : [];
         for (const raw of secretList) {
@@ -907,10 +1026,16 @@ export class StepRecorder {
         }
         const fieldList = Array.isArray(found['fields']) ? found['fields'] : [];
         for (const f of fieldList) {
-          if (!isRecord(f) || typeof f['value'] !== 'string') continue;
-          const value = f['value'];
-          if (!known.some((k) => value.includes(k))) continue;
+          if (!isRecord(f) || typeof f['value'] !== 'string' || !holds(f['value'])) continue;
           const b = box(f['box']);
+          if (b) out.push(grow(b, dx, dy));
+        }
+        // Page text that shows a known secret: masked in every description
+        // already, and painted here so the picture beside it agrees.
+        const textList = Array.isArray(found['texts']) ? found['texts'] : [];
+        for (const t of textList) {
+          if (!isRecord(t) || typeof t['text'] !== 'string' || !holds(t['text'])) continue;
+          const b = box(t['box']);
           if (b) out.push(grow(b, dx, dy));
         }
       }),

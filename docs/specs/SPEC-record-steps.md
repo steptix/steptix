@@ -127,11 +127,18 @@ shadow root is recorded like the rest of the page, including its `change`
 events, which never leave the root on their own.
 
 Not actions, though they look like one: the click a `<label>` passes on to
-its control (a checkbox, a hidden file input — the label's click is the
-action); a press-move-release inside a text field, which selects its text
-(the click it ends with is a click into the field); Enter in a textarea or a
-contenteditable, which is typing. Add check reports any typing still open
-before the check itself.
+its control (a checkbox, a hidden file input, a button — the label's click is
+the action; only that one click, in the same task: a later click on the
+control, such as Tab to it and Enter, is the author's own); a
+press-move-release inside a text field, which selects its text (the click it
+ends with is a click into the field); Enter in a textarea, which is typing.
+Enter in a contenteditable is decided by what it DID, once the keypress has
+settled (100 ms, or the author's next key, click or focus change, or Stop,
+whichever is first): a document editor that gained a line or a block is
+typing; a chat composer that sent and emptied the box — or a box that was
+removed, or did not change — is the typing up to the Enter, reported with the
+text it held before the key, then a `key` Enter action. Add check reports any
+typing still open before the check itself.
 
 **The runtime must be able to perform what is recorded.** A run's model has
 `back` and `forward` actions; `drag` (a drag from one element onto another)
@@ -177,13 +184,26 @@ again, within the same cap.
 - `ai.sendScreenshots: false` sends no crops.
 - A model that rejects images is asked once more without them.
 - At most 40 crops per recording; later actions carry descriptions only.
-- **Secrets are painted out.** Before a crop is kept, every secret field on
-  the page (§5 — a password box its "show" eye has flipped to text included)
-  and every field whose value holds a secret the recording knows is covered
-  with a solid fill, on the whole screenshot, so no crop or scaling can bring
-  it back. A frame that cannot say where its fields are in time costs the
-  crop: it is not sent. A secret field that is itself the target gets no crop
-  while it shows its value in clear. Anything else visible is sent, as
+- **Secrets are painted out.** Before a crop is kept, these are covered with
+  a solid fill, on the whole screenshot, so no crop or scaling can bring them
+  back:
+  - every secret field on the page (§5 — a password box its "show" eye has
+    flipped to text, or replaced with a new text box, included);
+  - every element whose text shows a secret typed on that page (a "reveal"
+    that copies the password into a `<span>`);
+  - every field whose value holds a secret the recording knows (§5), and
+    every run of text on screen that does. The page reports its field values
+    and its visible text with their boxes and the server compares, so the
+    known secrets never go into the page.
+
+  Positions inside a frame are measured from the frame's content box, inside
+  its border and padding. A frame that cannot account for itself costs the
+  crop — it is not sent: one that does not answer in time, whose answer
+  fails (mid-navigation it may still show its old document), that has no
+  recording script, whose page is too big to report whole, or whose element
+  cannot say where it is in time. Only a frame whose element has no box at
+  all (hidden) is passed over. A secret field that is itself the target gets
+  no crop while it shows its value in clear. Anything else visible is sent, as
   screenshots already are during runs.
 
 ## 5. Secrets
@@ -191,20 +211,39 @@ again, within the same cap.
 A field is **secret** when the DOM snapshot's secret-field rule says so: its
 `type` is `password`; its `autocomplete` names a password; its `name`, `id`,
 `aria-label` or `autocomplete` matches the secret-name rule; or its
-placeholder matches the password-field rule. The recorder adds two things the
+placeholder matches the password-field rule. The recorder adds what the
 snapshot cannot:
 
-- **Memory.** A field seen as secret once is secret for as long as its
-  document lives. The "show password" eye flips a password box to
+- **Memory of the field.** A field seen as secret once is secret for as long
+  as its document lives. The "show password" eye flips a password box to
   `type="text"`, after which the rule no longer calls it secret; the recorder
   remembers it, catching the flip itself (the `type` attribute's old value)
   even when the author never touched the field before it. Typing into it,
   editing it after the flip, an Add check on it and every crop treat it as
   secret.
-- **Its label.** A text field whose `<label>` matches the password-field rule
-  is secret too — on a minimal sign-in form, the only name a flipped password
-  box has left. (A box flipped before Record was pressed, on a page the
-  recording script was not yet in, is caught by this rule or not at all.)
+- **Memory of the value.** A toggle can also REPLACE the box — Vue's
+  `v-if`/`v-else`, Angular's `*ngIf`, a React key change — with a new text
+  box holding the same value, which nothing about the new element marks. So
+  the page script also remembers, in the page and never sent, what each
+  secret field holds (at every keystroke, and whenever it is asked about) and
+  what each finished typing into one left. A field whose value IS one of
+  those, or contains one of 4 characters or more, is secret (typing, an Add
+  check, every crop); every element whose text shows one is painted out of
+  the crops (§4.2); and every text the page script sends has them masked
+  out. A field secret only because the name rule's bare `key` matched (a
+  `keywords` search box) gives its value to this memory only when it looks
+  like a credential — 8 characters or more, no spaces — so a search term is
+  not masked out of the results page.
+- **Its label.** A text field whose `<label>` names a password, passcode,
+  passphrase, PIN, secret, token, one-time code or verification code — as
+  whole words, not the field rule's substrings, so "Boarding pass number" is
+  not one — is secret too, unless the label names another kind of field
+  beside it ("Email for password reset", "Password hint", "Security
+  question"): on a minimal sign-in form, the only name a flipped password box
+  has left. (A box flipped before Record was pressed, on a page the recording
+  script was not yet in, is caught by this rule or not at all.)
+- **Its style.** A field styled `-webkit-text-security: disc`, `circle` or
+  `square` shows dots, as a password box does, and is secret.
 
 For a secret field:
 
@@ -221,14 +260,27 @@ VALUES: the session's secret-named variables, the file's secret-named literal
 parameters, and the `.env` the request brought (TestBench sends the test's) —
 every secret-named key's value, and what each `$VAR` parameter with a
 secret-sounding name (or naming a secret-sounding variable) resolves to, the
-request's `.env` first and the server's environment after. A value typed
-anywhere that IS one of them is withheld like a secret field's and names its
-parameter; one that CONTAINS one keeps its other words. They are masked out of
-everything the model is sent — in either spelling, as typed or as it reads
-inside a JSON string (`pa"ss` is `pa\"ss` there), and before any text is cut
-to length, so a secret that crossed the cut leaves no prefix behind — and out
-of every panel line, `record:started`, and the server warnings forwarded as
-`output`.
+request's `.env` first and the server's environment after. A value from the
+`.env` that is known only because its VARIABLE's name sounds secret must look
+like a credential: 4 characters or more (`RECORD_SECRET_MIN_LENGTH`, the
+runner's floor for page-derived secrets) and not a boolean or a number —
+`TOKEN_TTL_MINUTES=30`, `ENABLE_PASSWORD_RESET=true` and `MAX_TOKENS=2048`
+are settings, and masked as substrings they turned a typed "1300" into
+"1***0". A `$VAR` parameter the file itself names like a secret (`- password:
+$LOGIN_PW`) keeps its value whatever it looks like.
+
+A value typed anywhere — or read by an Add check — that IS one of them is
+withheld like a secret field's and names its parameter; one that CONTAINS
+one (of 4 characters or more) is withheld whole too, with no parameter
+named: spliced, it became a parameter holding `***`. They are masked out of
+everything the model is sent, in every spelling — as typed, as it reads inside
+a JSON string (`pa"ss` is `pa\"ss` there), and as a URL carries it
+(`encodeURIComponent`'s, a form's `+`, `encodeURI`'s) — before any text is
+folded or cut: the page sends its text unfolded, and the server masks, then
+folds whitespace, then cuts, so a secret holding a double space or a line
+break still matches, and one that crossed the cut leaves no prefix behind.
+They are masked out of every panel line, `record:started`, the server
+warnings forwarded as `output`, and the recording's own log lines.
 
 ## 6. Checks
 

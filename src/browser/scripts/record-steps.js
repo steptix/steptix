@@ -61,6 +61,10 @@
   // Enter in a form field makes the browser click the form's submit button
   // (implicit submission). That click is the Enter, already reported as a key.
   var enter = { at: 0, form: null };
+  // A click on a <label> makes the browser click its control as well — in the
+  // same task, before any timer runs. That second click is the label's, which
+  // was reported; this says which control it goes to, and only until then.
+  var labelForward = null;
 
   function send(message) {
     var fn = window[BINDING];
@@ -85,6 +89,11 @@
       swallowing = false;
       press = null;
       html5Drag = null;
+      labelForward = null;
+      if (pendingEnter) {
+        clearTimeout(pendingEnter.timer);
+        pendingEnter = null;
+      }
     } else if (!wasRecording) {
       typing.clear();
     }
@@ -101,10 +110,36 @@
   // value, cut AFTER masking, so the page sends more than that.
   var PAGE_VALUE_MAX = 4000;
 
+  function isSpace(code) {
+    return code === 32 || (code >= 9 && code <= 13) || code === 160 || code === 0xfeff ||
+      code === 0x1680 || (code >= 0x2000 && code <= 0x200a) || code === 0x2028 ||
+      code === 0x2029 || code === 0x202f || code === 0x205f || code === 0x3000;
+  }
+
+  // Text for the server, as the page has it: NOT whitespace-folded. The
+  // server masks the secrets it knows and folds after (review 2, finding 9):
+  // folded here, a secret holding a double space or a line break arrived as
+  // a spelling no mask could match. Only the ends are trimmed. The cut is
+  // made where the FOLDED text would reach the limit — so the bound means
+  // what it did, and stays above every cut the server makes after folding —
+  // and the secrets typed on this page are masked out first, as the server
+  // would mask its own (see "Secrets typed on this page").
   function clip(value, max) {
-    var s = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+    var s = maskTyped(String(value == null ? '' : value)).trim();
     var limit = Math.max(max, PAGE_CLIP_FLOOR);
-    return s.length > limit ? s.slice(0, limit - 1) + '…' : s;
+    var folded = 0;
+    var inSpace = false;
+    for (var i = 0; i < s.length; i++) {
+      if (isSpace(s.charCodeAt(i))) {
+        if (!inSpace) folded++;
+        inSpace = true;
+      } else {
+        folded++;
+        inSpace = false;
+      }
+      if (folded > limit) return s.slice(0, i) + '…';
+    }
+    return s;
   }
 
   function visibleText(el, max) {
@@ -595,33 +630,205 @@
   // toggle by watching `type` attributes with their old value, because a
   // field toggled before the author ever touched it was never asked.
   //
-  // The recorder is also stricter than the snapshot's rule in one way: a text
-  // field whose LABEL names a password or a PIN is secret too — the only name a
-  // minimal sign-in form gives its password box once the eye has flipped it.
+  // The recorder is also stricter than the snapshot's rule in three ways, none
+  // of which the snapshot applies (it has no memory, and no label rule):
+  //
+  //   - a text field whose LABEL names a password, a PIN or a one-time code
+  //     is secret — the only name a minimal sign-in form gives its password
+  //     box once the eye has flipped it;
+  //   - a field styled `-webkit-text-security: disc | circle | square` is
+  //     secret — it shows dots, as a password box does, and that is how some
+  //     sites build their password box out of `type="text"`;
+  //   - a field whose value HOLDS a secret typed on this page is secret (next
+  //     section) — the one rule that follows a value rather than an element.
   var everSecret = new WeakSet();
+
+  // The label rule. Whole WORDS, not the field rule's substrings: a label is
+  // prose a person reads, and "Boarding pass number" is not a password box
+  // (review 2, finding 7). And a label that also names another kind of field
+  // — "Email for password reset", "Password hint", "Security question" — is
+  // that other field. The attribute rule (`isSecretField`, shared with the
+  // snapshot) is not changed by any of this.
+  var LABEL_SECRET_RE = new RegExp(
+    '(^|[^a-z0-9])(' +
+      'passwords?|passwd|pwd|passcodes?|passphrases?|secrets?|tokens?|otp|' +
+      'one[\\s-]?time[\\s-]?(pass)?(codes?|words?|pins?)|' +
+      '(verification|security|authentication|access|auth)[\\s-]?codes?' +
+    ')(?=$|[^a-z0-9])',
+    'i'
+  );
+  var LABEL_OTHER_FIELD_RE =
+    /(^|[^a-z0-9])(e-?mail|username|user[\s-]name|phone|mobile|hint|question|reminder)(?=$|[^a-z0-9])/i;
 
   function labelSaysSecret(el) {
     var tag = el.tagName.toLowerCase();
-    if (tag !== 'input' && tag !== 'textarea') return false;
+    if ((tag !== 'input' && tag !== 'textarea') || !isTextEntry(el)) return false;
     var label = labelsOf(el);
-    return label !== '' && (PASSWORD_FIELD_RE.test(label) || hasPinToken(label));
+    if (label === '') return false;
+    if (!LABEL_SECRET_RE.test(label) && !hasPinToken(label)) return false;
+    return !LABEL_OTHER_FIELD_RE.test(label);
+  }
+
+  function hidesItsText(el) {
+    try {
+      var style = window.getComputedStyle(el);
+      var v = String(style.getPropertyValue('-webkit-text-security') || style.webkitTextSecurity || '');
+      return v === 'disc' || v === 'circle' || v === 'square';
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // A secret field that shows dots, not its value: photographed like any
+  // other field (every crop paints it out anyway). One that shows its value in
+  // clear gets no picture of its own.
+  function showsDots(el) {
+    return (el.tagName.toLowerCase() === 'input' && inputType(el) === 'password') || hidesItsText(el);
   }
 
   function isSecretNow(el) {
     if (!el || el.nodeType !== 1) return false;
-    if (everSecret.has(el)) return true;
-    if (isSecretField(el) || labelSaysSecret(el)) {
+    if (!everSecret.has(el)) {
+      var entry = isTextEntry(el);
+      if (!(isSecretField(el) || labelSaysSecret(el) ||
+            (entry && (hidesItsText(el) || holdsTypedSecret(currentValue(el)))))) {
+        return false;
+      }
       everSecret.add(el);
-      return true;
+    }
+    rememberSecretValue(el);
+    return true;
+  }
+
+  // ── Secrets typed on this page ─────────────────────────────────────────
+  //
+  // The WeakSet follows an ELEMENT. A "show password" toggle that REPLACES
+  // the input — Vue's v-if/v-else, Angular's *ngIf, a React key change —
+  // puts a brand-new `<input type="text">` holding the same value where the
+  // old one was, and nothing about the new element says secret: its value was
+  // typed into an action, sent to the model, written under `## Parameters`
+  // and photographed (review 2, finding 1). So the script also remembers the
+  // VALUES — what each secret field holds whenever it is asked about, at every
+  // keystroke into one, and what each finished typing into one left behind —
+  // and:
+  //
+  //   - a field whose value IS one, or contains one of TYPED_SECRET_MIN
+  //     characters or more, is secret (typing, an Add check, the crops);
+  //   - every element whose text shows one — a toggle that reveals the value
+  //     into a <span> — is painted out of the crops (`fieldRects`);
+  //   - every text this script sends has them masked out (`clip`), as the
+  //     server masks the secrets it knows.
+  //
+  // They stay in this closure. Nothing here sends them: not the binding, not
+  // `fieldRects` (a text that shows one is reported as a box to paint, never
+  // as text), not a description. The server's known secrets never come in —
+  // the page reports text and field values with their boxes, and the server
+  // compares (`secretBoxes`, src/recorder/step-recorder.ts).
+  //
+  // TYPED_SECRET_MIN is RECORD_SECRET_MIN_LENGTH (src/utils/secrets.ts): a
+  // value shorter than that inside other text is more often a coincidence
+  // than the secret, and would have every field and label holding it painted.
+  var TYPED_SECRET_MIN = 4;
+  // One live entry per secret field (its value as last seen) — objects, so no
+  // element is held once the page drops it — and every finished value.
+  var typedSecretEntries = [];
+  var typedSecretOf = new WeakMap();
+  var typedSecretFinals = [];
+  // Fields that have been `type="password"` in this document.
+  var wasPasswordBox = new WeakSet();
+
+  // Is what this field holds worth remembering as a secret? The shared rule
+  // over-matches on purpose — its bare `key` calls a `keywords` search box
+  // and `aria-label="Search by keyword"` secret — and there that costs one
+  // withheld value. Remembered, the search term would be masked out of every
+  // description and painted out of every crop (the results page is full of
+  // it). So a field secret ONLY by that word gives up its value only when the
+  // value looks like a credential: eight characters or more, no spaces. Every
+  // other reason — a password box now or once, dots, the label, a password-,
+  // secret-, token-, credential- or PIN-like name — keeps it whatever it is.
+  function strongSecretField(el) {
+    if (wasPasswordBox.has(el) || inputType(el) === 'password' || showsDots(el) || labelSaysSecret(el)) return true;
+    var autocomplete = String(el.getAttribute('autocomplete') || '').toLowerCase();
+    if (autocomplete.indexOf('current-password') !== -1 || autocomplete.indexOf('new-password') !== -1) return true;
+    var attrs = SECRET_NAME_ATTRS.concat(PASSWORD_ONLY_ATTRS);
+    for (var i = 0; i < attrs.length; i++) {
+      var named = el.getAttribute(attrs[i]);
+      if (named && (PASSWORD_FIELD_RE.test(named) || hasPinToken(named))) return true;
     }
     return false;
+  }
+
+  function worthRemembering(el, value) {
+    if (value === '') return false;
+    if (strongSecretField(el) || holdsTypedSecret(value)) return true;
+    return value.length >= 8 && !/\s/.test(value);
+  }
+
+  function rememberSecretValue(el, value) {
+    if (!el || el.nodeType !== 1) return;
+    if (value === undefined && !isTextEntry(el)) return;
+    var v = value !== undefined ? String(value) : currentValue(el);
+    var keep = worthRemembering(el, v);
+    var entry = typedSecretOf.get(el);
+    if (!entry) {
+      if (!keep) return;
+      entry = { value: v };
+      typedSecretOf.set(el, entry);
+      if (typedSecretEntries.length < 500) typedSecretEntries.push(entry);
+      return;
+    }
+    entry.value = keep ? v : '';
+  }
+
+  function rememberFinalSecret(el, value) {
+    if (!worthRemembering(el, value)) return;
+    if (typedSecretFinals.indexOf(value) === -1 && typedSecretFinals.length < 200) {
+      typedSecretFinals.push(value);
+    }
+  }
+
+  function typedSecretValues(min) {
+    var out = [];
+    for (var i = 0; i < typedSecretEntries.length; i++) {
+      var v = typedSecretEntries[i].value;
+      if (v && v.length >= min && out.indexOf(v) === -1) out.push(v);
+    }
+    for (var j = 0; j < typedSecretFinals.length; j++) {
+      var f = typedSecretFinals[j];
+      if (f.length >= min && out.indexOf(f) === -1) out.push(f);
+    }
+    return out;
+  }
+
+  function holdsTypedSecret(value) {
+    if (!value) return false;
+    var all = typedSecretValues(1);
+    for (var i = 0; i < all.length; i++) {
+      if (value === all[i]) return true;
+      if (all[i].length >= TYPED_SECRET_MIN && value.indexOf(all[i]) !== -1) return true;
+    }
+    return false;
+  }
+
+  function maskTyped(text) {
+    if (text === '') return text;
+    var all = typedSecretValues(TYPED_SECRET_MIN);
+    if (all.length === 0) return text;
+    all.sort(function (a, b) { return b.length - a.length; });
+    var out = text;
+    for (var i = 0; i < all.length; i++) out = out.split(all[i]).join('***');
+    return out;
   }
 
   function rememberSecretsIn(root) {
     try {
       var list = root.querySelectorAll('input');
       for (var i = 0; i < list.length; i++) {
-        if (String(list[i].getAttribute('type') || '').toLowerCase() === 'password') everSecret.add(list[i]);
+        if (String(list[i].getAttribute('type') || '').toLowerCase() === 'password') {
+          everSecret.add(list[i]);
+          wasPasswordBox.add(list[i]);
+          rememberSecretValue(list[i]);
+        }
       }
     } catch (err) { /* nothing to scan yet */ }
   }
@@ -632,6 +839,8 @@
         var r = records[i];
         if (r.attributeName === 'type' && String(r.oldValue || '').toLowerCase() === 'password') {
           everSecret.add(r.target);
+          wasPasswordBox.add(r.target);
+          rememberSecretValue(r.target);
         }
       }
     })
@@ -666,25 +875,127 @@
     watchTypes(root);
   }
 
-  // Where every secret field is on screen right now — and every other field
-  // with a value, so the server can paint out one whose value equals a secret
-  // it knows (it compares; the known secrets never come into the page). A
-  // secret field's value is not included, ever. The document, and every open
-  // shadow root the author has touched.
+  // ── What a crop must not show ──────────────────────────────────────────
+  //
+  // For the crop being taken (`fieldRects`), everything that has to be
+  // painted out or checked, in this frame's viewport coordinates:
+  //
+  //   secret    — boxes to paint: every secret field (remembered, by label, by
+  //               style, or holding a typed secret), and every element whose
+  //               text shows a secret typed on this page;
+  //   fields    — every other field with a value, WITH the value, so the
+  //               server can paint out one that holds a secret it knows;
+  //   texts     — when the server asks (it has known secrets to look for):
+  //               every run of text on screen, with its box, for the same
+  //               comparison. A text that shows a typed secret is in `secret`
+  //               instead, and never here;
+  //   truncated — the page is too big to report whole. The server then does
+  //               not keep the crop: a picture whose secrets could not all be
+  //               located is not sent.
+  //
+  // A secret field's value is not included, ever. The document, and every
+  // open shadow root the author has touched.
   var FIELDS = 'input, textarea, [contenteditable=""], [contenteditable="true"]';
+  var MAX_FIELDS = 2000;
+  var MAX_TEXT_RUNS = 5000;
+  var MAX_TEXT_CHARS = 400000;
+  var NOT_SHOWN = { script: 1, style: 1, noscript: 1, template: 1, textarea: 1, title: 1 };
 
-  function fieldRects() {
+  function onScreen(box) {
+    return !!box && (box.width > 0 || box.height > 0) &&
+      box.x + box.width >= 0 && box.y + box.height >= 0 &&
+      box.x <= window.innerWidth && box.y <= window.innerHeight;
+  }
+
+  // The deepest elements whose text holds `value`: an element is one when
+  // the text of its own (its text nodes, and the children that do not hold it
+  // themselves) still does — so a value split across inline elements
+  // (`<b>hun</b>ter2`) is found in their parent, and a value shown in two
+  // places is found in both.
+  function textHolders(root, value, out, budget) {
+    var stack = [root];
+    while (stack.length > 0) {
+      if (--budget.left < 0) return false;
+      var node = stack.pop();
+      var own = '';
+      var deeper = false;
+      for (var c = node.firstChild; c; c = c.nextSibling) {
+        if (c.nodeType === 3) {
+          own += c.data;
+        } else if (c.nodeType === 1) {
+          if (NOT_SHOWN[c.tagName.toLowerCase()]) continue;
+          var t = c.textContent || '';
+          if (t.indexOf(value) !== -1) {
+            stack.push(c);
+            deeper = true;
+            own += '\u0000';
+          } else {
+            own += t;
+          }
+        }
+      }
+      if (!deeper || own.indexOf(value) !== -1) {
+        var holder = node.nodeType === 1 ? node : node.host;
+        if (holder) out.push(holder);
+      }
+    }
+    return true;
+  }
+
+  // Every run of text on screen, for the server to compare with the secrets
+  // it knows. False when there is more than the message may carry.
+  function visibleTexts(root, out, count) {
+    var walker;
+    try {
+      walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    } catch (err) {
+      return true;
+    }
+    var range = document.createRange();
+    for (var n = walker.nextNode(); n; n = walker.nextNode()) {
+      var data = n.data;
+      if (!/\S/.test(data)) continue;
+      var parent = n.parentElement;
+      if (!parent || NOT_SHOWN[parent.tagName.toLowerCase()]) continue;
+      range.selectNodeContents(n);
+      var r = range.getBoundingClientRect();
+      var box = {
+        x: Math.round(r.left), y: Math.round(r.top),
+        width: Math.round(r.width), height: Math.round(r.height),
+      };
+      if (!onScreen(box)) continue;
+      // Shows a secret typed here: painted already, and never sent.
+      if (maskTyped(data) !== data) continue;
+      count.runs++;
+      count.chars += data.length;
+      if (count.runs > MAX_TEXT_RUNS || count.chars > MAX_TEXT_CHARS) return false;
+      out.push({ box: box, text: data });
+    }
+    return true;
+  }
+
+  function scanRoot(root) {
+    return root === document ? document.body || document.documentElement : root;
+  }
+
+  function fieldRects(ask) {
+    var wantTexts = !!(ask && ask.text);
     var secret = [];
     var fields = [];
+    var texts = [];
+    var truncated = false;
     var roots = [document].concat(watchedRootList);
     var seen = 0;
-    for (var r = 0; r < roots.length; r++) {
+    for (var r = 0; r < roots.length && !truncated; r++) {
       var list;
       try { list = roots[r].querySelectorAll(FIELDS); } catch (err) { continue; }
-      for (var i = 0; i < list.length && seen < 500; i++) {
+      for (var i = 0; i < list.length; i++) {
         var el = list[i];
         if (!isTextEntry(el)) continue;
-        seen++;
+        if (++seen > MAX_FIELDS) {
+          truncated = true;
+          break;
+        }
         var box = boxOf(el);
         if (!box || (box.width === 0 && box.height === 0)) continue;
         if (isSecretNow(el)) {
@@ -695,7 +1006,38 @@
         }
       }
     }
-    return { secret: secret, fields: fields };
+    // Text that shows a secret typed on this page.
+    var typed = typedSecretValues(TYPED_SECRET_MIN);
+    var budget = { left: 20000 };
+    for (var t = 0; t < typed.length && !truncated; t++) {
+      for (var s = 0; s < roots.length; s++) {
+        var root = scanRoot(roots[s]);
+        if (!root || (root.textContent || '').indexOf(typed[t]) === -1) continue;
+        var holders = [];
+        if (!textHolders(root, typed[t], holders, budget)) {
+          truncated = true;
+          break;
+        }
+        for (var h = 0; h < holders.length; h++) {
+          var hb = boxOf(holders[h]);
+          if (onScreen(hb)) secret.push(hb);
+        }
+      }
+    }
+    if (wantTexts && !truncated) {
+      var count = { runs: 0, chars: 0 };
+      for (var q = 0; q < roots.length; q++) {
+        var textRoot = scanRoot(roots[q]);
+        if (textRoot && !visibleTexts(textRoot, texts, count)) {
+          truncated = true;
+          break;
+        }
+      }
+    }
+    var out = { secret: secret, fields: fields };
+    if (wantTexts && !truncated) out.texts = texts;
+    if (truncated) out.truncated = true;
+    return out;
   }
 
   // ── Typing ─────────────────────────────────────────────────────────────
@@ -714,10 +1056,9 @@
     typing.set(el, {
       // No picture of a secret field the screen shows in clear — a name-
       // detected token box rendered `type="text"`. A password box shows dots,
-      // as on screen (decision 6), and is photographed like any other field.
-      mark: secret && !(el.tagName.toLowerCase() === 'input' && inputType(el) === 'password')
-        ? undefined
-        : markNow(el),
+      // as on screen (decision 6), and is photographed like any other field;
+      // so is one styled to show dots (`showsDots`).
+      mark: secret && !showsDots(el) ? undefined : markNow(el),
       desc: describe(el),
       start: baseline.has(el) ? baseline.get(el) : before,
       // Asked at the start AND at the end, so a show/hide toggle in between
@@ -728,11 +1069,19 @@
 
   // The action for one field's typing, or null when nothing changed. The
   // secret question is asked here, at the last moment, one more time: this is
-  // the only function in the script that reads a typed value.
-  function typedAction(el, session) {
-    var value = currentValue(el);
+  // the only function in the script that reads a typed value. `value` is the
+  // field's value to report when it is not the one it holds now (an Enter
+  // that sent and cleared a message: what was typed is what it held before).
+  function typedAction(el, session, value) {
+    if (value === undefined) value = currentValue(el);
     if (value === session.start) return null;
-    var secret = session.secret || isSecretNow(el);
+    var secret = session.secret || isSecretNow(el) || holdsTypedSecret(value);
+    if (secret) {
+      // Remembered here, never sent: the value a toggle may carry into a
+      // new element, or a page may show as text.
+      rememberSecretValue(el, value);
+      rememberFinalSecret(el, value);
+    }
     var action = { kind: 'type', target: session.desc, secret: secret };
     if (session.mark) action.mark = session.mark;
     if (!secret) action.value = value.length > PAGE_VALUE_MAX ? value.slice(0, PAGE_VALUE_MAX) : value;
@@ -752,6 +1101,66 @@
     var els = [];
     typing.forEach(function (_s, el) { if (el !== keep && !(keep && el.contains(keep))) els.push(el); });
     for (var i = 0; i < els.length; i++) flushField(els[i]);
+  }
+
+  // ── Enter in a contenteditable, decided by what it did ─────────────────
+  //
+  // In a document editor Enter is a new line — typing. In a chat composer it
+  // SENDS the message and empties the box, and there it is an action with the
+  // typing before it: judged as typing, the message went nowhere (the field
+  // ended as it began) and the Enter with it (review 2, finding 3). The key
+  // itself cannot tell them apart, so its effect does: once the keypress has
+  // settled (the next task, or the next thing the author does, whichever is
+  // first — a page that clears the box in a microtask or a re-render has done
+  // so by then),
+  //
+  //   - the content GAINED a line or a block, and was not emptied: typing;
+  //   - it was emptied, the element is gone, or nothing changed: the typing
+  //     so far is reported with the text it held BEFORE the Enter, and the
+  //     Enter is a key action after it.
+  //
+  // A textarea keeps its rule: Enter there is a newline, and part of the
+  // typing.
+  var ENTER_SETTLE_MS = 100;
+  var pendingEnter = null;
+
+  function editorShape(el) {
+    var text = currentValue(el);
+    var blocks = 0;
+    try {
+      blocks = el.querySelectorAll('br,div,p,li,pre,blockquote,h1,h2,h3,h4,h5,h6').length;
+    } catch (err) { /* a detached element */ }
+    return { text: text, lines: text.split('\n').length, blocks: blocks };
+  }
+
+  function sendAction(action) {
+    void send({ type: 'action', action: action });
+  }
+
+  function settleEnter(sink) {
+    var p = pendingEnter;
+    if (!p) return;
+    pendingEnter = null;
+    clearTimeout(p.timer);
+    if (!state.recording) return;
+    var out = sink || sendAction;
+    var gone = !p.el.isConnected;
+    var after = gone ? { text: '', lines: 0, blocks: 0 } : editorShape(p.el);
+    var emptied = p.before.text.trim() !== '' && after.text.trim() === '';
+    var grew = after.blocks > p.before.blocks || after.lines > p.before.lines;
+    if (!gone && !emptied && grew) {
+      // A new line: typing, like any other keystroke into the field.
+      if (!typing.has(p.el)) startTyping(p.el, p.before.text);
+      return;
+    }
+    var session = typing.get(p.el);
+    if (session) {
+      typing.delete(p.el);
+      baseline.set(p.el, after.text);
+      var typed = typedAction(p.el, session, p.before.text);
+      if (typed) out(typed);
+    }
+    out(p.action);
   }
 
   // ── Pick mode (Add check, decision 10) ─────────────────────────────────
@@ -840,6 +1249,8 @@
     // (a pick released outside the window never gets its click).
     swallowing = false;
     watchShadowRootOf(target);
+    // An Enter still being judged happened first.
+    settleEnter();
     if (state.pick) {
       swallow(event);
       swallowing = true;
@@ -970,11 +1381,30 @@
     var target = realTarget(event);
     if (!target) return;
     var el = actionable(target);
+    // A label's click on its control (a checkbox, a hidden file input, a
+    // button): the author clicked the LABEL, which was reported; this is the
+    // browser passing it on, in the same task. Only then: the label is
+    // forgotten on the next task, so a later click on that control — Tab to
+    // it and Enter, with no pointer-down between — is the author's own
+    // (review 2, finding 6: it used to be swallowed for as long as the
+    // label's pointer-down was the last one).
+    if (labelForward && labelForward.control === el) {
+      labelForward = null;
+      return;
+    }
+    var control = labelControl(el);
+    if (control) {
+      var forward = { control: control };
+      labelForward = forward;
+      setTimeout(function () {
+        if (labelForward === forward) labelForward = null;
+        // The change a label's click causes has fired by now, and read the
+        // pointer for `viaLabel`; nothing else may.
+        if (pointer && pointer.el === el) pointer = null;
+      }, 0);
+    }
     // The click a browser fires after a pointer drag is part of the drag.
     if (Date.now() - draggedAt < 300) return;
-    // A label's click on its checkbox or radio: the author clicked the LABEL,
-    // which was reported; this is the browser passing it on.
-    if (pointer && pointer.el !== el && labelControl(pointer.el) === el) return;
     // Enter in a form field makes the browser click the form's submit button;
     // that click IS the Enter, already reported as a key.
     if (event.detail === 0 && Date.now() - enter.at < 250 && enter.form && el.form === enter.form) {
@@ -1017,6 +1447,7 @@
     var el = realTarget(event);
     if (!el) return;
     var tag = el.tagName.toLowerCase();
+    settleEnter();
     // A choice made without pointing — the keyboard, or a script such as
     // Playwright's selectOption — moves no focus, so typing still open in
     // another field has had no focus-out to report it. It happened first.
@@ -1057,6 +1488,10 @@
     if (!el || !isTextEntry(el)) return;
     watchShadowRootOf(el);
     startTyping(el, el.defaultValue !== undefined ? String(el.defaultValue) : '');
+    // A secret field's value as it stands after every keystroke: what a
+    // toggle that replaces the element carries over, even mid-typing.
+    var session = typing.get(el);
+    if (session && session.secret) rememberSecretValue(el);
   }
 
   function onFocusIn(event) {
@@ -1078,6 +1513,8 @@
   function onKeyDown(event) {
     if (!state.recording || !event.isTrusted) return;
     if (event.isComposing) return;
+    // The last Enter's effect is known by the next key.
+    settleEnter();
     var el = realTarget(event) || focusedElement();
     var key = event.key;
     if (el && isTextEntry(el) && !typing.has(el) &&
@@ -1092,23 +1529,38 @@
     // Enter on a button or link is a click, and the click event reports it.
     if (key === 'Enter' && (tag === 'button' || tag === 'a' || role === 'button' || role === 'link')) return;
     // Enter in a textarea is a newline: part of the typing, not an action.
-    if (key === 'Enter' && (tag === 'textarea' || (el && el.isContentEditable))) return;
-    if (el) flushField(el);
-    if (key === 'Enter') enter = { at: Date.now(), form: el && el.form ? el.form : null };
+    if (key === 'Enter' && tag === 'textarea') return;
     var action = { kind: 'key', key: key };
     if (event.shiftKey) action.shift = true;
     if (el) action.target = describe(el);
+    // Enter in a contenteditable is decided by what it does (above): a new
+    // line, or a message sent.
+    if (key === 'Enter' && el && el.isContentEditable) {
+      var editor = typeof el.closest === 'function'
+        ? el.closest('[contenteditable=""],[contenteditable="true"],[contenteditable="plaintext-only"]') || el
+        : el;
+      var judged = { el: editor, before: editorShape(editor), action: action, timer: 0 };
+      judged.timer = setTimeout(function () {
+        if (pendingEnter === judged) settleEnter();
+      }, ENTER_SETTLE_MS);
+      pendingEnter = judged;
+      return;
+    }
+    if (el) flushField(el);
+    if (key === 'Enter') enter = { at: Date.now(), form: el && el.form ? el.form : null };
     void send({ type: 'action', action: action });
   }
 
   function onFocusOut(event) {
     if (!state.recording) return;
+    settleEnter();
     var el = realTarget(event);
     if (el && typing.has(el)) flushField(el);
   }
 
   function onSubmit() {
     if (!state.recording) return;
+    settleEnter();
     flushAllExcept(null);
   }
 
@@ -1154,15 +1606,20 @@
   //   setState({recording, pick}) — Stop, Add check, Cancel check;
   //   flush() — the typing not yet reported, RETURNED rather than sent, so the
   //             server has every action in hand before it says stop;
-  //   fieldRects() — where the secret fields are, for the crop being taken to
-  //             paint them out (and the other fields' values, for the server
-  //             to compare with the secrets it knows; never a secret field's).
+  //   fieldRects({text}) — what the crop being taken must paint out: the
+  //             secret fields, and text showing a secret typed here; and the
+  //             other fields' values — with {text: true}, every run of text on
+  //             screen too — for the server to compare with the secrets it
+  //             knows (never a secret field's value, never a typed secret).
   Object.defineProperty(window, CONTROL, {
     value: Object.freeze({
       setState: function (next) { applyState(next); return true; },
-      fieldRects: function () { return fieldRects(); },
+      fieldRects: function (ask) { return fieldRects(ask); },
       flush: function () {
         var out = [];
+        // An Enter still being judged is decided now, before the typing it
+        // may report with its pre-Enter text.
+        settleEnter(function (action) { out.push(action); });
         typing.forEach(function (session, el) {
           var action = typedAction(el, session);
           baseline.set(el, currentValue(el));

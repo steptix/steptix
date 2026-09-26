@@ -144,7 +144,7 @@ vi.mock('../src/report/generator.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
-import { getLogLevel, logger, setLogLevel } from '../src/utils/logger.js';
+import { addLogCallback, getLogLevel, logger, setLogLevel } from '../src/utils/logger.js';
 import {
   RECORD_STEPS_HEADLESS_MESSAGE,
   RECORD_STEPS_NO_MODEL_MESSAGE,
@@ -1151,7 +1151,11 @@ describe("secrets from the request's .env (review, finding 7)", () => {
     const first = recordingOf(ai.requests[0]!);
     expect(first[0]).toMatchObject({ kind: 'type', secret: true, knownSecret: 'password' });
     const second = recordingOf(ai.requests[1]!);
-    expect(second[0]).toMatchObject({ kind: 'type', value: 'Bearer ***' });
+    // A value that CONTAINS a known secret is withheld whole (review 2,
+    // finding 2) — not spliced into "Bearer ***", a parameter holding a mask.
+    expect(second[0]).toMatchObject({ kind: 'type', secret: true });
+    expect(second[0]!['value']).toBeUndefined();
+    expect(second[0]!['knownSecret']).toBeUndefined();
     await control(id, { action: 'cancel' });
     await s.waitFor((f) => f.event === 'done', 'done');
   }, 60_000);
@@ -1196,5 +1200,33 @@ describe("the log bridge (review, finding 15)", () => {
     expect(JSON.stringify(s.frames)).not.toContain('sk-env-SECRET-42');
     await control(id, { action: 'cancel' });
     await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+});
+
+describe('the log lines a recording writes (review 2, finding 10)', () => {
+  it("are masked with the recording's secrets — the address it started on included", async () => {
+    const lines: string[] = [];
+    const remove = addLogCallback((_level, message) => lines.push(message));
+    try {
+      const id = 'rec-log-mask';
+      const s = await started(
+        id,
+        recordBody({
+          config: { baseUrl: `${origin}/form.html?token=tok-START-SECRET-9` },
+          env: { API_TOKEN: 'tok-START-SECRET-9' },
+        }),
+      );
+      expect(s.of('record:started')[0].url).toContain('token=***');
+      await control(id, { action: 'cancel' });
+      await s.waitFor((f) => f.event === 'done', 'done');
+    } finally {
+      remove();
+    }
+    const startedOn = lines.filter((l) => l.includes('Record Steps started on'));
+    expect(startedOn).toHaveLength(1);
+    expect(startedOn[0]).toContain('token=***');
+    expect(lines.filter((l) => l.includes('Record Steps') || l.includes('record-steps')).join('\n')).not.toContain(
+      'tok-START-SECRET-9',
+    );
   }, 60_000);
 });

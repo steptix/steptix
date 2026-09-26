@@ -760,14 +760,31 @@ opening a list are clicks", spec §4); what it did follows as an EVENT —
 `tick`/`untick` (with `viaLabel` when the label was clicked), `select` with the
 option text, `upload` with the file names — and rides with it. The click a
 browser passes from a label to its control is not a second action — a
-checkbox's, and a hidden file input's behind a styled "Upload" label alike
-(that one used to record two clicks). A custom
+checkbox's, a button's, and a hidden file input's behind a styled "Upload"
+label alike (that one used to record two clicks). Only that click: the label
+is forgotten on the next task, so a later click on the control — Tab to it and
+Enter, with no pointer-down between — is the author's own (it used to be
+swallowed for as long as the label's pointer-down was the last one, so a
+second, keyboard save was lost). A custom
 `role=checkbox` or `switch` click is a click action, followed by a
 `tick`/`untick` event read from its `aria-checked` after the page's handler
 ran. The click a browser makes on a form's submit button when Enter is pressed
 in its field is folded into that `key` action. Enter and Tab are the only keys
 recorded (Escape no longer is); Enter on a button or link is its click; Enter
-in a textarea or a contenteditable is typing. A choice made without pointing
+in a textarea is typing (kept deliberately — so a TEXTAREA composer that sends
+on Enter and empties itself still records neither the message nor the key,
+before this round and after; the effect rule below would cover it if
+extended). Enter in a contenteditable is decided by its EFFECT,
+because the key cannot tell a document editor from a chat composer: once it
+settles (100 ms, or at the author's next key, pointer-down, change, focus-out
+or submit, or at Stop's flush — whichever is first; a page that empties the
+box in a microtask or a re-render has done so by then), a box that gained a
+line or a block (`br`, `div`, `p`, `li` …) and was not emptied is typing; one
+that was emptied, removed, or left as it was is the typing so far — reported
+with the text it held BEFORE the Enter — then a `key` Enter action. Treating
+every contenteditable Enter as typing (the previous round) lost a chat
+message and its Enter together: the box ended as it began, so the typing
+reported nothing. A choice made without pointing
 (the keyboard, a script) first reports any field still being typed into, so
 the order is what happened — and so does an Add check pick, whose swallowed
 click moves no focus: the typing comes before the check.
@@ -803,16 +820,33 @@ first keystroke (or first `input`) into a text field. A field the recorder
 calls secret while it shows its value in clear (a `type="text"` token box, a
 password box its eye has flipped) gets no crop of its own — nor does an Add
 check picked on one. Every OTHER crop has the secrets painted out before it
-is kept (spec §4.2): the page script reports where every secret field is,
-across every frame and every open shadow root the author touched, plus every
-other field's value, and the server paints over the secret ones and any whose
-value contains a secret it knows (3 characters or longer; the comparison is on
-the server, so the known secrets never go into the page), with a solid fill 3
-px wider than the field, on the whole screenshot. A frame that does not
-answer within a second costs the crop — it is not sent — while a frame that is
-gone or has no script paints nothing. Both depart from decision 6's "anything
-else visible goes to the model", in the safe direction; a password box showing
-dots is painted too (it costs the model nothing but the dots). PNG, cropped to at least
+is kept (spec §4.2): the page script reports (`fieldRects`), across every frame
+and every open shadow root the author touched, where every secret field is and
+every element whose text shows a secret typed on that page (the deepest
+element holding each occurrence, so `<b>hun</b>ter2` is found in its parent),
+plus every other field's value and — only when the run knows secrets to look
+for — every run of text on screen with its box. The server paints over the
+secret ones and any field or text run that holds a secret it knows (3
+characters or longer; the comparison is on the server, so the known secrets
+never go into the page — the request's `.env` includes keys, such as the AI
+gateway's, that a page script hooking `String.prototype` could otherwise
+read), with a solid fill 3 px wider than the box, on the whole screenshot.
+A known secret split across elements in the page's own markup is not found by
+the text runs (each is one text node); the typed-secret scan does find those.
+Inside a frame, boxes are offset by the frame element's CONTENT box — its
+border box moved in by its border and padding (the border box alone missed a
+field in a bordered, padded iframe by that much, and put the target's outline
+off by the same). The crop fails CLOSED: it is not sent when a frame does not
+answer within a second, when its evaluate rejects (mid-navigation it may still
+show the old document), when it has no recording script, when it reports
+itself too big (more than 2000 fields, 5000 text runs or 400,000 characters of
+text, or a typed-secret scan past its budget), or when the frame element cannot
+say where it is in time. Only a frame element with no box (hidden) is passed
+over. (Measured: the recording script is present even in `sandbox=""` and
+script-written `about:blank` frames, so fail-closed costs no crops on ordinary
+pages.) All of this departs from decision 6's "anything else visible goes to
+the model", in the safe direction; a password box showing dots is painted too
+(it costs the model nothing but the dots). PNG, cropped to at least
 520×320 with 140 px round the target, the target outlined in red, scaled so
 the longer side is at most 640. The 40 are counted when taken, so a
 pointer-down that never became an action still counts. `ai.sendScreenshots`
@@ -832,17 +866,46 @@ and masking it would turn a check on the signed-in header into "Welcome ***"
 — the same rule a run's masking uses. Those values — and the file's own
 secret-named literals, wherever they appear in the file excerpt — are masked
 in everything the model is sent, in every `record:action` summary, in
-`record:started` and in the warnings forwarded as `output`.
+`record:started`, in the warnings forwarded as `output` and in the
+recording's own log lines (the "started on <url>" line, and the recorder's
+debug lines, which can carry a frame's address).
 
-Masked as VALUES, in both spellings, before anything is cut. The prompt is
-masked object by object before `JSON.stringify` — once stringified, a secret
-holding `"` or `\` is spelled with escapes and no longer matches itself — and
-each secret is also masked in its JSON-escaped spelling, which a page can show
-too. Page text is masked first and clipped after: the page script no longer
-clips to what the model sees (it sends up to 1000 characters of a text, 4000
-of a value) and the server masks, then cuts; the panel line masks the whole
-action before shortening it to 60 characters. A secret that crossed a cut used
-to leave its first characters behind, which no mask could match.
+Not every secret-NAMED `.env` value either (`envSecrets`,
+`couldBeCredential`). `.env` files hold settings the name rule catches by a
+word — `TOKEN_TTL_MINUTES=30`, `ENABLE_PASSWORD_RESET=true`, `MAX_TOKENS=2048`
+— and a known secret is masked as a substring: "1300" typed into an Amount
+field was recorded as "1***0", "true story" as "*** story", and a typed "30"
+became `{{TOKEN_TTL_MINUTES}}`. A value known only because its VARIABLE's name
+sounds secret must be 4 characters or more — `RECORD_SECRET_MIN_LENGTH`, the
+floor the runner already applies to page-derived secrets (the runner's own
+`.env` masking has none, but it masks the run's output, not what the author
+typed), now exported from `src/utils/secrets.ts` — and not a boolean or a
+number. A `$VAR` parameter whose own NAME the file makes secret-sounding
+(`- password: $LOGIN_PIN`) keeps its value whatever it looks like: the author
+named that parameter a password, the deliberate instruction the runner's rule
+never floors, and a numeric password is still a password.
+
+A value that CONTAINS a known secret (of 4 characters or more — a shorter one
+withholds only a value that IS it) is withheld whole, as a secret field's, with
+no `knownSecret`; so is an Add check's field value that holds one. The
+previous round spliced it ("Bearer ***"), which became a parameter holding a
+mask.
+
+Masked as VALUES, in every spelling, before anything is folded or cut. The
+prompt is masked object by object before `JSON.stringify` — once stringified,
+a secret holding `"` or `\` is spelled with escapes and no longer matches
+itself — and each secret is also masked in its JSON-escaped spelling, which a
+page can show too, and in the spellings a URL carries (`secretSpellings`:
+`encodeURIComponent`'s, a form's `+` for a space, `encodeURI`'s), because a
+link's `href`, a tab's address and a typed navigation hold a token encoded.
+Page text is masked first, then whitespace-folded, then clipped: the page
+script neither clips to what the model sees (it sends up to 1000 folded
+characters of a text, 4000 of a value) nor folds — it trims the ends, and cuts
+where the FOLDED text would reach its bound, so the bound means what it did —
+and the server masks, folds, then cuts; the panel line masks the whole action
+before shortening it to 60 characters. A secret that crossed a cut used to
+leave its first characters behind, and one holding a double space or a line
+break was folded into a spelling no mask could match.
 
 **The log bridge** forwards a warning or an error the server logs while the
 recording runs as an `output` frame. The logger fans out process-wide, so a
@@ -868,12 +931,41 @@ for the life of the document, asked at focus, pointer-down, the first
 keystroke, the end of the typing, a pick and every crop; and a
 `MutationObserver` on `type` attributes (with their old value) adds a field at
 the flip itself, so one flipped before the author ever touched it is still
-known. It also calls a text field secret when its `<label>` matches the
-password-field rule, as a placeholder does — the one name a minimal sign-in
-form leaves a flipped box, and the only cover for one flipped before Record
-was pressed on a page the script was not yet in. The memory and the label
-only ever ADD to the shared rule, so the parity test's three readers still
-agree on everything the rule itself decides.
+known. It also calls a text field secret when its `<label>` names a
+password — the one name a minimal sign-in form leaves a flipped box, and the
+only cover for one flipped before Record was pressed on a page the script was
+not yet in. The label rule is its own, not the field rule's: whole words
+(password, passwd, pwd, passcode, passphrase, secret, token, OTP, one-time
+code/password/PIN, verification/security/authentication/access code, and a
+PIN token), and not when the label also names another kind of field (email,
+username, phone, mobile, hint, question, reminder). The field rule's substring
+`pass` withheld "Boarding pass number", and the word alone withheld "Email for
+password reset". A field styled `-webkit-text-security: disc | circle |
+square` is secret too; it shows dots, and is photographed like a password box.
+
+**…and remembers VALUES.** The WeakSet follows an element, and a toggle that
+REPLACES the box — Vue `v-if`/`v-else`, Angular `*ngIf`, a React key change —
+put a new `<input type="text">` holding the typed password where the old one
+was: typed into an action, the summary, the prompt and `## Parameters`, and
+photographed. So the page script also keeps, in its closure and never sent,
+the value of every secret field (one live entry per field, updated at every
+keystroke into it and whenever it is asked about; and every finished value).
+A field whose value IS one, or contains one of 4 characters or more
+(`TYPED_SECRET_MIN`, pinned equal to `RECORD_SECRET_MIN_LENGTH` by a test), is
+secret — typing, an Add check, every crop; every element whose text shows one
+is painted out of the crops; and `clip`, which every text the script sends
+goes through, masks them — so a check on a "reveal" `<span>` says `***`. The
+server's known secrets are NOT handed to the page for this: the page reports
+its text with boxes and the server compares (above). One limit on what is
+remembered: the shared rule's bare `key` calls a `keywords` search box and
+`aria-label="Search by keyword"` secret, and a remembered search term would be
+masked out of every description and painted out of every crop of the results
+page. A field secret only by that word gives its value to the memory only when
+the value looks like a credential — 8 characters or more, no spaces
+(`strongSecretField`, `worthRemembering`; pinned by a test that fails without
+the gate). The memory, the label and the style only ever ADD to the shared
+rule, so the parity test's three readers still agree on everything the rule
+itself decides.
 
 **The answer, enforced.** Every draft — and so `record:result`, which is the
 final draft — has been through a file-safety pass. What the pass CHANGED stays

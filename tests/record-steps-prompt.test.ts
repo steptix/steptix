@@ -20,8 +20,10 @@ import {
   askForDraft,
   parseDraftAnswer,
 } from '../src/recorder/write-steps.js';
-import { summarizeAction, stripEdgePictographs } from '../src/recorder/step-recorder.js';
-import { envSecrets } from '../src/recorder/record-steps-run.js';
+import { readFileSync } from 'node:fs';
+import { secretSpellings, summarizeAction, stripEdgePictographs } from '../src/recorder/step-recorder.js';
+import { couldBeCredential, envSecrets } from '../src/recorder/record-steps-run.js';
+import { RECORD_SECRET_MIN_LENGTH } from '../src/utils/secrets.js';
 
 const FILE = [
   '---',
@@ -540,5 +542,50 @@ describe('envSecrets — the .env the request brought (review, finding 7)', () =
     ]);
     // Nothing sent, nothing known — beyond what the server's own environment holds.
     expect(envSecrets(f, undefined).map((s) => s.value)).not.toContain('pw-from-env');
+  });
+
+  it('a setting under a secret-sounding name is not a secret: short values, flags and numbers are left out (review 2, finding 2)', () => {
+    const f = summarizeTargetFile(
+      ['# T', '', '## Parameters', '- password: $LOGIN_PIN', '- ttl: $TOKEN_TTL_SECONDS', '', '## Steps', '1. Go'].join('\n'),
+      'new',
+    );
+    const found = envSecrets(f, {
+      TOKEN_TTL_MINUTES: '30',
+      TOKEN_TTL_SECONDS: '3600',
+      ENABLE_PASSWORD_RESET: 'true',
+      MAX_TOKENS: '2048',
+      SECRET_MODE: 'off',
+      API_KEY: 'abc',
+      SESSION_TOKEN: 'tok-REAL-123',
+      // A parameter the AUTHOR named a password keeps its value, number or not.
+      LOGIN_PIN: '482913',
+    });
+    expect(found).toEqual([
+      { name: 'password', value: '482913' },
+      { name: 'SESSION_TOKEN', value: 'tok-REAL-123' },
+    ]);
+    // The floor is the runner's own for page-derived secrets.
+    expect(couldBeCredential('abcd')).toBe(true);
+    expect(couldBeCredential('abc')).toBe(false);
+    expect(RECORD_SECRET_MIN_LENGTH).toBe(4);
+  });
+
+  it("the page script remembers typed secrets from the same floor (TYPED_SECRET_MIN)", () => {
+    const script = readFileSync(new URL('../src/browser/scripts/record-steps.js', import.meta.url), 'utf8');
+    expect(/var TYPED_SECRET_MIN = (\d+);/.exec(script)?.[1]).toBe(String(RECORD_SECRET_MIN_LENGTH));
+  });
+});
+
+describe('secretSpellings — every spelling a secret is masked in (review 2, finding 9)', () => {
+  it('as typed, JSON-escaped, and URL-encoded three ways', () => {
+    expect(secretSpellings(['p@ss w/"rd+1'])).toEqual([
+      'p@ss w/"rd+1',
+      'p@ss w/\\"rd+1',
+      'p%40ss%20w%2F%22rd%2B1',
+      'p%40ss+w%2F%22rd%2B1',
+      'p@ss%20w/%22rd+1',
+    ]);
+    expect(secretSpellings(['plain-token-1'])).toEqual(['plain-token-1']);
+    expect(secretSpellings([''])).toEqual([]);
   });
 });

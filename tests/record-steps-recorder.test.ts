@@ -17,7 +17,8 @@ import Jimp from 'jimp';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { PageTracker, type BrowserSession } from '../src/browser/manager.js';
 import { StepRecorder, classifyHistoryMove, type KnownSecret } from '../src/recorder/step-recorder.js';
-import type { RecordedAction } from '../src/recorder/types.js';
+import type { Box, RecordedAction } from '../src/recorder/types.js';
+import { addLogCallback } from '../src/utils/logger.js';
 
 const PAGES: Record<string, string> = {
   '/board.html': `<!doctype html><html><head><title>Board</title></head><body>
@@ -114,6 +115,62 @@ const PAGES: Record<string, string> = {
     <a id="nocontent" href="/204">No content</a>
     <a id="slow" href="/slow">Slow report</a>
     <button id="later-replace" onclick="setTimeout(() => history.replaceState({}, '', '?view=' + Date.now()), 400)">Load more</button>
+    </body></html>`,
+  // A "show" toggle that REPLACES the password box with a new text box (Vue
+  // v-if/v-else, Angular *ngIf), a "reveal" that shows the value in a span,
+  // and page text holding a secret the server knows — each in its own solid
+  // colour, so a crop can be read for them.
+  '/swap.html': `<!doctype html><html><head><title>Swap</title></head><body style="margin:0;background:#fff">
+    <div style="padding:20px">
+      <label for="mw3" style="display:block">Memorable word</label>
+      <input id="mw3" type="password" style="display:block;width:180px;height:30px;border:0;background:#00ff00;color:#00ff00">
+      <button type="button" id="swap" style="display:block" onclick="
+        const old = document.getElementById('mw3'); const n = document.createElement('input');
+        n.id = 'mw3'; n.type = old.type === 'password' ? 'text' : 'password'; n.value = old.value;
+        n.setAttribute('style', old.getAttribute('style')); old.replaceWith(n);">Show</button>
+      <button type="button" id="reveal" style="display:block" onclick="document.getElementById('shown').textContent = document.getElementById('mw3').value">Reveal</button>
+      <p>Your word: <span id="shown" style="background:#0000ff;color:#0000ff;font-size:20px"></span></p>
+      <p>Key on file: <span id="known-shown" style="background:#ff00ff;color:#ff00ff;font-size:20px">known-TEXT-42</span></p>
+      <button type="button" id="near3" style="display:block">Near</button>
+    </div></body></html>`,
+  // A password box inside an iframe with a thick border and padding.
+  '/framed.html': `<!doctype html><html><head><title>Framed</title></head><body style="margin:0;background:#fff">
+    <button id="near4" style="margin:10px">Near</button><br>
+    <iframe id="bordered" src="/framed-inner.html" style="border:24px solid #ccc;padding:16px;width:400px;height:120px"></iframe>
+    </body></html>`,
+  '/framed-inner.html': `<!doctype html><html><body style="margin:8px;background:#fff">
+    <input id="fpw" type="password" style="width:200px;height:30px;border:0;background:#00ff00;color:#00ff00">
+    <button id="feye" onclick="fpw.type = fpw.type === 'password' ? 'text' : 'password'">Show</button>
+    </body></html>`,
+  // A chat composer: Enter sends the message and empties the box.
+  '/chat.html': `<!doctype html><html><head><title>Chat</title></head><body>
+    <ul id="log"></ul>
+    <div id="composer" contenteditable="true" role="textbox" aria-label="Message" style="min-height:40px;border:1px solid"></div>
+    <button id="other">Other</button>
+    <script>
+      const composer = document.getElementById('composer');
+      composer.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' || e.shiftKey) return;
+        e.preventDefault();
+        const li = document.createElement('li');
+        li.textContent = composer.innerText;
+        document.getElementById('log').appendChild(li);
+        composer.innerHTML = '';
+      });
+    </script></body></html>`,
+  '/labels.html': `<!doctype html><html><head><title>Labels</title></head><body>
+    <label for="bp">Boarding pass number</label><input id="bp">
+    <label for="er">Email for password reset</label><input id="er">
+    <label for="otc">One-time code</label><input id="otc">
+    <label for="pcode">Passcode</label><input id="pcode">
+    <input id="dots" name="memo" style="-webkit-text-security: disc">
+    <label for="save" id="lab-save">Save changes</label>
+    <button id="save" onclick="window.saves = (window.saves || 0) + 1">Save</button>
+    <a id="enc" href="/other.html?token=p%40ss%20w%2Frd%2B1" onclick="event.preventDefault()">Open report</a>
+    <input id="phrase" name="note">
+    <pre id="pre">key: open  sesame</pre>
+    <input id="kw" aria-label="Search by keyword">
+    <h2 id="results">Results for shoes</h2>
     </body></html>`,
 };
 
@@ -635,19 +692,21 @@ describe('a secret field stays secret for the life of the document (review, find
   }, 30_000);
 });
 
-describe('crops have secrets painted out (review, finding 6)', () => {
-  /** How many pixels of a crop are within `tolerance` of a colour. */
-  async function pixelsNear(dataUrl: string, rgb: [number, number, number], tolerance = 40): Promise<number> {
-    const image = await Jimp.read(Buffer.from(dataUrl.split(',')[1]!, 'base64'));
-    let n = 0;
-    const d = image.bitmap.data;
-    for (let i = 0; i < d.length; i += 4) {
-      if (Math.abs(d[i]! - rgb[0]) + Math.abs(d[i + 1]! - rgb[1]) + Math.abs(d[i + 2]! - rgb[2]) <= tolerance) n++;
-    }
-    return n;
+/** How many pixels of a crop are within `tolerance` of a colour. */
+async function pixelsNear(dataUrl: string, rgb: [number, number, number], tolerance = 40): Promise<number> {
+  const image = await Jimp.read(Buffer.from(dataUrl.split(',')[1]!, 'base64'));
+  let n = 0;
+  const d = image.bitmap.data;
+  for (let i = 0; i < d.length; i += 4) {
+    if (Math.abs(d[i]! - rgb[0]) + Math.abs(d[i + 1]! - rgb[1]) + Math.abs(d[i + 2]! - rgb[2]) <= tolerance) n++;
   }
-  const GREEN: [number, number, number] = [0, 255, 0];
-  const BLUE: [number, number, number] = [0, 0, 255];
+  return n;
+}
+const GREEN: [number, number, number] = [0, 255, 0];
+const BLUE: [number, number, number] = [0, 0, 255];
+const MAGENTA: [number, number, number] = [255, 0, 255];
+
+describe('crops have secrets painted out (review, finding 6)', () => {
 
   it('a flipped password box and a field holding a known secret are covered in every crop', async () => {
     await page.goto(`${origin}/paint.html`);
@@ -844,5 +903,341 @@ describe('decoration is not a name (review, finding 16)', () => {
     expect(actions[0]!.target).toMatchObject({ name: 'Transactions', rawName: '💳 Transactions' });
     expect(actions[0]!.summary).toBe('Clicked link "Transactions"');
     expect(actions[1]!.target).toMatchObject({ name: 'Next', rawName: 'Next ›' });
+  }, 30_000);
+});
+
+// ── The second fix round (review 2 of the server half) ────────────────────
+
+describe('a secret typed on the page is remembered by its VALUE (review 2, finding 1)', () => {
+  beforeEach(async () => {
+    await page.goto(`${origin}/swap.html`);
+  });
+
+  it('a show toggle that REPLACES the box: the new text box is secret — typed, and in every crop', async () => {
+    recorder = newRecorder({ sendScreenshots: true });
+    await recorder.start();
+    await page.click('#mw3');
+    await page.keyboard.type('hunter2-SWAP');
+    await page.click('#swap'); // a new <input type="text"> holding the value
+    expect(await page.$eval('#mw3', (e) => (e as HTMLInputElement).type)).toBe('text');
+    await page.click('#mw3');
+    await page.keyboard.press('End');
+    await page.keyboard.type('!!');
+    await page.click('#near3');
+    const done = await recorder.stop();
+    const typed = done.filter((a) => a.kind === 'type');
+    expect(typed).toHaveLength(2);
+    for (const a of typed) {
+      expect(a.secret).toBe(true);
+      expect(a.value).toBeUndefined();
+      expect(a.summary).toContain('***');
+    }
+    expect(JSON.stringify(raw)).not.toContain('hunter2');
+    // The click on Near was photographed with the new box on screen,
+    // showing its value in clear: painted out.
+    const near = done.find((a) => a.kind === 'click' && a.target?.name === 'Near');
+    expect(near?.crop?.dataUrl).toMatch(/^data:image\/png/);
+    expect(await pixelsNear(near!.crop!.dataUrl, GREEN)).toBe(0);
+  }, 30_000);
+
+  it('a value revealed into a <span> is painted out of the crops and masked out of a check', async () => {
+    recorder = newRecorder({ sendScreenshots: true });
+    await recorder.start();
+    await page.click('#mw3');
+    await page.keyboard.type('hunter2-REVEAL');
+    await page.click('#reveal');
+    expect(await page.textContent('#shown')).toBe('hunter2-REVEAL');
+    await page.click('#near3');
+    recorder.armPick();
+    await sleep(100);
+    await page.click('#shown');
+    await actionsReach(5);
+    const done = await recorder.stop();
+    const near = done.find((a) => a.kind === 'click' && a.target?.name === 'Near');
+    expect(near?.crop?.dataUrl).toMatch(/^data:image\/png/);
+    expect(await pixelsNear(near!.crop!.dataUrl, BLUE)).toBe(0);
+    const check = done.find((a) => a.kind === 'check');
+    expect(check?.check?.text).toBe('***');
+    expect(JSON.stringify(raw)).not.toContain('hunter2');
+  }, 30_000);
+
+  it('page text holding a secret the SERVER knows is painted out too — the secret never goes into the page (finding 8)', async () => {
+    known = [{ name: 'api_token', value: 'known-TEXT-42' }];
+    recorder = newRecorder({ sendScreenshots: true });
+    await recorder.start();
+    await page.click('#near3');
+    const [click] = await actionsReach(1);
+    expect(click?.crop?.dataUrl).toMatch(/^data:image\/png/);
+    expect(await pixelsNear(click!.crop!.dataUrl, MAGENTA)).toBe(0);
+    // The control: without the secret known, the same text is left alone.
+    known = [];
+    actions.length = 0;
+    await page.click('#near3');
+    const [again] = await actionsReach(1);
+    expect(await pixelsNear(again!.crop!.dataUrl, MAGENTA)).toBeGreaterThan(100);
+  }, 30_000);
+});
+
+describe('value memory stays with real secrets (review 2, finding 1 — the composition)', () => {
+  it("a search box the shared rule calls secret by the word `keyword` withholds its term — and the results page still says it", async () => {
+    await page.goto(`${origin}/labels.html`);
+    recorder = newRecorder({ sendScreenshots: true });
+    await recorder.start();
+    await page.fill('#kw', 'shoes');
+    recorder.armPick();
+    await sleep(100);
+    await page.click('#results');
+    await actionsReach(2);
+    const done = await recorder.stop();
+    // The shared rule's over-match, unchanged: the typed term is withheld.
+    expect(done[0]).toMatchObject({ kind: 'type', secret: true });
+    // But a search term is not a credential: not remembered, not masked.
+    const check = done.find((a) => a.kind === 'check');
+    expect(check?.check?.text).toBe('Results for shoes');
+  }, 30_000);
+});
+
+describe('an iframe with a border and padding (review 2, finding 4)', () => {
+  beforeEach(async () => {
+    await page.goto(`${origin}/framed.html`);
+  });
+
+  it("paints the field where it is on screen — inside the frame's border and padding", async () => {
+    recorder = newRecorder({ sendScreenshots: true });
+    await recorder.start();
+    const frame = page.frames().find((f) => f.url().endsWith('/framed-inner.html'))!;
+    await frame.fill('#fpw', 'framed-SECRET');
+    await frame.click('#feye'); // now type="text", showing its value
+    await page.click('#near4');
+    const done = await recorder.stop();
+    const near = done.find((a) => a.kind === 'click' && a.target?.name === 'Near');
+    expect(near?.crop?.dataUrl).toMatch(/^data:image\/png/);
+    expect(await pixelsNear(near!.crop!.dataUrl, GREEN)).toBe(0);
+  }, 30_000);
+
+  it("outlines an in-frame target where it is: the crop's page box is the element's", async () => {
+    recorder = newRecorder({ sendScreenshots: true });
+    await recorder.start();
+    const frame = page.frames().find((f) => f.url().endsWith('/framed-inner.html'))!;
+    await frame.click('#feye');
+    const [click] = await actionsReach(1);
+    const actual = await page.evaluate(() => {
+      const f = document.getElementById('bordered') as HTMLIFrameElement;
+      const fr = f.getBoundingClientRect();
+      const cs = getComputedStyle(f);
+      const r = f.contentDocument!.getElementById('feye')!.getBoundingClientRect();
+      return {
+        x: Math.round(fr.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft) + r.left),
+        y: Math.round(fr.top + parseFloat(cs.borderTopWidth) + parseFloat(cs.paddingTop) + r.top),
+      };
+    });
+    expect(click?.crop?.pageBox).toBeDefined();
+    expect(Math.abs(click!.crop!.pageBox.x - actual.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(click!.crop!.pageBox.y - actual.y)).toBeLessThanOrEqual(1);
+  }, 30_000);
+});
+
+describe('Enter in a contenteditable, by what it did (review 2, finding 3)', () => {
+  it('a chat composer where Enter sends and empties the box: the message, then the key', async () => {
+    await page.goto(`${origin}/chat.html`);
+    recorder = newRecorder();
+    await recorder.start();
+    await page.click('#composer');
+    await page.keyboard.type('Hello team');
+    await page.keyboard.press('Enter');
+    await sleep(250);
+    await page.click('#other');
+    await actionsReach(4);
+    await sleep(200);
+    expect(await page.$$eval('#log li', (l) => l.map((x) => x.textContent))).toEqual(['Hello team']);
+    expect(actions.map((a) => [a.kind, a.action])).toEqual([
+      ['click', true], ['type', false], ['key', true], ['click', true],
+    ]);
+    expect(actions[1]!.value).toBe('Hello team');
+    expect(actions[2]).toMatchObject({ key: 'Enter' });
+    expect(actions[2]!.target?.name).toBe('Message');
+  }, 30_000);
+
+  it('an Enter still being judged at Stop is decided then — the message and the key come back', async () => {
+    await page.goto(`${origin}/chat.html`);
+    recorder = newRecorder();
+    await recorder.start();
+    await page.click('#composer');
+    await page.keyboard.type('Last words');
+    await page.keyboard.press('Enter');
+    const done = await recorder.stop();
+    expect(done.map((a) => a.kind)).toEqual(['click', 'type', 'key']);
+    expect(done[1]!.value).toBe('Last words');
+  }, 30_000);
+});
+
+describe("a label's forwarded click, and only that one (review 2, finding 6)", () => {
+  it("a later keyboard click on the label's control is the author's own", async () => {
+    await page.goto(`${origin}/labels.html`);
+    recorder = newRecorder();
+    await recorder.start();
+    await page.click('#lab-save'); // the label; the browser passes a click to Save
+    await sleep(100);
+    await page.focus('#save');
+    await page.keyboard.press('Enter'); // a second save, from the keyboard
+    await actionsReach(2);
+    await sleep(200);
+    expect(await page.evaluate('window.saves')).toBe(2);
+    expect(actions.map((a) => [a.kind, a.target?.tag, a.keyboard === true])).toEqual([
+      ['click', 'label', false],
+      ['click', 'button', true],
+    ]);
+  }, 30_000);
+});
+
+describe('the label rule reads whole words (review 2, finding 7)', () => {
+  it('"Boarding pass number" and "Email for password reset" are ordinary fields; a one-time code and a passcode are not', async () => {
+    await page.goto(`${origin}/labels.html`);
+    recorder = newRecorder();
+    await recorder.start();
+    await page.fill('#bp', 'BP-7781');
+    await page.fill('#er', 'me@example.test');
+    await page.fill('#otc', '918273');
+    await page.fill('#pcode', 'pc-5521');
+    const done = await recorder.stop();
+    expect(done.map((a) => [a.target?.name, a.secret === true, a.value])).toEqual([
+      ['Boarding pass number', false, 'BP-7781'],
+      ['Email for password reset', false, 'me@example.test'],
+      ['One-time code', true, undefined],
+      ['Passcode', true, undefined],
+    ]);
+  }, 30_000);
+});
+
+describe('other spellings of a secret (review 2, finding 9)', () => {
+  beforeEach(async () => {
+    await page.goto(`${origin}/labels.html`);
+  });
+
+  it('a known secret percent-encoded in a link is masked', async () => {
+    known = [{ name: 'api_token', value: 'p@ss w/rd+1' }];
+    recorder = newRecorder();
+    await recorder.start();
+    await page.click('#enc');
+    const [click] = await actionsReach(1);
+    expect(click!.target?.href).toBe('/other.html?token=***');
+    expect(JSON.stringify(click)).not.toContain('p%40ss');
+  }, 30_000);
+
+  it('a secret holding a double space is matched as sent — the page no longer folds it away', async () => {
+    known = [{ name: 'passphrase', value: 'open  sesame' }];
+    recorder = newRecorder();
+    await recorder.start();
+    await page.fill('#phrase', 'say open  sesame now');
+    recorder.armPick();
+    await sleep(100);
+    await page.click('#phrase');
+    await actionsReach(2);
+    recorder.armPick();
+    await sleep(100);
+    await page.click('#pre');
+    await actionsReach(3);
+    const done = await recorder.stop();
+    const typed = done.find((a) => a.kind === 'type');
+    expect(typed).toMatchObject({ secret: true });
+    expect(typed!.value).toBeUndefined();
+    const checks = done.filter((a) => a.kind === 'check');
+    // Holding it anywhere, a field's value is withheld whole, as typing is.
+    expect(checks[0]!.check).toMatchObject({ secret: true });
+    expect(checks[1]!.check!.text).toBe('key: ***');
+    expect(JSON.stringify(done)).not.toContain('sesame');
+  }, 30_000);
+
+  it('a field styled to show dots (-webkit-text-security) is secret', async () => {
+    recorder = newRecorder();
+    await recorder.start();
+    await page.fill('#dots', 'dotted-SECRET');
+    const done = await recorder.stop();
+    expect(done[0]).toMatchObject({ kind: 'type', secret: true });
+    expect(JSON.stringify(raw)).not.toContain('dotted-SECRET');
+  }, 30_000);
+});
+
+describe('a frame that cannot answer costs the crop (review 2, findings 5 and 10)', () => {
+  /** A recorder over a stand-in page — enough of one for `secretBoxes` and
+   *  `startCrop`, whose frames answer (or fail to) as each test needs. */
+  function standIn(frames: Array<Record<string, unknown>>): {
+    recorder: StepRecorder;
+    fake: Record<string, unknown>;
+    secretBoxes: () => Promise<unknown>;
+  } {
+    const main = frames[0]!;
+    const fake: Record<string, unknown> = {
+      frames: () => frames,
+      mainFrame: () => main,
+      screenshot: async () => (await new Jimp(400, 300, 0xffffffff)).getBufferAsync(Jimp.MIME_PNG),
+    };
+    const rec = new StepRecorder({
+      browser: { context: {} } as unknown as BrowserSession,
+      sendScreenshots: true,
+      knownSecrets: () => [{ name: 'api_token', value: 'tok-FRAME-SECRET' }],
+      onAction: () => {},
+      onPick: () => {},
+    });
+    return {
+      recorder: rec,
+      fake,
+      secretBoxes: () => (rec as unknown as { secretBoxes(p: unknown): Promise<unknown> }).secretBoxes(fake),
+    };
+  }
+  const answering = (): Record<string, unknown> => ({
+    url: () => 'https://app.test/',
+    evaluate: async () => ({ secret: [], fields: [], texts: [] }),
+  });
+  const child = (over: Record<string, unknown>): Record<string, unknown> => ({
+    url: () => 'https://pay.test/embed?token=tok-FRAME-SECRET',
+    evaluate: async () => ({ secret: [], fields: [], texts: [] }),
+    frameElement: async () => ({
+      boundingBox: async () => ({ x: 10, y: 10, width: 100, height: 100 }),
+      evaluate: async () => ({ x: 0, y: 0 }),
+    }),
+    ...over,
+  });
+
+  it('a frame whose evaluate REJECTS (mid-navigation), or that has no script, or is too big: no crop', async () => {
+    for (const over of [
+      { evaluate: () => Promise.reject(new Error('Execution context was destroyed')) },
+      { evaluate: async () => null },
+      { evaluate: async () => ({ secret: [], fields: [], truncated: true }) },
+    ]) {
+      await expect(standIn([answering(), child(over)]).secretBoxes()).rejects.toThrow();
+    }
+    // The control: every frame answering is a crop.
+    await expect(standIn([answering(), child({})]).secretBoxes()).resolves.toEqual([]);
+  }, 30_000);
+
+  it('a frame element that cannot say where it is in time: no crop', async () => {
+    const never = new Promise<never>(() => {});
+    await expect(standIn([answering(), child({ frameElement: () => never })]).secretBoxes()).rejects.toThrow();
+    const stuck = child({
+      frameElement: async () => ({ boundingBox: () => never, evaluate: async () => ({ x: 0, y: 0 }) }),
+    });
+    await expect(standIn([answering(), stuck]).secretBoxes()).rejects.toThrow();
+  }, 30_000);
+
+  it("the crop it costs is null, and the line that says why has the frame's token masked", async () => {
+    const lines: string[] = [];
+    const remove = addLogCallback((_level, message) => lines.push(message));
+    try {
+      const main = answering();
+      const s = standIn([main, child({ evaluate: () => Promise.reject(new Error('Frame was detached')) })]);
+      const internals = s.recorder as unknown as {
+        startCrop(source: unknown, mark: string, target: Box): void;
+        crops: Map<string, Promise<unknown>>;
+      };
+      internals.startCrop({ context: {}, page: s.fake, frame: main }, 'm1', { x: 10, y: 10, width: 20, height: 20 });
+      expect(await internals.crops.get('m1')).toBeNull();
+    } finally {
+      remove();
+    }
+    const said = lines.filter((l) => l.includes('no crop for m1'));
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain('***');
+    expect(lines.join('\n')).not.toContain('tok-FRAME-SECRET');
   }, 30_000);
 });

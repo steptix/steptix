@@ -1,8 +1,8 @@
 import type { ChatMessage } from '../ai/types.js';
 import type { BrowserSession } from '../browser/manager.js';
 import { addLogCallback, logger, shouldEmit } from '../utils/logger.js';
-import { isSecretName, redact } from '../utils/secrets.js';
-import { StepRecorder, type KnownSecret, type StepRecorderOptions } from './step-recorder.js';
+import { isSecretName, RECORD_SECRET_MIN_LENGTH, redact } from '../utils/secrets.js';
+import { secretSpellings, StepRecorder, type KnownSecret, type StepRecorderOptions } from './step-recorder.js';
 import { summarizeTargetFile, type TargetFileSummary } from './target-file.js';
 import type {
   RecordControl,
@@ -229,7 +229,9 @@ export class RecordStepsRun {
     // resolve to (review, finding 7).
     const fromEnv = envSecrets(file, request.env);
     const secrets = (): KnownSecret[] => [...this.safeKnownSecrets(), ...fileSecrets(file), ...fromEnv];
-    const secretValues = (): string[] => secrets().map((s) => s.value);
+    // Every spelling — as typed, JSON-escaped, URL-encoded — for everything
+    // this run masks: the frames, the prompt, the log lines.
+    const secretValues = (): string[] => secretSpellings(secrets().map((s) => s.value));
 
     // Warnings the server logs while this recording runs reach the author as
     // `output` frames, as a run's do. Warnings and errors only: an info line
@@ -308,7 +310,9 @@ export class RecordStepsRun {
       const started = await recorder.start();
       this.phase = 'recording';
       logger.info(
-        `Session "${sessionId}": Record Steps started on ${started.url}` +
+        // The address can carry a token (`?token=…`): masked like everything
+        // else this recording says (review 2, finding 10).
+        `Session "${sessionId}": Record Steps started on ${redact(started.url, secretValues())}` +
           (prepared.launched ? ' (browser launched for it)' : '') +
           (prepared.sendScreenshots ? '' : ' — no screenshots (ai.sendScreenshots is off)'),
       );
@@ -445,6 +449,25 @@ function fileSecrets(file: TargetFileSummary): KnownSecret[] {
  * `.env` first, then the server's environment, as a run resolves it. A
  * parameter whose value is `$VAR` is named in the step as that parameter, so
  * the parameter's name is what a secret typed from it is reported as.
+ *
+ * Not every value under a secret-SOUNDING name is a secret. `.env` files are
+ * full of settings the name rule catches by a word — `TOKEN_TTL_MINUTES=30`,
+ * `ENABLE_PASSWORD_RESET=true`, `MAX_TOKENS=2048` — and a known secret is
+ * masked out of everything as a substring: "1300" typed into an Amount field
+ * was recorded as "1***0", "true story" as "*** story", and a typed "30"
+ * became `{{TOKEN_TTL_MINUTES}}` (review 2, finding 2). So a value known
+ * only because a VARIABLE's name sounds secret is known only when it could be
+ * a credential ({@link couldBeCredential}): {@link RECORD_SECRET_MIN_LENGTH}
+ * characters or more — the floor the runner already applies to page-derived
+ * secrets (a run's own `.env` masking has none, but it masks the run's output,
+ * not what the author typed) — and not a boolean or a number.
+ *
+ * A `$VAR` parameter whose own name is secret-sounding (`- password:
+ * $LOGIN_PW`) is exempt: the author named that parameter a password, which is
+ * the deliberate instruction the runner's rule never puts a floor under — a
+ * numeric password is still a password. So are the file's secret-named
+ * literals and the session's secret-named variables, which do not come
+ * through here.
  */
 export function envSecrets(file: TargetFileSummary, env: Record<string, string> | undefined): KnownSecret[] {
   const out: KnownSecret[] = [];
@@ -453,12 +476,30 @@ export function envSecrets(file: TargetFileSummary, env: Record<string, string> 
     if (!ref) continue;
     const name = ref[1]!;
     const value = env?.[name] ?? process.env[name];
-    if (value && (isSecretName(p.name) || isSecretName(name))) out.push({ name: p.name, value });
+    if (!value) continue;
+    if (isSecretName(p.name) || (isSecretName(name) && couldBeCredential(value))) {
+      out.push({ name: p.name, value });
+    }
   }
   for (const [name, value] of Object.entries(env ?? {})) {
-    if (value && isSecretName(name) && !out.some((s) => s.value === value)) out.push({ name, value });
+    if (value && couldBeCredential(value) && isSecretName(name) && !out.some((s) => s.value === value)) {
+      out.push({ name, value });
+    }
   }
   return out;
+}
+
+/** A setting's value rather than a credential: a flag, or a number. */
+const SETTING_VALUE = /^\s*(true|false|yes|no|on|off|null|none|undefined|[+-]?\d+(?:[.,]\d+)?)\s*$/i;
+
+/**
+ * Could this `.env` value be a credential? Long enough not to turn up by
+ * chance inside ordinary text ({@link RECORD_SECRET_MIN_LENGTH}), and not a
+ * boolean or a plain number — the values a TTL, a limit or a feature flag
+ * holds.
+ */
+export function couldBeCredential(value: string): boolean {
+  return value.length >= RECORD_SECRET_MIN_LENGTH && !SETTING_VALUE.test(value);
 }
 
 function messageOf(err: unknown): string {
