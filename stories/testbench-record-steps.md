@@ -400,3 +400,142 @@ Palette: all five commands, gated on the context key. Panel: `● Record` and
 Recording block. The result is applied with one `editor.edit` (re-planned
 against the live text if a keystroke lands in between), the inserted steps
 are selected, and the file is left unsaved.
+
+## What the server half decided
+
+Built in `src/` — the page script `src/browser/scripts/record-steps.js`, the
+recorder and the run in `src/recorder/`, `buildRecordStepsPrompt` in
+`src/ai/prompts.ts`, the two routes in `src/server/api-server.ts` and
+`beginRecordSteps` / `controlRecordSteps` on the session manager. Pinned by
+`tests/record-steps-recorder.test.ts` (the page script and the recorder in a
+real Chromium), `tests/api-server-record-steps.test.ts` (the routes through
+the real HTTP entry, with a real browser the server launches itself),
+`tests/record-steps-prompt.test.ts` and `tests/secret-field-parity.test.ts`.
+Where this differs from [SPEC-record-steps.md](../docs/specs/SPEC-record-steps.md)
+it says so.
+
+**A steps request during a recording is refused, not queued.** `POST
+/sessions/:id/steps` answers 409 ("A Record Steps recording is running in
+session … Stop or cancel it before running steps in this session."). A run that
+waited behind a recording would sit on an open stream with nothing on it for
+as long as the author keeps clicking, and then run in a browser the author has
+moved on from. The recording still joins the session's queue, so anything
+in-process waits behind it.
+
+**What "a run holds the queue" means.** Any steps batch queued or executing on
+the session, counted from the moment it joins the queue — so a step-mode pause
+parked inside a batch holds it, and a TestBench breakpoint pause (the batch
+already ended) does not. The 409 reads "Stop the run before recording: a run is
+executing in this session." (§10's sentence). A second recording on the same
+session is a 409 too.
+
+**No model is a 400, decided before anything is created or launched** (spec §8
+left the code open). The same class of answer as headless: configuration the
+author has to change, not a moment to retry. The question is asked of the
+config the call would use — the request's `env` over the server base with the
+session's `runSettings.model` override when the request brings `env`, else the
+session's client as its last batch left it. §10's sentence, word for word.
+
+**Headless is a 400 with §10's sentence; a CDP-attached session is a 400 too**
+(a browser someone else started is "Not in the first version").
+
+**The AI switch.** The recording uses the session's client, with the policy
+veil lifted for its one call and put back exactly as it was found — not
+lowered for good: the veil is the last batch's statement about the session,
+and the next batch re-decides it anyway. A log line says so when the veil was
+up. The call uses the `authoring` profile.
+
+**Typed navigation.** On Chromium each page gets its own CDP session, and
+`Page.frameRequestedNavigation` — which fires for every navigation the page
+itself asked for (a link, a form, a script) and never for one the browser
+started (the address bar, a bookmark, back/forward) — is the primary signal. A
+main-frame commit is recorded as `navigate` only when no such request preceded
+it AND the author did not touch the page in the previous 3 seconds (a
+pointer-down, a first keystroke, a pick, or any action other than a finished
+field of typing — typing is reported on focus-out, which is exactly what
+clicking into the address bar causes). Firefox and WebKit get the window alone.
+Not recorded: a reload (same address), a non-web address (`about:blank`, the
+new-tab page), and a popup's own first load when the tab opened within 3
+seconds of a touch (it is part of that click).
+
+**Tabs.** A new tab is a `tab` action (`opened`) carrying its label, title and
+URL; acting in a different tab is a `tab` action (`moved`), except in a tab
+that opened since the last action — the `opened` one already says it. The
+session's active tab follows the author, so a Run after the recording
+continues where they left off.
+
+**Control answers 202 or 404 only**, as §9.3 says. After Stop, only `cancel`
+still does something — it abandons the model call and the stream ends
+`aborted`; a second `stop` or a check is answered 202 with an `ignored` reason
+and changes nothing. A body that is none of the four is a 400.
+
+**Typing still open at Stop arrives after Stop.** The page returns any field
+still being typed into when the server asks for it at Stop, and those
+`record:action` frames are sent before `record:writing`. They cannot be in
+`dropped` — the client could not have seen them — so a client should accept
+action frames until `record:writing`.
+
+**What becomes an action.** A click into a text field is recorded with
+`focusOnly` and dropped by the model when typing into that field follows. A
+click on a checkbox, a radio, a label for one, a `<select>`, an option or a
+file input is not reported as a click: the `change` reports the outcome
+(`tick`/`untick` with `viaLabel`, `select` with the option text, `upload` with
+file names). The click a browser makes on a form's submit button when Enter is
+pressed in its field is folded into that `key` action. A custom `role=checkbox`
+or `switch` is reported as `tick`/`untick` from its `aria-checked` after the
+page's handler ran. Escape counts only when the page changed within 300 ms;
+Enter on a button or link is its click; Enter in a textarea is typing. A choice
+made without pointing (the keyboard, a script) first reports any field still
+being typed into, so the order is what happened.
+
+**Crops.** Taken at pointer-down for anything but a text field, and at the
+first keystroke (or first `input`) into a text field. A field the secret rule
+calls secret by its NAME while showing its value in clear (a `type="text"`
+token box) gets no crop at all — the safe direction, departing from decision
+6's "anything else visible goes to the model". PNG, cropped to at least
+520×320 with 140 px round the target, the target outlined in red, scaled so
+the longer side is at most 640. The 40 are counted when taken, so a
+pointer-down that never became an action still counts. `ai.sendScreenshots`
+resolves as a batch's would: server, then project, then the session's run
+setting.
+
+**Secrets beyond the field rule.** A typed value equal to a secret-named
+session variable, or to a secret-named literal in the file's `## Parameters`,
+is withheld exactly like a secret field's, and the action names that parameter
+(`knownSecret`) so the step reuses it. Those values — and the file's own
+secret-named literals, wherever they appear in the file excerpt — are masked
+in everything the model is sent, in every `record:action` summary and in
+`record:started`.
+
+**One `isSecretField`.** The story counted three copies; there were two
+(`capture-dom.js` and the `expand` walk in `dom-cleaner.ts`). Both now splice
+in `src/browser/scripts/secret-field.js`, and the recorder loads the same
+text; `tests/secret-field-parity.test.ts` asks all three the same questions.
+
+**The answer, enforced.** `record:result` is the model's answer after a
+file-safety pass. A returned parameter whose name the file already has with a
+different value is renamed (`email` → `email_2`) and the new steps rewritten to
+match, with a note in §10's words finished with what was done instead
+("…; the recorded value was added as email_2 instead.") — the spec has the
+client leave such a line alone and warn, which would leave the new steps
+typing the old value. Two `.env` references under one name keep the file's.
+A value the model could only have seen masked becomes `$NAME`. A `{{name}}`
+nothing defines is a note. Stop with every action dropped (or none recorded)
+answers an empty result with a note and makes no model call. An unreadable
+answer ends with §10's "The steps could not be written: <reason>. Nothing was
+inserted." as both the `output` frame and `done.error`.
+
+**Beyond the wire block.** The start body's `env` is accepted (the TestBench
+half sends it): it points the session's AI client as a batch would, and a
+session the recording creates is built from it. `envName` is not read — the
+recording needs no `${env.…}` resolution.
+
+**Also worth knowing.** A recording counts as a run in flight, so `/health`
+shows it and `aiui stop` answers 409 while one is open. `DELETE
+/sessions/:id` cancels it. After a recording the session's browser context
+keeps one binding (`__aiuiRecordSteps`) and one init script for its life —
+Playwright can remove neither — and each new document asks the binding once
+whether a recording is running; every listener returns at its first line
+otherwise. The dialog guard still answers `alert`/`confirm` in that browser as
+it does in runs, so a page's native dialog is not something an author can
+click through while recording (native dialogs are out of scope).
