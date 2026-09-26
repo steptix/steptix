@@ -26,7 +26,7 @@ import { DraftEngine } from './draft-engine.js';
 
 /** Test-only knobs: the recorder's, and the draft engine's settle window. */
 export type RecordStepsTestKnobs = Partial<
-  Pick<StepRecorderOptions, 'typedNavigationWindowMs' | 'tap' | 'maxCrops'>
+  Pick<StepRecorderOptions, 'typedNavigationWindowMs' | 'historyCausedWindowMs' | 'tap' | 'maxCrops'>
 > & { draftSettleMs?: number };
 
 /** Everything a recording needs from the session it belongs to. */
@@ -222,6 +222,7 @@ export class RecordStepsRun {
             summary: a.summary,
             atMs: a.atMs,
             ...(a.tab !== 'main' && { tab: a.tab }),
+            action: a.action,
           });
           // After the frame, so the draft that covers it never arrives first.
           engine.addAction(a);

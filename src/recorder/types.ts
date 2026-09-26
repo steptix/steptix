@@ -7,7 +7,7 @@
  * the binding statement of both.
  */
 
-/** What one recorded action was. */
+/** What one recorded event was (docs/specs/SPEC-record-steps.md §4). */
 export type RecordActionKind =
   | 'click'
   | 'type'
@@ -18,7 +18,22 @@ export type RecordActionKind =
   | 'upload'
   | 'navigate'
   | 'tab'
-  | 'check';
+  | 'check'
+  | 'drag'
+  | 'back'
+  | 'forward'
+  | 'reload';
+
+/**
+ * The kinds that are ACTIONS — what the author does to move the application
+ * on, and what sends the draft to the model (decision 4, the author's
+ * definition): a click or a drag, Enter or Tab, the browser's Back, Forward or
+ * Refresh, an address typed into the bar, and the Add check click. Every other
+ * kind is an event that rides with the next action.
+ */
+export const ACTION_KINDS: ReadonlySet<RecordActionKind> = new Set<RecordActionKind>([
+  'click', 'drag', 'key', 'back', 'forward', 'reload', 'navigate', 'check',
+]);
 
 /**
  * The frames a `POST /sessions/:id/record-steps` stream carries, besides the
@@ -41,6 +56,9 @@ export type RecordEvent =
       atMs: number;
       /** PageTracker label of the tab the action happened in, when not `main`. */
       tab?: string;
+      /** True for an ACTION (`ACTION_KINDS`), false for an event that rides
+       *  with the next one. */
+      action: boolean;
     }
   | { type: 'record:pick'; armed: boolean }
   /** A draft call started (`busy: true`) or finished (decision 9). */
@@ -194,6 +212,8 @@ export interface RecordedAction {
   summary: string;
   /** PageTracker label — `main` included here; the frame drops it. */
   tab: string;
+  /** An ACTION (sends the draft) rather than an event (rides with the next). */
+  action: boolean;
   target?: ElementDescription;
   /** Typed text (never for a secret), or nothing. */
   value?: string;
@@ -232,4 +252,8 @@ export interface RecordedAction {
   };
   frame?: FrameDescription;
   crop?: ActionCrop;
+  /** For `drag`: the element dropped on (`target` is the one dragged). */
+  dropTarget?: ElementDescription;
+  /** For `drag`: the crop taken at the drop, around `dropTarget`. */
+  dropCrop?: ActionCrop;
 }

@@ -4,6 +4,7 @@ import { logger } from '../utils/logger.js';
 import { MASK, redact } from '../utils/secrets.js';
 import { cropAround } from './crop.js';
 import { RECORD_BINDING_NAME, RECORD_CONTROL_NAME, recordStepsPageScript } from './page-script.js';
+import { ACTION_KINDS } from './types.js';
 import type {
   ActionCrop,
   Box,
@@ -50,6 +51,32 @@ export const TYPED_NAVIGATION_WINDOW_MS = 3_000;
  *  load is part of that action rather than a typed navigation. */
 const POPUP_FIRST_LOAD_MS = 15_000;
 
+/**
+ * A Back, Forward or Refresh within this long of a touch is taken to be the
+ * PAGE's (`history.back()` or `location.reload()` in a click handler), not the
+ * author's use of the browser's buttons. Shorter than the typed-navigation
+ * window on purpose: a script's traversal lands in well under a second, while
+ * a person who clicks a link and then presses Back takes longer than that —
+ * and that is the common case this must not swallow.
+ */
+export const HISTORY_CAUSED_WINDOW_MS = 1_000;
+
+/** Without CDP: how long a commit waits for the page's own history hint. */
+const HISTORY_HINT_WAIT_MS = 500;
+
+/** The tab's navigation history over CDP, or null when it cannot be read. */
+async function readHistory(cdp: CDPSession): Promise<{ index: number; ids: number[] } | null> {
+  try {
+    const h = (await cdp.send('Page.getNavigationHistory')) as {
+      currentIndex: number;
+      entries: Array<{ id: number }>;
+    };
+    return { index: h.currentIndex, ids: h.entries.map((e) => e.id) };
+  } catch {
+    return null;
+  }
+}
+
 /** Upper bound on any one page round-trip the recorder makes. */
 const PAGE_CALL_MS = 2_500;
 
@@ -74,6 +101,8 @@ export interface StepRecorderOptions {
   maxCrops?: number;
   /** Override {@link TYPED_NAVIGATION_WINDOW_MS} — tests only. */
   typedNavigationWindowMs?: number;
+  /** Override {@link HISTORY_CAUSED_WINDOW_MS} — tests only. */
+  historyCausedWindowMs?: number;
   /** Every message the binding receives, raw — for tests that must assert on
    *  what crossed from the page, not on what the recorder kept of it. */
   tap?: (message: unknown) => void;
@@ -198,8 +227,9 @@ function strings(value: unknown, maxItems: number, maxLen: number): string[] | u
   return out;
 }
 
-const PAGE_KINDS = new Set<RecordActionKind>(['click', 'type', 'select', 'tick', 'untick', 'key', 'upload']);
-const KEYS = new Set(['Enter', 'Escape', 'Tab']);
+const PAGE_KINDS = new Set<RecordActionKind>(['click', 'type', 'select', 'tick', 'untick', 'key', 'upload', 'drag']);
+/** Enter and Tab are actions; no other key is recorded (Escape included). */
+const KEYS = new Set(['Enter', 'Tab']);
 
 /** How an element reads in a one-line summary: `button "Sign in"`. */
 function targetPhrase(t: ElementDescription | undefined): string {
@@ -244,6 +274,14 @@ export function summarizeAction(a: Omit<RecordedAction, 'summary'>): string {
         ? `Opened a new tab ${a.tab}${where ? ` — ${where}` : ''}`
         : `Moved to tab ${a.tab}${where ? ` — ${where}` : ''}`;
     }
+    case 'drag':
+      return `Dragged ${phrase} onto ${targetPhrase(a.dropTarget)}`;
+    case 'back':
+      return `Went back${a.url ? ` to ${a.url}` : ''}`;
+    case 'forward':
+      return `Went forward${a.url ? ` to ${a.url}` : ''}`;
+    case 'reload':
+      return `Reloaded the page${a.url ? ` — ${a.url}` : ''}`;
     case 'check': {
       const said = a.check?.secret
         ? MASK
@@ -252,6 +290,10 @@ export function summarizeAction(a: Omit<RecordedAction, 'summary'>): string {
     }
   }
 }
+
+/** An action before the recorder numbers it, times it, labels its tab and
+ *  decides whether it is an ACTION. */
+type PartialAction = Omit<RecordedAction, 'id' | 'atMs' | 'summary' | 'tab' | 'action'>;
 
 /** Per-page navigation bookkeeping. */
 interface PageWatch {
@@ -263,10 +305,44 @@ interface PageWatch {
   /** A popup's first load is part of the click that opened it. */
   skipFirstCommitUntil: number;
   lastUrl: string;
+  /** The tab's navigation history as last read over CDP: the current index,
+   *  and every entry's id — what tells Back from Forward from Reload from a
+   *  new navigation (`classifyHistoryMove`). Null without CDP. */
+  history: { index: number; ids: number[] } | null;
+  /** Without CDP: when the page last said a document arrived by history or
+   *  reload, so the typed-navigation check does not also call it `navigate`. */
+  historyHintAt: number;
   detach: () => void;
 }
 
-function sameDocument(a: string, b: string): boolean {
+/** What a navigation was, read from the tab's history before and after. */
+export type HistoryMove = 'back' | 'forward' | 'reload' | 'new';
+
+/**
+ * Classify one navigation from the tab's navigation history
+ * (`Page.getNavigationHistory`) before and after it.
+ *
+ * Entry ids are stable per entry, which is the whole trick: a move to an index
+ * whose entry existed before with the same id is a traversal — Back when the
+ * index went down, Forward when it went up — and the same index with the same
+ * id is a Reload. Anything else (a new id at the index: a link, a typed
+ * address, `location.replace`, `pushState`) is a new navigation. Exported for
+ * the unit test that pins it.
+ */
+export function classifyHistoryMove(
+  before: { index: number; ids: number[] } | null,
+  after: { index: number; ids: number[] },
+): HistoryMove {
+  if (!before) return 'new';
+  const sameEntry = before.ids[after.index] !== undefined && before.ids[after.index] === after.ids[after.index];
+  if (!sameEntry) return 'new';
+  if (after.index < before.index) return 'back';
+  if (after.index > before.index) return 'forward';
+  return 'reload';
+}
+
+/** Two addresses that differ only after `#`. */
+function pathOnlyHash(a: string, b: string): boolean {
   const strip = (u: string): string => u.replace(/#.*$/, '');
   return strip(a) === strip(b);
 }
@@ -280,10 +356,14 @@ export class StepRecorder {
   private readonly now: () => number;
   private readonly maxCrops: number;
   private readonly navWindowMs: number;
+  private readonly historyWindowMs: number;
   private active = false;
   private pickArmed = false;
   private stopped = false;
   private startedAt = 0;
+  /** When this recorder switched on — before the open frames were brought in,
+   *  so a document older than this is one that was already there. */
+  private activeSince = Number.POSITIVE_INFINITY;
   private seq = 0;
   private cropsTaken = 0;
   private warnedCropCap = false;
@@ -302,6 +382,7 @@ export class StepRecorder {
     this.now = opts.now ?? Date.now;
     this.maxCrops = opts.maxCrops ?? MAX_CROPS;
     this.navWindowMs = opts.typedNavigationWindowMs ?? TYPED_NAVIGATION_WINDOW_MS;
+    this.historyWindowMs = opts.historyCausedWindowMs ?? HISTORY_CAUSED_WINDOW_MS;
   }
 
   /** Every action recorded so far, in order. */
@@ -325,6 +406,7 @@ export class StepRecorder {
     hook.current = this;
     this.hook = hook;
     this.active = true;
+    this.activeSince = this.now();
     this.context.on('page', this.onPage);
     this.context.on('close', this.onContextClose);
 
@@ -396,8 +478,28 @@ export class StepRecorder {
     this.opts.tap?.(message);
     if (!isRecord(message)) return null;
     const type = message['type'];
-    if (type === 'hello') return { recording: this.active, pick: this.active && this.pickArmed };
+    if (type === 'hello') {
+      // Without CDP, a new top document says how it came to be. Only one that
+      // started during the recording counts — the frames already open when
+      // Record was pressed say hello too, about how THEY arrived.
+      const navType = message['navType'];
+      const age = num(message['docAgeMs']);
+      if (
+        this.active &&
+        source.frame === source.page.mainFrame() &&
+        (navType === 'reload' || navType === 'back_forward') &&
+        age !== undefined &&
+        this.now() - age >= this.activeSince
+      ) {
+        this.historyHint(source.page, navType === 'reload' ? 'reload' : 'back');
+      }
+      return { recording: this.active, pick: this.active && this.pickArmed };
+    }
     if (!this.active) return null;
+    if (type === 'history') {
+      if (source.frame === source.page.mainFrame()) this.historyHint(source.page, 'back');
+      return null;
+    }
     // What can CAUSE a navigation opens the typed-navigation window: a
     // pointer-down or first keystroke (a mark), a pick, and the actions that
     // follow a touch. A finished field of typing does not — it is reported on
@@ -445,12 +547,13 @@ export class StepRecorder {
     }
   }
 
-  private addAction(partial: Omit<RecordedAction, 'id' | 'atMs' | 'summary' | 'tab'>, page: Page): RecordedAction {
+  private addAction(partial: PartialAction, page: Page): RecordedAction {
     const withMeta: Omit<RecordedAction, 'summary'> = {
       ...partial,
       id: `a${++this.seq}`,
       atMs: Math.max(0, this.now() - this.startedAt),
       tab: this.labelOf(page),
+      action: ACTION_KINDS.has(partial.kind),
     };
     const summary = redact(summarizeAction(withMeta), this.secretsNow().map((s) => s.value));
     const action: RecordedAction = { ...withMeta, summary };
@@ -503,7 +606,7 @@ export class StepRecorder {
     const kind = raw['kind'];
     if (typeof kind !== 'string' || !PAGE_KINDS.has(kind as RecordActionKind)) return;
     const target = sanitizeDescription(raw['target']);
-    const partial: Omit<RecordedAction, 'id' | 'atMs' | 'summary' | 'tab'> = {
+    const partial: PartialAction = {
       kind: kind as RecordActionKind,
       ...(target && { target }),
     };
@@ -533,6 +636,13 @@ export class StepRecorder {
       if (via) partial.viaLabel = via;
     }
     if (kind === 'select') partial.options = strings(raw['options'], 20, 150) ?? [];
+    if (kind === 'drag') {
+      const dropTarget = sanitizeDescription(raw['dropTarget']);
+      if (!dropTarget) return;
+      partial.dropTarget = dropTarget;
+      const dropCrop = await this.claimCrop(raw['dropMark']);
+      if (dropCrop) partial.dropCrop = dropCrop;
+    }
     if (kind === 'upload') partial.files = strings(raw['files'], 20, 200) ?? [];
     if (kind === 'key') {
       const key = raw['key'];
@@ -576,7 +686,7 @@ export class StepRecorder {
       if (ctext) container.text = ctext;
       if (Object.keys(container).length > 0) check.container = container;
     }
-    const partial: Omit<RecordedAction, 'id' | 'atMs' | 'summary' | 'tab'> = {
+    const partial: PartialAction = {
       kind: 'check',
       ...(target && { target }),
       check,
@@ -677,17 +787,22 @@ export class StepRecorder {
       rendererNavAt: null,
       skipFirstCommitUntil,
       lastUrl: page.url(),
+      history: null,
+      historyHintAt: Number.NEGATIVE_INFINITY,
       detach: () => {},
     };
     this.watches.set(page, watch);
 
-    // Chromium: the exact signal. Anything that goes wrong here falls back to
-    // the time window alone, which is what Firefox and WebKit always get.
+    // Chromium: the exact signals — who asked for a navigation, and where in
+    // the tab's own history it landed. Anything that goes wrong here falls
+    // back to the time window and the page's own hints, which is what Firefox
+    // and WebKit always get.
     try {
       const cdp = await this.context.newCDPSession(page);
       await cdp.send('Page.enable');
       const tree = (await cdp.send('Page.getFrameTree')) as { frameTree: { frame: { id: string } } };
       watch.mainFrameId = tree.frameTree.frame.id;
+      watch.history = await readHistory(cdp);
       const onRequested = (e: { frameId: string; disposition?: string }): void => {
         if (e.frameId === watch.mainFrameId && (e.disposition ?? 'currentTab') === 'currentTab') {
           watch.rendererNavAt = this.now();
@@ -696,14 +811,23 @@ export class StepRecorder {
       const onNavigated = (e: { frame: { id: string; parentId?: string; url: string; urlFragment?: string } }): void => {
         if (e.frame.parentId) return;
         watch.mainFrameId = e.frame.id;
-        this.onMainCommit(watch, e.frame.url + (e.frame.urlFragment ?? ''));
+        this.onMainCommit(watch, e.frame.url + (e.frame.urlFragment ?? ''), false);
+      };
+      // A same-document move — `pushState`, a `#hash`, and Back/Forward
+      // between such entries — commits no new document, so `frameNavigated`
+      // never hears it.
+      const onWithinDocument = (e: { frameId: string; url: string }): void => {
+        if (e.frameId !== watch.mainFrameId) return;
+        this.onMainCommit(watch, e.url, true);
       };
       cdp.on('Page.frameRequestedNavigation', onRequested);
       cdp.on('Page.frameNavigated', onNavigated);
+      cdp.on('Page.navigatedWithinDocument', onWithinDocument);
       watch.cdp = cdp;
       watch.detach = () => {
         cdp.off('Page.frameRequestedNavigation', onRequested);
         cdp.off('Page.frameNavigated', onNavigated);
+        cdp.off('Page.navigatedWithinDocument', onWithinDocument);
         void cdp.detach().catch(() => {});
       };
       return;
@@ -711,41 +835,110 @@ export class StepRecorder {
       watch.cdp = null;
     }
     const onFrameNavigated = (frame: Frame): void => {
-      if (frame === page.mainFrame()) this.onMainCommit(watch, frame.url());
+      if (frame === page.mainFrame()) this.onMainCommit(watch, frame.url(), false);
     };
     page.on('framenavigated', onFrameNavigated);
     watch.detach = () => page.off('framenavigated', onFrameNavigated);
   }
 
   /**
-   * A main frame committed a navigation. It is recorded as one the author
-   * TYPED only when nothing on the page asked for it (Chromium's
-   * `frameRequestedNavigation`), the author did not touch the page just before
-   * (`TYPED_NAVIGATION_WINDOW_MS`), it is not a popup's own first load, it
-   * lands on a web address, and it goes somewhere new — a reload of the same
-   * address is not a step this version writes.
+   * A main frame moved — a new document, or (`sameDocument`) a history entry
+   * within one. What it was decides what is recorded:
+   *
+   * - **Back, Forward, Refresh** (decision 4 — actions). On Chromium the tab's
+   *   own navigation history says which ({@link classifyHistoryMove}). One the
+   *   PAGE caused is not the author's: a reload or traversal a script asked
+   *   for (`frameRequestedNavigation`), or one within
+   *   {@link HISTORY_CAUSED_WINDOW_MS} of a touch — `history.back()` in a
+   *   click handler lands that fast, while a person moving to the toolbar
+   *   does not.
+   * - **An address typed into the bar** (`navigate`). A new navigation only
+   *   when nothing on the page asked for it, the author did not touch the page
+   *   in the typed-navigation window, it is not a popup's own first load, it
+   *   lands on a web address and goes somewhere new.
+   * - Anything else — a link, a form, `pushState`, a `#hash` — is the page
+   *   following an action already recorded, and records nothing.
+   *
+   * Without CDP (Firefox, WebKit) the page script's hints stand in: the new
+   * document's `performance` navigation type, `popstate` and a back/forward
+   * cache restore ({@link historyHint}). Those cannot tell Back from Forward, so
+   * a traversal there is recorded as `back`. The typed-navigation check waits
+   * a moment for the hint, so a traversal is not ALSO called `navigate`.
    */
-  private onMainCommit(watch: PageWatch, url: string): void {
+  private onMainCommit(watch: PageWatch, url: string, sameDocument: boolean): void {
     const t = this.now();
     const requestedByPage = watch.rendererNavAt !== null;
-    watch.rendererNavAt = null;
+    if (!sameDocument) watch.rendererNavAt = null;
     const previous = watch.lastUrl;
     watch.lastUrl = url;
-    if (!this.active) return;
-    if (watch.skipFirstCommitUntil > 0) {
-      const within = t < watch.skipFirstCommitUntil;
+    const sinceTouch = t - this.lastInteractionAt;
+    let popupFirstLoad = false;
+    if (!sameDocument && watch.skipFirstCommitUntil > 0) {
+      popupFirstLoad = t < watch.skipFirstCommitUntil;
       watch.skipFirstCommitUntil = 0;
-      if (within) return;
     }
-    if (!isWebUrl(url)) return;
-    if (requestedByPage) return;
-    if (t - this.lastInteractionAt < this.navWindowMs) return;
-    if (url === previous) return;
-    if (!watch.cdp && sameDocument(previous, url)) return;
     const page = watch.page;
+    const typedNavigation = (): boolean =>
+      !sameDocument &&
+      !popupFirstLoad &&
+      isWebUrl(url) &&
+      !requestedByPage &&
+      sinceTouch >= this.navWindowMs &&
+      url !== previous;
+
+    const cdp = watch.cdp;
+    if (cdp) {
+      // In the action chain, so a history read that takes a moment cannot put
+      // this ahead of the click that came before it.
+      this.enqueue(async () => {
+        const before = watch.history;
+        const after = await readHistory(cdp);
+        if (after) watch.history = after;
+        if (!this.active && !this.stopped) return;
+        const move = after ? classifyHistoryMove(before, after) : 'new';
+        if (move !== 'new') {
+          if (popupFirstLoad || requestedByPage || sinceTouch < this.historyWindowMs) return;
+          if (!isWebUrl(url)) return;
+          await this.noteActingPage(page);
+          this.addAction({ kind: move, url }, page);
+          return;
+        }
+        if (!typedNavigation()) return;
+        await this.noteActingPage(page);
+        this.addAction({ kind: 'navigate', url }, page);
+      });
+      return;
+    }
+
+    if (!this.active) return;
+    if (!typedNavigation() || pathOnlyHash(previous, url)) return;
+    // Give the new document's hint (it rides the page's "hello") a moment to
+    // arrive: a traversal or reload it reports is not a typed address.
+    setTimeout(() => {
+      if (Math.abs(watch.historyHintAt - t) < HISTORY_HINT_WAIT_MS * 3) return;
+      this.enqueue(async () => {
+        await this.noteActingPage(page);
+        this.addAction({ kind: 'navigate', url }, page);
+      });
+    }, HISTORY_HINT_WAIT_MS);
+  }
+
+  /**
+   * Without CDP: the page said a document or entry arrived by the browser's
+   * history or a reload. Recorded as `back` (a traversal's direction is not
+   * knowable from the page) or `reload`, unless a touch just before says the
+   * page did it.
+   */
+  private historyHint(page: Page, move: 'back' | 'reload'): void {
+    const watch = this.watches.get(page);
+    if (!watch || watch.cdp) return; // Chromium reads the tab's own history instead.
+    const t = this.now();
+    watch.historyHintAt = t;
+    if (t - this.lastInteractionAt < this.historyWindowMs) return;
+    const url = page.url();
     this.enqueue(async () => {
       await this.noteActingPage(page);
-      this.addAction({ kind: 'navigate', url }, page);
+      this.addAction({ kind: move, ...(isWebUrl(url) && { url }) }, page);
     });
   }
 

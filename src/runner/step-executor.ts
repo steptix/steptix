@@ -104,6 +104,10 @@ const MUTATING_ACTIONS: ReadonlySet<AIAction['action']> = new Set([
   // a navigate gets (docs/specs/SPEC-browser-history.md §4.4).
   'back',
   'forward',
+  // A reload moves the page like a history move; a drag changes it like a
+  // click (docs/specs/SPEC-record-steps.md §4 added both to the runtime).
+  'reload',
+  'drag',
   'upload',
   'hover',
   'keyboard',

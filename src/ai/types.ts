@@ -11,6 +11,13 @@ export type ActionType =
   // nothing, which is the measured defect these exist to close (§2).
   | 'back'
   | 'forward'
+  // The browser's reload button, on the active tab — the deferral in
+  // SPEC-browser-history.md §9, taken up by Record Steps
+  // (docs/specs/SPEC-record-steps.md §4): a recorded Refresh has to run.
+  | 'reload'
+  // Drag `selector` onto `target` (both CSS selectors, same frame). Record
+  // Steps records drags, so the runtime has to perform them.
+  | 'drag'
   | 'upload'
   | 'hover'
   | 'wait'
@@ -125,6 +132,11 @@ export interface AIAction {
   action: ActionType;
   /** CSS selector for the target element */
   selector?: string;
+  /**
+   * `drag` only: CSS selector of the element `selector` is dropped ON. Resolved
+   * in the same frame as `selector`, with the same visible-first rule.
+   */
+  target?: string;
   /** Text to type, option value to select, or condition to wait for */
   value?: string;
   /** URL to navigate to */

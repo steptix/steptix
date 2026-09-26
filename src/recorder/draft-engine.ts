@@ -118,9 +118,17 @@ export class DraftEngine {
 
   // ── Inputs ─────────────────────────────────────────────────────────────
 
-  /** A new action: draft it once the settle window has passed quietly. */
+  /**
+   * A new recorded event. Only an ACTION (decision 4 — a click, a drag, Enter
+   * or Tab, Back/Forward/Refresh, a typed address, a check) sends the draft to
+   * the model, once the settle window has passed quietly. Any other event —
+   * typing, a choice in a list, a tick, files chosen, a tab — is kept and rides
+   * with the next action's call (or Stop's): typing an email address costs no
+   * model call; the Tab or the click after it does, and the model sees both.
+   */
   addAction(action: RecordedAction): void {
     this.actions.push(action);
+    if (!action.action) return;
     this.lastActionAt = this.now();
     if (this.open) this.schedule(this.settleMs);
   }
@@ -202,9 +210,12 @@ export class DraftEngine {
       if (this.lastActionAt > startedAt) this.schedule(this.settleWait());
       return;
     }
-    // `stale` goes straight to the redraft; `ok` batches what arrived meanwhile
-    // and still honours the settle window from the last of it.
-    this.schedule(this.needsFull ? 0 : this.settleWait());
+    // `stale` goes straight to the redraft; `ok` batches the ACTIONS that
+    // arrived meanwhile and still honours the settle window from the last of
+    // them. Events that arrived meanwhile wait for the next action, as they
+    // would have without the call.
+    if (this.needsFull) this.schedule(0);
+    else if (this.uncovered().some((a) => a.action)) this.schedule(this.settleWait());
   }
 
   private settleWait(): number {

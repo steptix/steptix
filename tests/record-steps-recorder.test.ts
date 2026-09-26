@@ -15,10 +15,36 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { createServer, type Server } from 'node:http';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { PageTracker, type BrowserSession } from '../src/browser/manager.js';
-import { StepRecorder, type KnownSecret } from '../src/recorder/step-recorder.js';
+import { StepRecorder, classifyHistoryMove, type KnownSecret } from '../src/recorder/step-recorder.js';
 import type { RecordedAction } from '../src/recorder/types.js';
 
 const PAGES: Record<string, string> = {
+  '/board.html': `<!doctype html><html><head><title>Board</title></head><body>
+    <section aria-label="To do" id="todo"><h2>To do</h2>
+      <div id="card" draggable="true" style="width:120px;height:30px">Invoice 1043</div></section>
+    <section aria-label="Paid" id="paid" style="min-height:80px"><h2>Paid</h2></section>
+    <ul id="list" style="list-style:none;padding:0;user-select:none">
+      <li id="one" style="height:40px">One</li><li id="two" style="height:40px">Two</li><li id="three" style="height:40px">Three</li>
+    </ul>
+    <p id="prose">Some words to select across</p><p id="prose2">and some more words</p>
+    <script>
+      const card = document.getElementById('card');
+      card.addEventListener('dragstart', (e) => e.dataTransfer.setData('text/plain', 'card'));
+      const paid = document.getElementById('paid');
+      paid.addEventListener('dragover', (e) => e.preventDefault());
+      paid.addEventListener('drop', (e) => { e.preventDefault(); paid.appendChild(card); });
+      let dragging = null;
+      document.getElementById('list').addEventListener('pointerdown', (e) => { dragging = e.target.closest('li'); });
+      document.addEventListener('pointerup', (e) => {
+        const over = document.elementFromPoint(e.clientX, e.clientY)?.closest('li');
+        if (dragging && over && over !== dragging) over.after(dragging);
+        dragging = null;
+      });
+    </script></body></html>`,
+  '/spa.html': `<!doctype html><html><head><title>SPA</title></head><body>
+    <button id="push" onclick="history.pushState({v:2}, '', '?view=2')">Show view 2</button>
+    <button id="script-back" onclick="history.back()">In-page back</button>
+    </body></html>`,
   '/form.html': `<!doctype html><html><head><title>Form</title></head><body>
     <nav aria-label="Main menu"><a href="/other.html" id="to-other">Reports</a>
       <a href="/other.html" target="_blank" id="new-tab">Open in new tab</a></nav>
@@ -81,7 +107,9 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server?.close(() => resolve()));
 });
 
-function newRecorder(opts: { sendScreenshots?: boolean; typedNavigationWindowMs?: number } = {}): StepRecorder {
+function newRecorder(
+  opts: { sendScreenshots?: boolean; typedNavigationWindowMs?: number; historyCausedWindowMs?: number } = {},
+): StepRecorder {
   return new StepRecorder({
     browser: session,
     sendScreenshots: opts.sendScreenshots ?? false,
@@ -90,6 +118,7 @@ function newRecorder(opts: { sendScreenshots?: boolean; typedNavigationWindowMs?
     onPick: (armed) => picks.push(armed),
     tap: (m) => raw.push(m),
     ...(opts.typedNavigationWindowMs !== undefined && { typedNavigationWindowMs: opts.typedNavigationWindowMs }),
+    ...(opts.historyCausedWindowMs !== undefined && { historyCausedWindowMs: opts.historyCausedWindowMs }),
   });
 }
 
@@ -180,19 +209,52 @@ describe('the page script — one described action per gesture', () => {
     expect(done[0]!.value).toBeUndefined();
   }, 30_000);
 
-  it('reports a select, a tick (direct and by label) and an untick by outcome', async () => {
+  it('a click on a checkbox or its label is the ACTION; what it did is an event that follows', async () => {
     recorder = newRecorder();
     await recorder.start();
-    await page.selectOption('#freq', { label: 'Monthly' });
+    await page.selectOption('#freq', { label: 'Monthly' }); // no pointer: the choice alone
     await page.check('#cash');
     await page.click('label[for="cash"]'); // unticks through the label
     await page.click('label[for="cash"]'); // and ticks again
-    const done = await actionsReach(4);
-    expect(done.map((a) => a.kind)).toEqual(['select', 'tick', 'untick', 'tick']);
+    const done = await actionsReach(7);
+    expect(done.map((a) => [a.kind, a.action])).toEqual([
+      ['select', false],
+      ['click', true], ['tick', false],
+      ['click', true], ['untick', false],
+      ['click', true], ['tick', false],
+    ]);
     expect(done[0]).toMatchObject({ options: ['Monthly'] });
     expect(done[0]!.target?.name).toBe('Frequency');
     expect(done[1]!.target).toMatchObject({ role: 'checkbox', name: 'Cash' });
-    expect(done[3]!.viaLabel).toMatchObject({ tag: 'label', name: 'Cash' });
+    expect(done[2]!.target).toMatchObject({ role: 'checkbox', name: 'Cash' });
+    // The label was clicked — once: the click the browser passes on to the
+    // checkbox is not a second action.
+    expect(done[5]!.target).toMatchObject({ tag: 'label', name: 'Cash' });
+    expect(done[6]!.viaLabel).toMatchObject({ tag: 'label', name: 'Cash' });
+  }, 30_000);
+
+  it('Escape is not recorded; Tab and Enter are actions, typing is an event', async () => {
+    recorder = newRecorder();
+    await recorder.start();
+    await page.click('#email');
+    await page.keyboard.type('a@b.test');
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Tab');
+    const done = await actionsReach(3);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(actions.map((a) => [a.kind, a.action])).toEqual([['click', true], ['type', false], ['key', true]]);
+    expect(actions[2]).toMatchObject({ key: 'Tab' });
+    expect(done).toHaveLength(3);
+  }, 30_000);
+
+  it("a script-dispatched click is not the author's and is not recorded", async () => {
+    recorder = newRecorder();
+    await recorder.start();
+    await page.evaluate('document.getElementById("signin").click()');
+    await page.evaluate(`document.getElementById('to-other').addEventListener('click', (e) => e.preventDefault())`);
+    await page.click('#to-other');
+    await actionsReach(1);
+    expect(actions.map((a) => a.target?.name)).toEqual(['Reports']);
   }, 30_000);
 
   it('records Enter after typing as the typing, then the key', async () => {
@@ -324,4 +386,131 @@ describe('after Stop the script is inert', () => {
     expect(done).toHaveLength(1);
     expect(done[0]).toMatchObject({ id: 'a1', value: 'second@run.test' });
   }, 30_000);
+});
+
+describe('drag (decision 4: a click or a DRAG is an action)', () => {
+  beforeEach(async () => {
+    await page.goto(`${origin}/board.html`);
+  });
+
+  it('an HTML drag-and-drop is ONE drag action: what was dragged, and what it was dropped on', async () => {
+    recorder = newRecorder({ sendScreenshots: true });
+    await recorder.start();
+    await page.locator('#card').dragTo(page.locator('#paid'));
+    const [drag] = await actionsReach(1);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(actions).toHaveLength(1);
+    expect(drag).toMatchObject({ kind: 'drag', action: true });
+    expect(drag!.target).toMatchObject({ text: 'Invoice 1043' });
+    expect(drag!.dropTarget?.context?.landmark ?? drag!.dropTarget?.name).toMatch(/Paid/);
+    expect(drag!.summary).toMatch(/^Dragged .*Invoice 1043.* onto /);
+    // Two pictures: where it was picked up, and where it went.
+    expect(drag!.crop?.dataUrl).toMatch(/^data:image\/png/);
+    expect(drag!.dropCrop?.dataUrl).toMatch(/^data:image\/png/);
+    expect(await page.evaluate('document.getElementById("card").parentElement.id')).toBe('paid');
+  }, 30_000);
+
+  it('a pointer drag onto another element is a drag — and not also a click', async () => {
+    recorder = newRecorder();
+    await recorder.start();
+    await page.locator('#one').dragTo(page.locator('#three'));
+    await actionsReach(1);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(actions.map((a) => a.kind)).toEqual(['drag']);
+    expect(actions[0]!.target?.text).toBe('One');
+    expect(actions[0]!.dropTarget?.text).toBe('Three');
+    expect(await page.evaluate('[...document.querySelectorAll("li")].map((l) => l.id).join()')).toBe('two,three,one');
+  }, 30_000);
+
+  it('press, move and release on the SAME element is not a drag; dragging across text is not either', async () => {
+    recorder = newRecorder();
+    await recorder.start();
+    const box = (await page.locator('#two').boundingBox())!;
+    await page.mouse.move(box.x + 5, box.y + 5);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 40, box.y + 20, { steps: 5 });
+    await page.mouse.up();
+    // Selecting text across two paragraphs.
+    const a = (await page.locator('#prose').boundingBox())!;
+    const b = (await page.locator('#prose2').boundingBox())!;
+    await page.mouse.move(a.x + 2, a.y + a.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(b.x + 60, b.y + b.height / 2, { steps: 8 });
+    await page.mouse.up();
+    await new Promise((r) => setTimeout(r, 400));
+    expect(actions.some((x) => x.kind === 'drag')).toBe(false);
+  }, 30_000);
+});
+
+describe('the browser\'s Back, Forward and Refresh (Chromium: read off the tab\'s own history)', () => {
+  /**
+   * Driven with `page.goBack()` / `goForward()` / `reload()`. Those are
+   * Playwright calls, not the toolbar — but over CDP they are the same
+   * browser-initiated navigations the toolbar makes (`Page.navigateToHistoryEntry`,
+   * `Page.reload`): nothing in the page asks for them, so no
+   * `frameRequestedNavigation` fires, and the tab's navigation history moves
+   * exactly as it does for a person. That history is what the recorder reads.
+   */
+  it('records back, forward and reload — and not one of them as a typed navigation', async () => {
+    recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
+    await recorder.start();
+    await page.click('#to-other'); // a link: the page's own navigation
+    await page.waitForURL(/other\.html$/);
+    await new Promise((r) => setTimeout(r, 250));
+    await page.goBack();
+    await actionsReach(2);
+    await new Promise((r) => setTimeout(r, 250));
+    await page.goForward();
+    await actionsReach(3);
+    await new Promise((r) => setTimeout(r, 250));
+    await page.reload();
+    await actionsReach(4);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(actions.map((a) => [a.kind, a.action])).toEqual([
+      ['click', true], ['back', true], ['forward', true], ['reload', true],
+    ]);
+    expect(actions[1]).toMatchObject({ url: `${origin}/form.html`, summary: `Went back to ${origin}/form.html` });
+    expect(actions[2]).toMatchObject({ url: `${origin}/other.html` });
+    expect(actions[3]).toMatchObject({ url: `${origin}/other.html`, summary: `Reloaded the page — ${origin}/other.html` });
+  }, 30_000);
+
+  it('a same-document Back (a pushState entry) is a back too', async () => {
+    await page.goto(`${origin}/spa.html`);
+    recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
+    await recorder.start();
+    await page.click('#push');
+    await new Promise((r) => setTimeout(r, 250));
+    await page.goBack();
+    await actionsReach(2);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(actions.map((a) => a.kind)).toEqual(['click', 'back']);
+  }, 30_000);
+
+  it('a Back the PAGE did — history.back() in a click handler — is the click, not a back', async () => {
+    await page.goto(`${origin}/spa.html`);
+    recorder = newRecorder({ typedNavigationWindowMs: 100 }); // the real history window
+    await recorder.start();
+    await page.click('#push');
+    await new Promise((r) => setTimeout(r, 1_200));
+    await page.click('#script-back');
+    await page.waitForURL(/spa\.html$/);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(actions.map((a) => a.kind)).toEqual(['click', 'click']);
+  }, 30_000);
+});
+
+describe('classifyHistoryMove', () => {
+  const at = (index: number, ids: number[]) => ({ index, ids });
+  it('tells back, forward and reload from a new navigation by entry id', () => {
+    expect(classifyHistoryMove(at(2, [1, 2, 3]), at(1, [1, 2, 3]))).toBe('back');
+    expect(classifyHistoryMove(at(0, [1, 2, 3]), at(2, [1, 2, 3]))).toBe('forward');
+    expect(classifyHistoryMove(at(1, [1, 2]), at(1, [1, 2]))).toBe('reload');
+    // A link or a typed address from the middle: a NEW entry at the next index.
+    expect(classifyHistoryMove(at(0, [1, 2, 3]), at(1, [1, 9]))).toBe('new');
+    // location.replace: same index, new id.
+    expect(classifyHistoryMove(at(1, [1, 2]), at(1, [1, 7]))).toBe('new');
+    // The newest entry reached by a new navigation is not "forward".
+    expect(classifyHistoryMove(at(1, [1, 2]), at(2, [1, 2, 3]))).toBe('new');
+    expect(classifyHistoryMove(null, at(0, [1]))).toBe('new');
+  });
 });

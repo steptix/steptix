@@ -46,7 +46,7 @@ const FILE = [
 ].join('\n');
 
 function action(partial: Partial<RecordedAction> & Pick<RecordedAction, 'kind'>, n: number): RecordedAction {
-  return { id: `a${n}`, atMs: n * 1000, summary: '', tab: 'main', ...partial };
+  return { id: `a${n}`, atMs: n * 1000, summary: '', tab: 'main', action: false, ...partial };
 }
 
 const ACTIONS: RecordedAction[] = [
@@ -120,6 +120,13 @@ describe('buildRecordStepsPrompt', () => {
       'V2. No other Verify, Assert or Wait steps.',
       'I6. The time gaps are information, not instructions: do not write Wait steps',
       'D1. Everything between',
+      // The author's definition of an action, and what rides with one.
+      'I7. Only ACTIONS reach you on their own',
+      'type then key Tab in the same field is one "Type {{email}} into the Email field"',
+      'a click on a list then a select is one "Select "Monthly" from the Frequency list"',
+      '  - Drag the <thing dragged> onto the <thing dropped on>',
+      '  - Go back / Go forward / Reload the page',
+      'A drag carries "target" (what was dragged) and "dropTarget" (what it was dropped on)',
     ]) {
       expect(RECORD_STEPS_SYSTEM).toContain(rule);
     }
@@ -155,6 +162,38 @@ describe('buildRecordStepsPrompt', () => {
     // Only this call's actions' crops: action 4 has one, action 3 does not.
     expect(text).toContain('Screenshot for action 4 (check)');
     expect((user!.content as MessageContentBlock[]).filter((b) => b.type === 'image_url')).toHaveLength(1);
+  });
+
+  it('a drag sends its second picture — where it was dropped — and no action carries its internal flag', () => {
+    const crop = (url: string) => ({
+      dataUrl: url,
+      width: 640,
+      height: 400,
+      boxInCrop: { x: 1, y: 2, width: 3, height: 4 },
+      pageBox: { x: 5, y: 6, width: 7, height: 8 },
+    });
+    const drag = action(
+      {
+        kind: 'drag',
+        action: true,
+        target: { tag: 'div', text: 'Invoice 1043' },
+        dropTarget: { tag: 'section', name: 'Paid' },
+        crop: crop('data:image/png;base64,FROM'),
+        dropCrop: crop('data:image/png;base64,ONTO'),
+      },
+      1,
+    );
+    const blocks = buildRecordStepsPrompt({ actions: [drag], file, includeImages: true, secrets: [] })[1]!
+      .content as MessageContentBlock[];
+    const urls = blocks.filter((b) => b.type === 'image_url').map((b) => (b as { image_url: { url: string } }).image_url.url);
+    expect(urls).toEqual(['data:image/png;base64,FROM', 'data:image/png;base64,ONTO']);
+    const text = userText(blocks);
+    expect(text).toContain('Screenshot for action 1 (drag — where it was dropped)');
+    const start = text.lastIndexOf('--- BEGIN RECORDING ---') + '--- BEGIN RECORDING ---'.length;
+    const [entry] = JSON.parse(text.slice(start, text.lastIndexOf('--- END RECORDING ---')));
+    expect(entry).toMatchObject({ kind: 'drag', dropTarget: { name: 'Paid' }, dropScreenshot: { outlinedInScreenshotAt: { x: 1 } } });
+    expect(entry.action).toBeUndefined();
+    expect(entry.dropCrop).toBeUndefined();
   });
 
   it('a full (re)draft says the draft is empty and asks for replaceFrom 0', () => {

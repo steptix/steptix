@@ -281,6 +281,7 @@ Plan your next action based on the observed result — do not batch multiple act
 15. Set "needs_reeval": true if the current step instruction is NOT yet fully satisfied after this action. Set false (or omit) when the step instruction IS satisfied. IMPORTANT: only consider the current step instruction — do NOT continue into actions that belong to subsequent steps. For example, if the step says "Enter username and password", set needs_reeval: true after entering the username (you still need to enter the password), but set needs_reeval: false after entering the password — do NOT proceed to click Login unless the step says to
 16. For elements inside an <iframe>, set "frame" to the CSS selector of the iframe element (shown in the <!-- comment --> after the <iframe> tag). For **nested iframes** (an iframe inside another iframe), chain the selectors with " >> " from outermost to innermost. Example: if the DOM snapshot shows \`<iframe id="outer"> <!-- #outer -->\n  <iframe id="inner"> <!-- #inner -->\n    <button id="btn">\`, then to click #btn set "frame": "#outer >> #inner", "selector": "#btn". Never put an iframe selector inside the "selector" field — iframe traversal belongs entirely in the "frame" field. Omit "frame" for elements in the main page
 16a. BROWSER HISTORY. To move the active tab through its own session history, use { "action": "back" } or { "action": "forward" } — the browser back and forward buttons, no other fields. A step that says "go back", "go back to the previous page", "browser back", "click the browser back button" or "navigate back in the history" means this action. A keyboard shortcut does NOT do it: a keypress is delivered to the focused element inside the page, not to the browser, so it silently does nothing and the step passes without moving. When the step names something in the PAGE instead ("Click Back to payments", "Click the Return to list link"), that is an ordinary click on that element, not this action. There is no history entry to move to when the tab has not navigated yet; the framework fails the step in that case rather than pretending it worked.
+16b. RELOAD AND DRAG. To refresh the page, use { "action": "reload" } — the browser reload button, no other fields. "Reload the page", "Refresh", "refresh the browser" and "reload" mean this action; a keyboard shortcut (F5) does NOT do it, for 16a's reason. To drag one element onto another, use { "action": "drag", "selector": "<the element dragged>", "target": "<the element it is dropped on>" } — both CSS selectors chosen by rule 3, in the same frame. "Drag the Invoice 1043 card onto the Paid column", "Move the Cash row to the top by dragging it" and "Drop X on Y" mean this action. A drag is ONE action: do not build it from hover, click or keypress actions, and do not click the target afterwards.
 17. When the application opens a new window or tab (via window.open or target="_blank"), the framework tracks all open pages. An "Open Pages" section will appear in the prompt listing each page with its label, URL, and title. Use a "switchPage" action to switch context before interacting with another page: { "action": "switchPage", "page": "page:2", "description": "Switch to popup window" }. After switching, all actions execute against that page and the DOM snapshot will reflect it on the next turn (set "needs_reeval": true after switchPage). Use "switchPage" with "main" to return to the original page. Do NOT use switchPage if there is only one page open
 18. To close a browser tab or popup window, use a "closePage" action: { "action": "closePage", "page": "page:2", "description": "Close the popup window" }. The "page" field accepts the same identifiers as switchPage: an auto label ("page:2"), a custom label (the name supplied via openPage's "as" field — e.g. "docs"), a URL substring, or a title substring. Prefer the custom label when one was assigned (deterministic, refactor-proof). You cannot close the main page. After closing, the framework automatically switches back to the main page — set "needs_reeval": true to get the updated DOM snapshot. Use this when a step asks to close a tab, window, or popup
 18a. To open a brand-new browser tab/window at a URL the test specifies (rather than waiting for the application to spawn one via window.open or a target="_blank" link), use an "openPage" action: { "action": "openPage", "url": "https://docs.example.com", "description": "Open documentation in a new tab" }. The new page is automatically promoted to the active page, so subsequent actions in this step and following steps target it without an explicit switchPage. Use this when a step asks to "open a new tab/window to <URL>", "open <URL> in a new tab", or similar. Always set "needs_reeval": true so the next turn sees the new page's DOM. To return to the original page later, use a "switchPage" action with "main".
@@ -1111,6 +1112,8 @@ const SINGULAR_TARGET_ACTIONS: ReadonlySet<AIAction['action']> = new Set([
   'hover',
   'upload',
   'read',
+  // The element dragged (`singularTargetOf` measures it, not the drop target).
+  'drag',
 ]);
 
 /** Did this action target one element? See {@link SINGULAR_TARGET_ACTIONS}. */
@@ -1616,12 +1619,25 @@ const CLOSING_ACTIONS: ReadonlySet<string> = new Set(['closePage', 'closeBrowser
  * post-condition rule computes from.
  */
 function historyRule(actions: TranscriptAction[]): string {
-  if (!actions.some((a) => a.action === 'back' || a.action === 'forward')) return '';
+  if (!actions.some((a) => a.action === 'back' || a.action === 'forward' || a.action === 'reload')) return '';
   return (
-    `\n7b. **A recorded \`back\` or \`forward\` is the browser's own session history.** ` +
-    `Write \`await page.goBack()\` or \`await page.goForward()\`. Never a keyboard shortcut: a key ` +
-    `event is delivered to the focused element inside the page, not to the browser, so it does ` +
-    `nothing at all — quietly, since the press itself succeeds.`
+    `\n7b. **A recorded \`back\`, \`forward\` or \`reload\` is the browser's own button.** ` +
+    `Write \`await page.goBack()\`, \`await page.goForward()\` or \`await page.reload()\`. Never a ` +
+    `keyboard shortcut: a key event is delivered to the focused element inside the page, not to the ` +
+    `browser, so it does nothing at all — quietly, since the press itself succeeds.`
+  );
+}
+
+/**
+ * How a recorded drag becomes code (docs/specs/SPEC-record-steps.md §4).
+ * Conditional for `historyRule`'s reason.
+ */
+function dragRule(actions: TranscriptAction[]): string {
+  if (!actions.some((a) => a.action === 'drag')) return '';
+  return (
+    `\n7c. **A recorded \`drag\` moves \`selector\` onto \`target\`.** Write ` +
+    `\`await page.locator(<selector>).dragTo(page.locator(<target>))\`, with each selector chosen by ` +
+    `rule 7 from the transcript. One call: never rebuild it from \`page.mouse\` moves, hovers or clicks.`
   );
 }
 
@@ -1968,7 +1984,7 @@ Rules — all of them are enforced:
 4. **Turn assertions into \`step.expect(condition, message)\`**, with a message that names what was compared.
 5. **Rely on Playwright's web-first waiting.** Locators auto-wait; add \`locator.waitFor()\` only where the recorded run needed an explicit wait. Do NOT use \`page.waitForTimeout\` unless the recorded transcript shows a wait action that required it. Code runs far faster than AI think-time, and a missing wait is the classic generated-test flake.
 6. **No imports.** Everything you need arrives via the context object — and everything you use must be in \`run\`'s destructured parameter list. The shape above shows \`{ page, step, log }\` because that is the common case, not because it is the whole context: an entry that calls \`tabs.open(...)\` must be written \`async run({ page, step, log, tabs })\`. A name you use but do not destructure is a \`ReferenceError\` on the first replay.
-7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.${historyRule(input.actions)}${tabHandleRule(input.actions)}
+7. Prefer stable selectors from the transcript (ids, \`data-testid\`, roles) over positional ones.${historyRule(input.actions)}${dragRule(input.actions)}${tabHandleRule(input.actions)}
 7b. **Files come through \`step.filePath\`.** An \`upload\` action's \`filePath\` / \`filePaths\` in the transcript are relative to the test file, so pass each through \`step.filePath('…')\` — the verbatim string — and give the result to Playwright. When the action's \`upload.via\` is \`"input"\`, that is \`await page.locator('#statement-file').setInputFiles(step.filePath('attachments/logo.png'))\`. When it is \`"chooser"\`, the action clicked a control that opened a picker, so write:
 \`\`\`
 const chooser = page.waitForEvent('filechooser');
@@ -2567,6 +2583,8 @@ S4. The phrasings the executor knows:
   - Press Escape to close the <thing it closed>
   - Upload <file name> using the <label> button
   - Switch to the <label> tab   ("main" is the first tab)
+  - Drag the <thing dragged> onto the <thing dropped on>
+  - Go back / Go forward / Reload the page   (the browser's own buttons)
   - Verify …   (only from a check action, V1)
 S5. Quote literal text copied from the page — an option, a message, a multi-word label in a Verify. Write a {{name}} placeholder without quotes and with no spaces inside the braces.
 S6. No explanations, reasons or notes inside a step's text: whatever a step says, the executor tries to do.
@@ -2575,8 +2593,9 @@ TURNING MECHANICS INTO INTENT — the next action can change what the last one m
 I1. A click marked focusOnly only put the caret in a text field. Drop it when the author then typed into that field — if it is already in the draft, rewrite it away.
 I2. A tick or untick with viaLabel was made by clicking the checkbox's label: it is still "Tick the <label> checkbox".
 I3. Clicks that only opened a menu and then chose an item are ONE step naming the item and the menu: a draft ending "Click Menu" followed by a click on Payments becomes "Click Payments in the main menu". A click that did something on its own is its own step.
-I4. A Tab that only moved to the next field the author then typed into is dropped. An Enter or an Escape that submitted or closed something is kept — join an Enter to the Type before it when it was pressed in that same field. An Enter in a form's last field and a click on that form's submit button straight after it are one step, not two.
-I5. A navigate action is an address the author typed: "Navigate to …". A tab action "opened" means the step before it opened a new tab: end that step with "and switch to the tab it opened". A tab action "moved" means the author went to another tab: "Switch to the <tab> tab".
+I4. A Tab that only moved on from a field is dropped: the field's Type is the step. An Enter that submitted something is kept — join it to the Type before it when it was pressed in that same field ("… and press Enter"). An Enter in a form's last field and a click on that form's submit button straight after it are one step, not two.
+I5. A navigate action is an address the author typed: "Navigate to …". back, forward and reload are the browser's own buttons: "Go back", "Go forward", "Reload the page" — never a click. A drag carries "target" (what was dragged) and "dropTarget" (what it was dropped on): "Drag the Invoice 1043 card onto the Paid column", both named and scoped as S2 says. A tab action "opened" means the step before it opened a new tab: end that step with "and switch to the tab it opened". A tab action "moved" means the author went to another tab: "Switch to the <tab> tab".
+I7. Only ACTIONS reach you on their own — a click, a drag, Enter, Tab, Back, Forward, Reload, a typed address, a check. Everything else (typing, a choice in a list, a tick or untick, files chosen, a tab opening) arrives WITH the action after it, so one call often shows both halves of one step: type then key Tab in the same field is one "Type {{email}} into the Email field"; a click on a list then a select is one "Select \"Monthly\" from the Frequency list"; a click on a checkbox or its label then a tick is one "Tick the Cash checkbox"; a click on a file button then an upload is one "Upload …" step. And a step already in the draft may be the first half: a draft ending "Click the Frequency list" followed by a select becomes that Select step (replaceFrom).
 I6. The time gaps are information, not instructions: do not write Wait steps, and never invent a step the author did not take.
 
 PARAMETERS
@@ -2606,7 +2625,7 @@ function fileParametersForPrompt(file: TargetFileSummary): Array<{ name: string;
 /** One action as the model reads it: the recorder's record minus the crop's
  *  pixels (those travel as images), with the gap since the previous one. */
 function actionForPrompt(action: RecordedAction, n: number, previousAtMs: number): Record<string, unknown> {
-  const { crop, id: _id, summary: _summary, atMs, ...rest } = action;
+  const { crop, dropCrop, id: _id, summary: _summary, action: _isAction, atMs, ...rest } = action;
   const entry: Record<string, unknown> = {
     n,
     ...rest,
@@ -2616,6 +2635,12 @@ function actionForPrompt(action: RecordedAction, n: number, previousAtMs: number
     entry['screenshot'] = {
       targetOnPage: crop.pageBox,
       outlinedInScreenshotAt: crop.boxInCrop,
+    };
+  }
+  if (dropCrop) {
+    entry['dropScreenshot'] = {
+      targetOnPage: dropCrop.pageBox,
+      outlinedInScreenshotAt: dropCrop.boxInCrop,
     };
   }
   return entry;
@@ -2718,6 +2743,18 @@ export function buildRecordStepsPrompt(input: RecordStepsPromptInput): ChatMessa
           `x=${b.x}, y=${b.y}, ${b.width}×${b.height} in this ${a.crop.width}×${a.crop.height} image.`,
       });
       blocks.push({ type: 'image_url', image_url: { url: a.crop.dataUrl } });
+    });
+    // A drag's second picture: where it was dropped.
+    input.actions.forEach((a, i) => {
+      if (!a.dropCrop) return;
+      const b = a.dropCrop.boxInCrop;
+      blocks.push({
+        type: 'text',
+        text:
+          `Screenshot for action ${first + i} (drag — where it was dropped): the drop target is outlined in red at ` +
+          `x=${b.x}, y=${b.y}, ${b.width}×${b.height} in this ${a.dropCrop.width}×${a.dropCrop.height} image.`,
+      });
+      blocks.push({ type: 'image_url', image_url: { url: a.dropCrop.dataUrl } });
     });
   }
   blocks.push({

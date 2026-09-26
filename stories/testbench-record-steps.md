@@ -507,11 +507,15 @@ actions it does not cover yet, and the file context; the answer is `{
 replaceFrom, steps, parameters, notes? }`. One prompt serves both shapes — a
 full redraft is a draft call over an empty draft.
 
-- *When.* A call starts once 600 ms pass with no new action (the settle
-  window); actions that arrive while a call runs wait for it and go together in
-  the next one, again after the settle window from the last of them. There is
-  never more than one call in flight per recording: every call goes through one
-  method that refuses to start a second.
+- *When.* Only an ACTION starts a call (decision 4: click, drag, Enter, Tab,
+  Back, Forward, Refresh, a typed address, a check) — once 600 ms pass with no
+  new action (the settle window). Every other event (typing, a choice, a tick,
+  files, a tab) is kept and goes with the next action's call, or Stop's.
+  Actions that arrive while a call runs wait for it and go together in the
+  next one, again after the settle window from the last of them; events that
+  arrive during a call wait for the next action, as they would have without the
+  call. There is never more than one call in flight per recording: every call
+  goes through one method that refuses to start a second.
 - *What it covers.* An incremental call covers every remaining action the
   draft does not, in order — so what the draft covers is always a prefix of the
   remaining actions, and `record:draft.through` is the last of it.
@@ -563,21 +567,40 @@ lowered for good: the veil is the last batch's statement about the session,
 and the next batch re-decides it anyway. A log line says so when the veil was
 up. Calls use the `authoring` profile.
 
-**Typed navigation.** On Chromium each page gets its own CDP session, and
-`Page.frameRequestedNavigation` — which fires for every navigation the page
-itself asked for (a link, a form, a script) and never for one the browser
-started (the address bar, a bookmark, back/forward) — is the primary signal. A
-main-frame commit is recorded as `navigate` only when no such request preceded
-it AND the author did not touch the page in the previous 3 seconds (a
-pointer-down, a first keystroke, a pick, or any action other than a finished
-field of typing — typing is reported on focus-out, which is exactly what
-clicking into the address bar causes). Firefox and WebKit get the window alone.
-Not recorded: a reload (same address), a non-web address (`about:blank`, the
-new-tab page), and a popup's own first load when the tab opened within 3
-seconds of a touch (it is part of that click).
+**Back, Forward, Refresh, and a typed address.** On Chromium each page gets
+its own CDP session. After every main-frame move — a new document
+(`Page.frameNavigated`) or a same-document one (`Page.navigatedWithinDocument`,
+which is how a `pushState` Back arrives) — the recorder reads the tab's own
+navigation history (`Page.getNavigationHistory`) and compares it with the
+reading before: the index moved to an entry that existed with the same id →
+`back` (index down) or `forward` (index up); same index, same id → `reload`;
+anything else is a new navigation (`classifyHistoryMove`). A traversal or
+reload is the author's unless the page asked for it
+(`Page.frameRequestedNavigation`) or it came within 1 second of a touch —
+`history.back()` or `location.reload()` in a click handler lands that fast, a
+person who clicks a link and then presses Back does not, and that common case
+must not be swallowed (so this window is shorter than the typed one). A new
+navigation is recorded as `navigate` only when no page request preceded it AND
+the author did not touch the page in the previous 3 seconds (a pointer-down, a
+first keystroke, a pick, or any action other than a finished field of typing —
+typing is reported on focus-out, which is exactly what clicking into the
+address bar causes). Not recorded: a non-web address (`about:blank`, the
+new-tab page), a popup's own first load when the tab opened within 3 seconds of
+a touch (it is part of that click), and `pushState`/`#hash` moves (the page's
+own doing). The tests drive Back/Forward/Refresh with `page.goBack()` /
+`goForward()` / `reload()`: over CDP those are the same browser-initiated
+navigations the toolbar makes, so what the recorder reads is identical.
 
-**Tabs.** A new tab is a `tab` action (`opened`) carrying its label, title and
-URL; acting in a different tab is a `tab` action (`moved`), except in a tab
+Firefox and WebKit have no CDP to ask, so the page script's hints stand in:
+the new top document's `performance` navigation type (`reload`,
+`back_forward`), `popstate`, and a back/forward-cache `pageshow`. Those cannot
+tell Back from Forward, so there a traversal is recorded as `back`. The
+typed-navigation check waits 500 ms for a hint, so a traversal is not also
+called `navigate`; a document that was already open when Record was pressed
+(its hint describes how IT arrived) is ignored.
+
+**Tabs.** A new tab is a `tab` event (`opened`) carrying its label, title and
+URL; acting in a different tab is a `tab` event (`moved`), except in a tab
 that opened since the last action — the `opened` one already says it. The
 session's active tab follows the author, so a Run after the recording
 continues where they left off.
@@ -596,18 +619,39 @@ still being typed into when the server asks for it at Stop, and those
 `dropped` — the client could not have seen them — so a client should accept
 action frames until `record:writing`.
 
-**What becomes an action.** A click into a text field is recorded with
-`focusOnly` and dropped by the model when typing into that field follows. A
-click on a checkbox, a radio, a label for one, a `<select>`, an option or a
-file input is not reported as a click: the `change` reports the outcome
-(`tick`/`untick` with `viaLabel`, `select` with the option text, `upload` with
-file names). The click a browser makes on a form's submit button when Enter is
-pressed in its field is folded into that `key` action. A custom `role=checkbox`
-or `switch` is reported as `tick`/`untick` from its `aria-checked` after the
-page's handler ran. Escape counts only when the page changed within 300 ms;
-Enter on a button or link is its click; Enter in a textarea is typing. A choice
-made without pointing (the keyboard, a script) first reports any field still
-being typed into, so the order is what happened.
+**What is recorded, and what is an action.** Every `record:action` frame
+carries `action: true|false` (`ACTION_KINDS` in `src/recorder/types.ts`). Only
+TRUSTED pointer, click and key events are recorded — what the author did, not
+a page script's `input.click()` or a re-fired click. A click into a text field
+is a click action with `focusOnly`, which the model drops when typing into that
+field follows. A click on a checkbox, a radio, a label for one, a `<select>`,
+an option or a file input is a click ACTION like any other ("ticking a box and
+opening a list are clicks", spec §4); what it did follows as an EVENT —
+`tick`/`untick` (with `viaLabel` when the label was clicked), `select` with the
+option text, `upload` with the file names — and rides with it. The click a
+browser passes from a label to its checkbox is not a second action. A custom
+`role=checkbox` or `switch` click is a click action, followed by a
+`tick`/`untick` event read from its `aria-checked` after the page's handler
+ran. The click a browser makes on a form's submit button when Enter is pressed
+in its field is folded into that `key` action. Enter and Tab are the only keys
+recorded (Escape no longer is); Enter on a button or link is its click; Enter
+in a textarea is typing. A choice made without pointing (the keyboard, a
+script) first reports any field still being typed into, so the order is what
+happened.
+
+**Drag.** A pointer pressed on one element, moved more than 8 CSS pixels and
+released on another is one `drag` action carrying the element dragged
+(`target`) and the element dropped on (`dropTarget`, what is under the pointer
+at release, or its actionable ancestor); an HTML drag-and-drop is the same
+action, from `dragstart` to `drop` (a drag with no drop moved nothing). A
+release on the same element (or inside it) is not a drag. A press-move-release
+that leaves text selected is text selection, not a drag — unless the element
+looks meant to be moved (`draggable`, or a `grab`/`move` cursor); real
+sortables stop the selection themselves (`user-select: none`), so this only
+decides the ambiguous case. The click a browser fires after a pointer drag is
+part of the drag. A drag has TWO crops: at the press, around what was
+dragged, and at the drop, around where it landed; both count toward the 40,
+and the model is shown both, the second introduced as "where it was dropped".
 
 **Crops.** Taken at pointer-down for anything but a text field, and at the
 first keystroke (or first `input`) into a text field. A field the secret rule
@@ -654,6 +698,29 @@ answer to Stop's last call ends with §10's "The steps could not be written:
 half sends it): it points the session's AI client as a batch would, and a
 session the recording creates is built from it. `envName` is not read — the
 recording needs no `${env.…}` resolution.
+
+**`drag` and `reload` in the runtime** (so recorded steps run). Built the way
+`back`/`forward` were (docs/specs/SPEC-browser-history.md): in
+`VALID_ACTION_TYPES` with the near-miss spellings aliased (`refresh`,
+`dragTo`, `dragAndDrop`, …) because an unknown type is a no-op that reports
+success; `{ action: 'drag', selector, target }` — the parser also reads a
+drag's target from `dropTarget`, `targetSelector` or `to`, and its source from
+`source`, for a drag only — executed as
+`locator(selector).dragTo(locator(target))`, both ends visible-first in the
+action's frame, the dragged element measured and gated like a click's;
+`reload` is `page.reload()` with navigate's arrival rule, on the page even
+inside a frame, and has no "did it move?" failure. Both are in
+`MUTATING_ACTIONS`; the run prompt gains rule 16b; code generation gets
+`page.reload()` through the existing conditional rule 7b and `dragTo` through
+a new conditional rule 7c; neither is on the compile's refusal list, and a
+condition entry may do neither (the static backstop already refused `reload(`
+and `dragTo(`). A drag's report row says which selector went onto which.
+Computer mode refuses the page spellings (`reload`, `refresh`, `dragTo`, …)
+with its page-action message; its own coordinate `drag` is unchanged. The
+three pins `back`/`forward`'s review found toothless are mutation-checked for
+these two in `tests/drag-reload-actions.test.ts`. Handbook §3, the authoring
+guide, the README action table, SPEC-browser-history §9 and the CHANGELOG say
+so.
 
 **Also worth knowing.** A recording counts as a run in flight, so `/health`
 shows it and `aiui stop` answers 409 while one is open. `DELETE

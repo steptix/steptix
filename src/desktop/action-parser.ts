@@ -143,6 +143,10 @@ const PAGE_ACTION_NAMES: ReadonlySet<string> = new Set([
   'closebrowser',
   'back', 'goback', 'browserback', 'navigateback', 'historyback',
   'forward', 'goforward', 'browserforward', 'navigateforward', 'historyforward',
+  // A page's reload and a drag between two ELEMENTS (drag is also a computer
+  // action, by coordinates, so only the element spellings are listed).
+  'reload', 'refresh', 'reloadpage', 'refreshpage', 'browserreload', 'browserrefresh',
+  'dragto', 'draganddrop', 'dragdrop',
   'find',
   'expand',
   'count',

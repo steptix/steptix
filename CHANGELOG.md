@@ -6,6 +6,21 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — `drag` and `reload` steps
+
+A step can now drag one element onto another and reload the page:
+`Drag the Invoice 1043 card onto the Paid column` and `Reload the page` run like
+any other step. The model has two new actions for them — `drag` (the element
+dragged and the element it is dropped on, both by selector; it drives HTML5
+drag-and-drop and pointer-event sortables alike) and `reload` (the browser's
+reload button, waiting for the page as a navigation does). Both compile to
+code-behind (`dragTo`, `page.reload()`), and a report row for a drag says which
+element went onto which. Before this, a drag had no action at all, and a
+reload — deferred when back and forward were added — could only be written as a
+navigation to the same address, which is not the same thing. Added because
+Record Steps records both (docs/specs/SPEC-record-steps.md §4), and a recorded
+step has to be able to run.
+
 ### Added — files that loop and decide now compile, conditions included
 
 `aiui compile` refused any file with a `While`, `Repeat … until` or `For each`,

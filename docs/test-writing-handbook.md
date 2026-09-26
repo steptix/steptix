@@ -192,6 +192,7 @@ to an action.
 | Go to a page | `Navigate to /orders` or `Navigate to https://…` | `page.goto`. Relative paths need `baseUrl`. |
 | Browser back | `Go back` / `Go back to the previous page` | `page.goBack()` on the active tab — the browser button, not anything in the page. Same-document entries count, so a single-page app that pushes history works. Fails the step when the tab does not move. |
 | Browser forward | `Go forward` | `page.goForward()`. Fails the same way when the tab does not move. |
+| Reload | `Reload the page` / `Refresh` | `page.reload()` on the active tab — the browser button, not F5 (a key goes to the page). Waits for the page as a navigation does. |
 | Click | `Click the Sign in button` | Located by visible label, then the most stable selector on that element. |
 | Click, scoped | `Click Edit in the row for order {{order_id}}` | Scoping by row, dialog, section or form is how repeated labels are disambiguated. |
 | Enter text | `Type "{{email}}" into the Email field` | Clears the field, then fills. It does not append. |
@@ -200,6 +201,7 @@ to an action.
 | Custom dropdown | `Open the Country dropdown and choose Australia` | Two clicks. |
 | Checkbox, toggle | `Check the I agree checkbox` | A click. Words like check, confirm and ensure describe an action here, not a verification. |
 | Hover | `Hover over Products to reveal its menu` | `hover`. |
+| Drag and drop | `Drag the Invoice 1043 card onto the Paid column` | One `drag` action: the element dragged and the element dropped on, each named by visible label and scoped like a click. Works for HTML drag-and-drop and for pointer-driven sortables. |
 | Key press | `Type "shoes" into the Search field and press Enter` | The key press is page-level and targets nothing. Put the field first in the same step so it has focus. |
 | Scroll a little | `Scroll down a little` / `Scroll down one screen` | About 300px, or a viewport height. |
 | Scroll to the end | `Scroll to the bottom of the page` | Exact, whatever the page height. |

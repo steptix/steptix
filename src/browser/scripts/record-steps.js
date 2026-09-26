@@ -83,6 +83,8 @@
       typing.clear();
       pointer = null;
       swallowing = false;
+      press = null;
+      html5Drag = null;
     } else if (!wasRecording) {
       typing.clear();
     }
@@ -683,9 +685,30 @@
   // On `window`, in the CAPTURE phase: the first stop of every event's path, so
   // a pick is swallowed before the page's own handlers — even ones registered
   // on window capture, when this script ran first (an init script always does).
+  //
+  // Pointer, click and key listeners take TRUSTED events only: what the author
+  // did, not what a page script dispatched (a styled upload button calling
+  // `input.click()`, a framework re-firing a click). The author's own gesture
+  // is recorded where it landed.
+  //
+  // What is an ACTION (decision 4, SPEC-record-steps.md §4): a click, a drag,
+  // Enter or Tab, and — seen by the server, not here — Back, Forward, Refresh
+  // and an address typed into the bar. A click on a checkbox, a radio, a label
+  // for one, a <select> or a file input is a click like any other; what it did
+  // (ticked, chose, picked files) follows as an EVENT that rides with it.
+
+  /** A pointer pressed and not yet released — a click in the making, or a drag. */
+  var press = null;
+  /** An HTML drag-and-drop in progress (dragstart seen, no drop yet). */
+  var html5Drag = null;
+  /** When a drag last completed: the click the browser fires after a pointer
+   *  drag is part of the drag, not a click of its own. */
+  var draggedAt = 0;
+  /** CSS pixels the pointer must travel before a press is a drag. */
+  var DRAG_THRESHOLD_PX = 8;
 
   function onPointerDown(event) {
-    if (!state.recording) return;
+    if (!state.recording || !event.isTrusted) return;
     if (event.button !== undefined && event.button !== 0) return;
     var target = realTarget(event);
     if (!target) return;
@@ -705,6 +728,98 @@
     // into one is focus, and the typing that follows is the action.
     var mark = isTextEntry(el) ? undefined : markNow(el);
     pointer = { el: el, desc: describe(el), mark: mark, at: Date.now() };
+    press = { el: el, desc: pointer.desc, mark: mark, x: event.clientX, y: event.clientY, moved: false };
+  }
+
+  function onPointerMove(event) {
+    if (!press || press.moved) return;
+    var dx = event.clientX - press.x;
+    var dy = event.clientY - press.y;
+    if (dx * dx + dy * dy > DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) press.moved = true;
+  }
+
+  // What a drop landed on: the element under the pointer, or its actionable
+  // ancestor when it has one (a card's title → the card).
+  function dropTargetAt(x, y, fallback) {
+    var hit = typeof document.elementFromPoint === 'function' ? document.elementFromPoint(x, y) : null;
+    var el = hit || fallback;
+    if (!el || el.nodeType !== 1) return null;
+    return actionable(el) || el;
+  }
+
+  // Dragging across text selects it; that is not moving anything.
+  function selectedText() {
+    try {
+      var sel = window.getSelection && window.getSelection();
+      return sel && !sel.isCollapsed ? String(sel).trim() : '';
+    } catch (err) {
+      return '';
+    }
+  }
+
+  function looksDraggable(el) {
+    if (el.getAttribute('draggable') === 'true') return true;
+    try {
+      var cursor = window.getComputedStyle(el).cursor;
+      return cursor === 'move' || cursor === 'grab' || cursor === 'grabbing';
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function sendDrag(source, dropEl) {
+    var action = { kind: 'drag', target: source.desc, dropTarget: describe(dropEl) };
+    if (source.mark) action.mark = source.mark;
+    var dropMark = markNow(dropEl);
+    if (dropMark) action.dropMark = dropMark;
+    draggedAt = Date.now();
+    pointer = null;
+    void send({ type: 'action', action: action });
+  }
+
+  function onPointerUp(event) {
+    if (swallowing) {
+      swallow(event);
+      return;
+    }
+    var p = press;
+    press = null;
+    if (!state.recording || !event.isTrusted || !p || !p.moved || html5Drag) return;
+    var dropEl = dropTargetAt(event.clientX, event.clientY, realTarget(event));
+    // Released on (or inside) what was pressed: not a drag — a click, or
+    // nothing — and the click listener has it.
+    if (!dropEl || dropEl === p.el || p.el.contains(dropEl) || dropEl.contains(p.el)) return;
+    // A press-move-release that left text selected was selecting text — unless
+    // the element says it is meant to be moved (draggable, or a grab/move
+    // cursor). Real sortables stop the selection themselves (user-select:
+    // none), so this only ever decides the ambiguous case.
+    if (selectedText() !== '' && !looksDraggable(p.el)) return;
+    sendDrag(p, dropEl);
+  }
+
+  function onDragStart(event) {
+    if (!state.recording || !event.isTrusted) return;
+    var from = press || { el: actionable(realTarget(event)) || realTarget(event) };
+    if (!from.el) return;
+    if (!from.desc) from.desc = describe(from.el);
+    if (from.mark === undefined) from.mark = markNow(from.el);
+    html5Drag = from;
+    press = null;
+  }
+
+  function onDrop(event) {
+    var source = html5Drag;
+    html5Drag = null;
+    if (!state.recording || !source) return;
+    var dropEl = actionable(realTarget(event)) || realTarget(event);
+    if (!dropEl || dropEl === source.el || source.el.contains(dropEl)) return;
+    sendDrag(source, dropEl);
+  }
+
+  function onDragEnd() {
+    // A drag that ended without a drop (cancelled, or dropped outside any
+    // target) moved nothing.
+    html5Drag = null;
   }
 
   function swallowRest(event) {
@@ -717,17 +832,17 @@
       swallowing = false;
       return;
     }
-    if (!state.recording) return;
+    if (!state.recording || !event.isTrusted) return;
     var target = realTarget(event);
     if (!target) return;
     var el = actionable(target);
-    var tag = el.tagName.toLowerCase();
-    // Reported by `change`, which knows the outcome: a checkbox, a radio or a
-    // label for one (ticked or not), a <select> and its options (which one),
-    // a file input (which files).
-    if (isToggle(el) || isToggle(labelControl(el))) return;
-    if (tag === 'select' || tag === 'option' || el.closest('select')) return;
-    if (tag === 'input' && inputType(el) === 'file') return;
+    // The click a browser fires after a pointer drag is part of the drag.
+    if (Date.now() - draggedAt < 300) return;
+    // A label's click on its checkbox or radio: the author clicked the LABEL,
+    // which was reported; this is the browser passing it on.
+    if (isToggle(el) && pointer && pointer.el !== el && labelControl(pointer.el) === el) return;
+    // Enter in a form field makes the browser click the form's submit button;
+    // that click IS the Enter, already reported as a key.
     if (event.detail === 0 && Date.now() - enter.at < 250 && enter.form && el.form === enter.form) {
       enter.at = 0;
       return;
@@ -735,25 +850,30 @@
     var fromPointer = pointer && (pointer.el === el || pointer.el.contains(el) || el.contains(pointer.el));
     var desc = fromPointer ? pointer.desc : describe(el);
     var mark = fromPointer ? pointer.mark : (isTextEntry(el) ? undefined : markNow(el));
-    pointer = null;
+    // The pointer stays known until the change that may follow (a label click
+    // reports `viaLabel` on its tick).
+    if (!fromPointer) pointer = null;
     var action = { kind: 'click', target: desc };
     if (mark) action.mark = mark;
     if (event.detail === 0) action.keyboard = true;
     if (isTextEntry(el)) action.focusOnly = true;
-    // A custom checkbox or switch: its state is only known once the page's
-    // own handler has run, so read it on the next task.
+    void send({ type: 'action', action: action });
+    // A custom checkbox or switch: what the click did is only known once the
+    // page's own handler has run, so it follows on the next task, as the
+    // `change` of a native one would.
     var role = roleOf(el);
     if (role === 'checkbox' || role === 'switch' || role === 'radio' ||
         role === 'menuitemcheckbox' || role === 'menuitemradio') {
       setTimeout(function () {
         var checked = el.getAttribute('aria-checked');
-        if (checked === 'true') action.kind = 'tick';
-        else if (checked === 'false') action.kind = role === 'radio' ? 'click' : 'untick';
-        void send({ type: 'action', action: action });
+        if (checked !== 'true' && checked !== 'false') return;
+        if (checked === 'false' && (role === 'radio' || role === 'menuitemradio')) return;
+        void send({
+          type: 'action',
+          action: { kind: checked === 'true' ? 'tick' : 'untick', target: describe(el) },
+        });
       }, 0);
-      return;
     }
-    void send({ type: 'action', action: action });
   }
 
   function onChange(event) {
@@ -766,12 +886,10 @@
     // another field has had no focus-out to report it. It happened first.
     if (!isTextEntry(el)) flushAllExcept(el);
     var viaLabel = pointer && pointer.el !== el && labelControl(pointer.el) === el ? pointer : null;
-    var fromPointer = pointer && (pointer.el === el || viaLabel) ? pointer : null;
     if (isToggle(el)) {
       var radio = inputType(el) === 'radio';
       if (radio && !el.checked) return;
       var action = { kind: el.checked ? 'tick' : 'untick', target: describe(el) };
-      if (fromPointer && fromPointer.mark) action.mark = fromPointer.mark;
       if (viaLabel) action.viaLabel = viaLabel.desc;
       pointer = null;
       void send({ type: 'action', action: action });
@@ -782,10 +900,8 @@
       for (var i = 0; i < el.options.length; i++) {
         if (el.options[i].selected) chosen.push(clip(el.options[i].text, 150));
       }
-      var select = { kind: 'select', target: describe(el), options: chosen };
-      if (fromPointer && fromPointer.mark) select.mark = fromPointer.mark;
       pointer = null;
-      void send({ type: 'action', action: select });
+      void send({ type: 'action', action: { kind: 'select', target: describe(el), options: chosen } });
       return;
     }
     if (tag === 'input' && inputType(el) === 'file') {
@@ -793,10 +909,7 @@
       if (el.files) {
         for (var f = 0; f < el.files.length; f++) names.push(clip(el.files[f].name, 200));
       }
-      var upload = { kind: 'upload', target: describe(el), files: names };
-      var m = markNow(el);
-      if (m) upload.mark = m;
-      void send({ type: 'action', action: upload });
+      void send({ type: 'action', action: { kind: 'upload', target: describe(el), files: names } });
       return;
     }
     if (isTextEntry(el)) flushField(el);
@@ -820,25 +933,8 @@
     return el && el !== document.body ? el : null;
   }
 
-  // Did the page react? Escape only counts when it closed or changed something.
-  function watchForChange(then) {
-    var changed = false;
-    var observer = new MutationObserver(function () { changed = true; });
-    try {
-      observer.observe(document.documentElement, {
-        subtree: true, childList: true, attributes: true,
-        attributeFilter: ['class', 'style', 'hidden', 'open', 'aria-expanded', 'aria-hidden'],
-      });
-    } catch (err) { /* no document yet */ }
-    var before = focusedElement();
-    setTimeout(function () {
-      observer.disconnect();
-      then(changed || focusedElement() !== before);
-    }, 300);
-  }
-
   function onKeyDown(event) {
-    if (!state.recording) return;
+    if (!state.recording || !event.isTrusted) return;
     if (event.isComposing) return;
     var el = realTarget(event) || focusedElement();
     var key = event.key;
@@ -847,7 +943,8 @@
       // The first keystroke into a field: the picture is taken before it lands.
       startTyping(el, currentValue(el));
     }
-    if (key !== 'Enter' && key !== 'Escape' && key !== 'Tab') return;
+    // Enter and Tab are actions; no other key is recorded (Escape included).
+    if (key !== 'Enter' && key !== 'Tab') return;
     var tag = el ? el.tagName.toLowerCase() : '';
     var role = el ? roleOf(el) : '';
     // Enter on a button or link is a click, and the click event reports it.
@@ -859,12 +956,6 @@
     var action = { kind: 'key', key: key };
     if (event.shiftKey) action.shift = true;
     if (el) action.target = describe(el);
-    if (key === 'Escape') {
-      watchForChange(function (did) {
-        if (did && state.recording) void send({ type: 'action', action: action });
-      });
-      return;
-    }
     void send({ type: 'action', action: action });
   }
 
@@ -879,18 +970,38 @@
     flushAllExcept(null);
   }
 
+  // History hints for a browser the server cannot ask over CDP (Firefox,
+  // WebKit): a same-document traversal, and a page restored from the
+  // back/forward cache. On Chromium the server reads the tab's own navigation
+  // history instead and ignores these.
+  function onPopState() {
+    if (!state.recording || window !== window.top) return;
+    void send({ type: 'history', event: 'popstate' });
+  }
+
+  function onPageShow(event) {
+    if (!state.recording || window !== window.top || !event.persisted) return;
+    void send({ type: 'history', event: 'bfcache' });
+  }
+
   var opts = { capture: true };
   window.addEventListener('pointerdown', onPointerDown, opts);
+  window.addEventListener('pointermove', onPointerMove, opts);
+  window.addEventListener('pointerup', onPointerUp, opts);
   window.addEventListener('mousedown', swallowRest, opts);
-  window.addEventListener('pointerup', swallowRest, opts);
   window.addEventListener('mouseup', swallowRest, opts);
   window.addEventListener('click', onClick, opts);
+  window.addEventListener('dragstart', onDragStart, opts);
+  window.addEventListener('drop', onDrop, opts);
+  window.addEventListener('dragend', onDragEnd, opts);
   window.addEventListener('change', onChange, opts);
   window.addEventListener('input', onInput, opts);
   window.addEventListener('keydown', onKeyDown, opts);
   window.addEventListener('focusin', onFocusIn, opts);
   window.addEventListener('focusout', onFocusOut, opts);
   window.addEventListener('submit', onSubmit, opts);
+  window.addEventListener('popstate', onPopState, opts);
+  window.addEventListener('pageshow', onPageShow, opts);
 
   // ── The server's handle ────────────────────────────────────────────────
   //
@@ -917,11 +1028,27 @@
     writable: false,
   });
 
+  // How this document came to be, for the top frame: 'navigate', 'reload' or
+  // 'back_forward' — and how long ago, so the server can tell a document that
+  // loaded during the recording from one that was already there. Used only
+  // where the server has no CDP history to ask.
+  function navigationHint() {
+    if (window !== window.top) return {};
+    try {
+      var entry = performance.getEntriesByType('navigation')[0];
+      return entry ? { navType: String(entry.type), docAgeMs: Math.round(performance.now()) } : {};
+    } catch (err) {
+      return {};
+    }
+  }
+
   // A new document asks once whether a recording is running. Until the answer
   // arrives the script behaves as stopped — which is the safe direction.
   function hello() {
     if (typeof window[BINDING] !== 'function') return false;
-    void send({ type: 'hello' }).then(applyState);
+    var message = navigationHint();
+    message.type = 'hello';
+    void send(message).then(applyState);
     return true;
   }
   if (!hello()) {

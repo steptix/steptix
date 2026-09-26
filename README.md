@@ -836,6 +836,8 @@ When you run a test, here's what happens end to end:
 | `type` | `locator.clear()` + `locator.fill(value)` |
 | `navigate` | `page.goto(url)` |
 | `back` / `forward` | `page.goBack()` / `page.goForward()` |
+| `reload` | `page.reload()` |
+| `drag` | `locator(selector).dragTo(locator(target))` |
 | `wait` | `waitForSelector()` or `waitForTimeout()` |
 | `select` | `locator.selectOption(value)` |
 | `scroll` | `page.evaluate()` scroll |

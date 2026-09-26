@@ -161,6 +161,16 @@ const PAGES: Record<string, string> = {
       <section aria-labelledby="pm"><h2 id="pm">Payment method</h2><p id="pm-text">Paid in cash</p></section>
     </main></body></html>`,
   '/other.html': '<!doctype html><html><head><title>Other</title></head><body><h1>Other</h1></body></html>',
+  '/board.html': `<!doctype html><html><head><title>Board</title></head><body>
+    <section aria-label="To do"><h2>To do</h2><div id="card" draggable="true" style="width:120px">Invoice 1043</div></section>
+    <section aria-label="Paid" id="paid" style="min-height:80px"><h2>Paid</h2></section>
+    <script>
+      const card = document.getElementById('card');
+      card.addEventListener('dragstart', (e) => e.dataTransfer.setData('text/plain', 'card'));
+      const paid = document.getElementById('paid');
+      paid.addEventListener('dragover', (e) => e.preventDefault());
+      paid.addEventListener('drop', (e) => { e.preventDefault(); paid.appendChild(card); });
+    </script></body></html>`,
 };
 
 const FILE_TEXT = [
@@ -253,7 +263,11 @@ async function startApp(
 ): Promise<void> {
   const built = createApiServer(testConfig(opts.headed ?? true, opts.apiKey === undefined ? 'test-key' : opts.apiKey), undefined, undefined, {
     // A typed navigation needs no real-time wait here, and the tap is not used.
-    recorder: { typedNavigationWindowMs: 200, draftSettleMs: opts.draftSettleMs ?? QUICK_SETTLE_MS },
+    recorder: {
+      typedNavigationWindowMs: 200,
+      historyCausedWindowMs: 200,
+      draftSettleMs: opts.draftSettleMs ?? QUICK_SETTLE_MS,
+    },
   });
   sessionManager = built.sessionManager;
   await listen(built.app);
@@ -476,16 +490,32 @@ describe('live drafting — a whole recording', () => {
     const first = await s.draftThrough(1);
     expect(first.data).toMatchObject({ type: 'record:draft', revision: 1, steps: ['Did click Reports'], parameters: [] });
 
+    // Typing is an EVENT: it sends nothing on its own…
     await page.fill('#email', 'demo@securebank.com');
     await page.fill('#pw', SECRET); // finishes the email field
-    await page.selectOption('#freq', { label: 'Monthly' }); // finishes the password field
+    await s.waitForCount('record:action', 2);
+    await sleep(QUICK_SETTLE_MS + 300);
+    expect(ai.requests).toHaveLength(1);
+    // …the Tab that follows is an ACTION, and its call carries the typing too.
+    await page.press('#pw', 'Tab');
     await s.draftThrough(4);
+    expect(recordingOf(ai.requests[1]!).map((a) => a['kind'])).toEqual(['type', 'type', 'key']);
+
+    // A choice in a list rides with the next action; a click on a checkbox is
+    // the action, and its tick rides with it.
+    await page.selectOption('#freq', { label: 'Monthly' });
     await page.check('#cash');
-    await s.draftThrough(5);
+    await s.draftThrough(7);
+    expect(recordingOf(ai.requests[2]!).map((a) => a['kind'])).toEqual(['select', 'click', 'tick']);
     expect((await control(id, { action: 'check' })).status).toBe(202);
     await s.waitFor((f) => f.event === 'record:pick' && f.data.armed === true, 'pick armed');
     await page.click('#pm-text');
-    const last = await s.draftThrough(6);
+    const last = await s.draftThrough(8);
+    // Every frame says whether it was an action.
+    expect(s.of('record:action').map((a) => [a.kind, a.action])).toEqual([
+      ['click', true], ['type', false], ['type', false], ['key', true],
+      ['select', false], ['click', true], ['tick', false], ['check', true],
+    ]);
 
     // Every call saw only what the drafts before it had not covered, in order,
     // beside the draft the previous call produced.
@@ -499,7 +529,7 @@ describe('live drafting — a whole recording', () => {
       seen = numbers[numbers.length - 1];
       expect(draftOf(req)).toEqual(i === 0 ? [] : drafts[i - 1].steps);
     });
-    expect(seen).toBe(6);
+    expect(seen).toBe(8);
     // Never two draft calls at once for one recording.
     expect(ai.maxInFlight).toBe(1);
     expect(ai.requests).toHaveLength(drafts.length);
@@ -544,12 +574,12 @@ describe('live drafting — a whole recording', () => {
   it('a quick burst of actions goes in ONE call', async () => {
     await restartApp({ draftSettleMs: 500 });
     const s = await started('rec-burst');
-    await pageOf().selectOption('#freq', { label: 'Monthly' });
+    await pageOf().click('#email');
     await pageOf().check('#cash');
-    await s.draftThrough(2);
+    await s.draftThrough(3);
     await sleep(700);
     expect(ai.requests).toHaveLength(1);
-    expect(recordingOf(ai.requests[0]!).map((a) => a['kind'])).toEqual(['select', 'tick']);
+    expect(recordingOf(ai.requests[0]!).map((a) => a['kind'])).toEqual(['click', 'click', 'tick']);
     await control('rec-burst', { action: 'cancel' });
     await s.waitFor((f) => f.event === 'done', 'done');
   }, 60_000);
@@ -565,15 +595,15 @@ describe('live drafting — a whole recording', () => {
     await s.waitFor((f) => f.event === 'record:drafting' && f.data.busy === true, 'the first call');
     await pageOf().click('#signin');
     await pageOf().check('#cash');
-    await s.waitForCount('record:action', 3);
+    await s.waitForCount('record:action', 4);
     await sleep(QUICK_SETTLE_MS + 300); // well past the settle window
     expect(ai.requests).toHaveLength(1);
 
     ai.gate = null;
     open();
-    await s.draftThrough(3);
+    await s.draftThrough(4);
     expect(ai.requests).toHaveLength(2);
-    expect(recordingOf(ai.requests[1]!).map((a) => a['n'])).toEqual([2, 3]);
+    expect(recordingOf(ai.requests[1]!).map((a) => a['n'])).toEqual([2, 3, 4]);
     expect(draftOf(ai.requests[1]!)).toEqual(['Did click Reports']);
     expect(ai.maxInFlight).toBe(1);
     await control('rec-batch-inflight', { action: 'cancel' });
@@ -681,6 +711,70 @@ describe('live drafting — a whole recording', () => {
     expect(ai.aborted).toBe(1);
     expect(s.of('record:draft').some((d) => d.steps.includes('Did click Reports'))).toBe(false);
     await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+});
+
+describe('what is an action (decision 4)', () => {
+  it('a drag is one drag action and one draft call', async () => {
+    const s = await started('rec-drag', recordBody({ config: { baseUrl: `${origin}/board.html` } }));
+    await pageOf().locator('#card').dragTo(pageOf().locator('#paid'));
+    const draft = await s.draftThrough(1);
+    await sleep(QUICK_SETTLE_MS + 300);
+    expect(s.of('record:action').map((a) => [a.kind, a.action])).toEqual([['drag', true]]);
+    expect(ai.requests).toHaveLength(1);
+    const [drag] = recordingOf(ai.requests[0]!);
+    expect(drag).toMatchObject({ kind: 'drag', target: { text: 'Invoice 1043' } });
+    expect(drag!['dropTarget']).toBeDefined();
+    // Two pictures for a drag: where it was picked up and where it landed.
+    expect(imagesIn(ai.requests[0]!)).toBe(2);
+    expect(textOf(ai.requests[0]!)).toContain('(drag — where it was dropped)');
+    expect(draft.data.steps).toEqual(['Did drag Invoice 1043']);
+    await control('rec-drag', { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  /**
+   * `page.goBack()`, `goForward()` and `reload()` are Playwright calls, not
+   * the toolbar — but over CDP they are the same browser-initiated navigations
+   * the toolbar makes, so what the recorder reads (nothing in the page asked;
+   * the tab's history moved to an existing entry, or reloaded the current one)
+   * is exactly what a person's click produces.
+   */
+  it('Back, Forward and Refresh are each an action, with a draft call — and none is a typed navigation', async () => {
+    const id = 'rec-history';
+    const s = await started(id);
+    const page = pageOf();
+    await page.goto(`${origin}/other.html`); // the address bar: a typed navigation
+    await s.draftThrough(1);
+    await sleep(300);
+    await page.goBack();
+    await s.draftThrough(2);
+    await sleep(300);
+    await page.goForward();
+    await s.draftThrough(3);
+    await sleep(300);
+    await page.reload();
+    await s.draftThrough(4);
+    expect(s.of('record:action').map((a) => [a.kind, a.action])).toEqual([
+      ['navigate', true], ['back', true], ['forward', true], ['reload', true],
+    ]);
+    expect(ai.requests).toHaveLength(4);
+    expect(ai.requests.map((r) => recordingOf(r).map((a) => a['kind']))).toEqual([
+      ['navigate'], ['back'], ['forward'], ['reload'],
+    ]);
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('Escape is not recorded and sends nothing', async () => {
+    const s = await started('rec-escape');
+    await pageOf().focus('#email');
+    await pageOf().keyboard.press('Escape');
+    await sleep(QUICK_SETTLE_MS + 400);
+    expect(s.of('record:action')).toEqual([]);
+    expect(ai.requests).toHaveLength(0);
+    await control('rec-escape', { action: 'cancel' });
     await s.waitFor((f) => f.event === 'done', 'done');
   }, 60_000);
 });

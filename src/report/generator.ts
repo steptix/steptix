@@ -1191,12 +1191,20 @@ function renderSubAction(
   // "just worked" and no way to see which table it actually read or which row
   // it took the names from.
   const mappingHtml = describeTableMapping(sub.action.mapping);
+  // A drag names two elements, and the row's description is the model's own
+  // sentence: say which selector was dragged onto which, as an upload row
+  // says which files it sent.
+  const dragHtml =
+    sub.action.action === 'drag'
+      ? `<div class="sub-action-detail">dragged: ${escapeHtml(sub.action.selector ?? '?')} → onto: `
+        + `${escapeHtml(sub.action.target ?? '?')}</div>`
+      : '';
   const onComputerTurn = opts.turnShot !== undefined;
   const ownShot = onComputerTurn && sub.screenshotBase64 === opts.turnShot
     ? undefined
     : sub.screenshotBase64;
   const hasBody = ownShot || sub.domSnapshot || sub.aiReasoning || sub.error || sub.apiCallData
-    || uploadHtml !== '' || mappingHtml !== '';
+    || uploadHtml !== '' || mappingHtml !== '' || dragHtml !== '';
 
   const subUrlHtml = sub.pageUrl ? `<div class="screenshot-url">${escapeHtml(sub.pageUrl)}</div>` : '';
   const screenshotHtml = onComputerTurn && !ownShot
@@ -1242,7 +1250,7 @@ function renderSubAction(
     <span class="sub-action-desc">${escapeHtml(description)}</span>
     ${timeLabel}
   </div>
-  ${hasBody ? `<div class="sub-action-body">${uploadHtml}${mappingHtml}${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
+  ${hasBody ? `<div class="sub-action-body">${uploadHtml}${dragHtml}${mappingHtml}${apiHtml}${screenshotHtml}${domHtml}${reasoningHtml}${errorHtml}</div>` : ''}
 </div>`;
 }
 
