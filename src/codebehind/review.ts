@@ -30,6 +30,10 @@ export interface FileReviewInput {
   steps: string[];
 }
 
+/** A `condition` function in an entry — `async condition({ … })` or
+ *  `condition: async (…) =>` — the shape a condition line's entry has. */
+const CONDITION_ENTRY = /\bcondition\s*(?:\(|:\s*(?:async\b|\())/;
+
 export function buildFileReviewPrompt(input: FileReviewInput): ChatMessage {
   const stepBlock = input.steps.length === 0
     ? '(step list unavailable)'
@@ -82,8 +86,32 @@ export function buildFileReviewPrompt(input: FileReviewInput): ChatMessage {
         '   assertions because the failure is tolerated.',
     );
   }
+  // Condition entries (stories/codebehind-loops-and-conditions.md, "Generation":
+  // "The review pass is told condition entries exist"). Gated on the FILE, not
+  // the steps: a test full of `If` lines whose conditions are decided from
+  // their values has none, and a reviewer told about a kind of entry the file
+  // does not hold is invited to write one.
+  const hasConditionEntry = CONDITION_ENTRY.test(input.file);
+  if (hasConditionEntry) {
+    tailRules.push(
+      '**A `condition` entry answers a condition line** (`If`, `Else if`, `While`, `Repeat …\n' +
+        '   until`): `async condition({ page, step })` returning `true` or `false` for whether the\n' +
+        '   condition, as written, holds on the page now. Keep it a condition that returns a boolean.\n' +
+        '   Keep it read-only — no click, fill, press, check, select, navigation, keyboard or mouse —\n' +
+        '   and give it no waits: the framework has already settled the page before it asks. Never\n' +
+        '   turn one into a `run` entry, never give an entry both, and never add a `condition` entry\n' +
+        '   for a line that has none. A `Repeat … until` entry answers whether its until-condition\n' +
+        '   holds (true ends the loop) — do not invert it.',
+    );
+  }
   const tailBlock =
     tailRules.length === 0 ? '' : `\n${tailRules.map((r, i) => `${10 + i}. ${r}`).join('\n')}`;
+  // Rule 3 asks every entry for a post-condition; a condition entry has none —
+  // it ends with its `return`.
+  const conditionException = hasConditionEntry
+    ? ' A `condition` entry takes no post-condition: it answers true or false and ends with its\n' +
+      '   `return` — never add one to it.'
+    : '';
 
   return {
     role: 'user',
@@ -111,7 +139,7 @@ ${input.file}
    literals.
 3. **Every entry ends with a post-condition** — a \`locator.waitFor()\` on what
    the step produced, or a \`step.expect(...)\` over a value read back from the
-   page — so "did not throw" means "the step worked".${flowControlException}
+   page — so "did not throw" means "the step worked".${flowControlException}${conditionException}
 4. **Captures are written**: a step with \`[as: x]\` must call
    \`step.setVar('x', ...)\`.
 5. **Stable selectors** (ids, \`data-testid\`, roles, labels) over positional

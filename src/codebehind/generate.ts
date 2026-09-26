@@ -2,12 +2,17 @@ import type { AiClient } from '../ai/client.js';
 import { normaliseUploadPath } from '../browser/upload-paths.js';
 import { MIN_GUARDED_VALUE_LENGTH, findInlinedParameterValue, parseStepCodeOrDecline } from '../ai/action-parser.js';
 import {
+  buildConditionCodePrompt,
   buildStepCodePrompt,
   buildSystemPrompt,
   formatTestInfo,
   isSingularTarget,
+  type ConditionCodePromptInput,
+  type LoopContext,
   type StepCodePromptInput,
 } from '../ai/prompts.js';
+import { parseControlLine } from '../parser/control-line.js';
+import { isLiteralCondition } from '../runner/literal-decision.js';
 import type { AIAction, ChatMessage } from '../ai/types.js';
 import {
   envDataRefsIn,
@@ -24,7 +29,7 @@ import { referencedVariableNames } from '../skills/expander.js';
 import { logger } from '../utils/logger.js';
 import type { CodeBehindBinding } from './loader.js';
 import type { RecordedAction } from './recording.js';
-import { scan, type StringToken } from './tokenizer.js';
+import { CODE, scan, type StringToken } from './tokenizer.js';
 
 /**
  * Turning one recorded step into its code-behind entry
@@ -207,6 +212,13 @@ export interface GenerateStepEntryOptions {
   urlBefore?: string | undefined;
   domAfter?: string | undefined;
   urlAfter?: string | undefined;
+  /**
+   * The runtime loop the step sits in the body of, when it does
+   * (stories/codebehind-loops-and-conditions.md, decision 2): the prompt then
+   * says the line repeats and names what changes per pass. The caller builds
+   * it with {@link loopContextFor}.
+   */
+  loop?: LoopContext | undefined;
 }
 
 /**
@@ -318,6 +330,7 @@ export async function generateStepEntry(
     ...(options.urlBefore !== undefined && { urlBefore: options.urlBefore }),
     ...(options.domAfter !== undefined && { domAfter: options.domAfter }),
     ...(options.urlAfter !== undefined && { urlAfter: options.urlAfter }),
+    ...(options.loop && { loop: options.loop }),
   };
   // The authored line goes in so a value the author quoted in it is not read
   // as a leak: see `guardedValues` / `authorQuotedLiterals`.
@@ -647,10 +660,13 @@ export function unwaitedReadComplaint(code: string): string | undefined {
  *  `ReferenceError` unless the entry destructured it. */
 const CONTEXT_PROPERTIES = ['page', 'context', 'browser', 'step', 'log', 'tabs', 'browsers'] as const;
 
-/** The destructured parameter list of `async run({ ... })`. Undefined when the
- *  entry took the context as a whole (`run(ctx)`), where there is nothing to
- *  check — `ctx.tabs` cannot be undeclared. */
-const RUN_DESTRUCTURE = /\brun\s*\(\s*\{([^}]*)\}/;
+/** The destructured parameter list of `async run({ ... })` — or of `async
+ *  condition({ ... })`, which receives the same context object
+ *  (stories/codebehind-loops-and-conditions.md). Group 1 is which function,
+ *  group 2 the list. Undefined when the entry took the context as a whole
+ *  (`run(ctx)`), where there is nothing to check — `ctx.tabs` cannot be
+ *  undeclared. */
+const RUN_DESTRUCTURE = /\b(run|condition)\s*\(\s*\{([^}]*)\}/;
 
 /**
  * Why this entry must not be written as it stands, or undefined when it may —
@@ -669,8 +685,9 @@ const RUN_DESTRUCTURE = /\brun\s*\(\s*\{([^}]*)\}/;
 export function undeclaredContextComplaint(code: string): string | undefined {
   const params = RUN_DESTRUCTURE.exec(code);
   if (!params) return undefined;
+  const fn = params[1]!;
   const declared = new Set(
-    params[1]!
+    params[2]!
       // `{ page, step: s, log }` — the property name is what is in scope only
       // when there is no rename, and a rename means the author asked for it
       // either way, so the property half is the right half to read.
@@ -684,7 +701,7 @@ export function undeclaredContextComplaint(code: string): string | undefined {
     // A local of the same name is defined, whatever the parameter list says.
     if (new RegExp(`(?:const|let|var)\\s+${name}\\b`).test(code)) continue;
     return (
-      `The entry uses \`${name}\` but \`run\` does not destructure it — the parameter list is ` +
+      `The entry uses \`${name}\` but \`${fn}\` does not destructure it — the parameter list is ` +
       `\`{ ${[...declared].join(', ')} }\`, so this throws \`ReferenceError: ${name} is not defined\` ` +
       `on the first replay. Add \`${name}\` to the destructured context object.`
     );
@@ -737,6 +754,9 @@ export async function askForEntry(
   prompt: ChatMessage,
   guarded: Array<{ name: string; value: string }>,
   signal?: AbortSignal | undefined,
+  /** The function the entry must define — `condition` for a condition line's
+   *  entry (`generateConditionEntry`), `run` for everything else. */
+  expect: 'run' | 'condition' = 'run',
 ): Promise<GeneratedEntry> {
   let answer;
   try {
@@ -745,7 +765,7 @@ export async function askForEntry(
       signal,
       { profile: 'authoring' },
     );
-    answer = parseStepCodeOrDecline(completion.text);
+    answer = parseStepCodeOrDecline(completion.text, expect);
   } catch (err) {
     return { kind: 'error', message: (err as Error).message };
   }
@@ -1327,4 +1347,338 @@ export function aiEntryFor(source: string, reason: string): string {
 /** One line, no comment terminator, no surprises in a generated file. */
 function sanitiseComment(reason: string): string {
   return reason.replace(/\r?\n/g, ' ').replace(/\*\//g, '* /').trim();
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Condition entries (stories/codebehind-loops-and-conditions.md, "Generation")
+// ───────────────────────────────────────────────────────────────────────────
+
+/** A control line that compiles to a `condition` entry, parsed. */
+export interface CompilableCondition {
+  kind: 'if' | 'elseif' | 'while' | 'repeat';
+  /** The condition part, AUTHORED — `{{plan}}`, never a skill's renamed form. */
+  condition: string;
+  /** What the line does when the condition holds (a loop: its body). */
+  tail: string;
+}
+
+/**
+ * The condition a line compiles to a `condition` entry for, or undefined when
+ * it compiles to none (decisions 4 and 10).
+ *
+ * `If`, `Else if`, `While` and `Repeat … until` get one. `Otherwise` has no
+ * condition, `For each` reads a list and never asks a model, the flow-control
+ * `If … then return|stop|fail` is a STEP (`parseControlLine` declines it, so
+ * it never reaches here as a guard), and a condition decided from its own
+ * values is free already and would only be made worse by code
+ * (`isLiteralCondition`).
+ *
+ * Read off the AUTHORED line — the binding's `source` — so a skill body's
+ * condition is the author's `{{order}}` rather than the `{{__skill1_order}}`
+ * the run judged it by. The live compiler asks it for its plan and for
+ * `offerGuard`; the boxed `describeSteps` is meant to ask it too.
+ */
+export function compilableCondition(line: string): CompilableCondition | undefined {
+  const parsed = parseControlLine(line.trim());
+  if (!parsed) return undefined;
+  if (parsed.kind === 'else' || parsed.kind === 'foreach') return undefined;
+  if (isLiteralCondition(parsed.condition)) return undefined;
+  return { kind: parsed.kind, condition: parsed.condition, tail: parsed.tail };
+}
+
+/**
+ * The runtime loop a line sits in the body of, as the generation prompts
+ * describe it (decision 2) — or undefined when `guardLine` is not a loop.
+ *
+ * `guardLine` is the loop's AUTHORED line. `passValues` is the evidence pass's
+ * own bindings (`StepResult.loop.values`): its dotted keys are the `item.key`
+ * bindings a `For each` over records made, and they are named under the
+ * AUTHORED item, which is the name `step.getVar` reads — `runtimeItem` is the
+ * name the run bound them under when that differs (a skill body's
+ * `__skill1_order`), so both roots are recognised.
+ */
+export function loopContextFor(
+  guardLine: string,
+  passValues?: Record<string, string> | undefined,
+  runtimeItem?: string | undefined,
+): LoopContext | undefined {
+  const parsed = parseControlLine(guardLine.trim());
+  if (!parsed) return undefined;
+  if (parsed.kind === 'while' || parsed.kind === 'repeat') {
+    return { line: guardLine.trim(), kind: parsed.kind, perPass: [] };
+  }
+  if (parsed.kind !== 'foreach') return undefined;
+  const names = new Set<string>([parsed.item]);
+  for (const key of Object.keys(passValues ?? {})) {
+    const dot = key.indexOf('.');
+    if (dot < 0) continue;
+    const root = key.slice(0, dot);
+    if (root === parsed.item || (runtimeItem !== undefined && root === runtimeItem)) {
+      names.add(`${parsed.item}${key.slice(dot)}`);
+    }
+  }
+  return { line: guardLine.trim(), kind: 'foreach', perPass: [...names] };
+}
+
+/**
+ * One visit on which the model decided a condition — what a `condition` entry
+ * is generated from (decision 9). `holds` undefined is a chain member after
+ * the one that held: never asked, first-holds-wins.
+ */
+export interface ConditionObservation {
+  holds: boolean | undefined;
+  /** The DOM the judge was shown, already masked for the model. Absent on the
+   *  computer surface, where there is none. */
+  dom?: string | undefined;
+  url?: string | undefined;
+}
+
+/**
+ * Which observations a generation is shown (decision 9): the first where the
+ * condition held and the first where it did not — a `While` generated from
+ * "enabled on page 1" AND "disabled on page 4" writes a better check than one
+ * generated from either — or, when there is neither, the first not-asked one.
+ *
+ * Order-preserving over `all`, which the caller keeps in visit order, and
+ * generic so a caller may hang its own facts (a parameter snapshot) on each.
+ */
+export function pickConditionObservations<T extends { holds: boolean | undefined }>(
+  all: readonly T[],
+): T[] {
+  const held = all.find((o) => o.holds === true);
+  const notHeld = all.find((o) => o.holds === false);
+  const picked = all.filter((o) => o === held || o === notHeld);
+  if (picked.length > 0) return picked;
+  const unasked = all.find((o) => o.holds === undefined);
+  return unasked ? [unasked] : [];
+}
+
+/**
+ * Why a condition judged on the computer surface stays AI
+ * (SPEC-use-computer.md §9, decision 10): there is no DOM to generate from,
+ * and a read of the screen is not portable.
+ */
+export const CONDITION_WITHOUT_DOM =
+  'the condition was judged without a DOM (computer mode); a screen read is not portable';
+
+/** The code of an entry with every string, template text, comment and regex
+ *  blanked out, so a check for a CALL cannot fire on `'Click me'`. */
+function codeOnly(code: string): string {
+  const s = scan(code);
+  let out = '';
+  for (let i = 0; i < code.length; i++) out += s.mask[i] === CODE ? code[i] : ' ';
+  return out;
+}
+
+/**
+ * Calls a condition entry must not make (the story's rules: read only, and
+ * about the page NOW). Each is a precise call shape rather than a word, so
+ * `isChecked()` is not `check(` and `getByRole('button', { name: 'Click' })`
+ * is not `click(` — the entry is scanned with its strings blanked first.
+ */
+const CONDITION_FORBIDDEN: ReadonlyArray<{ re: RegExp; why: string }> = [
+  // First, so `page.keyboard.press(` is named as the keyboard it is rather
+  // than as the `.press(` the next rule would also match.
+  {
+    re: /\.\s*(?:keyboard|mouse|touchscreen)\s*\./,
+    why: 'drives the keyboard or mouse. A condition reads the page; it never types or points',
+  },
+  {
+    re: /\.\s*(?:click|dblclick|fill|type|press|pressSequentially|check|uncheck|setChecked|selectOption|selectText|setInputFiles|hover|tap|focus|blur|dragTo|dragAndDrop|dispatchEvent|clear|scrollIntoViewIfNeeded)\s*\(/,
+    why:
+      'acts on the page. A condition answers a question about the page and must not change the ' +
+      'page it is asked about: read the state instead — `isChecked()`, `isEnabled()`, `count()`, ' +
+      '`textContent()` after a `count()` check',
+  },
+  {
+    re: /\.\s*(?:goto|goBack|goForward|reload)\s*\(/,
+    why: 'navigates. A condition is asked about the page the run is on, and must leave it there',
+  },
+  {
+    re: /\.\s*waitFor\w*\s*\(/,
+    why:
+      'waits. The framework has already waited for the page to settle before it asks, so answer ' +
+      'about the page now — an absent element is an answer, so check `await locator.count()` first',
+  },
+  {
+    re: /(?:^|[^\w$.])setTimeout\s*\(/,
+    why: 'sleeps. The page has already settled; answer about it now',
+  },
+  {
+    re: /(?:^|[^\w$.])(?:tabs|browsers)\s*\.\s*(?:open|openedBy|switchTo|close)\s*\(/,
+    why: 'opens or switches a tab or browser. A condition reads the page the run is on',
+  },
+  {
+    re: /(?:^|[^\w$.])step\s*\.\s*setVar\s*\(/,
+    why: "writes a variable. A condition only answers; it does not change the test's scope",
+  },
+];
+
+/**
+ * Why a generated CONDITION entry must not be written as it stands, or
+ * undefined when it may — the condition's own static backstop, sharing one
+ * re-ask with `undeclaredContextComplaint` as the step's checks do
+ * (stories/codebehind-loops-and-conditions.md, "Generation").
+ *
+ * The shape first: a condition line's entry defines `condition` and never
+ * `run` — the loader drops an entry with both, so it would silently be no
+ * entry at all. Then the calls a condition must not make.
+ */
+export function conditionEntryComplaint(code: string): string | undefined {
+  const text = codeOnly(code);
+  if (/\brun\s*[(:]/.test(text)) {
+    return (
+      "The entry defines `run`. A condition line's entry defines `condition` ONLY — " +
+      '`async condition({ page, step }) { … return true or false; }` — and never `run`: an entry ' +
+      'with both is dropped when the file loads, and a `run` on a condition line never decides it.'
+    );
+  }
+  if (!/\bcondition\s*[(:]/.test(text)) {
+    return (
+      'The entry defines no `condition` function. Write `async condition({ page, step })` and ' +
+      'return true when the condition, as written, holds on the page now, false when it does not.'
+    );
+  }
+  for (const { re, why } of CONDITION_FORBIDDEN) {
+    const match = re.exec(text);
+    if (!match) continue;
+    const call = match[0].replace(/^[^\w$.]/, '').replace(/\s+/g, '');
+    return `The entry calls \`${call}\`, which ${why}.`;
+  }
+  return undefined;
+}
+
+export interface GenerateConditionEntryOptions {
+  /** The binding of the condition LINE — its `source` is the whole authored
+   *  line, and is what the entry binds by. */
+  binding: CodeBehindBinding;
+  /** Every observation the caller kept, in visit order; the generator shows
+   *  {@link pickConditionObservations} of them. */
+  observations: ConditionObservation[];
+  /** The live map at the observation, for the condition's references. */
+  resolvedParameters: Record<string, string>;
+  /** The map with the loop marks, for §7.6's dotted-name rule — see
+   *  `GenerateStepEntryOptions.parameterMap`. */
+  parameterMap?: Record<string, string> | undefined;
+  envData?: EnvDataContext | undefined;
+  aiClient: AiClient;
+  contextContent: string;
+  testName: string;
+  baseUrl?: string | undefined;
+  signal?: AbortSignal | undefined;
+  wholeTest?: Array<{ index: number; text: string; inScope: boolean; isThisStep: boolean }>;
+  candidateFile?: string | undefined;
+  /** The loop this line sits in the body of, if any (decision 2). */
+  loop?: LoopContext | undefined;
+  /**
+   * The repair variant: the line already has a `condition` entry and it broke
+   * — it threw, returned a non-boolean, or said "carry on" at a loop's cap
+   * where the model said stop. The prompt shows the code and what went wrong.
+   */
+  repair?: { entryCode: string; error: string } | undefined;
+}
+
+/**
+ * Generate one condition line's `condition` entry. Never throws — a failed
+ * call is a result, as for a step.
+ *
+ * The pre-checks mirror `generateStepEntry`'s and decline for the same
+ * reasons: a condition with no DOM to read (decision 10), and a reference the
+ * run cannot answer. The parameters, the env references and the leak guard
+ * are scoped to the CONDITION rather than the whole line — the tail's values
+ * are the tail's business — and go through the same `stepParameters` /
+ * `stepEnvRefs` / `guardedValues`, so `getVar` names, env refs and the leak
+ * guard behave exactly as they do for a step.
+ */
+export async function generateConditionEntry(
+  options: GenerateConditionEntryOptions,
+): Promise<GeneratedEntry> {
+  const { binding } = options;
+  const line = compilableCondition(binding.source);
+  if (!line) {
+    return { kind: 'error', message: 'the line has no condition a `condition` entry could answer' };
+  }
+  const observations = pickConditionObservations(options.observations);
+  if (observations.length === 0) {
+    return { kind: 'error', message: 'the run observed no decision of this condition to generate from' };
+  }
+  if (observations.every((o) => o.dom === undefined)) {
+    return { kind: 'declined', reason: CONDITION_WITHOUT_DOM };
+  }
+
+  // The condition's own references, read through the line's binding scope —
+  // a skill body's `{{order}}` is renamed exactly as it is on the whole line.
+  const conditionBinding: CodeBehindBinding = { ...binding, source: line.condition };
+  const parameters = stepParameters(conditionBinding, options.resolvedParameters, options.envData);
+  const envRefs = stepEnvRefs(conditionBinding, options.envData);
+  if (envRefs.unresolved.length > 0) {
+    return { kind: 'declined', reason: unresolvedRefsReason(envRefs.unresolved, options.envData) };
+  }
+  const unresolvedInputs = unresolvedInputRefs(conditionBinding, options.resolvedParameters, options.envData);
+  if (unresolvedInputs.length > 0) {
+    return { kind: 'declined', reason: unresolvedRefsReason(unresolvedInputs, options.envData) };
+  }
+
+  const promptInput: ConditionCodePromptInput = {
+    rawLine: binding.source,
+    kind: line.kind,
+    condition: line.condition,
+    tail: line.tail,
+    observations: observations.map((o) => ({
+      holds: o.holds,
+      ...(o.dom !== undefined && { dom: o.dom }),
+      ...(o.url !== undefined && { url: o.url }),
+    })),
+    parameters,
+    ...(options.parameterMap && { parameterMap: options.parameterMap }),
+    ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
+    testInfoSection: formatTestInfo(options.testName, options.baseUrl),
+    ...(options.wholeTest && { wholeTest: options.wholeTest }),
+    ...(options.candidateFile !== undefined && { candidateFile: options.candidateFile }),
+    ...(options.loop && { loop: options.loop }),
+    ...(options.repair && { repair: options.repair }),
+  };
+  // The condition text, so a value the author QUOTED in it is the author's
+  // (`guardedValues` / `authorQuotedLiterals`).
+  const guarded = guardedValues(parameters, envRefs.resolved, line.condition);
+
+  const first = await askForEntry(
+    options.aiClient,
+    options.contextContent,
+    buildConditionCodePrompt(promptInput),
+    guarded,
+    options.signal,
+    'condition',
+  );
+  if (first.kind !== 'entry') return first;
+
+  const complaint = conditionEntryComplaint(first.code) ?? undeclaredContextComplaint(first.code);
+  if (complaint === undefined) return first;
+
+  // ONE re-ask, then take what we get — the step's rule, for the step's
+  // reasons (see `generateStepEntry`).
+  logger.debug(`Code-behind re-asking for condition "${binding.source}": ${complaint}`);
+  const second = await askForEntry(
+    options.aiClient,
+    options.contextContent,
+    buildConditionCodePrompt({ ...promptInput, retry: { previousEntry: first.code, complaint } }),
+    guarded,
+    options.signal,
+    'condition',
+  );
+  if (second.kind !== 'entry') {
+    logger.debug(
+      `The re-ask for condition "${binding.source}" produced no entry ` +
+        `(${second.kind === 'error' ? second.message : second.reason}); keeping the first answer`,
+    );
+    return first;
+  }
+  const stillWrong = conditionEntryComplaint(second.code) ?? undeclaredContextComplaint(second.code);
+  if (stillWrong !== undefined) {
+    logger.warn(
+      `Code-behind for condition "${binding.source}" still has a fault the static check can see; ` +
+        `the next run will show whether it holds. ${stillWrong}`,
+    );
+  }
+  return second;
 }

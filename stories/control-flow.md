@@ -395,7 +395,10 @@ The bounded-run rules extend the snapping the branched group already has:
 - A control line is `kind: 'step'` on the wire; runner-core's
   `ClassifiedStep` stays `step | input | interactive`. The server does the
   work.
-- A control line is never cached and never compiled. The guard is dispatched,
+- A control line is never cached and never compiled. (Its CONDITION now
+  compiles, to a `condition` entry —
+  [codebehind-loops-and-conditions.md](codebehind-loops-and-conditions.md).)
+  The guard is dispatched,
   like `Set` and `[tool:]`; its tail's steps compile and cache as they would
   anywhere — except that steps **inside a loop body** opt out of the step
   cache the way row runs do (decision 8 of the rows story, same reason: the
@@ -674,7 +677,13 @@ right tool for "if it appears, dismiss it".
 12. **Control lines are not cached and not compiled; loop bodies opt out of
     the step cache; a compile whose slice touches a loop is refused.** Guards
     are dispatched, like `Set`. A chain compiles as any steps do — its untaken
-    branch is simply not attempted. A loop does not: entries are placed at
+    branch is not attempted, and Run & Compile says so: its steps are named in
+    `notAttempted` with their own sentence, *the step did not run — the run
+    decided against it* ([issue 053](../issues/resolved/053-run-and-compile-does-not-list-an-untaken-branch.md),
+    resolved by decision 12 of
+    [codebehind-loops-and-conditions.md](codebehind-loops-and-conditions.md);
+    until then an untaken branch reached no list at all, and a file whose only
+    uncompiled steps sat in one was reported "already compiled"). A loop does not: entries are placed at
     `spans[occurrence]`, occurrence is counted per step line, and a loop body
     offers N transcripts for one slot. So a whole-file compile of a looping
     file is refused before anything runs, with advice that can be followed —
@@ -683,7 +692,11 @@ right tool for "if it appears, dismiss it".
     detached, once), both proceed, because the refusal is scoped to the
     compile's own slice. Recording pass 1 and replaying the
     rest, the way rows record row 1, is its own story. (The draft of this
-    decision said the opposite; §"What the build showed" says why.)
+    decision said the opposite; §"What the build showed" says why.) That
+    story is [codebehind-loops-and-conditions.md](codebehind-loops-and-conditions.md):
+    Run & Compile no longer refuses a loop — a body line is one entry,
+    generated from the first pass that ran it — and a guard whose condition the
+    model decides compiles to a `condition` entry.
 13. **Reports show every row of an untaken tail as skipped.** Honest, and
     what the matrix does. Collapsing is a presentation change to make with a
     rendered page in front of the reviewer.
@@ -796,6 +809,13 @@ the same command on the body lines of the looped section proceeds (a body
 selection compiles detached, once — there is no separate "compile this
 section" command), and a whole-file compile of a looping file is refused with
 advice naming both.
+
+Since superseded on the Run & Compile path by
+[codebehind-loops-and-conditions.md](codebehind-loops-and-conditions.md): the
+slot problem is solved by generating each body line once, from the first pass
+to reach the compiler (the live compiler's per-entry dedupe), and the summary
+counts expanded steps rather than passes. The boxed `aiui compile` still
+refuses until that story's boxed half lands.
 
 ### Three traps found by reading, before anything ran
 

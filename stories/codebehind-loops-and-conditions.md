@@ -1,6 +1,10 @@
 # Compile loops, and compile the conditions that drive them
 
-**Status:** spec, 2026-09-26. Not built.
+**Status:** spec, 2026-09-26. The runtime (condition entries decide guards)
+and Run & Compile / Compile This Step (generation, the live compiler, the
+recording) are built — see §"What the live half decided". The boxed
+`aiui compile` half (§"Boxed compile") is not: it still refuses a file that
+loops.
 
 ## In plain terms
 
@@ -216,7 +220,7 @@ from the page the model saw on that visit.
     replay; the next run proves the entry, as it proves every entry.
 
 12. **Steps a decision skipped are named as not attempted** (closes
-    [issue 053](../issues/053-run-and-compile-does-not-list-an-untaken-branch.md)).
+    [issue 053](../issues/resolved/053-run-and-compile-does-not-list-an-untaken-branch.md)).
     A `While` that ran no passes, and an untaken branch, leave steps nothing
     recorded. Run & Compile now names them, with their own sentence — *"the
     step did not run — the run decided against it"* — beside the return one.
@@ -455,6 +459,49 @@ them read-only, never turn one into a `run`.
 - Evidence beyond the first held / first not-held visit.
 - Verifying a Run & Compile's conditions before the next run.
 - Compiling the watch form (`If a banner appears, dismiss it`, no `then`).
+
+## What the live half decided
+
+Where building Run & Compile and Compile This Step had to choose something the
+sections above leave open.
+
+- **Compile This Step on a guard line compiles the condition, and runs the
+  body.** A selection ending on a guard's own line is the guard: its tail is
+  invoked FROM that line, so the end anchor resolves past the guard into the
+  tail, and the control-structure snap then runs to the end of what the guard
+  opens. The run keeps both — a decision needs its consequence, and a
+  `Repeat`'s condition is not asked until its body has run once, so without
+  the body there would be nothing to generate from — but the compile's slice
+  ends at the guard (`selectedEndIndex`). The body runs under AI and is not
+  generated, named or counted. The same holds for a plain-instruction tail
+  that shares the guard's line: Repair on a ⚠ guard reaches this path, and
+  it is the condition that broke.
+- **A selection inside a loop body runs more passes than it selected.** A run
+  starting in a body counts that partial pass as pass 1 and returns to the
+  guard; the guard is visited and its later passes run. None of it is outside
+  what compiles: the guard and anything past the selection are out of the
+  slice (the live compiler's `outside` set, `'steps'` mode only).
+- **Observations wait for the block, not the run.** A condition is queued in
+  `runStepsEnded` — once per request. A run split by a breakpoint inside a
+  `While` generates the condition from what the first block saw; the second
+  block's visits of the same key are the same entry arriving again, as a
+  step's are.
+- **A member with a working condition entry that the model decided anyway is
+  left alone.** In a chain where one member has no entry, the whole chain goes
+  to the model (decision 5), so the member WITH an entry did not run. It is
+  neither kept (its code did not run) nor regenerated (nothing says it is
+  wrong); its sibling is generated, and the next run decides the chain by
+  code.
+- **The loop line names the innermost loop only.** A step in a `While` inside
+  a `For each` is told about the `While`; the `For each` item is still read
+  with `getVar` because it is a reference in the step's own text, shown in the
+  parameter block with pass 1's value.
+- **An existing entry in an untaken branch counts in `totalSteps` and nowhere
+  else** — not `kept` (its code did not run), not `keptAi`, not `unproven`,
+  never `notAttempted`.
+- **A condition judged on the computer surface is not offered** — as a
+  computer-mode step is not, on this path. `generateConditionEntry` still
+  declines one with no DOM, for a caller that asks anyway.
 
 ## Rollout
 

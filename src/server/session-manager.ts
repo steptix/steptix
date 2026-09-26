@@ -69,11 +69,11 @@ import {
 import type { ComputerLockOptions, DesktopAdapter } from '../desktop/index.js';
 import type { VisionRouteAi, VisionRouteResult } from '../desktop/vision-route.js';
 import {
+  chainMembersFrom,
   createControlState,
-  firstLoopInRange,
   forEachPassOf,
   guardVisitEvaluates,
-  loopCompileRefusal,
+  isChainRecord,
   planAfterStep,
   planForStart,
   returnExit,
@@ -142,7 +142,8 @@ import {
   writeRecording,
   type RecordingInput,
 } from '../codebehind/recording.js';
-import { LiveCompiler } from '../codebehind/live-compile.js';
+import { hasEntryOfKind, LiveCompiler, type PlanEntry } from '../codebehind/live-compile.js';
+import { compilableCondition } from '../codebehind/generate.js';
 import type { CompilePhase, CompileStatus, CompileSummary } from '../codebehind/compile.js';
 import { compileLock, compileLockKey } from './compile-lock.js';
 import {
@@ -1740,6 +1741,29 @@ export function liveCompileSnapshot(resolvedParameters: Record<string, string>):
   const snapshot = { ...resolvedParameters };
   inheritLoopBindings(resolvedParameters, snapshot);
   return snapshot;
+}
+
+/**
+ * A guard row's decision, renumbered by `offset` — for a split run's later
+ * block, whose rows the live compile accumulates in the RUN's numbering. The
+ * member indices (`selected`, `staleMember`, each evidence member) move with
+ * the row's own index, or the recording would name a member of block 1.
+ */
+function shiftGuardDecision(
+  guard: NonNullable<StepResult['guard']>,
+  offset: number,
+): NonNullable<StepResult['guard']> {
+  return {
+    ...guard,
+    ...(typeof guard.selected === 'number' && { selected: guard.selected + offset }),
+    ...(guard.staleMember !== undefined && { staleMember: guard.staleMember + offset }),
+    ...(guard.evidence && {
+      evidence: {
+        ...guard.evidence,
+        members: guard.evidence.members.map((m) => ({ ...m, index: m.index + offset })),
+      },
+    }),
+  };
 }
 
 function outermostSectionName(
@@ -4090,37 +4114,74 @@ export class SessionManager {
      * serialized in step order, and the run never waits on it.
      */
     let liveCompile: LiveCompiler | undefined;
-    // A compile that reaches into a loop is refused — but the check needs the
-    // batch's `[startIndex, endIndex]`, which is not computed until well below
-    // this point, so it lives there rather than here (search
-    // `firstLoopInRange`). A chain is fine either way: its steps run at most
-    // once, and an untaken branch is simply not attempted.
+    // A compile that reaches into a loop used to be refused here
+    // (stories/control-flow.md, decision 12). It no longer is
+    // (stories/codebehind-loops-and-conditions.md): a loop body compiles one
+    // entry per authored line from the first pass that ran it (`takenKeys`),
+    // and the conditions that drive the loop compile to `condition` entries.
     if (request.compile !== undefined && request.testFilePath) {
       const testFilePath = request.testFilePath;
-      const plan = effectiveSteps.map((step, i) => {
+      /**
+       * The innermost runtime loop each index sits in the body of
+       * (decision 2): the loop's authored guard line, and a `For each`'s
+       * runtime item name. Innermost is the one with the narrowest body — a
+       * loop nested in another's body has a range strictly inside it.
+       */
+      const enclosingLoop = (i: number): PlanEntry['loop'] => {
+        let guard = -1;
+        let span = Infinity;
+        for (let g = 0; g < expansionControls.length; g++) {
+          const candidate = expansionControls[g];
+          if (!candidate || !isLoopRecord(candidate)) continue;
+          if (i < candidate.bodyStart || i > candidate.bodyEnd) continue;
+          if (candidate.bodyEnd - candidate.bodyStart < span) {
+            span = candidate.bodyEnd - candidate.bodyStart;
+            guard = g;
+          }
+        }
+        if (guard < 0) return undefined;
+        const record = expansionControls[guard] as LoopRecord;
+        const guardLine =
+          generationBindings.bindingFor(guard)?.source ?? expansionRawSteps[guard] ?? effectiveSteps[guard] ?? '';
+        return {
+          line: guardLine,
+          ...(record.kind === 'foreach' && { runtimeItem: record.item }),
+        };
+      };
+      const plan: PlanEntry[] = effectiveSteps.map((step, i) => {
         const binding = generationBindings.bindingFor(i);
         const line = sourceLineFor(i);
+        const text = binding?.source ?? expansionRawSteps[i] ?? step;
+        const control = expansionControls[i];
+        // A guard whose line has a condition the model decides — `If`,
+        // `Else if`, `While`, `Repeat … until` — is a compile step: it gets a
+        // `condition` entry (stories/codebehind-loops-and-conditions.md,
+        // decision 4). `Otherwise`, `For each` and a condition decided from its
+        // own values stay dispatched: nothing to compile on those lines.
+        const conditionLine = control !== null && compilableCondition(text) !== undefined;
+        const loop = enclosingLoop(i);
         return {
-          text: binding?.source ?? expansionRawSteps[i] ?? step,
-          // Decided statically, before the run: a step with no entry is one
-          // this compile means to write, and in `'steps'` mode every sent
-          // step is. The whole-test block has to read the same for step 1 as
-          // for step 9, and what step 9 will need is not knowable when step 1
-          // is generated.
+          text,
+          // Decided statically, before the run: a step with no entry OF ITS
+          // KIND is one this compile means to write, and in `'steps'` mode
+          // every sent step is. The whole-test block has to read the same for
+          // step 1 as for step 9, and what step 9 will need is not knowable
+          // when step 1 is generated.
           //
-          // A control line is never in scope, whatever the mode: the framework
-          // dispatches it and it performs nothing, so there is no transcript to
-          // write from — and a model told an `If …, then …` line was in scope
-          // would offer code that makes the decision itself
-          // (stories/control-flow.md, decision 12).
+          // A dispatched control line is never in scope, whatever the mode: the
+          // framework performs it and there is nothing to write from — and a
+          // model told an `Otherwise …` line was in scope would offer code that
+          // makes the decision itself (stories/control-flow.md, decision 12).
           inScope:
-            expansionControls[i] === null &&
-            (request.compile === 'steps' || binding?.entry === undefined),
+            (control === null || conditionLine) &&
+            (request.compile === 'steps' ||
+              !hasEntryOfKind(binding?.entry, conditionLine ? 'condition' : 'step')),
           // …and out of the denominator entirely, which `inScope: false` alone
           // does not say: a step that already has an entry is also out of
           // scope, and it IS one of the steps this compile is about.
-          ...(expansionControls[i] !== null && { dispatched: true }),
+          ...(control !== null && !conditionLine && { dispatched: true }),
           ...(line > 0 && { line }),
+          ...(loop && { loop }),
         };
       });
       // A logical run reaches the server as SEVERAL requests whenever it is
@@ -4650,6 +4711,16 @@ export class SessionManager {
     // of the skill body, so omitting endAt preserves the startAt-only behaviour
     // exactly.
     let endIndex = effectiveSteps.length - 1;
+    /**
+     * Where the SELECTION ends, before the control-structure snap below widens
+     * the run to the end of a guard's chain or body. A Compile This Step
+     * compiles what was selected, and no more: a selection of just a `While`
+     * line runs its whole body (the decision needs its consequence, and a
+     * `Repeat`'s condition is not even asked until its body has run once), but
+     * it compiles the condition, not the body
+     * (stories/codebehind-loops-and-conditions.md, "Live compile").
+     */
+    let selectedEndIndex = endIndex;
     if (request.endAt) {
       const { uri: endUri, line: endLine } = request.endAt;
       const exact = anchorNeedsExactLine(endUri);
@@ -4777,6 +4848,22 @@ export class SessionManager {
       // loop's `bodyEnd` — because a guard evaluated with its body sliced away
       // is a decision with no consequence (stories/control-flow.md §"Runs that
       // start or end mid-structure"). Idempotent on every ordinary step.
+      selectedEndIndex = endIndex;
+      if (request.compile === 'steps' && hasControls) {
+        // A Compile This Step whose end anchor is a GUARD's own line selected
+        // that guard — its condition — even though the anchor resolved past
+        // it: a guard's tail is invoked FROM the guard's line, so every tail
+        // step "sits at" that line by the call-line rule above (and a plain-
+        // instruction tail is on it outright). The body still runs (the snap
+        // below); it is not what was selected to compile. The first guard at
+        // the line, which for a line is the only one.
+        for (let g = startIndex; g <= endIndex; g++) {
+          if (controls[g] && uriOfStep(g) === endUri && sourceLineFor(g) === endLine) {
+            selectedEndIndex = g;
+            break;
+          }
+        }
+      }
       if (hasControls) endIndex = snapEndAt(controls, endIndex);
       logger.info(
         `Session "${sessionId}": bounded re-run to step ${endIndex + 1}/${stepsTotal} (${endUri}:${endLine})`,
@@ -4790,8 +4877,14 @@ export class SessionManager {
     // "not attempted". Bound the plan before any step is offered, so a
     // single-step compile reads "1 of 1" rather than "1 of 6, 5 not
     // attempted".
+    //
+    // A Compile This Step's slice ends where the SELECTION ends — not where the
+    // control-structure snap took the run (see `selectedEndIndex`): the body a
+    // selected guard runs is executed under AI and never generated, named or
+    // counted. A Run & Compile continuation keeps the run's bound, as before.
+    const compileEndIndex = request.compile === 'steps' ? selectedEndIndex : endIndex;
     if (liveCompile && (request.startAt !== undefined || request.endAt !== undefined)) {
-      liveCompile.setSlice(startIndex, endIndex);
+      liveCompile.setSlice(startIndex, compileEndIndex);
 
       // A slice cannot write an entry for occurrence k of a repeated step
       // while an EARLIER occurrence sits outside the slice with no entry yet:
@@ -4814,7 +4907,7 @@ export class SessionManager {
       // bookkeeping.
       const guardOccurrences =
         request.compile === 'steps' && request.compileContinues !== true;
-      for (let i = startIndex; guardOccurrences && i <= endIndex; i++) {
+      for (let i = startIndex; guardOccurrences && i <= compileEndIndex; i++) {
         const b = generationBindings.bindingFor(i);
         if (!b || b.occurrence === 0 || b.entry !== undefined) continue;
         // Occurrence is counted per FRAME INSTANCE (`buildCodeBehindRegistry`
@@ -4860,46 +4953,11 @@ export class SessionManager {
       }
     }
 
-    // ── A compile that reaches into a loop ────────────────────────────────
-    //
-    // Refused before anything runs (stories/control-flow.md, decision 12): an
-    // entry is placed at `spans[occurrence]`, occurrence is counted per step
-    // line, and a loop body runs the same lines a number of times only the page
-    // decides — so the run would offer several transcripts for one slot and the
-    // plan's "not attempted" arithmetic would count a step that ran three times
-    // as one.
-    //
-    // Scoped to THIS batch's `[startIndex, endIndex]`, which is why it sits
-    // here rather than beside the plan: the first version tested the whole
-    // file, so a bounded Compile This Step on a step nowhere near the loop was
-    // refused — and told to compile the section the loop runs, which the same
-    // check would have refused as well. A section compile arrives as the
-    // section's own steps (`compileScope`), detached from the guard, and now
-    // passes for the same reason a step outside the loop does: no loop
-    // structure overlaps the slice.
-    if (request.compile !== undefined) {
-      const loopIndex = firstLoopInRange(expansionControls, startIndex, endIndex);
-      if (loopIndex !== undefined) {
-        const message = loopCompileRefusal(
-          expansionRawSteps[loopIndex] ?? effectiveSteps[loopIndex] ?? '',
-        );
-        logger.error(`Session "${sessionId}": ${message}`);
-        emit({ type: 'output', msg: message, kind: 'error' });
-        await refuseOpenCompile(message);
-        emit({ type: 'done', status: 'error', effectiveSettings: resolvedSettings.effective });
-        return {
-          sessionId,
-          status: 'error',
-          stepsCompleted: 0,
-          stepsTotal,
-          results: [],
-          outputs: session.outputs,
-          outputSources: { ...session.outputSources },
-          error: { step: loopIndex + 1, message },
-          pageTitle: '',
-        };
-      }
-    }
+    // A compile that reaches into a loop is no longer refused here
+    // (stories/codebehind-loops-and-conditions.md). The two things the refusal
+    // guarded against are now handled where they arise: several passes offer
+    // ONE slot, and the first pass to reach `offer` takes it (`takenKeys`);
+    // and the summary counts expanded steps, never passes (decision 13).
 
     // Step indexes that have already had their breakpoint pause consumed
     // in this batch. Without this, the loop would re-pause forever on
@@ -4998,6 +5056,23 @@ export class SessionManager {
       if (skill) row.sourceSkill = skill;
       if (section) row.sourceSection = section;
       fullStepResults.push(row);
+      // Offered to the compile, with its CAUSE (issue 053, resolved by
+      // stories/codebehind-loops-and-conditions.md decision 12): a step the
+      // run decided against left no transcript, so it must be NAMED as not
+      // attempted — with its own sentence, not a return's — rather than
+      // quietly left without an entry. An untaken branch was the one skip
+      // producer that never reached the compiler, so a file whose only
+      // uncompiled steps sat in one came back "already compiled".
+      if (liveCompile) {
+        const skippedBinding = generationBindings.bindingFor(k);
+        liveCompile.offer({
+          index: k,
+          ...(skippedBinding && { binding: skippedBinding }),
+          result: row,
+          resolvedParameters: liveCompileSnapshot(resolvedParameters),
+          skipped: 'decision',
+        });
+      }
       emit({
         type: 'step:pass',
         line: sourceLineFor(k),
@@ -6163,6 +6238,32 @@ export class SessionManager {
             if (guardSkill) result.sourceSkill = guardSkill;
             if (guardSection) result.sourceSection = guardSection;
             fullStepResults.push(result);
+            // The visit, to the compile riding this run: what a `condition`
+            // entry is generated from (stories/codebehind-loops-and-conditions.md,
+            // "Live compile"). The members ASKED — a chain's conditioned members
+            // from the head, as `planAtGuard` asks them; a loop's guard alone —
+            // each with its generation binding, which is where the authored
+            // line comes from. Nothing is generated now: the compiler keeps the
+            // first held and first not-held page per line until the block's
+            // steps end.
+            if (liveCompile && result.guard) {
+              const askedMembers = isChainRecord(controlRecord)
+                ? chainMembersFrom(controls, i).filter(
+                    (j) => (controls[j] as { condition?: string } | null)?.condition !== undefined,
+                  )
+                : controlRecord.kind === 'foreach'
+                  ? []
+                  : [i];
+              liveCompile.offerGuard({
+                members: askedMembers.map((j) => {
+                  const memberBinding = generationBindings.bindingFor(j);
+                  return { index: j, ...(memberBinding && { binding: memberBinding }) };
+                }),
+                result,
+                resolvedParameters: liveCompileSnapshot(resolvedParameters),
+                surface: session.surface,
+              });
+            }
             // A guard whose condition entry broke and the model decided in its
             // place healed exactly as a step does, and its judge call is what
             // the healed summary's token figure is for.
@@ -7364,6 +7465,7 @@ export class SessionManager {
                   ...(skippedBinding && { binding: skippedBinding }),
                   result: fullSkipped,
                   resolvedParameters: liveCompileSnapshot(resolvedParameters),
+                  skipped: 'return',
                 });
               }
               logger.info(`Session "${sessionId}" step ${j + 1} skipped — ${reason}`);
@@ -7915,7 +8017,11 @@ export class SessionManager {
       for (const result of fullStepResults) {
         if (result.hookScope || result.interactiveAdHoc || result.interactiveChild) continue;
         const at = offset + result.index;
-        openCompile.steps.push({ ...result, index: at });
+        // A guard row's decision names members by 0-based index in THIS
+        // request's numbering; renumbered with the row, so the recording's
+        // `guard` (decision 14) points at the run's own steps.
+        const guard = result.guard && offset > 0 ? shiftGuardDecision(result.guard, offset) : result.guard;
+        openCompile.steps.push({ ...result, index: at, ...(guard && { guard }) });
         const binding = generationBindings.bindingFor(result.index - 1);
         if (binding) {
           openCompile.identities[at] = {
@@ -8001,7 +8107,9 @@ export class SessionManager {
       // caption a clean single-step compile with "N step(s) not attempted".
       // Without a slice the bounds are the whole expansion, as before.
       const notAttempted: number[] = [];
-      for (let n = offset + startIndex + 1; n <= offset + endIndex + 1; n++) {
+      // `compileEndIndex`: a Compile This Step names only what it was asked to
+      // compile, not the body a selected guard ran (see `selectedEndIndex`).
+      for (let n = offset + startIndex + 1; n <= offset + compileEndIndex + 1; n++) {
         if (!recorded.has(n)) notAttempted.push(n);
       }
       // `&& !r.tolerated`: this is "where did the run stop", and a tolerated
