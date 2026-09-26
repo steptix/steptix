@@ -1,6 +1,8 @@
 # Record Steps: click through the app, get the steps written for you
 
-**Status:** spec, 2026-09-26. Not built.
+**Status:** spec, 2026-09-26, decisions confirmed by the author (insert
+straight away, a panel **Add check** button, every typed value a parameter).
+Not built.
 
 ## In plain terms
 
@@ -28,11 +30,12 @@ Cash, click Pay now, and press **Stop**.
 - baseUrl: http://localhost:8787/
 
 ## Parameters
+- email: demo@securebank.com
 - password: $PASSWORD
 
 ## Steps
 1. Navigate to login.html
-2. Type "demo@securebank.com" into the Email field
+2. Type {{email}} into the Email field
 3. Type {{password}} into the Password field
 4. Click the Sign in button
 5. Click Payments in the main menu
@@ -136,9 +139,16 @@ and no step is written for it.
    points at `.env`. Recording into an existing test reuses a parameter that
    already fills that field.
 
-8. **Other typed values are written literally.** `Type "demo@securebank.com"
-   into the Email field` is the fastest thing to author and read, and turning
-   it into a parameter later is one edit. Only secrets become parameters.
+8. **Every typed value becomes a parameter** (the author's choice). `Type
+   {{email}} into the Email field`, with `- email: demo@securebank.com` added
+   under `## Parameters`. The name comes from the field (its label, else its
+   placeholder or name), in snake_case; a value typed twice into the same kind
+   of field reuses one name. Recording into an existing test reuses a
+   parameter the file already has when its value matches, and never
+   overwrites an existing line with a different value — the model is shown
+   the file's parameters and picks a new name instead. Selecting an option or
+   ticking a box is not typing, and stays literal (`Select "Monthly" from the
+   Frequency list`). Secrets follow decision 7: the value stays in `.env`.
 
 9. **One model call, at Stop.** The whole recording goes to the model at once,
    because turning mechanics into intents needs to see what came next: a
@@ -222,14 +232,71 @@ and no step is written for it.
   absent from the prompt and the stream.
 - TestBench unit tests for insertion (region rules, renumbering, one undo
   step) and a fake-server integration test for the panel flow.
-- A live test: record signing in and paying by cash on the fixture app,
-  drive the browser with Playwright from the test itself, check the inserted
-  steps run green.
+- End to end on the server, with a real browser: start a recording through
+  the real HTTP route on the fixture app, drive that page with Playwright
+  input (trusted events, as a person's are), stop, and check the prompt and
+  the result with a fake model. A TestBench live test cannot click in the
+  server's browser, so the extension half is proven with the fake-server
+  harness, and the whole loop by a real-model smoke run plus the author
+  trying it.
 
-## Open questions
+## On the wire
 
-- Should Stop insert straight into the file (undoable), or show the steps as
-  a preview to accept first, like the code-behind proposal?
-- Is a panel **Add check** button the right gesture, or Alt+click on the page?
-- Should typed non-secret values really stay literal (decision 8), or should
-  things like email addresses become parameters too?
+Owned by the server (`src/`) and by runner-core + TestBench on the other side;
+both build against this.
+
+**Start** — `POST /sessions/:id/record-steps`, always SSE, `x-api-key` auth as
+every route. Body:
+
+```ts
+{
+  testFilePath: string;            // the session's file; also resolves the project
+  config?: { baseUrl?: string; timeout?: number; viewport?: … };
+                                   // only when this is the session's FIRST request —
+                                   // the same object and rule as the steps route
+  target: {
+    mode: 'cursor' | 'new';
+    fileText: string;              // the document as it stands (for the prompt)
+    cursorLine?: number;           // 1-based; mode 'cursor' only
+  };
+}
+```
+
+409 when a run holds the session's queue; 400 on a headless server
+(`browser.headed: false`) with the reason.
+
+**Frames** (added to runner-core `protocol.ts`):
+
+```ts
+{ type: 'record:started'; url: string; title: string }
+{ type: 'record:action'; id: string; kind: 'click' | 'type' | 'select' | 'tick'
+    | 'untick' | 'key' | 'upload' | 'navigate' | 'tab' | 'check';
+  summary: string;                 // one line for the panel, secrets masked
+  atMs: number;                    // since record:started
+  tab?: string }                   // PageTracker label when not `main`
+{ type: 'record:pick'; armed: boolean }   // Add check armed / disarmed
+{ type: 'record:writing' }         // Stop received; the model call is running
+{ type: 'record:result';
+  steps: string[];                 // step texts, no numbers, in order
+  parameters: Array<{ name: string; value: string }>; // value is `$NAME` for a secret
+  notes?: string[] }               // anything the author should know
+{ type: 'output'; … }              // the existing frame, for warnings
+{ type: 'done'; status: 'passed' | 'error' | 'aborted'; error?: string }
+```
+
+**Control** — `POST /sessions/:id/record-steps/control`, JSON, answers 202:
+
+```ts
+{ action: 'stop'; dropped?: string[] }   // write the steps, leaving these ids out
+{ action: 'check' }                      // arm Add check; the next click is picked
+{ action: 'cancel-check' }
+{ action: 'cancel' }                     // end without writing anything
+```
+
+Closing the stream is `cancel`. 404 when no recording is running.
+
+**TestBench does the editing:** it numbers `record:result.steps` after the
+cursor line (or under `## Steps` of the new file), renumbers the rest, and
+adds each parameter it does not already have under `## Parameters` (creating
+the section above `## Steps` when there is none) — one edit, one undo. An
+existing parameter with the same name is left as it is.
