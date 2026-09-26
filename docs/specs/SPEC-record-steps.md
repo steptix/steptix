@@ -88,24 +88,44 @@ A Run cannot start while a recording holds the session.
 ## 4. What is captured
 
 A script is installed on every page, tab and frame of the session browser's
-active context, plus one binding back to the server. It records, as
-**actions**:
+active context, plus one binding back to the server. It records **events**,
+and a few kinds of event are **actions**.
+
+**An action** is what the author does to move the application on, and it is
+what sends the draft to the model (§8):
 
 | Kind | Recorded when | Carries |
 | --- | --- | --- |
-| `click` | A primary click lands on an element | The element (§4.1) |
-| `type` | A text field's value changes — ONE action per field per visit, with the final value | The element; the value, unless secret (§5) |
-| `select` | An option is chosen in a `<select>` | The element; the option's text |
-| `tick` / `untick` | A checkbox or radio changes | The element |
-| `key` | Enter, Escape or Tab does something (submits, closes, moves focus) | The key; the element |
-| `upload` | Files are chosen in a file input | The element; the file names |
-| `navigate` | The author changes the address in the address bar (a main-frame navigation no recorded click or submit caused) | The URL |
-| `tab` | A new tab opens, or the author acts in a different tab | The tab's label, title and URL |
+| `click` | A primary click lands on an element (ticking a box and opening a list are clicks) | The element (§4.1) |
+| `drag` | The pointer is pressed on one element, moved, and released on another (or an HTML drag-and-drop completes) | The element dragged; the element dropped on |
+| `key` | Enter or Tab is pressed in the page | The key; the element |
+| `back` / `forward` | The author uses the browser's Back or Forward | The URL arrived at |
+| `reload` | The author refreshes the page | The URL |
+| `navigate` | The author presses Enter in the address bar (a main-frame navigation nothing in the page caused) | The URL |
 | `check` | A click in pick mode (§6) | The element; its text or value at that moment |
 
-Not captured: hover, drag and drop, right-click, scrolling, keyboard
-shortcuts other than Enter/Escape/Tab, native dialogs, a second browser, the
-computer surface.
+**Other events** are captured but send nothing on their own; they go to the
+model with the next action (or at Stop, when nothing follows):
+
+| Kind | Recorded when | Carries |
+| --- | --- | --- |
+| `type` | A text field's value changes — ONE event per field per visit, with the final value | The element; the value, unless secret (§5) |
+| `select` | An option is chosen in a `<select>` | The element; the option's text |
+| `tick` / `untick` | A checkbox or radio changes | The element |
+| `upload` | Files are chosen in a file input | The element; the file names |
+| `tab` | A new tab opens, or the author acts in a different tab | The tab's label, title and URL |
+
+So typing an email address costs no model call; the Tab or the click that
+follows it does, and the model sees both.
+
+Not captured: Escape and every other key or shortcut, hover, right-click,
+scrolling, native dialogs, a second browser, the computer surface.
+
+**The runtime must be able to perform what is recorded.** A run's model has
+`back` and `forward` actions; `drag` (a drag from one element onto another)
+and `reload` are added to the runtime's action vocabulary with this feature,
+so `Drag the Invoice 1043 card onto the Paid column` and `Reload the page`
+run like any other step.
 
 After Stop the script cannot be uninstalled (Playwright has no way to remove
 an init script); it stays inert, asking the binding whether a recording is

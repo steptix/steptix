@@ -93,16 +93,22 @@ and no step is written for it.
 
 4. **What is captured.** An init script plus one binding on the session
    browser's context, so every page, every tab it opens and every frame is
-   covered from the moment the recording starts. It records:
-   - clicks (the element, and whether it is a link, button, checkbox, radio,
-     option or something else);
-   - typing — one action per field with its final value, not per keystroke;
-   - selecting an option, ticking or unticking;
-   - Enter, Escape and Tab when they do something (submit, close, move on);
-   - choosing files in a file input (the file names — the step will say
-     which file, relative to the test, when it can);
-   - navigation the author typed into the address bar, and a new tab opening
-     or the author moving to another tab.
+   covered from the moment the recording starts.
+
+   **An action is a click or a drag, pressing Enter or Tab, or the browser's
+   Back, Forward or Refresh** (the author's definition, 2026-09-26) — plus the
+   Add check click, and Enter in the address bar. Each action sends the draft
+   to the model (decision 9). Everything else is captured and rides with the
+   next action: typing (one event per field, its final value), selecting an
+   option, ticking or unticking, choosing files (their names), and a new tab
+   or the author moving to another tab. Escape is no longer recorded.
+
+   Drag and Refresh were out of scope in the first version, and the runtime
+   could not perform either: a run's model has `back` and `forward` actions
+   (SPEC-browser-history.md) but no `drag` and no `reload` (deferred there,
+   §9). So this feature adds both to the runtime's action vocabulary, the way
+   back and forward were added, or a recorded `Drag …` or `Reload the page`
+   step could not run.
 
    Playwright cannot remove an init script, so after Stop the script stays
    installed but inert: every event asks the binding whether a recording is
@@ -207,8 +213,8 @@ and no step is written for it.
 - MCP or CLI recording.
 - Inferring loops, decisions or waits. The model is told the time gaps, but
   writes a `Wait until …` only when the author added a check for it.
-- Hover menus, drag and drop, right-click, scrolling, keyboard shortcuts
-  beyond Enter/Escape/Tab, native dialogs.
+- Hover menus, right-click, scrolling, Escape and other keyboard shortcuts,
+  native dialogs.
 - A second browser opened mid-recording, CDP-attached browsers, computer mode.
 
 ## Design sketch
