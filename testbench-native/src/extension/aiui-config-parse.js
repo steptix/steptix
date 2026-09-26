@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
  * @property {string | null} skillsDir  Absolute path to the skills directory, or null if undeclared.
  * @property {string | null} toolsDir   Absolute path to the tools directory, or null if undeclared.
  * @property {string | null} dataDir    Raw `tests.dataDir` string (relative to the config dir, or absolute), or null if undeclared. The caller applies the `data` default.
+ * @property {string | null} testsDir   Absolute path to `tests.dir`, or null if undeclared.
  */
 
 /**
@@ -62,6 +63,9 @@ export function parseProjectDirs(text, configPath) {
     configPath,
     skillsDir: resolveDir(parsed?.tests?.skillsDir, configDir),
     toolsDir: resolveDir(parsed?.tests?.toolsDir, configDir),
+    // Where the project's tests live — Record New Test creates its file here
+    // (stories/testbench-record-steps.md).
+    testsDir: resolveDir(parsed?.tests?.dir, configDir),
     dataDir: typeof rawDataDir === 'string' && rawDataDir.trim() !== '' ? rawDataDir.trim() : null,
   };
 }

@@ -47,6 +47,7 @@ import {
   setRowsFor,
   variablesHeaderSuffix,
 } from "./lib/rows-panel.js";
+import { formatRecordTimeInline, recordingStatusTextInline } from "./lib/recording-panel.js";
 
 // Inline narrowing helper. The webview can't import named exports from
 // runner-core directly because Vite's CJS interop drops names through
@@ -67,6 +68,8 @@ const HOST_MSG_TYPES = new Set([
   "compileEvent",
   "compileProgress",
   "compileRunEvent",
+  // Record Steps: the Recording block (stories/testbench-record-steps.md).
+  "recording",
 ]);
 function isHostMsg(value) {
   if (!value || typeof value !== "object") return false;
@@ -241,6 +244,135 @@ function CompileStrip({ state }) {
   );
 }
 
+/**
+ * The Recording block (stories/testbench-record-steps.md, decision 13): the
+ * live action list, Add check, Stop and Cancel.
+ *
+ * Everything shown comes from the host's `recording` message — the ✕ asks the
+ * host to drop a row and the host re-posts the list — so what Stop sends as
+ * `dropped` is exactly the struck-through rows on screen. Rendered whichever
+ * file is active: the author is clicking in the browser, not reading the
+ * editor, and there is one recording per window.
+ */
+function RecordingPanel({ state }) {
+  const listRef = useRef(null);
+  const count = state ? state.actions.length : 0;
+  // Follow the newest action, as a log does.
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [count]);
+  if (!state) return null;
+  const writing = state.phase === "writing";
+  const starting = state.phase === "starting";
+  return (
+    <div
+      data-testid="recording-panel"
+      style={{
+        flexShrink: 0,
+        padding: "6px 10px 8px",
+        borderBottom: "1px solid var(--vscode-panel-border, #444)",
+        background: "var(--vscode-editorWidget-background, var(--vscode-sideBar-background))",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+        {writing ? (
+          <Spinner />
+        ) : (
+          <span aria-hidden="true" style={{ color: "var(--vscode-debugIcon-breakpointForeground, #e51400)" }}>●</span>
+        )}
+        <span style={{ fontWeight: 600 }}>{recordingStatusTextInline(state)}</span>
+        <span
+          style={{ flex: 1, minWidth: 0, opacity: 0.7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          title={state.uri}
+        >
+          · {state.file}
+        </span>
+      </div>
+      {starting && (
+        <div style={{ opacity: 0.75, fontSize: "0.9em", marginBottom: 4 }}>
+          Opening the test's browser — use the app there once it is ready.
+        </div>
+      )}
+      {state.pickArmed && (
+        <div style={{ fontSize: "0.9em", marginBottom: 4, color: "var(--vscode-editorInfo-foreground, #3794ff)" }}>
+          Click the element to check in the browser. That click is not performed.
+        </div>
+      )}
+      {writing && (
+        <div style={{ opacity: 0.75, fontSize: "0.9em", marginBottom: 4 }}>
+          The model is turning the actions into steps. They go into the file as one edit, so one undo takes them back.
+        </div>
+      )}
+      {state.actions.length > 0 && (
+        <div ref={listRef} style={{ maxHeight: 180, overflowY: "auto", marginBottom: 6 }}>
+          {state.actions.map((a) => (
+            <div
+              key={a.id}
+              className="tb-step"
+              style={{
+                cursor: "default",
+                opacity: a.dropped ? 0.5 : 1,
+                textDecoration: a.dropped ? "line-through" : "none",
+              }}
+              title={a.dropped ? "Dropped — no step will be written for this action" : a.summary}
+            >
+              {/* `● Clicked button "Sign in"  0:07` — SPEC-record-steps.md §3.2. */}
+              <span aria-hidden="true" style={{ flexShrink: 0 }}>{a.kind === "check" ? "◎" : "●"}</span>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {a.summary}
+                {a.tab ? <span style={{ opacity: 0.6 }}> [{a.tab}]</span> : null}
+              </span>
+              <span style={{ flexShrink: 0, opacity: 0.6, fontVariantNumeric: "tabular-nums", fontSize: "0.85em" }}>
+                {formatRecordTimeInline(a.atMs)}
+              </span>
+              <button
+                className="tb-btn"
+                disabled={writing}
+                onClick={() => hostBridge.postRecordDrop(a.id, !a.dropped)}
+                title={a.dropped ? "Put this action back" : "Drop this action — no step is written for it"}
+                style={{ padding: "0 6px", textDecoration: "none" }}
+              >
+                {a.dropped ? "↺" : "✕"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+        <button
+          className={state.pickArmed ? "tb-btn tb-btn--primary" : "tb-btn"}
+          aria-pressed={state.pickArmed}
+          disabled={state.phase !== "recording"}
+          onClick={() => hostBridge.postRecordCheck()}
+          title={
+            state.pickArmed
+              ? "Cancel Add check — the next click is performed as usual"
+              : "Add check: the next click in the browser picks the element to verify instead of clicking it"
+          }
+        >
+          ◎ {state.pickArmed ? "Picking…" : "Add check"}
+        </button>
+        <button
+          className="tb-btn tb-btn--primary"
+          disabled={writing}
+          onClick={() => hostBridge.postRecordStop()}
+          title="Stop recording and write the steps into the file"
+        >
+          ■ Stop
+        </button>
+        <button
+          className="tb-btn"
+          onClick={() => hostBridge.postRecordCancel()}
+          title="End the recording without writing anything"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** A CSS-only spinner — the webview has no codicon font to lean on. */
 function Spinner() {
   return (
@@ -389,6 +521,115 @@ function RowContextMenu({ menu, onClose }) {
 const STEPS_MIN_HEIGHT = 120;
 const OUTPUT_MIN_HEIGHT = 36;
 
+/**
+ * The panel's stylesheet. A constant rather than inline in the main render so
+ * the no-test-file view can carry it too: the Recording block (and its buttons)
+ * renders there as well, and without the rules its buttons are unstyled.
+ */
+const PANEL_CSS = `
+        body { padding: 0 !important; margin: 0; }
+        @keyframes tb-spin { to { transform: rotate(360deg); } }
+        .tb-btn {
+          padding: 4px 10px;
+          border: none;
+          border-radius: 2px;
+          background: var(--vscode-button-secondaryBackground);
+          color: var(--vscode-button-secondaryForeground);
+          font-family: inherit;
+          font-size: inherit;
+          line-height: 1.4;
+          cursor: pointer;
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+        }
+        .tb-btn:hover:not(:disabled) {
+          background: var(--vscode-button-secondaryHoverBackground);
+        }
+        .tb-btn:disabled { cursor: default; opacity: 0.5; }
+        .tb-btn--primary {
+          background: var(--vscode-button-background);
+          color: var(--vscode-button-foreground);
+        }
+        .tb-btn--primary:hover:not(:disabled) {
+          background: var(--vscode-button-hoverBackground);
+        }
+        .tb-step {
+          padding: 4px 8px;
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          cursor: pointer;
+          border-radius: 2px;
+        }
+        .tb-step:hover { background: var(--vscode-list-hoverBackground); }
+        .tb-menu-item {
+          display: block;
+          width: 100%;
+          padding: 4px 24px 4px 16px;
+          background: transparent;
+          color: var(--vscode-menu-foreground, #cccccc);
+          border: none;
+          text-align: left;
+          font-family: inherit;
+          font-size: inherit;
+          cursor: pointer;
+        }
+        .tb-menu-item:hover:not(:disabled) {
+          background: var(--vscode-menu-selectionBackground, #094771);
+          color: var(--vscode-menu-selectionForeground, #ffffff);
+        }
+        .tb-menu-item:disabled { opacity: 0.4; cursor: default; }
+        .tb-step--selected { background: var(--vscode-list-inactiveSelectionBackground); }
+        .tb-step--pass { color: var(--vscode-testing-iconPassed, #22c55e); }
+        .tb-step--fail { color: var(--vscode-testing-iconFailed, #f87171); }
+        /* A step that failed and the run carried on past it
+           (stories/step-failure-outcomes.md, decision 6). The editor's warning
+           colour — the same amber status-fail-tolerated.svg draws its ✗ in,
+           so the gutter and the panel read as one state. */
+        .tb-step--tolerated { color: var(--vscode-editorWarning-foreground, #f59e0b); }
+        .tb-step--running { color: var(--vscode-testing-iconQueued, #60a5fa); }
+        .tb-section-header {
+          padding: 6px 10px;
+          font-size: 0.92em;
+          letter-spacing: 0.5px;
+          text-transform: uppercase;
+          color: var(--vscode-sideBarSectionHeader-foreground, var(--vscode-foreground));
+          background: var(--vscode-sideBarSectionHeader-background, transparent);
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          cursor: pointer;
+          user-select: none;
+        }
+        .tb-section-body { padding: 4px 8px; }
+        /* A row the loop planned and did not reach. The gutter's skip icon is
+           a hollow slate circle; this is that colour, so ◌ reads the same in
+           both places. */
+        .tb-step--skip { color: var(--vscode-descriptionForeground, #94a3b8); }
+        /* One row line of the Rows section. Same shell as a step row — the
+           tb-step hover, selection and status colours all apply — with a
+           monospace values column that elides rather than wraps, because a
+           five-column table will not fit in a sidebar and the full text is
+           one hover away. */
+        .tb-row-values {
+          flex: 1;
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-family: var(--vscode-editor-font-family, monospace);
+          font-size: 0.92em;
+        }
+        .tb-row-detail { flex-shrink: 0; font-size: 0.85em; opacity: 0.85; }
+        .tb-row-duration {
+          flex-shrink: 0;
+          font-size: 0.85em;
+          opacity: 0.55;
+          font-variant-numeric: tabular-nums;
+        }
+      `;
+
 function TestBenchRunner() {
   const [snapshot, setSnapshot] = useState(null);
   const [running, setRunning] = useState(false);
@@ -453,6 +694,12 @@ function TestBenchRunner() {
    * banner doesn't need to linger.
    */
   const [batchBanner, setBatchBanner] = useState(null);
+  /**
+   * The Recording block's state, as the host holds it, or null when nothing
+   * is recording (stories/testbench-record-steps.md). Window-wide — one
+   * recording per window — so it is NOT cleared when the active file changes.
+   */
+  const [recording, setRecording] = useState(null);
   /**
    * Per-step right-click menu. Non-null carries cursor coords + the row's
    * state (line, hasBreakpoint, hasStatus) so the menu can label items
@@ -592,6 +839,9 @@ function TestBenchRunner() {
           setRowFailuresByUri((prev) =>
             setRowFailuresFor(prev, msg.uri ?? activeUriRef.current, msg.failures),
           );
+          break;
+        case "recording":
+          setRecording(msg.state ?? null);
           break;
         case "batchBanner":
           setBatchBanner(msg.state);
@@ -875,7 +1125,9 @@ function TestBenchRunner() {
   // `(row N)` prefix from the last loop would name the wrong one.
   const rowLoopRunning = isRowLoopRunning(rowTables);
   const varsSuffix = variablesHeaderSuffix(rowTables);
-  const rowRunDisabled = running || snapshot?.breakpointStop != null;
+  // A recording holds THIS file's session; runs of other files are unaffected.
+  const recordingHere = recording !== null && recording.uri === snapshot?.uri;
+  const rowRunDisabled = running || snapshot?.breakpointStop != null || recordingHere;
   // The multiplier a plain step selection is subject to in a data-driven file:
   // with no rows ticked, every selected step runs once per row, and the Run
   // button has to say so (`Run (×5 rows)`).
@@ -1100,15 +1352,31 @@ function TestBenchRunner() {
     setComposerText("");
   };
 
+  const handleRecord = () => hostBridge.postRecordSteps();
+  const handleRecordNewTest = () => hostBridge.postRecordNewTest();
+
   if (!isTestFile) {
     return (
       <div style={{ fontFamily: "var(--vscode-font-family)", fontSize: "var(--vscode-font-size, 13px)", color: "var(--vscode-foreground)" }}>
+        <style>{PANEL_CSS}</style>
         <BatchBanner state={batchBanner} />
+        <RecordingPanel state={recording} />
         <div style={{ padding: 16 }}>
           <div style={{ marginBottom: 12, fontWeight: 600 }}>TestBench</div>
           <div style={{ opacity: 0.8, lineHeight: 1.5 }}>
             Open a Markdown file with a <code>## Steps</code> heading to start a TestBench run.
           </div>
+          {!recording && (
+            <div style={{ marginTop: 12 }}>
+              <button
+                className="tb-btn"
+                onClick={handleRecordNewTest}
+                title="Name a new test, then use the app in its browser — the steps are written for you"
+              >
+                ● Record new test
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -1117,109 +1385,7 @@ function TestBenchRunner() {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", fontFamily: "var(--vscode-font-family)", fontSize: "var(--vscode-font-size, 13px)", color: "var(--vscode-foreground)", background: "var(--vscode-sideBar-background)" }}>
       <BatchBanner state={batchBanner} />
-      <style>{`
-        body { padding: 0 !important; margin: 0; }
-        @keyframes tb-spin { to { transform: rotate(360deg); } }
-        .tb-btn {
-          padding: 4px 10px;
-          border: none;
-          border-radius: 2px;
-          background: var(--vscode-button-secondaryBackground);
-          color: var(--vscode-button-secondaryForeground);
-          font-family: inherit;
-          font-size: inherit;
-          line-height: 1.4;
-          cursor: pointer;
-          display: inline-flex;
-          align-items: center;
-          gap: 4px;
-        }
-        .tb-btn:hover:not(:disabled) {
-          background: var(--vscode-button-secondaryHoverBackground);
-        }
-        .tb-btn:disabled { cursor: default; opacity: 0.5; }
-        .tb-btn--primary {
-          background: var(--vscode-button-background);
-          color: var(--vscode-button-foreground);
-        }
-        .tb-btn--primary:hover:not(:disabled) {
-          background: var(--vscode-button-hoverBackground);
-        }
-        .tb-step {
-          padding: 4px 8px;
-          display: flex;
-          gap: 8px;
-          align-items: center;
-          cursor: pointer;
-          border-radius: 2px;
-        }
-        .tb-step:hover { background: var(--vscode-list-hoverBackground); }
-        .tb-menu-item {
-          display: block;
-          width: 100%;
-          padding: 4px 24px 4px 16px;
-          background: transparent;
-          color: var(--vscode-menu-foreground, #cccccc);
-          border: none;
-          text-align: left;
-          font-family: inherit;
-          font-size: inherit;
-          cursor: pointer;
-        }
-        .tb-menu-item:hover:not(:disabled) {
-          background: var(--vscode-menu-selectionBackground, #094771);
-          color: var(--vscode-menu-selectionForeground, #ffffff);
-        }
-        .tb-menu-item:disabled { opacity: 0.4; cursor: default; }
-        .tb-step--selected { background: var(--vscode-list-inactiveSelectionBackground); }
-        .tb-step--pass { color: var(--vscode-testing-iconPassed, #22c55e); }
-        .tb-step--fail { color: var(--vscode-testing-iconFailed, #f87171); }
-        /* A step that failed and the run carried on past it
-           (stories/step-failure-outcomes.md, decision 6). The editor's warning
-           colour — the same amber status-fail-tolerated.svg draws its ✗ in,
-           so the gutter and the panel read as one state. */
-        .tb-step--tolerated { color: var(--vscode-editorWarning-foreground, #f59e0b); }
-        .tb-step--running { color: var(--vscode-testing-iconQueued, #60a5fa); }
-        .tb-section-header {
-          padding: 6px 10px;
-          font-size: 0.92em;
-          letter-spacing: 0.5px;
-          text-transform: uppercase;
-          color: var(--vscode-sideBarSectionHeader-foreground, var(--vscode-foreground));
-          background: var(--vscode-sideBarSectionHeader-background, transparent);
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          cursor: pointer;
-          user-select: none;
-        }
-        .tb-section-body { padding: 4px 8px; }
-        /* A row the loop planned and did not reach. The gutter's skip icon is
-           a hollow slate circle; this is that colour, so ◌ reads the same in
-           both places. */
-        .tb-step--skip { color: var(--vscode-descriptionForeground, #94a3b8); }
-        /* One row line of the Rows section. Same shell as a step row — the
-           tb-step hover, selection and status colours all apply — with a
-           monospace values column that elides rather than wraps, because a
-           five-column table will not fit in a sidebar and the full text is
-           one hover away. */
-        .tb-row-values {
-          flex: 1;
-          min-width: 0;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-          font-family: var(--vscode-editor-font-family, monospace);
-          font-size: 0.92em;
-        }
-        .tb-row-detail { flex-shrink: 0; font-size: 0.85em; opacity: 0.85; }
-        .tb-row-duration {
-          flex-shrink: 0;
-          font-size: 0.85em;
-          opacity: 0.55;
-          font-variant-numeric: tabular-nums;
-        }
-      `}</style>
+      <style>{PANEL_CSS}</style>
 
       <div style={{ padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6, borderBottom: "1px solid var(--vscode-sideBarSectionHeader-border, transparent)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.9em", opacity: 0.85, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={snapshot?.filePath ?? ""}>
@@ -1249,6 +1415,7 @@ function TestBenchRunner() {
             <button
               className="tb-btn tb-btn--primary"
               onClick={handleRun}
+              disabled={recordingHere}
               title={runButtonTitle({ rows: selectedRowCount, steps: webviewSelection.size, tableRows: runTableRows })}
             >
               ▶ {runButtonLabel({ rows: selectedRowCount, steps: webviewSelection.size, tableRows: runTableRows })}
@@ -1257,7 +1424,7 @@ function TestBenchRunner() {
           <button
             className="tb-btn"
             onClick={handleRunAll}
-            disabled={running || snapshot?.breakpointStop != null}
+            disabled={running || snapshot?.breakpointStop != null || recordingHere}
             title="Run every step in the file"
           >
             Run All
@@ -1273,7 +1440,7 @@ function TestBenchRunner() {
           <button
             className="tb-btn"
             onClick={handleCloseSession}
-            disabled={running || snapshot?.breakpointStop != null}
+            disabled={running || snapshot?.breakpointStop != null || recordingHere}
             title="Close the server-side session for this file"
           >
             Close Session
@@ -1281,11 +1448,30 @@ function TestBenchRunner() {
           <button
             className="tb-btn"
             onClick={handleCompile}
-            disabled={running}
+            disabled={running || recordingHere}
             title="Run this test once and generate code-behind for every step that ran under AI, then offer the result as a diff. The entries are unproven — the next run proves them."
           >
             <CodeBehindIcon style={{ marginRight: 5 }} />
             {"Run & Compile"}
+          </button>
+          {/* Record Steps (stories/testbench-record-steps.md). Enabled at a
+              breakpoint pause as well as idle: Record ends the paused run and
+              records from its page (decision 12). */}
+          <button
+            className="tb-btn"
+            onClick={handleRecord}
+            disabled={recording !== null || (running && snapshot?.breakpointStop == null)}
+            title="Record Steps: use the app in this test's browser, then Stop — the steps are written after the cursor's step"
+          >
+            <span aria-hidden="true" style={{ color: "var(--vscode-debugIcon-breakpointForeground, #e51400)" }}>●</span> Record
+          </button>
+          <button
+            className="tb-btn"
+            onClick={handleRecordNewTest}
+            disabled={recording !== null}
+            title="Record New Test: name a new test, then use the app in its browser"
+          >
+            New test…
           </button>
         </div>
         {(passCount > 0 || failCount > 0 || skipCount > 0 || toleratedCount > 0) && (
@@ -1305,6 +1491,8 @@ function TestBenchRunner() {
       </div>
 
       <CompileStrip state={compileStrip} />
+
+      <RecordingPanel state={recording} />
 
       {hostError && (
         <div style={{ padding: 10 }}>

@@ -1,0 +1,507 @@
+/**
+ * Record Steps, the TestBench half (stories/testbench-record-steps.md), in a
+ * real VS Code extension host against a FakeApiClient that plays the server.
+ *
+ * What only a host can prove, and so what this file is for:
+ *
+ *  - the wire as the extension sends it: the start body (`testFilePath`,
+ *    `target` with the document and the cursor's line, `config` on the
+ *    session's FIRST request only) and every control (`stop` with `dropped`,
+ *    `check` / `cancel-check`, `cancel`);
+ *  - the live state the panel and the status bar are fed from, as frames
+ *    arrive, including a ✕ dropped from the panel's own message;
+ *  - the result landing as ONE editor edit, so one undo restores the file;
+ *  - Record's relationship to runs: refused while one executes, and a paused
+ *    one ended first.
+ *
+ * The text decisions — where the steps go, the renumbering, the parameter
+ * merge — are pinned without a host in tests/record-steps.test.js.
+ *
+ * Fixtures are written at runtime (`*.tmp.md`, like the viewport suite) and
+ * never saved over; each case reverts its buffer.
+ */
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vscode = require('vscode');
+const { FakeApiClient } = require('../fakes/fake-api-client.cjs');
+
+const EXT_ID = 'pkent.testbench-native';
+const FIXTURES_DIR =
+  process.env.TESTBENCH_FIXTURES_DIR || path.resolve(__dirname, '..', 'fixtures');
+
+const FILE = 'record-steps.tmp.md';
+const NEW_NAME = 'record-new.tmp';
+const NEW_FILE = `${NEW_NAME}.md`;
+
+/**
+ * 1-based: `## Steps` 9, main flow 10-12, blank 13, `### Sign in` 14, body
+ * 16-17. `## Parameters` holds `email` only.
+ */
+const FIXTURE = [
+  '# Record fixture',
+  '',
+  '## Config',
+  '- baseUrl: https://example.test/',
+  '',
+  '## Parameters',
+  '- email: demo@example.test',
+  '',
+  '## Steps',
+  '1. Navigate to login.html',
+  '2. Click Sign in',
+  '3. Open the dashboard',
+  '',
+  '### Sign in',
+  '',
+  '1. Type {{email}} into the Email field',
+  '2. Click Submit',
+  '',
+].join('\n');
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitFor(label, predicate, timeoutMs = 5_000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      if (await predicate()) return;
+    } catch {
+      // transient
+    }
+    await sleep(25);
+  }
+  throw new Error(`timeout waiting for: ${label}`);
+}
+
+const stepLines = (text) => text.split(/\r?\n/).filter((l) => /^\d+\.\s+\S/.test(l));
+
+describe('TestBench Record Steps', function () {
+  this.timeout(30_000);
+
+  /** @type {FakeApiClient} */
+  let fake;
+  let hooks;
+  const fixturePath = path.resolve(FIXTURES_DIR, FILE);
+  const newPath = path.resolve(FIXTURES_DIR, NEW_FILE);
+  const uri = vscode.Uri.file(fixturePath);
+
+  before(async () => {
+    const ext = vscode.extensions.getExtension(EXT_ID);
+    assert.ok(ext, `${EXT_ID} not loaded`);
+    if (!ext.isActive) await ext.activate();
+    hooks = ext.exports?.__testHooks;
+    assert.ok(hooks, '__testHooks not exposed');
+    fs.writeFileSync(fixturePath, FIXTURE, 'utf8');
+  });
+
+  after(() => {
+    fs.rmSync(fixturePath, { force: true });
+    fs.rmSync(newPath, { force: true });
+  });
+
+  beforeEach(async () => {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    if (vscode.debug.breakpoints.length > 0) {
+      vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);
+    }
+    fake = new FakeApiClient();
+    // Discards every controller, which also cancels a recording a failed case
+    // left behind — so each case starts with a fresh session record too.
+    hooks.setApiClientFactory(() => fake);
+    await hooks.recordingSettled();
+    hooks.clearRunError();
+  });
+
+  afterEach(async () => {
+    // A case that failed midway must not leave a recording for the next.
+    if (hooks.recordingState() !== null) {
+      await vscode.commands.executeCommand('testbench-native.cancelRecording');
+      fake.endRecord();
+      await hooks.recordingSettled();
+    }
+    // Never save: revert whatever the case did to the buffer.
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    assert.equal(fs.readFileSync(fixturePath, 'utf8'), FIXTURE, 'the fixture on disk must not change');
+  });
+
+  async function openFixture() {
+    await vscode.commands.executeCommand('vscode.open', uri);
+    await waitFor('fixture editor active', () => {
+      const editor = vscode.window.activeTextEditor;
+      return editor && editor.document.uri.toString() === uri.toString();
+    });
+    await waitFor('active file detected as test file', () => hooks.tracker.snapshot().isTestFile);
+    return vscode.window.activeTextEditor;
+  }
+
+  function cursorAt(editor, line) {
+    const pos = new vscode.Position(line - 1, 0);
+    editor.selection = new vscode.Selection(pos, pos);
+  }
+
+  /** Start a recording at `line` and wait for the stream to open. */
+  async function recordAt(editor, line) {
+    cursorAt(editor, line);
+    const before = fake.recordRequests.length;
+    await vscode.commands.executeCommand('testbench-native.recordSteps');
+    await waitFor('record stream open', () => fake.recordRequests.length === before + 1 && fake.hasActiveRecordStream);
+    return fake.recordRequests[before];
+  }
+
+  /** Cancel the recording in flight and wait for it to be over. */
+  async function cancelRecording() {
+    await vscode.commands.executeCommand('testbench-native.cancelRecording');
+    await hooks.recordingSettled();
+  }
+
+  it('records at the cursor: actions stream in, Stop sends dropped, the result is one undo step', async () => {
+    const editor = await openFixture();
+    const original = editor.document.getText();
+    const mark = hooks.hostMessageCount();
+
+    const req = await recordAt(editor, 11);
+    assert.equal(fake.recordSessionIds[0], uri.fsPath, 'the session is the test\'s own — its file path');
+    assert.equal(req.testFilePath, uri.fsPath);
+    assert.deepEqual(req.target, { mode: 'cursor', fileText: original, cursorLine: 11 });
+    assert.deepEqual(req.config, { baseUrl: 'https://example.test/' }, 'the session\'s first request carries config');
+    assert.equal(hooks.recordingState().phase, 'starting');
+
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/login.html', title: 'Login' });
+    fake.pushRecord({ type: 'record:action', id: 'a1', kind: 'type', summary: 'Typed into Email', atMs: 1200 });
+    fake.pushRecord({ type: 'record:action', id: 'a2', kind: 'click', summary: 'Clicked link "Reports"', atMs: 2400 });
+    fake.pushRecord({ type: 'record:action', id: 'a3', kind: 'click', summary: 'Clicked button "Sign in"', atMs: 3100, tab: 'popup-1' });
+    await waitFor('three actions', () => hooks.recordingState()?.actions.length === 3);
+    const state = hooks.recordingState();
+    assert.equal(state.phase, 'recording');
+    assert.equal(state.startedUrl, 'https://example.test/login.html');
+    assert.equal(state.file, FILE);
+    assert.deepEqual(state.actions[2], {
+      id: 'a3',
+      kind: 'click',
+      summary: 'Clicked button "Sign in"',
+      atMs: 3100,
+      tab: 'popup-1',
+      dropped: false,
+    });
+    assert.equal(hooks.recordingStatusText(), '● Recording — 3 actions');
+    // The panel was told, with the whole list.
+    const posted = hooks.hostMessagesSince(mark).filter((m) => m.type === 'recording');
+    assert.ok(posted.length > 0, 'no recording message reached the panel');
+    assert.equal(posted[posted.length - 1].state.actions.length, 3);
+
+    // The ✕ on "Reports", from the panel's own message.
+    await hooks.dispatchWebviewMessage({ type: 'recordDrop', id: 'a2', dropped: true });
+    assert.equal(hooks.recordingState().actions.find((a) => a.id === 'a2').dropped, true);
+    assert.equal(hooks.recordingStatusText(), '● Recording — 2 actions');
+    // …and put back, and dropped again: the last word is what Stop sends.
+    await hooks.dispatchWebviewMessage({ type: 'recordDrop', id: 'a2', dropped: false });
+    assert.equal(hooks.recordingState().actions.find((a) => a.id === 'a2').dropped, false);
+    await hooks.dispatchWebviewMessage({ type: 'recordDrop', id: 'a2', dropped: true });
+
+    fake.recordControlImpl = async (_sessionId, body) => {
+      if (body.action === 'stop') fake.pushRecord({ type: 'record:writing' });
+    };
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    assert.deepEqual(
+      fake.recordControlCalls.map((c) => c.body),
+      [{ action: 'stop', dropped: ['a2'] }],
+    );
+    assert.equal(fake.recordControlCalls[0].sessionId, uri.fsPath);
+    await waitFor('writing', () => hooks.recordingState()?.phase === 'writing');
+    assert.equal(hooks.recordingStatusText(), '$(loading~spin) Writing steps…');
+
+    fake.pushRecord({
+      type: 'record:result',
+      steps: ['Type {{email}} into the Email field', 'Type {{password}} into the Password field', 'Click the Sign in button'],
+      parameters: [
+        { name: 'email', value: 'demo@example.test' },
+        { name: 'password', value: '$PASSWORD' },
+      ],
+      notes: ['The Sign in button has no label; the step names it by its text.'],
+    });
+    fake.pushRecord({ type: 'done', status: 'passed' });
+    fake.endRecord();
+    await hooks.recordingSettled();
+    assert.equal(hooks.recordingState(), null, 'the Recording block comes down');
+    assert.equal(hooks.recordingStatusText(), null);
+
+    const after = editor.document.getText();
+    assert.deepEqual(stepLines(after), [
+      '1. Navigate to login.html',
+      '2. Click Sign in',
+      '3. Type {{email}} into the Email field',
+      '4. Type {{password}} into the Password field',
+      '5. Click the Sign in button',
+      '6. Open the dashboard',
+      // The section body is its own flow and is not renumbered.
+      '1. Type {{email}} into the Email field',
+      '2. Click Submit',
+    ]);
+    // `email` was already there with this value; `password` is new, as a reference.
+    assert.match(after, /## Parameters\n- email: demo@example\.test\n- password: \$PASSWORD\n\n## Steps/);
+    assert.equal(editor.document.isDirty, true, 'the edit lands on the buffer, unsaved');
+    // The inserted steps are selected (the parameter line shifts them down one).
+    assert.equal(editor.selection.start.line + 1, 13);
+    assert.equal(editor.selection.end.line + 1, 15);
+
+    const report = hooks.recordingReport();
+    assert.equal(report.status, 'inserted');
+    assert.equal(report.steps, 3);
+    assert.match(report.messages[0].text, /Recorded 3 steps into record-steps\.tmp\.md; added password to ## Parameters\. The Sign in button has no label/);
+    // The fixture .env has no PASSWORD, so the next Run would fail — said now.
+    assert.ok(
+      report.messages.some((m) => m.level === 'warn' && /\{\{password\}\} reads \$PASSWORD/.test(m.text)),
+      JSON.stringify(report.messages),
+    );
+
+    await vscode.commands.executeCommand('undo');
+    await waitFor('one undo restores the original', () => editor.document.getText() === original);
+  });
+
+  it('Record New Test creates the file, records into it, and inserts under ## Steps', async () => {
+    fs.rmSync(newPath, { force: true });
+    await vscode.commands.executeCommand('testbench-native.recordNewTest', { name: NEW_NAME });
+    await waitFor('record stream open', () => fake.recordRequests.length === 1 && fake.hasActiveRecordStream);
+
+    assert.ok(fs.existsSync(newPath), 'the file is created on disk');
+    const onDisk = fs.readFileSync(newPath, 'utf8');
+    // Title case (SPEC-record-steps.md §7.2).
+    assert.match(onDisk, /^# Record New Tmp\n\n## Config\n(- baseUrl: \S+\n)?\n## Parameters\n\n## Steps\n$/);
+    const editor = vscode.window.activeTextEditor;
+    // Compared as VS Code spells the path (it lower-cases the drive letter).
+    const newFsPath = vscode.Uri.file(newPath).fsPath;
+    assert.equal(editor.document.uri.fsPath, newFsPath, 'the new test is open');
+    assert.equal(editor.selection.active.line, onDisk.split('\n').length - 1, 'the cursor is under ## Steps');
+
+    const req = fake.recordRequests[0];
+    assert.equal(req.testFilePath, newFsPath);
+    assert.equal(fake.recordSessionIds[0], newFsPath);
+    assert.deepEqual(req.target, { mode: 'new', fileText: onDisk });
+    const baseUrl = /- baseUrl: (\S+)/.exec(onDisk)?.[1];
+    if (baseUrl) assert.deepEqual(req.config, { baseUrl });
+    else assert.equal(req.config, undefined);
+
+    fake.pushRecord({ type: 'record:started', url: baseUrl ?? 'about:blank', title: '' });
+    fake.pushRecord({ type: 'record:action', id: 'a1', kind: 'navigate', summary: 'Went to /login.html', atMs: 500 });
+    fake.recordControlImpl = async (_s, body) => {
+      if (body.action !== 'stop') return;
+      fake.pushRecord({ type: 'record:writing' });
+      fake.pushRecord({
+        type: 'record:result',
+        steps: ['Navigate to login.html', 'Type {{user}} into the Username field'],
+        parameters: [{ name: 'user', value: 'demo' }],
+      });
+      fake.pushRecord({ type: 'done', status: 'passed' });
+      fake.endRecord();
+    };
+    await waitFor('action listed', () => hooks.recordingState()?.actions.length === 1);
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    assert.deepEqual(fake.recordControlCalls.map((c) => c.body), [{ action: 'stop' }], 'nothing dropped, so no `dropped`');
+    await hooks.recordingSettled();
+
+    assert.equal(
+      editor.document.getText(),
+      onDisk.replace(
+        '## Parameters\n\n## Steps\n',
+        '## Parameters\n- user: demo\n\n## Steps\n1. Navigate to login.html\n2. Type {{user}} into the Username field\n',
+      ),
+    );
+  });
+
+  it('Record New Test refuses a name that already exists, and asks nothing of the server', async () => {
+    fs.writeFileSync(newPath, '# Existing\n\n## Steps\n1. A\n', 'utf8');
+    try {
+      await vscode.commands.executeCommand('testbench-native.recordNewTest', { name: NEW_NAME });
+      assert.equal(fake.recordRequests.length, 0);
+      // SPEC-record-steps.md §10, verbatim — the workspace-relative path.
+      assert.equal(hooks.recordingRefusal(), `${NEW_FILE} already exists.`);
+      assert.equal(fs.readFileSync(newPath, 'utf8'), '# Existing\n\n## Steps\n1. A\n', 'never overwritten');
+      await vscode.commands.executeCommand('testbench-native.recordNewTest', { name: 'a/b' });
+      assert.match(hooks.recordingRefusal(), /no folders/);
+    } finally {
+      fs.rmSync(newPath, { force: true });
+    }
+  });
+
+  it('Add check toggles pick mode, and the toggle shows what record:pick said', async () => {
+    const editor = await openFixture();
+    await recordAt(editor, 12);
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    await waitFor('recording', () => hooks.recordingState()?.phase === 'recording');
+
+    fake.recordControlImpl = async (_s, body) => {
+      if (body.action === 'check') fake.pushRecord({ type: 'record:pick', armed: true });
+      if (body.action === 'cancel-check') fake.pushRecord({ type: 'record:pick', armed: false });
+    };
+    await vscode.commands.executeCommand('testbench-native.recordAddCheck');
+    await waitFor('armed', () => hooks.recordingState()?.pickArmed === true);
+    // The panel's toggle is the same gesture.
+    await hooks.dispatchWebviewMessage({ type: 'recordCheck' });
+    await waitFor('disarmed', () => hooks.recordingState()?.pickArmed === false);
+    assert.deepEqual(fake.recordControlCalls.map((c) => c.body), [{ action: 'check' }, { action: 'cancel-check' }]);
+
+    // Armed again, and the author picks an element: the pick disarms and
+    // arrives as a `check` action.
+    await vscode.commands.executeCommand('testbench-native.recordAddCheck');
+    await waitFor('armed again', () => hooks.recordingState()?.pickArmed === true);
+    fake.pushRecord({ type: 'record:pick', armed: false });
+    fake.pushRecord({ type: 'record:action', id: 'c1', kind: 'check', summary: 'Check: Payment method panel', atMs: 900 });
+    await waitFor('check listed', () => hooks.recordingState()?.actions.length === 1);
+    assert.equal(hooks.recordingState().pickArmed, false);
+    assert.equal(hooks.recordingState().actions[0].kind, 'check');
+
+    await cancelRecording();
+  });
+
+  it('Cancel ends the recording and inserts nothing', async () => {
+    const editor = await openFixture();
+    const original = editor.document.getText();
+    await recordAt(editor, 10);
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    fake.pushRecord({ type: 'record:action', id: 'a1', kind: 'click', summary: 'Clicked "Pay"', atMs: 100 });
+    await waitFor('action listed', () => hooks.recordingState()?.actions.length === 1);
+
+    await hooks.dispatchWebviewMessage({ type: 'recordCancel' });
+    await hooks.recordingSettled();
+    assert.deepEqual(fake.recordControlCalls.map((c) => c.body), [{ action: 'cancel' }]);
+    assert.equal(fake.hasActiveRecordStream, false, 'the stream is closed — the wire\'s cancel');
+    assert.equal(hooks.recordingState(), null);
+    assert.equal(hooks.recordingReport().status, 'cancelled');
+    assert.equal(editor.document.getText(), original);
+    assert.equal(editor.document.isDirty, false);
+  });
+
+  it('is refused while a run of the test is executing', async () => {
+    const editor = await openFixture();
+    editor.selection = new vscode.Selection(new vscode.Position(9, 0), new vscode.Position(9, 5));
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('run stream open', () => fake.hasActiveStream);
+
+    cursorAt(editor, 11);
+    await vscode.commands.executeCommand('testbench-native.recordSteps');
+    assert.equal(fake.recordRequests.length, 0);
+    assert.equal(hooks.recordingRefusal(), 'Stop the run before recording.');
+    assert.equal(hooks.recordingState(), null);
+
+    fake.end();
+    await waitFor('run over', () => !hooks.isRunning());
+  });
+
+  it('ends a run paused at a breakpoint first, then records in the same session', async () => {
+    const editor = await openFixture();
+    await vscode.commands.executeCommand('testbench-native.toggleBreakpoint', { lineNumber: 11 });
+    fake.streamScripts[0] = async (f) => {
+      f.push({ type: 'step:start', line: 10 });
+      f.push({ type: 'step:pass', line: 10 });
+      f.end();
+    };
+    await vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('parked at line 11', () => hooks.tracker.snapshot().breakpointStop === 11);
+    assert.equal(hooks.isParkedAtPause(uri), true);
+    assert.equal(hooks.keepAliveActive(), true, 'the pause pins the server');
+    assert.ok(fake.requests[0].config, 'the run created the session, with config');
+
+    const req = await recordAt(editor, 10);
+    assert.equal(hooks.tracker.snapshot().breakpointStop, null, 'the pause marker is gone');
+    assert.equal(hooks.isParkedAtPause(uri), false, 'the paused run is over');
+    assert.equal(hooks.keepAliveActive(), false, 'and so is its keep-alive');
+    assert.equal(req.config, undefined, 'the session exists, so config is not sent again');
+    assert.equal(fake.recordSessionIds[0], fake.streamSessionIds[0], 'the same session the run used');
+    assert.equal(fake.closeSessionCalls, 1, 'only the run\'s first-use close — the browser stays');
+
+    await cancelRecording();
+    await vscode.commands.executeCommand('testbench-native.toggleBreakpoint', { lineNumber: 11 });
+  });
+
+  it('ends a step-paused run (its stream still open) first, retrying while the server lets go of the session', async () => {
+    const editor = await openFixture();
+    editor.selection = new vscode.Selection(new vscode.Position(9, 0), new vscode.Position(11, 5));
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('run stream open', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 10 });
+    fake.push({ type: 'step:pass', line: 10 });
+    fake.push({ type: 'step:awaiting', line: 11 });
+    await waitFor('step-paused', () => hooks.isStepPaused());
+    // The server's run has not let go of the session's queue yet: one 409,
+    // then the recording starts.
+    const { ApiClientError } = require('ai-ui-automation-runner-core');
+    fake.recordThrows.push(new ApiClientError('conflict', 'A run holds this session.', { status: 409 }));
+
+    cursorAt(editor, 10);
+    await vscode.commands.executeCommand('testbench-native.recordSteps');
+    assert.equal(fake.hasActiveStream, false, 'the paused run\'s stream was closed');
+    assert.equal(hooks.isRunning(), false);
+    await waitFor('record stream open after the retry', () => fake.recordRequests.length === 2 && fake.hasActiveRecordStream);
+    assert.equal(hooks.tracker.snapshot().breakpointStop, null);
+    assert.equal(hooks.recordingState().phase, 'starting');
+
+    await cancelRecording();
+  });
+
+  it('sends config only on the session\'s first request, and a Run after a recording reuses its session', async () => {
+    const editor = await openFixture();
+    const first = await recordAt(editor, 10);
+    assert.deepEqual(first.config, { baseUrl: 'https://example.test/' });
+    assert.equal(fake.closeSessionCalls, 1, 'the first-use close, as a Run makes');
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    await waitFor('recording', () => hooks.recordingState()?.phase === 'recording');
+    await cancelRecording();
+
+    const second = await recordAt(editor, 10);
+    assert.equal(second.config, undefined);
+    await cancelRecording();
+
+    editor.selection = new vscode.Selection(new vscode.Position(9, 0), new vscode.Position(9, 5));
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('run stream open', () => fake.hasActiveStream);
+    assert.equal(fake.requests[0].config, undefined, 'the Run continues the recording\'s session');
+    assert.equal(fake.closeSessionCalls, 1, 'and does not close it first');
+    fake.end();
+    await waitFor('run over', () => !hooks.isRunning());
+  });
+
+  it('a run is refused while the recording holds the session', async () => {
+    const editor = await openFixture();
+    await recordAt(editor, 10);
+    editor.selection = new vscode.Selection(new vscode.Position(9, 0), new vscode.Position(9, 5));
+    await vscode.commands.executeCommand('testbench-native.runSelected');
+    assert.equal(fake.streamCallCount, 0, 'no step request while recording');
+    assert.equal(fake.closeSessionCalls, 1, 'and no session close under the recording');
+    await cancelRecording();
+  });
+
+  it('refuses a cursor that is not on a step, and asks nothing of the server', async () => {
+    const editor = await openFixture();
+    cursorAt(editor, 9); // `## Steps` itself
+    await vscode.commands.executeCommand('testbench-native.recordSteps');
+    assert.equal(fake.recordRequests.length, 0);
+    assert.equal(hooks.recordingRefusal(), 'Put the cursor on a step, or the blank line after one, under ## Steps.');
+    cursorAt(editor, 4); // `- baseUrl:` under ## Config
+    await vscode.commands.executeCommand('testbench-native.recordSteps');
+    assert.equal(fake.recordRequests.length, 0);
+  });
+
+  it('a done error says why and inserts nothing; a 409 names the conflict', async () => {
+    const editor = await openFixture();
+    const original = editor.document.getText();
+    await recordAt(editor, 10);
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    fake.pushRecord({ type: 'done', status: 'error', error: 'The model call failed: rate limited.' });
+    fake.endRecord();
+    await hooks.recordingSettled();
+    const report = hooks.recordingReport();
+    assert.equal(report.status, 'error');
+    assert.equal(report.messages[0].text, 'The model call failed: rate limited.', 'the server\'s sentence, as it came');
+    assert.equal(editor.document.getText(), original);
+
+    const { ApiClientError } = require('ai-ui-automation-runner-core');
+    fake.recordThrows.push(new ApiClientError('conflict', 'A run holds this session.', { status: 409 }));
+    cursorAt(editor, 10);
+    await vscode.commands.executeCommand('testbench-native.recordSteps');
+    await hooks.recordingSettled();
+    assert.match(hooks.recordingReport().messages[0].text, /A run holds this session\./);
+    assert.equal(hooks.recordingState(), null);
+  });
+});

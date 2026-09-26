@@ -28,6 +28,7 @@ import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
 import { registerCommands } from './commands/index.js';
 import type { SkillRunTarget } from './skill-run-targets.js';
 import { CodeBehindDiffs } from './codebehind-diff.js';
+import { StepRecorder, type RecordingReport } from './step-recorder.js';
 import { disposeOutputChannel, getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
 import { frameTargetUri, workspaceFolderFor } from './workspace.js';
@@ -167,6 +168,14 @@ class RunControllerRegistry implements vscode.Disposable {
    */
   readonly compileTailSignals = new CompileTailSignals();
 
+  /**
+   * The window's one Record Steps recorder (stories/testbench-record-steps.md).
+   * Here, beside the controllers, because the commands and the panel's
+   * messages both reach it through the registry, and the recording it runs
+   * lives in a controller's session.
+   */
+  readonly recorder: StepRecorder;
+
   constructor(
     private readonly view: TestBenchRunnerView,
     private readonly tracker: ActiveFileTracker,
@@ -180,6 +189,7 @@ class RunControllerRegistry implements vscode.Disposable {
       setProbe(probe: HealthProbe): void;
     },
   ) {
+    this.recorder = new StepRecorder((msg) => this.view.post(msg));
     // The run-state context keys describe the ACTIVE EDITOR's document, so
     // they have to be recomputed when the active editor changes — not only
     // when a run starts or ends. Without this, switching between two tests
@@ -1658,6 +1668,7 @@ class RunControllerRegistry implements vscode.Disposable {
   lastDoneStatus: 'passed' | 'failed' | 'error' | 'aborted' | null = null;
 
   dispose(): void {
+    this.recorder.dispose();
     this.compileTailSignals.dispose();
     this.trackerSub.dispose();
     this.discardControllers();
@@ -1891,6 +1902,19 @@ export interface TestBenchTestHooks {
   /** Re-read the bridge settings now, instead of waiting on the configuration
    *  event. Returns once the listen attempt has settled. */
   syncLmBridge: () => Promise<void>;
+  /** Record Steps: the panel's Recording block as the host holds it, or null
+   *  when nothing is recording (stories/testbench-record-steps.md). */
+  recordingState: () => import('ai-ui-automation-runner-core').RecordingPanelState | null;
+  /** Record Steps: the status bar text while recording, or null. */
+  recordingStatusText: () => string | null;
+  /** Record Steps: how the last recording ended and what the author was told
+   *  — notifications are not readable from the extension host. */
+  recordingReport: () => RecordingReport | null;
+  /** Record Steps: why the last Record gesture was refused, or null. */
+  recordingRefusal: () => string | null;
+  /** Record Steps: settles when the current recording, insertion included,
+   *  is over. */
+  recordingSettled: () => Promise<void>;
 }
 
 export interface TestBenchExports {
@@ -2357,6 +2381,11 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       configureLmBridge: (opts) => lmBridge.configureForTests(opts),
       lmBridgeToken: () => lmBridge.ensureToken(),
       syncLmBridge: () => lmBridge.sync(),
+      recordingState: () => registry.recorder.state,
+      recordingStatusText: () => registry.recorder.statusText,
+      recordingReport: () => registry.recorder.lastReport,
+      recordingRefusal: () => registry.recorder.lastRefusal,
+      recordingSettled: () => registry.recorder.settled,
     },
   };
 }
@@ -2386,7 +2415,31 @@ async function handleWebviewMessage(
 ): Promise<void> {
   switch (msg.type) {
     case 'ready':
-      // Tracker.onChange already pushed a snapshot; nothing more to do.
+      // Tracker.onChange already pushed a snapshot. A panel rebuilt mid-
+      // recording has lost its Recording block, though, and nothing else
+      // would re-send it until the next action.
+      registry.recorder.republish();
+      return;
+    // Record Steps (stories/testbench-record-steps.md). Delegated to the
+    // commands, like Stop and Pause below, so the panel and the editor title
+    // bar are one implementation each.
+    case 'recordSteps':
+      await vscode.commands.executeCommand('testbench-native.recordSteps');
+      return;
+    case 'recordNewTest':
+      await vscode.commands.executeCommand('testbench-native.recordNewTest');
+      return;
+    case 'recordStop':
+      await vscode.commands.executeCommand('testbench-native.stopRecording');
+      return;
+    case 'recordCancel':
+      await vscode.commands.executeCommand('testbench-native.cancelRecording');
+      return;
+    case 'recordCheck':
+      await vscode.commands.executeCommand('testbench-native.recordAddCheck');
+      return;
+    case 'recordDrop':
+      registry.recorder.setDropped(msg.id, msg.dropped === true);
       return;
     case 'run': {
       const controller = registry.active();

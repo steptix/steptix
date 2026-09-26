@@ -31,9 +31,15 @@ import {
   isSkillDocument,
   type SkillRunTarget,
 } from '../skill-run-targets.js';
+import type { StepRecorder } from '../step-recorder.js';
+import { registerRecordCommands } from './record-steps.js';
 
 interface Registry {
   active(): RunController | undefined;
+  /** Get-or-create the controller for a document (Record New Test's new file). */
+  get(document: vscode.TextDocument): RunController | undefined;
+  /** The window's one Record Steps recorder (stories/testbench-record-steps.md). */
+  readonly recorder: StepRecorder;
   /** The currently-running controller, if any. Prefer this over
    *  `active()` for step commands when a run is in flight — see
    *  `dispatchStep` for the routing rule. */
@@ -760,7 +766,16 @@ export function registerCommands(
    * (or paused awaiting Continue) must first tear the run down, otherwise
    * spinners and the yellow ▶ stay painted with no session behind them.
    */
-  const performStop = (opts: { setSkillDebug?: boolean; preferRunning?: boolean } = {}): void => {
+  const performStop = (
+    opts: {
+      setSkillDebug?: boolean;
+      preferRunning?: boolean;
+      /** Stop exactly this controller — Record Steps ending the paused run
+       *  it is about to record from (stories/testbench-record-steps.md,
+       *  decision 12). Overrides both rules below. */
+      target?: RunController;
+    } = {},
+  ): void => {
     // Normally the ACTIVE editor's controller — Close Session shares this
     // function and then closes `registry.active()`, so widening the reach
     // unconditionally made it stop one test and close another.
@@ -771,9 +786,10 @@ export function registerCommands(
     // state while the run kept going on the test's controller.
     const active = registry.active();
     const controller =
-      opts.preferRunning && !active?.isRunning
+      opts.target ??
+      (opts.preferRunning && !active?.isRunning
         ? (registry.runningController() ?? active)
-        : active;
+        : active);
     // On an explicit Stop (not Close Session), park a skill-debug context for a
     // parked TOP-LEVEL skill failure — read BEFORE resetFrameState wipes
     // lastSkillFailure. Latest Stop wins (setSkillDebug replaces any prior).
@@ -812,6 +828,7 @@ export function registerCommands(
     if (editor && tracker.isActiveTestFile) {
       tracker.setBreakpointStop(editor.document.uri, null);
     }
+    if (opts.target) tracker.setBreakpointStop(opts.target.document.uri, null);
     tracker.markAllRunningStopped();
     // A step-paused yellow ▶ may live on a SKILL file the run descended
     // into — `setBreakpointStop` above only cleared the test-file marker.
@@ -821,6 +838,10 @@ export function registerCommands(
   };
 
   return [
+    // Record Steps, Record New Test, Stop Recording, Add Check, Cancel
+    // Recording (stories/testbench-record-steps.md).
+    ...registerRecordCommands({ registry, tracker, performStop }),
+
     vscode.commands.registerCommand('testbench-native.runSelected', runSelected),
 
     // "Run This Row" — the gutter's one-row gesture

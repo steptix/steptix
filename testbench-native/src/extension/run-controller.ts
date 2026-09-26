@@ -5,6 +5,8 @@ import {
   ApiClient,
   ApiClientError,
   EnvParseError,
+  apiErrorReason,
+  isRecordStepsEvent,
   isUserAbort,
   classifySelectedSteps,
   matchText,
@@ -40,6 +42,11 @@ import {
   type FrameInfo,
   type HostRowsMsg,
   type HostToWebviewMsg,
+  type RecordControlRequest,
+  type RecordDoneEvent,
+  type RecordResultEvent,
+  type RecordStepsEvent,
+  type RecordStepsRequest,
   type RunEvent,
   type ScopeMasking,
   type StepMode,
@@ -149,7 +156,39 @@ export interface ApiClientLike {
   // ordinary step route now (stories/compile-as-you-go.md); the boxed
   // `POST /codebehind/compile` pipeline stays server-side for `aiui compile`,
   // where a headless caller has no diff to click.
+  /** Record Steps (stories/testbench-record-steps.md): the SSE start. Optional
+   *  so fakes that predate it still type-check; absent, Record refuses. */
+  streamRecordSteps?(
+    sessionId: string,
+    request: RecordStepsRequest,
+    signal: AbortSignal,
+  ): AsyncIterable<RecordStepsEvent>;
+  /** Record Steps: stop / check / cancel-check / cancel. */
+  controlRecordSteps?(sessionId: string, body: RecordControlRequest): Promise<void>;
 }
+
+/** Record refused while a run executes — docs/specs/SPEC-record-steps.md §10,
+ *  verbatim. One constant for the command's check and the controller's. */
+export const STOP_THE_RUN = 'Stop the run before recording.';
+
+/**
+ * How a recording ended, for the recorder that started it
+ * (stories/testbench-record-steps.md). `result` carries what to insert;
+ * `cancelled` inserts nothing; `error` says why in a sentence for a
+ * notification.
+ */
+export type RecordStepsOutcome =
+  | {
+      status: 'result';
+      steps: string[];
+      parameters: Array<{ name: string; value: string }>;
+      notes: string[];
+      /** The names the resolved `.env` defines — a `$NAME` parameter whose
+       *  variable is not among them will fail the next Run. */
+      envKeys: string[];
+    }
+  | { status: 'cancelled' }
+  | { status: 'error'; error: string };
 
 /** Shape returned by {@link ApiClientLike.getLastRun} (mirrors runner-core). */
 export interface LastRunInfoLike {
@@ -958,6 +997,30 @@ export class RunController {
     return this.active !== null;
   }
 
+  /**
+   * The recording in flight in this document's session, or null
+   * (stories/testbench-record-steps.md). Deliberately NOT `active`: a
+   * recording is not a run — the run toolbar, the `running` context key and
+   * the step statuses have nothing to say about it — but it holds the same
+   * session, so a run must not start while it is set (`runLinesInner`
+   * refuses), and the server holds the session's queue besides.
+   *
+   * Set synchronously at the top of `recordSteps`, before any await, so a Run
+   * pressed while the recording is still resolving its env is refused too.
+   */
+  private recording: {
+    ac: AbortController;
+    /** Null until the client is resolved; a control sent before then cancels. */
+    client: ApiClientLike | null;
+    sessionId: string;
+    /** Cancel was asked for: a result that races it in is not inserted. */
+    cancelled?: boolean;
+  } | null = null;
+
+  get isRecording(): boolean {
+    return this.recording !== null;
+  }
+
   /** Did the run that just finished park at a breakpoint or a pause? A parked
    *  compile has not finished — Continue sends the rest of the test, and the
    *  proposal it produces is the one to show. */
@@ -1714,6 +1777,9 @@ export class RunController {
       this.finalizeRowTables({ kind: 'stopped' });
     }
     this.active?.abort();
+    // The disposal path (see above) must not leave a recording holding the
+    // session either. Closing the stream is the wire's `cancel`.
+    this.recording?.ac.abort();
   }
 
   /**
@@ -2021,6 +2087,161 @@ export class RunController {
   }
 
   /**
+   * Everything a request to the server needs from the project's env: the
+   * resolved `.env` (with the selected environment's `.env.<name>` laid over
+   * it), SERVER_URL, and the API key by the machine-key chain. Refusals are
+   * the TBxxx payloads a run has always failed with; the caller reports them.
+   *
+   * Lifted out of `runLinesInner` unchanged so Record Steps resolves the same
+   * server, the same env map and the same errors a Run does.
+   */
+  private async resolveServerTarget(
+    envOverride: string | null | undefined,
+    log: (line: string) => void,
+  ): Promise<
+    | {
+        ok: true;
+        env: Record<string, string>;
+        envPath: string;
+        envName: string | null;
+        serverUrl: string;
+        apiKey: string;
+      }
+    | { ok: false; payload: ErrorPayload }
+  > {
+    const filePath = this.document.uri.fsPath;
+    const settings = vscode.workspace.getConfiguration('testbench-native');
+    const fallbackSetting = settings.get<string>('defaultEnvFile') ?? '';
+
+    const envResolution = await resolveEnvFile({
+      testFile: filePath,
+      workspaceRoot: this.workspaceFolder.uri.fsPath,
+      fallbackPath: fallbackSetting,
+    });
+
+    if (!envResolution.hit) {
+      log(`.env not found. Searched: ${envResolution.searchedDirs.join(' → ')}; fallback: "${envResolution.fallbackPath || 'unset'}"`);
+      const payload = reportError('TB001', {
+        searchedDirs: envResolution.searchedDirs,
+        fallbackSetting: fallbackSetting,
+      });
+      this.lastResolvedEnvPath = null;
+      return { ok: false, payload };
+    }
+
+    log(`.env resolved (${envResolution.source}): ${envResolution.path}`);
+    this.lastResolvedEnvPath = envResolution.path;
+
+    let env: Record<string, string>;
+    try {
+      env = await readEnvFile(envResolution.path);
+    } catch (err) {
+      if (err instanceof EnvParseError) {
+        const payload = reportError('TB005', {
+          envPath: envResolution.path,
+          lineNumber: err.lineNumber,
+          line: err.line,
+        });
+        log(`TB005 ${payload.diagnosis}`);
+        return { ok: false, payload };
+      }
+      throw err;
+    }
+
+    // Which environment this run targets. An explicit override (batch mode
+    // passes one per test) wins over the workspace-level EnvSelector. The SAME
+    // value feeds both the client-side $VAR overlay below and the `envName`
+    // sent to the server, so ## Parameters / ## Config resolve against the same
+    // env the server uses for ${env.X}.
+    //
+    // Trim + treat blank as unset: EnvSelector.activeEnv() already normalises,
+    // but the batch `envOverride` carries frontmatter `env:` verbatim — a quoted
+    // `env: " t2 "` would otherwise form `.env. t2 ` and spuriously TB006.
+    const effectiveEnvName =
+      ((envOverride !== undefined ? envOverride : EnvSelector.activeEnv()) ?? '')
+        .trim() || null;
+
+    // Overlay the selected `.env.<name>` on top of base `.env` so $VAR
+    // references in ## Parameters / ## Config — and SERVER_URL/AIUI_SERVER_API_KEY —
+    // honour the active environment (matching the server's ${env.X} map and the
+    // CLI). A selected env with no matching file is a hard error (TB006); a
+    // malformed overlay reuses TB005 with the overlay's path.
+    if (effectiveEnvName) {
+      // Read the overlay from the workspace root — where the env selector
+      // enumerates `.env.*` and where the CLI/server read `.env.<name>`
+      // (projectRoot). A walked-up / test-adjacent base `.env`'s directory
+      // would instead let a selector-offered env resolve to a missing file
+      // and spuriously TB006.
+      const envDir = this.workspaceFolder.uri.fsPath;
+      const overlayPath = path.join(envDir, `.env.${effectiveEnvName}`);
+      let overlay: Record<string, string> | null;
+      try {
+        overlay = await readEnvOverlayFile(envDir, effectiveEnvName);
+      } catch (err) {
+        if (err instanceof EnvParseError) {
+          const payload = reportError('TB005', {
+            envPath: overlayPath,
+            lineNumber: err.lineNumber,
+            line: err.line,
+          });
+          log(`TB005 ${payload.diagnosis}`);
+          return { ok: false, payload };
+        }
+        throw err;
+      }
+      if (overlay === null) {
+        const payload = reportError('TB006', {
+          envName: effectiveEnvName,
+          expectedPath: overlayPath,
+          baseEnvPath: envResolution.path,
+        });
+        log(`TB006 ${payload.diagnosis}`);
+        return { ok: false, payload };
+      }
+      env = composeEnv(env, overlay);
+      // The KEYS, not just how many: this line is the only place a run says
+      // which values the overlay took over, and the ones that mislead hardest
+      // when they are silently replaced (AI_API_KEY, SERVER_URL) look exactly
+      // like a broken bridge or a dead server from every other error message.
+      // Safe to name — a key is not its value, and the values are secrets.
+      const keys = Object.keys(overlay);
+      log(
+        keys.length === 0
+          ? `.env.${effectiveEnvName} overlaid (no keys)`
+          : `.env.${effectiveEnvName} overlaid (${keys.length} ` +
+              `${keys.length === 1 ? 'key' : 'keys'}: ${keys.join(', ')})`,
+      );
+    }
+
+    if (!env['SERVER_URL'] || env['SERVER_URL'].trim() === '') {
+      const payload = reportError('TB002', { envPath: envResolution.path });
+      return { ok: false, payload };
+    }
+    const serverUrl = env['SERVER_URL'].trim();
+    try {
+      new URL(serverUrl);
+    } catch {
+      const payload = reportError('TB004', { envPath: envResolution.path, value: serverUrl });
+      return { ok: false, payload };
+    }
+    // The client chain of stories/machine-key.md: the project's walk-up .env,
+    // then the extension host's environment, then the machine key. Most
+    // machines only ever have the last one — `aiui serve` generates it.
+    const projectKey = env['AIUI_SERVER_API_KEY']?.trim();
+    const processKey = process.env['AIUI_SERVER_API_KEY']?.trim();
+    const apiKey = projectKey || processKey || readMachineKey() || '';
+    if (apiKey === '') {
+      const payload = reportError('TB003', {
+        envPath: envResolution.path,
+        machineEnvPath: userRootEnvPath(),
+      });
+      return { ok: false, payload };
+    }
+
+    return { ok: true, env, envPath: envResolution.path, envName: effectiveEnvName, serverUrl, apiKey };
+  }
+
+  /**
    * Liveness gate for the re-run, called by the command handler BEFORE it
    * tears down any state (notifyRunning / resetFrameState) — so refusing a
    * dead session leaves the parked failure and its Variables panel intact.
@@ -2175,6 +2396,8 @@ export class RunController {
     if (!resolved) return;
     out.appendLine(`[${ts()}] closing server session for ${resolved.sessionId}`);
     this.active?.abort();
+    // A recording in this session ends with it — nothing is written.
+    this.recording?.ac.abort();
     await resolved.client.closeSession(resolved.sessionId);
     this.forgetSentConfig();
     // The session (and its live page) is gone — a parked skill-step re-run
@@ -2380,6 +2603,16 @@ export class RunController {
     if (this.isRunning) {
       return { ok: false };
     }
+    // Every gesture that runs funnels through here, so this is where a run
+    // is kept off a session a recording holds (stories/testbench-record-steps.md,
+    // decision 12). The server would answer 409 anyway — but only after this
+    // method's first-run stale-session close had shut the recording's browser.
+    if (this.recording) {
+      void vscode.window.showWarningMessage(
+        'TestBench is recording steps in this test\'s browser. Stop or cancel the recording before running.',
+      );
+      return { ok: false };
+    }
     // Past the guard: this call owns the compile slot for the run it is about
     // to start. Reset here rather than in the wrapper, so a call the guard
     // turned away cannot wipe the proposal of the run that turned it away.
@@ -2527,132 +2760,13 @@ export class RunController {
     log(`run requested for ${filePath}: lines=[${lines.join(',')}]`);
 
     const settings = vscode.workspace.getConfiguration('testbench-native');
-    const fallbackSetting = settings.get<string>('defaultEnvFile') ?? '';
-
-    const envResolution = await resolveEnvFile({
-      testFile: filePath,
-      workspaceRoot: this.workspaceFolder.uri.fsPath,
-      fallbackPath: fallbackSetting,
-    });
-
-    if (!envResolution.hit) {
-      log(`.env not found. Searched: ${envResolution.searchedDirs.join(' → ')}; fallback: "${envResolution.fallbackPath || 'unset'}"`);
-      const payload = reportError('TB001', {
-        searchedDirs: envResolution.searchedDirs,
-        fallbackSetting: fallbackSetting,
-      });
-      this.lastResolvedEnvPath = null;
-      return this.fail(payload, log);
-    }
-
-    log(`.env resolved (${envResolution.source}): ${envResolution.path}`);
-    this.lastResolvedEnvPath = envResolution.path;
-
-    let env: Record<string, string>;
-    try {
-      env = await readEnvFile(envResolution.path);
-    } catch (err) {
-      if (err instanceof EnvParseError) {
-        const payload = reportError('TB005', {
-          envPath: envResolution.path,
-          lineNumber: err.lineNumber,
-          line: err.line,
-        });
-        log(`TB005 ${payload.diagnosis}`);
-        return this.fail(payload, log);
-      }
-      throw err;
-    }
-
-    // Which environment this run targets. An explicit override (batch mode
-    // passes one per test) wins over the workspace-level EnvSelector. The SAME
-    // value feeds both the client-side $VAR overlay below and the `envName`
-    // sent to the server, so ## Parameters / ## Config resolve against the same
-    // env the server uses for ${env.X}.
-    //
-    // Trim + treat blank as unset: EnvSelector.activeEnv() already normalises,
-    // but the batch `envOverride` carries frontmatter `env:` verbatim — a quoted
-    // `env: " t2 "` would otherwise form `.env. t2 ` and spuriously TB006.
-    const effectiveEnvName =
-      ((options.envOverride !== undefined ? options.envOverride : EnvSelector.activeEnv()) ?? '')
-        .trim() || null;
-
-    // Overlay the selected `.env.<name>` on top of base `.env` so $VAR
-    // references in ## Parameters / ## Config — and SERVER_URL/AIUI_SERVER_API_KEY —
-    // honour the active environment (matching the server's ${env.X} map and the
-    // CLI). A selected env with no matching file is a hard error (TB006); a
-    // malformed overlay reuses TB005 with the overlay's path.
-    if (effectiveEnvName) {
-      // Read the overlay from the workspace root — where the env selector
-      // enumerates `.env.*` and where the CLI/server read `.env.<name>`
-      // (projectRoot). A walked-up / test-adjacent base `.env`'s directory
-      // would instead let a selector-offered env resolve to a missing file
-      // and spuriously TB006.
-      const envDir = this.workspaceFolder.uri.fsPath;
-      const overlayPath = path.join(envDir, `.env.${effectiveEnvName}`);
-      let overlay: Record<string, string> | null;
-      try {
-        overlay = await readEnvOverlayFile(envDir, effectiveEnvName);
-      } catch (err) {
-        if (err instanceof EnvParseError) {
-          const payload = reportError('TB005', {
-            envPath: overlayPath,
-            lineNumber: err.lineNumber,
-            line: err.line,
-          });
-          log(`TB005 ${payload.diagnosis}`);
-          return this.fail(payload, log);
-        }
-        throw err;
-      }
-      if (overlay === null) {
-        const payload = reportError('TB006', {
-          envName: effectiveEnvName,
-          expectedPath: overlayPath,
-          baseEnvPath: envResolution.path,
-        });
-        log(`TB006 ${payload.diagnosis}`);
-        return this.fail(payload, log);
-      }
-      env = composeEnv(env, overlay);
-      // The KEYS, not just how many: this line is the only place a run says
-      // which values the overlay took over, and the ones that mislead hardest
-      // when they are silently replaced (AI_API_KEY, SERVER_URL) look exactly
-      // like a broken bridge or a dead server from every other error message.
-      // Safe to name — a key is not its value, and the values are secrets.
-      const keys = Object.keys(overlay);
-      log(
-        keys.length === 0
-          ? `.env.${effectiveEnvName} overlaid (no keys)`
-          : `.env.${effectiveEnvName} overlaid (${keys.length} ` +
-              `${keys.length === 1 ? 'key' : 'keys'}: ${keys.join(', ')})`,
-      );
-    }
-
-    if (!env['SERVER_URL'] || env['SERVER_URL'].trim() === '') {
-      const payload = reportError('TB002', { envPath: envResolution.path });
-      return this.fail(payload, log);
-    }
-    const serverUrl = env['SERVER_URL'].trim();
-    try {
-      new URL(serverUrl);
-    } catch {
-      const payload = reportError('TB004', { envPath: envResolution.path, value: serverUrl });
-      return this.fail(payload, log);
-    }
-    // The client chain of stories/machine-key.md: the project's walk-up .env,
-    // then the extension host's environment, then the machine key. Most
-    // machines only ever have the last one — `aiui serve` generates it.
-    const projectKey = env['AIUI_SERVER_API_KEY']?.trim();
-    const processKey = process.env['AIUI_SERVER_API_KEY']?.trim();
-    const apiKey = projectKey || processKey || readMachineKey() || '';
-    if (apiKey === '') {
-      const payload = reportError('TB003', {
-        envPath: envResolution.path,
-        machineEnvPath: userRootEnvPath(),
-      });
-      return this.fail(payload, log);
-    }
+    // .env, the selected environment, SERVER_URL and the API key — shared with
+    // Record Steps, which needs the same server and the same env map.
+    const target = await this.resolveServerTarget(options.envOverride, log);
+    if (!target.ok) return this.fail(target.payload, log);
+    const { env, serverUrl, apiKey } = target;
+    const envResolution = { path: target.envPath };
+    const effectiveEnvName = target.envName;
 
     const text = this.document.getText();
 
@@ -2774,17 +2888,7 @@ export class RunController {
     const rawConfig = parseConfig(text);
     const rawParameters = parseParameters(text);
     const resolvedParameters = resolveSection(rawParameters, env);
-    const sessionConfig: { baseUrl?: string; timeout?: string; viewport?: string } = {};
-    const baseUrl = rawConfig['baseUrl'];
-    if (baseUrl) sessionConfig.baseUrl = resolveValue(baseUrl, env);
-    const timeout = rawConfig['timeout'];
-    if (timeout) sessionConfig.timeout = resolveValue(timeout, env);
-    // Forwarded raw, exactly like baseUrl: the server resolves the preset and
-    // owns the one validator + error message (stories/per-test-viewport.md §3).
-    // `resolveValue` still runs so `viewport: $VIEWPORT` works off the .env
-    // overlay — that is client-side $VAR resolution, not viewport parsing.
-    const viewport = rawConfig['viewport'];
-    if (viewport) sessionConfig.viewport = resolveValue(viewport, env);
+    const sessionConfig = sessionConfigFrom(rawConfig, env);
 
     const logging = resolveLoggingOverride(rawConfig, settings);
 
@@ -5321,6 +5425,257 @@ export class RunController {
     this.post({ type: 'runError', payload });
     return { ok: false, error: payload };
   }
+
+  // -------------------------------------------------------------------------
+  // Record Steps (stories/testbench-record-steps.md)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Record in this document's session until the recorder says stop or cancel,
+   * handing every frame to `onEvent`, and return what to insert.
+   *
+   * The session is the one a Run uses — the file path — so a recording
+   * continues from wherever the browser is, and the session a recording
+   * creates is the one the next Run reuses (decisions 2 and 3). That is why
+   * this goes through the run's own env resolution, server check, stale-
+   * session close and write-once `config` bookkeeping rather than a path of
+   * its own: `config` rides the request only when this session has not had it,
+   * and the first frame marks it sent, exactly as a steps stream does.
+   *
+   * Not done here, deliberately: the viewport recycle a fresh Run performs.
+   * Recording is "continue from this page"; closing the browser because the
+   * file's viewport changed would throw away the page the author paused on.
+   */
+  async recordSteps(args: {
+    target: { mode: 'cursor' | 'new'; cursorLine?: number };
+    onEvent: (event: RecordStepsEvent) => void;
+    /**
+     * A step-paused run was stopped a moment ago to make way. Its server-side
+     * run lets go of the session's queue shortly after the stream closes, so a
+     * 409 is retried for a few seconds rather than reported.
+     */
+    retryConflict?: boolean;
+  }): Promise<RecordStepsOutcome> {
+    if (this.isRunning) return { status: 'error', error: STOP_THE_RUN };
+    if (this.recording) return { status: 'error', error: 'This test is already recording.' };
+    const ac = new AbortController();
+    const filePath = this.document.uri.fsPath;
+    const rec: NonNullable<RunController['recording']> = {
+      ac,
+      client: null,
+      sessionId: filePath,
+    };
+    this.recording = rec;
+    const out = getOutputChannel();
+    const log = (line: string) => out.appendLine(`[${timestamp()}] ${line}`);
+    try {
+      const { mode, cursorLine } = args.target;
+      log(
+        `record steps requested for ${filePath} (${mode}` +
+          (cursorLine !== undefined ? `, after line ${cursorLine}` : '') +
+          ')',
+      );
+      const target = await this.resolveServerTarget(undefined, log);
+      if (!target.ok) {
+        this.fail(target.payload, log);
+        return { status: 'error', error: `${target.payload.diagnosis}. ${target.payload.fix}` };
+      }
+      if (ac.signal.aborted) return { status: 'cancelled' };
+      const { env, serverUrl, apiKey } = target;
+
+      // The same first-use close a Run makes: a session keyed on this path may
+      // be left over from another window, and `config` sent to it would be
+      // refused as a second config.
+      if (!this.staleSessionCleared) {
+        this.staleSessionCleared = true;
+        await this.closeStaleSession();
+      }
+
+      const ready = await this.ensureServerReady({ serverUrl, signal: ac.signal, log });
+      if (ready.kind === 'aborted' || ac.signal.aborted) return { status: 'cancelled' };
+      if (ready.kind === 'fail') {
+        this.fail(ready.payload, log);
+        return { status: 'error', error: `${ready.payload.diagnosis}. ${ready.payload.fix}` };
+      }
+
+      const client = this.clientFactory({ serverUrl, apiKey });
+      if (typeof client.streamRecordSteps !== 'function') {
+        return { status: 'error', error: 'This client cannot record steps.' };
+      }
+      rec.client = client;
+      // Out-of-band calls (Close Session, liveness) follow the server this
+      // session lives on, as they do after a run.
+      this.lastRunServerUrl = serverUrl;
+      this.lastRunApiKey = apiKey;
+
+      const text = this.document.getText();
+      const sessionConfig = sessionConfigFrom(parseConfig(text), env);
+      const includeConfig = !this.configSentForSession && Object.keys(sessionConfig).length > 0;
+      const request: RecordStepsRequest = {
+        testFilePath: filePath,
+        ...(includeConfig && { config: sessionConfig }),
+        target: { mode, fileText: text, ...(cursorLine !== undefined && { cursorLine }) },
+        env,
+        ...(target.envName && { envName: target.envName }),
+      };
+      log(
+        `recording on ${serverUrl}` +
+          (includeConfig ? ` (new session${sessionConfig.baseUrl ? `, baseUrl=${sessionConfig.baseUrl}` : ''})` : ''),
+      );
+
+      const conflictDelays = args.retryConflict ? [100, 200, 400, 800, 1200, 1600, 2000, 2400, 2800] : [];
+      let result: RecordResultEvent | null = null;
+      let done: RecordDoneEvent | null = null;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          for await (const event of client.streamRecordSteps(filePath, request, ac.signal)) {
+            // The first frame proves the server holds a session for this file,
+            // created with this request's `config` when it carried one.
+            this.markConfigSent(sessionConfig.viewport);
+            if (!isRecordStepsEvent(event)) {
+              log(`record: ignoring a frame this client does not know (${String((event as { type?: unknown }).type)})`);
+              continue;
+            }
+            if (event.type === 'record:result') result = event;
+            else if (event.type === 'done') done = event;
+            else if (event.type === 'output') log(`[${event.kind}] ${event.msg}`);
+            else if (event.type === 'record:action') log(`recorded ${event.kind}: ${event.summary}`);
+            else if (event.type === 'record:started') log(`recording from ${event.url}`);
+            args.onEvent(event);
+          }
+          break;
+        } catch (err) {
+          if (isUserAbort(err) || ac.signal.aborted) return { status: 'cancelled' };
+          const apiErr = asApiClientError(err);
+          const delay = conflictDelays[attempt];
+          if (apiErr?.kind === 'conflict' && delay !== undefined) {
+            log(`record: the session is still busy with the stopped run — retrying in ${delay}ms`);
+            await this.pollSleep(delay);
+            if (ac.signal.aborted) return { status: 'cancelled' };
+            continue;
+          }
+          return { status: 'error', error: this.describeRecordError(err, serverUrl, target.envPath, log) };
+        }
+      }
+
+      // Cancel is authoritative: a result that raced it in is not inserted.
+      if (rec.cancelled || ac.signal.aborted) return { status: 'cancelled' };
+      if (result) {
+        log(`record: ${result.steps.length} step(s) written`);
+        return {
+          status: 'result',
+          steps: Array.isArray(result.steps) ? result.steps : [],
+          parameters: Array.isArray(result.parameters) ? result.parameters : [],
+          notes: Array.isArray(result.notes) ? result.notes.map(String) : [],
+          envKeys: Object.keys(env),
+        };
+      }
+      if (done?.status === 'error') return { status: 'error', error: done.error ?? 'The recording failed.' };
+      if (done?.status === 'aborted') return { status: 'cancelled' };
+      if (done?.status === 'passed') {
+        return { status: 'error', error: 'The recording finished without writing any steps.' };
+      }
+      return { status: 'error', error: `The connection to ${serverUrl} ended before the recording finished.` };
+    } finally {
+      if (this.recording === rec) this.recording = null;
+    }
+  }
+
+  /**
+   * Steer the recording in flight: `stop`, `check`, `cancel-check`, `cancel`.
+   * Before the client exists nothing has reached the server's recorder, so a
+   * stop or a cancel just ends the stream there.
+   */
+  async controlRecording(body: RecordControlRequest): Promise<{ ok: true } | { ok: false; error: string }> {
+    const rec = this.recording;
+    if (!rec) return { ok: false, error: 'No recording is running.' };
+    if (!rec.client || typeof rec.client.controlRecordSteps !== 'function') {
+      if (body.action === 'stop' || body.action === 'cancel') {
+        rec.cancelled = true;
+        rec.ac.abort();
+        return { ok: true };
+      }
+      return { ok: false, error: 'The recording has not started yet.' };
+    }
+    try {
+      await rec.client.controlRecordSteps(rec.sessionId, body);
+      return { ok: true };
+    } catch (err) {
+      if (asApiClientError(err)?.kind === 'not-found') {
+        return { ok: false, error: 'The server has no recording running for this test any more.' };
+      }
+      return { ok: false, error: apiErrorReason(err) };
+    }
+  }
+
+  /**
+   * End the recording without writing anything: tell the server (best
+   * effort), then close the stream — which the server also reads as cancel,
+   * so the second half alone would do; the first makes it prompt.
+   */
+  async cancelRecording(): Promise<void> {
+    const rec = this.recording;
+    if (!rec) return;
+    rec.cancelled = true;
+    if (rec.client && typeof rec.client.controlRecordSteps === 'function') {
+      try {
+        await rec.client.controlRecordSteps(rec.sessionId, { action: 'cancel' });
+      } catch {
+        /* the abort below ends it either way */
+      }
+    }
+    rec.ac.abort();
+  }
+
+  /** A recording line for the run log AND this document's Output in the panel. */
+  postRecordLog(msg: string, kind: 'info' | 'warn' | 'error'): void {
+    getOutputChannel().appendLine(`[${timestamp()}] ${msg}`);
+    this.post({ type: 'runEvent', event: { type: 'output', msg, kind } });
+  }
+
+  /** `closeSession` without its aborts — the first-use close of a recording,
+   *  which must not cancel the recording it is clearing the way for. */
+  private async closeStaleSession(): Promise<void> {
+    try {
+      const resolved = await this.resolveClient();
+      if (!resolved) return;
+      await resolved.client.closeSession(resolved.sessionId);
+      this.forgetSentConfig();
+      this.clearSkillFailure();
+    } catch {
+      // Best effort, as the run's own first-use close is.
+    }
+  }
+
+  /** One sentence for a failed record request. The refusals the route defines
+   *  say themselves; transport faults get the run's TBxxx payload. */
+  private describeRecordError(
+    err: unknown,
+    serverUrl: string,
+    envPath: string,
+    log: (line: string) => void,
+  ): string {
+    const apiErr = asApiClientError(err);
+    if (apiErr?.kind === 'conflict') {
+      const reason = apiErrorReason(err);
+      return reason !== 'Conflict'
+        ? reason
+        : 'A run is using this test\'s browser session. Stop it before recording.';
+    }
+    if (apiErr?.kind === 'server-error' && apiErr.status !== undefined && apiErr.status < 500) {
+      // 400 — the headless refusal among them — carries its reason in the body.
+      return apiErrorReason(err);
+    }
+    if (apiErr?.kind === 'not-found') {
+      return (
+        `The server at ${serverUrl} does not know Record Steps — it predates the feature. ` +
+        'Restart it from an up-to-date build.'
+      );
+    }
+    const payload = mapApiErrorToPayload(err, { serverUrl, envPath });
+    this.fail(payload, log);
+    return `${payload.diagnosis}. ${payload.fix}`;
+  }
 }
 
 /**
@@ -5428,6 +5783,30 @@ function resolveValue(value: string, env: Record<string, string>): string {
   if (!value.startsWith('$')) return value;
   const name = value.slice(1);
   return env[name] ?? value;
+}
+
+/**
+ * The write-once per-session `config` block from a test's `## Config`, with
+ * `$VAR` values resolved against the env. Shared by a run's first request and
+ * a recording's, which the server treats alike (stories/testbench-record-steps.md,
+ * decision 3).
+ */
+function sessionConfigFrom(
+  rawConfig: Record<string, string>,
+  env: Record<string, string>,
+): { baseUrl?: string; timeout?: string; viewport?: string } {
+  const sessionConfig: { baseUrl?: string; timeout?: string; viewport?: string } = {};
+  const baseUrl = rawConfig['baseUrl'];
+  if (baseUrl) sessionConfig.baseUrl = resolveValue(baseUrl, env);
+  const timeout = rawConfig['timeout'];
+  if (timeout) sessionConfig.timeout = resolveValue(timeout, env);
+  // Forwarded raw, exactly like baseUrl: the server resolves the preset and
+  // owns the one validator + error message (stories/per-test-viewport.md §3).
+  // `resolveValue` still runs so `viewport: $VIEWPORT` works off the .env
+  // overlay — that is client-side $VAR resolution, not viewport parsing.
+  const viewport = rawConfig['viewport'];
+  if (viewport) sessionConfig.viewport = resolveValue(viewport, env);
+  return sessionConfig;
 }
 
 const VALID_LOG_LEVELS = new Set(['silent', 'error', 'warn', 'info', 'debug']);

@@ -724,6 +724,173 @@ export interface CompileRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Record Steps stream (stories/testbench-record-steps.md §On the wire)
+// ---------------------------------------------------------------------------
+
+/**
+ * What one recorded action was. `check` is the one an Add check pick produces;
+ * every other kind is something the author did to the page.
+ */
+export type RecordActionKind =
+  | 'click'
+  | 'type'
+  | 'select'
+  | 'tick'
+  | 'untick'
+  | 'key'
+  | 'upload'
+  | 'navigate'
+  | 'tab'
+  | 'check';
+
+/** The recorder is installed and listening; the browser is on `url`. */
+export interface RecordStartedEvent {
+  type: 'record:started';
+  url: string;
+  title: string;
+}
+
+/**
+ * One action, as it happened — the panel's live list. `id` is what the client
+ * names in `dropped` on Stop; `summary` is one line with secrets already
+ * masked by the server, so the client prints it as it comes.
+ */
+export interface RecordActionEvent {
+  type: 'record:action';
+  id: string;
+  kind: RecordActionKind;
+  summary: string;
+  /** Milliseconds since `record:started`. */
+  atMs: number;
+  /** The PageTracker label of the tab, when it is not `main`. */
+  tab?: string;
+}
+
+/** Add check was armed (the next click is picked, not performed) or disarmed. */
+export interface RecordPickEvent {
+  type: 'record:pick';
+  armed: boolean;
+}
+
+/** Stop was received; the one model call that writes the steps is running. */
+export interface RecordWritingEvent {
+  type: 'record:writing';
+}
+
+/**
+ * What the recording wrote. The client does the editing: it numbers `steps`
+ * after the cursor, renumbers the rest, and adds each parameter the file does
+ * not already have.
+ */
+export interface RecordResultEvent {
+  type: 'record:result';
+  /** Step texts in order, WITHOUT their numbers. */
+  steps: string[];
+  /** A secret's value is `$NAME` — the `.env` variable that holds it. */
+  parameters: Array<{ name: string; value: string }>;
+  /** Anything the author should know. */
+  notes?: string[];
+}
+
+/**
+ * The record stream's last frame. Its own shape rather than `DoneEvent`:
+ * the vocabulary is narrower (a recording has no `failed`) and it carries the
+ * reason an `error` ended it, which a run's `done` does not.
+ */
+export interface RecordDoneEvent {
+  type: 'done';
+  status: 'passed' | 'error' | 'aborted';
+  error?: string;
+}
+
+export type RecordStepsEvent =
+  | RecordStartedEvent
+  | RecordActionEvent
+  | RecordPickEvent
+  | RecordWritingEvent
+  | RecordResultEvent
+  | OutputEvent
+  | RecordDoneEvent;
+
+export function isRecordStepsEvent(value: unknown): value is RecordStepsEvent {
+  if (!value || typeof value !== 'object') return false;
+  const t = (value as { type?: unknown }).type;
+  return (
+    t === 'record:started' ||
+    t === 'record:action' ||
+    t === 'record:pick' ||
+    t === 'record:writing' ||
+    t === 'record:result' ||
+    t === 'output' ||
+    t === 'done'
+  );
+}
+
+/** `POST /sessions/:id/record-steps` — always SSE. */
+export interface RecordStepsRequest {
+  /** The session's file; also resolves the project. */
+  testFilePath: string;
+  /**
+   * Only on the session's FIRST request — the same write-once object and rule
+   * as the steps route's `config` (`StreamStepsRequest.config`).
+   */
+  config?: { baseUrl?: string; timeout?: string; viewport?: string };
+  target: {
+    mode: 'cursor' | 'new';
+    /** The document as it stands, for the prompt. */
+    fileText: string;
+    /** 1-based; mode `cursor` only. The line the steps go after. */
+    cursorLine?: number;
+  };
+  /**
+   * The project's `.env` as the client resolved it — the same map, and the
+   * same reason, as `StreamStepsRequest.env`: a recording can be the request
+   * that CREATES the session, and a session's model client is built from it.
+   * Beyond the story's wire block; see its "What the TestBench half decided".
+   */
+  env?: Record<string, string>;
+  /** The selected environment, as `StreamStepsRequest.envName`. */
+  envName?: string;
+}
+
+/** `POST /sessions/:id/record-steps/control` — JSON, answers 202. */
+export type RecordControlRequest =
+  | { action: 'stop'; dropped?: string[] }
+  | { action: 'check' }
+  | { action: 'cancel-check' }
+  | { action: 'cancel' };
+
+/**
+ * The panel's Recording block, as the host holds it. The host is the source of
+ * truth — the ✕ on a row asks the host to drop it, and the host re-posts the
+ * whole state — so what Stop sends as `dropped` is always what the panel shows.
+ */
+export interface RecordingPanelState {
+  /** The document being recorded into (`vscode.Uri.toString()`). */
+  uri: string;
+  /** Its basename, for the heading. */
+  file: string;
+  mode: 'cursor' | 'new';
+  /**
+   * `starting` until `record:started` (the browser may be launching),
+   * `recording` while actions stream, `writing` after `record:writing`.
+   */
+  phase: 'starting' | 'recording' | 'writing';
+  /** Add check is armed — from the last `record:pick`. */
+  pickArmed: boolean;
+  /** Where the browser was when recording started. */
+  startedUrl?: string;
+  actions: Array<{
+    id: string;
+    kind: RecordActionKind;
+    summary: string;
+    atMs: number;
+    tab?: string;
+    dropped: boolean;
+  }>;
+}
+
+// ---------------------------------------------------------------------------
 // Per-document state snapshot (sent host → webview)
 // ---------------------------------------------------------------------------
 
@@ -1177,6 +1344,17 @@ export interface HostCompileRunEventMsg {
   event: RunEvent;
 }
 
+/**
+ * The Recording block (stories/testbench-record-steps.md, decision 13). One
+ * recording at a time per window, so the state is window-wide rather than
+ * per file: the panel shows it whichever editor is active, because the author
+ * is clicking in a browser, not reading the editor. `null` takes it down.
+ */
+export interface HostRecordingMsg {
+  type: 'recording';
+  state: RecordingPanelState | null;
+}
+
 export type HostToWebviewMsg =
   | HostActiveFileMsg
   | HostRunEventMsg
@@ -1192,7 +1370,8 @@ export type HostToWebviewMsg =
   | HostSkillRerunAvailableMsg
   | HostCompileEventMsg
   | HostCompileProgressMsg
-  | HostCompileRunEventMsg;
+  | HostCompileRunEventMsg
+  | HostRecordingMsg;
 
 // ---------------------------------------------------------------------------
 // Webview → host
@@ -1358,7 +1537,49 @@ export interface WebviewRerunFailedRowsMsg {
   table: 'run' | { section: string };
 }
 
+/** The panel's ● Record button — record at the active editor's cursor. */
+export interface WebviewRecordStepsMsg {
+  type: 'recordSteps';
+}
+
+/** The panel's Record New Test button. */
+export interface WebviewRecordNewTestMsg {
+  type: 'recordNewTest';
+}
+
+/** The Recording block's Stop — write the steps. */
+export interface WebviewRecordStopMsg {
+  type: 'recordStop';
+}
+
+/** The Recording block's Cancel — end without writing anything. */
+export interface WebviewRecordCancelMsg {
+  type: 'recordCancel';
+}
+
+/** The Recording block's Add check toggle — arms or disarms pick mode. */
+export interface WebviewRecordCheckMsg {
+  type: 'recordCheck';
+}
+
+/**
+ * The ✕ on an action row (or the restore on a struck-through one). Carries
+ * the state wanted rather than "toggle", so a double click that crosses a
+ * re-post cannot flip it back.
+ */
+export interface WebviewRecordDropMsg {
+  type: 'recordDrop';
+  id: string;
+  dropped: boolean;
+}
+
 export type WebviewToHostMsg =
+  | WebviewRecordStepsMsg
+  | WebviewRecordNewTestMsg
+  | WebviewRecordStopMsg
+  | WebviewRecordCancelMsg
+  | WebviewRecordCheckMsg
+  | WebviewRecordDropMsg
   | WebviewCompileMsg
   | WebviewReadyMsg
   | WebviewRunMsg
@@ -1404,7 +1625,8 @@ export function isHostMsg(value: unknown): value is HostToWebviewMsg {
     t === 'skillRerunAvailable' ||
     t === 'compileEvent' ||
     t === 'compileProgress' ||
-    t === 'compileRunEvent'
+    t === 'compileRunEvent' ||
+    t === 'recording'
   );
 }
 
@@ -1429,7 +1651,16 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'clearStatus' ||
     t === 'webviewState' ||
     t === 'rerunSkillStep' ||
-    t === 'compile'
+    t === 'compile' ||
+    // Record Steps (stories/testbench-record-steps.md). `runner-view.ts` drops
+    // anything this guard rejects, so a panel button whose type is missing
+    // here does nothing at all — silently.
+    t === 'recordSteps' ||
+    t === 'recordNewTest' ||
+    t === 'recordStop' ||
+    t === 'recordCancel' ||
+    t === 'recordCheck' ||
+    t === 'recordDrop'
   );
 }
 

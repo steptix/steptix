@@ -300,3 +300,103 @@ cursor line (or under `## Steps` of the new file), renumbers the rest, and
 adds each parameter it does not already have under `## Parameters` (creating
 the section above `## Steps` when there is none) — one edit, one undo. An
 existing parameter with the same name is left as it is.
+
+## What the TestBench half decided
+
+Built in `runner-core/` (the frames, `streamRecordSteps`,
+`controlRecordSteps`) and `testbench-native/` (tb 0.5.151). The text rules
+live in `record-steps-core.ts` and are pinned by `tests/record-steps.test.js`;
+the flow is pinned against a fake server by
+`tests/integration/suite/record-steps.test.cjs`. Where this differs from
+[SPEC-record-steps.md](../docs/specs/SPEC-record-steps.md) it says so.
+
+**Where the cursor may be.** Decision 11's regions, plus three the story left
+open. A line that continues a wrapped step counts as that step, and the new
+steps go after the continuation, never between the step's two halves. Any
+blank line whose nearest non-blank line above is a step counts, not only the
+one directly after it (the spec says "directly after"). And the blank line
+under `## Steps` or under a `### Section` heading opens that flow: the steps
+go in ahead of its first step, numbered from 1. Without that last one an
+empty `## Steps` — which is what Record New Test leaves behind after a
+Cancel — could never be recorded into. Headings themselves, prose, fences and
+items under a `####` heading are refused with the spec's §10 sentence; the
+last three add a clause saying why, since those lines look like steps.
+
+**The line recorded from, when the file changed.** The anchor is remembered
+as a line number and that line's text. At Stop it is looked for where it was,
+then by its text (when that text is unique in the same flow). When it is
+gone, the steps go at the end of the flow the anchor was in — the main flow,
+or that section when it still exists — and a warning says so. This is not
+the spec's literal "end of `## Steps`": the end of the `## Steps` span is
+after the last section's body, where main-flow steps would silently become
+part of that section.
+
+**Numbering.** The new steps continue from the anchor step's number as
+written (so a `1.`-everywhere list stays consistent), and only the rest of
+that one flow is renumbered, by Renumber Steps' own walk. Step texts are
+flattened to one line and a stray leading `3. ` is stripped.
+
+**Parameters.** The section is found by runner-core's own rule, so an added
+line lands where the parser reads it. New lines go after the last bullet
+(after the last non-blank line when there is none); a created section takes
+the `## Steps` heading's depth and its blank lines. A name that is not a valid
+parameter name, or a value that is empty, is left out with a warning. The
+conflict warning is the spec's sentence and names no value. One addition: a
+`$NAME` parameter whose variable the resolved `.env` does not define gets a
+warning at insertion, since the next Run would fail on it.
+
+**One recording per window.** The Recording block and the status bar item
+are window-wide and show whichever file is active: the author is clicking in
+a browser, not reading an editor. Only the recorded test's session is held —
+runs of other tests are unaffected. The recorded test refuses a Run three
+ways: the Run buttons are hidden in the title bar and disabled in the panel,
+and the run controller itself refuses (it would otherwise close the session
+under the recording on its first-use stale-session clear).
+
+**The session.** A recording goes through the run's own plumbing: the same
+env resolution and server check (auto-start included), the same first-use
+close of a session another window left keyed on this path, and the same
+write-once `config` bookkeeping — sent when the session has not had it,
+marked sent on the first frame. The viewport recycle a fresh Run performs is
+not done: a recording means "continue from this page", and recycling would
+close it.
+
+**Paused runs.** Both kinds are ended with the Stop command's own teardown: a
+breakpoint pause (no stream open) and a step pause (the server holds the
+stream). For a step pause the client waits for the run to unwind, then
+retries a 409 for about ten seconds while the server lets go of the queue.
+
+**Beyond the wire block.** The start body also carries `env` (the resolved
+`.env`, as the steps route's does — a recording can be the request that
+creates the session, and a session's model client is built from it) and
+`envName`. `target.cursorLine` is the anchor's line — the step the steps go
+after, or the heading of a flow they open — not the raw cursor position.
+
+**Controls.** Stop before `record:started` is a cancel. Stop sends `dropped`
+only when something was dropped. Cancel sends `cancel` and then closes the
+stream, and a result that races it in is thrown away. The server's
+`done.error` and a 400's reason (the headless refusal) are shown as they
+came; a 404 on the start route says the server predates Record Steps;
+transport failures get the run's TBxxx payloads.
+
+**Record New Test.** The name is a plain file name (`.md` optional, no
+folders, no reserved device names). The title is title case with short
+joining words kept lower-case in the middle (`pay-by-cash` → `Pay by Cash`),
+per the spec — the story's example shows `Pay by cash`. The folder is
+`tests.dir` from the nearest `aiui.config.json` inside the workspace folder
+(never above it — a config outside is another project's); else the fixed
+start of `testbench-native.testsGlob` (`tests/**/*.md` → `tests/`); else the
+workspace folder. The project has no `baseUrl` setting, so it is the active
+test's own when that test is in the same folder, else the most common one
+among the tests in that folder, written raw (`$APP_URL` stays a reference);
+with none, `## Config` is written empty. The file is created with `wx`, so it
+is never overwritten. Skill files are refused: a skill has no browser of its
+own to record in.
+
+**Where things are.** Title bar: Record (`navigation@10`, on a test that is
+idle or paused); while recording, Add Check and Stop Recording at the front.
+Palette: all five commands, gated on the context key. Panel: `● Record` and
+`New test…` in the toolbar, `● Record new test` on the no-test view, and the
+Recording block. The result is applied with one `editor.edit` (re-planned
+against the live text if a keystroke lands in between), the inserted steps
+are selected, and the file is left unsaved.

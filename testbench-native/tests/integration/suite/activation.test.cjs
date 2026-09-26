@@ -88,6 +88,12 @@ describe('TestBench extension — structural smoke', function () {
       'testbench-native.dismissError',
       'testbench-native.selectEnv',
       'testbench-native.focusRunner',
+      // Record Steps (stories/testbench-record-steps.md).
+      'testbench-native.recordSteps',
+      'testbench-native.recordNewTest',
+      'testbench-native.stopRecording',
+      'testbench-native.recordAddCheck',
+      'testbench-native.cancelRecording',
     ];
     const missing = expected.filter((c) => !commands.includes(c));
     assert.deepEqual(missing, [], `missing commands: ${missing.join(', ')}`);

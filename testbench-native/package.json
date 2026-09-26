@@ -2,7 +2,7 @@
   "name": "testbench-native",
   "displayName": "TestBench (Native)",
   "publisher": "pkent",
-  "version": "0.5.150",
+  "version": "0.5.151",
   "description": "Edit and run ai-ui-automation natural-language tests inside VS Code (native editor variant)",
   "private": true,
   "engines": {
@@ -347,6 +347,31 @@
         "command": "testbench-native.continueRun",
         "title": "TestBench: Continue Run",
         "icon": "$(debug-continue)"
+      },
+      {
+        "command": "testbench-native.recordSteps",
+        "title": "TestBench: Record Steps",
+        "icon": "$(record)"
+      },
+      {
+        "command": "testbench-native.recordNewTest",
+        "title": "TestBench: Record New Test",
+        "icon": "$(record)"
+      },
+      {
+        "command": "testbench-native.stopRecording",
+        "title": "TestBench: Stop Recording",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "testbench-native.recordAddCheck",
+        "title": "TestBench: Add Check",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "testbench-native.cancelRecording",
+        "title": "TestBench: Cancel Recording",
+        "icon": "$(close)"
       }
     ],
     "menus": {
@@ -365,7 +390,7 @@
       "editor/title": [
         {
           "command": "testbench-native.runSelected",
-          "when": "testbench-native.activeFile && !testbench-native.running && !testbench-native.paused",
+          "when": "testbench-native.activeFile && !testbench-native.running && !testbench-native.paused && !testbench-native.recording",
           "group": "navigation@1"
         },
         {
@@ -400,12 +425,12 @@
         },
         {
           "command": "testbench-native.restartSession",
-          "when": "testbench-native.activeFile",
+          "when": "testbench-native.activeFile && !testbench-native.recording",
           "group": "navigation@6"
         },
         {
           "command": "testbench-native.runAndCompile",
-          "when": "testbench-native.activeFile && !testbench-native.running",
+          "when": "testbench-native.activeFile && !testbench-native.running && !testbench-native.recording",
           "group": "navigation@7"
         },
         {
@@ -417,6 +442,21 @@
           "command": "testbench-native.discardCodeBehind",
           "when": "testbench-native.codeBehindProposal",
           "group": "navigation@9"
+        },
+        {
+          "command": "testbench-native.recordSteps",
+          "when": "testbench-native.activeFile && !testbench-native.recording && (!testbench-native.running || testbench-native.stepPaused)",
+          "group": "navigation@10"
+        },
+        {
+          "command": "testbench-native.recordAddCheck",
+          "when": "testbench-native.recording",
+          "group": "navigation@1"
+        },
+        {
+          "command": "testbench-native.stopRecording",
+          "when": "testbench-native.recording",
+          "group": "navigation@2"
         }
       ],
       "editor/lineNumber/context": [
@@ -509,6 +549,26 @@
         {
           "command": "testbench-native.compileCodeBehind",
           "when": "false"
+        },
+        {
+          "command": "testbench-native.recordSteps",
+          "when": "testbench-native.activeFile && !testbench-native.recording"
+        },
+        {
+          "command": "testbench-native.recordNewTest",
+          "when": "!testbench-native.recording"
+        },
+        {
+          "command": "testbench-native.stopRecording",
+          "when": "testbench-native.recording"
+        },
+        {
+          "command": "testbench-native.recordAddCheck",
+          "when": "testbench-native.recording"
+        },
+        {
+          "command": "testbench-native.cancelRecording",
+          "when": "testbench-native.recording"
         }
       ]
     },
@@ -516,7 +576,7 @@
       {
         "command": "testbench-native.runSelected",
         "key": "f5",
-        "when": "editorTextFocus && testbench-native.activeFile && !testbench-native.running && !testbench-native.paused"
+        "when": "editorTextFocus && testbench-native.activeFile && !testbench-native.running && !testbench-native.paused && !testbench-native.recording"
       },
       {
         "command": "testbench-native.pause",
