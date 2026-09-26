@@ -1027,6 +1027,18 @@ something the sections above leave open, or departed from them.
   step did not run — the run decided against it*. They state the same cause;
   the boxed one says which decision, which the live offer does not carry, and
   both are pinned by tests on their own surfaces.
+- **A condition that cannot be generated read-only does not fail the
+  compile.** `conditionEntryComplaint` is a textual heuristic over generated
+  code with known false positives (a `reduce` accumulator or an
+  `Object.fromEntries` local written inside `page.evaluate`), and since review
+  round 1 a condition answer that breaks a hard rule twice is an error. A step's
+  generation error still ends the compile; a condition's no longer does. The
+  line gets no entry this time — the model keeps deciding it — it leaves the
+  selection so no replay round expects code from it, the compile ends `partial`
+  and says so in `summary.warnings`, and nothing is written for it, so the next
+  compile tries again (an `ai: true` write-off would stop that). A condition
+  REPAIR that produces nothing usable writes that entry off, as a step that
+  fails every round is written off, and the rounds carry on.
 
 ## Rollout
 

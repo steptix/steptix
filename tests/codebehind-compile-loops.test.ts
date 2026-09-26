@@ -391,6 +391,63 @@ describe('aiui compile — a While whose body runs three passes', () => {
     expect(replayLines(events)).toContain('4/4 passed as code');
   });
 
+  it('does not fail the compile when a condition cannot be generated read-only — the line stays AI, the rest compiles', async () => {
+    const md = await write('statements-refused.md', WHILE_MD);
+    const test = await parseTestFile(md);
+    const { client: base, prompts } = fakeAi();
+    // Every answer for the condition acts on the page, so the read-only rule
+    // refuses both the first answer and its re-ask. Before: the whole compile
+    // failed with `written: []` over a textual heuristic.
+    const client = {
+      complete: async (messages: ChatMessage[]) => {
+        const response = await (base as unknown as {
+          complete: (m: ChatMessage[]) => Promise<{ text: string; model: string }>;
+        }).complete(messages);
+        const prompt = prompts.at(-1)!;
+        if (isCondition(prompt)) {
+          return {
+            text: JSON.stringify({
+              entry: `{ source: ${JSON.stringify(WHILE_LINE)}, async condition({ page }) { await page.locator('#next').click(); return true; } }`,
+            }),
+            model: 'stub-model',
+          };
+        }
+        return response;
+      },
+    } as unknown as AiClient;
+    // With no entry, the replay's guard is decided by the model on every visit.
+    const replay = outcome(
+      [
+        codeRow(1),
+        { ...judged(2, true, 1), loop: marker(1) }, codeRow(3, { loop: marker(1) }),
+        { ...judged(2, true, 2), loop: marker(2) }, codeRow(3, { loop: marker(2) }),
+        { ...judged(2, true, 3), loop: marker(3) }, codeRow(3, { loop: marker(3) }),
+        judged(2, false, 4),
+        codeRow(4),
+      ],
+      4,
+    );
+    const { runner, requests } = scriptedRunner(whileRecord(), [replay]);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent });
+
+    // Not failed: it replayed, and the three steps that could compile did.
+    expect(result.status).toBe('partial');
+    expect(requests.map((r) => r.purpose)).toEqual(['record', 'replay']);
+    expect(result.summary.error ?? '').not.toContain('generation failed');
+    expect(result.summary.compiled).toBe(3);
+    expect(result.summary.warnings?.join('\n')).toContain("step 2's condition was not compiled");
+    expect(stepMessages(events, 'generate', 2).join('\n')).toContain('not compiled');
+
+    // Nothing written for the condition — no `ai: true` either, so the next
+    // compile tries again — and the other entries written.
+    const written = await fs.readFile(path.join(dir, 'statements-refused.steps.ts'), 'utf-8');
+    expect(written).not.toContain(`source: '${WHILE_LINE}'`);
+    expect(written).toContain("source: 'Click Next'");
+    expect(written).toContain("source: 'Open the statements page'");
+  });
+
   it('writes a body step off ONCE when it fails every round, and counts it once', async () => {
     const md = await write('statements.md', WHILE_MD);
     const test = await parseTestFile(md);

@@ -797,6 +797,20 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   /** Steps this compile wrote off as `ai: true` after a replay failure. */
   const writtenOffAi: number[] = [];
   /**
+   * Condition lines whose generation came back as an error — most often the
+   * read-only rule (`conditionEntryComplaint`) refusing both answers.
+   *
+   * NOT fatal to the compile, unlike a step's generation error. That rule is a
+   * textual heuristic over generated code, and it has known false positives
+   * (a `reduce` accumulator written inside `page.evaluate`, say); a heuristic
+   * must not be able to fail a whole compile and write nothing. So the line gets
+   * no entry this time — the model keeps deciding it — it leaves the selection,
+   * so no replay round expects code from it, and the summary names it. Nothing
+   * is written for it either, so the next compile tries again, where an
+   * `ai: true` write-off would stop every later compile from retrying.
+   */
+  const conditionsNotCompiled: Array<{ number: number; message: string }> = [];
+  /**
    * The runtime loop a line sits in the body of, as the prompts name it
    * (decision 2): its authored guard line, and a `For each`'s runtime item.
    * The live compiler's plan asks the same `innermostLoopGuard`.
@@ -869,17 +883,13 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         keptAiConditions.add(step.key!);
       }
       if (applied.kind === 'error') {
-        return finish(
-          'failed',
-          {
-            compiled: 0,
-            kept: keptExisting,
-            keptAi: keptAiExisting,
-            written: [],
-            candidatePath: await candidate.persist(),
-            error: `generation failed for step ${step.number}: ${applied.message}`,
-          },
-          `Generate failed at step ${step.number}: ${applied.message}`,
+        // See `conditionsNotCompiled`: this line stays AI for now, and the
+        // compile carries on with everything else.
+        conditionsNotCompiled.push({ number: step.number, message: applied.message });
+        stepEvent(
+          'generate',
+          step,
+          `not compiled — ${applied.message}; the model keeps deciding this line, and the next compile tries again`,
         );
       }
       continue;
@@ -982,6 +992,14 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         `Generate failed at step ${step.number}: ${applied.message}`,
       );
     }
+  }
+
+  // A condition that got no entry leaves the selection: no replay round may
+  // expect code from it, and `compiled` counts entries this compile wrote.
+  if (conditionsNotCompiled.length > 0) {
+    const dropped = new Set(conditionsNotCompiled.map((c) => c.number));
+    const order = selection.order.filter((s) => !dropped.has(s.number));
+    selection = { keys: new Set(order.map((s) => s.key!)), order, errors: [] };
   }
 
   // The candidate trail (stories/codebehind-recording-on-disk.md): what the
@@ -1460,6 +1478,17 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       if (applied.kind === 'declined') keptAiConditions.add(failed.step.key!);
       if (applied.kind === 'entry') keptAiConditions.delete(failed.step.key!);
     }
+    if (applied.kind === 'error' && failed.step.kind === 'condition') {
+      // A condition's repair that produced nothing usable — most often the
+      // read-only rule refusing both answers — does not end the compile: that
+      // rule is a heuristic (see `conditionsNotCompiled`). The entry it was
+      // repairing is known wrong (it failed this replay), so it is written off
+      // here, as a step that fails every round would be, and the rounds carry
+      // on with everything else.
+      await writeOff(failed.step, applied.message, 'because its repair produced no usable condition');
+      keptAiConditions.add(failed.step.key!);
+      continue;
+    }
     if (applied.kind === 'error') {
       return finish(
         'failed',
@@ -1600,6 +1629,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     && unreached.length === 0
     && toleratedInReplay.length === 0
     && notAttempted.length === 0
+    && conditionsNotCompiled.length === 0
       ? 'green'
       : 'partial';
   const keptAi = keptAiExisting + declined;
@@ -1626,6 +1656,10 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
           : recordingSkipCause(skipCauseRows);
   const tail = [
     writtenOffAi.length > 0 ? `${writtenOffAi.length} kept AI after replay failures` : '',
+    conditionsNotCompiled.length > 0
+      ? `${listSteps(conditionsNotCompiled.map((c) => c.number))} not compiled ` +
+        `(${conditionsNotCompiled[0]!.message})`
+      : '',
     unproven.length > 0 ? `${unproven.length} unproven (${listSteps(unproven)})` : '',
     unreached.length > 0
       ? `${listSteps(unreached.map((u) => u.step))} not reached by the replay ` +
@@ -1668,7 +1702,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     ...(endedAsWritten && { endedAsWritten }),
     notAttempted,
     ...(failure !== undefined && { error: failure }),
-    ...(loopWarnings.length > 0 && { warnings: loopWarnings }),
+    ...((loopWarnings.length > 0 || conditionsNotCompiled.length > 0) && {
+      warnings: [
+        ...loopWarnings,
+        ...conditionsNotCompiled.map(
+          (c) =>
+            `step ${c.number}'s condition was not compiled: ${c.message}. The model keeps ` +
+            'deciding it; compile again to retry.',
+        ),
+      ],
+    }),
   };
   // Said as they are decided — once, for the round that decides — so the CLI
   // prints them and the server carries them as `output` frames, the way an
