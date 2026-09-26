@@ -287,7 +287,9 @@ every route. Body:
 ```ts
 { type: 'record:started'; url: string; title: string }
 { type: 'record:action'; id: string; kind: 'click' | 'type' | 'select' | 'tick'
-    | 'untick' | 'key' | 'upload' | 'navigate' | 'tab' | 'check';
+    | 'untick' | 'key' | 'upload' | 'navigate' | 'tab' | 'check'
+    | 'drag' | 'back' | 'forward' | 'reload';
+  action: boolean;                 // true for an ACTION (decision 4), false for an event
   summary: string;                 // one line for the panel, secrets masked
   atMs: number;                    // since record:started
   tab?: string }                   // PageTracker label when not `main`

@@ -348,7 +348,8 @@ every route.
 { type: 'record:started'; url: string; title: string }
 { type: 'record:action'; id: string;
   kind: 'click' | 'type' | 'select' | 'tick' | 'untick' | 'key' | 'upload'
-      | 'navigate' | 'tab' | 'check';
+      | 'navigate' | 'tab' | 'check' | 'drag' | 'back' | 'forward' | 'reload';
+  action: boolean;             // true for an ACTION (§4), false for an event that rides with the next one
   summary: string;             // one line for the panel; secrets masked
   atMs: number;                // since record:started
   tab?: string }               // the tab's label when not `main`
