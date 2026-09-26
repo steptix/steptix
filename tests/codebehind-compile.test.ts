@@ -11,6 +11,7 @@ import { clearSkillCache } from '../src/skills/expander.js';
 import type { StepResult } from '../src/report/types.js';
 import {
   compileTest,
+  outcomeRows,
   reportToOutcome,
   type CompileEvent,
   type CompileRunOutcome,
@@ -598,7 +599,7 @@ export default defineSteps([
 
   // ── Control flow (stories/control-flow.md, decision 12) ──────────────────
 
-  it('refuses a test that loops, before it runs anything', async () => {
+  it('compiles a test that loops — the refusal is gone (stories/codebehind-loops-and-conditions.md)', async () => {
     const md = await write(
       'looping.md',
       [
@@ -611,26 +612,70 @@ export default defineSteps([
       ].join('\n'),
     );
     const test = await parseTestFile(md);
-    const { runner, requests } = scriptedRunner(3, []);
+    // Expanded: 1 Open · 2 While · 3 Click Next. One pass, then the loop ends.
+    const judgedAt = (holds: boolean): StepResult => ({
+      index: 2,
+      instruction: 'While the Next button is enabled, Click Next',
+      status: 'passed',
+      turns: [],
+      durationMs: 1,
+      retried: false,
+      guard: {
+        decidedBy: 'model',
+        holds,
+        evidence: { dom: `<button id="next"${holds ? '' : ' disabled'}>Next</button>`, url: 'https://app.test/s', members: [{ index: 1, holds }] },
+      },
+    });
+    const record: CompileRunOutcome = {
+      status: 'passed',
+      ...outcomeRows([stepResult(1), judgedAt(true), stepResult(3), judgedAt(false)], 3),
+      resolvedParameters: {},
+      tokensUsed: 0,
+    };
+    const coded = (holds: boolean): StepResult => ({
+      ...judgedAt(holds), guard: { decidedBy: 'code', holds }, fromCodeBehind: true,
+    });
+    const replay: CompileRunOutcome = {
+      status: 'passed',
+      ...outcomeRows(
+        [stepResult(1, { fromCodeBehind: true }), coded(true), stepResult(3, { fromCodeBehind: true }), coded(false)],
+        3,
+      ),
+      resolvedParameters: {},
+      tokensUsed: 0,
+    };
+    const requests: CompileRunRequest[] = [];
+    const runner: CompileRunner = async (request) => {
+      requests.push(request);
+      return request.purpose === 'record' ? record : replay;
+    };
+    const { client } = scriptedClient([
+      entryEnvelope('Open the statements page'),
+      JSON.stringify({
+        entry:
+          "{ source: 'While the Next button is enabled, Click Next', async condition({ page }) { " +
+          "return (await page.locator('#next:enabled').count()) > 0; } }",
+      }),
+      entryEnvelope('Click Next'),
+      REVIEW_NOOP,
+    ]);
+    const { events, onEvent } = collect();
 
     const result = await compileTest({
-      test, config: CONFIG, contextContent: '', aiClient: scriptedClient([]).client, runner,
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
     });
 
-    expect(result.status).toBe('failed');
-    expect(result.summary.error).toContain('While the Next button is enabled, Click Next');
-    expect(result.summary.error).toContain('a number of times the page decides');
-    // The advice names things that actually work. The first version said
-    // "compile the section the loop runs, on its own" — and the check it came
-    // from ran over the whole FILE, so that compile was refused too.
-    expect(result.summary.error).toContain('Compile This Step on a step OUTSIDE the loop');
-    expect(result.summary.error).toContain('the body of the section the loop runs');
-    expect(result.summary.error).toContain('remove the loop before compiling');
-    // Nothing ran — the point of refusing before Record.
-    expect(requests).toEqual([]);
+    expect(result.status).toBe('green');
+    // It recorded and replayed, where it used to refuse before running anything.
+    expect(requests.map((r) => r.purpose)).toEqual(['record', 'replay']);
+    // The guard is a compile step now: its condition entry, and the body's.
+    expect(generatedSteps(events)).toEqual([1, 2, 3]);
+    const written = await fs.readFile(path.join(dir, 'looping.steps.ts'), 'utf-8');
+    expect(written).toContain("source: 'While the Next button is enabled, Click Next'");
+    expect(written).toContain('async condition({ page })');
   });
 
-  it('compiles a chain, generating for the tails and not for the guards', async () => {
+  it('compiles a chain: the tails, the If as a condition, never the Otherwise', async () => {
     const md = await write(
       'decide.md',
       [
@@ -643,26 +688,77 @@ export default defineSteps([
       ].join('\n'),
     );
     const test = await parseTestFile(md);
-    // Four expanded steps: guard, tail, guard, tail. Only the two tails are
-    // eligible, so the client is scripted for exactly two entries.
+    // Four expanded steps: guard, tail, guard, tail. The If held, so its tail
+    // ran and the Otherwise's did not — the recording a real run makes. The If
+    // is a condition line the model decided, so it compiles too (decision 4);
+    // the Otherwise has no condition and stays dispatched.
+    const guard = (over: Partial<StepResult>): StepResult => ({
+      index: 1, instruction: 'If the Cash checkbox is ticked, then Confirm the booking',
+      status: 'passed', turns: [], durationMs: 1, retried: false, ...over,
+    });
+    const skipped = (index: number): StepResult => ({
+      index, instruction: `step ${index}`, status: 'skipped', turns: [], durationMs: 0, retried: false,
+      aiExplanation: 'Skipped: another branch of this decision was taken',
+    });
+    const record: CompileRunOutcome = {
+      status: 'passed',
+      ...outcomeRows(
+        [
+          guard({
+            guard: {
+              decidedBy: 'model',
+              selected: 0,
+              evidence: { dom: '<input id="cash" checked>', url: 'https://app.test/pay', members: [{ index: 0, holds: true }] },
+            },
+          }),
+          stepResult(2),
+          skipped(3),
+          skipped(4),
+        ],
+        4,
+      ),
+      resolvedParameters: {},
+      tokensUsed: 0,
+    };
+    const replay: CompileRunOutcome = {
+      status: 'passed',
+      ...outcomeRows(
+        [
+          guard({ guard: { decidedBy: 'code', selected: 0 }, fromCodeBehind: true }),
+          stepResult(2, { fromCodeBehind: true }),
+          skipped(3),
+          skipped(4),
+        ],
+        4,
+      ),
+      resolvedParameters: {},
+      tokensUsed: 0,
+    };
+    const runner: CompileRunner = async (request) => (request.purpose === 'record' ? record : replay);
     const { client } = scriptedClient([
+      JSON.stringify({
+        entry:
+          "{ source: 'If the Cash checkbox is ticked, then Confirm the booking', async condition({ page }) { " +
+          "return (await page.locator('#cash:checked').count()) > 0; } }",
+      }),
       entryEnvelope('Confirm the booking', `await page.locator('#confirmed').waitFor();`),
-      entryEnvelope('Enter the booking code'),
       REVIEW_NOOP,
     ]);
-    const { runner } = scriptedRunner(4, ['pass']);
     const { events, onEvent } = collect();
 
     const result = await compileTest({
       test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent,
     });
 
-    expect(result.status).toBe('green');
-    // Steps 2 and 4 — the tails. The guards were never offered.
-    expect(generatedSteps(events)).toEqual([2, 4]);
+    // Partial: the untaken tail never ran, so it has nothing to compile from.
+    expect(result.status).toBe('partial');
+    expect(result.summary.notAttempted).toEqual([4]);
+    // Step 1 — the If's condition — and step 2, its tail. Never the Otherwise.
+    expect(generatedSteps(events)).toEqual([1, 2]);
     const written = await fs.readFile(path.join(dir, 'decide.steps.ts'), 'utf-8');
-    expect(written).not.toContain('If the Cash checkbox is ticked');
+    expect(written).toContain("source: 'If the Cash checkbox is ticked, then Confirm the booking'");
     expect(written).not.toContain('Otherwise');
+    expect(result.summary.unproven).toEqual([]);
   });
 });
 

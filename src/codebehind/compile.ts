@@ -7,22 +7,33 @@ import type { TokenTracker } from '../utils/tokens.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
-import { loopCompileRefusal } from '../runner/control-flow.js';
+import {
+  chainMembers,
+  innermostLoopGuard,
+  isChainRecord,
+  type ControlRecord,
+} from '../runner/control-flow.js';
 import { buildCodeBehindRegistry } from './loader.js';
 import {
   aiEntryFor,
   anyActionCarriesPlaceholder,
   askForEntry,
+  compilableCondition,
+  generateConditionEntry,
   generateStepEntry,
   guardedValues,
+  loopContextFor,
+  pickConditionObservations,
   stepEnvRefs,
   stepParameters,
   SET_STEP_NOT_COMPILED,
   SURFACE_SWITCH_NOT_COMPILED,
   USE_AI_NOT_COMPILED,
   valueMatchWarning,
+  type ConditionObservation,
   type GeneratedEntry,
 } from './generate.js';
+import type { LoopContext } from '../ai/prompts.js';
 import { buildRepairPrompt } from './repair.js';
 import { reviewCandidate } from './review.js';
 // The two refusals both compilers say; they live beside `generationRefusal`.
@@ -33,6 +44,7 @@ import {
   DISPATCHED_NOT_COMPILED,
   endedAsWrittenReason,
   COMPUTER_MODE_STAYS_AI,
+  hasEntryOfKind,
   TOLERATED_FAILURE_REFUSAL,
 } from './live-compile.js';
 import { clearStale, readLastRun } from './last-run.js';
@@ -53,7 +65,7 @@ import {
   resolveEnvDataRef,
 } from '../parser/interpolate-env-data.js';
 import { loadDataFile } from '../parser/parameters.js';
-import { recordingDirFor, writeReplayFailure } from './recording.js';
+import { evidenceRows, recordingDirFor, writeReplayFailure } from './recording.js';
 
 /**
  * The compiler (stories/codebehind-compile.md, "The compile pipeline").
@@ -212,9 +224,29 @@ export interface CompileRunOutcome {
   /** Why the run failed when no step did — a candidate that could not be
    *  loaded. The compile reports it instead of "no step owns the failure". */
   error?: string;
-  /** One entry per expanded step, indexed by `step.index - 1`. Sparse when a
-   *  run bailed early. */
+  /**
+   * The EVIDENCE row per expanded step, indexed by `step.index - 1`: the first
+   * pass that passed, else the first row of all (`evidenceRows`, the row the
+   * recording on disk keeps too — stories/codebehind-loops-and-conditions.md,
+   * decisions 1 and 14). A step outside every runtime loop has one row and
+   * this is it. Sparse when a run bailed early.
+   */
   steps: (StepResult | undefined)[];
+  /**
+   * EVERY row per expanded step, in execution order — a `While` body index
+   * holds one row per pass, a guard one per visit (decision 3). What a replay
+   * is proven by, and what a Record's prefix is judged by. Absent on an
+   * outcome built by hand, which then means one row per index: `steps`.
+   * {@link outcomeRows} builds this, `steps` and `rows` together.
+   */
+  passes?: StepResult[][] | undefined;
+  /**
+   * Every step row of the run, in execution order across indices — what the
+   * replay's condition check walks visit by visit (decision 11), and what a
+   * guard's observations are read off in order. Absent means `passes`,
+   * flattened in index order.
+   */
+  rows?: StepResult[] | undefined;
   /** The run's final parameter map, for the leak guard and the prompt. */
   resolvedParameters: Record<string, string>;
   tokensUsed: number;
@@ -348,25 +380,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // to compile is the most expensive way to learn that. Everything selection
   // needs — which steps have entries, and which a previous run flagged — is
   // already on disk in the file and the last-run sidecar.
-  // A loop is refused outright, before anything runs
-  // (stories/control-flow.md). A compile places an entry at
-  // `spans[occurrence]`, and occurrence is counted per step line — but a loop
-  // body runs the same lines a number of times only the page decides, so the
-  // Record produces N transcripts for one slot and the plan's "not attempted"
-  // arithmetic counts a step that ran three times as one. Refusing is honest
-  // and cheap; supporting it properly is its own story. A CHAIN compiles
-  // normally: its steps run at most once, and the untaken branch is simply not
-  // attempted, which the summary already has a word for.
-  const loopLine = firstLoopGuard(test);
-  if (loopLine !== undefined) {
-    // `aiui compile` compiles a whole FILE — there is no slice to scope this
-    // to, which is why the refusal stands here where the server's is now
-    // bounded to the batch's own range. The wording is shared so the two
-    // surfaces say the same thing about the same file.
-    const message = loopCompileRefusal(loopLine);
-    return finish('failed', { compiled: 0, kept: 0, keptAi: 0, written: [], error: message }, message);
-  }
-
+  //
+  // A file that LOOPS compiles like any other
+  // (stories/codebehind-loops-and-conditions.md). A loop body re-runs the same
+  // expanded indices, so the Record hands back several rows for one index:
+  // the entry is generated from the first pass that passed (decision 1), and
+  // the replay proves it on every pass (decision 3). A guard whose condition
+  // the model decides — `If`, `Else if`, `While`, `Repeat … until` — is a
+  // compile step of its own, generated from the pages the judge decided on
+  // (decisions 4 and 9).
+  const controls: readonly (ControlRecord | null)[] = test.expansion?.controls ?? [];
   const steps = await describeSteps(test);
   const staleKeys = await collectStaleKeys(test, options.recorded, steps);
   let selection = selectSteps(steps, options.select ?? {}, staleKeys);
@@ -435,9 +458,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // modes honour as they do any stale flag: the default and `--only-stale`
   // take it, `--steps` ignores it.
   const recordStale = new Set(staleKeys);
-  for (const step of steps) {
-    if (step.key && record.steps[step.index]?.codeBehindStale) recordStale.add(step.key);
-  }
+  for (const key of staleKeysIn(record, steps)) recordStale.add(key);
   if (recordStale.size > staleKeys.size) {
     const widened = selectSteps(steps, options.select ?? {}, recordStale);
     for (const step of widened.order) {
@@ -456,7 +477,17 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // INCLUSIVE, because that step worked (stories/step-failure-outcomes.md,
   // decisions 1–3). Told apart here, once, because everything downstream words
   // itself off which happened.
-  const prefixEnd = usablePrefix(record.steps);
+  //
+  // Judged on EVERY row of an index, not its evidence row: a body step that
+  // passed on pass 1 and failed on pass 2 is a step the recording broke at,
+  // however good pass 1's transcript is.
+  /** The Record's rows, per index and in execution order. A const because the
+   *  replay's closures read it and `record` is a `let`. */
+  const recorded = runRows(record);
+  const recordedAt = (index: number): StepResult[] => recorded.passes[index] ?? [];
+  /** The Record's final parameter map, for the same reason. */
+  const recordParameters = record.resolvedParameters;
+  const prefixEnd = usablePrefix(recorded.passes);
   let stoppedAt: CompileSummary['stoppedAt'];
   /**
    * The step whose own text ended the recording, when one did
@@ -484,12 +515,11 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // it — which is why one branch below names the step that broke and the other
     // names the step that finished.
     const endedIndex =
-      prefixEnd > 0 && deliberateFailure(record.steps[prefixEnd - 1]) ? prefixEnd - 1 : -1;
-    const stoppedStep = record.steps[prefixEnd];
+      prefixEnd > 0 && recordedAt(prefixEnd - 1).some(deliberateFailure) ? prefixEnd - 1 : -1;
     const error =
       endedIndex >= 0
-        ? record.steps[endedIndex]?.error ?? 'the step failed as its text says'
-        : stoppedStep?.error ??
+        ? recordedAt(endedIndex).find(deliberateFailure)?.error ?? 'the step failed as its text says'
+        : breakingRow(recordedAt(prefixEnd))?.error ??
           (record.status === 'passed'
             ? 'the run stopped before this step'
             : 'the run failed before this step');
@@ -588,17 +618,46 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // history (stories/step-failure-outcomes.md, decision 11): it ran, and left a
   // transcript of the failure, so it is no evidence either and is dropped on the
   // same terms — `usablePrefix` steps over it, so the steps AFTER it compile.
-  const skippedInRecording = selection.order.filter(
-    (s) => record.steps[s.index]?.status === 'skipped',
+  //
+  // Per INDEX, across every pass (stories/codebehind-loops-and-conditions.md,
+  // decision 3): a body step skipped on pass 1 by a return and run on pass 2
+  // has evidence, and one skipped on every pass has none.
+  //
+  // A CONDITION line is judged differently: it has no transcript at all. Its
+  // evidence is the pages the judge decided on, read off the Record's guard
+  // rows (decision 9) — which exist only in memory, because the recording on
+  // disk keeps a guard row's decision and never its page. A condition no visit
+  // ever asked has nothing to generate from and is not attempted.
+  const recordVisits = guardVisits(recorded.rows, controls);
+  const snapshots = passSnapshots(recorded.rows, record.resolvedParameters);
+  const observationsFor = (member: number): RecordedObservation[] =>
+    observationsOf(recordVisits, member, snapshots);
+  const stepKinds = selection.order.filter((s) => s.kind !== 'condition');
+  const skippedInRecording = stepKinds.filter((s) => {
+    const rows = recordedAt(s.index);
+    return rows.length > 0 && rows.every((r) => r.status === 'skipped');
+  });
+  const toleratedInRecording = stepKinds.filter((s) => {
+    const rows = recordedAt(s.index);
+    return !rows.some((r) => r.status === 'passed') && rows.some((r) => toleratedFailure(r));
+  });
+  const neverAsked = selection.order.filter(
+    (s) => s.kind === 'condition' && observationsFor(s.index).length === 0,
   );
-  const toleratedInRecording = selection.order.filter((s) => toleratedFailure(record.steps[s.index]));
-  const noEvidence = new Set([...skippedInRecording, ...toleratedInRecording]);
+  const noEvidence = new Set([...skippedInRecording, ...toleratedInRecording, ...neverAsked]);
+  /** What the recording's skip cause is read off: each skipped step's first
+   *  row, and a never-asked condition's own row — skipped too, by the same
+   *  decision or return that skipped the structure it opens. */
+  const skipCauseRows = [...skippedInRecording, ...neverAsked].map((s) => recordedAt(s.index)[0]);
   if (noEvidence.size > 0) {
     for (const step of skippedInRecording) {
-      stepEvent('select', step, notRunOnRecordingReason(record.steps[step.index]));
+      stepEvent('select', step, notRunOnRecordingReason(recordedAt(step.index)[0]));
     }
     for (const step of toleratedInRecording) {
       stepEvent('select', step, TOLERATED_FAILURE_REFUSAL);
+    }
+    for (const step of neverAsked) {
+      stepEvent('select', step, neverAskedReason(recordedAt(step.index)));
     }
     notAttempted = [
       ...new Set([...notAttempted, ...[...noEvidence].map((s) => s.number)]),
@@ -621,7 +680,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       const cause = [
         didNotRun.length > 0
           ? `${listSteps(didNotRun)} did not run on the recording run` +
-            `${stoppedAt || endedAsWritten ? '' : describeRecordingSkips(skippedInRecording.map((s) => record.steps[s.index]))}`
+            `${stoppedAt || endedAsWritten ? '' : describeRecordingSkips(skipCauseRows)}`
           : '',
         toleratedNumbers.length > 0
           ? `${listSteps(toleratedNumbers)} failed on the recording run and was tolerated ` +
@@ -674,20 +733,113 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // name placeholders carries values everywhere — a secret's already redacted
   // to `***` — so every reference would look unaccounted
   // (stories/placeholder-preserving-actions.md, decision 6).
-  const recordingCarriesPlaceholders = record.steps.some((s) =>
+  const recordingCarriesPlaceholders = recorded.rows.some((s) =>
     anyActionCarriesPlaceholder(actionsOf(s)),
   );
   /** The pre-change notice is worth saying once, and only when it changed an
    *  answer — a test that references nothing is unaffected by the rule. */
   let saidPreChange = false;
   let declined = 0;
+  /**
+   * Condition lines whose entry in the candidate is `ai: true` — declined at
+   * generation (judged with no DOM) or at a repair. The model decides them in
+   * the replay, so no visit of theirs is decided by code; what proves them is
+   * a visit that did not fail, as a declined step is proven by passing under AI.
+   */
+  const keptAiConditions = new Set<string>();
   /** Steps this compile wrote off as `ai: true` after a replay failure. */
   const writtenOffAi: number[] = [];
+  /**
+   * The runtime loop a line sits in the body of, as the prompts name it
+   * (decision 2): its authored guard line, and a `For each`'s runtime item.
+   * The live compiler's plan asks the same `innermostLoopGuard`.
+   */
+  const loopAt = (index: number): { line: string; runtimeItem?: string } | undefined => {
+    const guard = innermostLoopGuard(controls, index);
+    if (guard === undefined) return undefined;
+    const loop = controls[guard];
+    return {
+      line: steps[guard]?.text ?? test.steps[guard] ?? '',
+      ...(loop?.kind === 'foreach' && { runtimeItem: loop.item }),
+    };
+  };
+  /** The same for a whole generation: the loop block, from the values of the
+   *  pass whose evidence the prompt shows. */
+  const loopContextAt = (index: number, passValues: Record<string, string>): LoopContext | undefined => {
+    const loop = loopAt(index);
+    return loop ? loopContextFor(loop.line, passValues, loop.runtimeItem) : undefined;
+  };
+  /** A condition line's generation — the first one, or a repair — from the
+   *  Record's observations of it. */
+  const askCondition = async (
+    step: CompileStep,
+    observations: RecordedObservation[],
+    repair?: { entryCode: string; error: string },
+  ): Promise<GeneratedEntry> => {
+    // The visit whose values the prompt reads: the first one it is shown.
+    const shown = pickConditionObservations(observations)[0] ?? observations[0];
+    const values = shown?.parameters ?? recordParameters;
+    const loop = loopContextAt(step.index, values);
+    return generateConditionEntry({
+      binding: step.binding!,
+      observations,
+      resolvedParameters: values,
+      ...(test.envData && { envData: test.envData }),
+      aiClient: options.aiClient,
+      contextContent: options.contextContent,
+      testName: test.title,
+      ...(test.config.baseUrl !== undefined && { baseUrl: test.config.baseUrl }),
+      ...(options.signal && { signal: options.signal }),
+      wholeTest: wholeTestFor(steps, selection.keys, step),
+      candidateFile: (await candidate.read(step.binding!.file)) ?? undefined,
+      ...(loop && { loop }),
+      ...(repair && { repair }),
+    });
+  };
   for (const step of selection.order) {
     if (options.signal?.aborted) {
       return finish('failed', { compiled: 0, kept: keptExisting, keptAi: keptAiExisting, written: [], error: 'aborted' }, 'Compile aborted.');
     }
+
+    // ── A condition line: its entry answers the question the judge answered
+    // (decisions 4 and 9), from the first page it held on and the first it
+    // did not. One judged without a DOM — the computer surface — is declined
+    // by the generator itself, as `ai: true` with the reason (decision 10).
+    if (step.kind === 'condition') {
+      const applied = await applyGenerated(
+        candidate,
+        step,
+        await askCondition(step, observationsFor(step.index)),
+        stepEvent,
+        'generate',
+      );
+      if (applied.kind === 'declined') {
+        declined++;
+        keptAiConditions.add(step.key!);
+      }
+      if (applied.kind === 'error') {
+        return finish(
+          'failed',
+          {
+            compiled: 0,
+            kept: keptExisting,
+            keptAi: keptAiExisting,
+            written: [],
+            candidatePath: await candidate.persist(),
+            error: `generation failed for step ${step.number}: ${applied.message}`,
+          },
+          `Generate failed at step ${step.number}: ${applied.message}`,
+        );
+      }
+      continue;
+    }
+
+    // The EVIDENCE row: the first pass that passed (decision 1).
     const result = record.steps[step.index];
+    // …read with that pass's own values (decision 2). The run's final map
+    // holds the LAST pass's `For each` item, which is not the item on the page
+    // this transcript was recorded against.
+    const passValues = result ? (snapshots.get(result) ?? record.resolvedParameters) : record.resolvedParameters;
 
     // ── A step that EXECUTED in computer mode stays AI (§9) ──────────────
     //
@@ -705,11 +857,12 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       continue;
     }
 
+    const loop = loopContextAt(step.index, result?.loop?.values ?? passValues);
     const generated = await generateStepEntry({
       binding: step.binding!,
       actions: actionsOf(result),
       ...(result?.assertions && { assertions: result.assertions }),
-      resolvedParameters: record.resolvedParameters,
+      resolvedParameters: passValues,
       recordingCarriesPlaceholders,
       // What `${data.url}` and kin resolved to, so the generator can say
       // "read it with step.getVar('data.url')" and the guard can catch the
@@ -723,6 +876,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       wholeTest: wholeTestFor(steps, selection.keys, step),
       candidateFile: (await candidate.read(step.binding!.file)) ?? undefined,
       ...contextOf(result),
+      ...(loop && { loop }),
     });
     const applied = await applyGenerated(candidate, step, generated, stepEvent, 'generate');
     if (applied.kind === 'entry' && applied.references) {
@@ -788,7 +942,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // error), or unreached. All three are proposed; the summary says which is
   // which (stories/codebehind-compile-as-a-run.md §Write what passed).
   let green = false;
-  let lastFailure: { step: CompileStep; error: string; result?: StepResult | undefined } | undefined;
+  let lastFailure: (ReplayFailure & { step: CompileStep }) | undefined;
   /** Why the compile is not green, when it is not. */
   let failure: string | undefined;
   const proven = new Set<string>();
@@ -826,41 +980,77 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
    * stays an ordinary replay failure.
    */
   let endedInReplay: { step: number } | undefined;
-  /** The recording's rows, for the comparison above. A const because
-   *  `markRound` is a closure and `record` is a `let`. */
-  const recordedSteps = record.steps;
+  /** Did the RECORDING fail at this index in the author's words? Read off every
+   *  pass, for the comparison above. */
+  const recordedDeliberate = (index: number): boolean => recordedAt(index).some(deliberateFailure);
   const stepsInS = (): CompileStep[] => steps.filter((s) => s.key && selection.keys.has(s.key));
+  /**
+   * A replay round's rows and what they say about the conditions: every visit
+   * to a guard, and the first where the replay's CODE answered differently from
+   * the recording (decision 11). Computed per call — it is a pure reading of
+   * the outcome — so `markRound` and `failureOf` cannot disagree.
+   */
+  const readRound = (
+    outcome: CompileRunOutcome,
+  ): RunRows & { visits: GuardVisit[]; mismatch: DecisionMismatch | undefined } => {
+    const run = runRows(outcome);
+    const visits = guardVisits(run.rows, controls);
+    return { ...run, visits, mismatch: compareDecisions(recordVisits, visits, steps) };
+  };
   const markRound = (outcome: CompileRunOutcome): void => {
     unreached = [];
     toleratedInReplay = [];
     endedInReplay = undefined;
-    const endedAt = outcome.steps.findIndex(
-      (s, i) => deliberateFailure(s) && deliberateFailure(recordedSteps[i]),
-    );
-    if (endedAt >= 0) endedInReplay = { step: endedAt + 1 };
+    const round = readRound(outcome);
+    const ended = round.rows.find((r) => deliberateFailure(r) && recordedDeliberate(r.index - 1));
+    if (ended) endedInReplay = { step: ended.index };
     for (const step of stepsInS()) {
-      const result = outcome.steps[step.index];
-      if (result?.status === 'passed') proven.add(step.key!);
-      // The entry failed the run in the author's words where the recording's AI
-      // turn did the same: the entry working, not breaking.
-      if (deliberateFailure(result) && deliberateFailure(recordedSteps[step.index])) {
+      if (step.kind === 'condition') {
+        // Proven when its code decided a visit cleanly and the decisions it made
+        // match the recording's — a replay whose decisions match is proof for
+        // the entries that decided them (decision 11). A member its chain's
+        // winner kept from ever running proves nothing, and stays unproven.
+        const clean = keptAiConditions.has(step.key!)
+          ? askedCleanly(round.visits, step.index)
+          : codeDecidedCleanly(round.visits, step.index);
+        if (clean && round.mismatch?.member !== step.index) {
+          proven.add(step.key!);
+        }
+        continue;
+      }
+      // Every pass, not the last (decision 3): proven only when every pass
+      // that ran ran cleanly. A pass a `return` skipped is no evidence against
+      // the ones that ran.
+      const rows = round.passes[step.index] ?? [];
+      const ran = rows.filter((r) => r.status !== 'skipped');
+      if (
+        ran.length > 0
+        && ran.every(
+          (r) =>
+            r.status === 'passed'
+            // The entry failed the run in the author's words where the
+            // recording's AI turn did the same: the entry working, not breaking.
+            || (deliberateFailure(r) && recordedDeliberate(step.index)),
+        )
+      ) {
         proven.add(step.key!);
       }
-      if (toleratedFailure(result)) {
+      const tolerated = ran.find((r) => toleratedFailure(r));
+      if (tolerated) {
         toleratedInReplay.push({
           step: step.number,
           // The step's own error, so the compile's summary and the run's
           // report say the same thing about the same step.
-          reason: result?.error?.trim() || 'the step failed and the run continued',
+          reason: tolerated.error?.trim() || 'the step failed and the run continued',
         });
       }
-      if (result?.status === 'skipped') {
+      if (rows.length > 0 && ran.length === 0) {
         unreached.push({
           step: step.number,
           // The runner's own sentence — `Not run: step 3 returned from "Sign
           // in"` — so the compile's summary and the run's report say the same
           // thing about the same step.
-          reason: result.aiExplanation?.trim() || 'a return ended its flow',
+          reason: rows[0]!.aiExplanation?.trim() || 'a return ended its flow',
         });
       }
     }
@@ -890,10 +1080,17 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     return outcome;
   };
   const replayTotal = throughStep ?? test.steps.length;
-  /** Where a replay failed, or undefined when the run failed without a step. */
-  const failureOf = (
-    outcome: CompileRunOutcome,
-  ): { step: CompileStep | undefined; result: StepResult | undefined; error: string } => {
+  /**
+   * Where a replay failed: the first failure in EXECUTION order (decision 3) —
+   * a step's failed pass, a guard that failed, or a condition that answered
+   * differently from the recording (decision 11), whichever the run reached
+   * first. A wrong answer comes first when it and the failure it caused are
+   * the same visit: a `While` whose code says "carry on" where the recording
+   * stopped is what then breaches the cap, or fails the pass it should never
+   * have run.
+   */
+  const failureOf = (outcome: CompileRunOutcome): ReplayFailure => {
+    const round = readRound(outcome);
     // `!tolerated`: a tolerated failure carries `status: 'failed'` and the run
     // went past it (stories/step-failure-outcomes.md, decision 6), so taking it
     // as THE failure would repair — and eventually write off as `ai: true` — a
@@ -901,18 +1098,84 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // recording made too (decisions 1–3): repairing that would ask the model to
     // stop a step from failing when failing is what its text says to do, and the
     // write-off after `maxRounds` would bury the author's own line.
-    const failedAt = outcome.steps.findIndex(
-      (s, i) =>
-        s?.status === 'failed'
-        && !s.tolerated
-        && !(deliberateFailure(s) && deliberateFailure(recordedSteps[i])),
+    const failedAt = round.rows.findIndex(
+      (r) =>
+        r.status === 'failed'
+        && !r.tolerated
+        && !(deliberateFailure(r) && recordedDeliberate(r.index - 1)),
     );
-    const result = failedAt >= 0 ? outcome.steps[failedAt] : undefined;
-    return {
-      step: failedAt >= 0 ? steps[failedAt] : undefined,
-      result,
-      error: result?.error ?? outcome.error ?? 'the run failed without naming a step',
-    };
+    const mismatch = round.mismatch;
+    if (mismatch && (failedAt < 0 || mismatch.position <= failedAt)) {
+      return {
+        step: steps[mismatch.member],
+        result: mismatch.replayed.row,
+        error: mismatchError(mismatch, steps),
+        mismatch,
+      };
+    }
+    const result = failedAt >= 0 ? round.rows[failedAt] : undefined;
+    const error = result?.error ?? outcome.error ?? 'the run failed without naming a step';
+    if (!result) return { step: undefined, result, error };
+    const at = result.index - 1;
+    const control = controls[at];
+    if (!control) return { step: steps[at], result, error };
+    // A guard row. Its CONDITION entry is to blame only when code decided the
+    // guard: the member whose code failed (a chain's is named on the row), or a
+    // loop's own line. Anything else — the model could not decide, a `For each`
+    // over a non-list, a cap the MODEL kept saying "carry on" to — failed with
+    // no entry of this compile's deciding it.
+    if (result.guard?.decidedBy === 'code') {
+      const member = result.guard.failedMember ?? (isChainRecord(control) ? undefined : at);
+      const owner = member !== undefined ? steps[member] : undefined;
+      if (owner?.kind === 'condition') return { step: owner, result, error };
+    }
+    return { step: steps[at], result, error, guardFailure: true, bodyRows: round.rows };
+  };
+  /**
+   * What the compile says about a failure it does not own, or undefined when it
+   * owns it — an entry in S, which the rounds repair. Worded for what actually
+   * happened, because "recompile it with `--steps N`" over a step with no entry
+   * — a guard the model decided, a step that never ran on the recording — sends
+   * the author to a command that cannot help.
+   */
+  const unownedFailure = (failed: ReplayFailure): string | undefined => {
+    const step = failed.step!;
+    if (failed.guardFailure) {
+      return `step ${step.number} failed on the replay — ${failed.error}${capBodyNote(step, failed, controls)}`;
+    }
+    if (step.key !== undefined && selection.keys.has(step.key)) return undefined;
+    if (step.ineligible !== undefined) {
+      return `step ${step.number} failed on the replay — ${failed.error} (${step.ineligible})`;
+    }
+    if (step.isAiEntry) {
+      return `step ${step.number} failed on the replay under AI (its entry is \`ai: true\`) — ${failed.error}`;
+    }
+    if (!step.hasEntry) {
+      return (
+        `step ${step.number} failed on the replay under AI, and this compile wrote no entry ` +
+        `for it — ${failed.error}`
+      );
+    }
+    return (
+      `existing entry for step ${step.number} ` +
+      `${failed.mismatch ? 'answers differently from the recording' : 'fails'}; recompile it with ` +
+      `\`--steps ${step.number}\` (or Compile This Step)`
+    );
+  };
+  /** Regenerate a condition line's entry after its replay failure: shown the
+   *  entry, what went wrong, and the recording's pages — the visit that
+   *  disagreed first, when one did (decision 11). */
+  const repairCondition = async (step: CompileStep, failed: ReplayFailure): Promise<GeneratedEntry> => {
+    const all = observationsFor(step.index);
+    const disagreed = failed.mismatch?.recorded.row;
+    const first = disagreed ? all.find((o) => o.row === disagreed) : undefined;
+    const observations = first ? [first, ...all.filter((o) => o !== first)] : all;
+    const entryCode = candidate.entryTextFor(step);
+    return askCondition(
+      step,
+      observations,
+      entryCode !== undefined ? { entryCode, error: failed.error } : undefined,
+    );
   };
   const writeOff = async (step: CompileStep, error: string, after: string): Promise<void> => {
     stepEvent('replay', step, `kept as AI ${after}: ${error}`);
@@ -931,7 +1194,9 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // decisions 1–3). `outcome.status` cannot say that, so the round's
     // completeness is read off the rows instead.
     const endedAsAsked = endedInReplay !== undefined && failed.result === undefined;
-    if (outcome.status === 'passed' || endedAsAsked) {
+    // …and a run whose conditions answered as the recording's did: a passing
+    // run whose `If` took the other branch is not the recording replayed.
+    if (failed.mismatch === undefined && (outcome.status === 'passed' || endedAsAsked)) {
       emit({
         kind: 'phase',
         phase: 'replay',
@@ -960,7 +1225,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       message: failed.step ? `✗ step ${failed.step.number} — ${failed.error}` : `✗ ${failed.error}`,
     });
 
-    if (!failed.step || !failed.step.key) {
+    if (!failed.step || (!failed.guardFailure && !failed.step.key)) {
       return finish(
         'failed',
         {
@@ -975,16 +1240,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       );
     }
 
-    // A failure on an entry the author owns is not the compiler's to rewrite.
+    // A failure on an entry the author owns is not the compiler's to rewrite,
+    // and one on a line with no entry of this compile's has nothing to repair.
     // The rounds stop here; what was proven before it is still proposed.
-    if (!selection.keys.has(failed.step.key)) {
-      failure =
-        `existing entry for step ${failed.step.number} fails; recompile it with ` +
-        `\`--steps ${failed.step.number}\` (or Compile This Step)`;
+    const notOurs = unownedFailure(failed);
+    if (notOurs !== undefined) {
+      failure = notOurs;
       break;
     }
 
-    lastFailure = { step: failed.step, error: failed.error, result: failed.result };
+    lastFailure = failed as ReplayFailure & { step: CompileStep };
     await writeReplayFailure(
       test.filePath,
       {
@@ -1002,14 +1267,21 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     if (round === maxRounds) break;
 
     stepEvent('repair', failed.step, 'regenerating from the failure');
-    const repaired = await repairStep(failed.step, failed.error, failed.result, record, options, candidate, {
-      number: round,
-      max: maxRounds,
-    });
-    proven.delete(failed.step.key);
+    const repaired =
+      failed.step.kind === 'condition'
+        ? await repairCondition(failed.step, failed)
+        : await repairStep(failed.step, failed.error, failed.result, record, options, candidate, {
+            number: round,
+            max: maxRounds,
+          });
+    proven.delete(failed.step.key!);
     const applied = await applyGenerated(candidate, failed.step, repaired, stepEvent, 'repair');
     await candidate.persist();
     if (applied.kind === 'declined') declined++;
+    if (failed.step.kind === 'condition') {
+      if (applied.kind === 'declined') keptAiConditions.add(failed.step.key!);
+      if (applied.kind === 'entry') keptAiConditions.delete(failed.step.key!);
+    }
     if (applied.kind === 'error') {
       return finish(
         'failed',
@@ -1036,7 +1308,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // The same two ways a round can be complete as the loop above: a test can
     // hold both a written-off step and a step whose text ends the run.
     const endedAsAsked = endedInReplay !== undefined && failed.result === undefined;
-    green = outcome.status === 'passed' || endedAsAsked;
+    green = failed.mismatch === undefined && (outcome.status === 'passed' || endedAsAsked);
     if (green) {
       const gaps = describeReplayGaps(unreached, toleratedInReplay);
       emit({
@@ -1065,7 +1337,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
           ? `✗ step ${failed.step.number} — ${failed.error} (after keeping step ${step.number} as AI)`
           : `✗ ${failed.error}`,
       });
-      if (!failed.step || !failed.step.key) {
+      if (!failed.step || (!failed.guardFailure && !failed.step.key)) {
         return finish(
           'failed',
           {
@@ -1079,10 +1351,9 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
           `Replay failed and no step owns the failure: ${failed.error}`,
         );
       }
-      if (!selection.keys.has(failed.step.key)) {
-        failure =
-          `existing entry for step ${failed.step.number} fails; recompile it with ` +
-          `\`--steps ${failed.step.number}\` (or Compile This Step)`;
+      const notOurs = unownedFailure(failed);
+      if (notOurs !== undefined) {
+        failure = notOurs;
       } else {
         await writeReplayFailure(
           test.filePath,
@@ -1165,7 +1436,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   const causesPresent = [
     endedAsWritten !== undefined,
     toleratedInRecording.length > 0,
-    skippedInRecording.length > 0,
+    skippedInRecording.length > 0 || neverAsked.length > 0,
   ].filter(Boolean).length;
   const notAttemptedCause =
     causesPresent !== 1
@@ -1174,7 +1445,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         ? endedAsWrittenReason('run', endedAsWritten.step)
         : toleratedInRecording.length > 0
           ? 'they failed on the recording run and were tolerated'
-          : recordingSkipCause(skippedInRecording.map((s) => record.steps[s.index]));
+          : recordingSkipCause(skipCauseRows);
   const tail = [
     writtenOffAi.length > 0 ? `${writtenOffAi.length} kept AI after replay failures` : '',
     unproven.length > 0 ? `${unproven.length} unproven (${listSteps(unproven)})` : '',
@@ -1292,17 +1563,34 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
  * The skipped and tolerated steps themselves are dropped from the selection
  * separately, with a reason: inside the prefix, but no evidence. The deliberate
  * one is not dropped — it compiles.
+ *
+ * Judged over EVERY row an index has (stories/codebehind-loops-and-conditions.md,
+ * decision 3): a loop body's step that passed on pass 1 and broke on pass 2 is
+ * where the recording broke, and an index no row reached is where it stopped.
  */
-function usablePrefix(steps: (StepResult | undefined)[]): number {
+function usablePrefix(passes: readonly (readonly StepResult[] | undefined)[]): number {
   let n = 0;
-  for (const step of steps) {
-    if (step?.status !== 'passed' && step?.status !== 'skipped' && !toleratedFailure(step)) {
-      if (deliberateFailure(step)) n++;
+  for (const rows of passes) {
+    const breaking = breakingRow(rows ?? []);
+    if ((rows ?? []).length === 0 || breaking) {
+      if (breaking && deliberateFailure(breaking)) n++;
       break;
     }
     n++;
   }
   return n;
+}
+
+/** A row that neither ends a recording nor is evidence against it: a pass, a
+ *  skip, a tolerated failure. */
+function neutralRow(row: StepResult): boolean {
+  return row.status === 'passed' || row.status === 'skipped' || toleratedFailure(row);
+}
+
+/** The first of an index's rows that ends a recording there — a failure the run
+ *  did not tolerate, in execution order — or undefined. */
+function breakingRow(rows: readonly StepResult[]): StepResult | undefined {
+  return rows.find((row) => !neutralRow(row));
 }
 
 /**
@@ -1341,21 +1629,40 @@ function toleratedFailure(result: StepResult | undefined): boolean {
  *    (`skippedByReturnReason`, src/runner/flow-control.ts);
  *  - `Skipped: another branch of this decision was taken`, `Skipped: the loop
  *    ran no passes` — a decision (`skipReasonFor`,
- *    src/runner/control-runtime.ts). A chain COMPILES (only loops are refused),
- *    so this is reachable on the shape control flow is mostly about, and it
- *    used to read "a return ended its flow" when no return had happened.
+ *    src/runner/control-runtime.ts). Chains and loops both compile, so this is
+ *    reachable on the shape control flow is mostly about, and it used to read
+ *    "a return ended its flow" when no return had happened.
  *
  * Both prefixes are anchored, so only those sentences are read; a result
  * skipped for some future reason falls back to a phrasing that asserts no
  * cause at all rather than quoting one out of unrelated prose.
  */
 export function notRunOnRecordingReason(result: StepResult | undefined): string {
+  const cause = recordingSkipDetail(result);
+  return cause === undefined ? 'not run on the recording run' : `not run on the recording run (${cause})`;
+}
+
+/** The cause a skipped row states for itself — `step 3 returned`, `the loop
+ *  ran no passes` — or undefined when it states none this reads. */
+function recordingSkipDetail(result: StepResult | undefined): string | undefined {
   const explanation = result?.aiExplanation ?? '';
   const at = /^Not run: step (\d+)\b/.exec(explanation)?.[1];
-  if (at !== undefined) return `not run on the recording run (step ${at} returned)`;
-  const decided = /^Skipped:\s*(\S.*)$/.exec(explanation)?.[1];
-  if (decided !== undefined) return `not run on the recording run (${decided})`;
-  return 'not run on the recording run';
+  if (at !== undefined) return `step ${at} returned`;
+  return /^Skipped:\s*(\S.*)$/.exec(explanation)?.[1];
+}
+
+/**
+ * Why a condition line is not attempted: no visit on the recording run asked
+ * it, so there is no page to generate its entry from
+ * (stories/codebehind-loops-and-conditions.md, "Boxed compile"). Its own rows
+ * say why when the structure it opens was skipped whole — an untaken branch, a
+ * loop around it that ran no passes, a return — and that cause is carried.
+ */
+function neverAskedReason(rows: readonly StepResult[]): string {
+  const cause = rows.length > 0 && rows.every((r) => r.status === 'skipped')
+    ? recordingSkipDetail(rows[0])
+    : undefined;
+  return `the condition was never asked on the recording run${cause === undefined ? '' : ` (${cause})`}`;
 }
 
 /** Was this skipped row a `return`'s doing, rather than a decision's? Reads
@@ -1435,26 +1742,6 @@ function listSteps(numbers: number[]): string {
 // Selection
 // ───────────────────────────────────────────────────────────────────────────
 
-/**
- * The first `While` / `Repeat … until` / `For each` guard line in the test, or
- * undefined when it has none (stories/control-flow.md, decision 12).
- *
- * Reads the expansion's control records rather than re-parsing: a loop can be
- * written inside a section body or a skill, and only the expander knows the
- * flat list those became.
- */
-function firstLoopGuard(test: ParsedTest): string | undefined {
-  const controls = test.expansion?.controls ?? [];
-  for (let i = 0; i < controls.length; i++) {
-    const record = controls[i];
-    if (!record) continue;
-    if (record.kind === 'while' || record.kind === 'repeat' || record.kind === 'foreach') {
-      return test.expansion?.rawSteps[i] ?? test.steps[i] ?? record.label;
-    }
-  }
-  return undefined;
-}
-
 /** Every expanded step, with its binding and why it can or cannot be in S. */
 async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
   const registry = test.expansion
@@ -1487,13 +1774,22 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
     // above: the compiler writes it, rather than refusing it as a guard
     // (stories/control-flow.md §"Composition with `If … then return`").
     const flowControl = parseFlowControlStep(text);
-    const ineligible = controls[i]
-      ? // The guard is dispatched by the framework — it asks a model a
-        // question and performs nothing — so there is no transcript to
-        // generate from and nothing for an entry to replace. Its TAIL is an
-        // ordinary step and compiles normally (stories/control-flow.md,
-        // decision 12).
+    // A guard whose condition the MODEL decides — `If`, `Else if`, `While`,
+    // `Repeat … until` — compiles to a `condition` entry
+    // (stories/codebehind-loops-and-conditions.md, decision 4). Read off the
+    // authored line, so a skill body's `{{order}}` is the author's.
+    const condition = controls[i] ? compilableCondition(text) !== undefined : false;
+    const ineligible = controls[i] && !condition
+      ? // `Otherwise` has no condition, `For each` reads a list and never asks
+        // a model, and a condition decided from its own values is free already
+        // (decision 10): the framework dispatches the line, and there is
+        // nothing for an entry to replace. Its TAIL is an ordinary step and
+        // compiles normally (stories/control-flow.md, decision 12).
         'a control line is dispatched, not compiled'
+      : condition
+      ? !binding
+        ? 'the step has no code-behind file to bind into'
+        : undefined
       : test.toolCalls[i]
       ? 'a [tool:] step is dispatched, not compiled'
       // `text` can be a RAW authored line still carrying a `[no-hooks]`
@@ -1532,9 +1828,13 @@ async function describeSteps(test: ParsedTest): Promise<CompileStep[]> {
       text,
       binding,
       ...(binding && { key: entryKeyOf(binding) }),
-      hasEntry: binding?.entry !== undefined,
+      // Kind-aware, as the live compiler's plan is (`hasEntryOfKind`): an
+      // entry of the other kind is in the wrong place — the runtime warns and
+      // runs the line under AI — so the line is owed one of its own.
+      hasEntry: hasEntryOfKind(binding?.entry, condition ? 'condition' : 'step'),
       isAiEntry,
       ...(ineligible !== undefined && { ineligible }),
+      ...(condition && { kind: 'condition' as const }),
     };
   });
 }
@@ -1552,10 +1852,7 @@ async function collectStaleKeys(
   recorded: CompileRunOutcome | undefined,
   steps: CompileStep[],
 ): Promise<Set<string>> {
-  const keys = new Set<string>();
-  for (const step of steps) {
-    if (step.key && recorded?.steps[step.index]?.codeBehindStale) keys.add(step.key);
-  }
+  const keys = new Set<string>(recorded ? staleKeysIn(recorded, steps) : []);
   const sidecar = await readLastRun(test.filePath);
   for (const entry of sidecar?.steps ?? []) {
     if (!entry.stale) continue;
@@ -1563,6 +1860,363 @@ async function collectStaleKeys(
     if (step?.key && step.text === entry.source) keys.add(step.key);
   }
   return keys;
+}
+
+/**
+ * Keys of entries a run's rows flagged stale — every pass of every index.
+ *
+ * Keyed by the MEMBER whose entry broke, not the row it rides: a chain's guard
+ * row belongs to the member that held, while its `codeBehindStale` can name a
+ * member before it whose code threw (`guard.staleMember`). Reading the row's
+ * own index would regenerate the member that worked and leave the broken one.
+ */
+function staleKeysIn(outcome: CompileRunOutcome, steps: CompileStep[]): string[] {
+  const keys: string[] = [];
+  for (const row of runRows(outcome).rows) {
+    if (!row.codeBehindStale) continue;
+    const key = steps[row.guard?.staleMember ?? row.index - 1]?.key;
+    if (key !== undefined) keys.push(key);
+  }
+  return keys;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Loops and conditions (stories/codebehind-loops-and-conditions.md)
+// ───────────────────────────────────────────────────────────────────────────
+
+/** A run's rows, both ways the compile reads them. */
+interface RunRows {
+  /** Per expanded index, in execution order. */
+  passes: StepResult[][];
+  /** Across indices, in execution order. */
+  rows: StepResult[];
+}
+
+/**
+ * A run's step rows as the compiler indexes them: the evidence row per
+ * expanded step, every row per step, and every row in execution order
+ * (stories/codebehind-loops-and-conditions.md, decisions 1 and 3).
+ *
+ * The one reduction both producers of a {@link CompileRunOutcome} use — the
+ * CLI's `reportToOutcome` and the server's compile runner — so the boxed
+ * compile reads the same rows whichever ran it. The evidence row is
+ * `evidenceRows`' choice, which is also the row the recording on disk keeps
+ * and the live compiler generates from (its `takenKeys`).
+ *
+ * Hook results and interactive ad-hoc rows share the `index` space with real
+ * steps, so they are dropped rather than allowed to stand in for one.
+ */
+export function outcomeRows(
+  results: readonly StepResult[],
+  totalSteps: number,
+): { steps: (StepResult | undefined)[]; passes: StepResult[][]; rows: StepResult[] } {
+  const rows = results.filter(
+    (r) =>
+      !r.hookScope && !r.interactiveAdHoc && !r.interactiveChild && r.index >= 1 && r.index <= totalSteps,
+  );
+  const passes: StepResult[][] = Array.from({ length: totalSteps }, () => []);
+  for (const row of rows) passes[row.index - 1]!.push(row);
+  const steps: (StepResult | undefined)[] = new Array(totalSteps).fill(undefined);
+  for (const row of evidenceRows(rows)) steps[row.index - 1] = row;
+  return { steps, passes, rows };
+}
+
+/** An outcome's rows, whether its producer kept every pass or (built by hand)
+ *  only the evidence row per index. */
+function runRows(outcome: CompileRunOutcome): RunRows {
+  if (outcome.passes) return { passes: outcome.passes, rows: outcome.rows ?? outcome.passes.flat() };
+  if (outcome.rows) return { passes: outcomeRows(outcome.rows, outcome.steps.length).passes, rows: outcome.rows };
+  const passes = outcome.steps.map((s) => (s ? [s] : []));
+  return { passes, rows: passes.flat() };
+}
+
+/**
+ * The parameter map as it stood at each row, as near as the rows can say.
+ *
+ * The run's final map holds the LAST pass's `For each` item, so a prompt built
+ * from it would name Travel over the page where Everyday was clicked
+ * (decision 2). Each row's loop marker carries the bindings of the pass it ran
+ * in; replayed in execution order over the final map, they give the item on
+ * the page each row was recorded against. A row with no marker of its own — a
+ * chain's guard row — reads the bindings of the pass the run was last seen in.
+ */
+function passSnapshots(
+  rows: readonly StepResult[],
+  final: Record<string, string>,
+): Map<StepResult, Record<string, string>> {
+  const live: Record<string, string> = {};
+  const out = new Map<StepResult, Record<string, string>>();
+  for (const row of rows) {
+    if (row.loop?.values) Object.assign(live, row.loop.values);
+    out.set(row, { ...final, ...live });
+  }
+  return out;
+}
+
+/**
+ * One decision a guard made: a visit to a chain or a loop condition
+ * (stories/codebehind-loops-and-conditions.md, decision 11). `For each` visits
+ * are not decisions — the list is read, never asked — and are not visits here.
+ */
+interface GuardVisit {
+  /** The structure: a chain's FIRST member, or the loop's guard. A chain's
+   *  rows sit on whichever member held, so this is what groups them. */
+  head: number;
+  row: StepResult;
+  /** The row's position in the run's rows, in execution order. */
+  position: number;
+  /** Each member asked, in order, with its answer — `true`, `false`, or
+   *  absent for a member after the one that held (never asked). A loop has
+   *  one member: the guard itself. */
+  members: Array<{ index: number; holds?: boolean }>;
+  /** Whether anything was decided — a guard that failed before a decision
+   *  (the judge could not decide) has none. */
+  decided: boolean;
+}
+
+/**
+ * Every guard visit in a run, in execution order.
+ *
+ * A guard row is a row at a control index that carries a decision or failed:
+ * an untaken member's plain `skipped` row is not a visit. A chain's answers
+ * come off the judge's evidence when the row kept it, and otherwise off
+ * `selected` and the chain's own members — first-holds-wins, which is how the
+ * judge was asked.
+ */
+function guardVisits(
+  rows: readonly StepResult[],
+  controls: readonly (ControlRecord | null)[],
+): GuardVisit[] {
+  const out: GuardVisit[] = [];
+  rows.forEach((row, position) => {
+    const at = row.index - 1;
+    const record = controls[at];
+    if (!record || record.kind === 'foreach') return;
+    if (row.guard === undefined && row.status !== 'failed') return;
+    const guard = row.guard;
+    if (isChainRecord(record)) {
+      const all = chainMembers(controls, at);
+      const asked = all.filter((m) => controls[m]?.kind !== 'else');
+      const selected = guard?.selected;
+      const decided = selected !== undefined;
+      const heldAt = selected === null || selected === undefined ? -1 : asked.indexOf(selected);
+      out.push({
+        head: all[0] ?? at,
+        row,
+        position,
+        members:
+          guard?.evidence?.members ??
+          asked.map((index, i) =>
+            !decided
+              ? { index }
+              : heldAt < 0 || i < heldAt
+                ? { index, holds: false }
+                : i === heldAt
+                  ? { index, holds: true }
+                  : { index },
+          ),
+        decided,
+      });
+      return;
+    }
+    const decided = guard?.holds !== undefined;
+    out.push({
+      head: at,
+      row,
+      position,
+      members: [{ index: at, ...(decided && { holds: guard!.holds }) }],
+      decided,
+    });
+  });
+  return out;
+}
+
+/** One visit on which the recording's MODEL decided a condition — what its
+ *  entry is generated from (decision 9) — with the visit's row and values. */
+interface RecordedObservation extends ConditionObservation {
+  row: StepResult;
+  parameters: Record<string, string>;
+}
+
+/**
+ * Every recorded observation of one condition line, in visit order: each
+ * decided visit that asked it and was decided by the model (the judge's page
+ * rides the row only then). `generateConditionEntry` is shown the first held
+ * and the first not-held of them. A visit judged with no DOM — the computer
+ * surface — is still an observation, with no page: the generator declines it
+ * (decision 10).
+ */
+function observationsOf(
+  visits: readonly GuardVisit[],
+  member: number,
+  snapshots: Map<StepResult, Record<string, string>>,
+): RecordedObservation[] {
+  const out: RecordedObservation[] = [];
+  for (const visit of visits) {
+    if (!visit.decided) continue;
+    const guard = visit.row.guard;
+    if (guard?.decidedBy !== 'model' && guard?.evidence === undefined) continue;
+    const asked = visit.members.find((m) => m.index === member);
+    if (!asked) continue;
+    out.push({
+      holds: asked.holds,
+      ...(guard?.evidence?.dom !== undefined && { dom: guard.evidence.dom }),
+      ...(guard?.evidence?.url !== undefined && { url: guard.evidence.url }),
+      row: visit.row,
+      parameters: snapshots.get(visit.row) ?? {},
+    });
+  }
+  return out;
+}
+
+/** Was this condition line asked on at least one replay visit that did not
+ *  fail, whoever decided it? What proves an `ai: true` condition entry. */
+function askedCleanly(visits: readonly GuardVisit[], member: number): boolean {
+  return visits.some(
+    (v) =>
+      v.decided
+      && v.row.status !== 'failed'
+      && v.members.some((m) => m.index === member && m.holds !== undefined),
+  );
+}
+
+/** Did this condition line's CODE answer at least one replay visit cleanly —
+ *  it ran (it was reached, first-holds-wins) and the guard did not fail? */
+function codeDecidedCleanly(visits: readonly GuardVisit[], member: number): boolean {
+  return visits.some(
+    (v) =>
+      v.row.guard?.decidedBy === 'code'
+      && v.row.status !== 'failed'
+      && v.members.some((m) => m.index === member && m.holds !== undefined),
+  );
+}
+
+/** The first visit where a replay's CODE answered a condition differently
+ *  from the recording (decision 11). */
+interface DecisionMismatch {
+  /** The member whose entry answered wrongly — the first member whose answers
+   *  differ, first-holds-wins. */
+  member: number;
+  /** 1-based visit of the structure (a chain's, or a loop's). */
+  visit: number;
+  /** The replay row's position in execution order. */
+  position: number;
+  recorded: GuardVisit;
+  replayed: GuardVisit;
+  recordedHolds: boolean;
+  replayHolds: boolean;
+}
+
+/**
+ * Compare a replay's guard decisions with the recording's, visit by visit per
+ * structure, in the replay's execution order (decision 11).
+ *
+ * The first difference ends the comparison, whoever made it: after one, the
+ * two runs are on different paths and nothing later is comparable. It is a
+ * MISMATCH — the entry's fault — only when the replay's code decided that
+ * visit and the member that differs is a condition line (not one answered from
+ * its values). A visit the model decided in the replay proves nothing about an
+ * entry, and a run that ended or failed before a visit the recording had simply
+ * has fewer to compare.
+ */
+function compareDecisions(
+  recorded: readonly GuardVisit[],
+  replayed: readonly GuardVisit[],
+  steps: readonly CompileStep[],
+): DecisionMismatch | undefined {
+  const byHead = new Map<number, GuardVisit[]>();
+  for (const visit of recorded) {
+    const list = byHead.get(visit.head) ?? [];
+    list.push(visit);
+    byHead.set(visit.head, list);
+  }
+  const seen = new Map<number, number>();
+  for (const visit of replayed) {
+    const k = seen.get(visit.head) ?? 0;
+    seen.set(visit.head, k + 1);
+    const was = byHead.get(visit.head)?.[k];
+    if (!was || !was.decided || !visit.decided) return undefined;
+    const differs = was.members.find(
+      (m) => m.holds !== visit.members.find((r) => r.index === m.index)?.holds,
+    );
+    if (!differs) continue;
+    const replayHolds = visit.members.find((r) => r.index === differs.index)?.holds;
+    if (
+      visit.row.guard?.decidedBy !== 'code'
+      || steps[differs.index]?.kind !== 'condition'
+      || differs.holds === undefined
+      || replayHolds === undefined
+    ) {
+      return undefined;
+    }
+    return {
+      member: differs.index,
+      visit: k + 1,
+      position: visit.position,
+      recorded: was,
+      replayed: visit,
+      recordedHolds: differs.holds,
+      replayHolds,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * What a mismatch says, in one sentence: both answers, for the condition as
+ * authored. The repair is shown it beside the page the recording decided on.
+ */
+function mismatchError(mismatch: DecisionMismatch, steps: readonly CompileStep[]): string {
+  const text = steps[mismatch.member]?.text ?? '';
+  const condition = compilableCondition(text)?.condition ?? text;
+  const said = (holds: boolean): string => (holds ? 'held' : 'did not hold');
+  return (
+    `the code said "${condition}" ${said(mismatch.replayHolds)} on visit ${mismatch.visit}; ` +
+    `on the recording it ${said(mismatch.recordedHolds)} there`
+  );
+}
+
+/**
+ * The clause a loop's failed guard adds when it breached its cap with its body
+ * running as code on every pass: the loop never ended, and what did not move
+ * the page on is the body, not the (model-decided) condition.
+ */
+function capBodyNote(
+  step: CompileStep,
+  failed: ReplayFailure,
+  controls: readonly (ControlRecord | null)[],
+): string {
+  const record = controls[step.index];
+  if (!record || isChainRecord(record) || record.kind === 'foreach') return '';
+  if (failed.result?.guard?.holds === undefined) return '';
+  const body = (failed.bodyRows ?? []).filter(
+    (r) => r.index - 1 >= record.bodyStart && r.index - 1 <= record.bodyEnd && r.status !== 'skipped',
+  );
+  if (body.length === 0 || !body.every((r) => r.status === 'passed' && r.fromCodeBehind)) return '';
+  const numbers = [];
+  for (let i = record.bodyStart; i <= record.bodyEnd; i++) numbers.push(i + 1);
+  return (
+    `; its body (${listSteps(numbers)}) ran as code on every pass and never ended the loop — ` +
+    'check that the body moves the page on'
+  );
+}
+
+/** Where a replay round failed (see `failureOf` in `compileTest`). */
+interface ReplayFailure {
+  /** The entry the failure is blamed on — a step's, or a condition line's —
+   *  or, with `guardFailure`, the guard that failed. Undefined when no step
+   *  owns the failure. */
+  step: CompileStep | undefined;
+  /** The replay row that failed; for a mismatch, the guard row of the visit. */
+  result: StepResult | undefined;
+  error: string;
+  /** A condition answered differently from the recording (decision 11). */
+  mismatch?: DecisionMismatch | undefined;
+  /** A guard failed and no condition entry decided it: nothing of this
+   *  compile's to repair. */
+  guardFailure?: boolean | undefined;
+  /** The round's rows, for what a failed guard's sentence says about its body. */
+  bodyRows?: readonly StepResult[] | undefined;
 }
 
 interface Selection {
@@ -1634,7 +2288,14 @@ async function repairStep(
   candidate: Candidate,
   round: { number: number; max: number },
 ): Promise<GeneratedEntry> {
-  const parameters = stepParameters(step.binding!, record.resolvedParameters, options.test.envData);
+  // The failing PASS's own values (stories/codebehind-loops-and-conditions.md,
+  // decision 3): pass 2 of a `For each` failed on Savings, and a repair told it
+  // was Travel — the Record's final map — would fix the wrong row.
+  const parameters = stepParameters(
+    step.binding!,
+    { ...record.resolvedParameters, ...(failedResult?.loop?.values ?? {}) },
+    options.test.envData,
+  );
   // The step passed Generate, so every reference it makes resolved there;
   // the repair sees the same list, and the same guard.
   const envRefs = stepEnvRefs(step.binding!, options.test.envData).resolved;
@@ -1821,22 +2482,14 @@ export function createTestFileRunner(options: CompileOptions): CompileRunner {
 }
 
 /**
- * A run's report, reduced to what the compiler indexes by expanded step.
- *
- * Hook results and interactive ad-hoc rows share the `index` space with real
- * steps, so they are dropped rather than allowed to overwrite one.
+ * A run's report, reduced to what the compiler indexes by expanded step —
+ * through {@link outcomeRows}, as the server's compile runner reduces its own.
  */
 export function reportToOutcome(report: TestReport, totalSteps: number): CompileRunOutcome {
-  const steps: (StepResult | undefined)[] = new Array(totalSteps).fill(undefined);
-  for (const step of report.steps) {
-    if (step.hookScope || step.interactiveAdHoc || step.interactiveChild) continue;
-    const at = step.index - 1;
-    if (at >= 0 && at < totalSteps) steps[at] = step;
-  }
   return {
     status: report.status === 'passed' ? 'passed' : 'failed',
     ...(report.error !== undefined && { error: report.error }),
-    steps,
+    ...outcomeRows(report.steps, totalSteps),
     resolvedParameters: report.parameters ?? {},
     tokensUsed: report.tokensUsed,
   };

@@ -73,6 +73,7 @@ import {
   createControlState,
   forEachPassOf,
   guardVisitEvaluates,
+  innermostLoopGuard,
   isChainRecord,
   planAfterStep,
   planForStart,
@@ -1065,6 +1066,14 @@ export interface InternalRunOptions {
       rawSteps: string[];
       origins: ExpandedStepOrigin[];
       frames: Record<string, ExpandedFrame>;
+      /**
+       * The expander's control records, parallel to `steps` — which lines are
+       * guards, and their bodies. Given with pre-expanded steps, so the server
+       * runs the chains and loops of the expansion it was handed instead of
+       * expanding the guard lines a second time
+       * (stories/codebehind-loops-and-conditions.md, "Boxed compile").
+       */
+      controls?: (ControlRecord | null)[];
     };
     /** Canonical `.steps.ts` path → the path to load instead (replay). */
     candidateFiles?: Record<string, string>;
@@ -1746,7 +1755,8 @@ export function liveCompileSnapshot(resolvedParameters: Record<string, string>):
 /**
  * A guard row's decision, renumbered by `offset` — for a split run's later
  * block, whose rows the live compile accumulates in the RUN's numbering. The
- * member indices (`selected`, `staleMember`, each evidence member) move with
+ * member indices (`selected`, `staleMember`, `failedMember`, each evidence
+ * member) move with
  * the row's own index, or the recording would name a member of block 1.
  */
 function shiftGuardDecision(
@@ -1757,6 +1767,7 @@ function shiftGuardDecision(
     ...guard,
     ...(typeof guard.selected === 'number' && { selected: guard.selected + offset }),
     ...(guard.staleMember !== undefined && { staleMember: guard.staleMember + offset }),
+    ...(guard.failedMember !== undefined && { failedMember: guard.failedMember + offset }),
     ...(guard.evidence && {
       evidence: {
         ...guard.evidence,
@@ -3835,7 +3846,17 @@ export class SessionManager {
     // enabled, Go to the next page` to the model as one prose instruction
     // (stories/control-flow.md). A file with a chain but no sections and no
     // skills reaches the server exactly like that.
-    const hasControlLines = request.steps.some((step) => parseControlLine(step) !== null);
+    //
+    // Except from `POST /codebehind/compile`, whose steps are ALREADY expanded
+    // — each guard line followed by its tail — with the compiler's expansion
+    // riding along (`internal.codeBehind.expansion`). Expanding those again
+    // expands every tail twice: a `While`'s body runs its tail line and then a
+    // plain copy of it, every row after lands one index late, and a chain's
+    // `Otherwise` — now after a tail step instead of its `If` — is refused
+    // outright. The compiler's own control records are used instead (below).
+    const preExpanded = internal?.codeBehind?.expansion !== undefined;
+    const hasControlLines =
+      !preExpanded && request.steps.some((step) => parseControlLine(step) !== null);
     if (request.skillsDir || hasSections(request) || hasControlLines) {
       try {
         const expansion = await expandSkills(
@@ -4002,6 +4023,14 @@ export class SessionManager {
         expansionOrigins = cb.expansion.origins.slice(0, n);
         expandedFrames = cb.expansion.frames;
         expansionRawSteps = cb.expansion.rawSteps.slice(0, n);
+        // …and the guards, so a chain or a loop in a compiled file runs as the
+        // compiler expanded it — once. A prefix replay's batch can end inside a
+        // body; a record whose range runs past it is harmless, because a skip
+        // outside the batch is never emitted (`emitSkippedStep`) and a body the
+        // batch does not finish never loops back.
+        if (cb.expansion.controls && cb.expansion.controls.length >= n) {
+          expansionControls = cb.expansion.controls.slice(0, n);
+        }
       }
     }
 
@@ -4124,22 +4153,12 @@ export class SessionManager {
       /**
        * The innermost runtime loop each index sits in the body of
        * (decision 2): the loop's authored guard line, and a `For each`'s
-       * runtime item name. Innermost is the one with the narrowest body — a
-       * loop nested in another's body has a range strictly inside it.
+       * runtime item name. The same `innermostLoopGuard` the boxed compile
+       * asks, so both name the same loop for the same step.
        */
       const enclosingLoop = (i: number): PlanEntry['loop'] => {
-        let guard = -1;
-        let span = Infinity;
-        for (let g = 0; g < expansionControls.length; g++) {
-          const candidate = expansionControls[g];
-          if (!candidate || !isLoopRecord(candidate)) continue;
-          if (i < candidate.bodyStart || i > candidate.bodyEnd) continue;
-          if (candidate.bodyEnd - candidate.bodyStart < span) {
-            span = candidate.bodyEnd - candidate.bodyStart;
-            guard = g;
-          }
-        }
-        if (guard < 0) return undefined;
+        const guard = innermostLoopGuard(expansionControls, i);
+        if (guard === undefined) return undefined;
         const record = expansionControls[guard] as LoopRecord;
         const guardLine =
           generationBindings.bindingFor(guard)?.source ?? expansionRawSteps[guard] ?? effectiveSteps[guard] ?? '';

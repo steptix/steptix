@@ -353,6 +353,17 @@ export interface StepResult {
      */
     staleMember?: number;
     /**
+     * The absolute 0-based index of the member whose condition code FAILED the
+     * guard: it threw on a strict replay (nothing heals there), or a
+     * `step.expect` / `step.fail` / refused `step.exit()` in it failed for real.
+     * Only on a failed row with `decidedBy: 'code'`. A chain runs its members'
+     * code in order and the failing one is not otherwise recoverable from the
+     * row, which belongs to the member the run was asked from; the boxed
+     * compile's replay blames and repairs this member's entry
+     * (stories/codebehind-loops-and-conditions.md, "Boxed compile").
+     */
+    failedMember?: number;
+    /**
      * The page the model decided on — only on a compiling run
      * (`captureStepContext`), and only when the model answered: it decided
      * (`decidedBy: 'model'`), or it was asked at a loop's cap to check the

@@ -55,6 +55,14 @@ export interface CompileStep {
   isAiEntry: boolean;
   /** Why this step can never be in S, when it can't. */
   ineligible?: string | undefined;
+  /**
+   * `'condition'` for a guard line whose condition the model decides — `If`,
+   * `Else if`, `While`, `Repeat … until` — which compiles to a `condition`
+   * entry generated from the pages the judge decided on, not from a transcript
+   * (stories/codebehind-loops-and-conditions.md, decision 4). Absent on every
+   * other step, which compiles to a `run` entry.
+   */
+  kind?: 'condition' | undefined;
 }
 
 /** Joins the parts of an entry key. NUL because it is the one character

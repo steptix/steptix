@@ -458,7 +458,8 @@ describe('a condition entry that throws', () => {
     expect(ev.error).toBe("the condition's code-behind threw: boom");
     expect(ev.reasoning).toContain('strict mode is on');
     expect(ev.fromCodeBehind).toBe(true);
-    expect(ev.guard).toEqual({ decidedBy: 'code' });
+    // The member whose code failed, so a compile replay repairs the right entry.
+    expect(ev.guard).toEqual({ decidedBy: 'code', failedMember: 0 });
     expect(ev.codeBehindStale).toBeUndefined();
     expect(judge.calls).toEqual([]);
     // A strict replay heals nothing, so nothing is discarded either.
@@ -500,7 +501,7 @@ describe('a condition entry that fails for real', () => {
     expect(ev.error).toBe('the list never loaded');
     expect(ev.reasoning).toContain('`step.expect`');
     expect(ev.fromCodeBehind).toBe(true);
-    expect(ev.guard).toEqual({ decidedBy: 'code' });
+    expect(ev.guard).toEqual({ decidedBy: 'code', failedMember: 0 });
     expect(judge.calls).toEqual([]);
     expect(w.entry).toBeDefined();
   });

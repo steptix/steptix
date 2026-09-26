@@ -351,7 +351,14 @@ export async function evaluateGuard(args: {
             error: decided.error,
             durationMs: Date.now() - startedAt,
             ...codeFields(code),
-            guard: { decidedBy: 'code', ...staleMemberOf(code) },
+            guard: {
+              decidedBy: 'code',
+              ...staleMemberOf(code),
+              // Which member's code failed: the row belongs to the member the
+              // visit was asked from, and a chain's failing member is otherwise
+              // lost — what the boxed compile's replay blames and repairs.
+              ...(decided.failedMember !== undefined && { failedMember: decided.failedMember }),
+            },
           };
         }
         reasoning = decided.reasoning;
@@ -597,6 +604,9 @@ interface ConditionDecision {
   evidence?: { dom: string; url: string } | undefined;
   /** Set when a condition entry failed and nothing decided — the guard fails. */
   error?: string;
+  /** With `error` on the code path: the absolute index of the member whose
+   *  code failed (`GuardDecision.failedMember`). */
+  failedMember?: number;
 }
 
 /**
@@ -651,6 +661,7 @@ async function decideCondition(args: {
         aiInteractions: [],
         decidedBy: 'code',
         error: outcome.error,
+        failedMember: outcome.member.index,
       };
     }
 
@@ -671,6 +682,7 @@ async function decideCondition(args: {
         aiInteractions: [],
         decidedBy: 'code',
         error: `the condition's code-behind threw: ${error}`,
+        failedMember: member.index,
       };
     }
     if (codeBehind.keyless) {
@@ -785,7 +797,7 @@ function activePage(opts: StepExecutorOptions): StepExecutorOptions['page'] | un
 type CodePlanOutcome =
   | { kind: 'decided'; selected: number | null; reasoning: string }
   | { kind: 'broken'; member: AskedMember; binding: CodeBehindBinding; error: string }
-  | { kind: 'failed'; error: string; reasoning: string };
+  | { kind: 'failed'; member: AskedMember; error: string; reasoning: string };
 
 /**
  * Run the code path: settle the page once (decision 6), then answer each member
@@ -848,6 +860,7 @@ async function runCodePlan(
       logger.error(`Condition "${member.condition}" FAILED (code-behind called step.exit())`);
       return {
         kind: 'failed',
+        member,
         error: CONDITION_EXIT_REFUSED,
         reasoning:
           'This condition\'s code-behind called `step.exit()`. A condition answers ' +
@@ -859,6 +872,7 @@ async function runCodePlan(
       logger.error(`Condition "${member.condition}" FAILED (code-behind): ${error}`);
       return {
         kind: 'failed',
+        member,
         error,
         reasoning:
           'The file this condition\'s code-behind names could not be resolved, so the ' +
@@ -873,6 +887,7 @@ async function runCodePlan(
     logger.error(`Condition "${member.condition}" FAILED (code-behind assertion): ${masked}`);
     return {
       kind: 'failed',
+      member,
       error: masked,
       reasoning: outcome.deliberate
         ? 'This condition\'s code-behind called `step.fail(...)`: a deliberate ' +

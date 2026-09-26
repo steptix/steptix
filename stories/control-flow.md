@@ -694,9 +694,10 @@ right tool for "if it appears, dismiss it".
     rest, the way rows record row 1, is its own story. (The draft of this
     decision said the opposite; §"What the build showed" says why.) That
     story is [codebehind-loops-and-conditions.md](codebehind-loops-and-conditions.md):
-    Run & Compile no longer refuses a loop — a body line is one entry,
-    generated from the first pass that ran it — and a guard whose condition the
-    model decides compiles to a `condition` entry.
+    neither Run & Compile nor `aiui compile` refuses a loop any more — a body
+    line is one entry, generated from the first pass that ran it and proven on
+    every pass by the boxed replay — and a guard whose condition the model
+    decides compiles to a `condition` entry.
 13. **Reports show every row of an untaken tail as skipped.** Honest, and
     what the matrix does. Collapsing is a presentation change to make with a
     rendered page in front of the reviewer.
@@ -814,8 +815,10 @@ Since superseded on the Run & Compile path by
 [codebehind-loops-and-conditions.md](codebehind-loops-and-conditions.md): the
 slot problem is solved by generating each body line once, from the first pass
 to reach the compiler (the live compiler's per-entry dedupe), and the summary
-counts expanded steps rather than passes. The boxed `aiui compile` still
-refuses until that story's boxed half lands.
+counts expanded steps rather than passes. The boxed `aiui compile` followed
+in that story's boxed half: it keeps every pass of the Record, generates from
+the first, proves every pass on replay, and checks the replay's condition
+decisions against the recording's.
 
 ### Three traps found by reading, before anything ran
 

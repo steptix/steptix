@@ -1,10 +1,11 @@
 # Compile loops, and compile the conditions that drive them
 
-**Status:** spec, 2026-09-26. The runtime (condition entries decide guards)
-and Run & Compile / Compile This Step (generation, the live compiler, the
-recording) are built — see §"What the live half decided". The boxed
-`aiui compile` half (§"Boxed compile") is not: it still refuses a file that
-loops.
+**Status:** built, 2026-09-26. The runtime (condition entries decide guards),
+Run & Compile / Compile This Step (generation, the live compiler, the
+recording) — see §"What the live half decided" — and the boxed `aiui compile`
+and `POST /codebehind/compile` — see §"What the boxed half decided". The
+TestBench live pass over `templates/init/tests/control-flow.md` (§Tests, "The
+fixture") has not been run.
 
 ## In plain terms
 
@@ -502,6 +503,104 @@ sections above leave open.
 - **A condition judged on the computer surface is not offered** — as a
   computer-mode step is not, on this path. `generateConditionEntry` still
   declines one with no DOM, for a caller that asks anyway.
+
+## What the boxed half decided
+
+Where building `aiui compile` and `POST /codebehind/compile` had to choose
+something the sections above leave open, or departed from them.
+
+- **The outcome keeps rows in execution order too, not only per index.**
+  `CompileRunOutcome` has `passes` (every row per index) as designed, and
+  `rows` (every row, in the order the run made them). Decision 11 needs the
+  second: a chain's rows sit on whichever member held, so per-index lists
+  cannot say which visit came first. Both are optional — an outcome built by
+  hand still means one row per index — and both producers build all three
+  fields through one `outcomeRows`, whose evidence row is `evidenceRows`'
+  choice, the row the recording on disk keeps.
+- **A Record's prefix is judged over every pass.** A body step that passed on
+  pass 1 and failed on pass 2 is where the recording broke, as a one-pass
+  failure is; pass 1's good transcript does not carry it into the prefix. A
+  step skipped on every pass has no evidence; skipped on one and run on
+  another, it has.
+- **A pass's values come off the loop markers.** The Record's final map holds
+  the last pass's item. Each row's loop marker carries its pass's bindings;
+  replayed over the final map in execution order they give the values on the
+  page each row was recorded against, for the step prompt, the condition
+  prompt and a repair. A chain's guard row carries no marker, so it reads the
+  bindings of the pass the run was last seen in — exact on pass 1, and a pass
+  behind if the chain is the first step of a later `For each` pass. A
+  table-row `### Section` gets its own row's values the same way; it used to
+  get the last row's.
+- **A condition no model-decided visit asked is not attempted.** Its reason
+  says so, with the cause its own skipped row states — *the condition was
+  never asked on the recording run (no condition in this decision held)*. A
+  condition asked only on the computer surface has visits but no page; it is
+  handed to `generateConditionEntry`, which declines it `ai: true` with
+  `CONDITION_WITHOUT_DOM` (decision 10).
+- **The first failure in execution order is the one blamed**, among the failed
+  rows and the first mismatch (decision 11). A mismatch wins a tie with a
+  failure on the same row: a `While` whose code says "carry on" where the
+  recording stopped is what then breaches the cap.
+- **The comparison stops at the first difference, whoever made it.** Past one,
+  the two runs are on different paths. It is a mismatch — the entry's fault —
+  only when the replay's CODE decided that visit and the member that differs
+  is a condition line; a difference the model or the values made ends the
+  comparison and blames nothing. A different number of visits with every
+  compared answer equal blames nothing either: fewer means the replay ended
+  earlier (a step's failure says why), more means an enclosing `For each`'s
+  list changed. The blamed member of a chain is the first whose answers
+  differ, first-holds-wins.
+- **The runtime says which member's code failed.** `StepResult.guard` gained
+  `failedMember`: a strict replay's thrown condition and a `step.expect` in one
+  failed the guard with no member named, and the row belongs to the member the
+  visit was asked from, so a chain's failing entry was otherwise not
+  recoverable. `staleMember` keeps its meaning (the model healed).
+- **What proves a condition entry:** its code decided at least one replay
+  visit cleanly and it was not the mismatched member. A chain member its
+  winner kept from ever running proves nothing and is proposed unproven, as a
+  step no round reached is; the next run proves it. An `ai: true` condition is
+  proven by a visit that did not fail, as a declined step is by passing under
+  AI.
+- **A failure the compile does not own is worded for what happened**, not as
+  *existing entry for step N fails; recompile it with `--steps N`*, which is
+  kept for a line that has an entry (with *answers differently from the
+  recording* for a mismatch). A guard no entry decided that failed says the
+  run's error, and — at a cap breached with its body running as code on every
+  pass — *its body (step 3) ran as code on every pass and never ended the
+  loop — check that the body moves the page on*. A step with no entry, an
+  `ai: true` one, and one a compile never writes (`[tool:]`, `Set`) each say
+  which. The rounds stop there, as for an author's entry.
+- **Known limit: a body that does not move the page on is blamed on the
+  condition.** A code-decided visit leaves no page, so when a body entry fails
+  to advance and a correct condition therefore says "carry on" where the
+  recording stopped, the mismatch names the condition. The repair is shown
+  both answers and the recorded page; if it cannot help, the condition is
+  written off `ai: true`, and the confirming round's model-decided loop then
+  reaches its cap with the body note above.
+- **A stale flag is keyed by the member it names.** `collectStaleKeys` and the
+  Record's own flags read `guard.staleMember` before the row's index, so a
+  chain whose `If` threw and whose `Else if` held regenerates the `If`.
+- **`hasEntry` is kind-aware** (`hasEntryOfKind`), as on the live path: an
+  entry of the other kind on a line is owed one of its own.
+- **`POST /codebehind/compile` expands once.** The route sends `test.steps` —
+  already expanded, each guard line followed by its tail — and the session
+  manager expanded again whenever a step parsed as a control line. Measured
+  before the fix through the real route: a chain file's Record failed with
+  *Skill expansion failed: … "Otherwise, Pay by card" has no decision to be
+  the alternative of* (the `Otherwise` now followed a tail step, not its
+  `If`), and a `While` file's Record ran `Click Next` a fourth time in the
+  slot where `Read the reference` belongs — the tail expanded twice, every
+  later row one index late against `outcomeRows(…, test.steps.length)` and the
+  registry, which binds through the compiler's expansion. The compiler now
+  sends its control records in `internal.codeBehind.expansion.controls`, and
+  the server does not re-expand a pre-expanded batch: it seeds its guards from
+  them, clipped to the batch as the origins already were.
+- **The skip-cause sentences were not unified.** The boxed per-step line names
+  the decision — *not run on the recording run (the loop ran no passes)* — and
+  its list clause says *the run decided against them*; the live line is *the
+  step did not run — the run decided against it*. They state the same cause;
+  the boxed one says which decision, which the live offer does not carry, and
+  both are pinned by tests on their own surfaces.
 
 ## Rollout
 
