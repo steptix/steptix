@@ -11,7 +11,7 @@ import type {
   RecordStepsRequest,
   RecordedAction,
 } from './types.js';
-import { writeRecordedSteps } from './write-steps.js';
+import { DraftEngine } from './draft-engine.js';
 
 /**
  * One recording, from `POST /sessions/:id/record-steps` to its `done` frame
@@ -20,9 +20,14 @@ import { writeRecordedSteps } from './write-steps.js';
  * The session manager decides whether a recording may start and what it holds
  * while it runs (the queue, the in-flight count, the session's one recording
  * slot); this class owns what happens inside it: getting a browser, the
- * recorder, the live frames, Stop → the model → the result, and handing
- * everything back on every way out.
+ * recorder, the live frames, the live draft (./draft-engine.ts), Stop → the
+ * final draft → the result, and handing everything back on every way out.
  */
+
+/** Test-only knobs: the recorder's, and the draft engine's settle window. */
+export type RecordStepsTestKnobs = Partial<
+  Pick<StepRecorderOptions, 'typedNavigationWindowMs' | 'tap' | 'maxCrops'>
+> & { draftSettleMs?: number };
 
 /** Everything a recording needs from the session it belongs to. */
 export interface RecordStepsRunDeps {
@@ -40,8 +45,9 @@ export interface RecordStepsRunDeps {
   knownSecrets(): KnownSecret[];
   /** Give back what beginning the recording took. Idempotent. */
   finish(): void;
-  /** Tests only: recorder knobs (the typed-navigation window, a tap). */
-  recorderOptions?: Partial<Pick<StepRecorderOptions, 'typedNavigationWindowMs' | 'tap' | 'maxCrops'>>;
+  /** Tests only: recorder knobs (the typed-navigation window, a tap) and the
+   *  draft engine's settle window. */
+  recorderOptions?: RecordStepsTestKnobs;
 }
 
 type EndReason =
@@ -59,7 +65,8 @@ export class RecordStepsRun {
   private readonly ended: Promise<EndReason>;
   /** Add check asked for while the browser was still coming up. */
   private pendingPick: boolean | null = null;
-  private readonly writeAbort = new AbortController();
+  /** The live draft — created once the browser is up, before the first action. */
+  private engine: DraftEngine | null = null;
 
   constructor(private readonly deps: RecordStepsRunDeps) {
     this.ended = new Promise<EndReason>((resolve) => {
@@ -100,16 +107,18 @@ export class RecordStepsRun {
   /**
    * `POST /sessions/:id/record-steps/control`.
    *
-   * While recording, every action is accepted. Once Stop has been received the
-   * steps are being written: only `cancel` still means something (it abandons
-   * the model call), and anything else answers `stopping`.
+   * While recording, every action is accepted. `drop` / `restore` of an id
+   * the recording does not have (or one already in that state) answers
+   * `ignored`. Once Stop has been received the draft is being finished: only
+   * `cancel` still means something (it abandons the call in flight), and
+   * anything else answers `stopping`.
    */
   control(control: RecordControl): RecordControlOutcome {
     if (this.phase === 'done') return 'no-recording';
     if (this.phase === 'writing' || this.endReason) {
       if (control.action === 'cancel') {
         this.settle({ kind: 'cancel' });
-        this.writeAbort.abort();
+        this.engine?.abandon();
         return 'accepted';
       }
       return 'stopping';
@@ -120,7 +129,12 @@ export class RecordStepsRun {
         return 'accepted';
       case 'cancel':
         this.settle({ kind: 'cancel' });
+        this.engine?.abandon();
         return 'accepted';
+      case 'drop':
+        return this.engine?.drop(control.id) ? 'accepted' : 'ignored';
+      case 'restore':
+        return this.engine?.restore(control.id) ? 'accepted' : 'ignored';
       case 'check':
       case 'cancel-check': {
         const arm = control.action === 'check';
@@ -146,7 +160,7 @@ export class RecordStepsRun {
     // Closing the stream is `cancel` (On the wire).
     const onClientGone = (): void => {
       this.settle({ kind: 'cancel' });
-      this.writeAbort.abort();
+      this.engine?.abandon();
     };
     if (signal.aborted) onClientGone();
     signal.addEventListener('abort', onClientGone, { once: true });
@@ -186,11 +200,21 @@ export class RecordStepsRun {
         return;
       }
 
+      const { draftSettleMs, ...recorderKnobs } = this.deps.recorderOptions ?? {};
+      const engine = new DraftEngine({
+        file,
+        sendImages: prepared.sendScreenshots,
+        secrets: secretValues,
+        complete: (messages, s) => this.deps.complete(messages, s),
+        emit,
+        ...(draftSettleMs !== undefined && { settleMs: draftSettleMs }),
+      });
+      this.engine = engine;
       const recorder = new StepRecorder({
         browser: prepared.browser,
         sendScreenshots: prepared.sendScreenshots,
         knownSecrets: secrets,
-        onAction: (a: RecordedAction) =>
+        onAction: (a: RecordedAction) => {
           emit({
             type: 'record:action',
             id: a.id,
@@ -198,11 +222,14 @@ export class RecordStepsRun {
             summary: a.summary,
             atMs: a.atMs,
             ...(a.tab !== 'main' && { tab: a.tab }),
-          }),
+          });
+          // After the frame, so the draft that covers it never arrives first.
+          engine.addAction(a);
+        },
         onPick: (armed) => emit({ type: 'record:pick', armed }),
         onGone: () => this.settle({ kind: 'gone' }),
         onWarning: (msg) => emit({ type: 'output', msg, kind: 'warn' }),
-        ...this.deps.recorderOptions,
+        ...recorderKnobs,
       });
       this.recorder = recorder;
       const started = await recorder.start();
@@ -224,6 +251,7 @@ export class RecordStepsRun {
       }
 
       const reason = await this.ended;
+      if (reason.kind !== 'stop') engine.abandon();
       if (reason.kind === 'cancel') {
         await recorder.cancel();
         logger.info(`Session "${sessionId}": Record Steps cancelled — nothing written`);
@@ -238,16 +266,22 @@ export class RecordStepsRun {
         return;
       }
 
+      // Stop: nothing new is scheduled; a field still being typed into is
+      // collected (its action frame goes out now, before record:writing); the
+      // Stop's own `dropped` joins the live drops.
+      engine.close();
       const all = await recorder.stop();
-      const kept = all.filter((a) => !reason.dropped.has(a.id));
+      engine.dropAll([...reason.dropped]);
+      engine.silence();
       this.phase = 'writing';
       emit({ type: 'record:writing' });
       logger.info(
         `Session "${sessionId}": Record Steps stopped — ${all.length} action(s), ` +
-          `${all.length - kept.length} dropped; writing the steps`,
+          `${all.length - engine.remainingCount} dropped; finishing the draft`,
       );
 
-      if (kept.length === 0) {
+      if (engine.remainingCount === 0) {
+        engine.abandon();
         emit({
           type: 'record:result',
           steps: [],
@@ -258,16 +292,10 @@ export class RecordStepsRun {
         return;
       }
 
-      const writeSignal = AbortSignal.any([signal, this.writeAbort.signal]);
-      const answer = await writeRecordedSteps({
-        actions: kept,
-        file,
-        sendImages: prepared.sendScreenshots,
-        secrets: secretValues(),
-        complete: (messages, s) => this.deps.complete(messages, s),
-        signal: writeSignal,
-        warn: (msg) => emit({ type: 'output', msg, kind: 'warn' }),
-      });
+      // The call in flight finishes; one more only when the draft does not
+      // cover every remaining action (§8). Its failure is thrown: nothing is
+      // inserted.
+      const answer = await engine.finish();
       if (this.cancelled()) {
         emit({ type: 'done', status: 'aborted' });
         return;
@@ -284,6 +312,7 @@ export class RecordStepsRun {
         emit({ type: 'done', status: 'aborted' });
         return;
       }
+      this.engine?.abandon();
       const reason = redact(messageOf(err), secretValues()).replace(/\.\s*$/, '');
       // SPEC-record-steps.md §10's sentence once Stop has been received — the
       // model's answer, or the call for it, failed; before that, the recording
@@ -301,6 +330,7 @@ export class RecordStepsRun {
       signal.removeEventListener('abort', onClientGone);
       removeLogBridge();
       this.phase = 'done';
+      this.engine?.abandon();
       try {
         await this.recorder?.cancel();
       } catch {

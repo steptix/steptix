@@ -43,6 +43,21 @@ export type RecordEvent =
       tab?: string;
     }
   | { type: 'record:pick'; armed: boolean }
+  /** A draft call started (`busy: true`) or finished (decision 9). */
+  | { type: 'record:drafting'; busy: boolean }
+  /**
+   * The draft as it stands — REPLACES the previous one. `revision` increases
+   * by one per draft; `through` is the id of the last action it covers.
+   */
+  | {
+      type: 'record:draft';
+      revision: number;
+      steps: string[];
+      parameters: Array<{ name: string; value: string }>;
+      notes?: string[];
+      through?: string;
+    }
+  /** Stop received; finishing the draft. */
   | { type: 'record:writing' }
   | {
       type: 'record:result';
@@ -93,12 +108,23 @@ export interface RecordStepsRequest {
 /** `POST /sessions/:id/record-steps/control` body, validated. */
 export type RecordControl =
   | { action: 'stop'; dropped?: string[] }
+  /** Leave this action out, and redraft now (decision 9). */
+  | { action: 'drop'; id: string }
+  /** Put it back, and redraft now. */
+  | { action: 'restore'; id: string }
   | { action: 'check' }
   | { action: 'cancel-check' }
   | { action: 'cancel' };
 
 /** Answer to a control request, which the route turns into a status. */
-export type RecordControlOutcome = 'accepted' | 'no-recording' | 'stopping';
+export type RecordControlOutcome =
+  | 'accepted'
+  | 'no-recording'
+  /** Stop has been received; only `cancel` still does anything. */
+  | 'stopping'
+  /** `drop` / `restore` of an id the recording does not have, or one already
+   *  in that state — nothing to do. */
+  | 'ignored';
 
 /** A rectangle in CSS pixels. */
 export interface Box {

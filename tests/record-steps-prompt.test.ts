@@ -7,6 +7,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { buildRecordStepsPrompt, RECORD_STEPS_SYSTEM } from '../src/ai/prompts.js';
+import type { ChatMessage } from '../src/ai/types.js';
 import type { MessageContentBlock } from '../src/ai/types.js';
 import { summarizeTargetFile } from '../src/recorder/target-file.js';
 import type { RecordedAction } from '../src/recorder/types.js';
@@ -16,7 +17,8 @@ import {
   parseRecordStepsAnswer,
   reconcileAnswer,
   RecordStepsAnswerError,
-  writeRecordedSteps,
+  askForDraft,
+  parseDraftAnswer,
 } from '../src/recorder/write-steps.js';
 import { summarizeAction } from '../src/recorder/step-recorder.js';
 
@@ -106,7 +108,10 @@ describe('buildRecordStepsPrompt', () => {
       'Tick the <label> checkbox',
       'I1. A click marked focusOnly',
       'I2. A tick or untick with viaLabel',
-      'I3. A burst of clicks',
+      'I3. Clicks that only opened a menu and then chose an item are ONE step',
+      '"replaceFrom": the index in the draft so far where your "steps" begin',
+      'You may reach back at most 3 steps (replaceFrom ≥ draft length − 3)',
+      '"parameters": the WHOLE list of parameters the draft uses',
       'P1. Every value the author TYPED becomes a {{name}} placeholder',
       'P2. Reuse a parameter the file already has when its value is exactly the value typed',
       'P3. Choosing an option or ticking a box is not typing',
@@ -118,6 +123,46 @@ describe('buildRecordStepsPrompt', () => {
     ]) {
       expect(RECORD_STEPS_SYSTEM).toContain(rule);
     }
+    // Quotes inside the rules are quotes, not escape sequences the model reads.
+    expect(RECORD_STEPS_SYSTEM).not.toContain('\\');
+    expect(RECORD_STEPS_SYSTEM).toContain('icon on the "Everyday" account row');
+  });
+
+  it('an incremental call shows the draft so far, indexed from 0, and the furthest replaceFrom may reach', () => {
+    const newOnes = ACTIONS.slice(2);
+    const [, user] = buildRecordStepsPrompt({
+      actions: newOnes,
+      draft: {
+        steps: ['Navigate to login.html', 'Type {{email}} into the Email field', 'Click Sign in', 'Click Menu'],
+        parameters: [{ name: 'email', value: 'demo@securebank.com' }],
+      },
+      firstActionNumber: 3,
+      previousAtMs: 2000,
+      file,
+      includeImages: true,
+      secrets: [],
+    });
+    const text = userText(user!.content as MessageContentBlock[]);
+    expect(text).toContain('## The draft so far: 4 steps');
+    expect(text).toContain('To only add steps, replaceFrom is 4; the furthest back you may start is 1.');
+    expect(text).toContain('"index": 3,\n      "step": "Click Menu"');
+    expect(text).toContain('## What the author did since the draft: 2 actions');
+    const start = text.lastIndexOf('--- BEGIN RECORDING ---') + '--- BEGIN RECORDING ---'.length;
+    const recording = JSON.parse(text.slice(start, text.lastIndexOf('--- END RECORDING ---')));
+    // Numbered where they sit in the recording, gaps measured from the action before.
+    expect(recording.map((a: { n: number }) => a.n)).toEqual([3, 4]);
+    expect(recording[0].secondsSincePrevious).toBe(1);
+    // Only this call's actions' crops: action 4 has one, action 3 does not.
+    expect(text).toContain('Screenshot for action 4 (check)');
+    expect((user!.content as MessageContentBlock[]).filter((b) => b.type === 'image_url')).toHaveLength(1);
+  });
+
+  it('a full (re)draft says the draft is empty and asks for replaceFrom 0', () => {
+    const text = userText(
+      buildRecordStepsPrompt({ actions: ACTIONS, file, includeImages: false, secrets: [] })[1]!.content as MessageContentBlock[],
+    );
+    expect(text).toContain('## The draft so far\nEmpty: write the draft from the start');
+    expect(text).toContain('replaceFrom 0.');
   });
 
   it('shows the file: baseUrl, parameter names and values (a $ reference as is), sections, the cursor line', () => {
@@ -270,21 +315,27 @@ describe('reconcileAnswer — the rules enforced, not hoped for', () => {
   });
 });
 
-describe('writeRecordedSteps — one call, and one retry without images', () => {
+describe('askForDraft — one call, and one retry without images', () => {
   const file = summarizeTargetFile(FILE, 'new');
-  const good = JSON.stringify({ steps: ['Click Sign in'], parameters: [] });
+  const good = JSON.stringify({ replaceFrom: 0, steps: ['Click Sign in'], parameters: [] });
+  const base = {
+    actions: ACTIONS,
+    draft: { steps: [], parameters: [] },
+    firstActionNumber: 1,
+    previousAtMs: 0,
+    file,
+    secrets: [],
+  };
 
-  it('asks again without images when the model rejects them, and says so', async () => {
+  it('asks again without images when the model rejects them, and says so once', async () => {
     const asked: boolean[] = [];
-    const warnings: string[] = [];
-    const out = await writeRecordedSteps({
-      actions: ACTIONS,
-      file,
+    let rejected = 0;
+    const out = await askForDraft({
+      ...base,
       sendImages: true,
-      secrets: [],
       signal: new AbortController().signal,
-      warn: (m) => warnings.push(m),
-      complete: async (messages) => {
+      onImagesRejected: () => rejected++,
+      complete: async (messages: ChatMessage[]) => {
         const hasImage = (messages[1]!.content as MessageContentBlock[]).some((b) => b.type === 'image_url');
         asked.push(hasImage);
         if (hasImage) throw Object.assign(new Error('400 nope'), { code: 'image_input_unsupported' });
@@ -292,20 +343,18 @@ describe('writeRecordedSteps — one call, and one retry without images', () => 
       },
     });
     expect(asked).toEqual([true, false]);
-    expect(out.steps).toEqual(['Click Sign in']);
-    expect(warnings[0]).toMatch(/does not accept images/);
+    expect(out).toMatchObject({ replaceFrom: 0, steps: ['Click Sign in'] });
+    expect(rejected).toBe(1);
   });
 
   it('does not retry any other failure', async () => {
     let calls = 0;
     await expect(
-      writeRecordedSteps({
-        actions: ACTIONS,
-        file,
+      askForDraft({
+        ...base,
         sendImages: true,
-        secrets: [],
         signal: new AbortController().signal,
-        warn: () => {},
+        onImagesRejected: () => {},
         complete: async () => {
           calls++;
           throw new Error('500 gateway down');
@@ -315,6 +364,16 @@ describe('writeRecordedSteps — one call, and one retry without images', () => 
     expect(calls).toBe(1);
     expect(isImageRejection(new Error('400 image_url is not supported for this model'))).toBe(true);
     expect(isImageRejection(new Error('500 internal'))).toBe(false);
+  });
+});
+
+describe('parseDraftAnswer', () => {
+  it('reads replaceFrom beside the steps; anything but a whole number >= 0 is undefined', () => {
+    expect(parseDraftAnswer('{"replaceFrom": 2, "steps": ["a"], "parameters": []}').replaceFrom).toBe(2);
+    expect(parseDraftAnswer('{"steps": ["a"]}').replaceFrom).toBeUndefined();
+    expect(parseDraftAnswer('{"replaceFrom": 1.5, "steps": []}').replaceFrom).toBeUndefined();
+    expect(parseDraftAnswer('{"replaceFrom": -1, "steps": []}').replaceFrom).toBeUndefined();
+    expect(() => parseDraftAnswer('not json')).toThrow(RecordStepsAnswerError);
   });
 });
 

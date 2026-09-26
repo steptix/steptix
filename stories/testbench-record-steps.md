@@ -465,9 +465,10 @@ are selected, and the file is left unsaved.
 ## What the server half decided
 
 Built in `src/` — the page script `src/browser/scripts/record-steps.js`, the
-recorder and the run in `src/recorder/`, `buildRecordStepsPrompt` in
-`src/ai/prompts.ts`, the two routes in `src/server/api-server.ts` and
-`beginRecordSteps` / `controlRecordSteps` on the session manager. Pinned by
+recorder, the run and the draft engine in `src/recorder/`,
+`buildRecordStepsPrompt` in `src/ai/prompts.ts`, the two routes in
+`src/server/api-server.ts` and `beginRecordSteps` / `controlRecordSteps` on the
+session manager. Pinned by
 `tests/record-steps-recorder.test.ts` (the page script and the recorder in a
 real Chromium), `tests/api-server-record-steps.test.ts` (the routes through
 the real HTTP entry, with a real browser the server launches itself),
@@ -500,11 +501,67 @@ session's client as its last batch left it. §10's sentence, word for word.
 **Headless is a 400 with §10's sentence; a CDP-attached session is a 400 too**
 (a browser someone else started is "Not in the first version").
 
-**The AI switch.** The recording uses the session's client, with the policy
-veil lifted for its one call and put back exactly as it was found — not
+**Live drafting** (`src/recorder/draft-engine.ts`). Every call is a draft
+call: the draft so far (steps indexed from 0, and its parameters), only the
+actions it does not cover yet, and the file context; the answer is `{
+replaceFrom, steps, parameters, notes? }`. One prompt serves both shapes — a
+full redraft is a draft call over an empty draft.
+
+- *When.* A call starts once 600 ms pass with no new action (the settle
+  window); actions that arrive while a call runs wait for it and go together in
+  the next one, again after the settle window from the last of them. There is
+  never more than one call in flight per recording: every call goes through one
+  method that refuses to start a second.
+- *What it covers.* An incremental call covers every remaining action the
+  draft does not, in order — so what the draft covers is always a prefix of the
+  remaining actions, and `record:draft.through` is the last of it.
+- *`replaceFrom`.* Must be between `draft.length − 3` and `draft.length`; on an
+  empty draft it is taken as 0 whatever it says. Out of range, missing or not a
+  whole number, the answer is refused (a log line, nothing in the panel) and
+  the same busy period retries ONCE as a full redraft over every remaining
+  action. A full redraft's `replaceFrom` is ignored: there is nothing before 0.
+- *A failed call* (the model errors, answers something unreadable, or its
+  retry fails) is an `output` warning — "The draft could not be updated:
+  <reason>. The steps so far stand; the next update covers those actions
+  again." — and the draft stands. The engine does not retry on its own: the next
+  ACTION starts the next call (an action that arrived during the failed call
+  counts), or Stop does.
+- *`drop` / `restore`.* A drop of an action the draft covers, or that the call
+  in flight was asked about, makes the next call a full redraft and aborts the
+  call in flight; its answer is thrown away by a generation counter even if it
+  arrives, so no draft that includes a dropped action is ever emitted. A drop
+  of an action nothing has seen yet just leaves it out of the next call. A
+  restore redrafts in full when the draft (or the call in flight) already
+  reaches past the restored action, and otherwise lets the next incremental
+  call pick it up. Both start "now" — no settle wait. Dropping every action
+  leaves an empty draft, emitted without a model call.
+- *Frames.* `record:drafting` `busy: true` / `false` bracket every call,
+  retry included; `record:draft` carries `revision` (+1 per draft),
+  `steps`, `parameters`, `notes` and `through`. Each draft already has the
+  parameter-conflict renaming applied, so the panel shows what will be
+  inserted.
+- *Stop.* Nothing new is scheduled; late typing is collected (its
+  `record:action` goes out); the Stop's `dropped` joins the live drops; then
+  `record:writing`. If a call is in flight at that moment the panel gets its
+  `busy: false` first, and from `record:writing` on no drafting frames or
+  draft warnings are sent — the finish reads "Finishing…", not "updating…".
+  The call in flight completes (its answer is used), and ONE more call is made
+  only when the draft does not cover every remaining action or a Stop drop
+  touched it (then it is a full redraft). That call's failure ends the
+  recording with §10's error and nothing inserted.
+- *Cancel* or the stream closing abandons the call in flight (its abort signal
+  fires) and makes no further calls; no frame about drafting follows.
+- *Images.* Each call sends the crops of the actions it covers — a full
+  redraft all remaining ones — within the recording's 40. A model that rejects
+  images is asked again without them within the same call; after the first
+  rejection the recording stops sending images at all (one warning), rather
+  than paying a failed call per action.
+
+**The AI switch.** Every draft call uses the session's client, with the
+policy veil lifted for that call and put back exactly as it was found — not
 lowered for good: the veil is the last batch's statement about the session,
 and the next batch re-decides it anyway. A log line says so when the veil was
-up. The call uses the `authoring` profile.
+up. Calls use the `authoring` profile.
 
 **Typed navigation.** On Chromium each page gets its own CDP session, and
 `Page.frameRequestedNavigation` — which fires for every navigation the page
@@ -528,7 +585,10 @@ continues where they left off.
 **Control answers 202 or 404 only**, as §9.3 says. After Stop, only `cancel`
 still does something — it abandons the model call and the stream ends
 `aborted`; a second `stop` or a check is answered 202 with an `ignored` reason
-and changes nothing. A body that is none of the four is a 400.
+and changes nothing. A `drop` of an id the recording does not have (or one
+already dropped), or a `restore` of one that is not dropped, is also 202 with
+`ignored` — not a 404, which a client would read as "no recording is running".
+A body that is none of the six, or a `drop`/`restore` with no `id`, is a 400.
 
 **Typing still open at Stop arrives after Stop.** The page returns any field
 still being typed into when the server asks for it at Stop, and those
@@ -573,8 +633,12 @@ in everything the model is sent, in every `record:action` summary and in
 in `src/browser/scripts/secret-field.js`, and the recorder loads the same
 text; `tests/secret-field-parity.test.ts` asks all three the same questions.
 
-**The answer, enforced.** `record:result` is the model's answer after a
-file-safety pass. A returned parameter whose name the file already has with a
+**The answer, enforced.** Every draft — and so `record:result`, which is the
+final draft — has been through a file-safety pass. What the pass CHANGED stays
+in the draft's notes for the rest of the recording (a full redraft starts them
+again); what is merely true right now (an undefined placeholder, a secret-named
+literal) is recomputed for each draft, so it disappears once the model fixes
+it. A returned parameter whose name the file already has with a
 different value is renamed (`email` → `email_2`) and the new steps rewritten to
 match, with a note in §10's words finished with what was done instead
 ("…; the recorded value was added as email_2 instead.") — the spec has the
@@ -583,8 +647,8 @@ typing the old value. Two `.env` references under one name keep the file's.
 A value the model could only have seen masked becomes `$NAME`. A `{{name}}`
 nothing defines is a note. Stop with every action dropped (or none recorded)
 answers an empty result with a note and makes no model call. An unreadable
-answer ends with §10's "The steps could not be written: <reason>. Nothing was
-inserted." as both the `output` frame and `done.error`.
+answer to Stop's last call ends with §10's "The steps could not be written:
+<reason>. Nothing was inserted." as both the `output` frame and `done.error`.
 
 **Beyond the wire block.** The start body's `env` is accepted (the TestBench
 half sends it): it points the session's AI client as a batch would, and a

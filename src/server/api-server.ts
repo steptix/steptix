@@ -1186,15 +1186,17 @@ export function createApiServer(
     }
   });
 
-  // POST /sessions/:id/record-steps/control — Stop, Add check, Cancel check,
-  // Cancel, for the recording running in this session. 202 when accepted, 404
-  // when no recording is running (SPEC-record-steps.md §9.3), 400 for a body
-  // that is none of the four.
+  // POST /sessions/:id/record-steps/control — Stop, Drop, Restore, Add check,
+  // Cancel check, Cancel, for the recording running in this session. 202 when
+  // accepted, 404 when no recording is running (SPEC-record-steps.md §9.3), 400
+  // for a body that is none of the six.
   //
-  // Once Stop has been received only `cancel` still does anything (it abandons
-  // the model call). A second `stop`, or a check, is still answered 202 — the
-  // recording IS running, and the contract has two answers — with `ignored`
-  // saying why nothing happened.
+  // Two kinds of 202 do nothing, and say so in `ignored`: anything but
+  // `cancel` once Stop has been received (only `cancel` still applies — it
+  // abandons the call in flight), and a `drop` / `restore` of an id the
+  // recording does not have or that is already in that state. Both are still
+  // 202 because the recording IS running, and the contract has two answers; a
+  // 404 for an unknown ACTION id would read to a client as "no recording".
   app.post('/sessions/:id/record-steps/control', (req: Request, res: Response) => {
     const sessionId = String(req.params.id);
     const control = parseRecordControl(req.body);
@@ -1211,6 +1213,16 @@ export function createApiServer(
       res.status(202).json({
         ok: true,
         ignored: 'The recording has already been stopped and its steps are being written; only "cancel" still applies.',
+      });
+      return;
+    }
+    if (outcome === 'ignored') {
+      res.status(202).json({
+        ok: true,
+        ignored:
+          control.action === 'restore'
+            ? `Action ${(control as { id: string }).id} is not dropped, so there is nothing to restore.`
+            : `There is no action ${(control as { id: string }).id} to drop, or it is already dropped.`,
       });
       return;
     }
@@ -3102,7 +3114,7 @@ export function parseRecordStepsRequest(raw: unknown): RecordStepsRequest | stri
 /** Validate a `POST /sessions/:id/record-steps/control` body. */
 export function parseRecordControl(raw: unknown): RecordControl | string {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    return 'Request body must be a JSON object: { action: "stop" | "check" | "cancel-check" | "cancel" }.';
+    return 'Request body must be a JSON object: { action: "stop" | "drop" | "restore" | "check" | "cancel-check" | "cancel" }.';
   }
   const body = raw as Record<string, unknown>;
   switch (body.action) {
@@ -3113,6 +3125,13 @@ export function parseRecordControl(raw: unknown): RecordControl | string {
       }
       return { action: 'stop', dropped: body.dropped as string[] };
     }
+    case 'drop':
+    case 'restore': {
+      if (typeof body.id !== 'string' || body.id === '') {
+        return `"${body.action}" needs "id": the id of the record:action to ${body.action}.`;
+      }
+      return { action: body.action, id: body.id };
+    }
     case 'check':
       return { action: 'check' };
     case 'cancel-check':
@@ -3120,6 +3139,6 @@ export function parseRecordControl(raw: unknown): RecordControl | string {
     case 'cancel':
       return { action: 'cancel' };
     default:
-      return '"action" must be one of: stop, check, cancel-check, cancel.';
+      return '"action" must be one of: stop, drop, restore, check, cancel-check, cancel.';
   }
 }

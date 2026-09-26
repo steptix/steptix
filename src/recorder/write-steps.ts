@@ -6,9 +6,10 @@ import type { TargetFileSummary } from './target-file.js';
 import type { RecordedAction } from './types.js';
 
 /**
- * Stop → the model → `record:result` (stories/testbench-record-steps.md,
- * decision 9): one call with the whole recording, and a strict reading of what
- * comes back.
+ * The model's side of live drafting (stories/testbench-record-steps.md,
+ * decision 9): one draft call, and a strict reading of what comes back. When
+ * calls happen, and what their answers do to the draft, is the draft engine's
+ * (./draft-engine.ts).
  */
 
 /** What the model answered, validated. */
@@ -120,6 +121,26 @@ export function parseRecordStepsAnswer(text: string): RecordStepsAnswer {
   return { steps, parameters, notes };
 }
 
+/** A draft call's answer: the parsed tail, and where it starts. */
+export interface DraftAnswer extends RecordStepsAnswer {
+  /**
+   * The 0-based index in the draft so far where `steps` begin. Undefined when
+   * the model left it out or gave something that is not a whole number — the
+   * engine refuses that exactly as it refuses one that reaches back too far.
+   */
+  replaceFrom: number | undefined;
+}
+
+/** Read a draft call's JSON answer `{ replaceFrom, steps, parameters, notes? }`. */
+export function parseDraftAnswer(text: string): DraftAnswer {
+  const answer = parseRecordStepsAnswer(text);
+  // Valid JSON by now — `parseRecordStepsAnswer` threw otherwise.
+  const obj = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)) as Record<string, unknown>;
+  const raw = obj['replaceFrom'];
+  const replaceFrom = typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 ? raw : undefined;
+  return { ...answer, replaceFrom };
+}
+
 /** `password` → `$PASSWORD`, `apiKey` → `$API_KEY`. */
 export function envReferenceFor(name: string): string {
   const upper = name
@@ -134,22 +155,26 @@ function escapeRegExp(s: string): string {
 }
 
 /**
- * The file-safety pass over a parsed answer — rules the prompt states,
+ * The parameter half of the file-safety pass — rules the prompt states,
  * enforced rather than hoped for, because TestBench writes what it is given.
+ * Applied to every draft, so the panel shows what will be inserted, and
+ * idempotent on a draft it already settled.
  *
  * - A parameter the file already has under the same name with a DIFFERENT
- *   value is renamed (`email` → `email_2`) and the new steps rewritten to match
+ *   value is renamed (`email` → `email_2`) and the steps rewritten to match
  *   (decision 8: "never overwrites an existing line with a different value").
- *   TestBench keeps an existing line as it is, so without this the new steps
- *   would silently type the old value. Two `.env` references under one name are
- *   the exception: the model meant the file's own and spelled the variable its
- *   own way, so the file's is kept.
+ *   TestBench keeps an existing line as it is, so without this the steps would
+ *   silently type the old value. Two `.env` references under one name are the
+ *   exception: the model meant the file's own and spelled the variable its own
+ *   way, so the file's is kept.
  * - A value that is, or contains, the secret mask is a secret the model could
  *   not see: it becomes `$NAME` (decision 7).
- * - A `{{name}}` the steps use that neither the answer nor the file defines is
- *   noted — the run would fail on it, and the author should hear it now.
+ *
+ * Its `notes` say what it CHANGED — they are kept with the draft for the rest
+ * of the recording. What is merely TRUE of the draft right now is
+ * {@link draftStateNotes}, recomputed every time.
  */
-export function reconcileAnswer(answer: RecordStepsAnswer, file: TargetFileSummary): RecordStepsAnswer {
+export function settleParameters(answer: RecordStepsAnswer, file: TargetFileSummary): RecordStepsAnswer {
   const existing = new Map(file.parameters.map((p) => [p.name, p.value.trim()]));
   let steps = [...answer.steps];
   const notes = [...answer.notes];
@@ -184,8 +209,25 @@ export function reconcileAnswer(answer: RecordStepsAnswer, file: TargetFileSumma
     }
     parameters.push({ name: p.name, value });
   }
+  return { steps, parameters, notes };
+}
 
-  const defined = new Set([...existing.keys(), ...parameters.map((p) => p.name)]);
+/**
+ * What is true of a draft as it stands — recomputed for every draft rather than
+ * kept, so a note disappears the moment the model fixes what it was about.
+ *
+ * - A `{{name}}` the steps use that neither the draft nor the file defines: the
+ *   run would fail on it, and the author should hear it now.
+ * - A secret-named NEW parameter holding a literal: how a password ends up in a
+ *   test file. The recorder never had one to give, so it is worth saying.
+ */
+export function draftStateNotes(
+  steps: readonly string[],
+  parameters: ReadonlyArray<{ name: string; value: string }>,
+  file: TargetFileSummary,
+): string[] {
+  const existing = new Set(file.parameters.map((p) => p.name));
+  const defined = new Set([...existing, ...parameters.map((p) => p.name)]);
   const undefinedNames = new Set<string>();
   for (const s of steps) {
     for (const m of s.matchAll(/\{\{([A-Za-z_][A-Za-z0-9_.]*)\}\}/g)) {
@@ -193,11 +235,10 @@ export function reconcileAnswer(answer: RecordStepsAnswer, file: TargetFileSumma
       if (!defined.has(root)) undefinedNames.add(root);
     }
   }
+  const notes: string[] = [];
   for (const name of undefinedNames) {
     notes.push(`The steps use {{${name}}}, which no parameter defines — add it under ## Parameters before running.`);
   }
-  // A secret-named parameter holding a literal is how a password ends up in a
-  // test file; the recorder never had one to give, so say so if one appears.
   for (const p of parameters) {
     if (isSecretName(p.name) && !isEnvReference(p.value) && !existing.has(p.name)) {
       notes.push(
@@ -205,7 +246,13 @@ export function reconcileAnswer(answer: RecordStepsAnswer, file: TargetFileSumma
       );
     }
   }
-  return { steps, parameters, notes };
+  return notes;
+}
+
+/** Both halves at once: the settled answer with its state notes appended. */
+export function reconcileAnswer(answer: RecordStepsAnswer, file: TargetFileSummary): RecordStepsAnswer {
+  const settled = settleParameters(answer, file);
+  return { ...settled, notes: [...settled.notes, ...draftStateNotes(settled.steps, settled.parameters, file)] };
 }
 
 /** Did the model refuse the request because it carried images? */
@@ -216,30 +263,41 @@ export function isImageRejection(err: unknown): boolean {
   return /\b4\d\d\b/.test(message) && /image|vision|multimodal/i.test(message);
 }
 
-export interface WriteRecordedStepsArgs {
+export interface AskForDraftArgs {
+  /** The actions this call covers. */
   actions: readonly RecordedAction[];
+  /** The draft so far; empty for a full (re)draft. */
+  draft: { steps: readonly string[]; parameters: ReadonlyArray<{ name: string; value: string }> };
+  firstActionNumber: number;
+  previousAtMs: number;
   file: TargetFileSummary;
-  /** Crops go to the model (`ai.sendScreenshots`). */
+  /** Send the covered actions' crops (`ai.sendScreenshots`, and the model has
+   *  not rejected images earlier in this recording). */
   sendImages: boolean;
   /** Values that must not reach the model. */
   secrets: readonly string[];
   complete: (messages: ChatMessage[], signal: AbortSignal) => Promise<{ text: string }>;
   signal: AbortSignal;
-  warn: (message: string) => void;
+  /** Called once when the model rejects images and the call is asked again
+   *  without them. */
+  onImagesRejected: () => void;
 }
 
 /**
- * Build the prompt, ask once, and read the answer. A model that rejects images
- * (SPEC-use-computer §15.4 — the Copilot bridge, some providers) is asked once
- * more without them, and the author is told the steps were written from the
- * descriptions alone.
+ * One draft call: build the prompt, ask, read the answer. A model that rejects
+ * images (SPEC-use-computer §15.4 — the Copilot bridge, some providers) is asked
+ * once more without them. The answer is parsed but not yet checked against the
+ * draft — `replaceFrom`'s limit is the draft engine's to enforce.
  */
-export async function writeRecordedSteps(args: WriteRecordedStepsArgs): Promise<RecordStepsAnswer> {
+export async function askForDraft(args: AskForDraftArgs): Promise<DraftAnswer> {
   const withImages = args.sendImages && args.actions.some((a) => a.crop !== undefined);
   const ask = (includeImages: boolean): Promise<{ text: string }> =>
     args.complete(
       buildRecordStepsPrompt({
         actions: args.actions,
+        draft: args.draft,
+        firstActionNumber: args.firstActionNumber,
+        previousAtMs: args.previousAtMs,
         file: args.file,
         includeImages,
         secrets: args.secrets,
@@ -252,11 +310,8 @@ export async function writeRecordedSteps(args: WriteRecordedStepsArgs): Promise<
     answer = await ask(withImages);
   } catch (err) {
     if (!withImages || args.signal.aborted || !isImageRejection(err)) throw err;
-    args.warn(
-      'The model does not accept images, so the steps are written from the page descriptions alone ' +
-        '(icon-only targets may be described less well).',
-    );
+    args.onImagesRejected();
     answer = await ask(false);
   }
-  return reconcileAnswer(parseRecordStepsAnswer(answer.text), args.file);
+  return parseDraftAnswer(answer.text);
 }
