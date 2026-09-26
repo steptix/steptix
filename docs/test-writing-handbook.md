@@ -631,6 +631,12 @@ is literal (§3.8), when the evaluation is free — so a chain costs one and a
 costs another call to perform it. That is why `If a cookie banner appears,
 reject it` is still better as a watch (§3.4) — one call, no `then`.
 
+Compiling (§10) removes both costs. The steps of a loop body compile once and
+replay on every pass, and a condition that looks at the page compiles to a
+`condition` entry that answers true or false in code — so a compiled `While`
+costs nothing per pass. `Otherwise` and `For each` have nothing to compile;
+their tails do.
+
 **Hooks do not dispatch control lines.** A `## Hooks` entry — or an
 `execution.defaultHooks` entry in `aiui.config.json` — that reads like one is
 handed to the model as a single prose instruction, and the run warns that it
@@ -2128,6 +2134,32 @@ compiled code had to be repaired by the model. `compile` records a run and
 writes a `.steps.ts` beside the test so future runs replay eligible steps as
 code with no tokens; the Markdown stays the authored test and steps that the
 compiler declines stay AI-driven.
+
+A file that decides and loops (§3.5) compiles too. Each line of a loop body
+gets ONE entry, generated from the first pass that ran it and replayed on
+every pass; a value that changes per pass (a `For each` item, `{{order.id}}`)
+is read with `step.getVar`, never written into the code. An `If`, `Else if`,
+`While` or `Repeat … until` line whose condition looks at the page gets an
+entry with a `condition` function instead of `run`:
+
+```ts
+{
+  source: 'While the Next button is enabled, Go to the next page',
+  async condition({ page }) {
+    const next = page.getByRole('button', { name: 'Next' });
+    return (await next.count()) > 0 && (await next.isEnabled());
+  },
+},
+```
+
+It answers whether the condition as written holds right now — for `Repeat …
+until` that is the `until` part — and it only reads the page. A run decides a
+condition from its values first, then from its entry, then with the model; a
+chain is decided in code only when every member has an answer without the
+model. An entry that throws is flagged ⚠ and the model decides for the rest of
+the run. A compiled loop that reaches its cap asks the model once whether the
+condition really still holds, so an entry that never says stop is caught
+rather than trusted.
 
 Interactive markers, for a person at the keyboard only:
 

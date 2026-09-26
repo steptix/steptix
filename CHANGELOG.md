@@ -6,6 +6,41 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — files that loop and decide now compile, conditions included
+
+`aiui compile` refused any file with a `While`, `Repeat … until` or `For each`,
+and Run & Compile refused whenever the steps it would compile touched one. Both
+now compile it: each line of a loop body gets one code-behind entry, generated
+from the first pass that ran it and replayed on every pass, with anything that
+changes per pass (a `For each` item) read through `step.getVar`.
+
+The conditions compile too. An `If`, `Else if`, `While` or `Repeat … until`
+line whose condition looks at the page gets an entry with a `condition`
+function that answers true or false, so a compiled test makes no model call to
+decide — before, every such line asked the model on every visit, and a project
+with `ai.allowInRuns: false` could not run one at all. A condition is decided
+from its values first, then by its entry, then by the model; a chain is
+decided in code only when every member can be. An entry that throws paints ⚠
+and the model decides for the rest of the run; a compiled loop that reaches
+its cap asks the model once whether it should really carry on. `aiui compile`'s
+replay also checks the compiled conditions against the recorded run, visit by
+visit. `Otherwise` and `For each` have nothing to compile. The Electron app
+runs no code-behind and is unchanged.
+
+Also fixed on the way:
+
+- Run & Compile now names the steps a decision skipped — an untaken branch, a
+  loop that ran no passes — as not attempted, instead of saying nothing
+  (issue 053).
+- `POST /codebehind/compile` on a file with a chain failed its recording run,
+  and on a file with a loop ran the tail twice; both now compile.
+- TestBench no longer paints a refused compile as "✓ Nothing to compile", and
+  keeps a condition's code mark on its line after the section it ran finishes.
+- `step.getVar('order.id')` inside a skill body reads the `For each` item's
+  field (it answered `undefined`).
+
+TestBench 0.5.150. Server: rebuild and restart.
+
 ### Removed — the step cache; code-behind is now the one way a step replays
 
 The step cache is gone. With `cache.enabled` on in `aiui.config.json`, or
