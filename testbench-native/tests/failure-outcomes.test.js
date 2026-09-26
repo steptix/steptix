@@ -331,6 +331,106 @@ test('a stopped compile that produced nothing still gets its ✗ line', () => {
   );
 });
 
+// ── A compile the server refused ───────────────────────────────────────────
+// (stories/codebehind-loops-and-conditions.md §TestBench)
+
+/** The summary `emitCompileRefusal` (session-manager.ts) sends: every count zero,
+ *  nothing stopped, nothing named as not attempted, the refusal in `error`. */
+const REFUSED = { totalSteps: 0, compiled: 0, keptAi: 0 };
+const LOOP_REFUSAL =
+  'Run & Compile does not compile a loop yet ("While the Next button is enabled, Go to the next page").';
+
+test('a refused compile says it did not compile, and why — never "✓ Nothing to compile"', () => {
+  const line = resultLine('failed', { ...REFUSED, error: LOOP_REFUSAL });
+  assert.equal(line, `✗ Did not compile failure-outcomes-live.md: ${LOOP_REFUSAL}`);
+  // The sentence it used to be: the zero counts read as a clean result.
+  assert.doesNotMatch(line, /Nothing to compile/);
+  assert.doesNotMatch(line, /already has code-behind/);
+  assert.doesNotMatch(line, /^✓/);
+});
+
+test('a refusal with no closing stop gets one; one that has it is left alone', () => {
+  assert.equal(
+    resultLine('failed', { ...REFUSED, error: 'Tool catalogue load failed: ENOENT' }),
+    '✗ Did not compile failure-outcomes-live.md: Tool catalogue load failed: ENOENT.',
+  );
+  assert.equal(
+    resultLine('failed', { ...REFUSED, error: 'no step "Sign in".' }),
+    '✗ Did not compile failure-outcomes-live.md: no step "Sign in".',
+  );
+  // Surrounding whitespace is the wire's, not the sentence's.
+  assert.equal(
+    resultLine('failed', { ...REFUSED, error: '  refused.  ' }),
+    '✗ Did not compile failure-outcomes-live.md: refused.',
+  );
+});
+
+test('a failed compile with no error still fails — blank is absent', () => {
+  for (const error of [undefined, '', '   ']) {
+    assert.equal(
+      resultLine('failed', { ...REFUSED, ...(error !== undefined && { error }) }),
+      '✗ Did not compile failure-outcomes-live.md: the compile failed before any step produced an entry.',
+      `error: ${JSON.stringify(error)}`,
+    );
+  }
+});
+
+test('the same zero counts on a GREEN result are still the ✓ they always were', () => {
+  // The status decides, not the counts: this is the case the refusal was being
+  // mistaken for, and it must not move.
+  assert.equal(
+    resultLine('green', { ...REFUSED }),
+    '✓ Nothing to compile in failure-outcomes-live.md — every step already has code-behind.',
+  );
+});
+
+test('every other failed line carries the reason after its own wording', () => {
+  // Stopped before anything was produced: the old ✗ line, then why the compile failed.
+  assert.equal(
+    resultLine('failed', { compiled: 0, keptAi: 0, notAttempted: [2, 3], error: 'the run threw' }),
+    '✗ Compiled nothing in failure-outcomes-live.md: the run stopped before any step produced an ' +
+      'entry (2 step(s) not attempted). the run threw.',
+  );
+  // Produced something and still failed: the general line, then why.
+  assert.equal(
+    resultLine('failed', { compiled: 2, error: 'Review could not parse the candidate' }),
+    '✗ Compiled failure-outcomes-live.md: 2 step(s) as code (unproven — the next run proves them). ' +
+      'Review could not parse the candidate.',
+  );
+  // …but not when the reason is only the stopping step's error again.
+  assert.equal(
+    resultLine('failed', {
+      compiled: 1,
+      stoppedAt: { step: 2, error: 'no such button' },
+      error: 'no such button',
+    }),
+    '✗ Compiled failure-outcomes-live.md: 1 step(s) as code (unproven — the next run proves them); ' +
+      'stopped at step 2 — no such button.',
+  );
+  // A failed result that ENDED as written keeps its ✗ and says why, rather than
+  // borrowing the ◐ "Compiled nothing" line a partial one gets.
+  const ended = resultLine('failed', {
+    compiled: 0,
+    keptAi: 0,
+    endedAsWritten: ENDED,
+    error: 'the recording could not be written',
+  });
+  assert.match(ended, /^✗ Compiled failure-outcomes-live\.md: /);
+  assert.match(ended, /ended at step 9 as its text says/);
+  assert.match(ended, /the recording could not be written\.$/);
+});
+
+test('a partial result never appends its error — its own line already says it', () => {
+  // The live compiler sets `error` on a partial result to restate the ending or
+  // the generation-error count; appending it would say the same thing twice.
+  const line = resultLine('partial', {
+    endedAsWritten: ENDED,
+    notAttempted: [10],
+    error: 'ended at step 9 as its text says',
+  });
+  assert.equal(line.match(/as its text says/g)?.length, 1, line);
+});
+
 test('the partial-compile notes name the ending step, the unrun steps, and no repair', () => {
   const notes = notesFor({ endedAsWritten: ENDED, notAttempted: [10] });
   assert.equal(
