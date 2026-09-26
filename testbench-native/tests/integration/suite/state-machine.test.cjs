@@ -2034,4 +2034,78 @@ describe('TestBench debug state machine', function () {
       await revertActiveEditor();
     }
   });
+
+  // The cases below drive the editor COMMANDS rather than `editor.edit`,
+  // because what they pin is the shape VS Code reports for each one — the
+  // shapes the unit suite (tests/mark-lines.test.js) was written from.
+
+  it('Undo of typing over a whole step puts the slid-up step\'s ✗ back on that step', async () => {
+    // Select step 2 with its line break (what a gutter click selects) and type
+    // over it: step 3 slides up behind the typed character, keeping its ✗.
+    // Undo reports the character replaced by the deleted step and its break —
+    // an in-place rewrite of line 9 — and kept in place, step 3's ✗ and its
+    // hover sat on the restored step 2.
+    await runPassPassFail();
+    try {
+      const editor = vscode.window.activeTextEditor;
+      editor.selection = new vscode.Selection(8, 0, 9, 0);
+      await vscode.commands.executeCommand('type', { text: 'x' });
+      await expectMarks('step 2 gone, step 3 slid up', {
+        statuses: { 8: 'pass', 9: 'fail' },
+        failures: { 9: 'boom' },
+      });
+      await vscode.commands.executeCommand('undo');
+      await expectMarks('step 3 keeps its ✗ where the undo put it', {
+        statuses: { 8: 'pass', 10: 'fail' },
+        failures: { 10: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  it('Alt+Down moves the step it passes as well as the step it moves', async () => {
+    // Move Line Down on step 2 is reported as step 3 deleted and re-inserted
+    // above step 2. Read as a delete, step 3's ✗ was lost though its text
+    // never changed.
+    await runPassPassFail();
+    try {
+      vscode.window.activeTextEditor.selection = new vscode.Selection(8, 3, 8, 3);
+      await vscode.commands.executeCommand('editor.action.moveLinesDownAction');
+      await expectMarks('both marks moved with their steps', {
+        statuses: { 8: 'pass', 9: 'fail', 10: 'pass' },
+        failures: { 9: 'boom' },
+      });
+      await vscode.commands.executeCommand('undo');
+      await expectMarks('and back again on Undo', {
+        statuses: { 8: 'pass', 9: 'pass', 10: 'fail' },
+        failures: { 10: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  it('two touching selections deleted together do not put a step\'s ✗ on the line it joined', async () => {
+    // Multi-cursor: the tail of step 1 (from column 5) and all of step 2, both
+    // selected, Backspace. VS Code keeps touching selections apart and reports
+    // two changes; neither is a join alone, but together they leave step 3's
+    // text carrying on after "1. Na". Step 1 has no mark (the run did not
+    // reach it, say), so nothing stopped step 3's ✗ landing on step 1's line.
+    await runPassPassFail();
+    const uri = vscode.window.activeTextEditor.document.uri;
+    hooks.tracker.clearStatus(uri, 8);
+    try {
+      vscode.window.activeTextEditor.selections = [
+        new vscode.Selection(7, 5, 8, 0),
+        new vscode.Selection(8, 0, 9, 0),
+      ];
+      await vscode.commands.executeCommand('deleteLeft');
+      await waitFor('the lines joined', () => vscode.window.activeTextEditor.document.lineAt(7).text.startsWith('1. Na3.'));
+      await sleep(100);
+      assert.deepEqual(marks(), { statuses: {}, failures: {} });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
 });

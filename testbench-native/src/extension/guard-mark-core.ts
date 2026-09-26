@@ -32,6 +32,8 @@
  * records only what that pass actually painted.
  */
 
+import { moveLineKeyed } from './mark-lines-core.ts';
+
 /** The two pass marks a clean `frame:pop` must not flatten to ✓. */
 export type GuardCodeMark = 'pass-code-behind' | 'pass-stale';
 
@@ -159,5 +161,23 @@ export class GuardMarks<D> {
   /** Forget every mark on one document — its statuses were just cleared. */
   clear(uri: string): void {
     this.byUri.delete(uri);
+  }
+
+  /** The lines one document has a remembered mark on. */
+  linesOf(uri: string): number[] {
+    return [...(this.byUri.get(uri)?.keys() ?? [])];
+  }
+
+  /**
+   * Move one document's remembered marks with an edit to its text — the moves
+   * `markLineMoves` (mark-lines-core.ts) computed, `null` for a line removed.
+   * The marks painted from this memory moved with the same edit, so a pop
+   * after it must look the guard up at its new line.
+   */
+  move(uri: string, moves: ReadonlyMap<number, number | null>): void {
+    const lines = this.byUri.get(uri);
+    if (!lines) return;
+    moveLineKeyed(lines, moves);
+    if (lines.size === 0) this.byUri.delete(uri);
   }
 }

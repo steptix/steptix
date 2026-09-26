@@ -7,7 +7,8 @@ import {
   isSkippedPass,
   stepFailureDetail,
 } from 'ai-ui-automation-runner-core';
-import { ActiveFileTracker } from './active-file-tracker.js';
+import { ActiveFileTracker, markLineMovesFor } from './active-file-tracker.js';
+import { moveLineKeyed } from './mark-lines-core.js';
 import { DecorationManager, computeStepsSummary, dataTablesOf } from './decorations.js';
 // The same builder the ⚠ decoration calls, so the test hook cannot drift from
 // what actually renders.
@@ -207,6 +208,36 @@ class RunControllerRegistry implements vscode.Disposable {
       this.refreshRunningContext();
       this.refreshFailedRowsContext();
     });
+    this.editSub = vscode.workspace.onDidChangeTextDocument((event) =>
+      this.moveRememberedMarks(event),
+    );
+  }
+
+  /** Disposed with the registry; see `moveRememberedMarks`. */
+  private readonly editSub: vscode.Disposable;
+
+  /**
+   * Move `toleratedLines` and `guardMarks` with an edit, the way the tracker
+   * moves the marks they repaint (`moveMarks`, active-file-tracker.ts).
+   *
+   * Both remember a line THIS run painted so a later event can paint it again,
+   * and a run outlives an edit whenever it is parked: a breakpoint or a failure
+   * pauses it, the author edits, and Continue is the same run. Left on their
+   * old numbers, the Continue's events — which carry the new ones — looked up
+   * whatever had slid into the old line: a step that passed on the second call
+   * of a section wore the amber ✗ and hover of the step above it, which went
+   * green, and a guard's tail popped to a plain ✓ over the `</>` it earned.
+   */
+  private moveRememberedMarks(event: vscode.TextDocumentChangeEvent): void {
+    if (event.contentChanges.length === 0) return;
+    const key = event.document.uri.toString();
+    const tolerated = this.toleratedLines.get(key);
+    const guarded = this.guardMarks.linesOf(key);
+    if (!tolerated && guarded.length === 0) return;
+    const moves = markLineMovesFor(event, [...(tolerated?.keys() ?? []), ...guarded]);
+    if (!moves) return;
+    if (tolerated) moveLineKeyed(tolerated, moves);
+    this.guardMarks.move(key, moves);
   }
 
   /** The `(row, line, values, status)` of the last `rows` message this
@@ -1660,6 +1691,7 @@ class RunControllerRegistry implements vscode.Disposable {
   dispose(): void {
     this.compileTailSignals.dispose();
     this.trackerSub.dispose();
+    this.editSub.dispose();
     this.discardControllers();
     for (const sub of this.frameSubs.values()) sub.dispose();
     this.frameSubs.clear();

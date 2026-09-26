@@ -355,6 +355,75 @@ describe('TestBench inline sections', function () {
     await waitFor('idle', () => !hooks.isRunning());
   });
 
+  it('an amber ✗ from the first call stays on its step when the body is edited during a pause', async () => {
+    // The registry remembers which lines a tolerated failure painted this run,
+    // so a later trip through the step that passes cannot repaint it green
+    // (`toleratedLines`, extension.ts). The memory is keyed by line and has to
+    // move with the text the way the marks do: edited during a pause, it
+    // pointed at whatever slid into the old line, and the Continue painted the
+    // amber ✗ and its hover on a step that never failed while the step that did
+    // went green.
+    const statuses = () => Object.fromEntries(hooks.tracker.snapshot().statuses);
+    const failures = () => Object.fromEntries(hooks.tracker.snapshot().failures);
+    vscode.debug.addBreakpoints([
+      new vscode.SourceBreakpoint(new vscode.Location(testUri, new vscode.Position(11, 0))),
+    ]);
+    await waitFor('breakpoint registered', () => vscode.debug.breakpoints.length === 1);
+
+    // First call: "Type the username" (17) fails and is tolerated; the run
+    // parks at the breakpoint on the second call (12).
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    const first = signInFrame('f1', 10, testPath);
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.push({ type: 'frame:push', frame: first });
+    fake.push({ type: 'step:start', line: 17, frame: first });
+    fake.push({ type: 'step:fail', line: 17, frame: first, error: 'no username box', tolerated: true });
+    fake.push({ type: 'step:start', line: 18, frame: first });
+    fake.push({ type: 'step:pass', line: 18, frame: first });
+    fake.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
+    fake.push({ type: 'step:start', line: 11 });
+    fake.push({ type: 'step:pass', line: 11 });
+    fake.end();
+    await waitFor('parked at the second call', () => hooks.tracker.snapshot().breakpointStop === 12);
+    await waitFor('idle while parked', () => !hooks.isRunning());
+
+    const editor = vscode.window.activeTextEditor;
+    try {
+      // A new first body step: the tolerated step is on 18 now.
+      assert.ok(await editor.edit((b) => b.insert(new vscode.Position(16, 0), '1. Wait for the form\n')));
+      await waitFor('the amber ✗ moved with its step', () => statuses()[18] === 'fail-tolerated');
+
+      // Second call, expanded from the edited text: every body step passes.
+      void vscode.commands.executeCommand('testbench-native.continueRun');
+      await waitFor('resume stream active', () => fake.hasActiveStream);
+      const second = signInFrame('f2', 12, testPath);
+      fake.push({ type: 'frame:push', frame: second });
+      for (const line of [17, 18, 19]) {
+        fake.push({ type: 'step:start', line, frame: second });
+        fake.push({ type: 'step:pass', line, frame: second });
+      }
+      fake.push({ type: 'frame:pop', frameId: 'f2', outputs: {} });
+      fake.push({ type: 'done', status: 'passed' });
+      fake.end();
+      await waitFor('idle after the resume', () => !hooks.isRunning());
+
+      // The step that failed on the first call keeps its amber ✗ and hover;
+      // the inserted step passed, and borrows neither.
+      const body = (line) => ({ status: statuses()[line], hover: failures()[line]?.error });
+      assert.deepEqual(
+        { 17: body(17), 18: body(18) },
+        {
+          17: { status: 'pass', hover: undefined },
+          18: { status: 'fail-tolerated', hover: 'no username box' },
+        },
+      );
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
   // -------------------------------------------------------------------------
   // Refusals
   // -------------------------------------------------------------------------

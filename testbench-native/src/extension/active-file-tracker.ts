@@ -685,7 +685,12 @@ export class ActiveFileTracker {
    * on land by the old numbering — and the step that was running when the
    * line moved keeps its ▶, its result painted on its old line, until the run
    * ends and turns the ▶ to ■. The marks from before the edit are right. A Run
-   * or Continue after the edit sends the current text and is unaffected.
+   * or Continue after the edit sends the current text, so what it paints lands
+   * by the new numbering, and the registry moves its memory of the marks this
+   * run already painted with the same edit (`moveRememberedMarks`,
+   * extension.ts). One store does not move: a parked DATA-ROW run's Continue
+   * repaints the rows from the matrix it built when it started (`rowTables`,
+   * run-controller.ts), on the lines the rows had then.
    *
    * Returns true when any mark moved or was removed.
    */
@@ -693,16 +698,11 @@ export class ActiveFileTracker {
     if (event.contentChanges.length === 0) return false;
     const state = this.states.get(event.document.uri.toString());
     if (!state) return false;
-    const moves = markLineMoves(
-      [...state.statuses.keys(), ...state.errors.keys(), ...state.failures.keys()],
-      event.contentChanges.map((c) => ({
-        startLine: c.range.start.line,
-        startCharacter: c.range.start.character,
-        endLine: c.range.end.line,
-        endCharacter: c.range.end.character,
-        addedLines: countNewlines(c.text),
-      })),
-    );
+    const moves = markLineMovesFor(event, [
+      ...state.statuses.keys(),
+      ...state.errors.keys(),
+      ...state.failures.keys(),
+    ]);
     if (!moves) return false;
     moveLineKeyed(state.statuses, moves);
     moveLineKeyed(state.errors, moves);
@@ -1163,6 +1163,35 @@ export class ActiveFileTracker {
  *  replacement text adds. */
 function countNewlines(s: string): number {
   return s.split('\n').length - 1;
+}
+
+/**
+ * `markLineMoves` (mark-lines-core.ts) for a live change event: where each of
+ * `lines` (1-based) goes, or null when none of them moved.
+ *
+ * Exported so every store that pins something to a line by the run's marks
+ * moves by the one rule — the tracker's own maps here, and the run registry's
+ * memory of marks it will paint again (extension.ts). `event.document` is the
+ * text AFTER the event, which is what the rule's line-length question asks
+ * about.
+ */
+export function markLineMovesFor(
+  event: vscode.TextDocumentChangeEvent,
+  lines: Iterable<number>,
+): Map<number, number | null> | null {
+  const doc = event.document;
+  return markLineMoves(
+    lines,
+    event.contentChanges.map((c) => ({
+      startLine: c.range.start.line,
+      startCharacter: c.range.start.character,
+      endLine: c.range.end.line,
+      endCharacter: c.range.end.character,
+      text: c.text,
+      rangeLength: c.rangeLength,
+    })),
+    (line) => (line < doc.lineCount ? doc.lineAt(line).text.length : 0),
+  );
 }
 
 /**
