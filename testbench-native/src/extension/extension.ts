@@ -227,6 +227,22 @@ class RunControllerRegistry implements vscode.Disposable {
    * whatever had slid into the old line: a step that passed on the second call
    * of a section wore the amber ✗ and hover of the step above it, which went
    * green, and a guard's tail popped to a plain ✓ over the `</>` it earned.
+   *
+   * They move while a stream is LIVE too, although its later events still
+   * carry the numbers the run started with (the accepted gap in `moveMarks`,
+   * active-file-tracker.ts). Every lookup is made for the line the event is
+   * about to paint, by the same number, so what matters is that the memory
+   * describes the mark on THAT line — and moved, it stays under the mark it
+   * remembers. Held on the run-start numbers instead, it answered for the step
+   * the stream meant and the paint landed on another: a step inserted above a
+   * tolerated one mid-run wore that step's amber ✗ and hover on the next call,
+   * and the step that failed went green; a guard's tail popping after an
+   * insert above it put the guard's ⚠ and its hover on the step that slid
+   * into the guard's old line, where moved it repaints that step's own ✓.
+   * And a Continue after the run parked, which sends the edited text, would
+   * miss every mark an edit during the stream had moved. Holding would also
+   * need an owner to ask whether a stream is live, and a skill file's memory
+   * is written by the TEST's controller, not one keyed by the skill's URI.
    */
   private moveRememberedMarks(event: vscode.TextDocumentChangeEvent): void {
     if (event.contentChanges.length === 0) return;

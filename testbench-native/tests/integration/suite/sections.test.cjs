@@ -424,6 +424,66 @@ describe('TestBench inline sections', function () {
     }
   });
 
+  it('an amber ✗ stays on its step when the body is edited while the stream is live', async () => {
+    // The accepted gap: a live stream keeps reporting the lines it was sent,
+    // so the second call's events below still say 17 and 18 after the insert
+    // has moved the body to 18 and 19. What is pinned here is the choice made
+    // for the registry's memory in that gap (`moveRememberedMarks`,
+    // extension.ts): it moves with the marks, so a repaint asks it about the
+    // step that is actually on the line being painted. Held on the run-start
+    // numbers instead, the second call put "Type the username"'s amber ✗ and
+    // hover on the inserted step, and painted the step that failed green.
+    const statuses = () => Object.fromEntries(hooks.tracker.snapshot().statuses);
+    const failures = () => Object.fromEntries(hooks.tracker.snapshot().failures);
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    const first = signInFrame('f1', 10, testPath);
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.push({ type: 'frame:push', frame: first });
+    fake.push({ type: 'step:start', line: 17, frame: first });
+    fake.push({ type: 'step:fail', line: 17, frame: first, error: 'no username box', tolerated: true });
+    fake.push({ type: 'step:start', line: 18, frame: first });
+    fake.push({ type: 'step:pass', line: 18, frame: first });
+    fake.push({ type: 'frame:pop', frameId: 'f1', outputs: {} });
+    fake.push({ type: 'step:start', line: 11 });
+    await waitFor('first call painted', () => statuses()[18] === 'pass' && statuses()[11] === 'running');
+
+    const editor = vscode.window.activeTextEditor;
+    try {
+      assert.ok(hooks.isRunning(), 'the stream is still live');
+      assert.ok(await editor.edit((b) => b.insert(new vscode.Position(16, 0), '1. Wait for the form\n')));
+      await waitFor('the amber ✗ moved with its step', () => statuses()[18] === 'fail-tolerated');
+
+      // Second call, on the numbers the run started with.
+      fake.push({ type: 'step:pass', line: 11 });
+      const second = signInFrame('f2', 12, testPath);
+      fake.push({ type: 'frame:push', frame: second });
+      for (const line of [17, 18]) {
+        fake.push({ type: 'step:start', line, frame: second });
+        fake.push({ type: 'step:pass', line, frame: second });
+      }
+      fake.push({ type: 'frame:pop', frameId: 'f2', outputs: {} });
+      fake.push({ type: 'done', status: 'passed' });
+      fake.end();
+      await waitFor('idle after the run', () => !hooks.isRunning());
+
+      // "Type the username" (now 18) keeps its amber ✗ and hover. The inserted
+      // step (17) wears the ✓ of a pass reported on its run-start line — the
+      // gap — but not the tolerated failure's amber or its hover.
+      const body = (line) => ({ status: statuses()[line], hover: failures()[line]?.error });
+      assert.deepEqual(
+        { 17: body(17), 18: body(18) },
+        {
+          17: { status: 'pass', hover: undefined },
+          18: { status: 'fail-tolerated', hover: 'no username box' },
+        },
+      );
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
+
   // -------------------------------------------------------------------------
   // Refusals
   // -------------------------------------------------------------------------

@@ -34,8 +34,8 @@
  * re-inserting it: Move Line Up / Down (Alt+↑ / Alt+↓). VS Code reports the
  * line the block moves PAST as deleted and re-inserted on the block's other
  * side, which the rules above would read as a removed step — its ✓ gone
- * although its text never changed. `lineMovedPast` recognises that event and
- * sends the mark with it.
+ * although its text never changed. `linesMovedPast` recognises that event —
+ * one block or several, one per cursor — and sends the mark with it.
  *
  * The removal rule is where this parts from the resume arrow
  * (`shiftAnchorForChanges`, step-lines.ts), which snaps forward to the next
@@ -90,8 +90,8 @@ const isInsertion = (s: MarkChange): boolean =>
   s.startLine === s.endLine && s.startCharacter === s.endCharacter;
 
 /**
- * The line a Move Line Up / Down event moved the block PAST, as its old and
- * new 0-based line, or null when the event is not one.
+ * The lines a Move Line Up / Down event moved its blocks PAST, as old 0-based
+ * line → new 0-based line, or null when the event is not one.
  *
  * The shapes, measured against VS Code 1.95 (the fast suite's
  * `tests/mark-lines.test.js` carries them verbatim):
@@ -103,31 +103,93 @@ const isInsertion = (s: MarkChange): boolean =>
  *    insert a line break plus that line's text at the end of `e`. The line
  *    lands on `e`.
  *
- * The deleted and inserted text are the same line, so their lengths must
- * agree; that, and the exact positions, is what keeps two unrelated changes
- * from being read as a move. The block's own lines need nothing special — the
- * ordinary rules already move them by one.
+ * With several cursors on separate lines, one event carries one such pair per
+ * block — four changes for two cursors — and in document order each pair's
+ * two changes sit side by side, since blocks that touch are merged into one
+ * before the move. Every change must belong to a pair, or the event is not a
+ * move at all.
+ *
+ * A pair is checked three ways, because a formatter or another extension can
+ * send an insert and a delete in one event that sit exactly where a move's
+ * would: a blank line added under a heading plus a doubled blank line removed
+ * further down is a Move Line Down past a blank line by position, and read as
+ * one it put the ✗ of the step below the removed blank line on the added one.
+ *
+ *  - The positions, as above.
+ *  - The deleted and inserted text are the same line, so their lengths must
+ *    agree (`rangeLength`).
+ *  - What the event left behind (`postEditLineLength`). A move takes and
+ *    puts back whole lines, so nothing is joined on or split off. Down: the
+ *    delete ran to the end of the moved-past line, so the block's last line,
+ *    now one lower, holds only its own text. Up: the insert was at the end of
+ *    the block's last line, so the moved-past line, where it landed, holds
+ *    only its own text. By position, the formatter's delete — up to column 0
+ *    of a step — read as moving past an EMPTY line there; after it, that
+ *    step's text sat on the end of the line above, which a move never leaves.
+ *
+ * The block's own lines need nothing special — the ordinary rules already
+ * move them by one. Each pair adds and removes one line, so a pair's
+ * positions after the event are not disturbed by the pairs above it.
  */
-function lineMovedPast(spans: ReadonlyArray<Span>): { from: number; to: number } | null {
-  if (spans.length !== 2) return null;
-  const ins = spans.find((s) => isInsertion(s) && s.added === 1);
-  const del = spans.find((s) => s !== ins && s.text === '' && s.endLine === s.startLine + 1);
-  if (!ins || !del) return null;
-  if (del.rangeLength !== undefined && del.rangeLength !== ins.text.length) return null;
-  // `added === 1` above, so a text ending in its break is `line + EOL`, and
-  // one starting with it is `EOL + line`.
-  const down =
-    ins.startCharacter === 0 &&
-    ins.lastLength === 0 &&
-    ins.startLine <= del.startLine &&
-    del.endCharacter === ins.text.length - (ins.text.endsWith('\r\n') ? 2 : 1);
-  if (down) return { from: del.endLine, to: ins.startLine };
-  const up =
-    /^\r?\n/.test(ins.text) &&
-    del.startCharacter === 0 &&
-    del.endCharacter === 0 &&
-    ins.startLine >= del.endLine;
-  if (up) return { from: del.startLine, to: ins.startLine };
+function linesMovedPast(
+  spans: ReadonlyArray<Span>,
+  postEditLineLength: PostEditLineLength,
+): Map<number, number> | null {
+  if (spans.length === 0 || spans.length % 2 !== 0) return null;
+  const ordered = [...spans].sort(
+    (a, b) =>
+      a.startLine - b.startLine ||
+      a.startCharacter - b.startCharacter ||
+      // At one position the insertion comes first: moving a blank line down
+      // inserts at, and deletes from, its column 0.
+      Number(isInsertion(b)) - Number(isInsertion(a)),
+  );
+  const moved = new Map<number, number>();
+  for (let i = 0; i < ordered.length; i += 2) {
+    const [first, second] = [ordered[i], ordered[i + 1]];
+    const pair = first && second ? movePair(first, second, postEditLineLength) : null;
+    if (!pair) return null;
+    moved.set(pair.from, pair.to);
+  }
+  return moved;
+}
+
+/** One block's two changes, in document order, as the line moved past — or
+ *  null when they are not a move (`linesMovedPast`). */
+function movePair(
+  first: Span,
+  second: Span,
+  postEditLineLength: PostEditLineLength,
+): { from: number; to: number } | null {
+  const isLineInsertion = (s: Span): boolean => isInsertion(s) && s.added === 1;
+  const isBreakDeletion = (s: Span): boolean =>
+    s.text === '' && s.endLine === s.startLine + 1;
+  const sameLength = (del: Span, ins: Span): boolean =>
+    del.rangeLength === undefined || del.rangeLength === ins.text.length;
+  // `added === 1`, so a text ending in its break is `line + EOL`, and one
+  // starting with it is `EOL + line`.
+  if (isLineInsertion(first) && isBreakDeletion(second)) {
+    const [ins, del] = [first, second];
+    const down =
+      ins.startCharacter === 0 &&
+      ins.lastLength === 0 &&
+      ins.startLine <= del.startLine &&
+      sameLength(del, ins) &&
+      del.endCharacter === ins.text.length - (ins.text.endsWith('\r\n') ? 2 : 1) &&
+      postEditLineLength(del.startLine + 1) === del.startCharacter;
+    return down ? { from: del.endLine, to: ins.startLine } : null;
+  }
+  if (isBreakDeletion(first) && isLineInsertion(second)) {
+    const [del, ins] = [first, second];
+    const up =
+      /^\r?\n/.test(ins.text) &&
+      del.startCharacter === 0 &&
+      del.endCharacter === 0 &&
+      ins.startLine >= del.endLine &&
+      sameLength(del, ins) &&
+      postEditLineLength(ins.startLine) === ins.lastLength;
+    return up ? { from: del.startLine, to: ins.startLine } : null;
+  }
   return null;
 }
 
@@ -196,10 +258,11 @@ function rewriteTail(
 function shiftSpans(
   line: number,
   spans: ReadonlyArray<Span>,
-  moved: { from: number; to: number } | null,
+  moved: ReadonlyMap<number, number> | null,
   postEditLineLength: PostEditLineLength,
 ): number | null {
-  if (moved?.from === line) return moved.to;
+  const movedTo = moved?.get(line);
+  if (movedTo !== undefined) return movedTo;
   let delta = 0;
   let rewrite: Span | null = null;
   for (const s of spans) {
@@ -241,7 +304,7 @@ export function shiftMarkLine(
   postEditLineLength: PostEditLineLength,
 ): number | null {
   const spans = spansOf(changes);
-  return shiftSpans(line, spans, lineMovedPast(spans), postEditLineLength);
+  return shiftSpans(line, spans, linesMovedPast(spans, postEditLineLength), postEditLineLength);
 }
 
 /**
@@ -268,7 +331,7 @@ export function markLineMoves(
 ): Map<number, number | null> | null {
   if (changes.every((c) => c.startLine === c.endLine && !c.text.includes('\n'))) return null;
   const spans = spansOf(changes);
-  const moved = lineMovedPast(spans);
+  const moved = linesMovedPast(spans, postEditLineLength);
   const moves = new Map<number, number | null>();
   const taken = new Set<number>();
   for (const line of [...new Set(lines)].sort((a, b) => a - b)) {

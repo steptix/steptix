@@ -2108,4 +2108,65 @@ describe('TestBench debug state machine', function () {
       await revertActiveEditor();
     }
   });
+
+  it('Alt+Down with two cursors keeps the mark of each step a block moves past', async () => {
+    // Cursors on step 1 and step 3: step 1 moves down past step 2, and step 3
+    // past the empty last line. VS Code reports one delete-and-insert pair per
+    // block — four changes — and read as ordinary deletes, step 2's ✓ was
+    // lost though its text never changed.
+    await runPassPassFail();
+    try {
+      vscode.window.activeTextEditor.selections = [
+        new vscode.Selection(7, 3, 7, 3),
+        new vscode.Selection(9, 3, 9, 3),
+      ];
+      await vscode.commands.executeCommand('editor.action.moveLinesDownAction');
+      await expectMarks('every mark moved with its step', {
+        statuses: { 8: 'pass', 9: 'pass', 11: 'fail' },
+        failures: { 11: 'boom' },
+      });
+      assert.equal(vscode.window.activeTextEditor.document.lineAt(7).text, '2. Click the "Get started" button');
+      await vscode.commands.executeCommand('undo');
+      await expectMarks('and back again on Undo', {
+        statuses: { 8: 'pass', 9: 'pass', 10: 'fail' },
+        failures: { 10: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  it('a formatter-shaped edit that sits where a move would is not read as one', async () => {
+    // One `editor.edit` with two edits, the way a formatter's TextEdit[]
+    // arrives: a blank line inserted under `## Steps`, and the blank line
+    // between steps 2 and 3 deleted. By position that is Move Line Down past
+    // an empty line, and read as one, step 3's ✗ and its hover landed on the
+    // inserted blank line above step 1.
+    const editor = vscode.window.activeTextEditor;
+    await insertLine(editor, 10, '\n');
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    for (const line of [8, 9]) {
+      fake.push({ type: 'step:start', line });
+      fake.push({ type: 'step:pass', line });
+    }
+    fake.push({ type: 'step:start', line: 11 });
+    fake.push({ type: 'step:fail', line: 11, error: 'boom' });
+    fake.end();
+    await waitFor('idle after the run', () => !hooks.isRunning());
+    try {
+      assert.ok(
+        await editor.edit((b) => {
+          b.insert(new vscode.Position(7, 0), '\n');
+          b.delete(new vscode.Range(9, 0, 10, 0));
+        }),
+      );
+      await expectMarks('steps 1 and 2 down one, step 3 where it was', {
+        statuses: { 9: 'pass', 10: 'pass', 11: 'fail' },
+        failures: { 11: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
 });

@@ -340,6 +340,101 @@ test('a delete and an insert that only look like a move are not read as one', ()
   assert.equal(after(changes).text[10], null);
 });
 
+// Several cursors. These shapes were measured on a five-line document of their
+// own, and are carried verbatim: one delete-and-insert pair per block, in
+// VS Code's order (last block first).
+const FIVE = ['alpha line', 'bravo', 'charlie line three', 'delta 4', 'echo five five', ''].join('\n');
+const FIVE_MARKS = [1, 2, 3, 4, 5];
+
+test('Alt+Down with two cursors moves both blocks and BOTH lines they move past', () => {
+  // Cursors on lines 1 and 3 (1-based). Four changes, not two — read as
+  // ordinary deletes, "bravo" and "delta 4" lost their marks though neither
+  // text changed.
+  const changes = [
+    change(2, 18, 3, 7, '', 8),
+    change(2, 0, 2, 0, 'delta 4\n', 0),
+    change(0, 10, 1, 5, '', 6),
+    change(0, 0, 0, 0, 'bravo\n', 0),
+  ];
+  const r = after(changes, { text: FIVE, marks: FIVE_MARKS });
+  assert.deepEqual(r.text, {
+    1: 'alpha line',
+    2: 'bravo',
+    3: 'charlie line three',
+    4: 'delta 4',
+    5: 'echo five five',
+  });
+  assert.deepEqual(r.lines, [2, 1, 4, 3, 5]);
+});
+
+test('Alt+Up with two cursors, and the Undo of Alt+Down with two, move every mark', () => {
+  // Cursors on lines 2 and 4 (1-based).
+  const up = [
+    change(3, 7, 3, 7, '\ncharlie line three', 0),
+    change(2, 0, 3, 0, '', 19),
+    change(1, 5, 1, 5, '\nalpha line', 0),
+    change(0, 0, 1, 0, '', 11),
+  ];
+  const r = after(up, { text: FIVE, marks: FIVE_MARKS });
+  assert.deepEqual(r.lines, [2, 1, 4, 3, 5]);
+  assert.equal(new Set(Object.values(r.text)).size, 5, 'every mark on its own text');
+  // Undo of the Alt+Down above, against the text it left.
+  const movedDown = ['bravo', 'alpha line', 'delta 4', 'charlie line three', 'echo five five', ''].join('\n');
+  const undo = [
+    change(3, 18, 3, 18, '\ndelta 4', 0),
+    change(2, 0, 3, 0, '', 8),
+    change(1, 10, 1, 10, '\nbravo', 0),
+    change(0, 0, 1, 0, '', 6),
+  ];
+  const back = after(undo, { text: movedDown, marks: FIVE_MARKS });
+  assert.deepEqual(back.text, {
+    1: 'bravo',
+    2: 'alpha line',
+    3: 'delta 4',
+    4: 'charlie line three',
+    5: 'echo five five',
+  });
+});
+
+test('Alt+Down CRLF, and past a blank line, are the same pair', () => {
+  const crlf = FIVE.replace(/\n/g, '\r\n');
+  const crlfDown = [change(1, 5, 2, 18, '', 20), change(1, 0, 1, 0, 'charlie line three\r\n', 0)];
+  assert.deepEqual(after(crlfDown, { text: crlf, marks: FIVE_MARKS }).lines, [1, 3, 2, 4, 5]);
+  // "bravo" moved down past a blank line: the blank line carries no mark,
+  // and bravo's goes down one.
+  const blank = ['alpha line', 'bravo', '', 'charlie line three', 'delta 4', ''].join('\n');
+  const pastBlank = [change(1, 5, 2, 0, '', 1), change(1, 0, 1, 0, '\n', 0)];
+  assert.deepEqual(after(pastBlank, { text: blank, marks: [1, 2, 4] }).text, {
+    1: 'alpha line',
+    2: 'bravo',
+    4: 'charlie line three',
+  });
+});
+
+test('a formatter\'s insert and delete that sit where a move\'s would are not read as one', () => {
+  // One event from `editor.edit` with two edits — the shape a formatter's
+  // TextEdit[] arrives in: a blank line inserted under the heading, and a
+  // doubled blank line above step 2 deleted. Measured: VS Code reports it
+  // exactly as Alt+Down past an empty line would be, and read as a move,
+  // step 2's ✗ landed on the inserted blank line.
+  const withBlank = ['# T', '## Steps', '1. one', '', '2. two', ''].join('\n');
+  const changes = [change(3, 0, 4, 0, '', 1), change(1, 0, 1, 0, '\n', 0)];
+  const r = after(changes, { text: withBlank, marks: [3, 5] });
+  assert.deepEqual(r.text, { 3: '1. one', 5: '2. two' });
+  assert.deepEqual(r.lines, [4, 5]);
+});
+
+test('…nor is a join that sits where a move\'s delete would', () => {
+  // A blank line inserted above the steps, and step 2 joined onto step 1, in
+  // one event: by position a Move Line Down past an empty line 9. Step 2's
+  // text is on the end of step 1 now, so its mark goes — it does not land on
+  // the inserted blank line.
+  const changes = [change(4, 0, 4, 0, '\n', 0), change(7, 34, 8, 0, '', 1)];
+  const r = after(changes);
+  assert.deepEqual(r.text, { 8: `${STEP_1}${STEP_2}`, 9: null, 10: STEP_3 });
+  assert.deepEqual(r.lines, [9, null, 10]);
+});
+
 // ---- applying the moves -------------------------------------------------------
 
 test('moveLineKeyed moves, removes and leaves alone, in place', () => {
