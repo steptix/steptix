@@ -305,4 +305,49 @@ describe('TestBench guard marks — a section tail\'s frame:pop keeps the guard\
 
     assert.equal(second.statuses[IF_CASH], 'pass', 'run 1\'s </> must not survive into run 2');
   });
+
+  it('a remembered </> follows its guard when the file is edited during a pause', async () => {
+    // The tail's body fails, which parks the run on the body line; the author
+    // inserts a step above the guard, and Continue finishes the tail. Its clean
+    // pop asks the memory for the guard's mark at the call line's NEW number —
+    // so the memory has to have moved with the text, as the marks did, or the
+    // pop paints a plain ✓ over the </> the guard earned.
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    const frame = tailFrame('cash', IF_CASH, 'Pay with cash');
+    fake.push({ type: 'step:start', line: IF_CASH });
+    fake.push({ type: 'step:pass', line: IF_CASH, output: 'decided', fromCodeBehind: true });
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:start', line: CASH_BODY, frame });
+    fake.push({ type: 'step:fail', line: CASH_BODY, frame, error: 'no Pay now button' });
+    await waitFor('parked on the body line', () => hooks.tracker.snapshot().breakpointStop === CASH_BODY);
+    fake.end();
+    await waitFor('idle while parked', () => !hooks.isRunning());
+
+    const editor = vscode.window.activeTextEditor;
+    try {
+      assert.ok(await editor.edit((b) => b.insert(new vscode.Position(OPEN - 1, 0), '1. Accept the cookies\n')));
+      await waitFor(
+        'the parked body line moved down one',
+        () => hooks.tracker.snapshot().breakpointStop === CASH_BODY + 1,
+      );
+
+      void vscode.commands.executeCommand('testbench-native.continueRun');
+      await waitFor('resume stream active', () => fake.hasActiveStream);
+      const resumed = tailFrame('cash-resumed', IF_CASH + 1, 'Pay with cash');
+      fake.push({ type: 'frame:push', frame: resumed });
+      fake.push({ type: 'step:start', line: CASH_BODY + 1, frame: resumed });
+      fake.push({ type: 'step:pass', line: CASH_BODY + 1, frame: resumed });
+      fake.push({ type: 'frame:pop', frameId: resumed.id, outputs: {} });
+      const { statuses } = await finish();
+
+      assert.equal(
+        statuses[IF_CASH + 1],
+        'pass-code-behind',
+        `the guard keeps the </> it earned before the pause — got ${statuses[IF_CASH + 1]}`,
+      );
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.files.revert');
+    }
+  });
 });

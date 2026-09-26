@@ -1903,4 +1903,270 @@ describe('TestBench debug state machine', function () {
     await waitFor('idle after resume', () => !hooks.isRunning());
     await revertActiveEditor();
   });
+
+  // ---------------------------------------------------------------------------
+  // Run marks follow the text (mark-lines-core.ts). The ✓ / ✗ and the failure
+  // text behind them are keyed by line, and the editor repaints from those
+  // keys on every keystroke — before this, an insert above step 2 left step
+  // 2's ✓ on the inserted line and step 3's ✗ on step 2.
+  // ---------------------------------------------------------------------------
+
+  /** The active file's marks as plain objects, for deepEqual. */
+  const marks = () => {
+    const snap = hooks.tracker.snapshot();
+    return {
+      statuses: Object.fromEntries(snap.statuses),
+      failures: Object.fromEntries(snap.failures.map(([line, f]) => [line, f.error])),
+    };
+  };
+
+  /** Wait for the marks to settle on `expected`; on timeout, fail with the
+   *  marks as they actually are rather than just the label. */
+  async function expectMarks(label, expected) {
+    try {
+      await waitFor(label, () => JSON.stringify(marks()) === JSON.stringify(expected));
+    } catch {
+      assert.deepEqual(marks(), expected, `${label} — got ${JSON.stringify(marks())}`);
+    }
+  }
+
+  /** Pass steps 1 and 2 (lines 8, 9), fail step 3 (line 10) with "boom". */
+  async function runPassPassFail() {
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 8 });
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.push({ type: 'step:start', line: 10 });
+    fake.push({ type: 'step:fail', line: 10, error: 'boom' });
+    fake.end();
+    await waitFor('idle after the run', () => !hooks.isRunning());
+    assert.deepEqual(marks(), {
+      statuses: { 8: 'pass', 9: 'pass', 10: 'fail' },
+      failures: { 10: 'boom' },
+    });
+  }
+
+  it('marks move down with a line inserted above them, and the failure text goes with its ✗', async () => {
+    await runPassPassFail();
+    try {
+      await insertLine(vscode.window.activeTextEditor, 9, '1.5. Inserted step\n');
+      await expectMarks('marks below the insert moved down one', {
+        statuses: { 8: 'pass', 10: 'pass', 11: 'fail' },
+        failures: { 11: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  it('deleting a marked step removes its mark and moves the ones below up, without handing it on', async () => {
+    await runPassPassFail();
+    try {
+      // Step 2 (line 9) deleted whole. Step 3 slides up into line 9 and keeps
+      // its OWN ✗ — the resume arrow snaps forward on this edit, a result
+      // must not, or step 3 would read as passed.
+      await deleteLine(vscode.window.activeTextEditor, 9);
+      await expectMarks('step 2 mark gone, step 3 moved up', {
+        statuses: { 8: 'pass', 9: 'fail' },
+        failures: { 9: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  it('editing a step in place keeps every mark where it is', async () => {
+    await runPassPassFail();
+    try {
+      const editor = vscode.window.activeTextEditor;
+      // Retype step 3's ordinal from column 0 (what Renumber Steps does), and
+      // add a word in the middle of step 2.
+      assert.ok(
+        await editor.edit((b) => {
+          b.replace(new vscode.Range(9, 0, 9, 1), '4');
+          b.insert(new vscode.Position(8, 9), 'big ');
+        }),
+      );
+      await sleep(100);
+      assert.deepEqual(marks(), {
+        statuses: { 8: 'pass', 9: 'pass', 10: 'fail' },
+        failures: { 10: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  it('the run state saved after an edit carries the moved lines, not the old ones', async () => {
+    // persist() stamps the signature from the live text, so it vouches for
+    // whatever line numbers it is handed. Unmoved, the saved state said step
+    // 3's ✗ was on line 10 — the inserted line — and a reopen restored it
+    // there.
+    const runState = path.join(FIXTURES_DIR, '.testbench', 'run-state.json');
+    const saved = () => {
+      try {
+        return JSON.parse(require('node:fs').readFileSync(runState, 'utf8')).files['test-with-steps.md'];
+      } catch {
+        return undefined;
+      }
+    };
+    await runPassPassFail();
+    try {
+      await insertLine(vscode.window.activeTextEditor, 8, '0. Inserted first\n');
+      const savedStatuses = () => [...(saved()?.statuses ?? [])].sort((a, b) => a[0] - b[0]);
+      const expected = [[9, 'pass'], [10, 'pass'], [11, 'fail']];
+      try {
+        await waitFor(
+          'saved statuses on the moved lines',
+          () => JSON.stringify(savedStatuses()) === JSON.stringify(expected),
+        );
+      } catch {
+        assert.deepEqual(savedStatuses(), expected, `saved statuses on the moved lines — got ${JSON.stringify(savedStatuses())}`);
+      }
+      assert.equal(
+        saved().signature,
+        hooks.tracker.stepSignatureForTests(vscode.window.activeTextEditor.document.getText()),
+        'stamped against the edited text',
+      );
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  // The cases below drive the editor COMMANDS rather than `editor.edit`,
+  // because what they pin is the shape VS Code reports for each one — the
+  // shapes the unit suite (tests/mark-lines.test.js) was written from.
+
+  it('Undo of typing over a whole step puts the slid-up step\'s ✗ back on that step', async () => {
+    // Select step 2 with its line break (what a gutter click selects) and type
+    // over it: step 3 slides up behind the typed character, keeping its ✗.
+    // Undo reports the character replaced by the deleted step and its break —
+    // an in-place rewrite of line 9 — and kept in place, step 3's ✗ and its
+    // hover sat on the restored step 2.
+    await runPassPassFail();
+    try {
+      const editor = vscode.window.activeTextEditor;
+      editor.selection = new vscode.Selection(8, 0, 9, 0);
+      await vscode.commands.executeCommand('type', { text: 'x' });
+      await expectMarks('step 2 gone, step 3 slid up', {
+        statuses: { 8: 'pass', 9: 'fail' },
+        failures: { 9: 'boom' },
+      });
+      await vscode.commands.executeCommand('undo');
+      await expectMarks('step 3 keeps its ✗ where the undo put it', {
+        statuses: { 8: 'pass', 10: 'fail' },
+        failures: { 10: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  it('Alt+Down moves the step it passes as well as the step it moves', async () => {
+    // Move Line Down on step 2 is reported as step 3 deleted and re-inserted
+    // above step 2. Read as a delete, step 3's ✗ was lost though its text
+    // never changed.
+    await runPassPassFail();
+    try {
+      vscode.window.activeTextEditor.selection = new vscode.Selection(8, 3, 8, 3);
+      await vscode.commands.executeCommand('editor.action.moveLinesDownAction');
+      await expectMarks('both marks moved with their steps', {
+        statuses: { 8: 'pass', 9: 'fail', 10: 'pass' },
+        failures: { 9: 'boom' },
+      });
+      await vscode.commands.executeCommand('undo');
+      await expectMarks('and back again on Undo', {
+        statuses: { 8: 'pass', 9: 'pass', 10: 'fail' },
+        failures: { 10: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  it('two touching selections deleted together do not put a step\'s ✗ on the line it joined', async () => {
+    // Multi-cursor: the tail of step 1 (from column 5) and all of step 2, both
+    // selected, Backspace. VS Code keeps touching selections apart and reports
+    // two changes; neither is a join alone, but together they leave step 3's
+    // text carrying on after "1. Na". Step 1 has no mark (the run did not
+    // reach it, say), so nothing stopped step 3's ✗ landing on step 1's line.
+    await runPassPassFail();
+    const uri = vscode.window.activeTextEditor.document.uri;
+    hooks.tracker.clearStatus(uri, 8);
+    try {
+      vscode.window.activeTextEditor.selections = [
+        new vscode.Selection(7, 5, 8, 0),
+        new vscode.Selection(8, 0, 9, 0),
+      ];
+      await vscode.commands.executeCommand('deleteLeft');
+      await waitFor('the lines joined', () => vscode.window.activeTextEditor.document.lineAt(7).text.startsWith('1. Na3.'));
+      await sleep(100);
+      assert.deepEqual(marks(), { statuses: {}, failures: {} });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  it('Alt+Down with two cursors keeps the mark of each step a block moves past', async () => {
+    // Cursors on step 1 and step 3: step 1 moves down past step 2, and step 3
+    // past the empty last line. VS Code reports one delete-and-insert pair per
+    // block — four changes — and read as ordinary deletes, step 2's ✓ was
+    // lost though its text never changed.
+    await runPassPassFail();
+    try {
+      vscode.window.activeTextEditor.selections = [
+        new vscode.Selection(7, 3, 7, 3),
+        new vscode.Selection(9, 3, 9, 3),
+      ];
+      await vscode.commands.executeCommand('editor.action.moveLinesDownAction');
+      await expectMarks('every mark moved with its step', {
+        statuses: { 8: 'pass', 9: 'pass', 11: 'fail' },
+        failures: { 11: 'boom' },
+      });
+      assert.equal(vscode.window.activeTextEditor.document.lineAt(7).text, '2. Click the "Get started" button');
+      await vscode.commands.executeCommand('undo');
+      await expectMarks('and back again on Undo', {
+        statuses: { 8: 'pass', 9: 'pass', 10: 'fail' },
+        failures: { 10: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  it('a formatter-shaped edit that sits where a move would is not read as one', async () => {
+    // One `editor.edit` with two edits, the way a formatter's TextEdit[]
+    // arrives: a blank line inserted under `## Steps`, and the blank line
+    // between steps 2 and 3 deleted. By position that is Move Line Down past
+    // an empty line, and read as one, step 3's ✗ and its hover landed on the
+    // inserted blank line above step 1.
+    const editor = vscode.window.activeTextEditor;
+    await insertLine(editor, 10, '\n');
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    for (const line of [8, 9]) {
+      fake.push({ type: 'step:start', line });
+      fake.push({ type: 'step:pass', line });
+    }
+    fake.push({ type: 'step:start', line: 11 });
+    fake.push({ type: 'step:fail', line: 11, error: 'boom' });
+    fake.end();
+    await waitFor('idle after the run', () => !hooks.isRunning());
+    try {
+      assert.ok(
+        await editor.edit((b) => {
+          b.insert(new vscode.Position(7, 0), '\n');
+          b.delete(new vscode.Range(9, 0, 10, 0));
+        }),
+      );
+      await expectMarks('steps 1 and 2 down one, step 3 where it was', {
+        statuses: { 9: 'pass', 10: 'pass', 11: 'fail' },
+        failures: { 11: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
 });

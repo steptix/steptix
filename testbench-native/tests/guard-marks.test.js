@@ -97,6 +97,23 @@ test('marks are per document and per line', () => {
   assert.equal(marks.forFramePop(OTHER, 9).status, 'pass');
 });
 
+test('an edit moves a document\'s marks with their lines, and a removed line forgets its mark', () => {
+  // The tracker's marks move with the text (mark-lines-core.ts); a pop after
+  // the edit asks for the guard at its new line, so the memory moves too.
+  const marks = new GuardMarks();
+  marks.notePass(DOC, 5, 'pass-code-behind');
+  marks.notePass(DOC, 9, 'pass-stale', { codeBehindStale: STALE.codeBehindStale });
+  marks.notePass(OTHER, 5, 'pass-code-behind');
+  assert.deepEqual(marks.linesOf(DOC).sort((a, b) => a - b), [5, 9]);
+  marks.move(DOC, new Map([[5, 6], [9, null]]));
+  assert.equal(marks.forFramePop(DOC, 6).status, 'pass-code-behind', 'moved');
+  assert.equal(marks.forFramePop(DOC, 5).status, 'pass', 'nothing left on the old line');
+  assert.equal(marks.forFramePop(DOC, 9).status, 'pass', 'the removed line forgot its ⚠');
+  assert.equal(marks.forFramePop(OTHER, 5).status, 'pass-code-behind', 'another document untouched');
+  marks.move(DOC, new Map([[6, null]]));
+  assert.deepEqual(marks.linesOf(DOC), []);
+});
+
 test('a new run clears the document — the next run starts with no marks', () => {
   const marks = new GuardMarks();
   marks.notePass(DOC, 2, 'pass-code-behind');
