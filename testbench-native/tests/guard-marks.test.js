@@ -13,7 +13,8 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { GuardMarks, isGuardCodeMark } from '../src/extension/guard-mark-core.ts';
+import { GuardMarks, isGuardCodeMark, passMarkFor } from '../src/extension/guard-mark-core.ts';
+import { staleHoverMessage } from '../src/extension/failure-hover-core.ts';
 
 const DOC = 'file:///c%3A/p/tests/control-flow.md';
 const OTHER = 'file:///c%3A/p/tests/other.md';
@@ -106,4 +107,56 @@ test('a new run clears the document — the next run starts with no marks', () =
   assert.deepEqual(marks.forFramePop(DOC, 5), { status: 'pass' });
   // Only that document: another file's run is not this one's to clear.
   assert.equal(marks.forFramePop(OTHER, 2).status, 'pass-code-behind');
+});
+
+// ── What a `step:pass` paints (passMarkFor) ─────────────────────────────────
+//
+// A chain member whose CONDITION entry threw on the visit that then took
+// another member carries its ⚠ on its own skipped event. Before this rule the
+// server put it on the member that HELD, and a skip outranked the stale flag,
+// so the broken line painted ◌ with no hover and "Repair this step" was
+// offered on a line whose entry did nothing wrong.
+
+const NOT_TAKEN = 'Skipped: another branch of this decision was taken';
+
+test('a skipped pass carrying codeBehindStale paints ⚠, with both facts in its detail', () => {
+  const mark = passMarkFor({ reason: NOT_TAKEN, ...STALE }, true);
+  assert.equal(mark.status, 'pass-stale');
+  assert.deepEqual(mark.detail, { codeBehindStale: STALE.codeBehindStale, notTaken: NOT_TAKEN });
+});
+
+test('a skipped ⚠ with no reason still says it was not taken', () => {
+  assert.deepEqual(passMarkFor({ ...STALE }, true).detail, {
+    codeBehindStale: STALE.codeBehindStale,
+    notTaken: 'Skipped',
+  });
+});
+
+test('a plain skip stays ◌ with its reason; a code-decided skip is still ◌', () => {
+  assert.deepEqual(passMarkFor({ reason: NOT_TAKEN }, true), {
+    status: 'skip',
+    detail: { error: NOT_TAKEN },
+  });
+  assert.deepEqual(passMarkFor({}, true), { status: 'skip' });
+  assert.equal(passMarkFor({ reason: NOT_TAKEN, fromCodeBehind: true }, true).status, 'skip');
+});
+
+test('a pass that ran keeps its order: ⚠, then </>, then ✓ — no notTaken on a line that ran', () => {
+  assert.deepEqual(passMarkFor({ ...STALE }, false), {
+    status: 'pass-stale',
+    detail: { codeBehindStale: STALE.codeBehindStale },
+  });
+  assert.deepEqual(passMarkFor({ fromCodeBehind: true }, false), { status: 'pass-code-behind' });
+  assert.deepEqual(passMarkFor({}, false), { status: 'pass' });
+});
+
+test('the skipped ⚠ hovers with the skip reason, what the condition threw, and the Repair line', () => {
+  const hover = staleHoverMessage({ codeBehindStale: STALE.codeBehindStale, notTaken: NOT_TAKEN });
+  assert.ok(hover.startsWith(NOT_TAKEN), hover);
+  assert.match(hover, /This line was not taken, and its condition's compiled code-behind threw/);
+  assert.match(hover, /locator timeout/);
+  assert.match(hover, /control-flow\.steps\.ts/);
+  assert.match(hover, /Repair this step/);
+  // A ⚠ on a line that RAN keeps its own wording.
+  assert.match(staleHoverMessage({ codeBehindStale: STALE.codeBehindStale }), /^This step passed under AI/);
 });

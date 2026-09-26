@@ -275,6 +275,78 @@ describe('the CLI runner and a condition entry', () => {
     expect(bySource(ELSE_IF_LINE).every((s) => !s.stale)).toBe(true);
   });
 
+  /** A chain with no `Otherwise`: `If … then Pay with cash`, then a step. */
+  const IF_ONLY_LINE = 'If the Cash checkbox is ticked, then Pay with cash';
+  const IF_ONLY_MD = [
+    '# Chain',
+    '',
+    '## Steps',
+    '1. Open the payments page',
+    `2. ${IF_ONLY_LINE}`,
+    '3. Verify the order confirmation is shown',
+    '',
+    '### Pay with cash',
+    '1. Click Pay now',
+    '',
+  ].join('\n');
+
+  it('writes the stale row for a skipped head whose own code threw — the row the server writes', async () => {
+    const file = await project(
+      'if-only',
+      IF_ONLY_MD,
+      `  {
+    source: ${JSON.stringify(IF_ONLY_LINE)},
+    async condition() { throw new Error('Cash checkbox went away'); },
+  },`,
+    );
+    evaluateConditionsMock.mockResolvedValueOnce({ selected: null, reasoning: 'none', aiInteractions: [] });
+
+    const report = await runTest({ test: await parseTestFile(file, {}), resolvedParameters: {} }, makeConfig(), '');
+
+    expect(report.status).toBe('passed');
+    const head = report.steps.find((s: StepResult) => s.instruction === IF_ONLY_LINE)!;
+    expect(head).toMatchObject({ status: 'skipped', guard: { decidedBy: 'model', selected: null, staleMember: 1 } });
+    // The exact row api-server-condition-codebehind.test.ts pins for the
+    // server's writer on the same chain: both writers or neither.
+    const sidecar = await readLastRun(file);
+    expect(sidecar?.steps.find((s) => s.source === IF_ONLY_LINE)).toEqual({
+      index: 2,
+      source: IF_ONLY_LINE,
+      file: file.replace(/\.md$/, '.steps.ts'),
+      occurrence: 0,
+      status: 'skipped',
+      fromCodeBehind: false,
+      stale: true,
+      error: 'Cash checkbox went away',
+      staleRuns: 1,
+    });
+  });
+
+  it('carries deliberate on a guard row a condition entry failed with step.fail()', async () => {
+    const file = await project(
+      'if-deliberate',
+      IF_ONLY_MD,
+      `  {
+    source: ${JSON.stringify(IF_ONLY_LINE)},
+    async condition({ step }) { step.fail('No payment method on this account'); return true; },
+  },`,
+    );
+
+    const report = await runTest({ test: await parseTestFile(file, {}), resolvedParameters: {} }, makeConfig(), '');
+
+    expect(report.status).toBe('failed');
+    expect(evaluateConditionsMock).not.toHaveBeenCalled();
+    const head = report.steps.find((s: StepResult) => s.instruction === IF_ONLY_LINE)!;
+    // Measured before the fix: `deliberate` was dropped between the condition
+    // outcome and the row, as on the server's `step:fail`.
+    expect(head).toMatchObject({
+      status: 'failed',
+      error: 'No payment method on this account',
+      deliberate: true,
+      fromCodeBehind: true,
+    });
+  });
+
   it('asks the judge, with no code, when the run bypasses code-behind', async () => {
     const file = await project(
       'bypass',

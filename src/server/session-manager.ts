@@ -811,7 +811,10 @@ export type RunEvent =
        *  (stories/codebehind-compile.md §What the author sees). Drives the code mark. */
       fromCodeBehind?: boolean;
       /** The entry threw and the step then passed under AI. Drives ⚠ and the
-       *  "recompile" prompt; the file is what "Open Code-behind" opens. */
+       *  "recompile" prompt; the file is what "Open Code-behind" opens. Also
+       *  beside `output: 'skipped'` on a chain member whose CONDITION entry
+       *  threw on the visit that decided against it — the ⚠ travels on the
+       *  broken member's own event, never on the member that held. */
       codeBehindStale?: { file: string; error: string };
       /**
        * Which surface answered this step (SPEC-use-computer.md §4.5, §10.3).
@@ -4330,6 +4333,17 @@ export class SessionManager {
     const skipQueue = new SkipQueue();
     const skipReasons = new Map<number, string>();
     /**
+     * The ⚠ a skipped chain member carries on its own `step:pass
+     * output:'skipped'`: its condition's entry threw on the visit that skipped
+     * it, and the model decided the chain in its place
+     * (stories/codebehind-loops-and-conditions.md, "What the live half
+     * decided"). Keyed by the member's 0-based index beside `skipReasons`, and
+     * consumed when the skip is emitted — the entry is discarded after it
+     * breaks, so a later pass that skips the same member again has nothing to
+     * say about it.
+     */
+    const skipStale = new Map<number, { file: string; error: string }>();
+    /**
      * §4.5 — a skill call restores the caller's surface on return.
      *
      * Per RUN rather than per session, and the corner that costs is named
@@ -5053,6 +5067,8 @@ export class SessionManager {
       const instruction = effectiveSteps[k] ?? '';
       const frame = frameInfoFor(k);
       const reason = skipReasons.get(k) ?? 'Skipped';
+      const stale = skipStale.get(k);
+      skipStale.delete(k);
       results.push({
         step: instruction,
         status: 'skipped',
@@ -5099,6 +5115,10 @@ export class SessionManager {
         reason,
         skipKind: 'not-taken',
         ...(frame && { frame }),
+        // A chain member whose condition entry threw on this visit: the ⚠
+        // belongs on ITS line, where "Repair this step" reaches the entry
+        // that broke — not on the member the model then picked.
+        ...(stale && { codeBehindStale: stale }),
       });
       // Counted, unlike a return's skips, which are deliberately not
       // (decision 9, "it counts steps that EXECUTED"). The two producers
@@ -6211,6 +6231,29 @@ export class SessionManager {
           const rows = guardRows(controlRecord, i, evaluation);
           const reason = skipReasonFor(controlRecord, plan);
           for (const k of rows.skip) skipReasons.set(k, reason);
+          // Whose line the ⚠ goes on: the member whose condition entry broke.
+          // The guard row is the member that HELD (or the head, when nothing
+          // did), so a broken member that is not that row is one of this
+          // visit's skips and carries the mark on its own skipped event. A
+          // guard that FAILED selected nobody and skips nothing — its row is
+          // the only event there is, so the flag stays on it.
+          const brokenMember = evaluation.codeBehindStale ? evaluation.guard?.staleMember : undefined;
+          const staleOnRow =
+            evaluation.codeBehindStale !== undefined &&
+            (brokenMember === undefined ||
+              brokenMember === rows.guard?.index ||
+              rows.guard?.status === 'failed');
+          if (
+            evaluation.codeBehindStale &&
+            brokenMember !== undefined &&
+            !staleOnRow &&
+            rows.skip.includes(brokenMember)
+          ) {
+            skipStale.set(brokenMember, {
+              file: evaluation.codeBehindStale.file,
+              error: evaluation.codeBehindStale.error,
+            });
+          }
           skipQueue.add(rows.skip);
 
           if (rows.guard) {
@@ -6236,15 +6279,22 @@ export class SessionManager {
              * decided by its code (the code mark), or by the model after its
              * code broke (⚠). A skipped guard row carries them too — the
              * decision that nothing held was still made by that code.
+             *
+             * The ⚠ only when the broken member IS this row's line. When it is
+             * another member, the model picked this one after that one's code
+             * threw: this line's own entry did nothing wrong, and the mark
+             * travels on the broken member's skipped event instead
+             * (`skipStale` above), so Repair is offered where the entry is.
              */
             const guardCodeMarks = {
               ...(result.fromCodeBehind && { fromCodeBehind: true }),
-              ...(result.codeBehindStale && {
-                codeBehindStale: {
-                  file: result.codeBehindStale.file,
-                  error: result.codeBehindStale.error,
-                },
-              }),
+              ...(staleOnRow &&
+                result.codeBehindStale && {
+                  codeBehindStale: {
+                    file: result.codeBehindStale.file,
+                    error: result.codeBehindStale.error,
+                  },
+                }),
             };
             const guardSkill = outermostSkillName(
               expansionOrigins?.[rows.guard.index]?.frameId,
@@ -6309,6 +6359,10 @@ export class SessionManager {
                 type: 'step:fail',
                 line: guardLine,
                 error: evaluation.error ?? 'The decision could not be made',
+                // `step.fail(...)` in a condition entry: the author's failure,
+                // worded as theirs — as a step's `step:fail` carries it
+                // (stories/step-failure-outcomes.md, decision 2).
+                ...(result.deliberate && { deliberate: true }),
                 ...(guardFrame && { frame: guardFrame }),
                 ...guardCodeMarks,
               });
@@ -7975,10 +8029,17 @@ export class SessionManager {
         // the CLI writer does it. Written even when the guard row itself is
         // skipped — a chain where nothing held still ran that member's code,
         // and the row that is skipped is only the one the question was asked
-        // from.
+        // from. That includes the row's OWN line: a head whose entry threw,
+        // in a chain where nothing held and there is no `Otherwise`, is
+        // skipped AND the broken member — and a skipped row writes nothing of
+        // its own below, so without this its stale row was lost and
+        // `--only-stale` never found the entry (the CLI's writer keeps its
+        // skipped guard rows, and wrote the same row all along).
         const staleMember = result.guard?.staleMember;
         const member =
-          failure !== undefined && staleMember !== undefined && staleMember !== i
+          failure !== undefined &&
+          staleMember !== undefined &&
+          (staleMember !== i || result.status === 'skipped')
             ? lastRunStaleMemberRow({
                 index: staleMember,
                 binding: codeBehind.bindingFor(staleMember),
@@ -7991,7 +8052,7 @@ export class SessionManager {
             : undefined;
         if (member && member.index < result.index) lastRunSteps.push(member);
         if (result.status === 'skipped') {
-          if (member && member.index > result.index) lastRunSteps.push(member);
+          if (member && member.index >= result.index) lastRunSteps.push(member);
           continue;
         }
         const binding = codeBehind.bindingFor(i);

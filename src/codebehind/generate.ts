@@ -22,14 +22,14 @@ import {
 } from '../parser/interpolate-env-data.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
-import { WIDE_PLACEHOLDER_SOURCE, interpolate } from '../parser/parameters.js';
+import { WIDE_PLACEHOLDER_SOURCE, dottedThroughRename, interpolate } from '../parser/parameters.js';
 import { boundValue } from '../runner/placeholder-substitution.js';
 import type { AssertionResult } from '../report/types.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import { logger } from '../utils/logger.js';
 import type { CodeBehindBinding } from './loader.js';
 import type { RecordedAction } from './recording.js';
-import { CODE, scan, type StringToken } from './tokenizer.js';
+import { CODE, COMMENT, matchForward, scan, type StringToken } from './tokenizer.js';
 
 /**
  * Turning one recorded step into its code-behind entry
@@ -939,11 +939,24 @@ export function stepParameters(
     // the text to search for.
     const renamed = boundValue(binding.scope.renames, name);
     const input = boundValue(binding.scope.inputs, name);
+    // A DOTTED name whose root the frame renames — `{{order.id}}` in a skill
+    // body whose `For each {{order}}` the expander rewrote — resolves through
+    // that rename, in the order `step.getVar` asks (execute.ts): the pass
+    // bound `__skill1_order.id`, and no map holds `order.id` under the name
+    // the step wrote. Missed, the prompt said "this step uses no parameters"
+    // and the leak guard held nothing, so an entry hard-coding the item's id
+    // was accepted — the one inlined value a loop exists to vary.
+    const scoped =
+      renamed === undefined && input === undefined
+        ? dottedThroughRename(name, binding.scope.renames)
+        : undefined;
     const value = renamed !== undefined
       ? boundValue(resolvedParameters, renamed)
       : input !== undefined
         ? resolveInputValue(input, resolvedParameters, envData)
-        : boundValue(resolvedParameters, name);
+        : scoped !== undefined
+          ? boundValue(resolvedParameters, scoped)
+          : boundValue(resolvedParameters, name);
     if (value !== undefined) out.push({ name, value });
   }
   return out;
@@ -1471,24 +1484,23 @@ function codeOnly(code: string): string {
 }
 
 /**
- * Calls a condition entry must not make (the story's rules: read only, and
- * about the page NOW). Each is a precise call shape rather than a word, so
- * `isChecked()` is not `check(` and `getByRole('button', { name: 'Click' })`
- * is not `click(` — the entry is scanned with its strings blanked first.
+ * Calls a condition entry must not make whatever they are called on (the
+ * story's rules: read only, and about the page NOW). Each is a precise call
+ * shape rather than a word, so `isChecked()` is not `check(` and
+ * `getByRole('button', { name: 'Click' })` is not `click(` — the entry is
+ * scanned with its strings blanked first.
+ *
+ * The page ACTIONS are not here: `fill`, `clear`, `click` and the rest are
+ * also the names of ordinary methods (`new Array(3).fill(0)`, `map.clear()`),
+ * so they are refused only on a Playwright receiver — see
+ * {@link CONDITION_PAGE_ACTIONS}.
  */
 const CONDITION_FORBIDDEN: ReadonlyArray<{ re: RegExp; why: string }> = [
   // First, so `page.keyboard.press(` is named as the keyboard it is rather
-  // than as the `.press(` the next rule would also match.
+  // than as the `.press(` the action rule would also match.
   {
     re: /\.\s*(?:keyboard|mouse|touchscreen)\s*\./,
     why: 'drives the keyboard or mouse. A condition reads the page; it never types or points',
-  },
-  {
-    re: /\.\s*(?:click|dblclick|fill|type|press|pressSequentially|check|uncheck|setChecked|selectOption|selectText|setInputFiles|hover|tap|focus|blur|dragTo|dragAndDrop|dispatchEvent|clear|scrollIntoViewIfNeeded)\s*\(/,
-    why:
-      'acts on the page. A condition answers a question about the page and must not change the ' +
-      'page it is asked about: read the state instead — `isChecked()`, `isEnabled()`, `count()`, ' +
-      '`textContent()` after a `count()` check',
   },
   {
     re: /\.\s*(?:goto|goBack|goForward|reload)\s*\(/,
@@ -1504,15 +1516,320 @@ const CONDITION_FORBIDDEN: ReadonlyArray<{ re: RegExp; why: string }> = [
     re: /(?:^|[^\w$.])setTimeout\s*\(/,
     why: 'sleeps. The page has already settled; answer about it now',
   },
+  // Any call on the run's tabs or browsers, on any receiver — `tabs.open(`
+  // destructured, `ctx.tabs.open(` not. A condition has no business with
+  // either. (A LOCAL named `tabs` is exempted in `forbiddenCall`.)
   {
-    re: /(?:^|[^\w$.])(?:tabs|browsers)\s*\.\s*(?:open|openedBy|switchTo|close)\s*\(/,
-    why: 'opens or switches a tab or browser. A condition reads the page the run is on',
+    re: /(?:^|[^\w$])(?:tabs|browsers)\s*\.\s*[\w$]+\s*\(/,
+    why: 'opens, switches or closes a tab or browser. A condition reads the page the run is on',
   },
+  // On any receiver: `step.setVar(`, `ctx.step.setVar(`, a destructured `setVar(`.
   {
-    re: /(?:^|[^\w$.])step\s*\.\s*setVar\s*\(/,
+    re: /(?:^|[^\w$])(?:step\s*\.\s*)?setVar\s*\(/,
     why: "writes a variable. A condition only answers; it does not change the test's scope",
   },
 ];
+
+/**
+ * Playwright calls that act on the page, refused on a Playwright RECEIVER
+ * ({@link isPlaywrightReceiver}): `page.close()`, `locator.fill('x')`,
+ * `page.getByLabel('Cash').check()`. The same names on anything else — an
+ * array, a map, a helper object — are ordinary JavaScript.
+ */
+const CONDITION_PAGE_ACTIONS =
+  /\.\s*(click|dblclick|fill|type|press|pressSequentially|check|uncheck|setChecked|selectOption|selectText|setInputFiles|hover|tap|focus|blur|dragTo|dragAndDrop|dispatchEvent|clear|scrollIntoViewIfNeeded|close)\s*\(/g;
+
+const CONDITION_PAGE_ACTION_WHY =
+  'acts on the page. A condition answers a question about the page and must not change the ' +
+  'page it is asked about: read the state instead — `isChecked()`, `isEnabled()`, `count()`, ' +
+  '`textContent()` after a `count()` check';
+
+/** Identifiers that name a Playwright page-level object when they root a chain. */
+const PLAYWRIGHT_ROOTS = new Set(['page', 'frame', 'context', 'browser']);
+
+/** A call that makes a Playwright locator or element handle out of anything. */
+const PLAYWRIGHT_MAKER = /(?:^|[^\w$])(?:locator|getBy[A-Za-z]+|frameLocator|contentFrame|\$\$?)\s*\(/;
+
+/**
+ * The receiver of the call whose `.` is at `dot`, read backwards over the
+ * member chain — identifiers, `.`/`?.`, `!`, and balanced `( )` / `[ ]` groups
+ * — in code whose strings are already blanked. `page.getByLabel(…).first()`
+ * for `….first().check(`; `(await page.$('#a'))` for `(await page.$('#a')).click(`.
+ * Returns the chain and whether a `new` precedes it (a freshly constructed
+ * object — `new Array(3).fill(0)` — is never the page).
+ */
+function receiverBefore(text: string, dot: number): { chain: string; constructed: boolean } {
+  let i = dot - 1;
+  const skipSpace = (): void => {
+    while (i >= 0 && /\s/.test(text[i]!)) i--;
+  };
+  skipSpace();
+  for (;;) {
+    while (i >= 0 && text[i] === '!') i--; // TS non-null
+    const c = text[i];
+    if (c === ')' || c === ']') {
+      const open = c === ')' ? '(' : '[';
+      let depth = 0;
+      for (; i >= 0; i--) {
+        if (text[i] === c) depth++;
+        else if (text[i] === open && --depth === 0) break;
+      }
+      i--;
+    } else if (c !== undefined && /[\w$]/.test(c)) {
+      while (i >= 0 && /[\w$]/.test(text[i]!)) i--;
+    } else {
+      break;
+    }
+    skipSpace();
+    if (text[i] === '.') {
+      i--;
+      if (text[i] === '?') i--;
+      skipSpace();
+      continue;
+    }
+    // `locator(…)`, `items[0]` — what a call or index group is applied to is
+    // part of the chain.
+    if ((c === ')' || c === ']') && i >= 0 && /[\w$)\]]/.test(text[i]!)) continue;
+    break;
+  }
+  const chain = text.slice(i + 1, dot).trim();
+  const before = text.slice(Math.max(0, i - 8), i + 1);
+  return { chain, constructed: /(?:^|[^\w$])new\s*$/.test(before) };
+}
+
+/**
+ * Names bound to a Playwright page, frame, locator or handle anywhere in the
+ * entry, to a fixpoint: a `page` alias from the destructure (`{ page: p }`),
+ * `const next = page.getByRole(…)`, `const rows = await next.all()`, and the
+ * loop variable of `for (const row of await rows…)`. Approximate by design —
+ * a right-hand side is read to the end of its line — and generous: a name it
+ * wrongly marks only matters if the entry then calls a page action on it.
+ */
+function playwrightNames(text: string): Set<string> {
+  const names = new Set<string>();
+  for (const m of text.matchAll(/\bpage\s*:\s*([A-Za-z_$][\w$]*)/g)) names.add(m[1]!);
+  const bindings: Array<{ targets: string[]; rhs: string }> = [];
+  for (const m of text.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*|\[[^\]]*\]|\{[^}]*\})\s*=\s*([^;\n]+)/g)) {
+    bindings.push({ targets: [...m[1]!.matchAll(/[A-Za-z_$][\w$]*/g)].map((t) => t[0]), rhs: m[2]! });
+  }
+  for (const m of text.matchAll(/for\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+([^\n]+)/g)) {
+    bindings.push({ targets: [m[1]!], rhs: m[2]! });
+  }
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const { targets, rhs } of bindings) {
+      if (/^\s*(?:new\b|\[)/.test(rhs) || !isPlaywrightReceiver(rhs, names)) continue;
+      for (const t of targets) {
+        if (!names.has(t)) {
+          names.add(t);
+          changed = true;
+        }
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * Is this receiver chain a Playwright page, frame, locator or handle? Yes
+ * when it is rooted at (or passes through) `page` / `frame` / `context` /
+ * `browser` — `ctx.page` included — when it makes a locator
+ * (`locator(`, `getBy…(`, `frameLocator(`, `$(`), or when it uses a name
+ * {@link playwrightNames} bound to one. A receiver nothing identifies — a
+ * helper's return value, a callback parameter — is NOT treated as one: this
+ * is a static backstop for what a model writes, not a type checker, and the
+ * next run is the proof either way.
+ */
+function isPlaywrightReceiver(chain: string, names: ReadonlySet<string>): boolean {
+  if (PLAYWRIGHT_MAKER.test(chain)) return true;
+  for (const [word] of chain.matchAll(/[A-Za-z_$][\w$]*/g)) {
+    if (PLAYWRIGHT_ROOTS.has(word) || names.has(word)) return true;
+  }
+  return false;
+}
+
+/**
+ * Inside a function the PAGE runs — `page.evaluate(…)`, `locator.evaluate(…)`,
+ * `evaluateAll`, `evaluateHandle`, `$eval` / `$$eval` — every DOM object is
+ * the live page, so any of these changes it. Checked over the page function
+ * whether it is written as a function or as a string of code.
+ */
+const EVALUATE_MUTATIONS: ReadonlyArray<RegExp> = [
+  /\.\s*(?:click|submit|requestSubmit|dispatchEvent|focus|blur|select|reset|remove|removeChild|append|appendChild|prepend|before|after|replaceWith|replaceChildren|insertAdjacentHTML|insertAdjacentElement|insertAdjacentText|insertBefore|setAttribute|removeAttribute|toggleAttribute|setSelectionRange|setRangeText|showModal|showPicker|execCommand|scrollIntoView|scrollTo|scrollBy)\s*\(/,
+  /\bclassList\s*\.\s*(?:add|remove|toggle|replace)\s*\(/,
+  /\b(?:location|history)\s*\.\s*(?:assign|replace|reload|back|forward|go|pushState|replaceState)\s*\(/,
+  /\bwindow\s*\.\s*open\s*\(/,
+  // A property assignment — `el.checked = true`, `el.style.display = 'none'`,
+  // `el['value'] += 'x'`, `location.href = …`. Not `===`, `==`, `=>`.
+  /(?:\.\s*[\w$]+|\])\s*(?:[-+*/%|&^]|\*\*|<<|>>>?|\?\?|&&|\|\|)?=(?![=>])/,
+];
+
+const EVALUATE_CALL = /\.\s*(evaluate|evaluateAll|evaluateHandle|\$eval|\$\$eval)\s*\(/g;
+
+/**
+ * The page function of every evaluate call — the first argument, or the second
+ * for `$eval` / `$$eval`, whose first is a selector — as raw text with the
+ * comments blanked and the strings KEPT, since a page function can be a string
+ * of code. Only the page function: a string passed as the evaluate's `arg` is
+ * data, and a selector like `'a[href=x]'` must not read as an assignment.
+ */
+function evaluateBodies(code: string, text: string, scanned: ReturnType<typeof scan>): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(EVALUATE_CALL)) {
+    const open = m.index! + m[0].length - 1;
+    const close = matchForward(scanned, open, '(', ')');
+    const end = close === -1 ? code.length : close;
+    // Split the arguments at depth-0 commas in CODE.
+    const args: Array<[number, number]> = [];
+    let depth = 0;
+    let start = open + 1;
+    for (let k = open + 1; k < end; k++) {
+      if (scanned.mask[k] !== CODE) continue;
+      const c = code[k]!;
+      if ('([{'.includes(c)) depth++;
+      else if (')]}'.includes(c)) depth--;
+      else if (c === ',' && depth === 0) {
+        args.push([start, k]);
+        start = k + 1;
+      }
+    }
+    args.push([start, end]);
+    const which = m[1]!.startsWith('$') ? 1 : 0;
+    const span = args[which];
+    if (!span) continue;
+    let body = '';
+    for (let k = span[0]; k < span[1]; k++) body += scanned.mask[k] === COMMENT ? ' ' : code[k];
+    out.push(body);
+  }
+  return out;
+}
+
+/** A local `const tabs = …` / `let browsers` shadows the run's own. */
+function declaresLocal(text: string, name: string): boolean {
+  return new RegExp(`(?:const|let|var)\\s+${name}\\b`).test(text);
+}
+
+/** The first forbidden call in the entry, named, with why — or undefined. */
+function forbiddenCall(code: string, text: string): string | undefined {
+  for (const { re, why } of CONDITION_FORBIDDEN) {
+    const g = new RegExp(re.source, 'g');
+    for (const match of text.matchAll(g)) {
+      const call = match[0].replace(/^[^\w$.]/, '').replace(/\s+/g, '');
+      const bare = /^(tabs|browsers)\./.exec(call);
+      // A bare `tabs.` whose name the entry declares is its own variable.
+      if (bare && !/\.\s*$/.test(text.slice(0, match.index! + 1)) && declaresLocal(text, bare[1]!)) {
+        continue;
+      }
+      return `The entry calls \`${call}\`, which ${why}.`;
+    }
+  }
+
+  const names = playwrightNames(text);
+  for (const match of text.matchAll(CONDITION_PAGE_ACTIONS)) {
+    const { chain, constructed } = receiverBefore(text, match.index!);
+    if (constructed || !isPlaywrightReceiver(chain, names)) continue;
+    return `The entry calls \`.${match[1]}(\`, which ${CONDITION_PAGE_ACTION_WHY}.`;
+  }
+
+  const scanned = scan(code);
+  for (const body of evaluateBodies(code, text, scanned)) {
+    for (const re of EVALUATE_MUTATIONS) {
+      const hit = re.exec(body);
+      if (!hit) continue;
+      const what = hit[0].replace(/\s+/g, '');
+      return (
+        `The entry's page function (\`evaluate\`) does \`${what}\`, which changes the page. A ` +
+        'condition only reads: a page function may return what it finds, never click, submit, ' +
+        'dispatch, focus or assign to the DOM.'
+      );
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The names an entry object literal defines at its OWN top level —
+ * `run` and `condition` in `{ source, async run() {…}, condition: … }` — read
+ * with the tokenizer, so `helpers.run(page)` inside a body and `x ? run : y`
+ * are not definitions. Undefined when the code holds no object literal.
+ */
+function entryKeys(code: string): Set<string> | undefined {
+  const s = scan(code);
+  let open = -1;
+  for (let i = 0; i < code.length; i++) {
+    if (s.mask[i] === CODE && code[i] === '{') {
+      open = i;
+      break;
+    }
+  }
+  if (open === -1) return undefined;
+  const closeAt = matchForward(s, open, '{', '}');
+  const end = closeAt === -1 ? code.length : closeAt;
+  const keys = new Set<string>();
+  let depth = 0;
+  let expectKey = true;
+  for (let i = open + 1; i < end; i++) {
+    const kind = s.mask[i];
+    if (kind !== CODE) {
+      if (kind === COMMENT) continue;
+      // A quoted key: `'run': …` / `"condition"() {…}`.
+      const token = s.strings.find((t) => t.start === i);
+      if (token && depth === 0 && expectKey) {
+        let k = token.end;
+        while (k < end && /\s/.test(code[k]!)) k++;
+        if (code[k] === ':' || code[k] === '(') keys.add(token.value);
+        expectKey = false;
+        i = token.end - 1;
+      }
+      continue;
+    }
+    const c = code[i]!;
+    if ('([{'.includes(c)) {
+      depth++;
+      expectKey = false;
+      continue;
+    }
+    if (')]}'.includes(c)) {
+      depth--;
+      continue;
+    }
+    if (depth !== 0 || /\s/.test(c)) continue;
+    if (c === ',') {
+      expectKey = true;
+      continue;
+    }
+    if (c === '*' && expectKey) continue;
+    if (/[A-Za-z_$]/.test(c) && expectKey) {
+      let j = i;
+      while (j < end && /[\w$]/.test(code[j]!)) j++;
+      const word = code.slice(i, j);
+      let k = j;
+      while (k < end && /\s/.test(code[k]!)) k++;
+      const next = code[k];
+      // `async run(`, `get x(` — a modifier, and the key follows it.
+      if ((word === 'async' || word === 'get' || word === 'set') && next !== undefined && /[A-Za-z_$*]/.test(next)) {
+        i = j - 1;
+        continue;
+      }
+      if (next === '(' || next === ':' || next === ',' || next === '}' || next === undefined) keys.add(word);
+      expectKey = false;
+      i = j - 1;
+      continue;
+    }
+    expectKey = false;
+  }
+  return keys;
+}
+
+/**
+ * Does this entry object literal define a `condition` function at its own top
+ * level? What makes an entry a condition entry — the review pass asks it of
+ * every entry before a revision, so each one it finds must still be one after.
+ */
+export function entryDefinesCondition(code: string): boolean {
+  const keys = entryKeys(code);
+  return keys ? keys.has('condition') : /\bcondition\s*[(:]/.test(codeOnly(code));
+}
 
 /**
  * Why a generated CONDITION entry must not be written as it stands, or
@@ -1522,30 +1839,47 @@ const CONDITION_FORBIDDEN: ReadonlyArray<{ re: RegExp; why: string }> = [
  *
  * The shape first: a condition line's entry defines `condition` and never
  * `run` — the loader drops an entry with both, so it would silently be no
- * entry at all. Then the calls a condition must not make.
+ * entry at all. Read off the object's OWN keys, so a `helpers.run(page)` call
+ * or a `run` variable in the body is not a `run` definition. Then the calls a
+ * condition must not make:
+ *
+ *  - the keyboard, the mouse, navigation, waits, sleeps, any tab or browser
+ *    call and any `setVar`, on whatever receiver;
+ *  - a page ACTION (`click`, `fill`, `check`, `clear`, `close`, …) only on a
+ *    Playwright receiver — `page`, `frame`, `context`, `browser`, a
+ *    `locator(…)` / `getBy…(…)` / `frameLocator(…)` / `$(…)` chain, or a name
+ *    bound from one — because `new Array(3).fill(0)` and `map.clear()` are
+ *    ordinary JavaScript. A receiver nothing identifies (a helper's return
+ *    value, a callback parameter) is let through: this is a backstop for what
+ *    a model writes, not a type checker;
+ *  - inside a page function (`evaluate`, `evaluateAll`, `evaluateHandle`,
+ *    `$eval`, `$$eval`, function or string): a click, submit, dispatch, focus,
+ *    DOM insertion or removal, attribute write, history or location move, or
+ *    any property assignment (`el.checked = true`).
+ *
+ * Since `generateConditionEntry` refuses an entry that still breaks one of
+ * these after its re-ask, a false positive here costs a compiled condition —
+ * which is why the action rule reads the receiver rather than the word.
  */
 export function conditionEntryComplaint(code: string): string | undefined {
   const text = codeOnly(code);
-  if (/\brun\s*[(:]/.test(text)) {
+  const keys = entryKeys(code);
+  const definesRun = keys ? keys.has('run') : /\brun\s*[(:]/.test(text);
+  const definesCondition = entryDefinesCondition(code);
+  if (definesRun) {
     return (
       "The entry defines `run`. A condition line's entry defines `condition` ONLY — " +
       '`async condition({ page, step }) { … return true or false; }` — and never `run`: an entry ' +
       'with both is dropped when the file loads, and a `run` on a condition line never decides it.'
     );
   }
-  if (!/\bcondition\s*[(:]/.test(text)) {
+  if (!definesCondition) {
     return (
       'The entry defines no `condition` function. Write `async condition({ page, step })` and ' +
       'return true when the condition, as written, holds on the page now, false when it does not.'
     );
   }
-  for (const { re, why } of CONDITION_FORBIDDEN) {
-    const match = re.exec(text);
-    if (!match) continue;
-    const call = match[0].replace(/^[^\w$.]/, '').replace(/\s+/g, '');
-    return `The entry calls \`${call}\`, which ${why}.`;
-  }
-  return undefined;
+  return forbiddenCall(code, text);
 }
 
 export interface GenerateConditionEntryOptions {
@@ -1652,11 +1986,18 @@ export async function generateConditionEntry(
   );
   if (first.kind !== 'entry') return first;
 
-  const complaint = conditionEntryComplaint(first.code) ?? undeclaredContextComplaint(first.code);
+  // Two grades of complaint. A HARD one breaks a rule of what a condition is
+  // (`conditionEntryComplaint`: a `run`, no `condition`, a call that acts,
+  // navigates, types, waits, switches a tab or writes a variable) — such an
+  // entry is never returned: a condition that clicks changes the page it is
+  // asked about, and one with both `run` and `condition` is dropped by the
+  // loader, so it would count as compiled while its guard stayed AI. A SOFT
+  // one (`undeclaredContextComplaint`) is the step path's: one re-ask, then
+  // take what we get, and the next run shows whether it holds.
+  const firstHard = conditionEntryComplaint(first.code);
+  const complaint = firstHard ?? undeclaredContextComplaint(first.code);
   if (complaint === undefined) return first;
 
-  // ONE re-ask, then take what we get — the step's rule, for the step's
-  // reasons (see `generateStepEntry`).
   logger.debug(`Code-behind re-asking for condition "${binding.source}": ${complaint}`);
   const second = await askForEntry(
     options.aiClient,
@@ -1667,13 +2008,37 @@ export async function generateConditionEntry(
     'condition',
   );
   if (second.kind !== 'entry') {
+    const why = second.kind === 'error' ? second.message : second.reason;
+    if (firstHard !== undefined) {
+      return {
+        kind: 'error',
+        message:
+          `the generated condition broke a rule a condition must keep, and the re-ask produced no ` +
+          `entry (${why}): ${firstHard}`,
+      };
+    }
     logger.debug(
-      `The re-ask for condition "${binding.source}" produced no entry ` +
-        `(${second.kind === 'error' ? second.message : second.reason}); keeping the first answer`,
+      `The re-ask for condition "${binding.source}" produced no entry (${why}); keeping the first answer`,
     );
     return first;
   }
-  const stillWrong = conditionEntryComplaint(second.code) ?? undeclaredContextComplaint(second.code);
+  const secondHard = conditionEntryComplaint(second.code);
+  if (secondHard !== undefined) {
+    // Neither answer is clean. The first one may still be — of hard faults:
+    // its complaint was only the soft one.
+    if (firstHard === undefined) {
+      logger.warn(
+        `Code-behind for condition "${binding.source}": the re-ask broke a rule (${secondHard}); ` +
+          `keeping the first answer, whose only fault the next run will show. ${complaint}`,
+      );
+      return first;
+    }
+    return {
+      kind: 'error',
+      message: `the generated condition still broke a rule a condition must keep after one re-ask: ${secondHard}`,
+    };
+  }
+  const stillWrong = undeclaredContextComplaint(second.code);
   if (stillWrong !== undefined) {
     logger.warn(
       `Code-behind for condition "${binding.source}" still has a fault the static check can see; ` +

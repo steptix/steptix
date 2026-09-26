@@ -397,6 +397,51 @@ describe('a chain decided by code', () => {
     expect(code.calls()).toBe(0);
     expect(settle.calls).toBe(0);
   });
+
+  it('says values, not code, when a literal member holds ahead of every entry — and settles nothing', async () => {
+    // `If {{plan}} is "pro"` (holds) + `Else if <page condition>` (has an
+    // entry): the code path applies, because every member is answerable
+    // without a model, but no entry runs. Measured before the fix:
+    // `{ decidedBy: 'code', selected: 0 }`, `fromCodeBehind: true`, a
+    // "Decided by code-behind" reasoning, and the page settled for nothing.
+    const code = scripted(true);
+    const controls: (ControlRecord | null)[] = [
+      { kind: 'if', chainId: 'c', condition: '{{plan}} is "pro"', bodyStart: 1, bodyEnd: 1, chainEnd: 3 },
+      null,
+      { kind: 'elseif', chainId: 'c', condition: B, bodyStart: 3, bodyEnd: 3, chainEnd: 3 },
+      null,
+    ];
+    const ev = await visit({
+      controls,
+      state: createControlState(),
+      parameters: { plan: 'pro' },
+      codeBehind: registry({ 2: binding(`Else if ${B}, then Pay by card`, { condition: code.condition }) }),
+    });
+    expect(ev.plan.selected).toBe(0);
+    expect(ev.guard).toEqual({ decidedBy: 'values', selected: 0 });
+    expect(ev.fromCodeBehind).toBeUndefined();
+    expect(ev.codeBehind).toBeUndefined();
+    expect(ev.reasoning).toBe('decided from the values: "pro" is "pro" → true');
+    expect(code.calls()).toBe(0);
+    expect(settle.calls).toBe(0);
+    expect(judge.calls).toEqual([]);
+  });
+
+  it('settles the page once, right before the first entry runs', async () => {
+    const a = scripted(false);
+    const b = scripted(true);
+    const ev = await visit({
+      controls: CHAIN,
+      state: createControlState(),
+      codeBehind: registry({
+        0: binding('a', { condition: a.condition }),
+        2: binding('b', { condition: b.condition }),
+        4: binding('c', { condition: scripted(true).condition }),
+      }),
+    });
+    expect(ev.guard).toEqual({ decidedBy: 'code', selected: 2 });
+    expect(settle.calls).toBe(1);
+  });
 });
 
 // ─── Broken code ─────────────────────────────────────────────────────────────
@@ -511,6 +556,67 @@ describe('a condition entry that fails for real', () => {
     const ev = await visit({ controls: whileControls(), state: createControlState(), codeBehind: registry({ 0: w }) });
     expect(ev.error).toBe('no statements at all');
     expect(ev.reasoning).toContain('step.fail');
+    // Carried as the step path carries it, all the way to the row: every
+    // surface words a deliberate failure as the author's, not as a defect.
+    expect(ev.deliberate).toBe(true);
+    const row = guardResult({
+      index: 1,
+      instruction: 'While …',
+      status: 'failed',
+      durationMs: 0,
+      error: ev.error,
+      ...guardCodeBehindFields(ev),
+    });
+    expect(row.deliberate).toBe(true);
+  });
+
+  it('does not mark a step.expect failure deliberate', async () => {
+    const w = binding('w', {
+      condition: async ({ step }) => { step.expect(false, 'the list never loaded'); return true; },
+    });
+    const ev = await visit({ controls: whileControls(), state: createControlState(), codeBehind: registry({ 0: w }) });
+    expect(ev.deliberate).toBeUndefined();
+  });
+
+  it('treats a failure while the run is being stopped as a stop: no stale, no failure', async () => {
+    // A Stop closes the page under the entry, which then throws. Measured
+    // before the fix: the guard healed under the model (the entry discarded
+    // and flagged stale) on a keyed run, and failed on a keyless one.
+    const controller = new AbortController();
+    const w = binding('w', {
+      condition: async () => {
+        controller.abort();
+        throw new Error('Target page, context or browser has been closed');
+      },
+    });
+    await expect(
+      visit({
+        controls: whileControls(),
+        state: createControlState(),
+        codeBehind: registry({ 0: w }),
+        extra: { signal: controller.signal },
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(judge.calls).toEqual([]);
+    expect(w.entry).toBeDefined();
+
+    // …and the same on a keyless run, which would otherwise fail the guard.
+    const keyless = new AbortController();
+    const k = binding('k', {
+      condition: async () => {
+        keyless.abort();
+        throw new Error('Target page, context or browser has been closed');
+      },
+    });
+    await expect(
+      visit({
+        controls: whileControls(),
+        state: createControlState(),
+        codeBehind: registry({ 0: k }, { keyless: true }),
+        extra: { signal: keyless.signal },
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(k.entry).toBeDefined();
   });
 
   it('refuses step.exit() — a condition answers, it does not end the flow', async () => {
@@ -569,6 +675,40 @@ describe('a coded loop that reaches its cap', () => {
     expect(ev.fromCodeBehind).toBeUndefined();
     expect(ev.reasoning).toBe('the model saw none hold');
     expect(w.entry).toBeUndefined();
+  });
+
+  it('lets the cap failure stand, not blame the code, when the model cannot be asked', async () => {
+    const { evaluateConditions } = await import('../src/runner/step-executor.js');
+    const cb = registry({ 0: binding('w', { condition: scripted(true).condition }) });
+    const { state, controls } = await toTheCap(cb);
+    vi.mocked(evaluateConditions).mockImplementationOnce(async () => {
+      throw new Error('could not decide: the page did not settle');
+    });
+    const ev = await visit({ controls, state, codeBehind: cb });
+    // Measured before the fix: `error` was the judge's own words, carried
+    // beside `fromCodeBehind` and the code block with no `guard` at all — a
+    // model failure reported as the code's.
+    expect(ev.plan.capBreached).toEqual({ cap: 2, source: 'line' });
+    expect(ev.error).toContain('the loop reached its cap of 2 passes');
+    expect(ev.error).toContain(
+      "decided by this line's code-behind, and the model could not be asked to check it " +
+        '(could not decide: the page did not settle)',
+    );
+    // As on a run with no model: the code decided every pass, nothing broke.
+    expect(ev.guard).toEqual({ decidedBy: 'code', holds: true });
+    expect(ev.codeBehindStale).toBeUndefined();
+    expect(ev.codeBehindHealSkipped).toBeUndefined();
+    expect(state.passes.get(0)).toBe(2);
+  });
+
+  it('still rethrows an abort during the cap check', async () => {
+    const { evaluateConditions } = await import('../src/runner/step-executor.js');
+    const cb = registry({ 0: binding('w', { condition: scripted(true).condition }) });
+    const { state, controls } = await toTheCap(cb);
+    vi.mocked(evaluateConditions).mockImplementationOnce(async () => {
+      throw new DOMException('Run aborted by client', 'AbortError');
+    });
+    await expect(visit({ controls, state, codeBehind: cb })).rejects.toMatchObject({ name: 'AbortError' });
   });
 
   it('cannot ask on a strict or keyless run, and fails at the cap saying why', async () => {

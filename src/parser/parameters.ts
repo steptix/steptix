@@ -186,6 +186,30 @@ export function placeholderRoot(name: string): string {
   return dot === -1 ? name : name.slice(0, dot);
 }
 
+/**
+ * `order.id` → `__skill3_order.id` when a frame renames `order`, or undefined
+ * when the name is flat or its root is not renamed.
+ *
+ * The one rule a skill body's dotted reference resolves by, asked by the
+ * runtime (`step.getVar`, src/codebehind/execute.ts) and by generation
+ * (`stepParameters`, src/codebehind/generate.ts) alike — a `For each {{order}}`
+ * inside a skill body binds the SCOPED keys, so `{{order.id}}` there means
+ * `__skill3_order.id` and never an outer `order.id`
+ * (stories/codebehind-loops-and-conditions.md).
+ *
+ * Own properties only: `constructor.x` must not find `Object.prototype.constructor`
+ * as a rename.
+ */
+export function dottedThroughRename(
+  name: string,
+  renames: Record<string, string>,
+): string | undefined {
+  const root = placeholderRoot(name);
+  if (root === name) return undefined;
+  const renamed = Object.hasOwn(renames, root) ? renames[root] : undefined;
+  return renamed === undefined ? undefined : `${renamed}${name.slice(root.length)}`;
+}
+
 /** The `property` half, or undefined for a flat name. */
 export function placeholderProperty(name: string): string | undefined {
   const dot = name.indexOf('.');

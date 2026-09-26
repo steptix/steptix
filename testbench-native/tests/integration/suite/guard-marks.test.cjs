@@ -33,6 +33,7 @@ const OTHERWISE = 19; //   3. Otherwise, Pay by card
 const WHILE_NEXT = 20; //   4. While the Next button is enabled, Go to the next page
 const GOODBYE = 21; //   5. Say goodbye
 const CASH_BODY = 25; //      Pay with cash → 1. Click Pay now
+const CARD_BODY = 29; //      Pay by card → 1. Click Pay by card
 const NEXT_BODY = 33; //      Go to the next page → 1. Click the Next button
 
 const STALE = {
@@ -165,6 +166,54 @@ describe('TestBench guard marks — a section tail\'s frame:pop keeps the guard\
     assert.equal(failures[IF_CASH]?.codeBehindStale?.error, STALE.error);
     assert.equal(failures[IF_CASH]?.codeBehindStale?.file, STALE.file);
     assert.equal(failures[IF_CASH]?.error, undefined, 'the guard passed — no step error');
+  });
+
+  it('puts ⚠ on the skipped If whose condition code threw — not on the Otherwise the model took', async () => {
+    // What the server sends when the If's condition entry throws and the model,
+    // deciding the whole chain, takes the Otherwise: the ⚠ rides the If's own
+    // skipped event, and the Otherwise's pass is clean. Before the fix the If
+    // painted ◌ with no hover (a skip outranked the stale flag), and the ⚠ —
+    // and so "Repair this step" — landed on the Otherwise, whose line has no
+    // entry to repair.
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+
+    const frame = tailFrame('card', OTHERWISE, 'Pay by card');
+    fake.push({ type: 'step:start', line: OPEN });
+    fake.push({ type: 'step:pass', line: OPEN });
+    fake.push({ type: 'step:start', line: IF_CASH });
+    fake.push({
+      type: 'step:pass',
+      line: IF_CASH,
+      output: 'skipped',
+      reason: NOT_TAKEN,
+      skipKind: 'not-taken',
+      codeBehindStale: STALE,
+    });
+    fake.push({ type: 'step:pass', line: OTHERWISE, output: 'the model saw none hold' });
+    fake.push({ type: 'frame:push', frame });
+    fake.push({ type: 'step:start', line: CARD_BODY, frame });
+    fake.push({ type: 'step:pass', line: CARD_BODY, frame });
+    fake.push({ type: 'frame:pop', frameId: frame.id, outputs: {} });
+    await waitFor('the If is published as a stale line', () =>
+      hooks.tracker.lastStaleLinesContextValue.includes(IF_CASH),
+    );
+    // Repair is offered on the If — its entry is the broken one — and nowhere else.
+    assert.deepEqual(hooks.tracker.lastStaleLinesContextValue, [IF_CASH]);
+    const { statuses, failures } = await finish();
+
+    assert.equal(statuses[IF_CASH], 'pass-stale');
+    assert.equal(statuses[OTHERWISE], 'pass', 'the member that held did nothing wrong');
+    assert.equal(failures[OTHERWISE], undefined);
+    const detail = failures[IF_CASH];
+    assert.equal(detail?.codeBehindStale?.error, STALE.error);
+    assert.equal(detail?.notTaken, NOT_TAKEN);
+    // The hover the decoration renders from that detail says both facts.
+    const hover = hooks.staleHoverMessage(detail);
+    assert.ok(hover.startsWith(NOT_TAKEN), hover);
+    assert.match(hover, /This line was not taken/);
+    assert.match(hover, /locator\.isChecked: Timeout 5000ms exceeded/);
+    assert.match(hover, /Repair this step/);
   });
 
   it('an If the model decided still pops to a plain ✓', async () => {

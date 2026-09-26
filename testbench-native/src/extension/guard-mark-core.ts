@@ -35,6 +35,59 @@
 /** The two pass marks a clean `frame:pop` must not flatten to ✓. */
 export type GuardCodeMark = 'pass-code-behind' | 'pass-stale';
 
+/** What a `step:pass` can paint on its line. */
+export type PassMark = 'skip' | 'pass-stale' | 'pass-code-behind' | 'pass';
+
+/** The fields of a `step:pass` the mark is decided from. Whether it is a
+ *  skip is the caller's `isSkippedPass(ev)` — the one predicate every
+ *  `step:pass` consumer asks (tests/skipped-pass-consumers.test.js). */
+export interface PassMarkEvent {
+  reason?: string;
+  fromCodeBehind?: boolean;
+  codeBehindStale?: { file: string; error: string };
+}
+
+/**
+ * The mark a `step:pass` paints, and the fields its hover detail is built from
+ * (the caller hands them to runner-core's `stepFailureDetail`).
+ *
+ * `codeBehindStale` outranks everything, the skip included. It rides a skipped
+ * event in exactly one case: a chain member whose CONDITION entry threw on the
+ * visit that then decided against it — the model decided the chain and took
+ * another member (stories/codebehind-loops-and-conditions.md). The member did
+ * not run, but its entry is broken, and ⚠ is the only mark that offers
+ * "Repair this step" — on the line whose entry broke, which is the point of the
+ * mark riding THIS event rather than the member that held. The hover says both
+ * facts (`notTaken`).
+ *
+ * Then the skip (◌, with its reason), then the code mark, then the plain ✓ —
+ * the order every `step:pass` has always been painted in.
+ */
+export function passMarkFor(
+  ev: PassMarkEvent,
+  /** `isSkippedPass(ev)`: the step did not run. */
+  skipped: boolean,
+): {
+  status: PassMark;
+  detail?: { codeBehindStale?: { file: string; error: string }; notTaken?: string; error?: string };
+} {
+  if (ev.codeBehindStale) {
+    return {
+      status: 'pass-stale',
+      detail: {
+        codeBehindStale: ev.codeBehindStale,
+        // A server that sends a skipped ⚠ always sends its reason; the bare
+        // label is what every runner falls back to without one.
+        ...(skipped && { notTaken: ev.reason?.trim() || 'Skipped' }),
+      },
+    };
+  }
+  if (skipped) {
+    return ev.reason ? { status: 'skip', detail: { error: ev.reason } } : { status: 'skip' };
+  }
+  return { status: ev.fromCodeBehind ? 'pass-code-behind' : 'pass' };
+}
+
 /** What a clean `frame:pop` paints on its call line, and the hover detail with it. */
 export interface FramePopMark<D> {
   status: 'pass' | GuardCodeMark;

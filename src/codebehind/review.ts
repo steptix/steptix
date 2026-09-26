@@ -9,7 +9,7 @@ import {
 import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseFailureTail } from '../parser/failure-tail.js';
 import type { Candidate } from './candidate.js';
-import { describeGuardedName } from './generate.js';
+import { conditionEntryComplaint, describeGuardedName, entryDefinesCondition } from './generate.js';
 import { listEntries, validateCodeBehindSource } from './writer.js';
 
 /**
@@ -281,9 +281,22 @@ export async function reviewCandidate(
     // Caught live: given the whole test, it wrote an entry for the step a
     // prefix compile had deliberately left alone — code for a step nobody
     // recorded, which the next compile would then skip as "already has one".
-    const entriesChanged = describeEntryChange(listEntries(before), listEntries(revised));
+    const entriesBefore = listEntries(before);
+    const entriesAfter = listEntries(revised);
+    const entriesChanged = describeEntryChange(entriesBefore, entriesAfter);
     if (entriesChanged) {
       emit(`rejected: the revision ${entriesChanged} — the generated file stands`);
+      continue;
+    }
+    // A condition entry stays a condition entry, and a clean one. The prompt
+    // says so; this is what holds the reviewer to it. Rewritten into a `run`,
+    // or into a condition that clicks, it would act on the page a decision is
+    // asked about — and the set-of-entries check above cannot see it, because
+    // the `source` did not move. Rejected the way every other violation here
+    // is: the whole revision of this file, and the generated file stands.
+    const brokenCondition = conditionEntryBroken(entriesBefore, entriesAfter);
+    if (brokenCondition) {
+      emit(`rejected: the revision ${brokenCondition} — the generated file stands`);
       continue;
     }
     const invalid = await validateCodeBehindSource(file, revised);
@@ -294,6 +307,40 @@ export async function reviewCandidate(
     await candidate.replaceFile(file, revised);
     emit(`revised ${basename(file)}`);
   }
+}
+
+/**
+ * The first entry that was a `condition` entry before a revision and is not a
+ * clean one after it — no longer defining `condition`, or failing
+ * `conditionEntryComplaint` — described for the rejection line; null when every
+ * one survived. Entries are paired by identity (section + source) and, for
+ * identically-worded ones, by their order, the pairing `describeEntryChange`
+ * has already confirmed is one-to-one.
+ */
+function conditionEntryBroken(
+  before: Array<{ source: string; section: string; code: string }>,
+  after: Array<{ source: string; section: string; code: string }>,
+): string | null {
+  const sep = String.fromCharCode(0);
+  const key = (e: { source: string; section: string }): string => `${e.section}${sep}${e.source}`;
+  const pending = new Map<string, Array<{ code: string }>>();
+  for (const e of after) {
+    const list = pending.get(key(e)) ?? [];
+    list.push(e);
+    pending.set(key(e), list);
+  }
+  for (const e of before) {
+    const revised = pending.get(key(e))?.shift();
+    if (!revised || !entryDefinesCondition(e.code)) continue;
+    if (!entryDefinesCondition(revised.code)) {
+      return `turns the condition entry for ${JSON.stringify(e.source)} into something that is not one`;
+    }
+    const complaint = conditionEntryComplaint(revised.code);
+    if (complaint !== undefined) {
+      return `breaks the condition entry for ${JSON.stringify(e.source)}: ${complaint}`;
+    }
+  }
+  return null;
 }
 
 /**

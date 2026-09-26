@@ -61,6 +61,22 @@ export function fenced(text: string): string {
 export function staleHoverMessage(failure?: StepFailureDetail): string {
   const cb = failure?.codeBehindStale;
   if (!cb) return STALE_HOVER_MESSAGE;
+  // A line that did NOT run and still has a broken entry: a chain member whose
+  // condition's code threw on the visit that then took another member
+  // (stories/codebehind-loops-and-conditions.md). Both facts, the skip reason
+  // first — it is why the line has no ✓ — then what the condition threw, and
+  // the Repair line, which is the whole reason the ⚠ is here and not on the
+  // member that held.
+  if (failure?.notTaken !== undefined) {
+    return (
+      `${failure.notTaken}\n\n` +
+      "This line was not taken, and its condition's compiled code-behind threw on " +
+      'that visit — the model decided in its place:\n\n' +
+      `${fenced(cb.error)}\n\n` +
+      `\`${cb.file}\`\n\n` +
+      REPAIR_HINT
+    );
+  }
   return (
     'This step passed under AI — its compiled code-behind threw:\n\n' +
     `${fenced(cb.error)}\n\n` +

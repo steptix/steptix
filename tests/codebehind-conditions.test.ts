@@ -382,11 +382,30 @@ describe('step.getVar on a dotted name whose root the frame renames', () => {
     expect(seen).toBe('ORD-7');
   });
 
-  it('lets a map that binds the whole dotted name win', async () => {
+  it('reads the frame\'s own item over an outer loop\'s `order.id`, as the flat name does', async () => {
+    // An outer `For each {{order}}` — running, or left behind by an earlier
+    // loop — binds the bare `order` / `order.id`; the skill body's own loop
+    // binds the renamed keys. Measured before the fix: `getVar('order')`
+    // answered the INNER item and `getVar('order.id')` the OUTER one — one
+    // step reading two different orders. The rename is final for both.
     const binding = await tailBinding();
     const scoped = binding.scope.renames['order']!;
-    const seen = await read(binding, 'order.id', { 'order.id': 'bare', [`${scoped}.id`]: 'scoped' });
-    expect(seen).toBe('bare');
+    const parameters = {
+      order: '{"id":"OUTER-1"}',
+      'order.id': 'OUTER-1',
+      [scoped]: '{"id":"INNER-7"}',
+      [`${scoped}.id`]: 'INNER-7',
+    };
+    expect(await read(binding, 'order', parameters)).toBe('{"id":"INNER-7"}');
+    expect(await read(binding, 'order.id', parameters)).toBe('INNER-7');
+  });
+
+  it('does not fall back to an outer `order.id` when the renamed item lacks the property', async () => {
+    const binding = await tailBinding();
+    const scoped = binding.scope.renames['order']!;
+    expect(
+      await read(binding, 'order.note', { 'order.note': 'OUTER', [`${scoped}.id`]: 'ORD-7' }),
+    ).toBeUndefined();
   });
 
   it('answers undefined for a property the pass did not bind', async () => {

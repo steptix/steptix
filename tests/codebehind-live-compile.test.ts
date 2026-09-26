@@ -1872,6 +1872,44 @@ describe('a skipped row carries its cause', () => {
     expect(outcome.summary.compiled).toBe(1);
     expect(outcome.summary.notAttempted).toEqual([]);
   });
+
+  it('says "did not run" for a line only while nothing was generated for it, and once per entry', async () => {
+    const events: LiveCompileEvent[] = [];
+    const compiler = compilerFor(['Click Next', 'Read the total'], { events });
+    const skipped = (i: number, text: string): StepResult => result(i + 1, text, { status: 'skipped', turns: [] });
+    // Pass 1 generates `Click Next`; passes 2 and 3 decide against it.
+    compiler.offer({ index: 0, binding: binding('Click Next'), result: result(1, 'Click Next'), resolvedParameters: {} });
+    for (let pass = 0; pass < 2; pass++) {
+      compiler.offer({
+        index: 0,
+        binding: binding('Click Next'),
+        result: skipped(0, 'Click Next'),
+        resolvedParameters: {},
+        skipped: 'decision',
+      });
+    }
+    // `Read the total` never runs, on three passes: said ONCE.
+    for (let pass = 0; pass < 3; pass++) {
+      compiler.offer({
+        index: 1,
+        binding: binding('Read the total'),
+        result: skipped(1, 'Read the total'),
+        resolvedParameters: {},
+        skipped: 'decision',
+      });
+    }
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    // Measured before the fix: step 1 said "generated" and then "the step did
+    // not run — the run decided against it" twice, and step 2 said it three
+    // times.
+    const said = events
+      .filter((e): e is LiveCompileStepEvent => e.type === 'compile:step')
+      .map((e) => [e.step, e.message]);
+    expect(said.filter(([step]) => step === 1).map(([, m]) => m)).not.toContain(SKIPPED_BY_DECISION_REFUSAL);
+    expect(said.filter(([step, m]) => step === 2 && m === SKIPPED_BY_DECISION_REFUSAL)).toHaveLength(1);
+    expect(outcome.summary.notAttempted).toEqual([2]);
+  });
 });
 
 describe('offerGuard', () => {

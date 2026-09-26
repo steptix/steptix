@@ -604,6 +604,9 @@ export class LiveCompiler {
    * the compile with no entry.
    */
   private readonly skippedByDecision: { number: number; key: string; guard?: boolean }[] = [];
+  /** Entry keys whose "did not run" line has already gone out — at most once
+   *  per entry, however many passes skip it (`offerDecisionSkip`). */
+  private readonly saidDecisionSkip = new Set<string>();
   /**
    * Steps that failed and were tolerated (stories/step-failure-outcomes.md,
    * decision 11).
@@ -1190,7 +1193,14 @@ export class LiveCompiler {
     if (binding?.entry !== undefined) return;
     const number = at + 1;
     const owed = (): void => {
-      this.skippedByDecision.push({ number, key: entryKeyOf(binding!) });
+      const key = entryKeyOf(binding!);
+      this.skippedByDecision.push({ number, key });
+      // Said once per entry, and only while nothing has been generated for it:
+      // a body line generated on pass 1 and decided against on pass 2 owes
+      // nothing (`finish` nets it off), and "the step did not run" after its
+      // own "generated" line reads as if the entry were lost.
+      if (this.takenKeys.has(key) || this.writtenKeys.has(key) || this.saidDecisionSkip.has(key)) return;
+      this.saidDecisionSkip.add(key);
       this.stepEvent(
         'generate',
         { index: at, number, text, hasEntry: false, isAiEntry: false },

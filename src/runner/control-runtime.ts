@@ -207,6 +207,9 @@ export interface GuardEvaluation {
   /** A condition entry broke and there was no model to decide in its place
    *  (a keyless or policy-off run): the guard failed. */
   codeBehindHealSkipped?: NonNullable<StepResult['codeBehindHealSkipped']>;
+  /** With `error`: a condition entry called `step.fail(...)` — the author's
+   *  own failure (`StepResult.deliberate`), worded as theirs everywhere. */
+  deliberate?: boolean;
   /**
    * The structured decision (stories/codebehind-loops-and-conditions.md).
    * Present on every `chain` / `condition` visit that decided, or whose
@@ -349,6 +352,10 @@ export async function evaluateGuard(args: {
             ...(decided.reasoning !== undefined && { reasoning: decided.reasoning }),
             aiInteractions: [],
             error: decided.error,
+            // `step.fail(...)`: the author's own failure, carried as the step
+            // path carries it, so every surface words it as theirs rather than
+            // as a code-behind defect.
+            ...(decided.deliberate && { deliberate: true }),
             durationMs: Date.now() - startedAt,
             ...codeFields(code),
             guard: {
@@ -607,6 +614,8 @@ interface ConditionDecision {
   /** With `error` on the code path: the absolute index of the member whose
    *  code failed (`GuardDecision.failedMember`). */
   failedMember?: number;
+  /** With `error`: the entry called `step.fail(...)` — the author's failure. */
+  deliberate?: boolean;
 }
 
 /**
@@ -645,12 +654,15 @@ async function decideCondition(args: {
   if (plan && codeBehind) {
     const outcome = await runCodePlan(asked, plan, executorOptions, redactText, code);
     if (outcome.kind === 'decided') {
-      code.fromCodeBehind = true;
+      // Code decided only when an entry actually RAN. `If {{plan}} is "pro"`
+      // holding ahead of an `Else if` with an entry is the values' decision,
+      // and the code mark on it would claim code that never ran.
+      if (outcome.ranCode) code.fromCodeBehind = true;
       return {
         selected: outcome.selected,
         reasoning: outcome.reasoning,
         aiInteractions: [],
-        decidedBy: 'code',
+        decidedBy: outcome.ranCode ? 'code' : 'values',
       };
     }
     if (outcome.kind === 'failed') {
@@ -662,6 +674,7 @@ async function decideCondition(args: {
         decidedBy: 'code',
         error: outcome.error,
         failedMember: outcome.member.index,
+        ...(outcome.deliberate && { deliberate: true }),
       };
     }
 
@@ -795,14 +808,34 @@ function activePage(opts: StepExecutorOptions): StepExecutorOptions['page'] | un
 }
 
 type CodePlanOutcome =
-  | { kind: 'decided'; selected: number | null; reasoning: string }
+  | {
+      kind: 'decided';
+      selected: number | null;
+      reasoning: string;
+      /** Whether any entry actually ran. False when a member ahead of every
+       *  entry held by its own values — the chain was decided by values, and
+       *  says so (`decidedBy: 'values'`, no code mark). */
+      ranCode: boolean;
+    }
   | { kind: 'broken'; member: AskedMember; binding: CodeBehindBinding; error: string }
-  | { kind: 'failed'; member: AskedMember; error: string; reasoning: string };
+  | {
+      kind: 'failed';
+      member: AskedMember;
+      error: string;
+      reasoning: string;
+      /** `step.fail(...)` — the author's failure, worded as theirs. */
+      deliberate?: boolean;
+    };
 
 /**
- * Run the code path: settle the page once (decision 6), then answer each member
- * in order — its values if it is literal, else its entry — stopping at the
- * first that holds. Members after it are not run.
+ * Run the code path: answer each member in order — its values if it is
+ * literal, else its entry — stopping at the first that holds. Members after it
+ * are not run.
+ *
+ * The page is settled (decision 6) LAZILY, right before the first entry runs:
+ * `If {{plan}} is "pro"` holding ahead of an `Else if` with an entry decides
+ * the chain from its values alone, and waiting up to 10 s for a page nothing
+ * reads is a cost with no question behind it.
  */
 async function runCodePlan(
   asked: readonly AskedMember[],
@@ -811,19 +844,24 @@ async function runCodePlan(
   redactText: (text: string) => string,
   code: CodeFacts,
 ): Promise<CodePlanOutcome> {
-  // The same gate the model gets. A condition is a question about the page
-  // once it has finished moving, and code cannot know when that is.
-  await settleBeforeConditions(executorOptions);
-
   const answers: Array<{ condition: string; holds: boolean; byValues: boolean }> = [];
+  let ranCode = false;
   const decided = (selected: number | null): CodePlanOutcome => {
-    const reasoning = redactText(codeReasoning(answers));
+    // No entry ran: a literal member held before the first one. That is a
+    // decision by VALUES, worded exactly as `decideLocally` words its winner —
+    // "Decided by code-behind" over a chain no code touched was a claim about
+    // code that did not run.
+    const winner = selected === null ? undefined : plan[selected];
+    const reasoning =
+      !ranCode && winner && 'literal' in winner
+        ? winner.literal.reasoning
+        : redactText(codeReasoning(answers));
     logger.debug(
       selected === null
         ? `Condition judge: none held — ${reasoning}`
         : `Condition judge: ${String.fromCharCode(65 + selected)} ("${asked[selected]!.condition}") held — ${reasoning}`,
     );
-    return { kind: 'decided', selected, reasoning };
+    return { kind: 'decided', selected, reasoning, ranCode };
   };
 
   for (let position = 0; position < plan.length; position++) {
@@ -838,6 +876,16 @@ async function runCodePlan(
       continue;
     }
 
+    if (!ranCode) {
+      // The same gate the model gets. A condition is a question about the page
+      // once it has finished moving, and code cannot know when that is.
+      await settleBeforeConditions(executorOptions);
+      if (executorOptions.signal?.aborted) {
+        throw new DOMException('Run aborted by client', 'AbortError');
+      }
+      ranCode = true;
+    }
+
     const { binding } = item;
     // Captured before anything can discard it: the row's code block shows the
     // entry that ran, even when this visit then throws it away.
@@ -849,6 +897,15 @@ async function runCodePlan(
       answers.push({ condition: member.condition, holds: outcome.value, byValues: false });
       if (outcome.value) return decided(position);
       continue;
+    }
+
+    // A Stop that lands while the entry runs — it closes the page under the
+    // entry, which then throws — is a stop, not broken code and not a failure
+    // of the guard. The step path asks the same question after its own entry
+    // fails (session-manager.ts, "Post-step abort check"); asked here, it
+    // reaches both run loops, and the entry is neither discarded nor flagged.
+    if (executorOptions.signal?.aborted) {
+      throw new DOMException('Run aborted by client', 'AbortError');
     }
 
     const error = outcome.error ?? 'unknown error';
@@ -889,6 +946,7 @@ async function runCodePlan(
       kind: 'failed',
       member,
       error: masked,
+      ...(outcome.deliberate && { deliberate: true }),
       reasoning: outcome.deliberate
         ? 'This condition\'s code-behind called `step.fail(...)`: a deliberate ' +
           'failure, not broken code, so the model was not asked.'
@@ -927,7 +985,9 @@ function codeReasoning(
  * Returns the note the cap failure carries (when it stands) and the judge's
  * verdict (when one was asked). A disagreement discards the entry and flags it
  * stale with both answers; the caller then plans on the model's verdict. A
- * strict or keyless run cannot ask, and fails at the cap saying why.
+ * strict or keyless run cannot ask, and fails at the cap saying why — and so
+ * does a run whose judge throws (not an abort): the cap failure stands with the
+ * judge's reason in the note, never as a failure of the code.
  */
 async function checkCapWithModel(args: {
   condition: string;
@@ -950,7 +1010,25 @@ async function checkCapWithModel(args: {
     };
   }
 
-  const judged = await evaluateConditions([condition], executorOptions);
+  let judged: ConditionVerdict;
+  try {
+    judged = await evaluateConditions([condition], executorOptions);
+  } catch (err) {
+    // A stop is a stop (issues/020) — rethrown for the caller's abort path.
+    if (executorOptions.signal?.aborted || (err as Error | undefined)?.name === 'AbortError') {
+      throw err;
+    }
+    // The model could not be asked. That is not the code's fault, and it must
+    // not reach `evaluateGuard`'s catch, which fails the guard with the
+    // judge's words beside the code mark — blaming the entry for the model.
+    // The cap failure stands exactly as on a run with no model, saying why
+    // the check did not happen.
+    const why = err instanceof Error ? err.message : String(err);
+    logger.warn(`Condition "${condition}": the model could not be asked at the cap: ${why}`);
+    return {
+      capNote: `${decidedBy}, and the model could not be asked to check it (${why}).`,
+    };
+  }
   const modelHolds = judged.selected === 0;
   if (modelHolds === holds) {
     return {
@@ -1194,6 +1272,8 @@ export function guardResult(args: {
   codeBehindStale?: StepResult['codeBehindStale'] | undefined;
   codeBehindHealSkipped?: StepResult['codeBehindHealSkipped'] | undefined;
   guard?: StepResult['guard'] | undefined;
+  /** A condition entry's `step.fail(...)` — see {@link GuardEvaluation.deliberate}. */
+  deliberate?: boolean | undefined;
 }): StepResult {
   const interactions = args.aiInteractions ?? [];
   return {
@@ -1227,6 +1307,7 @@ export function guardResult(args: {
       codeBehindHealSkipped: args.codeBehindHealSkipped,
     }),
     ...(args.guard !== undefined && { guard: args.guard }),
+    ...(args.deliberate && { deliberate: true }),
   };
 }
 
@@ -1239,9 +1320,10 @@ export function guardCodeBehindFields(
   evaluation: GuardEvaluation,
 ): Pick<
   Parameters<typeof guardResult>[0],
-  'fromCodeBehind' | 'codeBehind' | 'codeBehindStale' | 'codeBehindHealSkipped' | 'guard'
+  'fromCodeBehind' | 'codeBehind' | 'codeBehindStale' | 'codeBehindHealSkipped' | 'guard' | 'deliberate'
 > {
   return {
+    ...(evaluation.deliberate && { deliberate: true }),
     ...(evaluation.fromCodeBehind && { fromCodeBehind: true }),
     ...(evaluation.codeBehind !== undefined && { codeBehind: evaluation.codeBehind }),
     ...(evaluation.codeBehindStale !== undefined && { codeBehindStale: evaluation.codeBehindStale }),

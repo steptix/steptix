@@ -849,3 +849,219 @@ describe('aiui compile — a condition line the recording never asked', () => {
     expect(done.message).toContain('steps 2–3 not attempted on the recording run (the run decided against them)');
   });
 });
+
+// ── The evidence pass of a stale body step (review finding R4) ──────────────
+
+describe('aiui compile — a body entry that ran as code on pass 1 and healed on pass 2', () => {
+  it('regenerates it from the HEALED pass through the repair prompt — never ai: true from pass 1', async () => {
+    const md = await write('statements.md', WHILE_MD);
+    // Every line compiled but the last, so the compile runs a Record with
+    // code-behind ON (the sidecar flagged nothing).
+    await write(
+      'statements.steps.ts',
+      [
+        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        'export default defineSteps([',
+        "  { source: 'Open the statements page', async run({ page }) { await page.goto('/s'); } },",
+        `  { source: ${JSON.stringify(WHILE_LINE)}, async condition({ page }) { return (await page.locator('#next:enabled').count()) > 0; } },`,
+        "  { source: 'Click Next', async run({ page }) { await page.click('#next'); } },",
+        ']);',
+        '',
+      ].join('\n'),
+    );
+    const test = await parseTestFile(md);
+    const stale = {
+      file: path.join(dir, 'statements.steps.ts'),
+      source: 'Click Next',
+      error: 'locator.click: Timeout 30000ms exceeded',
+    };
+    // Pass 1 ran as code (no transcript); pass 2's entry threw and healed
+    // under AI; pass 3 ran under AI (the entry was discarded for the run).
+    const record = outcome(
+      [
+        codeRow(1),
+        { ...coded(2, true), loop: marker(1) },
+        codeRow(3, { loop: marker(1) }),
+        { ...coded(2, true), loop: marker(2) },
+        stepRow(3, 'statements page 2', { loop: marker(2), codeBehindStale: stale }),
+        { ...coded(2, true), loop: marker(3) },
+        stepRow(3, 'statements page 3', { loop: marker(3) }),
+        coded(2, false),
+        stepRow(4, 'the last page'),
+      ],
+      4,
+    );
+    const { client, prompts } = fakeAi();
+    const { runner } = scriptedRunner(record, [whileReplay()]);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({
+      test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent, dryRun: true,
+    });
+
+    // Measured before the fix: "3 kept as AI: the recorded run performed no
+    // page actions for this step", `ai: true` over the working entry, and a
+    // replay that passed under AI — a green compile.
+    expect(stepMessages(events, 'select', 3)).toContain('joined the selection: its entry failed during Record');
+    expect(stepMessages(events, 'generate', 3)).toEqual(['generated']);
+    const repair = prompts.find((p) => isStepRepair(p) && sourceOf(p) === 'Click Next')!;
+    expect(repair).toBeDefined();
+    // The code that broke, what it threw, and the page it threw on: pass 2's.
+    expect(repair).toContain("await page.click('#next')");
+    expect(repair).toContain('locator.click: Timeout 30000ms exceeded');
+    expect(repair).toContain('<p>statements page 2</p>');
+    const proposal = Object.values(result.files ?? {}).join('\n');
+    expect(proposal).not.toContain('ai: true');
+    expect(result.summary.keptAi).toBe(0);
+  });
+});
+
+// ── A pass's values: captures inside the body, and an enclosing loop (R5) ────
+
+describe('aiui compile — per-pass values folded forward from the start', () => {
+  const PAY_MD = [
+    '# Pay',
+    '',
+    '## Steps',
+    '1. Open the page',
+    '2. While the Next button is enabled, Pay the bill',
+    '3. Done',
+    '',
+    '### Pay the bill',
+    '1. Read the amount due [store as: total]',
+    '2. Type {{total}} into the Amount field',
+    '',
+  ].join('\n');
+  const TYPE = 'Type {{total}} into the Amount field';
+
+  function payRecord(): CompileRunOutcome {
+    const read = (pass: number, total: string): StepResult =>
+      stepRow(3, `bill ${pass}`, { loop: marker(pass), outputs: { total } });
+    const typed = (pass: number, total: string): StepResult =>
+      stepRow(4, `amount ${pass}`, {
+        loop: marker(pass),
+        turns: [
+          {
+            turnNumber: 1,
+            attemptNumber: 1,
+            timestamp: new Date().toISOString(),
+            aiInteractions: [],
+            subActions: [{ index: 1, action: { action: 'type', selector: '#amount', value: total }, durationMs: 1 }],
+          },
+        ],
+      });
+    return outcome(
+      [
+        stepRow(1, 'start'),
+        { ...judged(2, true, 1), loop: marker(1) }, read(1, '$10.00'), typed(1, '$10.00'),
+        { ...judged(2, true, 2), loop: marker(2) }, read(2, '$20.00'), typed(2, '$20.00'),
+        { ...judged(2, true, 3), loop: marker(3) }, read(3, '$30.00'), typed(3, '$30.00'),
+        judged(2, false, 4),
+        stepRow(5, 'end'),
+      ],
+      5,
+      // The run's FINAL map: the last pass's capture.
+      { resolvedParameters: { total: '$30.00' } },
+    );
+  }
+
+  it("shows pass 1's capture to pass 1's generation, and its leak guard catches pass 1's value", async () => {
+    const md = await write('pay.md', PAY_MD);
+    const test = await parseTestFile(md);
+    const { prompts, client: base } = fakeAi();
+    // The body's entry hard-codes pass 1's total.
+    const client = {
+      complete: async (messages: ChatMessage[]) => {
+        const response = await (base as unknown as { complete: (m: ChatMessage[]) => Promise<{ text: string }> }).complete(messages);
+        const prompt = prompts.at(-1)!;
+        if (!isReview(prompt) && sourceOf(prompt) === TYPE) {
+          return {
+            text: JSON.stringify({ entry: `{ source: ${JSON.stringify(TYPE)}, async run({ page }) { await page.fill('#amount', '$10.00'); } }` }),
+            model: 'stub-model',
+          };
+        }
+        return response;
+      },
+    } as unknown as AiClient;
+    const { runner } = scriptedRunner(payRecord(), []);
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true });
+
+    // Measured before the fix: `{{total}} resolved to "$30.00"` — the final
+    // map's — and the entry inlining pass 1's `$10.00` passed the guard, green.
+    const typePrompt = generationFor(prompts, TYPE)!;
+    expect(typePrompt).toContain('{{total}} resolved to "$10.00"');
+    expect(typePrompt).not.toContain('resolved to "$30.00"');
+    expect(result.status).toBe('failed');
+    expect(result.summary.error).toContain('generation failed for step 4');
+    expect(result.summary.error).toContain('resolved value of {{total}}');
+  });
+
+  it("repairs a body step inside a While inside a For each with the OUTER pass's item", async () => {
+    const md = await write(
+      'nested.md',
+      [
+        '# Accounts',
+        '',
+        '## Parameters',
+        '- accounts: ["Everyday","Savings","Travel"]',
+        '',
+        '## Steps',
+        '1. For each {{account}} in {{accounts}}, Page through the account',
+        '2. Read the reference',
+        '',
+        '### Page through the account',
+        '1. Open the account named {{account}}',
+        '2. While the Next button is enabled, Click Next for {{account}}',
+        '',
+      ].join('\n'),
+    );
+    const test = await parseTestFile(md);
+    // Expanded: 1 For each · 2 Open · 3 While · 4 Click Next for {{account}} · 5 Read.
+    expect(test.steps[3]).toBe('Click Next for {{account}}');
+    const outer = (pass: number): LoopMarker => marker(pass, { account: ACCOUNTS[pass - 1]! });
+    const recordPass = (pass: number): StepResult[] => [
+      ...(pass === 1 ? [guardRow(1, undefined, { loop: outer(1) })] : []),
+      stepRow(2, `${ACCOUNTS[pass - 1]} account`, { loop: outer(pass) }),
+      { ...judged(3, true, pass), loop: marker(1) },
+      stepRow(4, `${ACCOUNTS[pass - 1]} page 1`, { loop: marker(1) }),
+      judged(3, false, pass + 10),
+    ];
+    const record = outcome(
+      [...recordPass(1), ...recordPass(2), ...recordPass(3), stepRow(5, 'summary')],
+      5,
+      { resolvedParameters: { accounts: JSON.stringify(ACCOUNTS), account: 'Travel' } },
+    );
+    const replayPass = (pass: number, failing = false): StepResult[] => [
+      ...(pass === 1 ? [guardRow(1, undefined, { loop: outer(1) })] : []),
+      codeRow(2, { loop: outer(pass) }),
+      { ...coded(3, true), loop: marker(1) },
+      failing
+        ? codeRow(4, {
+            loop: marker(1),
+            status: 'failed',
+            error: 'no Next button in the Savings account',
+            domSnapshot: '<main>Savings, page 1</main>',
+          })
+        : codeRow(4, { loop: marker(1) }),
+      ...(failing ? [] : [coded(3, false)]),
+    ];
+    const round1 = outcome([...replayPass(1), ...replayPass(2, true)], 5);
+    const round2 = outcome([...replayPass(1), ...replayPass(2), ...replayPass(3), codeRow(5)], 5);
+    const { client, prompts } = fakeAi();
+    const { runner } = scriptedRunner(record, [round1, round2]);
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true });
+
+    expect(result.status).toBe('green');
+    const repair = prompts.find((p) => isStepRepair(p) && sourceOf(p) === 'Click Next for {{account}}')!;
+    expect(repair).toBeDefined();
+    // Measured before the fix: the innermost marker (the While's, which binds
+    // nothing) over the Record's final map — `{{account}}` resolved to
+    // "Travel" for a failure on the Savings pass.
+    expect(repair).toContain('{{account}} resolved to "Savings"');
+    expect(repair).not.toContain('"Travel"');
+    // Generation, from the same fold: pass 1's item.
+    expect(generationFor(prompts, 'Click Next for {{account}}')).toContain('{{account}} resolved to "Everyday"');
+  });
+});

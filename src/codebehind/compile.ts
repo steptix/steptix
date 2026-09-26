@@ -24,8 +24,10 @@ import {
   guardedValues,
   loopContextFor,
   pickConditionObservations,
+  refuseReason,
   stepEnvRefs,
   stepParameters,
+  unresolvedRefsReason,
   SET_STEP_NOT_COMPILED,
   SURFACE_SWITCH_NOT_COMPILED,
   USE_AI_NOT_COMPILED,
@@ -48,7 +50,7 @@ import {
   TOLERATED_FAILURE_REFUSAL,
 } from './live-compile.js';
 import { clearStale, readLastRun } from './last-run.js';
-import { writeCodeBehindFile } from './writer.js';
+import { entryTextIn, writeCodeBehindFile } from './writer.js';
 import {
   actionsOf,
   applyGenerated,
@@ -64,7 +66,7 @@ import {
   envDataSecretValues,
   resolveEnvDataRef,
 } from '../parser/interpolate-env-data.js';
-import { loadDataFile } from '../parser/parameters.js';
+import { bindVariable, clearDottedKeys, loadDataFile, placeholderRoot } from '../parser/parameters.js';
 import { evidenceRows, recordingDirFor, writeReplayFailure } from './recording.js';
 
 /**
@@ -629,7 +631,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // disk keeps a guard row's decision and never its page. A condition no visit
   // ever asked has nothing to generate from and is not attempted.
   const recordVisits = guardVisits(recorded.rows, controls);
-  const snapshots = passSnapshots(recorded.rows, record.resolvedParameters);
+  const snapshots = passSnapshots(recorded.rows, parameters, record.resolvedParameters);
   const observationsFor = (member: number): RecordedObservation[] =>
     observationsOf(recordVisits, member, snapshots);
   const stepKinds = selection.order.filter((s) => s.kind !== 'condition');
@@ -858,7 +860,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     }
 
     const loop = loopContextAt(step.index, result?.loop?.values ?? passValues);
-    const generated = await generateStepEntry({
+    // An evidence pass that HEALED — its entry threw and the step ran under AI,
+    // which is how a stale step joins the selection — is repaired rather than
+    // generated from scratch, as the live compiler does it: shown the entry
+    // that broke, what it threw, and the page it threw on. Plain generation
+    // hands the model the same page and lets it write the same broken selector
+    // again. No entry text to repair from (the file was edited) falls through.
+    const healed = result?.codeBehindStale
+      ? await repairHealedStep(step, result, passValues, options, candidate)
+      : undefined;
+    const generated = healed ?? await generateStepEntry({
       binding: step.binding!,
       actions: actionsOf(result),
       ...(result?.assertions && { assertions: result.assertions }),
@@ -1267,13 +1278,25 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     if (round === maxRounds) break;
 
     stepEvent('repair', failed.step, 'regenerating from the failure');
+    // The failing pass's values, from the same fold generation reads — over
+    // THIS replay's rows, whose pass failed. Its whole map, not its innermost
+    // marker alone: a body step of a `While` inside a `For each` needs the
+    // outer item too, which the innermost marker does not carry.
+    const failedValues = failed.result
+      ? passSnapshots(runRows(outcome).rows, parameters, outcome.resolvedParameters).get(failed.result)
+      : undefined;
     const repaired =
       failed.step.kind === 'condition'
         ? await repairCondition(failed.step, failed)
-        : await repairStep(failed.step, failed.error, failed.result, record, options, candidate, {
-            number: round,
-            max: maxRounds,
-          });
+        : await repairStep(
+            failed.step,
+            failed.error,
+            failed.result,
+            failedValues ?? { ...record.resolvedParameters, ...(failed.result?.loop?.values ?? {}) },
+            options,
+            candidate,
+            { number: round, max: maxRounds },
+          );
     proven.delete(failed.step.key!);
     const applied = await applyGenerated(candidate, failed.step, repaired, stepEvent, 'repair');
     await candidate.persist();
@@ -1931,24 +1954,57 @@ function runRows(outcome: CompileRunOutcome): RunRows {
 }
 
 /**
- * The parameter map as it stood at each row, as near as the rows can say.
+ * The parameter map as it stood at each row, as near as the rows can say —
+ * the ONE snapshot generation, repair and the condition prompts read a pass's
+ * values from (stories/codebehind-loops-and-conditions.md, decisions 2 and 3).
  *
- * The run's final map holds the LAST pass's `For each` item, so a prompt built
- * from it would name Travel over the page where Everyday was clicked
- * (decision 2). Each row's loop marker carries the bindings of the pass it ran
- * in; replayed in execution order over the final map, they give the item on
- * the page each row was recorded against. A row with no marker of its own — a
- * chain's guard row — reads the bindings of the pass the run was last seen in.
+ * Folded forward in EXECUTION order from the map the run started with: each
+ * row's loop marker binds its pass's item (clearing the last pass's dotted
+ * keys first, as the runtime does), the row is snapshotted, and then its
+ * captured `outputs` are bound for the rows after it. So a `[store as: total]`
+ * inside a loop body reaches pass 1's `Type {{total}}` as pass 1's total —
+ * the run's final map held pass 3's, which went into pass 1's prompt and
+ * leak guard, and an entry hard-coding pass 1's `$10.00` passed the guard. An
+ * outer `For each` item stays bound through an inner loop's passes the same
+ * way, because the outer marker was folded in before them.
+ *
+ * `final` fills only what the fold never saw — a name no row reports, such as
+ * a skill-internal capture, which `outputs` never carries — and never a name
+ * whose root the fold has bound, so the last pass's `order.note` cannot leak
+ * into a pass whose row had no note.
+ *
+ * A row with no marker of its own — a chain's guard row — reads the bindings
+ * of the pass the run was last seen in.
  */
 function passSnapshots(
   rows: readonly StepResult[],
+  start: Record<string, string>,
   final: Record<string, string>,
 ): Map<StepResult, Record<string, string>> {
+  // Copied as-is — not through `bindVariable`, whose rebind rule would let a
+  // flat `user` erase a data file's own `user.apikey` heading depending on key
+  // order. The start map is one map, not a sequence of writes.
   const live: Record<string, string> = {};
+  for (const [name, value] of Object.entries(start)) {
+    Object.defineProperty(live, name, { value, writable: true, enumerable: true, configurable: true });
+  }
   const out = new Map<StepResult, Record<string, string>>();
   for (const row of rows) {
-    if (row.loop?.values) Object.assign(live, row.loop.values);
-    out.set(row, { ...final, ...live });
+    const values = row.loop?.values;
+    if (values) {
+      clearDottedKeys(live, new Set(Object.keys(values).map(placeholderRoot)));
+      for (const [name, value] of Object.entries(values)) {
+        Object.defineProperty(live, name, { value, writable: true, enumerable: true, configurable: true });
+      }
+    }
+    const snapshot: Record<string, string> = { ...live };
+    const roots = new Set(Object.keys(live).map(placeholderRoot));
+    for (const [name, value] of Object.entries(final)) {
+      if (Object.hasOwn(snapshot, name) || roots.has(placeholderRoot(name))) continue;
+      Object.defineProperty(snapshot, name, { value, writable: true, enumerable: true, configurable: true });
+    }
+    out.set(row, snapshot);
+    for (const [name, value] of Object.entries(row.outputs ?? {})) bindVariable(live, name, value);
   }
   return out;
 }
@@ -2283,19 +2339,16 @@ async function repairStep(
   step: CompileStep,
   error: string,
   failedResult: StepResult | undefined,
-  record: CompileRunOutcome,
+  /** The failing PASS's own values (stories/codebehind-loops-and-conditions.md,
+   *  decision 3): pass 2 of a `For each` failed on Savings, and a repair told it
+   *  was Travel — the Record's final map — would fix the wrong row. The
+   *  caller's `passSnapshots` fold, so an enclosing loop's item is right too. */
+  values: Record<string, string>,
   options: CompileOptions,
   candidate: Candidate,
   round: { number: number; max: number },
 ): Promise<GeneratedEntry> {
-  // The failing PASS's own values (stories/codebehind-loops-and-conditions.md,
-  // decision 3): pass 2 of a `For each` failed on Savings, and a repair told it
-  // was Travel — the Record's final map — would fix the wrong row.
-  const parameters = stepParameters(
-    step.binding!,
-    { ...record.resolvedParameters, ...(failedResult?.loop?.values ?? {}) },
-    options.test.envData,
-  );
+  const parameters = stepParameters(step.binding!, values, options.test.envData);
   // The step passed Generate, so every reference it makes resolved there;
   // the repair sees the same list, and the same guard.
   const envRefs = stepEnvRefs(step.binding!, options.test.envData).resolved;
@@ -2326,6 +2379,60 @@ async function repairStep(
     // was written off `ai: true` after `maxRounds`
     // (stories/step-failure-outcomes.md, decisions 3 and 10).
     guardedValues(parameters, envRefs, step.text),
+    options.signal,
+  );
+}
+
+/**
+ * Regenerate a step whose evidence pass healed — its entry threw on that pass
+ * and the step ran under AI — through the repair prompt, as the live compiler's
+ * `askForRepair` does: the entry as it stands in the file (the code that
+ * broke), the error it threw (`codeBehindStale`), and the page BEFORE the step
+ * on that pass, which is the page the entry threw on. The pass's own values,
+ * from the same snapshot generation reads (`passSnapshots`).
+ *
+ * Undefined when the entry's text cannot be found — the caller then generates
+ * normally. The pre-checks mirror generation's: a transcript that changed
+ * runner state, or a reference this run cannot answer, declines here too.
+ */
+async function repairHealedStep(
+  step: CompileStep,
+  result: StepResult,
+  values: Record<string, string>,
+  options: CompileOptions,
+  candidate: Candidate,
+): Promise<GeneratedEntry | undefined> {
+  const binding = step.binding!;
+  const error = result.codeBehindStale?.error;
+  if (error === undefined) return undefined;
+  const file = await candidate.read(binding.file);
+  if (file === null) return undefined;
+  const entryCode = entryTextIn(file, binding.source, binding.section, binding.occurrence);
+  if (entryCode === undefined) return undefined;
+
+  const refused = refuseReason(binding.source, actionsOf(result));
+  if (refused) return { kind: 'declined', reason: refused };
+  const envRefs = stepEnvRefs(binding, options.test.envData);
+  if (envRefs.unresolved.length > 0) {
+    return { kind: 'declined', reason: unresolvedRefsReason(envRefs.unresolved, options.test.envData) };
+  }
+  const parameters = stepParameters(binding, values, options.test.envData);
+  const ctx = result.stepContext;
+  const prompt = buildRepairPrompt({
+    rawStepText: step.text,
+    stepIndex: step.number,
+    entryCode,
+    error,
+    ...(ctx?.domBefore !== undefined && { dom: ctx.domBefore }),
+    ...(ctx?.urlBefore !== undefined && { url: ctx.urlBefore }),
+    parameters,
+    ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
+  });
+  return askForEntry(
+    options.aiClient,
+    options.contextContent,
+    prompt,
+    guardedValues(parameters, envRefs.resolved, binding.source),
     options.signal,
   );
 }

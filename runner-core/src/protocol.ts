@@ -156,6 +156,13 @@ export interface StepPassEvent {
    * Painted ⚠ — "ran under AI; recompile" — and `file` is what Open
    * Code-behind opens. On a pass event because the STEP passed; it is the
    * entry that failed.
+   *
+   * Also beside `output: 'skipped'`, on a chain member whose CONDITION entry
+   * threw on the visit that then decided against it — the model decided the
+   * chain and took another member (stories/codebehind-loops-and-conditions.md).
+   * The ⚠ belongs on that member's line, where Repair reaches the entry that
+   * broke, so it rides that member's skipped event and never the event of the
+   * member that held. A client paints it ⚠ over the ◌ and says both facts.
    */
   codeBehindStale?: { file: string; error: string };
 }
@@ -750,6 +757,15 @@ export interface StepFailureDetail {
    *  WORDING of every surface that renders this detail — the sentence is the
    *  author's, so nothing may present it as a malfunction. */
   deliberate?: boolean;
+  /**
+   * A ⚠ on a line that did NOT run: the skip reason its `step:pass
+   * output:'skipped'` carried ("Skipped: another branch of this decision was
+   * taken"). Present only beside `codeBehindStale` — a chain member whose
+   * condition entry threw on the visit that then decided against it
+   * (stories/codebehind-loops-and-conditions.md). The hover says both facts:
+   * not taken, and what the condition's code threw.
+   */
+  notTaken?: string;
 }
 
 /**
@@ -821,6 +837,8 @@ export function stepFailureDetail(event: {
   codeBehindStale?: { file: string; error: string };
   warning?: string;
   deliberate?: boolean;
+  /** See {@link StepFailureDetail.notTaken}. */
+  notTaken?: string;
 }): StepFailureDetail {
   return {
     ...(event.error !== undefined && { error: clipFailureText(event.error) }),
@@ -835,6 +853,7 @@ export function stepFailureDetail(event: {
     // and re-posted on every snapshot, and a warning is free text like any other.
     ...(event.warning !== undefined && { warning: clipFailureText(event.warning) }),
     ...(event.deliberate && { deliberate: true }),
+    ...(event.notTaken !== undefined && { notTaken: clipFailureText(event.notTaken) }),
   };
 }
 

@@ -413,17 +413,148 @@ describe('a chain whose broken member is not the one that held', () => {
     expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
     expect(judge.calls).toEqual([['the Cash checkbox is ticked', 'the Card checkbox is ticked']]);
     expect(executed.steps).toContain('Enter the card details');
-    // The event names the Else if's line (the row) and the If's entry (stale).
-    const pass = events.find((e) => e.type === 'step:pass' && e.line === 5);
-    expect(pass?.codeBehindStale).toEqual({
-      file: path.join(tmpDir, 'payments.steps.ts'),
-      error: 'Cash checkbox went away',
+    // The ⚠ travels on the BROKEN member's own event — the If's skipped
+    // `step:pass` — so Repair is offered on the line whose entry threw. The
+    // Else if's pass carries no stale flag: its own entry did nothing wrong.
+    const ifSkip = events.find((e) => e.type === 'step:pass' && e.line === 4);
+    expect(ifSkip).toMatchObject({
+      output: 'skipped',
+      skipKind: 'not-taken',
+      codeBehindStale: {
+        file: path.join(tmpDir, 'payments.steps.ts'),
+        error: 'Cash checkbox went away',
+      },
     });
+    const pass = events.find((e) => e.type === 'step:pass' && e.line === 5);
+    expect(pass?.output).not.toBe('skipped');
+    expect(pass?.codeBehindStale).toBeUndefined();
 
     const sidecar = await readLastRun(testFilePath);
     const bySource = new Map(sidecar!.steps.map((s) => [s.source, s]));
     expect(bySource.get(IF_LINE)).toMatchObject({ stale: true, error: 'Cash checkbox went away' });
     // The row that HELD is not stale: its own entry did nothing wrong.
     expect(bySource.get(ELSE_IF_LINE)).toMatchObject({ stale: false });
+  });
+
+  it('puts the ⚠ on the If when its code threw and the model took the Otherwise', async () => {
+    const testFilePath = await project(
+      'payments-otherwise',
+      `  {
+    source: ${JSON.stringify(IF_LINE)},
+    async condition() { throw new Error('Cash checkbox went away'); },
+  },`,
+    );
+    judge.script = [null];
+
+    const events = await collect({
+      steps: ['Open the payments page', IF_LINE, 'Otherwise, Pay by card', 'Verify the order confirmation is shown'],
+      sourceLines: [3, 4, 5, 6],
+      testFilePath,
+      sections: {
+        'pay with cash': { name: 'Pay with cash', headingLine: 8, steps: ['Click Pay now'], stepLines: [9] },
+        'pay by card': { name: 'Pay by card', headingLine: 11, steps: ['Enter the card details'], stepLines: [12] },
+      },
+    });
+
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+    const marks = events
+      .filter((e) => (e.type === 'step:pass' || e.type === 'step:fail') && (e.line === 4 || e.line === 5))
+      .map((e) => ({ line: e.line, skipped: e.output === 'skipped', stale: e.codeBehindStale?.error }));
+    // Measured before the fix: the If's skip carried nothing and the
+    // Otherwise's pass carried the If's error.
+    expect(marks).toEqual([
+      { line: 4, skipped: true, stale: 'Cash checkbox went away' },
+      { line: 5, skipped: false, stale: undefined },
+    ]);
+  });
+});
+
+describe('a chain with no Otherwise whose head threw and where nothing held', () => {
+  const IF_LINE = 'If the Cash checkbox is ticked, then Pay with cash';
+
+  it('writes the head\'s stale sidecar row and paints the ⚠ on its skipped event', async () => {
+    const testFilePath = await project(
+      'pay-if-only',
+      `  {
+    source: ${JSON.stringify(IF_LINE)},
+    async condition() { throw new Error('Cash checkbox went away'); },
+  },`,
+    );
+    judge.script = [null];
+
+    const events = await collect({
+      steps: ['Open the payments page', IF_LINE, 'Verify the order confirmation is shown'],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      sections: {
+        'pay with cash': { name: 'Pay with cash', headingLine: 8, steps: ['Click Pay now'], stepLines: [9] },
+      },
+    });
+
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+    expect(judge.calls).toEqual([['the Cash checkbox is ticked']]);
+    // The guard row IS the broken member and is skipped: the ⚠ rides its own
+    // skipped event.
+    const guard = events.filter((e) => e.type === 'step:pass' && e.line === 4);
+    expect(guard).toHaveLength(1);
+    expect(guard[0]).toMatchObject({
+      output: 'skipped',
+      codeBehindStale: { file: path.join(tmpDir, 'pay-if-only.steps.ts'), error: 'Cash checkbox went away' },
+    });
+
+    // Measured before the fix: the server's sidecar had no row for the If at
+    // all — a skipped row writes nothing of its own, and the member branch
+    // required a member OTHER than the row's line — so `--only-stale` never
+    // found the entry. The CLI writer (test-runner-condition-codebehind)
+    // writes this same row.
+    const sidecar = await readLastRun(testFilePath);
+    expect(sidecar?.steps.find((s) => s.source === IF_LINE)).toEqual({
+      index: 2,
+      source: IF_LINE,
+      file: path.join(tmpDir, 'pay-if-only.steps.ts'),
+      occurrence: 0,
+      status: 'skipped',
+      fromCodeBehind: false,
+      stale: true,
+      error: 'Cash checkbox went away',
+      staleRuns: 1,
+    });
+  });
+});
+
+describe('step.fail() in a condition entry, over HTTP', () => {
+  const IF_LINE = 'If the Cash checkbox is ticked, then Pay with cash';
+
+  it('fails the guard with deliberate: true on step:fail and on the report row', async () => {
+    const testFilePath = await project(
+      'pay-deliberate',
+      `  {
+    source: ${JSON.stringify(IF_LINE)},
+    async condition({ step }) { step.fail('No payment method on this account'); return true; },
+  },`,
+    );
+
+    const events = await collect({
+      steps: ['Open the payments page', IF_LINE, 'Verify the order confirmation is shown'],
+      sourceLines: [3, 4, 5],
+      testFilePath,
+      sections: {
+        'pay with cash': { name: 'Pay with cash', headingLine: 8, steps: ['Click Pay now'], stepLines: [9] },
+      },
+    });
+
+    const fail = events.find((e) => e.type === 'step:fail');
+    // Measured before the fix: `{ line: 4, error: …, fromCodeBehind: true }`
+    // with no `deliberate` — TestBench and the MCP fold then worded the
+    // author's own sentence as a code-behind defect.
+    expect(fail).toMatchObject({
+      line: 4,
+      error: 'No payment method on this account',
+      deliberate: true,
+      fromCodeBehind: true,
+    });
+    expect(judge.calls).toEqual([]);
+    const row = (generatedReports.at(-1)?.steps ?? []).find((s: StepResult) => s.instruction === IF_LINE);
+    expect(row).toMatchObject({ status: 'failed', deliberate: true });
   });
 });

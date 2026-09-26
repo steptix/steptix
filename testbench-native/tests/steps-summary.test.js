@@ -45,6 +45,25 @@ test('every flavour of pass is a pass, and none of them is a skip', () => {
   assert.equal(counts.skipped, 0);
 });
 
+test('a ⚠ on a chain member that was NOT taken counts as skipped and stale, never passed', () => {
+  // A chain member whose condition's code threw on the visit that took
+  // another member paints ⚠ so Repair is offered on its line — but the line
+  // did not run (stories/codebehind-loops-and-conditions.md).
+  const counts = countMainFlowStatuses(
+    [
+      [1, 'pass'],
+      [2, 'pass-stale'],
+      [3, 'pass'],
+    ],
+    [1, 2, 3],
+    new Set([2]),
+  );
+  assert.equal(counts.passed, 2);
+  assert.equal(counts.skipped, 1);
+  assert.equal(counts.stale, 1);
+  assert.equal(counts.total, 3);
+});
+
 test('a fail is neither a pass nor a skip', () => {
   const counts = summaryOf('pass', 'fail', 'skip');
   assert.equal(counts.passed, 1);

@@ -71,19 +71,29 @@ export interface StepsSummaryCounts {
 export function countMainFlowStatuses(
   statuses: ReadonlyArray<readonly [number, StepLineStatus]>,
   mainFlowLines: readonly number[],
+  /**
+   * ⚠ lines that did NOT run — a chain member whose condition's code threw on
+   * the visit that took another member (the detail's `notTaken`). The ⚠ is
+   * there to offer Repair; the step was still skipped, so it is counted
+   * skipped (and stale), never passed.
+   */
+  notTakenLines: ReadonlySet<number> = new Set(),
 ): StepsSummaryCounts {
   const mainFlow = new Set(mainFlowLines);
   const count = (...wanted: StepLineStatus[]): number =>
     statuses.filter(([line, status]) => wanted.includes(status) && mainFlow.has(line)).length;
+  const staleNotTaken = statuses.filter(
+    ([line, status]) => status === 'pass-stale' && mainFlow.has(line) && notTakenLines.has(line),
+  ).length;
   // Every 'pass*' counts as passed — a step the AI drove, a code-behind entry
   // and a step that healed under AI are all successful steps. What differs is
   // what it cost and whether it needs attention, which is what the breakdown
   // says.
   return {
-    passed: count('pass', 'pass-code-behind', 'pass-stale'),
+    passed: count('pass', 'pass-code-behind', 'pass-stale') - staleNotTaken,
     passedCodeBehind: count('pass-code-behind'),
     stale: count('pass-stale'),
-    skipped: count('skip'),
+    skipped: count('skip') + staleNotTaken,
     tolerated: count('fail-tolerated'),
     total: mainFlowLines.length,
   };

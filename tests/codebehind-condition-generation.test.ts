@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import type { AiClient } from '../src/ai/client.js';
 import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import { parseEntryLiteral, parseStepCodeOrDecline } from '../src/ai/action-parser.js';
@@ -10,10 +13,12 @@ import {
   generateConditionEntry,
   loopContextFor,
   pickConditionObservations,
+  stepParameters,
   undeclaredContextComplaint,
 } from '../src/codebehind/generate.js';
 import { isLiteralCondition } from '../src/runner/literal-decision.js';
-import { buildFileReviewPrompt } from '../src/codebehind/review.js';
+import { buildFileReviewPrompt, reviewCandidate } from '../src/codebehind/review.js';
+import type { Candidate } from '../src/codebehind/candidate.js';
 
 /**
  * Generating a condition line's `condition` entry
@@ -443,5 +448,246 @@ describe('generateConditionEntry', () => {
     );
     expect(result.kind).toBe('error');
     expect(prompts).toEqual([]);
+  });
+});
+
+// ── conditionEntryComplaint: the receiver-aware corpus (review finding R8) ───
+
+describe('conditionEntryComplaint over a corpus of good and bad entries', () => {
+  const wrap = (body: string, params = '{ page, step }') =>
+    `{ source: 'If x, then y', async condition(${params}) { ${body} } }`;
+
+  // Every one of these is a realistic read-only condition. Since a condition
+  // that still breaks a rule after its re-ask is refused outright (R6), a
+  // false positive here costs a compiled condition.
+  it.each([
+    ['isChecked', wrap(`return await page.getByLabel('Cash').isChecked();`)],
+    ['count', wrap(`return (await page.getByRole('button', { name: 'Load more' }).count()) === 0;`)],
+    ['getAttribute after count', wrap(`const l = page.locator('#x'); if ((await l.count()) === 0) return false; return (await l.getAttribute('aria-disabled')) !== 'true';`)],
+    ['an evaluate that reads', wrap(`return await page.evaluate(() => document.querySelectorAll('tr').length > 3);`)],
+    ['an evaluate comparing, not assigning', wrap(`return await page.locator('#a').evaluate((el) => el === document.activeElement && el.value !== '' && el.childElementCount >= 1);`)],
+    ['an evaluate whose ARG is a selector-looking string', wrap(`return await page.evaluate((sel) => document.querySelector(sel) !== null, 'a[href=x]');`)],
+    ['textContent with getVar', wrap(`return ((await page.locator('#s').textContent()) ?? '').includes(step.getVar('plan') ?? '');`)],
+    ['inputValue', wrap(`return (await page.locator('#q').inputValue()) === '';`)],
+    ['new Array(3).fill(0)', wrap(`const a = new Array(3).fill(0); return a.length === 3;`)],
+    ['an array declared then filled', wrap(`const seen = new Array(2); seen.fill(false); return (await page.locator('li').count()) > seen.length;`)],
+    ['map.clear()', wrap(`const m = new Map(); m.clear(); return (await page.locator('#x').count()) > 0;`)],
+    ['a helper called run', wrap(`return (await helpers.run(page)) === true;`)],
+    ['a variable called run in a ternary', wrap(`const run = 1; const x = true ? run : 2; return x > 0;`)],
+    ['the arrow form', `{ source: 'x', condition: async ({ page }) => (await page.locator('#a').count()) > 0 }`],
+    ['page.url()', wrap(`return page.url().includes('/done');`)],
+    ['a local named tabs', wrap(`const tabs = page.getByRole('tab'); return (await tabs.count()) > 2;`)],
+    ['a regex mentioning click(', wrap(`return /click\\(/.test(page.url());`)],
+  ])('accepts %s', (_what, code) => {
+    expect(conditionEntryComplaint(code)).toBeUndefined();
+  });
+
+  it.each([
+    ['page.close()', wrap(`await page.close(); return true;`), '.close('],
+    ['a locator .check() through a variable', wrap(`const cash = page.getByLabel('Cash'); await cash.check(); return true;`), '.check('],
+    ['a .fill() on an item from .all()', wrap(`const inputs = await page.locator('input').all(); await inputs[0].fill('x'); return true;`), '.fill('],
+    ['a .clear() on a locator', wrap(`await page.locator('#q').clear(); return true;`), '.clear('],
+    ['a click on a $() handle', wrap(`await (await page.$('#a')).click(); return true;`), '.click('],
+    ['a click through a page alias', wrap(`await p.locator('#a').click(); return true;`, '{ page: p }'), '.click('],
+    ['ctx.page', wrap(`await ctx.page.getByRole('button').click(); return true;`, 'ctx'), '.click('],
+    ['ctx.tabs.open', wrap(`await ctx.tabs.open('https://x.test'); return true;`, 'ctx'), 'tabs.open('],
+    ['a bare tabs.switchTo', wrap(`await tabs.switchTo('page:2'); return true;`, '{ page, tabs }'), 'tabs.switchTo('],
+    ['ctx.browsers.open', wrap(`await ctx.browsers.open('b'); return true;`, 'ctx'), 'browsers.open('],
+    ['ctx.step.setVar', wrap(`ctx.step.setVar('a', 'b'); return true;`, 'ctx'), 'step.setVar('],
+    ['a destructured setVar', wrap(`const { setVar } = step; setVar('a', 'b'); return true;`), 'setVar('],
+    ['an evaluate that clicks', wrap(`await page.evaluate(() => (document.querySelector('button') as HTMLElement).click()); return true;`), '.click('],
+    ['an evaluate STRING that clicks', wrap(`await page.evaluate("document.querySelector('button').click()"); return true;`), '.click('],
+    ['an evaluate that submits', wrap(`await page.evaluate(() => document.forms[0].requestSubmit()); return true;`), '.requestSubmit('],
+    ['an evaluate that dispatches', wrap(`await page.locator('#a').evaluate((el) => el.dispatchEvent(new Event('change'))); return true;`), '.dispatchEvent('],
+    ['an evaluate that focuses', wrap(`await page.locator('#a').evaluate((el) => (el as HTMLElement).focus()); return true;`), '.focus('],
+    ['an evaluate that assigns a DOM property', wrap(`await page.locator('#c').evaluate((el) => { (el as HTMLInputElement).checked = true; }); return true;`), '.checked='],
+    ['an $eval that assigns', wrap(`await page.$eval('#c', (el) => { el.value = 'x'; }); return true;`), '.value='],
+    ['a locator dispatchEvent', wrap(`await page.locator('#a').dispatchEvent('click'); return true;`), '.dispatchEvent('],
+  ])('refuses %s', (_what, code, named) => {
+    const complaint = conditionEntryComplaint(code);
+    expect(complaint).toBeDefined();
+    expect(complaint).toContain(named);
+  });
+
+  it('reads run and condition off the object\'s own keys, not the words in its body', () => {
+    expect(conditionEntryComplaint(`{ source: 'x', 'run': async () => {}, async condition() { return true; } }`)).toMatch(/defines `run`/);
+    expect(conditionEntryComplaint(`{ source: 'x', async check() { return condition(); } }`)).toMatch(/no `condition` function/);
+  });
+});
+
+// ── generateConditionEntry never returns a hard-rule violation (R6) ─────────
+
+describe('generateConditionEntry and a hard-rule violation', () => {
+  const LINE = 'If the Cash checkbox is ticked, then Pay with cash';
+  const binding: CodeBehindBinding = { file: '/tmp/x.steps.ts', source: LINE, occurrence: 0, scope: { renames: {}, inputs: {} } };
+  const entry = (body: string) => JSON.stringify({ entry: `{ source: ${JSON.stringify(LINE)}, ${body} }` });
+  const clicking = entry(`async condition({ page }) { await page.getByLabel('Cash').check(); return true; }`);
+  const both = entry(`async run({ page }) { await page.getByLabel('Cash').check(); }, async condition({ page }) { return true; }`);
+  const clean = entry(`async condition({ page }) { return await page.getByLabel('Cash').isChecked(); }`);
+  const softOnly = entry(`async condition({ page }) { log.info('x'); return await page.getByLabel('Cash').isChecked(); }`);
+
+  function client(answers: Array<string | Error>): AiClient {
+    return {
+      complete: vi.fn(async () => {
+        const next = answers.shift();
+        if (next instanceof Error) throw next;
+        return { text: next ?? JSON.stringify({ entry: null, reason: 'out of answers' }) };
+      }),
+    } as unknown as AiClient;
+  }
+  const generate = (answers: Array<string | Error>) =>
+    generateConditionEntry({
+      binding,
+      observations: [{ holds: true, dom: '<input aria-label="Cash" type="checkbox" checked>', url: 'https://x.test' }],
+      resolvedParameters: {},
+      aiClient: client(answers),
+      contextContent: '',
+      testName: 't',
+    });
+
+  // Measured before the fix: every one of these came back `kind: 'entry'`
+  // with the clicking (or `run`-carrying) code.
+  it.each([
+    ['the re-ask throws', [clicking, new Error('network')]],
+    ['the re-ask declines', [clicking, JSON.stringify({ entry: null, reason: 'nope' })]],
+    ['the re-ask still clicks', [clicking, clicking]],
+    ['run + condition, and the re-ask throws', [both, new Error('network')]],
+  ] as const)('refuses the entry when %s, naming the rule', async (_what, answers) => {
+    const result = await generate([...answers]);
+    expect(result.kind).toBe('error');
+    const message = result.kind === 'error' ? result.message : '';
+    expect(message).toContain('broke a rule a condition must keep');
+    expect(message).toMatch(/`\.check\(`|defines `run`/);
+  });
+
+  it('takes a clean re-ask', async () => {
+    const result = await generate([clicking, clean]);
+    expect(result.kind).toBe('entry');
+    expect(result.kind === 'entry' && result.code).toContain('isChecked()');
+  });
+
+  it('keeps the step path\'s fallback for a soft complaint alone', async () => {
+    // Undeclared `log`: re-asked; the re-ask errors; the first answer stands.
+    const kept = await generate([softOnly, new Error('network')]);
+    expect(kept.kind).toBe('entry');
+    // …and a re-ask that then breaks a HARD rule does not replace it.
+    const notReplaced = await generate([softOnly, clicking]);
+    expect(notReplaced.kind).toBe('entry');
+    expect(notReplaced.kind === 'entry' && notReplaced.code).toContain('isChecked()');
+  });
+});
+
+// ── A dotted reference inside a skill body (R3b) ─────────────────────────────
+
+describe('stepParameters on a dotted name whose root the frame renames', () => {
+  const binding: CodeBehindBinding = {
+    file: '/tmp/review_orders.steps.ts',
+    source: 'Open order {{order.id}}',
+    occurrence: 0,
+    scope: { renames: { order: '__skill1_order' }, inputs: { orders: '{{all}}' } },
+  };
+  const live = {
+    all: '[{"id":"ORD-1001"},{"id":"ORD-1002"}]',
+    // an outer loop's leftovers under the bare names
+    order: '{"id":"OUTER-9"}',
+    'order.id': 'OUTER-9',
+    __skill1_order: '{"id":"ORD-1001"}',
+    '__skill1_order.id': 'ORD-1001',
+  };
+
+  it('resolves through the rename, as step.getVar does', () => {
+    // Measured before the fix: the name resolved to nothing — the prompt said
+    // "this step uses no parameters" and the leak guard held nothing.
+    expect(stepParameters(binding, live)).toEqual([{ name: 'order.id', value: 'ORD-1001' }]);
+  });
+
+  it('lets the leak guard catch a condition entry that hard-codes the item', async () => {
+    const LINE = 'While the {{order.id}} row is shown, Close it';
+    const result = await generateConditionEntry({
+      binding: { ...binding, source: LINE },
+      observations: [{ holds: true, dom: '<tr><td>ORD-1001</td></tr>' }],
+      resolvedParameters: live,
+      aiClient: {
+        complete: async () => ({
+          text: JSON.stringify({
+            entry: `{ source: ${JSON.stringify(LINE)}, async condition({ page }) { return (await page.getByRole('row', { name: 'ORD-1001' }).count()) > 0; } }`,
+          }),
+        }),
+      } as unknown as AiClient,
+      contextContent: '',
+      testName: 't',
+    });
+    expect(result).toMatchObject({ kind: 'error', message: expect.stringContaining('{{order.id}}') });
+  });
+});
+
+// ── The review pass keeps a condition a condition (R7) ───────────────────────
+
+describe('reviewCandidate over a file with a condition entry', () => {
+  const WHILE = 'While the Next button is enabled, Go to the next page';
+  const file = (conditionEntry: string) =>
+    [
+      'const defineSteps = (x: unknown) => x;',
+      'export default defineSteps([',
+      `  ${conditionEntry},`,
+      "  { source: 'Click Next', async run({ page }) { await page.click('#next'); } },",
+      ']);',
+      '',
+    ].join('\n');
+  const original = file(
+    `{ source: ${JSON.stringify(WHILE)}, async condition({ page }) { return (await page.locator('#next:enabled').count()) > 0; } }`,
+  );
+
+  async function review(revision: string): Promise<{ events: string[]; replaced: string | undefined }> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'review-condition-'));
+    const target = path.join(dir, 'statements.steps.ts');
+    let replaced: string | undefined;
+    const candidate = {
+      contentOf: () => original,
+      touchedFiles: () => [target],
+      replaceFile: async (_f: string, text: string) => { replaced = text; },
+    } as unknown as Candidate;
+    const events: string[] = [];
+    try {
+      await reviewCandidate(
+        candidate,
+        {
+          markdownName: 'statements.md',
+          steps: [WHILE, 'Click Next'],
+          guarded: [],
+          aiClient: { complete: async () => ({ text: JSON.stringify({ file: revision }) }) } as unknown as AiClient,
+        },
+        (m) => events.push(m),
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+    return { events, replaced };
+  }
+
+  it('rejects a revision that turns the condition into a run', async () => {
+    const { events, replaced } = await review(
+      file(`{ source: ${JSON.stringify(WHILE)}, async run({ page }) { await page.click('#next'); } }`),
+    );
+    expect(replaced).toBeUndefined();
+    expect(events.at(-1)).toBe(
+      `rejected: the revision turns the condition entry for ${JSON.stringify(WHILE)} into something that is not one — the generated file stands`,
+    );
+  });
+
+  it('rejects a revision whose condition now acts on the page', async () => {
+    const { events, replaced } = await review(
+      file(`{ source: ${JSON.stringify(WHILE)}, async condition({ page }) { await page.locator('#next').click(); return true; } }`),
+    );
+    expect(replaced).toBeUndefined();
+    expect(events.at(-1)).toMatch(/^rejected: the revision breaks the condition entry for .*`\.click\(`.* — the generated file stands$/);
+  });
+
+  it('accepts a revision that keeps it a clean condition', async () => {
+    const { events, replaced } = await review(
+      file(`{ source: ${JSON.stringify(WHILE)}, async condition({ page }) { const next = page.locator('#next'); return (await next.count()) > 0 && (await next.isEnabled()); } }`),
+    );
+    expect(events.at(-1)).toBe('revised statements.steps.ts');
+    expect(replaced).toContain('isEnabled()');
   });
 });

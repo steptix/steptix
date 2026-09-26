@@ -9,6 +9,7 @@ import {
   redact,
   secretValues,
   evidenceRows,
+  isEvidencePass,
   spliceRecording,
   writeRecording,
   writeReplayFailure,
@@ -663,6 +664,52 @@ describe('a looped step records its evidence pass', () => {
       [3, 'https://app.test/after'],
     ]);
     expect(rows[2]!.instruction).toBe('step 3');
+  });
+
+  it('skips a pass that ran cleanly as code for the pass that HEALED — the one with a transcript', () => {
+    // The review's scenario: a While body whose entry ran as code on pass 1,
+    // threw on pass 2 and healed under AI, then ran under AI on pass 3 (the
+    // entry was discarded). Measured before the fix: pass 1 — `turns: []` —
+    // was the evidence, so the boxed compile said "the recorded run performed
+    // no page actions" and wrote `ai: true` over a working entry.
+    const stale = { file: '/p/statements.steps.ts', source: 'Click Next', error: 'locator.click: Timeout 30000ms exceeded' };
+    const rows = evidenceRows([
+      step(1, { fromCodeBehind: true, turns: [] }),
+      pass(2, 1, { fromCodeBehind: true, turns: [] }),
+      pass(2, 2, { codeBehindStale: stale }),
+      pass(2, 3),
+    ]);
+    expect(rows.map((r) => r.pageUrl)).toEqual([
+      // Only ever ran as code: the first that passed still stands.
+      'https://app.test/after',
+      'https://app.test/pass-2',
+    ]);
+    expect(rows[1]!.codeBehindStale).toEqual(stale);
+    expect(isEvidencePass(rows[1]!)).toBe(true);
+    expect(isEvidencePass(rows[0]!)).toBe(false);
+  });
+
+  it('counts a deliberate failure as evidence — the step worked, as its text says', () => {
+    const rows = evidenceRows([
+      pass(2, 1, { status: 'failed', error: 'boom' }),
+      pass(2, 2, { status: 'failed', deliberate: true, error: 'as written' }),
+      pass(2, 3),
+    ]);
+    expect(rows[0]!.pageUrl).toBe('https://app.test/pass-2');
+  });
+
+  it('writes the healed pass to disk too, so the recording and the compile agree', async () => {
+    const test = path.join(dir, 'healed.md');
+    const stale = { file: '/p/healed.steps.ts', source: 'Click Next', error: 'boom' };
+    await writeRecording(test, {
+      steps: [step(1), pass(2, 1, { fromCodeBehind: true, turns: [] }), pass(2, 2, { codeBehindStale: stale }), step(3)],
+      status: 'passed',
+      startedAt: 'a',
+      parameters: {},
+      source: 'cli',
+    });
+    const recording = (await readRecording(test))!;
+    expect(recording.steps[1]!.pageUrl).toBe('https://app.test/pass-2');
   });
 
   it('writes pass 1 of a three-pass body, and counts expanded steps in the manifest', async () => {

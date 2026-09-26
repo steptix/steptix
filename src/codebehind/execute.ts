@@ -1,5 +1,5 @@
 import type { Page, BrowserContext, Browser } from 'playwright';
-import { bindVariable, interpolate, placeholderRoot } from '../parser/parameters.js';
+import { bindVariable, dottedThroughRename, interpolate } from '../parser/parameters.js';
 import { envDataRefsIn, interpolateEnvData, resolveEnvDataRef, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { createCapturingLog, type CapturedLog } from '../tools/step-api.js';
 import type { CodeBehindBinding, CodeBehindVarScope } from './loader.js';
@@ -505,17 +505,19 @@ export async function runCodeBehindCondition(
  *
  *  1. the frame's rename table (internal names + output aliases),
  *  2. the frame's captured inputs (declared parameters),
- *  3. the bare name — and then, for a dotted name that missed all three, the
- *     same name with its ROOT renamed (`order.id` → `__skill3_order.id`: a
- *     `For each {{order}}` inside a skill body binds the scoped keys),
- *  4. the environment: `data.url`, `env.BASE_URL`, `<source>.path`,
+ *  3. for a DOTTED name whose root the frame renames, the same name with its
+ *     ROOT renamed (`order.id` → `__skill3_order.id`: a `For each {{order}}`
+ *     inside a skill body binds the scoped keys) — and, like step 1, that
+ *     answer is final,
+ *  4. the bare name,
+ *  5. the environment: `data.url`, `env.BASE_URL`, `<source>.path`,
  *     `envName` — the name inside a `${...}` placeholder, resolved against
  *     the run's context the way the parser resolved the placeholder
  *     (stories/codebehind-env-data.md). Parameters win, as they would in
  *     the markdown; a run with no environment answers `undefined`.
  *
  * Steps at the top level, or in a section that is neither looped nor inside a
- * skill, have an empty scope, so the first three collapse to "the bare name"
+ * skill, have an empty scope, so the first four collapse to "the bare name"
  * and this behaves exactly like the tool executor's `step`.
  *
  * A step inside a LOOPED section does have a scope: its iteration's row
@@ -567,22 +569,29 @@ function makeStepApi(
         }
         return interpolateEnvData(value, envData);
       }
+      // A DOTTED name whose root the frame renames — `order.id` inside a
+      // skill body whose `For each {{order}}` the expander rewrote to
+      // `{{__skill3_order}}`. The pass bound `__skill3_order.id`, so without
+      // this the entry answered `undefined` on exactly the step the loop exists
+      // to vary (stories/codebehind-loops-and-conditions.md, "The entry,
+      // loading and running it").
+      //
+      // BEFORE the bare name, and final like the flat rename above: the frame
+      // renames `order`, so `order.id` in this frame IS `__skill3_order.id`.
+      // Asked after the bare map, an outer `For each {{order}}` — current, or
+      // left behind by an earlier loop — answered with the OUTER item's id
+      // while `getVar('order')` answered with the inner item: one step reading
+      // two different orders.
+      const scoped = dottedThroughRename(name, scope.renames);
+      if (scoped !== undefined) {
+        return Object.hasOwn(resolvedParameters, scoped)
+          ? resolvedParameters[scoped]
+          : undefined;
+      }
       const bare = Object.hasOwn(resolvedParameters, name)
         ? resolvedParameters[name]
         : undefined;
       if (bare !== undefined) return bare;
-      // A DOTTED name whose root the frame renames — `order.id` inside a
-      // skill body whose `For each {{order}}` the expander rewrote to
-      // `{{__skill3_order}}`. The pass bound `__skill3_order.id`, and no map
-      // holds `order.id` under any name, so without this the entry answered
-      // `undefined` on exactly the step the loop exists to vary
-      // (stories/codebehind-loops-and-conditions.md, "The entry, loading and
-      // running it"). Only after the whole name missed everywhere, so a map
-      // that really binds the dotted name still wins.
-      const scoped = dottedThroughRename(name, scope.renames);
-      if (scoped !== undefined && Object.hasOwn(resolvedParameters, scoped)) {
-        return resolvedParameters[scoped];
-      }
       return envData ? resolveEnvDataRef(name, envData) : undefined;
     },
     setVar(name, value) {
@@ -653,21 +662,4 @@ export function entrySourceText(entry: StepCodeEntry): string {
   if (entry.run) return String(entry.run);
   if (entry.condition) return String(entry.condition);
   return '(no run function)';
-}
-
-/**
- * `order.id` → `__skill3_order.id` when the frame renames `order`, or
- * undefined when the name is flat or its root is not renamed.
- *
- * Own properties only, for the reason `getVar` gives: `constructor.x` must not
- * find `Object.prototype.constructor` as a rename.
- */
-function dottedThroughRename(
-  name: string,
-  renames: Record<string, string>,
-): string | undefined {
-  const root = placeholderRoot(name);
-  if (root === name) return undefined;
-  const renamed = Object.hasOwn(renames, root) ? renames[root] : undefined;
-  return renamed === undefined ? undefined : `${renamed}${name.slice(root.length)}`;
 }

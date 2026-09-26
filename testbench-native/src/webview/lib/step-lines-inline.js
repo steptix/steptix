@@ -103,20 +103,26 @@ export function extractStepLineIds(text) {
  * The pass breakdown is folded in here too, so all five numbers come from one
  * filter and cannot disagree about which lines they were counting.
  */
-export function countStepLineStatuses(statuses, stepLineIds) {
+export function countStepLineStatuses(statuses, stepLineIds, notTakenLines) {
   const ids = new Set(stepLineIds ?? []);
-  const mine = Object.entries(statuses ?? {})
-    .filter(([line]) => ids.has(Number(line)))
-    .map(([, status]) => status);
+  const entries = Object.entries(statuses ?? {}).filter(([line]) => ids.has(Number(line)));
+  const mine = entries.map(([, status]) => status);
   const count = (...wanted) => mine.filter((s) => wanted.includes(s)).length;
+  // A ⚠ on a line that did NOT run — a chain member whose condition's code
+  // threw on the visit that took another member (the detail's `notTaken`). It
+  // is there to offer Repair; the step was still skipped, never passed.
+  const notTaken = new Set(notTakenLines ?? []);
+  const staleNotTaken = entries.filter(
+    ([line, status]) => status === "pass-stale" && notTaken.has(Number(line)),
+  ).length;
   return {
     // Every 'pass*' is a passed step; what differs is what it cost, which is
     // what the breakdown beside it says.
-    pass: count("pass", "pass-code-behind", "pass-stale"),
+    pass: count("pass", "pass-code-behind", "pass-stale") - staleNotTaken,
     codeBehind: count("pass-code-behind"),
     stale: count("pass-stale"),
     fail: count("fail"),
-    skip: count("skip"),
+    skip: count("skip") + staleNotTaken,
     // A step that failed and the run carried on past it — an `otherwise continue`
     // tail (stories/step-failure-outcomes.md, decision 6). Counted apart from BOTH
     // `pass` and `fail`: it did not do its work, and the run is not red for it.

@@ -298,11 +298,25 @@ export async function writeRecording(testFilePath: string, input: RecordingInput
  * A runtime loop — `While`, `Repeat … until`, `For each` — re-runs the same
  * expanded indices, so a run's rows hold a body index once per pass. An entry
  * is generated once per authored line, from the first pass that ran it, so
- * that is the row a recording keeps: the first pass that PASSED, else the
- * first row of all (a step that never passed is recorded as it first failed
- * or was skipped). A table-row `### Section` loop is unrolled at expansion —
- * one index per iteration — so it is untouched by this: every row is its own
- * index already.
+ * that is the row a recording keeps: the first pass that is usable EVIDENCE
+ * ({@link isEvidencePass}) — it passed, or failed as its text says, AND has a
+ * transcript to generate from. A table-row `### Section` loop is unrolled at
+ * expansion — one index per iteration — so it is untouched by this: every row
+ * is its own index already.
+ *
+ * "Has a transcript" is what makes this more than "the first that passed". A
+ * pass that ran cleanly AS CODE passed with no turns at all: its entry needs
+ * no evidence, and it is none. When the entry then threw on pass 2 and healed
+ * under AI, the step joins a compile as stale — and generating from pass 1's
+ * empty transcript said "the recorded run performed no page actions" and wrote
+ * `ai: true` over a working entry. The healed pass (`codeBehindStale`) is the
+ * one with the transcript, and the page its entry broke on. This is the live
+ * compiler's rule too: it refuses a clean code run as "ran as code" and takes
+ * the healed pass for its repair.
+ *
+ * When no pass is usable evidence: the first that passed (a step that only
+ * ever ran as code), else the first row of all (a step that never passed is
+ * recorded as it first failed or was skipped).
  *
  * Hook rows and interactive rows are dropped, as both writers always did.
  * Returned in the order each index first appears, which is the run's order,
@@ -315,17 +329,30 @@ export async function writeRecording(testFilePath: string, input: RecordingInput
 export function evidenceRows(steps: readonly StepResult[]): StepResult[] {
   const firstSeen: number[] = [];
   const chosen = new Map<number, StepResult>();
+  const rank = (r: StepResult): number => (isEvidencePass(r) ? 2 : r.status === 'passed' ? 1 : 0);
   for (const result of steps) {
     if (result.hookScope || result.interactiveAdHoc || result.interactiveChild) continue;
     const held = chosen.get(result.index);
     if (held === undefined) {
       firstSeen.push(result.index);
       chosen.set(result.index, result);
-    } else if (held.status !== 'passed' && result.status === 'passed') {
+    } else if (rank(result) > rank(held)) {
       chosen.set(result.index, result);
     }
   }
   return firstSeen.map((index) => chosen.get(index)!);
+}
+
+/**
+ * Is this pass usable evidence — something an entry can be generated from?
+ * It passed (or failed as its own text says: `deliberate`), and it has a
+ * transcript: it ran under AI, which a clean code run did not — unless its
+ * entry threw first and the step healed under AI (`codeBehindStale`).
+ */
+export function isEvidencePass(result: StepResult): boolean {
+  const worked = result.status === 'passed' || result.deliberate === true;
+  const transcript = result.fromCodeBehind !== true || result.codeBehindStale !== undefined;
+  return worked && transcript;
 }
 
 /**

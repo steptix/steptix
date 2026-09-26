@@ -53,16 +53,19 @@ export function describeStepFailure(failure) {
  * editor hovers follow, for the same reason.
  *
  * @param {{error?: string, fromCodeBehind?: boolean, deliberate?: boolean,
- *          warning?: string,
+ *          warning?: string, notTaken?: string,
  *          codeBehindStale?: {file: string, error: string}}} failure
  * @param {boolean} isStale True for a ⚠ row, false for a ✗ row.
  * @returns {string | null}
  */
 export function formatStepFailure(failure, isStale) {
   if (isStale) {
-    return failure.codeBehindStale
-      ? `code-behind failed: ${failure.codeBehindStale.error}`
-      : null;
+    if (!failure.codeBehindStale) return null;
+    // A ⚠ on a line that did not run — a chain member whose condition's code
+    // threw on the visit that took another member: both facts.
+    return failure.notTaken !== undefined
+      ? `${failure.notTaken}\ncondition code-behind failed: ${failure.codeBehindStale.error}`
+      : `code-behind failed: ${failure.codeBehindStale.error}`;
   }
   // The author's sentence, first — it says why the failure was survivable, which is
   // what a reader of an amber row wants; the framework's error keeps its place under.

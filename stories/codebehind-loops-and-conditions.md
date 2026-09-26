@@ -8,7 +8,9 @@ TestBench live pass (`testbench-native/tests/integration/live/compile-loops.test
 passed first time, 2/2: Run & Compile of `control-flow.md` and
 `control-flow-otherwise.md`, apply, replay — every `If` / `Else if` /
 `While` / `Repeat` decided by its condition entry, no condition-judge call in
-the replay's report, every loop still exactly three passes.
+the replay's report, every loop still exactly three passes. Review round 1's
+fixes are recorded where they changed a decision: "The guard", "The run
+loops", and both "decided" sections below.
 
 ## In plain terms
 
@@ -285,7 +287,13 @@ from the page the model saw on that visit.
   `entrySourceText` reads `condition` too. `makeStepApi.getVar` maps a DOTTED
   name through its root's skill rename, so `getVar('order.id')` works for a
   `For each` inside a skill body (today it answers `undefined` there; the
-  scoped key is `__skillN_order.id`).
+  scoped key is `__skillN_order.id`). Review round 1 fixed its precedence to
+  the flat name's — full-name rename, inputs, renamed root, bare, env — so an
+  outer `For each {{order}}` in the live map no longer answers the dotted read
+  while the flat one answers the inner item; generation's `stepParameters`
+  resolves `{{order.id}}` in a skill body through the same rule
+  (`dottedThroughRename`, parser/parameters.ts), so the prompt names it and the
+  leak guard holds its value.
 - `src/runner/step-executor.ts` — the context-building half of
   `runCodeBehindStep` (tabs, browsers, active session) is shared with a new
   exported `runConditionCode(binding, opts)`. `evaluateConditions` returns
@@ -308,11 +316,28 @@ codeBehind?: {
 ```
 
 Order per decisions 5–8: `decideLocally` (unchanged) → the code path → the
-judge. The code path settles the page, then runs each asked member in order
-(literal answer if the member is literal, else its entry), stopping at the
-first that holds. A throw discards that binding's entry and falls through to
-the judge for the whole chain. The cap check runs before the planner is
-consulted, so the planner's state is only ever advanced once.
+judge. The code path runs each asked member in order (literal answer if the
+member is literal, else its entry), stopping at the first that holds, and
+settles the page right before the FIRST entry runs — not before a literal
+member that holds ahead of every entry. A throw discards that binding's entry
+and falls through to the judge for the whole chain. The cap check runs before
+the planner is consulted, so the planner's state is only ever advanced once.
+
+Settled in review (round 1):
+
+- **`decidedBy: 'code'` means an entry ran.** `If {{plan}} is "pro"` holding
+  ahead of an `Else if` with an entry is decided by values — `decidedBy:
+  'values'`, no code mark, the values' own reasoning, and no page settle.
+- **A judge that throws at the cap check is not the code's failure.** The cap
+  failure stands as on a keyless run, with the judge's reason in the note
+  (*"…and the model could not be asked to check it (…)"*); an abort still
+  rethrows.
+- **`step.fail()` in a condition is deliberate**, carried from the condition
+  outcome through `GuardEvaluation` / `guardResult` to the row and the guard's
+  `step:fail`, as the step path carries it.
+- **A Stop during a condition entry is a stop.** An entry that fails while the
+  run's signal is aborted (the Stop closed its page) rethrows `AbortError`: no
+  stale flag, no failure, on keyed and keyless runs alike.
 
 `GuardEvaluation` and `guardResult` gain the step fields a code-behind step
 already has — `fromCodeBehind`, `codeBehind: { file, code, logs }`,
@@ -348,7 +373,11 @@ could not compare it.
   guard `step:pass` / `step:fail` carry `fromCodeBehind` / `codeBehindStale`.
   Both sidecar writers record the guard row; a stale MEMBER that is not the
   row's own line gets its own stale row, keyed to that member's binding, so
-  `--only-stale` and the repair find the right entry.
+  `--only-stale` and the repair find the right entry. So does a skipped row's
+  OWN line: a chain with no `Otherwise` whose head's entry threw and where
+  nothing held has its head as both the skipped row and the broken member, and
+  the server's writer (which writes nothing for a skipped row) lost it — both
+  writers now write the same stale row for it.
 - **Electron** — unchanged (decision 16).
 - The server's one-shot F11 flag is consumed at the top of every iteration,
   guards included; stepping into a condition entry is not wired (non-goal).
@@ -433,7 +462,10 @@ them read-only, never turn one into a `run`.
   refused compile (`compile-summary-core.ts`: honour `status`).
 - Nothing else: the guard's events carry the fields every surface already
   reads; Repair on a ⚠ guard line reaches `compile: 'steps'`, which the
-  server now accepts for a guard.
+  server now accepts for a guard. One addition from review round 1: a skipped
+  `step:pass` that carries `codeBehindStale` (a chain member whose condition
+  code threw on the visit that took another member) paints ⚠ rather than ◌,
+  hovering with both facts — see "What the live half decided".
 - Patch bump.
 
 ## Tests
@@ -518,6 +550,63 @@ sections above leave open.
 - **A condition judged on the computer surface is not offered** — as a
   computer-mode step is not, on this path. `generateConditionEntry` still
   declines one with no DOM, for a caller that asks anyway.
+- **The ⚠ goes on the line whose entry broke** (review round 1). When a chain
+  member's condition entry throws and the model then takes ANOTHER member, the
+  broken member is one of that visit's skips, so its `codeBehindStale` rides its
+  own `step:pass output:'skipped'` (the server threads a per-index stale map
+  beside `skipReasons` into `emitSkippedStep`, consumed on emit); the member
+  that held carries no stale flag. When the broken member IS the guard row's
+  line — a loop's guard, or a head where nothing held — it rides the row's own
+  event as before. TestBench paints a skipped pass carrying `codeBehindStale`
+  ⚠, not ◌ (`passMarkFor`, guard-mark-core.ts), with a hover that says both
+  facts — the skip reason, then what the condition's code threw — and so
+  offers "Repair this step" on that line. The detail carries the reason as
+  `StepFailureDetail.notTaken` (runner-core), which is also what keeps the two
+  run tallies (the `## Steps` heading and the panel header) counting that line
+  as skipped and stale rather than passed. The report row is unchanged: it
+  still carries the flag and `guard.staleMember`, which is what the sidecar
+  writers and the compilers key on.
+- **A condition entry never breaks a hard rule** (review round 1). A hard rule
+  is what `conditionEntryComplaint` checks — a `run`, no `condition`, or a call
+  that acts, navigates, types or points, waits, touches a tab or browser, or
+  writes a variable. After its one re-ask, `generateConditionEntry` returns an
+  error naming the rule when neither answer is clean — it no longer falls back
+  to the first answer, or returns a second that still breaks one with a
+  warning. A soft complaint (an undeclared context property) keeps the step
+  path's fallback: re-asked once, then the answer stands.
+- **The complaint reads the receiver, not the word** (review round 1). Since a
+  hard violation is now fatal, a false positive costs a compiled condition.
+  `run` / `condition` are read off the entry object's own keys (so
+  `helpers.run(page)` and `x ? run : y` are not definitions). Page actions —
+  `click`, `fill`, `check`, `clear`, `close` and the rest — are refused only on
+  a Playwright receiver: rooted at or passing through `page` / `frame` /
+  `context` / `browser`, a `locator(…)` / `getBy…(…)` / `frameLocator(…)` /
+  `$(…)` chain, or a name bound from one (a fixpoint over `const x = …` and
+  `for (const x of …)`); a freshly constructed object (`new Array(3).fill(0)`)
+  never is, and a receiver nothing identifies is let through. The keyboard,
+  navigation, waits, any `tabs.` / `browsers.` call on any receiver (a local
+  named `tabs` excepted) and any `setVar` on any receiver stay refused
+  outright. A page function (`evaluate`, `evaluateAll`, `evaluateHandle`,
+  `$eval`, `$$eval` — function or string) is refused when it clicks, submits,
+  dispatches, focuses, inserts or removes DOM, writes an attribute, moves
+  history or location, or assigns any property. Pinned by a corpus of good and
+  bad entries in codebehind-condition-generation.test.ts.
+- **The review pass keeps a condition a condition** (review round 1). Every
+  entry that was a `condition` entry before the review must still define
+  `condition` after it and pass `conditionEntryComplaint`; a revision that
+  breaks one is rejected the way the review already rejects its other
+  violations — the whole revision of that file, with *"rejected: the revision
+  turns the condition entry for … into something that is not one"* (or
+  *"breaks the condition entry for …: <complaint>"*), and the generated file
+  stands.
+- **"The step did not run" is said once per entry, and never after
+  "generated"** (review round 1). A body line generated on pass 1 and decided
+  against on pass 2 owes nothing, and its skip no longer logs the refusal after
+  its own "generated" line; a line skipped on every pass says it once.
+- **Known limit: `kept` counts per block.** A run split by a block boundary
+  inside a loop body (a breakpoint continuation) can count one body line once
+  per block — reported by review, not reproduced through a real client, and
+  left as it is.
 
 ## What the boxed half decided
 
@@ -537,15 +626,45 @@ something the sections above leave open, or departed from them.
   failure is; pass 1's good transcript does not carry it into the prefix. A
   step skipped on every pass has no evidence; skipped on one and run on
   another, it has.
-- **A pass's values come off the loop markers.** The Record's final map holds
-  the last pass's item. Each row's loop marker carries its pass's bindings;
-  replayed over the final map in execution order they give the values on the
-  page each row was recorded against, for the step prompt, the condition
-  prompt and a repair. A chain's guard row carries no marker, so it reads the
-  bindings of the pass the run was last seen in — exact on pass 1, and a pass
-  behind if the chain is the first step of a later `For each` pass. A
+- **A pass's values are folded forward from the start** (`passSnapshots`,
+  revised in review round 1). The Record's final map holds the last pass's item
+  AND the last pass's captures. The map as of each row is rebuilt in execution
+  order from the compile's starting parameters: each row's loop marker binds its
+  pass (clearing the last pass's dotted keys first, as the runtime does), the
+  row is snapshotted, then its captured `outputs` are bound for the rows after
+  it. So a `[store as: total]` inside the body reaches pass 1's `Type
+  {{total}}` as pass 1's total — overlaying the markers on the final map gave
+  it pass 3's, and an entry hard-coding pass 1's `$10.00` passed the leak
+  guard. The final map fills only names the fold never saw (a skill-internal
+  capture, which `outputs` never carries), and never a name whose root the
+  fold has bound. One snapshot for the step prompt, the condition prompt and a
+  repair — a repair folds over the failing replay's rows, so a body step of a
+  `While` inside a `For each` is told the OUTER pass's item too (the innermost
+  marker alone, over the final map, told it the last one). A chain's guard row
+  carries no marker, so it reads the bindings of the pass the run was last seen
+  in — exact on pass 1, and a pass behind if the chain is the first step of a
+  later `For each` pass; likewise an outer item reaches the fold only through a
+  row that carries the outer marker (a step directly in the outer body). A
   table-row `### Section` gets its own row's values the same way; it used to
   get the last row's.
+- **The evidence pass is the first with a transcript** (`evidenceRows` /
+  `isEvidencePass`, review round 1). It passed (or failed as its text says)
+  AND it ran under AI — a clean code run has no turns, and is no evidence —
+  or its entry threw first and it healed (`codeBehindStale`). A body entry
+  that ran as code on pass 1 and healed on pass 2 joins the compile as stale;
+  generating from pass 1 said *"the recorded run performed no page actions"*
+  and wrote `ai: true` over a working entry, with a green replay under AI. The
+  healed pass is now the evidence, and a healed evidence pass goes through the
+  repair prompt, as the live compiler repairs from the healed pass: the entry
+  as it stands in the file, the error it threw, and the page before the step on
+  that pass (plain generation when the entry's text cannot be found). No pass
+  with a transcript: the first that passed, else the first row. The recording
+  on disk keeps the same row.
+- **Known limit: the leak guard's 3-character minimum.** A resolved value
+  shorter than three characters is not guarded (pre-existing). Loops make it
+  more common — a pass index, a one-digit quantity, a two-letter code per item
+  — so an entry that hard-codes such a value per pass is not caught at
+  generation; the next pass's replay is what shows it.
 - **A condition no model-decided visit asked is not attempted.** Its reason
   says so, with the cause its own skipped row states — *the condition was
   never asked on the recording run (no condition in this decision held)*. A

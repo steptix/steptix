@@ -830,9 +830,17 @@ function TestBenchRunner() {
   // either: a skipped step is neither, and a run that returns would otherwise
   // report "✓ 4 passed" with the fifth step accounted for nowhere
   // (stories/step-flow-control.md, decision 15).
+  // A ⚠ on a line that did not run (`notTaken`) counts as the skip it was.
   const runCounts = useMemo(
-    () => countStepLineStatuses(statuses, stepLines),
-    [statuses, stepLines],
+    () =>
+      countStepLineStatuses(
+        statuses,
+        stepLines,
+        Object.entries(failureMap)
+          .filter(([, f]) => f?.notTaken !== undefined)
+          .map(([line]) => Number(line)),
+      ),
+    [statuses, stepLines, failureMap],
   );
   const passCount = runCounts.pass;
   const codeBehindCount = runCounts.codeBehind;
