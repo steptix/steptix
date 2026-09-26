@@ -472,6 +472,30 @@ function passBindings(
   return bindings;
 }
 
+/**
+ * Would a "carry on" verdict at the loop guard `index` breach its cap on this
+ * visit? The cap it would breach, or undefined.
+ *
+ * Pure: the same test {@link planConditionLoop} applies, asked BEFORE the
+ * planner is consulted, so a caller that wants to double-check a verdict at
+ * the cap — a condition decided by code-behind
+ * (stories/codebehind-loops-and-conditions.md, decision 8) — can do so and
+ * still advance the planner's state exactly once. Undefined for anything that
+ * is not a `While` / `Repeat` guard.
+ */
+export function capBreachAt(
+  controls: readonly (ControlRecord | null)[],
+  index: number,
+  state: ControlState,
+): { cap: number; source: 'line' | 'config'; passes: number } | undefined {
+  const record = controls[index];
+  if (!record || (record.kind !== 'while' && record.kind !== 'repeat')) return undefined;
+  const passes = state.passes.get(index) ?? 0;
+  const cap = record.cap ?? state.defaultCap;
+  if (passes < cap) return undefined;
+  return { cap, source: record.cap === undefined ? 'config' : 'line', passes };
+}
+
 function planConditionLoop(
   controls: readonly (ControlRecord | null)[],
   index: number,
@@ -480,8 +504,6 @@ function planConditionLoop(
   state: ControlState,
 ): ControlPlan {
   const passes = state.passes.get(index) ?? 0;
-  const cap = record.cap ?? state.defaultCap;
-  const capSource: 'line' | 'config' = record.cap === undefined ? 'config' : 'line';
 
   // `Repeat`'s first pass: no question was asked, the body simply runs.
   if (record.kind === 'repeat' && verdict.kind === 'resume') {
@@ -506,14 +528,15 @@ function planConditionLoop(
     };
   }
 
-  if (passes >= cap) {
+  const breach = capBreachAt(controls, index, state);
+  if (breach) {
     // Reaching the cap with the exit condition unmet FAILS the loop line. It
     // has not done what the author asked, so exiting quietly would be a green
     // run on an unfinished job (decision 9).
     return {
       skip: [],
       next: exitFrom(controls, record.bodyEnd, index),
-      capBreached: { cap, source: capSource },
+      capBreached: { cap: breach.cap, source: breach.source },
     };
   }
 

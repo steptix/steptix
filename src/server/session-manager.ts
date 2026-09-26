@@ -84,6 +84,7 @@ import { dottedReferenceError } from '../runner/placeholder-substitution.js';
 import {
   applyPassBindings,
   evaluateGuard,
+  guardCodeBehindFields,
   guardHistoryLines,
   guardResult,
   guardRows,
@@ -93,6 +94,7 @@ import {
   skipReasonFor,
   skippedResult,
   SkipQueue,
+  type GuardCodeBehind,
   type LoopRecord,
 } from '../runner/control-runtime.js';
 import { controlLineDefines, parseControlLine } from '../parser/control-line.js';
@@ -132,7 +134,8 @@ import {
   type ExpandedStepOrigin,
 } from '../skills/expander.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
-import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
+import { isStepCode } from '../codebehind/execute.js';
+import { lastRunStaleMemberRow, writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import {
   recordingDirFor,
   spliceRecording,
@@ -4045,6 +4048,27 @@ export class SessionManager {
       });
     }
     /**
+     * The code-behind a guard's condition is decided with
+     * (stories/codebehind-loops-and-conditions.md, "The run loops") — the same
+     * registry, strict flag and keyless flags the steps get (see the
+     * `executeStep` call below). With code-behind off for the batch no entry
+     * may decide, so the guard gets a registry that binds nothing — and still
+     * gets `captureEvidence`, because a Record and a Compile This Step are
+     * exactly the runs whose judge's page a condition entry is generated from
+     * (decision 9). With neither, nothing is passed: today's path.
+     */
+    const guardCodeBehind: GuardCodeBehind | undefined = codeBehindOff
+      ? captureStepContext
+        ? { bindingFor: () => undefined, captureEvidence: true }
+        : undefined
+      : {
+          bindingFor: (k) => codeBehind.bindingFor(k),
+          ...(cb?.strict && { strict: true }),
+          ...(runKeyless && { keyless: true }),
+          ...(runKeyless && aiPolicyOff && { keylessReason: 'policy' as const }),
+          ...(captureStepContext && { captureEvidence: true }),
+        };
+    /**
      * Where generation looks up a step's target file, section scope and
      * occurrence. Normally the execution registry, which binds the same way;
      * with execution disabled it has to be built separately — silently (the
@@ -5959,8 +5983,13 @@ export class SessionManager {
         //
         // After the breakpoint check, so a breakpoint on a guard line pauses
         // BEFORE the decision. Before everything else: a guard is not a page
-        // step — no code-behind, no compile, no `executeStep`
-        // (stories/control-flow.md §"What is deliberately unchanged").
+        // step — no `executeStep`, no hooks (stories/control-flow.md §"What
+        // is deliberately unchanged"). Its condition may still run CODE: a
+        // `condition` entry decides it inside `evaluateGuard`, after its own
+        // values and before the model, from the same registry the steps use
+        // (stories/codebehind-loops-and-conditions.md, decision 5). The
+        // one-shot F11 flag is not wired to a condition entry (a non-goal);
+        // an F9 breakpoint inside one works as in any entry.
         //
         // A breakpoint pauses on the guard's first visit whatever that visit
         // asks (`consumedBreakpoints` allows one pause per step index per
@@ -6035,7 +6064,18 @@ export class SessionManager {
                 ...(session.surface === 'computer' && session.computerAdapter
                   ? { computer: computerContextFor(session.desktopConfig, session.computerAdapter) }
                   : {}),
+                // What a condition entry's `step.filePath` resolves from — the
+                // same base the steps get.
+                uploadPaths: {
+                  ...(request.testFilePath !== undefined && {
+                    baseDir: dirname(request.testFilePath),
+                  }),
+                  projectRoot: projectBundle.projectRoot,
+                },
               },
+              // A condition with a `condition` entry is decided by it, after
+              // its own values and before the model (decision 5).
+              ...(guardCodeBehind && { codeBehind: guardCodeBehind }),
             });
           } catch (err) {
             // An aborted judge throws, exactly as an aborted branched step
@@ -6093,7 +6133,25 @@ export class SessionManager {
               error: evaluation.error,
               aiInteractions: evaluation.aiInteractions,
               loop: marker,
+              ...guardCodeBehindFields(evaluation),
             });
+            /**
+             * How the guard was decided, for the gutter — the same two fields,
+             * in the same shape, an ordinary step's `step:pass` / `step:fail`
+             * carry (stories/codebehind-loops-and-conditions.md, decision 15):
+             * decided by its code (the code mark), or by the model after its
+             * code broke (⚠). A skipped guard row carries them too — the
+             * decision that nothing held was still made by that code.
+             */
+            const guardCodeMarks = {
+              ...(result.fromCodeBehind && { fromCodeBehind: true }),
+              ...(result.codeBehindStale && {
+                codeBehindStale: {
+                  file: result.codeBehindStale.file,
+                  error: result.codeBehindStale.error,
+                },
+              }),
+            };
             const guardSkill = outermostSkillName(
               expansionOrigins?.[rows.guard.index]?.frameId,
               expansionFrames,
@@ -6105,6 +6163,12 @@ export class SessionManager {
             if (guardSkill) result.sourceSkill = guardSkill;
             if (guardSection) result.sourceSection = guardSection;
             fullStepResults.push(result);
+            // A guard whose condition entry broke and the model decided in its
+            // place healed exactly as a step does, and its judge call is what
+            // the healed summary's token figure is for.
+            if (isHealedStep(result)) {
+              healedTokens += Math.max(0, session.tokenTracker.runTotal - tokensAtStepStart);
+            }
             results.push({
               step: guardText,
               // Reported as recorded — `'skipped'` included. `StepResultResponse`
@@ -6126,6 +6190,7 @@ export class SessionManager {
                 line: guardLine,
                 error: evaluation.error ?? 'The decision could not be made',
                 ...(guardFrame && { frame: guardFrame }),
+                ...guardCodeMarks,
               });
             } else {
               // The FOURTH producer of `step:pass` + `output: 'skipped'`, and
@@ -6145,6 +6210,7 @@ export class SessionManager {
                 output: guardSkipped ? 'skipped' : (evaluation.reasoning ?? 'decided'),
                 ...(guardSkipped && { reason, skipKind: 'not-taken' as const }),
                 ...(guardFrame && { frame: guardFrame }),
+                ...guardCodeMarks,
               });
               stepsCompleted++;
             }
@@ -6625,7 +6691,12 @@ export class SessionManager {
             // opposite ("F11 degrades to a plain step pause"), and these are
             // not rare: compile writes off every step it could not compile as
             // an `ai: true` entry, so real `.steps.ts` files are full of them.
-            if (debugBinding?.entry && debugBinding.entry.ai !== true) {
+            //
+            // `isStepCode` is that gate, shared, and it also excludes a
+            // `condition` entry bound to an ordinary step — the executor warns
+            // and runs such a step under AI, so no `debugger;` would run either
+            // (stories/codebehind-loops-and-conditions.md).
+            if (isStepCode(debugBinding?.entry)) {
               // §5.9, for every wait for a person alike. A no-op today: this is
               // the page surface's branch, and leaving the computer surface
               // already released the lock — code-behind never binds a
@@ -7766,9 +7837,7 @@ export class SessionManager {
         // claim `fromCodeBehind: false, stale: false` — "ran under AI and was
         // fine" — about a step nothing executed, and `--only-stale` would then
         // skip a broken entry on the strength of it.
-        if (result.status === 'skipped') continue;
         const i = result.index - 1;
-        const binding = codeBehind.bindingFor(i);
         const stale = result.codeBehindStale;
         // Same as the CLI writer (test-runner.ts): a keyless run's broken
         // entry never healed, so it carries no `codeBehindStale` and no heal
@@ -7779,6 +7848,33 @@ export class SessionManager {
         // the test the other way.
         const healSkipped = stale ? undefined : result.codeBehindHealSkipped;
         const failure = stale ?? healSkipped;
+        // A guard row whose broken condition entry is ANOTHER member's
+        // (stories/codebehind-loops-and-conditions.md, "The run loops"): that
+        // member gets a stale row of its own, keyed to its binding, exactly as
+        // the CLI writer does it. Written even when the guard row itself is
+        // skipped — a chain where nothing held still ran that member's code,
+        // and the row that is skipped is only the one the question was asked
+        // from.
+        const staleMember = result.guard?.staleMember;
+        const member =
+          failure !== undefined && staleMember !== undefined && staleMember !== i
+            ? lastRunStaleMemberRow({
+                index: staleMember,
+                binding: codeBehind.bindingFor(staleMember),
+                fallbackSource:
+                  expansionRawSteps[staleMember] ?? effectiveSteps[staleMember] ?? '',
+                status: result.status,
+                error: failure.error,
+                healSkipped: healSkipped !== undefined,
+              })
+            : undefined;
+        if (member && member.index < result.index) lastRunSteps.push(member);
+        if (result.status === 'skipped') {
+          if (member && member.index > result.index) lastRunSteps.push(member);
+          continue;
+        }
+        const binding = codeBehind.bindingFor(i);
+        const ownFailure = member ? undefined : failure;
         lastRunSteps.push({
           index: result.index,
           source: binding?.source ?? expansionRawSteps[i] ?? effectiveSteps[i] ?? '',
@@ -7792,10 +7888,11 @@ export class SessionManager {
           ...(binding?.occurrence !== undefined && { occurrence: binding.occurrence }),
           status: result.status,
           fromCodeBehind: result.fromCodeBehind === true,
-          stale: failure !== undefined,
-          ...(failure && { error: failure.error }),
-          ...(healSkipped && { healSkipped: true }),
+          stale: ownFailure !== undefined,
+          ...(ownFailure && { error: ownFailure.error }),
+          ...(ownFailure && healSkipped && { healSkipped: true }),
         });
+        if (member && member.index > result.index) lastRunSteps.push(member);
       }
       if (lastRunSteps.length > 0) await writeLastRun(request.testFilePath, lastRunSteps);
     }

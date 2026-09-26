@@ -55,9 +55,11 @@ import { boundValue, dottedReferenceError } from './placeholder-substitution.js'
 import {
   applyPassBindings,
   evaluateGuard,
+  guardCodeBehindFields,
   guardHistoryLines,
   guardResult,
   guardRows,
+  type GuardCodeBehind,
   isLoopRecord,
   LoopRuntime,
   skipReasonFor,
@@ -112,7 +114,7 @@ import { loadToolCatalogue, ToolCatalogue } from '../tools/registry.js';
 import { executeToolStep, type ExecuteToolStepOptions } from '../tools/executor.js';
 import type { ToolCall } from '../tools/types.js';
 import { buildCodeBehindRegistry, CodeBehindRegistry } from '../codebehind/loader.js';
-import { writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
+import { lastRunStaleMemberRow, writeLastRun, type LastRunStep } from '../codebehind/last-run.js';
 import { writeRecording } from '../codebehind/recording.js';
 import { envDataSecretValues, interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { captureScreenshot } from '../browser/screenshot.js';
@@ -788,6 +790,32 @@ export async function runTest(
     };
 
     /**
+     * The code-behind a guard's condition is decided with
+     * (stories/codebehind-loops-and-conditions.md, "The run loops") — the same
+     * registry, strict flag and keyless flags `codeBehindOptionsFor` hands the
+     * steps.
+     *
+     * When this run bypasses code-behind (a compile's Record) no entry may
+     * decide, so the guard gets a registry that binds nothing — and still gets
+     * `captureEvidence`, because a Record is exactly the run whose judge's
+     * page a condition entry is generated from (decision 9). With neither,
+     * nothing is passed and every guard is on today's path.
+     */
+    const guardCodeBehind: GuardCodeBehind | undefined = extras.codeBehindDisabled
+      ? extras.captureStepContext
+        ? { bindingFor: () => undefined, captureEvidence: true }
+        : undefined
+      : {
+          bindingFor: (k) => codeBehind.bindingFor(k),
+          ...(extras.codeBehindStrict && { strict: true }),
+          ...(keyless && { keyless: true }),
+          ...(!aiAllowed && { keylessReason: 'policy' as const }),
+          // A compiling run keeps the page the judge decided on, the way it
+          // keeps each step's DOM (`captureStepContext`).
+          ...(extras.captureStepContext && { captureEvidence: true }),
+        };
+
+    /**
      * Record one expanded step's outcome for the last-run sidecar.
      *
      * Called at the single point every non-hook step result passes through, so
@@ -806,6 +834,15 @@ export async function runTest(
       // (stories/keyless-replay-and-gateway-env.md §Part B).
       const healSkipped = stale ? undefined : result.codeBehindHealSkipped;
       const failure = stale ?? healSkipped;
+      // A guard row whose broken entry is ANOTHER member's
+      // (stories/codebehind-loops-and-conditions.md, "The run loops"): the row
+      // belongs to the member that held, the failure to the one whose code
+      // threw. The failure gets a row of its own, keyed to that member's
+      // binding, so `--only-stale` and the repair find the right entry — and
+      // this row stays clean, because its own entry did nothing wrong.
+      const member = staleMemberRow(i, result, failure, healSkipped !== undefined);
+      if (member && member.index < i + 1) lastRunSteps.push(member);
+      const ownFailure = member ? undefined : failure;
       lastRunSteps.push({
         index: i + 1,
         source: binding?.source ?? test.expansion?.rawSteps[i] ?? test.steps[i] ?? '',
@@ -822,9 +859,33 @@ export async function runTest(
         ...(binding?.occurrence !== undefined && { occurrence: binding.occurrence }),
         status: result.status,
         fromCodeBehind: result.fromCodeBehind === true,
-        stale: failure !== undefined,
-        ...(failure && { error: failure.error }),
-        ...(healSkipped && { healSkipped: true }),
+        stale: ownFailure !== undefined,
+        ...(ownFailure && { error: ownFailure.error }),
+        ...(ownFailure && healSkipped && { healSkipped: true }),
+      });
+      if (member && member.index > i + 1) lastRunSteps.push(member);
+    };
+
+    /**
+     * The sidecar row for a guard's stale MEMBER, when it is not the row's own
+     * line — or undefined. Shared shape with the server's writer
+     * (`lastRunStaleMemberRow`).
+     */
+    const staleMemberRow = (
+      i: number,
+      result: StepResult,
+      failure: { error: string } | undefined,
+      healSkipped: boolean,
+    ): LastRunStep | undefined => {
+      const at = result.guard?.staleMember;
+      if (failure === undefined || at === undefined || at === i) return undefined;
+      return lastRunStaleMemberRow({
+        index: at,
+        binding: codeBehind.bindingFor(at),
+        fallbackSource: test.expansion?.rawSteps[at] ?? test.steps[at] ?? '',
+        status: result.status,
+        error: failure.error,
+        healSkipped,
       });
     };
 
@@ -1401,7 +1462,9 @@ export async function runTest(
       // ── Control flow: a guard decides, and the planner says what follows ──
       //
       // Before the hooks, deliberately: a guard is not a page step. It never
-      // reaches `executeStep`, it is never compiled, and
+      // reaches `executeStep` — its condition is decided by `evaluateGuard`,
+      // from its values, its code-behind `condition` entry, or the model
+      // (stories/codebehind-loops-and-conditions.md) — and
       // wrapping it in `beforeEach` / `afterEach` would run the test's plumbing
       // twice around one line — once for the decision and once for the step the
       // decision chose (stories/control-flow.md §"What is deliberately
@@ -1478,6 +1541,9 @@ export async function runTest(
               ? { computer: computerContextFor(config.desktop, surfaceState.adapter) }
               : {}),
           },
+          // A condition with a `condition` entry is decided by it, after its
+          // own values and before the model (decision 5).
+          ...(guardCodeBehind && { codeBehind: guardCodeBehind }),
           });
         } catch (err) {
           // `evaluateGuard` RETHROWS an abort — a stop mid-judge is a stop,
@@ -1550,6 +1616,7 @@ export async function runTest(
               error: evaluation.error,
               aiInteractions: evaluation.aiInteractions,
               loop: marker,
+              ...guardCodeBehindFields(evaluation),
             }),
             rows.guard.index,
           );
@@ -1585,7 +1652,9 @@ export async function runTest(
         }
 
         if (rows.guard?.status === 'passed' && !plan.pass) {
-          logger.success(`Step ${rows.guard.index + 1} passed`);
+          logger.success(
+            `Step ${rows.guard.index + 1} passed${evaluation.fromCodeBehind ? ' (code-behind)' : ''}`,
+          );
         }
 
         // `i++` is about to run, so aim one short of where the plan points.

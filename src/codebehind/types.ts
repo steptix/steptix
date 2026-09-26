@@ -229,7 +229,33 @@ export interface StepCodeEntry {
    * writes over this entry. An `ai: true` entry needs no `run`.
    */
   ai?: boolean;
+  /** The step's code: what it does, in place of the model's turns. */
   run?: (ctx: CodeBehindContext) => Promise<void> | void;
+  /**
+   * A CONDITION's code: whether the condition, as written, holds on the page
+   * now (stories/codebehind-loops-and-conditions.md, decision 4). The code
+   * form of the question the condition judge is asked, so a compiled `If`,
+   * `Else if`, `While` or `Repeat … until` decides with no model call.
+   *
+   * - `If` / `Else if` — true runs this member's tail (first true wins).
+   * - `While` — true runs another pass.
+   * - `Repeat X until C` — whether C holds, exactly as written: true STOPS
+   *   the loop.
+   *
+   * Read the page, never act on it: no click, fill, press or navigation. Do
+   * not wait for the state to arrive either — the framework has already
+   * waited for the page to settle, so an absent element is an answer (check
+   * `count()` before a call that would wait for its element). Anything other
+   * than `true` or `false` returned is broken code, handled like a `run` that
+   * throws: the model decides the guard and the line is flagged stale.
+   * `step.expect` / `step.fail` fail the guard for real; `step.exit()` is
+   * refused.
+   *
+   * An entry has `run` or `condition`, never both — the loader warns and
+   * drops one that has both. `Otherwise` and `For each` lines get neither:
+   * one has no condition, the other reads a list and never asks a model.
+   */
+  condition?: (ctx: CodeBehindContext) => boolean | Promise<boolean>;
 }
 
 /**
@@ -244,6 +270,15 @@ export interface StepCodeEntry {
  *     source: 'Enter the username {{username}}',
  *     async run({ page, step }) {
  *       await page.locator('#login_field').fill(step.getVar('username')!);
+ *     },
+ *   },
+ *   // A condition line — `While`, `Repeat … until`, `If`, `Else if` — gets a
+ *   // `condition` that answers true or false, read-only:
+ *   {
+ *     source: 'While the Next button is enabled, Go to the next page',
+ *     async condition({ page }) {
+ *       const next = page.getByRole('button', { name: 'Next' });
+ *       return (await next.count()) > 0 && (await next.isEnabled());
  *     },
  *   },
  * ]);

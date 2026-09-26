@@ -313,6 +313,66 @@ export interface StepResult {
     error: string;
   };
   /**
+   * A guard row's decision, structured
+   * (stories/codebehind-loops-and-conditions.md, "The guard").
+   *
+   * The verdict was prose until now (`aiExplanation`), which is why a replay
+   * could not compare one run's decision with another's. Present on a guard
+   * row for an `If` chain or a `While` / `Repeat … until` condition; absent on
+   * every ordinary step and on a `For each` row (its list is read, not
+   * decided). A guard row that FAILED before anything decided — the judge
+   * could not decide, a dotted reference the pass cannot answer — has none;
+   * one whose condition code failed has `decidedBy: 'code'` and neither
+   * `selected` nor `holds`.
+   *
+   * On a guard row, `fromCodeBehind` / `codeBehind` / `codeBehindStale` /
+   * `codeBehindHealSkipped` mean what they mean on a step: the condition's
+   * entry decided, which entry, and that it broke. `codeBehindStale` there
+   * can name a chain member OTHER than the row's own line — the row belongs to
+   * the member that held, the stale entry to the member whose code threw — so
+   * {@link staleMember} says which.
+   */
+  guard?: {
+    /**
+     * Who answered. `values` — every condition asked was decided from its own
+     * `{{…}}` values, with no page look. `code` — at least one was answered by
+     * its code-behind `condition` and none needed the model. `model` — the
+     * condition judge was asked (including after a condition entry broke).
+     */
+    decidedBy: 'model' | 'values' | 'code';
+    /** A chain: the absolute 0-based index of the member that held, or null
+     *  for none (the `Otherwise`, or nothing). Absent on a loop condition. */
+    selected?: number | null;
+    /** A loop condition: whether it held, AS WRITTEN — for `Repeat X until C`
+     *  whether C held, so `true` ended the loop. Absent on a chain. */
+    holds?: boolean;
+    /**
+     * The absolute 0-based index of the member whose code-behind broke, when
+     * `codeBehindStale` or `codeBehindHealSkipped` is set. The sidecar writers
+     * key that member's stale row to THIS index, not the row's own.
+     */
+    staleMember?: number;
+    /**
+     * The page the model decided on — only on a compiling run
+     * (`captureStepContext`), and only when the model answered: it decided
+     * (`decidedBy: 'model'`), or it was asked at a loop's cap to check the
+     * code's "carry on" and agreed (`decidedBy: 'code'`, decision 8). It is
+     * what a condition entry is generated from (decision 9).
+     */
+    evidence?: {
+      /** The DOM snapshot the judge was shown, masked as the model saw it. */
+      dom: string;
+      url: string;
+      /**
+       * Each member asked on this visit, in order: `true` for the one that
+       * held, `false` for each before it, and absent (`holds` undefined) for a
+       * member after it — never asked, first-holds-wins. A loop condition has
+       * one member: the guard itself.
+       */
+      members: Array<{ index: number; holds?: boolean }>;
+    };
+  };
+  /**
    * Page state either side of the step, captured only when the caller asked
    * for it (`captureStepContext`). This is compile's Record phase input — the
    * generator writes far better selectors with the DOM in front of it — and it

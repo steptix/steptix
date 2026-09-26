@@ -1,5 +1,5 @@
 import type { Page, BrowserContext, Browser } from 'playwright';
-import { bindVariable, interpolate } from '../parser/parameters.js';
+import { bindVariable, interpolate, placeholderRoot } from '../parser/parameters.js';
 import { envDataRefsIn, interpolateEnvData, resolveEnvDataRef, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { createCapturingLog, type CapturedLog } from '../tools/step-api.js';
 import type { CodeBehindBinding, CodeBehindVarScope } from './loader.js';
@@ -326,6 +326,174 @@ export async function runCodeBehindEntry(
 }
 
 /**
+ * True when `entry` runs as a STEP's code: it has a `run`, and the author has
+ * not opted the line out with `ai: true`.
+ *
+ * One predicate for every gate that asks "will this step execute its entry?"
+ * — `executeStep`'s own and the server's F11 step-into gate, which must agree
+ * or the server parks for a debugger ack in front of an entry that never runs.
+ * A `condition` entry is NOT step code: bound to an ordinary step it is in the
+ * wrong place, and the step runs under AI
+ * (stories/codebehind-loops-and-conditions.md, "The entry, loading and running
+ * it").
+ */
+export function isStepCode(entry: StepCodeEntry | undefined): entry is StepCodeEntry & {
+  run: NonNullable<StepCodeEntry['run']>;
+} {
+  return entry !== undefined && entry.ai !== true && typeof entry.run === 'function';
+}
+
+/** True when `entry` answers a CONDITION: it has a `condition`, and the author
+ *  has not opted the line out with `ai: true`. */
+export function isConditionCode(entry: StepCodeEntry | undefined): entry is StepCodeEntry & {
+  condition: NonNullable<StepCodeEntry['condition']>;
+} {
+  return entry !== undefined && entry.ai !== true && typeof entry.condition === 'function';
+}
+
+/**
+ * What running a `condition` entry produced
+ * (stories/codebehind-loops-and-conditions.md, decision 7).
+ *
+ * The failure fields mean what they mean on {@link CodeBehindOutcome}, so the
+ * guard reads them with the step path's rules: broken code (a throw, or a
+ * value that is not a boolean) heals under the model, an `expectationFailed`
+ * is a real failure of the guard, and `nonRetryable` is a fact about the world
+ * that no model can change.
+ */
+export interface CodeBehindConditionOutcome {
+  status: 'passed' | 'failed';
+  /** The answer — present exactly when `status` is `passed`. Whether the
+   *  condition, as written, holds on the page now. */
+  value?: boolean;
+  /** A `step.expect` or `step.fail` failed — the guard fails, never healed. */
+  expectationFailed: boolean;
+  /** It was `step.fail(message)` rather than `step.expect`. */
+  deliberate?: boolean;
+  /** A `step.filePath` that could not resolve, or a `step.exit()` — which a
+   *  condition never claims. The entry is not broken; the guard fails. */
+  nonRetryable?: boolean;
+  nonRetryableKind?: CodeBehindNonRetryableKind;
+  error?: string;
+  logs: CapturedLog[];
+  durationMs: number;
+}
+
+/** The one-line refusal a condition entry's non-boolean answer gets. */
+export function nonBooleanConditionError(value: unknown): string {
+  return `returned ${describeReturned(value)}; a condition must return true or false`;
+}
+
+/**
+ * What a non-boolean return WAS, in two or three words.
+ *
+ * Deliberately never the value itself: a condition that returns
+ * `page.textContent(...)` by mistake would otherwise put a piece of the page —
+ * a balance, a name, a token — into the stale flag, the report and the wire.
+ */
+function describeReturned(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'an array';
+  switch (typeof value) {
+    case 'string': return value === '' ? 'an empty string' : 'a string';
+    case 'number': return Number.isNaN(value) ? 'NaN' : 'a number';
+    case 'object': return 'an object';
+    case 'function': return 'a function';
+    case 'bigint': return 'a bigint';
+    case 'symbol': return 'a symbol';
+    default: return typeof value;
+  }
+}
+
+/**
+ * Execute a `condition` entry: the code form of the condition judge's question
+ * (stories/codebehind-loops-and-conditions.md, decisions 4 and 7).
+ *
+ * Same context and step API as {@link runCodeBehindEntry}, with two
+ * differences that follow from what a condition is:
+ *
+ *  - the answer is the RETURN VALUE, and anything but a boolean is broken
+ *    code — never coerced, because `"false"` is truthy and a condition that
+ *    returned a string by mistake would run the loop forever;
+ *  - `step.exit()` is refused. No flow-control claim is ever passed, so the
+ *    call fails non-retryably exactly as it does on any step that does not
+ *    claim a return: a condition answers, it does not end the flow.
+ *
+ * Never throws — the guard decides what a failure means.
+ */
+export async function runCodeBehindCondition(
+  options: Omit<RunCodeBehindOptions, 'flowControlClaim' | 'pauseBeforeRun'>,
+): Promise<CodeBehindConditionOutcome> {
+  const start = Date.now();
+  const logs: CapturedLog[] = [];
+  const entry = options.binding.entry;
+
+  if (typeof entry?.condition !== 'function') {
+    return {
+      status: 'failed',
+      expectationFailed: false,
+      durationMs: 0,
+      logs,
+      error: 'Code-behind entry has no `condition` function',
+    };
+  }
+
+  const ctx: CodeBehindContext = {
+    page: options.page,
+    context: options.context,
+    browser: options.browser,
+    step: makeStepApi(
+      options.binding.scope,
+      options.resolvedParameters,
+      // A condition writes nothing the report shows; a `setVar` still lands in
+      // the live map, like any entry's.
+      {},
+      options.envData,
+      options.uploadPaths,
+      false,
+    ),
+    log: createCapturingLog(options.label, logs),
+    tabs: options.tabs ?? unavailableTabApi(),
+    browsers: options.browsers ?? unavailableBrowserApi(),
+    ...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
+  };
+
+  try {
+    const value: unknown = await Promise.resolve(entry.condition(ctx));
+    if (typeof value !== 'boolean') {
+      return {
+        status: 'failed',
+        expectationFailed: false,
+        durationMs: Date.now() - start,
+        logs,
+        error: nonBooleanConditionError(value),
+      };
+    }
+    return {
+      status: 'passed',
+      value,
+      expectationFailed: false,
+      durationMs: Date.now() - start,
+      logs,
+    };
+  } catch (err) {
+    return {
+      status: 'failed',
+      expectationFailed: err instanceof CodeBehindExpectationError,
+      ...(err instanceof CodeBehindDeliberateFailure && { deliberate: true }),
+      durationMs: Date.now() - start,
+      logs,
+      error: err instanceof Error ? err.message : String(err),
+      ...(isNonRetryable(err) && {
+        nonRetryable: true,
+        nonRetryableKind: nonRetryableKindOf(err),
+      }),
+    };
+  }
+}
+
+/**
  * The frame-aware variable view.
  *
  * Generated code is written **once per skill**, not per invocation, so it uses
@@ -337,7 +505,9 @@ export async function runCodeBehindEntry(
  *
  *  1. the frame's rename table (internal names + output aliases),
  *  2. the frame's captured inputs (declared parameters),
- *  3. the bare name,
+ *  3. the bare name — and then, for a dotted name that missed all three, the
+ *     same name with its ROOT renamed (`order.id` → `__skill3_order.id`: a
+ *     `For each {{order}}` inside a skill body binds the scoped keys),
  *  4. the environment: `data.url`, `env.BASE_URL`, `<source>.path`,
  *     `envName` — the name inside a `${...}` placeholder, resolved against
  *     the run's context the way the parser resolved the placeholder
@@ -401,6 +571,18 @@ function makeStepApi(
         ? resolvedParameters[name]
         : undefined;
       if (bare !== undefined) return bare;
+      // A DOTTED name whose root the frame renames — `order.id` inside a
+      // skill body whose `For each {{order}}` the expander rewrote to
+      // `{{__skill3_order}}`. The pass bound `__skill3_order.id`, and no map
+      // holds `order.id` under any name, so without this the entry answered
+      // `undefined` on exactly the step the loop exists to vary
+      // (stories/codebehind-loops-and-conditions.md, "The entry, loading and
+      // running it"). Only after the whole name missed everywhere, so a map
+      // that really binds the dotted name still wins.
+      const scoped = dottedThroughRename(name, scope.renames);
+      if (scoped !== undefined && Object.hasOwn(resolvedParameters, scoped)) {
+        return resolvedParameters[scoped];
+      }
       return envData ? resolveEnvDataRef(name, envData) : undefined;
     },
     setVar(name, value) {
@@ -468,5 +650,24 @@ function makeStepApi(
  * that ran is the one shown, even when the file has since been edited.
  */
 export function entrySourceText(entry: StepCodeEntry): string {
-  return entry.run ? String(entry.run) : '(no run function)';
+  if (entry.run) return String(entry.run);
+  if (entry.condition) return String(entry.condition);
+  return '(no run function)';
+}
+
+/**
+ * `order.id` → `__skill3_order.id` when the frame renames `order`, or
+ * undefined when the name is flat or its root is not renamed.
+ *
+ * Own properties only, for the reason `getVar` gives: `constructor.x` must not
+ * find `Object.prototype.constructor` as a rename.
+ */
+function dottedThroughRename(
+  name: string,
+  renames: Record<string, string>,
+): string | undefined {
+  const root = placeholderRoot(name);
+  if (root === name) return undefined;
+  const renamed = Object.hasOwn(renames, root) ? renames[root] : undefined;
+  return renamed === undefined ? undefined : `${renamed}${name.slice(root.length)}`;
 }

@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { StepStatus } from '../report/types.js';
 import { logger } from '../utils/logger.js';
-import { resolveCodeBehindCacheDir } from './loader.js';
+import { resolveCodeBehindCacheDir, type CodeBehindBinding } from './loader.js';
 
 /**
  * The per-test last-run sidecar (stories/codebehind-compile.md, "The runtime
@@ -98,6 +98,44 @@ export interface LastRunSidecar {
   /** ISO 8601 timestamp of the run. */
   ranAt: string;
   steps: LastRunStep[];
+}
+
+/**
+ * The stale row for a guard's MEMBER whose condition entry broke, when that
+ * member is not the guard row's own line
+ * (stories/codebehind-loops-and-conditions.md, "The run loops").
+ *
+ * A chain's guard row belongs to the member that HELD, and the model may pick
+ * member C after member B's code threw. The row for C is not stale — C's entry
+ * did nothing wrong — so B's failure gets a row of its own, keyed to B's
+ * binding: that is the identity `--only-stale` and the repair look an entry up
+ * by. Both sidecar writers build it here, so the two cannot drift.
+ */
+export function lastRunStaleMemberRow(args: {
+  /** The member's absolute 0-based expanded index (`guard.staleMember`). */
+  index: number;
+  binding: CodeBehindBinding | undefined;
+  /** The member's authored text, for a member with no binding. */
+  fallbackSource: string;
+  /** The guard visit's outcome — the member's condition is part of it. */
+  status: StepStatus;
+  error: string;
+  /** Nothing healed it (a keyless run) — see {@link LastRunStep.healSkipped}. */
+  healSkipped: boolean;
+}): LastRunStep {
+  const { binding } = args;
+  return {
+    index: args.index + 1,
+    source: binding?.source ?? args.fallbackSource,
+    ...(binding?.section !== undefined && { section: binding.section }),
+    ...(binding?.file !== undefined && { file: binding.file }),
+    ...(binding?.occurrence !== undefined && { occurrence: binding.occurrence }),
+    status: args.status,
+    fromCodeBehind: false,
+    stale: true,
+    error: args.error,
+    ...(args.healSkipped && { healSkipped: true }),
+  };
 }
 
 /** `tests/github.md` → `tests/.aiui-codebehind-cache/github.last-run.json`. */
