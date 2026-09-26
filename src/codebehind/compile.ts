@@ -17,13 +17,15 @@ import { buildCodeBehindRegistry } from './loader.js';
 import {
   aiEntryFor,
   anyActionCarriesPlaceholder,
-  askForEntry,
+  askWithCaptureRetry,
+  capturedValueGuards,
   compilableCondition,
   generateConditionEntry,
   generateStepEntry,
   guardedValues,
   loopContextFor,
   pickConditionObservations,
+  recordedCapturesOf,
   refuseReason,
   stepEnvRefs,
   stepParameters,
@@ -915,6 +917,9 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       candidateFile: (await candidate.read(step.binding!.file)) ?? undefined,
       ...contextOf(result),
       ...(loop && { loop }),
+      // What the evidence pass captured: the result the entry must reproduce,
+      // and a value the leak guard refuses to see written in.
+      recordedCaptures: recordedCapturesOf(step.binding, result?.outputs),
     });
     const applied = await applyGenerated(candidate, step, generated, stepEvent, 'generate');
     if (applied.kind === 'entry' && applied.references) {
@@ -1413,6 +1418,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
               // The recording's captured list, when the step is blamed for a
               // `For each` that ran a different number of passes over it.
               ...(failed.passCount && { expected: failed.passCount.expected }),
+              // What the RECORDING captured on the pass that failed — never
+              // the failing row's own outputs, which are what the broken
+              // entry stored.
+              recordedCaptures: recordedCapturesAt(
+                failed.step,
+                failed.result,
+                runRows(outcome).passes[failed.step.index] ?? [],
+                recordedAt(failed.step.index),
+                record.steps[failed.step.index],
+              ),
             },
           );
     proven.delete(failed.step.key!);
@@ -2850,13 +2865,16 @@ async function repairStep(
     /** What the recording captured where this entry's replay captured
      *  something else (decision 11's pass-count check), already masked. */
     expected?: RepairPromptInput['expected'];
+    /** What the recording captured on the failing pass, RAW, by authored
+     *  capture name ({@link recordedCapturesAt}). */
+    recordedCaptures?: Record<string, string> | undefined;
   } = {},
 ): Promise<GeneratedEntry> {
   const parameters = stepParameters(step.binding!, values, options.test.envData);
   // The step passed Generate, so every reference it makes resolved there;
   // the repair sees the same list, and the same guard.
   const envRefs = stepEnvRefs(step.binding!, options.test.envData).resolved;
-  const prompt = buildRepairPrompt({
+  const repairInput: RepairPromptInput = {
     rawStepText: step.text,
     stepIndex: step.number,
     entryCode: candidate.entryTextFor(step) ?? '(entry unavailable)',
@@ -2875,21 +2893,57 @@ async function repairStep(
     round,
     ...(extras.loop && { loop: extras.loop }),
     ...(extras.expected && { expected: extras.expected }),
-  });
-  return askForEntry(
+    ...(extras.recordedCaptures && { recordedCaptures: extras.recordedCaptures }),
+  };
+  const { result } = await askWithCaptureRetry(
     options.aiClient,
     options.contextContent,
-    prompt,
-    // The authored line, exactly as generation passes it: a value the author
-    // QUOTED in the step is the author's, so an entry echoing it is repeating the
-    // step rather than inlining a resolved value (`guardedValues` /
-    // `authorQuotedLiterals`, generate.ts). Without it, `If {{a}} is "peanuts"
-    // then fail …` with `{{a}}` = `peanuts` cannot be repaired at all — every
-    // candidate contains `peanuts`, so each was discarded as a leak and the step
-    // was written off `ai: true` after `maxRounds`
-    // (stories/step-failure-outcomes.md, decisions 3 and 10).
-    guardedValues(parameters, envRefs, step.text),
+    (retry) => buildRepairPrompt({ ...repairInput, ...(retry && { retry }) }),
+    [
+      // The authored line, exactly as generation passes it: a value the author
+      // QUOTED in the step is the author's, so an entry echoing it is repeating the
+      // step rather than inlining a resolved value (`guardedValues` /
+      // `authorQuotedLiterals`, generate.ts). Without it, `If {{a}} is "peanuts"
+      // then fail …` with `{{a}}` = `peanuts` cannot be repaired at all — every
+      // candidate contains `peanuts`, so each was discarded as a leak and the step
+      // was written off `ai: true` after `maxRounds`
+      // (stories/step-failure-outcomes.md, decisions 3 and 10).
+      ...guardedValues(parameters, envRefs, step.text),
+      // …and what the recording captured, which a repair shown it must read
+      // from the page rather than store.
+      ...capturedValueGuards(extras.recordedCaptures, step.text),
+    ],
     options.signal,
+  );
+  return result;
+}
+
+/**
+ * What the RECORDING captured for a step whose replay failed on `failedRow` —
+ * the result its repair must reproduce.
+ *
+ * The recording's row for the SAME pass: the failing row's place among the
+ * replay's rows for this index, then that place among the recording's. A body
+ * step reading the amount due on pass 2 of a `While` is repaired against pass
+ * 2's page, and pass 1's value would tell it to produce the wrong one. When
+ * the recording has no row at that place, or it captured nothing, the evidence
+ * row — the one generation was shown — answers.
+ *
+ * Never the failing row's own `outputs`: those are what the broken entry
+ * stored.
+ */
+function recordedCapturesAt(
+  step: CompileStep,
+  failedRow: StepResult | undefined,
+  replayRows: readonly StepResult[],
+  recordedRows: readonly StepResult[],
+  evidenceRow: StepResult | undefined,
+): Record<string, string> | undefined {
+  const at = failedRow !== undefined ? replayRows.indexOf(failedRow) : -1;
+  const samePass = at >= 0 ? recordedRows[at] : undefined;
+  return (
+    recordedCapturesOf(step.binding, samePass?.outputs)
+    ?? recordedCapturesOf(step.binding, evidenceRow?.outputs)
   );
 }
 
@@ -2930,7 +2984,10 @@ async function repairHealedStep(
   }
   const parameters = stepParameters(binding, values, options.test.envData);
   const ctx = result.stepContext;
-  const prompt = buildRepairPrompt({
+  // What the healed pass captured under AI — the answer the broken entry was
+  // meant to produce, which the repair must reproduce and must not write in.
+  const recordedCaptures = recordedCapturesOf(binding, result.outputs);
+  const repairInput: RepairPromptInput = {
     rawStepText: step.text,
     stepIndex: step.number,
     entryCode,
@@ -2942,14 +2999,19 @@ async function repairHealedStep(
     secrets: promptSecrets(values, options.test.envData),
     ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
     ...(loop && { loop }),
-  });
-  return askForEntry(
+    ...(recordedCaptures && { recordedCaptures }),
+  };
+  const { result: repaired } = await askWithCaptureRetry(
     options.aiClient,
     options.contextContent,
-    prompt,
-    guardedValues(parameters, envRefs.resolved, binding.source),
+    (retry) => buildRepairPrompt({ ...repairInput, ...(retry && { retry }) }),
+    [
+      ...guardedValues(parameters, envRefs.resolved, binding.source),
+      ...capturedValueGuards(recordedCaptures, binding.source),
+    ],
     options.signal,
   );
+  return repaired;
 }
 
 /** Every parameter value in play, for the review's leak guard. Unlike the

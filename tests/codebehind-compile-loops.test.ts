@@ -1465,4 +1465,95 @@ describe("aiui compile — a replay whose loop runs a different number of passes
       `step 2 ("${WHILE_LINE}") ran 2 passes on the replay and 3 passes on the recording`,
     ]);
   });
+
+  // ── What the recording captured, before any replay can disagree ──────────
+  //
+  // The pass-count check above catches a wrong list in REPLAY. Run & Compile
+  // has no replay, so generation itself is shown what the recording read and
+  // may not write it in — measured on a real-model Run & Compile of
+  // control-flow.md, which stored nine values where the recording read three.
+
+  const CLEAN_READ =
+    `{ source: ${JSON.stringify(READ)}, async run({ page, step }) { ` +
+    "const names = page.locator('#account-list > li > span > span:first-child'); " +
+    "await names.first().waitFor(); step.setVar('accounts', JSON.stringify(await names.allTextContents())); } }";
+
+  /** `fakeAi`, with READ's prompts of one kind answered from `answers` in turn. */
+  function readAnswers(
+    answers: string[],
+    kind: (prompt: string) => boolean,
+  ): { client: AiClient; prompts: string[] } {
+    const { prompts, client: base } = fakeAi();
+    const client = {
+      complete: async (messages: ChatMessage[]) => {
+        const response = await (base as unknown as { complete: (m: ChatMessage[]) => Promise<{ text: string }> }).complete(messages);
+        const prompt = prompts.at(-1)!;
+        if (!isReview(prompt) && kind(prompt) && sourceOf(prompt) === READ && answers.length > 0) {
+          return { text: JSON.stringify({ entry: answers.shift() }), model: 'stub-model' };
+        }
+        return response;
+      },
+    } as unknown as AiClient;
+    return { client, prompts };
+  }
+
+  it('shows generation what the recording captured, and refuses an entry that writes it in for the clean re-ask', async () => {
+    const md = await write('accounts.md', listMd(READ));
+    const test = await parseTestFile(md);
+    const { client, prompts } = readAnswers(
+      [`{ source: ${JSON.stringify(READ)}, async run({ step }) { step.setVar('accounts', '${RECORDED}'); } }`, CLEAN_READ],
+      (p) => !isStepRepair(p),
+    );
+    const { runner } = scriptedRunner(recordOf(readRow(RECORDED)), [
+      replayOf(codeRow(1, { outputs: { accounts: RECORDED } }), RECORDED),
+    ]);
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true });
+
+    const asked = prompts.filter((p) => !isReview(p) && sourceOf(p) === READ);
+    expect(asked).toHaveLength(2);
+    expect(asked[0]).toContain(
+      `- \`step.setVar('accounts', ...)\` — the recording captured a list of 3 items: ${RECORDED}`,
+    );
+    expect(asked[0]).toContain('**Match what the recording captured.**');
+    expect(asked[1]).toContain('## Your previous answer was refused');
+    expect(asked[1]).toContain("step.setVar('accounts', '***')");
+    expect(result.status).toBe('green');
+    const proposal = Object.values(result.files).join('\n');
+    expect(proposal).toContain('allTextContents');
+    for (const name of ['Everyday', 'Savings', 'Travel']) expect(proposal).not.toContain(name);
+  });
+
+  it("repairs a failed read against the RECORDING's value, never what the broken entry stored, and holds it to the guard", async () => {
+    const md = await write('accounts.md', listMd(READ));
+    const test = await parseTestFile(md);
+    const { client, prompts } = readAnswers(
+      [
+        // The repair's first answer writes one item in, in a comment.
+        `{ source: ${JSON.stringify(READ)}, async run({ page, step }) { /* expect Everyday first */ ` +
+          "step.setVar('accounts', JSON.stringify(await page.locator('#x').allTextContents())); } }",
+        CLEAN_READ,
+      ],
+      isStepRepair,
+    );
+    const { runner } = scriptedRunner(recordOf(readRow(RECORDED)), [
+      // The generated read throws on the replay, having stored six values.
+      outcome([codeRow(1, { status: 'failed', error: 'strict mode violation: resolved to 9 elements', outputs: { accounts: SIX } })], 4),
+      replayOf(codeRow(1, { outputs: { accounts: RECORDED } }), RECORDED),
+    ]);
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true });
+
+    const repairs = prompts.filter((p) => isStepRepair(p) && sourceOf(p) === READ);
+    expect(repairs).toHaveLength(2);
+    expect(repairs[0]).toContain(
+      `## Values this step must capture\n- \`step.setVar('accounts', ...)\` — the recording captured a list of 3 items: ${RECORDED}`,
+    );
+    expect(repairs[0]).not.toContain('4111');
+    expect(repairs[1]).toContain('## Your previous answer was refused');
+    expect(repairs[1]).toContain('/* expect *** first */');
+    expect(result.status).toBe('green');
+    expect(result.summary.rounds).toBe(2);
+    expect(Object.values(result.files).join('\n')).not.toContain('Everyday');
+  });
 });

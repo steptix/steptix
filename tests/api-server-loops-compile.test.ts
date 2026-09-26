@@ -106,6 +106,10 @@ const run = vi.hoisted(() => ({
   /** The judge's scripted verdicts, in order. `null` is "none held". */
   judgeScript: [] as Array<number | null>,
   judgeCalls: 0,
+  /** What a `[store as: <name>]` step's read captures, by name: the executor
+   *  binds it into the run's map and records the read that wrote it, as a
+   *  real read does. */
+  captures: new Map<string, string>(),
 }));
 
 vi.mock('../src/runner/step-executor.js', async (importOriginal) => ({
@@ -115,11 +119,54 @@ vi.mock('../src/runner/step-executor.js', async (importOriginal) => ({
     stepIndex: number,
     _total: number,
     instruction: string,
-    opts: { codeBehind?: { entry?: { run?: unknown } }; captureStepContext?: boolean },
+    opts: {
+      codeBehind?: { entry?: { run?: unknown } };
+      captureStepContext?: boolean;
+      resolvedParameters?: Record<string, string>;
+    },
   ): Promise<StepResult> => {
     run.executed.push(instruction);
     const n = (run.perInstruction.get(instruction) ?? 0) + 1;
     run.perInstruction.set(instruction, n);
+    const storeAs = /\[store as: (\w+)\]/.exec(instruction)?.[1];
+    const captured = storeAs !== undefined ? run.captures.get(storeAs) : undefined;
+    if (storeAs !== undefined && captured !== undefined && opts.resolvedParameters) {
+      opts.resolvedParameters[storeAs] = captured;
+      return {
+        index: stepIndex,
+        instruction,
+        status: 'passed',
+        turns: [
+          {
+            turnNumber: 1,
+            attemptNumber: 1,
+            timestamp: new Date().toISOString(),
+            aiInteractions: [],
+            subActions: [
+              {
+                index: 1,
+                action: {
+                  action: 'read',
+                  selector: '#account-list > li[data-testid="account-row"] > span > span:first-child',
+                  multiple: true,
+                  as: storeAs,
+                },
+                durationMs: 1,
+              },
+            ],
+          },
+        ],
+        durationMs: 5,
+        retried: false,
+        aiExplanation: 'read',
+        ...(opts.captureStepContext === true && {
+          stepContext: {
+            domBefore: '<ul id="account-list"><li data-testid="account-row"><span><span>Everyday</span><span>•••• 1111</span></span></li></ul>',
+            urlBefore: 'https://example.com/accounts',
+          },
+        }),
+      } as StepResult;
+    }
     // A step whose binding carries a `run` entry "ran as code".
     if (typeof opts.codeBehind?.entry?.run === 'function') {
       return {
@@ -180,7 +227,12 @@ vi.mock('../src/context/loader.js', () => ({
   loadContextFiles: vi.fn(async () => ({ files: [], combined: '' })),
 }));
 
-const ai = vi.hoisted(() => ({ prompts: [] as string[] }));
+const ai = vi.hoisted(() => ({
+  prompts: [] as string[],
+  /** Scripted entry bodies per step source, answered in turn before the
+   *  default: `async run({ page, step }) { <body> }`. */
+  scripted: new Map<string, string[]>(),
+}));
 vi.mock('../src/ai/client.js', () => ({
   AiClient: class {
     chat = vi.fn(async () => '{}');
@@ -197,6 +249,12 @@ vi.mock('../src/ai/client.js', () => ({
       // earlier one can be an entry of the candidate file the prompt embeds.
       const quoted = [...last.matchAll(/\n\s*source:\s*("(?:[^"\\]|\\.)*")/g)].at(-1);
       const source = quoted?.[1] ? (JSON.parse(quoted[1]) as string) : 'step';
+      const scripted = ai.scripted.get(source)?.shift();
+      if (scripted !== undefined) {
+        return {
+          text: JSON.stringify({ entry: `{ source: ${JSON.stringify(source)}, async run({ page, step }) { ${scripted} } }` }),
+        };
+      }
       const entry = isConditionPrompt(last)
         ? `{ source: ${JSON.stringify(source)}, async condition({ page }) { const next = page.getByRole('button', { name: 'Next' }); return (await next.count()) > 0 && (await next.isEnabled()); } }`
         : `{ source: ${JSON.stringify(source)}, async run({ page }) { await page.click('#go'); } }`;
@@ -293,7 +351,9 @@ beforeEach(() => {
   run.perInstruction.clear();
   run.judgeScript = [];
   run.judgeCalls = 0;
+  run.captures.clear();
   ai.prompts.length = 0;
+  ai.scripted.clear();
   pageState.nextEnabled = [];
 });
 
@@ -531,6 +591,68 @@ describe('a For each body step', () => {
     const result = compileResult(frames);
     expect(sourcesIn(result.files[steps]!)).toEqual(['Open the accounts page', BODY]);
     expect(result.summary.totalSteps).toBe(2);
+  }, CASE_TIMEOUT);
+});
+
+// ── What the recording captured ──────────────────────────────────────────────
+
+describe('the step that reads a For each\'s list', () => {
+  const READ = 'Read the name of every account in the Your accounts panel [store as: accounts]';
+  const FOR_EACH = 'For each {{account}} in {{accounts}}, Check the account';
+  const BODY = 'Click the account named "{{account}}"';
+  const RECORDED = '["Everyday","Savings","Travel"]';
+  const CLEAN =
+    "const names = page.locator('#account-list > li[data-testid=\"account-row\"] > span > span:first-child'); " +
+    "await names.first().waitFor(); step.setVar('accounts', JSON.stringify(await names.allTextContents()));";
+
+  // Measured on a real-model Run & Compile of control-flow.md: the prompt named
+  // `accounts` and never its value, and the entry matched each row's three
+  // spans — nine values where the recording read three, so the replay's
+  // `For each` ran nine passes and nothing said so.
+  it('is shown what the recording captured, and an entry that writes it in is refused for the clean re-ask', async () => {
+    const { md, steps } = await project('recorded-capture');
+    run.captures.set('accounts', RECORDED);
+    ai.scripted.set(READ, [`step.setVar('accounts', '${RECORDED}');`, CLEAN]);
+
+    const frames = await collect({
+      steps: ['Open the accounts page', READ, FOR_EACH],
+      sourceLines: [3, 4, 5],
+      testFilePath: md,
+      sections: {
+        'check the account': { name: 'Check the account', headingLine: 7, steps: [BODY], stepLines: [8] },
+      },
+      compile: 'run',
+    });
+
+    expect(frames.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+    // The list the run captured drove the loop, as a real read would.
+    expect(run.executed).toEqual([
+      'Open the accounts page',
+      READ,
+      'Click the account named "Everyday"',
+      'Click the account named "Savings"',
+      'Click the account named "Travel"',
+    ]);
+
+    const asked = promptFor(READ);
+    expect(asked).toHaveLength(2);
+    // The value beside the name it is stored under, with the rule.
+    expect(asked[0]).toContain(
+      `- \`step.setVar('accounts', ...)\` — the recording captured a list of 3 items: ${RECORDED}`,
+    );
+    expect(asked[0]).toContain('**Match what the recording captured.**');
+    // The first answer stored the recording's answer as a constant: refused,
+    // and re-asked with the reason and its own answer, the value masked out.
+    expect(asked[1]).toContain('## Your previous answer was refused');
+    expect(asked[1]).toContain('The entry writes the value the recording captured into {{accounts}}');
+    expect(asked[1]).toContain("step.setVar('accounts', '***')");
+
+    const result = compileResult(frames);
+    const file = result.files[steps]!;
+    expect(file).toContain('allTextContents');
+    for (const name of ['Everyday', 'Savings', 'Travel']) expect(file).not.toContain(name);
+    // A refusal the re-ask recovered from is not a generation error.
+    expect(result.summary.error).toBeUndefined();
   }, CASE_TIMEOUT);
 });
 

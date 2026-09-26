@@ -24,12 +24,14 @@ import {
 } from './candidate.js';
 import {
   anyActionCarriesPlaceholder,
-  askForEntry,
+  askWithCaptureRetry,
+  capturedValueGuards,
   compilableCondition,
   generateConditionEntry,
   generateStepEntry,
   guardedValues,
   loopContextFor,
+  recordedCapturesOf,
   refuseReason,
   SET_STEP_NOT_COMPILED,
   SURFACE_SWITCH_NOT_COMPILED,
@@ -43,7 +45,7 @@ import {
 } from './generate.js';
 import type { StepCodeEntry } from './types.js';
 import { isConditionCode, isStepCode } from './execute.js';
-import { buildRepairPrompt } from './repair.js';
+import { buildRepairPrompt, type RepairPromptInput } from './repair.js';
 import { readLastRun, type LastRunStep } from './last-run.js';
 import { entryTextIn } from './writer.js';
 import type { CodeBehindBinding } from './loader.js';
@@ -1583,6 +1585,9 @@ export class LiveCompiler {
       candidateFile: (await this.candidate.read(binding.file)) ?? undefined,
       ...contextOf(input.result),
       ...(loop && { loop }),
+      // What this pass captured — the result the entry must reproduce, and a
+      // value the leak guard refuses to see written in.
+      recordedCaptures: recordedCapturesOf(binding, input.result.outputs),
     });
   }
 
@@ -1622,7 +1627,10 @@ export class LiveCompiler {
       ? loopContextFor(loopAt.line, input.result.loop?.values ?? input.resolvedParameters, loopAt.runtimeItem)
       : undefined;
     const ctx = input.result.stepContext;
-    const prompt = buildRepairPrompt({
+    // What the healed pass captured under AI — the answer the broken entry was
+    // meant to produce, which the repair must reproduce and must not write in.
+    const recordedCaptures = recordedCapturesOf(binding, input.result.outputs);
+    const repairInput: RepairPromptInput = {
       rawStepText: step.text,
       stepIndex: step.number,
       entryCode,
@@ -1644,21 +1652,26 @@ export class LiveCompiler {
       // the repaired entry replays on every pass, so what changes per pass is
       // read with `step.getVar`, never the healed pass's item.
       ...(loop && { loop }),
-    });
-    return askForEntry(
+      ...(recordedCaptures && { recordedCaptures }),
+    };
+    const { result } = await askWithCaptureRetry(
       this.options.aiClient,
       this.options.contextContent,
-      prompt,
-      // The authored line, exactly as generation passes it (`askModel` below,
-      // and `guardedValues` / `authorQuotedLiterals` in generate.ts): a value the
-      // AUTHOR quoted in the step is the author's, so an entry echoing it is
-      // repeating the step rather than inlining a resolved value. Without it a
-      // stale `If {{a}} is "peanuts" then fail …` could not be repaired at all —
-      // every candidate contains `peanuts`, so every one was discarded as a leak
-      // (stories/step-failure-outcomes.md, decisions 3 and 10).
-      guardedValues(parameters, envRefs.resolved, binding.source),
+      (retry) => buildRepairPrompt({ ...repairInput, ...(retry && { retry }) }),
+      [
+        // The authored line, exactly as generation passes it (`askModel` below,
+        // and `guardedValues` / `authorQuotedLiterals` in generate.ts): a value the
+        // AUTHOR quoted in the step is the author's, so an entry echoing it is
+        // repeating the step rather than inlining a resolved value. Without it a
+        // stale `If {{a}} is "peanuts" then fail …` could not be repaired at all —
+        // every candidate contains `peanuts`, so every one was discarded as a leak
+        // (stories/step-failure-outcomes.md, decisions 3 and 10).
+        ...guardedValues(parameters, envRefs.resolved, binding.source),
+        ...capturedValueGuards(recordedCaptures, binding.source),
+      ],
       this.signal,
     );
+    return result;
   }
 
   private async generate(step: CompileStep, ask: () => Promise<GeneratedEntry>): Promise<void> {

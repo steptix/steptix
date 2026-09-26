@@ -146,7 +146,10 @@ from the page the model saw on that visit.
    (`takenKeys`). The boxed compiler does not — it keeps the last row per
    expanded index, so it generated from the final pass: the page where the
    `While` had just gone false, and the last `For each` item. It changes to
-   the first usable pass.
+   the first usable pass. What that pass captured is shown to generation as
+   the result to reproduce, and refused if written in — added after a live
+   run read a `For each`'s list as nine values where the recording read three
+   (see "What the live half decided").
 
 2. **What changes per pass is read, never inlined.** A step inside a loop
    body is generated with a line in the prompt naming the loop and the values
@@ -683,6 +686,48 @@ sections above leave open.
   "generated"** (review round 1). A body line generated on pass 1 and decided
   against on pass 2 owes nothing, and its skip no longer logs the refusal after
   its own "generated" line; a line skipped on every pass says it once.
+- **Generation is shown what the recording captured, and may not write it
+  in** (after the live pass). A real-model Run & Compile of `control-flow.md`
+  compiled step 11, `Read the name of every account in the Your accounts
+  panel [store as: accounts]`, to a locator over each row's spans — the
+  outer one, the name and the masked number — so the entry stored nine values
+  where the recording's read (`#account-list > li[data-testid="account-row"] >
+  span > span:first-child`) stored three, and the replay's `For each` ran nine
+  passes without a word. Two of three live runs wrote a correct entry. The
+  prompt had named `accounts` and never its value, so the model had nothing to
+  check its selector against, and Run & Compile has no replay to catch it
+  (decision 11's pass-count check is the boxed compile's). Now:
+  - Every step prompt and every repair prompt, on both paths, shows each
+    capture's recorded value beside its `step.setVar` — a list with its item
+    count, JSON as the run stored it — masked exactly as the parameter block
+    masks a value (by the capture's name, by record shape, by the run's mask
+    set), clipped only after masking. One rule under them: produce exactly
+    that value from that page, the same number of items and the same text;
+    narrow a selector that would match anything else, preferring the recorded
+    read's; never write the value in, even in a comment.
+  - Where the value comes from: the evidence row's `outputs`, read through the
+    frame's rename (`recordedCapturesOf`) — for a live repair and a healed
+    boxed pass, the pass that healed under AI; for a boxed replay repair, the
+    RECORDING's row for the pass that failed (`recordedCapturesAt`), never
+    what the broken entry stored. A name the pass-count block already states
+    is not shown twice.
+  - The leak guard holds each recorded value, and each string item of a JSON
+    list, matched as a whole token (`containsAsToken`: `100` is not in `1000`)
+    with the usual three-character floor — never `***`, `(empty)`, `true`,
+    `false` or `null`, and never a value the step's own line says, quoted (the
+    `authorQuotedLiterals` exemption) or as a whole word (`Read the label of
+    the Submit button` may find the button by `Submit`). An answer it refuses
+    is asked again ONCE, with the reason and its own code, every recorded
+    value masked out (`askWithCaptureRetry`); a second refusal is the
+    ordinary leak error. Generation's re-ask is shared with its static
+    backstops. A parameter leak is refused as before, with no re-ask.
+  - The review pass is unchanged: its guard is the whole run's map across the
+    whole file, where an item word in another step's entry (`Click the
+    Savings tab`) is legitimate.
+
+  What this cannot do is make a model's selector right. The TestBench live
+  test therefore keeps the `While` and `Repeat` pass counts strict and only
+  warns — naming step 11's entry — when the `For each` does not run three.
 - **Known limit: `kept` counts per block.** A run split by a block boundary
   inside a loop body (a breakpoint continuation) can count one body line once
   per block — reported by review, not reproduced through a real client, and
@@ -766,9 +811,12 @@ something the sections above leave open, or departed from them.
     […]"*. It is not proven that round, and its repair prompt gains *"What the
     recording captured"*: the recorded value (the recording's writer row's
     `outputs`, masked as a prompt masks it) and both counts, with the rule to
-    read it from the page and never write it in. The values are not added to
-    the leak guard: its substring test would fail the whole compile on an
-    item word in a comment.
+    read it from the page and never write it in. Round 2 kept the values out
+    of the leak guard, whose substring test would fail the whole compile on an
+    item word in a comment; since then every generation and repair guards the
+    step's recorded captures — as whole tokens, with one re-ask before the
+    refusal stands (see "What the live half decided", *Generation is shown
+    what the recording captured*).
   - A `For each` whose writer is not this compile's (a tool, an AI step, a
     kept entry, or nothing in the replay) — a warning: *"step 12 (…) ran 6
     passes on the replay and 3 passes on the recording: {{accounts}} came

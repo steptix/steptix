@@ -1154,6 +1154,16 @@ export interface StepCodePromptInput {
   }>;
   /** `[as: x]` / `[store as: x]` capture names the step is expected to write. */
   captures?: string[];
+  /**
+   * What each capture held on the recorded pass, by the name in `captures` —
+   * the ground truth the entry's read must reproduce
+   * (stories/codebehind-loops-and-conditions.md, "What the live half decided":
+   * a read told only the NAME wrote a selector that matched nine spans where
+   * the recording read three names). RAW values: the prompt masks them as its
+   * parameter block masks a value. A name with no recorded value is listed as
+   * before, and a prompt with none at all is unchanged.
+   */
+  recordedCaptures?: Record<string, string> | undefined;
   /** `formatTestInfo(...)` output, when the caller has it. */
   testInfoSection?: string | undefined;
   /**
@@ -1331,6 +1341,118 @@ export function formatParameterBlock(
         `step.getVar(${JSON.stringify(r.ref)}); the value differs per environment`,
     ),
   ].join('\n');
+}
+
+/**
+ * The most of one recorded capture a prompt prints. A `readTable` capture of a
+ * long table is a single value, and the rule it serves — same items, same text
+ * — is read off the head of it; the item count, said beside it, is not
+ * clipped.
+ */
+const RECORDED_CAPTURE_LIMIT = 1500;
+
+/**
+ * One capture's recorded value, as the step and repair prompts print it beside
+ * `step.setVar('<name>', …)`.
+ *
+ * Masked exactly as {@link formatParameterBlock} masks a parameter's value —
+ * {@link maskValueForPrompt}, by the capture's NAME (`[store as: otp]` shows
+ * `"***"`), then by record shape, then by the run's mask set (a value that
+ * CONTAINS a known secret shows `***` in its place) — and only then clipped,
+ * because a clip first could cut a secret in half and leave both halves for
+ * `redact` to miss.
+ *
+ * A value that is JSON — a list or a record, which is how a multi-element read
+ * and a `readTable` store — prints as the JSON the recording stored; anything
+ * else prints quoted, as the parameter block quotes. A list says how many items
+ * it held, which is the fact a nested-element selector gets wrong first, and it
+ * is said from the raw value so a clip cannot hide it. Not for a secret-named
+ * capture: its whole entry is the mask.
+ */
+export function formatRecordedCapture(
+  name: string,
+  value: string,
+  secrets: string[] = [],
+  map?: Record<string, string>,
+): string {
+  const secret = isSecretParameterName(name, map);
+  const masked = maskValueForPrompt(secret, name, value, new Set<string>(), secrets);
+  const json = /^\s*[[{]/.test(masked) && parsesAsJson(masked);
+  const shown = json ? masked.trim() : JSON.stringify(masked);
+  const clipped =
+    shown.length > RECORDED_CAPTURE_LIMIT
+      ? `${shown.slice(0, RECORDED_CAPTURE_LIMIT)}… (${shown.length - RECORDED_CAPTURE_LIMIT} more characters)`
+      : shown;
+  const items = secret ? undefined : jsonArrayLength(value);
+  return items === undefined ? clipped : `a list of ${items} item${items === 1 ? '' : 's'}: ${clipped}`;
+}
+
+/**
+ * The rule the recorded values come with, said once under them. Worded for
+ * both prompts: generation shows the page the recording read, and a repair the
+ * page the replay failed on — the value is the recording's either way.
+ */
+export const RECORDED_CAPTURE_RULE =
+  `**Match what the recording captured.** The recording captured each value shown above from the page ` +
+  `as it was on the recorded run. Your code must produce EXACTLY that value from that page — the same ` +
+  `number of items, the same text. If your selector would match anything else (nested elements, hidden ` +
+  `duplicates, extra columns, a label beside the value), narrow it until it matches only what was ` +
+  `captured — prefer the selector the recorded read used. Never write the value, or any item of it, into ` +
+  `the code — not in a string, a selector, a regex or a comment: read it from the page, on every run, ` +
+  `because the next run's page may hold something else.`;
+
+/** The sentence a masked recorded value adds to {@link RECORDED_CAPTURE_RULE}. */
+const RECORDED_SECRET_NOTE =
+  ` A value shown as "${MASK}" is a secret and is masked here; the rule holds for it all the same.`;
+
+/**
+ * The `- step.setVar(…)` lines of a capture block, each with its recorded value
+ * when there is one, and the rule under them when any line carries one. Shared
+ * by the step prompt and the repair prompt, so the two cannot describe the same
+ * capture two ways.
+ */
+export function formatCaptureLines(
+  captures: readonly string[],
+  recorded: Record<string, string> | undefined,
+  secrets: string[] = [],
+  map?: Record<string, string>,
+): string {
+  let anyRecorded = false;
+  let anySecret = false;
+  const lines = captures.map((name) => {
+    const head = `- \`step.setVar('${name}', ...)\``;
+    if (recorded === undefined || !Object.hasOwn(recorded, name)) return head;
+    const value = recorded[name];
+    if (typeof value !== 'string') return head;
+    anyRecorded = true;
+    const shown = formatRecordedCapture(name, value, secrets, map);
+    if (shown.includes(MASK)) anySecret = true;
+    return `${head} — the recording captured ${shown}`;
+  });
+  return (
+    lines.join('\n') +
+    (anyRecorded ? `\n\n${RECORDED_CAPTURE_RULE}${anySecret ? RECORDED_SECRET_NOTE : ''}` : '')
+  );
+}
+
+function parsesAsJson(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** How many items a JSON-list value holds, or undefined when it is not one. */
+function jsonArrayLength(value: string): number | undefined {
+  if (!/^\s*\[/.test(value)) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.length : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -1695,11 +1817,20 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
         )
         .join('\n')}`;
 
+  // Each capture's name, and — when the caller has it — what the recording
+  // captured under it, masked as the parameter block masks a value. Without the
+  // value the model could not check its selector against anything: measured on
+  // a real-model Run & Compile of control-flow.md, a read of "the name of every
+  // account" matched each row's three spans and stored nine values where the
+  // recording stored three, and the `For each` over it ran nine passes.
   const captureBlock = (input.captures ?? []).length === 0
     ? ''
-    : `\n\n## Values this step must capture\n${(input.captures ?? [])
-        .map((c) => `- \`step.setVar('${c}', ...)\``)
-        .join('\n')}`;
+    : `\n\n## Values this step must capture\n${formatCaptureLines(
+        input.captures ?? [],
+        input.recordedCaptures,
+        input.secrets ?? [],
+        input.parameterMap,
+      )}`;
 
   const wholeTestBlock = (input.wholeTest ?? []).length === 0
     ? ''

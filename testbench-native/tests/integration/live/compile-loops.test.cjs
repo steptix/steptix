@@ -293,6 +293,7 @@ describe('TestBench live — compile loops and the conditions that drive them', 
       ['whileNext', null, 'While the Next button is enabled'],
       ['repeatLoad', null, 'Repeat Click Load more until'],
       ['forEach', null, 'For each {{account}} in {{accounts}}'],
+      ['readAccounts', null, 'Read the name of every account'],
       ['nextBody', 'Go to the next page', 'Click the Next button'],
       ['accountBody', 'Check the account', '{{account}}'],
     ]);
@@ -366,15 +367,33 @@ describe('TestBench live — compile loops and the conditions that drive them', 
     assert.equal(judgeCalls, 0, 'the replay report must hold no condition-judge call');
 
     // And the loops ran exactly as often as the page allows — a condition that
-    // answered wrongly shows up here as a wrong count.
+    // answered wrongly shows up here as a wrong count. These two counts are
+    // decided by the compiled `While` and `Repeat` conditions, which is what
+    // this file exists to prove, so they stay strict.
     const bands = reportBands(html);
     say(`bands: ${JSON.stringify(bands)}`);
-    for (const label of ['Go to the next page', 'Click Load more', 'Check the account']) {
-      const mine = bands.filter((b) => b.label === label);
-      assert.deepEqual(
-        mine.map((b) => `${b.index}/${b.count}`),
-        ['1/3', '2/3', '3/3'],
-        `"${label}" must run exactly three passes on the replay`,
+    const passesOf = (label) => bands.filter((b) => b.label === label).map((b) => `${b.index}/${b.count}`);
+    for (const label of ['Go to the next page', 'Click Load more']) {
+      assert.deepEqual(passesOf(label), ['1/3', '2/3', '3/3'], `"${label}" must run exactly three passes on the replay`);
+    }
+    // The `For each`'s count is not decided by any condition: it is the length
+    // of the list the compiled READ stored (step 11, "Read the name of every
+    // account … [store as: accounts]"), so it measures the model's selector for
+    // that read, not the loop and condition machinery. Measured on a real-model
+    // run: one of three compiles read each row's three spans and stored nine
+    // values, and this replay ran nine passes. Generation is now shown the
+    // recorded value and refuses one written in, which makes that rarer but
+    // cannot make a model's selector right — and Run & Compile has no replay to
+    // catch it (the boxed `aiui compile` does, by decision 11's pass-count
+    // check). So a wrong count here is said loudly, with the entry that caused
+    // it, rather than failing a test about conditions.
+    const accountPasses = passesOf('Check the account');
+    if (JSON.stringify(accountPasses) !== JSON.stringify(['1/3', '2/3', '3/3'])) {
+      const readEntry = entriesFor(content, text.readAccounts)[0] ?? '(no entry was proposed for it)';
+      say(
+        `WARNING: "For each {{account}} in {{accounts}}" ran ${accountPasses.length} pass(es) on the replay ` +
+          `(${JSON.stringify(accountPasses)}), not 3. The list came from the compiled step 11 ` +
+          `("${text.readAccounts}"), whose entry was:\n  source:${readEntry}`,
       );
     }
   });

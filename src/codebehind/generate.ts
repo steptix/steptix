@@ -27,6 +27,7 @@ import { boundValue } from '../runner/placeholder-substitution.js';
 import type { AssertionResult } from '../report/types.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import { logger } from '../utils/logger.js';
+import { EMPTY, MASK, redact } from '../utils/secrets.js';
 import type { CodeBehindBinding } from './loader.js';
 import type { RecordedAction } from './recording.js';
 import { CODE, COMMENT, matchForward, scan, type StringToken } from './tokenizer.js';
@@ -224,6 +225,58 @@ export interface GenerateStepEntryOptions {
    * it with {@link loopContextFor}.
    */
   loop?: LoopContext | undefined;
+  /**
+   * What each capture this step makes held on the evidence pass, by the
+   * AUTHORED capture name — RAW, as the run stored it. Both compilers fill it
+   * with {@link recordedCapturesOf} from the evidence row's `outputs`. The
+   * prompt shows each value (masked, beside its `step.setVar`) as the result
+   * the entry must reproduce, and the leak guard refuses an entry that writes
+   * it into the code ({@link capturedValueGuards}). Names the step does not
+   * capture are ignored.
+   */
+  recordedCaptures?: Record<string, string> | undefined;
+}
+
+/**
+ * The captures a step makes, with what each held on one recorded row — by the
+ * name the AUTHOR wrote in `[store as: …]`, the name the prompt lists and the
+ * entry's `step.setVar` writes.
+ *
+ * A row's `outputs` are keyed by the name the RUN wrote, which inside a skill
+ * body is the frame's rename of the authored one; it is read through the
+ * rename first, then by the authored name. A skill-internal `__skill*` capture
+ * never reaches `outputs`, so it has no recorded value here and is listed in
+ * the prompt by name alone, as before.
+ *
+ * Only names the step's own line captures: a row's `outputs` can carry a name
+ * the step did not declare (a model's own `as`), and the entry is not asked to
+ * write that.
+ */
+export function recordedCapturesOf(
+  binding: CodeBehindBinding | undefined,
+  outputs: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (binding === undefined || outputs === undefined) return undefined;
+  const found: Array<[string, string]> = [];
+  for (const name of referencedVariableNames(binding.source).captures) {
+    const renamed = boundValue(binding.scope.renames, name);
+    const value = (renamed !== undefined ? boundValue(outputs, renamed) : undefined) ?? boundValue(outputs, name);
+    if (typeof value === 'string') found.push([name, value]);
+  }
+  // `fromEntries` defines each key, so a capture named `__proto__` is a key.
+  return found.length > 0 ? Object.fromEntries(found) : undefined;
+}
+
+/** `recorded`, narrowed to the names in `captures` — or undefined when none is left. */
+function recordedFor(
+  captures: readonly string[],
+  recorded: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (recorded === undefined) return undefined;
+  const kept = captures
+    .filter((name) => Object.hasOwn(recorded, name) && typeof recorded[name] === 'string')
+    .map((name): [string, string] => [name, recorded[name]!]);
+  return kept.length > 0 ? Object.fromEntries(kept) : undefined;
 }
 
 /**
@@ -258,8 +311,29 @@ export type GeneratedEntry =
   | { kind: 'entry'; code: string; references?: PlaceholderReport }
   /** Not expressible as code — becomes an `ai: true` entry with this reason. */
   | { kind: 'declined'; reason: string }
-  /** The call itself failed. The compiler reports it and moves on. */
-  | { kind: 'error'; message: string };
+  /**
+   * The call itself failed. The compiler reports it and moves on.
+   *
+   * `refusedCapture` is set only by {@link askForEntry}, when the leak guard
+   * refused the answer for writing in a value the RECORDING captured — the
+   * one refusal {@link askWithCaptureRetry} re-asks over. It never leaves that
+   * helper: the code it holds is the refused answer.
+   */
+  | { kind: 'error'; message: string; refusedCapture?: { name: string; code: string } };
+
+/**
+ * One value the leak guard refuses to see in generated code.
+ *
+ * `captured` marks a value the RECORDING captured ({@link capturedValueGuards})
+ * rather than one the step was given: it is matched as a whole token, and an
+ * answer it refuses is worth one re-ask. Everything else — a parameter, an
+ * environment value — is the guard as it always was.
+ */
+export interface GuardedValue {
+  name: string;
+  value: string;
+  captured?: true;
+}
 
 /** Generate one entry. Never throws — a failed call is a result, not a crash. */
 export async function generateStepEntry(
@@ -312,6 +386,8 @@ export async function generateStepEntry(
   /** Carry the accounting out on whatever entry the model ends up producing. */
   const reported = (result: GeneratedEntry): GeneratedEntry =>
     result.kind === 'entry' && references !== undefined ? { ...result, references } : result;
+  // What the recording captured, for the captures this line declares.
+  const recordedCaptures = recordedFor(captures, options.recordedCaptures);
 
   const promptInput: StepCodePromptInput = {
     rawStepText: binding.source,
@@ -329,6 +405,7 @@ export async function generateStepEntry(
       })),
     }),
     ...(captures.length > 0 && { captures }),
+    ...(recordedCaptures && { recordedCaptures }),
     testInfoSection: formatTestInfo(options.testName, options.baseUrl),
     ...(options.wholeTest && { wholeTest: options.wholeTest }),
     ...(options.candidateFile !== undefined && { candidateFile: options.candidateFile }),
@@ -339,8 +416,14 @@ export async function generateStepEntry(
     ...(options.loop && { loop: options.loop }),
   };
   // The authored line goes in so a value the author quoted in it is not read
-  // as a leak: see `guardedValues` / `authorQuotedLiterals`.
-  const guarded = guardedValues(parameters, envRefs.resolved, binding.source);
+  // as a leak: see `guardedValues` / `authorQuotedLiterals`. The recorded
+  // captures join it: an entry that stores the recording's answer as a
+  // constant (`step.setVar('accounts', '["Everyday",…]')`) passes on every
+  // replay of a page that happens to agree, and captures nothing.
+  const guarded: GuardedValue[] = [
+    ...guardedValues(parameters, envRefs.resolved, binding.source),
+    ...capturedValueGuards(recordedCaptures, binding.source),
+  ];
   // Every value this step's references resolved to, keyed by the name the
   // MODEL would have written in an action: the authored name, the run-time
   // name a skill rename gave it, and each `${…}` reference. Used to read a
@@ -353,13 +436,16 @@ export async function generateStepEntry(
       envRefs.resolved,
     );
 
-  const first = await askForEntry(
+  // A recorded value written into the answer costs one re-ask here, before
+  // anything else looks at it (`askWithCaptureRetry`).
+  const asked = await askWithCaptureRetry(
     options.aiClient,
     options.contextContent,
-    buildStepCodePrompt(promptInput),
+    (retry) => buildStepCodePrompt({ ...promptInput, ...(retry && { retry }) }),
     guarded,
     options.signal,
   );
+  const first = asked.result;
   if (first.kind !== 'entry') return first;
 
   // ── The static backstops ──────────────────────────────────────────────────
@@ -378,6 +464,15 @@ export async function generateStepEntry(
     staleHandleComplaint(first.code) ??
     unwaitedReadComplaint(first.code);
   if (complaint === undefined) return reported(first);
+  // …shared with the recorded-value re-ask too. If that one was spent, this
+  // answer is the re-ask's, and the fault is said rather than asked about.
+  if (asked.reasked) {
+    logger.warn(
+      `Code-behind for "${binding.source}" has a fault the static check can see, and its one ` +
+        `re-ask went to a recorded value it had written in. ${complaint}`,
+    );
+    return reported(first);
+  }
 
   logger.debug(`Code-behind re-asking for "${binding.source}": ${complaint}`);
   const second = await askForEntry(
@@ -752,13 +847,16 @@ function isBareUse(code: string, token: StringToken): boolean {
  * leak guard are identical, and only the prompt differs.
  *
  * `guarded` is every value the answer must not contain as a literal: the
- * step's parameters and its environment references, from `guardedValues`.
+ * step's parameters and its environment references, from `guardedValues`, and
+ * what the recording captured, from `capturedValueGuards`. An answer refused
+ * for the last kind carries `refusedCapture`; call it through
+ * {@link askWithCaptureRetry}, which re-asks once over exactly that.
  */
 export async function askForEntry(
   aiClient: AiClient,
   contextContent: string,
   prompt: ChatMessage,
-  guarded: Array<{ name: string; value: string }>,
+  guarded: readonly GuardedValue[],
   signal?: AbortSignal | undefined,
   /** The function the entry must define — `condition` for a condition line's
    *  entry (`generateConditionEntry`), `run` for everything else. */
@@ -784,7 +882,7 @@ export async function askForEntry(
   // is the same failure with a different name: `${env.GITHUB_PASSWORD}` hands
   // the model the real password in the transcript, and `${data.url}` inlined
   // is a file that runs against one environment only.
-  const leaked = findInlinedParameterValue(answer.entry, guarded);
+  const leaked = findInlinedParameterValue(answer.entry, guarded.filter((g) => g.captured !== true));
   if (leaked) {
     return {
       kind: 'error',
@@ -793,8 +891,170 @@ export async function askForEntry(
         `so it was discarded`,
     };
   }
+  // A value the recording captured, written in: refused as any leaked value
+  // is, and marked so `askWithCaptureRetry` can ask once more.
+  const captured = guarded.find((g) => g.captured === true && containsAsToken(answer.entry, g.value));
+  if (captured) {
+    return {
+      kind: 'error',
+      message:
+        `the generated code contains the value the recording captured into ` +
+        `${describeGuardedName(captured.name)} as a literal, so it was discarded`,
+      refusedCapture: { name: captured.name, code: answer.entry },
+    };
+  }
 
   return { kind: 'entry', code: answer.entry };
+}
+
+/** The re-ask block a refused answer goes back with (`StepCodePromptInput.retry`,
+ *  `RepairPromptInput.retry`). */
+export type EntryRetry = { previousEntry: string; complaint: string };
+
+/**
+ * {@link askForEntry}, with ONE re-ask when the answer was refused for writing
+ * in a value the recording captured.
+ *
+ * Those values joined the guard after a real-model Run & Compile stored nine
+ * values where the recording read three, and the prompt now SHOWS them — which
+ * is exactly what tempts a model to write the answer in rather than read it.
+ * A refusal alone would turn that into a failed generation (fatal for the whole
+ * boxed compile), where one re-ask, told what it did and shown its own answer
+ * with the value masked out, usually reads the page instead. Every other
+ * refusal is returned as it was, unasked: a parameter or environment value
+ * written in is what rule 1 already forbids, and its refusal is unchanged.
+ *
+ * `prompt(retry)` builds the prompt; the second call gets the retry block. The
+ * result never carries the refused code (`refusedCapture` is stripped), and
+ * `reasked` says whether the re-ask was spent — a caller with its own one
+ * re-ask (generation's static backstops) shares it.
+ */
+export async function askWithCaptureRetry(
+  aiClient: AiClient,
+  contextContent: string,
+  prompt: (retry?: EntryRetry) => ChatMessage,
+  guarded: readonly GuardedValue[],
+  signal?: AbortSignal | undefined,
+): Promise<{ result: GeneratedEntry; reasked: boolean }> {
+  const first = await askForEntry(aiClient, contextContent, prompt(), guarded, signal);
+  if (first.kind !== 'error' || first.refusedCapture === undefined) return { result: first, reasked: false };
+  const retry = capturedValueRetry(first.refusedCapture, guarded);
+  logger.debug(`Code-behind re-asking: ${retry.complaint}`);
+  const second = await askForEntry(aiClient, contextContent, prompt(retry), guarded, signal);
+  return {
+    result: second.kind === 'error' ? { kind: 'error', message: second.message } : second,
+    reasked: true,
+  };
+}
+
+/**
+ * The retry block for an answer that wrote a recorded value in: why, and the
+ * answer itself with every recorded value masked — so the prompt carries no
+ * value the prompt's own capture block would have masked, and the model sees
+ * where it went wrong without being handed the literal to copy again.
+ */
+function capturedValueRetry(
+  refused: { name: string; code: string },
+  guarded: readonly GuardedValue[],
+): EntryRetry {
+  const values = guarded
+    .filter((g) => g.captured === true)
+    .map((g) => g.value.trim())
+    .filter((v) => v.length >= MIN_GUARDED_VALUE_LENGTH);
+  return {
+    previousEntry: redact(refused.code, values),
+    complaint:
+      `The entry writes the value the recording captured into ${describeGuardedName(refused.name)} ` +
+      `into the code as a literal — it is shown as ${MASK} in the answer below. That value is what this ` +
+      `step must READ off the page: on the next run the page may hold something else, and a constant ` +
+      `stores the recording's answer whatever the page says. Read it with a locator that matches exactly ` +
+      `what was captured, and write neither the value nor any item of it anywhere in the entry — not in a ` +
+      `string, a selector, a regex or a comment.`,
+  };
+}
+
+/**
+ * Does `code` contain `value` as a whole token — not glued to a word character
+ * on a side where the value itself begins or ends with one?
+ *
+ * The recorded-value half of the leak guard. A parameter keeps the bare
+ * substring test ({@link findInlinedParameterValue}); a captured value is
+ * page text, often a plain word (`Savings`, `Travel`), and the substring test
+ * would refuse an entry for a `savingsTotal`-shaped identifier or a `1000` that
+ * holds a captured `100`. A value written in as a value — in quotes, in a
+ * selector, in a comment, in a JSON literal — is always delimited, so nothing
+ * that matters is missed.
+ */
+function containsAsToken(code: string, value: string): boolean {
+  const needle = value.trim();
+  if (needle.length < MIN_GUARDED_VALUE_LENGTH) return false;
+  const wordAtStart = /\w/.test(needle[0]!);
+  const wordAtEnd = /\w/.test(needle[needle.length - 1]!);
+  for (let at = code.indexOf(needle); at !== -1; at = code.indexOf(needle, at + 1)) {
+    const before = at > 0 ? code[at - 1]! : '';
+    const after = code[at + needle.length] ?? '';
+    if (wordAtStart && /\w/.test(before)) continue;
+    if (wordAtEnd && /\w/.test(after)) continue;
+    return true;
+  }
+  return false;
+}
+
+/** Values the recorded-value guard never holds: the mask and the empty marker
+ *  (a recording read back from a redacted report holds these, not the value),
+ *  and JSON's literal words, which any entry may contain as code. */
+const UNGUARDED_CAPTURES = new Set([MASK, EMPTY, 'true', 'false', 'null']);
+
+/**
+ * The recorded captures, as leak-guard entries
+ * (stories/codebehind-loops-and-conditions.md, "What the live half decided").
+ *
+ * Each value whole, and — for a JSON list, which is what a multi-element read
+ * stores — each string item too, because an entry that inlines the list is as
+ * likely to write the items one by one (`['Everyday', 'Savings', 'Travel']`) as
+ * the JSON the run stored. {@link MIN_GUARDED_VALUE_LENGTH} applies to both, as
+ * it does to every guarded value.
+ *
+ * A value the AUTHOR wrote in the step's own line is exempt: an entry echoing
+ * the step's words is repeating the step, not storing the recording's answer.
+ * That is {@link authorQuotedLiterals}'s exemption — `Read the status "Active"
+ * [store as: status]` may say `'Active'` — and one step wider, because a
+ * capture's value is page text the author may name without quotes: `Read the
+ * label of the Submit button [store as: label]` recorded `Submit`, and an entry
+ * finding that button by its name is right. Matched as {@link containsAsToken}
+ * matches the code, so a quoted mention is covered by the same test.
+ */
+export function capturedValueGuards(
+  recorded: Record<string, string> | undefined,
+  authoredSource: string,
+): GuardedValue[] {
+  if (recorded === undefined) return [];
+  const quoted = authorQuotedLiterals(authoredSource);
+  const out: GuardedValue[] = [];
+  const add = (name: string, value: string): void => {
+    const trimmed = value.trim();
+    if (trimmed.length < MIN_GUARDED_VALUE_LENGTH || UNGUARDED_CAPTURES.has(trimmed)) return;
+    if (quoted.has(trimmed) || containsAsToken(authoredSource, trimmed)) return;
+    if (out.some((g) => g.value.trim() === trimmed)) return;
+    out.push({ name, value, captured: true });
+  };
+  for (const [name, value] of Object.entries(recorded)) {
+    if (typeof value !== 'string') continue;
+    add(name, value);
+    for (const item of jsonStringItems(value)) add(name, item);
+  }
+  return out;
+}
+
+/** The string items of a JSON-list value, or none when it is not one. */
+function jsonStringItems(value: string): string[] {
+  if (!/^\s*\[/.test(value)) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
