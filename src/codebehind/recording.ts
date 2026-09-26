@@ -162,6 +162,22 @@ export interface RecordedStep {
   surface?: 'browser' | 'computer';
   fromCodeBehind?: boolean;
   codeBehindStale?: { file: string; source: string; error: string };
+  /**
+   * A guard row's decision (stories/codebehind-loops-and-conditions.md,
+   * decision 14): who decided, and what — the member selected, or whether a
+   * loop condition held — plus the member whose condition entry broke.
+   *
+   * The DECISION only, never `StepResult.guard.evidence`: that is the page the
+   * judge was shown, and it belongs to the run that generates from it, not to
+   * a file anyone with the checkout can read. Absent on every ordinary step
+   * and on a recording written before the field.
+   */
+  guard?: {
+    decidedBy: 'model' | 'values' | 'code';
+    selected?: number | null;
+    holds?: boolean;
+    staleMember?: number;
+  };
   urlBefore?: string;
   urlAfter?: string;
   pageUrl?: string;
@@ -242,9 +258,13 @@ export async function writeRecording(testFilePath: string, input: RecordingInput
     await fs.mkdir(dir, { recursive: true });
 
     const recordedAt = new Date().toISOString();
+    // One row per expanded step — the evidence pass (decision 14). A runtime
+    // loop re-runs the same indices, so the run's rows carry each body index
+    // once per pass; writing them all put every pass through the same
+    // `step-NN` slot and left the LAST on disk — the page where the `While`
+    // had just gone false, and the last `For each` item.
     let count = 0;
-    for (const result of input.steps) {
-      if (result.hookScope || result.interactiveAdHoc || result.interactiveChild) continue;
+    for (const result of evidenceRows(input.steps)) {
       await writeRecordedStep(dir, result, {
         at: result.index,
         secrets,
@@ -269,6 +289,84 @@ export async function writeRecording(testFilePath: string, input: RecordingInput
     logger.warn(`Could not write the recording at ${dir}: ${String(err)}`);
     return null;
   }
+}
+
+/**
+ * One row per expanded step: the EVIDENCE pass
+ * (stories/codebehind-loops-and-conditions.md, decisions 1 and 14).
+ *
+ * A runtime loop — `While`, `Repeat … until`, `For each` — re-runs the same
+ * expanded indices, so a run's rows hold a body index once per pass. An entry
+ * is generated once per authored line, from the first pass that ran it, so
+ * that is the row a recording keeps: the first pass that is usable EVIDENCE
+ * ({@link isEvidencePass}) — it passed, or failed as its text says, AND has a
+ * transcript to generate from. A table-row `### Section` loop is unrolled at
+ * expansion — one index per iteration — so it is untouched by this: every row
+ * is its own index already.
+ *
+ * "Has a transcript" is what makes this more than "the first that passed". A
+ * pass that ran cleanly AS CODE passed with no turns at all: its entry needs
+ * no evidence, and it is none. When the entry then threw on pass 2 and healed
+ * under AI, the step joins a compile as stale — and generating from pass 1's
+ * empty transcript said "the recorded run performed no page actions" and wrote
+ * `ai: true` over a working entry. The healed pass (`codeBehindStale`) is the
+ * one with the transcript, and the page its entry broke on. This is the live
+ * compiler's rule too: it refuses a clean code run as "ran as code" and takes
+ * the healed pass for its repair.
+ *
+ * When no pass is usable evidence: the first that passed (a step that only
+ * ever ran as code), else the first row of all (a step that never passed is
+ * recorded as it first failed or was skipped).
+ *
+ * Hook rows and interactive rows are dropped, as both writers always did.
+ * Returned in the order each index first appears, which is the run's order,
+ * so a splice claims identity slots in the order the file is written in.
+ *
+ * Exported so every writer — the server's and the CLI's through
+ * `writeRecording`, a Compile This Step's through `spliceRecording`, and the
+ * boxed compile's evidence rows — takes the same row for an index.
+ */
+export function evidenceRows(steps: readonly StepResult[]): StepResult[] {
+  const firstSeen: number[] = [];
+  const chosen = new Map<number, StepResult>();
+  const rank = (r: StepResult): number => (isEvidencePass(r) ? 2 : r.status === 'passed' ? 1 : 0);
+  for (const result of steps) {
+    if (result.hookScope || result.interactiveAdHoc || result.interactiveChild) continue;
+    const held = chosen.get(result.index);
+    if (held === undefined) {
+      firstSeen.push(result.index);
+      chosen.set(result.index, result);
+    } else if (rank(result) > rank(held)) {
+      chosen.set(result.index, result);
+    }
+  }
+  return firstSeen.map((index) => chosen.get(index)!);
+}
+
+/**
+ * Is this pass usable evidence — something an entry can be generated from?
+ * It passed (or failed as its own text says: `deliberate`), and it has a
+ * transcript: it ran under AI, which a clean code run did not — unless its
+ * entry threw first and the step healed under AI (`codeBehindStale`).
+ */
+export function isEvidencePass(result: StepResult): boolean {
+  const worked = result.status === 'passed' || result.deliberate === true;
+  const transcript = result.fromCodeBehind !== true || result.codeBehindStale !== undefined;
+  return worked && transcript;
+}
+
+/**
+ * A guard row's decision as it goes to disk: who decided and what, never the
+ * page the judge was shown (`evidence` stays in the run that generates from
+ * it — see {@link RecordedStep.guard}).
+ */
+function guardDecisionOf(guard: NonNullable<StepResult['guard']>): NonNullable<RecordedStep['guard']> {
+  return {
+    decidedBy: guard.decidedBy,
+    ...(guard.selected !== undefined && { selected: guard.selected }),
+    ...(guard.holds !== undefined && { holds: guard.holds }),
+    ...(guard.staleMember !== undefined && { staleMember: guard.staleMember }),
+  };
 }
 
 /** File-name stem for a step slot: `step-07`. */
@@ -343,6 +441,7 @@ async function writeRecordedStep(
     ...(result.surface === 'computer' && { surface: 'computer' as const }),
     ...(result.fromCodeBehind && { fromCodeBehind: true }),
     ...(result.codeBehindStale && { codeBehindStale: result.codeBehindStale }),
+    ...(result.guard && { guard: guardDecisionOf(result.guard) }),
     ...(ctx?.urlBefore !== undefined && { urlBefore: ctx.urlBefore }),
     ...(ctx?.urlAfter !== undefined && { urlAfter: ctx.urlAfter }),
     ...(result.pageUrl !== undefined && { pageUrl: result.pageUrl }),
@@ -483,8 +582,11 @@ export async function spliceRecording(
 
     const recordedAt = new Date().toISOString();
     const spliced: number[] = [];
-    for (const result of input.steps) {
-      if (result.hookScope || result.interactiveAdHoc || result.interactiveChild) continue;
+    // The same one row per index the wholesale writer takes (decision 14). A
+    // pass is not a step: splicing each pass claimed the step's slot with pass
+    // 1 and then, its identity bucket empty, APPENDED a new slot for pass 2 and
+    // another for pass 3 — three recorded steps for one line.
+    for (const result of evidenceRows(input.steps)) {
       const identity = input.identities?.[result.index];
       const key = identityKey({
         instruction: result.instruction,

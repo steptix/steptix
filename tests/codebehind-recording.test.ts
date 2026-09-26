@@ -8,6 +8,8 @@ import {
   recordingDirFor,
   redact,
   secretValues,
+  evidenceRows,
+  isEvidencePass,
   spliceRecording,
   writeRecording,
   writeReplayFailure,
@@ -627,5 +629,153 @@ describe('the splice identity carries the binding\'s target file', () => {
     const after = (await readRecording(test))!;
     expect(after.steps).toHaveLength(2);
     expect(after.steps[0]!.pageUrl).toBe('https://app.test/spliced');
+  });
+});
+
+/**
+ * One row per expanded step: the evidence pass
+ * (stories/codebehind-loops-and-conditions.md, decisions 1 and 14).
+ *
+ * A runtime loop re-runs the same expanded indices, so a run's rows hold a body
+ * index once per pass. Written as they came, every pass went through one
+ * `step-NN` slot and the LAST won; spliced, each pass after the first opened a
+ * new slot.
+ */
+describe('a looped step records its evidence pass', () => {
+  /** One pass of a body step at `index`, told apart by its URL. */
+  const pass = (index: number, n: number, over: Partial<StepResult> = {}): StepResult =>
+    step(index, { instruction: 'Click Next', pageUrl: `https://app.test/pass-${n}`, ...over });
+
+  it('picks the first pass that PASSED, else the first row — per index, in run order', () => {
+    const rows = evidenceRows([
+      step(1),
+      pass(2, 1, { status: 'failed', tolerated: true }),
+      pass(2, 2),
+      pass(2, 3),
+      step(3, { status: 'skipped' }),
+      step(3, { status: 'skipped', instruction: 'later skip' }),
+      { ...step(1, { instruction: 'hook' }), hookScope: 'before' } as StepResult,
+    ]);
+    expect(rows.map((r) => [r.index, r.pageUrl ?? r.instruction])).toEqual([
+      [1, 'https://app.test/after'],
+      // Pass 1 failed (tolerated); pass 2 is the first that passed.
+      [2, 'https://app.test/pass-2'],
+      // Never passed: the first row stands.
+      [3, 'https://app.test/after'],
+    ]);
+    expect(rows[2]!.instruction).toBe('step 3');
+  });
+
+  it('skips a pass that ran cleanly as code for the pass that HEALED — the one with a transcript', () => {
+    // The review's scenario: a While body whose entry ran as code on pass 1,
+    // threw on pass 2 and healed under AI, then ran under AI on pass 3 (the
+    // entry was discarded). Measured before the fix: pass 1 — `turns: []` —
+    // was the evidence, so the boxed compile said "the recorded run performed
+    // no page actions" and wrote `ai: true` over a working entry.
+    const stale = { file: '/p/statements.steps.ts', source: 'Click Next', error: 'locator.click: Timeout 30000ms exceeded' };
+    const rows = evidenceRows([
+      step(1, { fromCodeBehind: true, turns: [] }),
+      pass(2, 1, { fromCodeBehind: true, turns: [] }),
+      pass(2, 2, { codeBehindStale: stale }),
+      pass(2, 3),
+    ]);
+    expect(rows.map((r) => r.pageUrl)).toEqual([
+      // Only ever ran as code: the first that passed still stands.
+      'https://app.test/after',
+      'https://app.test/pass-2',
+    ]);
+    expect(rows[1]!.codeBehindStale).toEqual(stale);
+    expect(isEvidencePass(rows[1]!)).toBe(true);
+    expect(isEvidencePass(rows[0]!)).toBe(false);
+  });
+
+  it('counts a deliberate failure as evidence — the step worked, as its text says', () => {
+    const rows = evidenceRows([
+      pass(2, 1, { status: 'failed', error: 'boom' }),
+      pass(2, 2, { status: 'failed', deliberate: true, error: 'as written' }),
+      pass(2, 3),
+    ]);
+    expect(rows[0]!.pageUrl).toBe('https://app.test/pass-2');
+  });
+
+  it('writes the healed pass to disk too, so the recording and the compile agree', async () => {
+    const test = path.join(dir, 'healed.md');
+    const stale = { file: '/p/healed.steps.ts', source: 'Click Next', error: 'boom' };
+    await writeRecording(test, {
+      steps: [step(1), pass(2, 1, { fromCodeBehind: true, turns: [] }), pass(2, 2, { codeBehindStale: stale }), step(3)],
+      status: 'passed',
+      startedAt: 'a',
+      parameters: {},
+      source: 'cli',
+    });
+    const recording = (await readRecording(test))!;
+    expect(recording.steps[1]!.pageUrl).toBe('https://app.test/pass-2');
+  });
+
+  it('writes pass 1 of a three-pass body, and counts expanded steps in the manifest', async () => {
+    const test = path.join(dir, 'loop.md');
+    await writeRecording(test, {
+      steps: [step(1), pass(2, 1), pass(2, 2), pass(2, 3), step(3)],
+      status: 'passed',
+      startedAt: 'a',
+      parameters: {},
+      source: 'cli',
+    });
+    const recording = (await readRecording(test))!;
+    expect(recording.manifest.steps).toBe(3);
+    expect(recording.steps[1]!.pageUrl).toBe('https://app.test/pass-1');
+  });
+
+  it('records a guard row\'s decision — never the page it was decided on', async () => {
+    const test = path.join(dir, 'guard.md');
+    await writeRecording(test, {
+      steps: [
+        step(1, {
+          instruction: 'While the Next button is enabled, Go to the next page',
+          turns: [],
+          guard: {
+            decidedBy: 'model',
+            holds: true,
+            evidence: { dom: '<p>SECRET-DOM</p>', url: 'https://app.test/judged', members: [{ index: 0, holds: true }] },
+          },
+        }),
+      ],
+      status: 'passed',
+      startedAt: 'a',
+      parameters: {},
+      source: 'server',
+    });
+    const recording = (await readRecording(test))!;
+    expect(recording.steps[0]!.guard).toEqual({ decidedBy: 'model', holds: true });
+    const raw = await fs.readFile(path.join(recordingDirFor(test), 'step-01.json'), 'utf-8');
+    expect(raw).not.toContain('SECRET-DOM');
+    expect(raw).not.toContain('evidence');
+  });
+
+  it('splices ONE slot for a body step a Compile This Step ran three times', async () => {
+    const test = path.join(dir, 'splice-loop.md');
+    await writeRecording(test, {
+      steps: [step(1, { instruction: 'Open' }), step(2, { instruction: 'Click Next' })],
+      status: 'passed',
+      startedAt: 'a',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Open' }, 2: { source: 'Click Next' } },
+    });
+
+    await spliceRecording(test, {
+      steps: [pass(1, 1), pass(1, 2), pass(1, 3)],
+      status: 'passed',
+      startedAt: 'b',
+      parameters: {},
+      source: 'server',
+      identities: { 1: { source: 'Click Next' } },
+    });
+
+    const after = (await readRecording(test))!;
+    // Two steps, not four: the passes are one step, and pass 1 is its evidence.
+    expect(after.manifest.steps).toBe(2);
+    expect(after.steps).toHaveLength(2);
+    expect(after.steps[1]!.pageUrl).toBe('https://app.test/pass-1');
   });
 });

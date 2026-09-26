@@ -958,6 +958,50 @@ tags: [codebehind]
     assert.match(thisRun, /✗ step 9 failed as written: The variable value was peanuts/);
   });
 
+  it('a compile the server refused is logged as refused, never as "Nothing to compile"', async () => {
+    // stories/codebehind-loops-and-conditions.md §TestBench. A refusal comes back
+    // as the server's `emitCompileRefusal` shapes it: `failed`, every count zero,
+    // nothing stopped, nothing named as not attempted, the refusal in `error` —
+    // counts that, read without the status, are exactly a clean compile's. The
+    // run log said "✓ Nothing to compile in … — every step already has
+    // code-behind" over it, beside the notification saying it failed.
+    const logBefore = readLiveLog()?.length ?? 0;
+    const refusal =
+      'Run & Compile does not compile a loop yet ("While the Next button is enabled, Go to the next page").';
+    fake.streamScripts = [
+      (f) => {
+        f.push({ type: 'output', msg: refusal, kind: 'error' });
+        f.push({
+          type: 'compile:result',
+          status: 'failed',
+          files: {},
+          summary: summaryFor({ totalSteps: 0, error: refusal }),
+        });
+        f.push({ type: 'done', status: 'error' });
+        f.end();
+      },
+    ];
+
+    void vscode.commands.executeCommand('testbench-native.runAndCompile');
+    await waitFor('compile answered', () => hooks.lastCompileError() !== null, 10_000);
+    await waitFor('idle', () => !hooks.isRunning());
+
+    // The notification path already honoured `failed`; pinned so the two
+    // surfaces are asserted to agree.
+    assert.equal(hooks.lastCompileError(), refusal);
+    assert.equal(hooks.pendingCodeBehind(), null, 'a refused compile proposes nothing');
+
+    const log = readLiveLog();
+    if (log === null) return; // TESTBENCH_LIVE_LOG not set — nothing to read.
+    const thisRun = log.slice(logBefore);
+    assert.ok(
+      thisRun.includes(`✗ Did not compile compile-me.md: ${refusal}`),
+      `the compile line must carry the refusal; got:\n${thisRun}`,
+    );
+    assert.doesNotMatch(thisRun, /Nothing to compile/);
+    assert.doesNotMatch(thisRun, /already has code-behind/);
+  });
+
   it('paints </> for a step that passed as code and ⚠ for a stale one', async () => {
     void vscode.commands.executeCommand('testbench-native.runAll');
     await waitFor('stream active', () => fake.hasActiveStream);

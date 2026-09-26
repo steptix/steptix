@@ -45,6 +45,8 @@
  */
 
 import { parseLiteralCondition } from '../parser/literal-condition.js';
+import { PLACEHOLDER_SOURCE } from '../parser/parameters.js';
+import { ENV_DATA_REF_SOURCE } from '../parser/interpolate-env-data.js';
 import { substituteAsLiterals, type PlaceholderValues } from './placeholder-substitution.js';
 
 /** A condition this module answered. */
@@ -93,4 +95,51 @@ export function decideConditionLocally(
  */
 export function localReasoning(condition: string, holds: boolean): string {
   return `decided from the values: ${condition} → ${holds}`;
+}
+
+/** Every reference the runtime substitutes into a condition — the narrow
+ *  `{{name}}` grammar and a `${…}` environment reference, the same two
+ *  `substituteAsLiterals` answers — in one pass. */
+const REFERENCE_RE = new RegExp(`${PLACEHOLDER_SOURCE}|${ENV_DATA_REF_SOURCE}`, 'g');
+
+/**
+ * The value every reference is replaced with when a condition is asked
+ * whether it is literal-decidable WITHOUT a run's values.
+ *
+ * A quoted number, because it is the one probe every family of the grammar
+ * accepts: the equality, substring and emptiness forms read it as text, and
+ * the five orderings read `"1"` as the plain number the rule demands of both
+ * operands (literal-condition.ts, `operandValue` then `PLAIN_NUMBER`).
+ */
+const PROBE = '1';
+
+/**
+ * Would this condition be decided from its own values, with no page look?
+ *
+ * The static twin of {@link decideConditionLocally}, asked of AUTHORED text
+ * before any run — by the compilers, which never generate a `condition`
+ * entry for such a line (stories/codebehind-loops-and-conditions.md,
+ * decision 10: it is free already, and an entry could only get it wrong).
+ *
+ * The same rule, read with a probe value for every reference: the text must
+ * make at least one `{{…}}` / `${…}` reference, and with each one substituted
+ * as a quoted literal it must parse under `parseLiteralCondition`.
+ *
+ * What it cannot see is a VALUE the runtime then refuses — one holding a `"`,
+ * or a non-number under an ordering (`{{balance}} is at least 100` with
+ * `$140.00`). Such a run asks the model and nothing is compiled for the line,
+ * which is the direction to be wrong in: the model decides, as it did before
+ * any of this.
+ */
+export function isLiteralCondition(condition: string): boolean {
+  let references = 0;
+  const text = condition.replace(REFERENCE_RE, (match: string, ...rest: unknown[]) => {
+    references++;
+    // `replace` hands the groups, then the offset, then the whole string.
+    const offset = rest[rest.length - 2] as number;
+    const quoted = condition[offset - 1] === '"' && condition[offset + match.length] === '"';
+    return quoted ? PROBE : `"${PROBE}"`;
+  });
+  if (references === 0) return false;
+  return parseLiteralCondition(text) !== null;
 }

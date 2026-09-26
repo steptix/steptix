@@ -1127,6 +1127,13 @@ export interface StepCodePromptInput {
    *  or nothing — see {@link formatParameterBlock}'s `map`. */
   parameterMap?: Record<string, string>;
   /**
+   * The run's free-text mask set — `runSecrets` over the map these values came
+   * out of — so a value no key names as secret still has a secret INSIDE it
+   * masked (`auth: "Bearer <the key>"`), as the run's own step prompt masks
+   * it. Empty masks by name alone.
+   */
+  secrets?: string[] | undefined;
+  /**
    * The environment references the step makes — `${data.url}`, `${env.X}`,
    * `${<source>.path}` — each with what it resolved to on this run. The name
    * inside the braces is the `step.getVar` name that reads it at run time
@@ -1147,6 +1154,16 @@ export interface StepCodePromptInput {
   }>;
   /** `[as: x]` / `[store as: x]` capture names the step is expected to write. */
   captures?: string[];
+  /**
+   * What each capture held on the recorded pass, by the name in `captures` —
+   * the ground truth the entry's read must reproduce
+   * (stories/codebehind-loops-and-conditions.md, "What the live half decided":
+   * a read told only the NAME wrote a selector that matched nine spans where
+   * the recording read three names). RAW values: the prompt masks them as its
+   * parameter block masks a value. A name with no recorded value is listed as
+   * before, and a prompt with none at all is unchanged.
+   */
+  recordedCaptures?: Record<string, string> | undefined;
   /** `formatTestInfo(...)` output, when the caller has it. */
   testInfoSection?: string | undefined;
   /**
@@ -1172,6 +1189,67 @@ export interface StepCodePromptInput {
    * gets.
    */
   retry?: { previousEntry: string; complaint: string };
+  /**
+   * The runtime loop this step sits in the body of — a `While`, `Repeat …
+   * until` or `For each` (stories/codebehind-loops-and-conditions.md, decision
+   * 2). Absent outside every runtime loop, which keeps an ordinary step's
+   * prompt byte-identical to the one built before loops compiled. A table-row
+   * `### Section` loop is NOT one: it is unrolled at expansion and its rows
+   * reach the step already interpolated.
+   */
+  loop?: LoopContext | undefined;
+}
+
+/**
+ * The runtime loop a step or a condition line sits in the body of
+ * (stories/codebehind-loops-and-conditions.md, decision 2).
+ *
+ * One entry per authored line, generated from the first pass that ran it and
+ * replayed on every pass — so the prompt has to say that the line repeats and
+ * which values change from pass to pass, or the model writes pass 1's item
+ * into the code and every later pass clicks Everyday again.
+ */
+export interface LoopContext {
+  /** The loop's guard line, exactly as authored. */
+  line: string;
+  kind: 'while' | 'repeat' | 'foreach';
+  /**
+   * The names a pass binds fresh, as the author writes them: a `For each`'s
+   * item and each `item.key` binding the evidence pass carried. Empty for a
+   * `While` / `Repeat`, which bind nothing — their page changes instead.
+   */
+  perPass: string[];
+}
+
+/**
+ * The loop block, for a step (`subject: 'step'`) or a condition line nested in
+ * an outer loop (`'condition'`). Empty when there is no loop, so a prompt
+ * outside every loop is unchanged.
+ */
+export function formatLoopBlock(loop: LoopContext | undefined, subject: 'step' | 'condition'): string {
+  if (!loop) return '';
+  const what = subject === 'step' ? 'This step' : 'This condition line';
+  const head =
+    `\n\n## ${what} runs inside a loop\n` +
+    `It is in the body of \`${loop.line}\`, so it runs once per pass, and this ONE entry replays on ` +
+    `every pass. What is shown below is one pass's evidence (the first usable one), not a rule about ` +
+    `every pass.`;
+  if (loop.perPass.length === 0) {
+    return (
+      head +
+      ` Nothing is bound per pass here, but the page changes from pass to pass: write what the ` +
+      `${subject === 'step' ? 'step does' : 'condition asks'} on ANY pass — no page number, row ` +
+      `position, count or text that only this pass had.`
+    );
+  }
+  return (
+    head +
+    `\n\nThese change on every pass. Read each with \`step.getVar\` — never write this pass's value ` +
+    `into the code, or every later pass repeats this one:\n` +
+    // Names are placeholder names — a word, dotted at most — so they quote as
+    // they are, in the single quotes every other `getVar` in these prompts uses.
+    loop.perPass.map((name) => `- \`{{${name}}}\` — \`step.getVar('${name}')\``).join('\n')
+  );
 }
 
 /**
@@ -1236,7 +1314,10 @@ export function maskValueForPrompt(
 }
 
 export function formatParameterBlock(
-  parameters: Array<{ name: string; value: string }>,
+  // `bound`: the key the map holds the value under when it is not `name` — a
+  // skill body's `{{row.keyword}}` is the pass's `__skill1_row.keyword`, and
+  // the loop mark that makes it the pass's is keyed by that name, not this one.
+  parameters: Array<{ name: string; value: string; bound?: string | undefined }>,
   envRefs: Array<{ ref: string; value: string }>,
   unmask: ReadonlySet<string> = new Set<string>(),
   secrets: string[] = [],
@@ -1255,7 +1336,8 @@ export function formatParameterBlock(
     JSON.stringify(maskValueForPrompt(secret, name, value, unmask, secrets));
   return [
     ...parameters.map(
-      (p) => `- {{${p.name}}} resolved to ${show(isSecretParameterName(p.name, map), p.name, p.value)} on this run`,
+      (p) =>
+        `- {{${p.name}}} resolved to ${show(isSecretParameterName(p.bound ?? p.name, map), p.name, p.value)} on this run`,
     ),
     ...envRefs.map(
       (r) =>
@@ -1263,6 +1345,118 @@ export function formatParameterBlock(
         `step.getVar(${JSON.stringify(r.ref)}); the value differs per environment`,
     ),
   ].join('\n');
+}
+
+/**
+ * The most of one recorded capture a prompt prints. A `readTable` capture of a
+ * long table is a single value, and the rule it serves — same items, same text
+ * — is read off the head of it; the item count, said beside it, is not
+ * clipped.
+ */
+const RECORDED_CAPTURE_LIMIT = 1500;
+
+/**
+ * One capture's recorded value, as the step and repair prompts print it beside
+ * `step.setVar('<name>', …)`.
+ *
+ * Masked exactly as {@link formatParameterBlock} masks a parameter's value —
+ * {@link maskValueForPrompt}, by the capture's NAME (`[store as: otp]` shows
+ * `"***"`), then by record shape, then by the run's mask set (a value that
+ * CONTAINS a known secret shows `***` in its place) — and only then clipped,
+ * because a clip first could cut a secret in half and leave both halves for
+ * `redact` to miss.
+ *
+ * A value that is JSON — a list or a record, which is how a multi-element read
+ * and a `readTable` store — prints as the JSON the recording stored; anything
+ * else prints quoted, as the parameter block quotes. A list says how many items
+ * it held, which is the fact a nested-element selector gets wrong first, and it
+ * is said from the raw value so a clip cannot hide it. Not for a secret-named
+ * capture: its whole entry is the mask.
+ */
+export function formatRecordedCapture(
+  name: string,
+  value: string,
+  secrets: string[] = [],
+  map?: Record<string, string>,
+): string {
+  const secret = isSecretParameterName(name, map);
+  const masked = maskValueForPrompt(secret, name, value, new Set<string>(), secrets);
+  const json = /^\s*[[{]/.test(masked) && parsesAsJson(masked);
+  const shown = json ? masked.trim() : JSON.stringify(masked);
+  const clipped =
+    shown.length > RECORDED_CAPTURE_LIMIT
+      ? `${shown.slice(0, RECORDED_CAPTURE_LIMIT)}… (${shown.length - RECORDED_CAPTURE_LIMIT} more characters)`
+      : shown;
+  const items = secret ? undefined : jsonArrayLength(value);
+  return items === undefined ? clipped : `a list of ${items} item${items === 1 ? '' : 's'}: ${clipped}`;
+}
+
+/**
+ * The rule the recorded values come with, said once under them. Worded for
+ * both prompts: generation shows the page the recording read, and a repair the
+ * page the replay failed on — the value is the recording's either way.
+ */
+export const RECORDED_CAPTURE_RULE =
+  `**Match what the recording captured.** The recording captured each value shown above from the page ` +
+  `as it was on the recorded run. Your code must produce EXACTLY that value from that page — the same ` +
+  `number of items, the same text. If your selector would match anything else (nested elements, hidden ` +
+  `duplicates, extra columns, a label beside the value), narrow it until it matches only what was ` +
+  `captured — prefer the selector the recorded read used. Never write the value, or any item of it, into ` +
+  `the code — not in a string, a selector, a regex or a comment: read it from the page, on every run, ` +
+  `because the next run's page may hold something else.`;
+
+/** The sentence a masked recorded value adds to {@link RECORDED_CAPTURE_RULE}. */
+const RECORDED_SECRET_NOTE =
+  ` A value shown as "${MASK}" is a secret and is masked here; the rule holds for it all the same.`;
+
+/**
+ * The `- step.setVar(…)` lines of a capture block, each with its recorded value
+ * when there is one, and the rule under them when any line carries one. Shared
+ * by the step prompt and the repair prompt, so the two cannot describe the same
+ * capture two ways.
+ */
+export function formatCaptureLines(
+  captures: readonly string[],
+  recorded: Record<string, string> | undefined,
+  secrets: string[] = [],
+  map?: Record<string, string>,
+): string {
+  let anyRecorded = false;
+  let anySecret = false;
+  const lines = captures.map((name) => {
+    const head = `- \`step.setVar('${name}', ...)\``;
+    if (recorded === undefined || !Object.hasOwn(recorded, name)) return head;
+    const value = recorded[name];
+    if (typeof value !== 'string') return head;
+    anyRecorded = true;
+    const shown = formatRecordedCapture(name, value, secrets, map);
+    if (shown.includes(MASK)) anySecret = true;
+    return `${head} — the recording captured ${shown}`;
+  });
+  return (
+    lines.join('\n') +
+    (anyRecorded ? `\n\n${RECORDED_CAPTURE_RULE}${anySecret ? RECORDED_SECRET_NOTE : ''}` : '')
+  );
+}
+
+function parsesAsJson(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** How many items a JSON-list value holds, or undefined when it is not one. */
+function jsonArrayLength(value: string): number | undefined {
+  if (!/^\s*\[/.test(value)) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.length : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -1607,7 +1801,7 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
     input.parameters,
     input.envRefs ?? [],
     new Set<string>(),
-    [],
+    input.secrets ?? [],
     input.parameterMap,
   );
 
@@ -1627,11 +1821,20 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
         )
         .join('\n')}`;
 
+  // Each capture's name, and — when the caller has it — what the recording
+  // captured under it, masked as the parameter block masks a value. Without the
+  // value the model could not check its selector against anything: measured on
+  // a real-model Run & Compile of control-flow.md, a read of "the name of every
+  // account" matched each row's three spans and stored nine values where the
+  // recording stored three, and the `For each` over it ran nine passes.
   const captureBlock = (input.captures ?? []).length === 0
     ? ''
-    : `\n\n## Values this step must capture\n${(input.captures ?? [])
-        .map((c) => `- \`step.setVar('${c}', ...)\``)
-        .join('\n')}`;
+    : `\n\n## Values this step must capture\n${formatCaptureLines(
+        input.captures ?? [],
+        input.recordedCaptures,
+        input.secrets ?? [],
+        input.parameterMap,
+      )}`;
 
   const wholeTestBlock = (input.wholeTest ?? []).length === 0
     ? ''
@@ -1703,7 +1906,7 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
 
 ## The step, exactly as authored
 ${input.rawStepText}
-${wholeTestBlock}
+${wholeTestBlock}${formatLoopBlock(input.loop, 'step')}
 
 ## Parameters in scope
 ${paramBlock}
@@ -1779,6 +1982,212 @@ ${postConditionNumber}. **End with a post-condition, and make it wait.** The las
    Wait on the state itself. \`await page.locator('#upload-status', { hasText: 'Uploaded logo.png' }).waitFor()\` — or \`.filter({ hasText: '…' })\` on a locator you already hold — does not resolve until that text is there, so the wait IS the assertion. \`await page.waitForFunction(...)\` covers what a text filter cannot: a count that has to change, an attribute that has to flip, a value computed from the page. Reading a value into \`step.expect\` is right once something has proved the page moved — wait first, then read. (Rule 6 rules out Playwright's \`expect(locator).toHaveText(...)\`; the forms above are the waiting ones you have.)
 
    **And it has to be able to FAIL.** A post-condition that cannot go red proves nothing at all — it is the same as having none, only harder to notice. Never compare a value to itself, or to a variable you just assigned from the same read: \`step.expect((await rows.count()) === rowCount)\` re-reads what it has already stored, so it passes just as happily on an empty page. When the step states an expectation, assert THAT — the literal it names, the count it names. When it states none, which is the usual shape of a capture step ("Count the rows [as: n]", "Read the balance [as: b]"), assert what makes the capture worth trusting instead: that the thing you read from was really there and really populated, e.g. \`await page.locator('#documents-body > tr').first().waitFor()\` before reading the count. Never that the number equals itself.${trackerPostCondition(input.actions)}${claimsFlowControl ? flowControlRule(postConditionNumber) : ''}${claimsFail ? failRule(postConditionNumber) : ''}${failureTail ? failureTailRule(postConditionNumber, failureTail) : ''}
+
+Respond with ONLY the JSON object — no prose around it.`;
+
+  return { role: 'user', content: textContent };
+}
+
+// ── Condition entries (stories/codebehind-loops-and-conditions.md) ───────────
+
+/**
+ * One visit on which the model decided a condition, as the generation prompt
+ * shows it (decision 9).
+ */
+export interface ConditionObservationInput {
+  /** `true` held, `false` did not hold, `undefined` not asked — an earlier
+   *  condition in the chain held, first-holds-wins. */
+  holds: boolean | undefined;
+  /** The DOM snapshot the judge was shown, already masked for the model. */
+  dom?: string | undefined;
+  url?: string | undefined;
+}
+
+/** What `buildConditionCodePrompt` needs. */
+export interface ConditionCodePromptInput {
+  /** The whole authored line — the entry's `source`. */
+  rawLine: string;
+  /** Which control line it is. */
+  kind: 'if' | 'elseif' | 'while' | 'repeat';
+  /** The condition part on its own, AUTHORED (`{{plan}}`, not the renamed
+   *  `{{__skill1_plan}}` a skill body runs with). */
+  condition: string;
+  /** What the line does when the condition holds — the tail, as written. */
+  tail: string;
+  /** At most one held, one not-held; a single not-asked one when that is all
+   *  there is (`pickConditionObservations`). */
+  observations: ConditionObservationInput[];
+  /** The parameters the CONDITION references, resolved, as for a step. */
+  parameters: Array<{ name: string; value: string }>;
+  /** The live map those came out of, for §7.6's dotted-name rule. */
+  parameterMap?: Record<string, string> | undefined;
+  /** The run's free-text mask set, as for a step. */
+  secrets?: string[] | undefined;
+  envRefs?: Array<{ ref: string; value: string }> | undefined;
+  testInfoSection?: string | undefined;
+  wholeTest?: Array<{ index: number; text: string; inScope: boolean; isThisStep: boolean }> | undefined;
+  candidateFile?: string | undefined;
+  /** The loop this LINE sits in the body of, if any — a `While` inside a
+   *  `For each`. Not the loop the line itself is. */
+  loop?: LoopContext | undefined;
+  /** A stale entry being repaired: the code as it stands and what went wrong
+   *  with it — what it threw, or the cap check's "the code said … still held". */
+  repair?: { entryCode: string; error: string } | undefined;
+  /** The one static re-ask, as for a step. */
+  retry?: { previousEntry: string; complaint: string } | undefined;
+}
+
+/** What the answer DOES, per kind — the thing a model most often inverts. */
+function conditionMeaning(kind: ConditionCodePromptInput['kind'], tail: string): string {
+  switch (kind) {
+    case 'if':
+      return (
+        `This is an \`If\` line. When the condition holds, the run takes this branch (\`${tail}\`); ` +
+        `when it does not, the run moves on to the chain's next \`Else if\` or \`Otherwise\`, or past it.`
+      );
+    case 'elseif':
+      return (
+        `This is an \`Else if\` line. It is only asked when every earlier condition in its chain did ` +
+        `not hold. When it holds, the run takes this branch (\`${tail}\`); when it does not, the run ` +
+        `moves on to the next member of the chain, or past it.`
+      );
+    case 'while':
+      return (
+        `This is a \`While\` loop. The condition is asked before every pass: while it holds, the run ` +
+        `performs \`${tail}\` again; the first time it does not, the loop ends.`
+      );
+    case 'repeat':
+      return (
+        `This is a \`Repeat … until\` loop. The body (\`${tail}\`) runs first, and the condition is ` +
+        `asked after each pass: the loop STOPS the first time it holds. Answer whether the condition, ` +
+        `AS WRITTEN, holds — \`true\` ends the loop. Do not answer "should it carry on".`
+      );
+  }
+}
+
+/** One observation's heading — the verdict the model reached on that visit. */
+function observationLabel(holds: boolean | undefined): string {
+  if (holds === true) return 'the condition HELD';
+  if (holds === false) return 'the condition did NOT hold';
+  return 'not asked — an earlier condition in the chain held';
+}
+
+/**
+ * Ask the model to turn a condition the judge decided into its code-behind
+ * `condition` entry (stories/codebehind-loops-and-conditions.md, "Generation").
+ *
+ * The step prompt's sibling, with the same envelope — `{"entry": "…"}` or a
+ * decline — so the one parse and the one leak guard serve both. What differs
+ * is the evidence: not a transcript of actions (a condition performs none) but
+ * the page the model decided on, per visit, with its verdict — and the rules,
+ * which are about READING: a condition answers true or false and must not
+ * change the page it is asked about.
+ */
+export function buildConditionCodePrompt(input: ConditionCodePromptInput): ChatMessage {
+  const testInfoBlock = input.testInfoSection ? `${input.testInfoSection}\n\n` : '';
+  const paramBlock = formatParameterBlock(
+    input.parameters,
+    input.envRefs ?? [],
+    new Set<string>(),
+    input.secrets ?? [],
+    input.parameterMap,
+  );
+
+  const wholeTestBlock = (input.wholeTest ?? []).length === 0
+    ? ''
+    : `\n\n## The whole test\n${(input.wholeTest ?? [])
+        .map((s) => {
+          const marks = [
+            s.isThisStep ? '← THIS LINE' : '',
+            !s.isThisStep && s.inScope ? '(also being compiled)' : '',
+            !s.inScope && !s.isThisStep ? '(already has code, or stays AI)' : '',
+          ].filter(Boolean).join(' ');
+          return `${s.index}. ${s.text}${marks ? `   ${marks}` : ''}`;
+        })
+        .join('\n')}`;
+
+  const observationBlock = input.observations
+    .map((o, i) => {
+      const url = o.url ? `\nURL: ${o.url}` : '';
+      const dom = o.dom ? `\n\n\`\`\`html\n${o.dom}\n\`\`\`` : '\n\n(no DOM was captured for this visit)';
+      return `### Observation ${i + 1} — ${observationLabel(o.holds)}${url}${dom}`;
+    })
+    .join('\n\n');
+
+  const candidateBlock = input.candidateFile
+    ? `\n\n## The code-behind file as it stands\nReuse its selectors and helpers where they fit; stay consistent with its style.\n\n\`\`\`ts\n${input.candidateFile}\n\`\`\``
+    : '';
+
+  const repairBlock = input.repair
+    ? `\n\n## The entry as it stands — it broke\nThis line already has a \`condition\` entry, and it failed on a run. Fix the cause; keep what is right.\n\n\`\`\`ts\n${input.repair.entryCode}\n\`\`\`\n\n## What went wrong\n${input.repair.error}`
+    : '';
+
+  const retryBlock = input.retry
+    ? `\n\n## Your previous answer was refused\n${input.retry.complaint}\n\nThat answer was:\n\n\`\`\`ts\n${input.retry.previousEntry}\n\`\`\`\n\nFix exactly that, keep the rest of the entry, and return it in the same envelope.`
+    : '';
+
+  const opening = input.repair
+    ? `A test's condition line has a code-behind entry that broke. Rewrite it so it answers the same question correctly, deterministically, with no model call.`
+    : `A test's condition line was just decided by a model looking at the page. Write the Playwright TypeScript that answers the same question deterministically, so future runs need no model call.`;
+
+  const textContent = `${testInfoBlock}${opening}
+
+## The line, exactly as authored
+${input.rawLine}
+
+## The condition
+${input.condition}
+
+${conditionMeaning(input.kind, input.tail)}${wholeTestBlock}${formatLoopBlock(input.loop, 'condition')}
+
+## Parameters the condition references
+${paramBlock}
+
+## The page when the model decided
+Each observation is the page the model was shown on one visit to this line, and what it answered.
+
+${observationBlock}${candidateBlock}${repairBlock}${retryBlock}
+
+## What to return
+
+Respond with ONLY this JSON — the code-behind entry as a single string field (standard JSON string encoding):
+
+{
+  "entry": "{ source: ..., async condition({ page, step }) { ... } }"
+}
+
+If the condition cannot be answered by reading the page — it needs a person's judgement, or what it asks is not in the DOM at all — decline instead, and say why in one sentence:
+
+{
+  "entry": null,
+  "reason": "whether the photo looks blurry is a judgement, not a DOM fact"
+}
+
+The "entry" string holds one TypeScript object literal with exactly this shape:
+
+{
+  source: ${JSON.stringify(input.rawLine)},
+  async condition({ page, step }) {
+    // ...
+    return /* true or false */;
+  },
+}
+
+\`condition\` receives one context object:
+- \`page\`, \`context\`, \`browser\` — the live Playwright instances the run is driving.
+- \`step.getVar(name)\` — the test's variable scope, by the name as written in the markdown: \`{{plan}}\` is \`step.getVar('plan')\`, \`{{order.id}}\` is \`step.getVar('order.id')\`, and an environment placeholder is read by the name inside its braces: \`\${data.url}\` is \`step.getVar('data.url')\`. It returns a string (or undefined).
+- \`log.info(...)\` / \`log.warn(...)\` — recorded into the report.
+
+Rules — all of them are enforced:
+
+1. **Write \`async condition({ page, step })\` and return a boolean**: \`true\` when the condition, as written, holds on the page now; \`false\` when it does not. Never a \`run\` function, never both. Anything other than \`true\` or \`false\` returned is broken code.
+2. **Read only.** No click, fill, type, press, check, uncheck, select, upload, hover, focus or drag; no navigation (\`goto\`, \`goBack\`, \`goForward\`, \`reload\`); no \`page.keyboard\` or \`page.mouse\`; no opening or switching tabs; no \`step.setVar\`. A condition answers a question about the page — it must not change the page it is asked about.
+3. **Answer about the page NOW.** No \`waitFor\`, \`waitForSelector\`, \`waitForTimeout\`, \`waitForFunction\`, \`waitForLoadState\` or \`waitForURL\`, and no retry loop: the framework has already waited for the page to settle before it asks, exactly as it does for the model.
+4. **An absent element is an answer.** \`isEnabled()\`, \`isChecked()\`, \`isVisible()\` on a missing element, \`textContent()\`, \`inputValue()\` and \`getAttribute()\` wait for their element to appear — so check \`await locator.count()\` first and answer from the count when it is 0.
+5. **Resolve to one element.** A locator matching several throws in strict mode. Prefer a role with its accessible name, an \`id\` or a \`data-testid\` the DOM above shows to be unique; \`.first()\` only where the page genuinely repeats the element.
+6. **Read values with \`step.getVar\`, never inline them.** Write \`step.getVar('plan')\`, not the value it had on this run. Generated code containing a resolved parameter or environment value as a literal is REJECTED.
+7. **Write the check from the condition's own words**, not from what one observation happened to show: the same code must answer \`true\` on a page like a held observation and \`false\` on one like a not-held observation.
+8. **No imports.** Everything arrives via the context object, and everything you use must be in \`condition\`'s destructured parameter list — a name you use but do not destructure is a \`ReferenceError\` on the first run.
 
 Respond with ONLY the JSON object — no prose around it.`;
 

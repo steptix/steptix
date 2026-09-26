@@ -45,7 +45,11 @@ export function computeStepsSummary(
   // imports no VS Code, so the fast suite pins THEM rather than a copy of the
   // rule. What stays here is the one thing that needs a snapshot: which lines
   // the author wrote under `## Steps`.
-  return { ...countMainFlowStatuses(snap.statuses, mainFlowLines), mainFlowLines };
+  // A ⚠ on a line that did not run counts as the skip it was (`notTaken`).
+  const notTaken = new Set(
+    (snap.failures ?? []).filter(([, f]) => f.notTaken !== undefined).map(([line]) => line),
+  );
+  return { ...countMainFlowStatuses(snap.statuses, mainFlowLines, notTaken), mainFlowLines };
 }
 
 /**

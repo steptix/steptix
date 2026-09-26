@@ -493,7 +493,8 @@ export class TestBenchTestController implements vscode.Disposable {
           // event because the wire has no third verdict
           // (stories/control-flow.md).
           if (isSkippedPass(event)) {
-            emit(skipTestOutputLine(event.line, whereOf(event), event.reason));
+            // A ⚠ that did not run says both facts, as its hover does.
+            emit(skipTestOutputLine(event.line, whereOf(event), event.reason, event.codeBehindStale));
             break;
           }
           if (event.codeBehindStale) {

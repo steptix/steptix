@@ -69,8 +69,17 @@ import {
 import { envDataRefsIn, resolveEnvDataRef } from '../parser/interpolate-env-data.js';
 import { parseOutputPrefixes, buildEnrichedInstruction } from '../server/run-helpers.js';
 import { maskRecordSecrets, redact, runSecrets } from '../utils/secrets.js';
-import type { CodeBehindBinding } from '../codebehind/loader.js';
-import { entrySourceText, runCodeBehindEntry, EXIT_NOT_CLAIMED } from '../codebehind/execute.js';
+import { warnBindingOnce, type CodeBehindBinding } from '../codebehind/loader.js';
+import {
+  entrySourceText,
+  isConditionCode,
+  isStepCode,
+  runCodeBehindCondition,
+  runCodeBehindEntry,
+  EXIT_NOT_CLAIMED,
+  type CodeBehindConditionOutcome,
+  type RunCodeBehindOptions,
+} from '../codebehind/execute.js';
 import { makeBrowserApi, makeTabApi } from '../codebehind/tabs.js';
 import type { EnvDataContext } from '../parser/interpolate-env-data.js';
 import type { StepGroup } from './step-grouper.js';
@@ -704,7 +713,19 @@ export async function executeStep(
   /** Set when an entry threw and was discarded — the step then heals under AI
    *  and the result is flagged for the next compile. */
   let staleAfterHeal: StepResult['codeBehindStale'] | undefined;
-  if (binding?.entry && binding.entry.ai !== true) {
+  // A `condition` entry bound to a line that is not a condition
+  // (stories/codebehind-loops-and-conditions.md, "The entry, loading and
+  // running it"). The entry is not broken — it is in the wrong place — so it
+  // is neither run nor discarded nor flagged stale: the step runs under AI and
+  // the author is told once. Running it would execute a read-only question as
+  // if it were the step's action and call the step done.
+  if (binding?.entry && isConditionCode(binding.entry) && !isStepCode(binding.entry)) {
+    warnBindingOnce(
+      binding,
+      `Code-behind for step ${stepIndex} in ${binding.file}: a condition entry is bound to ` +
+        'a step that is not a condition line — the step runs under AI',
+    );
+  } else if (binding?.entry && binding.entry.ai !== true) {
     const codeResult = await runCodeBehindStep(stepIndex, instruction, binding, opts, startTime);
     // The tail applies to a replay failure exactly as to an AI one (decision 5).
     // Applied at the CALL rather than inside, so all six of that function's
@@ -1042,32 +1063,22 @@ function tryGetActiveSession(
 }
 
 /**
- * Run a step's code-behind entry.
+ * Everything a code-behind entry runs against, for one binding: the live page
+ * and its browser and context, tab and browser control over the run's own
+ * trackers, and the per-run facts an entry reads (variables, env/data, upload
+ * base, baseUrl).
  *
- * Returns `{ result }` when the step is decided — passed, failed by a
- * `step.expect`, or failed outright under `codeBehindStrict` or on a keyless
- * run — and `{ stale }` when the entry threw and the step falls through to
- * AI, which discards the entry for the rest of the run and hands the step to
- * the AI flow with a clean slate.
- *
- * The `expect` distinction is the inline assertion's rule, lifted: broken
- * code heals, a failed assertion fails. Two things suspend the healing half.
- * Strict mode, because compile's replay has to see broken code as a red step,
- * not a slow one. And a keyless run, because there is no AI to heal with —
- * an entry that passes still replays, so only the broken step is affected
- * (stories/keyless-replay-and-gateway-env.md §Part B).
+ * One builder for a step's `run` and a guard's `condition`
+ * (stories/codebehind-loops-and-conditions.md), so the two cannot come to see
+ * different worlds — a condition that read a different tab from the step
+ * before it would be answering a different question.
  */
-async function runCodeBehindStep(
-  stepIndex: number,
-  instruction: string,
+function codeBehindRunContext(
   binding: CodeBehindBinding,
   opts: StepExecutorOptions,
-  startTime: number,
-): Promise<{ result?: StepResult; stale?: StepResult['codeBehindStale'] }> {
-  const entry = binding.entry;
-  if (!entry) return {};
-  let page = opts.pageTracker ? opts.pageTracker.getActive() : opts.page;
-  const code = entrySourceText(entry);
+  label: string,
+): Omit<RunCodeBehindOptions, 'flowControlClaim' | 'pauseBeforeRun'> {
+  const page = opts.pageTracker ? opts.pageTracker.getActive() : opts.page;
   // Ask the tracker for the browser when there is one: `context.browser()` is
   // null for a persistent context, which is what the CDP path can hand us.
   // The `!` is the same shape `executeToolStep`'s callers already rely on for
@@ -1093,7 +1104,7 @@ async function runCodeBehindStep(
       )
     : undefined;
 
-  const outcome = await runCodeBehindEntry({
+  return {
     binding,
     page,
     context: active?.context ?? page.context(),
@@ -1103,13 +1114,90 @@ async function runCodeBehindStep(
     resolvedParameters: opts.resolvedParameters ?? {},
     ...(opts.envData && { envData: opts.envData }),
     ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }),
-    ...(opts.codeBehindPauseBeforeRun && { pauseBeforeRun: true }),
     ...(opts.uploadPaths !== undefined && { uploadPaths: opts.uploadPaths }),
+    label,
+  };
+}
+
+/**
+ * Run a guard member's `condition` entry against the run's live page
+ * (stories/codebehind-loops-and-conditions.md, decisions 4 and 7).
+ *
+ * The same context a step's `run` gets — built by the same function — and no
+ * settle: the caller settles the page once for the whole visit
+ * ({@link settleBeforeConditions}), because a chain whose second member is
+ * code must not wait twice. Never throws; `evaluateGuard` decides what each
+ * outcome means for the guard.
+ */
+export async function runConditionCode(
+  binding: CodeBehindBinding,
+  opts: StepExecutorOptions,
+  label: string,
+): Promise<CodeBehindConditionOutcome> {
+  return runCodeBehindCondition(codeBehindRunContext(binding, opts, label));
+}
+
+/**
+ * The gate a condition waits at before anything reads the page: up to 10 s
+ * (capped by `execution.timeout`) for the DOM to go quiet for 1 s — the watch
+ * form's own gate, and the judge's (stories/control-flow.md, decision 4).
+ *
+ * Exported so a condition decided by CODE waits at exactly the same gate the
+ * model would have (stories/codebehind-loops-and-conditions.md, decision 6): a
+ * `While` asked straight after `Click Next` would otherwise read page 1's
+ * button. No-op on the computer surface (there is no DOM signal for a native
+ * window) and when there is no page.
+ */
+export async function settleBeforeConditions(opts: StepExecutorOptions): Promise<void> {
+  if (opts.computer) return;
+  const page = opts.pageTracker ? opts.pageTracker.getActive() : opts.page;
+  if (!page) return;
+  await settleConditionPage(page, opts.config);
+}
+
+async function settleConditionPage(page: Page, config: Config): Promise<void> {
+  await waitForPageStability(page, {
+    timeoutMs: Math.min(10_000, config.execution.timeout * 1000),
+    quiesceMs: 1000,
+  });
+}
+
+/**
+ * Run a step's code-behind entry.
+ *
+ * Returns `{ result }` when the step is decided — passed, failed by a
+ * `step.expect`, or failed outright under `codeBehindStrict` or on a keyless
+ * run — and `{ stale }` when the entry threw and the step falls through to
+ * AI, which discards the entry for the rest of the run and hands the step to
+ * the AI flow with a clean slate.
+ *
+ * The `expect` distinction is the inline assertion's rule, lifted: broken
+ * code heals, a failed assertion fails. Two things suspend the healing half.
+ * Strict mode, because compile's replay has to see broken code as a red step,
+ * not a slow one. And a keyless run, because there is no AI to heal with —
+ * an entry that passes still replays, so only the broken step is affected
+ * (stories/keyless-replay-and-gateway-env.md §Part B).
+ */
+async function runCodeBehindStep(
+  stepIndex: number,
+  instruction: string,
+  binding: CodeBehindBinding,
+  opts: StepExecutorOptions,
+  startTime: number,
+): Promise<{ result?: StepResult; stale?: StepResult['codeBehindStale'] }> {
+  const entry = binding.entry;
+  if (!entry) return {};
+  const code = entrySourceText(entry);
+  const context = codeBehindRunContext(binding, opts, `codebehind:${stepIndex}`);
+  let page = context.page;
+
+  const outcome = await runCodeBehindEntry({
+    ...context,
+    ...(opts.codeBehindPauseBeforeRun && { pauseBeforeRun: true }),
     // What lets this entry call `step.exit()` (stories/step-flow-control.md,
     // decision 11). The claim is the authored line's, computed by the run loop,
     // so a compiled return is legal exactly where the AI `return` action is.
     ...(opts.flowControlClaim !== undefined && { flowControlClaim: opts.flowControlClaim }),
-    label: `codebehind:${stepIndex}`,
   });
 
   // The entry may have moved the active tab or browser (`ctx.tabs`,
@@ -3957,6 +4045,17 @@ export interface ConditionVerdict {
   /** Every judge turn, so a guard's cost and its raw answers are as visible in
    *  the report as an ordinary step's. */
   aiInteractions: AiInteraction[];
+  /**
+   * The page the poll that produced this verdict was shown
+   * (stories/codebehind-loops-and-conditions.md, decision 9): the DOM
+   * snapshot exactly as the model got it — already masked with this run's
+   * secrets — and the URL beside it. A condition entry is generated from it.
+   *
+   * Absent on the computer surface, where the evidence is a screen capture and
+   * a condition stays AI (decision 10), and on a verdict nobody was asked for
+   * (`decideLocally`'s).
+   */
+  evidence?: { dom: string; url: string };
 }
 
 /**
@@ -4002,16 +4101,14 @@ export async function evaluateConditions(
   // There is no such signal for a native window — `desktop.settleMs` is the
   // whole of it, and the executor has already spent it after whatever action
   // preceded this decision — so the computer surface simply does not wait.
-  if (page) {
-    await waitForPageStability(page, {
-      timeoutMs: Math.min(10_000, config.execution.timeout * 1000),
-      quiesceMs: 1000,
-    });
-  }
+  if (page) await settleConditionPage(page, config);
 
   // Every `{{name}}` and `${…}` any condition references, with what it holds
   // now — built off the joined authored text so one block covers the chain.
   const values = buildStepValues(conditions.join('\n'), opts);
+  /** What the poll that decides was shown — see {@link ConditionVerdict.evidence}.
+   *  Overwritten every poll, so a verdict carries its OWN page, not the first. */
+  let evidence: ConditionVerdict['evidence'];
 
   let poll = 0;
   for (;;) {
@@ -4061,15 +4158,22 @@ export async function evaluateConditions(
         ? await pageTracker.getPageListWithTitles()
         : undefined;
 
+      // Masked for the MODEL only, the same one line the step prompt applies
+      // to the same string. The snapshot now carries LIVE form values, so a
+      // secret this run typed into an ordinary text field is in it — and the
+      // judge, one turn after a step that showed `••••`, would otherwise read
+      // it in full (review 3, finding 2). Nothing stored is redacted here:
+      // `redactReport` covers what is written.
+      const shownDom = redact(domSnapshot, secretsFor(opts));
+      let shownUrl = '';
+      try {
+        shownUrl = page!.url();
+      } catch { /* a page mid-navigation still gets judged; the URL is a label */ }
+      evidence = { dom: shownDom, url: shownUrl };
+
       const userMessage = buildConditionJudgeMessage(
         conditions,
-        // Masked for the MODEL only, the same one line the step prompt applies
-        // to the same string. The snapshot now carries LIVE form values, so a
-        // secret this run typed into an ordinary text field is in it — and the
-        // judge, one turn after a step that showed `••••`, would otherwise read
-        // it in full (review 3, finding 2). Nothing stored is redacted here:
-        // `redactReport` covers what is written.
-        redact(domSnapshot, secretsFor(opts)),
+        shownDom,
         screenshotBase64,
         conversationHistory,
         openPages,
@@ -4146,7 +4250,12 @@ export async function evaluateConditions(
       const answer = verdict.matched.trim().toUpperCase();
       if (answer === 'NONE') {
         logger.debug(`Condition judge: none held — ${verdict.reasoning}`);
-        return { selected: null, reasoning: verdict.reasoning, aiInteractions };
+        return {
+          selected: null,
+          reasoning: verdict.reasoning,
+          aiInteractions,
+          ...(evidence !== undefined && { evidence }),
+        };
       }
       if (answer !== 'WAITING') {
         const index = answer.length === 1 ? answer.charCodeAt(0) - 65 : -1;
@@ -4154,7 +4263,12 @@ export async function evaluateConditions(
           logger.debug(
             `Condition judge: ${answer} ("${conditions[index]}") held — ${verdict.reasoning}`,
           );
-          return { selected: index, reasoning: verdict.reasoning, aiInteractions };
+          return {
+            selected: index,
+            reasoning: verdict.reasoning,
+            aiInteractions,
+            ...(evidence !== undefined && { evidence }),
+          };
         }
         // A label naming no condition is as unusable as no label at all, so it
         // is a malformed answer and gets a re-ask rather than a guess.

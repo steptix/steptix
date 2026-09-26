@@ -154,6 +154,14 @@ vi.mock('../src/runner/step-executor.js', () => ({
       selected,
       reasoning: selected === null ? 'nothing held' : `condition ${selected} held`,
       aiInteractions: [],
+      // The page the judge decided on — what a compiling run keeps on the
+      // guard row and generates a `condition` entry from
+      // (stories/codebehind-loops-and-conditions.md, decision 9). Numbered per
+      // call, so a prompt can be traced to the visit it came from.
+      evidence: {
+        dom: `<html><body><button id="next">Next</button><!-- judge call ${judgeCalls.length} --></body></html>`,
+        url: 'https://example.com/statements',
+      },
     };
   }),
 }));
@@ -161,8 +169,30 @@ vi.mock('../src/runner/step-executor.js', () => ({
 vi.mock('../src/context/loader.js', () => ({
   loadContextFiles: vi.fn(async () => ({ files: [], combined: '' })),
 }));
+/** Every generation / review prompt the compile riding a run asked. */
+const compilePrompts: string[] = [];
 vi.mock('../src/ai/client.js', () => ({
-  AiClient: class { chat = vi.fn(async () => '{}'); setAiPolicy = vi.fn(); syncAuth = vi.fn(() => null); },
+  AiClient: class {
+    chat = vi.fn(async () => '{}');
+    setAiPolicy = vi.fn();
+    syncAuth = vi.fn(() => null);
+    /** The compile's model: a review echoes the file, a condition prompt gets
+     *  a read-only `condition`, anything else a `run`. */
+    complete = vi.fn(async (messages: Array<{ role: string; content: string }>) => {
+      const last = messages[messages.length - 1]?.content ?? '';
+      compilePrompts.push(last);
+      if (/Review a generated Playwright code-behind file/.test(last)) {
+        const fenced = /## The file, as generated\s*```ts\n([\s\S]*?)```/.exec(last);
+        return { text: JSON.stringify({ file: fenced?.[1] ?? 'export default defineSteps([]);\n' }) };
+      }
+      const quoted = /\n\s*source:\s*("(?:[^"\\]|\\.)*")/.exec(last);
+      const source = quoted?.[1] ? (JSON.parse(quoted[1]) as string) : 'step';
+      const entry = /async condition\(\{ page, step \}\)/.test(last)
+        ? `{ source: ${JSON.stringify(source)}, async condition({ page }) { return (await page.locator('#next').count()) > 0; } }`
+        : `{ source: ${JSON.stringify(source)}, async run({ page }) { await page.click('#go'); } }`;
+      return { text: JSON.stringify({ entry }) };
+    });
+  },
 }));
 vi.mock('../src/utils/tokens.js', () => ({
   TokenTracker: class {
@@ -276,6 +306,7 @@ beforeEach(() => {
   historyPerStep.length = 0;
   judgeCalls.length = 0;
   generatedReports.length = 0;
+  compilePrompts.length = 0;
   judgeScript = [];
   branchedRows = () => [];
   flowControlFor = () => undefined;
@@ -1906,19 +1937,42 @@ describe('compiling a file with control flow', () => {
   const refusalIn = (events: Array<{ type: string; [k: string]: any }>): string | undefined =>
     events.find((e) => e.type === 'output' && e.kind === 'error')?.msg as string | undefined;
 
-  it('refuses a whole-file compile of a file that loops, before anything runs', async () => {
+  /** The run's `compile:result` frame. */
+  const compileResultIn = (events: Array<{ type: string; [k: string]: any }>): any => {
+    const found = events.find((e) => e.type === 'compile:result');
+    expect(found, 'the run emitted no compile:result frame').toBeDefined();
+    return found;
+  };
+  /** The one proposed `.steps.ts`, as text. */
+  const proposalIn = (events: Array<{ type: string; [k: string]: any }>): string =>
+    Object.values(compileResultIn(events).files as Record<string, string>).join('\n');
+  const WHILE_LINE = 'While the Next button is enabled, Go to the next page';
+
+  it('compiles a whole file that loops — the refusal is gone', async () => {
+    // stories/codebehind-loops-and-conditions.md: the server used to refuse
+    // any compile whose slice touched a loop, before anything ran. Nothing is
+    // refused now; the `While` decides "no" on its first visit, so the loop
+    // runs no passes, and the run goes straight on.
     const events = await collect(whileBody({ compile: 'run' }));
 
-    const message = refusalIn(events)!;
-    expect(message).toContain('While the Next button is enabled, Go to the next page');
-    expect(message).toContain('a number of times the page decides');
-    // The advice names things the author can actually do. The first version
-    // said "compile the section the loop runs, on its own" while refusing on
-    // the whole FILE, so that compile was refused by the same check.
-    expect(message).toContain('Compile This Step on a step OUTSIDE the loop');
-    expect(message).toContain('the body of the section the loop runs');
-    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'error' });
-    expect(executedSteps).toEqual([]);
+    expect(refusalIn(events)).toBeUndefined();
+    expect(events.at(-1)).toMatchObject({ type: 'done', status: 'passed' });
+    expect(executedSteps).toEqual(['Open the statements page', 'Verify the last page is shown']);
+
+    const result = compileResultIn(events);
+    // The guard's condition is generated from the one visit — it did not hold.
+    expect(proposalIn(events)).toContain('async condition(');
+    const conditionPrompt = compilePrompts.find((p) => /async condition\(\{ page, step \}\)/.test(p))!;
+    expect(conditionPrompt).toContain('### Observation 1 — the condition did NOT hold');
+    // The body never ran: named not attempted with the DECISION sentence
+    // (decision 12), not the return one.
+    const bodyNumber = 3;
+    expect(result.summary.notAttempted).toContain(bodyNumber);
+    const bodyFrame = events.find(
+      (e) => e.type === 'compile:step' && e.step === bodyNumber && /did not run/.test(e.message),
+    );
+    expect(bodyFrame?.message).toBe('the step did not run — the run decided against it');
+    expect(result.status).toBe('partial');
   });
 
   it('lets a bounded compile of a step OUTSIDE every loop proceed', async () => {
@@ -1936,7 +1990,12 @@ describe('compiling a file with control flow', () => {
     expect(executedSteps).toEqual(['Open the statements page']);
   });
 
-  it('refuses a bounded compile that lands ON the loop guard', async () => {
+  it('compiles the condition of a selected loop guard, and nothing in its body', async () => {
+    // Compile This Step on the `While` line. The run goes to the end of what
+    // the guard opens (the control-structure snap — a decision needs its
+    // consequence), so the body runs its passes under AI; the compile writes
+    // the CONDITION and nothing else.
+    judgeScript = [0, 0, null];
     const events = await collect(
       whileBody({
         compile: 'steps',
@@ -1945,8 +2004,21 @@ describe('compiling a file with control flow', () => {
       }),
     );
 
-    expect(refusalIn(events)).toContain('a number of times the page decides');
-    expect(executedSteps).toEqual([]);
+    expect(refusalIn(events)).toBeUndefined();
+    expect(executedSteps).toEqual(['Click Next', 'Click Next']);
+    const result = compileResultIn(events);
+    const file = proposalIn(events);
+    expect(file).toContain(`source: '${WHILE_LINE}'`);
+    expect(file).toContain('async condition(');
+    expect(file).not.toContain('Click Next');
+    expect(result.summary).toMatchObject({ totalSteps: 1, compiled: 1, notAttempted: [] });
+    // One generation, shown the first held AND the first not-held page.
+    const prompts = compilePrompts.filter((p) => !/Review a generated/.test(p));
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('### Observation 1 — the condition HELD');
+    expect(prompts[0]).toContain('<!-- judge call 1 -->');
+    expect(prompts[0]).toContain('### Observation 2 — the condition did NOT hold');
+    expect(prompts[0]).toContain('<!-- judge call 3 -->');
   });
 
   it('lets a compile of the looped SECTION proceed — it arrives detached', async () => {
@@ -1966,9 +2038,12 @@ describe('compiling a file with control flow', () => {
     expect(executedSteps).toEqual(['Click Next']);
   });
 
-  it('refuses a bounded compile that lands INSIDE the loop body', async () => {
-    // Line 8 is `Click Next`, the section body the `While` runs — reached as a
-    // body step of the loop, so the same slot problem applies.
+  it('compiles a selected loop-body step once, however many passes it runs', async () => {
+    // Line 8 is `Click Next`, the section body the `While` runs. A run that
+    // starts inside the body counts that partial pass as pass 1, returns to
+    // the guard, and runs on — the guard is visited, but it was not selected,
+    // so its condition is not generated; the body line is ONE entry.
+    judgeScript = [0, null];
     const events = await collect(
       whileBody({
         compile: 'steps',
@@ -1977,11 +2052,18 @@ describe('compiling a file with control flow', () => {
       }),
     );
 
-    expect(refusalIn(events)).toContain('a number of times the page decides');
-    expect(executedSteps).toEqual([]);
+    expect(refusalIn(events)).toBeUndefined();
+    expect(executedSteps).toEqual(['Click Next', 'Click Next']);
+    const result = compileResultIn(events);
+    const file = proposalIn(events);
+    // The mocked step performed no page actions, so its one entry is an
+    // `ai: true` decline — one slot, not one per pass.
+    expect(file.match(/source: 'Click Next'/g)).toHaveLength(1);
+    expect(file).not.toContain(WHILE_LINE);
+    expect(result.summary).toMatchObject({ totalSteps: 1, keptAi: 1, notAttempted: [] });
   });
 
-  it('lets a chain compile, with the guards out of scope', async () => {
+  it('compiles a chain, its model-decided condition included', async () => {
     judgeScript = [0];
     const events = await collect(chainBody({ compile: 'run' }));
     // The run itself is untouched by the compile riding it.
@@ -1993,6 +2075,24 @@ describe('compiling a file with control flow', () => {
     ]);
     expect(events.at(-1)).toMatchObject({ type: 'done' });
     expect(events.some((e) => e.type === 'output' && e.kind === 'error')).toBe(false);
+
+    // The `If` line is a compile step now: its condition is generated from
+    // the page the model decided on. The `Otherwise` has no condition and
+    // stays dispatched — no entry, not in the denominator.
+    const file = proposalIn(events);
+    expect(file).toContain("source: 'If the Cash checkbox is ticked, then Pay with cash'");
+    expect(file).toMatch(/async condition\(/);
+    expect(file).not.toContain('Otherwise, Pay by card');
+    const result = compileResultIn(events);
+    // Eight expanded steps, the `Otherwise` dispatched.
+    expect(result.summary.totalSteps).toBe(7);
+    // The untaken branch's two steps — issue 053 — named, with the decision
+    // sentence on their frames.
+    const untaken = events
+      .filter((e) => e.type === 'compile:step' && e.message === 'the step did not run — the run decided against it')
+      .map((e) => e.line);
+    expect(untaken).toEqual([13, 14]);
+    expect(result.summary.notAttempted).toHaveLength(2);
   });
 });
 

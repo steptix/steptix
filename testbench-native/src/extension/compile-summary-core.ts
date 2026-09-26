@@ -110,21 +110,48 @@ export function compileResultLine(event: CompileResultEvent): string {
     );
   }
   const nothingHappened = wroteNothing && !summary.stoppedAt && !ended;
+  // Why a FAILED compile failed, which every failed line below carries. `error` is
+  // read only for `failed`: on a `partial` result it restates what the line already
+  // says (the ending, or the "could not be generated" count), and on `green` there
+  // is none. Blank counts as absent, so an empty field cannot print a bare dash.
+  const failedWhy = event.status === 'failed' ? summary.error?.trim() || undefined : undefined;
+  // A compile the server REFUSED — before any step ran, or at a step it will not
+  // compile — comes back `failed` with nothing written, nothing stopped, nothing
+  // named as not attempted, and the refusal in `summary.error`
+  // (`emitCompileRefusal`, session-manager.ts). Every count is zero for it, so the
+  // zero counts alone read as a clean result: this line used to print "✓ Nothing
+  // to compile — every step already has code-behind" over a compile that did
+  // nothing because it was told no. `failed` never earns a ✓. The refusal leads,
+  // because it is the only sentence here that says what to do next.
+  if (event.status === 'failed' && nothingHappened && summary.notAttempted.length === 0) {
+    return (
+      `✗ Did not compile ${name}: ` +
+      (failedWhy ? asSentence(failedWhy) : 'the compile failed before any step produced an entry.')
+    );
+  }
   // "Every step already has code-behind" is only true when the run reached every
   // step. Stopped with nothing generated, it says the opposite of what happened.
   if (nothingHappened && summary.notAttempted.length === 0) {
     return `✓ Nothing to compile in ${name} — every step already has code-behind.`;
   }
+  // After the stopped / ended wording, never instead of it, and never when it
+  // would only repeat the step error that wording already quotes.
+  const failedTail =
+    failedWhy !== undefined && failedWhy !== summary.stoppedAt?.error?.trim()
+      ? ` ${asSentence(failedWhy)}`
+      : '';
   if (nothingHappened) {
     return (
       `✗ Compiled nothing in ${name}: the run stopped before any step produced an entry ` +
-      `(${summary.notAttempted.length} step(s) not attempted).`
+      `(${summary.notAttempted.length} step(s) not attempted).` +
+      failedTail
     );
   }
   // The same "nothing came of it" line for a run that ended as written, in that
   // run's own words and with no ✗: an author who wrote the ending step is owed a
-  // run that goes past it, not a report of a failure.
-  if (wroteNothing && ended) {
+  // run that goes past it, not a report of a failure. Not for a `failed` result,
+  // whose ✗ and reason the general line below keeps.
+  if (wroteNothing && ended && event.status !== 'failed') {
     return (
       `◐ Compiled nothing in ${name}: ended at step ${ended.step} as its text says — ` +
       `${ended.error}` +
@@ -145,5 +172,12 @@ export function compileResultLine(event: CompileResultEvent): string {
     parts.push(`${summary.notAttempted.length} step(s) not attempted`);
   }
   const glyph = event.status === 'green' ? '✓' : event.status === 'partial' ? '◐' : '✗';
-  return `${glyph} Compiled ${name}: ${parts.join('; ')}.`;
+  return `${glyph} Compiled ${name}: ${parts.join('; ')}.${failedTail}`;
+}
+
+/** `text` ending in terminal punctuation — the server's refusals mostly do, and
+ *  a few (`Tool catalogue load failed: …`) end on whatever the cause said. A
+ *  closing quote or bracket after the stop still counts as ended. */
+function asSentence(text: string): string {
+  return /[.!?…]["'”’)]*$/.test(text) ? text : `${text}.`;
 }

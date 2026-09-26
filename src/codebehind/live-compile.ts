@@ -23,9 +23,15 @@ import {
 } from './candidate.js';
 import {
   anyActionCarriesPlaceholder,
-  askForEntry,
+  askWithCaptureRetry,
+  capturedValueGuards,
+  compilableCondition,
+  compilePromptSecrets,
+  generateConditionEntry,
   generateStepEntry,
   guardedValues,
+  loopContextFor,
+  recordedCapturesOf,
   refuseReason,
   SET_STEP_NOT_COMPILED,
   SURFACE_SWITCH_NOT_COMPILED,
@@ -34,9 +40,12 @@ import {
   stepParameters,
   unresolvedRefsReason,
   valueMatchWarning,
+  type ConditionObservation,
   type GeneratedEntry,
 } from './generate.js';
-import { buildRepairPrompt } from './repair.js';
+import type { StepCodeEntry } from './types.js';
+import { isConditionCode, isStepCode } from './execute.js';
+import { buildRepairPrompt, type RepairPromptInput } from './repair.js';
 import { readLastRun, type LastRunStep } from './last-run.js';
 import { entryTextIn } from './writer.js';
 import type { CodeBehindBinding } from './loader.js';
@@ -167,6 +176,34 @@ export interface PlanEntry {
   dispatched?: boolean | undefined;
   /** 1-based source line, for the gutter and the run log. */
   line?: number | undefined;
+  /**
+   * The innermost runtime loop — `While`, `Repeat … until`, `For each` — this
+   * step sits in the body of (stories/codebehind-loops-and-conditions.md,
+   * decision 2): the loop's AUTHORED guard line, and for a `For each` the item
+   * name the run binds, which a skill body renames (`__skill1_order`). Static,
+   * from the expansion's control records; the per-pass names are read off the
+   * evidence pass when the step is generated (`loopContextFor`). Absent
+   * outside every runtime loop, and for a table-row `### Section` loop, which
+   * is unrolled rather than run.
+   */
+  loop?: { line: string; runtimeItem?: string | undefined } | undefined;
+}
+
+/**
+ * Does this line already have an entry of ITS kind?
+ * (stories/codebehind-loops-and-conditions.md — "make the live path's
+ * `hasEntry` kind-aware").
+ *
+ * A condition line's entry is a `condition`; every other line's is a `run`.
+ * An entry of the other kind is in the wrong place — the runtime warns once
+ * and runs the line under AI — so it is not an entry this compile should
+ * leave alone: the line is in scope, and the generated entry replaces it. An
+ * `ai: true` entry is the author's opt-out on either kind of line.
+ */
+export function hasEntryOfKind(entry: StepCodeEntry | undefined, line: 'step' | 'condition'): boolean {
+  if (entry === undefined) return false;
+  if (entry.ai === true) return true;
+  return line === 'condition' ? isConditionCode(entry) : isStepCode(entry);
 }
 
 /** How many of these steps a compile counts — everything it did not dispatch. */
@@ -185,6 +222,56 @@ export interface LiveStepInput {
   result: StepResult;
   /** A SNAPSHOT of the live parameter map. The run keeps writing to its own. */
   resolvedParameters: Record<string, string>;
+  /**
+   * Why a `status: 'skipped'` row never ran — the CAUSE, structurally, so
+   * nothing downstream has to read it out of the row's prose:
+   *
+   * - `'return'` — a return ended its flow (stories/step-flow-control.md,
+   *   decision 12). What an absent field means too, for a caller written
+   *   before the second cause existed.
+   * - `'decision'` — the run decided against it: an untaken branch, a loop
+   *   that ran no passes, an exhausted or empty `For each`
+   *   (stories/codebehind-loops-and-conditions.md, decision 12; issue 053).
+   */
+  skipped?: 'return' | 'decision' | undefined;
+}
+
+/**
+ * One visit to a guard, offered to the compiler (`offerGuard`) — the evidence
+ * a `condition` entry is generated from
+ * (stories/codebehind-loops-and-conditions.md, "Live compile").
+ */
+export interface LiveGuardInput {
+  /**
+   * Every member ASKED on this visit, in chain order — a loop's guard alone
+   * for a `While` / `Repeat`. 0-based expanded indices WITHIN THE CURRENT
+   * BLOCK, in the same index space as the row's `guard.selected`,
+   * `guard.staleMember` and `guard.evidence.members`. Each with its binding
+   * from the generation registry, which is where the authored line comes from.
+   */
+  members: Array<{ index: number; binding?: CodeBehindBinding | undefined }>;
+  /** The guard row. `result.guard` carries the structured decision and, on a
+   *  compiling run where the model decided, the page it decided on. */
+  result: StepResult;
+  /** A SNAPSHOT of the live parameter map at the visit. */
+  resolvedParameters: Record<string, string>;
+  /** The surface the visit was judged on. A condition judged on the computer
+   *  surface stays AI (decision 10): no DOM, and a screen read is not portable. */
+  surface?: 'browser' | 'computer' | undefined;
+}
+
+/** What the compiler keeps about one condition LINE across its visits. */
+interface GuardAccumulator {
+  key: string;
+  /** Absolute 0-based expanded index of the line — its first visit's. */
+  index: number;
+  binding: CodeBehindBinding;
+  /** The first held, first not-held and first not-asked observation, each
+   *  with the parameter snapshot of its visit (decision 9). */
+  observations: Array<ConditionObservation & { parameters: Record<string, string> }>;
+  /** The LATEST error its condition entry produced on this run — what a
+   *  repair is shown. */
+  stale?: string | undefined;
 }
 
 export interface LiveCompileOutcome {
@@ -225,6 +312,19 @@ export interface LiveCompileFinish {
  * it is a const rather than a literal in two places.
  */
 export const SKIPPED_BY_RETURN_REFUSAL = 'the step did not run — a return ended its flow';
+
+/**
+ * A step the run DECIDED not to take — an untaken branch of a chain, the body
+ * of a loop that ran no passes, an exhausted or empty `For each`
+ * (stories/codebehind-loops-and-conditions.md, decision 12; closes issue 053).
+ *
+ * The sibling of {@link SKIPPED_BY_RETURN_REFUSAL}, and kept apart from it for
+ * the author's sake: "a return ended its flow" sends them to the step that
+ * returned, while this one says the run chose a different path, so the step
+ * needs a run that goes down it. Chosen by the offer's `skipped` cause, never
+ * by reading the row's prose.
+ */
+export const SKIPPED_BY_DECISION_REFUSAL = 'the step did not run — the run decided against it';
 
 /**
  * A step that failed and whose own `otherwise continue` tail let the run past it
@@ -326,8 +426,10 @@ export function endedAsWrittenReason(subject: 'run' | 'replay', step: number): s
  *   the model on every run by the author's choice (stories/use-ai-step.md,
  *   decision 1). Neither may become an `ai: true` entry, which is what the
  *   generator's "no page actions" decline would write.
- * - **skipped** — a return ended its flow before it ran, so there is no
- *   transcript to generate from.
+ * - **skipped** — a return ended its flow before it ran, or the run decided
+ *   against it (an untaken branch, a loop that ran no passes), so there is no
+ *   transcript to generate from. Which of the two is the offer's `skipped`
+ *   cause, and each has its own sentence.
  * - **tolerated** — it failed and its `otherwise continue` tail let the run
  *   carry on, so it has a transcript of the failure and no evidence of the step
  *   working (decision 11). Asked BEFORE "did not pass", because the status of a
@@ -359,6 +461,9 @@ export function generationRefusal(input: {
   /** `StepResult.surface` — which surface answered the step
    *  (SPEC-use-computer.md §9). Absent means `browser`. */
   surface?: 'browser' | 'computer' | undefined;
+  /** Why a `skipped` step never ran — see {@link LiveStepInput.skipped}.
+   *  Absent reads as a return, the one cause there was before decisions. */
+  skipped?: 'return' | 'decision' | undefined;
 }): string | undefined {
   // `[skill` / `[tool` calls only — `[input:]`, `[output:]` and
   // `[interactive]` DO reach generation and are declined there, with the
@@ -386,10 +491,14 @@ export function generationRefusal(input: {
   }
   // A control line, for the same reason: the framework asks a model whether a
   // condition holds and performs nothing, so there is no transcript to
-  // generate an entry from (stories/control-flow.md, decision 12). Belt and
-  // braces — the run loops never offer a guard — but `offer` is public and a
-  // generated entry for an `If` line would replace the decision with code that
-  // acts.
+  // generate a `run` entry from (stories/control-flow.md, decision 12). A
+  // condition line's entry is a `condition`, generated from the page the
+  // model decided on — which reaches the compiler through `offerGuard`, never
+  // through here (stories/codebehind-loops-and-conditions.md). Belt and
+  // braces — the run loops offer a guard only as a decision-skipped row,
+  // which `offer` settles before asking this — but `offer` is public, and a
+  // `run` entry generated for an `If` line would replace the decision with
+  // code that acts.
   if (parseControlLine(input.text.trim())) {
     return 'a control line is dispatched, never generated';
   }
@@ -425,7 +534,9 @@ export function generationRefusal(input: {
   // on there being a file to bind into — the step stays AI either way.
   if (input.surface === 'computer') return COMPUTER_MODE_STAYS_AI;
   if (!input.binding) return 'the step has no code-behind file to bind into';
-  if (input.status === 'skipped') return SKIPPED_BY_RETURN_REFUSAL;
+  if (input.status === 'skipped') {
+    return input.skipped === 'decision' ? SKIPPED_BY_DECISION_REFUSAL : SKIPPED_BY_RETURN_REFUSAL;
+  }
   // Which of the two tolerated reasons depends on what ran it. An entry that ran
   // and reported the failure leaves nothing owed, so it answers AHEAD of the
   // "ran as code" rule below: behind it the step landed in `notAttempted` — the
@@ -473,19 +584,32 @@ export class LiveCompiler {
    * — not merely queued — the same rule the `kept` getter applies, for the
    * same reason.
    *
-   * Named for the producer that fills it, not for a rule that is about the
-   * producer. `generationRefusal` answers `SKIPPED_BY_RETURN_REFUSAL` for ANY
-   * `status: 'skipped'` offer, so the netting is producer-agnostic and the
-   * second skip producer would land here unchanged if it ever offered. It does
-   * not: control flow's untaken branch (`skipKind: 'not-taken'`) is emitted
-   * without an `offer` and so reaches neither this list nor
-   * `final.notAttempted`, which only names steps that produced no result row
-   * at all. That divergence is the live path's, is main's, and is untouched
-   * here — the boxed pipeline is where the two producers were unified, by
-   * reading the cause off the recording's skipped rows
-   * (`recordingSkipCause`, src/codebehind/compile.ts).
+   * The OTHER skip producer — control flow's untaken branch, a loop that ran
+   * no passes — files into {@link skippedByDecision}, by the offer's
+   * `skipped` cause (issue 053, resolved).
    */
   private readonly skippedByReturn: { number: number; key: string }[] = [];
+  /**
+   * Steps the run DECIDED not to take — an untaken branch, a loop that ran no
+   * passes, an exhausted or empty `For each`
+   * (stories/codebehind-loops-and-conditions.md, decision 12; issue 053).
+   *
+   * Their own list for their own sentence ({@link SKIPPED_BY_DECISION_REFUSAL}),
+   * netted exactly as {@link skippedByReturn} is: against `writtenKeys`, so a
+   * body line one pass skipped and another pass compiled owes nothing, and a
+   * condition line an outer decision skipped here but that was observed (and
+   * written) on another visit owes nothing either.
+   *
+   * A step that already has an entry is NOT filed — decision 12 says it is
+   * left exactly as it is — and it lands in no count at all beyond
+   * `totalSteps`: not `kept` (its code did not run), not `keptAi`, not
+   * `unproven`, and never `notAttempted`, which is the list of lines that end
+   * the compile with no entry.
+   */
+  private readonly skippedByDecision: { number: number; key: string; guard?: boolean }[] = [];
+  /** Entry keys whose "did not run" line has already gone out — at most once
+   *  per entry, however many passes skip it (`offerDecisionSkip`). */
+  private readonly saidDecisionSkip = new Set<string>();
   /**
    * Steps that failed and were tolerated (stories/step-failure-outcomes.md,
    * decision 11).
@@ -564,6 +688,13 @@ export class LiveCompiler {
    * `kept`, which is a count of STEPS (the boxed `keptExistingFor` counts them
    * that way too, so a body called three times whose entry is clean is 3).
    *
+   * A set of absolute expanded INDICES per key, not a tally of offers
+   * (stories/codebehind-loops-and-conditions.md, decision 13): a runtime loop
+   * re-runs the same index once per pass, and a body line whose entry ran
+   * cleanly on three passes is one kept step, not three. A table-row section
+   * loop is unrolled at expansion — one index per iteration — so it still
+   * counts per iteration, which is the parity above.
+   *
    * Kept per key rather than as a running total because the two answers about
    * one key are decided at different times and in either order. A looped body
    * whose entry is clean on iteration 1 and stale on iteration 2 refuses
@@ -572,8 +703,30 @@ export class LiveCompiler {
    * one entry counted twice, where the boxed pipeline's `keptExistingFor`
    * excludes every step whose key is in the selection and says `kept 0`.
    */
-  private readonly keptByKey = new Map<string, number>();
-  private keptAiExisting = 0;
+  private readonly keptByKey = new Map<string, Set<number>>();
+  /** Expanded indices whose `ai: true` entry the run honoured — distinct, for
+   *  the reason {@link keptByKey} is (decision 13). */
+  private readonly keptAiExisting = new Set<number>();
+  /**
+   * Condition lines seen on this run, per entry key, with what their visits
+   * showed (stories/codebehind-loops-and-conditions.md, "Live compile"). A
+   * `While` visited 25 times is offered 25 times; generation waits for
+   * `runStepsEnded`, when every visit of the block has been seen, so it can be
+   * shown the first held AND the first not-held page.
+   */
+  private readonly guards = new Map<string, GuardAccumulator>();
+  /**
+   * Absolute indices a Compile This Step was NOT asked to compile (`setSlice`,
+   * `'steps'` mode only) — and yet may run, now that loops compile: a
+   * selection of a `While` line runs the body the guard opens, and a selection
+   * inside a loop's body returns to its guard and runs further passes. What
+   * runs outside the selection is not generated, named or counted.
+   *
+   * Not kept for a `'run'` compile, whose slice is a continuation block's
+   * bound: there, a step a loop runs from before the block's start is still
+   * part of the logical run the author asked to compile.
+   */
+  private readonly outside = new Set<number>();
   private errors = 0;
   /**
    * Entries put on the queue — the tail's `total`.
@@ -690,7 +843,10 @@ export class LiveCompiler {
     const start = Math.max(0, startIndex);
     const end = Math.min(blockLen - 1, endIndex);
     for (let i = 0; i < blockLen; i++) {
-      if (i < start || i > end) this.plan[this.offset + i]!.inScope = false;
+      if (i < start || i > end) {
+        this.plan[this.offset + i]!.inScope = false;
+        if (this.options.mode === 'steps') this.outside.add(this.offset + i);
+      }
     }
     const block = this.plan.slice(this.offset);
     this.scopedTotal += countable(block.slice(start, end + 1)) - countable(block);
@@ -735,10 +891,17 @@ export class LiveCompiler {
    */
   private get kept(): number {
     let total = 0;
-    for (const [key, count] of this.keptByKey) {
-      if (!this.writtenKeys.has(key)) total += count;
+    for (const [key, indices] of this.keptByKey) {
+      if (!this.writtenKeys.has(key)) total += indices.size;
     }
     return total;
+  }
+
+  /** Record that the entry `key` ran as code at absolute index `at`. */
+  private keep(key: string, at: number): void {
+    const indices = this.keptByKey.get(key) ?? new Set<number>();
+    indices.add(at);
+    this.keptByKey.set(key, indices);
   }
 
   /** True when at least one step is queued or already generated. */
@@ -804,6 +967,10 @@ export class LiveCompiler {
    * cannot happen.
    */
   runStepsEnded(): void {
+    // The conditions first, so the forecast below counts them: every visit of
+    // this block has now been seen, which is what a condition waits for
+    // (decision 9 — the first held AND the first not-held page).
+    this.enqueueConditions();
     const stopped = this.disposed || this.signal?.aborted === true;
     const outstanding = this.enqueued - this.settled;
     // Owed by what `finish` will actually do, not by "this compiler has ever
@@ -871,7 +1038,19 @@ export class LiveCompiler {
       this.sawPlaceholder = true;
     }
     const at = this.offset + input.index;
+    // Ran, but was not selected: a Compile This Step compiles its selection
+    // and no more — see `outside`.
+    if (this.outside.has(at)) {
+      logger.debug(`Compile-as-you-go skipped step ${at + 1}: outside the selection being compiled`);
+      return;
+    }
     const text = input.binding?.source ?? this.plan[at]?.text ?? input.result.instruction;
+    // A row the run DECIDED not to take (issue 053) is settled on its own
+    // terms, before anything that reads it as a step that could have run.
+    if (input.result.status === 'skipped' && input.skipped === 'decision') {
+      this.offerDecisionSkip(input, at, text);
+      return;
+    }
     const refusal = generationRefusal({
       binding: input.binding,
       text,
@@ -881,6 +1060,7 @@ export class LiveCompiler {
       fromCodeBehind: input.result.fromCodeBehind,
       codeBehindStale: input.result.codeBehindStale,
       surface: input.result.surface,
+      skipped: input.skipped,
     });
     if (refusal !== undefined) {
       // Both "ran as code" reasons: the entry ran, so the step is one this
@@ -890,10 +1070,9 @@ export class LiveCompiler {
       if (refusal === 'the step ran as code' || refusal === TOLERATED_CODE_BEHIND_REFUSAL) {
         // The binding is there: every refusal that could reach here without
         // one (`[skill:]`/`[tool:]`, no binding at all) is decided above this.
-        const keptKey = entryKeyOf(input.binding!);
-        this.keptByKey.set(keptKey, (this.keptByKey.get(keptKey) ?? 0) + 1);
+        this.keep(entryKeyOf(input.binding!), at);
       }
-      if (refusal === 'the entry is marked `ai: true`') this.keptAiExisting++;
+      if (refusal === 'the entry is marked `ai: true`') this.keptAiExisting.add(at);
       // Named in the summary rather than only counted, exactly as a
       // stop-skipped entry is: "3 step(s) not attempted" does not tell the
       // author WHICH of their steps still has no entry
@@ -953,9 +1132,20 @@ export class LiveCompiler {
       text,
       binding: input.binding,
       key,
-      hasEntry: input.binding!.entry !== undefined,
+      // Kind-aware: a `condition` entry on an ordinary step is not its entry
+      // (the runtime ran the step under AI), so it is generated over.
+      hasEntry: hasEntryOfKind(input.binding!.entry, 'step'),
       isAiEntry: false,
     };
+    this.enqueue(step, () => this.askModel(step, input));
+  }
+
+  /**
+   * Put one generation on the serialized queue — a step's (`offer`) or a
+   * condition's (`enqueueConditions`); both count in `enqueued`, `compiled`,
+   * `declined`, `errors` and the progress frames alike.
+   */
+  private enqueue(step: CompileStep, ask: () => Promise<GeneratedEntry>): void {
     this.enqueued++;
     // Each link is isolated. A rejected link would otherwise poison the rest
     // of the chain — `.then` on a rejected promise is skipped — so one
@@ -963,7 +1153,7 @@ export class LiveCompiler {
     // exactly the "a run must not fail over its own bookkeeping" rule at the
     // level below the one `generate` already guards.
     this.tail = this.tail
-      .then(() => this.generate(step, input))
+      .then(() => this.generate(step, ask))
       .catch((err: unknown) => {
         this.errors++;
         const message = err instanceof Error ? err.message : String(err);
@@ -977,6 +1167,265 @@ export class LiveCompiler {
         // otherwise never be counted settled.
         this.emitProgress('generate');
       });
+  }
+
+  /**
+   * A row the run decided not to take — an untaken branch, a loop that ran no
+   * passes, an exhausted or empty `For each`
+   * (stories/codebehind-loops-and-conditions.md, decision 12; issue 053).
+   *
+   * Nothing ran, so nothing is generated. What is decided here is whether the
+   * line is OWED an entry — named in `notAttempted` with
+   * {@link SKIPPED_BY_DECISION_REFUSAL} — or not the compile's business:
+   *
+   * - outside a Compile This Step's selection: never asked about (settled by
+   *   `offer` before this);
+   * - it already has an entry (any kind): left exactly as it is, counted
+   *   nowhere but `totalSteps` — see {@link skippedByDecision};
+   * - a condition line with no entry: owed, unless another visit of it is
+   *   observed and generated (netted at `finish`). Its observations arrive
+   *   through `offerGuard`, never here;
+   * - a line the framework dispatches (`Otherwise`, `For each`, a literal
+   *   condition, `Set`, `[use …]`, an unconditional `Return`, a `[tool:]` or
+   *   `[skill:]` call) or with no file to bind into: not owed, silently —
+   *   `generationRefusal` answers for all of them;
+   * - any other step with no entry: owed.
+   */
+  private offerDecisionSkip(input: LiveStepInput, at: number, text: string): void {
+    const binding = input.binding;
+    if (binding?.entry !== undefined) return;
+    const number = at + 1;
+    const owed = (): void => {
+      const key = entryKeyOf(binding!);
+      this.skippedByDecision.push({ number, key });
+      // Said once per entry, and only while nothing has been generated for it:
+      // a body line generated on pass 1 and decided against on pass 2 owes
+      // nothing (`finish` nets it off), and "the step did not run" after its
+      // own "generated" line reads as if the entry were lost.
+      if (this.takenKeys.has(key) || this.writtenKeys.has(key) || this.saidDecisionSkip.has(key)) return;
+      this.saidDecisionSkip.add(key);
+      this.stepEvent(
+        'generate',
+        { index: at, number, text, hasEntry: false, isAiEntry: false },
+        SKIPPED_BY_DECISION_REFUSAL,
+      );
+    };
+    if (binding && compilableCondition(text)) {
+      // Filed, but not SAID yet: a chain member skipped here may be the one
+      // after the member that held — never asked, and generated anyway from
+      // the not-asked page `offerGuard` keeps for it (decision 9). Whether it
+      // ends the compile owed is only known at `finish`, which says it then.
+      this.skippedByDecision.push({ number, key: entryKeyOf(binding), guard: true });
+      return;
+    }
+    const refusal = generationRefusal({
+      binding,
+      text,
+      status: 'skipped',
+      skipped: 'decision',
+      surface: input.result.surface,
+    });
+    if (refusal === SKIPPED_BY_DECISION_REFUSAL) owed();
+    else logger.debug(`Compile-as-you-go skipped step ${number}: ${refusal ?? 'not taken'}`);
+  }
+
+  /**
+   * Offer one visit to a guard — the evidence a `condition` entry is
+   * generated from (stories/codebehind-loops-and-conditions.md, "Live
+   * compile"). Returns immediately, and generates NOTHING: a condition is
+   * generated once every visit of the block has been seen
+   * (`runStepsEnded`), so it can be shown the first held AND the first
+   * not-held page.
+   *
+   * Per member that was asked on this visit:
+   *
+   * - decided from its VALUES — not offered: a literal condition is free and
+   *   is never compiled (decision 10), and its line is dispatched in the plan;
+   * - decided by its CODE, cleanly — a kept step, counted once per expanded
+   *   index however many times a loop visits it (decision 13). In a chain,
+   *   only the members whose code ran: up to the one that held;
+   * - decided by the MODEL — an observation, kept per member KEY: the first
+   *   held, the first not-held and the first not-asked (a member after the one
+   *   that held; decision 9), each with its parameter snapshot. A member whose
+   *   entry broke on this visit (`guard.staleMember`, which is the member's
+   *   own index — the row may belong to another member, the one that held)
+   *   carries the latest error, so its generation is a repair;
+   * - an `ai: true` entry — the author's opt-out, honoured: counted `keptAi`;
+   * - judged on the computer surface — stays AI, as a computer-mode step does
+   *   (decision 10): no DOM, and a screen read is not portable.
+   */
+  offerGuard(input: LiveGuardInput): void {
+    Object.assign(this.parameters, input.resolvedParameters);
+    const decision = input.result.guard;
+    if (!decision || decision.decidedBy === 'values') return;
+    if (input.surface === 'computer') return;
+
+    const staleError = input.result.codeBehindStale?.error ?? input.result.codeBehindHealSkipped?.error;
+    /** Whether anything was actually DECIDED — a loop's `holds` or a chain's
+     *  `selected`. A guard whose entry broke and whose judge then could not
+     *  decide either carries the stale member and nothing else: its error is
+     *  worth keeping for the repair, but it is no observation. */
+    const decided = decision.holds !== undefined || decision.selected !== undefined;
+    const isLoop = decision.holds !== undefined;
+    /** Position of the member that held within `members`, or null for none. */
+    const selectedAt = input.members.findIndex((m) => m.index === decision.selected);
+    const heldAt = isLoop ? (decision.holds === true ? 0 : null) : selectedAt >= 0 ? selectedAt : null;
+
+    input.members.forEach((member, position) => {
+      const binding = member.binding;
+      if (!binding || !compilableCondition(binding.source)) return;
+      const at = this.offset + member.index;
+      const key = entryKeyOf(binding);
+      const broke = staleError !== undefined && decision.staleMember === member.index;
+
+      if (decision.decidedBy === 'code') {
+        // Code answered every member it reached, first-holds-wins: all of them
+        // when none held, those up to the winner otherwise. A guard whose code
+        // FAILED for real (`step.expect`, a refused `step.exit()`) is no
+        // evidence that the entry stands; one that broke is no observation.
+        const reached = heldAt === null || position <= heldAt;
+        if (!broke && input.result.error === undefined && reached && isConditionCode(binding.entry)) {
+          this.keep(key, at);
+        }
+        return;
+      }
+
+      // The model decided.
+      if (binding.entry?.ai === true) {
+        this.keptAiExisting.add(at);
+        return;
+      }
+      const acc = this.guards.get(key) ?? { key, index: at, binding, observations: [] };
+      this.guards.set(key, acc);
+      if (broke) acc.stale = staleError;
+      if (!decided) return;
+      const holds: boolean | undefined = isLoop
+        ? decision.holds
+        : heldAt === null
+          ? false
+          : position < heldAt
+            ? false
+            : position === heldAt
+              ? true
+              : undefined;
+      // The first of each verdict only (decision 9) — a `While` visited 25
+      // times keeps two pages, not 25.
+      if (acc.observations.some((o) => o.holds === holds)) return;
+      const evidence = decision.evidence;
+      acc.observations.push({
+        holds,
+        ...(evidence?.dom !== undefined && { dom: evidence.dom }),
+        ...(evidence?.url !== undefined && { url: evidence.url }),
+        parameters: input.resolvedParameters,
+      });
+    });
+  }
+
+  /**
+   * Queue a `condition` entry for every condition line this block observed and
+   * owes one (stories/codebehind-loops-and-conditions.md, "Live compile").
+   * Called by `runStepsEnded` — every visit of the block has been seen — and
+   * again by `finish`, so a block that never reached `runStepsEnded` still
+   * generates what it observed. Idempotent: a queued key is taken.
+   *
+   * Owed means: observed at least once (a line never asked on this run has
+   * nothing to generate from and is not generated), inside the slice, not
+   * already queued (`takenKeys`, shared with steps), and — on the Run &
+   * Compile path — without a working `condition` entry of its own, unless
+   * that entry broke on this run. A member that has one and was not run
+   * (its chain went to the model because a SIBLING has none) is left as it
+   * stands. Compile This Step recompiles what it was sent, entry or not,
+   * which is why its execution runs with code-behind off.
+   */
+  private enqueueConditions(): void {
+    const owed = [...this.guards.values()]
+      .filter((acc) => {
+        if (this.takenKeys.has(acc.key) || this.outside.has(acc.index)) return false;
+        if (acc.observations.length === 0) return false;
+        if (this.options.mode === 'run' && acc.stale === undefined && isConditionCode(acc.binding.entry)) {
+          return false;
+        }
+        return true;
+      })
+      .sort((a, b) => a.index - b.index);
+    for (const acc of owed) {
+      this.takenKeys.add(acc.key);
+      this.guards.delete(acc.key);
+      const step: CompileStep = {
+        index: acc.index,
+        number: acc.index + 1,
+        text: acc.binding.source,
+        binding: acc.binding,
+        key: acc.key,
+        hasEntry: hasEntryOfKind(acc.binding.entry, 'condition'),
+        isAiEntry: false,
+      };
+      this.enqueue(step, () => this.askCondition(step, acc));
+    }
+  }
+
+  /**
+   * One model call for one condition line: a repair when its entry broke — on
+   * this run (in band), or on the last one (the sidecar, for Compile This
+   * Step, which runs with code-behind off) — a plain generation otherwise.
+   * The repair is `generateConditionEntry`'s variant, shown the entry as it
+   * stands in the candidate and what went wrong with it.
+   */
+  private async askCondition(step: CompileStep, acc: GuardAccumulator): Promise<GeneratedEntry> {
+    const binding = acc.binding;
+    const failed = await this.priorFailure(binding, acc.stale);
+    let repair: { entryCode: string; error: string } | undefined;
+    if (failed !== undefined) {
+      const file = await this.candidate.read(binding.file);
+      const entryCode =
+        file === null ? undefined : entryTextIn(file, binding.source, binding.section, binding.occurrence);
+      // No entry text to repair FROM — the file was edited, or the span could
+      // not be found: generate as if from scratch, as a step does.
+      if (entryCode !== undefined) repair = { entryCode, error: failed };
+    }
+    // The evidence the prompt is shown, and the visit whose values it reads.
+    const first = acc.observations[0]!;
+    const loop = this.plan[acc.index]?.loop;
+    return generateConditionEntry({
+      binding,
+      observations: acc.observations,
+      resolvedParameters: first.parameters,
+      parameterMap: first.parameters,
+      secrets: this.promptSecrets(first.parameters, binding),
+      ...(this.options.envData && { envData: this.options.envData }),
+      aiClient: this.options.aiClient,
+      contextContent: this.options.contextContent,
+      testName: this.options.testName,
+      ...(this.options.baseUrl !== undefined && { baseUrl: this.options.baseUrl }),
+      ...(this.signal && { signal: this.signal }),
+      wholeTest: this.wholeTestFor(step.index),
+      candidateFile: (await this.candidate.read(binding.file)) ?? undefined,
+      ...(loop && { loop: loopContextFor(loop.line, first.parameters, loop.runtimeItem) }),
+      ...(repair && { repair }),
+    });
+  }
+
+  /**
+   * The run's free-text mask set as of a snapshot — `runSecrets`, as the run's
+   * own `secretsNow()` computes it, with the binding's frame inputs, which
+   * `secretsNow` merges in (`compilePromptSecrets`) — for every prompt this
+   * compiler builds from that snapshot: a secret inside a value no key names
+   * as secret (`auth: "Bearer <the key>"`, or a skill's `header="Bearer <key>"`
+   * beside its `token="<key>"`) is masked there as it is in the run's own step
+   * prompts. The boxed compile hands its prompts the same set.
+   */
+  private promptSecrets(values: Record<string, string>, binding: CodeBehindBinding): string[] {
+    return compilePromptSecrets(values, this.options.envData, [binding]);
+  }
+
+  /** The prompt's whole-test block, marked for the step at `index`. */
+  private wholeTestFor(index: number): Array<{ index: number; text: string; inScope: boolean; isThisStep: boolean }> {
+    return this.plan.map((p, i) => ({
+      index: i + 1,
+      text: p.text,
+      inScope: p.inScope,
+      isThisStep: i === index,
+    }));
   }
 
   private stepEvent = (phase: CompilePhase, step: CompileStep, message: string): void => {
@@ -1020,9 +1469,11 @@ export class LiveCompiler {
    */
   private async priorFailure(
     binding: CodeBehindBinding,
-    result: StepResult,
+    /** What the entry threw in THIS run, when it did — a step's
+     *  `codeBehindStale.error`, a condition's latest stale error. */
+    inBand: string | undefined,
   ): Promise<string | undefined> {
-    if (result.codeBehindStale) return result.codeBehindStale.error;
+    if (inBand !== undefined) return inBand;
     const rows = await this.lastRunRows();
     // Matched by the identity the binding uses — section scope, authored text,
     // and the occurrence of that pair — because a body that says the same
@@ -1099,13 +1550,21 @@ export class LiveCompiler {
    */
   private async askModel(step: CompileStep, input: LiveStepInput): Promise<GeneratedEntry> {
     const binding = step.binding!;
-    const failed = await this.priorFailure(binding, input.result);
+    const failed = await this.priorFailure(binding, input.result.codeBehindStale?.error);
     if (failed !== undefined) {
       const repaired = await this.askForRepair(step, input, failed);
       if (repaired) return repaired;
       // No entry text to repair FROM — the file was edited, or the span could
       // not be found. Fall through and generate as if from scratch.
     }
+    // The loop this step repeats in, and what changes per pass (decision 2):
+    // the evidence pass's own bindings, which ride its loop marker — the same
+    // pass whose transcript and snapshot this generation reads, because the
+    // first iteration to reach `offer` is the one that took the key.
+    const loopAt = this.plan[step.index]?.loop;
+    const loop = loopAt
+      ? loopContextFor(loopAt.line, input.result.loop?.values ?? input.resolvedParameters, loopAt.runtimeItem)
+      : undefined;
     return generateStepEntry({
       binding,
       actions: actionsOf(input.result),
@@ -1115,20 +1574,22 @@ export class LiveCompiler {
       // (`liveCompileSnapshot`), so the prompt's parameter block can tell a
       // pass's `row.keyword` from an author's `user.apikey` (§7.6).
       parameterMap: input.resolvedParameters,
+      // …and the run's mask set as of that snapshot, so a secret inside a value
+      // no key names as secret is masked as the run's own prompts mask it.
+      secrets: this.promptSecrets(input.resolvedParameters, binding),
       recordingCarriesPlaceholders: this.sawPlaceholder,
       ...(this.options.envData && { envData: this.options.envData }),
       aiClient: this.options.aiClient,
       contextContent: this.options.contextContent,
       testName: this.options.testName,
       ...(this.options.baseUrl !== undefined && { baseUrl: this.options.baseUrl }),
-      wholeTest: this.plan.map((p, i) => ({
-        index: i + 1,
-        text: p.text,
-        inScope: p.inScope,
-        isThisStep: i === step.index,
-      })),
+      wholeTest: this.wholeTestFor(step.index),
       candidateFile: (await this.candidate.read(binding.file)) ?? undefined,
       ...contextOf(input.result),
+      ...(loop && { loop }),
+      // What this pass captured — the result the entry must reproduce, and a
+      // value the leak guard refuses to see written in.
+      recordedCaptures: recordedCapturesOf(binding, input.result.outputs),
     });
   }
 
@@ -1163,8 +1624,15 @@ export class LiveCompiler {
     }
 
     const parameters = stepParameters(binding, input.resolvedParameters, this.options.envData);
+    const loopAt = this.plan[step.index]?.loop;
+    const loop = loopAt
+      ? loopContextFor(loopAt.line, input.result.loop?.values ?? input.resolvedParameters, loopAt.runtimeItem)
+      : undefined;
     const ctx = input.result.stepContext;
-    const prompt = buildRepairPrompt({
+    // What the healed pass captured under AI — the answer the broken entry was
+    // meant to produce, which the repair must reproduce and must not write in.
+    const recordedCaptures = recordedCapturesOf(binding, input.result.outputs);
+    const repairInput: RepairPromptInput = {
       rawStepText: step.text,
       stepIndex: step.number,
       entryCode,
@@ -1180,25 +1648,35 @@ export class LiveCompiler {
       // (§7.6). Without it the block asked the binding rule about both and
       // wrote the credential into the prompt in clear.
       parameterMap: input.resolvedParameters,
+      secrets: this.promptSecrets(input.resolvedParameters, binding),
       ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
-    });
-    return askForEntry(
+      // The loop the step repeats in, as generation is told it (decision 2):
+      // the repaired entry replays on every pass, so what changes per pass is
+      // read with `step.getVar`, never the healed pass's item.
+      ...(loop && { loop }),
+      ...(recordedCaptures && { recordedCaptures }),
+    };
+    const { result } = await askWithCaptureRetry(
       this.options.aiClient,
       this.options.contextContent,
-      prompt,
-      // The authored line, exactly as generation passes it (`askModel` below,
-      // and `guardedValues` / `authorQuotedLiterals` in generate.ts): a value the
-      // AUTHOR quoted in the step is the author's, so an entry echoing it is
-      // repeating the step rather than inlining a resolved value. Without it a
-      // stale `If {{a}} is "peanuts" then fail …` could not be repaired at all —
-      // every candidate contains `peanuts`, so every one was discarded as a leak
-      // (stories/step-failure-outcomes.md, decisions 3 and 10).
-      guardedValues(parameters, envRefs.resolved, binding.source),
+      (retry) => buildRepairPrompt({ ...repairInput, ...(retry && { retry }) }),
+      [
+        // The authored line, exactly as generation passes it (`askModel` below,
+        // and `guardedValues` / `authorQuotedLiterals` in generate.ts): a value the
+        // AUTHOR quoted in the step is the author's, so an entry echoing it is
+        // repeating the step rather than inlining a resolved value. Without it a
+        // stale `If {{a}} is "peanuts" then fail …` could not be repaired at all —
+        // every candidate contains `peanuts`, so every one was discarded as a leak
+        // (stories/step-failure-outcomes.md, decisions 3 and 10).
+        ...guardedValues(parameters, envRefs.resolved, binding.source),
+        ...capturedValueGuards(recordedCaptures, binding.source),
+      ],
       this.signal,
     );
+    return result;
   }
 
-  private async generate(step: CompileStep, input: LiveStepInput): Promise<void> {
+  private async generate(step: CompileStep, ask: () => Promise<GeneratedEntry>): Promise<void> {
     // A stopped run skips what has not started. The in-flight one finishes:
     // its model call is already paid for, and its entry is work the author
     // asked for.
@@ -1226,7 +1704,7 @@ export class LiveCompiler {
     // steps are already reporting.
     this.emitProgress('generate', { step: step.number, line: this.plan[step.index]?.line });
     this.stepEvent('generate', step, 'generating…');
-    const generated = await this.askModel(step, input);
+    const generated = await ask();
     const applied = await applyGenerated(this.candidate, step, generated, this.stepEvent, 'generate');
     if (applied.kind === 'entry' && applied.references) {
       for (const name of applied.references.recoveredByValue) {
@@ -1288,6 +1766,9 @@ export class LiveCompiler {
    * path: the files ride the wire and TestBench applies them through the diff.
    */
   async finish(final: LiveCompileFinish): Promise<LiveCompileOutcome> {
+    // Normally a no-op — `runStepsEnded` queued them — but a block that ended
+    // without reaching it must not lose the conditions it observed.
+    this.enqueueConditions();
     await this.tail.catch((err: unknown) => {
       logger.warn(`Code-behind generation queue failed: ${String(err)}`);
     });
@@ -1358,12 +1839,31 @@ export class LiveCompiler {
     const toleratedOwed = this.toleratedFailures
       .filter((s) => !this.writtenKeys.has(s.key))
       .map((s) => s.number);
+    // A step the run decided against owes an entry on the same terms
+    // (stories/codebehind-loops-and-conditions.md, decision 12; issue 053): a
+    // body line one pass skipped and another compiled owes nothing.
+    const decisionOwed = this.skippedByDecision.filter((s) => !this.writtenKeys.has(s.key));
+    // A condition line's sentence is said only now, once it is known that no
+    // visit of it was generated (see `offerDecisionSkip`). Once per line: a
+    // chain member an outer loop skipped on three passes is one line owed.
+    const saidGuards = new Set<number>();
+    for (const s of decisionOwed) {
+      if (!s.guard || saidGuards.has(s.number)) continue;
+      saidGuards.add(s.number);
+      this.stepEvent(
+        'generate',
+        { index: s.number - 1, number: s.number, text: this.plan[s.number - 1]?.text ?? '', hasEntry: false, isAiEntry: false },
+        SKIPPED_BY_DECISION_REFUSAL,
+      );
+    }
+    const skippedByDecisionOwed = decisionOwed.map((s) => s.number);
     const notAttempted = [
       ...new Set([
         ...(final.notAttempted ?? []),
         ...this.skippedByStop,
         ...skippedByReturnOwed,
         ...toleratedOwed,
+        ...skippedByDecisionOwed,
       ]),
     ].sort((a, b) => a - b);
     /**
@@ -1409,7 +1909,10 @@ export class LiveCompiler {
       && !endedWithStepsLeft
       && !final.aborted
       && skippedByReturnOwed.length === 0
-      && toleratedOwed.length === 0;
+      && toleratedOwed.length === 0
+      // …and an untaken branch: a file whose only uncompiled steps sit in it
+      // is not "already compiled" (decision 12).
+      && skippedByDecisionOwed.length === 0;
     const summary: CompileSummary = {
       test: this.options.testFilePath,
       totalSteps: this.scopedTotal,
@@ -1418,7 +1921,7 @@ export class LiveCompiler {
       // way the boxed pipeline counts `selection.order.length`.
       compiled: this.compiled.length,
       kept: this.kept,
-      keptAi: this.keptAiExisting + this.declined.length,
+      keptAi: this.keptAiExisting.size + this.declined.length,
       rounds: 0,
       tokensUsed: final.tokensUsed,
       written: [],

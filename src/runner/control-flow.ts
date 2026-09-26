@@ -472,6 +472,30 @@ function passBindings(
   return bindings;
 }
 
+/**
+ * Would a "carry on" verdict at the loop guard `index` breach its cap on this
+ * visit? The cap it would breach, or undefined.
+ *
+ * Pure: the same test {@link planConditionLoop} applies, asked BEFORE the
+ * planner is consulted, so a caller that wants to double-check a verdict at
+ * the cap — a condition decided by code-behind
+ * (stories/codebehind-loops-and-conditions.md, decision 8) — can do so and
+ * still advance the planner's state exactly once. Undefined for anything that
+ * is not a `While` / `Repeat` guard.
+ */
+export function capBreachAt(
+  controls: readonly (ControlRecord | null)[],
+  index: number,
+  state: ControlState,
+): { cap: number; source: 'line' | 'config'; passes: number } | undefined {
+  const record = controls[index];
+  if (!record || (record.kind !== 'while' && record.kind !== 'repeat')) return undefined;
+  const passes = state.passes.get(index) ?? 0;
+  const cap = record.cap ?? state.defaultCap;
+  if (passes < cap) return undefined;
+  return { cap, source: record.cap === undefined ? 'config' : 'line', passes };
+}
+
 function planConditionLoop(
   controls: readonly (ControlRecord | null)[],
   index: number,
@@ -480,8 +504,6 @@ function planConditionLoop(
   state: ControlState,
 ): ControlPlan {
   const passes = state.passes.get(index) ?? 0;
-  const cap = record.cap ?? state.defaultCap;
-  const capSource: 'line' | 'config' = record.cap === undefined ? 'config' : 'line';
 
   // `Repeat`'s first pass: no question was asked, the body simply runs.
   if (record.kind === 'repeat' && verdict.kind === 'resume') {
@@ -506,14 +528,15 @@ function planConditionLoop(
     };
   }
 
-  if (passes >= cap) {
+  const breach = capBreachAt(controls, index, state);
+  if (breach) {
     // Reaching the cap with the exit condition unmet FAILS the loop line. It
     // has not done what the author asked, so exiting quietly would be a green
     // run on an unfinished job (decision 9).
     return {
       skip: [],
       next: exitFrom(controls, record.bodyEnd, index),
-      capBreached: { cap, source: capSource },
+      capBreached: { cap: breach.cap, source: breach.source },
     };
   }
 
@@ -809,52 +832,33 @@ export function snapEndAt(
 }
 
 /**
- * The first loop guard whose STRUCTURE overlaps `[startIndex, endIndex]`, or
- * undefined when the slice touches none.
+ * The guard index of the innermost runtime loop — `While`, `Repeat … until`,
+ * `For each` — whose BODY holds `index`, or undefined outside every one
+ * (stories/codebehind-loops-and-conditions.md, decision 2).
  *
- * A loop's structure is its guard plus its body — the indices the run can
- * visit more than once — so a compile bounded to a step outside every one of
- * them writes exactly one entry per step and is safe, while one that includes
- * a guard or any of its body is not (see {@link loopCompileRefusal}).
- *
- * A whole-file compile passes the whole range and gets the file-wide answer,
- * which is what the CLI wants: it has no way to bound a compile at all.
+ * Innermost is the narrowest body: a loop nested in another's body has a range
+ * strictly inside it. A guard is not in its own body (`bodyStart` is past it),
+ * so a loop's own line answers with the loop AROUND it, if any. A chain is not
+ * a loop and is looked through. Both compilers ask it, so a step's prompt names
+ * the same loop whichever one generated it.
  */
-export function firstLoopInRange(
+export function innermostLoopGuard(
   controls: readonly (ControlRecord | null)[],
-  startIndex: number,
-  endIndex: number,
+  index: number,
 ): number | undefined {
-  for (let i = 0; i < controls.length; i++) {
-    const record = controls[i];
+  let guard: number | undefined;
+  let span = Infinity;
+  for (let g = 0; g < controls.length; g++) {
+    const record = controls[g];
     if (!record) continue;
     if (record.kind !== 'while' && record.kind !== 'repeat' && record.kind !== 'foreach') continue;
-    if (i <= endIndex && record.bodyEnd >= startIndex) return i;
+    if (index < record.bodyStart || index > record.bodyEnd) continue;
+    if (record.bodyEnd - record.bodyStart < span) {
+      span = record.bodyEnd - record.bodyStart;
+      guard = g;
+    }
   }
-  return undefined;
-}
-
-/**
- * Why a compile that reaches into a loop is refused, in one wording shared by
- * the CLI's compile and the server's (stories/control-flow.md, decision 12).
- *
- * A compile places an entry at `spans[occurrence]`, and occurrence is counted
- * per step line — but a loop body runs the same lines a number of times only
- * the page decides, so the run offers several transcripts for one slot and the
- * plan's "not attempted" arithmetic counts a step that ran three times as one.
- *
- * The advice names things the author can actually do, which the first version
- * of this sentence did not: it said "compile the section the loop runs, on its
- * own" while refusing on the whole FILE, so that compile was refused too.
- */
-export function loopCompileRefusal(guardLine: string): string {
-  return (
-    `"${guardLine}" runs its step a number of times the page decides, and a compile ` +
-    'cannot write one entry for a step that ran several times with different values. ' +
-    'What still works: Compile This Step on a step OUTSIDE the loop, and Compile This ' +
-    'Step on the body of the section the loop runs — a section body compiles on its ' +
-    'own, once. Or remove the loop before compiling.'
-  );
+  return guard;
 }
 
 /**

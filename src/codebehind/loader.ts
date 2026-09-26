@@ -59,7 +59,9 @@ const EMPTY_SCOPE: CodeBehindVarScope = { renames: {}, inputs: {} };
  * One expanded step's code-behind binding. Mutable in exactly one way: the
  * executor clears `entry` when the code throws, which discards it for the rest
  * of the run (the registry hands out the same object on every lookup, so a
- * re-executed step stays healed).
+ * re-executed step stays healed). A guard's `condition` entry is discarded the
+ * same way by `evaluateGuard`, so a `While` whose code threw on pass 2 asks the
+ * model on every later pass rather than throwing again.
  */
 export interface CodeBehindBinding {
   /** Absolute path of the `.steps.ts` this step's entry lives in. */
@@ -78,6 +80,30 @@ export interface CodeBehindBinding {
   scope: CodeBehindVarScope;
   /** The matched entry, or undefined (no entry, or discarded after failure). */
   entry?: StepCodeEntry | undefined;
+}
+
+/** Bindings already warned about by {@link warnBindingOnce}. Weak, because a
+ *  binding lives exactly as long as its run's registry. */
+const warnedBindings = new WeakSet<CodeBehindBinding>();
+
+/**
+ * Warn about a binding once per run, however many times its line is visited.
+ *
+ * For an entry in the wrong place — a `condition` entry on an ordinary step, a
+ * `run` entry on a guard (stories/codebehind-loops-and-conditions.md). The
+ * entry is not broken, so it is not discarded, and a `While` visited 25 times
+ * would otherwise say the same sentence 25 times. Keyed by the binding object,
+ * which the registry hands out unchanged on every lookup and rebuilds for
+ * every run.
+ */
+export function warnBindingOnce(
+  binding: CodeBehindBinding,
+  message: string,
+  warn: (message: string) => void = (m) => logger.warn(m),
+): void {
+  if (warnedBindings.has(binding)) return;
+  warnedBindings.add(binding);
+  warn(message);
 }
 
 /**
@@ -411,13 +437,33 @@ async function loadCodeBehindFile(
       warn(`Ignoring malformed code-behind entry in ${file} (no string \`source\`).`);
       continue;
     }
-    if (entry.ai !== true && typeof entry.run !== 'function') {
+    const hasRun = typeof entry.run === 'function';
+    const hasCondition = typeof entry.condition === 'function';
+    if (hasRun && hasCondition) {
+      // A `run` acts and a `condition` answers; one entry cannot mean both
+      // (stories/codebehind-loops-and-conditions.md, decision 4). Guessing
+      // which half the author meant would run the wrong one on half the lines
+      // this could bind to, so the entry is dropped and the line runs under AI.
+      warn(
+        `Code-behind entry in ${file} for "${entry.source}" has both a \`run\` ` +
+          `and a \`condition\` function — an entry is one or the other. Ignoring ` +
+          `it, so the line runs under AI.`,
+      );
+      continue;
+    }
+    if (entry.ai !== true && !hasRun && !hasCondition) {
       // Half-written entry: no code and no opt-out. Dropping it from the
       // index makes the step miss, so it runs under AI and regenerates —
       // strictly better than executing nothing and calling the step done.
+      //
+      // Loading does not know which lines are guards, so a `condition` entry
+      // is kept whatever it binds to. A mismatch — a `condition` on an
+      // ordinary step, a `run` on a guard — is caught where the entry is
+      // used, which warns once and runs the line under AI.
       warn(
         `Code-behind entry in ${file} for "${entry.source}" has neither a ` +
-          `\`run\` function nor \`ai: true\` — ignoring it, so the step runs under AI.`,
+          `\`run\` function, a \`condition\` function nor \`ai: true\` — ignoring ` +
+          `it, so the step runs under AI.`,
       );
       continue;
     }

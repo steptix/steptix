@@ -11,6 +11,8 @@ import { markLoopBindings } from '../src/utils/secrets.js';
 import { liveCompileSnapshot } from '../src/server/session-manager.js';
 import {
   generationRefusal,
+  SKIPPED_BY_DECISION_REFUSAL,
+  SKIPPED_BY_RETURN_REFUSAL,
   LiveCompiler,
   TOLERATED_CODE_BEHIND_REFUSAL,
   TOLERATED_FAILURE_REFUSAL,
@@ -649,6 +651,76 @@ describe('a step healing a broken entry', () => {
     expect(outcome.summary.compiled).toBe(1);
   });
 
+  it('inside a loop, tells the repair the line repeats — and masks what the run masked (review round 2, F9/F1)', async () => {
+    // A body step of a `While`, stale on its evidence pass. Measured before the
+    // fix: the repair prompt said nothing about the loop — generation did —
+    // and a value holding a secret no key names (`auth`) went out in clear.
+    const LINE = 'Type {{auth}} into the header';
+    await fs.writeFile(
+      stepsFile,
+      [
+        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        'export default defineSteps([',
+        `  { source: '${LINE}', async run(ctx) { await ctx.page.fill('#h', ctx.step.getVar('auth') ?? ''); } },`,
+        ']);',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+    const { client, prompts } = fakeClient();
+    const WHILE = 'While the Next button is enabled, Page through the headers';
+    const compiler = new LiveCompiler({
+      mode: 'run',
+      testFilePath: testFile,
+      aiClient: client,
+      contextContent: '',
+      testName: 'checkout.md',
+      plan: [
+        { text: WHILE, inScope: false, dispatched: true, line: 10 },
+        { text: LINE, inScope: true, line: 11, loop: { line: WHILE } },
+        { text: 'Type {{auth}} into the footer', inScope: true, line: 12, loop: { line: WHILE } },
+      ],
+      emit: () => {},
+      note: () => {},
+    });
+    const live = { 'user.apikey': 'uk_live_1234', auth: 'Bearer uk_live_1234' };
+    compiler.offer({
+      index: 1,
+      binding: binding(LINE, { entry: { source: LINE, run: async () => {} } }),
+      result: result(2, LINE, {
+        codeBehindStale: { file: stepsFile, source: LINE, error: 'no #h on the page' },
+      }),
+      resolvedParameters: live,
+    });
+    compiler.offer({
+      index: 2,
+      binding: binding('Type {{auth}} into the footer'),
+      result: result(3, 'Type {{auth}} into the footer', {
+        turns: [
+          {
+            turnNumber: 1,
+            attemptNumber: 1,
+            timestamp: '2026-08-24T00:00:00.000Z',
+            aiInteractions: [],
+            subActions: [{ index: 1, action: { action: 'type', selector: '#f', value: '{{auth}}' }, durationMs: 1 }],
+          },
+        ],
+      }),
+      resolvedParameters: live,
+    });
+    await compiler.finish({ tokensUsed: 0 });
+
+    const asked = prompts.filter((p) => !/Review a generated/.test(p));
+    const repair = asked.find((p) => p.startsWith('A generated code-behind entry was replayed'))!;
+    expect(repair).toContain('no #h on the page');
+    expect(repair).toContain('## This step runs inside a loop');
+    expect(repair).toContain(`It is in the body of \`${WHILE}\``);
+    expect(repair).toContain('{{auth}} resolved to "Bearer ***" on this run');
+    const generation = asked.find((p) => p.includes('Type {{auth}} into the footer'))!;
+    expect(generation).toContain('{{auth}} resolved to "Bearer ***" on this run');
+    for (const prompt of asked) expect(prompt).not.toContain('uk_live_1234');
+  });
+
   it('a step that is NOT stale still uses the plain generation prompt', async () => {
     const { client, prompts } = fakeClient();
     const compiler = compilerFor(['Sign in'], { client });
@@ -1096,6 +1168,12 @@ describe('what a repeated entry counts as', () => {
     // Parity in the other direction, and the reason `kept` counts steps rather
     // than keys: the boxed pipeline's `keptExistingFor` filters `steps`, so a
     // body run twice with a clean entry is 2 there and must be 2 here.
+    //
+    // Two EXPANDED steps — indices 0 and 1 — which is what a table-row
+    // section loop is: unrolled at expansion, one index per row. A runtime
+    // loop re-running ONE index is the other shape, and counts once
+    // (stories/codebehind-loops-and-conditions.md, decision 13 — see
+    // "a runtime loop's step" below).
     const compiler = compilerFor(['Upload {{file}}', 'Upload {{file}}']);
     compiler.offer(ranAsCode(0, 'Upload a.png'));
     compiler.offer(ranAsCode(1, 'Upload b.png'));
@@ -1738,17 +1816,457 @@ describe('the live compile’s parameter snapshot keeps the loop marks', () => {
     expect(block).toContain('- {{payment.keyword}} resolved to "***" on this run');
   });
 
-  it('and it is what BOTH offer sites hand over', () => {
+  it('and it is what EVERY offer site hands over', () => {
     // A behavioural test of the helper cannot see a call site that stopped
-    // using it, and there are two — the ordinary step and the branched one.
+    // using it, and there are four — the ordinary step, the return-skipped one,
+    // the decision-skipped one (issue 053) and the guard visit
+    // (stories/codebehind-loops-and-conditions.md).
     const source = readFileSync(
       path.join(repoRoot, 'src', 'server', 'session-manager.ts'),
       'utf-8',
     );
     const offers = source.match(/resolvedParameters: [^,\n]+/g) ?? [];
     const toCompile = offers.filter((line) => line.includes('liveCompileSnapshot'));
-    expect(toCompile).toHaveLength(2);
+    expect(toCompile).toHaveLength(4);
+    // Every `offer(` / `offerGuard(` call, counted independently of the line
+    // above, so a fifth site that spreads the map cannot hide behind it.
+    expect(source.match(/liveCompile\.offer(?:Guard)?\(/g) ?? []).toHaveLength(4);
     // …and no offer spreads the map itself.
     expect(source).not.toMatch(/resolvedParameters: \{ \.\.\.resolvedParameters \}/);
+  });
+});
+
+// ── Review round 3: the live prompts mask as the run did (G2, G3) ────────────
+
+describe('the live prompts, inside a skill body (review round 3)', () => {
+  /** A transcript that typed `value` — a placeholder, as the model names it. */
+  const typing = (index: number, line: string, value: string): StepResult =>
+    result(index, line, {
+      turns: [
+        {
+          turnNumber: 1,
+          attemptNumber: 1,
+          timestamp: '2026-08-24T00:00:00.000Z',
+          aiInteractions: [],
+          subActions: [{ index: 1, action: { action: 'type', selector: '#q', value }, durationMs: 1 }],
+        },
+      ],
+    });
+
+  it("G2: shows a For each's dotted value the pass bound under the skill's scoped name", async () => {
+    // The pass marked `__skill1_row.keyword`; the prompt names the authored
+    // `row.keyword`, and asked about THAT one the author rule masked `AU`
+    // (`keyword` holds `key`).
+    const LINE = 'Search for {{row.keyword}}';
+    const live: Record<string, string> = { __skill1_row: '{"keyword":"AU"}', '__skill1_row.keyword': 'AU' };
+    markLoopBindings(live, ['__skill1_row.keyword']);
+    const { client, prompts } = fakeClient();
+    const compiler = compilerFor([LINE], { client });
+    compiler.offer({
+      index: 0,
+      binding: binding(LINE, { scope: { renames: { row: '__skill1_row' }, inputs: {} } }),
+      result: typing(1, LINE, '{{__skill1_row.keyword}}'),
+      resolvedParameters: liveCompileSnapshot(live),
+    });
+    await compiler.finish({ tokensUsed: 0 });
+
+    const generation = prompts.find((p) => p.includes(LINE) && !/Review a generated/.test(p))!;
+    // Measured before the fix: `{{row.keyword}} resolved to "***" on this run`.
+    expect(generation).toContain('{{row.keyword}} resolved to "AU" on this run');
+  });
+
+  it("G3: masks a secret the skill's caller passed, inside another argument", async () => {
+    // `[skill: api token="uk_live_1234" header="Bearer uk_live_1234"]`: the
+    // run's `secretsNow` merges frame inputs into its mask set; the live
+    // prompts' set was the parameter map's alone.
+    const KEY = 'uk_live_1234';
+    const LINE = 'Type {{header}} into the Authorization box';
+    const { client, prompts } = fakeClient();
+    const compiler = compilerFor([LINE], { client });
+    compiler.offer({
+      index: 0,
+      binding: binding(LINE, { scope: { renames: {}, inputs: { token: KEY, header: `Bearer ${KEY}` } } }),
+      result: typing(1, LINE, '{{header}}'),
+      resolvedParameters: {},
+    });
+    await compiler.finish({ tokensUsed: 0 });
+
+    const generation = prompts.find((p) => p.includes(LINE) && !/Review a generated/.test(p))!;
+    // Measured before the fix: `{{header}} resolved to "Bearer uk_live_1234"`.
+    expect(generation).toContain('{{header}} resolved to "Bearer ***" on this run');
+    for (const prompt of prompts) expect(prompt).not.toContain(KEY);
+  });
+});
+
+// ── Loops and conditions (stories/codebehind-loops-and-conditions.md) ────────
+
+describe("a runtime loop's step counts once (decision 13)", () => {
+  const withEntry = (source: string, entry: Record<string, unknown>): CodeBehindBinding =>
+    binding(source, { entry: { source, ...entry } });
+
+  it('is ONE kept step when its entry ran cleanly on three passes of one index', async () => {
+    const compiler = compilerFor(['While x, Go', 'Click Next']);
+    for (let pass = 0; pass < 3; pass++) {
+      compiler.offer({
+        index: 1,
+        binding: withEntry('Click Next', { run: async () => {} }),
+        result: result(2, 'Click Next', { fromCodeBehind: true }),
+        resolvedParameters: {},
+      });
+    }
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+    expect(outcome.summary.kept).toBe(1);
+  });
+
+  it('is ONE kept-AI step when its `ai: true` entry was honoured on three passes', async () => {
+    const compiler = compilerFor(['While x, Go', 'Click Next']);
+    for (let pass = 0; pass < 3; pass++) {
+      compiler.offer({
+        index: 1,
+        binding: withEntry('Click Next', { ai: true }),
+        result: result(2, 'Click Next'),
+        resolvedParameters: {},
+      });
+    }
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+    expect(outcome.summary.keptAi).toBe(1);
+  });
+});
+
+describe('a skipped row carries its cause', () => {
+  it('answers the decision sentence for a decision, and the return one otherwise', () => {
+    const b = binding('Submit the card form');
+    const text = 'Submit the card form';
+    expect(generationRefusal({ binding: b, text, status: 'skipped', skipped: 'decision' })).toBe(
+      SKIPPED_BY_DECISION_REFUSAL,
+    );
+    expect(generationRefusal({ binding: b, text, status: 'skipped', skipped: 'return' })).toBe(
+      SKIPPED_BY_RETURN_REFUSAL,
+    );
+    // Absent is a return: the one cause there was before decisions.
+    expect(generationRefusal({ binding: b, text, status: 'skipped' })).toBe(SKIPPED_BY_RETURN_REFUSAL);
+  });
+
+  it('names a decision-skipped step, leaves one with an entry alone, and keeps them apart from a return', async () => {
+    const events: LiveCompileEvent[] = [];
+    const compiler = compilerFor(['Enter the card details', 'Submit the card form', 'Click Pay now'], { events });
+    const skipped = (i: number, text: string): StepResult =>
+      result(i + 1, text, { status: 'skipped', turns: [] });
+    compiler.offer({
+      index: 0,
+      binding: binding('Enter the card details', {
+        entry: { source: 'Enter the card details', run: async () => {} },
+      }),
+      result: skipped(0, 'Enter the card details'),
+      resolvedParameters: {},
+      skipped: 'decision',
+    });
+    compiler.offer({
+      index: 1,
+      binding: binding('Submit the card form'),
+      result: skipped(1, 'Submit the card form'),
+      resolvedParameters: {},
+      skipped: 'decision',
+    });
+    compiler.offer({
+      index: 2,
+      binding: binding('Click Pay now'),
+      result: skipped(2, 'Click Pay now'),
+      resolvedParameters: {},
+      skipped: 'return',
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(outcome.summary.notAttempted).toEqual([2, 3]);
+    const said = events
+      .filter((e): e is LiveCompileStepEvent => e.type === 'compile:step')
+      .map((e) => [e.step, e.message]);
+    expect(said).toEqual([
+      [2, SKIPPED_BY_DECISION_REFUSAL],
+      [3, SKIPPED_BY_RETURN_REFUSAL],
+    ]);
+    // The existing entry is counted nowhere, and nothing is "already compiled".
+    expect(outcome.summary).toMatchObject({ kept: 0, keptAi: 0, compiled: 0 });
+    expect(outcome.status).toBe('partial');
+  });
+
+  it('owes nothing for a body line one pass skipped and another compiled', async () => {
+    const compiler = compilerFor(['Click Next']);
+    compiler.offer({ index: 0, binding: binding('Click Next'), result: result(1, 'Click Next'), resolvedParameters: {} });
+    compiler.offer({
+      index: 0,
+      binding: binding('Click Next'),
+      result: result(1, 'Click Next', { status: 'skipped', turns: [] }),
+      resolvedParameters: {},
+      skipped: 'decision',
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+    expect(outcome.summary.compiled).toBe(1);
+    expect(outcome.summary.notAttempted).toEqual([]);
+  });
+
+  it('says "did not run" for a line only while nothing was generated for it, and once per entry', async () => {
+    const events: LiveCompileEvent[] = [];
+    const compiler = compilerFor(['Click Next', 'Read the total'], { events });
+    const skipped = (i: number, text: string): StepResult => result(i + 1, text, { status: 'skipped', turns: [] });
+    // Pass 1 generates `Click Next`; passes 2 and 3 decide against it.
+    compiler.offer({ index: 0, binding: binding('Click Next'), result: result(1, 'Click Next'), resolvedParameters: {} });
+    for (let pass = 0; pass < 2; pass++) {
+      compiler.offer({
+        index: 0,
+        binding: binding('Click Next'),
+        result: skipped(0, 'Click Next'),
+        resolvedParameters: {},
+        skipped: 'decision',
+      });
+    }
+    // `Read the total` never runs, on three passes: said ONCE.
+    for (let pass = 0; pass < 3; pass++) {
+      compiler.offer({
+        index: 1,
+        binding: binding('Read the total'),
+        result: skipped(1, 'Read the total'),
+        resolvedParameters: {},
+        skipped: 'decision',
+      });
+    }
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    // Measured before the fix: step 1 said "generated" and then "the step did
+    // not run — the run decided against it" twice, and step 2 said it three
+    // times.
+    const said = events
+      .filter((e): e is LiveCompileStepEvent => e.type === 'compile:step')
+      .map((e) => [e.step, e.message]);
+    expect(said.filter(([step]) => step === 1).map(([, m]) => m)).not.toContain(SKIPPED_BY_DECISION_REFUSAL);
+    expect(said.filter(([step, m]) => step === 2 && m === SKIPPED_BY_DECISION_REFUSAL)).toHaveLength(1);
+    expect(outcome.summary.notAttempted).toEqual([2]);
+  });
+});
+
+describe('offerGuard', () => {
+  const WHILE = 'While the Next button is enabled, Go to the next page';
+  const IF = 'If the Cash checkbox is ticked, then Pay with cash';
+  const ELSE_IF = 'Else if the Card checkbox is ticked, then Pay by card';
+
+  /** A guard row, as `guardResult` builds it, with its decision. */
+  const guardRow = (
+    index: number,
+    guard: NonNullable<StepResult['guard']>,
+    over: Partial<StepResult> = {},
+  ): StepResult => ({
+    index: index + 1,
+    instruction: WHILE,
+    status: 'passed',
+    turns: [],
+    durationMs: 1,
+    retried: false,
+    guard,
+    ...over,
+  });
+  const modelVisit = (n: number, holds: boolean): NonNullable<StepResult['guard']> => ({
+    decidedBy: 'model',
+    holds,
+    evidence: { dom: `<p>visit ${n}</p>`, url: `https://x.test/${n}`, members: [{ index: 0, holds }] },
+  });
+  /** Answers a condition prompt with a condition entry for the LAST `source:`
+   *  line — the shape near the prompt's end. */
+  const conditionClient = () =>
+    fakeClient({
+      generate: (prompt) => {
+        const all = [...prompt.matchAll(/\n\s*source:\s*("(?:[^"\\]|\\.)*")/g)];
+        const text = JSON.parse(all.at(-1)![1]!) as string;
+        return JSON.stringify({
+          entry: `{ source: ${JSON.stringify(text)}, async condition({ page }) { return (await page.locator('#n').count()) > 0; } }`,
+        });
+      },
+    });
+  const generationsIn = (prompts: string[]): string[] => prompts.filter((p) => !/Review a generated/.test(p));
+
+  it('generates nothing at offer time, then one condition from the first held and first not-held visit', async () => {
+    const { client, prompts } = conditionClient();
+    const compiler = compilerFor([WHILE, 'Click Next'], { client });
+    const visits: Array<[number, boolean]> = [[1, true], [2, true], [3, true], [4, false]];
+    for (const [n, holds] of visits) {
+      compiler.offerGuard({
+        members: [{ index: 0, binding: binding(WHILE) }],
+        result: guardRow(0, modelVisit(n, holds)),
+        resolvedParameters: {},
+      });
+    }
+    // Nothing asked yet: a condition waits for every visit of the block.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(prompts).toEqual([]);
+
+    compiler.runStepsEnded();
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+    const generation = generationsIn(prompts);
+    expect(generation).toHaveLength(1);
+    expect(generation[0]).toContain('<p>visit 1</p>');
+    expect(generation[0]).toContain('<p>visit 4</p>');
+    expect(generation[0]).not.toContain('<p>visit 2</p>');
+    expect(outcome.summary).toMatchObject({ compiled: 1, unproven: [1] });
+    expect(outcome.files[stepsFile]).toContain('async condition(');
+  });
+
+  it('keeps a condition its code decided — once, however many visits', async () => {
+    const { client, prompts } = conditionClient();
+    const compiler = compilerFor([WHILE], { client });
+    const coded = binding(WHILE, { entry: { source: WHILE, condition: async () => true } });
+    for (let n = 0; n < 4; n++) {
+      compiler.offerGuard({
+        members: [{ index: 0, binding: coded }],
+        result: guardRow(0, { decidedBy: 'code', holds: n < 3 }, { fromCodeBehind: true }),
+        resolvedParameters: {},
+      });
+    }
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+    expect(outcome.summary.kept).toBe(1);
+    expect(prompts).toEqual([]);
+    expect(outcome.status).toBe('green');
+  });
+
+  it('keeps only the chain members whose code RAN — up to the one that held', async () => {
+    const compiler = compilerFor([IF, ELSE_IF]);
+    compiler.offerGuard({
+      members: [
+        { index: 0, binding: binding(IF, { entry: { source: IF, condition: async () => true } }) },
+        { index: 1, binding: binding(ELSE_IF, { entry: { source: ELSE_IF, condition: async () => true } }) },
+      ],
+      result: guardRow(0, { decidedBy: 'code', selected: 0 }, { fromCodeBehind: true }),
+      resolvedParameters: {},
+    });
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+    expect(outcome.summary.kept).toBe(1);
+  });
+
+  it('generates a chain member AFTER the one that held from a not-asked page', async () => {
+    const { client, prompts } = conditionClient();
+    const compiler = compilerFor([IF, ELSE_IF], { client });
+    compiler.offerGuard({
+      members: [
+        { index: 0, binding: binding(IF) },
+        { index: 1, binding: binding(ELSE_IF) },
+      ],
+      result: guardRow(0, {
+        decidedBy: 'model',
+        selected: 0,
+        evidence: { dom: '<p>cash</p>', url: 'https://x.test', members: [{ index: 0, holds: true }, { index: 1 }] },
+      }),
+      resolvedParameters: {},
+    });
+    compiler.runStepsEnded();
+    await compiler.finish({ tokensUsed: 0 });
+    const generation = generationsIn(prompts);
+    expect(generation).toHaveLength(2);
+    expect(generation[0]).toContain('### Observation 1 — the condition HELD');
+    expect(generation[1]).toContain('### Observation 1 — not asked — an earlier condition in the chain held');
+  });
+
+  it('offers nothing for a condition its values decided, or one judged on the computer surface', async () => {
+    const { client, prompts } = conditionClient();
+    const compiler = compilerFor([WHILE], { client });
+    compiler.offerGuard({
+      members: [{ index: 0, binding: binding(WHILE) }],
+      result: guardRow(0, { decidedBy: 'values', holds: true }),
+      resolvedParameters: {},
+    });
+    compiler.offerGuard({
+      members: [{ index: 0, binding: binding(WHILE) }],
+      result: guardRow(0, { decidedBy: 'model', holds: false }),
+      resolvedParameters: {},
+      surface: 'computer',
+    });
+    compiler.runStepsEnded();
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+    expect(prompts).toEqual([]);
+    expect(outcome.summary.compiled).toBe(0);
+  });
+
+  it('honours an `ai: true` entry on a condition line — kept AI, once', async () => {
+    const { client, prompts } = conditionClient();
+    const compiler = compilerFor([WHILE], { client });
+    for (let n = 1; n <= 3; n++) {
+      compiler.offerGuard({
+        members: [{ index: 0, binding: binding(WHILE, { entry: { source: WHILE, ai: true } }) }],
+        result: guardRow(0, modelVisit(n, n < 3)),
+        resolvedParameters: {},
+      });
+    }
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+    expect(prompts).toEqual([]);
+    expect(outcome.summary.keptAi).toBe(1);
+  });
+
+  it('a skipped chain member it then generates is not named; one it never saw is, once, at the end', async () => {
+    const events: LiveCompileEvent[] = [];
+    const { client } = conditionClient();
+    const WHILE_2 = 'While the More button is shown, Show more';
+    const compiler = compilerFor([IF, ELSE_IF, WHILE_2], { client, events });
+    // The If held: the Else if was never asked — and its skip row arrives.
+    compiler.offerGuard({
+      members: [
+        { index: 0, binding: binding(IF) },
+        { index: 1, binding: binding(ELSE_IF) },
+      ],
+      result: guardRow(0, {
+        decidedBy: 'model',
+        selected: 0,
+        evidence: { dom: '<p>cash</p>', url: 'https://x.test', members: [{ index: 0, holds: true }, { index: 1 }] },
+      }),
+      resolvedParameters: {},
+    });
+    const skippedRow = (i: number, text: string): StepResult => result(i + 1, text, { status: 'skipped', turns: [] });
+    compiler.offer({ index: 1, binding: binding(ELSE_IF), result: skippedRow(1, ELSE_IF), resolvedParameters: {}, skipped: 'decision' });
+    // A condition line an outer decision skipped: never visited at all.
+    compiler.offer({ index: 2, binding: binding(WHILE_2), result: skippedRow(2, WHILE_2), resolvedParameters: {}, skipped: 'decision' });
+    compiler.runStepsEnded();
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+
+    expect(outcome.summary.compiled).toBe(2);
+    expect(outcome.summary.notAttempted).toEqual([3]);
+    const didNotRun = events
+      .filter((e): e is LiveCompileStepEvent => e.type === 'compile:step' && e.message === SKIPPED_BY_DECISION_REFUSAL)
+      .map((e) => e.step);
+    expect(didNotRun).toEqual([3]);
+  });
+
+  it('takes no observation from a guard nothing decided — its entry broke and the judge failed too', async () => {
+    const { client, prompts } = conditionClient();
+    const compiler = compilerFor([WHILE], { client });
+    compiler.offerGuard({
+      members: [{ index: 0, binding: binding(WHILE, { entry: { source: WHILE, condition: async () => true } }) }],
+      result: guardRow(
+        0,
+        { decidedBy: 'model', staleMember: 0 },
+        {
+          status: 'failed',
+          error: 'the judge could not decide',
+          codeBehindStale: { file: stepsFile, source: WHILE, error: 'boom' },
+        },
+      ),
+      resolvedParameters: {},
+    });
+    compiler.runStepsEnded();
+    const outcome = await compiler.finish({ tokensUsed: 0 });
+    // A "did not hold" read off an absent verdict — with no page — would have
+    // been queued here and written off as an `ai: true` entry.
+    expect(prompts).toEqual([]);
+    expect(outcome.summary).toMatchObject({ compiled: 0, keptAi: 0 });
+    expect(outcome.files).toEqual({});
+  });
+
+  it("never generates a guard outside a Compile This Step's selection", async () => {
+    const { client, prompts } = conditionClient();
+    const compiler = compilerFor([WHILE, 'Click Next'], { client, mode: 'steps' });
+    compiler.setSlice(1, 1);
+    compiler.offerGuard({
+      members: [{ index: 0, binding: binding(WHILE) }],
+      result: guardRow(0, modelVisit(1, true)),
+      resolvedParameters: {},
+    });
+    compiler.runStepsEnded();
+    await compiler.finish({ tokensUsed: 0 });
+    expect(prompts).toEqual([]);
   });
 });

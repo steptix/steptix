@@ -9,7 +9,7 @@ import {
 import { isReturnClaim, parseFlowControlStep } from '../parser/flow-control-step.js';
 import { parseFailureTail } from '../parser/failure-tail.js';
 import type { Candidate } from './candidate.js';
-import { describeGuardedName } from './generate.js';
+import { conditionEntryComplaint, describeGuardedName, entryDefinesCondition } from './generate.js';
 import { listEntries, validateCodeBehindSource } from './writer.js';
 
 /**
@@ -29,6 +29,10 @@ export interface FileReviewInput {
   /** The test's steps, in order, so the reviewer can see what each entry is for. */
   steps: string[];
 }
+
+/** A `condition` function in an entry — `async condition({ … })` or
+ *  `condition: async (…) =>` — the shape a condition line's entry has. */
+const CONDITION_ENTRY = /\bcondition\s*(?:\(|:\s*(?:async\b|\())/;
 
 export function buildFileReviewPrompt(input: FileReviewInput): ChatMessage {
   const stepBlock = input.steps.length === 0
@@ -82,8 +86,32 @@ export function buildFileReviewPrompt(input: FileReviewInput): ChatMessage {
         '   assertions because the failure is tolerated.',
     );
   }
+  // Condition entries (stories/codebehind-loops-and-conditions.md, "Generation":
+  // "The review pass is told condition entries exist"). Gated on the FILE, not
+  // the steps: a test full of `If` lines whose conditions are decided from
+  // their values has none, and a reviewer told about a kind of entry the file
+  // does not hold is invited to write one.
+  const hasConditionEntry = CONDITION_ENTRY.test(input.file);
+  if (hasConditionEntry) {
+    tailRules.push(
+      '**A `condition` entry answers a condition line** (`If`, `Else if`, `While`, `Repeat …\n' +
+        '   until`): `async condition({ page, step })` returning `true` or `false` for whether the\n' +
+        '   condition, as written, holds on the page now. Keep it a condition that returns a boolean.\n' +
+        '   Keep it read-only — no click, fill, press, check, select, navigation, keyboard or mouse —\n' +
+        '   and give it no waits: the framework has already settled the page before it asks. Never\n' +
+        '   turn one into a `run` entry, never give an entry both, and never add a `condition` entry\n' +
+        '   for a line that has none. A `Repeat … until` entry answers whether its until-condition\n' +
+        '   holds (true ends the loop) — do not invert it.',
+    );
+  }
   const tailBlock =
     tailRules.length === 0 ? '' : `\n${tailRules.map((r, i) => `${10 + i}. ${r}`).join('\n')}`;
+  // Rule 3 asks every entry for a post-condition; a condition entry has none —
+  // it ends with its `return`.
+  const conditionException = hasConditionEntry
+    ? ' A `condition` entry takes no post-condition: it answers true or false and ends with its\n' +
+      '   `return` — never add one to it.'
+    : '';
 
   return {
     role: 'user',
@@ -111,7 +139,7 @@ ${input.file}
    literals.
 3. **Every entry ends with a post-condition** — a \`locator.waitFor()\` on what
    the step produced, or a \`step.expect(...)\` over a value read back from the
-   page — so "did not throw" means "the step worked".${flowControlException}
+   page — so "did not throw" means "the step worked".${flowControlException}${conditionException}
 4. **Captures are written**: a step with \`[as: x]\` must call
    \`step.setVar('x', ...)\`.
 5. **Stable selectors** (ids, \`data-testid\`, roles, labels) over positional
@@ -253,9 +281,22 @@ export async function reviewCandidate(
     // Caught live: given the whole test, it wrote an entry for the step a
     // prefix compile had deliberately left alone — code for a step nobody
     // recorded, which the next compile would then skip as "already has one".
-    const entriesChanged = describeEntryChange(listEntries(before), listEntries(revised));
+    const entriesBefore = listEntries(before);
+    const entriesAfter = listEntries(revised);
+    const entriesChanged = describeEntryChange(entriesBefore, entriesAfter);
     if (entriesChanged) {
       emit(`rejected: the revision ${entriesChanged} — the generated file stands`);
+      continue;
+    }
+    // A condition entry stays a condition entry, and a clean one. The prompt
+    // says so; this is what holds the reviewer to it. Rewritten into a `run`,
+    // or into a condition that clicks, it would act on the page a decision is
+    // asked about — and the set-of-entries check above cannot see it, because
+    // the `source` did not move. Rejected the way every other violation here
+    // is: the whole revision of this file, and the generated file stands.
+    const brokenCondition = conditionEntryBroken(entriesBefore, entriesAfter);
+    if (brokenCondition) {
+      emit(`rejected: the revision ${brokenCondition} — the generated file stands`);
       continue;
     }
     const invalid = await validateCodeBehindSource(file, revised);
@@ -266,6 +307,50 @@ export async function reviewCandidate(
     await candidate.replaceFile(file, revised);
     emit(`revised ${basename(file)}`);
   }
+}
+
+/**
+ * The first condition entry the revision CHANGED into something that is not a
+ * clean condition — no longer defining `condition`, or failing
+ * `conditionEntryComplaint` — described for the rejection line; null when
+ * every one survived. Entries are paired by identity (section + source) and,
+ * for identically-worded ones, by their order, the pairing
+ * `describeEntryChange` has already confirmed is one-to-one.
+ *
+ * Only what the revision touched is judged: an entry whose code it left as it
+ * was (whitespace aside) is the file's, not the reviewer's, and a hand-written
+ * condition the static check happens to dislike must not block every review
+ * of the file it sits in. An entry the revision turned INTO a condition is
+ * judged like one it rewrote.
+ */
+function conditionEntryBroken(
+  before: Array<{ source: string; section: string; code: string }>,
+  after: Array<{ source: string; section: string; code: string }>,
+): string | null {
+  const sep = String.fromCharCode(0);
+  const key = (e: { source: string; section: string }): string => `${e.section}${sep}${e.source}`;
+  const same = (a: string, b: string): boolean => a.replace(/\s+/g, '') === b.replace(/\s+/g, '');
+  const pending = new Map<string, Array<{ code: string }>>();
+  for (const e of after) {
+    const list = pending.get(key(e)) ?? [];
+    list.push(e);
+    pending.set(key(e), list);
+  }
+  for (const e of before) {
+    const revised = pending.get(key(e))?.shift();
+    if (!revised || same(e.code, revised.code)) continue;
+    const was = entryDefinesCondition(e.code);
+    const is = entryDefinesCondition(revised.code);
+    if (!was && !is) continue;
+    if (was && !is) {
+      return `turns the condition entry for ${JSON.stringify(e.source)} into something that is not one`;
+    }
+    const complaint = conditionEntryComplaint(revised.code);
+    if (complaint !== undefined) {
+      return `breaks the condition entry for ${JSON.stringify(e.source)}: ${complaint}`;
+    }
+  }
+  return null;
 }
 
 /**

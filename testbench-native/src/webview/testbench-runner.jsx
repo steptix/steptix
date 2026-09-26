@@ -643,7 +643,9 @@ function TestBenchRunner() {
         // server sends alongside; an older one sends none and the sentence
         // reads without it.
         if (isSkippedPass(event)) {
-          log(skipPanelLine(event.line, event.reason), "info", uri);
+          // A ⚠ that did not run — its condition's code threw on that visit —
+          // says both facts, at the warning level its gutter mark has.
+          log(skipPanelLine(event.line, event.reason, event.codeBehindStale), event.codeBehindStale ? "warn" : "info", uri);
           break;
         }
         if (event.codeBehindStale) {
@@ -830,9 +832,17 @@ function TestBenchRunner() {
   // either: a skipped step is neither, and a run that returns would otherwise
   // report "✓ 4 passed" with the fifth step accounted for nowhere
   // (stories/step-flow-control.md, decision 15).
+  // A ⚠ on a line that did not run (`notTaken`) counts as the skip it was.
   const runCounts = useMemo(
-    () => countStepLineStatuses(statuses, stepLines),
-    [statuses, stepLines],
+    () =>
+      countStepLineStatuses(
+        statuses,
+        stepLines,
+        Object.entries(failureMap)
+          .filter(([, f]) => f?.notTaken !== undefined)
+          .map(([line]) => Number(line)),
+      ),
+    [statuses, stepLines, failureMap],
   );
   const passCount = runCounts.pass;
   const codeBehindCount = runCounts.codeBehind;

@@ -1340,10 +1340,10 @@ describe('generateStepEntry — which dotted names the prompt masks (§7.6)', ()
   });
 
   it('without the map reads every dotted name as a binding — which is what the map buys', async () => {
-    // The boxed compile passes no map on purpose: its parameters are an
-    // unmarked copy of the already-redacted report map, and handing that over
-    // would put `row.keyword` under the author rule. This twin states the
-    // cost of that choice so nobody mistakes it for the live path's answer.
+    // What a caller that passes no map gets. Neither compiler is one any more:
+    // the boxed compile used to be, and it put a data file's `user.apikey`
+    // heading into its prompts in clear once its values stopped arriving
+    // pre-redacted (review round 2, F1). This twin states the cost.
     const { client, calls } = stubClient(JSON.stringify({ entry: null, reason: 'not needed' }));
     await generateStepEntry({
       binding: bindingFor(source),
@@ -1358,11 +1358,15 @@ describe('generateStepEntry — which dotted names the prompt masks (§7.6)', ()
     expect(text).toContain('{{user.apikey}} resolved to "uk_live_1234" on this run');
   });
 
-  it('is handed the marked snapshot by the live compiler, and nothing by the boxed one', () => {
+  it('is handed a marked snapshot by both compilers', () => {
+    // The live compiler: its `liveCompileSnapshot`. The boxed one: its
+    // `passSnapshots` fold, which marks what each pass bound — generation,
+    // the condition prompt, and both repairs (review round 2, F1).
     const live = readFileSync(path.join(repoRoot, 'src', 'codebehind', 'live-compile.ts'), 'utf8');
     const boxed = readFileSync(path.join(repoRoot, 'src', 'codebehind', 'compile.ts'), 'utf8');
     expect(live).toContain('parameterMap: input.resolvedParameters');
-    expect(boxed).not.toContain('parameterMap');
+    expect(boxed).toContain('parameterMap: passValues');
+    expect(boxed.match(/parameterMap: values/g)).toHaveLength(3);
   });
 });
 

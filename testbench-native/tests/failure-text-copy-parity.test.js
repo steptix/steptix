@@ -172,6 +172,10 @@ for (const [i, args] of [
   [5, "   "],
   [5, "Skipped:"],
   [5, undefined],
+  // A skipped ⚠: a chain member whose condition's code threw on the visit that
+  // took another member (review round 2, F8) — both facts, on both sides.
+  [5, "Skipped: another branch of this decision was taken", { error: "locator.isChecked: Timeout 5000ms exceeded" }],
+  [5, undefined, { error: "boom" }],
 ].entries()) {
   test(`webview skipPanelLine matches step-skip-core for case ${i}`, () => {
     assert.equal(

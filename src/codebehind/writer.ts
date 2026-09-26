@@ -337,12 +337,14 @@ export function findEntrySpans(
  * The `source` of every entry in a file, in file order, each paired with its
  * `section` scope — the identity an entry binds by. What the review guard
  * compares before and after a revision: a reviewer may edit an entry's code,
- * never the set of entries.
+ * never the set of entries. `code` is the entry's whole object literal, for
+ * the checks a revision's entries must still pass (a condition entry must
+ * stay one — review.ts).
  */
-export function listEntries(src: string): Array<{ source: string; section: string }> {
+export function listEntries(src: string): Array<{ source: string; section: string; code: string }> {
   const s = scan(src);
   const seen = new Set<number>();
-  const out: Array<{ source: string; section: string }> = [];
+  const out: Array<{ source: string; section: string; code: string }> = [];
   for (const token of s.strings) {
     const span = enclosingBraceSpan(s, token.start);
     if (!span || seen.has(span.start)) continue;
@@ -350,7 +352,11 @@ export function listEntries(src: string): Array<{ source: string; section: strin
     if (source === undefined || source.trim() !== token.value.trim()) continue;
     seen.add(span.start);
     const section = objectStringProperty(s, span.start, span.end, 'section');
-    out.push({ source: source.trim(), section: section ? matchText(section) : '' });
+    out.push({
+      source: source.trim(),
+      section: section ? matchText(section) : '',
+      code: src.slice(span.start, span.end),
+    });
   }
   return out;
 }

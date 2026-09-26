@@ -1010,7 +1010,18 @@ export type StepCodeAnswer =
  * author sees exactly what stayed AI and why — strictly better than a silent
  * omission, which is indistinguishable from the model failing.
  */
-export function parseStepCodeOrDecline(rawResponse: string): StepCodeAnswer {
+export function parseStepCodeOrDecline(
+  rawResponse: string,
+  /**
+   * Which function the entry must define: `run` for a step (the default, and
+   * every caller before condition entries existed), `condition` for a
+   * condition line's entry (stories/codebehind-loops-and-conditions.md,
+   * decision 4). The other function is not refused here — an entry carrying
+   * both is the generator's static check to complain about, with a re-ask —
+   * but the one asked for must be there, or there is nothing to run.
+   */
+  expect: 'run' | 'condition' = 'run',
+): StepCodeAnswer {
   let body = rawResponse;
   try {
     const parsed: unknown = JSON.parse(extractJson(rawResponse));
@@ -1033,11 +1044,16 @@ export function parseStepCodeOrDecline(rawResponse: string): StepCodeAnswer {
   } catch {
     // Not a JSON envelope — treat the raw response as the body.
   }
-  return { kind: 'entry', entry: parseEntryLiteral(body) };
+  return { kind: 'entry', entry: parseEntryLiteral(body, expect) };
 }
 
-/** Pull the entry object literal out of a decoded response body. */
-function parseEntryLiteral(body: string): string {
+/**
+ * Pull the entry object literal out of a decoded response body.
+ *
+ * Exported for tests. `expect` names the function the entry must define — see
+ * {@link parseStepCodeOrDecline}.
+ */
+export function parseEntryLiteral(body: string, expect: 'run' | 'condition' = 'run'): string {
 
   const fenced = /```(?:ts|typescript|js|javascript)?\s*\n([\s\S]*?)```/i.exec(body);
   const inner = (fenced?.[1] ?? body).trim();
@@ -1055,8 +1071,13 @@ function parseEntryLiteral(body: string): string {
   if (!/\bsource\s*:/.test(entry)) {
     throw new Error('Step code entry is missing a `source` property');
   }
-  if (!/\brun\s*[(:]/.test(entry)) {
+  if (expect === 'run' && !/\brun\s*[(:]/.test(entry)) {
     throw new Error('Step code entry is missing a `run` function');
+  }
+  // A condition line's entry answers with `condition` in place of `run`
+  // (stories/codebehind-loops-and-conditions.md, decision 4).
+  if (expect === 'condition' && !/\bcondition\s*[(:]/.test(entry)) {
+    throw new Error('Condition code entry is missing a `condition` function');
   }
   return entry;
 }

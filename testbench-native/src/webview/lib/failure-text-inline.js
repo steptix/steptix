@@ -53,16 +53,19 @@ export function describeStepFailure(failure) {
  * editor hovers follow, for the same reason.
  *
  * @param {{error?: string, fromCodeBehind?: boolean, deliberate?: boolean,
- *          warning?: string,
+ *          warning?: string, notTaken?: string,
  *          codeBehindStale?: {file: string, error: string}}} failure
  * @param {boolean} isStale True for a ⚠ row, false for a ✗ row.
  * @returns {string | null}
  */
 export function formatStepFailure(failure, isStale) {
   if (isStale) {
-    return failure.codeBehindStale
-      ? `code-behind failed: ${failure.codeBehindStale.error}`
-      : null;
+    if (!failure.codeBehindStale) return null;
+    // A ⚠ on a line that did not run — a chain member whose condition's code
+    // threw on the visit that took another member: both facts.
+    return failure.notTaken !== undefined
+      ? `${failure.notTaken}\ncondition code-behind failed: ${failure.codeBehindStale.error}`
+      : `code-behind failed: ${failure.codeBehindStale.error}`;
   }
   // The author's sentence, first — it says why the failure was survivable, which is
   // what a reader of an amber row wants; the framework's error keeps its place under.
@@ -116,13 +119,20 @@ export function isSkippedPass(event) {
  * step-skip-core.ts gives: the server writes a standalone sentence for a
  * report cell, and pasted after "skipped" it stutters.
  *
+ * A skipped line whose CONDITION's compiled code threw on that visit (`stale`,
+ * the event's `codeBehindStale`) leads with ⚠ — the gutter's mark — and says
+ * the second fact after the first, as step-skip-core.ts does.
+ *
  * @param {number} line
  * @param {string} [reason]
+ * @param {{error: string}} [stale]
  * @returns {string}
  */
 export const SKIP_GLYPH = "◌";
 
-export function skipPanelLine(line, reason) {
+export function skipPanelLine(line, reason, stale) {
   const trimmed = reason?.trim().replace(/^skipped\b\s*:?\s*/i, "");
-  return `${SKIP_GLYPH} Step on line ${line} skipped${trimmed ? ` — ${trimmed}` : ""}`;
+  const glyph = stale ? "⚠" : SKIP_GLYPH;
+  const broken = stale ? `; condition code-behind failed: ${stale.error}` : "";
+  return `${glyph} Step on line ${line} skipped${trimmed ? ` — ${trimmed}` : ""}${broken}`;
 }

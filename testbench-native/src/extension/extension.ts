@@ -14,6 +14,7 @@ import { DecorationManager, computeStepsSummary, dataTablesOf } from './decorati
 import { staleHoverMessage } from './failure-hover-core.js';
 import { skipPaintsOver } from './step-skip-core.js';
 import { passPaintsOver, toleratedPaintsOver } from './failure-outcome-core.js';
+import { GuardMarks, passMarkFor } from './guard-mark-core.js';
 import { lineStatusFromRowStatus, rowHeaderSummary } from './row-summary-core.js';
 import {
   allRowsOfTable,
@@ -132,6 +133,14 @@ class RunControllerRegistry implements vscode.Disposable {
    * statuses at run start, so a mark is always THIS run's.
    */
   private readonly toleratedLines = new Map<string, Map<number, StepFailureDetail>>();
+  /**
+   * The `</>` / ⚠ a guard's `step:pass` painted on its line this run, so the
+   * clean `frame:pop` of that line's section tail repaints it instead of a plain
+   * ✓ (stories/codebehind-loops-and-conditions.md, decision 15; the rule is in
+   * guard-mark-core.ts). Remembered for the same reason `toleratedLines` is — the
+   * tail's `frame:push` paints ▶ over the mark first — and cleared with it.
+   */
+  private readonly guardMarks = new GuardMarks<StepFailureDetail>();
 
   /** Test-only readback of the `testbench-native.running` context key. */
   get runningContextValue(): boolean {
@@ -711,11 +720,14 @@ class RunControllerRegistry implements vscode.Disposable {
    *
    * One method so the two cannot drift: a clear that left `toleratedLines` behind
    * would make the NEXT run refuse to paint a green ✓ on a line this one
-   * tolerated — a stale mark no event will ever correct.
+   * tolerated — a stale mark no event will ever correct. `guardMarks` likewise:
+   * left behind, the next run's clean `frame:pop` would repaint a `</>` this run
+   * earned on a line the next run decided with the model.
    */
   private clearStatusesFor(uri: vscode.Uri): void {
     this.tracker.clearStatuses(uri);
     this.toleratedLines.delete(uri.toString());
+    this.guardMarks.clear(uri.toString());
   }
 
   /** Remember an amber line and what it said, so a later trip through the
@@ -837,31 +849,31 @@ class RunControllerRegistry implements vscode.Disposable {
         }
         case 'step:pass': {
           const target = this.targetUriFor(uri, ev.frame);
-          // How the step passed decides the glyph. `output: 'skipped'` outranks
-          // even the code-behind marks, because the step did not run at all:
-          // the untaken half of a decision, or the whole body of a `While` that
-          // never entered (stories/control-flow.md — "the other line and its
-          // section paint as skipped, so you can read which way it went off the
-          // editor"). It rides the PASS event because a branch that was not
-          // taken is not a failure and the wire has no third verdict; painting
-          // it ✓ would claim work that was never done.
+          // How the step passed decides the glyph (`passMarkFor`,
+          // guard-mark-core.ts). `output: 'skipped'` paints ◌, because the
+          // step did not run at all: the untaken half of a decision, or the
+          // whole body of a `While` that never entered (stories/control-flow.md
+          // — "the other line and its section paint as skipped, so you can read
+          // which way it went off the editor"). It rides the PASS event because
+          // a branch that was not taken is not a failure and the wire has no
+          // third verdict; painting it ✓ would claim work that was never done.
           //
-          // Then `codeBehindStale`: the step DID pass, but its compiled entry
-          // threw and the AI covered for it, and ⚠ is the only mark that asks
-          // for a recompile. Then the code mark (ran as code), then the plain ✓.
-          const status = isSkippedPass(ev)
-            ? 'skip'
-            : ev.codeBehindStale
-            ? 'pass-stale'
-            : ev.fromCodeBehind
-              ? 'pass-code-behind'
-              : 'pass';
+          // `codeBehindStale` outranks it: ⚠ is the only mark that asks for a
+          // recompile. On a step that ran, its compiled entry threw and the AI
+          // covered for it; on a skipped chain member, its CONDITION entry
+          // threw on the visit that then took another member — the ⚠ lands on
+          // the line whose entry broke, with a hover saying both facts. Then
+          // the code mark (ran as code), then the plain ✓.
+          const skipped = isSkippedPass(ev);
+          const mark = passMarkFor(ev, skipped);
+          const status = mark.status;
           // The same precedence a `step:skip` gets, and for the same reason:
           // a ✗ is the one status a run must not lose, and the two producers
           // of a skipped step must not disagree about that
-          // (`skipPaintsOver`, step-skip-core.ts).
+          // (`skipPaintsOver`, step-skip-core.ts). A skipped ⚠ is still a
+          // skip here — the line did not run.
           const current = this.tracker.state(target).statuses.get(ev.line);
-          if (status === 'skip' && !skipPaintsOver(current)) {
+          if (skipped && !skipPaintsOver(current)) {
             break;
           }
           // …and the amber ✗ survives a later PASS on the same line
@@ -874,27 +886,28 @@ class RunControllerRegistry implements vscode.Disposable {
           const tolerated = this.toleratedEarlierThisRun(target, ev.line);
           if (!passPaintsOver(current) || tolerated) {
             this.tracker.setStatus(target, ev.line, 'fail-tolerated', tolerated);
+            // What this pass left on the line is the amber ✗, not a code mark,
+            // so a section tail's pop on this line goes back to its plain ✓.
+            this.guardMarks.notePass(target.toString(), ev.line, 'fail-tolerated');
             break;
           }
           // A ⚠ pins the code-behind crash to the line, so the hover and the
           // panel row can say WHAT threw, not just that something did. No
-          // `error`: the STEP passed, it is the entry that failed.
+          // `error`: the STEP passed (or did not run), it is the entry that
+          // failed; a skipped ⚠ carries its skip reason as `notTaken`.
           //
           // A ◌ pins its reason the same way a `step:skip` does, which is what
           // gives the untaken branch a hover at all — it had none, so the
           // commonest skip in the codebase explained itself least. `reason` is
           // absent on an older server, and an absent detail is exactly the
           // hoverless ◌ that used to be the only outcome.
-          this.tracker.setStatus(
-            target,
-            ev.line,
-            status,
-            ev.codeBehindStale
-              ? stepFailureDetail({ codeBehindStale: ev.codeBehindStale })
-              : status === 'skip' && ev.reason
-                ? stepFailureDetail({ error: ev.reason })
-                : undefined,
-          );
+          const detail = mark.detail ? stepFailureDetail(mark.detail) : undefined;
+          this.tracker.setStatus(target, ev.line, status, detail);
+          // Remembered for the `frame:pop` below: when this line is a guard
+          // whose tail is a section, the tail's frame is pushed and popped on
+          // this same line, and its pop must not flatten this `</>` / ⚠ to ✓
+          // (decision 15). Every pass records, so a loop's latest visit wins.
+          this.guardMarks.notePass(target.toString(), ev.line, status, detail);
           break;
         }
         case 'step:skip': {
@@ -1035,8 +1048,15 @@ class RunControllerRegistry implements vscode.Disposable {
             // descent had no failures — failures already painted `fail`
             // synchronously in the step:fail branch and we don't want to
             // step on them here.
+            //
+            // "Pass" is the call line's remembered `</>` / ⚠ when a guard put
+            // one there this run — a section tail's frame sits on its guard's
+            // line, and a plain ✓ would erase how the decision was made along
+            // with the ⚠'s hover (guard-mark-core.ts). Plain ✓ otherwise.
             if (!result.failed) {
-              this.tracker.setStatus(result.root.testUri, result.root.testLine, 'pass');
+              const { testUri, testLine } = result.root;
+              const mark = this.guardMarks.forFramePop(testUri.toString(), testLine);
+              this.tracker.setStatus(testUri, testLine, mark.status, mark.detail);
             }
           }
           break;
@@ -1131,15 +1151,11 @@ class RunControllerRegistry implements vscode.Disposable {
           // for the untaken branch. Same rule as the run gutter above: the
           // step did not run, so it is not a ✓, and like a `step:skip` it
           // never paints over a ✗.
-          const status = isSkippedPass(ev)
-            ? 'skip'
-            : ev.codeBehindStale
-              ? 'pass-stale'
-              : ev.fromCodeBehind
-                ? 'pass-code-behind'
-                : 'pass';
+          // The same `passMarkFor` the run gutter above paints with.
+          const skipped = isSkippedPass(ev);
+          const mark = passMarkFor(ev, skipped);
           const current = this.tracker.state(uri).statuses.get(ev.line);
-          if (status === 'skip' && !skipPaintsOver(current)) {
+          if (skipped && !skipPaintsOver(current)) {
             break;
           }
           // Same amber-survives-a-pass rule as the run gutter above: a Record and
@@ -1149,12 +1165,8 @@ class RunControllerRegistry implements vscode.Disposable {
           this.tracker.setStatus(
             uri,
             ev.line,
-            status,
-            ev.codeBehindStale
-              ? stepFailureDetail({ codeBehindStale: ev.codeBehindStale })
-              : status === 'skip' && ev.reason
-                ? stepFailureDetail({ error: ev.reason })
-                : undefined,
+            mark.status,
+            mark.detail ? stepFailureDetail(mark.detail) : undefined,
           );
           break;
         }

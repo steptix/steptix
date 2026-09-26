@@ -46,7 +46,7 @@ import {
 } from 'ai-ui-automation-runner-core';
 import { getOutputChannel } from './output-channel.js';
 import { skipCompileLogLine, skipRunLogLine } from './step-skip-core.js';
-import { runLogTallyLine } from './steps-summary-core.js';
+import { runLogHealLines, runLogTallyLine } from './steps-summary-core.js';
 import { deliberateRunLogLine, toleratedRunLogLine } from './failure-outcome-core.js';
 import { compileResultLine } from './compile-summary-core.js';
 import type { CompileTail } from './compile-progress-core.js';
@@ -262,7 +262,7 @@ export function compileLogLine(event: CompileEvent): string | null {
         // gets the same `◌` (`SKIP_GLYPH`) the interactive run log gives it
         // rather than a ✓, with the reason a current server sends alongside.
         if (isSkippedPass(inner)) {
-          return `  ${' '.repeat(11)} ${skipCompileLogLine(inner.line, inner.reason)}`;
+          return `  ${' '.repeat(11)} ${skipCompileLogLine(inner.line, inner.reason, inner.codeBehindStale)}`;
         }
         const how = inner.codeBehindStale
           ? ` ⚠ under AI — code-behind failed: ${inner.codeBehindStale.error}`
@@ -4939,6 +4939,13 @@ export class RunController {
     let sawFail = false;
     let codeBehindCount = 0;
     let staleCount = 0;
+    /**
+     * Of the skips below, the ones that wear ⚠: a chain member whose
+     * CONDITION's compiled code threw on the visit that took another member.
+     * Counted skipped — the line did not run — and said as stale beside the
+     * skip count and in the Repair lines, which is what the gutter's ⚠ offers.
+     */
+    let staleSkipCount = 0;
     /** Server-attributed cost of the steps that healed; 0 when unattributed. */
     let healedTokens = 0;
     let passCount = 0;
@@ -5050,7 +5057,9 @@ export class RunController {
         // one; `skipRunLogLine` reads without it either way.
         if (isSkippedPass(event)) {
           skipCount += 1;
-          log(skipRunLogLine(event.line, event.reason));
+          // A ⚠ that did not run: both facts, as its hover says them.
+          if (event.codeBehindStale) staleSkipCount += 1;
+          log(skipRunLogLine(event.line, event.reason, event.codeBehindStale));
         } else {
           passCount += 1;
           if (event.codeBehindStale) {
@@ -5143,21 +5152,15 @@ export class RunController {
           tolerated: toleratedCount,
           codeBehind: codeBehindCount,
           stale: staleCount,
+          staleSkipped: staleSkipCount,
         }),
       );
-      if (staleCount > 0) {
-        // Naming the price is the point of the line, not decoration: the
-        // count alone reads as a one-off, and it is not — the entry is still
-        // broken, so the same AI turns are paid on every run until someone
-        // repairs it. Tokens are omitted rather than shown as 0 when the
-        // server did not attribute them (an older server, or a path that
-        // does not track them).
-        const cost = healedTokens > 0 ? ` (${formatTokens(healedTokens)} tokens)` : '';
-        log(
-          `  ${staleCount} step(s) healed under AI because their code-behind failed${cost}.`,
-        );
-        log('  Repair this step from the ⚠ gutter, or it costs that again every run.');
-      }
+      // What the broken entries cost and what to do about it
+      // (`runLogHealLines`, pinned by `node --test`). Tokens are omitted
+      // rather than shown as 0 when the server did not attribute them (an
+      // older server, or a path that does not track them).
+      const cost = healedTokens > 0 ? ` (${formatTokens(healedTokens)} tokens)` : '';
+      for (const line of runLogHealLines({ stale: staleCount, staleSkipped: staleSkipCount }, cost)) log(line);
     }
     return !sawFail;
   }

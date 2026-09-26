@@ -1,4 +1,4 @@
-import { formatParameterBlock } from '../ai/prompts.js';
+import { formatCaptureLines, formatLoopBlock, formatParameterBlock, type LoopContext } from '../ai/prompts.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import type { ChatMessage, MessageContentBlock } from '../ai/types.js';
 
@@ -31,10 +31,33 @@ export interface RepairPromptInput {
    *  `user.apikey` heading rendered its credential into this prompt in clear.
    *  The live object or nothing; a copy carries none of the loop marks. */
   parameterMap?: Record<string, string> | undefined;
+  /** The run's free-text mask set, as for generation: a secret inside a value
+   *  no key names as secret is masked too. */
+  secrets?: string[] | undefined;
   /** The step's environment references with their values, as for generation. */
   envRefs?: Array<{ ref: string; value: string }> | undefined;
   /** Which round this is, and how many there are. */
   round?: { number: number; max: number } | undefined;
+  /**
+   * The runtime loop the step sits in the body of, as generation is told it
+   * (stories/codebehind-loops-and-conditions.md, decision 2): the ONE entry
+   * replays on every pass, and what changes per pass is read with
+   * `step.getVar`. Absent outside every loop, which leaves the prompt as it was.
+   */
+  loop?: LoopContext | undefined;
+  /**
+   * What each capture the step makes held on the RECORDING, by the authored
+   * capture name — RAW, masked here as the parameter block masks a value
+   * (`formatCaptureLines`, the step prompt's own formatter). The result the
+   * repaired entry must reproduce.
+   */
+  recordedCaptures?: Record<string, string> | undefined;
+  /**
+   * The one re-ask a refused answer buys (`askWithCaptureRetry`, generate.ts):
+   * the answer that wrote a recorded value into the code, masked, and why it
+   * was refused. Present only on that second call.
+   */
+  retry?: { previousEntry: string; complaint: string } | undefined;
 }
 
 export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
@@ -42,7 +65,7 @@ export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
     input.parameters,
     input.envRefs ?? [],
     new Set<string>(),
-    [],
+    input.secrets ?? [],
     input.parameterMap,
   );
 
@@ -66,13 +89,31 @@ export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
     ? `\nThis is repair round ${input.round.number} of ${input.round.max}. If you cannot make this step work as code, say so with {"entry": null, "reason": "..."} rather than guessing again.\n`
     : '';
 
+  // What the recording captured, beside the name the entry writes it under —
+  // the step prompt's own lines and rule. Absent (the prompt unchanged) when
+  // nothing was recorded.
+  const recorded = Object.entries(input.recordedCaptures ?? {});
+  const captureBlock =
+    recorded.length === 0
+      ? ''
+      : `\n\n## Values this step must capture\n${formatCaptureLines(
+          recorded.map(([name]) => name),
+          Object.fromEntries(recorded),
+          input.secrets ?? [],
+          input.parameterMap,
+        )}`;
+
+  const retryBlock = input.retry
+    ? `\n## Your previous answer was refused\n${input.retry.complaint}\n\nThat answer was:\n\n\`\`\`ts\n${input.retry.previousEntry}\n\`\`\`\n\nFix exactly that, keep the rest of the entry, and return it in the same envelope.\n`
+    : '';
+
   const text = `A generated code-behind entry was replayed and it failed. Rewrite it so it passes.
 
 ## The step, exactly as authored
 ${input.rawStepText}
 
 ## Parameters in scope
-${paramBlock}
+${paramBlock}${formatLoopBlock(input.loop, 'step')}${captureBlock}
 
 ## The entry that failed (step ${input.stepIndex})
 \`\`\`ts
@@ -81,7 +122,7 @@ ${input.entryCode}
 
 ## What went wrong
 ${input.error}
-${roundLine}
+${retryBlock}${roundLine}
 ## The page when it failed${input.url ? `\nURL: ${input.url}` : ''}${
     input.dom ? `\n\n\`\`\`html\n${input.dom}\n\`\`\`` : ''
   }${input.screenshotBase64 ? '\n\n[A screenshot of the page at the failure is attached.]' : ''}

@@ -12,6 +12,7 @@ import { readDefaultEnvVars, readEnvFileVars } from '../env/loader.js';
 import {
   compileTest,
   firstDataRow,
+  outcomeRows,
   type CompileEvent,
   type CompilePhase,
   type CompileResult,
@@ -24,7 +25,7 @@ import {
 import { applyEnvToAiConfig } from './run-helpers.js';
 import { compileLock } from './compile-lock.js';
 import type { ProjectBundle, ProjectBundleResolver } from './project-bundle.js';
-import type { RunDetails, RunEvent, SessionManager, StepRequest } from './session-manager.js';
+import type { RunEvent, SessionManager, StepRequest } from './session-manager.js';
 import { recordingDirFor } from '../codebehind/recording.js';
 
 /**
@@ -313,10 +314,14 @@ export class CodeBehindCompiler {
    * with a run that has no transcripts.
    *
    * The steps go out already expanded, with the compiler's own expansion handed
-   * over for the code-behind registry. Re-expanding server-side would be a
-   * second answer to "which `.steps.ts` does step 7 bind into", and the two
-   * only have to disagree once for a skill's entries to land in the test's file.
-   * A prefix replay sends fewer steps; the expansion's indices still line up.
+   * over for the code-behind registry and the control flow. Re-expanding
+   * server-side would be a second answer to "which `.steps.ts` does step 7 bind
+   * into", and the two only have to disagree once for a skill's entries to land
+   * in the test's file — and for a guard line it is worse than a second answer:
+   * its tail is already the next step, so a second expansion doubles it. The
+   * server therefore runs the chains and loops of the control records sent
+   * here and expands nothing. A prefix replay sends fewer steps; the
+   * expansion's indices still line up.
    *
    * Every event the run emits rides the compile stream inside `compile:run`.
    */
@@ -401,6 +406,12 @@ export class CodeBehindCompiler {
                 origins:
                   test.expansion?.origins ?? test.steps.map((_, i) => ({ inputIndex: i, frameId: '' })),
                 frames: test.expansion?.frames ?? {},
+                // The guards, with their bodies, so the server runs this
+                // expansion's chains and loops rather than expanding the guard
+                // lines in `steps` a second time — which doubled every tail
+                // and shifted every index after it
+                // (stories/codebehind-loops-and-conditions.md, "Boxed compile").
+                ...(test.expansion?.controls && { controls: test.expansion.controls }),
               },
               ...(run.candidateFiles && { candidateFiles: run.candidateFiles }),
               ...(run.disableCodeBehind && { disabled: true }),
@@ -409,7 +420,11 @@ export class CodeBehindCompiler {
             onRunDetails: (d) => {
               details = {
                 status: 'failed',
-                steps: outcomeSteps(d, test.steps.length),
+                // Every row, per index and in execution order, beside the
+                // evidence row per index — the same reduction the CLI's
+                // `reportToOutcome` makes (`outcomeRows`), so a loop body's
+                // passes reach the compile whichever ran it.
+                ...outcomeRows(d.steps, test.steps.length),
                 resolvedParameters: d.parameters,
                 tokensUsed: d.tokens,
               };
@@ -420,6 +435,8 @@ export class CodeBehindCompiler {
           status: response.status === 'passed' ? 'passed' : 'failed',
           ...(response.status !== 'passed' && runError !== undefined && { error: runError }),
           steps: details?.steps ?? [],
+          ...(details?.passes && { passes: details.passes }),
+          ...(details?.rows && { rows: details.rows }),
           resolvedParameters: details?.resolvedParameters ?? {},
           tokensUsed: details?.tokensUsed ?? 0,
         };
@@ -435,22 +452,6 @@ export class CodeBehindCompiler {
       }
     };
   }
-}
-
-/**
- * A run's step records, indexed by expanded step (`index - 1`) and sparse
- * where the run has nothing. Hook results and interactive rows share the index
- * space with real steps, so they are dropped rather than allowed to overwrite
- * one.
- */
-function outcomeSteps(details: RunDetails, totalSteps: number): CompileRunOutcome['steps'] {
-  const steps: CompileRunOutcome['steps'] = new Array(totalSteps).fill(undefined);
-  for (const step of details.steps) {
-    if (step.hookScope || step.interactiveAdHoc || step.interactiveChild) continue;
-    const at = step.index - 1;
-    if (at >= 0 && at < totalSteps) steps[at] = step;
-  }
-  return steps;
 }
 
 /**

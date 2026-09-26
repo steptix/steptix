@@ -104,6 +104,13 @@ test("countStepLineStatuses: counts step lines and ignores data-row lines", () =
   assert.equal(counts.fail, 0);
 });
 
+test("countStepLineStatuses: a ⚠ on a line that was not taken is a skip, not a pass", () => {
+  const counts = countStepLineStatuses({ 3: "pass-stale", 4: "pass" }, extractStepLineIds(WITH_ROWS), [3]);
+  assert.equal(counts.pass, 1);
+  assert.equal(counts.skip, 1);
+  assert.equal(counts.stale, 1);
+});
+
 test("countStepLineStatuses: a section body line is a step line, and counts", () => {
   // The other direction: the fix must not narrow the tally to the main flow.
   // `extractStepLineIds` returns body lines too and the header has always

@@ -247,6 +247,10 @@ function printSummary(result: CompileResult, dryRun: boolean): void {
       );
     }
     if (result.status === 'partial' && s.error) console.log(`  Reason:   ${s.error}`);
+    // A loop the replay ran a different number of passes from the recording,
+    // for a cause no entry of this compile's owns (decision 11): said, never
+    // failed on.
+    for (const warning of s.warnings ?? []) console.log(chalk.yellow(`  Warning:  ${warning}`));
     console.log(`  Written:  ${written}`);
   } else {
     console.log(chalk.red(`✗ Compile failed: ${s.error ?? 'unknown error'}`));
