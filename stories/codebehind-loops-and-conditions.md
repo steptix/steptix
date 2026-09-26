@@ -4,8 +4,11 @@
 Run & Compile / Compile This Step (generation, the live compiler, the
 recording) — see §"What the live half decided" — and the boxed `aiui compile`
 and `POST /codebehind/compile` — see §"What the boxed half decided". The
-TestBench live pass over `templates/init/tests/control-flow.md` (§Tests, "The
-fixture") has not been run.
+TestBench live pass (`testbench-native/tests/integration/live/compile-loops.test.cjs`)
+passed first time, 2/2: Run & Compile of `control-flow.md` and
+`control-flow-otherwise.md`, apply, replay — every `If` / `Else if` /
+`While` / `Repeat` decided by its condition entry, no condition-judge call in
+the replay's report, every loop still exactly three passes.
 
 ## In plain terms
 
@@ -35,8 +38,9 @@ After this story, both halves compile:
   `step.getVar`, never written into the code.
 - **A condition gets code-behind too.** `If`, `Else if`, `While` and
   `Repeat … until` lines get an entry whose `condition` function answers
-  true or false. A compiled test with loops and decisions then runs with no
-  model call at all.
+  true or false. A compiled test with loops and decisions then makes no model
+  call to decide anything; the only model calls left are the steps the
+  compiler kept as AI, as in any compiled file.
 
 ### What it looks like in practice
 
@@ -87,11 +91,22 @@ for any of it. The report's guard rows say *decided by code-behind* where
 they used to carry the model's reasoning.
 
 **You write** `For each {{account}} in {{accounts}}, Check the account` and
-the section body is `Click the account named "{{account}}"`.
+the section body is `Type "{{account}}" into the Search box`.
 **You get:** one entry for the body line, generated from the first pass
 (Everyday). It reads `step.getVar('account')`, so on the second pass it
-clicks Savings. The prompt told the model the line repeats and that
+types Savings. The prompt told the model the line repeats and that
 `{{account}}` changes on every pass.
+
+**You write** the same loop with the fixture's actual body, `Verify the Your
+accounts panel has a row for "{{account}}" showing a balance in dollars`.
+**You get:** that line is kept as AI (`ai: true`, with the reason as a
+comment), and asks the model once per pass. This is the rows story's
+placeholder rule, unchanged: a `{{value}}` that appears only in what a step
+CHECKS or clicks — never in what it types — is declined, because code
+generated from one pass's check would hard-code that pass's answer
+([data-driven-rows.md](data-driven-rows.md) §"Code-behind", and its "Open for
+review" note on `Click the {{plan}} tab`). Measured on the live run: every
+other line of the fixture compiled, and this was the one AI line left.
 
 **You write** an `Otherwise` or a `For each`.
 **You get:** nothing to compile on that line, as before. `Otherwise` has no
