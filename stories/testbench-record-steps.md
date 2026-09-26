@@ -150,17 +150,28 @@ and no step is written for it.
    ticking a box is not typing, and stays literal (`Select "Monthly" from the
    Frequency list`). Secrets follow decision 7: the value stays in `.env`.
 
-9. **One model call, at Stop.** The whole recording goes to the model at once,
-   because turning mechanics into intents needs to see what came next: a
-   click that only focused a field is dropped, keystrokes merge into one
-   `Type`, clicking a checkbox's label is `Tick the … checkbox`, a burst of
-   clicks through a menu is one `Click Payments in the main menu`. The model
-   is given the handbook's step-writing rules, the file around the cursor
-   (its `baseUrl`, parameters and section names, so it can write
-   `Navigate to login.html` and reuse `{{password}}`), and the time gaps
-   between actions. It answers JSON: the steps, and the parameters they need.
-   It uses the session's model. Recording is a request FOR AI, so it runs
-   even where runs forbid AI (`ai.allowInRuns: false`), as compile does.
+9. **The steps are drafted live, as the author works** (changed at the
+   author's request, 2026-09-26 — the first build wrote them in one call at
+   Stop). Each action goes to the model shortly after it happens, with the
+   draft so far; actions that arrive while a call is running, or within a
+   short settle window after the last one, go together in the next call. The
+   model answers with the draft's new TAIL: it may rewrite the last three
+   steps as well as append, because turning mechanics into intents needs to
+   see what came next — a click that only focused a field is dropped,
+   clicking a checkbox's label is `Tick the … checkbox`, `Click Menu`
+   followed by a click on Payments becomes one `Click Payments in the main
+   menu`. Typing is still one action per field, so there is no call per
+   keystroke. The draft shows in the TestBench panel as it grows; at Stop it
+   is final (one last call when actions arrived after the last draft), and
+   goes into the file as one edit, as before. Dropping or restoring an action
+   redrafts the whole recording in one call. The model is given the
+   handbook's step-writing rules, the file around the cursor (its `baseUrl`,
+   parameters and section names, so it can write `Navigate to login.html` and
+   reuse `{{password}}`), and the time gaps between actions. It uses the
+   session's model. Recording is a request FOR AI, so it runs even where runs
+   forbid AI (`ai.allowInRuns: false`), as compile does. The cost: roughly one
+   call per action or burst, where the first build made one per recording —
+   and each call carries the file context again.
 
 10. **Checks come from an explicit gesture.** **Add check** in the panel
     puts the page in pick mode: the next click is swallowed, not performed,
@@ -275,7 +286,14 @@ every route. Body:
   atMs: number;                    // since record:started
   tab?: string }                   // PageTracker label when not `main`
 { type: 'record:pick'; armed: boolean }   // Add check armed / disarmed
-{ type: 'record:writing' }         // Stop received; the model call is running
+{ type: 'record:drafting'; busy: boolean } // a draft call started / finished (decision 9)
+{ type: 'record:draft';            // the draft as it stands — REPLACES the last one
+  revision: number;                // increases by one per draft
+  steps: string[];                 // step texts, no numbers, in order
+  parameters: Array<{ name: string; value: string }>;
+  notes?: string[];
+  through?: string }               // id of the last action the draft covers
+{ type: 'record:writing' }         // Stop received; finishing the draft
 { type: 'record:result';
   steps: string[];                 // step texts, no numbers, in order
   parameters: Array<{ name: string; value: string }>; // value is `$NAME` for a secret
@@ -288,12 +306,22 @@ every route. Body:
 
 ```ts
 { action: 'stop'; dropped?: string[] }   // write the steps, leaving these ids out
+{ action: 'drop'; id: string }           // leave this action out; redraft now
+{ action: 'restore'; id: string }        // put it back; redraft now
 { action: 'check' }                      // arm Add check; the next click is picked
 { action: 'cancel-check' }
 { action: 'cancel' }                     // end without writing anything
 ```
 
 Closing the stream is `cancel`. 404 when no recording is running.
+
+**Live drafting on the wire** (decision 9): after `record:action` frames, a
+`record:drafting` `busy: true`, then a `record:draft` and `record:drafting`
+`busy: false`. A draft call that fails is an `output` warning; the previous
+draft stands and the next call (or Stop) covers the actions again. At Stop:
+`record:writing`, one more call only when the draft does not already cover
+every remaining action, then `record:result` — the final draft, with the
+server's parameter-conflict renaming applied — and `done`.
 
 **TestBench does the editing:** it numbers `record:result.steps` after the
 cursor line (or under `## Steps` of the new file), renumbers the rest, and

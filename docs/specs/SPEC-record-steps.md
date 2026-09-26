@@ -58,9 +58,13 @@ Run and Record, and the context key `testbench-native.recording` is set.
   `● Clicked button "Sign in"  0:07`. Each row has a **✕** that drops it —
   dropped rows are struck through, click again to restore — and dropped
   actions are left out of what the model is shown.
+- **Steps so far** — the draft the model has written from those actions
+  (§8), numbered, updated a moment after each action, with an **updating…**
+  marker while a draft call is running.
 - **Add check** as a toggle that shows whether pick mode is armed.
 - **Stop** and **Cancel**.
-- After Stop, **Writing steps…** until the result arrives.
+- After Stop, **Finishing…** until the result arrives — immediate when the
+  draft already covers every action.
 
 The status bar reads `● Recording — N actions`.
 
@@ -126,7 +130,11 @@ At the moment of a click — on mouse-down, before the click lands and the page
 moves on — and at the first keystroke into a field, the server captures the
 visible page, crops it around the target, draws the target's box on the crop
 and scales it down. The model is shown the crop beside the element's
-description, and told the box's position in text as well.
+description, and told the box's position in text as well — in the draft call
+that covers that action (§8), so crops go to the model **during** the
+recording, a moment after each action, not in one batch at the end. A redraft
+(an action dropped or restored) sends the crops of every remaining action
+again, within the same cap.
 
 - `ai.sendScreenshots: false` sends no crops.
 - A model that rejects images is asked once more without them.
@@ -225,26 +233,35 @@ Every **typed** value becomes a parameter; selecting and ticking do not.
 
 ## 8. Writing the steps
 
-One model call, when the author presses Stop, over the whole recording. The
-model needs to see what came next to turn mechanics into intent:
+The steps are **drafted live**. Each action goes to the model shortly after
+it happens, together with the draft so far; actions that arrive while a call
+is running, or within a short settle window, go together in the next call.
+The model turns mechanics into intent, and because the next action can
+change what the last one meant, it may **rewrite the last three steps** as
+well as append:
 
 - a click that only focused a field is dropped;
-- keystrokes into one field are one `Type`;
+- keystrokes into one field are one `Type` (typing is one action per field,
+  so there is never a call per keystroke);
 - a click on a checkbox's label is `Tick the … checkbox`;
-- a burst of clicks through a menu is one `Click … in the … menu`;
+- `Click Menu`, followed by a click on Payments, becomes one `Click Payments
+  in the main menu`;
 - a click that submitted a form and an Enter in its last field are one step.
 
-**Input:** the handbook's step-writing rules; the actions in order, each
-with its description (§4.1), its crop (§4.2), the time since the previous
-action and its tab; the file around the cursor — `baseUrl`, existing
-parameters with their values (secret ones masked), `### Section` names, and
-the steps just before and after the insertion point.
+**Input of a draft call:** the handbook's step-writing rules; the draft so
+far (its steps, numbered, and its parameters); the NEW actions, each with its
+description (§4.1), its crop (§4.2), the time since the previous action and
+its tab; the file around the cursor — `baseUrl`, existing parameters with
+their values (secret ones masked), `### Section` names, and the steps just
+before and after the insertion point.
 
-**Output:** JSON only.
+**Output of a draft call:** JSON only — the draft's new tail and the whole
+parameter list.
 
 ```json
 {
-  "steps": ["Navigate to login.html", "Type {{email}} into the Email field", "…"],
+  "replaceFrom": 4,
+  "steps": ["Click Payments in the main menu", "Tick the Cash checkbox"],
   "parameters": [
     { "name": "email", "value": "demo@securebank.com" },
     { "name": "password", "value": "$PASSWORD" }
@@ -253,8 +270,21 @@ the steps just before and after the insertion point.
 }
 ```
 
-`steps` carry no numbers. `notes` are shown to the author. A malformed answer
-ends the recording with an error; nothing is inserted.
+`replaceFrom` is the 0-based index in the current draft where `steps`
+begins; everything before it is kept. It may not reach back more than three
+steps: a smaller value is refused and the call is retried once as a full
+redraft. `steps` carry no numbers. `notes` are shown to the author.
+
+**When a draft call fails** (the model errors or answers something
+unreadable), the author is told in the panel, the previous draft stands, and
+the next call — or Stop — covers those actions again.
+
+**A redraft** — after an action is dropped or restored — is one call over
+every remaining action, answering `replaceFrom: 0`.
+
+**At Stop** the draft is final when it already covers every remaining action;
+otherwise one more call brings it up to date. If that last call fails, the
+recording ends with an error and nothing is inserted.
 
 **Model and policy:** the session's model (including a `runSettings.model`
 override). Recording is a request *for* AI, so it runs even where runs forbid
@@ -303,7 +333,13 @@ every route.
   atMs: number;                // since record:started
   tab?: string }               // the tab's label when not `main`
 { type: 'record:pick'; armed: boolean }
-{ type: 'record:writing' }
+{ type: 'record:drafting'; busy: boolean }   // a draft call started / finished
+{ type: 'record:draft'; revision: number;    // REPLACES the previous draft
+  steps: string[];
+  parameters: Array<{ name: string; value: string }>;
+  notes?: string[];
+  through?: string }           // id of the last action the draft covers
+{ type: 'record:writing' }     // Stop received; finishing the draft
 { type: 'record:result'; steps: string[];
   parameters: Array<{ name: string; value: string }>;
   notes?: string[] }
@@ -311,15 +347,21 @@ every route.
 { type: 'done'; status: 'passed' | 'error' | 'aborted'; error?: string }
 ```
 
-Frames arrive in this order: `record:started`, then `record:action` and
-`record:pick` as they happen, then — after `stop` — `record:writing`,
-`record:result`, `done`. A cancel, or the client closing the stream, ends
-with `done` `aborted` and no model call.
+Frames arrive in this order: `record:started`; then, as the author works,
+`record:action` and `record:pick`, each burst of actions followed by
+`record:drafting` `busy: true`, a `record:draft`, and `record:drafting`
+`busy: false`; then — after `stop` — `record:writing`, `record:result` (the
+final draft, with parameter conflicts settled), `done`. An action can still
+arrive after `stop` (a field being typed into is collected then), until
+`record:writing`. A cancel, or the client closing the stream, ends with
+`done` `aborted`; a draft call in flight is abandoned.
 
 ### 9.3 `POST /sessions/:id/record-steps/control`
 
 ```ts
 { action: 'stop'; dropped?: string[] }   // write the steps, leaving these action ids out
+{ action: 'drop'; id: string }           // leave this action out; redraft now
+{ action: 'restore'; id: string }        // put it back; redraft now
 { action: 'check' }                      // arm pick mode
 { action: 'cancel-check' }               // disarm it
 { action: 'cancel' }                     // end without writing
