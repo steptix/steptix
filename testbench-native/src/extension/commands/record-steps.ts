@@ -9,6 +9,7 @@ import { readProjectDirs } from '../aiui-config-parse.js';
 import { isSkillDocument } from '../skill-run-targets.js';
 import { resolveProjectDirs } from '../aiui-config.js';
 import {
+  findProjectConfigs,
   inferBaseUrl,
   newTestDir,
   newTestSkeleton,
@@ -136,9 +137,10 @@ export function registerRecordCommands(deps: {
   };
 
   /**
-   * Record New Test: ask for a name, create `<tests dir>/<name>.md` from the
-   * skeleton, save and open it, and record into it (decision 11). `name` in
-   * the argument skips the prompt.
+   * Record New Test: find the project (asking which, when the workspace holds
+   * several and the active editor names none), ask for a name, create
+   * `<tests dir>/<name>.md` from the skeleton, save and open it, and record
+   * into it (decision 11). `name` in the argument skips the name prompt.
    */
   const recordNewTest = async (arg?: { name?: string }): Promise<void> => {
     if (recorder.isRecording) {
@@ -152,12 +154,38 @@ export function registerRecordCommands(deps: {
       vscode.workspace.workspaceFolders?.[0];
     if (!folder) return recorder.refuse('Open a folder first: Record New Test creates the test inside the workspace.');
 
+    // The project first — asking which one, when that is a question — so the
+    // name prompt can say where the file goes, and a dismissed pick has not
+    // cost the author a typed name.
+    const root = folder.uri.fsPath;
+    const activeInFolder =
+      activeEditor &&
+      vscode.workspace.getWorkspaceFolder(activeEditor.document.uri)?.uri.toString() === folder.uri.toString()
+        ? activeEditor
+        : undefined;
+    const project = await chooseProjectConfig(
+      root,
+      activeInFolder ? path.dirname(activeInFolder.document.uri.fsPath) : root,
+    );
+    if (project === 'dismissed') return;
+    const configPath = project;
+    const target = newTestDir({
+      configPath,
+      configTestsDir: configPath ? (readProjectDirs(configPath)?.testsDir ?? null) : null,
+      testsGlob: vscode.workspace.getConfiguration('testbench-native').get<string>('testsGlob') ?? '**/*.md',
+      workspaceRoot: root,
+    });
+    // Refused before anything is created.
+    if ('refused' in target) return recorder.refuse(target.refused);
+
     const raw =
       typeof arg?.name === 'string'
         ? arg.name
         : await vscode.window.showInputBox({
             title: 'TestBench: Record New Test',
-            prompt: 'Name of the new test. It becomes <name>.md in the project\'s tests folder.',
+            prompt: `Name of the new test. It becomes <name>.md in ${
+              path.relative(root, target.dir).split(path.sep).join('/') || 'the workspace folder'
+            }.`,
             placeHolder: 'pay-by-cash',
             validateInput: (value) => {
               const v = validateNewTestName(value);
@@ -168,21 +196,6 @@ export function registerRecordCommands(deps: {
     const name = validateNewTestName(raw);
     if (!name.ok) return recorder.refuse(`Record New Test: ${name.reason}`);
 
-    const root = folder.uri.fsPath;
-    const activeInFolder =
-      activeEditor &&
-      vscode.workspace.getWorkspaceFolder(activeEditor.document.uri)?.uri.toString() === folder.uri.toString()
-        ? activeEditor
-        : undefined;
-    const configPath = findConfigWithin(activeInFolder ? path.dirname(activeInFolder.document.uri.fsPath) : root, root);
-    const target = newTestDir({
-      configPath,
-      configTestsDir: configPath ? (readProjectDirs(configPath)?.testsDir ?? null) : null,
-      testsGlob: vscode.workspace.getConfiguration('testbench-native').get<string>('testsGlob') ?? '**/*.md',
-      workspaceRoot: root,
-    });
-    // Refused before anything is created.
-    if ('refused' in target) return recorder.refuse(target.refused);
     const filePath = path.join(target.dir, name.fileName);
     if (fs.existsSync(filePath)) {
       // docs/specs/SPEC-record-steps.md §10, verbatim.
@@ -235,6 +248,30 @@ async function until(predicate: () => boolean, timeoutMs: number): Promise<boole
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   return true;
+}
+
+/**
+ * The project Record New Test creates its test in (SPEC-record-steps.md §7.2):
+ * the nearest `aiui.config.json` from `startDir` (the active editor's folder,
+ * else the workspace folder) up to `root`. When that finds none, the configs
+ * within the workspace folder (`findProjectConfigs`, a shallow search): one is
+ * the project; several are put to the author, and a dismissed pick is
+ * `'dismissed'`. Null — no project at all — is the testsGlob fallback.
+ */
+async function chooseProjectConfig(root: string, startDir: string): Promise<string | null | 'dismissed'> {
+  const near = findConfigWithin(startDir, root);
+  if (near) return near;
+  const found = findProjectConfigs(root);
+  if (found.length <= 1) return found[0] ?? null;
+  const rel = (p: string): string => path.relative(root, path.dirname(p)).split(path.sep).join('/');
+  const pick = await vscode.window.showQuickPick(
+    found.map((configPath) => ({ label: rel(configPath), description: 'aiui.config.json', configPath })),
+    {
+      title: 'TestBench: Record New Test',
+      placeHolder: 'This workspace holds several projects. Which one is the new test for?',
+    },
+  );
+  return pick ? pick.configPath : 'dismissed';
 }
 
 /**

@@ -24,6 +24,7 @@
  * What counts as a step is runner-core's `classifyLines`, with the fence
  * correction renumber-core makes: a numbered line inside a ``` fence is text.
  */
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   classifyLines,
@@ -50,11 +51,22 @@ const TOP_HEADING_RE = /^ {0,3}(#{1,2})(?:[ \t]+(.*?))?[ \t]*$/;
  *  an ordered item — the parser reads every list under the heading. */
 const LIST_ITEM_RE = /^\s*(?:[-*+]|\d{1,9}[.)])\s+(.*)$/;
 const PARAMETER_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** A GFM delimiter row — src/parser/data-rows.ts `DELIMITER_RE`, verbatim:
+ *  `| --- | :-: |` and its unpiped forms (`--- | ---`, `---`). */
+const TABLE_DELIMITER_RE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+/** Any ATX heading — src/parser/line-grammar.ts `ANY_HEADING_RE`: one never
+ *  opens a table, and it ends one. */
+const ANY_HEADING_RE = /^(#{1,6})\s+\S/;
 
 interface LineModel {
   lines: string[];
   classified: ClassifiedLine[];
   fenced: boolean[];
+  /**
+   * Per line, the 0-based index of the header row of the data table it is
+   * part of (header, delimiter or row), or -1 — see `tableTopsOf`.
+   */
+  tableTop: number[];
   /** 0-based index of the `## Steps` heading, or -1. */
   stepsIdx: number;
 }
@@ -75,7 +87,74 @@ function modelOf(text: string): LineModel {
       break;
     }
   }
-  return { lines, classified, fenced, stepsIdx };
+  return { lines, classified, fenced, tableTop: tableTopsOf(lines, fenced, classified), stepsIdx };
+}
+
+/**
+ * A `|` not escaped with a backslash — src/parser/data-rows.ts
+ * `hasUnescapedPipe`, verbatim: `a \| b` holds none.
+ */
+function hasUnescapedPipe(raw: string): boolean {
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] === '\\') {
+      i++;
+      continue;
+    }
+    if (raw[i] === '|') return true;
+  }
+  return false;
+}
+
+/**
+ * Where the data tables are, by the server parser's rule
+ * (src/parser/data-rows.ts: `scanDataTable`, `looksLikeTable`, `parseTable`).
+ * A table opens at a line holding an unescaped `|` whose very next line is a
+ * non-blank delimiter row; the pipes at a row's ends are optional, so
+ * `user | pass` / `--- | ---` / `a | b` is a table exactly as `| user |` /
+ * `| --- |` / `| a |` is. Its rows then run on while each line is non-blank,
+ * not a heading, and holds an unescaped `|`. Like the parser's scan, a blank
+ * line, a heading or an HTML comment (from its `<!--` line to the one holding
+ * `-->`) never opens one.
+ *
+ * Fenced lines and frontmatter are never table lines here. The parser's scan
+ * does not know fences, but under a flow's heading a table in one comes after
+ * the fence line — prose — which it refuses, and only the table a flow opens
+ * with is ever a place to record from.
+ *
+ * Returns, per line, the header row's 0-based index, or -1.
+ */
+function tableTopsOf(lines: string[], fenced: boolean[], classified: ClassifiedLine[]): number[] {
+  const tops = new Array<number>(lines.length).fill(-1);
+  const inert = (i: number): boolean =>
+    fenced[i] === true || isFenceDelimiter(lines[i] ?? '') || classified[i]?.kind === 'frontmatter';
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i] ?? '';
+    if (inert(i) || raw.trim() === '' || ANY_HEADING_RE.test(raw)) continue;
+    if (raw.trimStart().startsWith('<!--')) {
+      while (i < lines.length - 1 && !(lines[i] ?? '').includes('-->')) i++;
+      continue;
+    }
+    const next = lines[i + 1];
+    if (
+      !hasUnescapedPipe(raw) ||
+      next === undefined ||
+      inert(i + 1) ||
+      next.trim() === '' ||
+      !TABLE_DELIMITER_RE.test(next)
+    ) {
+      continue;
+    }
+    tops[i] = i;
+    tops[i + 1] = i;
+    let k = i + 2;
+    for (; k < lines.length; k++) {
+      const row = lines[k] ?? '';
+      if (inert(k) || row.trim() === '' || ANY_HEADING_RE.test(row) || !hasUnescapedPipe(row)) break;
+      tops[k] = i;
+    }
+    i = k - 1;
+  }
+  return tops;
 }
 
 function kindAt(m: LineModel, idx: number): ClassifiedLine['kind'] | undefined {
@@ -91,7 +170,8 @@ function isStepKind(kind: ClassifiedLine['kind'] | undefined): boolean {
  * paragraph line under a step into that step, so `1. Type the username` /
  * `   into the tenant field` is ONE step, and new steps must not land between
  * its halves. A table row is not folded here — a data table directly under a
- * step is its own block — and neither is a fence.
+ * step is its own block — and neither is a fence. A line with pipes and no
+ * delimiter row under it is not a table (`tableTopsOf`), so it is folded.
  */
 function isContinuation(m: LineModel, idx: number): boolean {
   const raw = m.lines[idx] ?? '';
@@ -99,7 +179,7 @@ function isContinuation(m: LineModel, idx: number): boolean {
     !m.fenced[idx] &&
     m.classified[idx]?.kind === 'prose' &&
     raw.trim() !== '' &&
-    !raw.trimStart().startsWith('|') &&
+    !isTableRow(m, idx) &&
     !isFenceDelimiter(raw)
   );
 }
@@ -132,9 +212,10 @@ function sectionHeadingIdx(m: LineModel, name: string): number {
   return -1;
 }
 
-/** A data-table row: a non-fenced line starting with `|`. */
+/** A line of a data table — header, delimiter or row — by the parser's rule
+ *  (`tableTopsOf`): leading pipes optional, escaped pipes not counted. */
 function isTableRow(m: LineModel, idx: number): boolean {
-  return !m.fenced[idx] && (m.lines[idx] ?? '').trimStart().startsWith('|');
+  return (m.tableTop[idx] ?? -1) >= 0;
 }
 
 /**
@@ -189,9 +270,10 @@ function skipGapUp(m: LineModel, idx: number): number {
 function tableUnder(m: LineModel, headingIdx: number): { first: number; last: number } | null {
   if (headingIdx < 0) return null;
   let i = skipGapDown(m, headingIdx + 1);
-  if (i >= m.lines.length || !isTableRow(m, i)) return null;
+  // The first line past the gap must OPEN a table — its header row.
+  if (i >= m.lines.length || m.tableTop[i] !== i) return null;
   const first = i;
-  while (i + 1 < m.lines.length && isTableRow(m, i + 1)) i++;
+  while (i + 1 < m.lines.length && m.tableTop[i + 1] === first) i++;
   return { first, last: i };
 }
 
@@ -315,9 +397,7 @@ export function resolveRecordCursor(text: string, cursorLine: number): CursorRes
   // the flow's heading, so this opens that flow (its steps follow the table).
   // A table anywhere else — under a step, after prose — is not a place.
   if (isTableRow(m, j)) {
-    let top = j;
-    while (top - 1 >= 0 && isTableRow(m, top - 1)) top--;
-    const h = skipGapUp(m, top - 1);
+    const h = skipGapUp(m, m.tableTop[j]! - 1);
     if (h >= 0 && h === m.stepsIdx) {
       return { ok: true, anchor: { line: h + 1, text: m.lines[h] ?? '', kind: 'heading', section: null } };
     }
@@ -1043,6 +1123,45 @@ export function newTestDir(args: {
     };
   }
   return { dir, source };
+}
+
+/** Folders the project search never enters, besides every dot-folder (`.git`,
+ *  `.vscode-test`, `.live-shards`, a worktree under `.claude/`…): installed
+ *  packages and build output, which carry other projects' configs. */
+const PROJECT_SEARCH_SKIP = new Set(['node_modules', 'dist']);
+
+/**
+ * Every `aiui.config.json` inside `root`, for Record New Test when the active
+ * editor leads to none (SPEC-record-steps.md §7.2): a workspace whose project
+ * sits in a subfolder, with no editor open inside it. A shallow search — the
+ * root's own folder and up to `maxDepth` levels below it, at most `maxDirs`
+ * folders read, symlinks and junctions not followed — shallowest first, then
+ * by path. One is the project; several are for the author to choose between.
+ */
+export function findProjectConfigs(root: string, opts: { maxDepth?: number; maxDirs?: number } = {}): string[] {
+  const maxDepth = opts.maxDepth ?? 3;
+  let budget = opts.maxDirs ?? 2000;
+  const found: string[] = [];
+  const queue: Array<{ dir: string; depth: number }> = [{ dir: path.resolve(root), depth: 0 }];
+  // Breadth first, so a budget that runs out has read the shallow folders.
+  while (queue.length > 0 && budget-- > 0) {
+    const { dir, depth } = queue.shift()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (e.isFile() && e.name === 'aiui.config.json') found.push(path.join(dir, e.name));
+      else if (e.isDirectory() && depth < maxDepth && !e.name.startsWith('.') && !PROJECT_SEARCH_SKIP.has(e.name)) {
+        queue.push({ dir: path.join(dir, e.name), depth: depth + 1 });
+      }
+    }
+  }
+  const base = path.resolve(root);
+  const rel = (p: string): string[] => path.relative(base, p).split(path.sep);
+  return found.sort((a, b) => rel(a).length - rel(b).length || rel(a).join('/').localeCompare(rel(b).join('/')));
 }
 
 /**

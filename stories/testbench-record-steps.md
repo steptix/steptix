@@ -367,7 +367,16 @@ the parser refuses a table that comes after a step ("the table has to be
 the first content under the heading"), so inserting under the heading, as an
 empty flow otherwise gets, left a file that no longer parsed. A table that
 ends the file, or runs straight into the next heading, gets the blank line
-written for it; the steps then get one before that heading too.
+written for it; the steps then get one before that heading too. What counts
+as a table is the parser's rule (src/parser/data-rows.ts), mirrored in
+`record-steps-core.ts`, not "a line starting with `|`": a line holding an
+unescaped `|` with a delimiter row directly under it, rows running on while
+each holds an unescaped `|`. So a table written without the outer pipes
+(`user | pass` / `--- | ---` / `a | b`) is one — before, its steps went in
+ABOVE it and the file no longer parsed, and the blank line after it was
+refused — while `a \| b` holds no pipe, and a `| Name | Age |` line with no
+delimiter under it is prose: under a step, Markdown and the parser fold it
+into that step, so the new steps go after it, not between the two.
 
 **The line recorded from, when the file changed.** The anchor is followed
 through the document's own edits while recording, and until the insertion
@@ -516,13 +525,22 @@ written.": the author did not cancel.
 folders, no reserved device names). The title is title case with short
 joining words kept lower-case in the middle (`pay-by-cash` → `Pay by Cash`),
 per the spec — the story's example shows `Pay by cash`. The folder is
-`tests.dir` from the nearest `aiui.config.json` inside the workspace folder
-(never above it — a config outside is another project's); a config that
-declares no `tests.dir` means the server's default, `./tests` beside it
-(src/config/defaults.ts) — not the glob's prefix, which would put the test
-where the server does not look. With no config at all, the fixed start of
-`testbench-native.testsGlob` (`tests/**/*.md` → `tests/`); else the
-workspace folder. A `tests.dir` outside the workspace is refused, before
+`tests.dir` from the nearest `aiui.config.json` above the active editor,
+inside the workspace folder (never above it — a config outside is another
+project's); a config that declares no `tests.dir` means the server's
+default, `./tests` beside it (src/config/defaults.ts) — not the glob's
+prefix, which would put the test where the server does not look. When the
+active editor leads to no config — none open, or one in no project — the
+workspace folder is searched (`findProjectConfigs`: three levels down,
+breadth first, skipping `node_modules`, `dist` and every dot-folder, so
+`.git`, `.vscode-test`, `.live-shards` and a worktree under `.claude/` are
+never read). Walking up alone missed a workspace whose project sits in a
+subfolder: with no editor inside it, the test was created at the workspace
+root, outside the project. One config found is the project; several, and a
+QuickPick asks which, labelled by folder, before the name prompt (which then
+names the folder the file goes in); Escape there creates nothing. With no
+config at all, the fixed start of `testbench-native.testsGlob`
+(`tests/**/*.md` → `tests/`); else the workspace folder. A `tests.dir` outside the workspace is refused, before
 anything is created, naming where it points: TestBench could neither find
 nor record a test there. The project has no `baseUrl` setting, so it is the active
 test's own when that test is in the same folder, else the most common one

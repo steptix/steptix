@@ -11,6 +11,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
@@ -19,6 +20,7 @@ import {
   applyRecordFrame,
   newRecordingState,
   cleanStepText,
+  findProjectConfigs,
   formatRecordTime,
   globStaticPrefix,
   inferBaseUrl,
@@ -409,6 +411,93 @@ test('the blank line between a table and its steps opens the flow ahead of step 
   serverParse(t, after);
 });
 
+// A table is what the parser calls one (src/parser/data-rows.ts): a line with
+// an unescaped `|` over a delimiter row — the pipes at a row's ends optional.
+
+test('a table written without leading pipes is a table: steps go after it, and the blank after it is a place', (t) => {
+  const text = doc('# T', '', '## Steps', '', 'user | pass', '--- | ---', 'a | b', '', '');
+  const heading = { line: 3, text: '## Steps', kind: 'heading', section: null };
+  assert.deepEqual(resolveRecordCursor(text, 8), { ok: true, anchor: heading }, 'the blank line after the table');
+  assert.deepEqual(resolveRecordCursor(text, 4), { ok: true, anchor: heading }, 'the blank line under ## Steps');
+  const plan = planRecordInsertion(text, { anchor: heading, steps: ['Type {{user}} into Username', 'Click Sign in'], parameters: [] });
+  const after = applyRecordEdits(text, plan.edits);
+  assert.equal(
+    after,
+    doc('# T', '', '## Steps', '', 'user | pass', '--- | ---', 'a | b', '', '1. Type {{user}} into Username', '2. Click Sign in', ''),
+  );
+  assert.deepEqual(plan.insertedLines, [9, 10]);
+  // Record New Test's case too: no anchor, the steps still follow the table.
+  assert.equal(applyRecordEdits(text, planRecordInsertion(text, { anchor: null, steps: ['Type {{user}} into Username', 'Click Sign in'], parameters: [] }).edits), after);
+  const parsed = serverParse(t, after);
+  if (parsed) {
+    assert.equal(parsed.steps.length, 2);
+    assert.deepEqual(parsed.dataRows, [{ user: 'a', pass: 'b' }]);
+  }
+});
+
+test('a section table without leading pipes: steps go after it, and escaped pipes are cell text, not columns', (t) => {
+  const text = doc(
+    '# T', '', '## Steps', '1. Log in', '',
+    '### Log in', '', 'user | note', ':--- | ---:', 'a | x \\| y', '',
+    '### Other', '1. X', '',
+  );
+  const cursor = resolveRecordCursor(text, 11);
+  assert.deepEqual(cursor, { ok: true, anchor: { line: 6, text: '### Log in', kind: 'heading', section: 'Log in' } });
+  const after = applyRecordEdits(text, planRecordInsertion(text, { anchor: cursor.anchor, steps: ['Type {{user}}'], parameters: [] }).edits);
+  assert.equal(
+    after,
+    doc(
+      '# T', '', '## Steps', '1. Log in', '',
+      '### Log in', '', 'user | note', ':--- | ---:', 'a | x \\| y', '', '1. Type {{user}}', '',
+      '### Other', '1. X', '',
+    ),
+  );
+  const parsed = serverParse(t, after);
+  if (parsed) {
+    const section = parsed.sections['log in'];
+    assert.deepEqual(section.rows, [{ user: 'a', note: 'x | y' }]);
+    assert.deepEqual(section.steps, ['Type {{user}}']);
+  }
+});
+
+test('a line whose only pipes are escaped opens no table: the flow has none, and the steps open it', (t) => {
+  // `a \| b` holds no pipe, so `--- | ---` under it is not its delimiter row,
+  // and nothing here is a table — the steps go under the heading, where a
+  // table-shaped reading would have put them after the "rows".
+  const text = doc('## Steps', '', 'a \\| b', '--- | ---', 'c | d', '');
+  const plan = planRecordInsertion(text, { anchor: null, steps: ['New'], parameters: [] });
+  const after = applyRecordEdits(text, plan.edits);
+  assert.equal(after, doc('## Steps', '1. New', '', 'a \\| b', '--- | ---', 'c | d', ''));
+  const parsed = serverParse(t, after);
+  if (parsed) {
+    assert.equal(parsed.dataRows, undefined);
+    assert.equal(parsed.steps.length, 1);
+  }
+  // And a pipe-less table whose second "row" has only escaped pipes ends
+  // before it, as the parser's rows do: the blank line after that prose is
+  // not the blank line after the table.
+  const prose = doc('## Steps', '', 'u | v', '--- | ---', '1 | 2', 'x \\| y', '', '');
+  assert.deepEqual(resolveRecordCursor(prose, 7), { ok: false, reason: CURSOR_REFUSALS.notAStep });
+  assert.deepEqual(resolveRecordCursor(doc('## Steps', '', 'u | v', '--- | ---', '1 | 2', '', ''), 6).ok, true);
+});
+
+test('pipes with no delimiter row under them are not a table: that line continues the step above', (t) => {
+  const text = doc('## Steps', '1. Check the grid heading reads', '| Name | Age |', '', '2. Sign out', '');
+  // The blank after the folded line belongs to step 1, as the line itself does.
+  const anchor = { line: 2, text: '1. Check the grid heading reads', kind: 'step', section: null };
+  assert.deepEqual(resolveRecordCursor(text, 4), { ok: true, anchor });
+  assert.deepEqual(resolveRecordCursor(text, 3), { ok: true, anchor });
+  const after = applyRecordEdits(text, planRecordInsertion(text, { anchor, steps: ['New'], parameters: [] }).edits);
+  // After the whole step, not between its two lines.
+  assert.equal(after, doc('## Steps', '1. Check the grid heading reads', '| Name | Age |', '2. New', '', '3. Sign out', ''));
+  const parsed = serverParse(t, after);
+  if (parsed) {
+    assert.equal(parsed.dataRows, undefined);
+    // The parser folds the line into step 1 too.
+    assert.deepEqual(parsed.steps, ['Check the grid heading reads\n| Name | Age |', 'New', 'Sign out']);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // The document changed while recording
 // ---------------------------------------------------------------------------
@@ -765,6 +854,34 @@ test('the new test directory: config tests.dir, else the server default beside t
   assert.equal(globStaticPrefix('{a,b}/**/*.md'), '');
   assert.equal(globStaticPrefix('../elsewhere/*.md'), '');
   assert.equal(globStaticPrefix('C:/abs/*.md'), '');
+});
+
+test('the projects inside a workspace: a shallow search that skips dependencies, build output and dot-folders', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'record-projects-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const put = (rel) => {
+    const file = path.join(root, ...rel.split('/'), 'aiui.config.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '{}');
+    return file;
+  };
+  // None: the testsGlob fallback's case.
+  fs.mkdirSync(path.join(root, 'docs'));
+  assert.deepEqual(findProjectConfigs(root), []);
+  // One, in a subfolder — the case the walk up from an editor never reaches.
+  const app = put('app');
+  for (const skipped of ['node_modules/pkg', 'dist', '.git', '.live-shards/w1/templates/init', '.vscode-test/x', '.claude/worktrees/wt']) {
+    put(skipped);
+  }
+  assert.deepEqual(findProjectConfigs(root), [app]);
+  // Several, shallowest first; three levels down is found, four is not.
+  const deep = put('packages/web/e2e');
+  put('packages/web/e2e/too-deep');
+  const b = put('b');
+  assert.deepEqual(findProjectConfigs(root), [app, b, deep]);
+  assert.deepEqual(findProjectConfigs(root, { maxDepth: 1 }), [app, b]);
+  // A missing folder is none, not a throw.
+  assert.deepEqual(findProjectConfigs(path.join(root, 'nope')), []);
 });
 
 test('panel and status bar text', () => {

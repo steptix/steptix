@@ -853,4 +853,82 @@ describe('TestBench Record Steps', function () {
       }
     }
   });
+
+  it('Record New Test with no editor in a project: the one project in a subfolder is used; several are asked about', async () => {
+    assert.equal(fs.existsSync(path.resolve(FIXTURES_DIR, 'aiui.config.json')), false, 'no config at the workspace root');
+    const projA = path.resolve(FIXTURES_DIR, 'record-proj-a.tmp');
+    const projB = path.resolve(FIXTURES_DIR, 'record-proj-b.tmp');
+    const atRoot = path.resolve(FIXTURES_DIR, NEW_FILE);
+    const originalPick = vscode.window.showQuickPick;
+    /** What the stub is to answer: an index into the items, or null for Escape. */
+    let answer = null;
+    const picks = [];
+    const closeAll = async () => {
+      await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    };
+    try {
+      fs.mkdirSync(projA, { recursive: true });
+      fs.writeFileSync(path.join(projA, 'aiui.config.json'), '{}', 'utf8');
+      assert.equal(vscode.window.activeTextEditor, undefined, 'no editor open');
+
+      // One project, in a subfolder: the walk up from the workspace root finds
+      // nothing, the search finds it, and the test goes in its ./tests.
+      await vscode.commands.executeCommand('testbench-native.recordNewTest', { name: NEW_NAME });
+      await waitFor('record stream open', () => fake.recordRequests.length === 1 && fake.hasActiveRecordStream);
+      const inA = vscode.Uri.file(path.join(projA, 'tests', NEW_FILE)).fsPath;
+      assert.equal(fake.recordRequests[0].testFilePath, inA);
+      assert.equal(fs.existsSync(atRoot), false, 'not created at the workspace root, outside the project');
+      await cancelRecording();
+      await closeAll();
+
+      // Two: the author is asked, and Escape creates nothing. With a test open
+      // at the workspace root this time — an editor in no project leads to
+      // none, so the search still decides. (It also displaces the tracker's
+      // sticky editor, which would otherwise still be the test just created
+      // in project A, whose config the walk up would find.)
+      fs.mkdirSync(projB, { recursive: true });
+      fs.writeFileSync(path.join(projB, 'aiui.config.json'), '{}', 'utf8');
+      const plain = vscode.Uri.file(path.resolve(FIXTURES_DIR, 'plain.md'));
+      await vscode.commands.executeCommand('vscode.open', plain);
+      await waitFor('root-level editor tracked', () => hooks.tracker.activeEditor?.document.uri.fsPath === plain.fsPath);
+      vscode.window.showQuickPick = (items, options) => {
+        picks.push({ labels: items.map((i) => i.label), placeHolder: options?.placeHolder });
+        return Promise.resolve(answer === null ? undefined : items[answer]);
+      };
+      await vscode.commands.executeCommand('testbench-native.recordNewTest', { name: NEW_NAME });
+      assert.equal(picks.length, 1, 'asked once');
+      assert.deepEqual(picks[0].labels, ['record-proj-a.tmp', 'record-proj-b.tmp']);
+      assert.match(picks[0].placeHolder, /several projects/);
+      assert.equal(fake.recordRequests.length, 1, 'a dismissed pick records nothing');
+      assert.equal(fs.existsSync(path.join(projB, 'tests', NEW_FILE)), false, 'and creates nothing');
+      assert.equal(fs.existsSync(atRoot), false);
+
+      // Picking one records into that project.
+      answer = 1;
+      await vscode.commands.executeCommand('testbench-native.recordNewTest', { name: NEW_NAME });
+      await waitFor('record stream open', () => fake.recordRequests.length === 2 && fake.hasActiveRecordStream);
+      const inB = vscode.Uri.file(path.join(projB, 'tests', NEW_FILE)).fsPath;
+      assert.equal(fake.recordRequests[1].testFilePath, inB);
+      assert.equal(vscode.window.activeTextEditor.document.uri.fsPath, inB);
+      await cancelRecording();
+    } finally {
+      vscode.window.showQuickPick = originalPick;
+      await closeAll();
+      fs.rmSync(atRoot, { force: true });
+      // As above: the files first, then the folders, which Windows may hold
+      // for a moment after the editors on them close.
+      for (const dir of [projA, projB]) {
+        fs.rmSync(path.join(dir, 'tests', NEW_FILE), { force: true });
+        fs.rmSync(path.join(dir, 'aiui.config.json'), { force: true });
+        for (const deadline = Date.now() + 10_000; fs.existsSync(dir) && Date.now() < deadline; ) {
+          try {
+            fs.rmSync(dir, { recursive: true, force: true });
+          } catch {
+            await sleep(250);
+          }
+        }
+      }
+    }
+  });
 });

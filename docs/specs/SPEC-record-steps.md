@@ -273,7 +273,12 @@ steps are `1.` too, and nothing is renumbered.
 
 A flow with no steps yet that opens with a data table gets its steps after
 the table — the parser refuses a table that comes after a step — with a
-blank line between them.
+blank line between them. A table is what the runner's parser calls one: a
+line holding an unescaped `|` with a delimiter row directly under it, the
+pipes at a row's ends optional (`user | pass` / `--- | ---` / `a | b` is a
+table), its rows running on while each line holds an unescaped `|`. A line
+with pipes and no delimiter row under it is not a table; under a step it
+continues that step.
 
 The line the steps go after is followed through every edit made to the
 document while recording: lines added or removed above it move it, and a
@@ -294,7 +299,14 @@ note, as information rather than an error.
 **Record New Test** asks for a name, and creates `<tests dir>/<name>.md` —
 the project's `tests.dir`, or `./tests` beside its `aiui.config.json` when
 it declares none (the server's default) — refusing if it exists, and
-refusing, before anything is created, a tests folder outside the workspace:
+refusing, before anything is created, a tests folder outside the workspace.
+The project is the nearest `aiui.config.json` above the active editor,
+within the workspace folder. When that finds none (no editor open, or one
+outside any project) the workspace folder is searched a few levels down,
+past `node_modules`, `dist` and dot-folders: one config found is the
+project; several, and the author is asked which — before the name, so the
+name prompt can say where the file goes. None at all: the fixed start of
+`testbench-native.testsGlob`, else the workspace folder. The file:
 
 ```markdown
 # <Name, in title case>
