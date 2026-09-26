@@ -651,6 +651,76 @@ describe('a step healing a broken entry', () => {
     expect(outcome.summary.compiled).toBe(1);
   });
 
+  it('inside a loop, tells the repair the line repeats — and masks what the run masked (review round 2, F9/F1)', async () => {
+    // A body step of a `While`, stale on its evidence pass. Measured before the
+    // fix: the repair prompt said nothing about the loop — generation did —
+    // and a value holding a secret no key names (`auth`) went out in clear.
+    const LINE = 'Type {{auth}} into the header';
+    await fs.writeFile(
+      stepsFile,
+      [
+        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        'export default defineSteps([',
+        `  { source: '${LINE}', async run(ctx) { await ctx.page.fill('#h', ctx.step.getVar('auth') ?? ''); } },`,
+        ']);',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+    const { client, prompts } = fakeClient();
+    const WHILE = 'While the Next button is enabled, Page through the headers';
+    const compiler = new LiveCompiler({
+      mode: 'run',
+      testFilePath: testFile,
+      aiClient: client,
+      contextContent: '',
+      testName: 'checkout.md',
+      plan: [
+        { text: WHILE, inScope: false, dispatched: true, line: 10 },
+        { text: LINE, inScope: true, line: 11, loop: { line: WHILE } },
+        { text: 'Type {{auth}} into the footer', inScope: true, line: 12, loop: { line: WHILE } },
+      ],
+      emit: () => {},
+      note: () => {},
+    });
+    const live = { 'user.apikey': 'uk_live_1234', auth: 'Bearer uk_live_1234' };
+    compiler.offer({
+      index: 1,
+      binding: binding(LINE, { entry: { source: LINE, run: async () => {} } }),
+      result: result(2, LINE, {
+        codeBehindStale: { file: stepsFile, source: LINE, error: 'no #h on the page' },
+      }),
+      resolvedParameters: live,
+    });
+    compiler.offer({
+      index: 2,
+      binding: binding('Type {{auth}} into the footer'),
+      result: result(3, 'Type {{auth}} into the footer', {
+        turns: [
+          {
+            turnNumber: 1,
+            attemptNumber: 1,
+            timestamp: '2026-08-24T00:00:00.000Z',
+            aiInteractions: [],
+            subActions: [{ index: 1, action: { action: 'type', selector: '#f', value: '{{auth}}' }, durationMs: 1 }],
+          },
+        ],
+      }),
+      resolvedParameters: live,
+    });
+    await compiler.finish({ tokensUsed: 0 });
+
+    const asked = prompts.filter((p) => !/Review a generated/.test(p));
+    const repair = asked.find((p) => p.startsWith('A generated code-behind entry was replayed'))!;
+    expect(repair).toContain('no #h on the page');
+    expect(repair).toContain('## This step runs inside a loop');
+    expect(repair).toContain(`It is in the body of \`${WHILE}\``);
+    expect(repair).toContain('{{auth}} resolved to "Bearer ***" on this run');
+    const generation = asked.find((p) => p.includes('Type {{auth}} into the footer'))!;
+    expect(generation).toContain('{{auth}} resolved to "Bearer ***" on this run');
+    for (const prompt of asked) expect(prompt).not.toContain('uk_live_1234');
+  });
+
   it('a step that is NOT stale still uses the plain generation prompt', async () => {
     const { client, prompts } = fakeClient();
     const compiler = compilerFor(['Sign in'], { client });

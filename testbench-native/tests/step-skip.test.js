@@ -24,7 +24,7 @@ import {
   skipRunLogLine,
   skipTestOutputLine,
 } from '../src/extension/step-skip-core.ts';
-import { runLogTallyLine } from '../src/extension/steps-summary-core.ts';
+import { runLogHealLines, runLogTallyLine } from '../src/extension/steps-summary-core.ts';
 
 // ---------------------------------------------------------------------------
 // Precedence
@@ -263,4 +263,70 @@ test('a run that ONLY skipped still says so', () => {
     runLogTallyLine({ passed: 0, skipped: 5, codeBehind: 0, stale: 0 }),
     '✓ 0 passed, 5 skipped',
   );
+});
+
+// ---------------------------------------------------------------------------
+// A skipped ⚠ — a chain member whose condition's code threw on the visit that
+// took another member (stories/codebehind-loops-and-conditions.md; review
+// round 2, F8). Measured before the fix: every one of these surfaces printed
+// the plain ◌ skip line, the tally said "✓ 2 passed, 1 skipped" with no heal
+// line, and nothing but the gutter said the condition's code had broken.
+// ---------------------------------------------------------------------------
+
+const NOT_TAKEN = 'Skipped: another branch of this decision was taken';
+const BROKE = { file: 'C:/x/pay.steps.ts', error: 'locator.isChecked: Timeout 5000ms exceeded' };
+
+test('every skip line of a skipped ⚠ says both facts, the skip first, as its hover does', () => {
+  const second = '; condition code-behind failed: locator.isChecked: Timeout 5000ms exceeded';
+  assert.equal(
+    skipRunLogLine(7, NOT_TAKEN, BROKE),
+    `⚠ step 7 skipped — another branch of this decision was taken${second}`,
+  );
+  assert.equal(
+    skipCompileLogLine(7, NOT_TAKEN, BROKE),
+    `⚠ step on line 7 skipped — another branch of this decision was taken${second}`,
+  );
+  assert.equal(
+    skipPanelLine(7, NOT_TAKEN, BROKE),
+    `⚠ Step on line 7 skipped — another branch of this decision was taken${second}`,
+  );
+  assert.equal(
+    skipTestOutputLine(7, ' of pay.md', NOT_TAKEN, BROKE),
+    `⚠ step on line 7 of pay.md skipped — another branch of this decision was taken${second}`,
+  );
+});
+
+test('a skip with no broken condition is byte-identical to before', () => {
+  assert.equal(skipRunLogLine(7, NOT_TAKEN, undefined), skipRunLogLine(7, NOT_TAKEN));
+  assert.equal(skipRunLogLine(7, NOT_TAKEN), '◌ step 7 skipped — another branch of this decision was taken');
+  assert.equal(skipCompileLogLine(7, NOT_TAKEN, undefined), '◌ step on line 7 skipped — another branch of this decision was taken');
+  assert.equal(skipTestOutputLine(7, '', NOT_TAKEN, undefined), '◌ step on line 7 skipped — another branch of this decision was taken');
+});
+
+test('the run log tally counts a skipped ⚠ as skipped, and says it is stale beside the skip', () => {
+  assert.equal(
+    runLogTallyLine({ passed: 2, skipped: 1, tolerated: 0, codeBehind: 0, stale: 0, staleSkipped: 1 }),
+    '✓ 2 passed, 1 skipped (1 stale)',
+  );
+  assert.equal(
+    runLogTallyLine({ passed: 2, skipped: 2, tolerated: 0, codeBehind: 1, stale: 1, staleSkipped: 1 }),
+    '✓ 2 passed (1 code-behind, 1 stale), 2 skipped (1 stale)',
+  );
+});
+
+test('the heal lines count a skipped ⚠ too, and read as before without one', () => {
+  assert.deepEqual(runLogHealLines({ stale: 0, staleSkipped: 0 }, ''), []);
+  assert.deepEqual(runLogHealLines({ stale: 2 }, ' (1.2k tokens)'), [
+    '  2 step(s) healed under AI because their code-behind failed (1.2k tokens).',
+    '  Repair this step from the ⚠ gutter, or it costs that again every run.',
+  ]);
+  assert.deepEqual(runLogHealLines({ stale: 0, staleSkipped: 1 }, ' (300 tokens)'), [
+    '  1 condition(s) whose code-behind failed were decided by the model instead (300 tokens).',
+    '  Repair this step from the ⚠ gutter, or it costs that again every run.',
+  ]);
+  assert.deepEqual(runLogHealLines({ stale: 1, staleSkipped: 1 }, ''), [
+    '  1 step(s) healed under AI because their code-behind failed.',
+    '  1 condition(s) whose code-behind failed were decided by the model instead.',
+    '  Repair this step from the ⚠ gutter, or it costs that again every run.',
+  ]);
 });

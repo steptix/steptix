@@ -35,8 +35,8 @@ import {
   type ConditionObservation,
   type GeneratedEntry,
 } from './generate.js';
-import type { LoopContext } from '../ai/prompts.js';
-import { buildRepairPrompt } from './repair.js';
+import { maskValueForPrompt, type LoopContext } from '../ai/prompts.js';
+import { buildRepairPrompt, type RepairPromptInput } from './repair.js';
 import { reviewCandidate } from './review.js';
 // The two refusals both compilers say; they live beside `generationRefusal`.
 // Safe in this direction because live-compile.ts's only reference back here is
@@ -68,6 +68,13 @@ import {
 } from '../parser/interpolate-env-data.js';
 import { bindVariable, clearDottedKeys, loadDataFile, placeholderRoot } from '../parser/parameters.js';
 import { evidenceRows, recordingDirFor, writeReplayFailure } from './recording.js';
+import {
+  inheritLoopBindings,
+  isSecretParameterName,
+  markLoopBindings,
+  redactMap,
+  runSecrets,
+} from '../utils/secrets.js';
 
 /**
  * The compiler (stories/codebehind-compile.md, "The compile pipeline").
@@ -178,6 +185,15 @@ export interface CompileSummary {
    * frame among them — still typechecks; the two compilers always set it.
    */
   recoveredByValue?: Array<{ step: number; name: string }> | undefined;
+  /**
+   * What the last replay's pass-count check noticed and the compile does not
+   * own (stories/codebehind-loops-and-conditions.md, decision 11): a runtime
+   * loop that ran a different number of passes from the recording's — or a
+   * `For each` that ran as many over a different list — where no entry this
+   * compile wrote is to blame. One sentence each, naming the loop and both
+   * counts. Said, never failed on: absent when there is nothing to say.
+   */
+  warnings?: string[] | undefined;
 }
 
 export interface CompileResult {
@@ -487,8 +503,6 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
    *  replay's closures read it and `record` is a `let`. */
   const recorded = runRows(record);
   const recordedAt = (index: number): StepResult[] => recorded.passes[index] ?? [];
-  /** The Record's final parameter map, for the same reason. */
-  const recordParameters = record.resolvedParameters;
   const prefixEnd = usablePrefix(recorded.passes);
   let stoppedAt: CompileSummary['stoppedAt'];
   /**
@@ -631,7 +645,10 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // disk keeps a guard row's decision and never its page. A condition no visit
   // ever asked has nothing to generate from and is not attempted.
   const recordVisits = guardVisits(recorded.rows, controls);
-  const snapshots = passSnapshots(recorded.rows, parameters, record.resolvedParameters);
+  const snapshots = passSnapshots(recorded.rows, parameters, record.resolvedParameters, test.envData);
+  /** The recording's loop entries and their passes, for the replay's
+   *  pass-count check (decision 11). */
+  const recordLoops = loopEntries(recorded.rows, controls);
   const observationsFor = (member: number): RecordedObservation[] =>
     observationsOf(recordVisits, member, snapshots);
   const stepKinds = selection.order.filter((s) => s.kind !== 'condition');
@@ -780,12 +797,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   ): Promise<GeneratedEntry> => {
     // The visit whose values the prompt reads: the first one it is shown.
     const shown = pickConditionObservations(observations)[0] ?? observations[0];
-    const values = shown?.parameters ?? recordParameters;
+    const values = shown?.parameters ?? snapshots.at(undefined);
     const loop = loopContextAt(step.index, values);
     return generateConditionEntry({
       binding: step.binding!,
       observations,
       resolvedParameters: values,
+      // The fold's own snapshot, marks and all, and the run's mask set as of
+      // it — so the prompt masks exactly what the run's own prompts did.
+      parameterMap: values,
+      secrets: promptSecrets(values, test.envData),
       ...(test.envData && { envData: test.envData }),
       aiClient: options.aiClient,
       contextContent: options.contextContent,
@@ -841,7 +862,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // …read with that pass's own values (decision 2). The run's final map
     // holds the LAST pass's `For each` item, which is not the item on the page
     // this transcript was recorded against.
-    const passValues = result ? (snapshots.get(result) ?? record.resolvedParameters) : record.resolvedParameters;
+    const passValues = snapshots.at(result);
 
     // ── A step that EXECUTED in computer mode stays AI (§9) ──────────────
     //
@@ -867,13 +888,19 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // hands the model the same page and lets it write the same broken selector
     // again. No entry text to repair from (the file was edited) falls through.
     const healed = result?.codeBehindStale
-      ? await repairHealedStep(step, result, passValues, options, candidate)
+      ? await repairHealedStep(step, result, passValues, options, candidate, loop)
       : undefined;
     const generated = healed ?? await generateStepEntry({
       binding: step.binding!,
       actions: actionsOf(result),
       ...(result?.assertions && { assertions: result.assertions }),
       resolvedParameters: passValues,
+      // The fold's snapshot is the map these values came out of, with the
+      // loop marks each pass made (§7.6), and the mask set the run had then:
+      // the prompt masks what the run's own prompts masked, a data file's
+      // `user.apikey` heading and a secret inside a non-secret value included.
+      parameterMap: passValues,
+      secrets: promptSecrets(passValues, test.envData),
       recordingCarriesPlaceholders,
       // What `${data.url}` and kin resolved to, so the generator can say
       // "read it with step.getVar('data.url')" and the guard can catch the
@@ -980,6 +1007,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
    */
   let toleratedInReplay: Array<{ step: number; reason: string }> = [];
   /**
+   * What the LAST replay's pass-count check noticed and this compile does not
+   * own (decision 11): a `For each` over a list a tool, an AI step or a kept
+   * entry wrote that ran a different number of passes — or the same number
+   * over different values — and a `While` / `Repeat` whose passes differ with
+   * no condition to blame. Warnings, not failures: nothing here is this
+   * compile's to repair, and a list's values may legitimately differ between
+   * runs. Recomputed per round beside `unreached`.
+   */
+  let loopWarnings: string[] = [];
+  /**
    * Where the LAST replay ended because a step's own text said to — a
    * deliberate failure at a step the RECORDING failed deliberately at too
    * (stories/step-failure-outcomes.md, decisions 1–3 and 10).
@@ -1003,16 +1040,68 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
    */
   const readRound = (
     outcome: CompileRunOutcome,
-  ): RunRows & { visits: GuardVisit[]; mismatch: DecisionMismatch | undefined } => {
+  ): RunRows & {
+    visits: GuardVisit[];
+    mismatch: DecisionMismatch | undefined;
+    passCount: PassCountFailure | undefined;
+    loopWarnings: string[];
+  } => {
     const run = runRows(outcome);
     const visits = guardVisits(run.rows, controls);
-    return { ...run, visits, mismatch: compareDecisions(recordVisits, visits, steps) };
+    const decisions = compareDecisions(recordVisits, visits, steps);
+    // …and every loop's passes (decision 11's other half): a `For each`
+    // decides nothing, so a list captured with six items where the recording
+    // had three runs six passes with every condition answering as recorded.
+    const replaySnapshots = passSnapshots(run.rows, parameters, outcome.resolvedParameters, test.envData);
+    const findings = compareLoopPasses({
+      recorded: { entries: recordLoops, rows: recorded.rows, snapshots },
+      replay: { entries: loopEntries(run.rows, controls), rows: run.rows, snapshots: replaySnapshots },
+      controls,
+      divergedAt: decisions.divergedAt,
+    });
+    let passCount: PassCountFailure | undefined;
+    const loopWarnings: string[] = [];
+    for (const finding of findings) {
+      // The list came from an entry THIS compile wrote, and it ran as code:
+      // that entry is wrong, and it is this compile's to repair.
+      const writer = finding.writer;
+      const owner = writer ? steps[writer.index - 1] : undefined;
+      if (
+        !finding.valuesOnly
+        && finding.kind === 'foreach'
+        && writer?.fromCodeBehind === true
+        && owner !== undefined
+        && owner.kind !== 'condition'
+        && owner.key !== undefined
+        && selection.keys.has(owner.key)
+      ) {
+        passCount = ownedPassCount(finding, owner, writer, steps, snapshots, test.envData);
+        continue;
+      }
+      // A loop whose own condition entry the decision check already blamed has
+      // said everything there is to say about its passes.
+      if (finding.kind !== 'foreach' && decisions.mismatch?.member === finding.guard) continue;
+      loopWarnings.push(
+        loopPassWarning(finding, steps, {
+          recorded:
+            finding.recordedValue === undefined
+              ? undefined
+              : maskedForSummary(finding.list!, finding.recordedValue, snapshots.at(finding.recordedRow), test.envData),
+          replay:
+            finding.replayValue === undefined
+              ? undefined
+              : maskedForSummary(finding.list!, finding.replayValue, replaySnapshots.at(finding.replayRow), test.envData),
+        }),
+      );
+    }
+    return { ...run, visits, mismatch: decisions.mismatch, passCount, loopWarnings };
   };
   const markRound = (outcome: CompileRunOutcome): void => {
     unreached = [];
     toleratedInReplay = [];
     endedInReplay = undefined;
     const round = readRound(outcome);
+    loopWarnings = round.loopWarnings;
     const ended = round.rows.find((r) => deliberateFailure(r) && recordedDeliberate(r.index - 1));
     if (ended) endedInReplay = { step: ended.index };
     for (const step of stepsInS()) {
@@ -1036,6 +1125,9 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       const ran = rows.filter((r) => r.status !== 'skipped');
       if (
         ran.length > 0
+        // An entry whose list made a `For each` run a different number of
+        // passes from the recording's passed every pass — and is wrong.
+        && round.passCount?.step.key !== step.key
         && ran.every(
           (r) =>
             r.status === 'passed'
@@ -1116,13 +1208,21 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         && !(deliberateFailure(r) && recordedDeliberate(r.index - 1)),
     );
     const mismatch = round.mismatch;
-    if (mismatch && (failedAt < 0 || mismatch.position <= failedAt)) {
+    const passCount = round.passCount;
+    const beforeFailure = (position: number): boolean => failedAt < 0 || position <= failedAt;
+    if (mismatch && beforeFailure(mismatch.position) && (!passCount || mismatch.position <= passCount.position)) {
       return {
         step: steps[mismatch.member],
         result: mismatch.replayed.row,
         error: mismatchError(mismatch, steps),
         mismatch,
       };
+    }
+    // A `For each` that ran a different number of passes over a list an entry
+    // of this compile captured: that entry is blamed, where the loop read it —
+    // ahead of whatever the extra (or missing) passes then broke.
+    if (passCount && beforeFailure(passCount.position)) {
+      return { step: passCount.step, result: passCount.result, error: passCount.error, passCount };
     }
     const result = failedAt >= 0 ? round.rows[failedAt] : undefined;
     const error = result?.error ?? outcome.error ?? 'the run failed without naming a step';
@@ -1206,8 +1306,14 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // completeness is read off the rows instead.
     const endedAsAsked = endedInReplay !== undefined && failed.result === undefined;
     // …and a run whose conditions answered as the recording's did: a passing
-    // run whose `If` took the other branch is not the recording replayed.
-    if (failed.mismatch === undefined && (outcome.status === 'passed' || endedAsAsked)) {
+    // run whose `If` took the other branch is not the recording replayed —
+    // nor is one whose `For each` ran over a list this compile's entry got
+    // wrong.
+    if (
+      failed.mismatch === undefined
+      && failed.passCount === undefined
+      && (outcome.status === 'passed' || endedAsAsked)
+    ) {
       emit({
         kind: 'phase',
         phase: 'replay',
@@ -1282,9 +1388,12 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // THIS replay's rows, whose pass failed. Its whole map, not its innermost
     // marker alone: a body step of a `While` inside a `For each` needs the
     // outer item too, which the innermost marker does not carry.
-    const failedValues = failed.result
-      ? passSnapshots(runRows(outcome).rows, parameters, outcome.resolvedParameters).get(failed.result)
-      : undefined;
+    const failedValues = passSnapshots(
+      runRows(outcome).rows,
+      parameters,
+      outcome.resolvedParameters,
+      test.envData,
+    ).at(failed.result);
     const repaired =
       failed.step.kind === 'condition'
         ? await repairCondition(failed.step, failed)
@@ -1292,10 +1401,19 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
             failed.step,
             failed.error,
             failed.result,
-            failedValues ?? { ...record.resolvedParameters, ...(failed.result?.loop?.values ?? {}) },
+            failedValues,
             options,
             candidate,
             { number: round, max: maxRounds },
+            {
+              // The loop the step repeats in, as generation told it
+              // (decision 2): a repair that forgets it writes the failing
+              // pass's item into the code.
+              loop: loopContextAt(failed.step.index, failed.result?.loop?.values ?? failedValues),
+              // The recording's captured list, when the step is blamed for a
+              // `For each` that ran a different number of passes over it.
+              ...(failed.passCount && { expected: failed.passCount.expected }),
+            },
           );
     proven.delete(failed.step.key!);
     const applied = await applyGenerated(candidate, failed.step, repaired, stepEvent, 'repair');
@@ -1331,7 +1449,10 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // The same two ways a round can be complete as the loop above: a test can
     // hold both a written-off step and a step whose text ends the run.
     const endedAsAsked = endedInReplay !== undefined && failed.result === undefined;
-    green = failed.mismatch === undefined && (outcome.status === 'passed' || endedAsAsked);
+    green =
+      failed.mismatch === undefined
+      && failed.passCount === undefined
+      && (outcome.status === 'passed' || endedAsAsked);
     if (green) {
       const gaps = describeReplayGaps(unreached, toleratedInReplay);
       emit({
@@ -1513,7 +1634,12 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     ...(endedAsWritten && { endedAsWritten }),
     notAttempted,
     ...(failure !== undefined && { error: failure }),
+    ...(loopWarnings.length > 0 && { warnings: loopWarnings }),
   };
+  // Said as they are decided — once, for the round that decides — so the CLI
+  // prints them and the server carries them as `output` frames, the way an
+  // unresolved parameter is said.
+  for (const message of loopWarnings) emit({ kind: 'note', level: 'warn', message });
 
   const files = candidate.changedFiles();
   if (options.dryRun) {
@@ -1953,6 +2079,31 @@ function runRows(outcome: CompileRunOutcome): RunRows {
   return { passes, rows: passes.flat() };
 }
 
+/** The variable writes one row reports: its captures, `Set` / `[use ai]`
+ *  values and code-behind `setVar`s (`outputs`), and a `[tool:]` step's
+ *  (`toolStep.outputs`). An `[input:]` answer and a hook's capture ride no row
+ *  the compile reads — the fold's final-value rule covers those. */
+function rowWrites(row: StepResult): Array<[string, string]> {
+  return [...Object.entries(row.outputs ?? {}), ...Object.entries(row.toolStep?.outputs ?? {})];
+}
+
+/** Define `name` on `map` as an own property — never through a setter, so a
+ *  name like `__proto__` is a key like any other. */
+function defineValue(map: Record<string, string>, name: string, value: string): void {
+  Object.defineProperty(map, name, { value, writable: true, enumerable: true, configurable: true });
+}
+
+/** The fold's answer: the map as it stood at each row. */
+interface PassSnapshots {
+  /**
+   * The map at `row`: its own object, carrying the loop-binding marks the fold
+   * made, so the prompts' parameter block can tell a pass's `row.keyword` from
+   * a data file's `user.apikey` heading (§7.6). A row the fold never saw — or
+   * none — gets the map before the first row.
+   */
+  at(row: StepResult | undefined): Record<string, string>;
+}
+
 /**
  * The parameter map as it stood at each row, as near as the rows can say —
  * the ONE snapshot generation, repair and the condition prompts read a pass's
@@ -1960,18 +2111,26 @@ function runRows(outcome: CompileRunOutcome): RunRows {
  *
  * Folded forward in EXECUTION order from the map the run started with: each
  * row's loop marker binds its pass's item (clearing the last pass's dotted
- * keys first, as the runtime does), the row is snapshotted, and then its
- * captured `outputs` are bound for the rows after it. So a `[store as: total]`
- * inside a loop body reaches pass 1's `Type {{total}}` as pass 1's total —
- * the run's final map held pass 3's, which went into pass 1's prompt and
- * leak guard, and an entry hard-coding pass 1's `$10.00` passed the guard. An
- * outer `For each` item stays bound through an inner loop's passes the same
- * way, because the outer marker was folded in before them.
+ * keys first, and marking what it bound, as `applyPassBindings` does), the
+ * row is snapshotted, and then its writes — `outputs` and a tool's
+ * `toolStep.outputs` ({@link rowWrites}) — are bound for the rows after it.
+ * So a `[store as: total]` inside a loop body reaches pass 1's `Type
+ * {{total}}` as pass 1's total, and a `[tool: create_order]`'s `order_id`
+ * reaches the step after it as the tool's value rather than the `none` the
+ * parameters started with.
  *
- * `final` fills only what the fold never saw — a name no row reports, such as
- * a skill-internal capture, which `outputs` never carries — and never a name
- * whose root the fold has bound, so the last pass's `order.note` cannot leak
- * into a pass whose row had no note.
+ * `final` is the run's final map, and it answers two things the rows cannot:
+ *
+ *  - a name no row reports at all — a skill-internal capture, which `outputs`
+ *    never carries — filled into every snapshot that lacks it, never under a
+ *    root the fold has bound (so the last pass's `order.note` cannot leak into
+ *    a pass whose row had no note);
+ *  - a STARTING name whose final value differs from where it started though no
+ *    row wrote it — an `[input:]` answer, a hook's capture — which takes the
+ *    final value from the first row on, as every snapshot did before the fold
+ *    existed. Not a name whose final value is only the start value MASKED:
+ *    the CLI's final map is the report's redacted copy, and `password` → `***`
+ *    is not a write.
  *
  * A row with no marker of its own — a chain's guard row — reads the bindings
  * of the pass the run was last seen in.
@@ -1980,33 +2139,61 @@ function passSnapshots(
   rows: readonly StepResult[],
   start: Record<string, string>,
   final: Record<string, string>,
-): Map<StepResult, Record<string, string>> {
+  envData: ParsedTest['envData'] | undefined,
+): PassSnapshots {
+  const written = new Set<string>();
+  for (const row of rows) {
+    for (const [name] of rowWrites(row)) written.add(name);
+    for (const name of Object.keys(row.loop?.values ?? {})) written.add(name);
+  }
+  // The start map as a report would print it, to tell a real change from the
+  // redaction of an unchanged value.
+  const maskedStart = redactMap({ ...start }, runSecrets({ parameters: start, envData }));
   // Copied as-is — not through `bindVariable`, whose rebind rule would let a
   // flat `user` erase a data file's own `user.apikey` heading depending on key
   // order. The start map is one map, not a sequence of writes.
   const live: Record<string, string> = {};
-  for (const [name, value] of Object.entries(start)) {
-    Object.defineProperty(live, name, { value, writable: true, enumerable: true, configurable: true });
+  for (const [name, value] of Object.entries(start)) defineValue(live, name, value);
+  for (const [name, value] of Object.entries(final)) {
+    if (!Object.hasOwn(start, name) || written.has(name)) continue;
+    if (value === start[name] || value === maskedStart[name]) continue;
+    defineValue(live, name, value);
   }
+  const snapshotOf = (): Record<string, string> => {
+    const snapshot: Record<string, string> = { ...live };
+    inheritLoopBindings(live, snapshot);
+    const roots = new Set(Object.keys(live).map(placeholderRoot));
+    for (const [name, value] of Object.entries(final)) {
+      if (Object.hasOwn(snapshot, name) || roots.has(placeholderRoot(name))) continue;
+      defineValue(snapshot, name, value);
+    }
+    return snapshot;
+  };
+  const before = snapshotOf();
   const out = new Map<StepResult, Record<string, string>>();
   for (const row of rows) {
     const values = row.loop?.values;
     if (values) {
       clearDottedKeys(live, new Set(Object.keys(values).map(placeholderRoot)));
-      for (const [name, value] of Object.entries(values)) {
-        Object.defineProperty(live, name, { value, writable: true, enumerable: true, configurable: true });
-      }
+      for (const [name, value] of Object.entries(values)) defineValue(live, name, value);
+      markLoopBindings(live, Object.keys(values).filter((key) => key.includes('.')));
     }
-    const snapshot: Record<string, string> = { ...live };
-    const roots = new Set(Object.keys(live).map(placeholderRoot));
-    for (const [name, value] of Object.entries(final)) {
-      if (Object.hasOwn(snapshot, name) || roots.has(placeholderRoot(name))) continue;
-      Object.defineProperty(snapshot, name, { value, writable: true, enumerable: true, configurable: true });
-    }
-    out.set(row, snapshot);
-    for (const [name, value] of Object.entries(row.outputs ?? {})) bindVariable(live, name, value);
+    out.set(row, snapshotOf());
+    for (const [name, value] of rowWrites(row)) bindVariable(live, name, value);
   }
-  return out;
+  return { at: (row) => (row !== undefined ? out.get(row) : undefined) ?? before };
+}
+
+/**
+ * The run's free-text mask set as of one snapshot — what the run itself masked
+ * its prompts with at that point (`runSecrets`, src/utils/secrets.ts): the
+ * values of its secret-named entries (decided by the snapshot's own loop
+ * marks) and the env/data secrets. Handed to every prompt the compile builds
+ * from the snapshot, so a secret inside a value no key names as secret —
+ * `auth: "Bearer <the key>"` — is masked there too.
+ */
+function promptSecrets(values: Record<string, string>, envData: ParsedTest['envData'] | undefined): string[] {
+  return runSecrets({ parameters: values, envData });
 }
 
 /**
@@ -2105,7 +2292,7 @@ interface RecordedObservation extends ConditionObservation {
 function observationsOf(
   visits: readonly GuardVisit[],
   member: number,
-  snapshots: Map<StepResult, Record<string, string>>,
+  snapshots: PassSnapshots,
 ): RecordedObservation[] {
   const out: RecordedObservation[] = [];
   for (const visit of visits) {
@@ -2119,7 +2306,7 @@ function observationsOf(
       ...(guard?.evidence?.dom !== undefined && { dom: guard.evidence.dom }),
       ...(guard?.evidence?.url !== undefined && { url: guard.evidence.url }),
       row: visit.row,
-      parameters: snapshots.get(visit.row) ?? {},
+      parameters: snapshots.at(visit.row),
     });
   }
   return out;
@@ -2174,12 +2361,17 @@ interface DecisionMismatch {
  * its values). A visit the model decided in the replay proves nothing about an
  * entry, and a run that ended or failed before a visit the recording had simply
  * has fewer to compare.
+ *
+ * `divergedAt` is the replay position where the comparison stopped — a
+ * mismatch, a difference someone else made, or a visit the other run did not
+ * have — or undefined when every visit compared equal. Past it the two runs
+ * are on different paths, and the pass-count check reads nothing there.
  */
 function compareDecisions(
   recorded: readonly GuardVisit[],
   replayed: readonly GuardVisit[],
   steps: readonly CompileStep[],
-): DecisionMismatch | undefined {
+): { mismatch?: DecisionMismatch; divergedAt?: number } {
   const byHead = new Map<number, GuardVisit[]>();
   for (const visit of recorded) {
     const list = byHead.get(visit.head) ?? [];
@@ -2191,7 +2383,7 @@ function compareDecisions(
     const k = seen.get(visit.head) ?? 0;
     seen.set(visit.head, k + 1);
     const was = byHead.get(visit.head)?.[k];
-    if (!was || !was.decided || !visit.decided) return undefined;
+    if (!was || !was.decided || !visit.decided) return { divergedAt: visit.position };
     const differs = was.members.find(
       (m) => m.holds !== visit.members.find((r) => r.index === m.index)?.holds,
     );
@@ -2203,19 +2395,22 @@ function compareDecisions(
       || differs.holds === undefined
       || replayHolds === undefined
     ) {
-      return undefined;
+      return { divergedAt: visit.position };
     }
     return {
-      member: differs.index,
-      visit: k + 1,
-      position: visit.position,
-      recorded: was,
-      replayed: visit,
-      recordedHolds: differs.holds,
-      replayHolds,
+      mismatch: {
+        member: differs.index,
+        visit: k + 1,
+        position: visit.position,
+        recorded: was,
+        replayed: visit,
+        recordedHolds: differs.holds,
+        replayHolds,
+      },
+      divergedAt: visit.position,
     };
   }
-  return undefined;
+  return {};
 }
 
 /**
@@ -2230,6 +2425,306 @@ function mismatchError(mismatch: DecisionMismatch, steps: readonly CompileStep[]
     `the code said "${condition}" ${said(mismatch.replayHolds)} on visit ${mismatch.visit}; ` +
     `on the recording it ${said(mismatch.recordedHolds)} there`
   );
+}
+
+// ── Pass counts (decision 11, the loops' half) ──────────────────────────────
+
+/**
+ * One ENTRY into a runtime loop — a `For each` reading its list, or a `While` /
+ * `Repeat` from its first pass to the decision that ended it — as a run's rows
+ * show it. A loop inside another's body is entered once per outer pass.
+ */
+interface LoopEntry {
+  /** The loop's guard, absolute 0-based. */
+  guard: number;
+  kind: 'while' | 'repeat' | 'foreach';
+  /** Where the entry starts in the run's rows: a `For each`'s list-reading
+   *  row, a `While` / `Repeat`'s first decision row. */
+  row: StepResult;
+  position: number;
+  /**
+   * How many passes: a `For each`'s list length (its pass-1 marker's `count`,
+   * or none for an empty list); a `While` / `Repeat`'s passes, counted off its
+   * decisions. Undefined when the rows cannot say — a hand-built marker with
+   * no count.
+   */
+  passes: number | undefined;
+  /** A `While` / `Repeat` that ended on its own decision — not at a cap, a
+   *  failed guard, or the end of a run that stopped. Always true for a
+   *  `For each`, whose count is known on entry. */
+  ended: boolean;
+}
+
+/**
+ * Every loop entry in a run, in execution order.
+ *
+ * A `For each` makes one row per entry — the visit that reads the list; its
+ * revisits ask nobody and record nothing — and its pass-1 marker carries the
+ * list's length. A `While` / `Repeat` is counted off its guard rows' decisions,
+ * not its markers: a `While` row that holds begins a pass, a `Repeat` row that
+ * does NOT hold begins one (its first pass ran before anything was asked), and
+ * the first answer the other way ends the entry. A failed guard row ends it
+ * without an ending of its own.
+ */
+function loopEntries(
+  rows: readonly StepResult[],
+  controls: readonly (ControlRecord | null)[],
+): LoopEntry[] {
+  const out: LoopEntry[] = [];
+  const open = new Map<number, LoopEntry>();
+  rows.forEach((row, position) => {
+    const guard = row.index - 1;
+    const record = controls[guard];
+    if (!record || isChainRecord(record)) return;
+    if (record.kind === 'foreach') {
+      if (row.status !== 'passed') return;
+      out.push({
+        guard,
+        kind: 'foreach',
+        row,
+        position,
+        passes: row.loop ? row.loop.count : 0,
+        ended: true,
+      });
+      return;
+    }
+    const current = open.get(guard);
+    if (row.status === 'failed') {
+      if (current) out.push(current);
+      open.delete(guard);
+      return;
+    }
+    const holds = row.guard?.holds;
+    if (holds === undefined) return;
+    const entry =
+      current ?? { guard, kind: record.kind, row, position, passes: record.kind === 'repeat' ? 1 : 0, ended: false };
+    const carriesOn = record.kind === 'while' ? holds : !holds;
+    if (carriesOn) {
+      entry.passes = (entry.passes ?? 0) + 1;
+      open.set(guard, entry);
+      return;
+    }
+    out.push({ ...entry, ended: true });
+    open.delete(guard);
+  });
+  for (const entry of open.values()) out.push(entry);
+  return out.sort((a, b) => a.position - b.position);
+}
+
+/** A loop entry whose passes differ from the recording's, or a `For each` that
+ *  ran as many passes over a different list. */
+interface LoopPassFinding {
+  guard: number;
+  kind: LoopEntry['kind'];
+  /** 1-based entry of this loop in the run. */
+  visit: number;
+  /** The replay's entry row, in execution order. */
+  position: number;
+  recordedPasses: number;
+  replayPasses: number;
+  /** The two entry rows compared — the recording's, and the replay's. */
+  recordedRow: StepResult;
+  replayRow: StepResult;
+  /** A `For each`'s list variable, as the run knows it. */
+  list?: string;
+  /** Its value on entry, on each run, as the fold has it. */
+  recordedValue?: string;
+  replayValue?: string;
+  /** Equal pass counts, a different list. */
+  valuesOnly?: boolean;
+  /** The last row BEFORE the replay's entry that wrote the list — outputs or a
+   *  tool's outputs — and the recording's counterpart. */
+  writer?: StepResult;
+  recordedWriter?: StepResult;
+}
+
+/** The last row before `position` that wrote `name`, in execution order. */
+function lastWriterBefore(rows: readonly StepResult[], position: number, name: string): StepResult | undefined {
+  for (let p = position - 1; p >= 0; p--) {
+    if (rowWrites(rows[p]!).some(([written]) => written === name)) return rows[p];
+  }
+  return undefined;
+}
+
+/**
+ * Compare every runtime loop's passes on a replay with the recording's, entry
+ * by entry per loop (stories/codebehind-loops-and-conditions.md, decision 11).
+ *
+ * The condition check cannot see this: a `For each` never asks anything, so a
+ * list captured with six items where the recording had three runs six passes
+ * with every condition along the way answering as the recording's did. Only
+ * entries that START before the decisions diverged (`divergedAt`) are compared
+ * — past that the runs are on different paths — and the first pass-count
+ * difference ends the comparison for the same reason; a `For each` whose count
+ * matches but whose list does not is noted and the comparison goes on.
+ * A `While` / `Repeat` is compared only when both runs ended it on its own
+ * decision: one a failure cut short already has its failure.
+ */
+function compareLoopPasses(input: {
+  recorded: { entries: readonly LoopEntry[]; rows: readonly StepResult[]; snapshots: PassSnapshots };
+  replay: { entries: readonly LoopEntry[]; rows: readonly StepResult[]; snapshots: PassSnapshots };
+  controls: readonly (ControlRecord | null)[];
+  divergedAt: number | undefined;
+}): LoopPassFinding[] {
+  const { recorded, replay, controls, divergedAt } = input;
+  const byGuard = new Map<number, LoopEntry[]>();
+  for (const entry of recorded.entries) {
+    const list = byGuard.get(entry.guard) ?? [];
+    list.push(entry);
+    byGuard.set(entry.guard, list);
+  }
+  const seen = new Map<number, number>();
+  const out: LoopPassFinding[] = [];
+  for (const entry of replay.entries) {
+    const k = seen.get(entry.guard) ?? 0;
+    seen.set(entry.guard, k + 1);
+    if (divergedAt !== undefined && entry.position > divergedAt) break;
+    const was = byGuard.get(entry.guard)?.[k];
+    if (!was || was.passes === undefined || entry.passes === undefined) continue;
+    if (!was.ended || !entry.ended) continue;
+    const base = {
+      guard: entry.guard,
+      kind: entry.kind,
+      visit: k + 1,
+      position: entry.position,
+      recordedPasses: was.passes,
+      replayPasses: entry.passes,
+      recordedRow: was.row,
+      replayRow: entry.row,
+    };
+    const record = controls[entry.guard];
+    if (record?.kind !== 'foreach') {
+      if (was.passes !== entry.passes) {
+        out.push(base);
+        break;
+      }
+      continue;
+    }
+    const list = record.list;
+    const recordedValue = recorded.snapshots.at(was.row)[list];
+    const replayValue = replay.snapshots.at(entry.row)[list];
+    const writer = lastWriterBefore(replay.rows, entry.position, list);
+    const recordedWriter = lastWriterBefore(recorded.rows, was.position, list);
+    const finding: LoopPassFinding = {
+      ...base,
+      list,
+      ...(recordedValue !== undefined && { recordedValue }),
+      ...(replayValue !== undefined && { replayValue }),
+      ...(writer && { writer }),
+      ...(recordedWriter && { recordedWriter }),
+    };
+    if (was.passes !== entry.passes) {
+      out.push(finding);
+      break;
+    }
+    if (recordedValue !== undefined && replayValue !== undefined && recordedValue !== replayValue) {
+      out.push({ ...finding, valuesOnly: true });
+    }
+  }
+  return out;
+}
+
+/** A value as a compile's own words may print it: masked the way the prompt
+ *  masks it — by name, by record shape, by the run's mask set — and clipped. */
+function maskedForSummary(
+  name: string,
+  value: string,
+  snapshot: Record<string, string>,
+  envData: ParsedTest['envData'] | undefined,
+  limit = 160,
+): string {
+  const masked = maskValueForPrompt(
+    isSecretParameterName(name, snapshot),
+    name,
+    value,
+    new Set<string>(),
+    promptSecrets(snapshot, envData),
+  );
+  return masked.length > limit ? `${masked.slice(0, limit - 1)}…` : masked;
+}
+
+/**
+ * A `For each` that ran a different number of passes from the recording's,
+ * over a list an entry of THIS compile captured: that entry's replay failure
+ * (decision 11). Blamed at the loop's entry row, and repaired with the
+ * recording's captured value as the result to reproduce.
+ */
+interface PassCountFailure {
+  /** The replay's entry row, in execution order — where the loop read its list. */
+  position: number;
+  /** The entry that wrote the list, and its replay row. */
+  step: CompileStep;
+  result: StepResult;
+  error: string;
+  expected: NonNullable<RepairPromptInput['expected']>;
+}
+
+/** The failure an owned pass-count finding is, worded with both counts and
+ *  the recording's value — masked the way a prompt masks it. */
+function ownedPassCount(
+  finding: LoopPassFinding,
+  owner: CompileStep,
+  writer: StepResult,
+  steps: readonly CompileStep[],
+  snapshots: PassSnapshots,
+  envData: ParsedTest['envData'] | undefined,
+): PassCountFailure {
+  const list = finding.list!;
+  // What the recording's own writer captured — its row's outputs — else the
+  // list as the recording's loop read it.
+  const captured =
+    (finding.recordedWriter && rowWrites(finding.recordedWriter).find(([name]) => name === list)?.[1])
+    ?? finding.recordedValue
+    ?? '';
+  const snapshot = snapshots.at(finding.recordedRow);
+  const passes = (n: number): string => `${n} pass${n === 1 ? '' : 'es'}`;
+  return {
+    position: finding.position,
+    step: owner,
+    result: writer,
+    error:
+      `the code stored ${finding.replayPasses} item(s) in {{${list}}}, so ${loopName(finding.guard, steps)} ` +
+      `ran ${passes(finding.replayPasses)}; on the recording it ran ${passes(finding.recordedPasses)}, with ` +
+      `{{${list}}} = ${maskedForSummary(list, captured, snapshot, envData)}`,
+    expected: {
+      name: list,
+      value: maskedForSummary(list, captured, snapshot, envData, 4000),
+      recordedPasses: finding.recordedPasses,
+      replayPasses: finding.replayPasses,
+    },
+  };
+}
+
+/** `step 12 ("For each {{account}} in {{accounts}}")` — a loop, named. */
+function loopName(guard: number, steps: readonly CompileStep[]): string {
+  return `step ${guard + 1} ("${clipLine(steps[guard]?.text ?? '')}")`;
+}
+
+/** The warning line for a pass-count finding the compile does not own. */
+function loopPassWarning(
+  finding: LoopPassFinding,
+  steps: readonly CompileStep[],
+  values: { recorded: string | undefined; replay: string | undefined },
+): string {
+  const loop = loopName(finding.guard, steps);
+  const passes = (n: number): string => `${n} pass${n === 1 ? '' : 'es'}`;
+  if (finding.valuesOnly) {
+    return (
+      `${loop} ran ${passes(finding.replayPasses)} on the replay, as on the recording, over a different ` +
+      `{{${finding.list}}}: ${values.replay ?? '(unknown)'} where the recording's was ` +
+      `${values.recorded ?? '(unknown)'}`
+    );
+  }
+  const head =
+    `${loop} ran ${passes(finding.replayPasses)} on the replay and ${passes(finding.recordedPasses)} ` +
+    'on the recording';
+  if (finding.kind !== 'foreach') return head;
+  const writer = finding.writer;
+  const source = writer
+    ? `{{${finding.list}}} came from step ${writer.index} ("${clipLine(steps[writer.index - 1]?.text ?? '')}"), ` +
+      'which is not an entry this compile wrote'
+    : `nothing in the replay wrote {{${finding.list}}} before it`;
+  return `${head}: ${source}`;
 }
 
 /**
@@ -2268,6 +2763,9 @@ interface ReplayFailure {
   error: string;
   /** A condition answered differently from the recording (decision 11). */
   mismatch?: DecisionMismatch | undefined;
+  /** A `For each` ran a different number of passes over a list this
+   *  compile's entry captured (decision 11). */
+  passCount?: PassCountFailure | undefined;
   /** A guard failed and no condition entry decided it: nothing of this
    *  compile's to repair. */
   guardFailure?: boolean | undefined;
@@ -2347,6 +2845,12 @@ async function repairStep(
   options: CompileOptions,
   candidate: Candidate,
   round: { number: number; max: number },
+  extras: {
+    loop?: LoopContext | undefined;
+    /** What the recording captured where this entry's replay captured
+     *  something else (decision 11's pass-count check), already masked. */
+    expected?: RepairPromptInput['expected'];
+  } = {},
 ): Promise<GeneratedEntry> {
   const parameters = stepParameters(step.binding!, values, options.test.envData);
   // The step passed Generate, so every reference it makes resolved there;
@@ -2363,8 +2867,14 @@ async function repairStep(
       screenshotBase64: failedResult.screenshotBase64,
     }),
     parameters,
+    // The fold's snapshot and the run's mask set as of it, as generation has
+    // them — so the repair masks what the run's own prompts masked.
+    parameterMap: values,
+    secrets: promptSecrets(values, options.test.envData),
     ...(envRefs.length > 0 && { envRefs }),
     round,
+    ...(extras.loop && { loop: extras.loop }),
+    ...(extras.expected && { expected: extras.expected }),
   });
   return askForEntry(
     options.aiClient,
@@ -2401,6 +2911,8 @@ async function repairHealedStep(
   values: Record<string, string>,
   options: CompileOptions,
   candidate: Candidate,
+  /** The loop the step repeats in, as generation is told it (decision 2). */
+  loop: LoopContext | undefined,
 ): Promise<GeneratedEntry | undefined> {
   const binding = step.binding!;
   const error = result.codeBehindStale?.error;
@@ -2426,7 +2938,10 @@ async function repairHealedStep(
     ...(ctx?.domBefore !== undefined && { dom: ctx.domBefore }),
     ...(ctx?.urlBefore !== undefined && { url: ctx.urlBefore }),
     parameters,
+    parameterMap: values,
+    secrets: promptSecrets(values, options.test.envData),
     ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
+    ...(loop && { loop }),
   });
   return askForEntry(
     options.aiClient,

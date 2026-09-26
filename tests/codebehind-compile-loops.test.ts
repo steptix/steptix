@@ -540,6 +540,11 @@ describe('aiui compile — a For each over three items', () => {
     expect(repair).not.toContain('"Travel"');
     expect(repair).not.toContain('"Everyday"');
     expect(repair).toContain('<li>Savings, closed</li>');
+    // …told the line repeats, and what changes per pass, as generation was
+    // (review round 2, F9) — a repair that forgets it writes Savings in.
+    expect(repair).toContain('## This step runs inside a loop');
+    expect(repair).toContain(`It is in the body of \`${FOR_EACH_LINE}\``);
+    expect(repair).toContain("`{{account}}` — `step.getVar('account')`");
     expect(result.summary.unproven).toEqual([]);
   });
 });
@@ -910,6 +915,9 @@ describe('aiui compile — a body entry that ran as code on pass 1 and healed on
     expect(repair).toContain("await page.click('#next')");
     expect(repair).toContain('locator.click: Timeout 30000ms exceeded');
     expect(repair).toContain('<p>statements page 2</p>');
+    // …and told the line repeats (review round 2, F9).
+    expect(repair).toContain('## This step runs inside a loop');
+    expect(repair).toContain(`It is in the body of \`${WHILE_LINE}\``);
     const proposal = Object.values(result.files ?? {}).join('\n');
     expect(proposal).not.toContain('ai: true');
     expect(result.summary.keptAi).toBe(0);
@@ -1063,5 +1071,398 @@ describe('aiui compile — per-pass values folded forward from the start', () =>
     expect(repair).not.toContain('"Travel"');
     // Generation, from the same fold: pass 1's item.
     expect(generationFor(prompts, 'Click Next for {{account}}')).toContain('{{account}} resolved to "Everyday"');
+  });
+});
+
+// ── The boxed prompts mask what the run masked (review round 2, F1) ─────────
+
+describe('aiui compile — the prompts mask what the run masked', () => {
+  // §7.6's case: a data file's own dotted heading holding a credential, and a
+  // value no key names as secret that holds the same credential inside it.
+  const KEY = 'uk_live_1234';
+  const KEYS_MD = [
+    '# Keys',
+    '',
+    '## Parameters',
+    `- user.apikey: ${KEY}`,
+    `- auth: Bearer ${KEY}`,
+    '',
+    '## Steps',
+    '1. Type {{user.apikey}} into the API key box',
+    '2. Type {{auth}} into the Authorization box',
+    '3. While the {{user.apikey}} banner is shown, Close the banner',
+    '',
+  ].join('\n');
+  const WHILE_KEY = 'While the {{user.apikey}} banner is shown, Close the banner';
+
+  function typed(index: number, page: string, value: string, over: Partial<StepResult> = {}): StepResult {
+    return stepRow(index, page, {
+      turns: [
+        {
+          turnNumber: 1,
+          attemptNumber: 1,
+          timestamp: new Date().toISOString(),
+          aiInteractions: [],
+          subActions: [{ index: 1, action: { action: 'type', selector: '#k', value }, durationMs: 1 }],
+        },
+      ],
+      ...over,
+    });
+  }
+
+  // The server hands back the run's map raw; the CLI hands back the report's
+  // redacted copy. The fold starts from the RAW start map either way, so the
+  // prompts must mask for themselves.
+  it.each([
+    ['the raw final map (the server)', { 'user.apikey': KEY, auth: `Bearer ${KEY}` }],
+    ['the redacted final map (the CLI)', { 'user.apikey': '***', auth: 'Bearer ***' }],
+  ])('never shows the key to generation, the condition, or a repair — with %s', async (_what, final) => {
+    const md = await write('keys.md', KEYS_MD);
+    const test = await parseTestFile(md);
+    expect(test.steps[3]).toBe('Close the banner');
+    const record = outcome(
+      [
+        typed(1, 'keys', '{{user.apikey}}'),
+        typed(2, 'header', '{{auth}}'),
+        { ...judged(3, true, 1), loop: marker(1) },
+        stepRow(4, 'banner 1', { loop: marker(1) }),
+        judged(3, false, 2),
+      ],
+      4,
+      { resolvedParameters: final },
+    );
+    const round1 = outcome(
+      [codeRow(1), codeRow(2, { status: 'failed', error: 'no Authorization box', domSnapshot: '<main/>' })],
+      4,
+      { resolvedParameters: final },
+    );
+    const round2 = outcome(
+      [codeRow(1), codeRow(2), coded(3, true), codeRow(4), coded(3, false)],
+      4,
+      { resolvedParameters: final },
+    );
+    const { client, prompts } = fakeAi();
+    const { runner } = scriptedRunner(record, [round1, round2]);
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true });
+
+    expect(result.status).toBe('green');
+    // Measured before the fix (the fold's raw start map, no map, no mask set):
+    // `{{user.apikey}} resolved to "uk_live_1234"` and `{{auth}} resolved to
+    // "Bearer uk_live_1234"`, in generation and in the repair alike.
+    for (const prompt of prompts) expect(prompt).not.toContain(KEY);
+    expect(generationFor(prompts, 'Type {{user.apikey}} into the API key box')).toContain(
+      '{{user.apikey}} resolved to "***" on this run',
+    );
+    expect(generationFor(prompts, 'Type {{auth}} into the Authorization box')).toContain(
+      '{{auth}} resolved to "Bearer ***" on this run',
+    );
+    expect(generationFor(prompts, WHILE_KEY)).toContain('{{user.apikey}} resolved to "***" on this run');
+    const repair = prompts.find((p) => isStepRepair(p) && sourceOf(p) === 'Type {{auth}} into the Authorization box');
+    expect(repair).toContain('{{auth}} resolved to "Bearer ***" on this run');
+  });
+
+  it('masks the healed-pass repair the same way', async () => {
+    const md = await write('keys.md', KEYS_MD);
+    await write(
+      'keys.steps.ts',
+      [
+        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        'export default defineSteps([',
+        // Step 1 has no entry, so the compile records (with code-behind on).
+        "  { source: 'Type {{auth}} into the Authorization box', async run({ page, step }) { await page.fill('#a', step.getVar('auth') ?? ''); } },",
+        `  { source: ${JSON.stringify(WHILE_KEY)}, async condition({ page }) { return (await page.locator('#banner').count()) > 0; } },`,
+        "  { source: 'Close the banner', async run({ page }) { await page.click('#close'); } },",
+        ']);',
+        '',
+      ].join('\n'),
+    );
+    const test = await parseTestFile(md);
+    const stale = { file: path.join(dir, 'keys.steps.ts'), source: 'Type {{auth}} into the Authorization box', error: 'no #a' };
+    const record = outcome(
+      [
+        typed(1, 'keys', '{{user.apikey}}'),
+        typed(2, 'header', '{{auth}}', { codeBehindStale: stale }),
+        { ...coded(3, true), loop: marker(1) },
+        codeRow(4, { loop: marker(1) }),
+        coded(3, false),
+      ],
+      4,
+      { resolvedParameters: { 'user.apikey': KEY, auth: `Bearer ${KEY}` } },
+    );
+    const { client, prompts } = fakeAi();
+    const { runner } = scriptedRunner(record, [
+      outcome([codeRow(1), codeRow(2), coded(3, true), codeRow(4), coded(3, false)], 4),
+    ]);
+
+    await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true });
+
+    const repair = prompts.find((p) => isStepRepair(p) && sourceOf(p) === 'Type {{auth}} into the Authorization box')!;
+    expect(repair).toContain('no #a');
+    expect(repair).toContain('{{auth}} resolved to "Bearer ***" on this run');
+    for (const prompt of prompts) expect(prompt).not.toContain(KEY);
+  });
+});
+
+// ── Writes the fold cannot see from `outputs` (review round 2, F2) ──────────
+
+describe('aiui compile — writes a row carries elsewhere, and writes no row carries', () => {
+  it("binds a [tool:] step's outputs, so the leak guard holds the value the step typed", async () => {
+    const md = await write(
+      'orders.md',
+      [
+        '# Orders',
+        '',
+        '## Parameters',
+        '- order_id: none',
+        '',
+        '## Steps',
+        '1. [tool: create_order]',
+        '2. Type {{order_id}} into the search box',
+        '',
+      ].join('\n'),
+    );
+    const test = await parseTestFile(md);
+    const TYPE = 'Type {{order_id}} into the search box';
+    const toolRow: StepResult = {
+      index: 1,
+      instruction: '[tool: create_order]',
+      status: 'passed',
+      durationMs: 1,
+      retried: false,
+      turns: [],
+      toolStep: { name: 'create_order', args: {}, outputs: { order_id: 'ORD-4821' }, logs: [] },
+    };
+    const typedRow = stepRow(2, 'search', {
+      turns: [
+        {
+          turnNumber: 1,
+          attemptNumber: 1,
+          timestamp: new Date().toISOString(),
+          aiInteractions: [],
+          subActions: [{ index: 1, action: { action: 'type', selector: '#q', value: 'ORD-4821' }, durationMs: 1 }],
+        },
+      ],
+    });
+    const record = outcome([toolRow, typedRow], 2, { resolvedParameters: { order_id: 'ORD-4821' } });
+    const { prompts, client: base } = fakeAi();
+    // A model that inlines what the transcript typed.
+    const client = {
+      complete: async (messages: ChatMessage[]) => {
+        const response = await (base as unknown as { complete: (m: ChatMessage[]) => Promise<{ text: string }> }).complete(messages);
+        const prompt = prompts.at(-1)!;
+        if (!isReview(prompt) && sourceOf(prompt) === TYPE) {
+          return {
+            text: JSON.stringify({ entry: `{ source: ${JSON.stringify(TYPE)}, async run({ page }) { await page.fill('#q', 'ORD-4821'); } }` }),
+            model: 'stub-model',
+          };
+        }
+        return response;
+      },
+    } as unknown as AiClient;
+    const { runner } = scriptedRunner(record, []);
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true });
+
+    // Measured before the fix: `{{order_id}} resolved to "none"`, and the entry
+    // hard-coding ORD-4821 went through, green.
+    expect(generationFor(prompts, TYPE)).toContain('{{order_id}} resolved to "ORD-4821" on this run');
+    expect(result.status).toBe('failed');
+    expect(result.summary.error).toContain('resolved value of {{order_id}}');
+  });
+
+  it('takes the FINAL value of a starting name no row wrote — an [input:] answer, a hook — not its start value', async () => {
+    const md = await write(
+      'ticket.md',
+      ['# Ticket', '', '## Parameters', '- ticket: none', '', '## Steps', '1. Type {{ticket}} into the ticket box', ''].join('\n'),
+    );
+    const test = await parseTestFile(md);
+    const record = outcome(
+      [
+        stepRow(1, 'ticket', {
+          turns: [
+            {
+              turnNumber: 1,
+              attemptNumber: 1,
+              timestamp: new Date().toISOString(),
+              aiInteractions: [],
+              subActions: [{ index: 1, action: { action: 'type', selector: '#t', value: '{{ticket}}' }, durationMs: 1 }],
+            },
+          ],
+        }),
+      ],
+      1,
+      // Written by something no row reports.
+      { resolvedParameters: { ticket: 'T-99' } },
+    );
+    const { client, prompts } = fakeAi();
+    const { runner } = scriptedRunner(record, [outcome([codeRow(1)], 1)]);
+
+    await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true });
+
+    // Measured before the fix: `"none"` — the start value, which the step never typed.
+    expect(generationFor(prompts, 'Type {{ticket}} into the ticket box')).toContain(
+      '{{ticket}} resolved to "T-99" on this run',
+    );
+  });
+});
+
+// ── The replay checks every loop's passes (review round 2, F10) ─────────────
+
+describe("aiui compile — a replay whose loop runs a different number of passes from the recording's", () => {
+  const READ = 'Read the name of every account in the Your accounts panel [store as: accounts]';
+  const LOOP = 'For each {{account}} in {{accounts}}, Check the account';
+  const RECORDED = '["Everyday","Savings","Travel"]';
+  const SIX = '["Everyday","4111 •••• 1111","Savings","5500 •••• 2222","Travel","3400 •••• 3333"]';
+
+  /** A marker the way a real `For each` hands it out: with the list's length. */
+  const pass = (index: number, count: number, account: string): LoopMarker => ({
+    kind: 'iteration',
+    label: 'Check the account',
+    index,
+    count,
+    values: { account },
+  });
+
+  /** Expanded: 1 the list's writer · 2 For each · 3 Check the account · 4 Read the reference. */
+  const listMd = (writer: string): string =>
+    ['# Accounts', '', '## Steps', `1. ${writer}`, `2. ${LOOP}`, '3. Read the reference', ''].join('\n');
+
+  /** The rows a run over `items` makes: the entry row, one body row per pass. */
+  function loopRows(items: string[], body: (i: number, marker: LoopMarker) => StepResult): StepResult[] {
+    return [
+      guardRow(2, undefined, { loop: pass(1, items.length, items[0]!) }),
+      ...items.map((item, i) => body(i, pass(i + 1, items.length, item))),
+    ];
+  }
+  const readRow = (value: string): StepResult =>
+    stepRow(1, 'the accounts panel', {
+      outputs: { accounts: value },
+      turns: [
+        {
+          turnNumber: 1,
+          attemptNumber: 1,
+          timestamp: new Date().toISOString(),
+          aiInteractions: [],
+          subActions: [
+            { index: 1, action: { action: 'read', selector: '.account', multiple: true, as: 'accounts' }, durationMs: 1 },
+          ],
+        },
+      ],
+    });
+  const recordOf = (first: StepResult): CompileRunOutcome =>
+    outcome(
+      [
+        first,
+        ...loopRows(JSON.parse(RECORDED) as string[], (i, m) => stepRow(3, `account ${i + 1}`, { loop: m })),
+        stepRow(4, 'the reference'),
+      ],
+      4,
+    );
+  const replayOf = (first: StepResult, list: string): CompileRunOutcome =>
+    outcome([first, ...loopRows(JSON.parse(list) as string[], (_i, m) => codeRow(3, { loop: m })), codeRow(4)], 4);
+
+  it('fails the entry that captured the list, says both counts, and repairs it with the recorded value', async () => {
+    const md = await write('accounts.md', listMd(READ));
+    const test = await parseTestFile(md);
+    expect(test.steps).toEqual([READ, LOOP, 'Check the account', 'Read the reference']);
+    const { client, prompts } = fakeAi();
+    const { runner } = scriptedRunner(recordOf(readRow(RECORDED)), [
+      replayOf(codeRow(1, { outputs: { accounts: SIX } }), SIX),
+      replayOf(codeRow(1, { outputs: { accounts: RECORDED } }), RECORDED),
+    ]);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent });
+
+    // Measured before the fix (templates/init/tests/control-flow.md, a real
+    // model): six passes where the recording ran three, "22/22 passed", written.
+    expect(result.status).toBe('green');
+    expect(result.summary.rounds).toBe(2);
+    const said =
+      `the code stored 6 item(s) in {{accounts}}, so step 2 ("${LOOP}") ran 6 passes; on the recording ` +
+      `it ran 3 passes, with {{accounts}} = ${RECORDED}`;
+    expect(replayLines(events)).toContain(`✗ step 1 — ${said}`);
+    expect(stepMessages(events, 'repair', 1)).toContain('repaired');
+    const repair = prompts.find((p) => isStepRepair(p) && sourceOf(p) === READ)!;
+    expect(repair).toContain(`## What went wrong\n${said}`);
+    expect(repair).toContain('## What the recording captured');
+    expect(repair).toContain(RECORDED);
+    expect(repair).toContain('ran 3 pass(es)');
+    expect(result.summary.warnings).toBeUndefined();
+    expect(result.summary.unproven).toEqual([]);
+  });
+
+  it('warns, and does not fail, when the list came from a step this compile does not own', async () => {
+    const md = await write('accounts.md', listMd('[tool: list_accounts]'));
+    const test = await parseTestFile(md);
+    const tool = (value: string): StepResult => ({
+      index: 1,
+      instruction: '[tool: list_accounts]',
+      status: 'passed',
+      durationMs: 1,
+      retried: false,
+      turns: [],
+      toolStep: { name: 'list_accounts', args: {}, outputs: { accounts: value }, logs: [] },
+    });
+    const { client } = fakeAi();
+    const { runner } = scriptedRunner(recordOf(tool(RECORDED)), [replayOf(tool(SIX), SIX)]);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent });
+
+    const warning =
+      `step 2 ("${LOOP}") ran 6 passes on the replay and 3 passes on the recording: {{accounts}} came from ` +
+      'step 1 ("[tool: list_accounts]"), which is not an entry this compile wrote';
+    expect(result.summary.rounds).toBe(1);
+    expect(result.summary.warnings).toEqual([warning]);
+    expect(events).toContainEqual({ kind: 'note', level: 'warn', message: warning });
+    expect(result.status).toBe('green');
+  });
+
+  it('warns when the counts match but the values do not — a list may differ between runs', async () => {
+    const md = await write('accounts.md', listMd(READ));
+    const test = await parseTestFile(md);
+    const other = '["Everyday","Savings","Holiday"]';
+    const { client } = fakeAi();
+    const { runner } = scriptedRunner(recordOf(readRow(RECORDED)), [
+      replayOf(codeRow(1, { outputs: { accounts: other } }), other),
+    ]);
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner });
+
+    expect(result.status).toBe('green');
+    expect(result.summary.rounds).toBe(1);
+    expect(result.summary.warnings).toEqual([
+      `step 2 ("${LOOP}") ran 3 passes on the replay, as on the recording, over a different {{accounts}}: ` +
+        `${other} where the recording's was ${RECORDED}`,
+    ]);
+  });
+
+  it('warns when a While the model decided on the replay ran a different number of passes', async () => {
+    const md = await write('statements.md', WHILE_MD);
+    const test = await parseTestFile(md);
+    const { client } = fakeAi();
+    // The replay's model decided the While — a difference nobody's code made,
+    // which the decision check does not blame.
+    const replay = outcome(
+      [
+        codeRow(1),
+        { ...judged(2, true, 1), loop: marker(1) },
+        codeRow(3, { loop: marker(1) }),
+        { ...judged(2, true, 2), loop: marker(2) },
+        codeRow(3, { loop: marker(2) }),
+        judged(2, false, 3),
+        codeRow(4),
+      ],
+      4,
+    );
+    const { runner } = scriptedRunner(whileRecord(), [replay]);
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner });
+
+    expect(result.summary.warnings).toEqual([
+      `step 2 ("${WHILE_LINE}") ran 2 passes on the replay and 3 passes on the recording`,
+    ]);
   });
 });

@@ -643,7 +643,9 @@ function TestBenchRunner() {
         // server sends alongside; an older one sends none and the sentence
         // reads without it.
         if (isSkippedPass(event)) {
-          log(skipPanelLine(event.line, event.reason), "info", uri);
+          // A ⚠ that did not run — its condition's code threw on that visit —
+          // says both facts, at the warning level its gutter mark has.
+          log(skipPanelLine(event.line, event.reason, event.codeBehindStale), event.codeBehindStale ? "warn" : "info", uri);
           break;
         }
         if (event.codeBehindStale) {

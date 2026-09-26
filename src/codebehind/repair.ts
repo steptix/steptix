@@ -1,4 +1,4 @@
-import { formatParameterBlock } from '../ai/prompts.js';
+import { formatLoopBlock, formatParameterBlock, type LoopContext } from '../ai/prompts.js';
 import { parseFlowControlStep } from '../parser/flow-control-step.js';
 import type { ChatMessage, MessageContentBlock } from '../ai/types.js';
 
@@ -31,10 +31,26 @@ export interface RepairPromptInput {
    *  `user.apikey` heading rendered its credential into this prompt in clear.
    *  The live object or nothing; a copy carries none of the loop marks. */
   parameterMap?: Record<string, string> | undefined;
+  /** The run's free-text mask set, as for generation: a secret inside a value
+   *  no key names as secret is masked too. */
+  secrets?: string[] | undefined;
   /** The step's environment references with their values, as for generation. */
   envRefs?: Array<{ ref: string; value: string }> | undefined;
   /** Which round this is, and how many there are. */
   round?: { number: number; max: number } | undefined;
+  /**
+   * The runtime loop the step sits in the body of, as generation is told it
+   * (stories/codebehind-loops-and-conditions.md, decision 2): the ONE entry
+   * replays on every pass, and what changes per pass is read with
+   * `step.getVar`. Absent outside every loop, which leaves the prompt as it was.
+   */
+  loop?: LoopContext | undefined;
+  /**
+   * What the RECORDING captured where this entry captured something else — a
+   * list the next `For each` then ran a different number of passes over
+   * (decision 11's pass-count check). `value` is already masked for a prompt.
+   */
+  expected?: { name: string; value: string; recordedPasses: number; replayPasses: number } | undefined;
 }
 
 export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
@@ -42,7 +58,7 @@ export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
     input.parameters,
     input.envRefs ?? [],
     new Set<string>(),
-    [],
+    input.secrets ?? [],
     input.parameterMap,
   );
 
@@ -66,13 +82,23 @@ export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
     ? `\nThis is repair round ${input.round.number} of ${input.round.max}. If you cannot make this step work as code, say so with {"entry": null, "reason": "..."} rather than guessing again.\n`
     : '';
 
+  const expected = input.expected;
+  const expectedBlock = expected
+    ? `\n## What the recording captured\n` +
+      `On the recording run this step stored \`{{${expected.name}}}\` = ${expected.value}, and the ` +
+      `\`For each\` over it ran ${expected.recordedPasses} pass(es). Replayed, this entry stored ` +
+      `something else, and the loop ran ${expected.replayPasses}. Capture exactly what the step's text ` +
+      `asks for — no more items and no fewer — read from the page on every run. Never write these ` +
+      `values into the code: the page decides them.\n`
+    : '';
+
   const text = `A generated code-behind entry was replayed and it failed. Rewrite it so it passes.
 
 ## The step, exactly as authored
 ${input.rawStepText}
 
 ## Parameters in scope
-${paramBlock}
+${paramBlock}${formatLoopBlock(input.loop, 'step')}
 
 ## The entry that failed (step ${input.stepIndex})
 \`\`\`ts
@@ -81,7 +107,7 @@ ${input.entryCode}
 
 ## What went wrong
 ${input.error}
-${roundLine}
+${expectedBlock}${roundLine}
 ## The page when it failed${input.url ? `\nURL: ${input.url}` : ''}${
     input.dom ? `\n\n\`\`\`html\n${input.dom}\n\`\`\`` : ''
   }${input.screenshotBase64 ? '\n\n[A screenshot of the page at the failure is attached.]' : ''}

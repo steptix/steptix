@@ -8,9 +8,9 @@ TestBench live pass (`testbench-native/tests/integration/live/compile-loops.test
 passed first time, 2/2: Run & Compile of `control-flow.md` and
 `control-flow-otherwise.md`, apply, replay — every `If` / `Else if` /
 `While` / `Repeat` decided by its condition entry, no condition-judge call in
-the replay's report, every loop still exactly three passes. Review round 1's
-fixes are recorded where they changed a decision: "The guard", "The run
-loops", and both "decided" sections below.
+the replay's report, every loop still exactly three passes. Review rounds 1
+and 2's fixes are recorded where they changed a decision: "The guard", "The
+run loops", decision 11, and both "decided" sections below.
 
 ## In plain terms
 
@@ -236,6 +236,22 @@ from the page the model saw on that visit.
     page and both answers. This is the only place a compile can catch a
     condition that answers wrongly without throwing. Run & Compile has no
     replay; the next run proves the entry, as it proves every entry.
+
+    **…and every loop's pass count** (review round 2). A `For each` decides
+    nothing, so a list captured with six items where the recording had three
+    runs six passes with every condition answering as recorded — measured on
+    a real-model `aiui compile` of `control-flow.md`, which said "22/22
+    passed" and wrote the file. After each replay, every runtime loop entry is
+    compared with the recording's: a `For each` by its list's length, a
+    `While` / `Repeat` by the passes it made before its own decision ended it.
+    A `For each` whose count differs blames the step that last wrote its list
+    before the loop, in the replay's rows: an entry this compile wrote (and
+    that ran as code) fails with both counts and the recording's value, and
+    its repair is shown the recording's captured value as the result to
+    reproduce; a writer the compile does not own — a tool, an AI step, a kept
+    entry — is a warning line in the summary, not a failure. Equal counts over
+    different values is a warning (a list may differ between runs); a `While`
+    / `Repeat` whose count differs with no condition to blame is a warning.
 
 12. **Steps a decision skipped are named as not attempted** (closes
     [issue 053](../issues/resolved/053-run-and-compile-does-not-list-an-untaken-branch.md)).
@@ -566,6 +582,22 @@ sections above leave open.
   as skipped and stale rather than passed. The report row is unchanged: it
   still carries the flag and `guard.staleMember`, which is what the sidecar
   writers and the compilers key on.
+- **Every surface says both facts of a skipped ⚠** (review round 2). Round 1
+  painted and hovered it; the text surfaces still printed a plain ◌ skip, and
+  the `## Steps` heading read *"2/3 passed (1 stale), 1 skipped"* — a
+  parenthesis that breaks down the PASSES claiming the one line that did not
+  run. One rule now, on every surface: a parenthesis breaks down the count it
+  follows, so the heading and the run log's tally say *"2/3 passed, 1 skipped
+  (1 stale)"* / *"✓ 2 passed, 1 skipped (1 stale)"* (`staleSkipped` beside
+  `stale`, which counts stale passes only), and the run log's heal lines count
+  it (*"1 condition(s) whose code-behind failed were decided by the model
+  instead."*, then the Repair line). The per-line text — run log, Test
+  Explorer's output, the compile log, the panel's log — leads with ⚠ and
+  mirrors the hover: the skip reason, then *"; condition code-behind failed:
+  <what it threw>"* (`step-skip-core.ts`, the panel's mirror pinned by the
+  parity test). The panel header's flat `⚠ 1 stale  ◌ 1 skipped` already said
+  both and is unchanged. A skipped pass WITHOUT `codeBehindStale` renders
+  byte-identically on every surface.
 - **A condition entry never breaks a hard rule** (review round 1). A hard rule
   is what `conditionEntryComplaint` checks — a `run`, no `condition`, or a call
   that acts, navigates, types or points, waits, touches a tab or browser, or
@@ -591,6 +623,40 @@ sections above leave open.
   dispatches, focuses, inserts or removes DOM, writes an attribute, moves
   history or location, or assigns any property. Pinned by a corpus of good and
   bad entries in codebehind-condition-generation.test.ts.
+- **The heuristic's rules, as review round 2 narrowed and closed them.** Round
+  1's version, read against real entries, both refused reads and let actions
+  through; since a hard complaint is fatal, each false positive was a failed
+  compile. The rules now:
+  - *Tabs and browsers:* only the calls that change which page the run is on
+    are refused, on any receiver, a local alias included — `tabs.open` /
+    `openedBy` / `switchTo` / `close`, `browsers.open` / `switchTo` / `close`.
+    The reads — `tabs.list()`, `tabs.active()`, `browsers.list()`,
+    `browsers.activeLabel()` — answer a question about the run and pass
+    (`If a second tab is open, …`). The "local named `tabs`" exemption is gone
+    with the blanket rule it existed for.
+  - *Receivers:* a Playwright receiver is also one reached through `?.`
+    (`el?.check()`, `page.getByRole('button')?.click()`), a name assigned
+    after its declaration (`let b; b = page.locator(…)`) or declared with a
+    type (`const b: Locator = …`), an element of an
+    array literal (`[page.locator('a')]`), or `tabs.active()`. A name bound
+    from a value READ — `await locator.count()`, `allTextContents()`,
+    `title()`, a comparison — is data, so `Array(n).fill(false)` passes. The
+    page's context-changing calls (`setContent`, `route`, `clearCookies`,
+    `newPage`, `setViewportSize`, …) join the refused actions, on a
+    Playwright receiver only.
+  - *Page functions:* a page function passed by NAME is resolved to the
+    function the entry defines under it (`const act = () => …;
+    page.evaluate(act)`, a `function act() {…}`, a name bound to another
+    name) and judged like an inline one. An assignment is refused only when
+    it writes page state — a DOM state property (`checked`, `value`,
+    `selected`, `disabled`, `textContent`, `innerHTML`, `className`, `hidden`,
+    `src`, `href`, `title`, `cookie`, `on…`, and the rest of that list),
+    `style.*`, `dataset.*`, the bracket form of any of them, or the location —
+    and never when its receiver is a local the page function built itself
+    (`const r = {}`, `[]`, `new Map()`, a literal). Destructuring
+    (`const [next] = …`), `acc[k] = …` and `out[0] = …` change nothing and
+    pass. Storage writes, `document.write`, and `style.setProperty` are
+    refused calls.
 - **The review pass keeps a condition a condition** (review round 1). Every
   entry that was a `condition` entry before the review must still define
   `condition` after it and pass `conditionEntryComplaint`; a revision that
@@ -598,7 +664,21 @@ sections above leave open.
   violations — the whole revision of that file, with *"rejected: the revision
   turns the condition entry for … into something that is not one"* (or
   *"breaks the condition entry for …: <complaint>"*), and the generated file
-  stands.
+  stands. Review round 2 narrowed it to what the REVIEWER did: an entry whose
+  code the revision left as it was (whitespace aside) is not judged, so a
+  hand-written condition the stricter check dislikes no longer blocks every
+  review of its file; an entry the revision rewrote, or turned into or out of
+  a condition, is.
+- **Repairs are told about the loop, on both paths** (review round 2). The
+  boxed `repairStep` and healed-pass repair, and the live `askForRepair`, now
+  hand `buildRepairPrompt` the same loop block the step prompt carries
+  (`loopContextFor`): the line repeats, and `{{account}}` changes every pass.
+  A repair told neither wrote the failing pass's item into the code.
+- **The live prompts mask with the run's mask set too** (review round 2). The
+  generation, condition and repair prompts both compilers build pass
+  `runSecrets` over their snapshot to the parameter block, beside the marked
+  map, so a secret inside a value no key names as secret (`auth: "Bearer
+  <the key>"`) is masked there as the run's own step prompts mask it.
 - **"The step did not run" is said once per entry, and never after
   "generated"** (review round 1). A body line generated on pass 1 and decided
   against on pass 2 owes nothing, and its skip no longer logs the refusal after
@@ -647,6 +727,59 @@ something the sections above leave open, or departed from them.
   row that carries the outer marker (a step directly in the outer body). A
   table-row `### Section` gets its own row's values the same way; it used to
   get the last row's.
+- **The fold masks what the run masked, and sees every write it can** (review
+  round 2). Starting from the RAW parameters undid a mask round 1 did not know
+  it relied on: the prompts were built from the CLI's redacted
+  `report.parameters` and masked by name only, so a data file's `user.apikey:
+  uk_live_1234` heading (§7.6) reached the model as `"uk_live_1234"`. Every
+  boxed prompt — generation, the condition prompt, a repair, a healed-pass
+  repair — now gets the fold's own snapshot as `parameterMap` (the fold marks
+  each pass's dotted bindings as `applyPassBindings` does, so `row.keyword`
+  keeps the record rule and a heading gets the author rule) and the run's mask
+  set as of that snapshot (`runSecrets`), so a secret inside a value no key
+  names (`auth: "Bearer uk_live_1234"` → `"Bearer ***"`) is masked too — what
+  the live path's prompts now get as well. The leak guard holds the real
+  values. The fold binds a `[tool:]` step's `toolStep.outputs` beside
+  `outputs` (a `Set`, a `[use ai]` answer and a code-behind `setVar` already
+  ride `outputs`). A starting name whose FINAL value differs though no row
+  wrote it — an `[input:]` answer, a hook's capture, neither on any row the
+  compile reads — takes the final value from the first row on, as every
+  snapshot did before the fold; a final value that is only the start value
+  masked (the CLI's `***`) is not a write.
+- **Decision 11 checks every loop's passes, not only its decisions** (review
+  round 2). `loopEntries` reads each runtime loop entry off a run's rows — a
+  `For each` by its list-reading row, whose pass-1 marker carries the list's
+  length; a `While` / `Repeat` counted off its guard rows' decisions (a
+  `While` row that holds begins a pass, a `Repeat` row that does not; the
+  first answer the other way ends the entry), not its markers. After each
+  replay `compareLoopPasses` pairs them with the recording's, entry by entry
+  per loop, for the entries that start before `compareDecisions`' new
+  `divergedAt` (past it the runs are on different paths), and a `While` /
+  `Repeat` only when both runs ended it on its own decision. The first count
+  difference ends the comparison. What it finds:
+  - A `For each` whose count differs, whose list the replay's rows show was
+    last written — `outputs` or `toolStep.outputs`, execution order — by an
+    entry of this compile that ran as code: that entry fails, positioned at
+    the loop's entry row (ahead of whatever the extra passes then broke),
+    with *"the code stored 6 item(s) in {{accounts}}, so step 12 ("For each
+    …") ran 6 passes; on the recording it ran 3 passes, with {{accounts}} =
+    […]"*. It is not proven that round, and its repair prompt gains *"What the
+    recording captured"*: the recorded value (the recording's writer row's
+    `outputs`, masked as a prompt masks it) and both counts, with the rule to
+    read it from the page and never write it in. The values are not added to
+    the leak guard: its substring test would fail the whole compile on an
+    item word in a comment.
+  - A `For each` whose writer is not this compile's (a tool, an AI step, a
+    kept entry, or nothing in the replay) — a warning: *"step 12 (…) ran 6
+    passes on the replay and 3 passes on the recording: {{accounts}} came
+    from step 11 (…), which is not an entry this compile wrote"*.
+  - Equal counts over a different list — a warning naming both values (a
+    list may differ between runs).
+  - A `While` / `Repeat` whose count differs with no condition mismatch on it
+    (the replay's model decided it) — a warning with both counts.
+  Warnings are the LAST replay round's: `summary.warnings`, a `note` event
+  each (the CLI's `[warn]` line, the server's `output` frame), and the CLI's
+  summary prints them as `Warning:` lines. They never change the status.
 - **The evidence pass is the first with a transcript** (`evidenceRows` /
   `isEvidencePass`, review round 1). It passed (or failed as its text says)
   AND it ran under AI — a clean code run has no turns, and is no evidence —
@@ -682,8 +815,9 @@ something the sections above leave open, or departed from them.
   comparison and blames nothing. A different number of visits with every
   compared answer equal blames nothing either: fewer means the replay ended
   earlier (a step's failure says why), more means an enclosing `For each`'s
-  list changed. The blamed member of a chain is the first whose answers
-  differ, first-holds-wins.
+  list changed — which the pass-count check (review round 2, above) now
+  catches at the loop itself. The blamed member of a chain is the first whose
+  answers differ, first-holds-wins.
 - **The runtime says which member's code failed.** `StepResult.guard` gained
   `failedMember`: a strict replay's thrown condition and a `step.expect` in one
   failed the guard with no member named, and the row belongs to the member the

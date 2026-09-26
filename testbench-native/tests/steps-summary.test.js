@@ -60,8 +60,33 @@ test('a ⚠ on a chain member that was NOT taken counts as skipped and stale, ne
   );
   assert.equal(counts.passed, 2);
   assert.equal(counts.skipped, 1);
-  assert.equal(counts.stale, 1);
+  // Stale, and counted where it is: among the skips, not the passes.
+  assert.equal(counts.stale, 0);
+  assert.equal(counts.staleSkipped, 1);
   assert.equal(counts.total, 3);
+  // Review round 2 (F8). Measured before the fix: "2/3 passed (1 stale), 1
+  // skipped" — a parenthesis that breaks down the PASSES claiming the one
+  // line that did not run.
+  assert.equal(stepsSummaryText(counts), '2/3 passed, 1 skipped (1 stale)');
+});
+
+test('a stale pass and a stale skip are each said beside their own count', () => {
+  const counts = countMainFlowStatuses(
+    [
+      [1, 'pass-stale'],
+      [2, 'pass-stale'],
+      [3, 'skip'],
+      [4, 'pass-code-behind'],
+    ],
+    [1, 2, 3, 4],
+    new Set([2]),
+  );
+  assert.equal(stepsSummaryText(counts), '2/4 passed (1 code-behind, 1 stale), 2 skipped (1 stale)');
+});
+
+test('a run with no stale skip renders exactly as before', () => {
+  assert.equal(stepsSummaryText(summaryOf('pass', 'pass-stale', 'skip')), '2/3 passed (1 stale), 1 skipped');
+  assert.equal(stepsSummaryText(summaryOf('pass', 'skip')), '1/2 passed, 1 skipped');
 });
 
 test('a fail is neither a pass nor a skip', () => {

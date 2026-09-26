@@ -7,6 +7,7 @@ import type { CodeBehindBinding } from '../src/codebehind/loader.js';
 import { parseEntryLiteral, parseStepCodeOrDecline } from '../src/ai/action-parser.js';
 import { buildConditionCodePrompt, type ConditionCodePromptInput } from '../src/ai/prompts.js';
 import {
+  accountPlaceholders,
   compilableCondition,
   CONDITION_WITHOUT_DOM,
   conditionEntryComplaint,
@@ -478,6 +479,25 @@ describe('conditionEntryComplaint over a corpus of good and bad entries', () => 
     ['page.url()', wrap(`return page.url().includes('/done');`)],
     ['a local named tabs', wrap(`const tabs = page.getByRole('tab'); return (await tabs.count()) > 2;`)],
     ['a regex mentioning click(', wrap(`return /click\\(/.test(page.url());`)],
+    // Review round 2 (F3): a page function's OWN locals are not the page. Each
+    // of these was refused as `]=` / `.count=` before, and since R6 a refusal
+    // after the re-ask is a failed compile.
+    ['an evaluate destructuring its first match', wrap(`return await page.evaluate(() => { const [next] = document.querySelectorAll('#next'); return !!next && !(next as HTMLButtonElement).disabled; });`)],
+    ['an evaluate filling an accumulator by key', wrap(`return await page.evaluate(() => { const seen: Record<string, boolean> = {}; for (const e of document.querySelectorAll('li')) seen[e.textContent ?? ''] = true; return Object.keys(seen).length > 1; });`)],
+    ['an evaluate writing a local object property', wrap(`return await page.evaluate(() => { const r = { count: 0 }; r.count = document.querySelectorAll('li').length; return r.count > 0; });`)],
+    ['an evaluate writing a local array slot', wrap(`return await page.evaluate(() => { const out = []; out[0] = document.title; return out[0] === 'x'; });`)],
+    ['a reduce into acc[k]', wrap(`return await page.locator('li').evaluateAll((els) => Object.keys(els.reduce((acc, e) => { acc[e.id] = 1; return acc; }, {} as Record<string, number>)).length > 1);`)],
+    ['a local object titled in a page function', wrap(`return await page.evaluate(() => { const o = {}; o.title = document.title; return o.title === 'x'; });`)],
+    // …(F7): the read-only tab and browser calls answer a question about the run.
+    ['tabs.list()', wrap(`return tabs.list().length > 1;`, '{ page, tabs }')],
+    ['tabs.active()', wrap(`return tabs.active().url().includes('/docs');`, '{ tabs }')],
+    ['ctx.browsers.list() and activeLabel()', wrap(`return ctx.browsers.list().length > 1 && ctx.browsers.activeLabel() !== 'default';`, 'ctx')],
+    // …and a name bound from an awaited READ is a value, not a receiver.
+    ['Array(n).fill() with n from count()', wrap(`const n = await page.locator('li').count(); const flags = Array(n).fill(false); return flags.length > 2;`)],
+    ['a parenthesised count', wrap(`const n = (await page.locator('li').count()); return Array(n).fill(0).length > 2;`)],
+    ['fill() on texts read off the page', wrap(`const texts = await page.locator('li').allTextContents(); const copy = texts.slice(); copy.fill(''); return texts.length > 0;`)],
+    ['fill() on a split title', wrap(`const t = await page.title(); const parts = t.split(' '); parts.fill(''); return parts.length > 1;`)],
+    ['a comparison bound to a name', wrap(`const many = (await page.locator('li').count()) > 2; return Array(3).fill(many).every(Boolean);`)],
   ])('accepts %s', (_what, code) => {
     expect(conditionEntryComplaint(code)).toBeUndefined();
   });
@@ -503,6 +523,30 @@ describe('conditionEntryComplaint over a corpus of good and bad entries', () => 
     ['an evaluate that assigns a DOM property', wrap(`await page.locator('#c').evaluate((el) => { (el as HTMLInputElement).checked = true; }); return true;`), '.checked='],
     ['an $eval that assigns', wrap(`await page.$eval('#c', (el) => { el.value = 'x'; }); return true;`), '.value='],
     ['a locator dispatchEvent', wrap(`await page.locator('#a').dispatchEvent('click'); return true;`), '.dispatchEvent('],
+    // Review round 2 (F6): real actions the receiver reading let through.
+    ['a ?.check() on a $() handle', wrap(`const el = await page.$('#cash'); await el?.check(); return true;`), '.check('],
+    ['a ?.click() straight off a locator', wrap(`await page.getByRole('button', { name: 'Next' })?.click(); return true;`), '.click('],
+    ['a click through an array literal of locators', wrap(`const locs = [page.locator('a')]; await locs[0].click(); return true;`), '.click('],
+    ['a click through a name assigned after its declaration', wrap(`let b; b = page.locator('#a'); await b.click(); return true;`), '.click('],
+    ['a click through a TYPED declaration', wrap(`const btn: Locator = page.locator('#a'); await btn.click(); return true;`), '.click('],
+    ['an evaluate of an arrow the entry defines', wrap(`const act = () => document.querySelector('#x').click(); await page.evaluate(act); return true;`), '.click('],
+    ['an evaluate of a function the entry declares', wrap(`function act() { (document.querySelector('#x') as HTMLElement).click(); } await page.evaluate(act); return true;`), '.click('],
+    ['an evaluate of a name bound to another name', wrap(`const act = () => { document.forms[0].submit(); }; const go = act; await page.evaluate(go); return true;`), '.submit('],
+    // …(F3): what a page function writes that IS the page.
+    ['an evaluate writing a style', wrap(`await page.evaluate(() => { (document.querySelector('#b') as HTMLElement).style.display = 'none'; }); return true;`), '.style.display='],
+    ['an evaluate writing a property by bracket', wrap(`await page.$eval('#c', (el) => { el['value'] = 'x'; }); return true;`), "['value']="],
+    ['an evaluate moving the location', wrap(`await page.evaluate(() => { window.location.href = '/next'; }); return true;`), '.href='],
+    ['an evaluate writing a cookie', wrap(`await page.evaluate(() => { document.cookie = 'a=b'; }); return true;`), '.cookie='],
+    ['an evaluate writing storage', wrap(`await page.evaluate(() => localStorage.setItem('a', 'b')); return true;`), 'localStorage.setItem('],
+    // …(F7): the tab and browser calls that change which page the run is on.
+    ['tabs.close', wrap(`await tabs.close('page:2'); return tabs.list().length === 1;`, '{ page, tabs }'), 'tabs.close('],
+    ['tabs.openedBy', wrap(`await tabs.openedBy(() => undefined); return true;`, '{ tabs }'), 'tabs.openedBy('],
+    ['browsers.switchTo', wrap(`await ctx.browsers.switchTo('b'); return true;`, 'ctx'), 'browsers.switchTo('],
+    ['a local alias of the run\'s tabs', wrap(`const tabs = ctx.tabs; await tabs.switchTo('page:2'); return true;`, 'ctx'), 'tabs.switchTo('],
+    ['close() on the active page', wrap(`await tabs.active().close(); return true;`, '{ tabs }'), '.close('],
+    // …and the page's own state-changing calls, on a Playwright receiver.
+    ['page.setContent', wrap(`await page.setContent('<p/>'); return true;`), '.setContent('],
+    ['context.clearCookies', wrap(`await context.clearCookies(); return true;`, '{ page, context }'), '.clearCookies('],
   ])('refuses %s', (_what, code, named) => {
     const complaint = conditionEntryComplaint(code);
     expect(complaint).toBeDefined();
@@ -601,6 +645,37 @@ describe('stepParameters on a dotted name whose root the frame renames', () => {
     expect(stepParameters(binding, live)).toEqual([{ name: 'order.id', value: 'ORD-1001' }]);
   });
 
+  it('is accounted for when the model names the RENAMED dotted token, as a flat rename is (review round 2, F4)', () => {
+    // The model is shown `{{__skill1_order.id}}` — the text the skill body ran
+    // with — and names it back. Measured before the fix: the accounting looked
+    // for the authored `order.id`, declined "{{order.id}} appears in no
+    // recorded action", and the step was written `ai: true` before its prompt
+    // was built. The flat rename beside it was always accepted.
+    const accounted = accountPlaceholders({
+      binding,
+      actions: [{ action: 'type', selector: '#q', value: '{{__skill1_order.id}}' }],
+      resolvedParameters: live,
+      recordingCarriesPlaceholders: true,
+    });
+    expect(accounted).toEqual({ recoveredByValue: [], preChangeFallback: false });
+    const flat = accountPlaceholders({
+      binding: { ...binding, source: 'Open order {{ref}}', scope: { renames: { ref: '__skill1_ref' }, inputs: {} } },
+      actions: [{ action: 'type', selector: '#q', value: '{{__skill1_ref}}' }],
+      resolvedParameters: { __skill1_ref: 'R-1' },
+      recordingCarriesPlaceholders: true,
+    });
+    expect(flat).toEqual(accounted);
+    // …and still declines a transcript that named neither.
+    expect(
+      accountPlaceholders({
+        binding,
+        actions: [{ action: 'type', selector: '#q', value: 'something else' }],
+        resolvedParameters: live,
+        recordingCarriesPlaceholders: true,
+      }).decline,
+    ).toBe('{{order.id}} appears in no recorded action');
+  });
+
   it('lets the leak guard catch a condition entry that hard-codes the item', async () => {
     const LINE = 'While the {{order.id}} row is shown, Close it';
     const result = await generateConditionEntry({
@@ -638,12 +713,15 @@ describe('reviewCandidate over a file with a condition entry', () => {
     `{ source: ${JSON.stringify(WHILE)}, async condition({ page }) { return (await page.locator('#next:enabled').count()) > 0; } }`,
   );
 
-  async function review(revision: string): Promise<{ events: string[]; replaced: string | undefined }> {
+  async function review(
+    revision: string,
+    before: string = original,
+  ): Promise<{ events: string[]; replaced: string | undefined }> {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'review-condition-'));
     const target = path.join(dir, 'statements.steps.ts');
     let replaced: string | undefined;
     const candidate = {
-      contentOf: () => original,
+      contentOf: () => before,
       touchedFiles: () => [target],
       replaceFile: async (_f: string, text: string) => { replaced = text; },
     } as unknown as Candidate;
@@ -689,5 +767,37 @@ describe('reviewCandidate over a file with a condition entry', () => {
     );
     expect(events.at(-1)).toBe('revised statements.steps.ts');
     expect(replaced).toContain('isEnabled()');
+  });
+
+  // Review round 2 (F5): the check is for what the REVIEWER did. A hand-written
+  // condition the static check dislikes — here it waits — sat in the file
+  // before the review and the revision left it alone; measured before the fix,
+  // every revision of the file was rejected over it, whatever it changed.
+  const handWritten =
+    `{ source: ${JSON.stringify(WHILE)}, async condition({ page }) { await page.locator('#next').waitFor({ timeout: 500 }).catch(() => {}); return (await page.locator('#next:enabled').count()) > 0; } }`;
+
+  it('accepts a revision that leaves an existing condition entry as it was, however it reads', async () => {
+    const before = file(handWritten);
+    const revision = before.replace("await page.click('#next');", "await page.getByRole('button', { name: 'Next' }).click();");
+    const { events, replaced } = await review(revision, before);
+    expect(events.at(-1)).toBe('revised statements.steps.ts');
+    expect(replaced).toContain("getByRole('button', { name: 'Next' })");
+    expect(replaced).toContain('waitFor({ timeout: 500 })');
+  });
+
+  it('still judges an existing condition entry the revision REWROTE', async () => {
+    const before = file(handWritten);
+    const revision = before.replace('timeout: 500', 'timeout: 800');
+    const { events, replaced } = await review(revision, before);
+    expect(replaced).toBeUndefined();
+    expect(events.at(-1)).toMatch(/^rejected: the revision breaks the condition entry for .*waitFor.* — the generated file stands$/);
+  });
+
+  it('judges an entry the revision turned INTO a condition', async () => {
+    const before = file(`{ source: ${JSON.stringify(WHILE)}, async run({ page }) { await page.click('#next'); } }`);
+    const revision = file(`{ source: ${JSON.stringify(WHILE)}, async condition({ page }) { await page.locator('#next').click(); return true; } }`);
+    const { events, replaced } = await review(revision, before);
+    expect(replaced).toBeUndefined();
+    expect(events.at(-1)).toMatch(/^rejected: the revision breaks the condition entry for .*`\.click\(`/);
   });
 });

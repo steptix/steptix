@@ -119,13 +119,20 @@ export function isSkippedPass(event) {
  * step-skip-core.ts gives: the server writes a standalone sentence for a
  * report cell, and pasted after "skipped" it stutters.
  *
+ * A skipped line whose CONDITION's compiled code threw on that visit (`stale`,
+ * the event's `codeBehindStale`) leads with ⚠ — the gutter's mark — and says
+ * the second fact after the first, as step-skip-core.ts does.
+ *
  * @param {number} line
  * @param {string} [reason]
+ * @param {{error: string}} [stale]
  * @returns {string}
  */
 export const SKIP_GLYPH = "◌";
 
-export function skipPanelLine(line, reason) {
+export function skipPanelLine(line, reason, stale) {
   const trimmed = reason?.trim().replace(/^skipped\b\s*:?\s*/i, "");
-  return `${SKIP_GLYPH} Step on line ${line} skipped${trimmed ? ` — ${trimmed}` : ""}`;
+  const glyph = stale ? "⚠" : SKIP_GLYPH;
+  const broken = stale ? `; condition code-behind failed: ${stale.error}` : "";
+  return `${glyph} Step on line ${line} skipped${trimmed ? ` — ${trimmed}` : ""}${broken}`;
 }

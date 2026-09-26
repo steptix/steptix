@@ -110,19 +110,43 @@ export function skipHoverMessage(reason: string | undefined): string | undefined
 }
 
 /**
+ * A skipped line whose CONDITION's compiled code threw on the visit that then
+ * took another member — the `step:pass` that carries both `output: 'skipped'`
+ * and `codeBehindStale` (stories/codebehind-loops-and-conditions.md, review
+ * round 1's R2). The gutter paints it ⚠ and its hover says both facts; every
+ * line below says both too, in the same order: the skip, then what the code
+ * threw. Without `stale` a line is byte-identical to what it always was.
+ */
+export interface StaleSkip {
+  error: string;
+}
+
+/** The glyph a skipped line leads with: ◌, or ⚠ when its condition's code
+ *  broke — the mark the gutter beside it wears. */
+function glyphOf(stale?: StaleSkip): string {
+  return stale ? '⚠' : SKIP_GLYPH;
+}
+
+/** The second fact a stale skip carries, or nothing. The words are the
+ *  panel's own (`formatStepFailure`'s "condition code-behind failed"). */
+function brokenCondition(stale?: StaleSkip): string {
+  return stale ? `; condition code-behind failed: ${stale.error}` : '';
+}
+
+/**
  * The interactive run log's line — the surface `✓ step 12 passed` and
  * `✗ step 12 failed: …` share (run-controller.ts).
  */
-export function skipRunLogLine(line: number, reason?: string): string {
-  return `${SKIP_GLYPH} step ${line} skipped${because(reason)}`;
+export function skipRunLogLine(line: number, reason?: string, stale?: StaleSkip): string {
+  return `${glyphOf(stale)} step ${line} skipped${because(reason)}${brokenCondition(stale)}`;
 }
 
 /**
  * The compile log's line, indented under its phase and addressing the step by
  * source line the way the `✓ step on line 12` beside it does.
  */
-export function skipCompileLogLine(line: number, reason?: string): string {
-  return `${SKIP_GLYPH} step on line ${line} skipped${because(reason)}`;
+export function skipCompileLogLine(line: number, reason?: string, stale?: StaleSkip): string {
+  return `${glyphOf(stale)} step on line ${line} skipped${because(reason)}${brokenCondition(stale)}`;
 }
 
 /**
@@ -133,8 +157,8 @@ export function skipCompileLogLine(line: number, reason?: string): string {
  * import this module, for the Vite CJS-interop reason that file's docstring
  * gives — and pinned by `tests/failure-text-copy-parity.test.js`.
  */
-export function skipPanelLine(line: number, reason?: string): string {
-  return `${SKIP_GLYPH} Step on line ${line} skipped${because(reason)}`;
+export function skipPanelLine(line: number, reason?: string, stale?: StaleSkip): string {
+  return `${glyphOf(stale)} Step on line ${line} skipped${because(reason)}${brokenCondition(stale)}`;
 }
 
 /**
@@ -143,6 +167,6 @@ export function skipPanelLine(line: number, reason?: string): string {
  * `whereOf` builds). Same vocabulary as the run log, same shape as the
  * `✓ step on line 12 of login.md passed` beside it.
  */
-export function skipTestOutputLine(line: number, where: string, reason?: string): string {
-  return `${SKIP_GLYPH} step on line ${line}${where} skipped${because(reason)}`;
+export function skipTestOutputLine(line: number, where: string, reason?: string, stale?: StaleSkip): string {
+  return `${glyphOf(stale)} step on line ${line}${where} skipped${because(reason)}${brokenCondition(stale)}`;
 }

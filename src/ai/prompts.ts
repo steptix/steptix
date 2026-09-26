@@ -1127,6 +1127,13 @@ export interface StepCodePromptInput {
    *  or nothing — see {@link formatParameterBlock}'s `map`. */
   parameterMap?: Record<string, string>;
   /**
+   * The run's free-text mask set — `runSecrets` over the map these values came
+   * out of — so a value no key names as secret still has a secret INSIDE it
+   * masked (`auth: "Bearer <the key>"`), as the run's own step prompt masks
+   * it. Empty masks by name alone.
+   */
+  secrets?: string[] | undefined;
+  /**
    * The environment references the step makes — `${data.url}`, `${env.X}`,
    * `${<source>.path}` — each with what it resolved to on this run. The name
    * inside the braces is the `step.getVar` name that reads it at run time
@@ -1668,7 +1675,7 @@ export function buildStepCodePrompt(input: StepCodePromptInput): ChatMessage {
     input.parameters,
     input.envRefs ?? [],
     new Set<string>(),
-    [],
+    input.secrets ?? [],
     input.parameterMap,
   );
 
@@ -1879,6 +1886,8 @@ export interface ConditionCodePromptInput {
   parameters: Array<{ name: string; value: string }>;
   /** The live map those came out of, for §7.6's dotted-name rule. */
   parameterMap?: Record<string, string> | undefined;
+  /** The run's free-text mask set, as for a step. */
+  secrets?: string[] | undefined;
   envRefs?: Array<{ ref: string; value: string }> | undefined;
   testInfoSection?: string | undefined;
   wholeTest?: Array<{ index: number; text: string; inScope: boolean; isThisStep: boolean }> | undefined;
@@ -1945,7 +1954,7 @@ export function buildConditionCodePrompt(input: ConditionCodePromptInput): ChatM
     input.parameters,
     input.envRefs ?? [],
     new Set<string>(),
-    [],
+    input.secrets ?? [],
     input.parameterMap,
   );
 

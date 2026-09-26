@@ -310,12 +310,18 @@ export async function reviewCandidate(
 }
 
 /**
- * The first entry that was a `condition` entry before a revision and is not a
- * clean one after it — no longer defining `condition`, or failing
- * `conditionEntryComplaint` — described for the rejection line; null when every
- * one survived. Entries are paired by identity (section + source) and, for
- * identically-worded ones, by their order, the pairing `describeEntryChange`
- * has already confirmed is one-to-one.
+ * The first condition entry the revision CHANGED into something that is not a
+ * clean condition — no longer defining `condition`, or failing
+ * `conditionEntryComplaint` — described for the rejection line; null when
+ * every one survived. Entries are paired by identity (section + source) and,
+ * for identically-worded ones, by their order, the pairing
+ * `describeEntryChange` has already confirmed is one-to-one.
+ *
+ * Only what the revision touched is judged: an entry whose code it left as it
+ * was (whitespace aside) is the file's, not the reviewer's, and a hand-written
+ * condition the static check happens to dislike must not block every review
+ * of the file it sits in. An entry the revision turned INTO a condition is
+ * judged like one it rewrote.
  */
 function conditionEntryBroken(
   before: Array<{ source: string; section: string; code: string }>,
@@ -323,6 +329,7 @@ function conditionEntryBroken(
 ): string | null {
   const sep = String.fromCharCode(0);
   const key = (e: { source: string; section: string }): string => `${e.section}${sep}${e.source}`;
+  const same = (a: string, b: string): boolean => a.replace(/\s+/g, '') === b.replace(/\s+/g, '');
   const pending = new Map<string, Array<{ code: string }>>();
   for (const e of after) {
     const list = pending.get(key(e)) ?? [];
@@ -331,8 +338,11 @@ function conditionEntryBroken(
   }
   for (const e of before) {
     const revised = pending.get(key(e))?.shift();
-    if (!revised || !entryDefinesCondition(e.code)) continue;
-    if (!entryDefinesCondition(revised.code)) {
+    if (!revised || same(e.code, revised.code)) continue;
+    const was = entryDefinesCondition(e.code);
+    const is = entryDefinesCondition(revised.code);
+    if (!was && !is) continue;
+    if (was && !is) {
       return `turns the condition entry for ${JSON.stringify(e.source)} into something that is not one`;
     }
     const complaint = conditionEntryComplaint(revised.code);

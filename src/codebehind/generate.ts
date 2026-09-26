@@ -186,12 +186,17 @@ export interface GenerateStepEntryOptions {
    * The map whose loop-binding marks decide which dotted names in the
    * prompt's parameter block are a pass's (`row.keyword`, record rule) and
    * which are the author's (`user.apikey`, whole-key rule) — §7.6. The live
-   * compiler passes its snapshot, which `liveCompileSnapshot` marks. The
-   * boxed compile passes nothing: its `resolvedParameters` is
-   * `report.parameters`, an unmarked copy of the already-redacted map, and
-   * handing that over would put `row.keyword` under the author rule.
+   * compiler passes its snapshot, which `liveCompileSnapshot` marks; the
+   * boxed compile passes its `passSnapshots` fold, which marks what each
+   * pass bound the way `applyPassBindings` does.
    */
   parameterMap?: Record<string, string> | undefined;
+  /**
+   * The run's free-text mask set (`runSecrets` over that map), so a value no
+   * key names as secret still has a secret inside it masked in the prompt —
+   * `auth: "Bearer <the key>"`. Both compilers pass it.
+   */
+  secrets?: string[] | undefined;
   /**
    * The env/data context the test was parsed with, for resolving `${data.url}`
    * and kin (stories/codebehind-env-data.md). Absent when the compile ran
@@ -312,6 +317,7 @@ export async function generateStepEntry(
     rawStepText: binding.source,
     parameters,
     ...(options.parameterMap && { parameterMap: options.parameterMap }),
+    ...(options.secrets && options.secrets.length > 0 && { secrets: options.secrets }),
     ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
     actions: options.actions,
     ...(options.assertions && options.assertions.length > 0 && {
@@ -1299,7 +1305,16 @@ export function accountPlaceholders(options: {
     // Decision 6: the expander baked this one into the text, so no token can
     // exist. Today's behaviour, no warning, no decline.
     if (renamed === undefined && boundValue(binding.scope.inputs, name) !== undefined) continue;
-    judge(name, renamed ?? name, boundValue(options.resolvedParameters, renamed ?? name));
+    // A DOTTED name whose root the frame renames — `{{order.id}}` in a skill
+    // body whose `For each {{order}}` the expander rewrote — is shown to the
+    // model, and so named back by it, as `{{__skill1_order.id}}`: the renamed
+    // root plus the property. The same `dottedThroughRename` `stepParameters`
+    // resolves its value through, in the same precedence (a full-name rename
+    // or an input wins). Looking for the authored `order.id` instead declined
+    // every such step "appears in no recorded action" and wrote it `ai: true`
+    // before its prompt was ever built.
+    const token = renamed ?? dottedThroughRename(name, binding.scope.renames) ?? name;
+    judge(name, token, boundValue(options.resolvedParameters, token));
   }
   for (const ref of envDataRefsIn(binding.source)) {
     judge(
@@ -1516,11 +1531,14 @@ const CONDITION_FORBIDDEN: ReadonlyArray<{ re: RegExp; why: string }> = [
     re: /(?:^|[^\w$.])setTimeout\s*\(/,
     why: 'sleeps. The page has already settled; answer about it now',
   },
-  // Any call on the run's tabs or browsers, on any receiver — `tabs.open(`
-  // destructured, `ctx.tabs.open(` not. A condition has no business with
-  // either. (A LOCAL named `tabs` is exempted in `forbiddenCall`.)
+  // The tab and browser calls that CHANGE which page the run is on
+  // (src/codebehind/types.ts) — on any receiver: `tabs.open(` destructured,
+  // `ctx.tabs.open(`, a local alias of either. The read-only ones —
+  // `tabs.list()`, `tabs.active()`, `browsers.list()`,
+  // `browsers.activeLabel()` — answer a question about the run, which is a
+  // condition's business (`If a second tab is open, …`).
   {
-    re: /(?:^|[^\w$])(?:tabs|browsers)\s*\.\s*[\w$]+\s*\(/,
+    re: /(?:^|[^\w$])(?:tabs\s*\.\s*(?:open|openedBy|switchTo|close)|browsers\s*\.\s*(?:open|switchTo|close))\s*\(/,
     why: 'opens, switches or closes a tab or browser. A condition reads the page the run is on',
   },
   // On any receiver: `step.setVar(`, `ctx.step.setVar(`, a destructured `setVar(`.
@@ -1531,13 +1549,15 @@ const CONDITION_FORBIDDEN: ReadonlyArray<{ re: RegExp; why: string }> = [
 ];
 
 /**
- * Playwright calls that act on the page, refused on a Playwright RECEIVER
+ * Playwright calls that act on the page — or on the page's context, which is
+ * the page's next state — refused on a Playwright RECEIVER
  * ({@link isPlaywrightReceiver}): `page.close()`, `locator.fill('x')`,
- * `page.getByLabel('Cash').check()`. The same names on anything else — an
- * array, a map, a helper object — are ordinary JavaScript.
+ * `page.getByLabel('Cash').check()`, `page.setContent(…)`,
+ * `context.clearCookies()`. The same names on anything else — an array, a map,
+ * a helper object — are ordinary JavaScript.
  */
 const CONDITION_PAGE_ACTIONS =
-  /\.\s*(click|dblclick|fill|type|press|pressSequentially|check|uncheck|setChecked|selectOption|selectText|setInputFiles|hover|tap|focus|blur|dragTo|dragAndDrop|dispatchEvent|clear|scrollIntoViewIfNeeded|close)\s*\(/g;
+  /\.\s*(click|dblclick|fill|type|press|pressSequentially|check|uncheck|setChecked|selectOption|selectText|setInputFiles|hover|tap|focus|blur|dragTo|dragAndDrop|dispatchEvent|clear|scrollIntoViewIfNeeded|close|setContent|addScriptTag|addStyleTag|addInitScript|setViewportSize|bringToFront|route|unroute|newPage|newContext|clearCookies|addCookies|setExtraHTTPHeaders|emulateMedia|exposeFunction|exposeBinding|setGeolocation|grantPermissions|clearPermissions|setOffline)\s*\(/g;
 
 const CONDITION_PAGE_ACTION_WHY =
   'acts on the page. A condition answers a question about the page and must not change the ' +
@@ -1547,14 +1567,36 @@ const CONDITION_PAGE_ACTION_WHY =
 /** Identifiers that name a Playwright page-level object when they root a chain. */
 const PLAYWRIGHT_ROOTS = new Set(['page', 'frame', 'context', 'browser']);
 
-/** A call that makes a Playwright locator or element handle out of anything. */
-const PLAYWRIGHT_MAKER = /(?:^|[^\w$])(?:locator|getBy[A-Za-z]+|frameLocator|contentFrame|\$\$?)\s*\(/;
+/** A call that makes a Playwright locator, element handle or page out of
+ *  anything — `tabs.active()` included, which hands back the active page. */
+const PLAYWRIGHT_MAKER =
+  /(?:^|[^\w$])(?:locator|getBy[A-Za-z]+|frameLocator|contentFrame|\$\$?)\s*\(|(?:^|[^\w$])tabs\s*\.\s*active\s*\(/;
+
+/**
+ * Calls — and one property — whose RESULT is a value read off the page, never
+ * a Playwright object: `await page.locator('li').count()` is a number,
+ * `await locator.allTextContents()` an array of strings, `texts.length` a
+ * number. A name bound from one is data. The page-object half (`all()`,
+ * `first()`, `$()`, `elementHandle()`, …) is deliberately absent: those hand
+ * back receivers.
+ */
+const VALUE_READS = new Set([
+  // Playwright reads.
+  'count', 'textContent', 'innerText', 'innerHTML', 'inputValue', 'getAttribute',
+  'isChecked', 'isVisible', 'isHidden', 'isEnabled', 'isDisabled', 'isEditable',
+  'allTextContents', 'allInnerTexts', 'title', 'url', 'content', 'boundingBox',
+  'evaluate', 'evaluateAll', '$eval', '$$eval', 'ariaSnapshot', 'jsonValue',
+  // JavaScript that answers with a primitive.
+  'length', 'toString', 'trim', 'toLowerCase', 'toUpperCase', 'includes', 'startsWith',
+  'endsWith', 'indexOf', 'test', 'join', 'some', 'every',
+]);
 
 /**
  * The receiver of the call whose `.` is at `dot`, read backwards over the
  * member chain — identifiers, `.`/`?.`, `!`, and balanced `( )` / `[ ]` groups
  * — in code whose strings are already blanked. `page.getByLabel(…).first()`
- * for `….first().check(`; `(await page.$('#a'))` for `(await page.$('#a')).click(`.
+ * for `….first().check(`; `(await page.$('#a'))` for `(await page.$('#a')).click(`;
+ * `el` for `el?.check(` — optional chaining is still a call on `el`.
  * Returns the chain and whether a `new` precedes it (a freshly constructed
  * object — `new Array(3).fill(0)` — is never the page).
  */
@@ -1563,6 +1605,8 @@ function receiverBefore(text: string, dot: number): { chain: string; constructed
   const skipSpace = (): void => {
     while (i >= 0 && /\s/.test(text[i]!)) i--;
   };
+  // `el?.check(`: the `?` of the call's own `?.`.
+  if (text[i] === '?') i--;
   skipSpace();
   for (;;) {
     while (i >= 0 && text[i] === '!') i--; // TS non-null
@@ -1592,33 +1636,153 @@ function receiverBefore(text: string, dot: number): { chain: string; constructed
     if ((c === ')' || c === ']') && i >= 0 && /[\w$)\]]/.test(text[i]!)) continue;
     break;
   }
-  const chain = text.slice(i + 1, dot).trim();
+  const chain = text.slice(i + 1, dot).replace(/\?\s*$/, '').trim();
   const before = text.slice(Math.max(0, i - 8), i + 1);
   return { chain, constructed: /(?:^|[^\w$])new\s*$/.test(before) };
+}
+
+/** Split `text` at its depth-0 commas (strings are already blanked). */
+function topLevelParts(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let k = 0; k < text.length; k++) {
+    const c = text[k]!;
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    else if (c === ',' && depth === 0) {
+      parts.push(text.slice(start, k));
+      start = k + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts.map((p) => p.trim()).filter((p) => p !== '');
+}
+
+/** The index of the bracket closing the one at `open`, or -1. */
+function closingOf(text: string, open: number): number {
+  const o = text[open]!;
+  const c = o === '(' ? ')' : o === '[' ? ']' : '}';
+  let depth = 0;
+  for (let k = open; k < text.length; k++) {
+    if (text[k] === o) depth++;
+    else if (text[k] === c && --depth === 0) return k;
+  }
+  return -1;
+}
+
+/** An expression with the wrapping it cannot be told apart by stripped:
+ *  leading `await`s, a trailing TS `!` / `as T`, and parentheses round the
+ *  whole of it. */
+function unwrapExpression(expr: string): string {
+  let e = expr.trim().replace(/;\s*$/, '');
+  for (;;) {
+    const before = e;
+    e = e.replace(/^await\s+/, '').replace(/\s+as\s+[\w$.<>[\], ]+$/, '').replace(/!+$/, '').trim();
+    if (e.startsWith('(') && closingOf(e, 0) === e.length - 1) e = e.slice(1, -1).trim();
+    if (e === before) return e;
+  }
+}
+
+/** The member name of an expression's LAST depth-0 access — `count` for
+ *  `page.locator('li').count()`, `length` for `texts.length` — or undefined. */
+function lastTopLevelMember(expr: string): string | undefined {
+  let depth = 0;
+  let last: string | undefined;
+  for (let k = 0; k < expr.length; k++) {
+    const c = expr[k]!;
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    else if (c === '.' && depth === 0) {
+      const m = /^\.\s*([A-Za-z_$][\w$]*)/.exec(expr.slice(k));
+      if (m) last = m[1];
+    }
+  }
+  return last;
+}
+
+/** Does the expression compute a primitive at its top level — a comparison,
+ *  arithmetic, a negation, `typeof`? Its result is then data whatever it read. */
+function computesPrimitive(expr: string): boolean {
+  if (/^(?:!(?!=)|typeof\b|void\b|-|\+(?!\+))/.test(expr)) return true;
+  let depth = 0;
+  for (let k = 0; k < expr.length; k++) {
+    const c = expr[k]!;
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    else if (depth === 0) {
+      const rest = expr.slice(k, k + 3);
+      if (/^(?:===|!==|==|!=|<=|>=)/.test(rest)) return true;
+      if ((c === '<' || c === '>') && expr[k - 1] !== '=' && expr[k + 1] !== '>') return true;
+      if ('*/%'.includes(c) && expr[k + 1] !== '*' && expr[k - 1] !== '*') return true;
+      if ((c === '+' || c === '-') && expr[k + 1] !== c && expr[k - 1] !== c) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Is a binding's right-hand side a Playwright page, frame, locator or handle —
+ * or a thing that holds one? A fresh `new …` is not; an array literal is when
+ * one of its elements is (`[page.locator('a')]`, never `[]` or `[false]`); a
+ * value READ is not, however it was reached (`await page.locator('li').count()`
+ * is a number); anything else is when {@link isPlaywrightReceiver} says so. An
+ * arrow function is judged by what it returns, so `(s) => page.locator(s)`
+ * binds a locator-maker and `(s) => s.length > 0` does not.
+ */
+function rhsIsReceiver(rhs: string, names: ReadonlySet<string>): boolean {
+  let e = unwrapExpression(rhs);
+  const arrow = /^(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*/.exec(e);
+  if (arrow) e = unwrapExpression(e.slice(arrow[0].length));
+  if (/^new\b/.test(e)) return false;
+  if (e.startsWith('[') && closingOf(e, 0) === e.length - 1) {
+    return topLevelParts(e.slice(1, -1)).some((part) => rhsIsReceiver(part, names));
+  }
+  if (computesPrimitive(e)) return false;
+  const last = lastTopLevelMember(e);
+  if (last !== undefined && VALUE_READS.has(last)) return false;
+  return isPlaywrightReceiver(e, names);
 }
 
 /**
  * Names bound to a Playwright page, frame, locator or handle anywhere in the
  * entry, to a fixpoint: a `page` alias from the destructure (`{ page: p }`),
- * `const next = page.getByRole(…)`, `const rows = await next.all()`, and the
- * loop variable of `for (const row of await rows…)`. Approximate by design —
- * a right-hand side is read to the end of its line — and generous: a name it
- * wrongly marks only matters if the entry then calls a page action on it.
+ * `const next = page.getByRole(…)`, `let b; b = page.locator(…)`,
+ * `const rows = await next.all()`, `const locs = [page.locator('a')]`, and the
+ * loop variable of `for (const row of await rows…)`. A name bound from a value
+ * READ is data, not a receiver ({@link rhsIsReceiver}). Approximate by design —
+ * a right-hand side is read to the end of its line — and generous otherwise: a
+ * name it wrongly marks only matters if the entry then calls a page action on
+ * it.
  */
 function playwrightNames(text: string): Set<string> {
   const names = new Set<string>();
   for (const m of text.matchAll(/\bpage\s*:\s*([A-Za-z_$][\w$]*)/g)) names.add(m[1]!);
   const bindings: Array<{ targets: string[]; rhs: string }> = [];
-  for (const m of text.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*|\[[^\]]*\]|\{[^}]*\})\s*=\s*([^;\n]+)/g)) {
+  // A TypeScript annotation between the name and the `=` is read past:
+  // `const btn: Locator = page.locator('#a')` binds `btn` as surely as the
+  // untyped form does.
+  for (const m of text.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*|\[[^\]]*\]|\{[^}]*\})\s*(?::[^=;\n]+)?=\s*([^;\n]+)/g)) {
     bindings.push({ targets: [...m[1]!.matchAll(/[A-Za-z_$][\w$]*/g)].map((t) => t[0]), rhs: m[2]! });
   }
-  for (const m of text.matchAll(/for\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+([^\n]+)/g)) {
+  // A plain assignment after the declaration — `let b; b = page.locator(…)`.
+  // Not a property write (`r.count = …`), not `==` / `=>` / `+=`.
+  for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=(?![=>])\s*([^;\n]+)/g)) {
     bindings.push({ targets: [m[1]!], rhs: m[2]! });
+  }
+  // `for (const row of <iterable>)` — the iterable is the header up to the
+  // parenthesis that closes it, not the rest of the line.
+  for (const m of text.matchAll(/\bfor\s*\(/g)) {
+    const open = m.index! + m[0].length - 1;
+    const close = closingOf(text, open);
+    if (close < 0) continue;
+    const header = /^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+([\s\S]+)$/.exec(text.slice(open + 1, close));
+    if (header) bindings.push({ targets: [header[1]!], rhs: header[2]! });
   }
   for (let changed = true; changed; ) {
     changed = false;
     for (const { targets, rhs } of bindings) {
-      if (/^\s*(?:new\b|\[)/.test(rhs) || !isPlaywrightReceiver(rhs, names)) continue;
+      if (!rhsIsReceiver(rhs, names)) continue;
       for (const t of targets) {
         if (!names.has(t)) {
           names.add(t);
@@ -1633,12 +1797,12 @@ function playwrightNames(text: string): Set<string> {
 /**
  * Is this receiver chain a Playwright page, frame, locator or handle? Yes
  * when it is rooted at (or passes through) `page` / `frame` / `context` /
- * `browser` — `ctx.page` included — when it makes a locator
- * (`locator(`, `getBy…(`, `frameLocator(`, `$(`), or when it uses a name
- * {@link playwrightNames} bound to one. A receiver nothing identifies — a
- * helper's return value, a callback parameter — is NOT treated as one: this
- * is a static backstop for what a model writes, not a type checker, and the
- * next run is the proof either way.
+ * `browser` — `ctx.page` included — when it makes a locator or a page
+ * (`locator(`, `getBy…(`, `frameLocator(`, `$(`, `tabs.active(`), or when it
+ * uses a name {@link playwrightNames} bound to one. A receiver nothing
+ * identifies — a helper's return value, a callback parameter — is NOT treated
+ * as one: this is a static backstop for what a model writes, not a type
+ * checker, and the next run is the proof either way.
  */
 function isPlaywrightReceiver(chain: string, names: ReadonlySet<string>): boolean {
   if (PLAYWRIGHT_MAKER.test(chain)) return true;
@@ -1651,20 +1815,126 @@ function isPlaywrightReceiver(chain: string, names: ReadonlySet<string>): boolea
 /**
  * Inside a function the PAGE runs — `page.evaluate(…)`, `locator.evaluate(…)`,
  * `evaluateAll`, `evaluateHandle`, `$eval` / `$$eval` — every DOM object is
- * the live page, so any of these changes it. Checked over the page function
- * whether it is written as a function or as a string of code.
+ * the live page, so these calls change it. Checked over the page function
+ * whether it is written as a function, as a string of code, or as the name of
+ * a function the entry defines.
  */
-const EVALUATE_MUTATIONS: ReadonlyArray<RegExp> = [
-  /\.\s*(?:click|submit|requestSubmit|dispatchEvent|focus|blur|select|reset|remove|removeChild|append|appendChild|prepend|before|after|replaceWith|replaceChildren|insertAdjacentHTML|insertAdjacentElement|insertAdjacentText|insertBefore|setAttribute|removeAttribute|toggleAttribute|setSelectionRange|setRangeText|showModal|showPicker|execCommand|scrollIntoView|scrollTo|scrollBy)\s*\(/,
+const EVALUATE_MUTATING_CALLS: ReadonlyArray<RegExp> = [
+  /\.\s*(?:click|submit|requestSubmit|dispatchEvent|focus|blur|select|reset|remove|removeChild|append|appendChild|prepend|before|after|replaceWith|replaceChildren|insertAdjacentHTML|insertAdjacentElement|insertAdjacentText|insertBefore|setAttribute|removeAttribute|toggleAttribute|setSelectionRange|setRangeText|showModal|showPicker|execCommand|scrollIntoView|scrollTo|scrollBy|setProperty|removeProperty)\s*\(/,
   /\bclassList\s*\.\s*(?:add|remove|toggle|replace)\s*\(/,
   /\b(?:location|history)\s*\.\s*(?:assign|replace|reload|back|forward|go|pushState|replaceState)\s*\(/,
   /\bwindow\s*\.\s*open\s*\(/,
-  // A property assignment — `el.checked = true`, `el.style.display = 'none'`,
-  // `el['value'] += 'x'`, `location.href = …`. Not `===`, `==`, `=>`.
-  /(?:\.\s*[\w$]+|\])\s*(?:[-+*/%|&^]|\*\*|<<|>>>?|\?\?|&&|\|\|)?=(?![=>])/,
+  /\bdocument\s*\.\s*(?:write|writeln|open|close)\s*\(/,
+  /\b(?:localStorage|sessionStorage)\s*\.\s*(?:setItem|removeItem|clear)\s*\(/,
 ];
 
+/** An assignment operator, compound forms included — not `===`, `==`, `=>`. */
+const ASSIGN = String.raw`\s*(?:[-+*/%|&^]|\*\*|<<|>>>?|\?\?|&&|\|\|)?=(?![=>])`;
+
+/**
+ * The DOM properties whose WRITE changes what the page shows, holds or
+ * submits. A property assignment is refused only when it names one of these
+ * (or `style.*` / `dataset.*`, or the location): a page function may keep its
+ * own locals — `acc[k] = …`, `r.count = …`, `const [next] = …` — and those
+ * change nothing.
+ */
+const DOM_STATE_PROPERTIES =
+  'checked|value|selected|selectedIndex|disabled|readOnly|required|indeterminate|defaultValue|' +
+  'defaultChecked|textContent|innerText|outerText|innerHTML|outerHTML|nodeValue|className|id|' +
+  'hidden|src|href|action|method|type|placeholder|title|name|scrollTop|scrollLeft|open|' +
+  'contentEditable|tabIndex|cookie|on[a-z]+';
+
+const DOM_WRITES: ReadonlyArray<RegExp> = [
+  // `el.checked = true`, `(el as HTMLInputElement).value += 'x'`, `document.title = …`.
+  new RegExp(String.raw`\.\s*(?:${DOM_STATE_PROPERTIES})\b${ASSIGN}`),
+  // `el.style.display = 'none'`, `el.dataset['state'] = …`, `el.style = …`, `el.classList = …`.
+  new RegExp(String.raw`\.\s*(?:style|dataset)\s*(?:\.\s*[\w$]+|\[[^\]]*\])${ASSIGN}`),
+  new RegExp(String.raw`\.\s*(?:style|dataset|classList)${ASSIGN}`),
+  // `el['value'] = …` — the bracket form of a property above.
+  new RegExp(String.raw`\[\s*(['"\x60])(?:${DOM_STATE_PROPERTIES})\1\s*\]${ASSIGN}`),
+  // The location itself: `location = …`, `window.location.href = …`.
+  new RegExp(String.raw`(?:^|[^\w$])location(?:\s*\.\s*[\w$]+)?${ASSIGN}`),
+];
+
+/**
+ * Is the write whose `.` (or `[`) is at `at` into a LOCAL the page function
+ * built itself — `const r = {}`, `let out = []`, `new Map()`, a literal? Then
+ * it changes nothing on the page, whatever the property is called.
+ */
+function writesToLocal(body: string, at: number): boolean {
+  const { chain } = receiverBefore(body, at);
+  const root = /^[\s(]*([A-Za-z_$][\w$]*)/.exec(chain)?.[1];
+  if (root === undefined || root === 'document' || root === 'window') return false;
+  return new RegExp(
+    String.raw`(?:const|let|var)\s+${root.replace(/\$/g, '\\$')}\s*=\s*(?:\{|\[|new\s+(?:Map|Set|WeakMap|Object|Array)\b|['"\x60\d])`,
+  ).test(body);
+}
+
+/** What a page function does that changes the page, named, or undefined. */
+function pageFunctionMutation(body: string): string | undefined {
+  for (const re of EVALUATE_MUTATING_CALLS) {
+    const hit = re.exec(body);
+    if (hit) return hit[0].replace(/\s+/g, '');
+  }
+  for (const re of DOM_WRITES) {
+    const g = new RegExp(re.source, 'g');
+    for (const hit of body.matchAll(g)) {
+      const dot = hit[0].search(/[.[]/);
+      if (dot >= 0 && writesToLocal(body, hit.index! + dot)) continue;
+      return hit[0].replace(/^[^\w$.[]/, '').replace(/\s+/g, '');
+    }
+  }
+  return undefined;
+}
+
 const EVALUATE_CALL = /\.\s*(evaluate|evaluateAll|evaluateHandle|\$eval|\$\$eval)\s*\(/g;
+
+/**
+ * The text of the function `name` the entry defines — `const act = () => …`,
+ * `let act = function () { … }`, `function act() { … }` — raw, comments
+ * blanked, strings kept, or undefined when the entry defines no such function.
+ * Read to the end of its statement: a depth-0 `;`, the end of the block it
+ * sits in, or a depth-0 line break that starts another statement.
+ */
+function definitionOf(code: string, text: string, scanned: ReturnType<typeof scan>, name: string): string | undefined {
+  const escaped = name.replace(/\$/g, '\\$');
+  const declared = new RegExp(String.raw`(?:const|let|var)\s+${escaped}\s*=\s*`).exec(text);
+  const fn = new RegExp(String.raw`\bfunction\s*\*?\s*${escaped}\s*\(`).exec(text);
+  const start = declared ? declared.index + declared[0].length : fn ? fn.index : -1;
+  if (start < 0) return undefined;
+  let depth = 0;
+  let end = code.length;
+  for (let k = start; k < code.length; k++) {
+    if (scanned.mask[k] !== CODE) continue;
+    const c = code[k]!;
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) {
+      depth--;
+      if (depth < 0) {
+        end = k;
+        break;
+      }
+      // `function act() { … }` ends at its own body's brace.
+      if (depth === 0 && c === '}' && !declared) {
+        end = k + 1;
+        break;
+      }
+    } else if (depth === 0 && c === ';') {
+      end = k;
+      break;
+    } else if (
+      depth === 0
+      && c === '\n'
+      && /^\s*(?:const|let|var|return|await|if|for|while|function|throw)\b/.test(text.slice(k + 1))
+    ) {
+      end = k;
+      break;
+    }
+  }
+  let body = '';
+  for (let k = start; k < end; k++) body += scanned.mask[k] === COMMENT ? ' ' : code[k];
+  return body;
+}
 
 /**
  * The page function of every evaluate call — the first argument, or the second
@@ -1672,6 +1942,11 @@ const EVALUATE_CALL = /\.\s*(evaluate|evaluateAll|evaluateHandle|\$eval|\$\$eval
  * comments blanked and the strings KEPT, since a page function can be a string
  * of code. Only the page function: a string passed as the evaluate's `arg` is
  * data, and a selector like `'a[href=x]'` must not read as an assignment.
+ *
+ * A page function passed by NAME — `const act = () => …; page.evaluate(act)` —
+ * is the function the entry defines under that name (resolved a few levels
+ * deep, for a name bound to another name), so a click cannot be moved out of
+ * the call to get past the check.
  */
 function evaluateBodies(code: string, text: string, scanned: ReturnType<typeof scan>): string[] {
   const out: string[] = [];
@@ -1699,29 +1974,25 @@ function evaluateBodies(code: string, text: string, scanned: ReturnType<typeof s
     if (!span) continue;
     let body = '';
     for (let k = span[0]; k < span[1]; k++) body += scanned.mask[k] === COMMENT ? ' ' : code[k];
+    for (let hops = 0; hops < 4; hops++) {
+      const name = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(body)?.[1];
+      if (name === undefined) break;
+      const defined = definitionOf(code, text, scanned, name);
+      if (defined === undefined) break;
+      body = defined;
+    }
     out.push(body);
   }
   return out;
 }
 
-/** A local `const tabs = …` / `let browsers` shadows the run's own. */
-function declaresLocal(text: string, name: string): boolean {
-  return new RegExp(`(?:const|let|var)\\s+${name}\\b`).test(text);
-}
-
 /** The first forbidden call in the entry, named, with why — or undefined. */
 function forbiddenCall(code: string, text: string): string | undefined {
   for (const { re, why } of CONDITION_FORBIDDEN) {
-    const g = new RegExp(re.source, 'g');
-    for (const match of text.matchAll(g)) {
-      const call = match[0].replace(/^[^\w$.]/, '').replace(/\s+/g, '');
-      const bare = /^(tabs|browsers)\./.exec(call);
-      // A bare `tabs.` whose name the entry declares is its own variable.
-      if (bare && !/\.\s*$/.test(text.slice(0, match.index! + 1)) && declaresLocal(text, bare[1]!)) {
-        continue;
-      }
-      return `The entry calls \`${call}\`, which ${why}.`;
-    }
+    const match = re.exec(text);
+    if (!match) continue;
+    const call = match[0].replace(/^[^\w$.]/, '').replace(/\s+/g, '');
+    return `The entry calls \`${call}\`, which ${why}.`;
   }
 
   const names = playwrightNames(text);
@@ -1733,16 +2004,13 @@ function forbiddenCall(code: string, text: string): string | undefined {
 
   const scanned = scan(code);
   for (const body of evaluateBodies(code, text, scanned)) {
-    for (const re of EVALUATE_MUTATIONS) {
-      const hit = re.exec(body);
-      if (!hit) continue;
-      const what = hit[0].replace(/\s+/g, '');
-      return (
-        `The entry's page function (\`evaluate\`) does \`${what}\`, which changes the page. A ` +
-        'condition only reads: a page function may return what it finds, never click, submit, ' +
-        'dispatch, focus or assign to the DOM.'
-      );
-    }
+    const what = pageFunctionMutation(body);
+    if (what === undefined) continue;
+    return (
+      `The entry's page function (\`evaluate\`) does \`${what}\`, which changes the page. A ` +
+      'condition only reads: a page function may return what it finds, never click, submit, ' +
+      'dispatch, focus or write to the DOM.'
+    );
   }
   return undefined;
 }
@@ -1843,19 +2111,31 @@ export function entryDefinesCondition(code: string): boolean {
  * or a `run` variable in the body is not a `run` definition. Then the calls a
  * condition must not make:
  *
- *  - the keyboard, the mouse, navigation, waits, sleeps, any tab or browser
- *    call and any `setVar`, on whatever receiver;
- *  - a page ACTION (`click`, `fill`, `check`, `clear`, `close`, …) only on a
- *    Playwright receiver — `page`, `frame`, `context`, `browser`, a
- *    `locator(…)` / `getBy…(…)` / `frameLocator(…)` / `$(…)` chain, or a name
- *    bound from one — because `new Array(3).fill(0)` and `map.clear()` are
- *    ordinary JavaScript. A receiver nothing identifies (a helper's return
- *    value, a callback parameter) is let through: this is a backstop for what
- *    a model writes, not a type checker;
+ *  - the keyboard, the mouse, navigation, waits, sleeps, a tab or browser
+ *    call that changes which page the run is on (`tabs.open` / `openedBy` /
+ *    `switchTo` / `close`, `browsers.open` / `switchTo` / `close` — the reads
+ *    `list()`, `active()` and `activeLabel()` are allowed) and any `setVar`,
+ *    on whatever receiver;
+ *  - a page ACTION (`click`, `fill`, `check`, `clear`, `close`, `setContent`,
+ *    `route`, `clearCookies`, …) only on a Playwright receiver — `page`,
+ *    `frame`, `context`, `browser`, a `locator(…)` / `getBy…(…)` /
+ *    `frameLocator(…)` / `$(…)` / `tabs.active()` chain, or a name bound from
+ *    one (declared, assigned later, destructured, held in an array literal, or
+ *    a `for … of` item), called directly or through `?.` — because
+ *    `new Array(3).fill(0)` and `map.clear()` are ordinary JavaScript. A name
+ *    bound from a value READ (`await locator.count()`, `allTextContents()`,
+ *    `title()`, a comparison) is data, not a receiver. A receiver nothing
+ *    identifies (a helper's return value, a callback parameter) is let
+ *    through: this is a backstop for what a model writes, not a type checker;
  *  - inside a page function (`evaluate`, `evaluateAll`, `evaluateHandle`,
- *    `$eval`, `$$eval`, function or string): a click, submit, dispatch, focus,
- *    DOM insertion or removal, attribute write, history or location move, or
- *    any property assignment (`el.checked = true`).
+ *    `$eval`, `$$eval` — a function, a string of code, or the NAME of a
+ *    function the entry defines): a click, submit, dispatch, focus, DOM
+ *    insertion or removal, attribute or style write, history or location move,
+ *    storage write, or an assignment to a DOM property that holds page state
+ *    (`el.checked = true`, `el.value = …`, `el.style.display = …`,
+ *    `location.href = …`). An assignment to the page function's own locals —
+ *    `acc[k] = …`, `r.count = …`, `const [next] = …` — changes nothing and is
+ *    allowed.
  *
  * Since `generateConditionEntry` refuses an entry that still breaks one of
  * these after its re-ask, a false positive here costs a compiled condition —
@@ -1894,6 +2174,8 @@ export interface GenerateConditionEntryOptions {
   /** The map with the loop marks, for §7.6's dotted-name rule — see
    *  `GenerateStepEntryOptions.parameterMap`. */
   parameterMap?: Record<string, string> | undefined;
+  /** The run's free-text mask set — see `GenerateStepEntryOptions.secrets`. */
+  secrets?: string[] | undefined;
   envData?: EnvDataContext | undefined;
   aiClient: AiClient;
   contextContent: string;
@@ -1965,6 +2247,7 @@ export async function generateConditionEntry(
     })),
     parameters,
     ...(options.parameterMap && { parameterMap: options.parameterMap }),
+    ...(options.secrets && options.secrets.length > 0 && { secrets: options.secrets }),
     ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
     testInfoSection: formatTestInfo(options.testName, options.baseUrl),
     ...(options.wholeTest && { wholeTest: options.wholeTest }),
