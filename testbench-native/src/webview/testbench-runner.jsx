@@ -326,7 +326,9 @@ function RecordingPanel({ state }) {
               title={a.dropped ? "Dropped — no step will be written for this action" : a.summary}
             >
               {/* `● Clicked button "Sign in"  0:07` — SPEC-record-steps.md §3.2. */}
-              <span aria-hidden="true" style={{ flexShrink: 0 }}>{a.kind === "check" ? "◎" : "●"}</span>
+              {/* ◎ a check, ● an action, ○ an event that rides with the next
+                  action (typing, selecting, ticking — decision 4). */}
+              <span aria-hidden="true" style={{ flexShrink: 0 }}>{a.kind === "check" ? "◎" : a.action === false ? "○" : "●"}</span>
               <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {a.summary}
                 {a.tab ? <span style={{ opacity: 0.6 }}> [{a.tab}]</span> : null}

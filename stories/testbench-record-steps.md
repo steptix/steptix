@@ -420,7 +420,10 @@ beside the heading; before the first draft the list reads "Writing the first
 steps…" while a call runs, and "The steps appear here a moment after each
 action" otherwise. After Stop the block reads **Finishing…** (it replaces
 "Writing steps…"), and the status bar item reads "Finishing…" with a spinner
-instead of `● Recording — N actions`. The frame folding is the pure
+instead of `● Recording — N actions`. N counts actions in decision 4's
+sense (a frame's `action` flag; an absent flag reads as an action) that were
+not dropped; an event that rides with the next action (typing, selecting,
+ticking) is listed with a hollow `○` rather than `●`. The frame folding is the pure
 `applyRecordFrame` in `record-steps-core.ts`, pinned by the unit suite. What
 goes into the file is still `record:result` alone, never the last draft.
 

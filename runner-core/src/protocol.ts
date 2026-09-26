@@ -741,7 +741,12 @@ export type RecordActionKind =
   | 'upload'
   | 'navigate'
   | 'tab'
-  | 'check';
+  | 'check'
+  // The browser's own gestures (decision 4, as widened 2026-09-26).
+  | 'drag'
+  | 'back'
+  | 'forward'
+  | 'reload';
 
 /** The recorder is installed and listening; the browser is on `url`. */
 export interface RecordStartedEvent {
@@ -759,6 +764,15 @@ export interface RecordActionEvent {
   type: 'record:action';
   id: string;
   kind: RecordActionKind;
+  /**
+   * True for an ACTION — a click or a drag, Enter or Tab, Back / Forward /
+   * Refresh, an Add check pick, Enter in the address bar — which sends the
+   * draft to the model; false for an EVENT (typing, selecting, ticking,
+   * choosing files, a tab change) that rides with the next action
+   * (decision 4). Required on the wire; a client reads an absent flag as
+   * `true`, which is what every frame meant before the flag existed.
+   */
+  action: boolean;
   summary: string;
   /** Milliseconds since `record:started`. */
   atMs: number;
@@ -926,6 +940,9 @@ export interface RecordingPanelState {
   actions: Array<{
     id: string;
     kind: RecordActionKind;
+    /** `record:action.action`: false for an event that rides with the next
+     *  action (typing, selecting, ticking…). */
+    action: boolean;
     summary: string;
     atMs: number;
     tab?: string;

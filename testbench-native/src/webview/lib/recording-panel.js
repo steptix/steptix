@@ -21,6 +21,6 @@ export function formatRecordTimeInline(atMs) {
 export function recordingStatusTextInline(state) {
   if (state.phase === "finishing") return "Finishing…";
   if (state.phase === "starting") return "Recording — starting…";
-  const n = state.actions.filter((a) => !a.dropped).length;
+  const n = state.actions.filter((a) => !a.dropped && a.action !== false).length;
   return `Recording — ${n} ${n === 1 ? "action" : "actions"}`;
 }

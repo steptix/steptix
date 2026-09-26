@@ -119,7 +119,7 @@ test('streamRecordSteps: yields every record frame in order, output and done inc
         frame({ type: 'record:started', url: 'http://localhost:8787/', title: 'SecureBank' }),
         frame({ type: 'record:action', id: 'a1', kind: 'click', summary: 'Clicked link "Reports"', atMs: 1200 }),
         frame({ type: 'output', msg: 'crop budget spent', kind: 'warn' }),
-        frame({ type: 'record:action', id: 'a2', kind: 'type', summary: 'Typed into Password (masked)', atMs: 2400, tab: 'popup-1' }),
+        frame({ type: 'record:action', id: 'a2', kind: 'type', action: false, summary: 'Typed into Password (masked)', atMs: 2400, tab: 'popup-1' }),
         frame({ type: 'record:pick', armed: true }),
         frame({ type: 'record:drafting', busy: true }),
         frame({
@@ -160,6 +160,7 @@ test('streamRecordSteps: yields every record frame in order, output and done inc
   );
   assert.equal(events[1].summary, 'Clicked link "Reports"');
   assert.equal(events[3].tab, 'popup-1');
+  assert.equal(events[3].action, false, 'the event flag survives the wire');
   assert.deepEqual(
     [events[5].busy, events[6].revision, events[6].through, events[7].busy],
     [true, 1, 'a2', false],

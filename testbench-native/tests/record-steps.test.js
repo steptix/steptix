@@ -494,6 +494,7 @@ test('the panel copies of the time and heading text match the core (recording-pa
     { phase: 'recording', actions: [] },
     { phase: 'recording', actions: [a(false)] },
     { phase: 'recording', actions: [a(false), a(true), a(false)] },
+    { phase: 'recording', actions: [a(false), { dropped: false, action: false }, { dropped: false, action: true }] },
     { phase: 'finishing', actions: [a(false)] },
   ]) {
     assert.equal(inline.recordingStatusTextInline(state), recordingStatusText(state), JSON.stringify(state));
@@ -524,14 +525,19 @@ test('started, actions and picks fold in; an action restated keeps its ✕', () 
   assert.equal(applyRecordFrame(s, { type: 'record:started', url: 'https://x/', title: 'X' }), true);
   assert.equal(s.phase, 'recording');
   assert.equal(s.startedUrl, 'https://x/');
-  applyRecordFrame(s, { type: 'record:action', id: 'a1', kind: 'click', summary: 'Clicked A', atMs: 10 });
-  applyRecordFrame(s, { type: 'record:action', id: 'a2', kind: 'type', summary: 'Typed', atMs: 20, tab: 'popup-1' });
+  applyRecordFrame(s, { type: 'record:action', id: 'a1', kind: 'click', action: true, summary: 'Clicked A', atMs: 10 });
+  // Typing is an EVENT that rides with the next action (decision 4).
+  applyRecordFrame(s, { type: 'record:action', id: 'a2', kind: 'type', action: false, summary: 'Typed', atMs: 20, tab: 'popup-1' });
   s.actions[0].dropped = true;
+  // A frame with no flag reads as an action — what every frame meant before it.
   applyRecordFrame(s, { type: 'record:action', id: 'a1', kind: 'click', summary: 'Clicked A (again)', atMs: 10 });
   assert.deepEqual(s.actions, [
-    { id: 'a1', kind: 'click', summary: 'Clicked A (again)', atMs: 10, dropped: true },
-    { id: 'a2', kind: 'type', summary: 'Typed', atMs: 20, tab: 'popup-1', dropped: false },
+    { id: 'a1', kind: 'click', action: true, summary: 'Clicked A (again)', atMs: 10, dropped: true },
+    { id: 'a2', kind: 'type', action: false, summary: 'Typed', atMs: 20, tab: 'popup-1', dropped: false },
   ]);
+  // "N actions" counts actions — not events, not dropped ones.
+  applyRecordFrame(s, { type: 'record:action', id: 'a3', kind: 'drag', action: true, summary: 'Dragged', atMs: 30 });
+  assert.equal(recordingStatusText(s), 'Recording — 1 action');
   applyRecordFrame(s, { type: 'record:pick', armed: true });
   assert.equal(s.pickArmed, true);
   assert.equal(applyRecordFrame(s, { type: 'record:action', summary: 'no id' }), false);

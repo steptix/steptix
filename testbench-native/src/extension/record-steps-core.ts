@@ -757,11 +757,18 @@ export function formatRecordTime(atMs: number): string {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
-/** The status bar's text while recording (SPEC-record-steps.md §3.2). */
-export function recordingStatusText(state: { phase: string; actions: Array<{ dropped: boolean }> }): string {
+/**
+ * The status bar's text while recording (SPEC-record-steps.md §3.2). "N
+ * actions" counts ACTIONS in decision 4's sense — not the events (typing,
+ * selecting…) that ride with them — and not the ones the author dropped.
+ */
+export function recordingStatusText(state: {
+  phase: string;
+  actions: Array<{ dropped: boolean; action?: boolean }>;
+}): string {
   if (state.phase === 'finishing') return 'Finishing…';
   if (state.phase === 'starting') return 'Recording — starting…';
-  const n = state.actions.filter((a) => !a.dropped).length;
+  const n = state.actions.filter((a) => !a.dropped && a.action !== false).length;
   return `Recording — ${n} ${n === 1 ? 'action' : 'actions'}`;
 }
 
@@ -810,6 +817,8 @@ export function applyRecordFrame(state: RecordingPanelState, event: { type: stri
       const entry = {
         id,
         kind: String(event['kind'] ?? 'click') as RecordActionKind,
+        // Absent reads as an action: every frame was one before the flag.
+        action: event['action'] !== false,
         summary: String(event['summary'] ?? ''),
         atMs: Number(event['atMs']) || 0,
         ...(tab !== undefined && tab !== null && { tab: String(tab) }),

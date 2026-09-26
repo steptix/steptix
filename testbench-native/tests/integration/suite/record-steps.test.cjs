@@ -180,6 +180,8 @@ describe('TestBench Record Steps', function () {
     assert.deepEqual(state.actions[2], {
       id: 'a3',
       kind: 'click',
+      // No `action` flag on the frame: read as an action, as before the flag.
+      action: true,
       summary: 'Clicked button "Sign in"',
       atMs: 3100,
       tab: 'popup-1',
