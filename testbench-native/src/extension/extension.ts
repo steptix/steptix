@@ -2439,7 +2439,8 @@ async function handleWebviewMessage(
       await vscode.commands.executeCommand('testbench-native.recordAddCheck');
       return;
     case 'recordDrop':
-      registry.recorder.setDropped(msg.id, msg.dropped === true);
+      // Shown at once and sent as `drop` / `restore` (decision 9: redraft now).
+      await registry.recorder.setDropped(msg.id, msg.dropped === true);
       return;
     case 'run': {
       const controller = registry.active();

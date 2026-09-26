@@ -772,7 +772,38 @@ export interface RecordPickEvent {
   armed: boolean;
 }
 
-/** Stop was received; the one model call that writes the steps is running. */
+/**
+ * A draft call started (`busy: true`) or finished (`busy: false`) — the
+ * panel's "updating…" marker (stories/testbench-record-steps.md, decision 9:
+ * the steps are drafted live, as the author works).
+ */
+export interface RecordDraftingEvent {
+  type: 'record:drafting';
+  busy: boolean;
+}
+
+/**
+ * The draft as it stands. It REPLACES the previous one — the model may have
+ * rewritten the last few steps as well as appended — so a client renders it
+ * whole and never merges. `revision` increases by one per draft; a client
+ * ignores one that is not newer than the draft it holds.
+ *
+ * What the panel shows while recording. What goes into the file is
+ * `record:result`, not the last draft.
+ */
+export interface RecordDraftEvent {
+  type: 'record:draft';
+  revision: number;
+  /** Step texts in order, WITHOUT their numbers. */
+  steps: string[];
+  parameters: Array<{ name: string; value: string }>;
+  notes?: string[];
+  /** Id of the last action the draft covers. */
+  through?: string;
+}
+
+/** Stop was received; the draft is being finished (one more call only when
+ *  it does not already cover every remaining action). */
 export interface RecordWritingEvent {
   type: 'record:writing';
 }
@@ -807,6 +838,8 @@ export type RecordStepsEvent =
   | RecordStartedEvent
   | RecordActionEvent
   | RecordPickEvent
+  | RecordDraftingEvent
+  | RecordDraftEvent
   | RecordWritingEvent
   | RecordResultEvent
   | OutputEvent
@@ -819,6 +852,10 @@ export function isRecordStepsEvent(value: unknown): value is RecordStepsEvent {
     t === 'record:started' ||
     t === 'record:action' ||
     t === 'record:pick' ||
+    // Live drafting (decision 9). The run controller consumes this guard and
+    // drops what it rejects, so a frame missing here never reaches the panel.
+    t === 'record:drafting' ||
+    t === 'record:draft' ||
     t === 'record:writing' ||
     t === 'record:result' ||
     t === 'output' ||
@@ -858,7 +895,12 @@ export type RecordControlRequest =
   | { action: 'stop'; dropped?: string[] }
   | { action: 'check' }
   | { action: 'cancel-check' }
-  | { action: 'cancel' };
+  | { action: 'cancel' }
+  /** Leave this action out, and redraft now (decision 9). The server also
+   *  unions `stop`'s `dropped` with these. */
+  | { action: 'drop'; id: string }
+  /** Put a dropped action back, and redraft now. */
+  | { action: 'restore'; id: string };
 
 /**
  * The panel's Recording block, as the host holds it. The host is the source of
@@ -873,9 +915,10 @@ export interface RecordingPanelState {
   mode: 'cursor' | 'new';
   /**
    * `starting` until `record:started` (the browser may be launching),
-   * `recording` while actions stream, `writing` after `record:writing`.
+   * `recording` while actions stream, `finishing` after `record:writing` —
+   * the panel's "Finishing…" (SPEC-record-steps.md §3.2).
    */
-  phase: 'starting' | 'recording' | 'writing';
+  phase: 'starting' | 'recording' | 'finishing';
   /** Add check is armed — from the last `record:pick`. */
   pickArmed: boolean;
   /** Where the browser was when recording started. */
@@ -888,6 +931,19 @@ export interface RecordingPanelState {
     tab?: string;
     dropped: boolean;
   }>;
+  /**
+   * Steps so far: the latest `record:draft`, whole — each newer revision
+   * replaces it. Null until the first draft arrives.
+   */
+  draft: {
+    revision: number;
+    steps: string[];
+    parameters: Array<{ name: string; value: string }>;
+    notes: string[];
+    through?: string;
+  } | null;
+  /** A draft call is running — the "updating…" marker (`record:drafting`). */
+  drafting: boolean;
 }
 
 // ---------------------------------------------------------------------------

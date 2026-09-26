@@ -19,7 +19,7 @@ export function formatRecordTimeInline(atMs) {
 
 /** The heading line: what the recording is doing, and how many actions count. */
 export function recordingStatusTextInline(state) {
-  if (state.phase === "writing") return "Writing steps…";
+  if (state.phase === "finishing") return "Finishing…";
   if (state.phase === "starting") return "Recording — starting…";
   const n = state.actions.filter((a) => !a.dropped).length;
   return `Recording — ${n} ${n === 1 ? "action" : "actions"}`;

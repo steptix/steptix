@@ -44,6 +44,9 @@ test('isRecordStepsEvent: accepts every frame the record stream carries', () => 
     'record:started',
     'record:action',
     'record:pick',
+    // Live drafting (decision 9): the updating marker and the draft itself.
+    'record:drafting',
+    'record:draft',
     'record:writing',
     'record:result',
     // The existing frame, for warnings.
@@ -118,6 +121,16 @@ test('streamRecordSteps: yields every record frame in order, output and done inc
         frame({ type: 'output', msg: 'crop budget spent', kind: 'warn' }),
         frame({ type: 'record:action', id: 'a2', kind: 'type', summary: 'Typed into Password (masked)', atMs: 2400, tab: 'popup-1' }),
         frame({ type: 'record:pick', armed: true }),
+        frame({ type: 'record:drafting', busy: true }),
+        frame({
+          type: 'record:draft',
+          revision: 1,
+          steps: ['Click Reports'],
+          parameters: [],
+          notes: ['n0'],
+          through: 'a2',
+        }),
+        frame({ type: 'record:drafting', busy: false }),
         frame({ type: 'record:writing' }),
         frame({
           type: 'record:result',
@@ -131,11 +144,27 @@ test('streamRecordSteps: yields every record frame in order, output and done inc
   const events = await collect(client.streamRecordSteps('s', MINIMAL, new AbortController().signal));
   assert.deepEqual(
     events.map((e) => e.type),
-    ['record:started', 'record:action', 'output', 'record:action', 'record:pick', 'record:writing', 'record:result', 'done'],
+    [
+      'record:started',
+      'record:action',
+      'output',
+      'record:action',
+      'record:pick',
+      'record:drafting',
+      'record:draft',
+      'record:drafting',
+      'record:writing',
+      'record:result',
+      'done',
+    ],
   );
   assert.equal(events[1].summary, 'Clicked link "Reports"');
   assert.equal(events[3].tab, 'popup-1');
-  assert.deepEqual(events[6].parameters, [{ name: 'password', value: '$PASSWORD' }]);
+  assert.deepEqual(
+    [events[5].busy, events[6].revision, events[6].through, events[7].busy],
+    [true, 1, 'a2', false],
+  );
+  assert.deepEqual(events[9].parameters, [{ name: 'password', value: '$PASSWORD' }]);
 });
 
 test('streamRecordSteps: a frame type the client does not know yet is passed through, not dropped', async () => {
@@ -219,11 +248,21 @@ test('controlRecordSteps: posts each control action as JSON to the control route
   });
   await client.controlRecordSteps('a b', { action: 'check' });
   await client.controlRecordSteps('a b', { action: 'cancel-check' });
+  // Live drafting (decision 9): a ✕ drops at once, and redrafts.
+  await client.controlRecordSteps('a b', { action: 'drop', id: 'a2' });
+  await client.controlRecordSteps('a b', { action: 'restore', id: 'a2' });
   await client.controlRecordSteps('a b', { action: 'stop', dropped: ['a2', 'a5'] });
   await client.controlRecordSteps('a b', { action: 'cancel' });
   assert.deepEqual(
     calls.map((c) => c.body),
-    [{ action: 'check' }, { action: 'cancel-check' }, { action: 'stop', dropped: ['a2', 'a5'] }, { action: 'cancel' }],
+    [
+      { action: 'check' },
+      { action: 'cancel-check' },
+      { action: 'drop', id: 'a2' },
+      { action: 'restore', id: 'a2' },
+      { action: 'stop', dropped: ['a2', 'a5'] },
+      { action: 'cancel' },
+    ],
   );
   for (const c of calls) {
     assert.equal(c.url, 'http://x/sessions/a%20b/record-steps/control');

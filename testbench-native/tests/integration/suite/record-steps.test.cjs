@@ -195,7 +195,8 @@ describe('TestBench Record Steps', function () {
     await hooks.dispatchWebviewMessage({ type: 'recordDrop', id: 'a2', dropped: true });
     assert.equal(hooks.recordingState().actions.find((a) => a.id === 'a2').dropped, true);
     assert.equal(hooks.recordingStatusText(), '● Recording — 2 actions');
-    // …and put back, and dropped again: the last word is what Stop sends.
+    // …and put back, and dropped again. Each ✕ is sent at once (decision 9:
+    // the server redrafts without it), and Stop still sends the last word.
     await hooks.dispatchWebviewMessage({ type: 'recordDrop', id: 'a2', dropped: false });
     assert.equal(hooks.recordingState().actions.find((a) => a.id === 'a2').dropped, false);
     await hooks.dispatchWebviewMessage({ type: 'recordDrop', id: 'a2', dropped: true });
@@ -206,11 +207,20 @@ describe('TestBench Record Steps', function () {
     await vscode.commands.executeCommand('testbench-native.stopRecording');
     assert.deepEqual(
       fake.recordControlCalls.map((c) => c.body),
-      [{ action: 'stop', dropped: ['a2'] }],
+      [
+        { action: 'drop', id: 'a2' },
+        { action: 'restore', id: 'a2' },
+        { action: 'drop', id: 'a2' },
+        { action: 'stop', dropped: ['a2'] },
+      ],
     );
-    assert.equal(fake.recordControlCalls[0].sessionId, uri.fsPath);
-    await waitFor('writing', () => hooks.recordingState()?.phase === 'writing');
-    assert.equal(hooks.recordingStatusText(), '$(loading~spin) Writing steps…');
+    assert.ok(fake.recordControlCalls.every((c) => c.sessionId === uri.fsPath));
+    await waitFor('finishing', () => hooks.recordingState()?.phase === 'finishing');
+    assert.equal(hooks.recordingStatusText(), '$(loading~spin) Finishing…');
+    // After Stop only `cancel` does anything server-side, so the rows freeze.
+    await hooks.dispatchWebviewMessage({ type: 'recordDrop', id: 'a1', dropped: true });
+    assert.equal(fake.recordControlCalls.length, 4, 'no drop is sent while finishing');
+    assert.equal(hooks.recordingState().actions.find((a) => a.id === 'a1').dropped, false);
 
     fake.pushRecord({
       type: 'record:result',
@@ -258,6 +268,104 @@ describe('TestBench Record Steps', function () {
 
     await vscode.commands.executeCommand('undo');
     await waitFor('one undo restores the original', () => editor.document.getText() === original);
+  });
+
+  it('drafts stream into Steps so far; only record:result is inserted, as one undo step', async () => {
+    const editor = await openFixture();
+    const original = editor.document.getText();
+    const mark = hooks.hostMessageCount();
+    await recordAt(editor, 12);
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    fake.pushRecord({ type: 'record:action', id: 'a1', kind: 'click', summary: 'Clicked button "Menu"', atMs: 900 });
+    fake.pushRecord({ type: 'record:drafting', busy: true });
+    await waitFor('updating marker on', () => hooks.recordingState()?.drafting === true);
+    assert.equal(hooks.recordingState().draft, null, 'no draft yet');
+    fake.pushRecord({ type: 'record:draft', revision: 1, steps: ['Click Menu'], parameters: [], through: 'a1' });
+    fake.pushRecord({ type: 'record:drafting', busy: false });
+    await waitFor('first draft', () => hooks.recordingState()?.draft?.revision === 1 && !hooks.recordingState().drafting);
+    assert.deepEqual(hooks.recordingState().draft.steps, ['Click Menu']);
+
+    // The next action changed what the last one meant: the draft is REPLACED,
+    // not appended to.
+    fake.pushRecord({ type: 'record:action', id: 'a2', kind: 'click', summary: 'Clicked link "Payments"', atMs: 1700 });
+    fake.pushRecord({ type: 'record:drafting', busy: true });
+    fake.pushRecord({
+      type: 'record:draft',
+      revision: 2,
+      steps: ['Click Payments in the main menu'],
+      parameters: [],
+      notes: ['The two clicks were one menu choice.'],
+      through: 'a2',
+    });
+    // A late, older draft must not put the stale list back.
+    fake.pushRecord({ type: 'record:draft', revision: 1, steps: ['Click Menu'], parameters: [] });
+    fake.pushRecord({ type: 'record:drafting', busy: false });
+    await waitFor('second draft', () => hooks.recordingState()?.draft?.revision === 2 && !hooks.recordingState().drafting);
+    // Give the stale frame time to arrive; it must change nothing.
+    await sleep(100);
+    const state = hooks.recordingState();
+    assert.deepEqual(state.draft.steps, ['Click Payments in the main menu']);
+    assert.deepEqual(state.draft.notes, ['The two clicks were one menu choice.']);
+    assert.equal(state.draft.through, 'a2');
+    // The panel was told each draft, whole.
+    const drafts = hooks
+      .hostMessagesSince(mark)
+      .filter((m) => m.type === 'recording' && m.state?.draft)
+      .map((m) => m.state.draft.revision);
+    assert.ok(drafts.includes(1) && drafts.includes(2), JSON.stringify(drafts));
+    assert.equal(drafts[drafts.length - 1], 2);
+
+    fake.recordControlImpl = async (_s, body) => {
+      if (body.action !== 'stop') return;
+      fake.pushRecord({ type: 'record:writing' });
+      // Differs from the last draft on purpose: what goes in is the result.
+      fake.pushRecord({
+        type: 'record:result',
+        steps: ['Click Payments in the main menu', 'Tick the Cash checkbox'],
+        parameters: [],
+      });
+      fake.pushRecord({ type: 'done', status: 'passed' });
+      fake.endRecord();
+    };
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    await hooks.recordingSettled();
+    assert.deepEqual(stepLines(editor.document.getText()).slice(0, 5), [
+      '1. Navigate to login.html',
+      '2. Click Sign in',
+      '3. Open the dashboard',
+      '4. Click Payments in the main menu',
+      '5. Tick the Cash checkbox',
+    ]);
+    assert.equal(hooks.recordingReport().steps, 2);
+    await vscode.commands.executeCommand('undo');
+    await waitFor('one undo restores the original', () => editor.document.getText() === original);
+  });
+
+  it('a drop the server cannot take is said in the log and still counts at Stop', async () => {
+    const editor = await openFixture();
+    await recordAt(editor, 10);
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    fake.pushRecord({ type: 'record:action', id: 'a1', kind: 'click', summary: 'Clicked "Pay"', atMs: 100 });
+    await waitFor('action listed', () => hooks.recordingState()?.actions.length === 1);
+    const { ApiClientError } = require('ai-ui-automation-runner-core');
+    fake.recordControlImpl = async (_s, body) => {
+      if (body.action === 'drop') throw new ApiClientError('not-found', 'No recording is running for this session.', { status: 404 });
+    };
+    const mark = hooks.hostMessageCount();
+    await hooks.dispatchWebviewMessage({ type: 'recordDrop', id: 'a1', dropped: true });
+    assert.equal(hooks.recordingState().actions[0].dropped, true, 'the row stays struck through');
+    const logged = hooks
+      .hostMessagesSince(mark)
+      .filter((m) => m.type === 'runEvent' && m.event.type === 'output')
+      .map((m) => m.event);
+    assert.ok(
+      logged.some((e) => e.kind === 'warn' && /Could not drop that action now/.test(e.msg)),
+      JSON.stringify(logged),
+    );
+    fake.recordControlImpl = null;
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    assert.deepEqual(fake.recordControlCalls[fake.recordControlCalls.length - 1].body, { action: 'stop', dropped: ['a1'] });
+    await cancelRecording();
   });
 
   it('Record New Test creates the file, records into it, and inserts under ## Steps', async () => {

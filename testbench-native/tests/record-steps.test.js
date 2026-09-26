@@ -14,6 +14,8 @@ import * as path from 'node:path';
 import {
   CURSOR_REFUSALS,
   applyRecordEdits,
+  applyRecordFrame,
+  newRecordingState,
   cleanStepText,
   formatRecordTime,
   globStaticPrefix,
@@ -478,7 +480,7 @@ test('panel and status bar text', () => {
   const a = (dropped) => ({ dropped });
   assert.equal(recordingStatusText({ phase: 'recording', actions: [a(false), a(true), a(false)] }), 'Recording — 2 actions');
   assert.equal(recordingStatusText({ phase: 'recording', actions: [a(false)] }), 'Recording — 1 action');
-  assert.equal(recordingStatusText({ phase: 'writing', actions: [] }), 'Writing steps…');
+  assert.equal(recordingStatusText({ phase: 'finishing', actions: [] }), 'Finishing…');
 });
 
 test('the panel copies of the time and heading text match the core (recording-panel.js)', async () => {
@@ -492,8 +494,142 @@ test('the panel copies of the time and heading text match the core (recording-pa
     { phase: 'recording', actions: [] },
     { phase: 'recording', actions: [a(false)] },
     { phase: 'recording', actions: [a(false), a(true), a(false)] },
-    { phase: 'writing', actions: [a(false)] },
+    { phase: 'finishing', actions: [a(false)] },
   ]) {
     assert.equal(inline.recordingStatusTextInline(state), recordingStatusText(state), JSON.stringify(state));
   }
+});
+
+// ---------------------------------------------------------------------------
+// The Recording block, frame by frame (decision 9: steps drafted live)
+// ---------------------------------------------------------------------------
+
+const fresh = () => newRecordingState({ uri: 'file:///t.md', file: 't.md', mode: 'cursor' });
+
+test('a fresh block is starting, with no actions, no draft and nothing drafting', () => {
+  assert.deepEqual(fresh(), {
+    uri: 'file:///t.md',
+    file: 't.md',
+    mode: 'cursor',
+    phase: 'starting',
+    pickArmed: false,
+    actions: [],
+    draft: null,
+    drafting: false,
+  });
+});
+
+test('started, actions and picks fold in; an action restated keeps its ✕', () => {
+  const s = fresh();
+  assert.equal(applyRecordFrame(s, { type: 'record:started', url: 'https://x/', title: 'X' }), true);
+  assert.equal(s.phase, 'recording');
+  assert.equal(s.startedUrl, 'https://x/');
+  applyRecordFrame(s, { type: 'record:action', id: 'a1', kind: 'click', summary: 'Clicked A', atMs: 10 });
+  applyRecordFrame(s, { type: 'record:action', id: 'a2', kind: 'type', summary: 'Typed', atMs: 20, tab: 'popup-1' });
+  s.actions[0].dropped = true;
+  applyRecordFrame(s, { type: 'record:action', id: 'a1', kind: 'click', summary: 'Clicked A (again)', atMs: 10 });
+  assert.deepEqual(s.actions, [
+    { id: 'a1', kind: 'click', summary: 'Clicked A (again)', atMs: 10, dropped: true },
+    { id: 'a2', kind: 'type', summary: 'Typed', atMs: 20, tab: 'popup-1', dropped: false },
+  ]);
+  applyRecordFrame(s, { type: 'record:pick', armed: true });
+  assert.equal(s.pickArmed, true);
+  assert.equal(applyRecordFrame(s, { type: 'record:action', summary: 'no id' }), false);
+});
+
+test('an action before record:started still moves the block to recording', () => {
+  const s = fresh();
+  applyRecordFrame(s, { type: 'record:action', id: 'a1', kind: 'click', summary: 'x', atMs: 0 });
+  assert.equal(s.phase, 'recording');
+});
+
+test('record:drafting is the updating marker, on and off', () => {
+  const s = fresh();
+  assert.equal(applyRecordFrame(s, { type: 'record:drafting', busy: true }), true);
+  assert.equal(s.drafting, true);
+  applyRecordFrame(s, { type: 'record:drafting', busy: false });
+  assert.equal(s.drafting, false);
+});
+
+test('each newer draft REPLACES the list whole — rewritten steps are not merged', () => {
+  const s = fresh();
+  applyRecordFrame(s, {
+    type: 'record:draft',
+    revision: 1,
+    steps: ['Navigate to login.html', 'Click Menu'],
+    parameters: [],
+    through: 'a2',
+  });
+  assert.deepEqual(s.draft, { revision: 1, steps: ['Navigate to login.html', 'Click Menu'], parameters: [], notes: [], through: 'a2' });
+  // The next action changed what the last one meant: `Click Menu` + Payments
+  // is one step now, and the list shrinks rather than growing a stale line.
+  assert.equal(
+    applyRecordFrame(s, {
+      type: 'record:draft',
+      revision: 2,
+      steps: ['Navigate to login.html', 'Click Payments in the main menu'],
+      parameters: [{ name: 'email', value: 'a@b' }],
+      notes: ['Two clicks were one menu choice.'],
+      through: 'a3',
+    }),
+    true,
+  );
+  assert.deepEqual(s.draft, {
+    revision: 2,
+    steps: ['Navigate to login.html', 'Click Payments in the main menu'],
+    parameters: [{ name: 'email', value: 'a@b' }],
+    notes: ['Two clicks were one menu choice.'],
+    through: 'a3',
+  });
+});
+
+test('a draft whose revision is not newer is ignored', () => {
+  const s = fresh();
+  applyRecordFrame(s, { type: 'record:draft', revision: 3, steps: ['Three'], parameters: [] });
+  assert.equal(applyRecordFrame(s, { type: 'record:draft', revision: 2, steps: ['Two'], parameters: [] }), false);
+  assert.equal(applyRecordFrame(s, { type: 'record:draft', revision: 3, steps: ['Three again'], parameters: [] }), false);
+  assert.equal(applyRecordFrame(s, { type: 'record:draft', steps: ['no revision'], parameters: [] }), false);
+  assert.deepEqual(s.draft.steps, ['Three']);
+  assert.equal(applyRecordFrame(s, { type: 'record:draft', revision: 4, steps: ['Four'], parameters: [] }), true);
+  assert.deepEqual(s.draft.steps, ['Four']);
+});
+
+test('draft step texts are cleaned like the result: one line, no number, no blanks', () => {
+  const s = fresh();
+  applyRecordFrame(s, {
+    type: 'record:draft',
+    revision: 1,
+    steps: ['1. Click   Go', '', '  Tick\nCash '],
+    parameters: [{ name: ' q ', value: 'v' }, { name: '', value: 'x' }],
+    notes: ['', 'kept'],
+  });
+  assert.deepEqual(s.draft.steps, ['Click Go', 'Tick Cash']);
+  assert.deepEqual(s.draft.parameters, [{ name: 'q', value: 'v' }]);
+  assert.deepEqual(s.draft.notes, ['kept']);
+});
+
+test('record:writing is Finishing…: pick mode drops, the draft and actions stay', () => {
+  const s = fresh();
+  applyRecordFrame(s, { type: 'record:started', url: 'u', title: '' });
+  applyRecordFrame(s, { type: 'record:action', id: 'a1', kind: 'click', summary: 'x', atMs: 0 });
+  applyRecordFrame(s, { type: 'record:draft', revision: 1, steps: ['Click X'], parameters: [] });
+  applyRecordFrame(s, { type: 'record:pick', armed: true });
+  applyRecordFrame(s, { type: 'record:writing' });
+  assert.equal(s.phase, 'finishing');
+  assert.equal(s.pickArmed, false);
+  assert.equal(recordingStatusText(s), 'Finishing…');
+  // An action can still arrive after Stop, until record:writing — and even a
+  // late one joins the list without undoing Finishing….
+  applyRecordFrame(s, { type: 'record:action', id: 'a2', kind: 'type', summary: 'y', atMs: 5 });
+  assert.equal(s.phase, 'finishing');
+  assert.equal(s.actions.length, 2);
+  assert.deepEqual(s.draft.steps, ['Click X']);
+});
+
+test('frames that are not the block\'s business change nothing', () => {
+  const s = fresh();
+  for (const type of ['output', 'record:result', 'done', 'record:crop']) {
+    assert.equal(applyRecordFrame(s, { type }), false, type);
+  }
+  assert.deepEqual(s, fresh());
 });

@@ -6,7 +6,13 @@ import type {
   RecordStepsEvent,
 } from 'ai-ui-automation-runner-core';
 import type { RecordStepsOutcome, RunController } from './run-controller.js';
-import { planRecordInsertion, recordingStatusText, type RecordAnchor } from './record-steps-core.js';
+import {
+  applyRecordFrame,
+  newRecordingState,
+  planRecordInsertion,
+  recordingStatusText,
+  type RecordAnchor,
+} from './record-steps-core.js';
 
 /**
  * Record Steps, the TestBench half (stories/testbench-record-steps.md): one
@@ -104,14 +110,11 @@ export class StepRecorder implements vscode.Disposable {
       anchor: opts.anchor,
       stopSent: false,
       loggedErrors: [],
-      state: {
+      state: newRecordingState({
         uri: doc.uri.toString(),
         file: path.basename(doc.uri.fsPath),
         mode: opts.mode,
-        phase: 'starting',
-        pickArmed: false,
-        actions: [],
-      },
+      }),
     };
     this.current = rec;
     this.publish();
@@ -135,7 +138,7 @@ export class StepRecorder implements vscode.Disposable {
       vscode.window.setStatusBarMessage('TestBench: nothing is recording', 2000);
       return;
     }
-    if (rec.stopSent || rec.state.phase === 'writing') return;
+    if (rec.stopSent || rec.state.phase === 'finishing') return;
     // Before `record:started` the server's recorder may not exist yet, and
     // there is nothing recorded to write — Stop there is a cancel.
     if (rec.state.phase === 'starting') {
@@ -179,7 +182,7 @@ export class StepRecorder implements vscode.Disposable {
       vscode.window.setStatusBarMessage(
         rec.state.phase === 'starting'
           ? 'TestBench: the recording is still starting'
-          : 'TestBench: the steps are being written',
+          : 'TestBench: the recording is finishing',
         2000,
       );
       return;
@@ -190,12 +193,29 @@ export class StepRecorder implements vscode.Disposable {
     if (!sent.ok) void vscode.window.showWarningMessage(`Record Steps: ${sent.error}`);
   }
 
-  /** The ✕ on an action row, or putting a struck-through one back. */
-  setDropped(id: string, dropped: boolean): void {
-    const action = this.current?.state.actions.find((a) => a.id === id);
-    if (!action || action.dropped === dropped) return;
+  /**
+   * The ✕ on an action row, or putting a struck-through one back. Shown at
+   * once, and sent at once as `drop` / `restore` so the server redrafts
+   * without that action (decision 9) — the Steps so far list catches up when
+   * the redraft arrives. Stop sends the whole `dropped` list as well, which
+   * the server unions with these, so a control that failed here still counts
+   * at Stop. After Stop only `cancel` does anything server-side, so the rows
+   * are frozen then.
+   */
+  async setDropped(id: string, dropped: boolean): Promise<void> {
+    const rec = this.current;
+    const action = rec?.state.actions.find((a) => a.id === id);
+    if (!rec || !action || action.dropped === dropped) return;
+    if (rec.state.phase === 'finishing' || rec.stopSent) return;
     action.dropped = dropped;
     this.publish();
+    const sent = await rec.controller.controlRecording({ action: dropped ? 'drop' : 'restore', id });
+    if (!sent.ok && this.current === rec) {
+      rec.controller.postRecordLog(
+        `Could not ${dropped ? 'drop' : 'restore'} that action now (${sent.error}); it is still ${dropped ? 'left out' : 'included'} when you press Stop.`,
+        'warn',
+      );
+    }
   }
 
   /** Re-post the state — the panel was rebuilt and asked (`ready`). */
@@ -243,45 +263,16 @@ export class StepRecorder implements vscode.Disposable {
   }
 
   private onEvent(rec: ActiveRecording, event: RecordStepsEvent): void {
-    const state = rec.state;
-    switch (event.type) {
-      case 'record:started':
-        state.phase = 'recording';
-        state.startedUrl = event.url;
-        break;
-      case 'record:action': {
-        const entry = {
-          id: String(event.id),
-          kind: event.kind,
-          summary: String(event.summary ?? ''),
-          atMs: Number(event.atMs) || 0,
-          ...(event.tab !== undefined && { tab: String(event.tab) }),
-          dropped: false,
-        };
-        // An id the server sends twice is the same action restated.
-        const at = state.actions.findIndex((a) => a.id === entry.id);
-        if (at >= 0) state.actions[at] = { ...entry, dropped: state.actions[at]!.dropped };
-        else state.actions.push(entry);
-        // An action can only arrive once the recorder is listening, whatever
-        // became of `record:started`.
-        if (state.phase === 'starting') state.phase = 'recording';
-        break;
-      }
-      case 'record:pick':
-        state.pickArmed = event.armed === true;
-        break;
-      case 'record:writing':
-        state.phase = 'writing';
-        state.pickArmed = false;
-        break;
-      case 'output':
-        if (event.kind === 'error') rec.loggedErrors.push(event.msg);
-        rec.controller.postRecordLog(event.msg, event.kind);
-        return;
-      default:
-        return;
+    if (event.type === 'output') {
+      // A failed draft call arrives here as a warning (decision 9): the
+      // previous draft stands, and the author is told in the panel's log.
+      if (event.kind === 'error') rec.loggedErrors.push(event.msg);
+      rec.controller.postRecordLog(event.msg, event.kind);
+      return;
     }
-    if (this.current === rec) this.publish();
+    // The block's state is folded by the pure core, where it is pinned.
+    const changed = applyRecordFrame(rec.state, event as unknown as { type: string } & Record<string, unknown>);
+    if (changed && this.current === rec) this.publish();
   }
 
   /**
@@ -392,7 +383,7 @@ export class StepRecorder implements vscode.Disposable {
       return;
     }
     this.statusItem.text =
-      state.phase === 'writing'
+      state.phase === 'finishing'
         ? `$(loading~spin) ${recordingStatusText(state)}`
         : `● ${recordingStatusText(state)}`;
     this.statusItem.tooltip = `Recording steps into ${state.file}. Click to show the TestBench panel.`;
@@ -403,7 +394,18 @@ export class StepRecorder implements vscode.Disposable {
 /** A deep copy — the panel message and the test hook must not alias the
  *  live state the next frame mutates. */
 function snapshotOf(state: RecordingPanelState): RecordingPanelState {
-  return { ...state, actions: state.actions.map((a) => ({ ...a })) };
+  return {
+    ...state,
+    actions: state.actions.map((a) => ({ ...a })),
+    draft: state.draft
+      ? {
+          ...state.draft,
+          steps: [...state.draft.steps],
+          parameters: state.draft.parameters.map((p) => ({ ...p })),
+          notes: [...state.draft.notes],
+        }
+      : null,
+  };
 }
 
 /**

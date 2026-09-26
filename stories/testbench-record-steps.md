@@ -408,8 +408,30 @@ creates the session, and a session's model client is built from it) and
 `envName`. `target.cursorLine` is the anchor's line — the step the steps go
 after, or the heading of a flow they open — not the raw cursor position.
 
-**Controls.** Stop before `record:started` is a cancel. Stop sends `dropped`
-only when something was dropped. Cancel sends `cancel` and then closes the
+**The live draft in the panel** (decision 9, as changed). Under the action
+list, a **Steps so far** list shows the latest `record:draft` whole, numbered
+1..n within the draft. Each draft replaces the list rather than merging into
+it, because the model may have rewritten its last steps; a draft whose
+`revision` is not newer than the one shown is ignored, so a late frame cannot
+put an older list back. Draft texts are cleaned the way the result's are. The
+draft's parameter names show on one line under it (names only), and its
+`notes` under that. `record:drafting` puts an **updating…** marker (a spinner)
+beside the heading; before the first draft the list reads "Writing the first
+steps…" while a call runs, and "The steps appear here a moment after each
+action" otherwise. After Stop the block reads **Finishing…** (it replaces
+"Writing steps…"), and the status bar item reads "Finishing…" with a spinner
+instead of `● Recording — N actions`. The frame folding is the pure
+`applyRecordFrame` in `record-steps-core.ts`, pinned by the unit suite. What
+goes into the file is still `record:result` alone, never the last draft.
+
+**Controls.** Stop before `record:started` is a cancel. The ✕ on an action is
+shown at once and sent at once as `drop` (or `restore` when put back), so the
+server redrafts without it. Stop still sends the whole `dropped` list, which
+the server unions with those, so a drop the server could not take (a 404, or
+a transport failure: a warning goes in the panel's log and the row stays
+struck through) still counts at Stop. `dropped` is sent only when something
+was dropped. From Finishing… on the rows are frozen, since after Stop only
+`cancel` does anything server-side. Cancel sends `cancel` and then closes the
 stream, and a result that races it in is thrown away. The server's
 `done.error` and a 400's reason (the headless refusal) are shown as they
 came; a 404 on the start route says the server predates Record Steps;

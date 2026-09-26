@@ -245,8 +245,9 @@ function CompileStrip({ state }) {
 }
 
 /**
- * The Recording block (stories/testbench-record-steps.md, decision 13): the
- * live action list, Add check, Stop and Cancel.
+ * The Recording block (stories/testbench-record-steps.md, decisions 9 and 13;
+ * SPEC-record-steps.md §3.2): the live action list, the Steps so far the model
+ * is drafting as the author works, Add check, Stop and Cancel.
  *
  * Everything shown comes from the host's `recording` message — the ✕ asks the
  * host to drop a row and the host re-posts the list — so what Stop sends as
@@ -256,15 +257,22 @@ function CompileStrip({ state }) {
  */
 function RecordingPanel({ state }) {
   const listRef = useRef(null);
+  const draftRef = useRef(null);
   const count = state ? state.actions.length : 0;
-  // Follow the newest action, as a log does.
+  const revision = state?.draft ? state.draft.revision : 0;
+  // Follow the newest action, and the newest draft, as a log does.
   useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [count]);
+  useEffect(() => {
+    const el = draftRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [revision]);
   if (!state) return null;
-  const writing = state.phase === "writing";
+  const finishing = state.phase === "finishing";
   const starting = state.phase === "starting";
+  const draft = state.draft;
   return (
     <div
       data-testid="recording-panel"
@@ -276,7 +284,7 @@ function RecordingPanel({ state }) {
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-        {writing ? (
+        {finishing ? (
           <Spinner />
         ) : (
           <span aria-hidden="true" style={{ color: "var(--vscode-debugIcon-breakpointForeground, #e51400)" }}>●</span>
@@ -299,9 +307,9 @@ function RecordingPanel({ state }) {
           Click the element to check in the browser. That click is not performed.
         </div>
       )}
-      {writing && (
+      {finishing && (
         <div style={{ opacity: 0.75, fontSize: "0.9em", marginBottom: 4 }}>
-          The model is turning the actions into steps. They go into the file as one edit, so one undo takes them back.
+          Bringing the draft up to date. It goes into the file as one edit, so one undo takes it back.
         </div>
       )}
       {state.actions.length > 0 && (
@@ -328,13 +336,48 @@ function RecordingPanel({ state }) {
               </span>
               <button
                 className="tb-btn"
-                disabled={writing}
+                disabled={finishing}
                 onClick={() => hostBridge.postRecordDrop(a.id, !a.dropped)}
                 title={a.dropped ? "Put this action back" : "Drop this action — no step is written for it"}
                 style={{ padding: "0 6px", textDecoration: "none" }}
               >
                 {a.dropped ? "↺" : "✕"}
               </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {/* Steps so far — the latest draft, whole: each one REPLACES the list
+          (the model may have rewritten its last steps), numbered 1..n. */}
+      {!starting && (
+        <div data-testid="recording-draft" style={{ marginBottom: 6 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.85em", letterSpacing: "0.5px", textTransform: "uppercase", opacity: 0.8, marginBottom: 2 }}>
+            <span>Steps so far</span>
+            {state.drafting && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, textTransform: "none", letterSpacing: 0, opacity: 0.9 }}>
+                <Spinner /> updating…
+              </span>
+            )}
+          </div>
+          {draft && draft.steps.length > 0 ? (
+            <ol ref={draftRef} style={{ margin: 0, paddingLeft: 26, maxHeight: 200, overflowY: "auto" }}>
+              {draft.steps.map((step, i) => (
+                <li key={i} style={{ padding: "1px 0", overflowWrap: "anywhere" }}>{step}</li>
+              ))}
+            </ol>
+          ) : (
+            <div style={{ opacity: 0.65, fontSize: "0.9em" }}>
+              {state.drafting ? "Writing the first steps…" : "The steps appear here a moment after each action."}
+            </div>
+          )}
+          {draft && draft.parameters.length > 0 && (
+            <div style={{ opacity: 0.7, fontSize: "0.85em", marginTop: 2 }}>
+              Parameters: {draft.parameters.map((p) => p.name).join(", ")}
+            </div>
+          )}
+          {draft && draft.notes.map((note, i) => (
+            <div key={i} style={{ opacity: 0.75, fontSize: "0.85em", fontStyle: "italic", marginTop: 2 }}>
+              {note}
             </div>
           ))}
         </div>
@@ -355,9 +398,9 @@ function RecordingPanel({ state }) {
         </button>
         <button
           className="tb-btn tb-btn--primary"
-          disabled={writing}
+          disabled={finishing}
           onClick={() => hostBridge.postRecordStop()}
-          title="Stop recording and write the steps into the file"
+          title="Stop recording and put the steps into the file"
         >
           ■ Stop
         </button>

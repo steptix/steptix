@@ -30,6 +30,8 @@ import {
   parseConfig,
   scanSectionItems,
   type ClassifiedLine,
+  type RecordActionKind,
+  type RecordingPanelState,
 } from 'ai-ui-automation-runner-core';
 // `.ts` specifiers: the vscode-free modules the `node --test` suite imports
 // directly (see renumber-core.ts for why the extension is literal).
@@ -755,10 +757,104 @@ export function formatRecordTime(atMs: number): string {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
-/** The status bar's text while recording. */
+/** The status bar's text while recording (SPEC-record-steps.md §3.2). */
 export function recordingStatusText(state: { phase: string; actions: Array<{ dropped: boolean }> }): string {
-  if (state.phase === 'writing') return 'Writing steps…';
+  if (state.phase === 'finishing') return 'Finishing…';
   if (state.phase === 'starting') return 'Recording — starting…';
   const n = state.actions.filter((a) => !a.dropped).length;
   return `Recording — ${n} ${n === 1 ? 'action' : 'actions'}`;
+}
+
+// ---------------------------------------------------------------------------
+// The Recording block's state, frame by frame
+// ---------------------------------------------------------------------------
+
+/** A fresh Recording block for `uri`. */
+export function newRecordingState(args: { uri: string; file: string; mode: 'cursor' | 'new' }): RecordingPanelState {
+  return {
+    uri: args.uri,
+    file: args.file,
+    mode: args.mode,
+    phase: 'starting',
+    pickArmed: false,
+    actions: [],
+    draft: null,
+    drafting: false,
+  };
+}
+
+/**
+ * Fold one record-stream frame into the Recording block. Returns whether the
+ * state changed — the caller re-posts the panel only then.
+ *
+ * The live draft (decision 9, SPEC-record-steps.md §9.2): each `record:draft`
+ * REPLACES the Steps so far list whole — the model may have rewritten its last
+ * steps, so there is nothing to merge — and one whose `revision` is not newer
+ * than the draft held is ignored, so a late frame cannot put an older draft
+ * back. `record:drafting` is the "updating…" marker; `record:writing` is
+ * Finishing…, after which the actions are frozen for the ✕ (only `cancel`
+ * still does anything server-side).
+ *
+ * `output`, `record:result` and `done` are not the block's business.
+ */
+export function applyRecordFrame(state: RecordingPanelState, event: { type: string } & Record<string, unknown>): boolean {
+  switch (event.type) {
+    case 'record:started':
+      if (state.phase === 'starting') state.phase = 'recording';
+      state.startedUrl = String(event['url'] ?? '');
+      return true;
+    case 'record:action': {
+      const id = String(event['id'] ?? '');
+      if (id === '') return false;
+      const tab = event['tab'];
+      const entry = {
+        id,
+        kind: String(event['kind'] ?? 'click') as RecordActionKind,
+        summary: String(event['summary'] ?? ''),
+        atMs: Number(event['atMs']) || 0,
+        ...(tab !== undefined && tab !== null && { tab: String(tab) }),
+        dropped: false,
+      };
+      // An id sent twice is the same action restated; the author's ✕ stays.
+      const at = state.actions.findIndex((a) => a.id === id);
+      if (at >= 0) state.actions[at] = { ...entry, dropped: state.actions[at]!.dropped };
+      else state.actions.push(entry);
+      // An action only arrives once the recorder is listening, whatever
+      // became of `record:started`. After Stop one can still arrive (a field
+      // being typed into is collected then); it joins the list as it is.
+      if (state.phase === 'starting') state.phase = 'recording';
+      return true;
+    }
+    case 'record:pick':
+      state.pickArmed = event['armed'] === true;
+      return true;
+    case 'record:drafting':
+      state.drafting = event['busy'] === true;
+      return true;
+    case 'record:draft': {
+      const revision = Number(event['revision']);
+      if (!Number.isFinite(revision)) return false;
+      if (state.draft !== null && revision <= state.draft.revision) return false;
+      const through = event['through'];
+      state.draft = {
+        revision,
+        steps: (Array.isArray(event['steps']) ? event['steps'] : []).map(cleanStepText).filter((s) => s !== ''),
+        parameters: (Array.isArray(event['parameters']) ? event['parameters'] : [])
+          .map((p) => {
+            const o = (p ?? {}) as { name?: unknown; value?: unknown };
+            return { name: String(o.name ?? '').trim(), value: String(o.value ?? '') };
+          })
+          .filter((p) => p.name !== ''),
+        notes: (Array.isArray(event['notes']) ? event['notes'] : []).map(String).filter((n) => n.trim() !== ''),
+        ...(typeof through === 'string' && through !== '' && { through }),
+      };
+      return true;
+    }
+    case 'record:writing':
+      state.phase = 'finishing';
+      state.pickArmed = false;
+      return true;
+    default:
+      return false;
+  }
 }
