@@ -1903,4 +1903,135 @@ describe('TestBench debug state machine', function () {
     await waitFor('idle after resume', () => !hooks.isRunning());
     await revertActiveEditor();
   });
+
+  // ---------------------------------------------------------------------------
+  // Run marks follow the text (mark-lines-core.ts). The ✓ / ✗ and the failure
+  // text behind them are keyed by line, and the editor repaints from those
+  // keys on every keystroke — before this, an insert above step 2 left step
+  // 2's ✓ on the inserted line and step 3's ✗ on step 2.
+  // ---------------------------------------------------------------------------
+
+  /** The active file's marks as plain objects, for deepEqual. */
+  const marks = () => {
+    const snap = hooks.tracker.snapshot();
+    return {
+      statuses: Object.fromEntries(snap.statuses),
+      failures: Object.fromEntries(snap.failures.map(([line, f]) => [line, f.error])),
+    };
+  };
+
+  /** Wait for the marks to settle on `expected`; on timeout, fail with the
+   *  marks as they actually are rather than just the label. */
+  async function expectMarks(label, expected) {
+    try {
+      await waitFor(label, () => JSON.stringify(marks()) === JSON.stringify(expected));
+    } catch {
+      assert.deepEqual(marks(), expected, `${label} — got ${JSON.stringify(marks())}`);
+    }
+  }
+
+  /** Pass steps 1 and 2 (lines 8, 9), fail step 3 (line 10) with "boom". */
+  async function runPassPassFail() {
+    void vscode.commands.executeCommand('testbench-native.runAll');
+    await waitFor('stream active', () => fake.hasActiveStream);
+    fake.push({ type: 'step:start', line: 8 });
+    fake.push({ type: 'step:pass', line: 8 });
+    fake.push({ type: 'step:start', line: 9 });
+    fake.push({ type: 'step:pass', line: 9 });
+    fake.push({ type: 'step:start', line: 10 });
+    fake.push({ type: 'step:fail', line: 10, error: 'boom' });
+    fake.end();
+    await waitFor('idle after the run', () => !hooks.isRunning());
+    assert.deepEqual(marks(), {
+      statuses: { 8: 'pass', 9: 'pass', 10: 'fail' },
+      failures: { 10: 'boom' },
+    });
+  }
+
+  it('marks move down with a line inserted above them, and the failure text goes with its ✗', async () => {
+    await runPassPassFail();
+    try {
+      await insertLine(vscode.window.activeTextEditor, 9, '1.5. Inserted step\n');
+      await expectMarks('marks below the insert moved down one', {
+        statuses: { 8: 'pass', 10: 'pass', 11: 'fail' },
+        failures: { 11: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  it('deleting a marked step removes its mark and moves the ones below up, without handing it on', async () => {
+    await runPassPassFail();
+    try {
+      // Step 2 (line 9) deleted whole. Step 3 slides up into line 9 and keeps
+      // its OWN ✗ — the resume arrow snaps forward on this edit, a result
+      // must not, or step 3 would read as passed.
+      await deleteLine(vscode.window.activeTextEditor, 9);
+      await expectMarks('step 2 mark gone, step 3 moved up', {
+        statuses: { 8: 'pass', 9: 'fail' },
+        failures: { 9: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  it('editing a step in place keeps every mark where it is', async () => {
+    await runPassPassFail();
+    try {
+      const editor = vscode.window.activeTextEditor;
+      // Retype step 3's ordinal from column 0 (what Renumber Steps does), and
+      // add a word in the middle of step 2.
+      assert.ok(
+        await editor.edit((b) => {
+          b.replace(new vscode.Range(9, 0, 9, 1), '4');
+          b.insert(new vscode.Position(8, 9), 'big ');
+        }),
+      );
+      await sleep(100);
+      assert.deepEqual(marks(), {
+        statuses: { 8: 'pass', 9: 'pass', 10: 'fail' },
+        failures: { 10: 'boom' },
+      });
+    } finally {
+      await revertActiveEditor();
+    }
+  });
+
+  it('the run state saved after an edit carries the moved lines, not the old ones', async () => {
+    // persist() stamps the signature from the live text, so it vouches for
+    // whatever line numbers it is handed. Unmoved, the saved state said step
+    // 3's ✗ was on line 10 — the inserted line — and a reopen restored it
+    // there.
+    const runState = path.join(FIXTURES_DIR, '.testbench', 'run-state.json');
+    const saved = () => {
+      try {
+        return JSON.parse(require('node:fs').readFileSync(runState, 'utf8')).files['test-with-steps.md'];
+      } catch {
+        return undefined;
+      }
+    };
+    await runPassPassFail();
+    try {
+      await insertLine(vscode.window.activeTextEditor, 8, '0. Inserted first\n');
+      const savedStatuses = () => [...(saved()?.statuses ?? [])].sort((a, b) => a[0] - b[0]);
+      const expected = [[9, 'pass'], [10, 'pass'], [11, 'fail']];
+      try {
+        await waitFor(
+          'saved statuses on the moved lines',
+          () => JSON.stringify(savedStatuses()) === JSON.stringify(expected),
+        );
+      } catch {
+        assert.deepEqual(savedStatuses(), expected, `saved statuses on the moved lines — got ${JSON.stringify(savedStatuses())}`);
+      }
+      assert.equal(
+        saved().signature,
+        hooks.tracker.stepSignatureForTests(vscode.window.activeTextEditor.document.getText()),
+        'stamped against the edited text',
+      );
+    } finally {
+      await revertActiveEditor();
+    }
+  });
 });
