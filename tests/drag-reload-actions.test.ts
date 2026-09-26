@@ -89,6 +89,23 @@ describe('drag and reload — the executor (mocked page)', () => {
     expect(reload).toHaveBeenCalledWith({ waitUntil: 'domcontentloaded', timeout: 30_000 });
   });
 
+  it('a reload that failed is not retryable — as back and forward are not (review, finding 14)', async () => {
+    const { page, reload } = mockPage();
+    reload.mockRejectedValueOnce(new Error('net::ERR_CONNECTION_REFUSED'));
+    const result = await executeAction(page, { action: 'reload', description: 'Reload the page' });
+    expect(result.success).toBe(false);
+    // A re-plan cannot make the page reload; it can only hand the model a
+    // failure to satisfy with a `navigate` or a `noop`.
+    expect(result.retryable).toBe(false);
+    // The control: a failed click stays retryable.
+    const click = await executeAction(
+      { ...page, locator: vi.fn(() => ({ count: async () => 0 })) } as unknown as Page,
+      { action: 'click', selector: '#nothing', description: 'Click nothing' },
+    );
+    expect(click.success).toBe(false);
+    expect(click.retryable).not.toBe(false);
+  });
+
   it('a drag with no target fails, naming the missing field', async () => {
     const { page } = mockPage();
     const result = await executeAction(page, { action: 'drag', selector: '#card', description: 'Drag' });

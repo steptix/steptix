@@ -55,6 +55,17 @@ type EndReason =
   | { kind: 'cancel' }
   | { kind: 'gone' };
 
+/**
+ * `done.error` when a recording ends because its session was closed (a
+ * DELETE, another window's first-use DELETE, the idle reaper, shutdown). The
+ * client shows it as the reason, word for word, so it is a contract.
+ */
+export const RECORD_STEPS_SESSION_CLOSED_MESSAGE = 'The session was closed while recording.';
+
+/** Why a recording is being abandoned: the author's Cancel (or the stream
+ *  closing), or its session going away. */
+type AbortCause = 'cancel' | 'session-closed';
+
 type Phase = 'starting' | 'recording' | 'writing' | 'done';
 
 export class RecordStepsRun {
@@ -67,6 +78,15 @@ export class RecordStepsRun {
   private pendingPick: boolean | null = null;
   /** The live draft — created once the browser is up, before the first action. */
   private engine: DraftEngine | null = null;
+  /**
+   * Set by Cancel (or the stream closing, or the session closing) at ANY point
+   * before `record:result` goes out — including after Stop, while the final
+   * draft is being written. Separate from {@link endReason}, which Stop has
+   * already settled by then (review, finding 2).
+   */
+  private abortCause: AbortCause | null = null;
+  /** `record:result` has gone out: nothing can take it back any more. */
+  private resultSent = false;
 
   constructor(private readonly deps: RecordStepsRunDeps) {
     this.ended = new Promise<EndReason>((resolve) => {
@@ -82,7 +102,35 @@ export class RecordStepsRun {
   /** A method, not an inline test, because the answer changes across awaits
    *  and TypeScript would otherwise narrow it to what it was at the first. */
   private cancelled(): boolean {
-    return this.endReason?.kind === 'cancel';
+    return this.abortCause !== null;
+  }
+
+  /**
+   * Abandon the recording: end the wait for Stop if it is still going on,
+   * abort the model call in flight, and make sure no further one is made. The
+   * run's own path then ends with `done: aborted` and no result. A no-op once
+   * the result is out, and the first cause wins.
+   */
+  private abortRun(cause: AbortCause): void {
+    if (this.resultSent) return;
+    this.abortCause ??= cause;
+    this.settle({ kind: 'cancel' });
+    this.engine?.abandon();
+  }
+
+  /**
+   * The session this recording belongs to is closing (DELETE, the idle reaper,
+   * shutdown). Same path as Cancel; the `done` frame says why.
+   */
+  sessionClosed(): void {
+    this.abortRun('session-closed');
+  }
+
+  /** The `done` frame of an abandoned recording. */
+  private abortedFrame(): { type: 'done'; status: 'aborted'; error?: string } {
+    return this.abortCause === 'session-closed'
+      ? { type: 'done', status: 'aborted', error: RECORD_STEPS_SESSION_CLOSED_MESSAGE }
+      : { type: 'done', status: 'aborted' };
   }
 
   private settle(reason: EndReason): void {
@@ -110,15 +158,15 @@ export class RecordStepsRun {
    * While recording, every action is accepted. `drop` / `restore` of an id
    * the recording does not have (or one already in that state) answers
    * `ignored`. Once Stop has been received the draft is being finished: only
-   * `cancel` still means something (it abandons the call in flight), and
-   * anything else answers `stopping`.
+   * `cancel` still means something — it wins until `record:result` is out:
+   * the call in flight is aborted, no result is sent and `done` is
+   * `aborted` — and anything else answers `stopping`.
    */
   control(control: RecordControl): RecordControlOutcome {
-    if (this.phase === 'done') return 'no-recording';
+    if (this.phase === 'done' || this.resultSent) return 'no-recording';
     if (this.phase === 'writing' || this.endReason) {
       if (control.action === 'cancel') {
-        this.settle({ kind: 'cancel' });
-        this.engine?.abandon();
+        this.abortRun('cancel');
         return 'accepted';
       }
       return 'stopping';
@@ -128,8 +176,7 @@ export class RecordStepsRun {
         this.settle({ kind: 'stop', dropped: new Set(control.dropped ?? []) });
         return 'accepted';
       case 'cancel':
-        this.settle({ kind: 'cancel' });
-        this.engine?.abandon();
+        this.abortRun('cancel');
         return 'accepted';
       case 'drop':
         return this.engine?.drop(control.id) ? 'accepted' : 'ignored';
@@ -154,41 +201,66 @@ export class RecordStepsRun {
    * whatever goes wrong becomes an `output` frame and `done: error`, and
    * `finish` runs on every path.
    */
-  async run(emit: RecordEventListener, signal: AbortSignal): Promise<void> {
+  async run(out: RecordEventListener, signal: AbortSignal): Promise<void> {
     this.started = true;
     const { sessionId, request } = this.deps;
+    // `done` is the last frame, whatever is still settling behind it — a crop
+    // being taken, a pick waiting in the recorder's chain, a warning logged
+    // by another session (review, finding 10). The recorder drops its own
+    // late work too; this is the one place that can promise it for every
+    // source at once.
+    let closed = false;
+    const emit: RecordEventListener = (event) => {
+      if (closed) return;
+      if (event.type === 'done') closed = true;
+      out(event);
+    };
     // Closing the stream is `cancel` (On the wire).
     const onClientGone = (): void => {
-      this.settle({ kind: 'cancel' });
-      this.engine?.abandon();
+      this.abortRun('cancel');
     };
     if (signal.aborted) onClientGone();
     signal.addEventListener('abort', onClientGone, { once: true });
 
+    const file = summarizeTargetFile(request.target.fileText, request.target.mode, request.target.cursorLine);
+    // Known from the first action: what the session holds, the file's own
+    // secret-named literals, and what the request's `.env` says — its
+    // secret-named keys, and whatever a `$VAR` parameter of the file will
+    // resolve to (review, finding 7).
+    const fromEnv = envSecrets(file, request.env);
+    const secrets = (): KnownSecret[] => [...this.safeKnownSecrets(), ...fileSecrets(file), ...fromEnv];
+    const secretValues = (): string[] => secrets().map((s) => s.value);
+
     // Warnings the server logs while this recording runs reach the author as
     // `output` frames, as a run's do. Warnings and errors only: an info line
-    // from another session's run is noise in a recording's panel.
+    // from another session's run is noise in a recording's panel. The logger
+    // fans out process-wide, so a line that names ANOTHER session is not this
+    // recording's and is skipped, and every line forwarded is masked with this
+    // recording's secrets — a line from code that does not say its session
+    // still gets through, but not in clear (review, finding 15).
+    const ownSession = `Session "${sessionId}"`;
     const removeLogBridge = addLogCallback((level, message) => {
       if (level !== 'warn' && level !== 'error') return;
       if (!shouldEmit(level)) return;
-      emit({ type: 'output', msg: message, kind: level });
+      if (/\bSession "[^"]*"/.test(message) && !message.includes(ownSession)) return;
+      emit({ type: 'output', msg: redact(message, secretValues()), kind: level });
     });
-
-    const file = summarizeTargetFile(request.target.fileText, request.target.mode, request.target.cursorLine);
-    const secrets = (): KnownSecret[] => [...this.safeKnownSecrets(), ...fileSecrets(file)];
-    const secretValues = (): string[] => secrets().map((s) => s.value);
 
     try {
       // A client that left before the stream opened gets no browser launched
       // on its behalf.
       if (this.cancelled()) {
-        emit({ type: 'done', status: 'aborted' });
+        emit(this.abortedFrame());
         return;
       }
       let prepared: Awaited<ReturnType<RecordStepsRunDeps['prepareBrowser']>>;
       try {
         prepared = await this.deps.prepareBrowser();
       } catch (err) {
+        if (this.cancelled()) {
+          emit(this.abortedFrame());
+          return;
+        }
         // The project config, or the launch (and its baseUrl navigation).
         const message = `Record Steps could not start: ${messageOf(err)}`;
         emit({ type: 'output', msg: message, kind: 'error' });
@@ -196,7 +268,7 @@ export class RecordStepsRun {
         return;
       }
       if (this.cancelled()) {
-        emit({ type: 'done', status: 'aborted' });
+        emit(this.abortedFrame());
         return;
       }
 
@@ -256,7 +328,7 @@ export class RecordStepsRun {
       if (reason.kind === 'cancel') {
         await recorder.cancel();
         logger.info(`Session "${sessionId}": Record Steps cancelled — nothing written`);
-        emit({ type: 'done', status: 'aborted' });
+        emit(this.abortedFrame());
         return;
       }
       if (reason.kind === 'gone') {
@@ -272,6 +344,10 @@ export class RecordStepsRun {
       // Stop's own `dropped` joins the live drops.
       engine.close();
       const all = await recorder.stop();
+      if (this.cancelled()) {
+        emit(this.abortedFrame());
+        return;
+      }
       engine.dropAll([...reason.dropped]);
       engine.silence();
       this.phase = 'writing';
@@ -283,6 +359,7 @@ export class RecordStepsRun {
 
       if (engine.remainingCount === 0) {
         engine.abandon();
+        this.resultSent = true;
         emit({
           type: 'record:result',
           steps: [],
@@ -297,10 +374,13 @@ export class RecordStepsRun {
       // cover every remaining action (§8). Its failure is thrown: nothing is
       // inserted.
       const answer = await engine.finish();
+      // Cancel wins until the result is out — here it has not gone yet.
       if (this.cancelled()) {
-        emit({ type: 'done', status: 'aborted' });
+        logger.info(`Session "${sessionId}": Record Steps cancelled while finishing — nothing written`);
+        emit(this.abortedFrame());
         return;
       }
+      this.resultSent = true;
       emit({
         type: 'record:result',
         steps: answer.steps,
@@ -310,7 +390,7 @@ export class RecordStepsRun {
       emit({ type: 'done', status: 'passed' });
     } catch (err) {
       if (this.cancelled()) {
-        emit({ type: 'done', status: 'aborted' });
+        emit(this.abortedFrame());
         return;
       }
       this.engine?.abandon();
@@ -356,6 +436,29 @@ function fileSecrets(file: TargetFileSummary): KnownSecret[] {
   return file.parameters
     .filter((p) => isSecretName(p.name) && p.value !== '' && !p.value.trim().startsWith('$'))
     .map((p) => ({ name: p.name, value: p.value }));
+}
+
+/**
+ * Secrets the request's `.env` carries (TestBench sends the file's resolved
+ * `.env` with the recording): every secret-named key's value, and the value
+ * each `$VAR` parameter of the target file will resolve to — the request's
+ * `.env` first, then the server's environment, as a run resolves it. A
+ * parameter whose value is `$VAR` is named in the step as that parameter, so
+ * the parameter's name is what a secret typed from it is reported as.
+ */
+export function envSecrets(file: TargetFileSummary, env: Record<string, string> | undefined): KnownSecret[] {
+  const out: KnownSecret[] = [];
+  for (const p of file.parameters) {
+    const ref = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(p.value.trim());
+    if (!ref) continue;
+    const name = ref[1]!;
+    const value = env?.[name] ?? process.env[name];
+    if (value && (isSecretName(p.name) || isSecretName(name))) out.push({ name: p.name, value });
+  }
+  for (const [name, value] of Object.entries(env ?? {})) {
+    if (value && isSecretName(name) && !out.some((s) => s.value === value)) out.push({ name, value });
+  }
+  return out;
 }
 
 function messageOf(err: unknown): string {

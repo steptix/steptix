@@ -30,7 +30,13 @@ import type { ChatMessage, MessageContentBlock } from '../src/ai/types.js';
 
 type Answer = string | Error;
 
-const launches = vi.hoisted(() => ({ count: 0, pages: [] as unknown[], closers: [] as Array<() => Promise<void>> }));
+const launches = vi.hoisted(() => ({
+  count: 0,
+  pages: [] as unknown[],
+  closers: [] as Array<() => Promise<void>>,
+  /** What the launched browser says it is — false stands for `openBrowser` opening a headless one. */
+  headed: true,
+}));
 const ai = vi.hoisted(() => ({
   requests: [] as ChatMessage[][],
   /** Answers taken first, in order — for a run's own steps or a scripted call. */
@@ -62,7 +68,7 @@ vi.mock('../src/browser/manager.js', async (importOriginal) => {
       launches.count++;
       launches.pages.push(page);
       launches.closers.push(() => browser.close());
-      return { browser, context, page, pageTracker, engine: 'chromium' as const, headed: true };
+      return { browser, context, page, pageTracker, engine: 'chromium' as const, headed: launches.headed };
     },
   };
 });
@@ -138,6 +144,7 @@ vi.mock('../src/report/generator.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
+import { getLogLevel, logger, setLogLevel } from '../src/utils/logger.js';
 import {
   RECORD_STEPS_HEADLESS_MESSAGE,
   RECORD_STEPS_NO_MODEL_MESSAGE,
@@ -327,6 +334,7 @@ beforeEach(async () => {
   launches.count = 0;
   launches.pages.length = 0;
   launches.closers.length = 0;
+  launches.headed = true;
   ai.requests.length = 0;
   ai.responses.length = 0;
   ai.responder = (messages) => echo(messages);
@@ -1043,4 +1051,150 @@ describe('POST /sessions/:id/record-steps/control', () => {
     expect((await control('nobody', { action: 'drop' })).status).toBe(400);
     expect((await control('nobody', { action: 'restore', id: '' })).status).toBe(400);
   });
+});
+
+// ── The fix round (review of the server half) ─────────────────────────────
+
+const SESSION_CLOSED = 'The session was closed while recording.';
+
+/** Hold every model call at its start until the returned opener is called. */
+function holdCalls(): () => void {
+  let open!: () => void;
+  ai.gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  ai.openGate = open;
+  return open;
+}
+
+async function callInFlight(): Promise<void> {
+  const until = Date.now() + 10_000;
+  while (ai.inFlight === 0 && Date.now() < until) await sleep(25);
+  expect(ai.inFlight).toBe(1);
+}
+
+function closeSession(id: string): Promise<globalThis.Response> {
+  return fetch(`${baseUrl}/sessions/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'x-api-key': API_KEY } });
+}
+
+describe('Cancel wins until the result is out (review, finding 2)', () => {
+  it('Cancel after Stop, while the final call runs: no result, done aborted, the call abandoned', async () => {
+    await restartApp({ draftSettleMs: NEVER_SETTLES_MS });
+    const id = 'rec-cancel-finishing';
+    const s = await started(id);
+    await pageOf().click('#signin');
+    await s.waitForCount('record:action', 1);
+    const open = holdCalls();
+    expect((await control(id, { action: 'stop' })).status).toBe(202);
+    await s.waitFor((f) => f.event === 'record:writing', 'record:writing');
+    await callInFlight();
+
+    expect((await control(id, { action: 'cancel' })).status).toBe(202);
+    const done = await s.waitFor((f) => f.event === 'done', 'done');
+    expect(done.data).toEqual({ type: 'done', status: 'aborted' });
+    expect(ai.aborted).toBe(1);
+    open();
+    await sleep(300);
+    expect(s.of('record:result')).toHaveLength(0);
+    expect(ai.requests).toHaveLength(1);
+    expect(sessionManager.isRecordingSteps(id)).toBe(false);
+  }, 60_000);
+
+  it('a session closed under a recording ends it aborted, saying why', async () => {
+    const id = 'rec-closed';
+    const s = await started(id);
+    await pageOf().click('#signin');
+    await s.waitForCount('record:action', 1);
+    expect((await closeSession(id)).status).toBe(200);
+    const done = await s.waitFor((f) => f.event === 'done', 'done');
+    expect(done.data).toEqual({ type: 'done', status: 'aborted', error: SESSION_CLOSED });
+    expect(s.of('record:result')).toHaveLength(0);
+  }, 60_000);
+
+  it('... and one closed while the final draft is being written, the same way', async () => {
+    await restartApp({ draftSettleMs: NEVER_SETTLES_MS });
+    const id = 'rec-closed-finishing';
+    const s = await started(id);
+    await pageOf().click('#signin');
+    await s.waitForCount('record:action', 1);
+    const open = holdCalls();
+    await control(id, { action: 'stop' });
+    await s.waitFor((f) => f.event === 'record:writing', 'record:writing');
+    await callInFlight();
+
+    const closing = closeSession(id);
+    const done = await s.waitFor((f) => f.event === 'done', 'done');
+    expect(done.data).toEqual({ type: 'done', status: 'aborted', error: SESSION_CLOSED });
+    expect(ai.aborted).toBe(1);
+    open();
+    expect((await closing).status).toBe(200);
+    await sleep(300);
+    expect(s.of('record:result')).toHaveLength(0);
+  }, 60_000);
+});
+
+describe("secrets from the request's .env (review, finding 7)", () => {
+  it('a value typed from .env is withheld from the panel and the model — through a $VAR parameter, and by key name', async () => {
+    const id = 'rec-env-secrets';
+    const s = await started(id, recordBody({ env: { PASSWORD: 'pw-from-env-77', STRIPE_API_KEY: 'sk-env-SECRET-42' } }));
+    // The file says `- password: $PASSWORD`; the field is only an email box.
+    await pageOf().fill('#email', 'pw-from-env-77');
+    await pageOf().click('#signin');
+    await s.draftThrough(2);
+    await pageOf().fill('#email', 'Bearer sk-env-SECRET-42');
+    await pageOf().click('#reports');
+    await s.draftThrough(4);
+
+    const everything = JSON.stringify([s.frames, ai.requests]);
+    expect(everything).not.toContain('pw-from-env-77');
+    expect(everything).not.toContain('sk-env-SECRET-42');
+    const first = recordingOf(ai.requests[0]!);
+    expect(first[0]).toMatchObject({ kind: 'type', secret: true, knownSecret: 'password' });
+    const second = recordingOf(ai.requests[1]!);
+    expect(second[0]).toMatchObject({ kind: 'type', value: 'Bearer ***' });
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+});
+
+describe('a browser opened headless (review, finding 12)', () => {
+  it('is refused though the server is headed — on the stream when the recording launches it, then with a 400', async () => {
+    launches.headed = false;
+    const id = 'rec-headless-browser';
+    const r = await record(id, recordBody());
+    expect(r.status).toBe(200);
+    const done = await r.stream!.waitFor((f) => f.event === 'done', 'done');
+    expect(done.data.status).toBe('error');
+    expect(done.data.error).toMatch(/opened headless/);
+    expect(r.stream!.of('record:started')).toHaveLength(0);
+
+    // The session now HAS that browser: refused before any stream opens.
+    const again = await record(id, recordBody({ config: undefined }));
+    expect(again.status).toBe(400);
+    expect(again.json.error).toMatch(/opened headless/);
+  }, 60_000);
+});
+
+describe("the log bridge (review, finding 15)", () => {
+  it("forwards this recording's warnings masked, and not another session's", async () => {
+    const id = 'rec-log-bridge';
+    const s = await started(id, recordBody({ env: { STRIPE_API_KEY: 'sk-env-SECRET-42' } }));
+    const previous = getLogLevel();
+    setLogLevel('warn');
+    try {
+      logger.warn('Session "someone-else": a warning of theirs');
+      logger.warn(`Session "${id}": upstream answered with sk-env-SECRET-42`);
+      logger.warn('A warning that names no session, holding sk-env-SECRET-42');
+      await sleep(100);
+    } finally {
+      setLogLevel(previous);
+    }
+    const warns = s.of('output').filter((o) => o.kind === 'warn').map((o) => o.msg as string);
+    expect(warns.some((m) => m.includes('someone-else'))).toBe(false);
+    expect(warns).toContain(`Session "${id}": upstream answered with ***`);
+    expect(warns).toContain('A warning that names no session, holding ***');
+    expect(JSON.stringify(s.frames)).not.toContain('sk-env-SECRET-42');
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
 });

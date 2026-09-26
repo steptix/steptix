@@ -228,7 +228,8 @@ only that the entry navigates.
   rule 7b; `refresh` and the other near-miss spellings aliased. The form-post
   decision is the browser's: a reload after a POST re-sends or not as the
   browser does, which is the application's behaviour under test. There is no
-  "did it move?" failure — a current page can always be reloaded. Pinned by
+  "did it move?" failure — a current page can always be reloaded; one that
+  fails anyway (the server gone, a timeout) is not retryable, as §4.3's are. Pinned by
   `tests/drag-reload-actions.test.ts`, where the three checks §12 found
   toothless here are mutation-checked for `reload` and `drag` too.
 - A `times` field, or "go back to the start of the history". Two steps do

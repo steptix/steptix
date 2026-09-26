@@ -161,6 +161,9 @@ export interface ElementDescription {
   tag: string;
   role?: string;
   name?: string;
+  /** The accessible name before icon glyphs / emoji were stripped from its
+   *  ends — present only when stripping changed it. */
+  rawName?: string;
   text?: string;
   inputType?: string;
   placeholder?: string;

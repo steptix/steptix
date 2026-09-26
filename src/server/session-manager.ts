@@ -1075,6 +1075,11 @@ export type RecordStepsBegin =
 export const RECORD_STEPS_HEADLESS_MESSAGE =
   'Record Steps needs a visible browser: this server runs headless (browser.headed: false).';
 
+/** The same refusal for one browser: `openBrowser` opened it headless. */
+export const RECORD_STEPS_HEADLESS_BROWSER_MESSAGE =
+  "Record Steps needs a visible browser: this session's active browser was opened headless " +
+  '(headed: false). Switch to a headed browser, or close the session, and record again.';
+
 /**
  * What the start route says when no model could write the steps
  * (docs/specs/SPEC-record-steps.md §8, §10) — decided before a browser is
@@ -2229,6 +2234,11 @@ export class SessionManager {
     // Again, after every await above: the slot is taken synchronously from here.
     const busy = this.recordRefusal(session);
     if (busy) return busy;
+    // Per browser, too: `openBrowser` can open a headless one on a headed
+    // server, and the recording follows the session's active browser.
+    if (session.browserTracker.hasActive() && session.browserTracker.getActive().headed === false) {
+      return { ok: false, status: 400, error: RECORD_STEPS_HEADLESS_BROWSER_MESSAGE };
+    }
 
     const held = session;
     const releaseRun = this.beginExternalRun();
@@ -2313,6 +2323,9 @@ export class SessionManager {
     if (active.cdp) {
       throw new Error('Record Steps does not record in a CDP-attached browser yet.');
     }
+    // Checked again at the browser the recording will actually use — the
+    // route's check saw only what was active before this launch.
+    if (active.headed === false) throw new Error(RECORD_STEPS_HEADLESS_BROWSER_MESSAGE);
     return { browser: active, sendScreenshots: settings.effective.sendScreenshots, launched };
   }
 
@@ -3192,11 +3205,12 @@ export class SessionManager {
   async closeSession(sessionId: string): Promise<void> {
     const session = this.sessions.get(this.sessionKey(sessionId));
     if (!session) return;
-    // A recording in this session ends here, writing nothing. Its browser is
-    // about to close under it anyway (which it would report as an error);
-    // cancelling first makes the close the reason, and covers a recording whose
-    // browser is still launching.
-    session.recording?.control({ action: 'cancel' });
+    // A recording in this session ends here, writing nothing — even one past
+    // Stop whose final draft is still being written. Its browser is about to
+    // close under it anyway (which it would report as an error); ending it
+    // first makes the close the reason (`done: aborted` saying so), and covers
+    // a recording whose browser is still launching.
+    session.recording?.sessionClosed();
     // Before the browser goes: an open compile has a queue running, and the
     // session is the only thing that still knows about it.
     await this.discardLiveCompile(session, 'the session is closing');

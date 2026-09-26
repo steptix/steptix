@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import Jimp from 'jimp';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { PageTracker, type BrowserSession } from '../src/browser/manager.js';
 import { StepRecorder, classifyHistoryMove, type KnownSecret } from '../src/recorder/step-recorder.js';
@@ -71,6 +72,49 @@ const PAGES: Record<string, string> = {
   '/other.html': `<!doctype html><html><head><title>Other</title></head><body>
     <h1>Other page</h1><button id="other-button">Continue</button></body></html>`,
   '/frame.html': `<!doctype html><html><body><label for="card">Card number</label><input id="card" name="card"></body></html>`,
+  // A password box whose LABEL does not say password, behind a "show" eye —
+  // so only the recorder's memory of its type can keep it secret.
+  '/eye.html': `<!doctype html><html><head><title>Eye</title></head><body>
+    <form onsubmit="event.preventDefault()">
+      <label for="mw">Memorable word</label><input id="mw" type="password">
+      <button type="button" id="eye" onclick="const f = document.getElementById('mw'); f.type = f.type === 'password' ? 'text' : 'password'">Show</button>
+      <label for="pw-text">Password</label><input id="pw-text" type="text">
+      <input id="plain" name="nickname">
+      <p id="note">A note</p>
+    </form></body></html>`,
+  // Fields in solid colours beside a button, so a crop can be read for them.
+  '/paint.html': `<!doctype html><html><head><title>Paint</title></head><body style="margin:0;background:#fff">
+    <div style="padding:20px">
+      <label for="mw2" style="display:block">Memorable word</label>
+      <input id="mw2" type="password" style="display:block;width:180px;height:30px;border:0;background:#00ff00;color:#00ff00">
+      <button type="button" id="eye2" style="display:block" onclick="const f = document.getElementById('mw2'); f.type = f.type === 'password' ? 'text' : 'password'">Show</button>
+      <input id="tok2" name="reference" style="display:block;width:180px;height:30px;border:0;background:#0000ff;color:#0000ff">
+      <button type="button" id="near" style="display:block">Near</button>
+    </div></body></html>`,
+  '/actions.html': `<!doctype html><html><head><title>Actions</title></head><body>
+    <form onsubmit="event.preventDefault()">
+      <label for="up" id="up-label" style="display:inline-block;padding:10px;border:1px solid">Upload statement</label>
+      <input id="up" type="file" style="display:none">
+      <input id="sel" value="some text here to select" style="width:260px">
+      <button type="button" id="beside" style="margin-left:40px">Beside</button>
+    </form>
+    <div id="editor" contenteditable="true" style="min-height:60px;border:1px solid" aria-label="Message"></div>
+    <nav aria-label="Main navigation"><a href="#tx" id="tx-link">💳 Transactions</a> <a href="#next" id="next-link">Next ›</a></nav>
+    <p id="long"></p>
+    <button id="elsewhere">Elsewhere</button>
+    </body></html>`,
+  '/shadow.html': `<!doctype html><html><head><title>Shadow</title></head><body>
+    <div id="host"></div>
+    <script>
+      const root = document.getElementById('host').attachShadow({ mode: 'open' });
+      root.innerHTML = '<label>Plan <select id="plan"><option>Basic</option><option>Premium</option></select></label>'
+        + '<label>Nickname <input id="nick"></label>';
+    </script></body></html>`,
+  '/nav.html': `<!doctype html><html><head><title>Nav</title></head><body>
+    <a id="nocontent" href="/204">No content</a>
+    <a id="slow" href="/slow">Slow report</a>
+    <button id="later-replace" onclick="setTimeout(() => history.replaceState({}, '', '?view=' + Date.now()), 400)">Load more</button>
+    </body></html>`,
 };
 
 let server: Server;
@@ -87,13 +131,29 @@ let known: KnownSecret[];
 
 beforeAll(async () => {
   server = createServer((req, res) => {
-    const body = PAGES[(req.url ?? '/').split('?')[0]!];
+    const route = (req.url ?? '/').split('?')[0]!;
+    // A link that goes nowhere: the page asked, and nothing ever commits.
+    if (route === '/204') {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+    // A link whose answer takes a while: long enough to be cut short.
+    if (route === '/slow') {
+      const timer = setTimeout(() => {
+        res.setHeader('Content-Type', 'text/html');
+        res.end('<!doctype html><title>Slow</title><h1>Slow</h1>');
+      }, 3_000);
+      res.on('close', () => clearTimeout(timer));
+      return;
+    }
+    const body = PAGES[route];
     if (!body) {
       res.statusCode = 404;
       res.end('not found');
       return;
     }
-    res.setHeader('Content-Type', 'text/html');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.end(body);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
@@ -104,6 +164,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await browser?.close().catch(() => {});
+  // A `/slow` answer the browser walked away from may still hold its socket.
+  server?.closeAllConnections();
   await new Promise<void>((resolve) => server?.close(() => resolve()));
 });
 
@@ -513,4 +575,274 @@ describe('classifyHistoryMove', () => {
     expect(classifyHistoryMove(at(1, [1, 2]), at(2, [1, 2, 3]))).toBe('new');
     expect(classifyHistoryMove(null, at(0, [1]))).toBe('new');
   });
+});
+
+// ── The fix round (review of the server half) ─────────────────────────────
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+describe('a secret field stays secret for the life of the document (review, finding 1)', () => {
+  beforeEach(async () => {
+    await page.goto(`${origin}/eye.html`);
+  });
+
+  it('a password box its eye flipped to text: typed after the flip, edited after it, and picked — never read', async () => {
+    recorder = newRecorder({ sendScreenshots: true });
+    await recorder.start();
+    // Flipped BEFORE the author touched the field, and named only by a label
+    // that does not say password: its type's OLD value is all that is left.
+    await page.click('#eye');
+    await page.click('#mw');
+    await page.keyboard.type('hunter2-EYE');
+    await page.keyboard.press('Tab');
+    // Back into it, one more character: the box has shown text for a while.
+    await page.click('#mw');
+    await page.keyboard.press('End');
+    await page.keyboard.type('!');
+    await page.keyboard.press('Tab');
+    // And an Add check on it.
+    recorder.armPick();
+    await sleep(100);
+    await page.click('#mw');
+    await actionsReach(8);
+    const done = await recorder.stop();
+    const typed = done.filter((a) => a.kind === 'type');
+    expect(typed).toHaveLength(2);
+    for (const a of typed) {
+      expect(a.secret).toBe(true);
+      expect(a.value).toBeUndefined();
+      // Showing its value in clear: no picture of it.
+      expect(a.crop).toBeUndefined();
+    }
+    const check = done.find((a) => a.kind === 'check');
+    expect(check?.check).toMatchObject({ secret: true });
+    expect(check?.check?.value).toBeUndefined();
+    expect(check?.crop).toBeUndefined();
+    expect(JSON.stringify(raw)).not.toContain('hunter2');
+  }, 30_000);
+
+  it('a text box LABELLED Password is secret though no password type was ever seen (flipped before Record)', async () => {
+    recorder = newRecorder();
+    await recorder.start();
+    await page.fill('#pw-text', 'label-says-SECRET');
+    await page.fill('#plain', 'Nick');
+    const done = await recorder.stop();
+    expect(done.map((a) => [a.target?.name ?? a.target?.nameAttr, a.secret === true, a.value])).toEqual([
+      ['Password', true, undefined],
+      ['nickname', false, 'Nick'],
+    ]);
+    expect(JSON.stringify(raw)).not.toContain('label-says-SECRET');
+  }, 30_000);
+});
+
+describe('crops have secrets painted out (review, finding 6)', () => {
+  /** How many pixels of a crop are within `tolerance` of a colour. */
+  async function pixelsNear(dataUrl: string, rgb: [number, number, number], tolerance = 40): Promise<number> {
+    const image = await Jimp.read(Buffer.from(dataUrl.split(',')[1]!, 'base64'));
+    let n = 0;
+    const d = image.bitmap.data;
+    for (let i = 0; i < d.length; i += 4) {
+      if (Math.abs(d[i]! - rgb[0]) + Math.abs(d[i + 1]! - rgb[1]) + Math.abs(d[i + 2]! - rgb[2]) <= tolerance) n++;
+    }
+    return n;
+  }
+  const GREEN: [number, number, number] = [0, 255, 0];
+  const BLUE: [number, number, number] = [0, 0, 255];
+
+  it('a flipped password box and a field holding a known secret are covered in every crop', async () => {
+    await page.goto(`${origin}/paint.html`);
+    known = [{ name: 'api_token', value: 'known-VALUE-1' }];
+    recorder = newRecorder({ sendScreenshots: true });
+    await recorder.start();
+    await page.fill('#mw2', 'typed-while-hidden');
+    await page.click('#eye2'); // the box now shows its value, in clear
+    await page.fill('#tok2', 'known-VALUE-1');
+    await page.click('#near');
+    const done = await recorder.stop();
+
+    // The control: the first crop was taken while the blue field was empty —
+    // an ordinary field, left alone — so the counter does see the colours.
+    const first = done.find((a) => a.kind === 'type' && a.target?.id === 'mw2');
+    expect(first?.crop?.dataUrl).toMatch(/^data:image\/png/);
+    expect(await pixelsNear(first!.crop!.dataUrl, BLUE)).toBeGreaterThan(500);
+    expect(await pixelsNear(first!.crop!.dataUrl, GREEN)).toBe(0);
+
+    const near = done.find((a) => a.kind === 'click' && a.target?.name === 'Near');
+    expect(near?.crop?.dataUrl).toMatch(/^data:image\/png/);
+    expect(await pixelsNear(near!.crop!.dataUrl, GREEN)).toBe(0);
+    expect(await pixelsNear(near!.crop!.dataUrl, BLUE)).toBe(0);
+  }, 30_000);
+});
+
+describe('what is not an action (review, finding 9)', () => {
+  beforeEach(async () => {
+    await page.goto(`${origin}/actions.html`);
+  });
+
+  it('a label for a hidden file input is ONE click — the click it passes on to the input is not another', async () => {
+    recorder = newRecorder();
+    await recorder.start();
+    const chooser = page.waitForEvent('filechooser');
+    await page.click('#up-label');
+    await (await chooser).setFiles({ name: 'statement.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF') });
+    await actionsReach(2);
+    await sleep(300);
+    expect(actions.map((a) => [a.kind, a.target?.name])).toEqual([
+      ['click', 'Upload statement'],
+      ['upload', 'Upload statement'],
+    ]);
+    expect(actions[1]!.files).toEqual(['statement.pdf']);
+  }, 30_000);
+
+  it("selecting a field's text by dragging is not a drag, wherever the pointer is released", async () => {
+    recorder = newRecorder();
+    await recorder.start();
+    const field = (await page.locator('#sel').boundingBox())!;
+    const beside = (await page.locator('#beside').boundingBox())!;
+    await page.mouse.move(field.x + 5, field.y + field.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(field.x + field.width - 5, field.y + field.height / 2, { steps: 5 });
+    await page.mouse.move(beside.x + beside.width / 2, beside.y + beside.height / 2, { steps: 5 });
+    await page.mouse.up();
+    await sleep(400);
+    expect(actions.some((a) => a.kind === 'drag')).toBe(false);
+    // What it did do was put the caret in the field.
+    expect(actions.filter((a) => a.kind === 'click').every((a) => a.focusOnly === true)).toBe(true);
+  }, 30_000);
+
+  it('Enter in a contenteditable is part of the typing, not a key action', async () => {
+    recorder = newRecorder();
+    await recorder.start();
+    await page.click('#editor');
+    await page.keyboard.type('line one');
+    await page.keyboard.press('Enter');
+    await page.keyboard.type('line two');
+    await page.click('#elsewhere');
+    await actionsReach(3);
+    await sleep(300);
+    expect(actions.map((a) => a.kind)).toEqual(['click', 'type', 'click']);
+    expect(actions[1]!.value).toMatch(/line one\s+line two/);
+  }, 30_000);
+});
+
+describe('Add check reports the typing before it (review, finding 11)', () => {
+  it('a field still being typed into is reported BEFORE the check that follows', async () => {
+    recorder = newRecorder();
+    await recorder.start();
+    await page.focus('#email');
+    await page.keyboard.type('a@b.test');
+    recorder.armPick();
+    await sleep(100);
+    await page.click('#pm-text');
+    await actionsReach(2);
+    expect(actions.map((a) => a.kind)).toEqual(['type', 'check']);
+    expect(actions[0]!.value).toBe('a@b.test');
+  }, 30_000);
+});
+
+describe('open shadow roots (review, finding 13)', () => {
+  it('a choice inside an open shadow root is recorded — its change event never leaves the root', async () => {
+    await page.goto(`${origin}/shadow.html`);
+    recorder = newRecorder();
+    await recorder.start();
+    await page.focus('#plan'); // Playwright's CSS pierces open shadow roots
+    await page.selectOption('#plan', { label: 'Premium' });
+    await page.fill('#nick', 'Robin');
+    const done = await recorder.stop();
+    expect(done.map((a) => [a.kind, a.options ?? a.value])).toEqual([
+      ['select', ['Premium']],
+      ['type', 'Robin'],
+    ]);
+  }, 30_000);
+});
+
+describe('Cancel leaves nothing behind (review, finding 10)', () => {
+  it('work still in flight at cancel reports nothing afterwards', async () => {
+    recorder = newRecorder({ sendScreenshots: true });
+    await recorder.start();
+    // Each gesture's crop is still being taken when cancel lands.
+    await page.click('#panel-button', { noWaitAfter: true });
+    recorder.armPick();
+    await sleep(50);
+    await page.click('#pm-text', { noWaitAfter: true });
+    await recorder.cancel();
+    const atCancel = actions.length;
+    const picksAtCancel = picks.length;
+    await sleep(1_500);
+    expect(actions.length).toBe(atCancel);
+    expect(picks.length).toBe(picksAtCancel);
+  }, 30_000);
+});
+
+describe('history moves the author did not make — and ones they did (review, findings 4 and 5)', () => {
+  beforeEach(async () => {
+    await page.goto(`${origin}/nav.html`);
+  });
+
+  it('a replaceState the page makes a while after a click is not a Reload', async () => {
+    recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
+    await recorder.start();
+    await page.click('#later-replace');
+    await page.waitForURL(/\?view=/);
+    await sleep(400);
+    expect(actions.map((a) => a.kind)).toEqual(['click']);
+  }, 30_000);
+
+  it("after a link that never committed (a 204), the author's Reload is still a Reload", async () => {
+    recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
+    await recorder.start();
+    await page.click('#nocontent');
+    await sleep(400);
+    await page.reload();
+    await actionsReach(2);
+    await sleep(300);
+    expect(actions.map((a) => a.kind)).toEqual(['click', 'reload']);
+  }, 30_000);
+
+  it("a Reload that cuts a slow page navigation short is the author's Reload", async () => {
+    recorder = newRecorder({ typedNavigationWindowMs: 100, historyCausedWindowMs: 100 });
+    await recorder.start();
+    await page.click('#slow', { noWaitAfter: true });
+    await sleep(400);
+    // Playwright may report the cut-short navigation's abort as the reload's.
+    await page.reload().catch(() => {});
+    await actionsReach(2);
+    await sleep(300);
+    expect(actions.map((a) => a.kind)).toEqual(['click', 'reload']);
+    expect(actions[1]!.url).toBe(`${origin}/nav.html`);
+  }, 30_000);
+});
+
+describe('masked, then clipped (review, finding 8)', () => {
+  it("a known secret across the page's length limit leaves no prefix behind", async () => {
+    await page.goto(`${origin}/actions.html`);
+    const secret = 'sk_live_ABCDEFGHIJ1234567890';
+    known = [{ name: 'api_key', value: secret }];
+    await page.evaluate((s) => {
+      document.getElementById('long')!.textContent = `${'x '.repeat(145)}${s} tail`;
+    }, secret);
+    recorder = newRecorder();
+    await recorder.start();
+    recorder.armPick();
+    await sleep(100);
+    await page.click('#long');
+    const [check] = await actionsReach(1);
+    expect(check!.kind).toBe('check');
+    expect(JSON.stringify(check)).not.toContain(secret.slice(0, 6));
+    expect(check!.check!.text).toContain('***');
+  }, 30_000);
+});
+
+describe('decoration is not a name (review, finding 16)', () => {
+  it("a link's emoji and a trailing chevron are left out of its name, and kept in rawName", async () => {
+    await page.goto(`${origin}/actions.html`);
+    recorder = newRecorder();
+    await recorder.start();
+    await page.click('#tx-link');
+    await page.click('#next-link');
+    await actionsReach(2);
+    expect(actions[0]!.target).toMatchObject({ name: 'Transactions', rawName: '💳 Transactions' });
+    expect(actions[0]!.summary).toBe('Clicked link "Transactions"');
+    expect(actions[1]!.target).toMatchObject({ name: 'Next', rawName: 'Next ›' });
+  }, 30_000);
 });

@@ -87,6 +87,8 @@ export class DraftEngine {
   private open = true;
   /** True after `record:writing` or cancel: no drafting frames, no warnings. */
   private silent = false;
+  /** Cancelled: no call is made from here, not even Stop's final one. */
+  private abandoned = false;
   /** `record:drafting busy: true` sent and not yet answered. */
   private busyShown = false;
   /** The model rejected images once; later calls go without them. */
@@ -270,6 +272,7 @@ export class DraftEngine {
    */
   private async runCall(kind: CallKind, final: boolean): Promise<CallOutcome> {
     if (this.current) throw new Error('a draft call is already running');
+    if (this.abandoned) return 'stale';
     const generation = this.generation;
     const actions = kind === 'full' ? this.remaining : this.uncovered();
     if (actions.length === 0) {
@@ -400,13 +403,16 @@ export class DraftEngine {
    */
   async finish(): Promise<RecordStepsAnswer> {
     while (this.current) await this.current.promise;
-    const kind = this.nextKind();
+    // Cancelled while the call in flight ran: no final call — its answer
+    // would be thrown away, and the model is not asked for nothing.
+    const kind = this.abandoned ? null : this.nextKind();
     if (kind) await this.runCall(kind, true);
     return { steps: [...this.steps], parameters: this.parameters.map((p) => ({ ...p })), notes: this.notes() };
   }
 
   /** Cancel, or the stream closed: abandon the call in flight, make no more. */
   abandon(): void {
+    this.abandoned = true;
     this.close();
     this.silent = true;
     this.generation++;

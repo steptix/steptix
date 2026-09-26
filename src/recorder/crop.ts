@@ -21,6 +21,9 @@ const MIN_CROP = { width: 520, height: 320 };
 export const MAX_CROP_SIDE_PX = 640;
 /** The outline drawn round the target: colour (RGBA) and thickness. */
 const OUTLINE_RGBA = 0xe0245eff;
+/** What a secret field is painted over with: solid, and nothing like the
+ *  outline, so the model reads it as "hidden", not as "this one". */
+const PAINT_RGBA = 0x2b2b2bff;
 const OUTLINE_PX = 3;
 
 /** Clamp `[start, start+size)` into `[0, limit)` without shrinking it below
@@ -39,12 +42,18 @@ function clampSpan(start: number, size: number, limit: number): { start: number;
  *
  * Null when the box is not on the screenshot at all — a target scrolled out of
  * view by the time the picture was taken says nothing useful about itself.
+ *
+ * `paintOut` are page boxes to cover with a solid fill BEFORE anything is kept:
+ * every secret field on screen (a toggled password box shows its value in
+ * clear) and every field whose value is a secret the run knows. Painted on the
+ * whole screenshot, so no crop or scale can bring the pixels back.
  */
-export async function cropAround(png: Buffer, box: Box): Promise<ActionCrop | null> {
+export async function cropAround(png: Buffer, box: Box, paintOut: readonly Box[] = []): Promise<ActionCrop | null> {
   const image = await Jimp.read(png);
   const W = image.bitmap.width;
   const H = image.bitmap.height;
   if (W <= 0 || H <= 0) return null;
+  for (const r of paintOut) paintBox(image, r);
   // Off the picture entirely.
   if (box.x >= W || box.y >= H || box.x + box.width <= 0 || box.y + box.height <= 0) return null;
 
@@ -83,6 +92,20 @@ export async function cropAround(png: Buffer, box: Box): Promise<ActionCrop | nu
     },
     pageBox: { ...box },
   };
+}
+
+/** Cover a page box with a solid fill, clamped to the image. */
+function paintBox(image: Jimp, r: Box): void {
+  const W = image.bitmap.width;
+  const H = image.bitmap.height;
+  const x0 = Math.max(0, Math.floor(r.x));
+  const y0 = Math.max(0, Math.floor(r.y));
+  const x1 = Math.min(W, Math.ceil(r.x + r.width));
+  const y1 = Math.min(H, Math.ceil(r.y + r.height));
+  if (x1 <= x0 || y1 <= y0) return;
+  image.scan(x0, y0, x1 - x0, y1 - y0, function (this: Jimp, _x: number, _y: number, idx: number) {
+    this.bitmap.data.writeUInt32BE(PAINT_RGBA, idx);
+  });
 }
 
 /** A rectangle outline, OUTLINE_PX thick, drawn inward from the box's edge

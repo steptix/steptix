@@ -31,7 +31,10 @@
 //
 // A WeakSet of every element ever seen as `type=password` would be the exact
 // answer, but each capture is its own `evaluate()` call with its own scope —
-// there is nowhere to keep one across captures.
+// there is nowhere to keep one across captures. The recorder is the exception:
+// its script lives as long as the document, so it keeps that WeakSet ON TOP of
+// this rule (record-steps.js, "Secrets, remembered for the life of the
+// document") — this rule decides what is secret, the memory only ever adds.
 //
 // The name rule mirrors `isSecretName` in src/utils/secrets.ts (defined in
 // src/parser/parameters.ts): /password|secret|token|key/i. This fragment is

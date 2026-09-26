@@ -119,7 +119,19 @@ So typing an email address costs no model call; the Tab or the click that
 follows it does, and the model sees both.
 
 Not captured: Escape and every other key or shortcut, hover, right-click,
-scrolling, native dialogs, a second browser, the computer surface.
+scrolling, native dialogs, a second browser, the computer surface — and
+anything inside a **closed** shadow root. Its events leave it retargeted to
+its host and nothing outside can look in, so typing or choosing there is not
+recorded (a Tab or Enter pressed there is, against the host). An **open**
+shadow root is recorded like the rest of the page, including its `change`
+events, which never leave the root on their own.
+
+Not actions, though they look like one: the click a `<label>` passes on to
+its control (a checkbox, a hidden file input — the label's click is the
+action); a press-move-release inside a text field, which selects its text
+(the click it ends with is a click into the field); Enter in a textarea or a
+contenteditable, which is typing. Add check reports any typing still open
+before the check itself.
 
 **The runtime must be able to perform what is recorded.** A run's model has
 `back` and `forward` actions; `drag` (a drag from one element onto another)
@@ -144,6 +156,12 @@ Every action's element is described from the page itself:
 - which frame it is in (its title, name or source);
 - a stable selector, verified unique when taken.
 
+The name and text lose the icon glyphs, emoji and decorative symbols at their
+ends — a link shown as "💳 Transactions" is named `Transactions`, "Next ›" is
+`Next` — and the name as the page gave it travels beside it as `rawName`. A
+step that names an element by its decoration breaks the day the icon changes,
+and the model copies what it is shown.
+
 ### 4.2 The screenshot
 
 At the moment of a click — on mouse-down, before the click lands and the page
@@ -159,15 +177,36 @@ again, within the same cap.
 - `ai.sendScreenshots: false` sends no crops.
 - A model that rejects images is asked once more without them.
 - At most 40 crops per recording; later actions carry descriptions only.
-- A password field shows dots, as it does on screen. Anything else visible is
-  sent, as screenshots already are during runs.
+- **Secrets are painted out.** Before a crop is kept, every secret field on
+  the page (§5 — a password box its "show" eye has flipped to text included)
+  and every field whose value holds a secret the recording knows is covered
+  with a solid fill, on the whole screenshot, so no crop or scaling can bring
+  it back. A frame that cannot say where its fields are in time costs the
+  crop: it is not sent. A secret field that is itself the target gets no crop
+  while it shows its value in clear. Anything else visible is sent, as
+  screenshots already are during runs.
 
 ## 5. Secrets
 
 A field is **secret** when the DOM snapshot's secret-field rule says so: its
 `type` is `password`; its `autocomplete` names a password; its `name`, `id`,
 `aria-label` or `autocomplete` matches the secret-name rule; or its
-placeholder matches the password-field rule. For a secret field:
+placeholder matches the password-field rule. The recorder adds two things the
+snapshot cannot:
+
+- **Memory.** A field seen as secret once is secret for as long as its
+  document lives. The "show password" eye flips a password box to
+  `type="text"`, after which the rule no longer calls it secret; the recorder
+  remembers it, catching the flip itself (the `type` attribute's old value)
+  even when the author never touched the field before it. Typing into it,
+  editing it after the flip, an Add check on it and every crop treat it as
+  secret.
+- **Its label.** A text field whose `<label>` matches the password-field rule
+  is secret too — on a minimal sign-in form, the only name a flipped password
+  box has left. (A box flipped before Record was pressed, on a page the
+  recording script was not yet in, is caught by this rule or not at all.)
+
+For a secret field:
 
 - the page script reports only *that* it was typed into — the value is never
   read into an action, a frame, a log line, a prompt or a file;
@@ -176,6 +215,20 @@ placeholder matches the password-field rule. For a secret field:
   any `$VAR` parameter is;
 - recording into a test that already fills that field from a parameter
   reuses that parameter.
+
+**Known secrets.** From the first action, the recording also knows secret
+VALUES: the session's secret-named variables, the file's secret-named literal
+parameters, and the `.env` the request brought (TestBench sends the test's) —
+every secret-named key's value, and what each `$VAR` parameter with a
+secret-sounding name (or naming a secret-sounding variable) resolves to, the
+request's `.env` first and the server's environment after. A value typed
+anywhere that IS one of them is withheld like a secret field's and names its
+parameter; one that CONTAINS one keeps its other words. They are masked out of
+everything the model is sent — in either spelling, as typed or as it reads
+inside a JSON string (`pa"ss` is `pa\"ss` there), and before any text is cut
+to length, so a secret that crossed the cut leaves no prefix behind — and out
+of every panel line, `record:started`, and the server warnings forwarded as
+`output`.
 
 ## 6. Checks
 
@@ -403,7 +456,11 @@ Frames arrive in this order: `record:started`; then, as the author works,
 final draft, with parameter conflicts settled), `done`. An action can still
 arrive after `stop` (a field being typed into is collected then), until
 `record:writing`. A cancel, or the client closing the stream, ends with
-`done` `aborted`; a draft call in flight is abandoned.
+`done` `aborted`; a draft call in flight is abandoned. That holds at any point
+before `record:result` — after `stop` too, while the final draft is being
+written: no result is sent. A session closed under the recording ends it the
+same way, saying why: `done` `aborted` with `error: "The session was closed
+while recording."`. `done` is always the last frame.
 
 ### 9.3 `POST /sessions/:id/record-steps/control`
 

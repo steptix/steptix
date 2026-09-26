@@ -611,12 +611,14 @@ export async function executeAction(
       // when the refusal was a shape reason, which is what tells a caller it
       // may spend a model call on the structure.
       ...(err instanceof TableShapeError && err.sketch !== null && { sketch: err.sketch }),
-      // A history move that did not happen cannot be fixed by re-planning,
-      // so a retry only burns an AI turn — the upload path takes the same
+      // A history move (or a reload) that did not happen cannot be fixed by
+      // re-planning, so a retry only burns an AI turn — the upload path takes the same
       // flag for the same reason. Worse here: the re-ask hands the model a
       // failure it can satisfy with a `navigate` or a `noop`, turning the
       // loud failure §4.3 chose back into the quiet pass §2 is about.
-      ...((eff.action === 'back' || eff.action === 'forward') && { retryable: false as const }),
+      ...((eff.action === 'back' || eff.action === 'forward' || eff.action === 'reload') && {
+        retryable: false as const,
+      }),
       ...(eff.selector !== undefined && { failedSelector: eff.selector }),
       ...(matchCount !== undefined && { matchCount }),
       ...(targeting !== undefined && { targeting }),

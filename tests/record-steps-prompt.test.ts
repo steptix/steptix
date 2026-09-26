@@ -20,7 +20,8 @@ import {
   askForDraft,
   parseDraftAnswer,
 } from '../src/recorder/write-steps.js';
-import { summarizeAction } from '../src/recorder/step-recorder.js';
+import { summarizeAction, stripEdgePictographs } from '../src/recorder/step-recorder.js';
+import { envSecrets } from '../src/recorder/record-steps-run.js';
 
 const FILE = [
   '---',
@@ -424,5 +425,120 @@ describe('summarizeAction — the panel line', () => {
       .toBe('Selected "Monthly" in combobox "Frequency"');
     expect(summarizeAction(action({ kind: 'tab', tabEvent: 'opened', tab: 'page:2', title: 'Docs', url: 'http://x/' }, 1)))
       .toBe('Opened a new tab page:2 — "Docs" http://x/');
+  });
+});
+
+// ── The fix round (review of the server half) ─────────────────────────────
+
+describe('secrets that JSON would spell differently (review, finding 3)', () => {
+  const BS = String.fromCharCode(92);
+  const QUOTED = 'pa"ss-WORD';
+  const SLASHED = `C:${BS}keys${BS}prod`;
+
+  it('a secret holding a quote or a backslash is masked in the file excerpt, the draft and the recording', () => {
+    const fileText = [
+      '# T',
+      '',
+      '## Parameters',
+      `- password: ${QUOTED}`,
+      `- key_file: ${SLASHED}`,
+      '',
+      '## Steps',
+      '1. Navigate to /',
+      '2. Type {{password}} into the Password field',
+    ].join('\n');
+    const f = summarizeTargetFile(fileText, 'cursor', 9);
+    const messages = buildRecordStepsPrompt({
+      actions: [
+        action({ kind: 'check', target: { tag: 'div', name: 'Token' }, check: { text: `Your key: sk"live and ${SLASHED}` } }, 1),
+      ],
+      draft: { steps: ['Type {{password}} into the Password field'], parameters: [{ name: 'note', value: `sk"live` }] },
+      file: f,
+      includeImages: false,
+      secrets: ['sk"live'],
+    });
+    const text = JSON.stringify(messages);
+    const escaped = (s: string): string => JSON.stringify(s).slice(1, -1);
+    for (const secret of [QUOTED, SLASHED, 'sk"live']) {
+      // Neither as typed nor as JSON spells it — at any depth of escaping.
+      expect(text).not.toContain(escaped(secret));
+      expect(text).not.toContain(escaped(escaped(secret)));
+    }
+    expect(userText(messages[1]!.content as MessageContentBlock[])).toContain('Your key: *** and ***');
+  });
+
+  it('a page that shows a secret already JSON-escaped is masked too', () => {
+    const messages = buildRecordStepsPrompt({
+      actions: [action({ kind: 'check', target: { tag: 'pre' }, check: { text: `{"token":"sk${BS}"live"}` } }, 1)],
+      file: summarizeTargetFile(FILE, 'cursor', 16),
+      includeImages: false,
+      secrets: ['sk"live'],
+    });
+    const text = userText(messages[1]!.content as MessageContentBlock[]);
+    const start = text.lastIndexOf('--- BEGIN RECORDING ---') + '--- BEGIN RECORDING ---'.length;
+    const recording = JSON.parse(text.slice(start, text.lastIndexOf('--- END RECORDING ---')));
+    expect(recording[0].check.text).toBe('{"token":"***"}');
+  });
+});
+
+describe('the drafting rules the smoke run asked for (review, finding 16)', () => {
+  it('names leave out icons and emoji (S2), and a dismissed banner stays a step (I8)', () => {
+    expect(RECORD_STEPS_SYSTEM).toMatch(/S2\.[^\n]*leave out icons, emoji and decorative symbols/);
+    expect(RECORD_STEPS_SYSTEM).toMatch(/"💳 Transactions" is "Click Transactions in the main navigation"/);
+    expect(RECORD_STEPS_SYSTEM).toMatch(/I8\. Keep every step that closes a cookie, consent/);
+    expect(RECORD_STEPS_SYSTEM).toMatch(/Keep it on every redraft too/);
+  });
+
+  it('stripEdgePictographs takes decoration off the ends and leaves the words', () => {
+    expect(stripEdgePictographs('💳 Transactions')).toBe('Transactions');
+    expect(stripEdgePictographs('Next ›')).toBe('Next');
+    expect(stripEdgePictographs('« Back')).toBe('Back');
+    expect(stripEdgePictographs('✅ Paid 👍🏽')).toBe('Paid');
+    expect(stripEdgePictographs(' Save')).toBe('Save'); // an icon font's glyph
+    expect(stripEdgePictographs('Pay 2 invoices')).toBe('Pay 2 invoices');
+    expect(stripEdgePictographs('Rock ♥ Roll')).toBe('Rock ♥ Roll'); // inside stays
+    expect(stripEdgePictographs('✕')).toBe('');
+  });
+});
+
+describe('summarizeAction masks before it shortens (review, finding 8)', () => {
+  it('a long value or check text keeps no prefix of a secret the cut went through', () => {
+    const secret = 'sk_live_51HxYzAbCdEfGhIjKlMnOpQrStUv';
+    const check = action({
+      kind: 'check',
+      target: { tag: 'div', name: 'API key panel' },
+      check: { text: `Your live API key (keep it safe) is ${secret} — rotate it yearly` },
+    }, 1);
+    const typed = action({
+      kind: 'type',
+      target: { tag: 'textarea', name: 'Notes' },
+      value: `Authorization header value: Bearer ${secret}`,
+    }, 2);
+    for (const a of [check, typed]) {
+      const line = summarizeAction(a, [secret]);
+      expect(line).not.toContain(secret.slice(0, 8));
+      expect(line).toContain('***');
+    }
+  });
+});
+
+describe('envSecrets — the .env the request brought (review, finding 7)', () => {
+  it('secret-named keys, and what a $VAR parameter will resolve to, under the parameter name', () => {
+    const f = summarizeTargetFile(
+      ['# T', '', '## Parameters', '- password: $LOGIN_PW', '- email: $TEST_EMAIL', '', '## Steps', '1. Go'].join('\n'),
+      'new',
+    );
+    const found = envSecrets(f, {
+      LOGIN_PW: 'pw-from-env',
+      TEST_EMAIL: 'demo@example.test',
+      STRIPE_API_KEY: 'sk-env-1',
+      BASE_URL: 'http://x.test',
+    });
+    expect(found).toEqual([
+      { name: 'password', value: 'pw-from-env' },
+      { name: 'STRIPE_API_KEY', value: 'sk-env-1' },
+    ]);
+    // Nothing sent, nothing known — beyond what the server's own environment holds.
+    expect(envSecrets(f, undefined).map((s) => s.value)).not.toContain('pw-from-env');
   });
 });

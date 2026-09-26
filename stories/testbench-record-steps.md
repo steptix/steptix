@@ -576,7 +576,14 @@ session's `runSettings.model` override when the request brings `env`, else the
 session's client as its last batch left it. §10's sentence, word for word.
 
 **Headless is a 400 with §10's sentence; a CDP-attached session is a 400 too**
-(a browser someone else started is "Not in the first version").
+(a browser someone else started is "Not in the first version"). Headless is
+also asked of the BROWSER, not only the server: `openBrowser` can open a
+headless one on a headed server, and the recording follows the session's
+active browser, which would then record where nobody can see. A session whose
+active browser is headless is a 400 ("…this session's active browser was
+opened headless (headed: false)…"); a browser the recording launches itself
+is checked again once it is up, and one that came up headless ends the stream
+with `done: error` before `record:started`.
 
 **Live drafting** (`src/recorder/draft-engine.ts`). Every call is a draft
 call: the draft so far (steps indexed from 0, and its parameters), only the
@@ -631,7 +638,19 @@ full redraft is a draft call over an empty draft.
   touched it (then it is a full redraft). That call's failure ends the
   recording with §10's error and nothing inserted.
 - *Cancel* or the stream closing abandons the call in flight (its abort signal
-  fires) and makes no further calls; no frame about drafting follows.
+  fires) and makes no further calls; no frame about drafting follows. Cancel
+  wins at ANY point before `record:result` goes out — after Stop too, while
+  the final draft is being written: the call is aborted, no result is sent,
+  and `done` is `aborted`. Before this round a Cancel after Stop was answered
+  `accepted` and then ignored: the final draft still came back as a result.
+- *A closed session* — DELETE, another window's first-use DELETE, the idle
+  reaper, shutdown — goes the same way at any point, and its `done` says why:
+  `{ status: 'aborted', error: 'The session was closed while recording.' }`
+  (`RECORD_STEPS_SESSION_CLOSED_MESSAGE`; the client shows it word for word).
+- *`done` is the last frame.* Whatever is still settling behind it — a crop
+  being taken, a pick waiting in the recorder's chain, a warning logged
+  elsewhere — is dropped by the run, and the recorder's own late work
+  (cancelled) records nothing and moves no tab.
 - *Images.* Each call sends the crops of the actions it covers — a full
   redraft all remaining ones — within the recording's 40. A model that rejects
   images is asked again without them within the same call; after the first
@@ -664,9 +683,25 @@ typing is reported on focus-out, which is exactly what clicking into the
 address bar causes). Not recorded: a non-web address (`about:blank`, the
 new-tab page), a popup's own first load when the tab opened within 3 seconds of
 a touch (it is part of that click), and `pushState`/`#hash` moves (the page's
-own doing). The tests drive Back/Forward/Refresh with `page.goBack()` /
+own doing). A same-document commit at the same history entry is
+`history.replaceState` — the page rewriting its own address, however long
+after a click — and never `reload`: the Reload button always makes a new
+document. The tests drive Back/Forward/Refresh with `page.goBack()` /
 `goForward()` / `reload()`: over CDP those are the same browser-initiated
 navigations the toolbar makes, so what the recorder reads is identical.
+
+A page's request is not believed forever. One that never commits — a link to
+a 204, a download, an aborted navigation — would otherwise stand until the
+next new document, and the author's next Back, Reload or typed address would
+be taken for the page's. It ends when its load stops without a commit
+(`frameStartedLoading` after the request, then `frameStoppedLoading`); when a
+navigation starts that is not the one requested (`Page.frameStartedNavigating`
+at another address: the page's own request is always followed at once by ITS
+start, so any other is the browser's — the author's Reload or Back cutting a
+slow one short, measured on Chromium 147 with no stop-loading between them);
+when a same-document commit lands on the address it asked for; and after 30
+seconds regardless (a slow form post can take that long, and the
+typed-navigation window still guards what is left).
 
 Firefox and WebKit have no CDP to ask, so the page script's hints stand in:
 the new top document's `performance` navigation type (`reload`,
@@ -683,8 +718,8 @@ session's active tab follows the author, so a Run after the recording
 continues where they left off.
 
 **Control answers 202 or 404 only**, as §9.3 says. After Stop, only `cancel`
-still does something — it abandons the model call and the stream ends
-`aborted`; a second `stop` or a check is answered 202 with an `ignored` reason
+still does something — until `record:result` is out it abandons the model
+call, no result is sent and the stream ends `aborted`; a second `stop` or a check is answered 202 with an `ignored` reason
 and changes nothing. A `drop` of an id the recording does not have (or one
 already dropped), or a `restore` of one that is not dropped, is also 202 with
 `ignored` — not a 404, which a client would read as "no recording is running".
@@ -706,15 +741,27 @@ an option or a file input is a click ACTION like any other ("ticking a box and
 opening a list are clicks", spec §4); what it did follows as an EVENT —
 `tick`/`untick` (with `viaLabel` when the label was clicked), `select` with the
 option text, `upload` with the file names — and rides with it. The click a
-browser passes from a label to its checkbox is not a second action. A custom
+browser passes from a label to its control is not a second action — a
+checkbox's, and a hidden file input's behind a styled "Upload" label alike
+(that one used to record two clicks). A custom
 `role=checkbox` or `switch` click is a click action, followed by a
 `tick`/`untick` event read from its `aria-checked` after the page's handler
 ran. The click a browser makes on a form's submit button when Enter is pressed
 in its field is folded into that `key` action. Enter and Tab are the only keys
 recorded (Escape no longer is); Enter on a button or link is its click; Enter
-in a textarea is typing. A choice made without pointing (the keyboard, a
-script) first reports any field still being typed into, so the order is what
-happened.
+in a textarea or a contenteditable is typing. A choice made without pointing
+(the keyboard, a script) first reports any field still being typed into, so
+the order is what happened — and so does an Add check pick, whose swallowed
+click moves no focus: the typing comes before the check.
+
+**Shadow DOM.** Targets are read through `composedPath()`, so an event from
+inside an OPEN shadow root is described by the element it happened on, not its
+host. `change` and `submit` do not cross a shadow boundary at all, so each
+open root the author touches (a pointer-down, a focus, an input) gets its own
+listeners — and its own `type` watch for the secret memory. A CLOSED root
+cannot be observed from outside: its events arrive retargeted to the host, so
+typing or choosing inside one is not recorded (spec §4, "Not captured"), and
+nothing typed there reaches the binding either.
 
 **Drag.** A pointer pressed on one element, moved more than 8 CSS pixels and
 released on another is one `drag` action carrying the element dragged
@@ -725,16 +772,29 @@ release on the same element (or inside it) is not a drag. A press-move-release
 that leaves text selected is text selection, not a drag — unless the element
 looks meant to be moved (`draggable`, or a `grab`/`move` cursor); real
 sortables stop the selection themselves (`user-select: none`), so this only
-decides the ambiguous case. The click a browser fires after a pointer drag is
+decides the ambiguous case. A press in a text field that moves is selecting
+the field's own text — which `getSelection()` does not report — and is not a
+drag either, wherever it is released; the click it ends with (on the common
+ancestor) is a click into the field, `focusOnly`. The click a browser fires after a pointer drag is
 part of the drag. A drag has TWO crops: at the press, around what was
 dragged, and at the drop, around where it landed; both count toward the 40,
 and the model is shown both, the second introduced as "where it was dropped".
 
 **Crops.** Taken at pointer-down for anything but a text field, and at the
-first keystroke (or first `input`) into a text field. A field the secret rule
-calls secret by its NAME while showing its value in clear (a `type="text"`
-token box) gets no crop at all — the safe direction, departing from decision
-6's "anything else visible goes to the model". PNG, cropped to at least
+first keystroke (or first `input`) into a text field. A field the recorder
+calls secret while it shows its value in clear (a `type="text"` token box, a
+password box its eye has flipped) gets no crop of its own — nor does an Add
+check picked on one. Every OTHER crop has the secrets painted out before it
+is kept (spec §4.2): the page script reports where every secret field is,
+across every frame and every open shadow root the author touched, plus every
+other field's value, and the server paints over the secret ones and any whose
+value contains a secret it knows (3 characters or longer; the comparison is on
+the server, so the known secrets never go into the page), with a solid fill 3
+px wider than the field, on the whole screenshot. A frame that does not
+answer within a second costs the crop — it is not sent — while a frame that is
+gone or has no script paints nothing. Both depart from decision 6's "anything
+else visible goes to the model", in the safe direction; a password box showing
+dots is painted too (it costs the model nothing but the dots). PNG, cropped to at least
 520×320 with 140 px round the target, the target outlined in red, scaled so
 the longer side is at most 640. The 40 are counted when taken, so a
 pointer-down that never became an action still counts. `ai.sendScreenshots`
@@ -742,17 +802,60 @@ resolves as a batch's would: server, then project, then the session's run
 setting.
 
 **Secrets beyond the field rule.** A typed value equal to a secret-named
-session variable, or to a secret-named literal in the file's `## Parameters`,
-is withheld exactly like a secret field's, and the action names that parameter
-(`knownSecret`) so the step reuses it. Those values — and the file's own
+session variable, to a secret-named literal in the file's `## Parameters`, or
+to a secret from the request's `env` is withheld exactly like a secret
+field's, and the action names that parameter (`knownSecret`) so the step
+reuses it. From `env` (TestBench sends the test's `.env`): every secret-named
+key's value, and the value each `$VAR` parameter resolves to — the request's
+`env` first, then the server's environment, as a run resolves it — when the
+parameter or the variable has a secret-sounding name, named as the parameter.
+Not every `$VAR` value: a `- email: $TEST_EMAIL` is a pointer, not a secret,
+and masking it would turn a check on the signed-in header into "Welcome ***"
+— the same rule a run's masking uses. Those values — and the file's own
 secret-named literals, wherever they appear in the file excerpt — are masked
-in everything the model is sent, in every `record:action` summary and in
-`record:started`.
+in everything the model is sent, in every `record:action` summary, in
+`record:started` and in the warnings forwarded as `output`.
+
+Masked as VALUES, in both spellings, before anything is cut. The prompt is
+masked object by object before `JSON.stringify` — once stringified, a secret
+holding `"` or `\` is spelled with escapes and no longer matches itself — and
+each secret is also masked in its JSON-escaped spelling, which a page can show
+too. Page text is masked first and clipped after: the page script no longer
+clips to what the model sees (it sends up to 1000 characters of a text, 4000
+of a value) and the server masks, then cuts; the panel line masks the whole
+action before shortening it to 60 characters. A secret that crossed a cut used
+to leave its first characters behind, which no mask could match.
+
+**The log bridge** forwards a warning or an error the server logs while the
+recording runs as an `output` frame. The logger fans out process-wide, so a
+line that names ANOTHER session (`Session "…"`) is skipped, and every line
+forwarded is masked with this recording's secrets. A line from code that does
+not say its session still gets through — masked with this recording's
+secrets, not the other session's. Filtering by session exactly would need a
+per-session log context (`AsyncLocalStorage`), which the binding callbacks the
+recorder runs in would not carry; the steps route's bridge has the same
+limitation and says so.
 
 **One `isSecretField`.** The story counted three copies; there were two
 (`capture-dom.js` and the `expand` walk in `dom-cleaner.ts`). Both now splice
 in `src/browser/scripts/secret-field.js`, and the recorder loads the same
 text; `tests/secret-field-parity.test.ts` asks all three the same questions.
+
+**The recorder remembers.** The rule answers about a field as it is NOW, and a
+"show password" eye flips a password box to `type="text"` — after which the
+rule no longer calls it secret, so its value was typed into an action, sent to
+the model, photographed, and read by a pick, one click after being withheld.
+The page script keeps a WeakSet of every element it has ever seen as secret,
+for the life of the document, asked at focus, pointer-down, the first
+keystroke, the end of the typing, a pick and every crop; and a
+`MutationObserver` on `type` attributes (with their old value) adds a field at
+the flip itself, so one flipped before the author ever touched it is still
+known. It also calls a text field secret when its `<label>` matches the
+password-field rule, as a placeholder does — the one name a minimal sign-in
+form leaves a flipped box, and the only cover for one flipped before Record
+was pressed on a page the script was not yet in. The memory and the label
+only ever ADD to the shared rule, so the parity test's three readers still
+agree on everything the rule itself decides.
 
 **The answer, enforced.** Every draft — and so `record:result`, which is the
 final draft — has been through a file-safety pass. What the pass CHANGED stays
@@ -773,8 +876,20 @@ answer to Stop's last call ends with §10's "The steps could not be written:
 
 **Beyond the wire block.** The start body's `env` is accepted (the TestBench
 half sends it): it points the session's AI client as a batch would, and a
-session the recording creates is built from it. `envName` is not read — the
-recording needs no `${env.…}` resolution.
+session the recording creates is built from it, and its secrets are known
+secrets from the first action (above). `envName` is not read — the recording
+needs no `${env.…}` resolution.
+
+**Names without decoration, and the prompt.** An element's name and text lose
+the emoji, icon-font glyphs, arrows and chevrons at their ends
+(`stripEdgePictographs`); the name as the page gave it goes to the model as
+`rawName` beside it. The real-model smoke run wrote `Click 💳 Transactions in
+the main navigation`, and rule S2 now says to name an element by its words
+only. The same run dropped a "Click Reject in the Cookie consent dialog" step
+on its second draft. The prompt never told the model to omit a dismissal, and
+a run does not dismiss banners by itself (the executor's "dismiss" nudge is
+only in the prompt when the test has hooks), so rule I8 now says to keep every
+step that closes a banner, popup or dialog, on every redraft.
 
 **`drag` and `reload` in the runtime** (so recorded steps run). Built the way
 `back`/`forward` were (docs/specs/SPEC-browser-history.md): in
@@ -786,7 +901,10 @@ drag's target from `dropTarget`, `targetSelector` or `to`, and its source from
 `locator(selector).dragTo(locator(target))`, both ends visible-first in the
 action's frame, the dragged element measured and gated like a click's;
 `reload` is `page.reload()` with navigate's arrival rule, on the page even
-inside a frame, and has no "did it move?" failure. Both are in
+inside a frame, and has no "did it move?" failure; a reload that did fail (the
+server gone, a timeout) is `retryable: false`, as `back`/`forward`'s are —
+re-planning cannot make it happen and only hands the model a failure to
+satisfy with a `navigate` or a `noop`. Both are in
 `MUTATING_ACTIONS`; the run prompt gains rule 16b; code generation gets
 `page.reload()` through the existing conditional rule 7b and `dragTo` through
 a new conditional rule 7c; neither is on the compile's refusal list, and a
