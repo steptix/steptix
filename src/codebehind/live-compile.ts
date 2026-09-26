@@ -12,7 +12,6 @@ import { parseControlLine } from '../parser/control-line.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import { logger } from '../utils/logger.js';
-import { runSecrets } from '../utils/secrets.js';
 import {
   actionsOf,
   applyGenerated,
@@ -27,6 +26,7 @@ import {
   askWithCaptureRetry,
   capturedValueGuards,
   compilableCondition,
+  compilePromptSecrets,
   generateConditionEntry,
   generateStepEntry,
   guardedValues,
@@ -1391,7 +1391,7 @@ export class LiveCompiler {
       observations: acc.observations,
       resolvedParameters: first.parameters,
       parameterMap: first.parameters,
-      secrets: this.promptSecrets(first.parameters),
+      secrets: this.promptSecrets(first.parameters, binding),
       ...(this.options.envData && { envData: this.options.envData }),
       aiClient: this.options.aiClient,
       contextContent: this.options.contextContent,
@@ -1407,13 +1407,15 @@ export class LiveCompiler {
 
   /**
    * The run's free-text mask set as of a snapshot — `runSecrets`, as the run's
-   * own `secretsNow()` computes it — for every prompt this compiler builds
-   * from that snapshot: a secret inside a value no key names as secret
-   * (`auth: "Bearer <the key>"`) is masked there as it is in the run's own
-   * step prompts. The boxed compile hands its prompts the same set.
+   * own `secretsNow()` computes it, with the binding's frame inputs, which
+   * `secretsNow` merges in (`compilePromptSecrets`) — for every prompt this
+   * compiler builds from that snapshot: a secret inside a value no key names
+   * as secret (`auth: "Bearer <the key>"`, or a skill's `header="Bearer <key>"`
+   * beside its `token="<key>"`) is masked there as it is in the run's own step
+   * prompts. The boxed compile hands its prompts the same set.
    */
-  private promptSecrets(values: Record<string, string>): string[] {
-    return runSecrets({ parameters: values, envData: this.options.envData });
+  private promptSecrets(values: Record<string, string>, binding: CodeBehindBinding): string[] {
+    return compilePromptSecrets(values, this.options.envData, [binding]);
   }
 
   /** The prompt's whole-test block, marked for the step at `index`. */
@@ -1574,7 +1576,7 @@ export class LiveCompiler {
       parameterMap: input.resolvedParameters,
       // …and the run's mask set as of that snapshot, so a secret inside a value
       // no key names as secret is masked as the run's own prompts mask it.
-      secrets: this.promptSecrets(input.resolvedParameters),
+      secrets: this.promptSecrets(input.resolvedParameters, binding),
       recordingCarriesPlaceholders: this.sawPlaceholder,
       ...(this.options.envData && { envData: this.options.envData }),
       aiClient: this.options.aiClient,
@@ -1646,7 +1648,7 @@ export class LiveCompiler {
       // (§7.6). Without it the block asked the binding rule about both and
       // wrote the credential into the prompt in clear.
       parameterMap: input.resolvedParameters,
-      secrets: this.promptSecrets(input.resolvedParameters),
+      secrets: this.promptSecrets(input.resolvedParameters, binding),
       ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
       // The loop the step repeats in, as generation is told it (decision 2):
       // the repaired entry replays on every pass, so what changes per pass is

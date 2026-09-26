@@ -24,7 +24,10 @@ decided in code only when every member can be. An entry that throws paints ⚠
 and the model decides for the rest of the run; a compiled loop that reaches
 its cap asks the model once whether it should really carry on. `aiui compile`'s
 replay also checks the compiled conditions against the recorded run, visit by
-visit. `Otherwise` and `For each` have nothing to compile. The Electron app
+visit, and warns — naming the step that captured the list — when a loop ran a
+different number of passes than it did on the recording (a warning, because
+the list may really have changed between the two runs). `Otherwise` and `For
+each` have nothing to compile. The Electron app
 runs no code-behind and is unchanged.
 
 Also fixed on the way:

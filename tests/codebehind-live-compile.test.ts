@@ -1836,6 +1836,68 @@ describe('the live compile’s parameter snapshot keeps the loop marks', () => {
   });
 });
 
+// ── Review round 3: the live prompts mask as the run did (G2, G3) ────────────
+
+describe('the live prompts, inside a skill body (review round 3)', () => {
+  /** A transcript that typed `value` — a placeholder, as the model names it. */
+  const typing = (index: number, line: string, value: string): StepResult =>
+    result(index, line, {
+      turns: [
+        {
+          turnNumber: 1,
+          attemptNumber: 1,
+          timestamp: '2026-08-24T00:00:00.000Z',
+          aiInteractions: [],
+          subActions: [{ index: 1, action: { action: 'type', selector: '#q', value }, durationMs: 1 }],
+        },
+      ],
+    });
+
+  it("G2: shows a For each's dotted value the pass bound under the skill's scoped name", async () => {
+    // The pass marked `__skill1_row.keyword`; the prompt names the authored
+    // `row.keyword`, and asked about THAT one the author rule masked `AU`
+    // (`keyword` holds `key`).
+    const LINE = 'Search for {{row.keyword}}';
+    const live: Record<string, string> = { __skill1_row: '{"keyword":"AU"}', '__skill1_row.keyword': 'AU' };
+    markLoopBindings(live, ['__skill1_row.keyword']);
+    const { client, prompts } = fakeClient();
+    const compiler = compilerFor([LINE], { client });
+    compiler.offer({
+      index: 0,
+      binding: binding(LINE, { scope: { renames: { row: '__skill1_row' }, inputs: {} } }),
+      result: typing(1, LINE, '{{__skill1_row.keyword}}'),
+      resolvedParameters: liveCompileSnapshot(live),
+    });
+    await compiler.finish({ tokensUsed: 0 });
+
+    const generation = prompts.find((p) => p.includes(LINE) && !/Review a generated/.test(p))!;
+    // Measured before the fix: `{{row.keyword}} resolved to "***" on this run`.
+    expect(generation).toContain('{{row.keyword}} resolved to "AU" on this run');
+  });
+
+  it("G3: masks a secret the skill's caller passed, inside another argument", async () => {
+    // `[skill: api token="uk_live_1234" header="Bearer uk_live_1234"]`: the
+    // run's `secretsNow` merges frame inputs into its mask set; the live
+    // prompts' set was the parameter map's alone.
+    const KEY = 'uk_live_1234';
+    const LINE = 'Type {{header}} into the Authorization box';
+    const { client, prompts } = fakeClient();
+    const compiler = compilerFor([LINE], { client });
+    compiler.offer({
+      index: 0,
+      binding: binding(LINE, { scope: { renames: {}, inputs: { token: KEY, header: `Bearer ${KEY}` } } }),
+      result: typing(1, LINE, '{{header}}'),
+      resolvedParameters: {},
+    });
+    await compiler.finish({ tokensUsed: 0 });
+
+    const generation = prompts.find((p) => p.includes(LINE) && !/Review a generated/.test(p))!;
+    // Measured before the fix: `{{header}} resolved to "Bearer uk_live_1234"`.
+    expect(generation).toContain('{{header}} resolved to "Bearer ***" on this run');
+    for (const prompt of prompts) expect(prompt).not.toContain(KEY);
+  });
+});
+
 // ── Loops and conditions (stories/codebehind-loops-and-conditions.md) ────────
 
 describe("a runtime loop's step counts once (decision 13)", () => {

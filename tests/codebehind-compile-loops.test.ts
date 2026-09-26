@@ -1204,6 +1204,185 @@ describe('aiui compile — the prompts mask what the run masked', () => {
   });
 });
 
+// ── Review round 3: what round 2's masks still got wrong (G2–G4) ────────────
+
+describe('aiui compile — the prompts mask what the run masked, round 3', () => {
+  /** A step typing what the transcript names by placeholder. */
+  function typedRow(index: number, page: string, value: string, over: Partial<StepResult> = {}): StepResult {
+    return stepRow(index, page, {
+      turns: [
+        {
+          turnNumber: 1,
+          attemptNumber: 1,
+          timestamp: new Date().toISOString(),
+          aiInteractions: [],
+          subActions: [{ index: 1, action: { action: 'type', selector: '#q', value }, durationMs: 1 }],
+        },
+      ],
+      ...over,
+    });
+  }
+
+  it("G2: shows a For each's dotted value inside a skill body — the pass's binding, not the author's word", async () => {
+    // `keyword` holds `key`: asked about the AUTHORED `row.keyword`, which no
+    // mark names, the author rule masked `AU` out of the block the model
+    // writes its selector from. The pass marked the SCOPED name.
+    const md = await write(
+      'tests/search.md',
+      ['# Search', '', '## Parameters', '- rows: [{"keyword":"AU"},{"keyword":"NZ"}]', '', '## Steps', '1. [skill: search_all list="{{rows}}"]', ''].join('\n'),
+    );
+    await write(
+      'skills/search_all.md',
+      ['---', 'type: skill', '---', '# search_all', '', '## Parameters', '- list: the rows', '', '## Steps', '1. For each {{row}} in {{list}}, Search for {{row.keyword}}', ''].join('\n'),
+    );
+    const test = await parseTestFile(md, { skillsDir: path.join(dir, 'skills') });
+    const control = test.expansion!.controls!.find((c) => c !== null)!;
+    const item = control.kind === 'foreach' ? control.item : '';
+    expect(item).toMatch(/^__skill\d+_row$/);
+    const pass = (index: number, keyword: string): LoopMarker => ({
+      kind: 'iteration',
+      label: 'x',
+      index,
+      count: 2,
+      values: { [item]: JSON.stringify({ keyword }), [`${item}.keyword`]: keyword },
+    });
+    const record = outcome(
+      [
+        guardRow(1, undefined, { loop: pass(1, 'AU') }),
+        typedRow(2, 'search AU', 'AU', { loop: pass(1, 'AU') }),
+        typedRow(2, 'search NZ', 'NZ', { loop: pass(2, 'NZ') }),
+      ],
+      2,
+    );
+    const { client, prompts } = fakeAi();
+    const { runner } = scriptedRunner(record, [
+      outcome(
+        [guardRow(1, undefined, { loop: pass(1, 'AU') }), codeRow(2, { loop: pass(1, 'AU') }), codeRow(2, { loop: pass(2, 'NZ') })],
+        2,
+      ),
+    ]);
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true });
+
+    expect(result.status).toBe('green');
+    // Measured before the fix: `{{row.keyword}} resolved to "***" on this run`.
+    expect(generationFor(prompts, 'Search for {{row.keyword}}')).toContain('{{row.keyword}} resolved to "AU" on this run');
+  });
+
+  it("G3: masks a secret a skill's caller passed, inside another argument — generation and summary alike", async () => {
+    // The run's own `secretsNow` merges every frame's inputs into the mask set;
+    // the compile's prompts took the parameter map's alone, and a skill's
+    // arguments exist under no name there.
+    const KEY = 'uk_live_1234';
+    const md = await write('tests/api.md', ['# Api', '', '## Steps', `1. [skill: api token="${KEY}" header="Bearer ${KEY}"]`, ''].join('\n'));
+    await write(
+      'skills/api.md',
+      ['---', 'type: skill', '---', '# api', '', '## Parameters', '- token: the key', '- header: the header', '', '## Steps', '1. Type {{header}} into the Authorization box', ''].join('\n'),
+    );
+    const test = await parseTestFile(md, { skillsDir: path.join(dir, 'skills') });
+    const record = outcome([typedRow(1, 'hdr', '{{header}}')], 1);
+    const { client, prompts } = fakeAi();
+    const { runner } = scriptedRunner(record, [
+      // The replay fails with the value in the run's own error — which the CLI
+      // run masks with its parameter map alone — and then passes.
+      outcome([codeRow(1, { status: 'failed', error: `no box took "Bearer ${KEY}"`, domSnapshot: '<main/>' })], 1),
+      outcome([codeRow(1)], 1),
+    ]);
+    const { events, onEvent } = collect();
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent, dryRun: true });
+
+    expect(result.status).toBe('green');
+    // Measured before the fix: `{{header}} resolved to "Bearer uk_live_1234"`.
+    expect(generationFor(prompts, 'Type {{header}} into the Authorization box')).toContain(
+      '{{header}} resolved to "Bearer ***" on this run',
+    );
+    const repair = prompts.find(isStepRepair)!;
+    expect(repair).toContain('{{header}} resolved to "Bearer ***" on this run');
+    expect(repair).toContain('no box took "Bearer ***"');
+    for (const prompt of prompts) expect(prompt).not.toContain(KEY);
+    // …and the compile's own words.
+    expect(replayLines(events)).toContain('✗ step 1 — no box took "Bearer ***"');
+    expect(JSON.stringify(events)).not.toContain(KEY);
+  });
+
+  it('G4: a start value holding a secret captured LATER is not a write — the guard holds the real value, the prompt masks it', async () => {
+    // The CLI's final map is redacted with the END-of-run mask set: `cb` comes
+    // back as `…?t=***` once `[store as: api_token]` captured `abcd1234`.
+    // Round 2 took that for a write, so the snapshot and the leak guard held
+    // `…?t=***`, and an entry hard-coding the real URL passed.
+    const URL_ = 'https://app.test/cb?t=abcd1234';
+    const NAV = 'Navigate to {{cb}}';
+    const md = await write(
+      'cb.md',
+      ['# Cb', '', '## Parameters', `- cb: ${URL_}`, '', '## Steps', '1. Read the token on the page [store as: api_token]', `2. ${NAV}`, ''].join('\n'),
+    );
+    const test = await parseTestFile(md);
+    const record = outcome(
+      [
+        stepRow(1, 'token', { outputs: { api_token: '***' } }),
+        stepRow(2, 'cb', {
+          turns: [
+            {
+              turnNumber: 1,
+              attemptNumber: 1,
+              timestamp: new Date().toISOString(),
+              aiInteractions: [],
+              subActions: [{ index: 1, action: { action: 'navigate', url: '{{cb}}' }, durationMs: 1 }],
+            },
+          ],
+        }),
+      ],
+      2,
+      { resolvedParameters: { cb: 'https://app.test/cb?t=***', api_token: '***' } },
+    );
+    const { prompts, client: base } = fakeAi();
+    const client = {
+      complete: async (messages: ChatMessage[]) => {
+        const response = await (base as unknown as { complete: (m: ChatMessage[]) => Promise<{ text: string }> }).complete(messages);
+        const prompt = prompts.at(-1)!;
+        if (!isReview(prompt) && sourceOf(prompt) === NAV) {
+          return {
+            text: JSON.stringify({ entry: `{ source: ${JSON.stringify(NAV)}, async run({ page }) { await page.goto('${URL_}'); } }` }),
+            model: 'stub-model',
+          };
+        }
+        return response;
+      },
+    } as unknown as AiClient;
+    const { runner } = scriptedRunner(record, [outcome([codeRow(1), codeRow(2)], 2)]);
+
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true });
+
+    // Measured before the fix: green, and the proposal hard-coded the URL.
+    expect(result.status).toBe('failed');
+    expect(result.summary.error).toContain('resolved value of {{cb}}');
+    expect(Object.values(result.files ?? {}).join('\n')).not.toContain(URL_);
+    // The prompt still masks what the run masked.
+    expect(generationFor(prompts, NAV)).toContain('{{cb}} resolved to "https://app.test/cb?t=***" on this run');
+    for (const prompt of prompts) expect(prompt).not.toContain('abcd1234');
+  });
+
+  it('G4: a value the run really rewrote still takes its final value', async () => {
+    // The other side of the rule: `ticket` came back as something else
+    // entirely (an `[input:]` answer), not as a masking of where it started.
+    const md = await write(
+      'ticket.md',
+      ['# Ticket', '', '## Parameters', '- ticket: T-1', '', '## Steps', '1. Type {{ticket}} into the ticket box', ''].join('\n'),
+    );
+    const test = await parseTestFile(md);
+    const record = outcome([typedRow(1, 'ticket', '{{ticket}}')], 1, { resolvedParameters: { ticket: 'T-***-9' } });
+    const { client, prompts } = fakeAi();
+    const { runner } = scriptedRunner(record, [outcome([codeRow(1)], 1)]);
+
+    await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true });
+
+    expect(generationFor(prompts, 'Type {{ticket}} into the ticket box')).toContain(
+      '{{ticket}} resolved to "T-***-9" on this run',
+    );
+  });
+});
+
 // ── Writes the fold cannot see from `outputs` (review round 2, F2) ──────────
 
 describe('aiui compile — writes a row carries elsewhere, and writes no row carries', () => {
@@ -1362,35 +1541,150 @@ describe("aiui compile — a replay whose loop runs a different number of passes
   const replayOf = (first: StepResult, list: string): CompileRunOutcome =>
     outcome([first, ...loopRows(JSON.parse(list) as string[], (_i, m) => codeRow(3, { loop: m })), codeRow(4)], 4);
 
-  it('fails the entry that captured the list, says both counts, and repairs it with the recorded value', async () => {
+  /** The warning an entry of this compile's gets when its list ran a different
+   *  number of passes (review round 3, G1). */
+  const ownedWarning = (replayPasses: string, recordedPasses: string, recorded: string, replayed: string): string =>
+    `step 2 ("${LOOP}") ran ${replayPasses} on the replay and ${recordedPasses} on the recording — check the ` +
+    `entry for step 1 ("${READ}"), which captured the list: {{accounts}} was ${recorded} on the recording and ` +
+    `${replayed} on the replay (a list that changed between the two runs does this too, and then the entry is right)`;
+
+  it('WARNS about the entry that captured the list, naming it and both counts — never fails, repairs or writes it off', async () => {
+    // Review round 3 (G1): a count cannot tell a selector that matches too much
+    // from a list that changed between the runs. Round 2 failed this entry,
+    // repaired it twice and wrote it off `ai: true` after three rounds.
     const md = await write('accounts.md', listMd(READ));
     const test = await parseTestFile(md);
     expect(test.steps).toEqual([READ, LOOP, 'Check the account', 'Read the reference']);
     const { client, prompts } = fakeAi();
-    const { runner } = scriptedRunner(recordOf(readRow(RECORDED)), [
+    const { runner, requests } = scriptedRunner(recordOf(readRow(RECORDED)), [
       replayOf(codeRow(1, { outputs: { accounts: SIX } }), SIX),
-      replayOf(codeRow(1, { outputs: { accounts: RECORDED } }), RECORDED),
     ]);
     const { events, onEvent } = collect();
 
-    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent });
+    const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, onEvent, dryRun: true });
 
-    // Measured before the fix (templates/init/tests/control-flow.md, a real
-    // model): six passes where the recording ran three, "22/22 passed", written.
     expect(result.status).toBe('green');
-    expect(result.summary.rounds).toBe(2);
-    const said =
-      `the code stored 6 item(s) in {{accounts}}, so step 2 ("${LOOP}") ran 6 passes; on the recording ` +
-      `it ran 3 passes, with {{accounts}} = ${RECORDED}`;
-    expect(replayLines(events)).toContain(`✗ step 1 — ${said}`);
-    expect(stepMessages(events, 'repair', 1)).toContain('repaired');
-    const repair = prompts.find((p) => isStepRepair(p) && sourceOf(p) === READ)!;
-    expect(repair).toContain(`## What went wrong\n${said}`);
-    expect(repair).toContain('## What the recording captured');
-    expect(repair).toContain(RECORDED);
-    expect(repair).toContain('ran 3 pass(es)');
-    expect(result.summary.warnings).toBeUndefined();
+    expect(result.summary.rounds).toBe(1);
+    expect(requests.filter((r) => r.purpose === 'replay')).toHaveLength(1);
+    const warning = ownedWarning('6 passes', '3 passes', RECORDED, SIX);
+    expect(result.summary.warnings).toEqual([warning]);
+    expect(events).toContainEqual({ kind: 'note', level: 'warn', message: warning });
+    expect(replayLines(events)).toEqual(['running 4 step(s) as code', '4/4 passed as code']);
+    expect(prompts.filter(isStepRepair)).toEqual([]);
+    expect(result.summary.writtenOffAi).toEqual([]);
     expect(result.summary.unproven).toEqual([]);
+    // The capture entry is proposed as code.
+    const proposal = Object.values(result.files).join('\n');
+    expect(proposal).toContain(`source: '${READ}'`);
+    expect(proposal).not.toContain('ai: true');
+  });
+
+  describe('a list that legitimately changes between the recording and the replay (review round 3, G1)', () => {
+    // The reviewer's two shapes: a loop that consumes its list, and a stateful
+    // app with one more item on every run. The capture entry is RIGHT in both.
+    const READ_MSGS = 'Read the subject of every unread message [store as: msgs]';
+    const OPEN = 'For each {{msg}} in {{msgs}}, Open {{msg}} and mark it read';
+    const inboxMd = ['# Inbox', '', '## Steps', `1. ${READ_MSGS}`, `2. ${OPEN}`, '3. Check the unread badge shows 0', ''].join('\n');
+    const msgPass = (index: number, count: number, msg: string): LoopMarker => ({
+      kind: 'iteration',
+      label: 'x',
+      index,
+      count,
+      values: { msg },
+    });
+    const readMsgs = (value: string): StepResult =>
+      stepRow(1, 'inbox', {
+        outputs: { msgs: value },
+        turns: [
+          {
+            turnNumber: 1,
+            attemptNumber: 1,
+            timestamp: new Date().toISOString(),
+            aiInteractions: [],
+            subActions: [
+              { index: 1, action: { action: 'read', selector: '.unread', multiple: true, as: 'msgs' }, durationMs: 1 },
+            ],
+          },
+        ],
+      });
+    const ABC = ['A', 'B', 'C'];
+    const inboxRecord = (): CompileRunOutcome =>
+      outcome(
+        [
+          readMsgs(JSON.stringify(ABC)),
+          guardRow(2, undefined, { loop: msgPass(1, 3, 'A') }),
+          ...ABC.map((m, i) => stepRow(3, `msg ${m}`, { loop: msgPass(i + 1, 3, m) })),
+          stepRow(4, 'badge'),
+        ],
+        4,
+      );
+    const warningFor = (replayPasses: string, replayed: string): string =>
+      `step 2 ("${OPEN}") ran ${replayPasses} on the replay and 3 passes on the recording — check the entry for ` +
+      `step 1 ("${READ_MSGS}"), which captured the list: {{msgs}} was ["A","B","C"] on the recording and ` +
+      `${replayed} on the replay (a list that changed between the two runs does this too, and then the entry is right)`;
+
+    it('the recording consumed the list, so the replay reads [] — the capture entry stays code', async () => {
+      const md = await write('inbox.md', inboxMd);
+      const test = await parseTestFile(md);
+      const { client, prompts } = fakeAi();
+      const { runner, requests } = scriptedRunner(inboxRecord(), [
+        outcome(
+          [
+            codeRow(1, { outputs: { msgs: '[]' } }),
+            guardRow(2, undefined),
+            { index: 3, instruction: 'step 3', status: 'skipped', turns: [], durationMs: 0, retried: false, aiExplanation: 'Skipped: the list was empty' },
+            codeRow(4),
+          ],
+          4,
+        ),
+      ]);
+
+      const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true });
+
+      // Measured before the fix: 3 failing rounds, 2 repairs, then step 1
+      // written `ai: true` with the recorded list pasted into its comment.
+      expect(requests.filter((r) => r.purpose === 'replay')).toHaveLength(1);
+      expect(prompts.filter(isStepRepair)).toEqual([]);
+      expect(result.summary.writtenOffAi).toEqual([]);
+      expect(result.summary.warnings).toEqual([warningFor('0 passes', '[]')]);
+      const proposal = Object.values(result.files).join('\n');
+      expect(proposal).toContain(`source: '${READ_MSGS}'`);
+      expect(proposal).not.toContain('ai: true');
+      // Not green only because the body never ran on the replay — an empty
+      // list leaves its entry unproven — never because of the count.
+      expect(result.status).toBe('partial');
+      expect(result.summary.error).toBe(
+        'the replay never reached step 3 — Skipped: the list was empty; those entries are proposed but unproven',
+      );
+    });
+
+    it('a stateful app has one more item on the replay — green, with the warning', async () => {
+      const md = await write('inbox.md', inboxMd);
+      const test = await parseTestFile(md);
+      const ABCD = ['A', 'B', 'C', 'D'];
+      const { client, prompts } = fakeAi();
+      const { runner, requests } = scriptedRunner(inboxRecord(), [
+        outcome(
+          [
+            codeRow(1, { outputs: { msgs: JSON.stringify(ABCD) } }),
+            guardRow(2, undefined, { loop: msgPass(1, 4, 'A') }),
+            ...ABCD.map((m, i) => codeRow(3, { loop: msgPass(i + 1, 4, m) })),
+            codeRow(4),
+          ],
+          4,
+        ),
+      ]);
+
+      const result = await compileTest({ test, config: CONFIG, contextContent: '', aiClient: client, runner, dryRun: true });
+
+      expect(result.status).toBe('green');
+      expect(requests.filter((r) => r.purpose === 'replay')).toHaveLength(1);
+      expect(prompts.filter(isStepRepair)).toEqual([]);
+      expect(result.summary.writtenOffAi).toEqual([]);
+      expect(result.summary.keptAi).toBe(0);
+      expect(result.summary.warnings).toEqual([warningFor('4 passes', '["A","B","C","D"]')]);
+      expect(Object.values(result.files).join('\n')).not.toContain('ai: true');
+    });
   });
 
   it('warns, and does not fail, when the list came from a step this compile does not own', async () => {
@@ -1468,8 +1762,8 @@ describe("aiui compile — a replay whose loop runs a different number of passes
 
   // ── What the recording captured, before any replay can disagree ──────────
   //
-  // The pass-count check above catches a wrong list in REPLAY. Run & Compile
-  // has no replay, so generation itself is shown what the recording read and
+  // The pass-count check above only WARNS about a wrong list in replay, and
+  // Run & Compile has no replay, so generation itself is shown what the recording read and
   // may not write it in — measured on a real-model Run & Compile of
   // control-flow.md, which stored nine values where the recording read three.
 

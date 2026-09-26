@@ -1314,7 +1314,10 @@ export function maskValueForPrompt(
 }
 
 export function formatParameterBlock(
-  parameters: Array<{ name: string; value: string }>,
+  // `bound`: the key the map holds the value under when it is not `name` — a
+  // skill body's `{{row.keyword}}` is the pass's `__skill1_row.keyword`, and
+  // the loop mark that makes it the pass's is keyed by that name, not this one.
+  parameters: Array<{ name: string; value: string; bound?: string | undefined }>,
   envRefs: Array<{ ref: string; value: string }>,
   unmask: ReadonlySet<string> = new Set<string>(),
   secrets: string[] = [],
@@ -1333,7 +1336,8 @@ export function formatParameterBlock(
     JSON.stringify(maskValueForPrompt(secret, name, value, unmask, secrets));
   return [
     ...parameters.map(
-      (p) => `- {{${p.name}}} resolved to ${show(isSecretParameterName(p.name, map), p.name, p.value)} on this run`,
+      (p) =>
+        `- {{${p.name}}} resolved to ${show(isSecretParameterName(p.bound ?? p.name, map), p.name, p.value)} on this run`,
     ),
     ...envRefs.map(
       (r) =>

@@ -189,12 +189,14 @@ describe('the repair prompt shows what the recording captured', () => {
     expect(text).not.toContain('4455');
   });
 
-  it('is unchanged without it, and does not repeat a value the pass-count block already states', () => {
+  it('is unchanged without it, and states the value once', () => {
     const without = buildRepairPrompt(base).content as string;
     expect(without).not.toContain('## Values this step must capture');
-    const expected = { name: 'accounts', value: RECORDED, recordedPasses: 3, replayPasses: 9 };
-    const text = buildRepairPrompt({ ...base, expected, recordedCaptures: { accounts: RECORDED } }).content as string;
-    expect(text).toBe(buildRepairPrompt({ ...base, expected }).content);
+    // The pass-count block that also stated it went with the pass-count
+    // failure (review round 3, G1): a count difference is a warning now, and
+    // no repair is asked for over one.
+    expect(without).not.toContain('## What the recording captured');
+    const text = buildRepairPrompt({ ...base, recordedCaptures: { accounts: RECORDED } }).content as string;
     expect(text.split(RECORDED)).toHaveLength(2);
   });
 

@@ -2159,7 +2159,10 @@ chain is decided in code only when every member has an answer without the
 model. An entry that throws is flagged ⚠ and the model decides for the rest of
 the run. A compiled loop that reaches its cap asks the model once whether the
 condition really still holds, so an entry that never says stop is caught
-rather than trusted.
+rather than trusted. `aiui compile` also compares each loop's passes on its
+replay with the recording's, and prints a `Warning:` — naming the step that
+captured a `For each`'s list — when they differ; check that step's selector,
+unless the list really changed between the two runs.
 
 Interactive markers, for a person at the keyboard only:
 

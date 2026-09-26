@@ -13,12 +13,13 @@ import {
   isChainRecord,
   type ControlRecord,
 } from '../runner/control-flow.js';
-import { buildCodeBehindRegistry } from './loader.js';
+import { buildCodeBehindRegistry, type CodeBehindBinding } from './loader.js';
 import {
   aiEntryFor,
   anyActionCarriesPlaceholder,
   askWithCaptureRetry,
   capturedValueGuards,
+  compilePromptSecrets,
   compilableCondition,
   generateConditionEntry,
   generateStepEntry,
@@ -74,6 +75,8 @@ import {
   inheritLoopBindings,
   isSecretParameterName,
   markLoopBindings,
+  MASK,
+  redact,
   redactMap,
   runSecrets,
 } from '../utils/secrets.js';
@@ -648,6 +651,29 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   // ever asked has nothing to generate from and is not attempted.
   const recordVisits = guardVisits(recorded.rows, controls);
   const snapshots = passSnapshots(recorded.rows, parameters, record.resolvedParameters, test.envData);
+  /**
+   * Secrets a run's REDACTED final map shows masked inside a starting value —
+   * `cb: https://app.test/cb?t=***` where a later `[store as: api_token]`
+   * captured `abcd1234` — recovered by {@link passSnapshots}. The snapshots
+   * keep the real start value (the leak guard must hold real values), so the
+   * prompts are handed these to mask it with, as the run's own were.
+   */
+  const recoveredSecrets = new Set<string>(snapshots.recovered);
+  /**
+   * The mask set a prompt built from `values` for one binding is masked with —
+   * the run's (`runSecrets`), that binding's frame inputs (the run's own
+   * `secretsNow` merges them: `[skill: api header="Bearer <key>"]`), and the
+   * recovered secrets above.
+   */
+  const promptSecretsFor = (values: Record<string, string>, binding: CodeBehindBinding | undefined): string[] =>
+    compilePromptSecrets(values, test.envData, binding ? [binding] : [], [...recoveredSecrets]);
+  /** The same for the compile's own words — warnings, errors, write-off
+   *  comments — over EVERY frame's inputs, as the run masks its report. */
+  const summarySecrets = (values: Record<string, string>): string[] =>
+    compilePromptSecrets(values, test.envData, steps.map((s) => s.binding), [...recoveredSecrets]);
+  /** A run's error text, as the compile repeats it: masked with that set, as
+   *  of the map the run started from. */
+  const sayMasked = (text: string): string => redact(text, summarySecrets(snapshots.at(undefined)));
   /** The recording's loop entries and their passes, for the replay's
    *  pass-count check (decision 11). */
   const recordLoops = loopEntries(recorded.rows, controls);
@@ -808,7 +834,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       // The fold's own snapshot, marks and all, and the run's mask set as of
       // it — so the prompt masks exactly what the run's own prompts did.
       parameterMap: values,
-      secrets: promptSecrets(values, test.envData),
+      secrets: promptSecretsFor(values, step.binding),
       ...(test.envData && { envData: test.envData }),
       aiClient: options.aiClient,
       contextContent: options.contextContent,
@@ -890,7 +916,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // hands the model the same page and lets it write the same broken selector
     // again. No entry text to repair from (the file was edited) falls through.
     const healed = result?.codeBehindStale
-      ? await repairHealedStep(step, result, passValues, options, candidate, loop)
+      ? await repairHealedStep(step, result, passValues, promptSecretsFor(passValues, step.binding), options, candidate, loop)
       : undefined;
     const generated = healed ?? await generateStepEntry({
       binding: step.binding!,
@@ -902,7 +928,9 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       // the prompt masks what the run's own prompts masked, a data file's
       // `user.apikey` heading and a secret inside a non-secret value included.
       parameterMap: passValues,
-      secrets: promptSecrets(passValues, test.envData),
+      // …with the step's frame inputs and anything the final map shows the
+      // run masked inside a starting value.
+      secrets: promptSecretsFor(passValues, step.binding),
       recordingCarriesPlaceholders,
       // What `${data.url}` and kin resolved to, so the generator can say
       // "read it with step.getVar('data.url')" and the guard can catch the
@@ -1012,13 +1040,16 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
    */
   let toleratedInReplay: Array<{ step: number; reason: string }> = [];
   /**
-   * What the LAST replay's pass-count check noticed and this compile does not
-   * own (decision 11): a `For each` over a list a tool, an AI step or a kept
-   * entry wrote that ran a different number of passes — or the same number
-   * over different values — and a `While` / `Repeat` whose passes differ with
-   * no condition to blame. Warnings, not failures: nothing here is this
-   * compile's to repair, and a list's values may legitimately differ between
-   * runs. Recomputed per round beside `unreached`.
+   * What the LAST replay's pass-count check noticed (decision 11): a `For
+   * each` that ran a different number of passes — or the same number over
+   * different values — whoever wrote its list, and a `While` / `Repeat` whose
+   * passes differ with no condition to blame. Warnings, never failures: a
+   * count cannot tell a wrong selector from a list that changed between the
+   * two runs (a test that creates a record and then loops over every record
+   * sees one more each run; a loop that consumes its list sees `[]` on the
+   * replay), so nothing here is repaired or written off. A list an entry of
+   * this compile captured names that entry, for the author to check.
+   * Recomputed per round beside `unreached`.
    */
   let loopWarnings: string[] = [];
   /**
@@ -1048,7 +1079,6 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
   ): RunRows & {
     visits: GuardVisit[];
     mismatch: DecisionMismatch | undefined;
-    passCount: PassCountFailure | undefined;
     loopWarnings: string[];
   } => {
     const run = runRows(outcome);
@@ -1058,48 +1088,50 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // decides nothing, so a list captured with six items where the recording
     // had three runs six passes with every condition answering as recorded.
     const replaySnapshots = passSnapshots(run.rows, parameters, outcome.resolvedParameters, test.envData);
+    for (const secret of replaySnapshots.recovered) recoveredSecrets.add(secret);
     const findings = compareLoopPasses({
       recorded: { entries: recordLoops, rows: recorded.rows, snapshots },
       replay: { entries: loopEntries(run.rows, controls), rows: run.rows, snapshots: replaySnapshots },
       controls,
       divergedAt: decisions.divergedAt,
     });
-    let passCount: PassCountFailure | undefined;
     const loopWarnings: string[] = [];
     for (const finding of findings) {
+      // A loop whose own condition entry the decision check already blamed has
+      // said everything there is to say about its passes.
+      if (finding.kind !== 'foreach' && decisions.mismatch?.member === finding.guard) continue;
       // The list came from an entry THIS compile wrote, and it ran as code:
-      // that entry is wrong, and it is this compile's to repair.
+      // the warning names that entry, because a selector that matches too much
+      // (or too little) is the first thing to rule out. It stays a warning —
+      // the same count difference is what a list that legitimately changed
+      // between the two runs looks like, and a correct entry repaired (then
+      // written off `ai: true`) over it is worse than a word to the author.
       const writer = finding.writer;
       const owner = writer ? steps[writer.index - 1] : undefined;
-      if (
-        !finding.valuesOnly
-        && finding.kind === 'foreach'
+      const owned =
+        finding.kind === 'foreach'
         && writer?.fromCodeBehind === true
         && owner !== undefined
         && owner.kind !== 'condition'
         && owner.key !== undefined
-        && selection.keys.has(owner.key)
-      ) {
-        passCount = ownedPassCount(finding, owner, writer, steps, snapshots, test.envData);
-        continue;
-      }
-      // A loop whose own condition entry the decision check already blamed has
-      // said everything there is to say about its passes.
-      if (finding.kind !== 'foreach' && decisions.mismatch?.member === finding.guard) continue;
+        && selection.keys.has(owner.key);
+      // A value as the warning prints it: masked as a prompt masks it, with
+      // every frame's inputs.
+      const shown = (value: string | undefined, at: Record<string, string>): string | undefined =>
+        value === undefined ? undefined : maskedForSummary(finding.list!, value, at, summarySecrets(at));
       loopWarnings.push(
-        loopPassWarning(finding, steps, {
-          recorded:
-            finding.recordedValue === undefined
-              ? undefined
-              : maskedForSummary(finding.list!, finding.recordedValue, snapshots.at(finding.recordedRow), test.envData),
-          replay:
-            finding.replayValue === undefined
-              ? undefined
-              : maskedForSummary(finding.list!, finding.replayValue, replaySnapshots.at(finding.replayRow), test.envData),
-        }),
+        loopPassWarning(
+          finding,
+          steps,
+          {
+            recorded: shown(finding.recordedValue, snapshots.at(finding.recordedRow)),
+            replay: shown(finding.replayValue, replaySnapshots.at(finding.replayRow)),
+          },
+          owned,
+        ),
       );
     }
-    return { ...run, visits, mismatch: decisions.mismatch, passCount, loopWarnings };
+    return { ...run, visits, mismatch: decisions.mismatch, loopWarnings };
   };
   const markRound = (outcome: CompileRunOutcome): void => {
     unreached = [];
@@ -1130,9 +1162,6 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
       const ran = rows.filter((r) => r.status !== 'skipped');
       if (
         ran.length > 0
-        // An entry whose list made a `For each` run a different number of
-        // passes from the recording's passed every pass — and is wrong.
-        && round.passCount?.step.key !== step.key
         && ran.every(
           (r) =>
             r.status === 'passed'
@@ -1195,7 +1224,8 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
    * first. A wrong answer comes first when it and the failure it caused are
    * the same visit: a `While` whose code says "carry on" where the recording
    * stopped is what then breaches the cap, or fails the pass it should never
-   * have run.
+   * have run. A loop that ran a different number of passes is never a failure
+   * here — it is a warning (`loopWarnings`).
    */
   const failureOf = (outcome: CompileRunOutcome): ReplayFailure => {
     const round = readRound(outcome);
@@ -1213,9 +1243,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         && !(deliberateFailure(r) && recordedDeliberate(r.index - 1)),
     );
     const mismatch = round.mismatch;
-    const passCount = round.passCount;
-    const beforeFailure = (position: number): boolean => failedAt < 0 || position <= failedAt;
-    if (mismatch && beforeFailure(mismatch.position) && (!passCount || mismatch.position <= passCount.position)) {
+    if (mismatch && (failedAt < 0 || mismatch.position <= failedAt)) {
       return {
         step: steps[mismatch.member],
         result: mismatch.replayed.row,
@@ -1223,14 +1251,12 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
         mismatch,
       };
     }
-    // A `For each` that ran a different number of passes over a list an entry
-    // of this compile captured: that entry is blamed, where the loop read it —
-    // ahead of whatever the extra (or missing) passes then broke.
-    if (passCount && beforeFailure(passCount.position)) {
-      return { step: passCount.step, result: passCount.result, error: passCount.error, passCount };
-    }
     const result = failedAt >= 0 ? round.rows[failedAt] : undefined;
-    const error = result?.error ?? outcome.error ?? 'the run failed without naming a step';
+    // The run's own words, masked as the compile's words are — everywhere this
+    // error goes next (the summary, the repair prompt, a write-off comment in a
+    // committed file) — with every frame's inputs, which the CLI run's error
+    // text was never masked with.
+    const error = sayMasked(result?.error ?? outcome.error ?? 'the run failed without naming a step');
     if (!result) return { step: undefined, result, error };
     const at = result.index - 1;
     const control = controls[at];
@@ -1311,14 +1337,10 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // completeness is read off the rows instead.
     const endedAsAsked = endedInReplay !== undefined && failed.result === undefined;
     // …and a run whose conditions answered as the recording's did: a passing
-    // run whose `If` took the other branch is not the recording replayed —
-    // nor is one whose `For each` ran over a list this compile's entry got
-    // wrong.
-    if (
-      failed.mismatch === undefined
-      && failed.passCount === undefined
-      && (outcome.status === 'passed' || endedAsAsked)
-    ) {
+    // run whose `If` took the other branch is not the recording replayed. (A
+    // `For each` that ran a different number of passes is a warning, not this:
+    // the list may have changed between the runs.)
+    if (failed.mismatch === undefined && (outcome.status === 'passed' || endedAsAsked)) {
       emit({
         kind: 'phase',
         phase: 'replay',
@@ -1393,12 +1415,14 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // THIS replay's rows, whose pass failed. Its whole map, not its innermost
     // marker alone: a body step of a `While` inside a `For each` needs the
     // outer item too, which the innermost marker does not carry.
-    const failedValues = passSnapshots(
+    const failedSnapshots = passSnapshots(
       runRows(outcome).rows,
       parameters,
       outcome.resolvedParameters,
       test.envData,
-    ).at(failed.result);
+    );
+    for (const secret of failedSnapshots.recovered) recoveredSecrets.add(secret);
+    const failedValues = failedSnapshots.at(failed.result);
     const repaired =
       failed.step.kind === 'condition'
         ? await repairCondition(failed.step, failed)
@@ -1411,13 +1435,11 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
             candidate,
             { number: round, max: maxRounds },
             {
+              secrets: promptSecretsFor(failedValues, failed.step.binding),
               // The loop the step repeats in, as generation told it
               // (decision 2): a repair that forgets it writes the failing
               // pass's item into the code.
               loop: loopContextAt(failed.step.index, failed.result?.loop?.values ?? failedValues),
-              // The recording's captured list, when the step is blamed for a
-              // `For each` that ran a different number of passes over it.
-              ...(failed.passCount && { expected: failed.passCount.expected }),
               // What the RECORDING captured on the pass that failed — never
               // the failing row's own outputs, which are what the broken
               // entry stored.
@@ -1464,10 +1486,7 @@ export async function compileTest(options: CompileOptions): Promise<CompileResul
     // The same two ways a round can be complete as the loop above: a test can
     // hold both a written-off step and a step whose text ends the run.
     const endedAsAsked = endedInReplay !== undefined && failed.result === undefined;
-    green =
-      failed.mismatch === undefined
-      && failed.passCount === undefined
-      && (outcome.status === 'passed' || endedAsAsked);
+    green = failed.mismatch === undefined && (outcome.status === 'passed' || endedAsAsked);
     if (green) {
       const gaps = describeReplayGaps(unreached, toleratedInReplay);
       emit({
@@ -2117,6 +2136,41 @@ interface PassSnapshots {
    * none — gets the map before the first row.
    */
   at(row: StepResult | undefined): Record<string, string>;
+  /**
+   * What the final map shows MASKED inside a starting value no row wrote —
+   * the spans of the real start value that the run's end-of-run mask set
+   * replaced (`cb: https://app.test/cb?t=abcd1234` against the CLI's redacted
+   * `…?t=***` recovers `abcd1234`, which a later `[store as: api_token]`
+   * captured). The snapshots keep the real value; these are for the prompts'
+   * mask set, so the prompt masks what the run's own prompts did.
+   */
+  recovered: string[];
+}
+
+/** The fewest characters a recovered secret may have. A span is inferred from
+ *  where the mask sits, and a one- or two-character one would mask every such
+ *  run of text in a prompt on a guess. */
+const MIN_RECOVERED_SECRET_LENGTH = 3;
+
+/**
+ * When `shown` is `start` with some spans replaced by the mask and nothing else
+ * changed — the way `redact` masks a secret inside a value — the spans of
+ * `start` it replaced, in order; otherwise undefined.
+ *
+ * What a redacted final map is compared with a starting value by: the CLI's
+ * `report.parameters` is redacted with the END-of-run mask set, which may hold
+ * a secret the run captured after it started, so "only the start value,
+ * masked" cannot be told by redacting the start value with any mask set the
+ * compile can build — the secret's real value is gone from every map it has.
+ */
+function maskedSpans(shown: string, start: string): string[] | undefined {
+  if (!shown.includes(MASK)) return undefined;
+  const pieces = shown.split(MASK);
+  // A bound on the pattern's backtracking, far above any real value.
+  if (pieces.length > 17 || start.length > 20_000) return undefined;
+  const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(`^${pieces.map(escape).join('([\\s\\S]+?)')}$`).exec(start);
+  return match ? match.slice(1) : undefined;
 }
 
 /**
@@ -2145,7 +2199,15 @@ interface PassSnapshots {
  *    final value from the first row on, as every snapshot did before the fold
  *    existed. Not a name whose final value is only the start value MASKED:
  *    the CLI's final map is the report's redacted copy, and `password` → `***`
- *    is not a write.
+ *    is not a write. The report is redacted with the END-of-run mask set, so a
+ *    start value holding a secret the run captured LATER — `cb:
+ *    https://app.test/cb?t=abcd1234`, then `[store as: api_token]` reads
+ *    `abcd1234` — comes back as `…?t=***`: the start value masked, never a
+ *    write ({@link maskedSpans}). Taken as one, the snapshots held `…?t=***`
+ *    and the leak guard with them, and an entry hard-coding the real URL
+ *    passed it. The snapshots keep the REAL start value — the leak guard must
+ *    hold real values — and the masked spans go to `recovered`, for the
+ *    prompts to mask it with.
  *
  * A row with no marker of its own — a chain's guard row — reads the bindings
  * of the pass the run was last seen in.
@@ -2162,16 +2224,27 @@ function passSnapshots(
     for (const name of Object.keys(row.loop?.values ?? {})) written.add(name);
   }
   // The start map as a report would print it, to tell a real change from the
-  // redaction of an unchanged value.
-  const maskedStart = redactMap({ ...start }, runSecrets({ parameters: start, envData }));
+  // redaction of an unchanged value — with the start map's mask set and the
+  // final map's, which is the set the report was redacted with (and holds
+  // real values where the final map does: the server's, not the CLI's).
+  const maskedStart = redactMap(
+    { ...start },
+    [...runSecrets({ parameters: start, envData }), ...runSecrets({ parameters: final, envData })],
+  );
   // Copied as-is — not through `bindVariable`, whose rebind rule would let a
   // flat `user` erase a data file's own `user.apikey` heading depending on key
   // order. The start map is one map, not a sequence of writes.
   const live: Record<string, string> = {};
   for (const [name, value] of Object.entries(start)) defineValue(live, name, value);
+  const recovered = new Set<string>();
   for (const [name, value] of Object.entries(final)) {
     if (!Object.hasOwn(start, name) || written.has(name)) continue;
     if (value === start[name] || value === maskedStart[name]) continue;
+    const spans = maskedSpans(value, start[name]!);
+    if (spans !== undefined) {
+      for (const span of spans) if (span.length >= MIN_RECOVERED_SECRET_LENGTH) recovered.add(span);
+      continue;
+    }
     defineValue(live, name, value);
   }
   const snapshotOf = (): Record<string, string> => {
@@ -2196,19 +2269,10 @@ function passSnapshots(
     out.set(row, snapshotOf());
     for (const [name, value] of rowWrites(row)) bindVariable(live, name, value);
   }
-  return { at: (row) => (row !== undefined ? out.get(row) : undefined) ?? before };
-}
-
-/**
- * The run's free-text mask set as of one snapshot — what the run itself masked
- * its prompts with at that point (`runSecrets`, src/utils/secrets.ts): the
- * values of its secret-named entries (decided by the snapshot's own loop
- * marks) and the env/data secrets. Handed to every prompt the compile builds
- * from the snapshot, so a secret inside a value no key names as secret —
- * `auth: "Bearer <the key>"` — is masked there too.
- */
-function promptSecrets(values: Record<string, string>, envData: ParsedTest['envData'] | undefined): string[] {
-  return runSecrets({ parameters: values, envData });
+  return {
+    at: (row) => (row !== undefined ? out.get(row) : undefined) ?? before,
+    recovered: [...recovered],
+  };
 }
 
 /**
@@ -2548,9 +2612,8 @@ interface LoopPassFinding {
   /** Equal pass counts, a different list. */
   valuesOnly?: boolean;
   /** The last row BEFORE the replay's entry that wrote the list — outputs or a
-   *  tool's outputs — and the recording's counterpart. */
+   *  tool's outputs. */
   writer?: StepResult;
-  recordedWriter?: StepResult;
 }
 
 /** The last row before `position` that wrote `name`, in execution order. */
@@ -2619,14 +2682,12 @@ function compareLoopPasses(input: {
     const recordedValue = recorded.snapshots.at(was.row)[list];
     const replayValue = replay.snapshots.at(entry.row)[list];
     const writer = lastWriterBefore(replay.rows, entry.position, list);
-    const recordedWriter = lastWriterBefore(recorded.rows, was.position, list);
     const finding: LoopPassFinding = {
       ...base,
       list,
       ...(recordedValue !== undefined && { recordedValue }),
       ...(replayValue !== undefined && { replayValue }),
       ...(writer && { writer }),
-      ...(recordedWriter && { recordedWriter }),
     };
     if (was.passes !== entry.passes) {
       out.push(finding);
@@ -2640,74 +2701,17 @@ function compareLoopPasses(input: {
 }
 
 /** A value as a compile's own words may print it: masked the way the prompt
- *  masks it — by name, by record shape, by the run's mask set — and clipped. */
+ *  masks it — by name, by record shape, by `secrets` (the run's mask set with
+ *  every frame's inputs) — and clipped. */
 function maskedForSummary(
   name: string,
   value: string,
   snapshot: Record<string, string>,
-  envData: ParsedTest['envData'] | undefined,
+  secrets: string[],
   limit = 160,
 ): string {
-  const masked = maskValueForPrompt(
-    isSecretParameterName(name, snapshot),
-    name,
-    value,
-    new Set<string>(),
-    promptSecrets(snapshot, envData),
-  );
+  const masked = maskValueForPrompt(isSecretParameterName(name, snapshot), name, value, new Set<string>(), secrets);
   return masked.length > limit ? `${masked.slice(0, limit - 1)}…` : masked;
-}
-
-/**
- * A `For each` that ran a different number of passes from the recording's,
- * over a list an entry of THIS compile captured: that entry's replay failure
- * (decision 11). Blamed at the loop's entry row, and repaired with the
- * recording's captured value as the result to reproduce.
- */
-interface PassCountFailure {
-  /** The replay's entry row, in execution order — where the loop read its list. */
-  position: number;
-  /** The entry that wrote the list, and its replay row. */
-  step: CompileStep;
-  result: StepResult;
-  error: string;
-  expected: NonNullable<RepairPromptInput['expected']>;
-}
-
-/** The failure an owned pass-count finding is, worded with both counts and
- *  the recording's value — masked the way a prompt masks it. */
-function ownedPassCount(
-  finding: LoopPassFinding,
-  owner: CompileStep,
-  writer: StepResult,
-  steps: readonly CompileStep[],
-  snapshots: PassSnapshots,
-  envData: ParsedTest['envData'] | undefined,
-): PassCountFailure {
-  const list = finding.list!;
-  // What the recording's own writer captured — its row's outputs — else the
-  // list as the recording's loop read it.
-  const captured =
-    (finding.recordedWriter && rowWrites(finding.recordedWriter).find(([name]) => name === list)?.[1])
-    ?? finding.recordedValue
-    ?? '';
-  const snapshot = snapshots.at(finding.recordedRow);
-  const passes = (n: number): string => `${n} pass${n === 1 ? '' : 'es'}`;
-  return {
-    position: finding.position,
-    step: owner,
-    result: writer,
-    error:
-      `the code stored ${finding.replayPasses} item(s) in {{${list}}}, so ${loopName(finding.guard, steps)} ` +
-      `ran ${passes(finding.replayPasses)}; on the recording it ran ${passes(finding.recordedPasses)}, with ` +
-      `{{${list}}} = ${maskedForSummary(list, captured, snapshot, envData)}`,
-    expected: {
-      name: list,
-      value: maskedForSummary(list, captured, snapshot, envData, 4000),
-      recordedPasses: finding.recordedPasses,
-      replayPasses: finding.replayPasses,
-    },
-  };
 }
 
 /** `step 12 ("For each {{account}} in {{accounts}}")` — a loop, named. */
@@ -2715,11 +2719,18 @@ function loopName(guard: number, steps: readonly CompileStep[]): string {
   return `step ${guard + 1} ("${clipLine(steps[guard]?.text ?? '')}")`;
 }
 
-/** The warning line for a pass-count finding the compile does not own. */
+/**
+ * The warning line for a pass-count finding (decision 11). `owned`: the list
+ * came from an entry this compile wrote, which ran as code — the line names
+ * it, for the author to check, and says the other explanation too, because a
+ * count cannot tell a selector that matches too much from a list that changed
+ * between the two runs.
+ */
 function loopPassWarning(
   finding: LoopPassFinding,
   steps: readonly CompileStep[],
   values: { recorded: string | undefined; replay: string | undefined },
+  owned = false,
 ): string {
   const loop = loopName(finding.guard, steps);
   const passes = (n: number): string => `${n} pass${n === 1 ? '' : 'es'}`;
@@ -2735,6 +2746,14 @@ function loopPassWarning(
     'on the recording';
   if (finding.kind !== 'foreach') return head;
   const writer = finding.writer;
+  if (owned && writer) {
+    return (
+      `${head} — check the entry for step ${writer.index} ("${clipLine(steps[writer.index - 1]?.text ?? '')}"), ` +
+      `which captured the list: {{${finding.list}}} was ${values.recorded ?? '(unknown)'} on the recording ` +
+      `and ${values.replay ?? '(unknown)'} on the replay (a list that changed between the two runs does ` +
+      'this too, and then the entry is right)'
+    );
+  }
   const source = writer
     ? `{{${finding.list}}} came from step ${writer.index} ("${clipLine(steps[writer.index - 1]?.text ?? '')}"), ` +
       'which is not an entry this compile wrote'
@@ -2778,9 +2797,6 @@ interface ReplayFailure {
   error: string;
   /** A condition answered differently from the recording (decision 11). */
   mismatch?: DecisionMismatch | undefined;
-  /** A `For each` ran a different number of passes over a list this
-   *  compile's entry captured (decision 11). */
-  passCount?: PassCountFailure | undefined;
   /** A guard failed and no condition entry decided it: nothing of this
    *  compile's to repair. */
   guardFailure?: boolean | undefined;
@@ -2861,14 +2877,14 @@ async function repairStep(
   candidate: Candidate,
   round: { number: number; max: number },
   extras: {
+    /** The prompt's mask set: the run's as of `values`, the step's frame
+     *  inputs, and what the final map showed masked (`promptSecretsFor`). */
+    secrets: string[];
     loop?: LoopContext | undefined;
-    /** What the recording captured where this entry's replay captured
-     *  something else (decision 11's pass-count check), already masked. */
-    expected?: RepairPromptInput['expected'];
     /** What the recording captured on the failing pass, RAW, by authored
      *  capture name ({@link recordedCapturesAt}). */
     recordedCaptures?: Record<string, string> | undefined;
-  } = {},
+  },
 ): Promise<GeneratedEntry> {
   const parameters = stepParameters(step.binding!, values, options.test.envData);
   // The step passed Generate, so every reference it makes resolved there;
@@ -2888,11 +2904,10 @@ async function repairStep(
     // The fold's snapshot and the run's mask set as of it, as generation has
     // them — so the repair masks what the run's own prompts masked.
     parameterMap: values,
-    secrets: promptSecrets(values, options.test.envData),
+    secrets: extras.secrets,
     ...(envRefs.length > 0 && { envRefs }),
     round,
     ...(extras.loop && { loop: extras.loop }),
-    ...(extras.expected && { expected: extras.expected }),
     ...(extras.recordedCaptures && { recordedCaptures: extras.recordedCaptures }),
   };
   const { result } = await askWithCaptureRetry(
@@ -2963,14 +2978,17 @@ async function repairHealedStep(
   step: CompileStep,
   result: StepResult,
   values: Record<string, string>,
+  /** The prompt's mask set, as generation's (`promptSecretsFor`). */
+  secrets: string[],
   options: CompileOptions,
   candidate: Candidate,
   /** The loop the step repeats in, as generation is told it (decision 2). */
   loop: LoopContext | undefined,
 ): Promise<GeneratedEntry | undefined> {
   const binding = step.binding!;
-  const error = result.codeBehindStale?.error;
-  if (error === undefined) return undefined;
+  const thrown = result.codeBehindStale?.error;
+  if (thrown === undefined) return undefined;
+  const error = redact(thrown, secrets);
   const file = await candidate.read(binding.file);
   if (file === null) return undefined;
   const entryCode = entryTextIn(file, binding.source, binding.section, binding.occurrence);
@@ -2996,7 +3014,7 @@ async function repairHealedStep(
     ...(ctx?.urlBefore !== undefined && { url: ctx.urlBefore }),
     parameters,
     parameterMap: values,
-    secrets: promptSecrets(values, options.test.envData),
+    secrets,
     ...(envRefs.resolved.length > 0 && { envRefs: envRefs.resolved }),
     ...(loop && { loop }),
     ...(recordedCaptures && { recordedCaptures }),

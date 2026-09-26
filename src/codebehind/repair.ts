@@ -46,17 +46,10 @@ export interface RepairPromptInput {
    */
   loop?: LoopContext | undefined;
   /**
-   * What the RECORDING captured where this entry captured something else — a
-   * list the next `For each` then ran a different number of passes over
-   * (decision 11's pass-count check). `value` is already masked for a prompt.
-   */
-  expected?: { name: string; value: string; recordedPasses: number; replayPasses: number } | undefined;
-  /**
    * What each capture the step makes held on the RECORDING, by the authored
    * capture name — RAW, masked here as the parameter block masks a value
    * (`formatCaptureLines`, the step prompt's own formatter). The result the
-   * repaired entry must reproduce. A name `expected` already shows is not
-   * shown twice.
+   * repaired entry must reproduce.
    */
   recordedCaptures?: Record<string, string> | undefined;
   /**
@@ -96,20 +89,10 @@ export function buildRepairPrompt(input: RepairPromptInput): ChatMessage {
     ? `\nThis is repair round ${input.round.number} of ${input.round.max}. If you cannot make this step work as code, say so with {"entry": null, "reason": "..."} rather than guessing again.\n`
     : '';
 
-  const expected = input.expected;
-  const expectedBlock = expected
-    ? `\n## What the recording captured\n` +
-      `On the recording run this step stored \`{{${expected.name}}}\` = ${expected.value}, and the ` +
-      `\`For each\` over it ran ${expected.recordedPasses} pass(es). Replayed, this entry stored ` +
-      `something else, and the loop ran ${expected.replayPasses}. Capture exactly what the step's text ` +
-      `asks for — no more items and no fewer — read from the page on every run. Never write these ` +
-      `values into the code: the page decides them.\n`
-    : '';
-
   // What the recording captured, beside the name the entry writes it under —
-  // the step prompt's own lines and rule. Skipped for the name the block above
-  // already states, and absent (the prompt unchanged) when nothing was recorded.
-  const recorded = Object.entries(input.recordedCaptures ?? {}).filter(([name]) => name !== expected?.name);
+  // the step prompt's own lines and rule. Absent (the prompt unchanged) when
+  // nothing was recorded.
+  const recorded = Object.entries(input.recordedCaptures ?? {});
   const captureBlock =
     recorded.length === 0
       ? ''
@@ -139,7 +122,7 @@ ${input.entryCode}
 
 ## What went wrong
 ${input.error}
-${expectedBlock}${retryBlock}${roundLine}
+${retryBlock}${roundLine}
 ## The page when it failed${input.url ? `\nURL: ${input.url}` : ''}${
     input.dom ? `\n\n\`\`\`html\n${input.dom}\n\`\`\`` : ''
   }${input.screenshotBase64 ? '\n\n[A screenshot of the page at the failure is attached.]' : ''}

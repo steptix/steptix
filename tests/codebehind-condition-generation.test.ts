@@ -559,6 +559,72 @@ describe('conditionEntryComplaint over a corpus of good and bad entries', () => 
   });
 });
 
+// ── Review round 3 (G5–G8): what the round-2 rules still got wrong ──────────
+
+describe('conditionEntryComplaint — review round 3', () => {
+  const wrap = (body: string, params = '{ page, step }') =>
+    `{ source: 'If x, then y', async condition(${params}) {\n${body}\n} }`;
+
+  // The six realistic read-only conditions the last review measured, kept
+  // passing verbatim, and the reads round 3's rules must not start refusing.
+  it.each([
+    ['a count compared', wrap(`const rows = page.locator('tr');\nconst n = await rows.count();\nreturn n > 0;`)],
+    ['a checkbox read through a name', wrap(`const el = page.getByRole('checkbox', { name: 'Cash' });\nreturn await el.isChecked();`)],
+    ['a destructured text read', wrap(`const [a] = await page.locator('x').allTextContents();\nreturn a === 'y';`)],
+    ['a bounding box', wrap(`const box = await page.locator('#x').boundingBox();\nreturn box !== null;`)],
+    ['sorting an array of nodes in a page function', wrap(`return await page.evaluate(() => { const rows = [...document.querySelectorAll('tr')]; rows.sort(); return rows.length > 1; });`)],
+    ['a for…of over texts', wrap(`let found = false;\nfor (const t of await page.locator('li').allTextContents()) { if (t.includes('x')) found = true; }\nreturn found;`)],
+    // G5: a conditional or logical expression over DATA stays data.
+    ['a conditional choosing between strings', wrap(`const n = await page.locator('tr').count();\nconst label = n > 1 ? 'many' : 'one';\nreturn label === 'many';`)],
+    ['an && over two reads', wrap(`const b = page.getByRole('button');\nconst ok = (await b.count()) > 0 && (await b.isEnabled());\nreturn ok;`)],
+    ['a comparison with a generic call on its right', wrap(`const n = await page.locator('li').count();\nconst big = n > (await page.evaluate<number>(() => 3));\nreturn big;`)],
+    // G6: a page function's local built from literals is still its own.
+    ['a local list of numbers written in a page function', wrap(`return await page.evaluate(() => { const out = [0]; out[0] = document.querySelectorAll('li').length; return out[0] > 1; });`)],
+    // G7: a page function's local named `location`.
+    ['a local named location, compared', wrap(`return await page.evaluate(() => { const location = document.querySelector('.loc').textContent; return location === 'Sydney'; });`)],
+    ['a local named location, whose string replace is not a navigation', wrap(`return await page.evaluate(() => { const location = document.querySelector('.loc').textContent ?? ''; return location.replace(/\\s/g, '') === 'Sydney'; });`)],
+    // G8: what is not an alias of the run's tabs.
+    ['a list read off the run\'s tabs into a local', wrap(`const open = await tabs.list();\nreturn open.length > 1;`, '{ page, tabs }')],
+    ['a Map the entry names tabs, closed through ?.', wrap(`const tabs = new Map();\ntabs.close?.();\nreturn true;`)],
+  ])('accepts %s', (_what, code) => {
+    expect(conditionEntryComplaint(code)).toBeUndefined();
+  });
+
+  // Each was passed before round 3's rules — measured through the reviewer's
+  // repro scripts against the round-2 build.
+  it.each([
+    // G5: the value of a conditional / logical expression is a locator.
+    ['a conditional whose branches are locators', wrap(`const n = await page.locator('tr').count();\nconst target = n > 1 ? page.getByRole('row').nth(1) : page.getByRole('row').first();\nawait target.click();\nreturn true;`), '.click('],
+    ['a conditional with null on one side', wrap(`const n = await page.locator('tr').count();\nconst row = n === 0 ? null : page.locator('tr').first();\nif (row) await row.check();\nreturn true;`), '.check('],
+    ['an && whose last operand is a locator', wrap(`const n = await page.locator('tr').count();\nconst row = n > 0 && page.locator('tr').first();\nif (row) await row.click();\nreturn true;`), '.click('],
+    ['an || falling back to a locator', wrap(`const n = await page.locator('tr').count();\nconst row = n < 1 || page.locator('tr').first();\nawait (row as Locator).click();\nreturn true;`), '.click('],
+    // G5: a type argument is not a comparison.
+    ['a handle from evaluateHandle<T>()', wrap(`const h = await page.evaluateHandle<HTMLElement>(() => document.querySelector('a'));\nawait h.click();\nreturn true;`), '.click('],
+    ['a handle from $<T>()', wrap(`const el = await page.$<HTMLInputElement>('#x');\nawait el!.check();\nreturn true;`), '.check('],
+    // G6: a local built from the page's nodes IS the page.
+    ['a spread of nodes, ticked by index', wrap(`return await page.evaluate(() => { const boxes = [...document.querySelectorAll('input[type=checkbox]')]; boxes[0].checked = true; return boxes.length > 0; });`), '.checked='],
+    ['a spread of nodes, restyled by index', wrap(`return await page.evaluate(() => { const rows = [...document.querySelectorAll('tr')]; rows[0].style.display = 'none'; return rows.length > 0; });`), '.style.display='],
+    ['an array literal of one node, hidden', wrap(`return await page.evaluate(() => { const els = [document.getElementById('a')]; els[0].hidden = true; return true; });`), '.hidden='],
+    ['an object holding a node, written through', wrap(`return await page.evaluate(() => { const o = { el: document.body }; o.el.title = 'x'; return true; });`), '.title='],
+    // G7: the global location is still the page's, however it is reached.
+    ['a bare location assignment', wrap(`await page.evaluate(() => { location = '/next'; }); return true;`), 'location='],
+    ['a bare location.assign()', wrap(`await page.evaluate(() => location.assign('/next')); return true;`), 'location.assign('],
+    ['window.location.replace()', wrap(`await page.evaluate(() => window.location.replace('/next')); return true;`), 'location.replace('],
+    ['document.location = …', wrap(`await page.evaluate(() => { document.location = '/next'; }); return true;`), 'location='],
+    ['window.location written though a local location exists', wrap(`await page.evaluate(() => { const location = 'x'; window.location.href = location; }); return true;`), '.href='],
+    // G8: the run's tabs and browsers through an alias.
+    ['a local alias of the destructured tabs', wrap(`const t = tabs;\nawait t.switchTo('Docs');\nreturn true;`, '{ page, tabs }'), 't.switchTo('],
+    ['tabs renamed in the destructure', wrap(`await tb.close();\nreturn true;`, '{ page, tabs: tb }'), 'tb.close('],
+    ['tabs renamed in a destructure of ctx', wrap(`const { tabs: tb } = ctx;\nawait tb.open('https://x.test');\nreturn true;`, 'ctx'), 'tb.open('],
+    ['browsers assigned to a local after its declaration', wrap(`let b;\nb = ctx.browsers;\nawait b.switchTo('other');\nreturn true;`, 'ctx'), 'b.switchTo('],
+    ['an alias of an alias', wrap(`const t = ctx.tabs;\nconst u = t;\nawait u.openedBy(() => undefined);\nreturn true;`, 'ctx'), 'u.openedBy('],
+  ])('refuses %s', (_what, code, named) => {
+    const complaint = conditionEntryComplaint(code);
+    expect(complaint).toBeDefined();
+    expect(complaint).toContain(named);
+  });
+});
+
 // ── generateConditionEntry never returns a hard-rule violation (R6) ─────────
 
 describe('generateConditionEntry and a hard-rule violation', () => {
@@ -642,7 +708,11 @@ describe('stepParameters on a dotted name whose root the frame renames', () => {
   it('resolves through the rename, as step.getVar does', () => {
     // Measured before the fix: the name resolved to nothing — the prompt said
     // "this step uses no parameters" and the leak guard held nothing.
-    expect(stepParameters(binding, live)).toEqual([{ name: 'order.id', value: 'ORD-1001' }]);
+    // `bound`: the key the value is held under, which a loop mark is keyed by
+    // (review round 3, G2).
+    expect(stepParameters(binding, live)).toEqual([
+      { name: 'order.id', value: 'ORD-1001', bound: '__skill1_order.id' },
+    ]);
   });
 
   it('is accounted for when the model names the RENAMED dotted token, as a flat rename is (review round 2, F4)', () => {

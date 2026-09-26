@@ -27,7 +27,7 @@ import { boundValue } from '../runner/placeholder-substitution.js';
 import type { AssertionResult } from '../report/types.js';
 import { referencedVariableNames } from '../skills/expander.js';
 import { logger } from '../utils/logger.js';
-import { EMPTY, MASK, redact } from '../utils/secrets.js';
+import { EMPTY, MASK, inheritLoopBindings, redact, runSecrets, secretValues } from '../utils/secrets.js';
 import type { CodeBehindBinding } from './loader.js';
 import type { RecordedAction } from './recording.js';
 import { CODE, COMMENT, matchForward, scan, type StringToken } from './tokenizer.js';
@@ -1188,9 +1188,9 @@ export function stepParameters(
   binding: CodeBehindBinding,
   resolvedParameters: Record<string, string>,
   envData?: EnvDataContext | undefined,
-): Array<{ name: string; value: string }> {
+): StepParameter[] {
   const { placeholders } = referencedVariableNames(binding.source);
-  const out: Array<{ name: string; value: string }> = [];
+  const out: StepParameter[] = [];
   for (const name of placeholders) {
     // `boundValue` on all three maps, not a bare index. Two prototype reads
     // sat here and cancelled each other into the wrong answer: `renames[name]`
@@ -1223,9 +1223,85 @@ export function stepParameters(
         : scoped !== undefined
           ? boundValue(resolvedParameters, scoped)
           : boundValue(resolvedParameters, name);
-    if (value !== undefined) out.push({ name, value });
+    // The scoped key rides along, so the prompt asks the map's loop marks
+    // about the name the map HOLDS: the pass marked `__skill1_row.keyword`,
+    // never the authored `row.keyword`, and asked about that one the author
+    // rule answered — `keyword` matches `key`, and `AU` was masked out of the
+    // block the model writes its selector from.
+    if (value !== undefined) out.push({ name, value, ...(scoped !== undefined && { bound: scoped }) });
   }
   return out;
+}
+
+/** One parameter a step references, as {@link stepParameters} resolves it. */
+export interface StepParameter {
+  /** The name as the step wrote it — what the prompt shows and `getVar` reads. */
+  name: string;
+  value: string;
+  /** The key the value is held under in the map, when it is not `name`: a
+   *  dotted name in a skill body, resolved through its root's rename
+   *  (`row.keyword` → `__skill1_row.keyword`). What a loop mark is keyed by. */
+  bound?: string;
+}
+
+/**
+ * The caller-supplied inputs of a binding's frames, resolved the way the step's
+ * own references resolve them ({@link resolveInputValue}): `[skill: api
+ * token="uk_live_1234" header="Bearer uk_live_1234"]` inlined both into the
+ * body's text, so they exist under no name in the run's map — only here.
+ */
+function resolvedFrameInputs(
+  binding: CodeBehindBinding,
+  resolvedParameters: Record<string, string>,
+  envData: EnvDataContext | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, input] of Object.entries(binding.scope.inputs)) {
+    Object.defineProperty(out, name, {
+      value: resolveInputValue(input, resolvedParameters, envData),
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  return out;
+}
+
+/**
+ * The mask set a compile's prompt — or its own words — built from `values` is
+ * masked with, so it masks what the run's own prompts masked:
+ *
+ *  - the run's (`runSecrets`): its secret-named entries, decided by the
+ *    snapshot's own loop marks, and the env/data secrets — a secret inside a
+ *    value no key names as secret (`auth: "Bearer <the key>"`) included;
+ *  - each binding's frame inputs, resolved ({@link resolvedFrameInputs}) and
+ *    judged by their names as the run's `secretsNow` judges them — which
+ *    merges every frame's inputs into the set, so `[skill: api token="<key>"
+ *    header="Bearer <key>"]` masks the key inside `{{header}}` too;
+ *  - `extra`: secrets the caller knows some other way (the boxed compile's
+ *    values recovered from a redacted final map).
+ *
+ * Shared by both compilers.
+ */
+export function compilePromptSecrets(
+  values: Record<string, string>,
+  envData: EnvDataContext | undefined,
+  bindings: ReadonlyArray<CodeBehindBinding | undefined> = [],
+  extra: readonly string[] = [],
+): string[] {
+  const out = new Set(runSecrets({ parameters: values, envData }));
+  const seen = new Set<Record<string, string>>();
+  for (const binding of bindings) {
+    const inputs = binding?.scope.inputs;
+    if (inputs === undefined || seen.has(inputs) || Object.keys(inputs).length === 0) continue;
+    seen.add(inputs);
+    const layer = resolvedFrameInputs(binding!, values, envData);
+    // A dotted input a pass bound is the pass's: its marks come from the map.
+    inheritLoopBindings(values, layer);
+    for (const secret of secretValues(layer)) out.add(secret);
+  }
+  for (const secret of extra) if (secret.length > 0) out.add(secret);
+  return [...out];
 }
 
 /**
@@ -1749,6 +1825,68 @@ export function pickConditionObservations<T extends { holds: boolean | undefined
 export const CONDITION_WITHOUT_DOM =
   'the condition was judged without a DOM (computer mode); a screen read is not portable';
 
+/** Where the tab and browser rule sits among {@link CONDITION_FORBIDDEN}; the
+ *  rule itself is built per entry ({@link tabCallRule}). */
+const TAB_CALLS_SLOT: { re: RegExp; why: string } = { re: /(?!)/, why: '' };
+
+const TAB_CALLS_WHY = 'opens, switches or closes a tab or browser. A condition reads the page the run is on';
+
+/**
+ * The names an entry reaches the context's `tabs` (or `browsers`) by: the
+ * property itself, a destructure that renames it (`{ tabs: tb }` — the
+ * condition's own parameter, or `const { tabs: tb } = ctx`), and any local
+ * bound to one of those or to a member ending in it (`const t = tabs`,
+ * `let t; t = ctx.tabs`), to a fixpoint. A method destructured off it
+ * (`const { close } = tabs`) is not followed.
+ */
+function contextAliases(text: string, property: 'tabs' | 'browsers'): Set<string> {
+  const names = new Set<string>([property]);
+  for (const m of text.matchAll(new RegExp(String.raw`(?:^|[^\w$.])${property}\s*:\s*([A-Za-z_$][\w$]*)`, 'g'))) {
+    names.add(m[1]!);
+  }
+  const bindings: Array<{ target: string; rhs: string }> = [];
+  for (const m of text.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]+)?=\s*([^;\n]+)/g)) {
+    bindings.push({ target: m[1]!, rhs: m[2]! });
+  }
+  for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=(?![=>])\s*([^;\n]+)/g)) {
+    bindings.push({ target: m[1]!, rhs: m[2]! });
+  }
+  const memberOf = new RegExp(String.raw`^[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*)*\s*\??\.\s*${property}$`);
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const { target, rhs } of bindings) {
+      if (names.has(target)) continue;
+      const e = unwrapExpression(rhs);
+      if (names.has(e) || memberOf.test(e)) {
+        names.add(target);
+        changed = true;
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * The tab and browser calls that CHANGE which page the run is on
+ * (src/codebehind/types.ts) — `tabs.open` / `openedBy` / `switchTo` / `close`,
+ * `browsers.open` / `switchTo` / `close` — on the context's own object however
+ * the entry reaches it: destructured, `ctx.tabs.…`, renamed in a destructure,
+ * or through a local alias ({@link contextAliases}). The read-only ones —
+ * `tabs.list()`, `tabs.active()`, `browsers.list()`, `browsers.activeLabel()`
+ * — answer a question about the run, which is a condition's business (`If a
+ * second tab is open, …`).
+ */
+function tabCallRule(text: string): { re: RegExp; why: string } {
+  const alt = (names: Set<string>): string => [...names].map((n) => n.replace(/\$/g, '\\$')).join('|');
+  return {
+    re: new RegExp(
+      String.raw`(?:^|[^\w$])(?:(?:${alt(contextAliases(text, 'tabs'))})\s*\.\s*(?:open|openedBy|switchTo|close)|` +
+        String.raw`(?:${alt(contextAliases(text, 'browsers'))})\s*\.\s*(?:open|switchTo|close))\s*\(`,
+    ),
+    why: TAB_CALLS_WHY,
+  };
+}
+
 /** The code of an entry with every string, template text, comment and regex
  *  blanked out, so a check for a CALL cannot fire on `'Click me'`. */
 function codeOnly(code: string): string {
@@ -1792,15 +1930,9 @@ const CONDITION_FORBIDDEN: ReadonlyArray<{ re: RegExp; why: string }> = [
     why: 'sleeps. The page has already settled; answer about it now',
   },
   // The tab and browser calls that CHANGE which page the run is on
-  // (src/codebehind/types.ts) — on any receiver: `tabs.open(` destructured,
-  // `ctx.tabs.open(`, a local alias of either. The read-only ones —
-  // `tabs.list()`, `tabs.active()`, `browsers.list()`,
-  // `browsers.activeLabel()` — answer a question about the run, which is a
-  // condition's business (`If a second tab is open, …`).
-  {
-    re: /(?:^|[^\w$])(?:tabs\s*\.\s*(?:open|openedBy|switchTo|close)|browsers\s*\.\s*(?:open|switchTo|close))\s*\(/,
-    why: 'opens, switches or closes a tab or browser. A condition reads the page the run is on',
-  },
+  // (src/codebehind/types.ts) go here, in this order — built per entry, since
+  // they follow the entry's own aliases ({@link tabCallRule}).
+  TAB_CALLS_SLOT,
   // On any receiver: `step.setVar(`, `ctx.step.setVar(`, a destructured `setVar(`.
   {
     re: /(?:^|[^\w$])(?:step\s*\.\s*)?setVar\s*\(/,
@@ -1961,8 +2093,31 @@ function lastTopLevelMember(expr: string): string | undefined {
   return last;
 }
 
+/**
+ * Where a TypeScript type-argument list that starts at `at` (a `<` right after
+ * an identifier) ends, when it is one — `<HTMLElement>` in
+ * `page.evaluateHandle<HTMLElement>(…)`, `<Array<string>>` — and a call
+ * follows it; otherwise -1. Read as a type only when every character inside is
+ * one a type is spelled with and the closing `>` is followed by `(`, so
+ * `n < m` and `a < b && c > d` stay comparisons.
+ */
+function typeArgumentsEnd(expr: string, at: number): number {
+  if (expr[at] !== '<' || !/[\w$]/.test(expr[at - 1] ?? '')) return -1;
+  let depth = 0;
+  for (let k = at; k < expr.length; k++) {
+    const c = expr[k]!;
+    if (c === '<') depth++;
+    else if (c === '>') {
+      if (--depth === 0) return /^\s*\(/.test(expr.slice(k + 1)) ? k : -1;
+    } else if (!/[\w$.\s,[\]|&{}:;?'"`]/.test(c)) return -1;
+  }
+  return -1;
+}
+
 /** Does the expression compute a primitive at its top level — a comparison,
- *  arithmetic, a negation, `typeof`? Its result is then data whatever it read. */
+ *  arithmetic, a negation, `typeof`? Its result is then data whatever it read.
+ *  A TypeScript type argument (`evaluateHandle<HTMLElement>(`) is not a
+ *  comparison. */
 function computesPrimitive(expr: string): boolean {
   if (/^(?:!(?!=)|typeof\b|void\b|-|\+(?!\+))/.test(expr)) return true;
   let depth = 0;
@@ -1971,6 +2126,11 @@ function computesPrimitive(expr: string): boolean {
     if ('([{'.includes(c)) depth++;
     else if (')]}'.includes(c)) depth--;
     else if (depth === 0) {
+      const typeEnd = typeArgumentsEnd(expr, k);
+      if (typeEnd >= 0) {
+        k = typeEnd;
+        continue;
+      }
       const rest = expr.slice(k, k + 3);
       if (/^(?:===|!==|==|!=|<=|>=)/.test(rest)) return true;
       if ((c === '<' || c === '>') && expr[k - 1] !== '=' && expr[k + 1] !== '>') return true;
@@ -1982,6 +2142,62 @@ function computesPrimitive(expr: string): boolean {
 }
 
 /**
+ * The branches of a depth-0 conditional expression — `a` and `b` of
+ * `cond ? a : b` — or undefined when the expression is not one. `?.` and `??`
+ * are not its `?`; a nested conditional in either branch is left for the
+ * caller to split again.
+ */
+function conditionalBranches(expr: string): [string, string] | undefined {
+  let depth = 0;
+  let question = -1;
+  let pending = 0;
+  for (let k = 0; k < expr.length; k++) {
+    const c = expr[k]!;
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    else if (depth !== 0) continue;
+    else if (c === '?') {
+      const next = expr[k + 1];
+      // `?.` (not `?.5`, a conditional over a number) and `??` are not it.
+      if ((next === '.' && !/\d/.test(expr[k + 2] ?? '')) || next === '?' || expr[k - 1] === '?') continue;
+      if (question < 0) question = k;
+      else pending++;
+    } else if (c === ':' && question >= 0) {
+      if (pending > 0) {
+        pending--;
+        continue;
+      }
+      return [expr.slice(question + 1, k), expr.slice(k + 1)];
+    }
+  }
+  return undefined;
+}
+
+/** The operands of a depth-0 `&&` / `||` / `??` chain, or undefined when the
+ *  expression has none of them at its top level. */
+function logicalOperands(expr: string): string[] | undefined {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let k = 0; k < expr.length - 1; k++) {
+    const c = expr[k]!;
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    else if (depth === 0) {
+      const two = expr.slice(k, k + 2);
+      if ((two === '&&' || two === '||' || two === '??') && expr[k + 2] !== '=') {
+        parts.push(expr.slice(start, k));
+        start = k + 2;
+        k++;
+      }
+    }
+  }
+  if (parts.length === 0) return undefined;
+  parts.push(expr.slice(start));
+  return parts;
+}
+
+/**
  * Is a binding's right-hand side a Playwright page, frame, locator or handle —
  * or a thing that holds one? A fresh `new …` is not; an array literal is when
  * one of its elements is (`[page.locator('a')]`, never `[]` or `[false]`); a
@@ -1989,6 +2205,12 @@ function computesPrimitive(expr: string): boolean {
  * is a number); anything else is when {@link isPlaywrightReceiver} says so. An
  * arrow function is judged by what it returns, so `(s) => page.locator(s)`
  * binds a locator-maker and `(s) => s.length > 0` does not.
+ *
+ * A value that is one of several — `n > 1 ? rows.nth(1) : rows.first()`,
+ * `n > 0 && page.locator('tr').first()`, `a || page.getByRole('row')` — is a
+ * receiver when any branch or operand it can be is one: the comparison inside
+ * it decides WHICH value, not that the value is data (review round 3). Only
+ * then is the top level read for a comparison or arithmetic.
  */
 function rhsIsReceiver(rhs: string, names: ReadonlySet<string>): boolean {
   let e = unwrapExpression(rhs);
@@ -1998,6 +2220,10 @@ function rhsIsReceiver(rhs: string, names: ReadonlySet<string>): boolean {
   if (e.startsWith('[') && closingOf(e, 0) === e.length - 1) {
     return topLevelParts(e.slice(1, -1)).some((part) => rhsIsReceiver(part, names));
   }
+  const branches = conditionalBranches(e);
+  if (branches) return branches.some((branch) => rhsIsReceiver(branch, names));
+  const operands = logicalOperands(e);
+  if (operands) return operands.some((operand) => rhsIsReceiver(operand, names));
   if (computesPrimitive(e)) return false;
   const last = lastTopLevelMember(e);
   if (last !== undefined && VALUE_READS.has(last)) return false;
@@ -2072,6 +2298,10 @@ function isPlaywrightReceiver(chain: string, names: ReadonlySet<string>): boolea
   return false;
 }
 
+/** `window.` / `document.` / `self.` / `globalThis.` / `top.` / `parent.`
+ *  before a name: the global it names, whatever the page function declared. */
+const GLOBAL_OWNER = String.raw`\b(?:window|document|self|globalThis|top|parent)\s*\.\s*`;
+
 /**
  * Inside a function the PAGE runs — `page.evaluate(…)`, `locator.evaluate(…)`,
  * `evaluateAll`, `evaluateHandle`, `$eval` / `$$eval` — every DOM object is
@@ -2082,7 +2312,11 @@ function isPlaywrightReceiver(chain: string, names: ReadonlySet<string>): boolea
 const EVALUATE_MUTATING_CALLS: ReadonlyArray<RegExp> = [
   /\.\s*(?:click|submit|requestSubmit|dispatchEvent|focus|blur|select|reset|remove|removeChild|append|appendChild|prepend|before|after|replaceWith|replaceChildren|insertAdjacentHTML|insertAdjacentElement|insertAdjacentText|insertBefore|setAttribute|removeAttribute|toggleAttribute|setSelectionRange|setRangeText|showModal|showPicker|execCommand|scrollIntoView|scrollTo|scrollBy|setProperty|removeProperty)\s*\(/,
   /\bclassList\s*\.\s*(?:add|remove|toggle|replace)\s*\(/,
-  /\b(?:location|history)\s*\.\s*(?:assign|replace|reload|back|forward|go|pushState|replaceState)\s*\(/,
+  /\bhistory\s*\.\s*(?:back|forward|go|pushState|replaceState)\s*\(/,
+  // The location's own moves, on the global reached by name — a bare
+  // `location.` is judged apart ({@link locationMutation}), since a page
+  // function may name a local `location`.
+  new RegExp(String.raw`${GLOBAL_OWNER}location\s*\.\s*(?:assign|replace|reload)\s*\(`),
   /\bwindow\s*\.\s*open\s*\(/,
   /\bdocument\s*\.\s*(?:write|writeln|open|close)\s*\(/,
   /\b(?:localStorage|sessionStorage)\s*\.\s*(?:setItem|removeItem|clear)\s*\(/,
@@ -2112,22 +2346,79 @@ const DOM_WRITES: ReadonlyArray<RegExp> = [
   new RegExp(String.raw`\.\s*(?:style|dataset|classList)${ASSIGN}`),
   // `el['value'] = …` — the bracket form of a property above.
   new RegExp(String.raw`\[\s*(['"\x60])(?:${DOM_STATE_PROPERTIES})\1\s*\]${ASSIGN}`),
-  // The location itself: `location = …`, `window.location.href = …`.
-  new RegExp(String.raw`(?:^|[^\w$])location(?:\s*\.\s*[\w$]+)?${ASSIGN}`),
+  // The location reached through the global: `window.location = …`,
+  // `document.location.href = …`. A bare `location` is judged apart
+  // ({@link locationMutation}).
+  new RegExp(String.raw`${GLOBAL_OWNER}location(?:\s*\.\s*[\w$]+|\s*\[[^\]]*\])?${ASSIGN}`),
 ];
+
+/**
+ * A bare `location` the page function writes or moves — `location = …`,
+ * `location.href = …`, `location.assign(…)` — named, or undefined.
+ *
+ * Bare, the name is the page's location only when the page function has not
+ * declared its own: `const location = document.querySelector('.loc')
+ * .textContent; return location === 'Sydney'` reads a label, and refusing its
+ * declaration as a navigation (review round 3) cost a compiled condition. So
+ * a declaration of a local named `location` is never a write, and once one
+ * exists, every bare `location` is that local. `window.location` and its kin
+ * stay the global's either way ({@link DOM_WRITES}, {@link EVALUATE_MUTATING_CALLS}).
+ */
+function locationMutation(body: string): string | undefined {
+  if (/(?:^|[^\w$.])(?:const|let|var)\s+location\b/.test(body)) return undefined;
+  const bare = String.raw`(?:^|[^\w$.])location`;
+  const write = new RegExp(String.raw`${bare}(?:\s*\.\s*[\w$]+|\s*\[[^\]]*\])?${ASSIGN}`).exec(body);
+  if (write) return write[0].replace(/^[^\w$]/, '').replace(/\s+/g, '');
+  const move = new RegExp(String.raw`${bare}\s*\.\s*(?:assign|replace|reload)\s*\(`).exec(body);
+  return move ? move[0].replace(/^[^\w$]/, '').replace(/\s+/g, '') : undefined;
+}
+
+/**
+ * An expression that yields DOM nodes: a query (`querySelectorAll(…)`,
+ * `getElementById(…)`, `closest(…)`, `elementFromPoint(…)`), a node's
+ * neighbours (`children`, `parentElement`, `nextElementSibling`, …), or a
+ * document collection (`document.body`, `forms`, `elements`, `options`,
+ * `rows`, `cells`, `activeElement`). Not `document.title` — a string.
+ */
+const YIELDS_DOM_NODES =
+  /\b(?:querySelector(?:All)?|getElementById|getElementsBy[A-Za-z]+|closest|elementsFromPoint|elementFromPoint)\s*\(|\.\s*(?:children|childNodes|(?:first|last)(?:Element)?Child|(?:next|previous)(?:Element)?Sibling|parent(?:Element|Node)|body|forms|elements|options|selectedOptions|rows|cells|tBodies|activeElement|labels|files)\b/;
 
 /**
  * Is the write whose `.` (or `[`) is at `at` into a LOCAL the page function
  * built itself — `const r = {}`, `let out = []`, `new Map()`, a literal? Then
  * it changes nothing on the page, whatever the property is called.
+ *
+ * Not when that local was built FROM the page's nodes (review round 3):
+ * `const boxes = [...document.querySelectorAll('input')]` is an array, but
+ * `boxes[0].checked = true` ticks a box on the page — and so does it through
+ * `[document.getElementById('a')]`. Only a write through such a local is
+ * refused; `boxes.sort()` reorders a JavaScript array and touches no node.
  */
 function writesToLocal(body: string, at: number): boolean {
   const { chain } = receiverBefore(body, at);
   const root = /^[\s(]*([A-Za-z_$][\w$]*)/.exec(chain)?.[1];
   if (root === undefined || root === 'document' || root === 'window') return false;
-  return new RegExp(
-    String.raw`(?:const|let|var)\s+${root.replace(/\$/g, '\\$')}\s*=\s*(?:\{|\[|new\s+(?:Map|Set|WeakMap|Object|Array)\b|['"\x60\d])`,
-  ).test(body);
+  const declared = new RegExp(
+    String.raw`(?:const|let|var)\s+${root.replace(/\$/g, '\\$')}\s*=\s*(?=\{|\[|new\s+(?:Map|Set|WeakMap|Object|Array)\b|['"\x60\d])`,
+  ).exec(body);
+  if (!declared) return false;
+  return !YIELDS_DOM_NODES.test(initialiserAt(body, declared.index + declared[0].length));
+}
+
+/** The initialiser that starts at `start`: up to its depth-0 `;`, line break
+ *  or `,`, or the close of the block it sits in. */
+function initialiserAt(body: string, start: number): string {
+  let depth = 0;
+  for (let k = start; k < body.length; k++) {
+    const c = body[k]!;
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) {
+      if (--depth < 0) return body.slice(start, k);
+    } else if (depth === 0 && (c === ';' || c === '\n' || c === ',')) {
+      return body.slice(start, k);
+    }
+  }
+  return body.slice(start);
 }
 
 /** What a page function does that changes the page, named, or undefined. */
@@ -2144,7 +2435,7 @@ function pageFunctionMutation(body: string): string | undefined {
       return hit[0].replace(/^[^\w$.[]/, '').replace(/\s+/g, '');
     }
   }
-  return undefined;
+  return locationMutation(body);
 }
 
 const EVALUATE_CALL = /\.\s*(evaluate|evaluateAll|evaluateHandle|\$eval|\$\$eval)\s*\(/g;
@@ -2248,7 +2539,8 @@ function evaluateBodies(code: string, text: string, scanned: ReturnType<typeof s
 
 /** The first forbidden call in the entry, named, with why — or undefined. */
 function forbiddenCall(code: string, text: string): string | undefined {
-  for (const { re, why } of CONDITION_FORBIDDEN) {
+  for (const rule of CONDITION_FORBIDDEN) {
+    const { re, why } = rule === TAB_CALLS_SLOT ? tabCallRule(text) : rule;
     const match = re.exec(text);
     if (!match) continue;
     const call = match[0].replace(/^[^\w$.]/, '').replace(/\s+/g, '');
