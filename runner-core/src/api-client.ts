@@ -524,11 +524,19 @@ export class ApiClient {
     sessionId: string,
     request: RecordStepsRequest,
     signal: AbortSignal,
+    /**
+     * Called once the server has answered 200, before any frame is read. By
+     * then the server holds a session for this id — created with this
+     * request's `config` when it carried one — even if the recording is
+     * cancelled before its first frame (the browser still launching).
+     */
+    onOpen?: () => void,
   ): AsyncIterable<RecordStepsEvent> {
     yield* this.postSse<RecordStepsEvent>(
       `/sessions/${encodeURIComponent(sessionId)}/record-steps`,
       request,
       signal,
+      onOpen,
     );
   }
 
@@ -583,6 +591,8 @@ export class ApiClient {
     route: string,
     request: unknown,
     signal: AbortSignal,
+    /** Called once a 2xx answer arrives, before the body is read. */
+    onOpen?: () => void,
   ): AsyncIterable<T> {
     const url = `${this.serverUrl}${route}`;
     let response: Response;
@@ -633,6 +643,7 @@ export class ApiClient {
         status: response.status,
       });
     }
+    onOpen?.();
 
     const parser = new SseParser();
     const reader = response.body.getReader();

@@ -10,7 +10,9 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   CURSOR_REFUSALS,
   applyRecordEdits,
@@ -23,13 +25,33 @@ import {
   newTestDir,
   newTestSkeleton,
   planRecordInsertion,
+  plainNotificationText,
+  recordedStepsText,
   recordingStatusText,
   resolveRecordCursor,
   titleFromName,
+  trackAnchorThroughChanges,
   validateNewTestName,
 } from '../src/extension/record-steps-core.ts';
 
 const doc = (...lines) => lines.join('\n');
+
+/**
+ * The server's own parser (src/parser/markdown.ts, as built into the repo
+ * root's dist/) — the judge of whether an inserted result still makes a test
+ * the runner will read, and of what it reads out of `## Parameters`. The cases
+ * that use it skip, saying so, when the root has not been built.
+ */
+const PARSER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../dist/parser/markdown.js');
+const serverParser = fs.existsSync(PARSER_PATH) ? await import(pathToFileURL(PARSER_PATH).href) : null;
+/** `text` as the server parses it, or null (and the case skipped) with no build. */
+function serverParse(t, text) {
+  if (!serverParser) {
+    t.skip(`the repo root is not built (${PARSER_PATH} is missing)`);
+    return null;
+  }
+  return serverParser.parseTestContent(text, 'recorded.md');
+}
 /** 1-based line number of the first line equal to `needle`. */
 const lineOf = (text, needle) => {
   const i = text.split(/\r?\n/).indexOf(needle);
@@ -209,10 +231,30 @@ test('inside a section: the section body continues and only it is renumbered', (
 });
 
 test('numbers continue from the anchor as written, and only the steps after it are renumbered', () => {
-  // `1.`-everywhere lists are common; the walk continues from what is written.
-  const text = doc('## Steps', '1. A', '1. B', '1. C');
-  const { after } = recordAt(text, '1. B', ['New']);
-  assert.equal(after, doc('## Steps', '1. A', '1. B', '2. New', '3. C'));
+  // The walk continues from what is written, not from the step's position.
+  const text = doc('## Steps', '1. A', '5. B', '6. C', '', '### S', '1. X', '2. Y');
+  const { after } = recordAt(text, '5. B', ['New']);
+  assert.equal(after, doc('## Steps', '1. A', '5. B', '6. New', '7. C', '', '### S', '1. X', '2. Y'));
+});
+
+test('a flow numbered 1. throughout stays 1. throughout — its own style, nothing renumbered', () => {
+  // Main flow, from a step and from the heading.
+  const main = doc('## Steps', '1. A', '1. B', '1. C');
+  assert.equal(recordAt(main, '1. B', ['New', 'Newer']).after, doc('## Steps', '1. A', '1. B', '1. New', '1. Newer', '1. C'));
+  const opened = doc('## Steps', '', '1. A', '1. B');
+  assert.equal(recordAt(opened, '', ['New']).after, doc('## Steps', '', '1. New', '1. A', '1. B'));
+  // A section body keeps its own style; the main flow beside it keeps its own.
+  const sections = doc('## Steps', '1. Main', '2. More', '', '### S', '1. X', '1. Y');
+  assert.equal(
+    recordAt(sections, '1. X', ['New']).after,
+    doc('## Steps', '1. Main', '2. More', '', '### S', '1. X', '1. New', '1. Y'),
+  );
+  assert.equal(
+    recordAt(sections, '1. Main', ['New']).after,
+    doc('## Steps', '1. Main', '2. New', '3. More', '', '### S', '1. X', '1. Y'),
+  );
+  // One step is not a style: a lone `1.` continues as 2.
+  assert.equal(recordAt(doc('## Steps', '1. A'), '1. A', ['New']).after, doc('## Steps', '1. A', '2. New'));
 });
 
 test('at the end of the flow nothing is renumbered, and a missing trailing newline is handled', () => {
@@ -299,8 +341,162 @@ test('mode new (no anchor): the steps go directly under ## Steps of the skeleton
 });
 
 // ---------------------------------------------------------------------------
+// A flow that opens with a data table (the parser: the table comes first,
+// "before the numbered steps it feeds")
+// ---------------------------------------------------------------------------
+
+test('a main flow holding only a data table: steps go after the table, and the file still parses', (t) => {
+  const text = doc('# T', '', '## Steps', '', '| user |', '| --- |', '| a |', '');
+  // The blank line after the table is a place to record from, as is the one
+  // under the heading; both open the flow.
+  const heading = { line: 3, text: '## Steps', kind: 'heading', section: null };
+  assert.deepEqual(resolveRecordCursor(text, 8), { ok: true, anchor: heading });
+  assert.deepEqual(resolveRecordCursor(text, 4), { ok: true, anchor: heading });
+  const plan = planRecordInsertion(text, {
+    anchor: heading,
+    steps: ['Type {{user}} into the Username field', 'Click Sign in'],
+    parameters: [],
+  });
+  const after = applyRecordEdits(text, plan.edits);
+  assert.equal(
+    after,
+    doc('# T', '', '## Steps', '', '| user |', '| --- |', '| a |', '', '1. Type {{user}} into the Username field', '2. Click Sign in', ''),
+  );
+  assert.deepEqual(plan.insertedLines, [9, 10]);
+  const parsed = serverParse(t, after);
+  if (parsed) assert.equal(parsed.steps.length, 2);
+});
+
+test('a section holding only a data table: steps go after its table, before the next section', (t) => {
+  const text = doc('# T', '', '## Steps', '1. Log in', '', '### Log in', '', '| user |', '| --- |', '| a |', '', '### Other', '1. X', '');
+  const cursor = resolveRecordCursor(text, 11);
+  assert.deepEqual(cursor, { ok: true, anchor: { line: 6, text: '### Log in', kind: 'heading', section: 'Log in' } });
+  const plan = planRecordInsertion(text, { anchor: cursor.anchor, steps: ['Type {{user}}'], parameters: [] });
+  const after = applyRecordEdits(text, plan.edits);
+  assert.equal(
+    after,
+    doc('# T', '', '## Steps', '1. Log in', '', '### Log in', '', '| user |', '| --- |', '| a |', '', '1. Type {{user}}', '', '### Other', '1. X', ''),
+  );
+  assert.equal(plan.section, 'Log in');
+  serverParse(t, after);
+});
+
+test('a table that ends the file, or runs straight into a heading, gets a blank line before the steps', (t) => {
+  const endsFile = doc('## Steps', '', '| a |', '| - |', '| 1 |');
+  const a = applyRecordEdits(endsFile, planRecordInsertion(endsFile, { anchor: null, steps: ['New'], parameters: [] }).edits);
+  assert.equal(a, doc('## Steps', '', '| a |', '| - |', '| 1 |', '', '1. New'));
+  serverParse(t, a);
+  const intoHeading = doc('## Steps', '| a |', '| - |', '| 1 |', '### S', '1. X', '');
+  const b = applyRecordEdits(intoHeading, planRecordInsertion(intoHeading, { anchor: null, steps: ['New'], parameters: [] }).edits);
+  assert.equal(b, doc('## Steps', '| a |', '| - |', '| 1 |', '', '1. New', '', '### S', '1. X', ''));
+  serverParse(t, b);
+});
+
+test('a comment between the heading and its table is skipped, as the parser skips it', (t) => {
+  const text = doc('## Steps', '<!-- one row per user -->', '| a |', '| - |', '| 1 |', '');
+  const cursor = resolveRecordCursor(text, 6);
+  assert.equal(cursor.ok, true);
+  assert.equal(cursor.anchor.kind, 'heading');
+  const after = applyRecordEdits(text, planRecordInsertion(text, { anchor: cursor.anchor, steps: ['New'], parameters: [] }).edits);
+  assert.equal(after, doc('## Steps', '<!-- one row per user -->', '| a |', '| - |', '| 1 |', '', '1. New', ''));
+  serverParse(t, after);
+});
+
+test('the blank line between a table and its steps opens the flow ahead of step 1', (t) => {
+  const text = doc('## Steps', '', '| a |', '| - |', '| 1 |', '', '1. Old', '');
+  const { after } = recordAt(text, '', ['New'], [], 1); // the blank under the table
+  assert.equal(after, doc('## Steps', '', '| a |', '| - |', '| 1 |', '', '1. New', '2. Old', ''));
+  serverParse(t, after);
+});
+
+// ---------------------------------------------------------------------------
 // The document changed while recording
 // ---------------------------------------------------------------------------
+
+/** A change as VS Code reports one: 0-based range in the document before it. */
+const change = (startLine, startChar, endLine, endChar, text) => ({ startLine, startChar, endLine, endChar, text });
+
+test('the anchor follows edits: lines added or removed above move it; edits within it keep it', () => {
+  const a = { line: 5, text: '3. Click Next', kind: 'step', section: null, tracked: true };
+  const track = (changes) => trackAnchorThroughChanges(a, changes);
+  assert.deepEqual(track([change(1, 0, 1, 0, 'A note.\n')]), { ...a, line: 6 });
+  assert.equal(track([change(1, 0, 3, 0, '')]).line, 3, 'two whole lines deleted above');
+  assert.equal(track([change(2, 0, 4, 0, 'x\n')]).line, 4, 'two lines replaced by one, ending in a break');
+  // A renumber rewrites the line in place: same line, still tracked, whatever
+  // its text now says.
+  assert.deepEqual(track([change(4, 0, 4, 1, '4')]), { ...a, line: 5 });
+  assert.equal(track([change(4, 0, 4, 0, '\n')]).line, 6, 'Enter at its start pushes it down');
+  assert.equal(track([change(4, 13, 4, 13, ' twice')]).line, 5, 'typing at its end');
+  assert.equal(track([change(6, 0, 9, 0, '')]).line, 5, 'an edit below changes nothing');
+  // One event carrying several changes (a multi-cursor edit, a renumber).
+  assert.equal(track([change(0, 0, 0, 0, 'top\n'), change(4, 0, 4, 1, '9'), change(6, 0, 6, 0, 'below\n')]).line, 6);
+});
+
+test('the anchor is lost when its line is deleted or glued onto the line above — and stays lost', () => {
+  const a = { line: 5, text: '3. Click Next', kind: 'step', section: null, tracked: true };
+  for (const [what, c] of [
+    ['the line deleted', change(4, 0, 5, 0, '')],
+    ['Backspace at its start', change(3, 9, 4, 0, '')],
+    ['lines above replaced by text with no break', change(2, 0, 4, 0, 'x')],
+    ['a selection through it replaced', change(3, 0, 4, 5, 'y')],
+  ]) {
+    const lost = trackAnchorThroughChanges(a, [c]);
+    assert.equal(lost.tracked, false, what);
+    assert.equal(trackAnchorThroughChanges(lost, [change(0, 0, 0, 0, '\n')]), lost, `${what}: stays lost`);
+  }
+});
+
+test('a tracked anchor lands after the step the author chose, not an identical one the text matches', () => {
+  // The author records after the SECOND "Click Next", then inserts a step
+  // above it and renumbers — which gives the FIRST "Click Next" the anchor's
+  // old text and old line. Matching by text or position picks the wrong one.
+  const before = doc('## Steps', '1. Open', '2. Click Next', '3. Click Next', '4. Done');
+  const cursor = resolveRecordCursor(before, 4);
+  let anchor = { ...cursor.anchor, tracked: true };
+  anchor = trackAnchorThroughChanges(anchor, [change(2, 0, 2, 0, '2. Log in\n')]);
+  anchor = trackAnchorThroughChanges(anchor, [change(3, 0, 3, 1, '3'), change(4, 0, 4, 1, '4'), change(5, 0, 5, 1, '5')]);
+  const during = doc('## Steps', '1. Open', '2. Log in', '3. Click Next', '4. Click Next', '5. Done');
+  const plan = planRecordInsertion(during, { anchor, steps: ['Tick Agree'], parameters: [] });
+  assert.equal(plan.fellBack, false);
+  assert.equal(
+    applyRecordEdits(during, plan.edits),
+    doc('## Steps', '1. Open', '2. Log in', '3. Click Next', '4. Click Next', '5. Tick Agree', '6. Done'),
+  );
+  // The same with a line added under the title of a `1.`-everywhere list,
+  // where the anchor's old line number now holds the other "Click Next".
+  const ones = doc('# T', '', '## Steps', '1. Open wizard', '1. Click Next', '1. Click Next', '1. Click Finish');
+  let onesAnchor = { ...resolveRecordCursor(ones, 6).anchor, tracked: true };
+  onesAnchor = trackAnchorThroughChanges(onesAnchor, [change(1, 0, 1, 0, 'A wizard test.\n')]);
+  const onesDuring = doc('# T', 'A wizard test.', '', '## Steps', '1. Open wizard', '1. Click Next', '1. Click Next', '1. Click Finish');
+  assert.equal(
+    applyRecordEdits(onesDuring, planRecordInsertion(onesDuring, { anchor: onesAnchor, steps: ['Tick Agree'], parameters: [] }).edits),
+    doc('# T', 'A wizard test.', '', '## Steps', '1. Open wizard', '1. Click Next', '1. Click Next', '1. Tick Agree', '1. Click Finish'),
+  );
+});
+
+test('a tracked section anchor follows the section when it is renamed', () => {
+  const before = doc('## Steps', '1. Login', '', '### Login', '1. a', '2. b');
+  let anchor = { ...resolveRecordCursor(before, 5).anchor, tracked: true };
+  anchor = trackAnchorThroughChanges(anchor, [change(3, 4, 3, 9, 'Sign in'), change(1, 3, 1, 8, 'Sign in')]);
+  const during = doc('## Steps', '1. Sign in', '', '### Sign in', '1. a', '2. b');
+  const plan = planRecordInsertion(during, { anchor, steps: ['X'], parameters: [] });
+  assert.equal(plan.fellBack, false);
+  assert.equal(plan.section, 'Sign in');
+  assert.equal(applyRecordEdits(during, plan.edits), doc('## Steps', '1. Sign in', '', '### Sign in', '1. a', '2. X', '3. b'));
+});
+
+test('a lost anchor falls back to its text, else to the end of its flow', () => {
+  const before = doc('## Steps', '1. A', '2. B', '3. C');
+  const anchor = { ...resolveRecordCursor(before, 3).anchor, tracked: false };
+  // Its line was deleted and retyped lower down: found by its text.
+  const moved = doc('## Steps', '1. A', '3. C', '2. B');
+  assert.match(applyRecordEdits(moved, planRecordInsertion(moved, { anchor, steps: ['N'], parameters: [] }).edits), /2\. B\n3\. N$/);
+  // Gone: the end of its flow, said.
+  const gone = doc('## Steps', '1. A', '3. C');
+  const plan = planRecordInsertion(gone, { anchor, steps: ['N'], parameters: [] });
+  assert.equal(plan.fellBack, true);
+  assert.match(plan.warnings[0], /deleted or changed while you were recording/);
+});
 
 test('an anchor that moved is found again by its text', () => {
   const cursor = resolveRecordCursor(SAMPLE, lineOf(SAMPLE, '2. Sign in'));
@@ -417,6 +613,82 @@ test('bullets straight above the next heading keep a blank line before it', () =
   assert.equal(after, doc('## Parameters', '- a: 1', '- b: 2', '', '## Steps', '1. A', '2. B'));
 });
 
+test('## Parameters is found where the server parser finds it: not in a fence, not in frontmatter, not at depth 3', (t) => {
+  const text = doc(
+    '---',
+    'notes: |',
+    '  ## Parameters',
+    '---',
+    '# T',
+    '',
+    '```md',
+    '## Parameters',
+    '- x: 1',
+    '```',
+    '',
+    '### Parameters',
+    '- y: 2',
+    '',
+    '## Steps',
+    '1. a',
+  );
+  const { after, plan } = recordAt(text, '1. a', ['Type {{email}}'], [{ name: 'email', value: 'a@b' }]);
+  // None of the three is a section the server reads, so one is created where it will.
+  assert.deepEqual(plan.parametersAdded, ['email']);
+  assert.match(after, /- y: 2\n\n## Parameters\n- email: a@b\n\n## Steps\n1\. a\n2\. Type \{\{email\}\}$/);
+  assert.match(after, /```md\n## Parameters\n- x: 1\n```/, 'the fenced example is untouched');
+  const parsed = serverParse(t, after);
+  if (parsed) assert.deepEqual(parsed.parameters, { email: 'a@b' });
+});
+
+test('existing parameters written with * or + bullets, or numbered, are recognised', (t) => {
+  const text = doc('## Parameters', '* email: a@b', '+ user: me', '1. pin: 1234', '', '## Steps', '1. a');
+  const { after, plan } = recordAt(text, '1. a', ['B'], [
+    { name: 'email', value: 'a@b' },
+    { name: 'user', value: 'other' },
+    { name: 'pin', value: '1234' },
+  ]);
+  assert.deepEqual(plan.parametersAdded, []);
+  assert.deepEqual(plan.parameterConflicts, [{ name: 'user', existing: 'me', recorded: 'other' }]);
+  assert.equal(after, doc('## Parameters', '* email: a@b', '+ user: me', '1. pin: 1234', '', '## Steps', '1. a', '2. B'));
+  const parsed = serverParse(t, after);
+  if (parsed) assert.deepEqual(parsed.parameters, { email: 'a@b', user: 'me', pin: '1234' });
+});
+
+test('a ### heading inside ## Parameters does not end it, and a second ## Parameters counts too', (t) => {
+  const text = doc('## Parameters', '- a: 1', '### Logins', '- b: 2', '', '## Parameters', '- c: 3', '', '## Steps', '1. x');
+  const { after, plan } = recordAt(text, '1. x', ['Y'], [
+    { name: 'b', value: '2' },
+    { name: 'c', value: '9' },
+    { name: 'd', value: '4' },
+  ]);
+  assert.deepEqual(plan.parametersAdded, ['d']);
+  assert.deepEqual(plan.parameterConflicts, [{ name: 'c', existing: '3', recorded: '9' }]);
+  // Added to the FIRST section, after its last item.
+  assert.equal(
+    after,
+    doc('## Parameters', '- a: 1', '### Logins', '- b: 2', '- d: 4', '', '## Parameters', '- c: 3', '', '## Steps', '1. x', '2. Y'),
+  );
+  const parsed = serverParse(t, after);
+  if (parsed) assert.deepEqual(parsed.parameters, { a: '1', b: '2', c: '3', d: '4' });
+});
+
+test('recorded values are written exactly; one with a line break is left out, and named', (t) => {
+  const text = doc('## Steps', '1. a');
+  const { after, plan } = recordAt(text, '1. a', ['B'], [
+    { name: 'greeting', value: 'Hello,  two  spaces' },
+    { name: 'padded', value: '  trimmed at the ends only  ' },
+    { name: 'address', value: '1 Main St\nSpringfield' },
+  ]);
+  assert.deepEqual(plan.parametersAdded, ['greeting', 'padded']);
+  assert.match(after, /^## Parameters\n- greeting: Hello, {2}two {2}spaces\n- padded: trimmed at the ends only\n\n/);
+  assert.doesNotMatch(after, /address|Springfield/);
+  assert.equal(plan.warnings.length, 1);
+  assert.match(plan.warnings[0], /"address".*line break/);
+  const parsed = serverParse(t, after);
+  if (parsed) assert.equal(parsed.parameters.greeting, 'Hello,  two  spaces', 'the parser reads back what was recorded');
+});
+
 // ---------------------------------------------------------------------------
 // Record New Test
 // ---------------------------------------------------------------------------
@@ -455,17 +727,39 @@ test('baseUrl inference: the active test first, else the most common, raw', () =
   assert.equal(inferBaseUrl([doc('## Steps', '1. A')]), null);
 });
 
-test('the new test directory: config tests.dir, else the testsGlob prefix, else the workspace', () => {
+test('the new test directory: config tests.dir, else the server default beside the config, else the testsGlob prefix, else the workspace', () => {
   const root = path.resolve('/ws');
-  assert.deepEqual(newTestDir({ configTestsDir: path.resolve('/ws/e2e'), testsGlob: 'tests/**/*.md', workspaceRoot: root }), {
-    dir: path.resolve('/ws/e2e'),
-    source: 'config',
+  const config = path.resolve('/ws/app/aiui.config.json');
+  assert.deepEqual(
+    newTestDir({ configPath: config, configTestsDir: path.resolve('/ws/app/e2e'), testsGlob: 'specs/**/*.md', workspaceRoot: root }),
+    { dir: path.resolve('/ws/app/e2e'), source: 'config' },
+  );
+  // A project that declares no tests.dir has the server's default, ./tests
+  // beside its config (src/config/defaults.ts) — not the glob's prefix.
+  assert.deepEqual(newTestDir({ configPath: config, configTestsDir: null, testsGlob: 'specs/**/*.md', workspaceRoot: root }), {
+    dir: path.resolve('/ws/app/tests'),
+    source: 'config-default',
   });
-  assert.deepEqual(newTestDir({ configTestsDir: null, testsGlob: 'tests/**/*.md', workspaceRoot: root }), {
+  assert.deepEqual(newTestDir({ configPath: null, configTestsDir: null, testsGlob: 'tests/**/*.md', workspaceRoot: root }), {
     dir: path.resolve('/ws/tests'),
     source: 'glob',
   });
-  assert.deepEqual(newTestDir({ configTestsDir: null, testsGlob: '**/*.md', workspaceRoot: root }), { dir: root, source: 'workspace' });
+  assert.deepEqual(newTestDir({ configPath: null, configTestsDir: null, testsGlob: '**/*.md', workspaceRoot: root }), {
+    dir: root,
+    source: 'workspace',
+  });
+  // A tests.dir outside the workspace is refused, and says where it points.
+  const outside = newTestDir({
+    configPath: config,
+    configTestsDir: path.resolve('/elsewhere/tests'),
+    testsGlob: '**/*.md',
+    workspaceRoot: root,
+  });
+  assert.ok('refused' in outside);
+  assert.match(outside.refused, /outside this workspace/);
+  assert.ok(outside.refused.includes(path.resolve('/elsewhere/tests')));
+  const climbing = newTestDir({ configPath: config, configTestsDir: path.resolve('/ws/../x'), testsGlob: '**/*.md', workspaceRoot: root });
+  assert.ok('refused' in climbing);
   assert.equal(globStaticPrefix('./specs/ui/**/*.md'), 'specs/ui');
   assert.equal(globStaticPrefix('tests\\*.md'), 'tests');
   assert.equal(globStaticPrefix('{a,b}/**/*.md'), '');
@@ -499,6 +793,42 @@ test('the panel copies of the time and heading text match the core (recording-pa
   ]) {
     assert.equal(inline.recordingStatusTextInline(state), recordingStatusText(state), JSON.stringify(state));
   }
+});
+
+test('notification text from the page or the model cannot make a link', () => {
+  // VS Code's notification link grammar (vs/base/common/linkedText.ts): only
+  // `[text](target)` with the two brackets adjacent becomes a link.
+  const LINK = /\[([^\]]+)\]\(((?:https?:\/\/|command:|file:)[^)\s]+)(?: (["'])(.+?)(\3))?\)/gi;
+  for (const note of [
+    'Click [here](command:workbench.action.quit) to continue.',
+    'See [the docs](https://evil.test/) and [more]  (file:///c:/x).',
+    '[a](command:x "title")',
+  ]) {
+    const plain = plainNotificationText(note);
+    assert.equal(plain.match(LINK), null, plain);
+    // The words are all still there.
+    assert.equal(plain.replace(/\s+/g, ''), note.replace(/\s+/g, ''));
+  }
+  assert.equal(plainNotificationText('Recorded 2 steps into t.md.'), 'Recorded 2 steps into t.md.');
+});
+
+test('a result that could not be inserted, as text to paste: numbered steps, parameters above them', () => {
+  assert.equal(
+    recordedStepsText(
+      ['Navigate to login.html', '  3. Type {{email}}  into Email ', ''],
+      [{ name: 'email', value: 'a@b' }, { name: 'address', value: '1 Main St\nSpringfield' }, { name: '', value: 'x' }],
+    ),
+    doc(
+      '## Parameters',
+      '- email: a@b',
+      '- address: "1 Main St\\nSpringfield"',
+      '',
+      '## Steps',
+      '1. Navigate to login.html',
+      '2. Type {{email}} into Email',
+    ),
+  );
+  assert.equal(recordedStepsText(['Click Pay'], []), doc('## Steps', '1. Click Pay'));
 });
 
 // ---------------------------------------------------------------------------

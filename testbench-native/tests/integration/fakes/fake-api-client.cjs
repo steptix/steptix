@@ -104,13 +104,23 @@ class FakeApiClient {
     /** What successive streamRecordSteps() calls throw before streaming:
      *  each entry an ApiClientError kind, an Error, or null for "no throw". */
     this.recordThrows = [];
+    /**
+     * When set, a Promise the next streamRecordSteps() call waits on BEFORE it
+     * "answers 200" (calls `onOpen`) — a server still creating the session.
+     * An abort while waiting ends the call as the real client's does, with no
+     * answer. Cleared once used.
+     */
+    this.recordAnswerGate = null;
+    /** How many streamRecordSteps() calls got their 200 (`onOpen`). */
+    this.recordAnswers = 0;
   }
 
   /**
-   * Async generator matching ApiClient.streamRecordSteps. Streams whatever
+   * Async generator matching ApiClient.streamRecordSteps. Answers "200"
+   * (`onOpen`) unless a `recordThrows` entry refuses it, then streams whatever
    * the test pushes with `pushRecord`, until `endRecord` or an abort.
    */
-  async *streamRecordSteps(sessionId, request, signal) {
+  async *streamRecordSteps(sessionId, request, signal, onOpen) {
     this.recordSessionIds.push(sessionId);
     this.recordRequests.push(request);
     const toThrow = this.recordThrows.shift();
@@ -118,6 +128,18 @@ class FakeApiClient {
       if (toThrow instanceof Error) throw toThrow;
       throw new ApiClientError(toThrow, `fake record error: ${toThrow}`);
     }
+    const gate = this.recordAnswerGate;
+    if (gate) {
+      this.recordAnswerGate = null;
+      await new Promise((resolve) => {
+        if (signal.aborted) return resolve();
+        signal.addEventListener('abort', () => resolve(), { once: true });
+        gate.then(resolve, resolve);
+      });
+    }
+    if (signal.aborted) throw new ApiClientError('aborted', 'aborted');
+    this.recordAnswers++;
+    onOpen?.();
     const stream = { queue: [], waiters: [], ended: false, aborted: false };
     this.activeRecordStream = stream;
     const onAbort = () => {
@@ -125,10 +147,6 @@ class FakeApiClient {
       const w = stream.waiters.shift();
       if (w) w.resolve();
     };
-    if (signal.aborted) {
-      this.activeRecordStream = null;
-      throw new ApiClientError('aborted', 'aborted');
-    }
     signal.addEventListener('abort', onAbort);
     try {
       while (true) {

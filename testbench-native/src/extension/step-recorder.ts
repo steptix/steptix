@@ -6,11 +6,16 @@ import type {
   RecordStepsEvent,
 } from 'ai-ui-automation-runner-core';
 import type { RecordStepsOutcome, RunController } from './run-controller.js';
+import { getOutputChannel } from './output-channel.js';
 import {
   applyRecordFrame,
+  cleanStepText,
   newRecordingState,
   planRecordInsertion,
+  plainNotificationText,
+  recordedStepsText,
   recordingStatusText,
+  trackAnchorThroughChanges,
   type RecordAnchor,
 } from './record-steps-core.js';
 
@@ -41,15 +46,26 @@ export interface RecordStartOptions {
 /** How the last recording ended, and what the author was told — the
  *  notifications themselves are not readable from the extension host. */
 export interface RecordingReport {
-  status: 'inserted' | 'cancelled' | 'error';
+  /** `empty`: the result had no steps (nothing recorded, or every action
+   *  dropped) — said, not an error. */
+  status: 'inserted' | 'empty' | 'cancelled' | 'error';
   /** Steps inserted, when `inserted`. */
   steps?: number;
-  messages: Array<{ level: 'info' | 'warn' | 'error'; text: string }>;
+  /** Each notification as shown: plain text (`plainNotificationText`), with
+   *  the buttons it offered. */
+  messages: Array<{ level: 'info' | 'warn' | 'error'; text: string; actions?: string[] }>;
+  /** A result that could not be inserted, as written to the output channel
+   *  and copied by the notification's "Copy steps". */
+  rescued?: string;
 }
 
 interface ActiveRecording {
   controller: RunController;
+  /** Where the steps go, carried through every edit made to the document
+   *  while recording (`trackAnchorThroughChanges`). */
   anchor: RecordAnchor | null;
+  /** The listeners that carry `anchor`; disposed when the insertion is over. */
+  watch: vscode.Disposable | null;
   state: RecordingPanelState;
   /** Stop has been sent; a second press waits for the result. */
   stopSent: boolean;
@@ -57,6 +73,9 @@ interface ActiveRecording {
    *  error is not printed twice. */
   loggedErrors: string[];
 }
+
+const COPY_STEPS = 'Copy steps';
+const SHOW_OUTPUT = 'Show output';
 
 export class StepRecorder implements vscode.Disposable {
   private current: ActiveRecording | null = null;
@@ -107,7 +126,10 @@ export class StepRecorder implements vscode.Disposable {
     const doc = controller.document;
     const rec: ActiveRecording = {
       controller,
-      anchor: opts.anchor,
+      // Tracked from here on: the line it names is the anchor line whatever
+      // the author does to the text around it (or to it — a renumber).
+      anchor: opts.anchor ? { ...opts.anchor, tracked: true } : null,
+      watch: null,
       stopSent: false,
       loggedErrors: [],
       state: newRecordingState({
@@ -116,6 +138,7 @@ export class StepRecorder implements vscode.Disposable {
         mode: opts.mode,
       }),
     };
+    rec.watch = this.watchAnchor(rec, doc.uri);
     this.current = rec;
     this.publish();
     controller.postRecordLog(
@@ -128,7 +151,54 @@ export class StepRecorder implements vscode.Disposable {
       .catch((err: unknown) => {
         this.finish('error', [{ level: 'error', text: `Record Steps failed: ${err instanceof Error ? err.message : String(err)}` }]);
       })
-      .finally(() => this.release(rec));
+      .finally(() => {
+        rec.watch?.dispose();
+        rec.watch = null;
+        this.release(rec);
+      });
+  }
+
+  /**
+   * Carry `rec.anchor` through the author's edits while recording — and
+   * until the insertion is made — so the steps go after the line the author
+   * chose even when lines were added above it, or it was renumbered. An edit
+   * that deletes the line, or the document closing (its unsaved edits gone
+   * with it), loses the track; the insertion then finds the line by its text.
+   */
+  private watchAnchor(rec: ActiveRecording, uri: vscode.Uri): vscode.Disposable | null {
+    if (!rec.anchor) return null;
+    const key = uri.toString();
+    return vscode.Disposable.from(
+      vscode.workspace.onDidChangeTextDocument((e) => {
+        if (!rec.anchor || e.document.uri.toString() !== key || e.contentChanges.length === 0) return;
+        rec.anchor = trackAnchorThroughChanges(
+          rec.anchor,
+          e.contentChanges.map((c) => ({
+            startLine: c.range.start.line,
+            startChar: c.range.start.character,
+            endLine: c.range.end.line,
+            endChar: c.range.end.character,
+            text: c.text,
+          })),
+        );
+      }),
+      vscode.workspace.onDidCloseTextDocument((closed) => {
+        if (rec.anchor && closed.uri.toString() === key) rec.anchor = { ...rec.anchor, tracked: false };
+      }),
+    );
+  }
+
+  /**
+   * A notification. Everything shown this way may carry text the page or the
+   * model wrote (a note, a parameter name, the server's error), and a
+   * notification turns `[text](target)` into a link — so it is shown as
+   * plain text.
+   */
+  private notify(level: 'info' | 'warn' | 'error', text: string, actions: string[] = []): Thenable<string | undefined> {
+    const plain = plainNotificationText(text);
+    if (level === 'error') return vscode.window.showErrorMessage(plain, ...actions);
+    if (level === 'warn') return vscode.window.showWarningMessage(plain, ...actions);
+    return vscode.window.showInformationMessage(plain, ...actions);
   }
 
   /** Stop: write the steps, leaving the dropped actions out. */
@@ -153,7 +223,7 @@ export class StepRecorder implements vscode.Disposable {
     });
     if (!sent.ok) {
       rec.stopSent = false;
-      void vscode.window.showErrorMessage(`Record Steps: could not stop the recording — ${sent.error}`);
+      void this.notify('error', `Record Steps: could not stop the recording — ${sent.error}`);
     }
   }
 
@@ -190,7 +260,7 @@ export class StepRecorder implements vscode.Disposable {
     const sent = await rec.controller.controlRecording({
       action: rec.state.pickArmed ? 'cancel-check' : 'check',
     });
-    if (!sent.ok) void vscode.window.showWarningMessage(`Record Steps: ${sent.error}`);
+    if (!sent.ok) void this.notify('warn', `Record Steps: ${sent.error}`);
   }
 
   /**
@@ -226,7 +296,11 @@ export class StepRecorder implements vscode.Disposable {
   dispose(): void {
     const rec = this.current;
     this.current = null;
-    if (rec) void rec.controller.cancelRecording();
+    if (rec) {
+      rec.watch?.dispose();
+      rec.watch = null;
+      void rec.controller.cancelRecording();
+    }
     this.statusItem.dispose();
   }
 
@@ -245,6 +319,14 @@ export class StepRecorder implements vscode.Disposable {
     // touching the document.
     this.release(rec);
     if (outcome.status === 'cancelled') {
+      if (outcome.reason) {
+        // The server ended it — the session was closed under the recording
+        // (another window's Run, Close Session, the idle reaper). The author
+        // did not cancel, so they are told why, in the server's words.
+        rec.controller.postRecordLog(outcome.reason, 'warn');
+        this.finish('cancelled', [{ level: 'warn', text: outcome.reason }]);
+        return;
+      }
       rec.controller.postRecordLog('Recording cancelled — nothing was written.', 'info');
       this.finish('cancelled', []);
       return;
@@ -278,13 +360,40 @@ export class StepRecorder implements vscode.Disposable {
   /**
    * The result, as ONE editor edit — one undo step (decision 11): the steps
    * after the anchor, the rest of that flow renumbered, and the parameters
-   * the file lacks. Planned against the document as it is NOW, which is why
-   * the anchor carries its text: the author may have edited while recording.
+   * the file lacks. Planned against the document as it is NOW, with the anchor
+   * carried through the author's edits while recording.
+   *
+   * A result is never lost. One with no steps is said as the server's note,
+   * not as an error; one that cannot be inserted — the plan refused, the edit
+   * rejected three times, the file renamed or deleted — is written to the
+   * TestBench output, and the error offers "Copy steps".
    */
   private async insert(
     rec: ActiveRecording,
     outcome: Extract<RecordStepsOutcome, { status: 'result' }>,
   ): Promise<void> {
+    if (outcome.steps.map(cleanStepText).every((s) => s === '')) {
+      const text = outcome.notes.length > 0 ? outcome.notes.join(' ') : 'Nothing was recorded, so nothing was written.';
+      rec.controller.postRecordLog(text, 'info');
+      this.finish('empty', [{ level: 'info', text }]);
+      return;
+    }
+    let failure: string;
+    try {
+      const inserted = await this.applyResult(rec, outcome);
+      if (inserted.ok) return;
+      failure = inserted.reason;
+    } catch (err) {
+      failure = `${rec.state.file} could not be opened for editing (${err instanceof Error ? err.message : String(err)})`;
+    }
+    this.rescue(rec, outcome, failure);
+  }
+
+  /** The edit itself, or why it could not be made. */
+  private async applyResult(
+    rec: ActiveRecording,
+    outcome: Extract<RecordStepsOutcome, { status: 'result' }>,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
     const uri = rec.controller.document.uri;
     const file = rec.state.file;
     const doc = rec.controller.document.isClosed
@@ -304,11 +413,7 @@ export class StepRecorder implements vscode.Disposable {
         steps: outcome.steps,
         parameters: outcome.parameters,
       });
-      if ('error' in plan) {
-        rec.controller.postRecordLog(`Record Steps: ${plan.error}`, 'error');
-        this.finish('error', [{ level: 'error', text: `Record Steps: ${plan.error}` }]);
-        return;
-      }
+      if ('error' in plan) return { ok: false, reason: plan.error };
       const edits = plan.edits;
       applied = await editor.edit(
         (builder) => {
@@ -320,9 +425,7 @@ export class StepRecorder implements vscode.Disposable {
       );
     }
     if (!applied || !plan || 'error' in plan) {
-      const text = 'Record Steps: the steps were not inserted — the document kept changing. Record again.';
-      this.finish('error', [{ level: 'error', text }]);
-      return;
+      return { ok: false, reason: `${file} kept changing while the steps were being inserted` };
     }
 
     const first = plan.insertedLines[0]!;
@@ -347,17 +450,50 @@ export class StepRecorder implements vscode.Disposable {
     }
 
     for (const m of messages) {
-      if (m.level === 'warn') void vscode.window.showWarningMessage(`Record Steps: ${m.text}`);
-      else void vscode.window.showInformationMessage(m.text);
+      m.text = plainNotificationText(m.text);
+      void this.notify(m.level, m.level === 'warn' ? `Record Steps: ${m.text}` : m.text);
     }
     this.lastReport = { status: 'inserted', steps: n, messages };
+    return { ok: true };
+  }
+
+  /**
+   * The result could not be inserted: put it where the author can take it —
+   * the TestBench output, whole, and the clipboard on "Copy steps".
+   */
+  private rescue(
+    rec: ActiveRecording,
+    outcome: Extract<RecordStepsOutcome, { status: 'result' }>,
+    reason: string,
+  ): void {
+    const text = recordedStepsText(outcome.steps, outcome.parameters);
+    const out = getOutputChannel();
+    out.appendLine(`Record Steps: the recorded steps were not inserted — ${reason}. Here they are, to paste by hand:`);
+    for (const line of text.split('\n')) out.appendLine(`    ${line}`);
+    for (const note of outcome.notes) out.appendLine(`Note: ${note}`);
+    rec.controller.postRecordLog(
+      `The recorded steps were not inserted — ${reason}. They are in the TestBench output; "Copy steps" copies them.`,
+      'error',
+    );
+    const message = {
+      level: 'error' as const,
+      text: plainNotificationText(
+        `Record Steps: the recorded steps were not inserted — ${reason}. They are in the TestBench output.`,
+      ),
+      actions: [COPY_STEPS, SHOW_OUTPUT],
+    };
+    void this.notify(message.level, message.text, message.actions).then((choice) => {
+      if (choice === COPY_STEPS) void vscode.env.clipboard.writeText(text);
+      else if (choice === SHOW_OUTPUT) out.show(true);
+    });
+    this.lastReport = { status: 'error', messages: [message], rescued: text };
   }
 
   /** Show what went wrong and remember how it ended. */
   private finish(status: RecordingReport['status'], messages: RecordingReport['messages']): void {
     for (const m of messages) {
-      if (m.level === 'error') void vscode.window.showErrorMessage(m.text);
-      else if (m.level === 'warn') void vscode.window.showWarningMessage(m.text);
+      m.text = plainNotificationText(m.text);
+      void this.notify(m.level, m.text, m.actions);
     }
     this.lastReport = { status, messages };
   }

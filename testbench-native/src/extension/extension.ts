@@ -1261,6 +1261,13 @@ class RunControllerRegistry implements vscode.Disposable {
     this.refreshRunningContext();
   }
 
+  /** `clearStepPaused` for a caller outside the router: Record Steps ending
+   *  ONE test's paused run, where Stop's `clearAllStepPausedMarkers` would
+   *  also wipe other tests' markers. */
+  clearStepPausedFor(controllerUri: vscode.Uri): void {
+    this.clearStepPaused(controllerUri);
+  }
+
   /**
    * On the first `step:start` inside a non-test frame, open the frame's
    * file in a non-preview tab next to the user's current editor. Without

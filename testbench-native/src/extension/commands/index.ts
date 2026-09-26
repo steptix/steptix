@@ -49,6 +49,9 @@ interface Registry {
   /** Phase 3.1 — drop step-paused yellow ▶ markers across every URI
    *  they live on (test file AND any skill file the run descended into). */
   clearAllStepPausedMarkers(): void;
+  /** Drop ONE controller's step-paused ▶, wherever it is painted — Record
+   *  Steps ending the paused run it records from, and nothing else. */
+  clearStepPausedFor(controllerUri: vscode.Uri): void;
   /** Phase 3.1.b — distinguish step-paused (server blocked on
    *  pendingRunControl) from running-but-not-step-paused (server is
    *  mid-step). dispatchStep uses this to give a clean diagnostic
@@ -770,10 +773,6 @@ export function registerCommands(
     opts: {
       setSkillDebug?: boolean;
       preferRunning?: boolean;
-      /** Stop exactly this controller — Record Steps ending the paused run
-       *  it is about to record from (stories/testbench-record-steps.md,
-       *  decision 12). Overrides both rules below. */
-      target?: RunController;
     } = {},
   ): void => {
     // Normally the ACTIVE editor's controller — Close Session shares this
@@ -786,10 +785,9 @@ export function registerCommands(
     // state while the run kept going on the test's controller.
     const active = registry.active();
     const controller =
-      opts.target ??
-      (opts.preferRunning && !active?.isRunning
+      opts.preferRunning && !active?.isRunning
         ? (registry.runningController() ?? active)
-        : active);
+        : active;
     // On an explicit Stop (not Close Session), park a skill-debug context for a
     // parked TOP-LEVEL skill failure — read BEFORE resetFrameState wipes
     // lastSkillFailure. Latest Stop wins (setSkillDebug replaces any prior).
@@ -828,7 +826,6 @@ export function registerCommands(
     if (editor && tracker.isActiveTestFile) {
       tracker.setBreakpointStop(editor.document.uri, null);
     }
-    if (opts.target) tracker.setBreakpointStop(opts.target.document.uri, null);
     tracker.markAllRunningStopped();
     // A step-paused yellow ▶ may live on a SKILL file the run descended
     // into — `setBreakpointStop` above only cleared the test-file marker.
@@ -840,7 +837,7 @@ export function registerCommands(
   return [
     // Record Steps, Record New Test, Stop Recording, Add Check, Cancel
     // Recording (stories/testbench-record-steps.md).
-    ...registerRecordCommands({ registry, tracker, performStop }),
+    ...registerRecordCommands({ registry, tracker }),
 
     vscode.commands.registerCommand('testbench-native.runSelected', runSelected),
 
@@ -992,7 +989,15 @@ export function registerCommands(
       tracker.markAllRunningStopped();
     }),
 
-    vscode.commands.registerCommand('testbench-native.stop', () => {
+    vscode.commands.registerCommand('testbench-native.stop', async () => {
+      // While the active test is recording, Stop means Stop Recording: write
+      // the steps. The run teardown below would abort the recording's stream,
+      // which the server reads as a cancel — silently throwing the recording
+      // away (stories/testbench-record-steps.md).
+      if (registry.active()?.isRecording) {
+        await registry.recorder.stop();
+        return;
+      }
       performStop({ setSkillDebug: true, preferRunning: true });
     }),
 

@@ -162,6 +162,7 @@ export interface ApiClientLike {
     sessionId: string,
     request: RecordStepsRequest,
     signal: AbortSignal,
+    onOpen?: () => void,
   ): AsyncIterable<RecordStepsEvent>;
   /** Record Steps: stop / check / cancel-check / cancel. */
   controlRecordSteps?(sessionId: string, body: RecordControlRequest): Promise<void>;
@@ -187,7 +188,9 @@ export type RecordStepsOutcome =
        *  variable is not among them will fail the next Run. */
       envKeys: string[];
     }
-  | { status: 'cancelled' }
+  /** `reason`: the server ended it — the session was closed under it (another
+   *  window's Run, Close Session, the idle reaper) — and said so. */
+  | { status: 'cancelled'; reason?: string }
   | { status: 'error'; error: string };
 
 /** Shape returned by {@link ApiClientLike.getLastRun} (mirrors runner-core). */
@@ -1019,6 +1022,15 @@ export class RunController {
 
   get isRecording(): boolean {
     return this.recording !== null;
+  }
+
+  /**
+   * Every file the current (or parked) run painted: this test, and each skill
+   * file it descended into. What a teardown scoped to THIS run — rather than
+   * the whole window — has to reach (Record Steps ending a paused run).
+   */
+  get touchedFileUris(): vscode.Uri[] {
+    return [this.document.uri, ...[...this.revealedFrameUris].map((fsPath) => vscode.Uri.file(fsPath))];
   }
 
   /** Did the run that just finished park at a breakpoint or a pause? A parked
@@ -5440,7 +5452,8 @@ export class RunController {
    * this goes through the run's own env resolution, server check, stale-
    * session close and write-once `config` bookkeeping rather than a path of
    * its own: `config` rides the request only when this session has not had it,
-   * and the first frame marks it sent, exactly as a steps stream does.
+   * and the server's 200 marks it sent (the session exists from then on, even
+   * if no frame ever arrives).
    *
    * Not done here, deliberately: the viewport recycle a fresh Run performs.
    * Recording is "continue from this page"; closing the browser because the
@@ -5526,12 +5539,31 @@ export class RunController {
       const conflictDelays = args.retryConflict ? [100, 200, 400, 800, 1200, 1600, 2000, 2400, 2800] : [];
       let result: RecordResultEvent | null = null;
       let done: RecordDoneEvent | null = null;
+      // The 200 proves the server holds a session for this file, created with
+      // this request's `config` when it carried one — so `config` is marked
+      // sent then, not on the first frame: a cancel while the browser is still
+      // launching never lets a frame arrive, and the next Run would re-send
+      // `config` to a session that already has it (the server refuses that).
+      let opened = false;
+      const onOpen = (): void => {
+        opened = true;
+        this.markConfigSent(sessionConfig.viewport);
+      };
+      // A request that carried `config` and ended with no 200 — abandoned
+      // before the server answered, a transport failure, or a refusal — leaves
+      // it unknown whether the session now exists with that config (the
+      // server creates it before the stream opens). Undo the first-use close's
+      // flag instead of guessing: the next Run (or recording) closes whatever
+      // is there and sends `config` to a session it knows is new.
+      const unknownSession = (): void => {
+        if (includeConfig && !opened && !this.configSentForSession) this.staleSessionCleared = false;
+      };
       for (let attempt = 0; ; attempt++) {
         try {
-          for await (const event of client.streamRecordSteps(filePath, request, ac.signal)) {
-            // The first frame proves the server holds a session for this file,
-            // created with this request's `config` when it carried one.
-            this.markConfigSent(sessionConfig.viewport);
+          for await (const event of client.streamRecordSteps(filePath, request, ac.signal, onOpen)) {
+            // A client whose stream cannot report the 200 (a fake, an older
+            // runner-core) still proves the session by its first frame.
+            if (!opened) onOpen();
             if (!isRecordStepsEvent(event)) {
               log(`record: ignoring a frame this client does not know (${String((event as { type?: unknown }).type)})`);
               continue;
@@ -5545,15 +5577,22 @@ export class RunController {
           }
           break;
         } catch (err) {
-          if (isUserAbort(err) || ac.signal.aborted) return { status: 'cancelled' };
+          if (isUserAbort(err) || ac.signal.aborted) {
+            unknownSession();
+            return { status: 'cancelled' };
+          }
           const apiErr = asApiClientError(err);
           const delay = conflictDelays[attempt];
-          if (apiErr?.kind === 'conflict' && delay !== undefined) {
+          if (apiErr?.kind === 'conflict' && delay !== undefined && !opened) {
             log(`record: the session is still busy with the stopped run — retrying in ${delay}ms`);
             await this.pollSleep(delay);
-            if (ac.signal.aborted) return { status: 'cancelled' };
+            if (ac.signal.aborted) {
+              unknownSession();
+              return { status: 'cancelled' };
+            }
             continue;
           }
+          unknownSession();
           return { status: 'error', error: this.describeRecordError(err, serverUrl, target.envPath, log) };
         }
       }
@@ -5571,7 +5610,16 @@ export class RunController {
         };
       }
       if (done?.status === 'error') return { status: 'error', error: done.error ?? 'The recording failed.' };
-      if (done?.status === 'aborted') return { status: 'cancelled' };
+      if (done?.status === 'aborted') {
+        if (!done.error) return { status: 'cancelled' };
+        // An abort the server explains is the session closing under the
+        // recording ("The session was closed while recording.", the one such
+        // reason it sends). The session that had our `config` is gone, so the
+        // next request must carry it again, or its browser would start with
+        // no baseUrl.
+        this.forgetSentConfig();
+        return { status: 'cancelled', reason: done.error };
+      }
       if (done?.status === 'passed') {
         return { status: 'error', error: 'The recording finished without writing any steps.' };
       }

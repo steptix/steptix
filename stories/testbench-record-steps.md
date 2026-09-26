@@ -354,32 +354,80 @@ one directly after it (the spec says "directly after"). And the blank line
 under `## Steps` or under a `### Section` heading opens that flow: the steps
 go in ahead of its first step, numbered from 1. Without that last one an
 empty `## Steps` — which is what Record New Test leaves behind after a
-Cancel — could never be recorded into. Headings themselves, prose, fences and
-items under a `####` heading are refused with the spec's §10 sentence; the
-last three add a clause saying why, since those lines look like steps.
+Cancel — could never be recorded into. The blank line after the data table
+a flow opens with opens that flow the same way (blank lines and HTML
+comments may sit between the heading and the table, as the parser allows).
+Headings themselves, prose, fences and items under a `####` heading are
+refused with the spec's §10 sentence; the last three add a clause saying
+why, since those lines look like steps.
 
-**The line recorded from, when the file changed.** The anchor is remembered
-as a line number and that line's text. At Stop it is looked for where it was,
-then by its text (when that text is unique in the same flow). When it is
-gone, the steps go at the end of the flow the anchor was in — the main flow,
-or that section when it still exists — and a warning says so. This is not
-the spec's literal "end of `## Steps`": the end of the `## Steps` span is
-after the last section's body, where main-flow steps would silently become
-part of that section.
+**A flow that opens with a data table.** When a flow has no steps yet and
+opens with a table, the steps go AFTER the table, with a blank line between:
+the parser refuses a table that comes after a step ("the table has to be
+the first content under the heading"), so inserting under the heading, as an
+empty flow otherwise gets, left a file that no longer parsed. A table that
+ends the file, or runs straight into the next heading, gets the blank line
+written for it; the steps then get one before that heading too.
+
+**The line recorded from, when the file changed.** The anchor is followed
+through the document's own edits while recording, and until the insertion
+is made: every `onDidChangeTextDocument` batch moves it by the lines added
+or removed above it (`trackAnchorThroughChanges`, pure and pinned). An edit
+inside the line — a renumber rewriting `2.` to `3.`, a typo fixed — keeps
+it; so does a renamed section, whose new name is read off the document. Text
+is only the fallback, for when the track is lost: the line deleted, glued
+onto the line above (Backspace at its start), or the document closed. Then
+it is the one line in the same flow with the anchor's original text, never
+"whatever is at the old line number" — after lines were added above, that is
+a different step, and with identical steps (`1. Click Next` twice) the text
+alone picked the wrong one. When neither finds it, the steps go at the end
+of the flow the anchor was in — the main flow, or that section when it still
+exists — and a warning says so. This is not the spec's literal "end of
+`## Steps`": the end of the `## Steps` span is after the last section's
+body, where main-flow steps would silently become part of that section.
 
 **Numbering.** The new steps continue from the anchor step's number as
-written (so a `1.`-everywhere list stays consistent), and only the rest of
-that one flow is renumbered, by Renumber Steps' own walk. Step texts are
+written, and only the rest of that one flow is renumbered, by Renumber
+Steps' own walk. A flow numbered `1.` on every step (two or more) keeps its
+style: the new steps are `1.` too and nothing is renumbered — before, a
+`1. A` / `1. B` / `1. C` list came out `1. A` / `1. B` / `2. New` / `3. C`.
+One `1.` step is not a style, and continues as `2.`. Step texts are
 flattened to one line and a stray leading `3. ` is stripped.
 
-**Parameters.** The section is found by runner-core's own rule, so an added
-line lands where the parser reads it. New lines go after the last bullet
-(after the last non-blank line when there is none); a created section takes
-the `## Steps` heading's depth and its blank lines. A name that is not a valid
-parameter name, or a value that is empty, is left out with a warning. The
-conflict warning is the spec's sentence and names no value. One addition: a
-`$NAME` parameter whose variable the resolved `.env` does not define gets a
-warning at insertion, since the next Run would fail on it.
+**Parameters.** The section is found the way the SERVER's parser finds it
+(src/parser/markdown.ts), not runner-core's looser meta scan: a depth-2
+`## Parameters` heading outside frontmatter and fenced blocks — a `##
+Parameters` in a fenced example, or a `### Parameters`, is not it — running
+to the next depth-1 or depth-2 heading (a `###` inside does not end it). An
+existing parameter is any list item in it — `-`, `*`, `+` or numbered — of
+the form `name: value`, across every such section, the last of a repeated
+name winning, as the parser reads them. New lines go after the first
+section's last item (after its last non-blank line when there is none); a
+created section is always `## Parameters`, the only depth the parser reads.
+Values are written exactly as recorded — internal whitespace kept — bar the
+whitespace at their ends, which the parser trims anyway. A value with a line
+break cannot be one parameter line, so it is left out with a warning that
+names it; escaping it would write a value the parser reads back differently.
+A name that is not a valid parameter name, or a value that is empty, is left
+out with a warning. The conflict warning is the spec's sentence and names no
+value. One addition: a `$NAME` parameter whose variable the resolved `.env`
+does not define gets a warning at insertion, since the next Run would fail
+on it.
+
+**A result is never lost.** One the plan cannot place (`## Steps` deleted
+while recording), one whose edit is rejected three times, and one whose
+file cannot be opened (renamed or deleted) is written, numbered, with its
+parameters above it, to the TestBench output; the error notification offers
+**Copy steps** (to the clipboard) and **Show output**. A result with no
+steps — nothing recorded, or every action dropped — is an information
+message carrying the server's note, not an error.
+
+**Notifications are plain text.** Notes the model wrote, parameter names it
+chose and the server's errors can all carry page text, and a VS Code
+notification turns `[text](target)` into a link — `command:` targets
+included. Every notification Record Steps raises breaks that one pattern up
+(`] (`), words unchanged. The panel's log renders text as text and is left
+as it came.
 
 **One recording per window.** The Recording block and the status bar item
 are window-wide and show whichever file is active: the author is clicking in
@@ -387,20 +435,39 @@ a browser, not reading an editor. Only the recorded test's session is held —
 runs of other tests are unaffected. The recorded test refuses a Run three
 ways: the Run buttons are hidden in the title bar and disabled in the panel,
 and the run controller itself refuses (it would otherwise close the session
-under the recording on its first-use stale-session clear).
+under the recording on its first-use stale-session clear). **TestBench: Stop
+Run** — the palette entry, Shift+F5, the panel's run Stop — means Stop
+Recording while the active test records: the steps are written. The run
+teardown it otherwise does aborts the recording's stream, which the server
+reads as a cancel, so the recording was silently thrown away.
 
 **The session.** A recording goes through the run's own plumbing: the same
 env resolution and server check (auto-start included), the same first-use
 close of a session another window left keyed on this path, and the same
 write-once `config` bookkeeping — sent when the session has not had it,
-marked sent on the first frame. The viewport recycle a fresh Run performs is
-not done: a recording means "continue from this page", and recycling would
-close it.
+marked sent when the start request answers 200 (runner-core's
+`streamRecordSteps` takes an `onOpen` for it). Not on the first frame: the
+server creates the session before the stream opens, so a Cancel while the
+browser is still launching left the session holding `config` and the client
+believing it had none — the next Run re-sent it into the server's 400. A
+request that carried `config` and never got its 200 (cancelled before the
+answer, a transport failure, a refusal) leaves it unknown whether the
+session exists with it, so the first-use close is re-armed: the next Run or
+recording closes whatever is there and sends `config` to a session it knows
+is new. A recording the server ends because the session was closed under it
+(`done` `aborted` with `error`) forgets the sent `config` too — that session
+is gone. The viewport recycle a fresh Run performs is not done: a recording
+means "continue from this page", and recycling would close it.
 
-**Paused runs.** Both kinds are ended with the Stop command's own teardown: a
-breakpoint pause (no stream open) and a step pause (the server holds the
-stream). For a step pause the client waits for the run to unwind, then
-retries a 409 for about ten seconds while the server lets go of the queue.
+**Paused runs.** Both kinds are ended: a breakpoint pause (no stream open)
+and a step pause (the server holds the stream). Only the recorded test's
+run is touched — its controller stopped and reset, the spinners on the
+files it painted (the test and any skill file it descended into), its own
+pause marker and its own step-paused ▶. Not the Stop command's teardown,
+which is window-wide: it flips every spinner in the window and clears every
+test's step-paused marker. For a step pause the client waits for the run to
+unwind, then retries a 409 for about ten seconds while the server lets go of
+the queue.
 
 **Beyond the wire block.** The start body also carries `env` (the resolved
 `.env`, as the steps route's does — a recording can be the request that
@@ -438,16 +505,26 @@ was dropped. From Finishing… on the rows are frozen, since after Stop only
 stream, and a result that races it in is thrown away. The server's
 `done.error` and a 400's reason (the headless refusal) are shown as they
 came; a 404 on the start route says the server predates Record Steps;
-transport failures get the run's TBxxx payloads.
+transport failures get the run's TBxxx payloads. A recording the server ends
+itself — `done` `aborted` with an `error`, which it sends when the session
+is closed under the recording (another window's Run, Close Session, the
+idle reaper) — shows that sentence, "The session was closed while
+recording.", as a warning, instead of "Recording cancelled — nothing was
+written.": the author did not cancel.
 
 **Record New Test.** The name is a plain file name (`.md` optional, no
 folders, no reserved device names). The title is title case with short
 joining words kept lower-case in the middle (`pay-by-cash` → `Pay by Cash`),
 per the spec — the story's example shows `Pay by cash`. The folder is
 `tests.dir` from the nearest `aiui.config.json` inside the workspace folder
-(never above it — a config outside is another project's); else the fixed
-start of `testbench-native.testsGlob` (`tests/**/*.md` → `tests/`); else the
-workspace folder. The project has no `baseUrl` setting, so it is the active
+(never above it — a config outside is another project's); a config that
+declares no `tests.dir` means the server's default, `./tests` beside it
+(src/config/defaults.ts) — not the glob's prefix, which would put the test
+where the server does not look. With no config at all, the fixed start of
+`testbench-native.testsGlob` (`tests/**/*.md` → `tests/`); else the
+workspace folder. A `tests.dir` outside the workspace is refused, before
+anything is created, naming where it points: TestBench could neither find
+nor record a test there. The project has no `baseUrl` setting, so it is the active
 test's own when that test is in the same folder, else the most common one
 among the tests in that folder, written raw (`$APP_URL` stays a reference);
 with none, `## Config` is written empty. The file is created with `wx`, so it

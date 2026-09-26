@@ -316,3 +316,23 @@ test('apiErrorReason: parsed JSON, truncated JSON, escapes, plain text and non-e
   assert.equal(apiErrorReason(new Error('plain')), 'plain');
   assert.equal(apiErrorReason('str'), 'str');
 });
+
+test('streamRecordSteps: onOpen fires once the server answers 200, before any frame — and not on a refusal', async () => {
+  // The server holds a session from the 200 on, so a caller marks `config` as
+  // sent here — not on the first frame, which a cancel during the browser
+  // launch never lets arrive.
+  const order = [];
+  const ok = new ApiClient({
+    serverUrl: 'http://x',
+    apiKey: 'k',
+    fetch: async () => streamingResponse([frame({ type: 'record:started', url: 'u', title: '' })]),
+  });
+  for await (const ev of ok.streamRecordSteps('s', MINIMAL, new AbortController().signal, () => order.push('open'))) {
+    order.push(ev.type);
+  }
+  assert.deepEqual(order, ['open', 'record:started']);
+  let opened = false;
+  const refused = new ApiClient({ serverUrl: 'http://x', apiKey: 'k', fetch: async () => jsonErrorResponse(409, '{}') });
+  await assert.rejects(() => collect(refused.streamRecordSteps('s', MINIMAL, new AbortController().signal, () => { opened = true; })));
+  assert.equal(opened, false);
+});

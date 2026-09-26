@@ -206,21 +206,42 @@ The cursor must be under `## Steps`, not inside a fenced block, on one of:
 
 - a numbered step line in the main flow;
 - a numbered step line in a `### Section` body;
-- the blank line directly after one of those.
+- the blank line directly after one of those;
+- the blank line under `## Steps` or under a `### Section` heading, which
+  opens that flow: the steps go in ahead of its first step;
+- the blank line after the data table a flow opens with, which opens that
+  flow the same way.
 
 Anywhere else, Record Steps is refused with a message saying where to put
 the cursor. The steps are inserted after that line, in the same flow or
 section, numbered to follow it; every later step in that flow or section is
-renumbered.
+renumbered. A flow numbered `1.` on every step keeps that style: the new
+steps are `1.` too, and nothing is renumbered.
 
-If the document changed while recording, the insertion is made against the
-current text. If the cursor's line no longer exists, the steps go at the end
-of `## Steps` and the author is told.
+A flow with no steps yet that opens with a data table gets its steps after
+the table — the parser refuses a table that comes after a step — with a
+blank line between them.
+
+The line the steps go after is followed through every edit made to the
+document while recording: lines added or removed above it move it, and a
+renumber that rewrites its number does not lose it. Only when that line
+itself is deleted (or the file is closed) is it looked for again by its
+text; when that fails too, the steps go at the end of the flow the line was
+in — not of `## Steps`, whose end is inside the last section — and the
+author is told.
+
+A result is never lost. One that cannot be inserted — `## Steps` deleted,
+the file renamed or deleted, the edit rejected three times — is written to
+the TestBench output, and the error offers **Copy steps**. A result with no
+steps (nothing recorded, or every action dropped) is said as the server's
+note, as information rather than an error.
 
 ### 7.2 A new test
 
 **Record New Test** asks for a name, and creates `<tests dir>/<name>.md` —
-the project's `tests.dir` — refusing if it exists:
+the project's `tests.dir`, or `./tests` beside its `aiui.config.json` when
+it declares none (the server's default) — refusing if it exists, and
+refusing, before anything is created, a tests folder outside the workspace:
 
 ```markdown
 # <Name, in title case>
@@ -250,6 +271,13 @@ Every **typed** value becomes a parameter; selecting and ticking do not.
 - New parameters are added under `## Parameters`; the section is created
   directly above `## Steps` when absent. An existing parameter line is never
   changed; a conflicting one is left alone and the author is warned.
+- `## Parameters` is found as the runner's parser finds it: a depth-2
+  heading outside frontmatter and fenced blocks, running to the next depth-1
+  or depth-2 heading; an existing parameter is any list item in it (`-`,
+  `*`, `+` or numbered) of the form `name: value`, in every such section.
+- A value is written exactly as it was typed, bar the whitespace at its ends
+  (which the parser trims). A value with a line break cannot be one
+  parameter line: it is left out, and a warning names the parameter.
 
 ## 8. Writing the steps
 
@@ -401,6 +429,9 @@ arrive after `stop` (a field being typed into is collected then), until
 | The model's answer could not be read | "The steps could not be written: <reason>. Nothing was inserted." |
 | A parameter name conflicts | "Parameter <name> already exists with a different value; the recorded value was not added." |
 | The file for Record New Test exists | "<path> already exists." |
+| Record New Test's tests folder is outside the workspace | "The project's tests folder (<path>) is outside this workspace, so Record New Test cannot create a test there. …" |
+| The session was closed under the recording (another window's Run, Close Session, the idle reaper) | "The session was closed while recording." — a warning, nothing inserted |
+| The result could not be inserted | "Record Steps: the recorded steps were not inserted — <reason>. They are in the TestBench output." with **Copy steps** |
 
 ## 11. Limits
 

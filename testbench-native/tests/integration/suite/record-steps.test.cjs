@@ -499,7 +499,7 @@ describe('TestBench Record Steps', function () {
     await waitFor('run over', () => !hooks.isRunning());
   });
 
-  it('ends a run paused at a breakpoint first, then records in the same session', async () => {
+  it('ends a run paused at a breakpoint first — that run only — then records in the same session', async () => {
     const editor = await openFixture();
     await vscode.commands.executeCommand('testbench-native.toggleBreakpoint', { lineNumber: 11 });
     fake.streamScripts[0] = async (f) => {
@@ -512,6 +512,10 @@ describe('TestBench Record Steps', function () {
     assert.equal(hooks.isParkedAtPause(uri), true);
     assert.equal(hooks.keepAliveActive(), true, 'the pause pins the server');
     assert.ok(fake.requests[0].config, 'the run created the session, with config');
+    // Another test's spinner: ending THIS test's paused run must not touch it
+    // (Stop's own teardown flips every spinner in the window).
+    const otherUri = vscode.Uri.file(path.resolve(FIXTURES_DIR, 'plain.md'));
+    hooks.tracker.setStatus(otherUri, 3, 'running');
 
     const req = await recordAt(editor, 10);
     assert.equal(hooks.tracker.snapshot().breakpointStop, null, 'the pause marker is gone');
@@ -520,8 +524,14 @@ describe('TestBench Record Steps', function () {
     assert.equal(req.config, undefined, 'the session exists, so config is not sent again');
     assert.equal(fake.recordSessionIds[0], fake.streamSessionIds[0], 'the same session the run used');
     assert.equal(fake.closeSessionCalls, 1, 'only the run\'s first-use close — the browser stays');
+    assert.deepEqual(
+      new Map(hooks.tracker.snapshotFor(otherUri)?.statuses ?? []).get(3),
+      'running',
+      'the other test\'s spinner is not this run\'s to stop',
+    );
 
     await cancelRecording();
+    hooks.tracker.setStatuses(otherUri, [{ line: 3, status: null }]);
     await vscode.commands.executeCommand('testbench-native.toggleBreakpoint', { lineNumber: 11 });
   });
 
@@ -613,5 +623,234 @@ describe('TestBench Record Steps', function () {
     await hooks.recordingSettled();
     assert.match(hooks.recordingReport().messages[0].text, /A run holds this session\./);
     assert.equal(hooks.recordingState(), null);
+  });
+
+  /** Play the server's Stop: Finishing…, then this result, then done. */
+  function answerStopWith(result) {
+    fake.recordControlImpl = async (_s, body) => {
+      if (body.action !== 'stop') return;
+      fake.pushRecord({ type: 'record:writing' });
+      fake.pushRecord({ type: 'record:result', parameters: [], ...result });
+      fake.pushRecord({ type: 'done', status: 'passed' });
+      fake.endRecord();
+    };
+  }
+
+  /** Start a Run of line 10 and return its request; the caller ends it. */
+  async function runLine10(editor) {
+    editor.selection = new vscode.Selection(new vscode.Position(9, 0), new vscode.Position(9, 5));
+    void vscode.commands.executeCommand('testbench-native.runSelected');
+    await waitFor('run stream open', () => fake.hasActiveStream);
+    return fake.requests[0];
+  }
+
+  it('a cancel before the first frame still counts the config sent: the server answered, so the next Run reuses the session', async () => {
+    const editor = await openFixture();
+    const first = await recordAt(editor, 10);
+    assert.deepEqual(first.config, { baseUrl: 'https://example.test/' });
+    assert.equal(fake.recordAnswers, 1, 'the server answered 200');
+    // No frame at all — the server is still launching the browser.
+    await cancelRecording();
+    assert.equal(hooks.recordingReport().status, 'cancelled');
+
+    const run = await runLine10(editor);
+    // A real server answers 400 "Config can only be provided on the first
+    // request" to a second config.
+    assert.equal(run.config, undefined, 'the session the recording created already has its config');
+    assert.equal(fake.closeSessionCalls, 1, 'and it is not closed first');
+    fake.end();
+    await waitFor('run over', () => !hooks.isRunning());
+  });
+
+  it('a cancel before the server answers leaves the session unknown: the next Run closes it and sends config', async () => {
+    const editor = await openFixture();
+    fake.recordAnswerGate = new Promise(() => {}); // never answers
+    cursorAt(editor, 10);
+    await vscode.commands.executeCommand('testbench-native.recordSteps');
+    await waitFor('record request sent', () => fake.recordRequests.length === 1);
+    assert.deepEqual(fake.recordRequests[0].config, { baseUrl: 'https://example.test/' });
+    assert.equal(fake.closeSessionCalls, 1, 'the first-use close');
+    await cancelRecording();
+    assert.equal(fake.recordAnswers, 0, 'no 200 ever came');
+
+    const run = await runLine10(editor);
+    assert.equal(fake.closeSessionCalls, 2, 'whatever the abandoned request left is closed first');
+    assert.deepEqual(run.config, { baseUrl: 'https://example.test/' }, 'so config rides again, to a session known to be new');
+    fake.end();
+    await waitFor('run over', () => !hooks.isRunning());
+  });
+
+  it('TestBench: Stop while the test records means Stop Recording — the steps are written, not thrown away', async () => {
+    const editor = await openFixture();
+    const original = editor.document.getText();
+    await recordAt(editor, 10);
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    fake.pushRecord({ type: 'record:action', id: 'a1', kind: 'click', action: true, summary: 'Clicked button "Pay"', atMs: 1000 });
+    await waitFor('action listed', () => hooks.recordingState()?.actions.length === 1);
+    answerStopWith({ steps: ['Click Pay'] });
+
+    // The palette's "TestBench: Stop Run", as the panel's run Stop and Shift+F5 send it.
+    await vscode.commands.executeCommand('testbench-native.stop');
+    await hooks.recordingSettled();
+    assert.deepEqual(fake.recordControlCalls.map((c) => c.body), [{ action: 'stop' }]);
+    assert.equal(hooks.recordingReport().status, 'inserted');
+    assert.deepEqual(stepLines(editor.document.getText()).slice(0, 4), [
+      '1. Navigate to login.html',
+      '2. Click Pay',
+      '3. Click Sign in',
+      '4. Open the dashboard',
+    ]);
+    await vscode.commands.executeCommand('undo');
+    await waitFor('one undo restores the original', () => editor.document.getText() === original);
+  });
+
+  it('the steps go after the line the author chose, carried through edits made while recording', async () => {
+    const editor = await openFixture();
+    await recordAt(editor, 11); // "2. Click Sign in"
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    await waitFor('recording', () => hooks.recordingState()?.phase === 'recording');
+
+    // While recording, the author adds a step at the top of the flow and
+    // renumbers: the anchor's line moves, and its text changes to "3. …".
+    assert.ok(await editor.edit((b) => b.insert(new vscode.Position(9, 0), '1. Open the home page\n')));
+    assert.ok(
+      await editor.edit((b) => {
+        b.replace(new vscode.Range(10, 0, 10, 1), '2');
+        b.replace(new vscode.Range(11, 0, 11, 1), '3');
+        b.replace(new vscode.Range(12, 0, 12, 1), '4');
+      }),
+    );
+    answerStopWith({ steps: ['Accept the cookie banner'] });
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    await hooks.recordingSettled();
+
+    assert.deepEqual(stepLines(editor.document.getText()).slice(0, 5), [
+      '1. Open the home page',
+      '2. Navigate to login.html',
+      '3. Click Sign in',
+      '4. Accept the cookie banner',
+      '5. Open the dashboard',
+    ]);
+    const report = hooks.recordingReport();
+    assert.equal(report.status, 'inserted');
+    assert.ok(!report.messages.some((m) => m.level === 'warn'), JSON.stringify(report.messages));
+  });
+
+  it('a result that cannot be inserted is not lost: it goes to the output, and the error offers Copy steps', async () => {
+    const editor = await openFixture();
+    await recordAt(editor, 10);
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    await waitFor('recording', () => hooks.recordingState()?.phase === 'recording');
+    // While recording, the author deletes the ## Steps heading: there is
+    // nowhere left to insert.
+    assert.ok(await editor.edit((b) => b.delete(new vscode.Range(8, 0, 9, 0))));
+    const edited = editor.document.getText();
+    answerStopWith({ steps: ['Click Pay'], parameters: [{ name: 'amount', value: '10' }] });
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    await hooks.recordingSettled();
+
+    const report = hooks.recordingReport();
+    assert.equal(report.status, 'error');
+    assert.equal(report.rescued, '## Parameters\n- amount: 10\n\n## Steps\n1. Click Pay');
+    assert.equal(report.messages.length, 1);
+    assert.equal(report.messages[0].level, 'error');
+    assert.match(report.messages[0].text, /not inserted .*They are in the TestBench output/);
+    assert.deepEqual(report.messages[0].actions, ['Copy steps', 'Show output']);
+    assert.equal(editor.document.getText(), edited, 'nothing was written into the file');
+  });
+
+  it('a result with no steps is said as the server\'s note, not as an error', async () => {
+    const editor = await openFixture();
+    const original = editor.document.getText();
+    await recordAt(editor, 10);
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    await waitFor('recording', () => hooks.recordingState()?.phase === 'recording');
+    const note = 'Nothing was recorded (or every action was removed), so there are no steps to add.';
+    answerStopWith({ steps: [], notes: [note] });
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    await hooks.recordingSettled();
+    assert.deepEqual(hooks.recordingReport(), { status: 'empty', messages: [{ level: 'info', text: note }] });
+    assert.equal(editor.document.getText(), original);
+  });
+
+  it('notes the model wrote are shown as plain text: page content cannot make a link', async () => {
+    const editor = await openFixture();
+    await recordAt(editor, 10);
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    await waitFor('recording', () => hooks.recordingState()?.phase === 'recording');
+    answerStopWith({ steps: ['Click Pay'], notes: ['The button said [Pay now](command:workbench.action.quit).'] });
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    await hooks.recordingSettled();
+    const report = hooks.recordingReport();
+    assert.equal(report.status, 'inserted');
+    // A notification links `[text](target)` only with the brackets adjacent.
+    for (const m of report.messages) assert.doesNotMatch(m.text, /\]\(/, m.text);
+    assert.match(report.messages[0].text, /\[Pay now\] \(command:workbench\.action\.quit\)/, 'the words are all still there');
+  });
+
+  it('a recording the server ends by closing the session says so — and the next Run sends config again', async () => {
+    const editor = await openFixture();
+    const original = editor.document.getText();
+    await recordAt(editor, 10);
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    fake.pushRecord({ type: 'record:action', id: 'a1', kind: 'click', action: true, summary: 'Clicked "Pay"', atMs: 100 });
+    // Another window's Run, Close Session or the idle reaper closed it.
+    fake.pushRecord({ type: 'done', status: 'aborted', error: 'The session was closed while recording.' });
+    fake.endRecord();
+    await hooks.recordingSettled();
+    assert.deepEqual(hooks.recordingReport(), {
+      status: 'cancelled',
+      messages: [{ level: 'warn', text: 'The session was closed while recording.' }],
+    });
+    assert.equal(editor.document.getText(), original);
+
+    const run = await runLine10(editor);
+    assert.deepEqual(run.config, { baseUrl: 'https://example.test/' }, 'the session that had it is gone');
+    fake.end();
+    await waitFor('run over', () => !hooks.isRunning());
+  });
+
+  it('Record New Test: no tests.dir means the server default ./tests; one outside the workspace is refused before anything is created', async () => {
+    const configPath = path.resolve(FIXTURES_DIR, 'aiui.config.json');
+    assert.equal(fs.existsSync(configPath), false, 'the fixtures workspace has no project config of its own');
+    const outside = path.resolve(FIXTURES_DIR, '..', '..', 'record-outside.tmp');
+    const testsDir = path.resolve(FIXTURES_DIR, 'tests');
+    fs.rmSync(path.join(testsDir, NEW_FILE), { force: true });
+    try {
+      fs.writeFileSync(configPath, JSON.stringify({ tests: { dir: '../../record-outside.tmp' } }), 'utf8');
+      await vscode.commands.executeCommand('testbench-native.recordNewTest', { name: NEW_NAME });
+      assert.match(hooks.recordingRefusal(), /outside this workspace/);
+      assert.equal(fs.existsSync(outside), false, 'refused before anything is created');
+      assert.equal(fake.recordRequests.length, 0);
+
+      await sleep(20); // a new mtime, so the config is read again
+      fs.writeFileSync(configPath, JSON.stringify({ tests: { pattern: '**/*.md' } }), 'utf8');
+      await vscode.commands.executeCommand('testbench-native.recordNewTest', { name: NEW_NAME });
+      await waitFor('record stream open', () => fake.recordRequests.length === 1 && fake.hasActiveRecordStream);
+      const created = vscode.Uri.file(path.join(testsDir, NEW_FILE)).fsPath;
+      assert.equal(vscode.window.activeTextEditor.document.uri.fsPath, created);
+      assert.equal(fake.recordRequests[0].testFilePath, created);
+      await cancelRecording();
+    } finally {
+      fs.rmSync(configPath, { force: true });
+      // The new test is open, and Windows will not remove its folder until it
+      // is closed.
+      await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      // The file first: a folder VS Code has just seen created can refuse
+      // rmdir (EBUSY) for a while, and a file left in it would make the next
+      // run's Record New Test refuse "already exists". An empty folder left
+      // behind is harmless (git does not track it).
+      for (const dir of [testsDir, outside]) {
+        fs.rmSync(path.join(dir, NEW_FILE), { force: true });
+        for (const deadline = Date.now() + 10_000; fs.existsSync(dir) && Date.now() < deadline; ) {
+          try {
+            fs.rmSync(dir, { recursive: true, force: true });
+          } catch {
+            await sleep(250);
+          }
+        }
+      }
+    }
   });
 });

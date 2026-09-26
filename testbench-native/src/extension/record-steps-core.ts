@@ -28,7 +28,6 @@ import * as path from 'node:path';
 import {
   classifyLines,
   parseConfig,
-  scanSectionItems,
   type ClassifiedLine,
   type RecordActionKind,
   type RecordingPanelState,
@@ -44,8 +43,12 @@ import { computeRenumberEdits } from './renumber-core.ts';
 
 const STEPS_HEADING_RE = /^(#{2,})\s+steps\s*$/i;
 const LEADING_ORDINAL_RE = /^(\d+)\./;
-/** Same grammar as runner-core's test-meta (`## Config` / `## Parameters`). */
-const META_HEADING_RE = /^(#{2,})\s+(\S.*?)\s*$/;
+/** A depth-1 or depth-2 ATX heading — the ones that open and close the
+ *  server parser's `## Parameters` section (src/parser/markdown.ts). */
+const TOP_HEADING_RE = /^ {0,3}(#{1,2})(?:[ \t]+(.*?))?[ \t]*$/;
+/** A list item: a bullet with any of the three markers Markdown allows, or
+ *  an ordered item — the parser reads every list under the heading. */
+const LIST_ITEM_RE = /^\s*(?:[-*+]|\d{1,9}[.)])\s+(.*)$/;
 const PARAMETER_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 interface LineModel {
@@ -129,6 +132,74 @@ function sectionHeadingIdx(m: LineModel, name: string): number {
   return -1;
 }
 
+/** A data-table row: a non-fenced line starting with `|`. */
+function isTableRow(m: LineModel, idx: number): boolean {
+  return !m.fenced[idx] && (m.lines[idx] ?? '').trimStart().startsWith('|');
+}
+
+/**
+ * The first line at or below `idx` that is neither blank nor part of an HTML
+ * comment — what the parser lets sit between a flow's heading and its table
+ * (src/parser/data-rows.ts). A comment runs from its `<!--` line to the line
+ * holding `-->`.
+ */
+function skipGapDown(m: LineModel, idx: number): number {
+  let i = idx;
+  while (i < m.lines.length && !m.fenced[i]) {
+    const raw = (m.lines[i] ?? '').trim();
+    if (raw === '') {
+      i++;
+    } else if (raw.startsWith('<!--')) {
+      let j = i;
+      while (j < m.lines.length && !(m.lines[j] ?? '').includes('-->')) j++;
+      i = j + 1;
+    } else {
+      break;
+    }
+  }
+  return i;
+}
+
+/** `skipGapDown` upwards: the first line at or above `idx` that is neither
+ *  blank nor part of an HTML comment, or -1. */
+function skipGapUp(m: LineModel, idx: number): number {
+  let i = idx;
+  while (i >= 0 && !m.fenced[i]) {
+    const raw = (m.lines[i] ?? '').trim();
+    if (raw === '') {
+      i--;
+    } else if (raw.endsWith('-->')) {
+      let j = i;
+      while (j >= 0 && !(m.lines[j] ?? '').includes('<!--')) j--;
+      if (j < 0) break;
+      i = j - 1;
+    } else {
+      break;
+    }
+  }
+  return i;
+}
+
+/**
+ * The data table a flow opens with — directly under its heading, blank lines
+ * and comments aside, which is the one place the parser accepts it — as its
+ * first and last row (0-based), or null. `headingIdx` is `## Steps` or the
+ * `### Section`.
+ */
+function tableUnder(m: LineModel, headingIdx: number): { first: number; last: number } | null {
+  if (headingIdx < 0) return null;
+  let i = skipGapDown(m, headingIdx + 1);
+  if (i >= m.lines.length || !isTableRow(m, i)) return null;
+  const first = i;
+  while (i + 1 < m.lines.length && isTableRow(m, i + 1)) i++;
+  return { first, last: i };
+}
+
+/** The heading a flow hangs off: `## Steps` for the main flow, or its section's. */
+function flowHeadingIdx(m: LineModel, section: string | null): number {
+  return section === null ? m.stepsIdx : sectionHeadingIdx(m, section);
+}
+
 /** Step lines (0-based) of one flow, in order. */
 function flowSteps(m: LineModel, section: string | null): number[] {
   const out: number[] = [];
@@ -167,6 +238,14 @@ export interface RecordAnchor {
   kind: 'step' | 'heading';
   /** The `### Section` the steps join, as authored; null for the main flow. */
   section: string | null;
+  /**
+   * `line` has been carried through every edit made to the document while
+   * recording (`trackAnchorThroughChanges`), so it IS the anchor line now,
+   * whatever its text has become (a renumber rewrites it). False once an edit
+   * deleted or merged the line itself, and absent on an anchor nobody
+   * tracked: then the line is found again by its text.
+   */
+  tracked?: boolean;
 }
 
 export type CursorResolution = { ok: true; anchor: RecordAnchor } | { ok: false; reason: string };
@@ -232,6 +311,23 @@ export function resolveRecordCursor(text: string, cursorLine: number): CursorRes
   }
   const above = m.classified[j]?.kind;
   if (isStepKind(above)) return atStep(j);
+  // The blank line after a flow's data table: the table sits directly under
+  // the flow's heading, so this opens that flow (its steps follow the table).
+  // A table anywhere else — under a step, after prose — is not a place.
+  if (isTableRow(m, j)) {
+    let top = j;
+    while (top - 1 >= 0 && isTableRow(m, top - 1)) top--;
+    const h = skipGapUp(m, top - 1);
+    if (h >= 0 && h === m.stepsIdx) {
+      return { ok: true, anchor: { line: h + 1, text: m.lines[h] ?? '', kind: 'heading', section: null } };
+    }
+    if (h >= 0 && kindAt(m, h) === 'section-heading') {
+      const name = sectionNameOf(m.lines[h] ?? '');
+      if (name === '') return { ok: false, reason: CURSOR_REFUSALS.unnamedSection };
+      return { ok: true, anchor: { line: h + 1, text: m.lines[h] ?? '', kind: 'heading', section: name } };
+    }
+    return { ok: false, reason: CURSOR_REFUSALS.notAStep };
+  }
   if (above === 'prose') {
     const owner = stepOwning(m, j);
     return owner === null ? { ok: false, reason: CURSOR_REFUSALS.notAStep } : atStep(owner);
@@ -306,11 +402,14 @@ export function cleanStepText(raw: unknown): string {
  * `anchor: null` is Record New Test (mode `new`): the steps go at the end of
  * the main flow — directly under `## Steps` in the file it just created.
  *
- * The anchor is looked for where it was and, failing that, by its text (the
- * author may have edited above it while recording). When neither finds it the
- * steps go at the end of the flow the anchor was in, and `fellBack` says so —
- * not literally the end of the `## Steps` span, which would put main-flow
- * steps inside the last section's body.
+ * The anchor is found as `locateAnchor` says: a tracked anchor where the
+ * edits made while recording carried it, else by its text. When neither finds
+ * it the steps go at the end of the flow the anchor was in, and `fellBack`
+ * says so — not literally the end of the `## Steps` span, which would put
+ * main-flow steps inside the last section's body.
+ *
+ * A flow that has no steps yet but opens with a data table gets its steps
+ * AFTER the table: the parser refuses a table that comes after a step.
  */
 export function planRecordInsertion(
   text: string,
@@ -319,7 +418,7 @@ export function planRecordInsertion(
   const steps = (Array.isArray(args.steps) ? args.steps : []).map(cleanStepText).filter((s) => s !== '');
   if (steps.length === 0) return { error: 'The recording came back with no steps.' };
   const m = modelOf(text);
-  if (m.stepsIdx < 0) return { error: CURSOR_REFUSALS.noSteps };
+  if (m.stepsIdx < 0) return { error: 'the file has no ## Steps heading any more' };
   const eol = /\r\n/.test(text) ? '\r\n' : '\n';
   const warnings: string[] = [];
 
@@ -330,8 +429,9 @@ export function planRecordInsertion(
   let anchorKind: 'step' | 'heading';
   const located = args.anchor === null ? null : locateAnchor(m, args.anchor);
   if (located !== null) {
-    anchorIdx = located;
+    anchorIdx = located.idx;
     anchorKind = args.anchor!.kind;
+    section = located.section;
   } else {
     if (args.anchor !== null) {
       fellBack = true;
@@ -343,55 +443,86 @@ export function planRecordInsertion(
   }
   if (fellBack) {
     warnings.push(
-      'The line you started recording from changed while you were recording, so the steps went at the end of ' +
+      'The line you started recording from was deleted or changed while you were recording, so the steps went ' +
+        'at the end of ' +
         (section === null ? 'the main flow.' : `the "${section}" section.`),
     );
   }
 
   let insertAt: number;
+  /** A blank line goes in ahead of the steps (after a table with none). */
+  let blankBefore = false;
   if (anchorKind === 'step') {
     insertAt = anchorIdx + 1;
     while (insertAt < m.lines.length && isContinuation(m, insertAt)) insertAt++;
   } else {
     // Ahead of the flow's first step, so the new steps take its place in the
-    // list and share its spacing; directly under the heading when it has none.
+    // list and share its spacing. A flow with no steps yet: after its data
+    // table when it has one — the parser requires the table to come first,
+    // "before the numbered steps it feeds" — else directly under the heading.
     const first = flowSteps(m, section)[0];
-    insertAt = first ?? anchorIdx + 1;
+    const table = first === undefined ? tableUnder(m, flowHeadingIdx(m, section)) : null;
+    if (first !== undefined) {
+      insertAt = first;
+    } else if (table) {
+      // After the blank line that ends the table. The last entry of `lines`
+      // is not a line when the file ends in a newline — it is what follows
+      // it — so a table that ends the file gets a blank line of its own.
+      insertAt = table.last + 1;
+      const blankFollows =
+        insertAt < m.lines.length - 1 && (m.lines[insertAt] ?? '').trim() === '' && !m.fenced[insertAt];
+      if (blankFollows) insertAt++;
+      else blankBefore = true;
+    } else {
+      insertAt = anchorIdx + 1;
+    }
   }
+  // A flow opened straight above a heading gets a blank line before it. After
+  // a step the author's own spacing stands.
+  const blankAfter =
+    anchorKind === 'heading' &&
+    insertAt < m.lines.length &&
+    /^#/.test(m.lines[insertAt] ?? '') &&
+    !m.fenced[insertAt];
 
   // ── Numbers ────────────────────────────────────────────────────────────
+  // The flow's own style: a flow written `1.` throughout (two steps or more,
+  // every one `1.`) stays that way, and nothing after the new steps is
+  // renumbered. Otherwise the new steps continue from the anchor's number.
+  const ones = allOnes(m, section);
   const prev = anchorKind === 'step' ? writtenOrdinal(m, anchorIdx, section) : 0;
-  const newLines = steps.map((s, k) => `${prev + 1 + k}. ${s}`);
+  const newLines = steps.map((s, k) => `${ones ? 1 : prev + 1 + k}. ${s}`);
+  const block = [...(blankBefore ? [''] : []), ...newLines, ...(blankAfter ? [''] : [])];
 
   const edits: RecordEdit[] = [];
   if (insertAt < m.lines.length) {
-    edits.push(point(insertAt, 0, newLines.map((l) => l + eol).join('')));
+    edits.push(point(insertAt, 0, block.map((l) => l + eol).join('')));
   } else {
     const last = m.lines.length - 1;
-    edits.push(point(last, (m.lines[last] ?? '').length, newLines.map((l) => eol + l).join('')));
+    edits.push(point(last, (m.lines[last] ?? '').length, block.map((l) => eol + l).join('')));
   }
 
   // The rest of the flow, renumbered by the Renumber Steps walk over the
   // document as it will read: the inserted steps are non-targets, so the walk
   // continues from their numbers exactly as it continues from any step written
   // above a selection.
-  const simLines = [...m.lines.slice(0, insertAt), ...newLines, ...m.lines.slice(insertAt)];
+  const simLines = [...m.lines.slice(0, insertAt), ...block, ...m.lines.slice(insertAt)];
   const sim = modelOf(simLines.join('\n'));
   const targets: number[] = [];
-  for (let i = insertAt + newLines.length; i < sim.lines.length; i++) {
+  for (let i = insertAt + block.length; i < sim.lines.length && !ones; i++) {
     const kind = kindAt(sim, i);
     if (kind === 'section-heading') break;
     if (kind === (section === null ? 'step' : 'section-step')) targets.push(i + 1);
   }
   if (targets.length > 0) {
     for (const edit of computeRenumberEdits(sim.lines.join('\n'), targets)) {
-      const orig = edit.line - 1 - newLines.length;
+      const orig = edit.line - 1 - block.length;
       edits.push({ startLine: orig, startChar: 0, endLine: orig, endChar: edit.digits, text: String(edit.ordinal) });
     }
   }
 
   // ── Parameters ─────────────────────────────────────────────────────────
-  const params = planParameters(text, m, args.parameters, eol);
+  const params = planParameters(m, args.parameters, eol);
   warnings.push(...params.warnings);
   let shift = 0;
   if (params.edit) {
@@ -399,9 +530,10 @@ export function planRecordInsertion(
     if (params.edit.startLine < insertAt) shift = params.lineCount;
   }
 
+  const firstStep = insertAt + 1 + (blankBefore ? 1 : 0) + shift;
   return {
     edits,
-    insertedLines: newLines.map((_, k) => insertAt + 1 + k + shift),
+    insertedLines: newLines.map((_, k) => firstStep + k),
     section,
     fellBack,
     parametersAdded: params.added,
@@ -414,22 +546,47 @@ function point(line: number, char: number, text: string): RecordEdit {
   return { startLine: line, startChar: char, endLine: line, endChar: char, text };
 }
 
-/** Find the anchor again: where it was, else by its text when that is unique. */
-function locateAnchor(m: LineModel, anchor: RecordAnchor): number | null {
+/**
+ * Find the anchor in the document as it is now, and the flow it is in.
+ *
+ * A TRACKED anchor's line is taken as it stands — its text may have changed
+ * (a renumber rewrites `2.` to `3.`), and its section may have been renamed —
+ * as long as it is still the same kind of line. Text is the fallback, for an
+ * anchor nobody tracked or one whose line an edit deleted: where it was, else
+ * the one line in the same flow with that exact text.
+ */
+function locateAnchor(m: LineModel, anchor: RecordAnchor): { idx: number; section: string | null } | null {
+  if (anchor.tracked === true) {
+    const idx = anchor.line - 1;
+    const kind = kindAt(m, idx);
+    if (anchor.kind === 'step' && isStepKind(kind)) {
+      return { idx, section: kind === 'section-step' ? sectionOf(m, idx) : null };
+    }
+    if (anchor.kind === 'heading' && idx === m.stepsIdx) return { idx, section: null };
+    if (anchor.kind === 'heading' && kind === 'section-heading') {
+      const name = sectionNameOf(m.lines[idx] ?? '');
+      if (name !== '') return { idx, section: name };
+    }
+  }
   if (anchor.kind === 'heading') {
-    if (anchor.section === null) return m.stepsIdx;
+    if (anchor.section === null) return { idx: m.stepsIdx, section: null };
     const idx = sectionHeadingIdx(m, anchor.section);
-    return idx < 0 ? null : idx;
+    return idx < 0 ? null : { idx, section: anchor.section };
   }
   const wanted = anchor.section === null ? 'step' : 'section-step';
   const matches = (idx: number): boolean =>
     m.lines[idx] === anchor.text &&
     kindAt(m, idx) === wanted &&
     (anchor.section === null || sectionOf(m, idx) === anchor.section);
-  if (matches(anchor.line - 1)) return anchor.line - 1;
+  // Where it was only when nobody tracked it: a tracked anchor that got here
+  // has lost its line, and an identical line now at that position is a
+  // different step.
+  if (anchor.tracked === undefined && matches(anchor.line - 1)) {
+    return { idx: anchor.line - 1, section: anchor.section };
+  }
   const found: number[] = [];
   for (let i = 0; i < m.lines.length; i++) if (matches(i)) found.push(i);
-  return found.length === 1 ? found[0]! : null;
+  return found.length === 1 ? { idx: found[0]!, section: anchor.section } : null;
 }
 
 /** The last step of a flow, or its heading when it has none. */
@@ -437,7 +594,77 @@ function endOfFlow(m: LineModel, section: string | null): { idx: number; kind: '
   const steps = flowSteps(m, section);
   const last = steps[steps.length - 1];
   if (last !== undefined) return { idx: last, kind: 'step' };
-  return { idx: section === null ? m.stepsIdx : sectionHeadingIdx(m, section), kind: 'heading' };
+  return { idx: flowHeadingIdx(m, section), kind: 'heading' };
+}
+
+/** A flow numbered `1.` on every step (two or more of them) — a style some
+ *  authors use; a new step joins it as `1.` too. */
+function allOnes(m: LineModel, section: string | null): boolean {
+  const steps = flowSteps(m, section);
+  return steps.length >= 2 && steps.every((i) => LEADING_ORDINAL_RE.exec(m.lines[i] ?? '')?.[1] === '1');
+}
+
+// ---------------------------------------------------------------------------
+// Following the anchor through edits made while recording
+// ---------------------------------------------------------------------------
+
+/**
+ * One text change, as VS Code reports it (`TextDocumentContentChangeEvent`):
+ * the replaced range, 0-based, in the document as it was before the change,
+ * and the text put in its place.
+ */
+export interface DocumentChange {
+  startLine: number;
+  startChar: number;
+  endLine: number;
+  endChar: number;
+  text: string;
+}
+
+/**
+ * Carry the anchor through one batch of edits (one `onDidChangeTextDocument`
+ * event). Lines added or removed above it move it; edits inside it — a
+ * renumber, a typo fixed — leave it where it is; an edit that deletes the
+ * line, or merges its start into the line above, loses it (`tracked: false`),
+ * and the insertion falls back to finding it by its text.
+ *
+ * Changes are applied bottom-up, so each one's range is still in the
+ * coordinates it was reported in whichever convention the batch used.
+ * `anchor.line` is 1-based, the changes 0-based, as VS Code reports them.
+ */
+export function trackAnchorThroughChanges(anchor: RecordAnchor, changes: DocumentChange[]): RecordAnchor {
+  if (anchor.tracked === false) return anchor;
+  let line = anchor.line - 1;
+  const ordered = [...changes].sort((a, b) => b.startLine - a.startLine || b.startChar - a.startChar);
+  for (const c of ordered) {
+    const added = (c.text.match(/\n/g) ?? []).length;
+    const delta = added - (c.endLine - c.startLine);
+    if (c.startLine > line) continue;
+    if (c.endLine < line) {
+      line += delta;
+      continue;
+    }
+    if (c.startLine < line) {
+      // The change reaches the anchor line from above and stops at its very
+      // start. The line survives, still starting a line, only when nothing is
+      // glued in front of it: whole lines deleted (from column 0, nothing put
+      // in), or a replacement that ends in a line break.
+      const keepsStart = c.text === '' ? c.startChar === 0 : c.text.endsWith('\n');
+      if (c.endLine === line && c.endChar === 0 && keepsStart) {
+        line += delta;
+        continue;
+      }
+      return { ...anchor, tracked: false };
+    }
+    // The change starts on the anchor line.
+    if (c.startChar > 0) continue; // after the line's start: the line stays
+    if (c.endLine > line) return { ...anchor, tracked: false }; // the line deleted
+    // Within the line from column 0: the rest of the line follows whatever
+    // was put in — lines typed in front of it push it down, and a renumber
+    // (no break) edits it in place.
+    line += added;
+  }
+  return { ...anchor, line: line + 1, tracked: true };
 }
 
 /**
@@ -454,17 +681,67 @@ function writtenOrdinal(m: LineModel, idx: number, section: string | null): numb
 }
 
 /**
+ * The `## Parameters` section as the SERVER's parser reads it
+ * (src/parser/markdown.ts): a depth-2 heading named Parameters, outside
+ * frontmatter and fenced blocks, running to the next depth-1 or depth-2
+ * heading (a `###` inside it does not end it); its items are list items —
+ * `-`, `*`, `+` or numbered — of the form `key: value`, split at the first
+ * colon, both halves trimmed. The parser reads EVERY such section, the last of
+ * a duplicated key winning, so `items` holds them all; the heading and end
+ * are the first section's, where new lines go. Null when there is none.
+ */
+function scanParameters(m: LineModel): {
+  headingIdx: number;
+  end: number;
+  items: Array<{ key: string; value: string; line: number }>;
+} | null {
+  const headingAt = (i: number): RegExpExecArray | null =>
+    m.fenced[i] || isFenceDelimiter(m.lines[i] ?? '') || m.classified[i]?.kind === 'frontmatter'
+      ? null
+      : TOP_HEADING_RE.exec(m.lines[i] ?? '');
+  const isParameters = (h: RegExpExecArray | null): boolean =>
+    h !== null && h[1]!.length === 2 && (h[2] ?? '').replace(/[ \t]+#+$/, '').trim().toLowerCase() === 'parameters';
+
+  let first: { headingIdx: number; end: number } | null = null;
+  const items: Array<{ key: string; value: string; line: number }> = [];
+  for (let i = 0; i < m.lines.length; i++) {
+    if (!isParameters(headingAt(i))) continue;
+    const headingIdx = i;
+    let end = m.lines.length;
+    for (let k = headingIdx + 1; k < m.lines.length; k++) {
+      if (headingAt(k)) {
+        end = k;
+        break;
+      }
+    }
+    first ??= { headingIdx, end };
+    for (let k = headingIdx + 1; k < end; k++) {
+      if (m.fenced[k] || isFenceDelimiter(m.lines[k] ?? '')) continue;
+      const item = LIST_ITEM_RE.exec(m.lines[k] ?? '');
+      if (!item) continue;
+      const text = item[1]!;
+      const colon = text.indexOf(':');
+      if (colon < 0) continue;
+      const key = text.slice(0, colon).trim();
+      if (key !== '') items.push({ key, value: text.slice(colon + 1).trim(), line: k });
+    }
+    i = end - 1;
+  }
+  return first === null ? null : { ...first, items };
+}
+
+/**
  * The `## Parameters` half of the edit (decision 8): each recorded parameter
  * the file does not have is added; one it has with the same value is left;
  * one it has with a DIFFERENT value is left too, and reported, because the
  * author's line is theirs and the recorded steps now read its value.
  *
- * The section is found by runner-core's own rule — the first heading named
- * Parameters (any depth ≥ 2), ending at the next heading as deep or shallower
- * — so an added line lands where `parseParameters` will read it.
+ * Values are written as they came. Only what a parameter line cannot carry is
+ * touched: surrounding whitespace, which the parser trims when it reads the
+ * line (so it is trimmed here, and compared trimmed), and a line break, which
+ * would end the line — such a parameter is left out, with a warning naming it.
  */
 function planParameters(
-  text: string,
   m: LineModel,
   recorded: unknown[],
   eol: string,
@@ -475,10 +752,10 @@ function planParameters(
   conflicts: ParameterConflict[];
   warnings: string[];
 } {
-  const items = scanSectionItems(text, 'Parameters');
-  // Last one wins, as `parseSection` reads a duplicated key.
+  const section = scanParameters(m);
+  // Last one wins, as the parser reads a duplicated key.
   const existing = new Map<string, string>();
-  for (const item of items) existing.set(item.key, item.value);
+  for (const item of section?.items ?? []) existing.set(item.key, item.value);
 
   const added: string[] = [];
   const conflicts: ParameterConflict[] = [];
@@ -488,13 +765,21 @@ function planParameters(
   for (const raw of Array.isArray(recorded) ? recorded : []) {
     const p = (raw ?? {}) as { name?: unknown; value?: unknown };
     const name = String(p.name ?? '').trim();
-    const value = String(p.value ?? '').replace(/\s+/g, ' ').trim();
+    const rawValue = String(p.value ?? '');
     if (!PARAMETER_NAME_RE.test(name)) {
       warnings.push(`Left out a parameter named "${name}": a parameter name is letters, digits and _.`);
       continue;
     }
     if (seen.has(name)) continue;
     seen.add(name);
+    if (/[\r\n]/.test(rawValue.trim())) {
+      warnings.push(
+        `Left out parameter "${name}": its value has a line break, which a parameter line cannot hold. ` +
+          `Add it under ## Parameters yourself before running.`,
+      );
+      continue;
+    }
+    const value = rawValue.trim();
     if (value === '') {
       warnings.push(`Left out parameter "${name}": it came back with no value.`);
       continue;
@@ -513,22 +798,11 @@ function planParameters(
   }
   if (toAdd.length === 0) return { lineCount: 0, added, conflicts, warnings };
 
-  let headingIdx = -1;
-  let depth = 0;
-  for (let i = 0; i < m.lines.length; i++) {
-    const h = META_HEADING_RE.exec(m.lines[i] ?? '');
-    if (h && h[2]!.toLowerCase() === 'parameters') {
-      headingIdx = i;
-      depth = h[1]!.length;
-      break;
-    }
-  }
-
-  if (headingIdx < 0) {
-    // No section: create one immediately above `## Steps`, at its depth.
-    const hashes = /^#+/.exec(m.lines[m.stepsIdx] ?? '')?.[0] ?? '##';
+  if (section === null) {
+    // No section: create one immediately above `## Steps`. Always depth 2 —
+    // the parser reads no other.
     const blankBefore = m.stepsIdx > 0 && (m.lines[m.stepsIdx - 1] ?? '').trim() !== '';
-    const block = [`${hashes} Parameters`, ...toAdd, ''];
+    const block = ['## Parameters', ...toAdd, ''];
     return {
       edit: point(m.stepsIdx, 0, (blankBefore ? eol : '') + block.map((l) => l + eol).join('')),
       lineCount: block.length + (blankBefore ? 1 : 0),
@@ -538,22 +812,15 @@ function planParameters(
     };
   }
 
-  let end = m.lines.length;
-  for (let i = headingIdx + 1; i < m.lines.length; i++) {
-    const h = META_HEADING_RE.exec(m.lines[i] ?? '');
-    if (h && h[1]!.length <= depth) {
-      end = i;
-      break;
-    }
-  }
-  // After the section's last bullet; with none, after its last non-blank line
-  // (the heading itself when the section is empty).
-  let after = headingIdx;
-  if (items.length > 0) {
-    after = Math.max(...items.map((item) => item.line));
+  // In the first section: after its last item; with none, after its last
+  // non-blank line outside a fence (the heading itself when it is empty).
+  let after = section.headingIdx;
+  const own = section.items.filter((item) => item.line < section.end);
+  if (own.length > 0) {
+    after = Math.max(...own.map((item) => item.line));
   } else {
-    for (let i = end - 1; i > headingIdx; i--) {
-      if ((m.lines[i] ?? '').trim() !== '') {
+    for (let i = section.end - 1; i > section.headingIdx; i--) {
+      if ((m.lines[i] ?? '').trim() !== '' && !m.fenced[i] && !isFenceDelimiter(m.lines[i] ?? '')) {
         after = i;
         break;
       }
@@ -732,21 +999,82 @@ export function globStaticPrefix(glob: string): string {
 }
 
 /**
- * Where Record New Test creates the file: the project's `tests.dir` from
- * `aiui.config.json`; else the fixed folder `testbench-native.testsGlob`
- * starts in (`tests/**\/*.md` → `tests/`), which is where Test Explorer looks;
- * else the workspace folder itself (the default glob, `**\/*.md`, starts
- * there).
+ * Where Record New Test creates the file (SPEC-record-steps.md §7.2):
+ *
+ *  - a project (an `aiui.config.json` inside the workspace): its `tests.dir`,
+ *    or — when it declares none — the server's default, `./tests` beside the
+ *    config (src/config/defaults.ts);
+ *  - no project: the fixed folder `testbench-native.testsGlob` starts in
+ *    (`tests/**\/*.md` → `tests/`), which is where Test Explorer looks; else
+ *    the workspace folder itself (the default glob, `**\/*.md`, starts there).
+ *
+ * A folder outside the workspace is refused — before anything is created —
+ * since TestBench can neither discover nor record a test there.
  */
 export function newTestDir(args: {
+  /** The project's `aiui.config.json`, or null when there is none. */
+  configPath: string | null;
+  /** Its `tests.dir`, resolved; null when it declares none. */
   configTestsDir: string | null;
   testsGlob: string;
   workspaceRoot: string;
-}): { dir: string; source: 'config' | 'glob' | 'workspace' } {
-  if (args.configTestsDir) return { dir: args.configTestsDir, source: 'config' };
-  const prefix = globStaticPrefix(args.testsGlob);
-  if (prefix !== '') return { dir: path.resolve(args.workspaceRoot, prefix), source: 'glob' };
-  return { dir: args.workspaceRoot, source: 'workspace' };
+}):
+  | { dir: string; source: 'config' | 'config-default' | 'glob' | 'workspace' }
+  | { refused: string } {
+  let dir: string;
+  let source: 'config' | 'config-default' | 'glob' | 'workspace';
+  if (args.configPath && args.configTestsDir) {
+    dir = path.resolve(args.configTestsDir);
+    source = 'config';
+  } else if (args.configPath) {
+    dir = path.resolve(path.dirname(args.configPath), 'tests');
+    source = 'config-default';
+  } else {
+    const prefix = globStaticPrefix(args.testsGlob);
+    dir = prefix !== '' ? path.resolve(args.workspaceRoot, prefix) : path.resolve(args.workspaceRoot);
+    source = prefix !== '' ? 'glob' : 'workspace';
+  }
+  const rel = path.relative(path.resolve(args.workspaceRoot), dir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    return {
+      refused:
+        `The project's tests folder (${dir}) is outside this workspace, so Record New Test cannot create ` +
+        `a test there. Open the project's folder, or point tests.dir in aiui.config.json inside it.`,
+    };
+  }
+  return { dir, source };
+}
+
+/**
+ * Text for a VS Code notification from something the page or the model wrote
+ * (a note, a server error). Notifications turn `[text](target)` into a
+ * clickable link — `command:` targets included — so the one pattern that
+ * makes a link is broken up; the words are unchanged.
+ */
+export function plainNotificationText(text: string): string {
+  return text.replace(/\]\s*\(/g, '] (');
+}
+
+/**
+ * The steps and parameters a recording produced, as text the author can paste
+ * — what is shown in the output channel, and copied by "Copy steps", when the
+ * insertion itself could not be made. A result is never lost.
+ */
+export function recordedStepsText(steps: unknown[], parameters: unknown[]): string {
+  const lines = (Array.isArray(steps) ? steps : [])
+    .map(cleanStepText)
+    .filter((s) => s !== '')
+    .map((s, i) => `${i + 1}. ${s}`);
+  const params = (Array.isArray(parameters) ? parameters : [])
+    .map((p) => (p ?? {}) as { name?: unknown; value?: unknown })
+    .filter((p) => String(p.name ?? '').trim() !== '')
+    .map((p) => {
+      const value = String(p.value ?? '').trim();
+      // A line break would end the parameter line; shown escaped instead, so
+      // the value is still all there.
+      return `- ${String(p.name).trim()}: ${/[\r\n]/.test(value) ? JSON.stringify(value) : value}`;
+    });
+  return [...(params.length > 0 ? ['## Parameters', ...params, ''] : []), '## Steps', ...lines].join('\n');
 }
 
 /** `m:ss` since the recording started, for the panel's action list. */

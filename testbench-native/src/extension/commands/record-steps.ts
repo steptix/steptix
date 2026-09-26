@@ -21,6 +21,9 @@ export interface RecordRegistry {
   active(): RunController | undefined;
   get(document: vscode.TextDocument): RunController | undefined;
   isStepPaused(controllerUri: vscode.Uri): boolean;
+  /** Drop the step-paused ▶ of ONE controller's run, wherever it is painted. */
+  clearStepPausedFor(controllerUri: vscode.Uri): void;
+  refreshRunningContext(): void;
   readonly recorder: StepRecorder;
 }
 
@@ -30,17 +33,33 @@ export interface RecordRegistry {
  * messages that execute these same commands, so there is one implementation
  * of each gesture.
  *
- * `performStop` is the Stop command's own teardown, handed in rather than
- * re-implemented: a paused run that Record ends (decision 12) must end exactly
- * as a Stop ends it — the yellow ▶, the spinners, the keep-alive and the
- * parked state all go — or the next Continue would resume a run that is over.
+ * A paused run that Record ends (decision 12) is ended the way Stop ends it —
+ * the yellow ▶, the spinners, the keep-alive and the parked state all go, or
+ * the next Continue would resume a run that is over — but for the recorded
+ * test's run ONLY (`endPausedRun`): the Stop command's own teardown is
+ * window-wide, and would stop other tests' spinners and markers too.
  */
 export function registerRecordCommands(deps: {
   registry: RecordRegistry;
   tracker: ActiveFileTracker;
-  performStop: (opts: { target?: RunController }) => void;
 }): vscode.Disposable[] {
-  const { registry, tracker, performStop } = deps;
+  const { registry, tracker } = deps;
+
+  /** End `controller`'s paused run, touching nothing of any other test's. */
+  const endPausedRun = (controller: RunController): void => {
+    // Read before the reset below forgets which skill files the run entered.
+    const touched = controller.touchedFileUris;
+    controller.stop();
+    controller.resetFrameState();
+    for (const uri of touched) {
+      tracker.markRunningStopped(uri);
+      // Only where this run left a marker: clearing one also drops the
+      // tracker's single edit-following anchor, which may be another test's.
+      if (tracker.breakpointStopFor(uri) !== null) tracker.setBreakpointStop(uri, null);
+    }
+    registry.clearStepPausedFor(controller.document.uri);
+    registry.refreshRunningContext();
+  };
   const recorder = registry.recorder;
   /** A Record gesture between its checks and `recorder.start` — waiting on a
    *  paused run to unwind, or on the new-test prompt. A second one then would
@@ -98,7 +117,7 @@ export function registerRecordCommands(deps: {
       return recorder.refuse(STOP_THE_RUN);
     }
     if (stepPaused || controller.isParkedAtPause || tracker.breakpointStopFor(uri) !== null) {
-      performStop({ target: controller });
+      endPausedRun(controller);
       // A step pause holds the run's stream open; the abort above ends it, but
       // the run unwinds asynchronously and the controller refuses to record
       // until it has.
@@ -157,10 +176,13 @@ export function registerRecordCommands(deps: {
         : undefined;
     const configPath = findConfigWithin(activeInFolder ? path.dirname(activeInFolder.document.uri.fsPath) : root, root);
     const target = newTestDir({
+      configPath,
       configTestsDir: configPath ? (readProjectDirs(configPath)?.testsDir ?? null) : null,
       testsGlob: vscode.workspace.getConfiguration('testbench-native').get<string>('testsGlob') ?? '**/*.md',
       workspaceRoot: root,
     });
+    // Refused before anything is created.
+    if ('refused' in target) return recorder.refuse(target.refused);
     const filePath = path.join(target.dir, name.fileName);
     if (fs.existsSync(filePath)) {
       // docs/specs/SPEC-record-steps.md §10, verbatim.
