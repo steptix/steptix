@@ -22,7 +22,7 @@ Every typed value becomes a `{{parameter}}` with its value under
 `{{password}}` and its value comes from `.env` — and secret fields are painted
 out of every screenshot. **Add check** turns your next click into a
 `Verify …` step instead of a click. A ✕ drops a misclick. See
-docs/specs/SPEC-record-steps.md. Server: rebuild and restart; TestBench 0.5.153.
+docs/specs/SPEC-record-steps.md. Server: rebuild and restart; TestBench 0.5.154.
 
 ### Added — `drag` and `reload` steps
 
