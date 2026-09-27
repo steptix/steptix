@@ -340,7 +340,7 @@ existing parameter with the same name is left as it is.
 ## What the TestBench half decided
 
 Built in `runner-core/` (the frames, `streamRecordSteps`,
-`controlRecordSteps`) and `testbench-native/` (tb 0.5.151). The text rules
+`controlRecordSteps`) and `testbench-native/` (tb 0.5.152 — main shipped 0.5.151 in PR #160 first). The text rules
 live in `record-steps-core.ts` and are pinned by `tests/record-steps.test.js`;
 the flow is pinned against a fake server by
 `tests/integration/suite/record-steps.test.cjs`. Where this differs from
