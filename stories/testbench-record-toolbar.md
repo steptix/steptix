@@ -765,7 +765,9 @@ taken; where it had none, the simplest safe choice is:
 
 1. **Editing a recorded line in the editor:** unchanged in this change — the
    next draft overwrites it and the author is warned once (§7). Locking an
-   edited line in is the next change.
+   edited line in is the next change. *Superseded 2026-09-28 by
+   stories/testbench-record-edit-steps.md: an edit is kept as the author's,
+   nothing is locked against the author, and the lock glyph goes.*
 2. **Cancel keeps editor-typed steps** (they are the author's text); steps
    added from the toolbar's box are the recording's and go with it.
 3. **The toolbar is painted out of screenshot crops**, not hidden.
