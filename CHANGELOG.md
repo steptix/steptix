@@ -22,7 +22,23 @@ Every typed value becomes a `{{parameter}}` with its value under
 `{{password}}` and its value comes from `.env` — and secret fields are painted
 out of every screenshot. **Add check** turns your next click into a
 `Verify …` step instead of a click. A ✕ drops a misclick. See
-docs/specs/SPEC-record-steps.md. Server: rebuild and restart; TestBench 0.5.154.
+docs/specs/SPEC-record-steps.md.
+
+The recording also has **controls in the browser**: a small bar docked in the
+page (bottom-centre by default; drag it to any corner or edge, or minimise it
+to a pill — it remembers) with the time and action count, **Pause** (browse
+anywhere, nothing is recorded; resume where you left off), **Add check**,
+**Add step** (type any step — a `Verify …` or anything else — and it goes in
+exactly as written, locked in with everything recorded before it), **Undo**,
+**Stop** and **Cancel**, a status line with the last step, and a Steps so far
+drawer. Shortcuts: Alt+Shift+P/C/S/Z/M/R. It works on strict-CSP pages, is
+painted out of every screenshot the model sees, and its own clicks and keys are
+never recorded. A step you **type in the test file** during a recording joins
+it the same way: it is kept exactly as you wrote it, the recording numbers
+around it, and the next steps go after it. Pause, Resume and Add Step to
+Recording are also commands; `testbench-native.recordSteps.browserToolbar`
+turns the bar off. See stories/testbench-record-toolbar.md. Server: rebuild and
+restart; TestBench 0.5.157.
 
 ### Added — `drag` and `reload` steps
 

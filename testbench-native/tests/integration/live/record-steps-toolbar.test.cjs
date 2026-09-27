@@ -97,6 +97,15 @@ describe('TestBench live — the Record Steps toolbar in the page', function () 
     L.say(`project ${project.dir}, recording browser DevTools on :${project.cdpPort}, strict page ${strictOrigin}/strict.html`);
   });
 
+  // A test that FAILS mid-recording must not leave it running for a later
+  // test's Record to find (record-steps-extend.test.cjs measured that cascade).
+  // Only on failure: the first five tests here share one recording on purpose.
+  afterEach(async function () {
+    if (this.currentTest?.state !== 'failed' || !hooks?.recordingState()) return;
+    await vscode.commands.executeCommand('testbench-native.cancelRecording');
+    await L.waitFor('the leftover recording ends', () => hooks.recordingState() === null, 30_000).catch(() => {});
+  });
+
   after(async () => {
     if (hooks?.recordingState()) await vscode.commands.executeCommand('testbench-native.cancelRecording');
     await hooks?.setRecordingToolbar(undefined);

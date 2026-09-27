@@ -70,6 +70,15 @@ describe('TestBench live — Record Steps extends an existing test', function ()
     L.say(`project ${project.dir}, recording browser DevTools on :${project.cdpPort}`);
   });
 
+  // A test that fails mid-recording leaves it running, and the next test's
+  // Record would then find it already recording and drive THAT one — measured:
+  // a failed first test made the Cancel test cancel the wrong recording.
+  afterEach(async function () {
+    if (this.currentTest?.state !== 'failed' || !hooks?.recordingState()) return;
+    await vscode.commands.executeCommand('testbench-native.cancelRecording');
+    await L.waitFor('the leftover recording ends', () => hooks.recordingState() === null, 30_000).catch(() => {});
+  });
+
   after(async () => {
     if (hooks?.recordingState()) await vscode.commands.executeCommand('testbench-native.cancelRecording');
     if (vscode.debug.breakpoints.length > 0) vscode.debug.removeBreakpoints([...vscode.debug.breakpoints]);

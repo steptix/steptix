@@ -339,6 +339,18 @@ describe('the prompt with locks (buildRecordStepsPrompt)', () => {
     expect(text).toContain('Write the steps for these actions now. Answer with the one JSON object described in the rules, replaceFrom 0.');
   });
 
+  // Measured live: recording from a breakpoint after step 5 of a 6-step test,
+  // the first draft for ONE click came back as steps 1–5 copied from
+  // aroundTheCursor, the click, and step 6 — the file then held its whole
+  // flow twice. The excerpt is labelled as already in the file (I10).
+  it('an existing test\'s excerpt is labelled as already in the file, never part of the draft', () => {
+    const file = summarizeTargetFile('# T\n\n## Steps\n1. Navigate to /\n2. Click "Sign in"\n3. Click "Sign out"\n', 'cursor', 5);
+    const [, user] = buildRecordStepsPrompt({ ...base, file });
+    const text = textOf([user!]);
+    expect(text).toContain('">>" marks the line the new steps follow; every line there is already in the test, so none of it goes in the draft (I10).');
+    expect(text).toContain('>>   5  2. Click \\"Sign in\\"');
+  });
+
   it('without locks, the draft reads exactly as it always did', () => {
     const [, user] = buildRecordStepsPrompt({ ...base, draft: { steps: ['A', 'B'], parameters: [] } });
     const text = textOf([user!]);
@@ -355,6 +367,8 @@ describe('the prompt with locks (buildRecordStepsPrompt)', () => {
       'the actions right after it that only do what it says are covered by it, so write nothing for them',
       'A3. Never write a Verify that repeats one of the author\'s steps, not even for a check action',
       'I9. An action marked afterPause is the first thing the author did after pausing',
+      'I10. In an EXISTING test, every line in aroundTheCursor is already in the file',
+      'never copy, repeat or re-describe a step from aroundTheCursor',
       'D2. A solid dark box in a screenshot was painted over something you must not see',
     ]) {
       expect(RECORD_STEPS_SYSTEM).toContain(rule);
