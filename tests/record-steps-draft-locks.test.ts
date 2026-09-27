@@ -347,7 +347,7 @@ describe('the prompt with locks (buildRecordStepsPrompt)', () => {
     const file = summarizeTargetFile('# T\n\n## Steps\n1. Navigate to /\n2. Click "Sign in"\n3. Click "Sign out"\n', 'cursor', 5);
     const [, user] = buildRecordStepsPrompt({ ...base, file });
     const text = textOf([user!]);
-    expect(text).toContain('">>" marks the line the new steps follow; every line there is already in the test, so none of it goes in the draft (I10).');
+    expect(text).toContain('">>" marks the line the new steps follow; those lines are already in the test and are never copied into the draft, while every action below still gets its step (I10).');
     expect(text).toContain('>>   5  2. Click \\"Sign in\\"');
   });
 
@@ -368,7 +368,8 @@ describe('the prompt with locks (buildRecordStepsPrompt)', () => {
       'A3. Never write a Verify that repeats one of the author\'s steps, not even for a check action',
       'I9. An action marked afterPause is the first thing the author did after pausing',
       'I10. In an EXISTING test, every line in aroundTheCursor is already in the file',
-      'never copy, repeat or re-describe a step from aroundTheCursor',
+      'They are context, never copied into the draft: the draft is only the steps for the actions in THIS recording.',
+      'every action the author did take gets its step, even when a line in aroundTheCursor already does the same thing',
       'D2. A solid dark box in a screenshot was painted over something you must not see',
     ]) {
       expect(RECORD_STEPS_SYSTEM).toContain(rule);
