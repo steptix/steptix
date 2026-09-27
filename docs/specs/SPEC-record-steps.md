@@ -318,26 +318,52 @@ as it stood at the first write and the draft alone, so the file after drafts
 1…n reads as draft n alone would have made it. A draft older than the one
 written is skipped.
 
+**The rule over all of it: the recording never overwrites text it cannot
+prove it wrote.** What it wrote is kept as text — the block's lines, the
+parameter lines it added, and for each later step it renumbered the number it
+gave it and the rest of that line — and before every write, that text is
+checked to be where the recording left it (§7.4).
+
 - **Stop** writes the result the same way, over the last draft. Nothing is
   inserted twice.
 - **Cancel** — and a recording that ends in an error, or that the server
   ends — takes out everything the recording wrote: the block, the renumbering
   (every later step gets back the number it had), and the parameter lines it
   added, including a `## Parameters` section it created. A result with no
-  steps does the same.
+  steps does the same. Only what is found to be the recording's is taken out;
+  a later step gets its number back only when its line still reads exactly as
+  the recording numbered it.
 - The **author's own edits** elsewhere in the file stay, and what the
-  recording wrote is followed through them. An edit **inside** the lines
-  being recorded is overwritten by the next draft; the first one is warned
-  about, once per recording: "Lines being recorded are rewritten as the model
-  updates them — edit them after Stop." The later steps' numbers belong to
-  the recording while it runs; a later step whose line is deleted, or
-  rewritten around its number, is no longer renumbered.
+  recording wrote is followed through them. An edit wholly **inside** the
+  lines being recorded — some recorded text left on either side of it — is
+  overwritten by the next draft; the first one is warned about, once per
+  recording: "Lines being recorded are rewritten as the model updates them —
+  edit them after Stop." Nothing else is warned about: not an undo, a redo, a
+  revert or a reload. Replacing ALL the recorded lines at once is not an edit
+  inside them: what was typed in their place is the author's.
+- **Edges.** Whole lines typed at the start of the first recorded line go
+  above the block. Typing at the start of the line after the block is that
+  line's. A line break typed at the end of the last recorded line (End,
+  Enter) starts a line of the author's **below** the block: a step typed on
+  it stays, and the next draft writes above it.
+- **Later steps.** A later step's number belongs to the recording while its
+  line starts with exactly the number the recording gave it. Anything that
+  touches the line's start or its number — text typed in front of it, the
+  line indented, the number edited, the line deleted — makes that line the
+  author's: it is not renumbered, and Cancel does not give it its number
+  back, unless the whole line is found again, exactly (the author pressed
+  Enter after the text they typed in front of it, say). The rest of the line
+  after the number is the author's to edit throughout.
 - The lines being recorded — the steps and the parameter lines — are
-  **highlighted** until Stop or Cancel. When the editor shows where the steps
-  go, it follows the block as it grows.
+  **highlighted** until Stop or Cancel, and only while they are known to be
+  where they are. When the editor shows where the steps go, it follows the
+  block as it grows.
 - The file is **never saved** for the author. A draft that arrives while the
   file is in no visible editor still goes into it (a workspace edit); Stop
   shows the file, as insertion always has.
+- A file **renamed** while recording is followed: VS Code opens it under the
+  new name with the same unsaved text, and the drafts and the result go on
+  going into it there.
 - A file **closed** while recording is not written again: the panel keeps
   drafting, and the result is rescued as in §7.1.
 
@@ -349,9 +375,12 @@ saves it, and a draft written while the file is in no visible editor is an
 undo step of its own; when any of that happened, the result is written as two
 steps — the drafts taken out, then the result — so the one Ctrl+Z still lands
 on the file without the recording, the author's own edits kept (the file
-stays marked unsaved). Undoing further walks back through the drafts. After
-Cancel the file reads as it did, still marked unsaved; its history then holds
-one undo step that changes nothing.
+stays marked unsaved). An undo or redo during the recording is one of those
+too: one Ctrl+Z after Stop still lands on the file without the recording.
+Undoing further walks back through the drafts. After Cancel the file reads as
+it did, still marked unsaved; its history then holds one undo step that
+changes nothing. A result inserted once at the anchor (§7.4) is an undo step
+of its own, and one Ctrl+Z takes out exactly that insertion.
 
 ### 7.1 At the cursor
 
@@ -390,10 +419,11 @@ and the author is told. From the first write on, what the recording wrote is
 what is followed.
 
 A result is never lost. One that cannot be written — `## Steps` deleted
-before anything was written, the file closed, renamed or deleted while
-recording, the edit rejected three times — is written to the TestBench
-output, and the error offers **Copy steps**; any draft still in the file is
-taken out. A result with no steps (nothing recorded, or every action
+before anything was written, the file closed or deleted while recording (a
+rename is followed, §7), the edit rejected three times, or the drafts not
+found and the anchor's flow gone (§7.4) — is written to the TestBench
+output, and the error offers **Copy steps**; any draft still found in the
+file is taken out. A result with no steps (nothing recorded, or every action
 dropped) is said as the server's note, as information rather than an error.
 
 ### 7.2 A new test
@@ -445,6 +475,74 @@ Every **typed** value becomes a parameter; selecting and ticking do not.
 - A value is written exactly as it was typed, bar the whitespace at its ends
   (which the parser trims). A value with a line break cannot be one
   parameter line: it is left out, and a warning names the parameter.
+
+### 7.4 Finding what the recording wrote
+
+Most edits can be followed by position: an edit above what the recording
+wrote moves it, one below leaves it, one inside it is taken in. Some cannot,
+because VS Code reports them as line diffs that reach across the recorded
+lines' edges, or as one change over the whole document:
+
+- an **undo** or **redo** (whatever it undoes — the author's typing or a
+  draft);
+- **File: Revert**, a save conflict resolved by reverting, and a **reload
+  from disk** (a checkout while the file is saved, with auto-save on): the
+  change that leaves the document with no unsaved changes, which the
+  recording did not make;
+- a **line-ending change** (LF to CRLF), or any other extension replacing
+  the whole document;
+- any edit that is partly inside what the recording wrote and partly out.
+
+After one of those, before anything is written, what the recording wrote is
+looked for by its text — the last draft's, then each earlier draft's (an
+undo can bring any of them back, including one from before the recording
+started over at its anchor): its block as one run of whole lines exactly
+once in the file, below the anchor, its parameter lines exactly once, and
+nothing else of any draft's left outside them. Line endings are compared
+after converting the recording's text to the file's.
+
+- **Found:** the recording carries on from there — the next draft replaces
+  it.
+- **Nothing of it left** (not one line any draft wrote is in the file more
+  often than it was before): the next draft goes in afresh at the anchor, as
+  the first one did. The anchor must be found — where it was followed to,
+  else by its text; failing that, as below. This is an undo that took the
+  drafts out, a revert, a reload to a version without them.
+- **Anything else** — part of it left, all of it there twice, or lines the
+  author edited inside it since the last draft: the recording **stops
+  writing into the file** for the rest of this recording. The author is told
+  once: "The recorded steps could not be found in the file any more, so they
+  are no longer written live; the panel keeps them and Stop will insert them
+  at your cursor line." The panel keeps drafting, and nothing is highlighted.
+  **Stop** looks once more and, finding it, writes the result over it;
+  otherwise it inserts the result once at the anchor, into the file as it is
+  — the one-shot insertion every result used before drafts were written live
+  (the anchor where it was followed to, else by its text, else the end of its
+  flow, said) — and what is left of the drafts is left for the author. When
+  even that cannot be written, the result is rescued (§7.1). **Cancel** takes
+  out only what it can still find; when it finds nothing, nothing is taken
+  out, and the panel's log says so.
+
+### 7.5 A window closed while recording
+
+When the window closes or reloads, or the extension host restarts, while a
+recording runs, the recording is cancelled and its draft taken out if the
+extension still has a moment to do it (best effort). A window reload usually
+does not give it that moment: hot exit backs the unsaved file up — draft and
+all — before extensions stop.
+
+So after every write, what the recording has written into the file — the
+file, the block's lines, the parameter lines it added, each later step's
+number, the number it had and the rest of its line — is kept in the
+workspace's state (following the file through a rename), and forgotten when
+the recording ends — unless taking the draft out at the end was tried and
+the edit did not go through, as when the window goes first. At the next
+activation, one still kept whose block and parameter lines are in that file
+**exactly** once is offered for removal: **Remove the unfinished recording's
+steps** (the empty draft, found by text: the block and parameter lines out,
+each later step whose line is exact given its number back) or **Keep them**.
+One whose lines were edited since, or are gone, is not offered. The kept
+record is forgotten either way.
 
 ## 8. Writing the steps
 
@@ -599,6 +697,8 @@ while recording."`. `done` is always the last frame.
 | No model configured | "Record Steps needs a model to write the steps; configure ai in aiui.config.json or .env." |
 | The model's answer could not be read | "The steps could not be written: <reason>. Nothing was inserted." |
 | The author edits a line being recorded | "Lines being recorded are rewritten as the model updates them — edit them after Stop." — a warning, once per recording |
+| What the recording wrote can no longer be found in the file (§7.4) | "The recorded steps could not be found in the file any more, so they are no longer written live; the panel keeps them and Stop will insert them at your cursor line." — a warning, once per recording |
+| A recording was cut off by a window reload and its draft is still in the file | "Record Steps: a recording was still running when the window closed, and its draft steps are still in <file>." with **Remove the unfinished recording's steps** and **Keep them** (§7.5) |
 | A parameter name conflicts | "Parameter <name> already exists with a different value; the recorded value was not added." |
 | The file for Record New Test exists | "<path> already exists." |
 | Record New Test's tests folder is outside the workspace | "The project's tests folder (<path>) is outside this workspace, so Record New Test cannot create a test there. …" |
@@ -623,6 +723,11 @@ while recording."`. `done` is always the last frame.
   renumbers only that body.
 - The file shows each draft as it arrives, in place of the last; Cancel
   restores it byte for byte.
+- No undo, redo, revert, reload, line-ending change, rename or edit of the
+  author's while recording makes a draft, the result or Cancel delete or
+  change a character the recording did not write (bar a later step's number
+  while its line is exactly as the recording numbered it, and an edit wholly
+  inside the recorded lines, warned about).
 - One Ctrl+Z after Stop takes the whole recording out — byte for byte when
   nothing else changed the file while recording.
 - A dropped action produces no step.

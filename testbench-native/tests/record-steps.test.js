@@ -812,7 +812,7 @@ function writeDrafts(text, anchor, drafts, live = beginLiveRecord(text, anchor))
     assert.ok(!('error' in w), w.error);
     assert.equal(applyOffsetEdits(cur, w.edits), w.text, 'the edits make the text the write reports');
     cur = w.text;
-    live.slots = w.slots;
+    Object.assign(live, w.record);
     // Every slot holds what this draft put there.
     for (const slot of w.slots) {
       if (slot.kind === 'block') assert.equal(cur.slice(slot.start, slot.end), w.plan?.parts.block ?? '');
@@ -973,7 +973,9 @@ test('live drafts: a later step the author deletes is not renumbered again; the 
   const r = authorEdit(run.text, run.live, offsetChange(lineC, '4. C\n'.length, ''));
   assert.equal(r.touched, false);
   assert.equal(r.text, doc('## Steps', '1. A', '2. New', '3. B', '5. D'));
-  assert.equal(run.live.slots.filter((s) => s.kind === 'tail').length, 2, 'C\'s ordinal is no longer the recording\'s');
+  // Unplaced rather than forgotten: its line is looked for again, exactly, at
+  // every write — and it is gone, so it is never written.
+  assert.equal(run.live.slots.filter((s) => s.kind === 'tail' && s.placed !== false).length, 2, 'C\'s ordinal is no longer the recording\'s');
   const next = writeDrafts(r.text, anchor, [{ steps: ['New', 'Newer'], parameters: [] }, EMPTY], run.live);
   assert.equal(next.after[0], doc('## Steps', '1. A', '2. New', '3. Newer', '4. B', '6. D'));
   assert.equal(next.after[1], doc('## Steps', '1. A', '2. B', '4. D'));
@@ -993,8 +995,8 @@ test('slot edges: whole lines at the block\'s start go above it; typing at the s
   const above = trackRecordSlots(run.live.slots, [offsetChange(start, 0, 'x\n')]);
   assert.equal(above.touched, false);
   assert.equal(above.slots.find((s) => s.kind === 'block').start, start + 2);
-  // Typing where the block ends is on the next line — which is `3. B`, whose
-  // digits are the recording's too, so it is absorbed by the tail, not the block.
+  // Typing where the block ends is on the next line — which is `3. B`: typed
+  // in front of its number, which makes that line the author's, not the block's.
   const atEnd = trackRecordSlots(run.live.slots, [offsetChange(end, 0, 'y')]);
   assert.equal(atEnd.touched, false);
   assert.deepEqual(atEnd.slots.find((s) => s.kind === 'block'), block());

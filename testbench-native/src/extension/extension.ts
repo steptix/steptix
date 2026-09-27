@@ -29,7 +29,7 @@ import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
 import { registerCommands } from './commands/index.js';
 import type { SkillRunTarget } from './skill-run-targets.js';
 import { CodeBehindDiffs } from './codebehind-diff.js';
-import { StepRecorder, type RecordingReport } from './step-recorder.js';
+import { StepRecorder, type PersistedRecording, type RecordingReport } from './step-recorder.js';
 import { disposeOutputChannel, getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
 import { frameTargetUri, workspaceFolderFor } from './workspace.js';
@@ -1977,6 +1977,17 @@ export interface TestBenchTestHooks {
   /** Record Steps: the notifications the most recent recording showed while
    *  it ran (the warning about editing the lines being recorded). */
   recordingNotices: () => Array<{ level: 'info' | 'warn' | 'error'; text: string }>;
+  /** Record Steps: what the in-flight recording has written, as kept in the
+   *  workspace's state for a window reload, or undefined. */
+  recordingPersisted: () => PersistedRecording | undefined;
+  /** Record Steps: put a kept recording back — the state a window reload that
+   *  cut a recording off leaves behind. */
+  setRecordingPersisted: (value: PersistedRecording | undefined) => Promise<void>;
+  /** Record Steps: what activation does with a kept recording, the offer
+   *  answered with `choice` (the button's text, or undefined for dismissed). */
+  recoverUnfinishedRecording: (choice: string | undefined) => Promise<'none' | 'not-found' | 'kept' | 'removed'>;
+  /** Record Steps: what `deactivate` does with a recording in flight. */
+  shutdownRecording: () => Promise<void>;
 }
 
 export interface TestBenchExports {
@@ -2040,6 +2051,16 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
   const view = new TestBenchRunnerView(context, tracker);
   const serverStatusBar = new ServerStatusBar(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
   const registry = new RunControllerRegistry(view, tracker, serverLogPath, serverStatusBar);
+  // Record Steps keeps an in-flight recording's writes in the workspace's
+  // state; one a reload cut off is offered for removal now
+  // (SPEC-record-steps.md §7).
+  registry.recorder.attachStorage(context.workspaceState);
+  recorderAtShutdown = registry.recorder;
+  void registry.recorder.recoverUnfinished().catch((err: unknown) => {
+    out.appendLine(
+      `[${ts()}] Record Steps: checking for an unfinished recording failed — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
   const discovery = new TestDiscovery();
   const testController = new TestBenchTestController(discovery, registry, {
     // Forward batch progress to the sidebar webview banner. `null` clears
@@ -2450,6 +2471,10 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       recordingSettled: () => registry.recorder.settled,
       recordingHighlight: () => registry.recorder.highlightedLines,
       recordingNotices: () => registry.recorder.liveNotices,
+      recordingPersisted: () => registry.recorder.persisted,
+      setRecordingPersisted: (value) => registry.recorder.setPersisted(value),
+      recoverUnfinishedRecording: (choice) => registry.recorder.recoverUnfinished(async () => choice),
+      shutdownRecording: () => registry.recorder.shutdown(),
     },
   };
 }
@@ -2714,6 +2739,16 @@ function notifyNoActive(): void {
   );
 }
 
-export function deactivate(): void {
+/** The recorder `deactivate` gives a moment to take an in-flight recording's
+ *  draft back out of its file. */
+let recorderAtShutdown: StepRecorder | null = null;
+
+export async function deactivate(): Promise<void> {
+  const recorder = recorderAtShutdown;
+  recorderAtShutdown = null;
+  // Called before the subscriptions are disposed: the recording is cancelled
+  // here, and its draft taken out if the host lives that long (best effort —
+  // what is left is offered for removal at the next activation).
+  await recorder?.shutdown().catch(() => undefined);
   disposeOutputChannel();
 }

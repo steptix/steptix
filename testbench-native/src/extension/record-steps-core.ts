@@ -25,8 +25,10 @@
  * `liveRecordWrite`): the first write fixes the place and keeps the document
  * as it stood then; each later draft is that same plan against that same text,
  * written into the regions the recording owns (`RecordSlot`), which are
- * carried through the author's own edits (`trackRecordSlots`). The empty
- * draft puts back what the file had.
+ * carried through the author's own edits (`trackRecordSlots`) and, where
+ * offsets cannot follow an edit, found again by what they hold
+ * (`locateLiveRecord`) — the recording never overwrites text it cannot prove
+ * it wrote. The empty draft puts back what the file had.
  *
  * What counts as a step is runner-core's `classifyLines`, with the fence
  * correction renumber-core makes: a numbered line inside a ``` fence is text.
@@ -1071,6 +1073,17 @@ export function applyRecordEdits(text: string, edits: RecordEdit[]): string {
 // ---------------------------------------------------------------------------
 // The file while recording: every draft written in place of the last
 // ---------------------------------------------------------------------------
+//
+// The rule every function below serves (SPEC-record-steps.md §7): the
+// recording never overwrites text it cannot prove it wrote. What it wrote is
+// kept as TEXT — the block's lines, the parameter lines, each later step's
+// number and the rest of its line — and every write first checks that text is
+// still where the offsets say (`locateLiveRecord`). Offsets are only the fast
+// path. When a change came that they cannot follow exactly (an undo or redo, a
+// revert or reload, a line-ending change, anything reaching across the edge of
+// what was written), the text is looked for instead; found exactly once, the
+// recording carries on from there; with nothing of it left, it starts again at
+// the anchor; otherwise it stops writing into the file (`lost`).
 
 /**
  * A region of the document a recording owns while it runs, as offsets into the
@@ -1080,9 +1093,9 @@ export function applyRecordEdits(text: string, edits: RecordEdit[]): string {
  *    table or a following heading needs. Empty until a draft has steps.
  *  - `params`: the parameter lines the recording added, or the whole
  *    `## Parameters` section it created. Empty while it adds none.
- *  - `tail`: the ordinal of one later step of the same flow, which the block
- *    renumbers. `original` is what the file had — what the empty draft
- *    writes back.
+ *  - `tail`: the number of one later step of the same flow, which the block
+ *    renumbers — `start` is its line's start, `end` the end of its digits.
+ *    `original` is what the file had, and what the empty draft writes back.
  */
 export interface RecordSlot {
   kind: 'params' | 'block' | 'tail';
@@ -1091,69 +1104,131 @@ export interface RecordSlot {
   /** The slot hangs off the END of a line — its text starts with a line
    *  break — because it follows the file's last line, which has none. */
   lineEnd: boolean;
+  /** What the recording last wrote here: the block's or the parameters' text
+   *  ('' before any), or a later step's digits (its original ones until the
+   *  first renumber). */
+  wrote: string;
   /** `tail`: the step's 0-based line in `LiveRecord.base`. */
   line?: number;
-  /** `tail`: its ordinal as the file had it. */
+  /** `tail`: its number as the file had it. */
   original?: string;
+  /** `tail`: the rest of its line after the digits, as it last read. With
+   *  `wrote`, the whole line the step is looked for by when `placed` is false. */
+  rest?: string;
+  /** `tail`: its number is where `start` says. False once anything touched
+   *  the line's start or its number (typing in front of it, indenting it,
+   *  editing the number, deleting the line) — the line is then the author's
+   *  unless it is found again, exactly, by its text. */
+  placed?: boolean;
+  /** `block`/`params`: an edit wholly inside since the last write — the slot
+   *  no longer reads `wrote`, and the next draft writes over it (warned). */
+  touched?: boolean;
+}
+
+/**
+ * One state of the file a recording wrote: the document as it stood when the
+ * recording first wrote to it (`base`), the anchor as found there, the flow,
+ * and the slots with what was written in them.
+ */
+export interface LiveState {
+  base: string;
+  anchor: RecordAnchor | null;
+  /** The flow the steps join — where later steps are looked for by text. */
+  section: string | null;
+  slots: RecordSlot[];
 }
 
 /**
  * What a recording keeps so that each draft replaces the last one in the file
- * rather than being inserted again: the document as it stood when the
- * recording first wrote to it (`base`), the anchor as found there, and the
- * slots, carried through every edit since (`trackRecordSlots`).
+ * rather than being inserted again: its state now, and the state after every
+ * earlier write (`history`) — an undo can bring any of those back, including
+ * one from before the recording started again at its anchor (a revert, then
+ * Ctrl+Z).
  *
  * What a draft writes is a pure function of `base`, `anchor` and the draft —
  * the same `planRecordInsertion` a one-shot insertion uses — so the file after
  * drafts d1…dn reads as dn alone would have made it, and the EMPTY draft puts
  * back exactly what the file had: no block, no added parameter lines, every
- * later step's ordinal as it was written. What the author changed elsewhere
+ * later step's number as it was written. What the author changed elsewhere
  * meanwhile is outside the slots, and stays.
  */
-export interface LiveRecord {
-  base: string;
-  anchor: RecordAnchor | null;
-  slots: RecordSlot[];
+export interface LiveRecord extends LiveState {
+  /** A change since the last write that the offsets could not follow
+   *  exactly: before anything is written, the recording's text is looked for
+   *  (`locateLiveRecord`). */
+  uncertain: boolean;
+  /** Earlier states that held written steps, oldest first. */
+  history: LiveState[];
 }
+
+/** The state part of a record, for its history. */
+function stateOf(record: LiveState): LiveState {
+  return { base: record.base, anchor: record.anchor, section: record.section, slots: record.slots };
+}
+
+/** The state holds steps the recording wrote. */
+const holdsSteps = (state: LiveState): boolean => state.slots.some((s) => s.kind === 'block' && s.wrote !== '');
 
 /** A replacement in offsets of the document as it is — `start === end` inserts. */
 export interface OffsetEdit {
   start: number;
   end: number;
   text: string;
+  /** The slot it writes, when a live write made it. */
+  kind?: RecordSlot['kind'];
 }
+
+/** How many earlier writes an undo is looked for among. */
+const HISTORY_LIMIT = 50;
+
+/** SPEC-record-steps.md §7: why a recording stopped writing into its file. */
+export const RECORDING_NOT_FOUND = 'the recorded steps could not be found in the file any more';
 
 /**
  * Fix where a recording writes into `text`: the block's point after the
- * anchor, the parameters' point, and the ordinal of every later step of that
+ * anchor, the parameters' point, and the number of every later step of that
  * flow. Nothing is written yet — every slot but the tails is empty. Fails as
- * `planRecordInsertion` does when there is no `## Steps` to write under.
+ * `planRecordInsertion` does when there is no `## Steps` to write under, and —
+ * `strict`, when the recording starts again after its text vanished — when the
+ * anchor itself cannot be found.
  */
-export function beginLiveRecord(text: string, anchor: RecordAnchor | null): LiveRecord | { error: string } {
+export function beginLiveRecord(
+  text: string,
+  anchor: RecordAnchor | null,
+  opts: { strict?: boolean } = {},
+): LiveRecord | { error: string } {
   const placed = placeRecording(text, anchor);
   if ('error' in placed) return placed;
+  if (opts.strict && placed.fellBack) return { error: 'the line the steps go after could not be found' };
   const starts = lineStarts(text);
   const at = (line: number, char: number): number => (starts[line] ?? text.length) + char;
   const params = parametersPoint(placed.m);
   const block = blockPoint(placed);
   const slots: RecordSlot[] = [
-    { kind: 'params', start: at(params.line, params.char), end: at(params.line, params.char), lineEnd: params.lineEnd },
-    { kind: 'block', start: at(block.line, block.char), end: at(block.line, block.char), lineEnd: block.lineEnd },
+    { kind: 'params', start: at(params.line, params.char), end: at(params.line, params.char), lineEnd: params.lineEnd, wrote: '' },
+    { kind: 'block', start: at(block.line, block.char), end: at(block.line, block.char), lineEnd: block.lineEnd, wrote: '' },
     ...tailOf(placed).map(
       (t): RecordSlot => ({
         kind: 'tail',
         start: at(t.line, 0),
         end: at(t.line, t.digits.length),
         lineEnd: false,
+        wrote: t.digits,
         line: t.line,
         original: t.digits,
+        rest: (placed.m.lines[t.line] ?? '').slice(t.digits.length),
+        placed: true,
       }),
     ),
   ];
-  // Stable: at one offset the parameters come before the block, and the block
-  // before the step it is inserted ahead of — the order the text reads in.
-  slots.sort((a, b) => a.start - b.start);
-  return { base: text, anchor: anchor === null ? null : { ...anchor }, slots };
+  return {
+    base: text,
+    anchor: anchor === null ? null : { ...anchor },
+    section: placed.section,
+    slots: sortSlots(slots),
+    uncertain: false,
+    history: [],
+  };
 }
 
 export interface LiveRecordWrite {
@@ -1162,11 +1237,17 @@ export interface LiveRecordWrite {
   edits: OffsetEdit[];
   /** The slots once `edits` are applied. */
   slots: RecordSlot[];
+  /** The record once `edits` are applied — keep it for the next write. */
+  record: LiveRecord;
   /** The document once `edits` are applied. */
   text: string;
   /** The draft's plan against `base` — its section, the parameters it adds
    *  and its warnings — or null for the empty draft. */
   plan: RecordInsertionPlan | null;
+  /** Before writing, the recording's text was not where the offsets said:
+   *  `found` again by its text, or — nothing of it left — written `fresh` at
+   *  the anchor. */
+  relocated: 'no' | 'found' | 'fresh';
 }
 
 /**
@@ -1174,18 +1255,48 @@ export interface LiveRecordWrite {
  * the recording wrote last — read as `draft`: each slot replaced by what the
  * draft puts there. A draft with no steps is the empty draft: it takes out
  * everything the recording wrote (parameters too — they only exist for the
- * steps) and writes each later step's ordinal back as the file had it.
+ * steps) and writes each later step's number back as the file had it.
+ *
+ * First, what the recording wrote is found (`locateLiveRecord`). When it
+ * cannot be — gone in part, or there twice — nothing is written: `lost`, and
+ * the caller stops writing into the file. When NONE of it is left (an undo
+ * took the drafts out, a revert or reload put the file back) a draft is
+ * written afresh at the anchor — `opts.anchor`, the anchor as the caller has
+ * followed it, else the record's own found by its text — as the first write
+ * was; the empty draft then has nothing to take out.
  */
 export function liveRecordWrite(
   live: LiveRecord,
   current: string,
   draft: { steps: unknown[]; parameters: unknown[] },
-): LiveRecordWrite | { error: string } {
+  opts: { anchor?: RecordAnchor | null } = {},
+): LiveRecordWrite | { error: string; lost?: boolean } {
   const steps = cleanSteps(draft.steps);
+  const where = locateLiveRecord(live, current, opts.anchor);
+  if (where.status === 'lost') return { error: where.reason, lost: true };
+  let record: LiveRecord;
+  /** The history the record carries on: every earlier state that held steps. */
+  let prior: LiveState[];
+  let relocated: LiveRecordWrite['relocated'] = where.status === 'found' && where.moved ? 'found' : 'no';
+  if (where.status === 'absent') {
+    if (steps.length === 0) {
+      return { edits: [], slots: live.slots, record: live, text: current, plan: null, relocated: 'no' };
+    }
+    const anchor = opts.anchor !== undefined ? opts.anchor : live.anchor && { ...live.anchor, tracked: false };
+    const begun = beginLiveRecord(current, anchor, { strict: true });
+    if ('error' in begun) return { error: `${RECORDING_NOT_FOUND} (${begun.error})`, lost: true };
+    record = begun;
+    prior = holdsSteps(live) ? [...live.history, stateOf(live)] : live.history;
+    relocated = 'fresh';
+  } else {
+    record = where.record;
+    prior = holdsSteps(record) ? [...record.history, stateOf(record)] : record.history;
+  }
+
   let plan: RecordInsertionPlan | null = null;
   let want: (slot: RecordSlot) => string = (slot) => (slot.kind === 'tail' ? (slot.original ?? '') : '');
   if (steps.length > 0) {
-    const planned = planRecordInsertion(live.base, { anchor: live.anchor, steps, parameters: draft.parameters });
+    const planned = planRecordInsertion(record.base, { anchor: record.anchor, steps, parameters: draft.parameters });
     if ('error' in planned) return planned;
     plan = planned;
     const renumbered = new Map(planned.parts.renumber.map((r) => [r.line, r.text]));
@@ -1196,22 +1307,46 @@ export function liveRecordWrite(
           ? planned.parts.params
           : (renumbered.get(slot.line ?? -1) ?? slot.original ?? '');
   }
+
   const edits: OffsetEdit[] = [];
-  const slots: RecordSlot[] = [];
+  const written: RecordSlot[] = [];
+  const shifts: Array<{ at: number; delta: number }> = [];
   let delta = 0;
   let floor = 0;
-  for (const slot of live.slots) {
-    // Overlapping slots cannot come out of `trackRecordSlots`; one that did
-    // would be written twice, so it is left alone.
+  for (const slot of record.slots) {
+    // A later step whose line is not where it was and could not be found by
+    // its text is the author's now: not written, not renumbered.
+    if (slot.kind === 'tail' && slot.placed === false) continue;
+    // Overlapping slots cannot come out of the tracker or the search; one that
+    // did would be written twice, so it is left alone.
     if (slot.start < floor) continue;
     floor = slot.end;
     const text = want(slot);
-    if (current.slice(slot.start, slot.end) !== text) edits.push({ start: slot.start, end: slot.end, text });
+    if (current.slice(slot.start, slot.end) !== text) {
+      edits.push({ start: slot.start, end: slot.end, text, kind: slot.kind });
+      shifts.push({ at: slot.end, delta: text.length - (slot.end - slot.start) });
+    }
     const start = slot.start + delta;
-    slots.push({ ...slot, start, end: start + text.length });
+    written.push({ ...slot, start, end: start + text.length, wrote: text, touched: false });
     delta += text.length - (slot.end - slot.start);
   }
-  return { edits, slots, text: applyOffsetEdits(current, edits), plan };
+  // Steps the author has taken over keep their place as a hint, moved past
+  // the writes above them.
+  for (const slot of record.slots) {
+    if (slot.kind !== 'tail' || slot.placed !== false) continue;
+    const moved = shifts.filter((s) => s.at <= slot.start).reduce((sum, s) => sum + s.delta, 0);
+    written.push({ ...slot, start: slot.start + moved, end: slot.end + moved });
+  }
+  const slots = sortSlots(written);
+  const history = prior.slice(-HISTORY_LIMIT);
+  return {
+    edits,
+    slots,
+    record: { ...record, slots, uncertain: false, history },
+    text: applyOffsetEdits(current, edits),
+    plan,
+    relocated,
+  };
 }
 
 /** `text` with offset edits applied, all in `text`'s offsets. At one start, a
@@ -1235,78 +1370,438 @@ export interface OffsetChange {
 
 /**
  * Carry the slots through one batch of edits someone else made (one
- * `onDidChangeTextDocument` event that was not the recording's own write).
+ * `onDidChangeTextDocument` event that was not the recording's own write),
+ * where the offsets CAN follow them:
  *
- * An edit before a slot moves it; one after leaves it. An edit that reaches
- * INTO the block or the parameters — the lines being recorded — is taken into
- * the slot, so the next draft rewrites it, and `touched` says so (the author
- * is warned, once). The ordinal of a later step belongs to the recording while
- * it runs: an edit within those digits is taken in too; one that reaches past
- * them — the line deleted, or rewritten around its number — drops the slot,
- * and that step is not renumbered again.
+ *  - an edit before a slot moves it; one after leaves it;
+ *  - an edit wholly inside the block or the parameters — the lines being
+ *    recorded — is taken into the slot, so the next draft rewrites it, and
+ *    `touched` says so (the author is warned, once);
+ *  - an edit that reaches ACROSS a slot's edge — part inside, part out — can
+ *    not be followed by offsets: `uncertain`, and the next write finds the
+ *    recording's text by the text itself;
+ *  - a later step's number is the recording's only while its line starts with
+ *    exactly that number: anything that touches the line's start or its
+ *    number unplaces it (`placed: false`) — typing in front of it, indenting
+ *    it, editing the number, deleting the line. It is written again only if
+ *    its whole line is found again, exactly.
  *
- * At a slot's edge, an insertion counts as outside it when it cannot be part
- * of it: whole lines put in at its start go above it, and typing at the start
- * of the line after it is that line's. Typing at the start of a recorded line,
- * or at the end of the last one when the block ends the file, is inside.
+ * At a slot's edge an insertion is outside when it cannot be part of it:
+ * whole lines put in at its start go above it; typing at the start of the line
+ * after it is that line's; and a line break typed at the end of its last line
+ * (End, Enter) starts a line BELOW it, which is the author's. Typing at the
+ * start of a recorded line, or at the end of the last one when the block ends
+ * the file, is inside.
  */
 export function trackRecordSlots(
   slots: RecordSlot[],
   changes: OffsetChange[],
-): { slots: RecordSlot[]; touched: boolean } {
-  let out = slots.map((s) => ({ ...s }));
+): { slots: RecordSlot[]; touched: boolean; uncertain: boolean } {
+  const out = slots.map((s) => ({ ...s }));
   let touched = false;
+  let uncertain = false;
   // Bottom-up, so each change's offsets are still those it was reported in.
   const ordered = [...changes].sort((a, b) => b.offset - a.offset);
   for (const c of ordered) {
     const delta = c.text.length - c.length;
-    const end = c.offset + c.length;
-    const next: RecordSlot[] = [];
     for (const slot of out) {
-      const where = slotRelation(slot, c);
-      if (where === 'before') {
-        next.push({ ...slot, start: slot.start + delta, end: slot.end + delta });
-      } else if (where === 'after') {
-        next.push(slot);
-      } else if (slot.kind === 'tail') {
-        if (c.offset >= slot.start && end <= slot.end) next.push({ ...slot, end: slot.end + delta });
-      } else if (slot.start === slot.end) {
-        // Nothing written there yet: the point moves to the edge of the edit.
-        const at = slot.lineEnd ? c.offset + c.text.length : c.offset;
-        next.push({ ...slot, start: at, end: at });
-      } else {
-        touched = true;
-        next.push({
-          ...slot,
-          start: Math.min(slot.start, c.offset),
-          end: Math.max(slot.end + delta, c.offset + c.text.length),
-        });
+      if (slot.kind === 'tail') {
+        trackTail(slot, c, delta);
+        continue;
+      }
+      switch (regionRelation(slot, c)) {
+        case 'before':
+          slot.start += delta;
+          slot.end += delta;
+          break;
+        case 'after':
+          break;
+        case 'inside':
+          touched = true;
+          slot.touched = true;
+          slot.end += delta;
+          break;
+        case 'across':
+          // Left where it was: the next write looks for it by its text.
+          uncertain = true;
+          break;
       }
     }
-    out = next;
   }
-  return { slots: out, touched };
+  return { slots: out, touched, uncertain };
 }
 
-function slotRelation(slot: RecordSlot, c: OffsetChange): 'before' | 'after' | 'inside' {
-  const end = c.offset + c.length;
-  if (end < slot.start) return 'before';
-  if (c.offset > slot.end) return 'after';
+function regionRelation(slot: RecordSlot, c: OffsetChange): 'before' | 'after' | 'inside' | 'across' {
+  const { start: s, end: e } = slot;
+  const cEnd = c.offset + c.length;
+  if (cEnd < s) return 'before';
+  if (c.offset > e) return 'after';
   if (c.length > 0) {
-    if (end === slot.start) return 'before';
-    if (c.offset === slot.end) return 'after';
-    return 'inside';
+    if (cEnd === s) return 'before';
+    if (c.offset === e) return 'after';
+    // Inside only when some of the slot's text is left on one side of it:
+    // the whole slot replaced is the author's text in its place.
+    if (s < e && c.offset >= s && cEnd <= e && (c.offset > s || cEnd < e)) return 'inside';
+    return 'across';
   }
-  // An insertion at an edge.
-  if (c.offset === slot.start) {
-    if (slot.lineEnd || c.text.endsWith('\n')) return 'before';
-    return slot.start === slot.end ? 'after' : 'inside';
+  // An insertion at an edge, or inside.
+  if (s === e) {
+    // Nothing written there yet: the point stays below whole lines typed at
+    // it, and above typing that joins the line it is in front of.
+    return slot.lineEnd || endsWithBreak(c.text) ? 'before' : 'after';
   }
-  // At the end of a non-empty slot: the start of the line after it, unless the
-  // slot ends mid-line — the last recorded line of a file with no final line
-  // break, or an ordinal's digits.
-  if (c.offset === slot.end) return slot.lineEnd || slot.kind === 'tail' ? 'inside' : 'after';
+  if (c.offset === s) return slot.lineEnd || endsWithBreak(c.text) ? 'before' : 'inside';
+  if (c.offset === e) {
+    // The start of the line after the slot — unless the slot ends mid-line
+    // (the block ends the file): then it is the end of the last recorded
+    // line, where a line break starts a new line of the author's below it.
+    if (!slot.lineEnd) return 'after';
+    return startsWithBreak(c.text) ? 'after' : 'inside';
+  }
+  // End, Enter on the slot's last line: the break goes in just before the
+  // slot's own final break, and the slot's text is unchanged up to its end —
+  // the new line after it is the author's.
+  const eol = slot.wrote.endsWith('\r\n') ? '\r\n' : '\n';
+  if (!slot.lineEnd && slot.wrote.endsWith(eol) && c.offset === e - eol.length && c.text.startsWith(eol)) return 'after';
   return 'inside';
+}
+
+/** Follow one later step's number through a change (see `trackRecordSlots`). */
+function trackTail(slot: RecordSlot, c: OffsetChange, delta: number): void {
+  const cEnd = c.offset + c.length;
+  // Wholly above the line — or a line deleted above it, ending at its start.
+  if (cEnd < slot.start || (c.length > 0 && cEnd === slot.start)) {
+    slot.start += delta;
+    slot.end += delta;
+    return;
+  }
+  if (slot.placed === false) return;
+  if (c.length === 0 && c.offset === slot.start) {
+    // Whole lines typed in front of it push it down; anything else joins the
+    // front of its line.
+    if (endsWithBreak(c.text)) {
+      slot.start += delta;
+      slot.end += delta;
+    } else {
+      slot.placed = false;
+    }
+    return;
+  }
+  // After the number's dot: the step's own text, or later lines.
+  if (c.offset > slot.end) return;
+  slot.placed = false;
+}
+
+const endsWithBreak = (text: string): boolean => text.endsWith('\n');
+const startsWithBreak = (text: string): boolean => text.startsWith('\n') || text.startsWith('\r\n');
+
+/** Where a recording's text is now — see `locateLiveRecord`. */
+export type LiveRecordLocation =
+  | { status: 'found'; record: LiveRecord; moved: boolean }
+  | { status: 'absent' }
+  | { status: 'lost'; reason: string };
+
+/**
+ * Find what the recording wrote in `current`.
+ *
+ * Fast path — nothing since the last write the offsets could not follow: each
+ * region still reads what was written there (or was only edited inside, and
+ * warned about), and each later step's line still starts with the number the
+ * recording gave it. A later step that does not is looked for by its whole
+ * line; not found exactly once, it is the author's (`placed: false`).
+ *
+ * Otherwise the text itself is looked for — the last write's, then each
+ * earlier write's, each with the base it was planned against (undo walks back
+ * through them): the block's lines as one run exactly once in the file,
+ * starting at a line and below the anchor; the parameter lines it added
+ * exactly once; nothing of any write's lines left outside those; each later
+ * step's line exactly once in the flow below the block. Found: `found`, with
+ * the slots where it is. Not found, and not one line the recording wrote is
+ * left in the file (more often than the base had it): `absent`. Anything
+ * else — part of it left, all of it there twice, or lines edited inside since
+ * the last write that are not back as written — is `lost`.
+ *
+ * `anchor` is the anchor as the caller followed it through the document's
+ * edits; without it, the record's own is found by its text.
+ */
+export function locateLiveRecord(live: LiveRecord, current: string, anchor?: RecordAnchor | null): LiveRecordLocation {
+  const record = withEol(live, current);
+  let m: LineModel | null = null;
+  const model = (): LineModel => (m ??= modelOf(current));
+  if (!record.uncertain) {
+    const inPlace = verifyInPlace(record, current, model);
+    if (inPlace) return { status: 'found', record: inPlace, moved: false };
+  }
+  const found = anchor !== undefined ? anchor : record.anchor && { ...record.anchor, tracked: false };
+  const anchorIdx = found === null ? model().stepsIdx : (locateAnchor(model(), found)?.idx ?? -1);
+  const paramsPoint = (base: string) => (): { at: number; lineEnd: boolean } | null => {
+    const p = parametersPoint(model());
+    // No `## Steps` to create a section above any more.
+    if (p.line < 0) return null;
+    // A section created since, or removed: the planned lines were written for
+    // the other case.
+    if (p.create !== parametersPoint(modelOf(base)).create) return null;
+    return { at: (lineStarts(current)[p.line] ?? current.length) + p.char, lineEnd: p.lineEnd };
+  };
+  // Newest first: the last write, then each earlier one an undo may have
+  // brought back — each with the base it was planned against. Lines the
+  // author edited inside since the last write hold text that is neither
+  // theirs nor the recording's: only that write, exactly as written (an undo
+  // of the edit), is taken; an earlier one could match part of it.
+  const touched = record.slots.some((s) => s.touched);
+  const states = touched ? [stateOf(record)] : [stateOf(record), ...[...record.history].reverse()];
+  for (const state of states) {
+    const slots = findWritten(current, model, state.slots, state.section, anchorIdx, paramsPoint(state.base));
+    if (slots && nothingLeft(record, current, slots)) {
+      return { status: 'found', record: { ...state, slots, uncertain: false, history: record.history }, moved: true };
+    }
+  }
+  if (!touched && nothingLeft(record, current)) return { status: 'absent' };
+  return { status: 'lost', reason: RECORDING_NOT_FOUND };
+}
+
+/**
+ * Follow the record through one change event that was not the recording's own
+ * write — what the extension's change listener does, kept here so it is
+ * pinned without a host. `uncertain` marks an event the offsets must not be
+ * trusted for at all (an undo or redo, a revert or a reload from disk: VS Code
+ * reports those as line diffs that can reach across the recording's lines).
+ * Whenever the record is uncertain its text is looked for at once, so the
+ * highlight is right; what is not found now is looked for again at the next
+ * write. `touched`: an edit wholly inside the recorded lines — the author is
+ * warned about that, and about nothing else.
+ */
+export function followLiveRecord(
+  live: LiveRecord,
+  changes: OffsetChange[],
+  opts: { text: () => string; uncertain?: boolean; anchor?: RecordAnchor | null },
+): { record: LiveRecord; touched: boolean } {
+  const tracked = opts.uncertain
+    ? { slots: live.slots, touched: false, uncertain: true }
+    : trackRecordSlots(live.slots, changes);
+  let record: LiveRecord = { ...live, slots: tracked.slots, uncertain: live.uncertain || tracked.uncertain };
+  if (record.uncertain) {
+    const where = locateLiveRecord(record, opts.text(), opts.anchor);
+    if (where.status === 'found') record = where.record;
+  }
+  return { record, touched: tracked.touched && !tracked.uncertain };
+}
+
+/**
+ * The record with its text in the document's line endings: when something
+ * converted the file's line breaks (LF to CRLF, or back) while recording, the
+ * base and everything written are converted the same way, and the offsets are
+ * not trusted until the text is found again.
+ */
+function withEol(record: LiveRecord, current: string): LiveRecord {
+  if (!current.includes('\n') || !record.base.includes('\n')) return record;
+  const eol = current.includes('\r\n') ? '\r\n' : '\n';
+  if ((record.base.includes('\r\n') ? '\r\n' : '\n') === eol) return record;
+  const convert = (s: string): string => s.replace(/\r?\n/g, eol);
+  const stateIn = <T extends LiveState>(state: T): T => ({
+    ...state,
+    base: convert(state.base),
+    slots: state.slots.map((s) => (s.kind === 'tail' ? s : { ...s, wrote: convert(s.wrote) })),
+  });
+  return { ...stateIn(record), history: record.history.map(stateIn), uncertain: true };
+}
+
+/** The fast path of `locateLiveRecord`, or null when it does not hold. */
+function verifyInPlace(record: LiveRecord, current: string, model: () => LineModel): LiveRecord | null {
+  const regions: RecordSlot[] = [];
+  let blockEnd = 0;
+  for (const slot of record.slots) {
+    if (slot.kind === 'tail') continue;
+    if (!regionInPlace(current, slot)) return null;
+    regions.push({ ...slot });
+    if (slot.kind === 'block') blockEnd = slot.end;
+  }
+  const tails = placeTails(
+    record.slots.filter((s) => s.kind === 'tail'),
+    current,
+    model,
+    blockEnd,
+    record.section,
+  );
+  return { ...record, slots: sortSlots([...regions, ...tails]) };
+}
+
+/** A block or parameters slot still where the offsets say: at a line
+ *  boundary, reading what was written — or edited only inside since. */
+function regionInPlace(current: string, slot: RecordSlot): boolean {
+  if (slot.start < 0 || slot.end > current.length || slot.start > slot.end) return false;
+  if (!slot.touched && current.slice(slot.start, slot.end) !== slot.wrote) return false;
+  return slot.lineEnd ? atLineEnd(current, slot.start) : atLineStart(current, slot.start);
+}
+
+const atLineStart = (text: string, at: number): boolean => at === 0 || text[at - 1] === '\n';
+const atLineEnd = (text: string, at: number): boolean => at === text.length || text[at] === '\n' || text[at] === '\r';
+
+/**
+ * Every later step placed: those whose line still starts with the number the
+ * recording wrote, where the offsets say (the rest of the line read again —
+ * it is the author's to edit); the others looked for by their whole line,
+ * exactly once, in the flow below `after`. Not found: `placed: false`.
+ */
+function placeTails(
+  tails: RecordSlot[],
+  current: string,
+  model: () => LineModel,
+  after: number,
+  section: string | null,
+): RecordSlot[] {
+  const out: RecordSlot[] = [];
+  let starts: number[] | null = null;
+  for (const tail of tails) {
+    if (tail.placed !== false && tailInPlace(current, tail)) {
+      out.push({ ...tail, placed: true, rest: restOfLine(current, tail.start + tail.wrote.length) });
+      continue;
+    }
+    starts ??= lineStarts(current);
+    const m = model();
+    const target = tail.wrote + (tail.rest ?? '');
+    const wanted = section === null ? 'step' : 'section-step';
+    let from = lineAtOffset(starts, after);
+    if ((starts[from] ?? 0) < after) from++;
+    const hits: number[] = [];
+    for (let i = from; i < m.lines.length; i++) {
+      const kind = kindAt(m, i);
+      if (kind === 'section-heading') break;
+      if (kind === wanted && m.lines[i] === target) hits.push(i);
+    }
+    const hit = hits.length === 1 ? starts[hits[0]!] : undefined;
+    out.push(
+      hit === undefined
+        ? { ...tail, placed: false }
+        : { ...tail, start: hit, end: hit + tail.wrote.length, placed: true },
+    );
+  }
+  return out;
+}
+
+function tailInPlace(current: string, tail: RecordSlot): boolean {
+  return (
+    tail.end - tail.start === tail.wrote.length &&
+    atLineStart(current, tail.start) &&
+    current.startsWith(tail.wrote, tail.start) &&
+    current[tail.start + tail.wrote.length] === '.'
+  );
+}
+
+function restOfLine(text: string, from: number): string {
+  let end = text.indexOf('\n', from);
+  if (end < 0) end = text.length;
+  if (end > from && text[end - 1] === '\r') end--;
+  return text.slice(from, end);
+}
+
+/**
+ * The slots of one earlier write, found in `current` by what they hold, or
+ * null. `anchorIdx`: the block must start below that line (-1: anywhere).
+ * `paramsPoint`: where parameters would go now, for a write that added none.
+ */
+function findWritten(
+  current: string,
+  model: () => LineModel,
+  snapshot: RecordSlot[],
+  section: string | null,
+  anchorIdx: number,
+  paramsPoint: () => { at: number; lineEnd: boolean } | null,
+): RecordSlot[] | null {
+  const block = snapshot.find((s) => s.kind === 'block');
+  const params = snapshot.find((s) => s.kind === 'params');
+  if (!block || block.wrote === '') return null;
+  const blockAt = uniqueAt(current, block.wrote, block.lineEnd);
+  if (blockAt === null) return null;
+  const blockEnd = blockAt + block.wrote.length;
+  if (anchorIdx >= 0) {
+    const lead = block.lineEnd ? (block.wrote.startsWith('\r\n') ? 2 : 1) : 0;
+    const first = lineAtOffset(lineStarts(current), blockAt + lead);
+    if (first <= anchorIdx) return null;
+  }
+  const regions: RecordSlot[] = [{ ...block, start: blockAt, end: blockEnd, touched: false }];
+  if (params) {
+    if (params.wrote !== '') {
+      const at = uniqueAt(current, params.wrote, params.lineEnd);
+      if (at === null) return null;
+      const end = at + params.wrote.length;
+      if (at < blockEnd && end > blockAt) return null;
+      regions.push({ ...params, start: at, end, touched: false });
+    } else {
+      const point = paramsPoint();
+      if (point === null || point.lineEnd !== params.lineEnd) return null;
+      regions.push({ ...params, start: point.at, end: point.at, touched: false });
+    }
+  }
+  const tails = placeTails(
+    snapshot.filter((s) => s.kind === 'tail').map((t) => ({ ...t, placed: false })),
+    current,
+    model,
+    blockEnd,
+    section,
+  );
+  return sortSlots([...regions, ...tails]);
+}
+
+/**
+ * The one place `needle` stands in `hay` as whole lines — starting at a line
+ * start, or (`lineEnd`, text that starts with its line break) ending at a
+ * line's end — or null when it stands nowhere, or in more than one place.
+ */
+function uniqueAt(hay: string, needle: string, lineEnd: boolean): number | null {
+  let found: number | null = null;
+  for (let i = hay.indexOf(needle); i >= 0; i = hay.indexOf(needle, i + 1)) {
+    const ok = lineEnd ? atLineEnd(hay, i + needle.length) : atLineStart(hay, i);
+    if (!ok) continue;
+    if (found !== null) return null;
+    found = i;
+  }
+  return found;
+}
+
+/**
+ * Not one line any write of this recording put in the file is there now more
+ * often than the base had it — the block's and the parameters' lines, and each
+ * later step's line as renumbered — leaving out the lines of `found`, the
+ * write just found in the file. With nothing found, this is "none of it is
+ * left"; with a write found, "none of it is left anywhere else": a match that
+ * leaves another write's line outside it is only part of what is there (an
+ * earlier, shorter draft matching the start of a later one), and not taken.
+ */
+function nothingLeft(record: LiveRecord, current: string, found: RecordSlot[] | null = null): boolean {
+  const counts = (text: string): Map<string, number> => {
+    const out = new Map<string, number>();
+    for (const line of text.split(/\r?\n/)) out.set(line, (out.get(line) ?? 0) + 1);
+    return out;
+  };
+  const now = counts(current);
+  for (const slot of found ?? []) {
+    const lines =
+      slot.kind === 'tail' ? (slot.placed ? [slot.wrote + (slot.rest ?? '')] : []) : slot.wrote.split(/\r?\n/);
+    for (const line of lines) now.set(line, (now.get(line) ?? 0) - 1);
+  }
+  // Each state against the base it was written into.
+  for (const state of [record, ...record.history]) {
+    const base = counts(state.base);
+    const ours = new Set<string>();
+    for (const slot of state.slots) {
+      if (slot.kind === 'tail') {
+        if (slot.wrote !== slot.original) ours.add(slot.wrote + (slot.rest ?? ''));
+        continue;
+      }
+      for (const line of slot.wrote.split(/\r?\n/)) if (line.trim() !== '') ours.add(line);
+    }
+    for (const line of ours) if ((now.get(line) ?? 0) > (base.get(line) ?? 0)) return false;
+  }
+  return true;
+}
+
+/** In document order; at one offset the parameters come before the block, and
+ *  the block before the step it is inserted ahead of — the order the text
+ *  reads in (a stable sort of slots listed in that order). */
+function sortSlots(slots: RecordSlot[]): RecordSlot[] {
+  const rank = { params: 0, block: 1, tail: 2 } as const;
+  return [...slots].sort((a, b) => a.start - b.start || rank[a.kind] - rank[b.kind]);
 }
 
 /**
@@ -1322,7 +1817,7 @@ export function recordedLines(
   const starts = lineStarts(text);
   const out = new Set<number>();
   for (const slot of slots) {
-    if (!kinds.includes(slot.kind) || slot.end <= slot.start) continue;
+    if (!kinds.includes(slot.kind) || slot.end <= slot.start || slot.placed === false) continue;
     for (let line = lineAtOffset(starts, slot.start); line < starts.length && starts[line]! < slot.end; line++) {
       const lineEnd = line + 1 < starts.length ? starts[line + 1]! : text.length;
       const part = text.slice(Math.max(slot.start, starts[line]!), Math.min(slot.end, lineEnd));
@@ -1330,6 +1825,90 @@ export function recordedLines(
     }
   }
   return [...out].sort((a, b) => a - b);
+}
+
+// ---------------------------------------------------------------------------
+// A recording the window closed on (reload, extension host restart)
+// ---------------------------------------------------------------------------
+
+/**
+ * What a recording has written into its file, kept in the workspace's state
+ * after every write so that a recording cut off by a window reload — whose
+ * dirty buffer hot exit restores, draft and all — can be taken back out at the
+ * next activation. Text only: offsets mean nothing after a restart.
+ */
+export interface UnfinishedRecording {
+  block: string;
+  blockLineEnd: boolean;
+  params: string;
+  paramsLineEnd: boolean;
+  section: string | null;
+  /** Later steps the recording renumbered: the number it wrote, the one the
+   *  file had, and the rest of the line. */
+  tails: Array<{ wrote: string; original: string; rest: string }>;
+}
+
+/** The record as `UnfinishedRecording`, or null when nothing of it is in the
+ *  file (no steps written, or not where the offsets say). */
+export function unfinishedRecordingOf(live: LiveRecord): UnfinishedRecording | null {
+  if (live.uncertain) return null;
+  const block = live.slots.find((s) => s.kind === 'block');
+  const params = live.slots.find((s) => s.kind === 'params');
+  if (!block || block.wrote === '') return null;
+  return {
+    block: block.wrote,
+    blockLineEnd: block.lineEnd,
+    params: params?.wrote ?? '',
+    paramsLineEnd: params?.lineEnd ?? false,
+    section: live.section,
+    tails: live.slots
+      .filter((s) => s.kind === 'tail' && s.placed !== false && s.wrote !== s.original)
+      .map((s) => ({ wrote: s.wrote, original: s.original ?? '', rest: s.rest ?? '' })),
+  };
+}
+
+/**
+ * The edits that take an unfinished recording back out of `current` — its
+ * block and parameter lines removed, each later step it renumbered given its
+ * number back — or null when its block and parameter lines are not in the file
+ * exactly once each (edited since, or gone): then nothing is offered, because
+ * nothing can be proved to be the recording's. A later step whose line is not
+ * found exactly keeps whatever number it has.
+ */
+export function removeUnfinishedRecording(
+  current: string,
+  unfinished: UnfinishedRecording,
+): { edits: OffsetEdit[]; text: string } | null {
+  const eol = current.includes('\r\n') ? '\r\n' : '\n';
+  const convert = (s: string): string => s.replace(/\r?\n/g, eol);
+  const snapshot: RecordSlot[] = [
+    { kind: 'params', start: 0, end: 0, lineEnd: unfinished.paramsLineEnd, wrote: convert(unfinished.params) },
+    { kind: 'block', start: 0, end: 0, lineEnd: unfinished.blockLineEnd, wrote: convert(unfinished.block) },
+    ...unfinished.tails.map(
+      (t): RecordSlot => ({ kind: 'tail', start: 0, end: 0, lineEnd: false, wrote: t.wrote, original: t.original, rest: t.rest }),
+    ),
+  ];
+  let m: LineModel | null = null;
+  const found = findWritten(
+    current,
+    () => (m ??= modelOf(current)),
+    snapshot,
+    unfinished.section,
+    -1,
+    () => ({ at: 0, lineEnd: unfinished.paramsLineEnd }),
+  );
+  if (!found) return null;
+  const edits: OffsetEdit[] = [];
+  for (const slot of found) {
+    if (slot.kind === 'tail') {
+      if (slot.placed && slot.wrote !== slot.original) {
+        edits.push({ start: slot.start, end: slot.end, text: slot.original ?? '', kind: 'tail' });
+      }
+    } else if (slot.end > slot.start) {
+      edits.push({ start: slot.start, end: slot.end, text: '', kind: slot.kind });
+    }
+  }
+  return { edits, text: applyOffsetEdits(current, edits) };
 }
 
 /** Offset of the start of every line. */

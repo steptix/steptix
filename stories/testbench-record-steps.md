@@ -205,7 +205,11 @@ and no step is written for it.
       takes everything the recording wrote back out. The recorded lines are
       highlighted while it runs; an edit inside them is overwritten by the
       next draft and warned about once; the file is never saved for the
-      author.
+      author. Over all of it (0.5.154, after an adversarial review): the
+      recording never overwrites text it cannot prove it wrote — it knows its
+      lines by their text, finds them again after an undo, a revert, a
+      reload or a line-ending change, and when it cannot, stops writing into
+      the file and inserts the result once at Stop.
     - **A new test** — *TestBench: Record New Test* asks for a name, creates
       `<tests dir>/<name>.md` with a title, `## Config` (`baseUrl` from the
       project), an empty `## Parameters` and `## Steps`, opens it and starts
@@ -263,6 +267,12 @@ and no step is written for it.
   absent from the prompt and the stream.
 - TestBench unit tests for insertion (region rules, renumbering, one undo
   step) and a fake-server integration test for the panel flow.
+- The drafts in the file: every sequence the review reproduced (revert,
+  reload, line endings, undo/redo, column-0 typing, indenting, End+Enter,
+  rename, window reload) replayed against the pure core with the host's own
+  change events, a randomized test that no write ever replaces a character
+  the recording did not write, and a host case per sequence (§ The draft in
+  the file).
 - End to end on the server, with a real browser: start a recording through
   the real HTTP route on the fixture app, drive that page with Playwright
   input (trusted events, as a person's are), stop, and check the prompt and
@@ -520,44 +530,139 @@ ticking) is listed with a hollow `○` rather than `●`. The frame folding is t
 same draft goes into the file (next).
 
 **The draft in the file** (decision 11, as changed at the author's request,
-2026-09-27; tb 0.5.153). Every `record:draft` that is newer than the one
-written goes into the file as it arrives; drafts that arrive while a write is
-in flight coalesce into one write of the latest. The first write fixes the
-place: it plans against the document as it is then, with the tracked anchor,
-and keeps that text as the recording's BASE together with three kinds of
-slot — the block's insertion point, the parameters' insertion point, and the
-ordinal digits of every later step of the flow, with the digits each had
-(`beginLiveRecord`). Every write after that is the same `planRecordInsertion`
-run against the base with the new draft, its pieces written into the slots
-(`liveRecordWrite`) — so what a draft writes is a pure function of the base
-and the draft, the file after drafts 1…n reads as draft n alone would have
-made it, and the EMPTY draft writes back exactly what the base had. The
-slots are offsets, carried through everyone else's edits by
-`trackRecordSlots` (pure, pinned); the recording's own writes are told apart
-by the text they leave, which the change event is compared against. The
-result is the last write through the same path; Cancel, a `done` error or
-abort, a result with no steps, and a rescue each write the empty draft.
+2026-09-27; tb 0.5.153, made fail-safe in 0.5.154). Every `record:draft`
+that is newer than the one written goes into the file as it arrives; drafts
+that arrive while a write is in flight coalesce into one write of the latest.
+The first write fixes the place: it plans against the document as it is then,
+with the tracked anchor, and keeps that text as the recording's BASE together
+with three kinds of slot — the block's insertion point, the parameters'
+insertion point, and the number of every later step of the flow, with the
+number each had (`beginLiveRecord`). Every write after that is the same
+`planRecordInsertion` run against the base with the new draft, its pieces
+written into the slots (`liveRecordWrite`) — so what a draft writes is a pure
+function of the base and the draft, the file after drafts 1…n reads as draft
+n alone would have made it, and the EMPTY draft writes back exactly what the
+base had. The recording's own writes are told apart by the text they leave,
+which the change event is compared against. The result is the last write
+through the same path; Cancel, a `done` error or abort, a result with no
+steps, and a rescue each write the empty draft.
+
+**Never overwrite what it cannot prove it wrote** (tb 0.5.154). An
+adversarial review of 0.5.153 in a real 1.95 host found the slots, which were
+offsets and nothing else, following edits they could not follow: File:
+Revert arrives as one line diff reaching from the parameters through the
+recorded steps, the slot widened over it, and the next draft deleted `## Steps`
+and the main flow; LF→CRLF arrives as one change over the whole document and
+the file became just the recorded steps; Ctrl+Z then Ctrl+Y duplicated the
+steps (undo and redo were taken for the author's edits, `e.reason` unread);
+typing at column 0 of a later step went into its number's slot and was
+deleted by the next write; a rename was taken for a close and the renamed
+buffer kept the draft; a window reload left the draft with no way to take it
+out; End+Enter on the last recorded line was counted inside the block; and
+Ctrl+Z warned about an edit nobody made. So the recording now identifies its
+text by CONTENT, and offsets are only the fast path:
+
+- *What it keeps.* Each slot carries what was written in it (`wrote`); a
+  later step carries the number the recording gave it and the rest of its
+  line. `LiveRecord.history` keeps the state after every earlier write —
+  base, anchor, flow and slots — because an undo can bring any of them back.
+- *Before every write* (`locateLiveRecord`), the text is checked. Fast path —
+  nothing since the last write the offsets could not follow: every region
+  reads what was written there (or was edited only inside, and warned), at a
+  line boundary, and every later step's line starts with exactly the number
+  written. Otherwise the text is looked for: the last write's, then each
+  earlier one's, newest first, each with its own base — the block as a run of
+  whole lines exactly once and below the anchor, the parameter lines exactly
+  once, and NOTHING of any write's lines left outside the match (without
+  that, an undo that restored an edited longer block let an earlier, shorter
+  draft match its first lines, and the next write left the rest behind — the
+  randomized test found it). Found: carry on from there. Not one line of any
+  write left (counted against each state's base): `absent`, and a draft goes
+  in afresh at the anchor — which must be found, where it was followed to or
+  by its text (`beginLiveRecord(…, { strict: true })`). Anything else: `lost`.
+- *Which events cannot be followed* (`followLiveRecord`, what the change
+  listener calls): an undo or redo (`e.reason`), the change that leaves the
+  document clean without the recording having saved it (a revert, a reload
+  from disk — `!e.document.isDirty` at the event, which the extension host
+  updates before it fires), and in `trackRecordSlots` any change that
+  reaches ACROSS a slot's edge, including one replacing a whole slot exactly.
+  For those the text is looked for at once, so the highlight is right; what
+  is not found then is looked for again at the next write, and nothing is
+  highlighted meanwhile. Only an edit wholly inside warns — not an undo, redo
+  or revert (finding 8).
+- *Line endings.* A record whose base's line breaks differ from the
+  document's is converted — base, written texts, every history state — and
+  looked for by text; the next draft is planned against the converted base
+  and goes in with the file's line endings. Offsets are not mapped through
+  the conversion: a block edited inside before a line-ending change is
+  therefore `lost`, the safe way.
+- *Edited inside, then an unfollowable change*: only the last write, exactly
+  as written, is taken (the author undid their edit); never an earlier one,
+  and never `absent` — an edited block cannot be proved gone.
+- *Later steps.* Any change touching a later step's line start or number
+  unplaces it (`placed: false`) rather than dropping it: at every write it is
+  looked for by its whole line, exactly once, in the flow below the block,
+  and renumbered only when found — so text typed at its column 0 followed by
+  Enter leaves it renumbered and restored by Cancel, while text typed in
+  front of it on the same line, or an indent, leaves the line the author's
+  for good. The rest of the line after the number is the author's to edit and
+  is re-read at every write. (The spec's first wording had the line checked
+  "exactly" including that rest; checking the number prefix exactly and
+  re-reading the rest keeps a step the author retitles while recording in the
+  renumbering, which the existing suite pins.)
+- *Edges.* A line break inserted just before the block's final line break
+  (End, Enter on the last recorded line), or at the end of a block that ends
+  the file, is outside: the slot's text is unchanged up to its end and the new
+  line is the author's, below it.
+- *`lost`* stops the live writing for the rest of the recording
+  (`StepRecorder.detach`): the warning is shown once, the panel keeps
+  drafting, the highlight comes off, nothing more is written. Stop looks once
+  more (the final write with the record uncertain) and otherwise inserts the
+  result once at the anchor into the file as it is (`insertOnce` — the
+  pre-0.5.153 insertion, its own undo step), leaving what remains of the
+  drafts for the author; Cancel takes out nothing it cannot find and says so
+  in the panel's log.
+- *Rename.* `onWillRenameFiles` notes where the file is going, so the old
+  document closing is not taken for a close; `onDidRenameFiles` (or the next
+  write, whichever comes first) switches the recording to the document VS
+  Code opened under the new name with the same unsaved text, and the record
+  is looked for there by text. A document that cannot be opened there is a
+  closed one: rescued at the end.
+- *Reload.* After every draft write the record's text (`unfinishedRecordingOf`:
+  block, parameter lines, renumbered steps with their numbers and the rest of
+  their lines) is kept in `workspaceState` with the file's URI (moved along
+  on a rename), and forgotten when the recording ends — unless the edit that
+  takes the draft out was tried and did not go through (`keepUnfinished`: the
+  window went first). `deactivate` cancels the
+  recording and waits up to 1.5 s for its draft to be taken out
+  (`StepRecorder.shutdown`); on a window reload hot exit has usually backed
+  the buffer up by then, so at the next activation a kept record whose block
+  and parameter lines are in that file exactly once is offered for removal —
+  "Remove the unfinished recording's steps" (the verified empty draft,
+  `removeUnfinishedRecording`) or "Keep them" — and forgotten either way.
+  Author edits to a renumbered step's text after the last draft make that
+  step's line not match, so its number is not given back; the rest still is.
 
 Where that differs from what the one-shot insertion did, or from the spec's
 first wording:
 
-- *The base is fixed at the first write.* A step the author adds to the flow
-  after the insertion point while recording is not renumbered, and a
-  parameter line they add by hand is not seen as existing — the one-shot
-  insertion, which planned against the document at the end, did both. What
-  they wrote stays; Renumber Steps catches the numbering.
-- *The later steps' numbers are the recording's while it runs.* An edit to
-  those digits is overwritten by the next write; an edit that reaches past
-  them (the line deleted, or rewritten around its number) drops that step
-  from the renumbering, and the empty draft does not touch it again.
-- *An edit inside the recorded lines* — the block or the parameter lines — is
-  taken into the slot and overwritten by the next draft, and warned about
-  once per recording, as a notification and in the panel's log: "Lines being
-  recorded are rewritten as the model updates them — edit them after Stop."
-  At a slot's edge an insertion is outside when it cannot be part of it:
-  whole lines typed at the block's first line go above it, and typing at the
-  start of the line after it is that line's. Reverting the file while
-  recording is an edit inside it too, and warns.
+- *The base is fixed at the first write* — and again whenever nothing of the
+  recording is left in the file and it starts afresh at the anchor. A step
+  the author adds to the flow after the insertion point while recording is
+  not renumbered, and a parameter line they add by hand is not seen as
+  existing — the one-shot insertion, which planned against the document at
+  the end, did both. What they wrote stays; Renumber Steps catches the
+  numbering.
+- *An edit wholly inside the recorded lines* — the block or the parameter
+  lines, with some recorded text left on either side — is taken into the slot
+  and overwritten by the next draft, and warned about once per recording, as
+  a notification and in the panel's log: "Lines being recorded are rewritten
+  as the model updates them — edit them after Stop." At a slot's edge an
+  insertion is outside when it cannot be part of it: whole lines typed at the
+  block's first line go above it, typing at the start of the line after it is
+  that line's, and End, Enter on its last line starts the author's line below
+  it. Reverting the file while recording is not an edit inside it (0.5.153
+  warned about it and then wrote over the file).
 - *A file in no visible editor* still gets the draft, as a WorkspaceEdit —
   the only way to edit a document without an editor, and always an undo step
   of its own (the document's editor, when one is visible in any group, is
@@ -566,14 +671,35 @@ first wording:
 - *A file closed while recording* is not written again, and the result is
   rescued (output + Copy steps) rather than reopened and inserted — the
   first build reopened it. Closing it with "Save" leaves the last draft saved
-  in the file; nothing can take it back out then.
+  in the file; nothing can take it back out then. A file RENAMED while
+  recording is followed instead (0.5.154).
 - *Highlight*: every recorded line (steps and parameter lines, not the blank
   lines a block carries for spacing) gets a whole-line decoration in the
   theme's own diff colours — `diffEditor.insertedLineBackground`, a 2px bar
   of `editorGutter.addedBackground` at the left, and a mark in the overview
-  ruler — on every editor showing the file, until the recording ends. The
-  editor follows the block's last line as it grows only when the author was
-  looking at the block; one who scrolled away is left there.
+  ruler — on every editor showing the file, until the recording ends, and
+  only while the recorded lines are known to be where they are. The editor
+  follows the block's last line as it grows only when the author was looking
+  at the block; one who scrolled away is left there.
+
+**Tests for the fail-safe rule** (0.5.154). `tests/record-steps-live.test.js`
+replays every review sequence against the pure core with the change events
+the host logged for it (a `Session` drives the core as `step-recorder.ts`
+does), plus the undo-to-an-earlier-draft, undo-past-a-revert, found-twice and
+found-in-part cases, the unfinished-recording removal, and a randomized test:
+400 seeds of 40 operations (drafts, insertions, deletions, replacements,
+undos and redos as line diffs, reverts, line-ending toggles) over five
+fixtures, with every character tagged by who wrote it — no write may replace
+a character the recording did not write except an author's typing inside its
+lines or a step's leading number, and Cancel must leave no whole line of the
+recording's behind unless it stopped writing. The file imports the core as a
+namespace so each case can run against an older core: all 17 fail on
+0.5.153's. The integration suite adds a host case per finding — revert, a
+reload from disk after a save, LF→CRLF, undo+redo, undo then Stop and one
+Ctrl+Z, column-0 typing, Tab, End+Enter, rename then Stop, rename then
+Cancel, shutdown and recovery — all 11 failing on 0.5.153's sources, and two
+for the stop-writing fallback (Stop inserts once at the anchor, one Ctrl+Z
+takes that out; Cancel takes nothing out).
 
 **Undo, measured** (the integration harness, VS Code 1.95). Each draft goes
 in through the document's editor with `undoStopBefore` true for the first
@@ -619,6 +745,23 @@ other. After Cancel the file reads as before but stays marked unsaved; the
 drafts and their removal compress to an undo step that changes nothing
 (measured: the next Ctrl+Z changed nothing, and the document's version did
 not move).
+
+Re-measured on 0.5.154, where the fail-safe rule changed what a write finds
+before it writes but not how it writes: with nothing else touching the file,
+one Ctrl+Z still restores it byte for byte and clears the unsaved mark; after
+typing, `cursorDown` or a draft into a hidden file, one Ctrl+Z still lands on
+the file without the recording. New cases, all measured in the harness: an
+undo DURING the recording is a change that is not the recording's own, so it
+splits — the next draft goes in as a new step, and one Ctrl+Z after Stop
+lands on the file without the recording. Stop, Ctrl+Z (file byte for byte,
+clean), Ctrl+Y, then a second recording in the same file: one Ctrl+Z takes
+out only the second, a second Ctrl+Z the first. Cancel, then record again and
+Stop: one Ctrl+Z takes that recording out, and the next one changes nothing.
+When the recording gave up on its file (§7.4) the result is one insertion at
+the anchor, its own undo step: one Ctrl+Z takes out exactly that insertion
+and leaves what remained of the drafts — which one Ctrl+Z never promised to
+reach, since those lines could not be proved to be the recording's. Not
+measured: undo after a rename, and after a line-ending change.
 
 **Controls.** Stop before `record:started` is a cancel. The ✕ on an action is
 shown at once and sent at once as `drop` (or `restore` when put back), so the

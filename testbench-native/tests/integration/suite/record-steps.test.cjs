@@ -11,6 +11,10 @@
  *  - the live state the panel and the status bar are fed from, as frames
  *    arrive, including a ✕ dropped from the panel's own message;
  *  - the result landing as ONE editor edit, so one undo restores the file;
+ *  - the drafts in the file never overwriting what the recording cannot prove
+ *    it wrote, under the change events only a host sends: File: Revert, a
+ *    reload from disk, a line-ending change, undo and redo, typing and Tab at
+ *    a later step's start, End+Enter, a rename, and a window closing;
  *  - Record's relationship to runs: refused while one executes, and a paused
  *    one ended first.
  *
@@ -608,6 +612,377 @@ describe('TestBench Record Steps', function () {
       !vscode.workspace.textDocuments.some((d) => d.uri.toString() === uri.toString() && d.isDirty),
       'the file was not reopened and written',
     );
+  });
+
+  // ---- Never overwrite text the recording cannot prove it wrote
+  // (SPEC-record-steps.md §7). Each case below is a sequence an adversarial
+  // review reproduced against tb 0.5.153 in this host, where it deleted or
+  // duplicated the author's text; the events VS Code reports for them (an
+  // undo, a revert, a line-ending change) are the ones offsets cannot follow.
+
+  const D1 = ['Click Menu'];
+  const D2 = ['Click Menu', 'Click Payments'];
+  const D3 = ['Click Menu', 'Click Payments', 'Tick Cash'];
+  /** FIXTURE with `steps` recorded after line 11, and what else is asked. */
+  const recorded = (steps, extra = {}) =>
+    fixtureWith({
+      insert: { ...(extra.insert ?? {}), 11: [...steps.map((s, k) => `${3 + k}. ${s}`), ...(extra.after ?? [])] },
+      replace: { 12: `${3 + steps.length}. Open the dashboard`, ...(extra.replace ?? {}) },
+    });
+
+  /** Record at line 11 and write draft 1 (`D1` unless said) into the file. */
+  async function recordDraft1(editor, steps = D1, parameters = []) {
+    await recordAt(editor, 11);
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    pushDraft(1, steps, parameters);
+    const expected = recorded(steps, parameters.length > 0 ? { insert: { 7: parameters.map((p) => `- ${p.name}: ${p.value}`) } } : {});
+    await waitFor('draft 1 in the file', () => editor.document.getText() === expected);
+    return expected;
+  }
+
+  it('File: Revert while recording is not written over: the next draft goes in afresh at the anchor, and Cancel restores the file', async () => {
+    const editor = await openFixture();
+    const pw = [{ name: 'password', value: '$PASSWORD' }];
+    await recordDraft1(editor, D2, pw);
+    // VS Code sends the revert as ONE line diff reaching from the parameters
+    // through the recorded steps into the flow; 0.5.153 widened the recording's
+    // lines over it and the next draft deleted `## Steps` and the main flow.
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    await vscode.commands.executeCommand('workbench.action.files.revert');
+    await waitFor('reverted', () => editor.document.getText() === FIXTURE);
+    pushDraft(2, D3, pw);
+    await waitFor('draft 2, afresh', () => editor.document.getText() === recorded(D3, { insert: { 7: ['- password: $PASSWORD'] } }));
+    assert.deepEqual(hooks.recordingNotices(), [], 'a revert is not an edit inside the recorded lines');
+    await cancelRecording();
+    assert.equal(editor.document.getText(), FIXTURE);
+  });
+
+  /** Write `text` to the fixture on disk, retrying while Windows still holds
+   *  the file from VS Code's own save (EBUSY), as a checkout would. */
+  async function writeFixtureOnDisk(text) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        fs.writeFileSync(fixturePath, text, 'utf8');
+        return;
+      } catch (err) {
+        if (err.code !== 'EBUSY' || attempt >= 40) throw err;
+        await sleep(50);
+      }
+    }
+  }
+
+  it('the file reloaded from disk while recording (saved, then changed underneath — a checkout) is not written over', async () => {
+    const editor = await openFixture();
+    await recordDraft1(editor);
+    const other = FIXTURE.replace('# Record fixture', '# Record fixture, as another branch has it');
+    try {
+      assert.ok(await editor.document.save());
+      await writeFixtureOnDisk(other);
+      await waitFor('reloaded from disk', () => editor.document.getText() === other, 15_000);
+      pushDraft(2, D2);
+      await waitFor('draft 2, afresh', () => editor.document.getText() === recorded(D2).replace('# Record fixture', '# Record fixture, as another branch has it'));
+      await cancelRecording();
+      assert.equal(editor.document.getText(), other, 'the file as the checkout left it');
+    } finally {
+      await writeFixtureOnDisk(FIXTURE);
+    }
+  });
+
+  it('the line endings changed while recording (one change over the whole document) keep the file: the next draft goes in, in CRLF; Cancel restores it', async () => {
+    const editor = await openFixture();
+    await recordDraft1(editor);
+    // 0.5.153: the recorded lines were widened over the whole file, which
+    // then became just the recorded steps; Cancel left it empty.
+    assert.ok(await editor.edit((b) => b.setEndOfLine(vscode.EndOfLine.CRLF)));
+    pushDraft(2, D2);
+    await waitFor('draft 2, in CRLF', () => editor.document.getText() === recorded(D2).replace(/\n/g, '\r\n'));
+    await cancelRecording();
+    assert.equal(editor.document.getText(), FIXTURE.replace(/\n/g, '\r\n'), 'the author\'s line endings kept, the recording gone');
+  });
+
+  it('Ctrl+Z then Ctrl+Y while recording does not duplicate the steps and warns about nothing; Cancel leaves no stray copy', async () => {
+    const editor = await openFixture();
+    const d1 = await recordDraft1(editor);
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    await vscode.commands.executeCommand('undo');
+    await waitFor('undone', () => editor.document.getText() === FIXTURE);
+    await vscode.commands.executeCommand('redo');
+    await waitFor('redone', () => editor.document.getText() === d1);
+    assert.deepEqual(hooks.recordingHighlight(), [12], 'found again by its text: highlighted where it is');
+    pushDraft(2, D2);
+    await waitFor('draft 2 over the redone draft', () => editor.document.getText() === recorded(D2));
+    await sleep(100);
+    assert.equal(editor.document.getText(), recorded(D2), 'once');
+    assert.deepEqual(hooks.recordingNotices(), [], 'undo and redo are not edits inside the recorded lines');
+    await cancelRecording();
+    assert.equal(editor.document.getText(), FIXTURE);
+  });
+
+  it('Ctrl+Z while recording takes the draft out and the next goes back in — no warning; one Ctrl+Z after Stop still removes the recording', async () => {
+    const editor = await openFixture();
+    await recordDraft1(editor);
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    await vscode.commands.executeCommand('undo');
+    await waitFor('undone', () => editor.document.getText() === FIXTURE);
+    pushDraft(2, D2);
+    await waitFor('draft 2 back in at the anchor', () => editor.document.getText() === recorded(D2));
+    assert.deepEqual(hooks.recordingNotices(), [], 'nothing was edited: no warning');
+    answerStopWith({ steps: D3 });
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    await hooks.recordingSettled();
+    assert.equal(hooks.recordingReport().status, 'inserted');
+    assert.equal(editor.document.getText(), recorded(D3));
+    await vscode.commands.executeCommand('undo');
+    await waitFor('one undo removes the recording', () => editor.document.getText() === FIXTURE);
+  });
+
+  it('typing at the start of a later step is the author\'s line: never overwritten, and Cancel keeps it', async () => {
+    const editor = await openFixture();
+    await recordDraft1(editor);
+    // 0.5.153 took the typing into that step's number and wrote the number
+    // back over it at the next draft — the typed text gone, silently.
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    editor.selection = new vscode.Selection(12, 0, 12, 0); // "4. Open the dashboard"
+    await vscode.commands.executeCommand('type', { text: 'Check the banner' });
+    await vscode.commands.executeCommand('type', { text: '\n' });
+    const typed = editor.document.lineAt(12).text;
+    assert.equal(typed.trim(), 'Check the banner');
+    pushDraft(2, D2);
+    // The step below the typed line is exactly as the recording numbered it,
+    // so it is still renumbered.
+    await waitFor('draft 2, the typed line kept', () => editor.document.getText() === recorded(D2, { after: [typed] }));
+    assert.deepEqual(hooks.recordingNotices(), []);
+    await cancelRecording();
+    assert.equal(editor.document.getText(), fixtureWith({ insert: { 11: [typed] } }));
+  });
+
+  it('indenting a later step while recording (Tab) is the author\'s: the indentation is never stripped', async () => {
+    const editor = await openFixture();
+    await recordDraft1(editor);
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    editor.selection = new vscode.Selection(12, 0, 12, 0);
+    await vscode.commands.executeCommand('tab');
+    const indented = editor.document.lineAt(12).text;
+    assert.match(indented, /^\s+4\. Open the dashboard$/);
+    pushDraft(2, D2);
+    await waitFor('draft 2', () => editor.document.getText().includes('4. Click Payments\n'));
+    assert.equal(editor.document.lineAt(13).text, indented, 'the indented step is the author\'s now: left as it is');
+    await cancelRecording();
+    assert.equal(editor.document.getText(), fixtureWith({ replace: { 12: indented } }));
+  });
+
+  it('End, Enter on the last recorded line starts the author\'s own line below the steps: a step typed there is kept', async () => {
+    const editor = await openFixture();
+    await recordDraft1(editor);
+    // 0.5.153 counted the new line inside the recorded block, and the next
+    // draft deleted the step typed on it.
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    editor.selection = new vscode.Selection(11, 13, 11, 13); // the end of "3. Click Menu"
+    await vscode.commands.executeCommand('type', { text: '\n' });
+    await vscode.commands.executeCommand('type', { text: '4. Check the banner' });
+    const mine = editor.document.lineAt(12).text;
+    assert.equal(mine.trim(), '4. Check the banner');
+    pushDraft(2, D2);
+    await waitFor('draft 2, the author\'s step kept below it', () => editor.document.getText() === recorded(D2, { after: [mine] }));
+    assert.deepEqual(hooks.recordingNotices(), []);
+    await cancelRecording();
+    assert.equal(editor.document.getText(), fixtureWith({ insert: { 11: [mine] } }));
+  });
+
+  it('one undo per recording: Stop, undo, redo — then a second recording in the same file, and one undo takes out only that one', async () => {
+    const editor = await openFixture();
+    await recordDraft1(editor);
+    answerStopWith({ steps: D2 });
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    await hooks.recordingSettled();
+    const first = recorded(D2);
+    assert.equal(editor.document.getText(), first);
+    await vscode.commands.executeCommand('undo');
+    await waitFor('undo', () => editor.document.getText() === FIXTURE);
+    assert.equal(editor.document.isDirty, false);
+    await vscode.commands.executeCommand('redo');
+    await waitFor('redo', () => editor.document.getText() === first);
+    // "5. Open the dashboard", the main flow's last step now.
+    await recordAt(editor, 14);
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    pushDraft(1, ['Click Logout']);
+    await waitFor('second recording, draft 1', () => editor.document.getText().includes('5. Open the dashboard\n6. Click Logout\n'));
+    answerStopWith({ steps: ['Click Logout', 'Close the tab'] });
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    await hooks.recordingSettled();
+    assert.ok(editor.document.getText().includes('5. Open the dashboard\n6. Click Logout\n7. Close the tab\n'));
+    await vscode.commands.executeCommand('undo');
+    await waitFor('one undo: the first recording\'s result', () => editor.document.getText() === first);
+    await vscode.commands.executeCommand('undo');
+    await waitFor('a second: the file before either', () => editor.document.getText() === FIXTURE);
+  });
+
+  it('Cancel, then record again and Stop: one undo takes out that recording', async () => {
+    const editor = await openFixture();
+    await recordDraft1(editor);
+    await cancelRecording();
+    assert.equal(editor.document.getText(), FIXTURE);
+    await recordDraft1(editor);
+    answerStopWith({ steps: D2 });
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    await hooks.recordingSettled();
+    assert.equal(editor.document.getText(), recorded(D2));
+    await vscode.commands.executeCommand('undo');
+    await waitFor('one undo', () => editor.document.getText() === FIXTURE);
+    await vscode.commands.executeCommand('undo');
+    await sleep(150);
+    assert.equal(editor.document.getText(), FIXTURE, 'the cancelled recording\'s undo step changes nothing');
+  });
+
+  /**
+   * Record D2, then delete from the middle of the anchor line into the middle
+   * of the first recorded line — across the recording's edge, leaving
+   * "4. Click Payments" behind: what the recording wrote can no longer be
+   * proved to be where it is.
+   */
+  async function recordThenCutAcross(editor) {
+    await recordDraft1(editor, D2);
+    assert.ok(await editor.edit((b) => b.delete(new vscode.Range(10, 12, 11, 10))));
+    const cut = editor.document.getText();
+    assert.match(cut, /\n2\. Click Sigenu\n4\. Click Payments\n5\. Open the dashboard\n/);
+    pushDraft(2, D3);
+    await waitFor('told once', () => hooks.recordingNotices().length === 1);
+    assert.deepEqual(hooks.recordingNotices(), [
+      {
+        level: 'warn',
+        text:
+          'The recorded steps could not be found in the file any more, so they are no longer written live; ' +
+          'the panel keeps them and Stop will insert them at your cursor line.',
+      },
+    ]);
+    await sleep(100);
+    assert.equal(editor.document.getText(), cut, 'nothing written into the file');
+    assert.deepEqual(hooks.recordingHighlight(), [], 'nothing highlighted: nothing is known to be the recording\'s');
+    assert.deepEqual(hooks.recordingState().draft.steps, D3, 'the panel keeps drafting');
+    return cut;
+  }
+
+  it('what the recording wrote cannot be found any more: it stops writing live, says so once, and Stop inserts the result once at the anchor', async () => {
+    const editor = await openFixture();
+    const cut = await recordThenCutAcross(editor);
+    pushDraft(3, [...D3, 'Click Pay']);
+    await sleep(150);
+    assert.equal(editor.document.getText(), cut, 'still nothing written');
+    assert.equal(hooks.recordingNotices().length, 1, 'said once');
+    answerStopWith({ steps: D3 });
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    await hooks.recordingSettled();
+    assert.equal(hooks.recordingReport().status, 'inserted');
+    // One insertion after the anchor, the flow renumbered — what is left of
+    // the drafts (the author's to delete) included.
+    assert.equal(
+      editor.document.getText(),
+      cut.replace(
+        '2. Click Sigenu\n4. Click Payments\n5. Open the dashboard\n',
+        '2. Click Sigenu\n3. Click Menu\n4. Click Payments\n5. Tick Cash\n6. Click Payments\n7. Open the dashboard\n',
+      ),
+    );
+    // Its own undo step.
+    await vscode.commands.executeCommand('undo');
+    await waitFor('one undo takes the insertion out', () => editor.document.getText() === cut);
+  });
+
+  it('what the recording wrote cannot be found any more: Cancel takes nothing out', async () => {
+    const editor = await openFixture();
+    const cut = await recordThenCutAcross(editor);
+    await cancelRecording();
+    assert.equal(hooks.recordingReport().status, 'cancelled');
+    assert.equal(editor.document.getText(), cut);
+  });
+
+  /** Rename the fixture to `record-steps-renamed.tmp.md`; `body` runs with
+   *  the renamed document; the fixture is put back afterwards. */
+  async function withRenamedFixture(body) {
+    const newUri = vscode.Uri.file(path.resolve(FIXTURES_DIR, 'record-steps-renamed.tmp.md'));
+    const renamed = () => vscode.workspace.textDocuments.find((d) => d.uri.toString() === newUri.toString() && !d.isClosed);
+    try {
+      const we = new vscode.WorkspaceEdit();
+      we.renameFile(uri, newUri, { overwrite: true });
+      assert.ok(await vscode.workspace.applyEdit(we));
+      await waitFor('the renamed document is open', () => renamed() !== undefined);
+      await body(renamed);
+    } finally {
+      const doc = renamed();
+      if (doc) {
+        await vscode.window.showTextDocument(doc);
+        await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+      }
+      fs.rmSync(newUri.fsPath, { force: true });
+      fs.writeFileSync(fixturePath, FIXTURE, 'utf8');
+    }
+  }
+
+  it('a file renamed while recording is followed: the next draft and the result go into it under its new name', async () => {
+    const editor = await openFixture();
+    await recordDraft1(editor);
+    // 0.5.153 took the rename for the file being closed: the result was
+    // rescued, and the renamed buffer kept the draft.
+    await withRenamedFixture(async (renamed) => {
+      assert.equal(renamed().getText(), recorded(D1), 'VS Code moved the unsaved draft along');
+      await waitFor('what is kept for a reload moved along', () => hooks.recordingPersisted()?.uri === renamed().uri.toString());
+      pushDraft(2, D2);
+      await waitFor('draft 2 in the renamed file', () => renamed().getText() === recorded(D2));
+      assert.equal(hooks.recordingState().file, 'record-steps-renamed.tmp.md');
+      answerStopWith({ steps: D3 });
+      await vscode.commands.executeCommand('testbench-native.stopRecording');
+      await hooks.recordingSettled();
+      assert.equal(hooks.recordingReport().status, 'inserted');
+      assert.equal(renamed().getText(), recorded(D3));
+    });
+  });
+
+  it('a file renamed while recording and then cancelled: the renamed file keeps nothing of the recording', async () => {
+    const editor = await openFixture();
+    await recordDraft1(editor);
+    await withRenamedFixture(async (renamed) => {
+      await cancelRecording();
+      assert.equal(renamed().getText(), FIXTURE);
+    });
+  });
+
+  it('a window closing on a recording takes its draft out; one that could not is offered for removal at the next activation', async () => {
+    const editor = await openFixture();
+    const pw = [{ name: 'password', value: '$PASSWORD' }];
+    const drafted = await recordDraft1(editor, D2, pw);
+    // What a reload leaves behind is kept after every write.
+    await waitFor('kept for a reload', () => hooks.recordingPersisted()?.block === '3. Click Menu\n4. Click Payments\n');
+    const kept = hooks.recordingPersisted();
+    assert.equal(kept.uri, uri.toString());
+    assert.equal(kept.params, '- password: $PASSWORD\n');
+    assert.deepEqual(kept.tails, [{ wrote: '5', original: '3', rest: '. Open the dashboard' }]);
+
+    // deactivate(): the recording is cancelled and its draft taken out while
+    // the host still runs (0.5.153 marked it stopped and left the draft).
+    await hooks.shutdownRecording();
+    await hooks.recordingSettled();
+    assert.equal(editor.document.getText(), FIXTURE, 'the draft taken back out');
+    assert.equal(hooks.recordingPersisted(), undefined, 'nothing left to recover');
+
+    // A reload that took the window before that: hot exit restored the
+    // buffer, draft and all, and the kept record says what the recording wrote.
+    const whole = () => new vscode.Range(0, 0, editor.document.lineCount, 0);
+    assert.ok(await editor.edit((b) => b.replace(whole(), drafted)));
+    await hooks.setRecordingPersisted(kept);
+    assert.equal(await hooks.recoverUnfinishedRecording('Keep them'), 'kept');
+    assert.equal(editor.document.getText(), drafted);
+    assert.equal(hooks.recordingPersisted(), undefined, 'forgotten either way');
+
+    await hooks.setRecordingPersisted(kept);
+    assert.equal(await hooks.recoverUnfinishedRecording("Remove the unfinished recording's steps"), 'removed');
+    assert.equal(editor.document.getText(), FIXTURE, 'the verified empty draft');
+
+    // Edited since, inside the recorded lines: nothing can be proved, nothing offered.
+    const edited = drafted.replace('Click Payments', 'Tap Payments');
+    assert.ok(await editor.edit((b) => b.replace(whole(), edited)));
+    await hooks.setRecordingPersisted(kept);
+    assert.equal(await hooks.recoverUnfinishedRecording("Remove the unfinished recording's steps"), 'not-found');
+    assert.equal(editor.document.getText(), edited);
+    assert.equal(hooks.recordingPersisted(), undefined);
   });
 
   it('a drop the server cannot take is said in the log and still counts at Stop', async () => {
