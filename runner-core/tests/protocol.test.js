@@ -33,6 +33,8 @@ test('isHostMsg: accepts every host variant', () => {
     'compileRunEvent',
     // The Recording block (stories/testbench-record-steps.md, decision 13).
     'recording',
+    // The answer to the Add step box, by the press's id.
+    'recordAddStepResult',
   ]) {
     assert.equal(isHostMsg({ type }), true, type);
   }

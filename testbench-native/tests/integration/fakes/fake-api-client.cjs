@@ -95,10 +95,11 @@ class FakeApiClient {
     /** Each controlRecordSteps() call: `{ sessionId, body }`. */
     this.recordControlCalls = [];
     /**
-     * Optional `(sessionId, body) => Promise<void>` run for every control
-     * call — where a test plays the server, pushing the frames a real one
-     * would answer with (`record:pick` after `check`, `record:writing` after
-     * `stop`). Throw from it to make the control call fail.
+     * Optional `(sessionId, body) => Promise<void | { ignored, reason }>` run
+     * for every control call — where a test plays the server, pushing the
+     * frames a real one would answer with (`record:pick` after `check`,
+     * `record:writing` after `stop`). Throw from it to make the control call
+     * fail; return `{ ignored: true, reason }` for a 202 that did nothing.
      */
     this.recordControlImpl = null;
     /** What successive streamRecordSteps() calls throw before streaming:
@@ -167,7 +168,8 @@ class FakeApiClient {
   /** Matching ApiClient.controlRecordSteps (`POST …/record-steps/control`). */
   async controlRecordSteps(sessionId, body) {
     this.recordControlCalls.push({ sessionId, body });
-    if (this.recordControlImpl) await this.recordControlImpl(sessionId, body);
+    const answer = this.recordControlImpl ? await this.recordControlImpl(sessionId, body) : undefined;
+    return answer && answer.ignored === true ? answer : undefined;
   }
 
   /** Push the next frame onto the open record stream. */

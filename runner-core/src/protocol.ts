@@ -1581,6 +1581,18 @@ export interface HostRecordingMsg {
   state: RecordingPanelState | null;
 }
 
+/**
+ * The answer to the Add step box's `recordAddStep` (by its `id`): whether the
+ * server took the steps. The box clears only when it did; otherwise it keeps
+ * the text and shows `reason`.
+ */
+export interface HostRecordAddStepResultMsg {
+  type: 'recordAddStepResult';
+  id: string;
+  accepted: boolean;
+  reason?: string;
+}
+
 export type HostToWebviewMsg =
   | HostActiveFileMsg
   | HostRunEventMsg
@@ -1597,7 +1609,8 @@ export type HostToWebviewMsg =
   | HostCompileEventMsg
   | HostCompileProgressMsg
   | HostCompileRunEventMsg
-  | HostRecordingMsg;
+  | HostRecordingMsg
+  | HostRecordAddStepResultMsg;
 
 // ---------------------------------------------------------------------------
 // Webview → host
@@ -1811,10 +1824,12 @@ export interface WebviewRecordPauseMsg {
 }
 
 /** The Recording block's Add step box: one line is one step, several lines
- *  are several steps, in order. */
+ *  are several steps, in order. `id` names this press: the host answers it
+ *  with `recordAddStepResult`, and the box keeps its text until then. */
 export interface WebviewRecordAddStepMsg {
   type: 'recordAddStep';
   text: string;
+  id?: string;
 }
 
 export type WebviewToHostMsg =
@@ -1872,7 +1887,8 @@ export function isHostMsg(value: unknown): value is HostToWebviewMsg {
     t === 'compileEvent' ||
     t === 'compileProgress' ||
     t === 'compileRunEvent' ||
-    t === 'recording'
+    t === 'recording' ||
+    t === 'recordAddStepResult'
   );
 }
 

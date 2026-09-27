@@ -79,7 +79,10 @@ in the next start body (§9.1).
   `❚❚ Paused` or `▶ Resumed` row where it happened; markers are not actions
   and have no ✕.
 - An **Add step** box: Enter adds what is in it (Shift+Enter starts another
-  line — one step per line), exactly as typed. Each step of the author's —
+  line — one step per line), exactly as typed. The box keeps its text until
+  the server has taken the steps; when it does not (the recording is
+  finishing, the server answers `ignored`), the text stays with the reason
+  under it. Each step of the author's —
   from the box, the palette, the browser's toolbar or the test file (§7.6) —
   is a `✎ Your step: …` row in the action list, with a ✕ that drops it by its
   id like an action. A drop or restore made in the browser (its Undo,
@@ -663,28 +666,54 @@ leading number or list marker is the recording's to give — and is a
   Enter), or put in between two recorded lines. Lines above the first
   recorded line stay outside the recording. The line **counts** when the
   cursor leaves it (moves to another line, Enter, or the file is shown in no
-  editor) with a step on it; a blank line, or a bare number, never counts, and
-  one a cursor is on is still being typed. Then TestBench sends `add-step`
-  with `source: 'editor'`, `afterStep` the index of the step it follows in
-  the draft last written into the file (absent when nothing the recording
-  wrote is below it) and `revision` that draft's (§9.3). Lines next to each
-  other that count together are one `add-step`, several lines in order. A
-  call that fails, or that the server answers `ignored`, leaves the line the
-  author's text in the file — said in the log, never sent again.
+  editor) with a step on it, and when the author leaves VS Code (the window
+  loses focus — the cursor's line included); a blank line, or a bare number,
+  never counts, and one a cursor is on is still being typed. Only a line that
+  is a step, or becomes one when the recording numbers it (text or a list
+  item under `## Steps`), counts: a heading, a data table, a fence, an HTML
+  comment — or anything below a heading that ends `## Steps` — is the
+  author's text and never sent. Then TestBench sends `add-step` with
+  `source: 'editor'`, `afterStep` the index of the step it follows in the
+  draft that was in the file when the line counted (absent when nothing the
+  recording wrote is below it) and `revision` that draft's (§9.3). Lines that
+  count together between the same two steps of that draft are one
+  `add-step`, several lines in order. A line **waits** while another line of
+  the author's between those same two steps was sent and no draft in the file
+  holds it yet: both would name the same step, and the server would put them
+  in whichever order it takes them. It goes after the next draft write, naming
+  its neighbour. **Stop** — TestBench's, or the browser's as `record:writing`
+  arrives — first sends every line that counts, the cursor's included, waiting
+  for nothing, after the add-steps already on their way. A call that fails, or
+  that the server answers `ignored`, leaves the line the author's text in the
+  file — said in the log, never sent again.
 
 A line the author typed in the file is **theirs**: the recording never writes
-it and never takes it out. Drafts are laid out around it. Until a draft holds
-its step (`record:draft.authored` / `authoredIds`, the id `record:step` named —
-or, when the draft arrives first, the step whose text is what the line was sent
-as), it divides the draft by count: as many steps above it as the file has now
-(for a line below the block, all of them — "the next draft writes above it").
-Once a draft holds it, that step IS the line: it is not written beside it; the
-steps before it go above, the ones after it below. Its **leading number**
-follows the recording's numbering while the draft holds it — the digits of an
-`N.` line (after any indentation), or a list marker, `N)` or nothing replaced by
-`N. ` (an indented line with no number is left alone) — and is given back when
-the draft no longer holds it, and by Cancel. A number the author changes after
-the recording set it is theirs for good, as a later step's is.
+it and never takes it out — bar Undo of its step, below. Drafts are laid out
+around it. Until a draft holds its step (`record:draft.authored` /
+`authoredIds`, the id `record:step` named — or, when the draft arrives first,
+or `authoredIds` is absent, the step whose text is what the line was sent as),
+it divides the draft by count: as many steps above it as the file has now (for
+a line below the block, all of them — "the next draft writes above it"; and a
+line sent from below the block is below it until a draft holds it, for the
+lines above it too). Once a draft holds it, that step IS the line: it is not
+written beside it; the steps before it go above, the ones after it below. Its
+**leading number** follows the recording's numbering while the draft holds it
+— the digits of an `N.` line (after any indentation), or a list marker, `N)` or
+nothing replaced by `N. ` (an indented line with no number, or one with no step
+left on it, is left alone) — and is given back when the draft no longer holds
+it, and by Cancel. A number the author changes after the recording set it —
+or after the first draft that held the line found it already right — is
+theirs for good, as a later step's is.
+
+- **Undo of a step typed in the file** (the browser toolbar's Undo, or the ✕
+  on its row): the line comes out of the file at once, when it still reads
+  exactly as the recording last left it, number included; the row and the
+  file agree. Restore (↺, or Restore in the browser) puts it back where it
+  was, and Cancel puts it back with the number the author gave it. A line the
+  author has edited since stays, and the log says so once: "Your step N was
+  left in the file because you edited it — delete it if you meant to."
+  A step from the toolbar or the panel that is dropped comes out of the file
+  at once too (it is the recording's line).
 
 - **Locked steps are never rewritten.** Each draft changes a block only where
   it differs from what is there, line by line, and a line whose only change is
@@ -701,21 +730,29 @@ the recording set it is theirs for good, as a later step's is.
 - **The result** (`record:result`) does not say which of its steps are the
   author's: they are where the last draft had them — or, if the final call
   moved one, the next step with the same text — and their lines are adopted
-  as a draft's are.
+  as a draft's are. A line sent at Stop that no draft held yet is the
+  result's step with the text it was sent as.
 - **Found by text** (§7.4): the block and the author's lines in it are looked
   for together, as one run of lines. A record holding lines of the author's is
   never "nothing of it left" while one of those lines is still in the file (a
   draft written afresh would put that step in a second time, beside it): the
-  recording stops writing live instead. A draft that holds the author's lines
-  in an order the file does not have them in is not written either.
+  recording stops writing live instead.
+- **A draft that holds the author's lines in an order the file does not have
+  them in** (two add-steps aimed at one step, placed the other way round) is
+  laid out by count, not given up on: each line the draft holds is still its
+  step and never written beside it, the draft's other steps are divided around
+  the lines by how many the draft has before each, and every step is numbered
+  in the order the file has them.
 - **A line the author deletes** closes the block up again; a step the draft
   still holds for it is written by the recording from then on, as its own —
   the ✕ on its row leaves it out.
 - **After a window reload** (§7.5) what is kept names the author's lines too,
   and "Remove the unfinished recording's steps" keeps them.
 - The one-shot insertion at Stop after the recording gave up on the file
-  (§7.4) inserts the whole result, the author's steps included; what is left
-  in the file is the author's to tidy, as for the drafts.
+  (§7.4) inserts the result without the author's steps whose lines are still
+  in the file (known by id, or by the text they were sent as) — those lines
+  stay where they were typed, and are never put in twice. What is left of the
+  drafts is the author's to tidy, as before.
 
 ## 8. Writing the steps
 

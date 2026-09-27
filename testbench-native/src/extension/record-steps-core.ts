@@ -114,6 +114,12 @@ function hasUnescapedPipe(raw: string): boolean {
   return false;
 }
 
+/** A line that opens an HTML comment, as the parser's table scan reads one
+ *  (src/parser/data-rows.ts): its `<!--` line, whatever indentation. */
+function opensHtmlComment(raw: string): boolean {
+  return raw.trimStart().startsWith('<!--');
+}
+
 /**
  * Where the data tables are, by the server parser's rule
  * (src/parser/data-rows.ts: `scanDataTable`, `looksLikeTable`, `parseTable`).
@@ -139,7 +145,7 @@ function tableTopsOf(lines: string[], fenced: boolean[], classified: ClassifiedL
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i] ?? '';
     if (inert(i) || raw.trim() === '' || ANY_HEADING_RE.test(raw)) continue;
-    if (raw.trimStart().startsWith('<!--')) {
+    if (opensHtmlComment(raw)) {
       while (i < lines.length - 1 && !(lines[i] ?? '').includes('-->')) i++;
       continue;
     }
@@ -1168,6 +1174,13 @@ export interface RecordSlot {
   /** `mine`, `sent`: the step as it was sent — what the server's step for it
    *  reads, whatever the author does to the line afterwards. */
   sentText?: string;
+  /**
+   * `mine`, `sent`: it went with no `afterStep` — below everything recorded —
+   * so the server puts it after every step drafted until it does. Until a
+   * draft holds it, it is at the end of the run as far as any line above it
+   * is concerned: every step goes above it.
+   */
+  sentAtEnd?: boolean;
   /** `mine`: its step was one of the draft last written (`authoredIds`). */
   inDraft?: boolean;
   /**
@@ -1183,6 +1196,26 @@ export interface RecordSlot {
    * later step's is (§7).
    */
   number?: { mode: 'digits' | 'marker'; author: string; wrote: string } | 'author';
+  /**
+   * `mine`, once sent: the line as the recording last left it — as it read
+   * when it was sent, then as each write that numbered it (or put it back)
+   * made it, while the author had not changed it meanwhile. A line whose step
+   * is dropped is taken out of the file only when it still reads exactly this
+   * (`dropped`).
+   */
+  recAs?: string;
+  /**
+   * `mine`: its step was dropped — the panel's ✕ or the toolbar's Undo
+   * (stories/testbench-record-toolbar.md §"Undo and locked steps": removing a
+   * step of yours "takes your line out"). `hidden`: taken out of the file —
+   * the slot is empty where the line was, and `hiddenText` is the line, put
+   * back there when the step is restored and by the empty draft. `left`: the
+   * author had edited the line since the recording last left it, so it stayed
+   * in the file (said once). Absent: not dropped.
+   */
+  dropped?: 'hidden' | 'left';
+  /** `mine`, `dropped: 'hidden'`: the line taken out, with its line break. */
+  hiddenText?: string;
 }
 
 /**
@@ -1196,6 +1229,12 @@ export interface LiveState {
   /** The flow the steps join — where later steps are looked for by text. */
   section: string | null;
   slots: RecordSlot[];
+  /**
+   * The `revision` of the draft these slots hold (`record:draft.revision`):
+   * what an `afterStep` counted against them refers to. Absent until a draft
+   * that carried one was written.
+   */
+  revision?: number;
 }
 
 /**
@@ -1223,7 +1262,13 @@ export interface LiveRecord extends LiveState {
 
 /** The state part of a record, for its history. */
 function stateOf(record: LiveState): LiveState {
-  return { base: record.base, anchor: record.anchor, section: record.section, slots: record.slots };
+  return {
+    base: record.base,
+    anchor: record.anchor,
+    section: record.section,
+    slots: record.slots,
+    ...(record.revision !== undefined && { revision: record.revision }),
+  };
 }
 
 /** The state holds steps the recording wrote. */
@@ -1308,6 +1353,10 @@ export interface LiveRecordWrite {
    *  `found` again by its text, or — nothing of it left — written `fresh` at
    *  the anchor. */
   relocated: 'no' | 'found' | 'fresh';
+  /** Lines of the author's whose step was dropped by this write's draft and
+   *  that stayed in the file because the author had edited them — the line
+   *  as it reads, for the one sentence that says so. */
+  left: Array<{ key: string; line: string }>;
 }
 
 /**
@@ -1335,6 +1384,17 @@ export interface LiveRecordWrite {
  * the draft left as they were — the locked ones — are not rewritten, bar a
  * number the author's line pushed on. The empty draft takes every block part
  * out and leaves the author's lines where they are.
+ *
+ * A draft that holds the author's lines in an order the file does not have
+ * them in (the server placed two lines at one point the other way round) is
+ * laid out by count instead (`layoutRun`): every line of the author's the
+ * draft holds is still that step, never written beside it, and the steps are
+ * numbered in the order the file has them.
+ *
+ * A line of the author's whose step was dropped (`draft.droppedIds`) is taken
+ * out of the file when it still reads as the recording last left it, and put
+ * back where it was when the step is restored and by the empty draft; one the
+ * author edited since stays, and is listed in `left` (`RecordSlot.dropped`).
  */
 export function liveRecordWrite(
   live: LiveRecord,
@@ -1342,7 +1402,7 @@ export function liveRecordWrite(
   draft: LiveDraft,
   opts: { anchor?: RecordAnchor | null } = {},
 ): LiveRecordWrite | { error: string; lost?: boolean } {
-  const { steps, authoredAt } = draftSteps(draft);
+  const { steps, authoredAt, anonymous } = draftSteps(draft);
   const where = locateLiveRecord(live, current, opts.anchor);
   if (where.status === 'lost') return { error: where.reason, lost: true };
   let record: LiveRecord;
@@ -1351,7 +1411,7 @@ export function liveRecordWrite(
   let relocated: LiveRecordWrite['relocated'] = where.status === 'found' && where.moved ? 'found' : 'no';
   if (where.status === 'absent') {
     if (steps.length === 0) {
-      return { edits: [], slots: live.slots, record: live, text: current, plan: null, relocated: 'no' };
+      return { edits: [], slots: live.slots, record: live, text: current, plan: null, relocated: 'no', left: [] };
     }
     const anchor = opts.anchor !== undefined ? opts.anchor : live.anchor && { ...live.anchor, tracked: false };
     const begun = beginLiveRecord(current, anchor, { strict: true });
@@ -1365,6 +1425,20 @@ export function liveRecordWrite(
   }
   record = adoptStepIds(record, steps, authoredAt, draft.foreignIds ?? []);
 
+  // What becomes of each line of the author's whose step was dropped, or
+  // restored, since the last write.
+  const drops = dropActions(record.slots, draft, steps.length === 0);
+  const left: LiveRecordWrite['left'] = [];
+  for (const [slot, act] of drops) if (act === 'left') left.push({ key: slot.key ?? '', line: mineLineText(slot) });
+  const dropState = (slot: RecordSlot): RecordSlot['dropped'] => {
+    const act = drops.get(slot);
+    if (act === 'hide') return 'hidden';
+    if (act === 'left') return 'left';
+    if (act === 'reveal' || act === 'undrop') return undefined;
+    return slot.dropped;
+  };
+  const held = heldLines(record.slots, steps, authoredAt, anonymous, (s) => dropState(s) !== undefined, draft.adoptSentByText === true);
+
   let plan: RecordInsertionPlan | null = null;
   let want: (slot: RecordSlot) => string = (slot) => (slot.kind === 'tail' ? (slot.original ?? '') : '');
   /** `mine` slots the draft holds the step of, each with its number. */
@@ -1373,9 +1447,12 @@ export function liveRecordWrite(
     const planned = planRecordInsertion(record.base, { anchor: record.anchor, steps, parameters: draft.parameters });
     if ('error' in planned) return planned;
     plan = planned;
-    const layout = layoutRun(record.slots, planned.parts, authoredAt);
-    // The draft places the author's lines in an order the file does not have
-    // them in: nothing written can be proved right.
+    // A line of the author's below another counts as of THIS draft: one it
+    // holds now is a step of it, whatever the last draft said.
+    const placed = (s: RecordSlot): boolean =>
+      s.status === 'sent' && dropState(s) === undefined && (held.has(s) || s.sentAtEnd !== true);
+    const layout = layoutRun(record.slots, planned.parts, (s) => held.get(s), placed);
+    // Not block, mine, block, …, block: nothing written can be proved right.
     if (layout === null) return { error: RECORDING_NOT_FOUND, lost: true };
     joined = layout.joined;
     const renumbered = new Map(planned.parts.renumber.map((r) => [r.line, r.text]));
@@ -1401,17 +1478,50 @@ export function liveRecordWrite(
     // moves with the writes above it, and says whether the draft holds it.
     if (slot.kind === 'mine') {
       floor = Math.max(floor, slot.end);
-      const renumbered = numberAuthorLine(slot, joined.get(slot) ?? null);
-      if (renumbered.edit) {
-        edits.push(renumbered.edit);
-        shifts.push({ at: slot.end, delta: renumbered.wrote.length - slot.wrote.length });
-      }
+      const act = drops.get(slot);
       const start = slot.start + delta;
+      if (act === 'hide') {
+        // Its step was dropped and the line reads as the recording left it:
+        // taken out, kept to put back.
+        if (slot.end > slot.start) {
+          edits.push({ start: slot.start, end: slot.end, text: '', kind: 'mine' });
+          shifts.push({ at: slot.end, delta: slot.start - slot.end });
+        }
+        written.push({ ...slot, start, end: start, wrote: '', hiddenText: slot.wrote, dropped: 'hidden', inDraft: false });
+        delta += slot.start - slot.end;
+        continue;
+      }
+      if (slot.dropped === 'hidden' && act !== 'reveal') {
+        written.push({ ...slot, start, end: start, inDraft: false });
+        continue;
+      }
+      // Put back where it was — its step restored, or the empty draft — and
+      // numbered as it is now.
+      const shown = act === 'reveal' ? { ...slot, wrote: slot.hiddenText ?? '', end: slot.start + (slot.hiddenText ?? '').length } : slot;
+      const renumbered = numberAuthorLine(shown, joined.get(slot) ?? null);
+      const was = slot.end - slot.start;
+      if (act === 'reveal') {
+        if (renumbered.wrote !== '') {
+          edits.push({ start: slot.start, end: slot.start, text: renumbered.wrote, kind: 'mine' });
+          shifts.push({ at: slot.start, delta: renumbered.wrote.length });
+        }
+      } else if (renumbered.edit) {
+        edits.push(renumbered.edit);
+        shifts.push({ at: slot.end, delta: renumbered.wrote.length - was });
+      }
       const next: RecordSlot = { ...slot, start, end: start + renumbered.wrote.length, wrote: renumbered.wrote, inDraft: joined.has(slot) };
       if (renumbered.number === undefined) delete next.number;
       else next.number = renumbered.number;
+      delete next.hiddenText;
+      const dropped = dropState(slot);
+      if (dropped === undefined) delete next.dropped;
+      else next.dropped = dropped;
+      // What the recording leaves the line as — unless the author had changed
+      // it since the recording last did: then it stays changed.
+      const changed = act === 'reveal' || renumbered.wrote !== slot.wrote;
+      if (changed && slot.status === 'sent' && (act === 'reveal' || slot.wrote === slot.recAs)) next.recAs = renumbered.wrote;
       written.push(next);
-      delta += renumbered.wrote.length - slot.wrote.length;
+      delta += renumbered.wrote.length - was;
       continue;
     }
     // Overlapping slots cannot come out of the tracker or the search; one that
@@ -1437,13 +1547,15 @@ export function liveRecordWrite(
   }
   const slots = sortSlots(written);
   const history = prior.slice(-HISTORY_LIMIT);
+  const revision = typeof draft.revision === 'number' && Number.isFinite(draft.revision) ? draft.revision : record.revision;
   return {
     edits,
     slots,
-    record: { ...record, slots, uncertain: false, history },
+    record: { ...record, slots, uncertain: false, history, ...(revision !== undefined && { revision }) },
     text: applyOffsetEdits(current, edits),
     plan,
     relocated,
+    left,
   };
 }
 
@@ -1462,29 +1574,135 @@ export interface LiveDraft {
   /** Ids `record:step` said came from the toolbar or the panel: never taken
    *  for a line the author typed in the file. */
   foreignIds?: string[];
+  /** The draft's `revision` (`record:draft.revision`), kept with what the
+   *  write leaves (`LiveState.revision`). Absent for the result and the empty
+   *  draft: the record keeps the one it had. */
+  revision?: number;
+  /**
+   * Ids of the author's steps that are dropped now — struck in the panel, by
+   * its ✕ or the toolbar's Undo. Each is left out of the draft (the draft the
+   * server sends next is this one without it), and a line of the author's
+   * that is one is taken out of the file (`RecordSlot.dropped`).
+   */
+  droppedIds?: string[];
+  /**
+   * The result at Stop: a line of the author's that went to the server and
+   * that no draft held yet (sent just before Stop) is the result's step with
+   * the text it was sent as — `record:result` does not say which steps are the
+   * author's, and writing that step as the recording's would put it in the
+   * file a second time, beside the line.
+   */
+  adoptSentByText?: boolean;
 }
 
-/** The draft's steps as they will be written (blanks dropped), and where each
- *  of the author's steps is among them, by its id. */
-function draftSteps(draft: LiveDraft): { steps: string[]; authoredAt: Map<string, number> } {
+/**
+ * The draft's steps as they will be written (blanks dropped, and the author's
+ * steps that are dropped now), and where each of the author's steps is among
+ * them: by its id, or — `anonymous` — at an index the draft names no id for (a
+ * server that sends `authored` without `authoredIds`).
+ */
+function draftSteps(draft: LiveDraft): { steps: string[]; authoredAt: Map<string, number>; anonymous: number[] } {
   const raw = Array.isArray(draft.steps) ? draft.steps : [];
+  const authored = Array.isArray(draft.authored) ? draft.authored : [];
+  const ids = Array.isArray(draft.authoredIds) ? draft.authoredIds : [];
+  const dropped = new Set(Array.isArray(draft.droppedIds) ? draft.droppedIds : []);
+  /** Each author step's raw index, with its id ('' when none is named). */
+  const idAt = new Map<number, string>();
+  authored.forEach((idx, k) => {
+    const i = Number(idx);
+    if (!Number.isInteger(i) || idAt.has(i)) return;
+    const id = ids[k];
+    idAt.set(i, typeof id === 'string' ? id : '');
+  });
   const steps: string[] = [];
-  const cleanIndex = new Map<number, number>();
+  const authoredAt = new Map<string, number>();
+  const anonymous: number[] = [];
   raw.forEach((r, i) => {
     const s = cleanStepText(r);
     if (s === '') return;
-    cleanIndex.set(i, steps.length);
+    const id = idAt.get(i);
+    if (id !== undefined && id !== '' && dropped.has(id)) return;
+    if (id !== undefined && id !== '' && !authoredAt.has(id)) authoredAt.set(id, steps.length);
+    else if (id !== undefined) anonymous.push(steps.length);
     steps.push(s);
   });
-  const authored = Array.isArray(draft.authored) ? draft.authored : [];
-  const ids = Array.isArray(draft.authoredIds) ? draft.authoredIds : [];
-  const authoredAt = new Map<string, number>();
-  authored.forEach((idx, k) => {
-    const id = ids[k];
-    const at = cleanIndex.get(Number(idx));
-    if (typeof id === 'string' && id !== '' && at !== undefined) authoredAt.set(id, at);
-  });
-  return { steps, authoredAt };
+  return { steps, authoredAt, anonymous };
+}
+
+/**
+ * The author's lines the draft holds, each with its step's index: by the id
+ * the server gave the step — or, for a step the draft names no id for, by the
+ * text the line was sent as, in order. `bySentText` (the result at Stop): a
+ * line sent that neither names is the first step not the author's with its
+ * text. A line whose step is dropped is held by nothing.
+ */
+function heldLines(
+  slots: RecordSlot[],
+  steps: string[],
+  authoredAt: Map<string, number>,
+  anonymous: number[],
+  isDropped: (slot: RecordSlot) => boolean,
+  bySentText = false,
+): Map<RecordSlot, number> {
+  const held = new Map<RecordSlot, number>();
+  const taken = new Set<number>();
+  const mines = slots.filter((s) => s.kind === 'mine' && s.status === 'sent' && !isDropped(s));
+  for (const s of mines) {
+    const idx = s.stepId ? authoredAt.get(s.stepId) : undefined;
+    if (idx === undefined || taken.has(idx)) continue;
+    held.set(s, idx);
+    taken.add(idx);
+  }
+  for (const s of mines) {
+    if (held.has(s)) continue;
+    const idx = anonymous.find((i) => !taken.has(i) && steps[i] === s.sentText);
+    if (idx === undefined) continue;
+    held.set(s, idx);
+    taken.add(idx);
+  }
+  if (bySentText) {
+    const theirs = new Set([...authoredAt.values(), ...anonymous]);
+    for (const s of mines) {
+      if (held.has(s)) continue;
+      const idx = steps.findIndex((t, i) => t === s.sentText && !taken.has(i) && !theirs.has(i));
+      if (idx < 0) continue;
+      held.set(s, idx);
+      taken.add(idx);
+    }
+  }
+  return held;
+}
+
+/**
+ * What a write does to each line of the author's whose step is dropped or
+ * restored (`LiveDraft.droppedIds`):
+ *
+ *  - `hide` — dropped since the last write, and the line reads exactly as the
+ *    recording last left it (`recAs`): taken out of the file;
+ *  - `left` — dropped, but the author has changed the line since: it stays,
+ *    and the caller says so once;
+ *  - `reveal` — taken out, and now restored, or the empty draft: put back
+ *    where it was;
+ *  - `undrop` — left in the file when dropped, and now restored or the empty
+ *    draft: an ordinary line of the author's again.
+ */
+function dropActions(
+  slots: RecordSlot[],
+  draft: LiveDraft,
+  empty: boolean,
+): Map<RecordSlot, 'hide' | 'left' | 'reveal' | 'undrop'> {
+  const dropped = new Set(Array.isArray(draft.droppedIds) ? draft.droppedIds : []);
+  const out = new Map<RecordSlot, 'hide' | 'left' | 'reveal' | 'undrop'>();
+  for (const s of slots) {
+    if (s.kind !== 'mine') continue;
+    const isDropped = !empty && s.status === 'sent' && s.stepId !== undefined && dropped.has(s.stepId);
+    if (isDropped && s.dropped === undefined) {
+      out.set(s, s.recAs !== undefined && s.wrote === s.recAs && s.wrote !== '' ? 'hide' : 'left');
+    } else if (!isDropped && s.dropped !== undefined) {
+      out.set(s, s.dropped === 'hidden' ? 'reveal' : 'undrop');
+    }
+  }
+  return out;
 }
 
 /**
@@ -1512,27 +1730,46 @@ function adoptStepIds(record: LiveRecord, steps: string[], authoredAt: Map<strin
 /**
  * The draft laid out around the author's lines: the text of every block part
  * of the run (block, mine, block, …, block), and which of the author's lines
- * the draft holds. Null when the draft holds the author's lines in an order
- * the file does not (the writer then writes nothing).
+ * the draft holds, each with the number its step takes. Null only when the
+ * run is not block, mine, block, …, block.
  *
- * A line whose step the draft holds (its id among `authoredAt`) is that step:
- * the steps before it go above it, the ones after below, and it is not
- * written. A line the draft does not hold divides the draft by count: as many
- * steps above it as the file has above it now (the draft the author saw) —
- * or, at the end of the run with none of the recording's lines below it, all
- * of them, as a line typed below the block always had.
+ * A line whose step the draft holds (`heldAt`) is that step: the steps before
+ * it go above it, the ones after below, and it is not written. A line the
+ * draft does not hold divides the draft by count: as many steps above it as
+ * the file has above it now (the draft the author saw) — or, at the end of the
+ * run with none of the recording's lines below it, all of them, as a line
+ * typed below the block always had.
+ *
+ * When the draft holds the author's lines in an order the file does not have
+ * them in — the server put two lines aimed at one point the other way round —
+ * the draft's order cannot be followed without writing a line of the
+ * author's a second time, so the lines are laid out by count instead
+ * (`layoutByCount`).
  */
 function layoutRun(
   slots: RecordSlot[],
   parts: RecordInsertionPlan['parts'],
-  authoredAt: Map<string, number>,
+  heldAt: (slot: RecordSlot) => number | undefined,
+  placed: (slot: RecordSlot) => boolean,
 ): { blocks: Map<RecordSlot, string>; joined: Map<RecordSlot, string> } | null {
   const run = slots.filter(isRun);
-  const n = parts.lines.length;
   const mines = run.flatMap((s, i) => (s.kind === 'mine' ? [i] : []));
   // block, mine, block, …, block — what `settleRun` leaves.
   if (run.length !== 2 * mines.length + 1 || run.some((s, i) => (i % 2 === 0) !== (s.kind === 'block'))) return null;
-  const at = (s: RecordSlot): number | undefined => (s.stepId ? authoredAt.get(s.stepId) : undefined);
+  const held = mines.map((i) => heldAt(run[i]!));
+  return layoutByDraft(run, mines, held, parts, placed) ?? layoutByCount(run, mines, held, parts, placed);
+}
+
+/** `layoutRun` in the draft's order, or null when the draft holds the
+ *  author's lines in an order the file does not have them in. */
+function layoutByDraft(
+  run: RecordSlot[],
+  mines: number[],
+  held: Array<number | undefined>,
+  parts: RecordInsertionPlan['parts'],
+  placed: (slot: RecordSlot) => boolean,
+): { blocks: Map<RecordSlot, string>; joined: Map<RecordSlot, string> } | null {
+  const n = parts.lines.length;
   const cuts: Array<{ cut: number; consumes: boolean }> = [];
   /** The author's lines the draft holds, each with the number its step takes. */
   const joined = new Map<RecordSlot, string>();
@@ -1540,7 +1777,7 @@ function layoutRun(
   for (let j = 0; j < mines.length; j++) {
     const i = mines[j]!;
     const mine = run[i]!;
-    const idx = at(mine);
+    const idx = held[j];
     if (idx !== undefined) {
       if (idx < floor) return null;
       cuts.push({ cut: idx, consumes: true });
@@ -1549,12 +1786,12 @@ function layoutRun(
       continue;
     }
     let cut: number;
-    if (atRunEnd(run, i)) {
+    if (atRunEnd(run, i, placed)) {
       cut = n;
     } else {
       let upper = n;
       for (let k = j + 1; k < mines.length; k++) {
-        const below = at(run[mines[k]!]!);
+        const below = held[k];
         if (below !== undefined) {
           upper = below;
           break;
@@ -1582,14 +1819,83 @@ function layoutRun(
 }
 
 /**
+ * `layoutRun` by count, for a draft whose order of the author's lines the file
+ * does not have. Every line of the author's the draft holds is its step, so
+ * none of those steps is written; the draft's other steps are divided around
+ * the author's lines by count — above a held line, as many as the draft has
+ * before its step; above one it does not hold, as many as the file has above
+ * it now (all of them at the end of the run) — never fewer than above the line
+ * before it. The steps are then numbered in the order the file has them: the
+ * recording's lines and the held lines of the author's alike, from the number
+ * the draft's first step has (or all `1.` in a flow written that way).
+ */
+function layoutByCount(
+  run: RecordSlot[],
+  mines: number[],
+  held: Array<number | undefined>,
+  parts: RecordInsertionPlan['parts'],
+  placed: (slot: RecordSlot) => boolean,
+): { blocks: Map<RecordSlot, string>; joined: Map<RecordSlot, string> } {
+  const n = parts.lines.length;
+  const consumed = new Set(held.filter((h): h is number => h !== undefined));
+  /** The draft's steps that are not the author's lines, by index. */
+  const rest: number[] = [];
+  for (let k = 0; k < n; k++) if (!consumed.has(k)) rest.push(k);
+  const ordinal = (k: number): string => LEADING_ORDINAL_RE.exec(parts.lines[k] ?? '')?.[1] ?? '';
+  // The planned lines are `${number}. ${step}` (`planRecordInsertion`).
+  const stepOf = (k: number): string => (parts.lines[k] ?? '').slice(ordinal(k).length + 2);
+  const ones = n >= 2 && parts.lines.every((_, k) => ordinal(k) === '1');
+  let next = Number(ordinal(0)) || 1;
+  const label = (): string => (ones ? '1' : String(next++));
+  const cuts: number[] = [];
+  let floor = 0;
+  mines.forEach((i, j) => {
+    const h = held[j];
+    let want: number;
+    if (h !== undefined) {
+      want = rest.filter((k) => k < h).length;
+    } else if (atRunEnd(run, i, placed)) {
+      want = rest.length;
+    } else {
+      want = 0;
+      for (let k = 0; k < i; k++) if (run[k]!.kind === 'block') want += stepCount(run[k]!.wrote);
+    }
+    const cut = Math.min(Math.max(want, floor), rest.length);
+    cuts.push(cut);
+    floor = cut;
+  });
+  const blocks = new Map<RecordSlot, string>();
+  const joined = new Map<RecordSlot, string>();
+  let from = 0;
+  for (let j = 0; j <= mines.length; j++) {
+    const block = run[2 * j]!;
+    const to = j < mines.length ? cuts[j]! : rest.length;
+    const lines = [
+      ...(j === 0 && parts.blankBefore ? [''] : []),
+      ...rest.slice(from, Math.max(from, to)).map((k) => `${label()}. ${stepOf(k)}`),
+      ...(j === mines.length && parts.blankAfter ? [''] : []),
+    ];
+    blocks.set(block, linesText(lines, block.lineEnd, parts.eol));
+    if (j < mines.length) {
+      if (held[j] !== undefined) joined.set(run[mines[j]!]!, label());
+      from = Math.max(from, to);
+    }
+  }
+  return { blocks, joined };
+}
+
+/**
  * A line of the author's, numbered as the recording numbers its steps while
  * the draft holds its step (`want`: that step's number), or given back the
  * number it had when the draft no longer does (`want` null — the empty draft
  * too). Only the leading number is ever touched: the digits of an `N.` line,
  * else the list marker (or nothing) in front of the text, replaced by `N. `.
  * A number the author changed after the recording set it is theirs from then
- * on (`'author'`), and a number the recording never changed is not given
- * anything back.
+ * on (`'author'`) — the recording's number is kept as state from the first
+ * write that holds the step, even when the author's number already was that
+ * one, so a later edit of it is seen — and a number the recording never
+ * changed is not given anything back. A line with nothing on it but a number
+ * is not given one.
  */
 function numberAuthorLine(
   slot: RecordSlot,
@@ -1607,21 +1913,38 @@ function numberAuthorLine(
     (state.mode === 'digits' ? cur?.mode === 'digits' && cur.text === state.wrote : line.startsWith(state.wrote));
   if (!intact) return { wrote: slot.wrote, number: 'author' };
   const at = slot.start + from;
-  const replace = (was: string, to: string): { wrote: string; edit: OffsetEdit } => ({
-    wrote: slot.wrote.slice(0, from) + to + line.slice(was.length),
-    edit: { start: at, end: at + was.length, text: to, kind: 'mine' },
-  });
+  const replace = (was: string, to: string): { wrote: string; edit?: OffsetEdit } =>
+    was === to
+      ? { wrote: slot.wrote }
+      : {
+          wrote: slot.wrote.slice(0, from) + to + line.slice(was.length),
+          edit: { start: at, end: at + was.length, text: to, kind: 'mine' },
+        };
   if (want === null) {
     if (state === undefined) return { wrote: slot.wrote };
     return replace(state.wrote, state.author);
   }
-  // An indented line with no number of its own is left as it is.
+  // An indented line with no number of its own is left as it is, and so is a
+  // line with no step on it (the author emptied it).
   if (!state && !cur) return { wrote: slot.wrote };
+  if (cleanAuthorLine(unitLine(slot.wrote)) === '') return { wrote: slot.wrote, ...(state && { number: state }) };
   const mode = state ? state.mode : cur!.mode;
   const now = state ? state.wrote : cur!.text;
   const target = mode === 'digits' ? want : `${want}. `;
-  if (now === target) return { wrote: slot.wrote, ...(state && { number: state }) };
-  return { ...replace(now, target), number: { mode, author: state ? state.author : cur!.text, wrote: target } };
+  const number = { mode, author: state ? state.author : cur!.text, wrote: target };
+  return { ...replace(now, target), number };
+}
+
+/**
+ * The sentence for a line of the author's that stayed in the file when its
+ * step was dropped, because they had edited it (stories/testbench-record-toolbar.md
+ * §"Undo and locked steps"): the step named by the number the line carries,
+ * else by its text.
+ */
+export function leftInFileText(line: string): string {
+  const prefix = authorLinePrefix(line);
+  const name = prefix?.mode === 'digits' ? `Your step ${prefix.text}` : `Your step "${cleanAuthorLine(line)}"`;
+  return `${name} was left in the file because you edited it — delete it if you meant to.`;
 }
 
 /**
@@ -1666,16 +1989,27 @@ function stepsAbove(run: RecordSlot[], i: number): number {
 
 /**
  * The run's part `i` is at its end: none of the recording's steps below it,
- * and none of the author's lines below it that went to the server. A line
- * typed there is "below the block": every step goes above it until the
- * server places it.
+ * and none of the author's lines below it that a draft holds or that went to
+ * the server aimed at a step (and were not dropped since). A line typed there
+ * is "below the block": every step goes above it until the server places it.
+ * A line below it that went with no `afterStep` is below the block too — the
+ * server puts it after everything drafted until then — so it does not count
+ * until a draft holds it. `placed` says of a line of the author's whether it
+ * counts: by default as of the draft last written (`placedLine`); a write
+ * laying out a new draft asks with what that draft holds.
  */
-function atRunEnd(run: RecordSlot[], i: number): boolean {
+function atRunEnd(run: RecordSlot[], i: number, placed: (s: RecordSlot) => boolean = placedLine): boolean {
   for (let k = i + 1; k < run.length; k++) {
     const s = run[k]!;
-    if (s.kind === 'block' ? stepCount(s.wrote) > 0 : s.status === 'sent') return false;
+    if (s.kind === 'block' ? stepCount(s.wrote) > 0 : placed(s)) return false;
   }
   return true;
+}
+
+/** A line of the author's that has a place among the recording's steps, as
+ *  of the draft last written: one it holds, or one sent aimed at a step. */
+function placedLine(s: RecordSlot): boolean {
+  return s.status === 'sent' && s.dropped === undefined && (s.inDraft === true || s.sentAtEnd !== true);
 }
 
 /**
@@ -2061,13 +2395,25 @@ export function carryAuthorState(from: LiveRecord, to: LiveRecord): LiveRecord {
   let changed = false;
   const slots = to.slots.map((s) => {
     const k = s.kind === 'mine' && s.key ? known.get(s.key) : undefined;
-    if (!k || (k.status === s.status && k.stepId === s.stepId && k.sentText === s.sentText)) return s;
+    // The line as the recording left it, when it was sent: known only to the
+    // record that sent it.
+    const recAs = s.recAs ?? k?.recAs;
+    const same =
+      k !== undefined &&
+      k.status === s.status &&
+      k.stepId === s.stepId &&
+      k.sentText === s.sentText &&
+      k.sentAtEnd === s.sentAtEnd &&
+      recAs === s.recAs;
+    if (!k || same) return s;
     changed = true;
     return {
       ...s,
       status: k.status,
       ...(k.stepId !== undefined && { stepId: k.stepId }),
       ...(k.sentText !== undefined && { sentText: k.sentText }),
+      ...(k.sentAtEnd !== undefined && { sentAtEnd: k.sentAtEnd }),
+      ...(recAs !== undefined && { recAs }),
     };
   });
   return changed ? { ...to, slots } : to;
@@ -2163,6 +2509,13 @@ function settleRun(record: LiveRecord, text: string): LiveRecord | null {
     if (slot.start < 0 || slot.end > text.length || slot.start > slot.end) return null;
     const now = text.slice(slot.start, slot.end);
     if (slot.kind === 'mine') {
+      // Taken out because its step was dropped: kept where it was, empty, to
+      // put back on a restore.
+      if (slot.dropped === 'hidden') {
+        if (now !== '') return null;
+        parts.push(slot);
+        continue;
+      }
       if (now === '') continue; // deleted: the author's to delete
       if (!wholeLines(text, slot.start, slot.end, slot.lineEnd)) return null;
       const units = unitsOf(now, slot.lineEnd);
@@ -2282,6 +2635,12 @@ export interface AuthorStepCommit {
    * the server puts them after all of it.
    */
   afterStep?: number;
+  /**
+   * The `revision` of the draft `afterStep` counts in — the one written into
+   * the file when the lines were counted (`LiveState.revision`), whenever the
+   * add-step itself goes out. Absent before any draft carried one.
+   */
+  revision?: number;
 }
 
 /**
@@ -2289,21 +2648,39 @@ export interface AuthorStepCommit {
  * §"Steps typed in the editor"): lines not counted yet (`typing`) with a step
  * on them that no cursor is on — the author left the line, by moving the
  * cursor or pressing Enter. A blank line never counts, and a line a cursor is
- * on is still being typed: a half-finished sentence is not locked in.
+ * on is still being typed: a half-finished sentence is not locked in. Only a
+ * line that is a step, or becomes one when the recording numbers it, counts
+ * (`authorLineIsStep`): a heading, a table row, a fence or a comment typed
+ * there is the author's text and is never sent.
  *
- * Each counted line becomes `sent`; lines next to each other that count at
- * once are ONE add-step, several lines in order. `cursors` are offsets into
- * `text`, the document as it is; a record whose offsets cannot be trusted
- * (`uncertain`) counts nothing.
+ * Each counted line becomes `sent`. The lines that count between the same two
+ * steps of the draft last written (the recording's lines, and the author's
+ * lines that draft holds) go as ONE add-step, in order: `afterStep` names the
+ * step above them, and all of them follow it. They go only while no other
+ * line between those two steps is sent and not yet held by a draft: that one
+ * names the same step, and two add-steps aimed at one step land in whichever
+ * order the server puts them. So a line waits until the draft that holds its
+ * neighbour is written, and then names it (`afterStep` past it, or before it
+ * by counting only what is above) — the caller counts again after each write.
+ * `final` (Stop) sends every line that counts, waiting for nothing: nothing
+ * later would send it, and a draft that places two of them the other way round
+ * is laid out by count (`layoutRun`) rather than lost.
+ *
+ * `cursors` are offsets into `text`, the document as it is; `final` ignores
+ * them — a line the cursor is still on at Stop is finished. A record whose
+ * offsets cannot be trusted (`uncertain`) counts nothing.
  */
 export function commitAuthorLines(
   live: LiveRecord,
   text: string,
   cursors: number[],
+  opts: { final?: boolean } = {},
 ): { record: LiveRecord; commits: AuthorStepCommit[] } {
   if (live.uncertain) return { record: live, commits: [] };
   const run = live.slots.filter(isRun);
-  const now = new Map<RecordSlot, string>();
+  let model: LineModel | null = null;
+  let starts: number[] | null = null;
+  const ready = new Map<RecordSlot, string>();
   for (let i = 0; i < run.length; i++) {
     const s = run[i]!;
     if (s.kind !== 'mine' || s.status !== 'typing' || !s.key) continue;
@@ -2317,35 +2694,72 @@ export function commitAuthorLines(
     const brk = s.lineEnd ? (s.wrote.startsWith('\r\n') ? 2 : 1) : s.wrote.endsWith('\r\n') ? 2 : s.wrote.endsWith('\n') ? 1 : 0;
     const from = s.lineEnd ? s.start + brk : s.start;
     const to = s.lineEnd ? s.end : s.end - brk;
-    if (cursors.some((c) => c >= from && c <= to)) continue;
-    now.set(s, step);
+    if (!opts.final && cursors.some((c) => c >= from && c <= to)) continue;
+    model ??= modelOf(text);
+    starts ??= lineStarts(text);
+    if (!authorLineIsStep(model, lineAtOffset(starts, from))) continue;
+    ready.set(s, step);
   }
-  if (now.size === 0) return { record: live, commits: [] };
+  if (ready.size === 0) return { record: live, commits: [] };
   const commits: AuthorStepCommit[] = [];
-  let open: AuthorStepCommit | null = null;
-  for (let i = 0; i < run.length; i++) {
-    const s = run[i]!;
-    if (s.kind === 'block') {
-      if (s.end > s.start) open = null;
+  /** The author's lines since the last step of the draft written. */
+  let gap: RecordSlot[] = [];
+  const close = (): void => {
+    const lines = gap;
+    gap = [];
+    const go = lines.filter((s) => ready.has(s));
+    if (go.length === 0) return;
+    // Sent and not held yet: its step is aimed at the same place.
+    const waiting = lines.some((s) => s.status === 'sent' && !s.inDraft && s.dropped === undefined);
+    if (waiting && !opts.final) {
+      for (const s of go) ready.delete(s);
+      return;
+    }
+    const i = run.indexOf(go[0]!);
+    commits.push({
+      keys: go.map((s) => s.key!),
+      lines: go.map((s) => ready.get(s)!),
+      ...(!atRunEnd(run, i) && { afterStep: stepsAbove(run, i) - 1 }),
+      ...(live.revision !== undefined && { revision: live.revision }),
+    });
+  };
+  for (const s of run) {
+    if (s.kind === 'block' ? stepCount(s.wrote) > 0 : s.status === 'sent' && s.inDraft === true && s.dropped === undefined) {
+      close();
       continue;
     }
-    const step = now.get(s);
-    if (step === undefined) {
-      open = null;
-      continue;
-    }
-    if (open === null) {
-      open = { keys: [], lines: [], ...(!atRunEnd(run, i) && { afterStep: stepsAbove(run, i) - 1 }) };
-      commits.push(open);
-    }
-    open.keys.push(s.key!);
-    open.lines.push(step);
+    if (s.kind === 'mine') gap.push(s);
   }
+  close();
+  const atEnd = new Set(commits.filter((c) => c.afterStep === undefined).flatMap((c) => c.keys));
   const slots = live.slots.map((s) => {
-    const step = now.get(s);
-    return step === undefined ? s : { ...s, status: 'sent' as const, sentText: step };
+    const step = ready.get(s);
+    if (step === undefined) return s;
+    return { ...s, status: 'sent' as const, sentText: step, recAs: s.wrote, ...(atEnd.has(s.key!) && { sentAtEnd: true }) };
   });
   return { record: { ...live, slots }, commits };
+}
+
+/**
+ * A line the author typed into the recorded block is a step: one already
+ * (`N. text`), or one when the recording numbers it — text or a list item — by
+ * the line model (`classifyLines`, with fences and data tables as `modelOf`
+ * reads them). A heading (which would open a section or end `## Steps`), a
+ * numbered item a `####` heading makes inert, a data table's line, a fence or
+ * a line inside one, and an HTML comment are not.
+ */
+function authorLineIsStep(m: LineModel, idx: number): boolean {
+  const raw = m.lines[idx] ?? '';
+  if (m.fenced[idx] || isFenceDelimiter(raw) || isTableRow(m, idx)) return false;
+  const kind = kindAt(m, idx);
+  if (isStepKind(kind)) return true;
+  if (kind !== 'prose' || opensHtmlComment(raw)) return false;
+  // Text or a list item: a step once the recording numbers it — which it is
+  // only inside `## Steps`, and not under a `####` heading. Asked of the line
+  // model itself, with the line numbered.
+  const numbered = [...m.lines];
+  numbered[idx] = `1. ${cleanAuthorLine(raw)}`;
+  return isStepKind(classifyLines(numbered.join('\n'))[idx]?.kind);
 }
 
 /**
@@ -2374,17 +2788,24 @@ export function keepAuthorLines(live: LiveRecord, keys: string[]): LiveRecord {
 
 /** The author's lines in the recorded block, in order — for the panel's tests
  *  and the log. */
-export function authorLinesOf(
-  live: LiveRecord,
-): Array<{ key: string; line: string; status: 'typing' | 'sent' | 'kept'; stepId?: string; inDraft: boolean }> {
+export function authorLinesOf(live: LiveRecord): Array<{
+  key: string;
+  line: string;
+  status: 'typing' | 'sent' | 'kept';
+  stepId?: string;
+  inDraft: boolean;
+  dropped?: 'hidden' | 'left';
+}> {
   return live.slots
     .filter((s) => s.kind === 'mine')
     .map((s) => ({
       key: s.key ?? '',
-      line: mineLineText(s),
+      // A line taken out of the file: as it read when it was.
+      line: s.dropped === 'hidden' ? unitLine(s.hiddenText ?? '') : mineLineText(s),
       status: s.status ?? 'typing',
       ...(s.stepId !== undefined && { stepId: s.stepId }),
       inDraft: s.inDraft === true,
+      ...(s.dropped !== undefined && { dropped: s.dropped }),
     }));
 }
 
@@ -3277,6 +3698,8 @@ export function draftStepMarks(
  * all in the locked part, so each is where the draft had it, or (a model that
  * moved things anyway) the next step on with the same text. One not found is
  * left out: its line in the file is then the author's text beside the result.
+ * A step the draft named no id for keeps '' as its id: the writer then knows
+ * its line by the text it was sent as.
  */
 export function authoredForResult(
   draft: { steps: string[]; authored?: number[]; authoredIds?: string[] } | null,
@@ -3285,12 +3708,12 @@ export function authoredForResult(
   const result = (Array.isArray(resultSteps) ? resultSteps : []).map(cleanStepText).filter((s) => s !== '');
   const authored: number[] = [];
   const authoredIds: string[] = [];
-  if (!draft?.authored || !draft.authoredIds) return { authored, authoredIds };
+  if (!draft?.authored) return { authored, authoredIds };
   let from = 0;
   draft.authored.forEach((idx, k) => {
     const id = draft.authoredIds?.[k] ?? '';
     const text = draft.steps[idx];
-    if (id === '' || text === undefined) return;
+    if (text === undefined) return;
     let at = result[idx] === text && idx >= from ? idx : -1;
     if (at < 0) at = result.indexOf(text, from);
     if (at < 0) return;
@@ -3299,4 +3722,53 @@ export function authoredForResult(
     from = at + 1;
   });
   return { authored, authoredIds };
+}
+
+/**
+ * The result as the one-shot insertion at Stop puts it in, for a recording
+ * that gave up on its file (SPEC-record-steps.md §7.4): every step but the
+ * author's own whose line is still in the file. A line typed in the file is
+ * the author's and stays where they put it, so its step is not inserted a
+ * second time beside it. `result.authored` / `authoredIds` place the author's
+ * steps in the result (`authoredForResult`); a line is known by the id its
+ * step has, or — no id — by the text it was sent as, and found in `current`
+ * as it last read or by that text. `kept`: the steps left out.
+ */
+export function oneShotSteps(
+  live: LiveRecord | null,
+  current: string,
+  result: { steps: unknown[]; authored?: number[]; authoredIds?: string[] },
+): { steps: string[]; kept: string[] } {
+  const steps = cleanSteps(result.steps);
+  const mines = (live?.slots ?? []).filter((s) => s.kind === 'mine' && s.status === 'sent' && s.dropped !== 'hidden');
+  if (mines.length === 0) return { steps, kept: [] };
+  const lines = current.split(/\r?\n/);
+  const inFile = (s: RecordSlot): boolean => {
+    const line = mineLineText(s);
+    return (line.trim() !== '' && lines.includes(line)) || (s.sentText !== undefined && lines.some((l) => cleanAuthorLine(l) === s.sentText));
+  };
+  const skip = new Set<number>();
+  const used = new Set<RecordSlot>();
+  const authored = result.authored ?? [];
+  const ids = result.authoredIds ?? [];
+  authored.forEach((idx, k) => {
+    const id = ids[k];
+    const text = steps[idx];
+    if (text === undefined) return;
+    const mine =
+      (id ? mines.find((s) => !used.has(s) && s.stepId === id) : undefined) ??
+      mines.find((s) => !used.has(s) && !s.stepId && s.sentText === text);
+    if (!mine) return;
+    used.add(mine);
+    if (inFile(mine)) skip.add(idx);
+  });
+  // A line sent that no draft held (just before Stop): the result's first
+  // step with its text that is not an author's step of the draft.
+  const theirs = new Set(authored);
+  for (const mine of mines) {
+    if (used.has(mine) || !inFile(mine)) continue;
+    const idx = steps.findIndex((t, i) => t === mine.sentText && !theirs.has(i) && !skip.has(i));
+    if (idx >= 0) skip.add(idx);
+  }
+  return { steps: steps.filter((_, i) => !skip.has(i)), kept: steps.filter((_, i) => skip.has(i)) };
 }

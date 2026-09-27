@@ -1991,12 +1991,22 @@ export interface TestBenchTestHooks {
   /** Record Steps: the lines the author wrote into the recorded block, and
    *  what became of each — typed, sent, its step's id, held by the draft
    *  (stories/testbench-record-toolbar.md §"Steps typed in the editor"). */
-  recordingAuthorLines: () => Array<{ key: string; line: string; status: string; stepId?: string; inDraft: boolean }>;
+  recordingAuthorLines: () => Array<{
+    key: string;
+    line: string;
+    status: string;
+    stepId?: string;
+    inDraft: boolean;
+    dropped?: 'hidden' | 'left';
+  }>;
   /** Record Steps: where the browser toolbar was last left (`record:toolbar`),
    *  as the next start body sends it. */
   recordingToolbar: () => { dock: string; minimised: boolean } | undefined;
   /** Record Steps: set or forget where the toolbar was left. */
   setRecordingToolbar: (value: { dock: 'tl' | 'tc' | 'tr' | 'bl' | 'bc' | 'br'; minimised: boolean } | undefined) => Promise<void>;
+  /** Record Steps: the window's focus changing, as `onDidChangeWindowState`
+   *  reports it — a test cannot unfocus the window it runs in. */
+  recordingWindowFocus: (focused: boolean) => void;
 }
 
 export interface TestBenchExports {
@@ -2487,6 +2497,7 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       recordingAuthorLines: () => registry.recorder.authorLines,
       recordingToolbar: () => registry.recorder.rememberedToolbar,
       setRecordingToolbar: (value) => registry.recorder.setRememberedToolbar(value),
+      recordingWindowFocus: (focused) => registry.recorder.windowFocusChanged(focused),
     },
   };
 }
@@ -2553,6 +2564,12 @@ async function handleWebviewMessage(
     case 'recordAddStep':
       // A box with nothing in it adds nothing; the command would ask instead.
       if (typeof msg.text !== 'string' || msg.text.trim() === '') return;
+      // The box keeps its text until the answer comes back by its id: cleared
+      // when the server took the steps, kept with the reason otherwise.
+      if (typeof msg.id === 'string' && msg.id !== '') {
+        await registry.recorder.addStepFromPanel(msg.text, msg.id);
+        return;
+      }
       await vscode.commands.executeCommand('testbench-native.addStepToRecording', { text: msg.text });
       return;
     case 'run': {

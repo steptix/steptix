@@ -76,6 +76,10 @@ test('isHostMsg: the Recording block message is a host message', () => {
   assert.equal(isHostMsg({ type: 'recording', state: null }), true);
 });
 
+test('isHostMsg: the Add step box\'s answer is a host message', () => {
+  assert.equal(isHostMsg({ type: 'recordAddStepResult', id: 'add-1', accepted: false, reason: 'the recording is finishing' }), true);
+});
+
 test('isWebviewMsg: every Recording control the panel posts is accepted', () => {
   // runner-view.ts drops whatever this guard rejects, so a button whose type is
   // missing here would do nothing at all.

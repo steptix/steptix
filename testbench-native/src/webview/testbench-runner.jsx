@@ -47,7 +47,15 @@ import {
   setRowsFor,
   variablesHeaderSuffix,
 } from "./lib/rows-panel.js";
-import { draftStepMarksInline, formatRecordTimeInline, recordingStatusTextInline } from "./lib/recording-panel.js";
+import {
+  EMPTY_ADD_STEP_BOX,
+  addStepBoxAnswer,
+  addStepBoxEdit,
+  addStepBoxSend,
+  draftStepMarksInline,
+  formatRecordTimeInline,
+  recordingStatusTextInline,
+} from "./lib/recording-panel.js";
 
 // Inline narrowing helper. The webview can't import named exports from
 // runner-core directly because Vite's CJS interop drops names through
@@ -70,6 +78,8 @@ const HOST_MSG_TYPES = new Set([
   "compileRunEvent",
   // Record Steps: the Recording block (stories/testbench-record-steps.md).
   "recording",
+  // The Add step box's answer — handled by the block itself (RecordingPanel).
+  "recordAddStepResult",
 ]);
 function isHostMsg(value) {
   if (!value || typeof value !== "object") return false;
@@ -292,7 +302,10 @@ function YoursTag() {
 function RecordingPanel({ state }) {
   const listRef = useRef(null);
   const draftRef = useRef(null);
-  const [stepText, setStepText] = useState("");
+  // The Add step box: its text stays until the host says the server took the
+  // steps (`recordAddStepResult`); a refusal keeps it, with the reason.
+  const [box, setBox] = useState(EMPTY_ADD_STEP_BOX);
+  const pressRef = useRef(0);
   const count = state ? state.actions.length : 0;
   const revision = state?.draft ? state.draft.revision : 0;
   // Follow the newest action, and the newest draft, as a log does.
@@ -304,6 +317,13 @@ function RecordingPanel({ state }) {
     const el = draftRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [revision]);
+  useEffect(
+    () =>
+      hostBridge.subscribe((msg) => {
+        if (msg.type === "recordAddStepResult") setBox((b) => addStepBoxAnswer(b, msg));
+      }),
+    [],
+  );
   if (!state) return null;
   const finishing = state.phase === "finishing";
   const starting = state.phase === "starting";
@@ -312,9 +332,13 @@ function RecordingPanel({ state }) {
   const draft = state.draft;
   const marks = draftStepMarksInline(draft);
   const addStep = () => {
-    if (!recordingNow || stepText.trim() === "") return;
-    hostBridge.postRecordAddStep(stepText);
-    setStepText("");
+    if (!recordingNow) return;
+    pressRef.current += 1;
+    const id = `add-${pressRef.current}`;
+    const { box: next, sent } = addStepBoxSend(box, id);
+    if (!sent) return;
+    setBox(next);
+    hostBridge.postRecordAddStep(next.text, id);
   };
   return (
     <div
@@ -511,8 +535,12 @@ function RecordingPanel({ state }) {
           <textarea
             data-testid="recording-add-step"
             aria-label="Add a step"
-            value={stepText}
-            onChange={(e) => setStepText(e.target.value)}
+            aria-invalid={box.error ? true : undefined}
+            value={box.text}
+            onChange={(e) => {
+              const text = e.target.value;
+              setBox((b) => addStepBoxEdit(b, text));
+            }}
             rows={1}
             disabled={!recordingNow}
             placeholder={'Verify the balance shows "$1,234.56"'}
@@ -527,12 +555,21 @@ function RecordingPanel({ state }) {
           />
           <button
             className="tb-btn"
-            disabled={!recordingNow || stepText.trim() === ""}
+            disabled={!recordingNow || box.text.trim() === "" || box.pending !== null}
             onClick={addStep}
             title="Add this step to the recording"
           >
-            ✎ Add step
+            {box.pending ? "Adding…" : "✎ Add step"}
           </button>
+        </div>
+      )}
+      {!starting && box.error && (
+        <div
+          data-testid="recording-add-step-error"
+          role="alert"
+          style={{ fontSize: "0.9em", marginTop: -2, marginBottom: 6, color: "var(--vscode-errorForeground, #f48771)" }}
+        >
+          {box.error}
         </div>
       )}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>

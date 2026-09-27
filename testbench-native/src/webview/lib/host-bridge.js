@@ -117,6 +117,7 @@ export const hostBridge = {
   postRecordDrop(id, dropped) { post({ type: 'recordDrop', id, dropped }); },
   /** Pause (`paused: true`) or Resume (stories/testbench-record-toolbar.md). */
   postRecordPause(paused) { post({ type: 'recordPause', paused }); },
-  /** The Add step box: one line is one step, several lines several steps. */
-  postRecordAddStep(text) { post({ type: 'recordAddStep', text }); },
+  /** The Add step box: one line is one step, several lines several steps.
+   *  `id` names the press; the host answers it with `recordAddStepResult`. */
+  postRecordAddStep(text, id) { post({ type: 'recordAddStep', text, ...(id !== undefined && { id }) }); },
 };
