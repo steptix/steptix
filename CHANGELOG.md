@@ -6,6 +6,23 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — Record Steps: write a test by using the app (TestBench)
+
+Press **Record** in TestBench (or run **Record New Test**), use the application
+in the test's own browser, and press **Stop**: the numbered steps are written
+into the file at the cursor, in the handbook's style, as one edit that one
+Ctrl+Z takes back. The model drafts them live as you work — the TestBench panel
+shows *Steps so far* a moment after each action — and each draft call is sent
+the page's own description of what you clicked plus a cropped screenshot around
+it. An action is a click or a drag, Enter or Tab, or the browser's Back,
+Forward or Refresh; typing, selecting and ticking ride with the next action.
+Every typed value becomes a `{{parameter}}` with its value under
+`## Parameters`; a password never leaves the browser — its step reads
+`{{password}}` and its value comes from `.env` — and secret fields are painted
+out of every screenshot. **Add check** turns your next click into a
+`Verify …` step instead of a click. A ✕ drops a misclick. See
+docs/specs/SPEC-record-steps.md. Server: rebuild and restart; TestBench 0.5.152.
+
 ### Added — `drag` and `reload` steps
 
 A step can now drag one element onto another and reload the page:
