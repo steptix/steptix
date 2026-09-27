@@ -9,6 +9,7 @@ import {
 } from 'ai-ui-automation-runner-core';
 import type { ErrorPayload, StepFailureDetail } from 'ai-ui-automation-runner-core';
 import { extractStepLineIds, shiftAnchorForChanges } from './step-lines.js';
+import { markLineMoves, moveLineKeyed } from './mark-lines-core.js';
 import { selectionLinesFrom } from './selection-lines-core.js';
 import { dataTablesOf } from './data-tables-core.js';
 import { restoredStatuses } from './run-state-core.js';
@@ -78,6 +79,9 @@ const PERSIST_DEBOUNCE_MS = 400;
  * `vscode.debug.breakpoints` (the canonical store, which gives us free
  * persistence + native gutter-click UX) and are read on demand. This struct
  * only holds state that's transient to the current run.
+ *
+ * The maps are keyed by 1-based line, and the keys follow the text as it is
+ * edited (`moveMarks`) — the repaint on every keystroke reads them.
  */
 export interface FileState {
   statuses: Map<number, LineStatus>;
@@ -217,9 +221,16 @@ export class ActiveFileTracker {
         // not whatever slid into its old line. Done before emit() so the
         // derived breakpointStop in the snapshot reflects the new position.
         this.maintainAnchor(event);
+        // The run marks move with the text the same way, for the same reason:
+        // the repaint below reads their line numbers.
+        const marksMoved = this.moveMarks(event);
         if (event.document === this.currentEditor?.document) {
           // `## Steps` may have been added/removed; re-check context key.
           this.updateContextKey();
+          this.emit();
+        } else if (marksMoved) {
+          // A skill file open beside the test, edited while it carries marks
+          // from a descent: nothing else repaints it.
           this.emit();
         }
       }),
@@ -653,6 +664,50 @@ export class ActiveFileTracker {
     // current editor the change handler already emits; emit here only
     // otherwise so a background skill-file edit still repaints.
     if (event.document !== this.currentEditor?.document) this.emit();
+  }
+
+  /**
+   * Move the edited document's run marks — statuses, failure details and
+   * error bands — with its text, so each stays on the step it belongs to.
+   * The rule (what moves, what stays, what is removed) is `markLineMoves`'s,
+   * mark-lines-core.ts.
+   *
+   * One set of moves for all three stores, computed over the union of their
+   * lines, so a removed step loses its ✗ and its hover together.
+   *
+   * This is also what keeps the persisted state honest. `persist()` stamps
+   * the signature from the live text every time it writes, so line numbers
+   * left behind by an edit would be saved as valid and restored onto the
+   * wrong steps after a reopen.
+   *
+   * What it cannot do: an edit made while a stream is live leaves the server
+   * reporting the lines it was sent, so the marks that stream paints from then
+   * on land by the old numbering — and the step that was running when the
+   * line moved keeps its ▶, its result painted on its old line, until the run
+   * ends and turns the ▶ to ■. The marks from before the edit are right. A Run
+   * or Continue after the edit sends the current text, so what it paints lands
+   * by the new numbering, and the registry moves its memory of the marks this
+   * run already painted with the same edit (`moveRememberedMarks`,
+   * extension.ts). One store does not move: a parked DATA-ROW run's Continue
+   * repaints the rows from the matrix it built when it started (`rowTables`,
+   * run-controller.ts), on the lines the rows had then.
+   *
+   * Returns true when any mark moved or was removed.
+   */
+  private moveMarks(event: vscode.TextDocumentChangeEvent): boolean {
+    if (event.contentChanges.length === 0) return false;
+    const state = this.states.get(event.document.uri.toString());
+    if (!state) return false;
+    const moves = markLineMovesFor(event, [
+      ...state.statuses.keys(),
+      ...state.errors.keys(),
+      ...state.failures.keys(),
+    ]);
+    if (!moves) return false;
+    moveLineKeyed(state.statuses, moves);
+    moveLineKeyed(state.errors, moves);
+    moveLineKeyed(state.failures, moves);
+    return true;
   }
 
   /**
@@ -1108,6 +1163,35 @@ export class ActiveFileTracker {
  *  replacement text adds. */
 function countNewlines(s: string): number {
   return s.split('\n').length - 1;
+}
+
+/**
+ * `markLineMoves` (mark-lines-core.ts) for a live change event: where each of
+ * `lines` (1-based) goes, or null when none of them moved.
+ *
+ * Exported so every store that pins something to a line by the run's marks
+ * moves by the one rule — the tracker's own maps here, and the run registry's
+ * memory of marks it will paint again (extension.ts). `event.document` is the
+ * text AFTER the event, which is what the rule's line-length question asks
+ * about.
+ */
+export function markLineMovesFor(
+  event: vscode.TextDocumentChangeEvent,
+  lines: Iterable<number>,
+): Map<number, number | null> | null {
+  const doc = event.document;
+  return markLineMoves(
+    lines,
+    event.contentChanges.map((c) => ({
+      startLine: c.range.start.line,
+      startCharacter: c.range.start.character,
+      endLine: c.range.end.line,
+      endCharacter: c.range.end.character,
+      text: c.text,
+      rangeLength: c.rangeLength,
+    })),
+    (line) => (line < doc.lineCount ? doc.lineAt(line).text.length : 0),
+  );
 }
 
 /**
