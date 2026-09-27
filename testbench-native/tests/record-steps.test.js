@@ -16,8 +16,13 @@ import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   CURSOR_REFUSALS,
+  applyOffsetEdits,
   applyRecordEdits,
   applyRecordFrame,
+  beginLiveRecord,
+  liveRecordWrite,
+  recordedLines,
+  trackRecordSlots,
   newRecordingState,
   cleanStepText,
   findProjectConfigs,
@@ -776,6 +781,245 @@ test('recorded values are written exactly; one with a line break is left out, an
   assert.match(plan.warnings[0], /"address".*line break/);
   const parsed = serverParse(t, after);
   if (parsed) assert.equal(parsed.parameters.greeting, 'Hello,  two  spaces', 'the parser reads back what was recorded');
+});
+
+// ---------------------------------------------------------------------------
+// The file while recording: each draft replaces the last (the author's
+// request, 2026-09-27 — "the steps appear in the test after every action")
+// ---------------------------------------------------------------------------
+
+const EMPTY = { steps: [], parameters: [] };
+
+/** What a one-shot insertion of `draft` into `text` reads as — the reference
+ *  every live write must match. */
+const oneShot = (text, anchor, draft) => {
+  const plan = planRecordInsertion(text, { anchor, ...draft });
+  assert.ok(!('error' in plan), plan.error);
+  return applyRecordEdits(text, plan.edits);
+};
+
+/**
+ * Write `drafts` one after another into `text`, as the extension does: each
+ * against the document as the last one left it, carrying the slots. Returns
+ * the document after each draft, and the live record (its slots current).
+ */
+function writeDrafts(text, anchor, drafts, live = beginLiveRecord(text, anchor)) {
+  assert.ok(!('error' in live), live.error);
+  let cur = text;
+  const after = [];
+  for (const draft of drafts) {
+    const w = liveRecordWrite(live, cur, draft);
+    assert.ok(!('error' in w), w.error);
+    assert.equal(applyOffsetEdits(cur, w.edits), w.text, 'the edits make the text the write reports');
+    cur = w.text;
+    live.slots = w.slots;
+    // Every slot holds what this draft put there.
+    for (const slot of w.slots) {
+      if (slot.kind === 'block') assert.equal(cur.slice(slot.start, slot.end), w.plan?.parts.block ?? '');
+      if (slot.kind === 'params') assert.equal(cur.slice(slot.start, slot.end), w.plan?.parts.params ?? '');
+      if (slot.kind === 'tail') assert.match(cur.slice(slot.start, slot.end), /^\d+$/);
+    }
+    after.push(cur);
+  }
+  return { live, after, text: cur };
+}
+
+/** A change as VS Code reports one, in offsets: `text` replaces `length` chars at `offset`. */
+const offsetChange = (offset, length, text) => ({ offset, length, text });
+/** Apply one author change to `text` and carry `live`'s slots through it. */
+function authorEdit(text, live, c) {
+  const tracked = trackRecordSlots(live.slots, [c]);
+  live.slots = tracked.slots;
+  return { text: text.slice(0, c.offset) + c.text + text.slice(c.offset + c.length), touched: tracked.touched };
+}
+
+const anchorAt = (text, needle, nth = 0) => {
+  const lines = text.split(/\r?\n/);
+  let idx = -1;
+  for (let i = 0, seen = 0; i < lines.length; i++) {
+    if (lines[i] === needle && seen++ === nth) {
+      idx = i;
+      break;
+    }
+  }
+  assert.ok(idx >= 0, `fixture has no line ${JSON.stringify(needle)}`);
+  const cursor = resolveRecordCursor(text, idx + 1);
+  assert.equal(cursor.ok, true, cursor.reason);
+  return { ...cursor.anchor, tracked: true };
+};
+
+test('live drafts: each one reads as that draft alone would, and the empty draft restores the file exactly', () => {
+  // The model grows the draft, then rewrites its last steps (Click Menu +
+  // Payments became one step), then adds a parameter and a step.
+  const d1 = { steps: ['Click Menu'], parameters: [] };
+  const d2 = { steps: ['Click Payments in the main menu', 'Type {{password}} into the Password field'], parameters: [{ name: 'password', value: '$PASSWORD' }] };
+  const d3 = {
+    steps: ['Click Payments in the main menu', 'Type {{password}} into the Password field', 'Type {{amount}} into Amount', 'Click Pay'],
+    parameters: [{ name: 'password', value: '$PASSWORD' }, { name: 'amount', value: '10' }, { name: 'email', value: 'demo@securebank.com' }],
+  };
+  const cases = [
+    ['main flow', SAMPLE, anchorAt(SAMPLE, '2. Sign in')],
+    ['section body', SAMPLE, anchorAt(SAMPLE, '1. Type {{email}} into the Email field')],
+    ['the blank line under ## Steps (ahead of step 1)', doc('## Steps', '', '1. Old first', '2. Old second', ''), anchorAt(doc('## Steps', '', '1. Old first', '2. Old second', ''), '')],
+    ['after a data table', doc('# T', '', '## Steps', '', '| user |', '| --- |', '| a |', ''), { line: 3, text: '## Steps', kind: 'heading', section: null, tracked: true }],
+    ['a table that ends the file', doc('## Steps', '', '| a |', '| - |', '| 1 |'), null],
+    ['a section table before the next section', doc('# T', '', '## Steps', '1. Log in', '', '### Log in', '', '| user |', '| --- |', '| a |', '', '### Other', '1. X', ''), { line: 6, text: '### Log in', kind: 'heading', section: 'Log in', tracked: true }],
+    ['1.-style numbering', doc('## Steps', '1. A', '1. B', '1. C'), anchorAt(doc('## Steps', '1. A', '1. B', '1. C'), '1. B')],
+    ['the last line, no final line break', doc('## Parameters', '- q: 1', '## Steps', '1. A', '2. B'), anchorAt(doc('## Parameters', '- q: 1', '## Steps', '1. A', '2. B'), '2. B')],
+    ['CRLF, ## Parameters created', doc('# T', '', '## Steps', '1. A', '2. B', '').replace(/\n/g, '\r\n'), anchorAt(doc('# T', '', '## Steps', '1. A', '2. B', '').replace(/\n/g, '\r\n'), '1. A')],
+    ['Record New Test (no anchor)', newTestSkeleton({ title: 'Pay by cash', baseUrl: 'http://localhost:8787/' }).text, null],
+  ];
+  for (const [name, text, anchor] of cases) {
+    const { after } = writeDrafts(text, anchor, [d1, d2, d3, EMPTY]);
+    assert.equal(after[0], oneShot(text, anchor, d1), `${name}: d1`);
+    assert.equal(after[1], oneShot(text, anchor, d2), `${name}: d2`);
+    assert.equal(after[2], oneShot(text, anchor, d3), `${name}: d3`);
+    assert.equal(after[3], text, `${name}: the empty draft restores the file byte for byte`);
+    // And straight to d3, with no drafts before it, is the same file.
+    assert.equal(writeDrafts(text, anchor, [d3]).text, after[2], `${name}: d3 alone`);
+  }
+});
+
+test('live drafts: a ## Parameters section the recording created is removed again by the empty draft', () => {
+  const text = doc('# T', '', '## Config', '- baseUrl: x', '', '## Steps', '1. A', '');
+  const anchor = anchorAt(text, '1. A');
+  const withParam = { steps: ['Type {{email}} into Email'], parameters: [{ name: 'email', value: 'a@b.c' }] };
+  const { after } = writeDrafts(text, anchor, [withParam, { steps: ['Click Next'], parameters: [] }, withParam, EMPTY]);
+  assert.equal(after[0], doc('# T', '', '## Config', '- baseUrl: x', '', '## Parameters', '- email: a@b.c', '', '## Steps', '1. A', '2. Type {{email}} into Email', ''));
+  // A draft that no longer needs the parameter takes the section back out.
+  assert.equal(after[1], doc('# T', '', '## Config', '- baseUrl: x', '', '## Steps', '1. A', '2. Click Next', ''));
+  assert.equal(after[2], after[0]);
+  assert.equal(after[3], text);
+});
+
+test('live drafts: a draft that shrinks (the model merged steps) renumbers the rest of the flow for its new length', () => {
+  const text = doc('## Steps', '1. Open', '2. Sign in', '3. Pay', '4. Sign out', '', '### S', '1. X');
+  const anchor = anchorAt(text, '2. Sign in');
+  const { after } = writeDrafts(text, anchor, [
+    { steps: ['Click Menu', 'Click Payments', 'Tick Cash'], parameters: [] },
+    { steps: ['Click Payments in the main menu'], parameters: [] },
+    { steps: [], parameters: [] },
+  ]);
+  assert.equal(after[0], doc('## Steps', '1. Open', '2. Sign in', '3. Click Menu', '4. Click Payments', '5. Tick Cash', '6. Pay', '7. Sign out', '', '### S', '1. X'));
+  assert.equal(after[1], doc('## Steps', '1. Open', '2. Sign in', '3. Click Payments in the main menu', '4. Pay', '5. Sign out', '', '### S', '1. X'));
+  assert.equal(after[2], text);
+});
+
+test('live drafts: the empty draft writes back each later ordinal as the file had it, not as a renumber would', () => {
+  // Out-of-sequence numbers are the author's; a recording that ends with
+  // nothing must not "fix" them.
+  const text = doc('## Steps', '1. A', '2. B', '7. C', '9. D');
+  const anchor = anchorAt(text, '1. A');
+  const { after } = writeDrafts(text, anchor, [{ steps: ['New'], parameters: [] }, EMPTY]);
+  assert.equal(after[0], doc('## Steps', '1. A', '2. New', '3. B', '4. C', '5. D'));
+  assert.equal(after[1], text);
+});
+
+test('live drafts: edits the author makes elsewhere stay, and the block follows them', () => {
+  const text = SAMPLE;
+  const anchor = anchorAt(text, '2. Sign in');
+  const d1 = { steps: ['Click Menu'], parameters: [{ name: 'password', value: '$PASSWORD' }] };
+  const d2 = { steps: ['Click Payments in the main menu', 'Tick Cash'], parameters: [{ name: 'password', value: '$PASSWORD' }] };
+  const run = writeDrafts(text, anchor, [d1]);
+  let cur = run.text;
+  // A line typed under the title (above everything the recording wrote)…
+  let r = authorEdit(cur, run.live, offsetChange(cur.indexOf('\n') + 1, 0, 'Written while recording.\n'));
+  assert.equal(r.touched, false);
+  cur = r.text;
+  // …a typo fixed in the anchor step itself…
+  r = authorEdit(cur, run.live, offsetChange(cur.indexOf('Sign in\n3.') + 'Sign in'.length, 0, ' as demo'));
+  assert.equal(r.touched, false);
+  cur = r.text;
+  // …and a word changed in a later step (not its number).
+  r = authorEdit(cur, run.live, offsetChange(cur.indexOf('Open Payments') + 5, 8, 'the payments page'));
+  assert.equal(r.touched, false);
+  cur = r.text;
+  const next = writeDrafts(cur, anchor, [d2, EMPTY], run.live);
+  const edited = (t) =>
+    t.replace('# Pay by cash\n', '# Pay by cash\nWritten while recording.\n').replace('2. Sign in\n', '2. Sign in as demo\n').replace('Open Payments', 'Open the payments page');
+  assert.equal(next.after[0], edited(oneShot(text, anchor, d2)));
+  assert.equal(next.after[1], edited(text), 'the empty draft takes out only what the recording wrote');
+});
+
+test('live drafts: an edit inside the recorded lines is reported, and the next draft writes over it', () => {
+  const text = SAMPLE;
+  const anchor = anchorAt(text, '2. Sign in');
+  const d1 = { steps: ['Click Menu', 'Tick Cash'], parameters: [] };
+  const run = writeDrafts(text, anchor, [d1]);
+  const at = run.text.indexOf('Tick Cash');
+  const r = authorEdit(run.text, run.live, offsetChange(at, 4, 'Untick'));
+  assert.equal(r.touched, true);
+  assert.match(r.text, /4\. Untick Cash/);
+  // Typing in the middle of a recorded line is inside it too.
+  const r2 = authorEdit(r.text, run.live, offsetChange(r.text.indexOf('Click Menu') + 'Click Menu'.length, 0, ' twice'));
+  assert.equal(r2.touched, true);
+  assert.match(r2.text, /3\. Click Menu twice\n4\. Untick Cash/);
+  const next = writeDrafts(r2.text, anchor, [d1], run.live);
+  assert.equal(next.text, oneShot(text, anchor, d1), 'the draft is back as the model wrote it');
+  // A new step typed as a whole line at the block's start goes above it,
+  // outside the recording, and is kept.
+  const blockStart = next.text.indexOf('3. Click Menu');
+  const above = authorEdit(next.text, next.live, offsetChange(blockStart, 0, '2b. mine\n'));
+  assert.equal(above.touched, false);
+  assert.equal(writeDrafts(above.text, anchor, [EMPTY], next.live).text, text.replace('2. Sign in\n', '2. Sign in\n2b. mine\n'));
+});
+
+test('live drafts: a later step the author deletes is not renumbered again; the rest still are', () => {
+  const text = doc('## Steps', '1. A', '2. B', '3. C', '4. D');
+  const anchor = anchorAt(text, '1. A');
+  const run = writeDrafts(text, anchor, [{ steps: ['New'], parameters: [] }]);
+  assert.equal(run.text, doc('## Steps', '1. A', '2. New', '3. B', '4. C', '5. D'));
+  const lineC = run.text.indexOf('4. C');
+  const r = authorEdit(run.text, run.live, offsetChange(lineC, '4. C\n'.length, ''));
+  assert.equal(r.touched, false);
+  assert.equal(r.text, doc('## Steps', '1. A', '2. New', '3. B', '5. D'));
+  assert.equal(run.live.slots.filter((s) => s.kind === 'tail').length, 2, 'C\'s ordinal is no longer the recording\'s');
+  const next = writeDrafts(r.text, anchor, [{ steps: ['New', 'Newer'], parameters: [] }, EMPTY], run.live);
+  assert.equal(next.after[0], doc('## Steps', '1. A', '2. New', '3. Newer', '4. B', '6. D'));
+  assert.equal(next.after[1], doc('## Steps', '1. A', '2. B', '4. D'));
+});
+
+test('slot edges: whole lines at the block\'s start go above it; typing at the start of the line after it is that line\'s', () => {
+  const text = doc('## Steps', '1. A', '2. B', '');
+  const anchor = anchorAt(text, '1. A');
+  const run = writeDrafts(text, anchor, [{ steps: ['New'], parameters: [] }]);
+  assert.equal(run.text, doc('## Steps', '1. A', '2. New', '3. B', ''));
+  const block = () => run.live.slots.find((s) => s.kind === 'block');
+  const { start, end } = block();
+  assert.equal(run.text.slice(start, end), '2. New\n');
+  // Typing at the start of the first recorded line is inside it.
+  assert.equal(trackRecordSlots(run.live.slots, [offsetChange(start, 0, 'x')]).touched, true);
+  // Whole lines inserted there go above it.
+  const above = trackRecordSlots(run.live.slots, [offsetChange(start, 0, 'x\n')]);
+  assert.equal(above.touched, false);
+  assert.equal(above.slots.find((s) => s.kind === 'block').start, start + 2);
+  // Typing where the block ends is on the next line — which is `3. B`, whose
+  // digits are the recording's too, so it is absorbed by the tail, not the block.
+  const atEnd = trackRecordSlots(run.live.slots, [offsetChange(end, 0, 'y')]);
+  assert.equal(atEnd.touched, false);
+  assert.deepEqual(atEnd.slots.find((s) => s.kind === 'block'), block());
+  // A block that ends the file (no final line break) ends mid-line: typing
+  // there extends the last recorded line.
+  const bare = doc('## Steps', '1. A');
+  const run2 = writeDrafts(bare, anchorAt(bare, '1. A'), [{ steps: ['New'], parameters: [] }]);
+  assert.equal(run2.text, doc('## Steps', '1. A', '2. New'));
+  assert.equal(trackRecordSlots(run2.live.slots, [offsetChange(run2.text.length, 0, '!')]).touched, true);
+  // …while typing at the end of the anchor line, where that block starts, is not.
+  assert.equal(trackRecordSlots(run2.live.slots, [offsetChange(bare.length, 0, '!')]).touched, false);
+});
+
+test('the recorded lines: the block\'s steps and the added parameters, not the blank lines between', () => {
+  const text = doc('# T', '', '## Steps', '1. Log in', '', '### Log in', '', '| user |', '| --- |', '| a |', '### Other', '1. X', '');
+  const run = writeDrafts(text, { line: 6, text: '### Log in', kind: 'heading', section: 'Log in', tracked: true }, [
+    { steps: ['Type {{user}}', 'Click Go'], parameters: [{ name: 'user', value: 'a' }] },
+  ]);
+  const lines = run.text.split('\n');
+  assert.deepEqual(
+    recordedLines(run.text, run.live.slots).map((i) => lines[i]),
+    ['## Parameters', '- user: a', '1. Type {{user}}', '2. Click Go'],
+  );
+  assert.deepEqual(recordedLines(run.text, run.live.slots, ['block']).map((i) => lines[i]), ['1. Type {{user}}', '2. Click Go']);
+  assert.deepEqual(recordedLines(text, beginLiveRecord(text, null).slots), [], 'nothing written, nothing highlighted');
 });
 
 // ---------------------------------------------------------------------------

@@ -167,9 +167,11 @@ and no step is written for it.
    clicking a checkbox's label is `Tick the … checkbox`, `Click Menu`
    followed by a click on Payments becomes one `Click Payments in the main
    menu`. Typing is still one action per field, so there is no call per
-   keystroke. The draft shows in the TestBench panel as it grows; at Stop it
-   is final (one last call when actions arrived after the last draft), and
-   goes into the file as one edit, as before. Dropping or restoring an action
+   keystroke. The draft shows in the TestBench panel as it grows — and, since
+   the author asked for it on 2026-09-27 ("it would be nice if the steps
+   appeared in the test after every action"), in the file too (decision 11);
+   at Stop it is final (one last call when actions arrived after the last
+   draft), and is written over the last draft. Dropping or restoring an action
    redrafts the whole recording in one call. The model is given the
    handbook's step-writing rules, the file around the cursor (its `baseUrl`,
    parameters and section names, so it can write `Navigate to login.html` and
@@ -191,7 +193,19 @@ and no step is written for it.
       line, or the blank line after one, under `## Steps` (the same regions
       `classifyLines` already knows). The steps are inserted after that line,
       in that flow or section, numbered to follow it, and everything after is
-      renumbered with the existing Renumber Steps logic. One edit, one undo.
+      renumbered with the existing Renumber Steps logic. One undo takes the
+      recording back out.
+    - **While recording** (changed at the author's request, 2026-09-27 — the
+      first build changed the file once, at the result): every draft goes
+      into the file as it arrives, by the same rules, REPLACING the block the
+      last draft wrote rather than inserting again — the model may rewrite its
+      last three steps, so lines change as well as grow — with the rest of the
+      flow renumbered for the block's current length and the draft's
+      parameters merged. The result is written over the last draft; Cancel
+      takes everything the recording wrote back out. The recorded lines are
+      highlighted while it runs; an edit inside them is overwritten by the
+      next draft and warned about once; the file is never saved for the
+      author.
     - **A new test** — *TestBench: Record New Test* asks for a name, creates
       `<tests dir>/<name>.md` with a title, `## Config` (`baseUrl` from the
       project), an empty `## Parameters` and `## Steps`, opens it and starts
@@ -340,7 +354,8 @@ existing parameter with the same name is left as it is.
 ## What the TestBench half decided
 
 Built in `runner-core/` (the frames, `streamRecordSteps`,
-`controlRecordSteps`) and `testbench-native/` (tb 0.5.152 — main shipped 0.5.151 in PR #160 first). The text rules
+`controlRecordSteps`) and `testbench-native/` (tb 0.5.152 — main shipped 0.5.151 in PR #160 first; the draft
+in the file, below, is tb 0.5.153). The text rules
 live in `record-steps-core.ts` and are pinned by `tests/record-steps.test.js`;
 the flow is pinned against a fake server by
 `tests/integration/suite/record-steps.test.cjs`. Where this differs from
@@ -379,8 +394,8 @@ delimiter under it is prose: under a step, Markdown and the parser fold it
 into that step, so the new steps go after it, not between the two.
 
 **The line recorded from, when the file changed.** The anchor is followed
-through the document's own edits while recording, and until the insertion
-is made: every `onDidChangeTextDocument` batch moves it by the lines added
+through the document's own edits while recording, until the first write
+fixes the place (see "The draft in the file", below): every `onDidChangeTextDocument` batch moves it by the lines added
 or removed above it (`trackAnchorThroughChanges`, pure and pinned). An edit
 inside the line — a renumber rewriting `2.` to `3.`, a typo fixed — keeps
 it; so does a renamed section, whose new name is read off the document. Text
@@ -424,9 +439,10 @@ does not define gets a warning at insertion, since the next Run would fail
 on it.
 
 **A result is never lost.** One the plan cannot place (`## Steps` deleted
-while recording), one whose edit is rejected three times, and one whose
-file cannot be opened (renamed or deleted) is written, numbered, with its
-parameters above it, to the TestBench output; the error notification offers
+before anything was written), one whose edit is rejected three times, and
+one whose file was closed while recording (renamed, deleted, or closed by
+the author) is written, numbered, with its parameters above it, to the
+TestBench output, and any draft still in the file is taken out; the error notification offers
 **Copy steps** (to the clipboard) and **Show output**. A result with no
 steps — nothing recorded, or every action dropped — is an information
 message carrying the server's note, not an error.
@@ -500,8 +516,109 @@ instead of `● Recording — N actions`. N counts actions in decision 4's
 sense (a frame's `action` flag; an absent flag reads as an action) that were
 not dropped; an event that rides with the next action (typing, selecting,
 ticking) is listed with a hollow `○` rather than `●`. The frame folding is the pure
-`applyRecordFrame` in `record-steps-core.ts`, pinned by the unit suite. What
-goes into the file is still `record:result` alone, never the last draft.
+`applyRecordFrame` in `record-steps-core.ts`, pinned by the unit suite. The
+same draft goes into the file (next).
+
+**The draft in the file** (decision 11, as changed at the author's request,
+2026-09-27; tb 0.5.153). Every `record:draft` that is newer than the one
+written goes into the file as it arrives; drafts that arrive while a write is
+in flight coalesce into one write of the latest. The first write fixes the
+place: it plans against the document as it is then, with the tracked anchor,
+and keeps that text as the recording's BASE together with three kinds of
+slot — the block's insertion point, the parameters' insertion point, and the
+ordinal digits of every later step of the flow, with the digits each had
+(`beginLiveRecord`). Every write after that is the same `planRecordInsertion`
+run against the base with the new draft, its pieces written into the slots
+(`liveRecordWrite`) — so what a draft writes is a pure function of the base
+and the draft, the file after drafts 1…n reads as draft n alone would have
+made it, and the EMPTY draft writes back exactly what the base had. The
+slots are offsets, carried through everyone else's edits by
+`trackRecordSlots` (pure, pinned); the recording's own writes are told apart
+by the text they leave, which the change event is compared against. The
+result is the last write through the same path; Cancel, a `done` error or
+abort, a result with no steps, and a rescue each write the empty draft.
+
+Where that differs from what the one-shot insertion did, or from the spec's
+first wording:
+
+- *The base is fixed at the first write.* A step the author adds to the flow
+  after the insertion point while recording is not renumbered, and a
+  parameter line they add by hand is not seen as existing — the one-shot
+  insertion, which planned against the document at the end, did both. What
+  they wrote stays; Renumber Steps catches the numbering.
+- *The later steps' numbers are the recording's while it runs.* An edit to
+  those digits is overwritten by the next write; an edit that reaches past
+  them (the line deleted, or rewritten around its number) drops that step
+  from the renumbering, and the empty draft does not touch it again.
+- *An edit inside the recorded lines* — the block or the parameter lines — is
+  taken into the slot and overwritten by the next draft, and warned about
+  once per recording, as a notification and in the panel's log: "Lines being
+  recorded are rewritten as the model updates them — edit them after Stop."
+  At a slot's edge an insertion is outside when it cannot be part of it:
+  whole lines typed at the block's first line go above it, and typing at the
+  start of the line after it is that line's. Reverting the file while
+  recording is an edit inside it too, and warns.
+- *A file in no visible editor* still gets the draft, as a WorkspaceEdit —
+  the only way to edit a document without an editor, and always an undo step
+  of its own (the document's editor, when one is visible in any group, is
+  used otherwise, since only it can join an open undo step). Stop shows the
+  file first, as the insertion always did, and writes through its editor.
+- *A file closed while recording* is not written again, and the result is
+  rescued (output + Copy steps) rather than reopened and inserted — the
+  first build reopened it. Closing it with "Save" leaves the last draft saved
+  in the file; nothing can take it back out then.
+- *Highlight*: every recorded line (steps and parameter lines, not the blank
+  lines a block carries for spacing) gets a whole-line decoration in the
+  theme's own diff colours — `diffEditor.insertedLineBackground`, a 2px bar
+  of `editorGutter.addedBackground` at the left, and a mark in the overview
+  ruler — on every editor showing the file, until the recording ends. The
+  editor follows the block's last line as it grows only when the author was
+  looking at the block; one who scrolled away is left there.
+
+**Undo, measured** (the integration harness, VS Code 1.95). Each draft goes
+in through the document's editor with `undoStopBefore` true for the first
+write and false after, and `undoStopAfter` false; the result closes the step
+(`undoStopAfter: true` — with an edit that rewrites the block as it is when
+the result says nothing new, since an empty edit never reaches VS Code and
+so carries no undo stop). With nothing else touching the file, three drafts
+and the result are ONE undo step: one Ctrl+Z restores the file byte for byte
+and clears its unsaved mark — with the cursor sitting exactly where the steps
+go in, too. That grouping does not survive everything, though. Measured with
+plain `editor.edit` calls (an open step, something in between, two more
+edits joining it): VS Code closes the open step when the author types in the
+file, moves the cursor with `cursorDown`, or saves; a selection set through
+the API does not close it, and neither does showing another file and coming
+back. Measured with the recorder written as above, the one-undo promise then
+broke — one Ctrl+Z left a draft on screen:
+
+- the author typed in the file between drafts: three steps — undo 1 back to
+  draft 1 with the typing, undo 2 took the typing, undo 3 the draft;
+- the author moved the cursor in it (a selection set, then `cursorDown`):
+  two steps, undo 1 back to draft 1;
+- an author's edit made through the API between drafts: three steps, undo 1
+  back to draft 1 with the author's line;
+- a draft written while the file was in no visible editor (the
+  WorkspaceEdit): three steps, undo 1 back to that draft, undo 2 to draft 1.
+
+So the recorder notes when anything may have closed its step since its first
+write (`split`: a change event that is not its own, a selection change that
+carries a kind, a save, a WorkspaceEdit draft), and then writes the result as
+TWO steps: the empty draft first, closing whatever step is open, then the
+result as a step of its own. The state one Ctrl+Z returns to is then the file
+without the recording, the author's own edits kept — measured for the four
+cases above, for `cursorDown` alone, for a save between drafts, and for a
+selection set through the API alone. That last one is a false alarm: VS Code
+reports an API selection change with a kind (as a command's), so it counts,
+though it does not close the step. A split costs two things, false alarm or
+not: the file stays marked unsaved after that undo even when it now matches
+the disk, and undoing further walks back through the drafts (undo 2 brings
+the last draft back). Counting every selection change with a kind keeps the
+costly mistake — a real break missed, a stale draft left by one Ctrl+Z — out
+of reach. An auto-save setting that saves while recording is a save like any
+other. After Cancel the file reads as before but stays marked unsaved; the
+drafts and their removal compress to an undo step that changes nothing
+(measured: the next Ctrl+Z changed nothing, and the document's version did
+not move).
 
 **Controls.** Stop before `record:started` is a cancel. The ✕ on an action is
 shown at once and sent at once as `drop` (or `restore` when put back), so the
@@ -553,9 +670,9 @@ own to record in.
 idle or paused); while recording, Add Check and Stop Recording at the front.
 Palette: all five commands, gated on the context key. Panel: `● Record` and
 `New test…` in the toolbar, `● Record new test` on the no-test view, and the
-Recording block. The result is applied with one `editor.edit` (re-planned
-against the live text if a keystroke lands in between), the inserted steps
-are selected, and the file is left unsaved.
+Recording block. The result is written over the last draft through the
+document's editor (re-planned against the live text if a keystroke lands in
+between), the recorded steps are selected, and the file is left unsaved.
 
 ## What the server half decided
 

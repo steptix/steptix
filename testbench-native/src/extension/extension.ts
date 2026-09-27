@@ -1970,6 +1970,13 @@ export interface TestBenchTestHooks {
   /** Record Steps: settles when the current recording, insertion included,
    *  is over. */
   recordingSettled: () => Promise<void>;
+  /** Record Steps: the 1-based lines the recording highlights in its file
+   *  now, or null when no highlight exists (it comes off when the recording
+   *  ends) — decorations are not readable from the extension host. */
+  recordingHighlight: () => number[] | null;
+  /** Record Steps: the notifications the most recent recording showed while
+   *  it ran (the warning about editing the lines being recorded). */
+  recordingNotices: () => Array<{ level: 'info' | 'warn' | 'error'; text: string }>;
 }
 
 export interface TestBenchExports {
@@ -2441,6 +2448,8 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       recordingReport: () => registry.recorder.lastReport,
       recordingRefusal: () => registry.recorder.lastRefusal,
       recordingSettled: () => registry.recorder.settled,
+      recordingHighlight: () => registry.recorder.highlightedLines,
+      recordingNotices: () => registry.recorder.liveNotices,
     },
   };
 }

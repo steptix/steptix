@@ -68,6 +68,12 @@ Run and Record, and the context key `testbench-native.recording` is set.
 
 The status bar reads `● Recording — N actions`.
 
+The **file** shows the draft too, as it grows (§7): each draft is written
+into the test where the steps will go — numbered, the rest of the flow
+renumbered, its parameters under `## Parameters` — in place of the draft
+before it, and the lines being recorded are highlighted. Stop writes the
+result over the last draft; Cancel takes the draft back out.
+
 ### 3.3 Which browser, and where it starts
 
 Recording uses the test's own session browser — the one Run drives, keyed
@@ -302,8 +308,50 @@ check calls for one.
 
 ## 7. Where the steps go
 
-The result is inserted as **one edit** — one Ctrl+Z restores the file
-exactly.
+The steps go into the file **while recording**. Each draft (§8) is written
+where the steps will go, by the rules below, in place of the draft before it:
+the recorded block is replaced, not inserted again — the model may have
+rewritten its last steps, so lines change as well as grow — the rest of the
+flow is renumbered for the block's length now, and the draft's parameters
+are merged under `## Parameters`. What a draft writes is decided by the file
+as it stood at the first write and the draft alone, so the file after drafts
+1…n reads as draft n alone would have made it. A draft older than the one
+written is skipped.
+
+- **Stop** writes the result the same way, over the last draft. Nothing is
+  inserted twice.
+- **Cancel** — and a recording that ends in an error, or that the server
+  ends — takes out everything the recording wrote: the block, the renumbering
+  (every later step gets back the number it had), and the parameter lines it
+  added, including a `## Parameters` section it created. A result with no
+  steps does the same.
+- The **author's own edits** elsewhere in the file stay, and what the
+  recording wrote is followed through them. An edit **inside** the lines
+  being recorded is overwritten by the next draft; the first one is warned
+  about, once per recording: "Lines being recorded are rewritten as the model
+  updates them — edit them after Stop." The later steps' numbers belong to
+  the recording while it runs; a later step whose line is deleted, or
+  rewritten around its number, is no longer renumbered.
+- The lines being recorded — the steps and the parameter lines — are
+  **highlighted** until Stop or Cancel. When the editor shows where the steps
+  go, it follows the block as it grows.
+- The file is **never saved** for the author. A draft that arrives while the
+  file is in no visible editor still goes into it (a workspace edit); Stop
+  shows the file, as insertion always has.
+- A file **closed** while recording is not written again: the panel keeps
+  drafting, and the result is rescued as in §7.1.
+
+**Undo.** One Ctrl+Z after Stop takes the whole recording out. Measured in
+VS Code 1.95: the drafts and the result are one undo step, and that undo
+restores the file byte for byte and clears its unsaved mark. VS Code closes
+an open undo step when the author types in the file, moves its cursor, or
+saves it, and a draft written while the file is in no visible editor is an
+undo step of its own; when any of that happened, the result is written as two
+steps — the drafts taken out, then the result — so the one Ctrl+Z still lands
+on the file without the recording, the author's own edits kept (the file
+stays marked unsaved). Undoing further walks back through the drafts. After
+Cancel the file reads as it did, still marked unsaved; its history then holds
+one undo step that changes nothing.
 
 ### 7.1 At the cursor
 
@@ -333,18 +381,20 @@ with pipes and no delimiter row under it is not a table; under a step it
 continues that step.
 
 The line the steps go after is followed through every edit made to the
-document while recording: lines added or removed above it move it, and a
-renumber that rewrites its number does not lose it. Only when that line
-itself is deleted (or the file is closed) is it looked for again by its
-text; when that fails too, the steps go at the end of the flow the line was
-in — not of `## Steps`, whose end is inside the last section — and the
-author is told.
+document until the first draft is written, which fixes the place: lines
+added or removed above it move it, and a renumber that rewrites its number
+does not lose it. Only when that line itself is deleted is it looked for
+again by its text; when that fails too, the steps go at the end of the flow
+the line was in — not of `## Steps`, whose end is inside the last section —
+and the author is told. From the first write on, what the recording wrote is
+what is followed.
 
-A result is never lost. One that cannot be inserted — `## Steps` deleted,
-the file renamed or deleted, the edit rejected three times — is written to
-the TestBench output, and the error offers **Copy steps**. A result with no
-steps (nothing recorded, or every action dropped) is said as the server's
-note, as information rather than an error.
+A result is never lost. One that cannot be written — `## Steps` deleted
+before anything was written, the file closed, renamed or deleted while
+recording, the edit rejected three times — is written to the TestBench
+output, and the error offers **Copy steps**; any draft still in the file is
+taken out. A result with no steps (nothing recorded, or every action
+dropped) is said as the server's note, as information rather than an error.
 
 ### 7.2 A new test
 
@@ -449,7 +499,7 @@ every remaining action, answering `replaceFrom: 0`.
 
 **At Stop** the draft is final when it already covers every remaining action;
 otherwise one more call brings it up to date. If that last call fails, the
-recording ends with an error and nothing is inserted.
+recording ends with an error and the drafts are taken back out of the file.
 
 **Model and policy:** the session's model (including a `runSettings.model`
 override). Recording is a request *for* AI, so it runs even where runs forbid
@@ -548,6 +598,7 @@ while recording."`. `done` is always the last frame.
 | The server is headless | "Record Steps needs a visible browser: this server runs headless (browser.headed: false)." |
 | No model configured | "Record Steps needs a model to write the steps; configure ai in aiui.config.json or .env." |
 | The model's answer could not be read | "The steps could not be written: <reason>. Nothing was inserted." |
+| The author edits a line being recorded | "Lines being recorded are rewritten as the model updates them — edit them after Stop." — a warning, once per recording |
 | A parameter name conflicts | "Parameter <name> already exists with a different value; the recorded value was not added." |
 | The file for Record New Test exists | "<path> already exists." |
 | Record New Test's tests folder is outside the workspace | "The project's tests folder (<path>) is outside this workspace, so Record New Test cannot create a test there. …" |
@@ -570,7 +621,10 @@ while recording."`. `done` is always the last frame.
   log line and no file.
 - Recording at a cursor inside a `### Section` body inserts there and
   renumbers only that body.
-- One Ctrl+Z after insertion restores the file byte for byte.
+- The file shows each draft as it arrives, in place of the last; Cancel
+  restores it byte for byte.
+- One Ctrl+Z after Stop takes the whole recording out — byte for byte when
+  nothing else changed the file while recording.
 - A dropped action produces no step.
 - A check produces exactly one `Verify` step, and its click did nothing on
   the page.

@@ -21,6 +21,13 @@
  * coordinates, which the command applies through a single `editor.edit` so the
  * whole insertion is one undo step.
  *
+ * While recording, every draft is written the same way (`beginLiveRecord`,
+ * `liveRecordWrite`): the first write fixes the place and keeps the document
+ * as it stood then; each later draft is that same plan against that same text,
+ * written into the regions the recording owns (`RecordSlot`), which are
+ * carried through the author's own edits (`trackRecordSlots`). The empty
+ * draft puts back what the file had.
+ *
  * What counts as a step is runner-core's `classifyLines`, with the fence
  * correction renumber-core makes: a numbered line inside a ``` fence is text.
  */
@@ -450,6 +457,14 @@ export interface ParameterConflict {
 
 export interface RecordInsertionPlan {
   edits: RecordEdit[];
+  /**
+   * The same edits by what each one is, for the live writer
+   * (`liveRecordWrite`): the text of the block inserted after the anchor, the
+   * text inserted for `## Parameters` ('' when nothing is added), and the new
+   * ordinal of each later step of the flow that is renumbered (0-based line
+   * in the planned text).
+   */
+  parts: { block: string; params: string; renumber: Array<{ line: number; text: string }> };
   /** 1-based lines the inserted steps occupy once the edits are applied. */
   insertedLines: number[];
   /** The flow the steps joined. */
@@ -495,8 +510,98 @@ export function planRecordInsertion(
   text: string,
   args: { anchor: RecordAnchor | null; steps: unknown[]; parameters: unknown[] },
 ): RecordInsertionPlan | { error: string } {
-  const steps = (Array.isArray(args.steps) ? args.steps : []).map(cleanStepText).filter((s) => s !== '');
+  const steps = cleanSteps(args.steps);
   if (steps.length === 0) return { error: 'The recording came back with no steps.' };
+  const placed = placeRecording(text, args.anchor);
+  if ('error' in placed) return placed;
+  const { m, eol, section, fellBack, insertAt, blankBefore, blankAfter, ones, prev } = placed;
+  const warnings = [...placed.warnings];
+
+  const newLines = steps.map((s, k) => `${ones ? 1 : prev + 1 + k}. ${s}`);
+  const block = [...(blankBefore ? [''] : []), ...newLines, ...(blankAfter ? [''] : [])];
+
+  const edits: RecordEdit[] = [];
+  const at = blockPoint(placed);
+  const blockText = blockTextAt(at, block, eol);
+  edits.push(point(at.line, at.char, blockText));
+
+  // The rest of the flow, renumbered by the Renumber Steps walk over the
+  // document as it will read: the inserted steps are non-targets, so the walk
+  // continues from their numbers exactly as it continues from any step written
+  // above a selection.
+  const simLines = [...m.lines.slice(0, insertAt), ...block, ...m.lines.slice(insertAt)];
+  const sim = modelOf(simLines.join('\n'));
+  const targets: number[] = [];
+  for (let i = insertAt + block.length; i < sim.lines.length && !ones; i++) {
+    const kind = kindAt(sim, i);
+    if (kind === 'section-heading') break;
+    if (kind === (section === null ? 'step' : 'section-step')) targets.push(i + 1);
+  }
+  const renumber: Array<{ line: number; text: string }> = [];
+  if (targets.length > 0) {
+    for (const edit of computeRenumberEdits(sim.lines.join('\n'), targets)) {
+      const orig = edit.line - 1 - block.length;
+      edits.push({ startLine: orig, startChar: 0, endLine: orig, endChar: edit.digits, text: String(edit.ordinal) });
+      renumber.push({ line: orig, text: String(edit.ordinal) });
+    }
+  }
+
+  // ── Parameters ─────────────────────────────────────────────────────────
+  const params = planParameters(m, args.parameters, eol);
+  warnings.push(...params.warnings);
+  let shift = 0;
+  if (params.edit) {
+    edits.push(params.edit);
+    if (params.edit.startLine < insertAt) shift = params.lineCount;
+  }
+
+  const firstStep = insertAt + 1 + (blankBefore ? 1 : 0) + shift;
+  return {
+    edits,
+    parts: { block: blockText, params: params.edit?.text ?? '', renumber },
+    insertedLines: newLines.map((_, k) => firstStep + k),
+    section,
+    fellBack,
+    parametersAdded: params.added,
+    parameterConflicts: params.conflicts,
+    warnings,
+  };
+}
+
+/** Step texts as they will be written, blanks dropped. */
+function cleanSteps(raw: unknown): string[] {
+  return (Array.isArray(raw) ? raw : []).map(cleanStepText).filter((s) => s !== '');
+}
+
+/**
+ * Where a recording's steps go in `text`, and how they are numbered — all of
+ * it independent of what the steps say, so the live writer can fix it once
+ * and write every draft of the recording into the same place.
+ */
+interface Placement {
+  m: LineModel;
+  eol: string;
+  /** The flow the steps join. */
+  section: string | null;
+  /** The anchor was not found again: the steps go at the end of its flow. */
+  fellBack: boolean;
+  /** The fallback, said. */
+  warnings: string[];
+  /** 0-based line the block goes in front of (`m.lines.length`: after the
+   *  last line, which has no line break of its own). */
+  insertAt: number;
+  /** A blank line goes in ahead of the steps (after a table with none). */
+  blankBefore: boolean;
+  /** A blank line goes in after them (a flow opened straight above a heading). */
+  blankAfter: boolean;
+  /** The flow is written `1.` throughout: the new steps are `1.` too, and
+   *  nothing is renumbered. */
+  ones: boolean;
+  /** The number the new steps continue from. */
+  prev: number;
+}
+
+function placeRecording(text: string, anchor: RecordAnchor | null): Placement | { error: string } {
   const m = modelOf(text);
   if (m.stepsIdx < 0) return { error: 'the file has no ## Steps heading any more' };
   const eol = /\r\n/.test(text) ? '\r\n' : '\n';
@@ -504,16 +609,16 @@ export function planRecordInsertion(
 
   // ── Where ──────────────────────────────────────────────────────────────
   let fellBack = false;
-  let section: string | null = args.anchor?.section ?? null;
+  let section: string | null = anchor?.section ?? null;
   let anchorIdx: number;
   let anchorKind: 'step' | 'heading';
-  const located = args.anchor === null ? null : locateAnchor(m, args.anchor);
+  const located = anchor === null ? null : locateAnchor(m, anchor);
   if (located !== null) {
     anchorIdx = located.idx;
-    anchorKind = args.anchor!.kind;
+    anchorKind = anchor!.kind;
     section = located.section;
   } else {
-    if (args.anchor !== null) {
+    if (anchor !== null) {
       fellBack = true;
       if (section !== null && sectionHeadingIdx(m, section) < 0) section = null;
     }
@@ -571,55 +676,42 @@ export function planRecordInsertion(
   // renumbered. Otherwise the new steps continue from the anchor's number.
   const ones = allOnes(m, section);
   const prev = anchorKind === 'step' ? writtenOrdinal(m, anchorIdx, section) : 0;
-  const newLines = steps.map((s, k) => `${ones ? 1 : prev + 1 + k}. ${s}`);
-  const block = [...(blankBefore ? [''] : []), ...newLines, ...(blankAfter ? [''] : [])];
+  return { m, eol, section, fellBack, warnings, insertAt, blankBefore, blankAfter, ones, prev };
+}
 
-  const edits: RecordEdit[] = [];
-  if (insertAt < m.lines.length) {
-    edits.push(point(insertAt, 0, block.map((l) => l + eol).join('')));
-  } else {
-    const last = m.lines.length - 1;
-    edits.push(point(last, (m.lines[last] ?? '').length, block.map((l) => eol + l).join('')));
-  }
+/**
+ * The point the block is inserted at: the start of line `insertAt`, or — when
+ * the steps go after the last line, which has no line break of its own — the
+ * end of that line, the block then written break-first (`lineEnd`).
+ */
+function blockPoint(p: Placement): { line: number; char: number; lineEnd: boolean } {
+  if (p.insertAt < p.m.lines.length) return { line: p.insertAt, char: 0, lineEnd: false };
+  const last = p.m.lines.length - 1;
+  return { line: last, char: (p.m.lines[last] ?? '').length, lineEnd: true };
+}
 
-  // The rest of the flow, renumbered by the Renumber Steps walk over the
-  // document as it will read: the inserted steps are non-targets, so the walk
-  // continues from their numbers exactly as it continues from any step written
-  // above a selection.
-  const simLines = [...m.lines.slice(0, insertAt), ...block, ...m.lines.slice(insertAt)];
-  const sim = modelOf(simLines.join('\n'));
-  const targets: number[] = [];
-  for (let i = insertAt + block.length; i < sim.lines.length && !ones; i++) {
-    const kind = kindAt(sim, i);
+function blockTextAt(at: { lineEnd: boolean }, block: string[], eol: string): string {
+  return at.lineEnd ? block.map((l) => eol + l).join('') : block.map((l) => l + eol).join('');
+}
+
+/**
+ * The later steps of the flow a recording renumbers (0-based lines in the
+ * placement's text), each with its ordinal as written: every step of that flow
+ * after the insertion point, up to the next section heading. None in a flow
+ * written `1.` throughout, which is never renumbered.
+ */
+function tailOf(p: Placement): Array<{ line: number; digits: string }> {
+  const out: Array<{ line: number; digits: string }> = [];
+  if (p.ones) return out;
+  const wanted = p.section === null ? 'step' : 'section-step';
+  for (let i = p.insertAt; i < p.m.lines.length; i++) {
+    const kind = kindAt(p.m, i);
     if (kind === 'section-heading') break;
-    if (kind === (section === null ? 'step' : 'section-step')) targets.push(i + 1);
+    if (kind !== wanted) continue;
+    const digits = LEADING_ORDINAL_RE.exec(p.m.lines[i] ?? '')?.[1];
+    if (digits !== undefined) out.push({ line: i, digits });
   }
-  if (targets.length > 0) {
-    for (const edit of computeRenumberEdits(sim.lines.join('\n'), targets)) {
-      const orig = edit.line - 1 - block.length;
-      edits.push({ startLine: orig, startChar: 0, endLine: orig, endChar: edit.digits, text: String(edit.ordinal) });
-    }
-  }
-
-  // ── Parameters ─────────────────────────────────────────────────────────
-  const params = planParameters(m, args.parameters, eol);
-  warnings.push(...params.warnings);
-  let shift = 0;
-  if (params.edit) {
-    edits.push(params.edit);
-    if (params.edit.startLine < insertAt) shift = params.lineCount;
-  }
-
-  const firstStep = insertAt + 1 + (blankBefore ? 1 : 0) + shift;
-  return {
-    edits,
-    insertedLines: newLines.map((_, k) => firstStep + k),
-    section,
-    fellBack,
-    parametersAdded: params.added,
-    parameterConflicts: params.conflicts,
-    warnings,
-  };
+  return out;
 }
 
 function point(line: number, char: number, text: string): RecordEdit {
@@ -878,22 +970,55 @@ function planParameters(
   }
   if (toAdd.length === 0) return { lineCount: 0, added, conflicts, warnings };
 
-  if (section === null) {
+  const at = parametersPoint(m, section);
+  if (at.create) {
     // No section: create one immediately above `## Steps`. Always depth 2 —
     // the parser reads no other.
-    const blankBefore = m.stepsIdx > 0 && (m.lines[m.stepsIdx - 1] ?? '').trim() !== '';
     const block = ['## Parameters', ...toAdd, ''];
     return {
-      edit: point(m.stepsIdx, 0, (blankBefore ? eol : '') + block.map((l) => l + eol).join('')),
-      lineCount: block.length + (blankBefore ? 1 : 0),
+      edit: point(at.line, at.char, (at.blankBefore ? eol : '') + block.map((l) => l + eol).join('')),
+      lineCount: block.length + (at.blankBefore ? 1 : 0),
       added,
       conflicts,
       warnings,
     };
   }
+  if (at.lineEnd) {
+    return {
+      edit: point(at.line, at.char, toAdd.map((l) => eol + l).join('')),
+      lineCount: toAdd.length,
+      added,
+      conflicts,
+      warnings,
+    };
+  }
+  // A heading straight after the new bullets gets its blank line back.
+  const lines = at.headingNext ? [...toAdd, ''] : toAdd;
+  return {
+    edit: point(at.line, at.char, lines.map((l) => l + eol).join('')),
+    lineCount: lines.length,
+    added,
+    conflicts,
+    warnings,
+  };
+}
 
-  // In the first section: after its last item; with none, after its last
-  // non-blank line outside a fence (the heading itself when it is empty).
+/**
+ * Where new parameter lines go — which does not depend on what they are, so
+ * the live writer fixes it once: after the first `## Parameters` section's
+ * last item (after its last non-blank line outside a fence when it has none,
+ * the heading itself when it is empty); or, with no section, a new one
+ * created immediately above `## Steps`. `lineEnd`: the point is the end of the
+ * file's last line, which has no line break, so lines are written break-first.
+ */
+function parametersPoint(
+  m: LineModel,
+  section: ReturnType<typeof scanParameters> = scanParameters(m),
+): { line: number; char: number; lineEnd: boolean; create: boolean; blankBefore: boolean; headingNext: boolean } {
+  if (section === null) {
+    const blankBefore = m.stepsIdx > 0 && (m.lines[m.stepsIdx - 1] ?? '').trim() !== '';
+    return { line: m.stepsIdx, char: 0, lineEnd: false, create: true, blankBefore, headingNext: false };
+  }
   let after = section.headingIdx;
   const own = section.items.filter((item) => item.line < section.end);
   if (own.length > 0) {
@@ -909,24 +1034,9 @@ function planParameters(
   const at = after + 1;
   if (at >= m.lines.length) {
     const last = m.lines.length - 1;
-    return {
-      edit: point(last, (m.lines[last] ?? '').length, toAdd.map((l) => eol + l).join('')),
-      lineCount: toAdd.length,
-      added,
-      conflicts,
-      warnings,
-    };
+    return { line: last, char: (m.lines[last] ?? '').length, lineEnd: true, create: false, blankBefore: false, headingNext: false };
   }
-  // A heading straight after the new bullets gets its blank line back.
-  const headingNext = /^#/.test(m.lines[at] ?? '');
-  const lines = headingNext ? [...toAdd, ''] : toAdd;
-  return {
-    edit: point(at, 0, lines.map((l) => l + eol).join('')),
-    lineCount: lines.length,
-    added,
-    conflicts,
-    warnings,
-  };
+  return { line: at, char: 0, lineEnd: false, create: false, blankBefore: false, headingNext: /^#/.test(m.lines[at] ?? '') };
 }
 
 /**
@@ -956,6 +1066,289 @@ export function applyRecordEdits(text: string, edits: RecordEdit[]): string {
   let out = text;
   for (const { edit, start, end } of ordered) out = out.slice(0, start) + edit.text + out.slice(end);
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// The file while recording: every draft written in place of the last
+// ---------------------------------------------------------------------------
+
+/**
+ * A region of the document a recording owns while it runs, as offsets into the
+ * document as it is NOW (0-based UTF-16 code units — VS Code's `rangeOffset`).
+ *
+ *  - `block`: the recorded steps after the anchor, with the blank lines a
+ *    table or a following heading needs. Empty until a draft has steps.
+ *  - `params`: the parameter lines the recording added, or the whole
+ *    `## Parameters` section it created. Empty while it adds none.
+ *  - `tail`: the ordinal of one later step of the same flow, which the block
+ *    renumbers. `original` is what the file had — what the empty draft
+ *    writes back.
+ */
+export interface RecordSlot {
+  kind: 'params' | 'block' | 'tail';
+  start: number;
+  end: number;
+  /** The slot hangs off the END of a line — its text starts with a line
+   *  break — because it follows the file's last line, which has none. */
+  lineEnd: boolean;
+  /** `tail`: the step's 0-based line in `LiveRecord.base`. */
+  line?: number;
+  /** `tail`: its ordinal as the file had it. */
+  original?: string;
+}
+
+/**
+ * What a recording keeps so that each draft replaces the last one in the file
+ * rather than being inserted again: the document as it stood when the
+ * recording first wrote to it (`base`), the anchor as found there, and the
+ * slots, carried through every edit since (`trackRecordSlots`).
+ *
+ * What a draft writes is a pure function of `base`, `anchor` and the draft —
+ * the same `planRecordInsertion` a one-shot insertion uses — so the file after
+ * drafts d1…dn reads as dn alone would have made it, and the EMPTY draft puts
+ * back exactly what the file had: no block, no added parameter lines, every
+ * later step's ordinal as it was written. What the author changed elsewhere
+ * meanwhile is outside the slots, and stays.
+ */
+export interface LiveRecord {
+  base: string;
+  anchor: RecordAnchor | null;
+  slots: RecordSlot[];
+}
+
+/** A replacement in offsets of the document as it is — `start === end` inserts. */
+export interface OffsetEdit {
+  start: number;
+  end: number;
+  text: string;
+}
+
+/**
+ * Fix where a recording writes into `text`: the block's point after the
+ * anchor, the parameters' point, and the ordinal of every later step of that
+ * flow. Nothing is written yet — every slot but the tails is empty. Fails as
+ * `planRecordInsertion` does when there is no `## Steps` to write under.
+ */
+export function beginLiveRecord(text: string, anchor: RecordAnchor | null): LiveRecord | { error: string } {
+  const placed = placeRecording(text, anchor);
+  if ('error' in placed) return placed;
+  const starts = lineStarts(text);
+  const at = (line: number, char: number): number => (starts[line] ?? text.length) + char;
+  const params = parametersPoint(placed.m);
+  const block = blockPoint(placed);
+  const slots: RecordSlot[] = [
+    { kind: 'params', start: at(params.line, params.char), end: at(params.line, params.char), lineEnd: params.lineEnd },
+    { kind: 'block', start: at(block.line, block.char), end: at(block.line, block.char), lineEnd: block.lineEnd },
+    ...tailOf(placed).map(
+      (t): RecordSlot => ({
+        kind: 'tail',
+        start: at(t.line, 0),
+        end: at(t.line, t.digits.length),
+        lineEnd: false,
+        line: t.line,
+        original: t.digits,
+      }),
+    ),
+  ];
+  // Stable: at one offset the parameters come before the block, and the block
+  // before the step it is inserted ahead of — the order the text reads in.
+  slots.sort((a, b) => a.start - b.start);
+  return { base: text, anchor: anchor === null ? null : { ...anchor }, slots };
+}
+
+export interface LiveRecordWrite {
+  /** What to change, in offsets of the document as it is now. Slots that
+   *  already hold what the draft wants are not touched. */
+  edits: OffsetEdit[];
+  /** The slots once `edits` are applied. */
+  slots: RecordSlot[];
+  /** The document once `edits` are applied. */
+  text: string;
+  /** The draft's plan against `base` — its section, the parameters it adds
+   *  and its warnings — or null for the empty draft. */
+  plan: RecordInsertionPlan | null;
+}
+
+/**
+ * The edits that make `current` — the document as it is now, holding whatever
+ * the recording wrote last — read as `draft`: each slot replaced by what the
+ * draft puts there. A draft with no steps is the empty draft: it takes out
+ * everything the recording wrote (parameters too — they only exist for the
+ * steps) and writes each later step's ordinal back as the file had it.
+ */
+export function liveRecordWrite(
+  live: LiveRecord,
+  current: string,
+  draft: { steps: unknown[]; parameters: unknown[] },
+): LiveRecordWrite | { error: string } {
+  const steps = cleanSteps(draft.steps);
+  let plan: RecordInsertionPlan | null = null;
+  let want: (slot: RecordSlot) => string = (slot) => (slot.kind === 'tail' ? (slot.original ?? '') : '');
+  if (steps.length > 0) {
+    const planned = planRecordInsertion(live.base, { anchor: live.anchor, steps, parameters: draft.parameters });
+    if ('error' in planned) return planned;
+    plan = planned;
+    const renumbered = new Map(planned.parts.renumber.map((r) => [r.line, r.text]));
+    want = (slot) =>
+      slot.kind === 'block'
+        ? planned.parts.block
+        : slot.kind === 'params'
+          ? planned.parts.params
+          : (renumbered.get(slot.line ?? -1) ?? slot.original ?? '');
+  }
+  const edits: OffsetEdit[] = [];
+  const slots: RecordSlot[] = [];
+  let delta = 0;
+  let floor = 0;
+  for (const slot of live.slots) {
+    // Overlapping slots cannot come out of `trackRecordSlots`; one that did
+    // would be written twice, so it is left alone.
+    if (slot.start < floor) continue;
+    floor = slot.end;
+    const text = want(slot);
+    if (current.slice(slot.start, slot.end) !== text) edits.push({ start: slot.start, end: slot.end, text });
+    const start = slot.start + delta;
+    slots.push({ ...slot, start, end: start + text.length });
+    delta += text.length - (slot.end - slot.start);
+  }
+  return { edits, slots, text: applyOffsetEdits(current, edits), plan };
+}
+
+/** `text` with offset edits applied, all in `text`'s offsets. At one start, a
+ *  wider range goes first, and of two insertions the earlier listed ends up
+ *  in front — as one editor edit applies them. */
+export function applyOffsetEdits(text: string, edits: OffsetEdit[]): string {
+  const ordered = edits
+    .map((edit, index) => ({ edit, index }))
+    .sort((a, b) => b.edit.start - a.edit.start || b.edit.end - a.edit.end || b.index - a.index);
+  let out = text;
+  for (const { edit } of ordered) out = out.slice(0, edit.start) + edit.text + out.slice(edit.end);
+  return out;
+}
+
+/** One change as VS Code reports it: `rangeOffset`, `rangeLength`, `text`. */
+export interface OffsetChange {
+  offset: number;
+  length: number;
+  text: string;
+}
+
+/**
+ * Carry the slots through one batch of edits someone else made (one
+ * `onDidChangeTextDocument` event that was not the recording's own write).
+ *
+ * An edit before a slot moves it; one after leaves it. An edit that reaches
+ * INTO the block or the parameters — the lines being recorded — is taken into
+ * the slot, so the next draft rewrites it, and `touched` says so (the author
+ * is warned, once). The ordinal of a later step belongs to the recording while
+ * it runs: an edit within those digits is taken in too; one that reaches past
+ * them — the line deleted, or rewritten around its number — drops the slot,
+ * and that step is not renumbered again.
+ *
+ * At a slot's edge, an insertion counts as outside it when it cannot be part
+ * of it: whole lines put in at its start go above it, and typing at the start
+ * of the line after it is that line's. Typing at the start of a recorded line,
+ * or at the end of the last one when the block ends the file, is inside.
+ */
+export function trackRecordSlots(
+  slots: RecordSlot[],
+  changes: OffsetChange[],
+): { slots: RecordSlot[]; touched: boolean } {
+  let out = slots.map((s) => ({ ...s }));
+  let touched = false;
+  // Bottom-up, so each change's offsets are still those it was reported in.
+  const ordered = [...changes].sort((a, b) => b.offset - a.offset);
+  for (const c of ordered) {
+    const delta = c.text.length - c.length;
+    const end = c.offset + c.length;
+    const next: RecordSlot[] = [];
+    for (const slot of out) {
+      const where = slotRelation(slot, c);
+      if (where === 'before') {
+        next.push({ ...slot, start: slot.start + delta, end: slot.end + delta });
+      } else if (where === 'after') {
+        next.push(slot);
+      } else if (slot.kind === 'tail') {
+        if (c.offset >= slot.start && end <= slot.end) next.push({ ...slot, end: slot.end + delta });
+      } else if (slot.start === slot.end) {
+        // Nothing written there yet: the point moves to the edge of the edit.
+        const at = slot.lineEnd ? c.offset + c.text.length : c.offset;
+        next.push({ ...slot, start: at, end: at });
+      } else {
+        touched = true;
+        next.push({
+          ...slot,
+          start: Math.min(slot.start, c.offset),
+          end: Math.max(slot.end + delta, c.offset + c.text.length),
+        });
+      }
+    }
+    out = next;
+  }
+  return { slots: out, touched };
+}
+
+function slotRelation(slot: RecordSlot, c: OffsetChange): 'before' | 'after' | 'inside' {
+  const end = c.offset + c.length;
+  if (end < slot.start) return 'before';
+  if (c.offset > slot.end) return 'after';
+  if (c.length > 0) {
+    if (end === slot.start) return 'before';
+    if (c.offset === slot.end) return 'after';
+    return 'inside';
+  }
+  // An insertion at an edge.
+  if (c.offset === slot.start) {
+    if (slot.lineEnd || c.text.endsWith('\n')) return 'before';
+    return slot.start === slot.end ? 'after' : 'inside';
+  }
+  // At the end of a non-empty slot: the start of the line after it, unless the
+  // slot ends mid-line — the last recorded line of a file with no final line
+  // break, or an ordinal's digits.
+  if (c.offset === slot.end) return slot.lineEnd || slot.kind === 'tail' ? 'inside' : 'after';
+  return 'inside';
+}
+
+/**
+ * The 0-based lines that hold recorded text — the block's steps and the
+ * parameter lines — for the highlight and the selection. Blank lines the
+ * block carries for spacing are left out.
+ */
+export function recordedLines(
+  text: string,
+  slots: RecordSlot[],
+  kinds: Array<RecordSlot['kind']> = ['params', 'block'],
+): number[] {
+  const starts = lineStarts(text);
+  const out = new Set<number>();
+  for (const slot of slots) {
+    if (!kinds.includes(slot.kind) || slot.end <= slot.start) continue;
+    for (let line = lineAtOffset(starts, slot.start); line < starts.length && starts[line]! < slot.end; line++) {
+      const lineEnd = line + 1 < starts.length ? starts[line + 1]! : text.length;
+      const part = text.slice(Math.max(slot.start, starts[line]!), Math.min(slot.end, lineEnd));
+      if (part.trim() !== '') out.add(line);
+    }
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/** Offset of the start of every line. */
+function lineStarts(text: string): number[] {
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
+  return starts;
+}
+
+/** The 0-based line holding `offset`. */
+function lineAtOffset(starts: number[], offset: number): number {
+  let lo = 0;
+  let hi = starts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (starts[mid]! <= offset) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
 }
 
 // ---------------------------------------------------------------------------

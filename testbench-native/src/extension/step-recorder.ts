@@ -9,21 +9,28 @@ import type { RecordStepsOutcome, RunController } from './run-controller.js';
 import { getOutputChannel } from './output-channel.js';
 import {
   applyRecordFrame,
+  beginLiveRecord,
   cleanStepText,
+  liveRecordWrite,
   newRecordingState,
-  planRecordInsertion,
   plainNotificationText,
+  recordedLines,
   recordedStepsText,
   recordingStatusText,
   trackAnchorThroughChanges,
+  trackRecordSlots,
+  type LiveRecord,
   type RecordAnchor,
+  type RecordInsertionPlan,
+  type RecordSlot,
 } from './record-steps-core.js';
 
 /**
  * Record Steps, the TestBench half (stories/testbench-record-steps.md): one
  * recording at a time per window, its live state for the panel and the status
- * bar, the controls the author steers it with, and — when the result comes
- * back — the one edit that inserts it.
+ * bar, the controls the author steers it with, and the file: each draft is
+ * written into it as it arrives, in place of the last, and the result over the
+ * last draft (or, at Cancel, everything the drafts wrote taken back out).
  *
  * The recording itself runs in the document's `RunController` (it owns the
  * session, the env, the write-once `config`); this class owns everything the
@@ -62,9 +69,11 @@ export interface RecordingReport {
 interface ActiveRecording {
   controller: RunController;
   /** Where the steps go, carried through every edit made to the document
-   *  while recording (`trackAnchorThroughChanges`). */
+   *  while recording (`trackAnchorThroughChanges`) — until the first write
+   *  fixes the place (`LiveFile.record`). */
   anchor: RecordAnchor | null;
-  /** The listeners that carry `anchor`; disposed when the insertion is over. */
+  /** The listeners that carry `anchor` and the live slots; disposed when the
+   *  insertion is over. */
   watch: vscode.Disposable | null;
   state: RecordingPanelState;
   /** Stop has been sent; a second press waits for the result. */
@@ -72,13 +81,75 @@ interface ActiveRecording {
   /** The error lines the server already put in the log, so the closing
    *  error is not printed twice. */
   loggedErrors: string[];
+  live: LiveFile;
+}
+
+/**
+ * The recorded file while recording (SPEC-record-steps.md §7): each draft is
+ * written into it in place of the last, and what the recording wrote is
+ * tracked through the author's own edits, so Stop writes the result over it
+ * and Cancel takes it out again.
+ */
+interface LiveFile {
+  /** Where the recording writes and what the file had there. Null until the
+   *  first write, which plans against the document as it is then. */
+  record: LiveRecord | null;
+  /** Revision of the draft last written; 0 before any. */
+  written: number;
+  /** Our own edit in flight: the text it leaves and the slots after it, so
+   *  its change event is told from the author's (`matched`). */
+  pending: { text: string; slots: RecordSlot[]; matched: boolean } | null;
+  /** Every write runs after the one before it. */
+  chain: Promise<void>;
+  /** A draft write is queued on `chain` and has not started. */
+  queued: boolean;
+  /** No more draft writes: the recording is over or ending. */
+  stopped: boolean;
+  /** The document was closed while recording: never written again. */
+  closed: boolean;
+  /**
+   * The recording's writes so far are one undo step, still open for the next
+   * write to join (`undoStopBefore: false`). False before the first write, and
+   * after anything else changed the document — the author's edit is its own
+   * undo step, so the recording's next write starts a new one rather than
+   * joining whatever the author left open.
+   */
+  groupOpen: boolean;
+  /** Something the recording wrote is in the document's undo history. */
+  wroteAny: boolean;
+  /**
+   * The recording's writes may no longer be ONE undo step: since the first
+   * write, the document changed under another hand, the author moved the
+   * cursor in it (VS Code closes the open undo step on a cursor move), it was
+   * saved, or a draft went in as a WorkspaceEdit. The result is then written
+   * as two steps — the drafts taken out, then the result — so one Ctrl+Z
+   * after Stop still lands on the file without the recording.
+   */
+  split: boolean;
+  /** The one warning about editing the lines being recorded has been shown. */
+  warned: boolean;
+  /** Notifications shown while recording, as shown. */
+  notices: Array<{ level: 'info' | 'warn' | 'error'; text: string }>;
+  /** The highlight on the recorded lines; disposed when the recording ends. */
+  decoration: vscode.TextEditorDecorationType | null;
+  /** 0-based lines highlighted now. */
+  highlighted: number[];
+  /** Why no draft could be written yet, said once in the output. */
+  unwritable: string | null;
 }
 
 const COPY_STEPS = 'Copy steps';
 const SHOW_OUTPUT = 'Show output';
 
+/** SPEC-record-steps.md §7: said once per recording. */
+export const EDITED_WHILE_RECORDING =
+  'Lines being recorded are rewritten as the model updates them — edit them after Stop.';
+
 export class StepRecorder implements vscode.Disposable {
   private current: ActiveRecording | null = null;
+  /** The most recent recording's file state — outlives `current`, which is
+   *  dropped as soon as the stream ends, while the result is still written. */
+  private lastLive: LiveFile | null = null;
   private readonly statusItem: vscode.StatusBarItem;
   private lastContextValue = false;
 
@@ -109,6 +180,19 @@ export class StepRecorder implements vscode.Disposable {
     return this.current ? this.statusItem.text : null;
   }
 
+  /** Test-only: the 1-based lines the recording highlights now, or null when
+   *  no highlight exists (before the first recording, and once one ends). */
+  get highlightedLines(): number[] | null {
+    const live = this.lastLive;
+    return live?.decoration ? live.highlighted.map((l) => l + 1) : null;
+  }
+
+  /** Test-only: the notifications the most recent recording showed while it
+   *  ran (the in-block edit warning). */
+  get liveNotices(): Array<{ level: 'info' | 'warn' | 'error'; text: string }> {
+    return (this.lastLive?.notices ?? []).map((n) => ({ ...n }));
+  }
+
   /** Say why a Record gesture did nothing — a warning, remembered for tests. */
   refuse(reason: string): void {
     this.lastRefusal = reason;
@@ -137,8 +221,37 @@ export class StepRecorder implements vscode.Disposable {
         file: path.basename(doc.uri.fsPath),
         mode: opts.mode,
       }),
+      live: {
+        record: null,
+        written: 0,
+        pending: null,
+        chain: Promise.resolve(),
+        queued: false,
+        stopped: false,
+        closed: doc.isClosed,
+        groupOpen: false,
+        wroteAny: false,
+        split: false,
+        warned: false,
+        notices: [],
+        // A faint "added lines" background with a bar at the left, in the
+        // theme's own diff colours.
+        decoration: vscode.window.createTextEditorDecorationType({
+          isWholeLine: true,
+          backgroundColor: new vscode.ThemeColor('diffEditor.insertedLineBackground'),
+          borderColor: new vscode.ThemeColor('editorGutter.addedBackground'),
+          borderStyle: 'solid',
+          borderWidth: '0 0 0 2px',
+          overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.addedForeground'),
+          overviewRulerLane: vscode.OverviewRulerLane.Left,
+        }),
+        highlighted: [],
+        unwritable: null,
+      },
     };
-    rec.watch = this.watchAnchor(rec, doc.uri);
+    this.lastLive?.decoration?.dispose();
+    this.lastLive = rec.live;
+    rec.watch = this.watchDocument(rec, doc.uri);
     this.current = rec;
     this.publish();
     controller.postRecordLog(
@@ -148,42 +261,95 @@ export class StepRecorder implements vscode.Disposable {
       'info',
     );
     this.settled = this.run(rec, opts)
-      .catch((err: unknown) => {
+      .catch(async (err: unknown) => {
+        this.release(rec);
+        await this.clearLive(rec).catch(() => undefined);
         this.finish('error', [{ level: 'error', text: `Record Steps failed: ${err instanceof Error ? err.message : String(err)}` }]);
       })
       .finally(() => {
         rec.watch?.dispose();
         rec.watch = null;
+        this.endHighlight(rec);
         this.release(rec);
       });
   }
 
   /**
-   * Carry `rec.anchor` through the author's edits while recording — and
-   * until the insertion is made — so the steps go after the line the author
-   * chose even when lines were added above it, or it was renumbered. An edit
-   * that deletes the line, or the document closing (its unsaved edits gone
-   * with it), loses the track; the insertion then finds the line by its text.
+   * Follow the recorded document while recording — and until the result is
+   * written:
+   *
+   *  - `rec.anchor` through every edit, so the first write goes after the line
+   *    the author chose even when lines were added above it or it was
+   *    renumbered. An edit that deletes the line, or the document closing,
+   *    loses the track; the first write then finds the line by its text.
+   *  - once something is written, the recording's slots through the author's
+   *    edits (`trackRecordSlots`), telling our own writes apart by the text
+   *    they leave. An edit inside the recorded lines is warned about, once.
+   *  - the document closing: it is not written again (§7 — the result is
+   *    rescued at the end instead).
+   *  - the highlight, onto each editor that shows the document.
    */
-  private watchAnchor(rec: ActiveRecording, uri: vscode.Uri): vscode.Disposable | null {
-    if (!rec.anchor) return null;
+  private watchDocument(rec: ActiveRecording, uri: vscode.Uri): vscode.Disposable {
     const key = uri.toString();
+    const live = rec.live;
     return vscode.Disposable.from(
       vscode.workspace.onDidChangeTextDocument((e) => {
-        if (!rec.anchor || e.document.uri.toString() !== key || e.contentChanges.length === 0) return;
-        rec.anchor = trackAnchorThroughChanges(
-          rec.anchor,
-          e.contentChanges.map((c) => ({
-            startLine: c.range.start.line,
-            startChar: c.range.start.character,
-            endLine: c.range.end.line,
-            endChar: c.range.end.character,
-            text: c.text,
-          })),
+        if (e.document.uri.toString() !== key || e.contentChanges.length === 0) return;
+        if (rec.anchor) {
+          rec.anchor = trackAnchorThroughChanges(
+            rec.anchor,
+            e.contentChanges.map((c) => ({
+              startLine: c.range.start.line,
+              startChar: c.range.start.character,
+              endLine: c.range.end.line,
+              endChar: c.range.end.character,
+              text: c.text,
+            })),
+          );
+        }
+        const pending = live.pending;
+        if (pending && !pending.matched && e.document.getText() === pending.text) {
+          // Our own write: the slots are where the write put them.
+          pending.matched = true;
+          if (live.record) live.record = { ...live.record, slots: pending.slots };
+          return;
+        }
+        // Someone else's edit — the author's, usually. It is its own undo
+        // step, so the recording's next write starts a new one.
+        live.groupOpen = false;
+        if (live.wroteAny) live.split = true;
+        if (!live.record) return;
+        const tracked = trackRecordSlots(
+          live.record.slots,
+          e.contentChanges.map((c) => ({ offset: c.rangeOffset, length: c.rangeLength, text: c.text })),
         );
+        live.record = { ...live.record, slots: tracked.slots };
+        if (tracked.touched && !live.warned) {
+          live.warned = true;
+          const notice = { level: 'warn' as const, text: EDITED_WHILE_RECORDING };
+          live.notices.push(notice);
+          rec.controller.postRecordLog(notice.text, 'warn');
+          void this.notify(notice.level, notice.text);
+        }
+        this.highlight(rec);
       }),
       vscode.workspace.onDidCloseTextDocument((closed) => {
-        if (rec.anchor && closed.uri.toString() === key) rec.anchor = { ...rec.anchor, tracked: false };
+        if (closed.uri.toString() !== key) return;
+        if (rec.anchor) rec.anchor = { ...rec.anchor, tracked: false };
+        live.closed = true;
+        this.highlight(rec);
+      }),
+      vscode.window.onDidChangeVisibleTextEditors(() => this.highlight(rec)),
+      // A cursor the author moves closes the open undo step (measured with
+      // `cursorDown`). Every selection change that carries a kind counts —
+      // one set through the API carries one too (a command's) and does not
+      // close the step, but a false alarm only costs a split result, and a
+      // missed one leaves a draft behind one Ctrl+Z.
+      vscode.window.onDidChangeTextEditorSelection((e) => {
+        if (e.kind !== undefined && live.wroteAny && e.textEditor.document.uri.toString() === key) live.split = true;
+      }),
+      vscode.workspace.onDidSaveTextDocument((saved) => {
+        if (live.wroteAny && saved.uri.toString() === key) live.split = true;
       }),
     );
   }
@@ -299,8 +465,10 @@ export class StepRecorder implements vscode.Disposable {
     if (rec) {
       rec.watch?.dispose();
       rec.watch = null;
+      rec.live.stopped = true;
       void rec.controller.cancelRecording();
     }
+    this.lastLive?.decoration?.dispose();
     this.statusItem.dispose();
   }
 
@@ -316,8 +484,13 @@ export class StepRecorder implements vscode.Disposable {
       ...(opts.retryConflict && { retryConflict: true }),
     });
     // The recording is over, however it ended: take the block down before
-    // touching the document.
+    // touching the document, and write no more drafts.
+    rec.live.stopped = true;
     this.release(rec);
+    if (outcome.status !== 'result') {
+      // Cancelled, aborted or failed: nothing recorded stays in the file.
+      await this.clearLive(rec);
+    }
     if (outcome.status === 'cancelled') {
       if (outcome.reason) {
         // The server ended it — the session was closed under the recording
@@ -355,24 +528,232 @@ export class StepRecorder implements vscode.Disposable {
     // The block's state is folded by the pure core, where it is pinned.
     const changed = applyRecordFrame(rec.state, event as unknown as { type: string } & Record<string, unknown>);
     if (changed && this.current === rec) this.publish();
+    // A newer draft goes into the file too (a stale one changed nothing).
+    if (changed && event.type === 'record:draft') this.queueDraftWrite(rec);
+  }
+
+  // -------------------------------------------------------------------------
+  // The file while recording
+  // -------------------------------------------------------------------------
+
+  /**
+   * Write the latest draft into the file, after any write still in flight.
+   * Drafts that arrive meanwhile coalesce: the queued write reads the latest
+   * one when it starts, so a burst costs one edit.
+   */
+  private queueDraftWrite(rec: ActiveRecording): void {
+    const live = rec.live;
+    if (live.queued || live.stopped || live.closed) return;
+    live.queued = true;
+    live.chain = live.chain
+      .then(async () => {
+        live.queued = false;
+        const draft = rec.state.draft;
+        if (live.stopped || live.closed || !draft || draft.revision <= live.written) return;
+        const written = await this.writeLive(rec, draft, 'draft');
+        if (written.ok) {
+          live.written = draft.revision;
+        } else if (live.unwritable !== written.reason) {
+          // Said once, in the output: the panel still shows the draft, and the
+          // result is written — or rescued — at Stop.
+          live.unwritable = written.reason;
+          getOutputChannel().appendLine(`Record Steps: the draft is not shown in ${rec.state.file} — ${written.reason}.`);
+        }
+      })
+      .catch((err: unknown) => {
+        getOutputChannel().appendLine(
+          `Record Steps: writing the draft into ${rec.state.file} failed — ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 
   /**
-   * The result, as ONE editor edit — one undo step (decision 11): the steps
-   * after the anchor, the rest of that flow renumbered, and the parameters
-   * the file lacks. Planned against the document as it is NOW, with the anchor
-   * carried through the author's edits while recording.
+   * Make the file read as `draft`: each slot the recording owns replaced by
+   * what the draft puts there (`liveRecordWrite`). The first write fixes the
+   * slots, planning against the document as it is then.
+   *
+   * Undo (SPEC-record-steps.md §7): the recording's writes are meant to be one
+   * undo step. A draft goes in through the document's editor with no undo stop
+   * after it, so the next one joins the same step; the final write (the result,
+   * or the empty draft at Cancel) closes it. The first write — and the first
+   * after anything else changed the document — opens a new step instead of
+   * joining one the author left open. A document shown in no editor has no
+   * editor to join a step through: a DRAFT for it goes in as a WorkspaceEdit,
+   * which is always an undo step of its own; the FINAL write shows the
+   * document first, as the insertion always has, and goes through its editor.
+   *
+   * An edit rejected because the document changed under it (an author's
+   * keystroke landing first) is planned again, three times.
+   */
+  private async writeLive(
+    rec: ActiveRecording,
+    draft: { steps: unknown[]; parameters: unknown[] },
+    kind: 'draft' | 'final' | 'clear',
+  ): Promise<{ ok: true; plan: RecordInsertionPlan | null; editor: vscode.TextEditor | null } | { ok: false; reason: string }> {
+    const live = rec.live;
+    const file = rec.state.file;
+    const doc = rec.controller.document;
+    if (live.closed || doc.isClosed) {
+      live.closed = true;
+      return { ok: false, reason: `${file} was closed while recording` };
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let editor = visibleEditorFor(doc);
+      if (!editor && kind === 'final') editor = await vscode.window.showTextDocument(doc, { preview: false });
+      if (doc.isClosed) {
+        live.closed = true;
+        return { ok: false, reason: `${file} was closed while recording` };
+      }
+      if (!live.record) {
+        // Nothing written yet, so nothing to take out.
+        if (kind === 'clear') return { ok: true, plan: null, editor };
+        const begun = beginLiveRecord(doc.getText(), rec.state.mode === 'new' ? null : rec.anchor);
+        if ('error' in begun) return { ok: false, reason: begun.error };
+        live.record = begun;
+      }
+      const current = doc.getText();
+      const write = liveRecordWrite(live.record, current, draft);
+      if ('error' in write) return { ok: false, reason: write.error };
+      // The final write closes the undo step the drafts left open — which
+      // takes an edit even when the draft already said it all: a replace of
+      // the block with itself carries the undo stop.
+      const closing = kind !== 'draft' && live.groupOpen && editor !== null;
+      const edits =
+        write.edits.length > 0 || !closing
+          ? write.edits
+          : (live.record.slots.filter((s) => s.kind === 'block').map((s) => ({ start: s.start, end: s.end, text: current.slice(s.start, s.end) })));
+      if (edits.length === 0) {
+        live.record = { ...live.record, slots: write.slots };
+        return { ok: true, plan: write.plan, editor };
+      }
+      const watching = editor !== null && kind === 'draft' && this.isWatching(rec, editor);
+      live.pending = { text: write.text, slots: write.slots, matched: false };
+      let applied = false;
+      try {
+        const toRange = (e: { start: number; end: number }): vscode.Range =>
+          new vscode.Range(doc.positionAt(e.start), doc.positionAt(e.end));
+        if (editor) {
+          applied = await editor.edit(
+            (builder) => {
+              for (const e of edits) builder.replace(toRange(e), e.text);
+            },
+            { undoStopBefore: !live.groupOpen, undoStopAfter: kind !== 'draft' },
+          );
+          if (applied) live.groupOpen = kind === 'draft';
+        } else {
+          const we = new vscode.WorkspaceEdit();
+          for (const e of edits) we.replace(doc.uri, toRange(e), e.text);
+          applied = await vscode.workspace.applyEdit(we);
+          // Always an undo step of its own.
+          if (applied) {
+            live.groupOpen = false;
+            if (kind === 'draft') live.split = true;
+          }
+        }
+        if (applied && kind === 'draft') live.wroteAny = true;
+      } catch (err) {
+        // The editor went away between finding it and editing through it:
+        // try again with whatever shows the document now.
+        getOutputChannel().appendLine(
+          `Record Steps: an edit to ${file} was refused (${err instanceof Error ? err.message : String(err)}); trying again.`,
+        );
+        applied = false;
+      } finally {
+        const matched = live.pending?.matched ?? false;
+        live.pending = null;
+        // An edit that changed nothing sends no change event to match.
+        if (applied && !matched && live.record) live.record = { ...live.record, slots: write.slots };
+      }
+      if (applied) {
+        this.highlight(rec);
+        if (watching && editor) this.followBlock(rec, editor);
+        return { ok: true, plan: write.plan, editor };
+      }
+    }
+    return { ok: false, reason: `${file} kept changing while the steps were being inserted` };
+  }
+
+  /**
+   * Take out everything the recording wrote — the empty draft: no block, no
+   * added parameter lines, every later step's number as the file had it. What
+   * the author changed elsewhere stays. Used at Cancel, at a recording that
+   * ends in an error, and before a result is rescued.
+   */
+  private async clearLive(rec: ActiveRecording): Promise<void> {
+    const live = rec.live;
+    live.stopped = true;
+    await live.chain;
+    if (!live.record || live.closed) return;
+    const cleared = await this.writeLive(rec, { steps: [], parameters: [] }, 'clear');
+    if (!cleared.ok) {
+      rec.controller.postRecordLog(
+        `The draft steps written while recording could not be taken out of ${rec.state.file} — ${cleared.reason}.`,
+        'warn',
+      );
+    }
+  }
+
+  /** The editor shows where the recording writes: the block's first line (or
+   *  the anchor, before anything is written) is on screen. */
+  private isWatching(rec: ActiveRecording, editor: vscode.TextEditor): boolean {
+    const block = rec.live.record?.slots.find((s) => s.kind === 'block');
+    const line = block ? editor.document.positionAt(block.start).line : (rec.anchor?.line ?? 1) - 1;
+    return editor.visibleRanges.some((r) => r.start.line <= line && line <= r.end.line);
+  }
+
+  /** Keep the block's last line on screen as it grows — only for an author
+   *  who was looking at it; one who scrolled elsewhere is left there. */
+  private followBlock(rec: ActiveRecording, editor: vscode.TextEditor): void {
+    const record = rec.live.record;
+    if (!record) return;
+    const lines = recordedLines(editor.document.getText(), record.slots, ['block']);
+    const last = lines[lines.length - 1];
+    if (last === undefined) return;
+    editor.revealRange(new vscode.Range(last, 0, last, 0), vscode.TextEditorRevealType.Default);
+  }
+
+  /** Put the highlight on the recorded lines in every editor showing the
+   *  document. */
+  private highlight(rec: ActiveRecording): void {
+    const live = rec.live;
+    if (!live.decoration) return;
+    const doc = rec.controller.document;
+    live.highlighted = live.record && !live.closed && !doc.isClosed ? recordedLines(doc.getText(), live.record.slots) : [];
+    const ranges = live.highlighted.map((line) => new vscode.Range(line, 0, line, 0));
+    const key = doc.uri.toString();
+    for (const editor of vscode.window.visibleTextEditors) {
+      if (editor.document.uri.toString() === key) editor.setDecorations(live.decoration, ranges);
+    }
+  }
+
+  /** The recording is over: its highlight comes off. */
+  private endHighlight(rec: ActiveRecording): void {
+    const live = rec.live;
+    live.decoration?.dispose();
+    live.decoration = null;
+    live.highlighted = [];
+  }
+
+  /**
+   * The result, written over the last draft through the same path every draft
+   * took (`writeLive`) — so nothing is inserted twice, and it closes the undo
+   * step the drafts opened (decision 11): the steps after the anchor, the rest
+   * of that flow renumbered, and the parameters the file lacks. When no draft
+   * was written, the place is fixed now, against the document as it is, with
+   * the anchor carried through the author's edits while recording.
    *
    * A result is never lost. One with no steps is said as the server's note,
-   * not as an error; one that cannot be inserted — the plan refused, the edit
-   * rejected three times, the file renamed or deleted — is written to the
-   * TestBench output, and the error offers "Copy steps".
+   * not as an error (and whatever the drafts wrote is taken out); one that
+   * cannot be written — `## Steps` gone before anything was written, the edit
+   * rejected three times, the file closed, renamed or deleted — is written to
+   * the TestBench output, and the error offers "Copy steps".
    */
   private async insert(
     rec: ActiveRecording,
     outcome: Extract<RecordStepsOutcome, { status: 'result' }>,
   ): Promise<void> {
     if (outcome.steps.map(cleanStepText).every((s) => s === '')) {
+      await this.clearLive(rec);
       const text = outcome.notes.length > 0 ? outcome.notes.join(' ') : 'Nothing was recorded, so nothing was written.';
       rec.controller.postRecordLog(text, 'info');
       this.finish('empty', [{ level: 'info', text }]);
@@ -386,6 +767,8 @@ export class StepRecorder implements vscode.Disposable {
     } catch (err) {
       failure = `${rec.state.file} could not be opened for editing (${err instanceof Error ? err.message : String(err)})`;
     }
+    // The file keeps no half-written draft beside a rescued result.
+    await this.clearLive(rec).catch(() => undefined);
     this.rescue(rec, outcome, failure);
   }
 
@@ -394,45 +777,35 @@ export class StepRecorder implements vscode.Disposable {
     rec: ActiveRecording,
     outcome: Extract<RecordStepsOutcome, { status: 'result' }>,
   ): Promise<{ ok: true } | { ok: false; reason: string }> {
-    const uri = rec.controller.document.uri;
     const file = rec.state.file;
-    const doc = rec.controller.document.isClosed
-      ? await vscode.workspace.openTextDocument(uri)
-      : rec.controller.document;
-    const editor =
-      vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === uri.toString()) ??
-      (await vscode.window.showTextDocument(doc, { preview: false }));
-
-    let plan: ReturnType<typeof planRecordInsertion> | undefined;
-    let applied = false;
-    // The edit is version-checked against the live buffer: a keystroke landing
-    // between the plan and the apply rejects it whole. Plan again and retry.
-    for (let attempt = 0; attempt < 3 && !applied; attempt++) {
-      plan = planRecordInsertion(editor.document.getText(), {
-        anchor: rec.state.mode === 'new' ? null : rec.anchor,
-        steps: outcome.steps,
-        parameters: outcome.parameters,
-      });
-      if ('error' in plan) return { ok: false, reason: plan.error };
-      const edits = plan.edits;
-      applied = await editor.edit(
-        (builder) => {
-          for (const e of edits) {
-            builder.replace(new vscode.Range(e.startLine, e.startChar, e.endLine, e.endChar), e.text);
-          }
-        },
-        { undoStopBefore: true, undoStopAfter: true },
-      );
+    // A draft still being written finishes first; the result goes over it.
+    await rec.live.chain;
+    // One Ctrl+Z after Stop takes the whole recording back. The drafts and the
+    // result are one undo step unless something closed it on the way (`split`);
+    // then the drafts are taken out first, closing whatever step is open, and
+    // the result goes in as a step of its own — so the state one undo returns
+    // to is the file without the recording, the author's own edits kept.
+    if (rec.live.split) {
+      const cleared = await this.writeLive(rec, { steps: [], parameters: [] }, 'clear');
+      if (!cleared.ok) return cleared;
     }
-    if (!applied || !plan || 'error' in plan) {
-      return { ok: false, reason: `${file} kept changing while the steps were being inserted` };
-    }
+    const written = await this.writeLive(rec, outcome, 'final');
+    if (!written.ok) return written;
+    const plan = written.plan;
+    const editor = written.editor;
+    if (!plan) return { ok: false, reason: 'The recording came back with no steps.' };
 
-    const first = plan.insertedLines[0]!;
-    const last = plan.insertedLines[plan.insertedLines.length - 1]!;
-    const end = editor.document.lineAt(last - 1).text.length;
-    editor.selection = new vscode.Selection(first - 1, 0, last - 1, end);
-    editor.revealRange(new vscode.Range(first - 1, 0, last - 1, end), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    // The recorded steps, selected (the blank lines the block may carry for
+    // spacing are not steps).
+    const block = rec.live.record?.slots.filter((s) => s.kind === 'block') ?? [];
+    const lines = editor ? recordedLines(editor.document.getText(), block) : [];
+    const first = lines[0];
+    const last = lines[lines.length - 1];
+    if (editor && first !== undefined && last !== undefined) {
+      const end = editor.document.lineAt(last).text.length;
+      editor.selection = new vscode.Selection(first, 0, last, end);
+      editor.revealRange(new vscode.Range(first, 0, last, end), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    }
 
     const messages: RecordingReport['messages'] = [];
     const n = plan.insertedLines.length;
@@ -564,4 +937,10 @@ function missingEnvWarnings(
     }
   }
   return out;
+}
+
+/** An editor showing `doc` now, if any — one in any visible editor group. */
+function visibleEditorFor(doc: vscode.TextDocument): vscode.TextEditor | null {
+  const key = doc.uri.toString();
+  return vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === key) ?? null;
 }
