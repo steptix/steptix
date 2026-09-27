@@ -144,6 +144,7 @@ vi.mock('../src/report/generator.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
+import { clickToolbar, readToolbar, until } from './record-toolbar-cdp.js';
 import { addLogCallback, getLogLevel, logger, setLogLevel } from '../src/utils/logger.js';
 import {
   RECORD_STEPS_HEADLESS_MESSAGE,
@@ -304,15 +305,23 @@ function recordingOf(messages: ChatMessage[]): Array<Record<string, any>> {
   return JSON.parse(text.slice(start + '--- BEGIN RECORDING ---'.length, end));
 }
 
-/** The draft so far one call was shown — [] for a full (re)draft. */
+/** The draft so far one call was shown — [] for a full (re)draft. A call
+ *  that inserts shows where its steps go; that marker is not a step. */
 function draftOf(messages: ChatMessage[]): string[] {
+  return draftEntriesOf(messages)
+    .filter((s) => typeof s['step'] === 'string')
+    .map((s) => s['step'] as string);
+}
+
+/** The draft so far as one call was shown it, flags and marker included. */
+function draftEntriesOf(messages: ChatMessage[]): Array<Record<string, unknown>> {
   const text = textOf(messages);
-  const m = /## The draft so far: [^\n]*\n[^\n]*\n```json\n([\s\S]*?)\n```/.exec(text);
+  const m = /## The draft so far: [^\n]*\n(?:[^\n]*\n)*?```json\n([\s\S]*?)\n```/.exec(text);
   if (!m) {
     expect(text).toContain('## The draft so far\nEmpty:');
     return [];
   }
-  return (JSON.parse(m[1]!) as { steps: Array<{ index: number; step: string }> }).steps.map((s) => s.step);
+  return (JSON.parse(m[1]!) as { steps: Array<Record<string, unknown>> }).steps;
 }
 
 function imagesIn(messages: ChatMessage[]): number {
@@ -1046,7 +1055,9 @@ describe('refusals', () => {
 describe('POST /sessions/:id/record-steps/control', () => {
   it('404 when no recording is running; 400 on an unknown action, a bad dropped list, or a drop with no id', async () => {
     expect((await control('nobody', { action: 'stop' })).status).toBe(404);
-    expect((await control('nobody', { action: 'pause' })).status).toBe(400);
+    expect((await control('nobody', { action: 'rewind' })).status).toBe(400);
+    // Pause is an action now (stories/testbench-record-toolbar.md): no recording, 404.
+    expect((await control('nobody', { action: 'pause' })).status).toBe(404);
     expect((await control('nobody', { action: 'stop', dropped: [1, 2] })).status).toBe(400);
     expect((await control('nobody', { action: 'drop' })).status).toBe(400);
     expect((await control('nobody', { action: 'restore', id: '' })).status).toBe(400);
@@ -1228,5 +1239,430 @@ describe('the log lines a recording writes (review 2, finding 10)', () => {
     expect(lines.filter((l) => l.includes('Record Steps') || l.includes('record-steps')).join('\n')).not.toContain(
       'tok-START-SECRET-9',
     );
+  }, 60_000);
+});
+
+// ── Controls in the browser (stories/testbench-record-toolbar.md) ─────────
+
+async function toolbarShows(page: Page, words: string, timeoutMs = 8_000): Promise<string> {
+  const seen = await until(
+    () => readToolbar(page),
+    (t) => t !== null && (t.sub.includes(words) || t.all.includes(words)),
+    `the toolbar to show "${words}"`,
+    timeoutMs,
+  );
+  return seen!.all;
+}
+
+describe('the browser toolbar — on the wire', () => {
+  it('is in the page by default, honours dock and minimised from the start body, and says when it moves; none with enabled false', async () => {
+    const s = await started('tb-default', recordBody({ toolbar: { enabled: true, dock: 'tl', minimised: true } }));
+    const page = pageOf();
+    const bar = await until(() => readToolbar(page), (t) => t !== null && t.minimised, 'the pill');
+    expect(bar!.shadowType).toBe('closed');
+    const box = await page.evaluate(() => {
+      const r = document.querySelector('aiui-recorder')!.getBoundingClientRect();
+      return { x: r.x, y: r.y };
+    });
+    expect(box.x).toBeLessThan(40);
+    expect(box.y).toBeLessThan(40);
+    // Opening it from the pill: TestBench is told, so it can remember.
+    await clickToolbar(page, 'expand');
+    const moved = await s.waitFor((f) => f.event === 'record:toolbar', 'record:toolbar');
+    expect(moved.data).toEqual({ type: 'record:toolbar', dock: 'tl', minimised: false });
+    await control('tb-default', { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+
+    const off = await started('tb-off', recordBody({ toolbar: { enabled: false } }));
+    await pageOf(1).goto(`${origin}/other.html`);
+    await sleep(400);
+    expect(await pageOf(1).evaluate(() => document.querySelector('aiui-recorder') === null)).toBe(true);
+    await pageOf(1).click('h1');
+    await off.waitForCount('record:action', 1);
+    await control('tb-off', { action: 'cancel' });
+    await off.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('Pause and Resume from the toolbar: record:paused, nothing recorded and no draft call while paused, the waiting action drafted on Resume', async () => {
+    await restartApp({ draftSettleMs: 700 });
+    const id = 'tb-pause';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#reports');
+    await s.waitForCount('record:action', 1);
+    await page.keyboard.press('Alt+Shift+P');
+    const paused = await s.waitFor((f) => f.event === 'record:paused', 'record:paused');
+    expect(paused.data).toMatchObject({ type: 'record:paused', paused: true, source: 'toolbar' });
+    await toolbarShows(page, 'Paused. Nothing you do is recorded.');
+    // Nothing is recorded, and the call the settle window had queued waits.
+    await page.click('#signin');
+    await page.fill('#email', 'while@paused.test');
+    await page.goto(`${origin}/other.html`);
+    await page.goBack();
+    await sleep(1_500);
+    expect(s.of('record:action')).toHaveLength(1);
+    expect(ai.requests).toHaveLength(0);
+
+    await page.keyboard.press('Alt+Shift+P');
+    await s.waitForCount('record:paused', 2);
+    expect(s.of('record:paused')[1]).toMatchObject({ paused: false, source: 'toolbar' });
+    // Resumed: the action that waited is drafted…
+    await s.draftThrough(1);
+    expect(ai.requests).toHaveLength(1);
+    // …and the first action after the pause says so to the model.
+    await page.click('#signin');
+    await s.draftThrough(2);
+    expect(recordingOf(ai.requests[1]!)[0]).toMatchObject({ kind: 'click', afterPause: true });
+    expect(JSON.stringify([s.frames, ai.requests])).not.toContain('while@paused.test');
+    // The model is told what a pause means.
+    expect(textOf(ai.requests[1]!)).toContain('I9. An action marked afterPause');
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('pause and resume from the panel; a second pause, a resume while recording, or Add check while paused do nothing, and say so', async () => {
+    const id = 'tb-panel-pause';
+    const s = await started(id);
+    expect((await control(id, { action: 'pause' })).status).toBe(202);
+    await s.waitFor((f) => f.event === 'record:paused', 'record:paused');
+    expect(s.of('record:paused')[0]).toMatchObject({ paused: true, source: 'panel' });
+    expect((await control(id, { action: 'pause' })).json.ignored).toMatch(/already paused/);
+    expect((await control(id, { action: 'check' })).json.ignored).toMatch(/resume it to add a check/);
+    await toolbarShows(pageOf(), 'Paused. Nothing you do is recorded.');
+    expect((await control(id, { action: 'resume' })).status).toBe(202);
+    await s.waitForCount('record:paused', 2);
+    expect((await control(id, { action: 'resume' })).json.ignored).toMatch(/not paused/);
+    expect(s.of('record:pick')).toEqual([]);
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('Add step from the toolbar: the draft is caught up in one call, the line goes in exactly as typed and locks the steps above it', async () => {
+    await restartApp({ draftSettleMs: NEVER_SETTLES_MS });
+    const id = 'tb-add-step';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#reports');
+    await page.click('#signin');
+    await s.waitForCount('record:action', 2);
+    expect(ai.requests).toHaveLength(0);
+
+    await page.keyboard.press('Alt+Shift+S');
+    await toolbarShows(page, 'Enter to add');
+    await page.keyboard.type('8. Verify the balance shows "$1,234.56"');
+    await page.keyboard.press('Enter');
+    const step = await s.waitFor((f) => f.event === 'record:step', 'record:step');
+    expect(step.data).toMatchObject({
+      type: 'record:step',
+      id: 's1',
+      // Exactly as typed: only the leading "8." is the recording's to replace.
+      text: 'Verify the balance shows "$1,234.56"',
+      source: 'toolbar',
+      afterStep: 1,
+    });
+    // One catch-up call, over the two actions waiting, BEFORE the step.
+    expect(ai.requests).toHaveLength(1);
+    expect(recordingOf(ai.requests[0]!).map((a) => a['target'].name)).toEqual(['Reports', 'Sign in']);
+    const withStep = await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.authored?.length === 1,
+      'the draft with the step',
+    );
+    expect(withStep.data).toMatchObject({
+      steps: ['Did click Reports', 'Did click Sign in', 'Verify the balance shows "$1,234.56"'],
+      locked: 3,
+      authored: [2],
+      authoredIds: ['s1'],
+    });
+    // record:step arrives before the draft that holds it.
+    const at = (pred: (f: Frame) => boolean): number => s.frames.findIndex(pred);
+    expect(at((f) => f.event === 'record:step')).toBeLessThan(at((f) => f === withStep));
+    await toolbarShows(page, 'Added as step 3 · steps 1–2 locked');
+
+    // The next call is shown the locks and the author's step, and the rules for them.
+    await page.check('#cash');
+    await s.waitForCount('record:action', 4);
+    expect((await control(id, { action: 'stop' })).status).toBe(202);
+    const result = await s.waitFor((f) => f.event === 'record:result', 'record:result');
+    expect(ai.requests).toHaveLength(2);
+    const prompt = textOf(ai.requests[1]!);
+    expect(prompt).toContain('Steps 0 to 2 are LOCKED');
+    expect(prompt).toContain('Steps marked "author": true were written by hand by the author');
+    expect(prompt).toContain('the furthest back you may start is 3');
+    expect(prompt).toContain('A2. A step marked "author" was written by hand');
+    expect(prompt).toContain('A3. Never write a Verify that repeats one of the author');
+    expect(draftEntriesOf(ai.requests[1]!)[2]).toEqual({
+      index: 2,
+      step: 'Verify the balance shows "$1,234.56"',
+      locked: true,
+      author: true,
+    });
+    expect(result.data.steps).toEqual([
+      'Did click Reports',
+      'Did click Sign in',
+      'Verify the balance shows "$1,234.56"',
+      'Did click Cash',
+      'Did tick Cash',
+    ]);
+    await s.waitFor((f) => f.event === 'done', 'done');
+    await toolbarShows(page, 'Done · 5 steps written to pay-by-cash.md');
+  }, 60_000);
+
+  it('a replaceFrom that reaches into a lock is refused, and retried once as a redraft of the open steps only', async () => {
+    ai.responder = (messages, call) =>
+      call === 2 ? JSON.stringify({ replaceFrom: 0, steps: ['Rewrote everything'], parameters: [] }) : echo(messages);
+    const id = 'tb-lock-refused';
+    const s = await started(id);
+    await pageOf().click('#reports');
+    await s.draftThrough(1);
+    expect((await control(id, { action: 'add-step', text: 'Verify the page says "Sign in"', source: 'panel' })).status).toBe(202);
+    await s.waitFor((f) => f.event === 'record:draft' && f.data.locked === 2, 'the locked draft');
+    expect(ai.requests).toHaveLength(1); // nothing to catch up
+    await pageOf().click('#signin');
+    const redrafted = await s.draftThrough(2);
+    expect(ai.requests).toHaveLength(3);
+    // The retry: the locked steps as they are, and where the open steps go.
+    const retry = ai.requests[2]!;
+    expect(textOf(retry)).toContain('answer with replaceFrom 2');
+    expect(draftEntriesOf(retry)).toEqual([
+      { index: 0, step: 'Did click Reports', locked: true },
+      { index: 1, step: 'Verify the page says "Sign in"', locked: true, author: true },
+      { yourStepsGoHere: true },
+    ]);
+    expect(recordingOf(retry).map((a) => a['target'].name)).toEqual(['Sign in']);
+    expect(redrafted.data).toMatchObject({
+      steps: ['Did click Reports', 'Verify the page says "Sign in"', 'Did click Sign in'],
+      locked: 2,
+      authored: [1],
+    });
+    expect(s.of('record:draft').some((d) => d.steps.includes('Rewrote everything'))).toBe(false);
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('Add step from the editor between two recorded steps: everything so far locked on both sides, and undrafted actions go after the block', async () => {
+    ai.responder = (messages, call) => (call === 3 ? new Error('scripted: this call fails') : echo(messages));
+    const id = 'tb-editor-step';
+    const s = await started(id);
+    await pageOf().click('#reports');
+    await s.draftThrough(1);
+    await pageOf().click('#signin');
+    const two = await s.draftThrough(2);
+    // An action the draft does not cover yet: its call fails.
+    await pageOf().click('#email');
+    await s.waitFor((f) => f.event === 'output' && f.data.kind === 'warn', 'the failed call');
+    const r = await control(id, {
+      action: 'add-step',
+      text: 'Wait for the sign-in form',
+      source: 'editor',
+      afterStep: 0,
+      revision: two.data.revision,
+    });
+    expect(r.status).toBe(202);
+    const step = await s.waitFor((f) => f.event === 'record:step', 'record:step');
+    expect(step.data).toMatchObject({ id: 's1', source: 'editor', afterStep: 0, text: 'Wait for the sign-in form' });
+    const locked = await s.waitFor((f) => f.event === 'record:draft' && f.data.authored?.length === 1, 'the draft with it');
+    expect(locked.data).toMatchObject({
+      steps: ['Did click Reports', 'Wait for the sign-in form', 'Did click Sign in'],
+      locked: 3,
+      authored: [1],
+    });
+    // No catch-up for a step between two recorded ones.
+    expect(ai.requests).toHaveLength(3);
+    // The next action: the one left undrafted goes after the whole block, with it.
+    await pageOf().click('#reports');
+    const after = await s.draftThrough(4);
+    expect(recordingOf(ai.requests[3]!).map((a) => a['target'].name)).toEqual(['Email', 'Reports']);
+    expect(after.data.steps).toEqual([
+      'Did click Reports',
+      'Wait for the sign-in form',
+      'Did click Sign in',
+      'Did click Email',
+      'Did click Reports',
+    ]);
+    expect(after.data.locked).toBe(3);
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('Undo and Restore from the toolbar; an author step undone and restored as it was', async () => {
+    const id = 'tb-undo';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#reports');
+    await s.draftThrough(1);
+    await page.click('#signin');
+    await s.draftThrough(2);
+    const calls = ai.requests.length;
+
+    // Undo: the most recent entry, struck through for the panel, redrafted without it.
+    await page.keyboard.press('Alt+Shift+Z');
+    const dropped = await s.waitFor((f) => f.event === 'record:dropped', 'record:dropped');
+    expect(dropped.data).toEqual({ type: 'record:dropped', id: 'a2', dropped: true, source: 'toolbar' });
+    await toolbarShows(page, 'Removed: Clicked button "Sign in"');
+    const without = await s.waitFor((f) => f.event === 'record:draft' && f.data.steps.length === 1, 'the redraft without a2');
+    expect(ai.requests).toHaveLength(calls + 1);
+    // Restore puts it back.
+    await clickToolbar(page, 'restore');
+    await s.waitForCount('record:dropped', 2);
+    expect(s.of('record:dropped')[1]).toEqual({ type: 'record:dropped', id: 'a2', dropped: false, source: 'toolbar' });
+    await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.steps.length === 2 && f.data.revision > without.data.revision,
+      'the redraft with a2',
+    );
+
+    // A step of the author's, then Undo straight away: out, and the lock lifted.
+    await page.keyboard.press('Alt+Shift+S');
+    await toolbarShows(page, 'Enter to add');
+    await page.keyboard.type('Verify the Sign in button is shown');
+    await page.keyboard.press('Enter');
+    const lockedDraft = await s.waitFor((f) => f.event === 'record:draft' && f.data.locked === 3, 'locked');
+    const before = ai.requests.length;
+    await page.keyboard.press('Alt+Shift+Z');
+    await s.waitForCount('record:dropped', 3);
+    expect(s.of('record:dropped')[2]).toMatchObject({ id: 's1', dropped: true, source: 'toolbar' });
+    const unlocked = await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.locked === 0 && f.data.revision > lockedDraft.data.revision,
+      'unlocked',
+    );
+    expect(unlocked.data).toMatchObject({ steps: ['Did click Reports', 'Did click Sign in'], authored: [] });
+    await toolbarShows(page, 'Removed your step: Verify the Sign in button is shown');
+    // Restore: back exactly as it was — no call needed.
+    await clickToolbar(page, 'restore');
+    const relocked = await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.locked === 3 && f.data.revision > unlocked.data.revision,
+      'relocked',
+    );
+    expect(relocked.data).toMatchObject({
+      steps: ['Did click Reports', 'Did click Sign in', 'Verify the Sign in button is shown'],
+      authored: [2],
+    });
+    await sleep(300);
+    expect(ai.requests).toHaveLength(before);
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('dropping an action inside a locked stretch redrafts only that stretch; dropping the author step lifts its lock', async () => {
+    const id = 'tb-stretch';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#reports');
+    await s.draftThrough(1);
+    await page.click('#signin');
+    await s.draftThrough(2);
+    expect((await control(id, { action: 'add-step', text: 'Check the form', source: 'panel' })).status).toBe(202);
+    await s.waitFor((f) => f.event === 'record:draft' && f.data.locked === 3, 'locked');
+    await page.click('#email');
+    await s.draftThrough(3);
+    const calls = ai.requests.length;
+
+    // a1 is inside the locked stretch: that stretch alone is redrafted.
+    expect((await control(id, { action: 'drop', id: 'a1' })).status).toBe(202);
+    const stretch = await s.waitFor(
+      (f) => f.event === 'record:draft' && !f.data.steps.includes('Did click Reports'),
+      'the stretch redrafted',
+    );
+    expect(ai.requests).toHaveLength(calls + 1);
+    const call = ai.requests[calls]!;
+    expect(recordingOf(call).map((a) => a['target'].name)).toEqual(['Sign in']);
+    expect(draftEntriesOf(call)).toEqual([
+      { yourStepsGoHere: true },
+      { index: 0, step: 'Check the form', locked: true, author: true },
+      { index: 1, step: 'Did click Email' },
+    ]);
+    expect(stretch.data).toMatchObject({
+      steps: ['Did click Sign in', 'Check the form', 'Did click Email'],
+      locked: 2,
+      authored: [1],
+    });
+    // The panel's drop is the panel's own: no record:dropped for it.
+    expect(s.of('record:dropped')).toEqual([]);
+
+    // Dropping the author's step lifts its lock; what the model wrote after it
+    // is redrafted with the steps before it, as if it had never been added.
+    expect((await control(id, { action: 'drop', id: 's1' })).status).toBe(202);
+    const lifted = await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.revision > stretch.data.revision,
+      'the lock lifted',
+    );
+    // At once, before any call: the line is out and nothing is locked.
+    expect(lifted.data).toMatchObject({
+      steps: ['Did click Sign in', 'Did click Email'],
+      locked: 0,
+      authored: [],
+    });
+    const redraft = await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.revision > lifted.data.revision,
+      'the redraft over both sides',
+    );
+    expect(redraft.data.steps).toEqual(['Did click Sign in', 'Did click Email']);
+    expect(recordingOf(ai.requests[ai.requests.length - 1]!).map((a) => a['target'].name)).toEqual(['Sign in', 'Email']);
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('Cancel from the toolbar asks first; Discard ends done aborted cancelledBy browser, with no model call', async () => {
+    const id = 'tb-cancel';
+    const s = await started(id);
+    const page = pageOf();
+    await until(() => readToolbar(page), (t) => t !== null, 'the toolbar');
+    await clickToolbar(page, 'cancel');
+    await toolbarShows(page, "Discard this recording? The steps won't be written.");
+    await clickToolbar(page, 'keep');
+    await until(() => readToolbar(page), (t) => t !== null && !t.sub.includes('Discard'), 'kept');
+    expect(s.of('done')).toEqual([]);
+    await clickToolbar(page, 'cancel');
+    await toolbarShows(page, 'Discard this recording?');
+    await clickToolbar(page, 'discard');
+    const done = await s.waitFor((f) => f.event === 'done', 'done');
+    expect(done.data).toEqual({ type: 'done', status: 'aborted', cancelledBy: 'browser' });
+    expect(ai.requests).toHaveLength(0);
+    expect(s.of('record:writing')).toEqual([]);
+    await toolbarShows(page, 'Recording cancelled. Nothing was written.');
+    expect(sessionManager.isRecordingSteps(id)).toBe(false);
+  }, 60_000);
+
+  it('Stop from the toolbar writes the steps: record:writing, record:result, done', async () => {
+    const id = 'tb-stop';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#reports');
+    await s.draftThrough(1);
+    await clickToolbar(page, 'stop');
+    await s.waitFor((f) => f.event === 'record:writing', 'record:writing');
+    const result = await s.waitFor((f) => f.event === 'record:result', 'record:result');
+    expect(result.data.steps).toEqual(['Did click Reports']);
+    expect((await s.waitFor((f) => f.event === 'done', 'done')).data).toEqual({ type: 'done', status: 'passed' });
+    await toolbarShows(page, 'Done · 1 step written to pay-by-cash.md');
+  }, 60_000);
+
+  it('a recording ended elsewhere says why in the page', async () => {
+    const id = 'tb-ended';
+    const s = await started(id);
+    const page = pageOf();
+    await until(() => readToolbar(page), (t) => t !== null, 'the toolbar');
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+    expect(s.of('done')[0]).toEqual({ type: 'done', status: 'aborted' });
+    await toolbarShows(page, 'Recording ended: it was cancelled in VS Code. Nothing was written.');
+  }, 60_000);
+
+  it('400 for a bad toolbar in the start body, and for an add-step without text or a source it knows', async () => {
+    const badToolbar = await record('tb-bad', recordBody({ toolbar: { dock: 'tl' } }));
+    expect(badToolbar.status).toBe(400);
+    expect(badToolbar.json.error).toMatch(/toolbar.enabled/);
+    expect((await record('tb-bad', recordBody({ toolbar: { enabled: true, dock: 'middle' } }))).status).toBe(400);
+    expect((await control('nobody', { action: 'add-step', source: 'editor' })).status).toBe(400);
+    expect((await control('nobody', { action: 'add-step', text: 'x', source: 'toolbar' })).status).toBe(400);
+    expect((await control('nobody', { action: 'add-step', text: 'x', source: 'editor', afterStep: -1 })).status).toBe(400);
+    expect((await control('nobody', { action: 'add-step', text: 'x', source: 'panel' })).status).toBe(404);
+    // A running recording answers a blank add-step with "ignored".
+    const id = 'tb-blank';
+    const s = await started(id);
+    const blank = await control(id, { action: 'add-step', text: '  \n\n', source: 'panel' });
+    expect(blank).toMatchObject({ status: 202, json: { ok: true } });
+    expect(blank.json.ignored).toMatch(/every line is blank/);
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
   }, 60_000);
 });

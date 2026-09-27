@@ -33,11 +33,13 @@ import {
   type SessionManagerDeps,
   type StepRequest,
 } from './session-manager.js';
-import type {
-  RecordControl,
-  RecordEventListener,
-  RecordStepsRequest,
-  RecordStreamEvent,
+import {
+  TOOLBAR_DOCKS,
+  type RecordControl,
+  type RecordEventListener,
+  type RecordStepsRequest,
+  type RecordStreamEvent,
+  type ToolbarDock,
 } from '../recorder/types.js';
 import { ErrandRunner, type ErrandRequest } from './errand-runner.js';
 import {
@@ -1187,16 +1189,19 @@ export function createApiServer(
   });
 
   // POST /sessions/:id/record-steps/control — Stop, Drop, Restore, Add check,
-  // Cancel check, Cancel, for the recording running in this session. 202 when
-  // accepted, 404 when no recording is running (SPEC-record-steps.md §9.3), 400
-  // for a body that is none of the six.
+  // Cancel check, Cancel, Pause, Resume and Add step, for the recording running
+  // in this session. 202 when accepted, 404 when no recording is running
+  // (SPEC-record-steps.md §9.3), 400 for a body that is none of the nine.
   //
-  // Two kinds of 202 do nothing, and say so in `ignored`: anything but
-  // `cancel` once Stop has been received (only `cancel` still applies — it
-  // abandons the call in flight), and a `drop` / `restore` of an id the
-  // recording does not have or that is already in that state. Both are still
-  // 202 because the recording IS running, and the contract has two answers; a
-  // 404 for an unknown ACTION id would read to a client as "no recording".
+  // Some 202s do nothing, and say so in `ignored`: anything but `cancel` once
+  // Stop has been received (only `cancel` still applies — it abandons the call
+  // in flight); a `drop` / `restore` of an id the recording does not have or
+  // that is already in that state; `pause` while paused and `resume` while
+  // not; Add check while paused; an `add-step` whose every line is blank.
+  // They are still 202 because the recording IS running, and the contract has
+  // two answers; a 404 for an unknown ACTION id would read to a client as "no
+  // recording". `add-step` is accepted at once and carried out after: the
+  // draft is brought up to date first, which is a model call.
   app.post('/sessions/:id/record-steps/control', (req: Request, res: Response) => {
     const sessionId = String(req.params.id);
     const control = parseRecordControl(req.body);
@@ -1217,13 +1222,7 @@ export function createApiServer(
       return;
     }
     if (outcome === 'ignored') {
-      res.status(202).json({
-        ok: true,
-        ignored:
-          control.action === 'restore'
-            ? `Action ${(control as { id: string }).id} is not dropped, so there is nothing to restore.`
-            : `There is no action ${(control as { id: string }).id} to drop, or it is already dropped.`,
-      });
+      res.status(202).json({ ok: true, ignored: ignoredControlMessage(control) });
       return;
     }
     res.status(202).json({ ok: true });
@@ -3108,13 +3107,57 @@ export function parseRecordStepsRequest(raw: unknown): RecordStepsRequest | stri
     }
     request.env = env;
   }
+  // The browser toolbar (stories/testbench-record-toolbar.md, "The wire,
+  // exactly"). Absent: on, docked bottom centre, not minimised.
+  if (body.toolbar !== undefined && body.toolbar !== null) {
+    if (typeof body.toolbar !== 'object' || Array.isArray(body.toolbar)) {
+      return '"toolbar" must be an object: { enabled: boolean, dock?: "tl" | "tc" | "tr" | "bl" | "bc" | "br", minimised?: boolean }.';
+    }
+    const tb = body.toolbar as Record<string, unknown>;
+    if (typeof tb.enabled !== 'boolean') return '"toolbar.enabled" must be true or false.';
+    const toolbar: NonNullable<RecordStepsRequest['toolbar']> = { enabled: tb.enabled };
+    if (tb.dock !== undefined && tb.dock !== null) {
+      if (typeof tb.dock !== 'string' || !TOOLBAR_DOCKS.has(tb.dock as ToolbarDock)) {
+        return '"toolbar.dock" must be one of: tl, tc, tr, bl, bc, br.';
+      }
+      toolbar.dock = tb.dock as ToolbarDock;
+    }
+    if (tb.minimised !== undefined && tb.minimised !== null) {
+      if (typeof tb.minimised !== 'boolean') return '"toolbar.minimised" must be true or false.';
+      toolbar.minimised = tb.minimised;
+    }
+    request.toolbar = toolbar;
+  }
   return request;
+}
+
+/** Why a control that the running recording answered with `ignored` did nothing. */
+function ignoredControlMessage(control: RecordControl): string {
+  switch (control.action) {
+    case 'restore':
+      return `${control.id} is not dropped, so there is nothing to restore.`;
+    case 'drop':
+      return `There is no action or step ${control.id} to drop, or it is already dropped.`;
+    case 'pause':
+      return 'The recording is already paused.';
+    case 'resume':
+      return 'The recording is not paused.';
+    case 'check':
+      return 'The recording is paused; resume it to add a check.';
+    case 'add-step':
+      return 'The text holds no step: every line is blank.';
+    default:
+      return 'Nothing to do.';
+  }
 }
 
 /** Validate a `POST /sessions/:id/record-steps/control` body. */
 export function parseRecordControl(raw: unknown): RecordControl | string {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    return 'Request body must be a JSON object: { action: "stop" | "drop" | "restore" | "check" | "cancel-check" | "cancel" }.';
+    return (
+      'Request body must be a JSON object: { action: "stop" | "drop" | "restore" | "check" | "cancel-check" | ' +
+      '"cancel" | "pause" | "resume" | "add-step" }.'
+    );
   }
   const body = raw as Record<string, unknown>;
   switch (body.action) {
@@ -3128,7 +3171,7 @@ export function parseRecordControl(raw: unknown): RecordControl | string {
     case 'drop':
     case 'restore': {
       if (typeof body.id !== 'string' || body.id === '') {
-        return `"${body.action}" needs "id": the id of the record:action to ${body.action}.`;
+        return `"${body.action}" needs "id": the id of the record:action or record:step to ${body.action}.`;
       }
       return { action: body.action, id: body.id };
     }
@@ -3138,7 +3181,37 @@ export function parseRecordControl(raw: unknown): RecordControl | string {
       return { action: 'cancel-check' };
     case 'cancel':
       return { action: 'cancel' };
+    case 'pause':
+      return { action: 'pause' };
+    case 'resume':
+      return { action: 'resume' };
+    case 'add-step': {
+      if (typeof body.text !== 'string') {
+        return '"add-step" needs "text": the step as the author wrote it (several lines are several steps).';
+      }
+      if (body.source !== 'editor' && body.source !== 'panel') {
+        return '"add-step" needs "source": "editor" or "panel" (the toolbar\'s box goes through the page).';
+      }
+      const control: Extract<RecordControl, { action: 'add-step' }> = {
+        action: 'add-step',
+        text: body.text,
+        source: body.source,
+      };
+      if (body.afterStep !== undefined && body.afterStep !== null) {
+        if (!Number.isInteger(body.afterStep) || (body.afterStep as number) < 0) {
+          return '"afterStep" must be a whole number, 0 or more: the index in the draft the step goes after.';
+        }
+        control.afterStep = body.afterStep as number;
+      }
+      if (body.revision !== undefined && body.revision !== null) {
+        if (!Number.isInteger(body.revision) || (body.revision as number) < 0) {
+          return '"revision" must be a whole number: the record:draft revision "afterStep" refers to.';
+        }
+        control.revision = body.revision as number;
+      }
+      return control;
+    }
     default:
-      return '"action" must be one of: stop, drop, restore, check, cancel-check, cancel.';
+      return '"action" must be one of: stop, drop, restore, check, cancel-check, cancel, pause, resume, add-step.';
   }
 }

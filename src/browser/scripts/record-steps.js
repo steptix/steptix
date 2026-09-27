@@ -22,6 +22,18 @@
 //                           drives this script through (state push, flush)
 //   SECRET_FIELD_RULE (double-underscored) → ./secret-field.js, the one copy
 //                           of `isSecretField` the snapshot also uses
+//   RECORD_TOOLBAR (double-underscored) → ./record-toolbar.js, the recording
+//                           controls in the page (stories/testbench-record-toolbar.md),
+//                           spliced into this closure so they share its state
+//
+// ── The token ───────────────────────────────────────────────────────────────
+// The binding is a function on `window`, so the page's own scripts can call it.
+// Every toolbar message (a step, Stop, Pause…) therefore carries a token the
+// server gave THIS document — not in the hello answer, which a page script
+// could ask for itself, but by calling `claim` on the frozen control object
+// below, which accepts one token per document and never hands it out. The
+// script also keeps its own reference to the binding function from the
+// moment it installs, before any page code runs.
 //
 // ── Inert after Stop ────────────────────────────────────────────────────────
 // Playwright cannot remove an init script or a binding, so after a recording
@@ -38,7 +50,15 @@
   // eslint-disable-next-line
   __SECRET_FIELD_RULE__
 
-  var state = { recording: false, pick: false };
+  // recording — a recording is running; pick — Add check is armed; paused —
+  // the author paused it (nothing is recorded); bar — it has the toolbar (and
+  // its shortcuts, check-ins and "Typing hidden" reports).
+  var state = { recording: false, pick: false, paused: false, bar: false };
+  // The binding as it was when this script installed — before any page code
+  // could replace `window[BINDING]` to listen in.
+  var bindingFn = typeof window[BINDING] === 'function' ? window[BINDING] : null;
+  // This document's token (see "The token" above); null until claimed.
+  var token = null;
   // A mark names the crop the server takes at the moment of a pointer-down or
   // the first keystroke into a field; the action that follows carries it. The
   // document id keeps two documents' counters apart.
@@ -67,7 +87,7 @@
   var labelForward = null;
 
   function send(message) {
-    var fn = window[BINDING];
+    var fn = bindingFn;
     if (typeof fn !== 'function') return Promise.resolve(null);
     try {
       return Promise.resolve(fn(message)).catch(function () { return null; });
@@ -76,27 +96,56 @@
     }
   }
 
+  /** A toolbar message: carries this document's token, and is not sent
+   *  without one (the server would refuse it anyway). */
+  function sendCmd(message) {
+    if (token === null) return Promise.resolve(null);
+    message.token = token;
+    return send(message);
+  }
+
+  /** Whatever a gesture left half-done — the server has already collected
+   *  the typing through `flush` before it says stop, or pause. */
+  function dropHalfDone() {
+    typing.clear();
+    pointer = null;
+    swallowing = false;
+    press = null;
+    html5Drag = null;
+    labelForward = null;
+    if (pendingEnter) {
+      clearTimeout(pendingEnter.timer);
+      pendingEnter = null;
+    }
+  }
+
   function applyState(next) {
     if (!next || typeof next !== 'object') return;
     var wasRecording = state.recording;
+    var wasPaused = state.paused;
     state.recording = next.recording === true;
-    state.pick = state.recording && next.pick === true;
+    state.paused = state.recording && next.paused === true;
+    state.pick = state.recording && !state.paused && next.pick === true;
+    state.bar = state.recording && next.bar === true;
     if (!state.recording) {
       // Stopping drops whatever was half-typed: the server has already asked
       // for it through `flush` before it says stop.
-      typing.clear();
-      pointer = null;
-      swallowing = false;
-      press = null;
-      html5Drag = null;
-      labelForward = null;
-      if (pendingEnter) {
-        clearTimeout(pendingEnter.timer);
-        pendingEnter = null;
-      }
+      dropHalfDone();
     } else if (!wasRecording) {
       typing.clear();
+    } else if (state.paused && !wasPaused) {
+      // Paused: nothing from here on is recorded.
+      dropHalfDone();
     }
+    if (state.recording && !state.paused && wasPaused) {
+      // Resumed: what the focused field holds now is where its typing starts —
+      // anything typed into it while paused is not the author's step.
+      var focused = focusedElement();
+      if (focused && isTextEntry(focused)) baseline.set(focused, currentValue(focused));
+    }
+    pickApply();
+    if (IS_TOP) toolbarApply(next.toolbar);
+    checkInSchedule();
   }
 
   // ── Text ───────────────────────────────────────────────────────────────
@@ -576,6 +625,9 @@
   // keystroke changes the field — and name the picture so the action that
   // follows can claim it.
   function markNow(el) {
+    // The pick outline and label sit on the very element a crop is about:
+    // they come down before the picture is asked for, and are never in it.
+    pickHide();
     var box = boxOf(el);
     if (!box || box.width === 0 && box.height === 0) return undefined;
     var mark = docId + ':' + (++markSeq);
@@ -1036,7 +1088,12 @@
     }
     var out = { secret: secret, fields: fields };
     if (wantTexts && !truncated) out.texts = texts;
-    if (truncated) out.truncated = true;
+    // The recorder's own toolbar is painted out like a secret — the model is
+    // never shown it, and a run (which has no toolbar) never looks for it.
+    // A toolbar that is there and cannot say where costs the crop.
+    var bar = toolbarBoxes();
+    if (bar.boxes.length > 0) out.toolbar = bar.boxes;
+    if (truncated || bar.unknown) out.truncated = true;
     return out;
   }
 
@@ -1213,7 +1270,15 @@
     return pick;
   }
 
+  // eslint-disable-next-line
+  __RECORD_TOOLBAR__
+
   // ── Listeners ──────────────────────────────────────────────────────────
+  //
+  // Every one of them first asks `isOurs`: an event from the recorder's own
+  // toolbar is never an action, never typing, never a focus change. (The
+  // gate — the toolbar's first listener — has already stopped such events;
+  // the question is asked again so no listener depends on that.)
   //
   // On `window`, in the CAPTURE phase: the first stop of every event's path, so
   // a pick is swallowed before the page's own handlers — even ones registered
@@ -1241,7 +1306,7 @@
   var DRAG_THRESHOLD_PX = 8;
 
   function onPointerDown(event) {
-    if (!state.recording || !event.isTrusted) return;
+    if (!state.recording || state.paused || !event.isTrusted || isOurs(event)) return;
     if (event.button !== undefined && event.button !== 0) return;
     var target = realTarget(event);
     if (!target) return;
@@ -1255,6 +1320,9 @@
       swallow(event);
       swallowing = true;
       state.pick = false;
+      // The outline and label come down in the same instant, before the crop
+      // is asked for (markNow does it again).
+      pickApply();
       // Typing still open is finished, and happened before the check.
       flushAllExcept(null);
       var pick = pickNow(target);
@@ -1274,7 +1342,7 @@
   }
 
   function onPointerMove(event) {
-    if (!press || press.moved) return;
+    if (!press || press.moved || isOurs(event)) return;
     var dx = event.clientX - press.x;
     var dy = event.clientY - press.y;
     if (dx * dx + dy * dy > DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) press.moved = true;
@@ -1284,7 +1352,10 @@
   // ancestor when it has one (a card's title → the card).
   function dropTargetAt(x, y, fallback) {
     var hit = typeof document.elementFromPoint === 'function' ? document.elementFromPoint(x, y) : null;
+    // Released over the toolbar: not dropped on anything of the page's.
+    if (isOurHost(hit)) hit = null;
     var el = hit || fallback;
+    if (isOurHost(el)) return null;
     if (!el || el.nodeType !== 1) return null;
     return actionable(el) || el;
   }
@@ -1326,7 +1397,7 @@
     }
     var p = press;
     press = null;
-    if (!state.recording || !event.isTrusted || !p || !p.moved || html5Drag) return;
+    if (!state.recording || state.paused || !event.isTrusted || !p || !p.moved || html5Drag || isOurs(event)) return;
     var dropEl = dropTargetAt(event.clientX, event.clientY, realTarget(event));
     // Released on (or inside) what was pressed: not a drag — a click, or
     // nothing — and the click listener has it.
@@ -1343,7 +1414,7 @@
   }
 
   function onDragStart(event) {
-    if (!state.recording || !event.isTrusted) return;
+    if (!state.recording || state.paused || !event.isTrusted || isOurs(event)) return;
     var from = press || { el: actionable(realTarget(event)) || realTarget(event) };
     if (!from.el) return;
     if (!from.desc) from.desc = describe(from.el);
@@ -1355,7 +1426,7 @@
   function onDrop(event) {
     var source = html5Drag;
     html5Drag = null;
-    if (!state.recording || !source) return;
+    if (!state.recording || state.paused || !source || isOurs(event)) return;
     var dropEl = actionable(realTarget(event)) || realTarget(event);
     if (!dropEl || dropEl === source.el || source.el.contains(dropEl)) return;
     sendDrag(source, dropEl);
@@ -1377,7 +1448,7 @@
       swallowing = false;
       return;
     }
-    if (!state.recording || !event.isTrusted) return;
+    if (!state.recording || state.paused || !event.isTrusted || isOurs(event)) return;
     var target = realTarget(event);
     if (!target) return;
     var el = actionable(target);
@@ -1443,7 +1514,7 @@
   }
 
   function onChange(event) {
-    if (!state.recording) return;
+    if (!state.recording || state.paused || isOurs(event)) return;
     var el = realTarget(event);
     if (!el) return;
     var tag = el.tagName.toLowerCase();
@@ -1483,7 +1554,7 @@
   }
 
   function onInput(event) {
-    if (!state.recording) return;
+    if (!state.recording || state.paused || isOurs(event)) return;
     var el = realTarget(event);
     if (!el || !isTextEntry(el)) return;
     watchShadowRootOf(el);
@@ -1495,6 +1566,7 @@
   }
 
   function onFocusIn(event) {
+    if (isOurs(event)) return;
     var el = realTarget(event);
     if (!el) return;
     watchShadowRootOf(el);
@@ -1502,16 +1574,19 @@
       isSecretNow(el);
       if (!typing.has(el)) baseline.set(el, currentValue(el));
     }
+    reportFocus(el, true);
   }
 
   function focusedElement() {
     var el = document.activeElement;
+    // The active element IS the toolbar's host while a step is typed.
+    if (isOurHost(el)) return null;
     while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
     return el && el !== document.body ? el : null;
   }
 
   function onKeyDown(event) {
-    if (!state.recording || !event.isTrusted) return;
+    if (!state.recording || state.paused || !event.isTrusted || isOurs(event)) return;
     if (event.isComposing) return;
     // The last Enter's effect is known by the next key.
     settleEnter();
@@ -1552,14 +1627,16 @@
   }
 
   function onFocusOut(event) {
-    if (!state.recording) return;
+    if (!state.recording || isOurs(event)) return;
+    reportFocus(null, false);
+    if (state.paused) return;
     settleEnter();
     var el = realTarget(event);
     if (el && typing.has(el)) flushField(el);
   }
 
   function onSubmit() {
-    if (!state.recording) return;
+    if (!state.recording || state.paused) return;
     settleEnter();
     flushAllExcept(null);
   }
@@ -1569,12 +1646,12 @@
   // back/forward cache. On Chromium the server reads the tab's own navigation
   // history instead and ignores these.
   function onPopState() {
-    if (!state.recording || window !== window.top) return;
+    if (!state.recording || state.paused || window !== window.top) return;
     void send({ type: 'history', event: 'popstate' });
   }
 
   function onPageShow(event) {
-    if (!state.recording || window !== window.top || !event.persisted) return;
+    if (!state.recording || state.paused || window !== window.top || !event.persisted) return;
     void send({ type: 'history', event: 'bfcache' });
   }
 
@@ -1582,6 +1659,13 @@
   // From the start of the document: a password box toggled to text before the
   // author ever touches it is still remembered as secret.
   watchTypes(document);
+  // FIRST: the toolbar's gate (record-toolbar.js). Registered before every
+  // other listener here — and this script runs before the page's — so it
+  // hears every event first and can stop the toolbar's own.
+  installGate();
+  window.addEventListener('pointermove', onPickHover, opts);
+  window.addEventListener('scroll', onPickScroll, { capture: true, passive: true });
+  window.addEventListener('mouseout', onPickLeave, opts);
   window.addEventListener('pointerdown', onPointerDown, opts);
   window.addEventListener('pointermove', onPointerMove, opts);
   window.addEventListener('pointerup', onPointerUp, opts);
@@ -1603,7 +1687,12 @@
   // ── The server's handle ────────────────────────────────────────────────
   //
   // Non-enumerable, and the only thing on `window` besides the binding.
-  //   setState({recording, pick}) — Stop, Add check, Cancel check;
+  //   setState({recording, pick, paused, bar, toolbar?}) — Stop, Add check,
+  //             Cancel check, Pause, and everything the toolbar shows (the
+  //             `toolbar` block goes to top frames only);
+  //   claim(token) — this document's token; accepted once, never handed out;
+  //   toolbar(command) — a shortcut pressed in a frame, carried out in this
+  //             tab's top document: 'open-step' or 'focus-bar';
   //   flush() — the typing not yet reported, RETURNED rather than sent, so the
   //             server has every action in hand before it says stop;
   //   fieldRects({text}) — what the crop being taken must paint out: the
@@ -1614,6 +1703,18 @@
   Object.defineProperty(window, CONTROL, {
     value: Object.freeze({
       setState: function (next) { applyState(next); return true; },
+      claim: function (t) {
+        if (token !== null || typeof t !== 'string' || t === '') return false;
+        token = t;
+        return true;
+      },
+      toolbar: function (command) {
+        if (!IS_TOP || !tb || !state.recording) return false;
+        if (command === 'open-step') tbOpenBox();
+        else if (command === 'focus-bar') tbFocusBar();
+        else return false;
+        return true;
+      },
       fieldRects: function (ask) { return fieldRects(ask); },
       flush: function () {
         var out = [];
@@ -1652,6 +1753,7 @@
   // arrives the script behaves as stopped — which is the safe direction.
   function hello() {
     if (typeof window[BINDING] !== 'function') return false;
+    if (!bindingFn) bindingFn = window[BINDING];
     var message = navigationHint();
     message.type = 'hello';
     void send(message).then(applyState);

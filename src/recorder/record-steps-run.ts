@@ -1,15 +1,24 @@
+import path from 'node:path';
 import type { ChatMessage } from '../ai/types.js';
 import type { BrowserSession } from '../browser/manager.js';
 import { addLogCallback, logger, shouldEmit } from '../utils/logger.js';
 import { isSecretName, RECORD_SECRET_MIN_LENGTH, redact } from '../utils/secrets.js';
-import { secretSpellings, StepRecorder, type KnownSecret, type StepRecorderOptions } from './step-recorder.js';
+import {
+  secretSpellings,
+  StepRecorder,
+  type KnownSecret,
+  type StepRecorderOptions,
+  type ToolbarCommand,
+} from './step-recorder.js';
 import { summarizeTargetFile, type TargetFileSummary } from './target-file.js';
 import type {
   RecordControl,
   RecordControlOutcome,
   RecordEventListener,
+  RecordStepSource,
   RecordStepsRequest,
   RecordedAction,
+  ToolbarDock,
 } from './types.js';
 import { DraftEngine } from './draft-engine.js';
 
@@ -26,7 +35,7 @@ import { DraftEngine } from './draft-engine.js';
 
 /** Test-only knobs: the recorder's, and the draft engine's settle window. */
 export type RecordStepsTestKnobs = Partial<
-  Pick<StepRecorderOptions, 'typedNavigationWindowMs' | 'historyCausedWindowMs' | 'tap' | 'maxCrops'>
+  Pick<StepRecorderOptions, 'typedNavigationWindowMs' | 'historyCausedWindowMs' | 'tap' | 'maxCrops' | 'checkInMs'>
 > & { draftSettleMs?: number };
 
 /** Everything a recording needs from the session it belongs to. */
@@ -68,6 +77,36 @@ type AbortCause = 'cancel' | 'session-closed';
 
 type Phase = 'starting' | 'recording' | 'writing' | 'done';
 
+/** How long the toolbar's confirmations stay (stories/testbench-record-toolbar.md). */
+const ADDED_NOTICE_MS = 4_000;
+const REMOVED_NOTICE_MS = 8_000;
+const NOTHING_TO_UNDO_MS = 3_000;
+
+/** At most this many steps go to the toolbar's drawer. */
+const MAX_TOOLBAR_STEPS = 500;
+
+/**
+ * The lines of a step the author wrote, each one step: exactly as typed, bar a
+ * leading number (`8.`) or list marker, which the recording's numbering
+ * replaces, and the whitespace at the ends. A blank line adds nothing.
+ */
+export function authorStepLines(text: string): string[] {
+  return text
+    .split(/\r\n|\r|\n/)
+    .map((line) => line.trim().replace(/^(?:\d+[.)]|[-*+])\s+/, '').trim())
+    .filter((line) => line !== '');
+}
+
+/** The toolbar's status line while it shows something other than the last step. */
+interface ToolbarNotice {
+  kind: 'adding' | 'added' | 'removed' | 'error' | 'info';
+  text: string;
+  seq: number;
+  /** Date.now() when it stops showing; undefined: until replaced. */
+  until?: number;
+  restore?: boolean;
+}
+
 export class RecordStepsRun {
   private phase: Phase = 'starting';
   private recorder: StepRecorder | null = null;
@@ -87,11 +126,44 @@ export class RecordStepsRun {
   private abortCause: AbortCause | null = null;
   /** `record:result` has gone out: nothing can take it back any more. */
   private resultSent = false;
+  /** Where a Cancel came from — the browser's toolbar ends with `done`
+   *  `cancelledBy: 'browser'`; the toolbar says which it was. */
+  private cancelSource: 'browser' | 'control' | 'stream' | null = null;
+  /** The stream's emit, once `run` has it. */
+  private out: RecordEventListener = () => {};
+
+  // The browser toolbar (stories/testbench-record-toolbar.md).
+  private readonly toolbarEnabled: boolean;
+  private dock: ToolbarDock;
+  private minimised: boolean;
+  private toolbarPhase: 'recording' | 'writing' | 'done' | 'ended' = 'recording';
+  private endKind: 'done' | 'nothing' | 'cancelled' | 'ended' | null = null;
+  private endText = '';
+  private notice: ToolbarNotice | null = null;
+  private noticeSeq = 0;
+  private boxText = '';
+  private draftView: { steps: string[]; locked: number; authored: number[] } = { steps: [], locked: 0, authored: [] };
+  private updating = false;
+  /** What the toolbar's Undo took out, most recent last — Restore's list. */
+  private readonly undoStack: string[] = [];
+  /** Add step, Undo and Restore, one at a time and in order. */
+  private ops: Promise<void> = Promise.resolve();
+  /** Resolved once the recording is up (or will never be): an Add step that
+   *  arrived while the browser was coming up waits for it. */
+  private markReady: () => void = () => {};
+  private readonly ready = new Promise<void>((resolve) => {
+    this.markReady = resolve;
+  });
+  private secretValues: () => string[] = () => [];
 
   constructor(private readonly deps: RecordStepsRunDeps) {
     this.ended = new Promise<EndReason>((resolve) => {
       this.resolveEnd = resolve;
     });
+    const prefs = deps.request.toolbar;
+    this.toolbarEnabled = prefs?.enabled !== false;
+    this.dock = prefs?.dock ?? 'bc';
+    this.minimised = prefs?.minimised === true;
   }
 
   /** Where this recording is — for the session's refusals and for tests. */
@@ -126,11 +198,253 @@ export class RecordStepsRun {
     this.abortRun('session-closed');
   }
 
-  /** The `done` frame of an abandoned recording. */
-  private abortedFrame(): { type: 'done'; status: 'aborted'; error?: string } {
-    return this.abortCause === 'session-closed'
-      ? { type: 'done', status: 'aborted', error: RECORD_STEPS_SESSION_CLOSED_MESSAGE }
-      : { type: 'done', status: 'aborted' };
+  /** The `done` frame of an abandoned recording — and the toolbar's last word. */
+  private abortedFrame(): { type: 'done'; status: 'aborted'; error?: string; cancelledBy?: 'browser' } {
+    if (this.abortCause === 'session-closed') {
+      this.endWith('ended', 'Recording ended: the session was closed while recording. Nothing was written.');
+      return { type: 'done', status: 'aborted', error: RECORD_STEPS_SESSION_CLOSED_MESSAGE };
+    }
+    if (this.cancelSource === 'browser') {
+      this.endWith('cancelled', 'Recording cancelled. Nothing was written.');
+      return { type: 'done', status: 'aborted', cancelledBy: 'browser' };
+    }
+    this.endWith(
+      'ended',
+      this.cancelSource === 'stream'
+        ? 'Recording ended: TestBench closed the recording. Nothing was written.'
+        : 'Recording ended: it was cancelled in VS Code. Nothing was written.',
+    );
+    return { type: 'done', status: 'aborted' };
+  }
+
+  // ── The browser toolbar ────────────────────────────────────────────────
+
+  /** What the page's toolbar shows. Everything in it is text the panel
+   *  already shows, so it is already masked — and masked again here. */
+  private toolbarView(): Record<string, unknown> {
+    const secrets = this.secretValues();
+    const now = Date.now();
+    const notice = this.notice && (this.notice.until === undefined || now < this.notice.until) ? this.notice : null;
+    const locked = this.draftView.locked;
+    const authored = new Set(this.draftView.authored);
+    const steps = this.draftView.steps.slice(0, MAX_TOOLBAR_STEPS).map((text, i) => ({
+      text: redact(text, secrets),
+      locked: i < locked,
+      yours: authored.has(i),
+    }));
+    return {
+      phase: this.toolbarPhase,
+      actions: this.engine?.actionCount ?? 0,
+      steps,
+      updating: this.updating,
+      dock: this.dock,
+      minimised: this.minimised,
+      boxText: this.boxText,
+      ...(notice && {
+        notice: {
+          kind: notice.kind,
+          text: redact(notice.text, secrets),
+          seq: notice.seq,
+          ...(notice.until !== undefined && { remainingMs: Math.max(0, notice.until - now) }),
+          ...(notice.restore === true && { restore: true }),
+        },
+      }),
+      ...(this.endKind && { endKind: this.endKind, endText: redact(this.endText, secrets) }),
+    };
+  }
+
+  private pushView(): void {
+    if (this.toolbarEnabled) this.recorder?.setToolbar(this.toolbarView());
+  }
+
+  private setNotice(n: { kind: ToolbarNotice['kind']; text: string; ms?: number; restore?: boolean } | null): void {
+    this.notice = n
+      ? {
+          kind: n.kind,
+          text: n.text,
+          seq: ++this.noticeSeq,
+          ...(n.ms !== undefined && { until: Date.now() + n.ms }),
+          ...(n.restore === true && { restore: true }),
+        }
+      : null;
+    this.pushView();
+  }
+
+  /** The toolbar's last state: done, cancelled, or ended elsewhere. */
+  private endWith(kind: 'done' | 'nothing' | 'cancelled' | 'ended', text: string): void {
+    this.toolbarPhase = kind === 'ended' ? 'ended' : 'done';
+    this.endKind = kind;
+    this.endText = text;
+    this.notice = null;
+    this.updating = false;
+    this.pushView();
+  }
+
+  /** Run toolbar work one piece at a time, in the order it was asked for. */
+  private enqueueOp(work: () => Promise<void>): void {
+    this.ops = this.ops.then(work).catch((err: unknown) => {
+      logger.debug(`[record-steps] toolbar work failed: ${redact(messageOf(err), this.secretValues())}`);
+    });
+  }
+
+  /** A command from the page's toolbar, its token already checked. */
+  private onToolbar(command: ToolbarCommand): void {
+    switch (command.kind) {
+      case 'paused':
+        this.afterPaused(command.paused, 'toolbar');
+        return;
+      case 'undo':
+        this.enqueueOp(() => this.undo());
+        return;
+      case 'restore':
+        this.enqueueOp(() => this.restoreLast());
+        return;
+      case 'stop':
+        this.control({ action: 'stop' });
+        return;
+      case 'cancel':
+        this.cancelSource ??= 'browser';
+        this.control({ action: 'cancel' });
+        return;
+      case 'minimise':
+      case 'toggle-minimised':
+        this.minimised = command.kind === 'minimise' ? command.minimised : !this.minimised;
+        this.out({ type: 'record:toolbar', dock: this.dock, minimised: this.minimised });
+        this.pushView();
+        return;
+      case 'dock':
+        this.dock = command.dock;
+        this.out({ type: 'record:toolbar', dock: this.dock, minimised: this.minimised });
+        this.pushView();
+        return;
+      case 'step':
+        this.addStep(command.text, 'toolbar');
+        return;
+      case 'box-text':
+        this.boxText = command.text;
+        return;
+      case 'typing-hidden':
+        return;
+    }
+  }
+
+  /** Pause or resume, from the toolbar or the panel. */
+  private setPaused(paused: boolean, source: 'toolbar' | 'panel'): boolean {
+    const recorder = this.recorder;
+    if (!recorder) return false;
+    const changed = paused ? recorder.pause() : recorder.resume();
+    if (!changed) return false;
+    this.afterPaused(paused, source);
+    return true;
+  }
+
+  private afterPaused(paused: boolean, source: 'toolbar' | 'panel'): void {
+    this.engine?.setPaused(paused);
+    const atMs = this.recorder?.clockMs ?? 0;
+    this.out({ type: 'record:paused', paused, atMs, source });
+    logger.info(`Session "${this.deps.sessionId}": Record Steps ${paused ? 'paused' : 'resumed'} (${source})`);
+    this.pushView();
+  }
+
+  /**
+   * A step the author wrote — from the toolbar's box, the editor or the panel
+   * (stories/testbench-record-toolbar.md, "Steps you write"). Typing still
+   * open is collected first; the draft is brought up to date (the toolbar
+   * says "Adding…" meanwhile); the lines go in exactly as written and lock
+   * everything up to them. `record:step` goes out for each, before the draft
+   * that holds them.
+   */
+  private addStep(
+    text: string,
+    source: RecordStepSource,
+    afterStep?: number,
+    revision?: number,
+  ): RecordControlOutcome {
+    const lines = authorStepLines(text);
+    if (lines.length === 0) return 'ignored';
+    this.enqueueOp(async () => {
+      await this.ready;
+      const engine = this.engine;
+      const recorder = this.recorder;
+      if (!engine || !recorder || this.endReason || this.cancelled()) return;
+      await recorder.flushTyping();
+      if (this.endReason || this.cancelled()) return;
+      const boundary = engine.recordedCount;
+      const atMs = recorder.clockMs;
+      const added = await engine.addAuthorSteps(lines, {
+        source,
+        boundary,
+        atMs,
+        afterStep,
+        revision,
+        onCatchUp: () => this.setNotice({ kind: 'adding', text: 'Adding…' }),
+        onJoined: (list) => {
+          for (const a of list) {
+            this.out({
+              type: 'record:step',
+              id: a.step.id,
+              text: a.step.text,
+              source,
+              afterStep: a.index - 1,
+              atMs,
+            });
+          }
+        },
+      });
+      if (added.length === 0) return;
+      if (source === 'toolbar') this.boxText = '';
+      const first = added[0]!.index + 1;
+      const last = added[added.length - 1]!.index + 1;
+      const where = first === last ? `Added as step ${first}` : `Added as steps ${first}–${last}`;
+      const above = first - 1;
+      this.setNotice({
+        kind: 'added',
+        text: above === 0 ? where : `${where} · ${above === 1 ? 'step 1' : `steps 1–${above}`} locked`,
+        ms: ADDED_NOTICE_MS,
+      });
+      logger.info(
+        `Session "${this.deps.sessionId}": Record Steps — ${added.length} step(s) written by the author (${source}) ` +
+          `joined at step ${first}`,
+      );
+    });
+    return 'accepted';
+  }
+
+  /** The toolbar's Undo: take out the most recent entry still in — an
+   *  action, a check or a step of the author's — as the panel's ✕ does. */
+  private async undo(): Promise<void> {
+    const engine = this.engine;
+    const recorder = this.recorder;
+    if (!engine || !recorder || this.endReason) return;
+    await recorder.flushTyping();
+    const entry = engine.latestLiveEntry();
+    if (!entry) {
+      this.setNotice({ kind: 'info', text: 'Nothing to undo.', ms: NOTHING_TO_UNDO_MS });
+      return;
+    }
+    if (!engine.drop(entry.id)) return;
+    this.undoStack.push(entry.id);
+    this.out({ type: 'record:dropped', id: entry.id, dropped: true, source: 'toolbar' });
+    this.setNotice({
+      kind: 'removed',
+      text: entry.kind === 'author' ? `Removed your step: ${entry.summary}` : `Removed: ${entry.summary}`,
+      ms: REMOVED_NOTICE_MS,
+      restore: true,
+    });
+  }
+
+  /** The toolbar's Restore: put back the last thing its Undo took out (one
+   *  the panel restored meanwhile is passed over). */
+  private async restoreLast(): Promise<void> {
+    const engine = this.engine;
+    if (!engine || this.endReason) return;
+    while (this.undoStack.length > 0) {
+      const id = this.undoStack.pop()!;
+      if (!engine.restore(id)) continue;
+      this.out({ type: 'record:dropped', id, dropped: false, source: 'toolbar' });
+      this.setNotice(null);
+      return;
+    }
   }
 
   private settle(reason: EndReason): void {
@@ -147,6 +461,7 @@ export class RecordStepsRun {
   abandon(): void {
     if (this.started) return;
     this.phase = 'done';
+    this.markReady();
     this.deps.finish();
   }
 
@@ -166,6 +481,7 @@ export class RecordStepsRun {
     if (this.phase === 'done' || this.resultSent) return 'no-recording';
     if (this.phase === 'writing' || this.endReason) {
       if (control.action === 'cancel') {
+        this.cancelSource ??= 'control';
         this.abortRun('cancel');
         return 'accepted';
       }
@@ -176,6 +492,7 @@ export class RecordStepsRun {
         this.settle({ kind: 'stop', dropped: new Set(control.dropped ?? []) });
         return 'accepted';
       case 'cancel':
+        this.cancelSource ??= 'control';
         this.abortRun('cancel');
         return 'accepted';
       case 'drop':
@@ -189,10 +506,15 @@ export class RecordStepsRun {
           this.pendingPick = arm;
           return 'accepted';
         }
-        if (arm) this.recorder.armPick();
-        else this.recorder.cancelPick();
+        if (arm) return this.recorder.armPick() ? 'accepted' : 'ignored';
+        this.recorder.cancelPick();
         return 'accepted';
       }
+      case 'pause':
+      case 'resume':
+        return this.setPaused(control.action === 'pause', 'panel') ? 'accepted' : 'ignored';
+      case 'add-step':
+        return this.addStep(control.text, control.source, control.afterStep, control.revision);
     }
   }
 
@@ -215,8 +537,10 @@ export class RecordStepsRun {
       if (event.type === 'done') closed = true;
       out(event);
     };
+    this.out = emit;
     // Closing the stream is `cancel` (On the wire).
     const onClientGone = (): void => {
+      this.cancelSource ??= 'stream';
       this.abortRun('cancel');
     };
     if (signal.aborted) onClientGone();
@@ -232,6 +556,7 @@ export class RecordStepsRun {
     // Every spelling — as typed, JSON-escaped, URL-encoded — for everything
     // this run masks: the frames, the prompt, the log lines.
     const secretValues = (): string[] => secretSpellings(secrets().map((s) => s.value));
+    this.secretValues = secretValues;
 
     // Warnings the server logs while this recording runs reach the author as
     // `output` frames, as a run's do. Warnings and errors only: an info line
@@ -275,12 +600,27 @@ export class RecordStepsRun {
       }
 
       const { draftSettleMs, ...recorderKnobs } = this.deps.recorderOptions ?? {};
+      // The draft's frames go out as they are, and the toolbar follows them:
+      // its "updating…", its last step and its drawer.
+      const engineEmit: RecordEventListener = (event) => {
+        if (event.type === 'record:drafting') {
+          this.updating = event.busy;
+          this.pushView();
+        } else if (event.type === 'record:draft') {
+          this.draftView = { steps: [...event.steps], locked: event.locked, authored: [...event.authored] };
+          if (this.notice?.kind === 'error') this.notice = null;
+          this.pushView();
+        }
+        emit(event);
+      };
       const engine = new DraftEngine({
         file,
         sendImages: prepared.sendScreenshots,
         secrets: secretValues,
         complete: (messages, s) => this.deps.complete(messages, s),
-        emit,
+        emit: engineEmit,
+        onCallFailed: () =>
+          this.setNotice({ kind: 'error', text: "Couldn't update the steps. They'll catch up with your next action." }),
         ...(draftSettleMs !== undefined && { settleMs: draftSettleMs }),
       });
       this.engine = engine;
@@ -300,15 +640,22 @@ export class RecordStepsRun {
           });
           // After the frame, so the draft that covers it never arrives first.
           engine.addAction(a);
+          this.pushView();
         },
-        onPick: (armed) => emit({ type: 'record:pick', armed }),
+        onPick: (armed) => {
+          emit({ type: 'record:pick', armed });
+          this.pushView();
+        },
         onGone: () => this.settle({ kind: 'gone' }),
         onWarning: (msg) => emit({ type: 'output', msg, kind: 'warn' }),
+        toolbar: this.toolbarEnabled ? this.toolbarView() : null,
+        onToolbar: (command) => this.onToolbar(command),
         ...recorderKnobs,
       });
       this.recorder = recorder;
       const started = await recorder.start();
       this.phase = 'recording';
+      this.markReady();
       logger.info(
         // The address can carry a token (`?token=…`): masked like everything
         // else this recording says (review 2, finding 10).
@@ -343,10 +690,15 @@ export class RecordStepsRun {
         return;
       }
 
-      // Stop: nothing new is scheduled; a field still being typed into is
-      // collected (its action frame goes out now, before record:writing); the
-      // Stop's own `dropped` joins the live drops.
+      // Stop: nothing new is scheduled; a step being added, or an Undo being
+      // made, finishes first; a field still being typed into is collected (its
+      // action frame goes out now, before record:writing); the Stop's own
+      // `dropped` joins the live drops.
       engine.close();
+      await this.ops;
+      this.toolbarPhase = 'writing';
+      this.notice = null;
+      this.pushView();
       const all = await recorder.stop();
       if (this.cancelled()) {
         emit(this.abortedFrame());
@@ -361,8 +713,9 @@ export class RecordStepsRun {
           `${all.length - engine.remainingCount} dropped; finishing the draft`,
       );
 
-      if (engine.remainingCount === 0) {
+      if (engine.remainingCount === 0 && engine.authorCount === 0) {
         engine.abandon();
+        this.endWith('nothing', 'Nothing was recorded, so no steps were written.');
         this.resultSent = true;
         emit({
           type: 'record:result',
@@ -384,6 +737,13 @@ export class RecordStepsRun {
         emit(this.abortedFrame());
         return;
       }
+      const written = answer.steps.length;
+      this.endWith(
+        written > 0 ? 'done' : 'nothing',
+        written > 0
+          ? `Done · ${written} step${written === 1 ? '' : 's'} written to ${path.basename(request.testFilePath)}`
+          : 'Nothing was recorded, so no steps were written.',
+      );
       this.resultSent = true;
       emit({
         type: 'record:result',
@@ -406,6 +766,7 @@ export class RecordStepsRun {
         this.phase === 'writing'
           ? `The steps could not be written: ${reason}. Nothing was inserted.`
           : `Record Steps failed: ${reason}.`;
+      this.endWith('ended', `Recording ended: ${message.charAt(0).toLowerCase()}${message.slice(1)}`);
       emit({ type: 'output', msg: message, kind: 'error' });
       emit({ type: 'done', status: 'error', error: message });
       // Info, not warn: the log bridge above would echo a warning back onto
@@ -413,6 +774,7 @@ export class RecordStepsRun {
       logger.info(`Session "${sessionId}": ${message}`);
     } finally {
       signal.removeEventListener('abort', onClientGone);
+      this.markReady();
       removeLogBridge();
       this.phase = 'done';
       this.engine?.abandon();
@@ -421,7 +783,14 @@ export class RecordStepsRun {
       } catch {
         // The browser may be gone; there is nothing left to switch off.
       }
+      // The session is free when `done` has gone out — before the page is
+      // told anything more.
       this.deps.finish();
+      // The toolbar's last word — Done, cancelled, or why it ended — then it
+      // leaves the page on its own. Never over a recording that started since.
+      if (this.toolbarEnabled && this.endKind) {
+        await this.recorder?.flushToolbar().catch(() => undefined);
+      }
     }
   }
 

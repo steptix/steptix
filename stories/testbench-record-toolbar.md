@@ -1,6 +1,6 @@
 # Record Steps: controls in the browser
 
-**Status:** design approved for build, 2026-09-27 ("That design is very nice … let's build what you designed first"). Not built yet. Extends
+**Status:** design approved for build, 2026-09-27 ("That design is very nice … let's build what you designed first"). Built: both halves — see §"What the TestBench half built" and §"What the server half built" at the end, which say where the build differs from this design. Extends
 `docs/specs/SPEC-record-steps.md` (section numbers below are that spec's) and
 `stories/testbench-record-steps.md`. The mockup beside this file,
 `testbench-record-toolbar-mockup.html`, shows every state described here.
@@ -936,3 +936,223 @@ added to the integration suite: Pause/Resume, Add Step and its rows, a line at
 the end, a line between steps (with the undo after Stop), the remembered
 toolbar and the setting, and a browser Cancel. runner-core adds the frame guard,
 the two webview messages and the `ignored` answer.
+
+## What the server half built
+
+Built in `src/`. The toolbar itself is `src/browser/scripts/record-toolbar.js`,
+spliced into the recorder's page script (`record-steps.js`) by
+`src/recorder/page-script.ts`, so it shares that script's closure: its state,
+its token and its describers. The recorder (`step-recorder.ts`) gained pause
+and resume, the token, the toolbar's messages and its state push; the draft
+engine (`draft-engine.ts`) gained locks and the author's steps; the run
+(`record-steps-run.ts`) owns what the toolbar shows and carries out its
+commands; the prompt (`src/ai/prompts.ts`) shows locks and authored steps and
+has the new rules; the routes parse the start body's `toolbar` and the three
+new controls. Pinned by `tests/record-steps-toolbar.test.ts` (the bar in a real
+Chromium, read and clicked through DevTools, since its shadow root is closed:
+`tests/record-toolbar-cdp.ts`), twelve new cases in
+`tests/api-server-record-steps.test.ts` (the whole path through the HTTP
+routes, the page and the model stub) and `tests/record-steps-draft-locks.test.ts`
+(the engine paths a page cannot produce on demand, and the prompt).
+
+It looks and behaves as the mockup does. Here is what was decided while
+building it, and what was measured.
+
+**The token is not in the `hello` answer.** Any page script can call the
+binding and say hello, so a token handed out in the answer would go to whoever
+asked. The server makes a token for each hello and gives it to the recorder's
+script by calling `claim` on the script's frozen control object, which takes one
+token per document and never hands it out. The recorder's script says hello at
+document start, before any page script runs, so the first claim is its own; a
+page script's hello leads to a claim that is refused, and that token is never
+registered. Tokens are kept per frame for the life of the browser context, not
+per recording, because a document's script accepts one token for its whole life
+and a second recording in the same page must still recognise it. A page script
+that calls the binding with no token, a guessed one, or after its own hello
+cannot add a step, stop or cancel (tested). What it does not stop is a page
+written to attack the recorder: Playwright 1.59's binding serialises through
+page globals (`JSON.stringify`, `Map`, `Promise`) looked up at call time, so
+such a page can read what crosses the binding. That is out of reach for any
+page script design, and the design only claimed the first kind.
+
+**The gate is the first listener only in documents loaded during the
+recording.** An init script runs before the page's scripts, so in every
+document created after Record its capture listener on `window` is the first,
+and the toolbar's keys, clicks and shortcuts are stopped there. The page that
+was already open when Record was pressed got the script by `evaluate`, after
+its own listeners: a capture-phase listener that page put on `window` earlier
+still hears them, while listeners anywhere else (on `document`, on elements,
+bubble-phase on `window`) do not. Measured in the first test run, where every
+case started on a page loaded before the recording and `window` capture
+listeners heard the chord. The tests now load their page after starting, which
+is the case for every page after the first. A reload fixes the first one, which
+seems a fair price. Alt and Shift pressed on their own always reach the page:
+nothing says a chord is coming.
+
+**Keys the bar consumes take their keyup with them.** Enter in the step box
+closes it and gives focus back to the page's field, so the Enter's keyup landed
+on the field. The same happened to the Esc that cancels pick mode. The keyup of
+any key the bar handled is now swallowed too.
+
+**Painting the toolbar out.** The top frame's `fieldRects` answer reports the
+host's box as `toolbar`, and the server fills it as it fills a secret field.
+A host that is there but cannot say where it is marks the answer `truncated`,
+which costs the crop (the same fail-closed rule). Measured: a click on a
+full-width green button with the bar over its middle gives a crop 1000 px wide
+with no pixel of the bar's graphite (#1B1E23) or Stop white left, while the
+screenshot taken beside it has over 2,000 graphite pixels. The pick outline and
+label come down in `markNow`, before ANY crop is asked for (a keystroke with
+pick mode armed takes one too), not only on the picking pointer-down; the crop
+of a pick has no pixel of the outline's blue. The model is told (rule D2) that a
+solid dark box is a secret or the recorder's controls, and to name neither.
+
+**Strict CSP, measured** (Chromium 147.0.7727.15, Playwright 1.59). The design
+said a constructable stylesheet adopted into the shadow root "isn't checked
+against `style-src` at all", from reading, not measuring. It holds. A page
+served with `Content-Security-Policy: default-src 'none'; style-src 'none';
+script-src 'none'` had its own `<style>`, its inline `style` attribute and its
+script all refused (body background transparent, a `width:300px` div laid out
+at 984 px, the title unchanged). The toolbar on it measured 732 × 74 px at
+(134, 610) in the top layer, with 87% of its box the graphite surface, and its
+step box took a step. The same with `require-trusted-types-for 'script';
+trusted-types 'none'` added: identical numbers. Nothing in the bar uses
+`innerHTML`, a `<style>` element, `setAttribute('style')` or `cssText`; the
+host's own styles are `style.setProperty(…, 'important')` one property at a
+time, starting from `all: initial`.
+
+**Pause.** The flag flips in the order the binding delivered the messages: what
+the page sent before its Pause is kept, and anything a frame sends after it,
+before the push reaches that frame, is refused on arrival. Pause collects the
+typing still open in every frame first (the toolbar's own button also finishes
+it, as any pointing at the bar does). While paused the server still follows
+each tab's history and address, and ignores them. At Resume it re-reads the
+history as the new starting point, in the action chain so it comes after any
+read a paused commit queued. The first thing recorded after Resume carries
+`afterPause`, and `atMs` is the recording's clock, which does not run while
+paused, so gaps leave the pause out. No draft call starts for new actions while
+paused, including one whose settle window was already running; the calls the
+author asks for (Add step's catch-up, a redraft after Undo) still run. A new tab
+opened while paused is watched but its opening is not recorded, and resuming
+in it adopts it silently (decision 6). Add check cannot be armed while paused,
+from the toolbar, a shortcut or the panel (`ignored`).
+
+**Locks are stretches.** The engine keeps the draft as a list of stretches: the
+steps between two locks and the actions they were written from. Only the last
+stretch, after the last lock, is ever drafted on the model's own account.
+Everything in the design fell out of that:
+
+- A step added at the end marks where it sits in the stream of actions (how
+  many had been recorded when Enter was pressed, after the typing was
+  collected). The catch-up call covers only the actions before that point. One
+  the author makes while "Adding…" goes after the step. If the catch-up fails,
+  the step goes in anyway and the actions before it stay uncovered in its
+  closed stretch; the next call is a "gap" call that inserts their steps above
+  the author's line and moves nothing after it. Actions a failed call left
+  behind still wait for the next action to be retried, as they always have: an
+  added step does not retry on its own (the first version did, and a test
+  caught it).
+- A step typed between two recorded steps goes in at that index with no call.
+  The open stretch closes after the last action the draft covers, so what is
+  not drafted yet goes after the whole block. `afterStep` is read against the
+  draft named by `revision`: the text of that step, found in the draft as it
+  is now (nearest occurrence), else the index clamped.
+- Each line of a multi-line step closes a stretch of its own, so dropping one
+  line lifts only its own lock.
+- A call that places steps rather than extending the tail (a redraft of the open
+  stretch or of one locked stretch, or a gap) is shown the draft with a
+  `{ "yourStepsGoHere": true }` marker and told to answer `replaceFrom` at it.
+  Its `replaceFrom` is not trusted: where the steps go is the engine's
+  decision. An ordinary call's `replaceFrom` must reach back no more than three
+  steps and not past the last lock or step of the author's. Refused, it is
+  retried once as a redraft of the open stretch; with no locks that is the old
+  full redraft, and the prompt reads exactly as it did.
+- The author's lines are never rewritten. The parameter pass (which renames
+  `{{email}}` to `{{email_2}}` on a clash) skips them, and an exact copy of one
+  in a redraft's answer is not written a second time.
+- Dropping an action inside a locked stretch redrafts that stretch alone; the
+  author's steps at its edge stay at its edge. A step typed in the editor
+  INSIDE a stretch (between two recorded steps) keeps its index among the
+  stretch's steps through such a redraft, and the model is told it is there
+  and not to write it. That is an approximation: the model's new steps may not
+  line up with the old ones around it. It only arises when an action is dropped
+  from a stretch that also holds an editor line.
+- Dropping a step of the author's takes the line out at once (a draft without
+  it goes out before any call) and joins its stretch to the next. The joined
+  stretch is redrafted only when the model had drafted actions after the step,
+  which it may have left unwritten under rule A2. Undo straight after Add step
+  therefore costs no call. Restore puts the two stretches back exactly as they
+  were when neither has changed since, again with no call. Otherwise it puts
+  the lock back where the step sat in the recording and redrafts both sides.
+- Stop may now make more than one call: one for the open stretch as before,
+  plus one per locked stretch the author changed. A recording whose only steps
+  are the author's ends with them, with no call.
+
+**Undo takes the most recent entry, events included.** The design said "an
+action, a check or a step of yours". Typing a wrong value and pressing Undo is
+the obvious case, so Undo also takes events (typing, a choice, a tick), exactly
+as the panel's ✕ does on any row. The order is the stream's: an author step
+sits after the actions recorded before it. With nothing left, the row reads
+"Nothing to undo." for three seconds. Restore puts back the last thing the
+toolbar's Undo took out; one the panel restored meanwhile is passed over.
+
+**Docking goes by where the pointer lets go**, not by the bar's middle as the
+mockup's code did. At 732 px the bar is wider than a third of a 1000 px window,
+so its middle could never reach the left or right third, and it could not be
+docked left or right. A test caught this. The pill docks the same way, and the
+grip moves the dock with the arrow keys.
+
+**Frames.** The pick outline and label are drawn by each frame's own script,
+in a second closed-root popover that takes no pointer events. A shortcut
+pressed in a frame goes to the server with that frame's token. Pause, Add
+check and Undo are carried out there; Add step and "focus the bar" are carried
+out in that tab's top document by an `evaluate` of the control object's
+`toolbar()`; minimise toggles on the server. "Typing hidden" is a yes-or-no
+`focus` message from any frame, aggregated on the server. A frame's report is
+forgotten when its next document says hello, and only the booleans cross
+(tested: a password typed in the page and in a frame, and the chip on and off
+for both).
+
+**The words at the end.** Stop: `Done · 12 steps written to pay-by-cash.md`
+(the file's name from the request), or "Nothing was recorded, so no steps were
+written." A browser Cancel: "Recording cancelled. Nothing was written." A
+Cancel from VS Code: "Recording ended: it was cancelled in VS Code. Nothing was
+written." The stream closing (the TestBench window): "Recording ended:
+TestBench closed the recording. Nothing was written." The session closed:
+"Recording ended: the session was closed while recording. Nothing was
+written." An error: "Recording ended: " followed by §10's sentence. The browser
+closing says nothing, since there is no page to say it in. The bar leaves the
+page six seconds later, or when Close is pressed.
+
+**Check-in** is every 2 s. Two unanswered in a row show the not-connected
+state. After four the question is asked again, so a lost answer is not waited
+on forever. An answer clears the state.
+
+**The session is released before the toolbar's last push.** The first version
+awaited the final "Done" push before giving the session back, and under the
+full suite's load a test saw the slot still held after `done`. The slot now goes
+first. The last push is skipped if another recording has taken the browser over
+since, so it cannot write over that recording's bar.
+
+**Not built, or built differently.**
+
+- No dock targets are drawn while dragging. The bar moves with the pointer and
+  docks where it is let go.
+- Done fades by leaving: after six seconds the bar is removed, with no opacity
+  animation.
+- Whether the step box is open belongs to the document. A navigation under
+  the open box closes it; its text is kept by the server and comes back the
+  next time the box opens, in any tab.
+- A page's modal dialog: per decision 4 the bar is not moved into the dialog.
+  It is put back on top of the top layer (hidden and shown again) when a
+  `toggle` event, a change to an `open` attribute or a one-second check sees a
+  new top-layer element. It stays inert behind the modal, as the spec requires,
+  and the shortcuts work (tested with `showModal()`). It is never re-shown while
+  focus is inside it, because hiding a popover drops its focus, which would lose
+  the text in the step box.
+- `add-step` sent while the browser is still coming up is accepted and
+  carried out once the recording is up, not refused.
+
+Counts: `npm run build` clean. The record-steps files: 45 in the HTTP suite
+(12 new, and the old `pause`-is-a-400 case now a 404), 19 toolbar, 8
+draft-lock, and the recorder and prompt files unchanged at 83, all green. Root
+`npx vitest run`: 270 files, 6780 tests, all passing (baseline 268 / 6741).

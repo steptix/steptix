@@ -1,4 +1,4 @@
-import { buildRecordStepsPrompt } from '../ai/prompts.js';
+import { buildRecordStepsPrompt, type RecordStepsPromptInput } from '../ai/prompts.js';
 import type { ChatMessage } from '../ai/types.js';
 import { isImageInputUnsupported } from '../desktop/vision-route.js';
 import { MASK, isSecretName } from '../utils/secrets.js';
@@ -266,8 +266,9 @@ export function isImageRejection(err: unknown): boolean {
 export interface AskForDraftArgs {
   /** The actions this call covers. */
   actions: readonly RecordedAction[];
-  /** The draft so far; empty for a full (re)draft. */
-  draft: { steps: readonly string[]; parameters: ReadonlyArray<{ name: string; value: string }> };
+  /** The draft so far; empty for a full (re)draft. With the toolbar: its
+   *  locked and authored steps, and where an inserting call's steps go. */
+  draft: NonNullable<RecordStepsPromptInput['draft']>;
   firstActionNumber: number;
   previousAtMs: number;
   file: TargetFileSummary;

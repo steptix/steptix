@@ -119,6 +119,55 @@ there, press Record.
 
 A Run cannot start while a recording holds the session.
 
+### 3.4 The toolbar in the browser
+
+The server puts a toolbar into the recorded page (stories/testbench-record-toolbar.md,
+which has the design and every state): a dark bar docked bottom centre with
+the recording's status (`● REC 02:14 · 9 actions`), **Pause**, **Add check**,
+**Add step**, **Undo**, **Stop**, **Cancel** and a minimise button, and a
+second row showing the last step as written — or a hint, the step box, a
+confirmation or an error. It is in the top-level document of every tab and
+popup, comes back after every navigation, and shows the one state the server
+pushes to all of them. Frames get no bar, but draw their own pick outline and
+take the shortcuts.
+
+| Control | Shortcut |
+| --- | --- |
+| Pause / Resume | Alt+Shift+P |
+| Add check (again to disarm) | Alt+Shift+C |
+| Add step (Enter adds, Esc closes and keeps the text) | Alt+Shift+S |
+| Undo (Restore on the confirmation) | Alt+Shift+Z |
+| Minimise / open | Alt+Shift+M |
+| Put keyboard focus on the bar (arrows move, Esc gives it back) | Alt+Shift+R |
+| Stop, Cancel (Cancel asks first: Discard / Keep recording) | none |
+
+- **Pause** finishes the typing still open, then records nothing — no
+  action, no crop, no pick, none of the navigation the server detects itself —
+  and starts no draft call for new actions (a call already running finishes).
+  **Resume** re-reads each tab's history as the new starting point and takes
+  the first tab acted in as where the author is, with no `tab`; the first
+  thing recorded after it carries `afterPause` for the model, and paused time
+  is left out of every gap and of the clock.
+- **Add step** is §7.6's step from the toolbar's box. **Undo** takes out the
+  most recent entry still in — an action, an event, a check or a step of the
+  author's — as the panel's ✕ does, and walks further back when pressed again;
+  **Restore** puts the last one back.
+- It is kept out of the recording (§4, §4.2): its clicks and keys never reach
+  the recorder or the page's listeners, it is painted out of every crop, and
+  nothing of it is in any description.
+- The page cannot drive it: every toolbar message carries a token the server
+  gave that document alone (§9.4).
+- It needs nothing the page's Content-Security-Policy could refuse: a closed
+  shadow root styled by one adopted constructable sheet and per-property
+  `style.setProperty` on its host, built without HTML strings (Trusted Types),
+  in the system font. Measured under `default-src 'none'; style-src 'none';
+  script-src 'none'`, with and without `require-trusted-types-for 'script'`:
+  the styled bar shows and works.
+- It checks in with the server every 2 s; two unanswered in a row show "The
+  recorder isn't answering…", which clears when an answer comes.
+- `toolbar.enabled: false` in the start body (§9.1) puts no toolbar in the
+  page, and no shortcut is taken from it; the recording is otherwise the same.
+
 ## 4. What is captured
 
 A script is installed on every page, tab and frame of the session browser's
@@ -173,6 +222,23 @@ typing; a chat composer that sent and emptied the box — or a box that was
 removed, or did not change — is the typing up to the Enter, reported with the
 text it held before the key, then a `key` Enter action. Add check reports any
 typing still open before the check itself.
+
+**Nothing is captured while the recording is paused** (§3.4) — not an action,
+not an event, not a crop, not a Back, a Reload, an address or a new tab. The
+page stops at once, and what it sends anyway (a frame the pause has not
+reached yet) is refused on arrival, in the order the binding delivered it:
+what the page sent before its pause is kept.
+
+**The recorder's own toolbar is never captured.** Its host is a closed shadow
+root, so every event from it reaches the page retargeted to the host; the
+recorder's first listener on `window` (an init script's, so the first one
+registered in every document loaded during the recording) handles those
+events itself and stops them there — they are never an action, never typing,
+never a focus change, and the page's own listeners never hear them. Pointing
+at the toolbar still finishes the typing open in a field, as pointing
+anywhere does. The host is left out wherever the recorder asks
+`elementFromPoint` or `document.activeElement`, and nothing inside a closed
+root is reachable by the queries and text walks a description is built from.
 
 **The runtime must be able to perform what is recorded.** A run's model has
 `back` and `forward` actions; `drag` (a drag from one element onto another)
@@ -229,6 +295,14 @@ again, within the same cap.
     every run of text on screen that does. The page reports its field values
     and its visible text with their boxes and the server compares, so the
     known secrets never go into the page.
+  - the recorder's own toolbar (§3.4): the top frame reports its box beside
+    its secret fields, and it is filled the same way, so the model never sees
+    it and a run — which has no toolbar — never looks for it. The model is
+    told a solid dark box is a secret or the recorder's controls, and to name
+    neither. A toolbar that is there and cannot say where costs the crop.
+
+  Add check's outline and label sit on the very element a crop is about, so
+  they are not painted: they are taken down before any crop is asked for.
 
   Positions inside a frame are measured from the frame's content box, inside
   its border and padding. A frame that cannot account for itself costs the
@@ -661,11 +735,18 @@ well as append:
 - a click that submitted a form and an Enter in its last field are one step.
 
 **Input of a draft call:** the handbook's step-writing rules; the draft so
-far (its steps, numbered, and its parameters); the NEW actions, each with its
-description (§4.1), its crop (§4.2), the time since the previous action and
-its tab; the file around the cursor — `baseUrl`, existing parameters with
-their values (secret ones masked), `### Section` names, and the steps just
-before and after the insertion point.
+far (its steps, numbered, and its parameters) — each LOCKED step marked final,
+each of the author's marked as written by hand at that point (§7.6); the NEW
+actions, each with its description (§4.1), its crop (§4.2), the time since the
+previous action (paused time left out) and its tab, and `afterPause` on the
+first one after a Resume; the file around the cursor — `baseUrl`, existing
+parameters with their values (secret ones masked), `### Section` names, and
+the steps just before and after the insertion point. The rules add: never
+repeat, reword or reach back past a locked step (A1); the actions right after
+a step of the author's that only carry it out are covered by it — write
+nothing for them (A2); never a Verify that repeats one of the author's (A3);
+a pause is not a wait the app needed nor a reason to navigate (I9); a solid
+dark box in a crop is a secret or the recorder's controls (D2).
 
 **Output of a draft call:** JSON only — the draft's new tail and the whole
 parameter list.
@@ -683,20 +764,62 @@ parameter list.
 ```
 
 `replaceFrom` is the 0-based index in the current draft where `steps`
-begins; everything before it is kept. It may not reach back more than three
-steps: a smaller value is refused and the call is retried once as a full
-redraft. `steps` carry no numbers. `notes` are shown to the author.
+begins; everything before it is kept. It may reach back neither more than
+three steps nor past the last locked step (or step of the author's): a value
+that does is refused and the call is retried once as a redraft of the OPEN
+steps only — the steps after the last lock, over the actions since it —
+never of the whole recording. Without locks that is the whole draft, as
+before. `steps` carry no numbers. `notes` are shown to the author.
+
+**Locks** (stories/testbench-record-toolbar.md, "Steps you write"). A step of
+the author's locks everything before it. The draft is kept as STRETCHES — the
+steps between two locks and the actions they are written from — and only the
+open stretch, after the last lock, is ever drafted on the model's own
+account. A call that places steps rather than extending the tail (a redraft of
+the open steps or of one locked stretch, or the steps a failed catch-up left
+out) is shown the draft with a marker where its steps go and answers
+`replaceFrom` at the marker; every step already in the draft stays. The
+author's lines are never rewritten: the parameter pass does not touch them,
+and an exact copy of one in the answer is not written a second time.
+
+- **A step added at the end** (the toolbar, the panel, a line under the
+  block): the typing still open is collected, the draft is brought up to date
+  first in one call over the actions recorded before it (the toolbar reads
+  "Adding…"), then the lines go in exactly as written, each locking what is
+  above it, and recording carries on below. When that call fails, the step
+  still goes in where it was put, and the next call drafts the actions before
+  it into the space above it; nothing after it moves.
+- **A step between two recorded steps** (the editor): it goes in there, with
+  no call; everything drafted so far is locked, on both sides of it; actions
+  not drafted yet go after the whole block. `afterStep` is read against the
+  draft the author saw (`revision`): that step's text, found in the draft as
+  it is now.
 
 **When a draft call fails** (the model errors or answers something
 unreadable), the author is told in the panel, the previous draft stands, and
 the next call — or Stop — covers those actions again.
 
 **A redraft** — after an action is dropped or restored — is one call over
-every remaining action, answering `replaceFrom: 0`.
+the remaining actions of the stretch it is in: after the last lock, the open
+steps (`replaceFrom` at the lock; the whole draft when there is none); inside
+a locked stretch, that stretch alone, the author's steps at its edges staying
+as they are and nothing outside it changing. Dropping a step of the author's
+takes its line out at once and lifts its lock: its stretch and the next are
+one again, redrafted together when the model had drafted actions after the
+step (it may have left them unwritten, A2). Restoring it puts the two
+stretches back exactly as they were when nothing touched them since — no call
+— and otherwise puts its lock back where it was in the recording and redrafts
+both sides.
+
+**While paused** (§3.4) no call starts for new actions; a call already
+running finishes, and the calls the author asks for — Add step's catch-up, a
+redraft after Undo — still run. On Resume what waited is drafted.
 
 **At Stop** the draft is final when it already covers every remaining action;
-otherwise one more call brings it up to date. If that last call fails, the
-recording ends with an error and the drafts are taken back out of the file.
+otherwise the calls it still needs bring it up to date — one, as before, or
+one more per locked stretch the author changed. If one fails, the recording
+ends with an error and the drafts are taken back out of the file. A recording
+whose only steps are the author's writes them with no call.
 
 **Model and policy:** the session's model (including a `runSettings.model`
 override). Recording is a request *for* AI, so it runs even where runs forbid
@@ -735,7 +858,7 @@ every route.
 | Status | When |
 | --- | --- |
 | 200 + SSE | Recording started |
-| 400 | Invalid body; `config` sent to an existing session; the server is headless |
+| 400 | Invalid body (a `toolbar` without a boolean `enabled`, or a `dock` that is not one of the six, included); `config` sent to an existing session; the server is headless |
 | 401 | Missing or wrong `x-api-key` |
 | 409 | A run holds the session's queue, or a recording is already running |
 
@@ -816,9 +939,48 @@ while recording."`. `done` is always the last frame.
 ```
 
 `202` accepted — with `{ ignored: "<why>" }` when the call did nothing (a
-pause while paused, anything but `cancel` after `stop`), which TestBench says
-where the author asked (an `add-step` from the file leaves the line theirs);
-`404` when no recording is running for the session.
+pause while paused, a resume while recording, `check` while paused, an
+`add-step` whose every line is blank, a `drop` or `restore` of an id the
+recording does not have or that is already in that state, anything but
+`cancel` after `stop`), which TestBench says where the author asked (an
+`add-step` from the file leaves the line theirs); `404` when no recording is
+running for the session; `400` for a body that is none of these (an
+`add-step` with no `text`, a `source` other than `editor` or `panel`, an
+`afterStep` or `revision` that is not a whole number 0 or more). `add-step` is
+answered at once and carried out after: bringing the draft up to date is a
+model call, and `record:step` says when the step joined.
+
+### 9.4 Page and server (internal)
+
+The page script talks to the server through the recorder's one binding; this
+is the server half's own business, listed so the client half knows what
+exists. The toolbar's messages: a command (`pause`, `resume`, `check`,
+`cancel-check`, `undo`, `restore`, `stop`, `cancel`, `minimise`, `dock`, and
+from a frame `open-step`, `focus-bar`, `toggle-minimised`), a step with its
+text (top-level frames only), the box's unsent text, a focus report — a yes or
+no for "the focused field is secret", from any frame, never a value — and a
+check-in. Each carries the document's **token**; a message without the right
+one is refused (and said in the log).
+
+The token is not in the `hello` answer: any page script can call the binding
+and say hello. The server makes one for each hello and hands it to the
+recorder's script by calling `claim` on the script's frozen control object,
+which accepts one token per document and never gives it out; the recorder's
+script says hello at document start, before the page's scripts run, so the
+first claim is its own, and a token made for a page script's hello is refused
+and never registered. It keeps out a page that calls the binding; it does not
+keep out a page written to attack the recorder (Playwright's binding
+serialises through page globals — measured in Playwright 1.59 — so such a page
+can read what crosses it).
+
+The server's push to each frame (`setState`, and the `hello` answer) is `{
+recording, pick, paused, bar }`; a top-level frame also gets the `toolbar`
+block — phase (`recording`, `writing`, `done`, `ended`), the clock and whether
+it runs, the action count, the steps with their locked and yours flags, whether
+a draft call is running, the current confirmation or error with how long it
+has left, "Typing hidden", dock, minimised, the box's unsent text and, at the
+end, what to say. Everything in it is text the panel already shows, masked
+again with the recording's secrets.
 
 ## 10. Errors the author can meet
 

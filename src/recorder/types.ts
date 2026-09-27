@@ -66,6 +66,10 @@ export type RecordEvent =
   /**
    * The draft as it stands — REPLACES the previous one. `revision` increases
    * by one per draft; `through` is the id of the last action it covers.
+   * `locked` leading steps are final — the model cannot rewrite them — and
+   * `authored` are the indices of the steps the author wrote by hand, with
+   * their ids beside them in `authoredIds` (stories/testbench-record-toolbar.md,
+   * "The wire, exactly").
    */
   | {
       type: 'record:draft';
@@ -74,6 +78,9 @@ export type RecordEvent =
       parameters: Array<{ name: string; value: string }>;
       notes?: string[];
       through?: string;
+      locked: number;
+      authored: number[];
+      authoredIds?: string[];
     }
   /** Stop received; finishing the draft. */
   | { type: 'record:writing' }
@@ -85,7 +92,44 @@ export type RecordEvent =
       parameters: Array<{ name: string; value: string }>;
       notes?: string[];
     }
-  | { type: 'done'; status: 'passed' | 'error' | 'aborted'; error?: string };
+  /** Paused or resumed — from the browser's toolbar or the panel. `atMs` is
+   *  the recording's clock, which does not run while paused. */
+  | { type: 'record:paused'; paused: boolean; atMs: number; source: 'toolbar' | 'panel' }
+  /**
+   * A step the author wrote joined the recording. `afterStep` is where it sits:
+   * the 0-based index of the draft step it follows in the draft it joined
+   * (-1 at the very start) — so it is step `afterStep + 1` of the next
+   * `record:draft`, whose `authored` says the same.
+   */
+  | {
+      type: 'record:step';
+      id: string;
+      text: string;
+      source: RecordStepSource;
+      afterStep: number;
+      atMs: number;
+    }
+  /** An action or an author step was dropped or restored from the browser's
+   *  toolbar (Undo / Restore), so the panel can strike it through. */
+  | { type: 'record:dropped'; id: string; dropped: boolean; source: 'toolbar' | 'panel' }
+  /** The toolbar was moved or minimised: TestBench keeps it for the next start body. */
+  | { type: 'record:toolbar'; dock: ToolbarDock; minimised: boolean }
+  | {
+      type: 'done';
+      status: 'passed' | 'error' | 'aborted';
+      error?: string;
+      /** Cancel was pressed in the browser: TestBench takes the drafts out
+       *  quietly, with no error. */
+      cancelledBy?: 'browser';
+    };
+
+/** Where the browser toolbar docks: top or bottom, left, centre or right. */
+export type ToolbarDock = 'tl' | 'tc' | 'tr' | 'bl' | 'bc' | 'br';
+
+export const TOOLBAR_DOCKS: ReadonlySet<ToolbarDock> = new Set<ToolbarDock>(['tl', 'tc', 'tr', 'bl', 'bc', 'br']);
+
+/** Where an author step came from. */
+export type RecordStepSource = 'toolbar' | 'editor' | 'panel';
 
 /** Every frame a recording stream can carry. */
 export type RecordStreamEvent =
@@ -121,18 +165,34 @@ export interface RecordStepsRequest {
     /** 1-based; mode `cursor` only. */
     cursorLine?: number;
   };
+  /**
+   * The browser toolbar (stories/testbench-record-toolbar.md). Absent means
+   * `{ enabled: true, dock: 'bc', minimised: false }`; `enabled: false` puts
+   * no toolbar in the page — the rest of the recording is unchanged.
+   */
+  toolbar?: { enabled: boolean; dock?: ToolbarDock; minimised?: boolean };
 }
 
 /** `POST /sessions/:id/record-steps/control` body, validated. */
 export type RecordControl =
   | { action: 'stop'; dropped?: string[] }
-  /** Leave this action out, and redraft now (decision 9). */
+  /** Leave this action — or author step — out, and redraft now (decision 9). */
   | { action: 'drop'; id: string }
   /** Put it back, and redraft now. */
   | { action: 'restore'; id: string }
   | { action: 'check' }
   | { action: 'cancel-check' }
-  | { action: 'cancel' };
+  | { action: 'cancel' }
+  | { action: 'pause' }
+  | { action: 'resume' }
+  /**
+   * A step the author wrote in the editor or the panel. `text` is one line or
+   * several (several lines are several steps, in order); `afterStep` is the
+   * 0-based index in the draft the author saw — absent means at the end — and
+   * `revision` is the `record:draft` that index refers to. The toolbar's box
+   * goes through the page binding instead.
+   */
+  | { action: 'add-step'; text: string; source: 'editor' | 'panel'; afterStep?: number; revision?: number };
 
 /** Answer to a control request, which the route turns into a status. */
 export type RecordControlOutcome =
@@ -141,7 +201,8 @@ export type RecordControlOutcome =
   /** Stop has been received; only `cancel` still does anything. */
   | 'stopping'
   /** `drop` / `restore` of an id the recording does not have, or one already
-   *  in that state — nothing to do. */
+   *  in that state; `pause` while paused, `resume` while not; Add check while
+   *  paused; an `add-step` whose every line is blank — nothing to do. */
   | 'ignored';
 
 /** A rectangle in CSS pixels. */
@@ -259,4 +320,8 @@ export interface RecordedAction {
   dropTarget?: ElementDescription;
   /** For `drag`: the crop taken at the drop, around `dropTarget`. */
   dropCrop?: ActionCrop;
+  /** The first thing recorded after the author paused and resumed: the time
+   *  across the pause is not a wait the app needed (the gap already leaves
+   *  it out), and the pause is no reason to write a navigation. */
+  afterPause?: boolean;
 }
