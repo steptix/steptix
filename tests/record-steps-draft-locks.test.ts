@@ -13,7 +13,7 @@ import { describe, it, expect } from 'vitest';
 import { buildRecordStepsPrompt, RECORD_STEPS_SYSTEM } from '../src/ai/prompts.js';
 import type { ChatMessage, MessageContentBlock } from '../src/ai/types.js';
 import { DraftEngine } from '../src/recorder/draft-engine.js';
-import { authorStepLines } from '../src/recorder/record-steps-run.js';
+import { authorStepLines, authorStepSecrets } from '../src/recorder/record-steps-run.js';
 import { summarizeTargetFile } from '../src/recorder/target-file.js';
 import type { RecordStreamEvent, RecordedAction } from '../src/recorder/types.js';
 
@@ -189,6 +189,112 @@ describe('undo and restore of an author step', () => {
       authored: [1],
     });
     expect(h.engine.latestLiveEntry()).toMatchObject({ id: 'a3' });
+  });
+});
+
+// ── The fix round (review of the toolbar's server half) ───────────────────
+
+describe('a failed catch-up (finding 7)', () => {
+  it('is not retried on its own: the gap above the step waits for the next action', async () => {
+    const h = harness();
+    h.script.set(1, new Error('503 the model is down'));
+    h.engine.setPaused(true);
+    h.engine.addAction(action(1, 'One'));
+    h.engine.setPaused(false);
+    await sleep(0);
+    await h.engine.addAuthorSteps(['Verify it'], { source: 'toolbar', boundary: 1, atMs: 1500 });
+    expect(h.calls).toHaveLength(1);
+    // No new action: nothing is asked again, however long it waits.
+    await sleep(250);
+    expect(h.calls).toHaveLength(1);
+    expect(h.last()).toMatchObject({ steps: ['Verify it'], locked: 1 });
+    // The next action is what sends it: the gap first, then the action.
+    h.engine.addAction(action(2, 'Two'));
+    await settled(h, 3);
+    expect(h.calls).toHaveLength(3);
+    expect(h.last().steps).toEqual(['Step for One', 'Verify it', 'Step for Two']);
+  });
+});
+
+describe("a secret in a step of the author's (finding 5, authorStepSecrets)", () => {
+  it('becomes {{name}} in every spelling, longest first, with a $NAME parameter the file does not already have', () => {
+    const known = [
+      { name: 'password', value: 'hunter2-X' },
+      { name: 'API_TOKEN', value: 'tok"quoted"-123' },
+      { name: 'short', value: 'hunter2' },
+    ];
+    const out = authorStepSecrets(
+      ['Type hunter2-X into Password', 'Send tok\\"quoted\\"-123 as the key', 'Verify "hunter2" is not shown'],
+      known,
+      [{ name: 'password' }],
+    );
+    expect(out.lines).toEqual([
+      'Type {{password}} into Password',
+      'Send {{API_TOKEN}} as the key',
+      'Verify "{{short}}" is not shown',
+    ]);
+    // The file defines {{password}} already; the others read the .env.
+    expect(out.parameters).toEqual([
+      { name: 'API_TOKEN', value: '$API_TOKEN' },
+      { name: 'short', value: '$SHORT' },
+    ]);
+    expect(out.unnamed).toBe(false);
+    // Nothing to replace: unchanged.
+    expect(authorStepSecrets(['Click Save'], known, [])).toMatchObject({ lines: ['Click Save'], parameters: [] });
+  });
+
+  it('a secret with no usable name leaves the step refused, not sent', () => {
+    expect(authorStepSecrets(['Type s3cr3t-value here'], [{ name: null, value: 's3cr3t-value' }], []).unnamed).toBe(true);
+    expect(authorStepSecrets(['Type s3cr3t-value here'], [{ name: 'row.pw', value: 's3cr3t-value' }], []).unnamed).toBe(true);
+  });
+});
+
+describe('two editor steps aimed at the same place (finding 9)', () => {
+  it('land in the order they were sent, the second after the first', async () => {
+    const h = harness();
+    h.engine.addAction(action(1, 'Menu'));
+    h.engine.addAction(action(2, 'Payments'));
+    await settled(h, 1);
+    expect(h.last().steps).toEqual(['Step for Menu', 'Step for Payments']);
+    const revision = h.engine.currentRevision;
+    // Both typed under step 1 of the same draft, sent one after the other.
+    await h.engine.addAuthorSteps(['Verify A'], { source: 'editor', boundary: 2, atMs: 2500, afterStep: 0, revision });
+    await h.engine.addAuthorSteps(['Verify B'], { source: 'editor', boundary: 2, atMs: 2600, afterStep: 0, revision });
+    expect(h.last().steps).toEqual(['Step for Menu', 'Verify A', 'Verify B', 'Step for Payments']);
+    // The same at the end of the draft: the second after the first.
+    const end = h.engine.currentRevision;
+    await h.engine.addAuthorSteps(['Verify C'], { source: 'editor', boundary: 2, atMs: 2700, afterStep: 3, revision: end });
+    await h.engine.addAuthorSteps(['Verify D'], { source: 'editor', boundary: 2, atMs: 2800, afterStep: 3, revision: end });
+    expect(h.last().steps).toEqual([
+      'Step for Menu', 'Verify A', 'Verify B', 'Step for Payments', 'Verify C', 'Verify D',
+    ]);
+  });
+});
+
+describe('restoring an editor step typed between two recorded steps (finding 10)', () => {
+  it('after its stretch changed, it goes back between the same two steps — not to where the recording ended', async () => {
+    const h = harness();
+    h.engine.addAction(action(1, 'One'));
+    await settled(h, 1);
+    h.engine.addAction(action(2, 'Two'));
+    await settled(h, 2);
+    const revision = h.engine.currentRevision;
+    await h.engine.addAuthorSteps(['Mine'], { source: 'editor', boundary: 2, atMs: 2500, afterStep: 0, revision });
+    expect(h.last().steps).toEqual(['Step for One', 'Mine', 'Step for Two']);
+    expect(h.engine.drop('s1')).toBe(true);
+    expect(h.last().steps).toEqual(['Step for One', 'Step for Two']);
+    // Something new since: its stretch changed, so Restore redrafts both sides.
+    h.engine.addAction(action(3, 'Three'));
+    await settled(h, 3);
+    expect(h.last().steps).toEqual(['Step for One', 'Step for Two', 'Step for Three']);
+    expect(h.engine.restore('s1')).toBe(true);
+    // At once, and after the redrafts: between One and Two, where the file has it.
+    expect(h.last().steps.indexOf('Mine')).toBe(1);
+    await settled(h, 5);
+    expect(h.last()).toMatchObject({
+      steps: ['Step for One', 'Mine', 'Step for Two', 'Step for Three'],
+      authored: [1],
+    });
   });
 });
 

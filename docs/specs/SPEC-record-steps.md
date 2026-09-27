@@ -150,11 +150,35 @@ take the shortcuts.
   **Resume** re-reads each tab's history as the new starting point and takes
   the first tab acted in as where the author is, with no `tab`; the first
   thing recorded after it carries `afterPause` for the model, and paused time
-  is left out of every gap and of the clock.
+  is left out of every gap and of the clock. The page shows Paused the moment
+  it is pressed; a Pause the server refuses, or does not answer within 3 s, is
+  taken back in the page (so is a minimise, a move, an Esc out of Add check,
+  and a step leaving the box, whose text goes back into it).
 - **Add step** is §7.6's step from the toolbar's box. **Undo** takes out the
   most recent entry still in — an action, an event, a check or a step of the
   author's — as the panel's ✕ does, and walks further back when pressed again;
   **Restore** puts the last one back.
+- **Stop.** Every Add step, Undo and Restore accepted before Stop is carried
+  out before the steps are written — one waiting behind another's model call
+  included. From the toolbar after Stop, a step, Undo, Restore, Pause or Add
+  check is refused: the bar says so (through "Writing the steps…"), and a
+  step's words go to the panel as a warning and onto the end line ("Done · 12
+  steps written to pay-by-cash.md · 1 step typed after Stop was not added").
+- **Typing hidden** shows while a secret field (§5) has focus in any frame of
+  any tab — also one that already had focus when the recording reached its
+  document (an autofocused password box, the one the author was in when
+  Record was pressed) — and goes when focus leaves it, or its frame or page
+  goes (a sign-in popup that closes itself). A confirmation or an error
+  (Added…, Removed… Restore, Couldn't update…) and the paused line show over
+  it.
+- **Once it is not recording** (writing, done, ended) the bar takes no pointer
+  events but its Close button's: a click on the page under it lands on the
+  page. A run started on the session takes the bar out of every page before
+  its first step, so the run never clicks it and no screenshot shows it.
+- **A native popover the page has open** (`popover="auto"`, a menu) closes
+  when a toolbar button is clicked: HTML light-dismisses it on the pointer
+  going down, before anything the bar could do. The shortcuts do not touch it
+  — Alt+Shift+C arms Add check with the menu still open.
 - It is kept out of the recording (§4, §4.2): its clicks and keys never reach
   the recorder or the page's listeners, it is painted out of every crop, and
   nothing of it is in any description.
@@ -166,8 +190,10 @@ take the shortcuts.
   in the system font. Measured under `default-src 'none'; style-src 'none';
   script-src 'none'`, with and without `require-trusted-types-for 'script'`:
   the styled bar shows and works.
-- It checks in with the server every 2 s; two unanswered in a row show "The
-  recorder isn't answering…", which clears when an answer comes.
+- It checks in with the server every 2 s; two unanswered in a row — a
+  refusal counts as unanswered, and so does a document that has no token to
+  ask with — show "The recorder isn't answering…", which clears when an
+  answer comes.
 - `toolbar.enabled: false` in the start body (§9.1) puts no toolbar in the
   page, and no shortcut is taken from it; the recording is otherwise the same.
 
@@ -391,7 +417,8 @@ folded or cut: the page sends its text unfolded, and the server masks, then
 folds whitespace, then cuts, so a secret holding a double space or a line
 break still matches, and one that crossed the cut leaves no prefix behind.
 They are masked out of every panel line, `record:started`, the server
-warnings forwarded as `output`, and the recording's own log lines.
+warnings forwarded as `output`, and the recording's own log lines. One the
+author types into a step of their own is written as `{{name}}` (§7.6).
 
 ## 6. Checks
 
@@ -685,7 +712,18 @@ leading number or list marker is the recording's to give — and is a
   arrives — first sends every line that counts, the cursor's included, waiting
   for nothing, after the add-steps already on their way. A call that fails, or
   that the server answers `ignored`, leaves the line the author's text in the
-  file — said in the log, never sent again.
+  file — said in the log, never sent again. Two sent for the same place in
+  the same draft go in in the order they were sent: the second after the
+  first (the server's guard behind the wait above).
+- **A secret the recording knows** (§5 — the session's, the file's, the
+  `.env`'s) in a step from the panel or the toolbar is written as a typed one
+  is: the value, in every spelling the recording masks, becomes `{{name}}` —
+  the parameter it came from — and the draft gains `name: $NAME` (§5, as for
+  a secret field) unless the file already defines `name`. The step, its `record:step`,
+  every draft and the result carry `{{name}}`; the value never crosses. From
+  the editor it cannot be: that line is the author's own text, which the
+  recording does not rewrite, so the `add-step` is answered `ignored` with
+  what to write in its place (`{{password}}`), and the line stays theirs.
 
 A line the author typed in the file is **theirs**: the recording never writes
 it and never takes it out — bar Undo of its step, below. Drafts are laid out
@@ -824,8 +862,10 @@ and an exact copy of one in the answer is not written a second time.
   first in one call over the actions recorded before it (the toolbar reads
   "Adding…"), then the lines go in exactly as written, each locking what is
   above it, and recording carries on below. When that call fails, the step
-  still goes in where it was put, and the next call drafts the actions before
-  it into the space above it; nothing after it moves.
+  still goes in where it was put, and the next call an ACTION causes drafts
+  the actions before it into the space above it (as any failed call's
+  actions wait for the next action — it is not retried on its own); nothing
+  after it moves. Stop drafts them regardless.
 - **A step between two recorded steps** (the editor): it goes in there, with
   no call; everything drafted so far is locked, on both sides of it; actions
   not drafted yet go after the whole block. `afterStep` is read against the
@@ -846,7 +886,9 @@ one again, redrafted together when the model had drafted actions after the
 step (it may have left them unwritten, A2). Restoring it puts the two
 stretches back exactly as they were when nothing touched them since — no call
 — and otherwise puts its lock back where it was in the recording and redrafts
-both sides.
+both sides; the line goes back at the edge of the stretch it closes, or — one
+typed between two recorded steps — after the step that was before it, where
+the file still has it.
 
 **While paused** (§3.4) no call starts for new actions; a call already
 running finishes, and the calls the author asks for — Add step's catch-up, a
@@ -977,7 +1019,8 @@ while recording."`. `done` is always the last frame.
 
 `202` accepted — with `{ ignored: "<why>" }` when the call did nothing (a
 pause while paused, a resume while recording, `check` while paused, an
-`add-step` whose every line is blank, a `drop` or `restore` of an id the
+`add-step` whose every line is blank, an `add-step` from the editor holding a
+secret the recording knows (§7.6), a `drop` or `restore` of an id the
 recording does not have or that is already in that state, anything but
 `cancel` after `stop`), which TestBench says where the author asked (an
 `add-step` from the file leaves the line theirs); `404` when no recording is
@@ -985,7 +1028,10 @@ running for the session; `400` for a body that is none of these (an
 `add-step` with no `text`, a `source` other than `editor` or `panel`, an
 `afterStep` or `revision` that is not a whole number 0 or more). `add-step` is
 answered at once and carried out after: bringing the draft up to date is a
-model call, and `record:step` says when the step joined.
+model call, and `record:step` says when the step joined. An `add-step`
+answered `202` without `ignored` is always carried out, and before the result:
+a `stop` that arrives while it waits (behind another step's model call, say)
+waits for it.
 
 ### 9.4 Page and server (internal)
 
@@ -999,25 +1045,52 @@ no for "the focused field is secret", from any frame, never a value — and a
 check-in. Each carries the document's **token**; a message without the right
 one is refused (and said in the log).
 
+The answer says whether it was taken: `{ ok: true }`; `{ ok: false, state }`
+when it was this document's and was not (a Pause while paused, Add check while
+paused, anything that would change the recording after Stop), with the state
+the page should show; `null` for a message that is not this document's. The
+page shows some commands before the answer (Pause, minimise, a move, Esc out
+of Add check, a step leaving the box) and takes each back on anything but
+`ok: true` — to the `state` given, or, with none (no answer within 3 s, or no
+token to send with), to what it showed before, unless the server has pushed a
+state since. A check-in answered with anything but `ok: true` counts as
+unanswered.
+
 The token is not in the `hello` answer: any page script can call the binding
 and say hello. The server makes one for each hello and hands it to the
 recorder's script by calling `claim` on the script's frozen control object,
 which accepts one token per document and never gives it out; the recorder's
 script says hello at document start, before the page's scripts run, so the
 first claim is its own, and a token made for a page script's hello is refused
-and never registered. It keeps out a page that calls the binding; it does not
-keep out a page written to attack the recorder (Playwright's binding
-serialises through page globals — measured in Playwright 1.59 — so such a page
-can read what crosses it).
+and never registered. The hello's answer waits for the claim at most 2.5 s,
+but the claim is registered whenever it lands — a document whose own scripts
+keep it busy while it loads answers late — unless a later claim for the same
+frame (a newer document's) has been registered first.
+
+The control object is on `window`, so the page's scripts can call it too.
+Every method of it (`claim`, `setState`, `flush`, `fieldRects`, `toolbar`)
+wants the **control key**: a random value the server writes into the
+script's closure when it builds the init script — once per browser context,
+since an init script cannot change — and passes as an evaluate argument,
+never through the binding or a page global. A page script calling
+`claim('x')` before the recorder's claim gets `false`.
+
+This keeps out a page that calls the binding or the control object; it does
+not keep out a page written to attack the recorder (Playwright's binding
+serialises through page globals — measured in Playwright 1.59 — so such a
+page can read what crosses it, the token included; the key crosses by
+evaluate, which was not measured and is assumed to be no better).
 
 The server's push to each frame (`setState`, and the `hello` answer) is `{
 recording, pick, paused, bar }`; a top-level frame also gets the `toolbar`
 block — phase (`recording`, `writing`, `done`, `ended`), the clock and whether
 it runs, the action count, the steps with their locked and yours flags, whether
 a draft call is running, the current confirmation or error with how long it
-has left, "Typing hidden", dock, minimised, the box's unsent text and, at the
-end, what to say. Everything in it is text the panel already shows, masked
-again with the recording's secrets.
+has left, "Typing hidden", dock, minimised, the box's unsent text (empty from
+the moment its step arrives) and, at the end, what to say. Everything in it
+is text the panel already shows, masked again with the recording's secrets.
+When a run starts on the session the last recording's recorder pushes one
+more state with no `toolbar` block, which takes the bar out of the page.
 
 ## 10. Errors the author can meet
 
@@ -1028,6 +1101,7 @@ again with the recording's secrets.
 | The server is headless | "Record Steps needs a visible browser: this server runs headless (browser.headed: false)." |
 | No model configured | "Record Steps needs a model to write the steps; configure ai in aiui.config.json or .env." |
 | The model's answer could not be read | "The steps could not be written: <reason>. Nothing was inserted." |
+| A step entered in the browser's toolbar after Stop (§3.4) | "A step typed in the browser after Stop was not added to the recording: "<text>". Add it to the test by hand." — a warning; the bar's last line says it too |
 | The author edits a line being recorded | "Lines being recorded are rewritten as the model updates them — edit them after Stop." — a warning, once per recording |
 | A step typed in the file that the server does not take (§7.6) | "Your step "<text>" was not added to the recording (<why>); it stays in the file as you wrote it." — in the log |
 | What the recording wrote can no longer be found in the file (§7.4) | "The recorded steps could not be found in the file any more, so they are no longer written live; the panel keeps them and Stop will insert them at your cursor line." — a warning, once per recording |

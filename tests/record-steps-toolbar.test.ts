@@ -36,8 +36,29 @@ const PAGES: Record<string, string> = {
       <label for="email">Email</label><input id="email">
       <label for="pw">Password</label><input id="pw" type="password">
       <button id="go" onclick="window.went = (window.went || 0) + 1">Go</button>
+      <button id="oauth" onclick="window.open('/login-popup.html', 'oauth', 'width=420,height=360')">Sign in with Example</button>
       <iframe id="frame" title="Payment" src="/frame.html" style="width:300px;height:80px"></iframe>
     </main>${LISTENERS}</body></html>`,
+  // An OAuth-style sign-in popup: Enter signs in and the window closes itself.
+  '/login-popup.html': `<!doctype html><html><head><title>Sign in</title></head><body>
+    <form id="f"><label for="pop-pw">Password</label><input id="pop-pw" type="password"><button>Sign in</button></form>
+    <script>document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault(); window.close(); });</script>
+    </body></html>`,
+  '/autofocus.html': `<!doctype html><html><head><title>Autofocus</title></head><body>
+    <label for="email">Email</label><input id="email">
+    <label for="pw">Password</label><input id="pw" type="password" autofocus></body></html>`,
+  // A document whose own scripts keep it busy while it loads: the recorder's
+  // claim waits behind them.
+  '/busy.html': `<!doctype html><html><head><title>Busy</title>
+    <script>var t0 = Date.now(); while (Date.now() - t0 < 3500) {}</script></head>
+    <body><button id="b">Continue</button></body></html>`,
+  // A page that goes for the recorder's control object before anything else.
+  '/claims.html': `<!doctype html><html><head><title>Claims</title><script>
+    var ctl = window.__aiuiRecordStepsCtl;
+    window.claimed = ctl ? ctl.claim('x') : 'no control';
+    window.pushed = ctl ? ctl.setState({ recording: true, bar: true, toolbar: { phase: 'done', endText: 'Fake' } }) : 'no control';
+    window.flushed = ctl ? JSON.stringify(ctl.flush()) : 'no control';
+    </script></head><body><button id="b">Continue</button></body></html>`,
   '/other.html': `<!doctype html><html><head><title>Other</title></head><body>
     <h1>Other page</h1><button id="other-button">Continue</button></body></html>`,
   '/frame.html': `<!doctype html><html><body><label for="card">Card number</label><input id="card">
@@ -45,11 +66,16 @@ const PAGES: Record<string, string> = {
   '/dialog.html': `<!doctype html><html><head><title>Dialog</title></head><body>
     <button id="open" onclick="document.getElementById('dlg').showModal()">Open</button>
     <dialog id="dlg"><p>Are you sure?</p><button id="yes">Yes</button></dialog></body></html>`,
+  '/menu.html': `<!doctype html><html><head><title>Menu</title></head><body>
+    <button id="menu-button" popovertarget="menu">Account</button>
+    <div id="menu" popover><button id="settings">Settings</button><button id="sign-out">Sign out</button></div>
+    </body></html>`,
   // A button across the whole bottom of the viewport: the toolbar (docked
   // bottom centre) sits over part of it, and the crop around it takes in the bar.
   '/wide.html': `<!doctype html><html><head><title>Wide</title></head><body style="margin:0;background:#ffffff">
     <p>Top</p>
-    <button id="wide" style="position:fixed;left:0;right:0;bottom:0;height:150px;border:0;background:#00ff00">Wide</button>
+    <button id="wide" onclick="window.wideClicks = (window.wideClicks || 0) + 1"
+      style="position:fixed;left:0;right:0;bottom:0;height:150px;border:0;background:#00ff00">Wide</button>
     </body></html>`,
 };
 
@@ -667,5 +693,159 @@ describe('using the bar', () => {
     await page.keyboard.press('Alt+Shift+P');
     await until(async () => recorder.isPaused, (p) => p, 'paused with the dialog open');
     expect(await page.evaluate(() => document.getElementById('dlg')!.open)).toBe(true);
+  }, 30_000);
+});
+
+// ── The fix round (review of the toolbar's server half) ───────────────────
+
+/** Answer the page's messages of one type as the recorder would not: with
+ *  nothing (a refusal), or never. */
+function interfere(type: string, how: () => 'refuse' | 'hang' | 'pass'): void {
+  const real = recorder.onMessage.bind(recorder);
+  (recorder as unknown as { onMessage: typeof real }).onMessage = (source, message, token) => {
+    if ((message as { type?: string })?.type !== type) return real(source, message, token);
+    const mode = how();
+    if (mode === 'refuse') return null;
+    if (mode === 'hang') return new Promise(() => {});
+    return real(source, message, token);
+  };
+}
+
+describe('a page busy at load (finding 2)', () => {
+  it('its bar still works: the claim that landed after the recorder stopped waiting is honoured', async () => {
+    await startOn('/busy.html');
+    await page.keyboard.press('Alt+Shift+P');
+    await until(async () => recorder.isPaused, (p) => p, 'paused');
+    expect(commands).toEqual([{ kind: 'paused', paused: true }]);
+    await until(() => readToolbar(page), (t) => t !== null && t.status.startsWith('PAUSED'), 'PAUSED shown');
+  }, 45_000);
+
+  it('a Pause the recorder refuses is taken back in the page, and so is one it never answers', async () => {
+    await startOn('/app.html');
+    let mode: 'refuse' | 'hang' | 'pass' = 'refuse';
+    interfere('toolbar', () => mode);
+    await page.keyboard.press('Alt+Shift+P');
+    await sleep(400);
+    expect(recorder.isPaused).toBe(false);
+    expect((await readToolbar(page))!.status).toMatch(/^REC/);
+    // …and the page records again: a click is an action.
+    await page.click('#go');
+    await until(async () => actions.length, (n) => n === 1, 'the click after the refused pause');
+
+    mode = 'hang';
+    await page.keyboard.press('Alt+Shift+P');
+    await until(() => readToolbar(page), (t) => t !== null && t.status.startsWith('PAUSED'), 'PAUSED at once', 2_000);
+    await until(() => readToolbar(page), (t) => t !== null && t.status.startsWith('REC'), 'taken back: no answer came', 8_000);
+    expect(recorder.isPaused).toBe(false);
+  }, 45_000);
+
+  it('a check-in the recorder answers with a refusal counts as missed', async () => {
+    recorder = newRecorder({ checkInMs: 150 });
+    await recorder.start();
+    await until(() => hostState(page), (s) => s.present, 'the toolbar');
+    let refuse = true;
+    interfere('checkin', () => (refuse ? 'refuse' : 'pass'));
+    await until(() => readToolbar(page), (t) => t !== null && t.sub.includes("The recorder isn't answering"), 'not connected');
+    refuse = false;
+    await until(() => readToolbar(page), (t) => t !== null && !t.sub.includes("isn't answering"), 'connected again', 10_000);
+  }, 30_000);
+});
+
+describe('"Typing hidden" (finding 4)', () => {
+  it('goes when the popup whose password field had it closes', async () => {
+    await startOn('/app.html');
+    const popupPromise = context.waitForEvent('page');
+    await page.click('#oauth');
+    const popup = await popupPromise;
+    await popup.waitForLoadState('domcontentloaded');
+    await until(() => hostState(popup), (s) => s.present, 'the toolbar in the popup');
+    await popup.focus('#pop-pw');
+    await popup.keyboard.type('hunter2-HIDDEN');
+    await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Typing hidden'), 'Typing hidden, from the popup');
+    const closed = popup.waitForEvent('close');
+    // The window closes on the keydown: the keyup has nowhere to go.
+    await popup.keyboard.press('Enter').catch(() => undefined);
+    await closed;
+    // Back in the main tab: an ordinary field, and a click.
+    await page.click('#email');
+    await page.keyboard.type('a@b.test');
+    await page.click('#go');
+    await until(() => readToolbar(page), (t) => t !== null && !t.sub.includes('Typing hidden'), 'the chip gone');
+  }, 45_000);
+
+  it('lights for a secret field that has focus as the page comes up, or when Record is pressed', async () => {
+    await startOn('/autofocus.html');
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe('pw');
+    await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Typing hidden'), 'Typing hidden, autofocused');
+    await recorder.stop();
+
+    // Focus already in the password box when Record is pressed.
+    await page.goto(`${origin}/app.html`);
+    await page.focus('#pw');
+    recorder = newRecorder();
+    await recorder.start();
+    await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Typing hidden'), 'Typing hidden, focused before Record');
+  }, 45_000);
+
+  it('a confirmation outranks it: Removed… Restore shows while a secret field has focus', async () => {
+    await startOn('/app.html');
+    await page.focus('#pw');
+    await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Typing hidden'), 'Typing hidden');
+    recorder.setToolbar({
+      ...VIEW,
+      notice: { kind: 'removed', text: 'Removed: Clicked button "Go"', seq: 1, remainingMs: 8_000, restore: true },
+    });
+    const shown = await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Removed:'), 'the notice');
+    expect(shown!.sub).toBe('Removed: Clicked button "Go" Restore');
+  }, 30_000);
+});
+
+describe('after the recording (finding 6)', () => {
+  it('the bar lets clicks through to the page as soon as it is not recording — bar its Close button', async () => {
+    await page.goto(`${origin}/wide.html`);
+    recorder = newRecorder();
+    await recorder.start();
+    await until(() => hostState(page), (s) => s.present && s.width > 300, 'the toolbar');
+    recorder.setToolbar({ ...VIEW, phase: 'done', endKind: 'done', endText: 'Done · 1 step written to t.md' });
+    await recorder.stop();
+    await recorder.flushToolbar();
+    await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Done'), 'the done state');
+    // The full-width button's middle is under the bar: clicked at once.
+    await page.click('#wide', { timeout: 1_500 });
+    expect(await page.evaluate('window.wideClicks')).toBe(1);
+    expect((await hostState(page)).present).toBe(true);
+    // Close still works.
+    await clickToolbar(page, 'close');
+    await until(() => hostState(page), (s) => !s.present, 'the bar closed');
+  }, 30_000);
+});
+
+describe("a page's native popover menu (finding 8, documented)", () => {
+  it('a click on a toolbar button light-dismisses it; Alt+Shift+C arms Add check with it still open', async () => {
+    await startOn('/menu.html');
+    const menuOpen = (): Promise<boolean> => page.evaluate(() => document.getElementById('menu')!.matches(':popover-open'));
+    await page.evaluate(() => document.getElementById('menu')!.showPopover());
+    expect(await menuOpen()).toBe(true);
+    await page.keyboard.press('Alt+Shift+C');
+    await until(async () => picks, (p) => p.length === 1, 'armed by the shortcut');
+    expect(await menuOpen()).toBe(true);
+    await page.keyboard.press('Alt+Shift+C');
+    await until(async () => picks, (p) => p.length === 2, 'disarmed by the shortcut');
+    expect(await menuOpen()).toBe(true);
+    // The platform's light dismiss runs on the pointer going down, before any
+    // listener: the bar's own button closes the menu.
+    await clickToolbar(page, 'check');
+    await until(async () => picks, (p) => p.length === 3, 'armed by the button');
+    expect(await menuOpen()).toBe(false);
+  }, 30_000);
+});
+
+describe('the control object (finding 11)', () => {
+  it('a page script that calls it first can neither claim the document nor push state; the bar still works', async () => {
+    await startOn('/claims.html');
+    expect(await page.evaluate('[window.claimed, window.pushed, window.flushed]')).toEqual([false, false, '[]']);
+    await page.keyboard.press('Alt+Shift+Z');
+    await until(async () => commands.length, (n) => n === 1, 'Undo from the bar');
+    expect(commands).toEqual([{ kind: 'undo' }]);
   }, 30_000);
 });

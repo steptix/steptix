@@ -20,6 +20,9 @@
 //   __BINDING_NAME__      → JSON string literal, the exposed binding's name
 //   __CONTROL_NAME__      → JSON string literal, the window property the server
 //                           drives this script through (state push, flush)
+//   __CONTROL_KEY__       → JSON string literal, the context's control key:
+//                           every method of the control object wants it, and
+//                           only the server has it (see "The token")
 //   SECRET_FIELD_RULE (double-underscored) → ./secret-field.js, the one copy
 //                           of `isSecretField` the snapshot also uses
 //   RECORD_TOOLBAR (double-underscored) → ./record-toolbar.js, the recording
@@ -35,6 +38,12 @@
 // script also keeps its own reference to the binding function from the
 // moment it installs, before any page code runs.
 //
+// The control object is on `window` too, so each of its methods also wants
+// the control key: a value written into this closure when the server built
+// the script, and passed by the server as an evaluate argument. A page script
+// that calls `claim('x')` first — before the server's claim lands — gets
+// false, and the document's token stays the recorder's to give.
+//
 // ── Inert after Stop ────────────────────────────────────────────────────────
 // Playwright cannot remove an init script or a binding, so after a recording
 // ends this script stays installed in the context for the life of the session
@@ -45,6 +54,9 @@
 (() => {
   var CONTROL = __CONTROL_NAME__;
   var BINDING = __BINDING_NAME__;
+  // A name, not a literal inside the methods below: a method's source text
+  // (`Function.prototype.toString`) is readable by the page.
+  var CONTROL_KEY = __CONTROL_KEY__;
   if (Object.prototype.hasOwnProperty.call(window, CONTROL)) return;
 
   // eslint-disable-next-line
@@ -59,6 +71,8 @@
   var bindingFn = typeof window[BINDING] === 'function' ? window[BINDING] : null;
   // This document's token (see "The token" above); null until claimed.
   var token = null;
+  // How many states the server has sent this document (`applyState`).
+  var serverSeq = 0;
   // A mark names the crop the server takes at the moment of a pointer-down or
   // the first keystroke into a field; the action that follows carries it. The
   // document id keeps two documents' counters apart.
@@ -119,10 +133,16 @@
     }
   }
 
+  /** What the server says the state is — its push, the hello answer, and the
+   *  state a refused command comes back with. Bumps `serverSeq`, which is how
+   *  a command the page applied ahead of the server knows whether to take its
+   *  own change back (record-toolbar.js, `sendOptimistic`). */
   function applyState(next) {
     if (!next || typeof next !== 'object') return;
+    serverSeq++;
     var wasRecording = state.recording;
     var wasPaused = state.paused;
+    var wasBar = state.bar;
     state.recording = next.recording === true;
     state.paused = state.recording && next.paused === true;
     state.pick = state.recording && !state.paused && next.pick === true;
@@ -146,6 +166,10 @@
     pickApply();
     if (IS_TOP) toolbarApply(next.toolbar);
     checkInSchedule();
+    // Focus that was already in a field when the recording reached this
+    // document (an autofocused password box, or one the author was in when
+    // Record was pressed) never fired a focus event the recording heard.
+    if (state.recording && state.bar && (!wasRecording || !wasBar)) setTimeout(focusReportAfterConnect, 0);
   }
 
   // ── Text ───────────────────────────────────────────────────────────────
@@ -1686,7 +1710,9 @@
 
   // ── The server's handle ────────────────────────────────────────────────
   //
-  // Non-enumerable, and the only thing on `window` besides the binding.
+  // Non-enumerable, and the only thing on `window` besides the binding. Every
+  // method takes the control key last (see "The token") and does nothing
+  // without it — the page's scripts can reach the object, not the key.
   //   setState({recording, pick, paused, bar, toolbar?}) — Stop, Add check,
   //             Cancel check, Pause, and everything the toolbar shows (the
   //             `toolbar` block goes to top frames only);
@@ -1702,21 +1728,32 @@
   //             knows (never a secret field's value, never a typed secret).
   Object.defineProperty(window, CONTROL, {
     value: Object.freeze({
-      setState: function (next) { applyState(next); return true; },
-      claim: function (t) {
-        if (token !== null || typeof t !== 'string' || t === '') return false;
-        token = t;
+      setState: function (next, key) {
+        if (key !== CONTROL_KEY) return false;
+        applyState(next);
         return true;
       },
-      toolbar: function (command) {
-        if (!IS_TOP || !tb || !state.recording) return false;
+      claim: function (t, key) {
+        if (key !== CONTROL_KEY || token !== null || typeof t !== 'string' || t === '') return false;
+        token = t;
+        // A document that already showed the bar before its token arrived (a
+        // page busy at load): say now where focus is.
+        setTimeout(focusReportAfterConnect, 0);
+        return true;
+      },
+      toolbar: function (command, key) {
+        if (key !== CONTROL_KEY || !IS_TOP || !tb || !state.recording) return false;
         if (command === 'open-step') tbOpenBox();
         else if (command === 'focus-bar') tbFocusBar();
         else return false;
         return true;
       },
-      fieldRects: function (ask) { return fieldRects(ask); },
-      flush: function () {
+      fieldRects: function (ask, key) {
+        if (key !== CONTROL_KEY) return null;
+        return fieldRects(ask);
+      },
+      flush: function (key) {
+        if (key !== CONTROL_KEY) return [];
         var out = [];
         // An Enter still being judged is decided now, before the typing it
         // may report with its pre-Enter text.

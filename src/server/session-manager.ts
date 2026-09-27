@@ -1733,6 +1733,13 @@ interface ManagedSession {
    * for as long as it is set — see {@link RecordingInProgressError}.
    */
   recording?: RecordStepsRun | undefined;
+  /**
+   * The last recording in this session, kept after it ends: its toolbar may
+   * still be in the page (Done shows for six seconds), and the next batch
+   * takes it out before its first step (stories/testbench-record-toolbar.md;
+   * review, finding 6).
+   */
+  lastRecording?: RecordStepsRun | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -2265,6 +2272,7 @@ export class SessionManager {
       ...(this.deps.recorder && { recorderOptions: this.deps.recorder }),
     });
     held.recording = run;
+    held.lastRecording = run;
     return { ok: true, run };
   }
 
@@ -2667,6 +2675,12 @@ export class SessionManager {
       session.queueTail = session.queueTail
         .then(async () => {
           try {
+            // A recording that ended just before may still show its bar
+            // (Done, for six seconds): out of the page before the first step,
+            // so the run neither clicks it nor has it in a screenshot.
+            const last = session.lastRecording;
+            session.lastRecording = undefined;
+            if (last) await last.dismissToolbar();
             return await this.executeStepsInternal(
               session,
               sessionId,

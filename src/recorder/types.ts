@@ -203,7 +203,10 @@ export type RecordControlOutcome =
   /** `drop` / `restore` of an id the recording does not have, or one already
    *  in that state; `pause` while paused, `resume` while not; Add check while
    *  paused; an `add-step` whose every line is blank — nothing to do. */
-  | 'ignored';
+  | 'ignored'
+  /** Nothing was done, for a reason only the recording can word: an
+   *  `add-step` from the editor holding a secret the recording knows. */
+  | { ignored: string };
 
 /** A rectangle in CSS pixels. */
 export interface Box {

@@ -1197,7 +1197,9 @@ export function createApiServer(
   // Stop has been received (only `cancel` still applies — it abandons the call
   // in flight); a `drop` / `restore` of an id the recording does not have or
   // that is already in that state; `pause` while paused and `resume` while
-  // not; Add check while paused; an `add-step` whose every line is blank.
+  // not; Add check while paused; an `add-step` whose every line is blank, or
+  // one from the editor that holds a secret the recording knows (the line is
+  // the author's text; the reason says what to write in its place).
   // They are still 202 because the recording IS running, and the contract has
   // two answers; a 404 for an unknown ACTION id would read to a client as "no
   // recording". `add-step` is accepted at once and carried out after: the
@@ -1223,6 +1225,10 @@ export function createApiServer(
     }
     if (outcome === 'ignored') {
       res.status(202).json({ ok: true, ignored: ignoredControlMessage(control) });
+      return;
+    }
+    if (typeof outcome === 'object') {
+      res.status(202).json({ ok: true, ignored: outcome.ignored });
       return;
     }
     res.status(202).json({ ok: true });

@@ -90,6 +90,18 @@ export interface AuthorStep {
   seq: number;
   /** The recording's clock when it joined. */
   atMs: number;
+  /** The draft's revision when it was added: no draft up to this one
+   *  showed it. */
+  sinceRevision: number;
+  /** Where in the recording its lock sits (the end of the stretch it
+   *  closed): `boundary` for a step added at the end; for one typed between
+   *  two recorded steps, just after the last action drafted then. */
+  lockAt: number;
+  /** Typed between two recorded steps (the editor), not at the end. */
+  between: boolean;
+  /** Parameters its text names that the file does not define: a secret it
+   *  held, written as `{{name}}` (record-steps-run.ts `authorStepSecrets`). */
+  parameters: Array<{ name: string; value: string }>;
 }
 
 /** What one call works on. */
@@ -201,8 +213,22 @@ export class DraftEngine {
    *  back exactly as they were when nothing touched them since. */
   private readonly authorDrops = new Map<
     string,
-    { merged: Stretch | null; mergedVersion: number; before: Stretch[]; holder: Stretch | null; holderInBefore: boolean; at: number }
+    {
+      merged: Stretch | null;
+      mergedVersion: number;
+      before: Stretch[];
+      holder: Stretch | null;
+      holderInBefore: boolean;
+      at: number;
+      /** The draft step just before it when it was dropped — an author
+       *  step by its id, the model's by its text — and where it was. */
+      prev: Item | null;
+      flatAt: number;
+    }
   >();
+  /** When the last call that FAILED started. Its actions are asked about
+   *  again only once an action has arrived since (`nextWork`). */
+  private failedCallStartedAt = Number.NEGATIVE_INFINITY;
 
   /** Bumped by every drop/restore that invalidates the draft. A call that
    *  started under an older generation is stale: its answer is thrown away. */
@@ -330,12 +356,20 @@ export class DraftEngine {
   /** The next thing a call should do, or null. Closed stretches first, in
    *  order — they are above the open one — then the open stretch.
    *  `includeIncremental` false: only what the author's own changes asked
-   *  for (while paused, no call starts for new actions). */
-  private nextWork(includeIncremental: boolean): Work | null {
+   *  for (while paused, no call starts for new actions).
+   *
+   *  A gap — actions a failed catch-up left undrafted above a step of the
+   *  author's — is the model's failure to make up, not something the author
+   *  asked for: like any failed call's actions it waits for the next ACTION,
+   *  not for whatever work happens to be scheduled next (review, finding 7:
+   *  it was retried at once, from the catch-up's own clean-up). Stop's
+   *  `final` pass takes it regardless. */
+  private nextWork(includeIncremental: boolean, final = false): Work | null {
+    const gapsDue = final || this.lastActionAt > this.failedCallStartedAt;
     for (let i = 0; i < this.stretches.length - 1; i++) {
       const s = this.stretches[i]!;
       if (s.dirty) return { kind: 'stretch', stretch: s };
-      if (this.uncoveredIn(s).length > 0) return { kind: 'gap', stretch: s };
+      if (gapsDue && this.uncoveredIn(s).length > 0) return { kind: 'gap', stretch: s };
     }
     const open = this.openStretch;
     if (open.dirty) return { kind: 'open-redraft' };
@@ -445,6 +479,11 @@ export class DraftEngine {
         at = j;
       }
     }
+    // Where it sat in the whole draft, and the step before it there — what
+    // a Restore after its stretch changed puts it back after.
+    const flat = this.flatItems();
+    const flatAt = flat.findIndex((i) => i.authorId === id);
+    const prev = flatAt > 0 ? { ...flat[flatAt - 1]! } : null;
     this.dropped.add(id);
     const k = this.stretches.findIndex((s) => s.closedBy === id);
     const pair = k >= 0 && k < this.stretches.length - 1 ? [this.stretches[k]!, this.stretches[k + 1]!] : [];
@@ -476,6 +515,8 @@ export class DraftEngine {
       holder,
       holderInBefore,
       at,
+      prev,
+      flatAt,
     });
     this.generation++;
     this.current?.abort.abort();
@@ -508,7 +549,7 @@ export class DraftEngine {
         memo.holder.version++;
       }
     } else {
-      this.splitAt(step, memo?.holder ?? null, memo?.at ?? -1);
+      this.splitAt(step, memo?.holder ?? null, memo?.at ?? -1, memo ?? null);
     }
     this.generation++;
     this.current?.abort.abort();
@@ -517,10 +558,27 @@ export class DraftEngine {
     return true;
   }
 
-  /** Put an author step's lock back at its place in the recording, splitting
-   *  the stretch that holds that place; both halves are redrafted. */
-  private splitAt(step: AuthorStep, holder: Stretch | null, at: number): void {
-    const b = step.boundary;
+  /**
+   * Put an author step's lock back at its place in the recording (where the
+   * stretch it closed ended), splitting the stretch that holds that place;
+   * both halves are redrafted.
+   *
+   * The line itself goes back where it was among the steps. For a step added
+   * at the end, that is the edge of the stretch it closes. For one typed
+   * BETWEEN two recorded steps it is after the step that was before it — the
+   * file still has it there, and the lock's place in the recording (the end
+   * of what was drafted when it was typed) says nothing about which steps
+   * are around it. Put at the lock instead, it moved below steps it was
+   * typed above, and TestBench's order check took the recording out of the
+   * file (review, finding 10).
+   */
+  private splitAt(
+    step: AuthorStep,
+    holder: Stretch | null,
+    at: number,
+    memo: { prev: Item | null; flatAt: number } | null,
+  ): void {
+    const b = step.lockAt;
     let k = this.stretches.findIndex((s) => s.startAt <= b && b < s.endAt);
     if (k < 0) k = this.stretches.length - 1;
     const m = this.stretches[k]!;
@@ -544,13 +602,47 @@ export class DraftEngine {
       dirty: secondCovered.size > 0,
       version: 0,
     };
+    this.stretches.splice(k, 1, first, second);
+    if (step.between && memo) {
+      this.placeAfterNeighbour(item, memo.prev, memo.flatAt);
+      return;
+    }
     if (holder && holder !== m && this.stretches.includes(holder)) {
       holder.items.splice(Math.min(Math.max(0, at), holder.items.length), 0, item);
       holder.version++;
     } else {
       first.items.push(item);
     }
-    this.stretches.splice(k, 1, first, second);
+  }
+
+  /**
+   * Put `item` just after the step that was before it (`prev`, the nearest
+   * copy of it to where it was; the very start when there was none) — or,
+   * that step no longer being in the draft as it was (a redraft reworded
+   * it), back at the index it had.
+   */
+  private placeAfterNeighbour(item: Item, prev: Item | null, flatAt: number): void {
+    const flat = this.flatItems();
+    let after = -1;
+    if (prev !== null) {
+      flat.forEach((candidate, i) => {
+        const same =
+          prev.authorId !== undefined
+            ? candidate.authorId === prev.authorId
+            : candidate.authorId === undefined && candidate.text === prev.text;
+        if (same && (after < 0 || Math.abs(i - (flatAt - 1)) < Math.abs(after - (flatAt - 1)))) after = i;
+      });
+      if (after < 0) after = Math.min(flatAt, flat.length) - 1;
+    }
+    if (after < 0) {
+      const s = this.stretches[0]!;
+      s.items.unshift(item);
+      s.version++;
+      return;
+    }
+    const { stretch, local } = this.locate(after);
+    stretch.items.splice(local + 1, 0, item);
+    stretch.version++;
   }
 
   /**
@@ -578,6 +670,9 @@ export class DraftEngine {
       atMs: number;
       afterStep?: number | undefined;
       revision?: number | undefined;
+      /** Parameters the lines name that the file does not define (a secret
+       *  written as `{{name}}`): part of the draft while the step is in. */
+      parameters?: ReadonlyArray<{ name: string; value: string }>;
       onCatchUp?: () => void;
       onJoined?: (added: AddedAuthorStep[]) => void;
     },
@@ -588,7 +683,12 @@ export class DraftEngine {
       const steps = this.flatSteps();
       const at = opts.afterStep === undefined ? undefined : this.mapIndex(opts.afterStep, opts.revision);
       const atEnd = at === undefined || at >= steps.length - 1;
-      const made = lines.map((text) => this.newAuthor(text, opts.source, boundary, opts.atMs));
+      const made = lines.map((text) => {
+        const step = this.newAuthor(text, opts.source, boundary, opts.atMs);
+        step.between = !atEnd;
+        step.parameters = (opts.parameters ?? []).filter((p) => text.includes(`{{${p.name}}}`)).map((p) => ({ ...p }));
+        return step;
+      });
       let added: AddedAuthorStep[];
 
       if (atEnd) {
@@ -615,9 +715,12 @@ export class DraftEngine {
         const open = this.openStretch;
         const coveredAt = [...open.covered].map((a) => this.indexOfAction(a)).filter((i) => i >= 0);
         const end = Math.max(open.startAt, Math.min(boundary, coveredAt.length ? Math.max(...coveredAt) + 1 : open.startAt));
+        for (const step of made) step.lockAt = end;
         this.closeOpen(end, made, false);
         added = made.map((step, i) => ({ step, index: insertAfter + 1 + i }));
       }
+      // The draft emitted next is the first to show them.
+      for (const step of made) step.sinceRevision = this.revision;
       opts.onJoined?.(added);
       this.emitDraft();
       return added;
@@ -626,9 +729,40 @@ export class DraftEngine {
 
   private newAuthor(text: string, source: RecordStepSource, boundary: number, atMs: number): AuthorStep {
     const seq = ++this.authorSeq;
-    const step: AuthorStep = { id: `s${seq}`, text, source, boundary, seq, atMs };
+    const step: AuthorStep = {
+      id: `s${seq}`,
+      text,
+      source,
+      boundary,
+      seq,
+      atMs,
+      sinceRevision: this.revision,
+      lockAt: boundary,
+      between: false,
+      parameters: [],
+    };
     this.authors.set(step.id, step);
     return step;
+  }
+
+  /**
+   * The draft's parameters: the model's, and those the author's steps still
+   * in the draft name (a secret they held, written as `{{name}}`) that the
+   * model's list does not have. The model's answer replaces its list every
+   * call; the author's are theirs and stay while their step does.
+   */
+  private allParameters(): Array<{ name: string; value: string }> {
+    const out = this.parameters.map((p) => ({ ...p }));
+    const named = new Set(out.map((p) => p.name));
+    for (const item of this.flatItems()) {
+      const step = item.authorId !== undefined ? this.authors.get(item.authorId) : undefined;
+      for (const p of step?.parameters ?? []) {
+        if (named.has(p.name)) continue;
+        named.add(p.name);
+        out.push({ ...p });
+      }
+    }
+    return out;
   }
 
   /** Close the open stretch at `endAt`: the first author step closes it (its
@@ -677,24 +811,42 @@ export class DraftEngine {
     return { stretch: last, local: last.items.length - 1 };
   }
 
-  /** An editor step's `afterStep` read against the draft the author saw:
-   *  the same step's text, found in the draft as it is now. */
+  /**
+   * An editor step's `afterStep` read against the draft the author saw: the
+   * same step's text, found in the draft as it is now — and then past any
+   * step of the author's that joined right after it since that draft. Two
+   * lines typed under the same step of the same draft, sent one after the
+   * other, land in the order they were sent: the second after the first,
+   * not between the step and the first (review, TestBench half).
+   */
   private mapIndex(afterStep: number, revision: number | undefined): number {
-    const steps = this.flatSteps();
+    const items = this.flatItems();
+    const steps = items.map((i) => i.text);
     const clamp = (i: number): number => Math.max(0, Math.min(i, steps.length - 1));
     if (revision === undefined || revision === this.revision) return afterStep;
     const seen = this.history.find((h) => h.revision === revision);
     const text = seen?.steps[afterStep];
-    if (text === undefined) return clamp(afterStep);
-    let best = -1;
-    let distance = Number.POSITIVE_INFINITY;
-    steps.forEach((s, i) => {
-      if (s === text && Math.abs(i - afterStep) < distance) {
-        best = i;
-        distance = Math.abs(i - afterStep);
-      }
-    });
-    return best >= 0 ? best : clamp(afterStep);
+    let at: number;
+    if (text === undefined) {
+      at = clamp(afterStep);
+    } else {
+      let best = -1;
+      let distance = Number.POSITIVE_INFINITY;
+      steps.forEach((s, i) => {
+        if (s === text && Math.abs(i - afterStep) < distance) {
+          best = i;
+          distance = Math.abs(i - afterStep);
+        }
+      });
+      at = best >= 0 ? best : clamp(afterStep);
+    }
+    while (at + 1 < items.length) {
+      const id = items[at + 1]!.authorId;
+      const step = id !== undefined ? this.authors.get(id) : undefined;
+      if (!step || step.sinceRevision < revision) break;
+      at++;
+    }
+    return at;
   }
 
   /** The most recent entry still in — an action (event included) or a step
@@ -882,7 +1034,7 @@ export class DraftEngine {
       draft: {
         steps: view.steps,
         // A redraft from nothing starts its parameters from nothing too.
-        parameters: view.fresh ? [] : this.parameters,
+        parameters: view.fresh ? [] : this.allParameters(),
         locked: view.locked,
         authored: view.authored,
         ...(view.insertAt !== undefined && !view.fresh && { insertAt: view.insertAt }),
@@ -947,11 +1099,12 @@ export class DraftEngine {
     const promise = new Promise<void>((resolve) => {
       settle = resolve;
     });
+    const startedAt = this.now();
     this.current = {
       promise,
       abort,
       covers: new Set(actions.map((a) => a.id)),
-      startedAt: this.now(),
+      startedAt,
     };
     if (!this.silent) {
       this.busyShown = true;
@@ -982,6 +1135,7 @@ export class DraftEngine {
     } catch (err) {
       if (stale()) return 'stale';
       if (final) throw err;
+      this.failedCallStartedAt = Math.max(this.failedCallStartedAt, startedAt);
       const reason = (err instanceof Error ? err.message : String(err)).replace(/\.\s*$/, '');
       this.warn(
         `The draft could not be updated: ${reason}. The steps so far stand; ` +
@@ -1048,9 +1202,22 @@ export class DraftEngine {
     items.forEach((item, i) => {
       if (item.authorId === undefined) item.text = settled.steps[i]!;
     });
-    this.parameters = settled.parameters;
+    // The model was shown the author's own parameters and may hand them back:
+    // they stay the author's, in the draft for as long as their step is.
+    this.parameters = settled.parameters.filter((p) => !this.authorsOnly(p));
     this.keptNotes = [...new Set([...(fresh ? [] : this.keptNotes), ...settled.notes])];
     this.emitDraft();
+  }
+
+  /** A parameter that is one of the author's steps' (same name and value)
+   *  and that none of the model's own steps uses. */
+  private authorsOnly(p: { name: string; value: string }): boolean {
+    const theirs = [...this.authors.values()].some((a) =>
+      a.parameters.some((q) => q.name === p.name && q.value === p.value),
+    );
+    if (!theirs) return false;
+    const ref = `{{${p.name}}}`;
+    return !this.flatItems().some((i) => i.authorId === undefined && i.text.includes(ref));
   }
 
   private emitDraft(): void {
@@ -1066,7 +1233,7 @@ export class DraftEngine {
       type: 'record:draft',
       revision: this.revision,
       steps: [...steps],
-      parameters: this.parameters.map((p) => ({ ...p })),
+      parameters: this.allParameters(),
       ...(notes.length > 0 && { notes }),
       ...(through !== undefined && { through }),
       locked: this.lockedCount,
@@ -1076,7 +1243,7 @@ export class DraftEngine {
   }
 
   private notes(): string[] {
-    return [...new Set([...this.keptNotes, ...draftStateNotes(this.flatSteps(), this.parameters, this.opts.file)])];
+    return [...new Set([...this.keptNotes, ...draftStateNotes(this.flatSteps(), this.allParameters(), this.opts.file)])];
   }
 
   // ── Stop and cancel ────────────────────────────────────────────────────
@@ -1118,11 +1285,11 @@ export class DraftEngine {
     // would be thrown away, and the model is not asked for nothing.
     let guard = this.stretches.length * 2 + 4;
     while (!this.abandoned && guard-- > 0) {
-      const work = this.nextWork(true);
+      const work = this.nextWork(true, true);
       if (!work) break;
       await this.runCall(work, true);
     }
-    return { steps: this.flatSteps(), parameters: this.parameters.map((p) => ({ ...p })), notes: this.notes() };
+    return { steps: this.flatSteps(), parameters: this.allParameters(), notes: this.notes() };
   }
 
   /** Cancel, or the stream closed: abandon the call in flight, make no more. */

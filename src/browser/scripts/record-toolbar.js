@@ -41,6 +41,9 @@
   var DEFAULT_CHECK_IN_MS = 2000;
   /** Unanswered check-ins before "The recorder isn't answering". */
   var MISSED_FOR_OFFLINE = 2;
+  /** How long a command the page applied ahead of the server waits for the
+   *  server's answer before taking its own change back. */
+  var COMMAND_ANSWER_MS = 3000;
   var SHORTCUTS = { KeyP: 'pause', KeyC: 'check', KeyS: 'step', KeyZ: 'undo', KeyM: 'minimise', KeyR: 'focus' };
 
   var tb = null;
@@ -201,6 +204,8 @@
     '.mini{flex:none;border:1px solid var(--line);background:var(--raise);color:var(--text);font:500 12px var(--ui);',
     'border-radius:5px;padding:3px 9px;cursor:pointer}',
     '.mini:hover{background:var(--press)}',
+    // The host takes no pointer events once the recording is over; Close does.
+    '.mini[data-cmd="close"]{pointer-events:auto}',
     '.mini.danger{background:#5A1E22;border-color:#7A2A30;color:#FFD9D9}',
     '.mini.danger:hover{background:#6E252A}',
     '.input{flex:1;min-width:0;width:320px;height:28px;background:var(--field);color:var(--text);',
@@ -758,6 +763,11 @@
     return n;
   }
 
+  function tbWritingNotice() {
+    var n = tbNotice();
+    return n && n.kind === 'error' ? n : null;
+  }
+
   // ── Rendering ──────────────────────────────────────────────────────────
 
   function tbRender() {
@@ -768,7 +778,13 @@
     var paused = !closed && state.paused;
     var pick = !closed && state.pick;
     var offline = !closed && tbLocal.offline;
-    var notice = closed ? null : tbNotice();
+    // While writing, a warning still shows beside "Writing the steps…" (a
+    // step that came after Stop); a confirmation does not.
+    var notice = !closed ? tbNotice() : phase === 'writing' ? tbWritingNotice() : null;
+    // Once it is not recording the bar is only something to read: the page
+    // under it takes every click — Close apart (a style in the sheet) — so a
+    // run started straight after, or the author, never clicks the bar instead.
+    important(tb.host, 'pointer-events', closed ? 'none' : 'auto');
 
     var kind = paused ? 'paused' : phase === 'writing' ? 'writing' : phase === 'done' ? 'done'
       : phase === 'ended' ? 'ended' : offline ? 'offline' : 'rec';
@@ -839,6 +855,7 @@
     var mode;
     if (v.phase === 'writing') {
       mode = 'writing';
+      parts.push(notice ? notice.text : '');
     } else if (v.phase === 'done' || v.phase === 'ended') {
       mode = 'end';
       parts.push(v.endKind, v.endText);
@@ -850,16 +867,18 @@
       mode = 'offline';
     } else if (pick) {
       mode = 'pick';
-    } else if (v.typingHidden === true) {
-      mode = 'secret';
     } else if (notice && (notice.kind !== 'error' || !paused)) {
       // A confirmation (Added…, Removed…, Adding…) shows for its moment even
       // while paused — Undo and Add step work then; an error waits for Resume.
+      // Above "Typing hidden": a Removed… with its Restore lasts seconds, the
+      // chip as long as focus stays in the field.
       mode = 'notice';
       parts.push(notice.kind, notice.text, notice.restore === true, notice.seq);
     } else if (paused) {
       mode = 'paused';
       parts.push(tbLocal.drawer);
+    } else if (v.typingHidden === true) {
+      mode = 'secret';
     } else {
       mode = 'last';
       var steps = Array.isArray(v.steps) ? v.steps : [];
@@ -883,7 +902,11 @@
       case 'writing': {
         var spin = add(tbEl('span', 'spin'));
         spin.setAttribute('aria-hidden', 'true');
-        add(tbEl('span', 'msg', 'Writing the steps…'));
+        add(tbEl('span', notice ? null : 'msg', 'Writing the steps…'));
+        if (notice) {
+          add(ico('warn', 'warn'));
+          add(tbEl('span', 'msg warn', String(notice.text || '')));
+        }
         break;
       }
       case 'end':
@@ -1072,7 +1095,11 @@
       return;
     }
     clearTimeout(tbLocal.boxTimer);
-    void sendCmd({ type: 'step', text: text.slice(0, 4000) });
+    // Not taken: the text goes back into the box for the next time it opens
+    // (a step refused because Stop came first is said by the server instead).
+    sendOptimistic({ type: 'step', text: text.slice(0, 4000) }, function () {
+      if (!tbLocal.box && tbLocal.boxText === '') tbLocal.boxText = text;
+    });
     tb.input.value = '';
     tbLocal.boxText = '';
     tbLocal.box = false;
@@ -1093,10 +1120,47 @@
     if (!tbView) return;
     if (!min) tbLocal.expanded = true;
     // Written into the local copy at once; the server's next push says the same.
-    tbView.minimised = min;
+    var view = tbView;
+    var was = view.minimised;
+    view.minimised = min;
     tbRender();
-    void sendCmd({ type: 'toolbar', command: 'minimise', minimised: min });
+    sendOptimistic({ type: 'toolbar', command: 'minimise', minimised: min }, function () {
+      if (tbView !== view) return;
+      view.minimised = was;
+      tbRender();
+    });
     tbAnnounce(min ? 'Toolbar minimised' : 'Toolbar opened');
+  }
+
+  // ── Commands shown before the server agrees ────────────────────────────
+
+  /**
+   * Send a command whose effect this page shows at once, before the server
+   * agrees (Pause, minimise, a dock, Esc out of pick mode, a step leaving the
+   * box). Anything but `{ ok: true }` takes the change back: a refusal that
+   * carries the state gets that state; no answer — none in time, a document
+   * with no token, a message the server did not take as this document's —
+   * puts back what the page had, unless the server has sent a state since,
+   * which already said what is true. Without this a Pause the server never
+   * took left the bar saying Paused, and the page recording nothing, for good.
+   */
+  function sendOptimistic(message, revert) {
+    var seq = serverSeq;
+    var done = false;
+    var timer = 0;
+    var finish = function (answer) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (answer && answer.ok === true) return;
+      if (answer && answer.state && typeof answer.state === 'object') {
+        applyState(answer.state);
+        return;
+      }
+      if (serverSeq === seq) revert();
+    };
+    timer = setTimeout(function () { finish(null); }, COMMAND_ANSWER_MS);
+    void sendCmd(message).then(finish, function () { finish(null); });
   }
 
   /** Pause here, now: typing still open is reported first, and from this
@@ -1104,10 +1168,16 @@
   function pauseLocally() {
     settleEnter();
     flushAllExcept(null);
+    var was = { paused: state.paused, pick: state.pick };
     state.paused = true;
     state.pick = false;
     pickApply();
-    void sendCmd({ type: 'toolbar', command: 'pause' });
+    sendOptimistic({ type: 'toolbar', command: 'pause' }, function () {
+      state.paused = was.paused;
+      state.pick = state.recording && !state.paused && was.pick;
+      pickApply();
+      if (IS_TOP) tbRender();
+    });
   }
 
   function tbCommand(cmd) {
@@ -1184,9 +1254,15 @@
 
   function tbSetDock(dock) {
     if (!tbView || !DOCKS[dock]) return;
-    tbView.dock = dock;
+    var view = tbView;
+    var was = view.dock;
+    view.dock = dock;
     tbRender();
-    void sendCmd({ type: 'toolbar', command: 'dock', dock: dock });
+    sendOptimistic({ type: 'toolbar', command: 'dock', dock: dock }, function () {
+      if (tbView !== view) return;
+      view.dock = was;
+      tbRender();
+    });
   }
 
   function tbDragStart(event, handle) {
@@ -1413,7 +1489,11 @@
       swallowKeyUp = event.code;
       state.pick = false;
       pickApply();
-      void sendCmd({ type: 'toolbar', command: 'cancel-check' });
+      sendOptimistic({ type: 'toolbar', command: 'cancel-check' }, function () {
+        state.pick = state.recording && !state.paused;
+        pickApply();
+        if (IS_TOP) tbRender();
+      });
       return true;
     }
     if (IS_TOP && tb && tbLocal.confirm) {
@@ -1478,14 +1558,16 @@
   // own when an answer comes.
 
   function tbCheckIn() {
-    if (!IS_TOP || !state.recording || !state.bar || token === null) return;
+    if (!IS_TOP || !state.recording || !state.bar) return;
+    // A document with no token cannot send the recorder anything: every
+    // check-in it cannot make is one missed, so its bar says so rather than
+    // sitting there looking fine and doing nothing.
+    if (token === null) {
+      tbMissedCheckIn();
+      return;
+    }
     if (tbCheck.pending) {
-      tbCheck.missed++;
-      if (tbCheck.missed >= MISSED_FOR_OFFLINE && !tbLocal.offline) {
-        tbLocal.offline = true;
-        tbAnnounce('Not connected');
-        tbRender();
-      }
+      tbMissedCheckIn();
       // A question lost for good is not waited on for ever.
       if (tbCheck.missed < MISSED_FOR_OFFLINE * 2) return;
     }
@@ -1501,8 +1583,21 @@
           tbLocal.offline = false;
           tbRender();
         }
+      } else {
+        // Refused — the recorder does not know this document — is as good
+        // as unanswered.
+        tbMissedCheckIn();
       }
     });
+  }
+
+  function tbMissedCheckIn() {
+    tbCheck.missed++;
+    if (tbCheck.missed >= MISSED_FOR_OFFLINE && !tbLocal.offline) {
+      tbLocal.offline = true;
+      tbAnnounce('Not connected');
+      tbRender();
+    }
   }
 
   function checkInSchedule() {
@@ -1532,6 +1627,26 @@
     if (secret === tbLocal.lastFocusSecret) return;
     tbLocal.lastFocusSecret = secret;
     void sendCmd({ type: 'focus', secret: secret });
+  }
+
+  /**
+   * Where focus is now, said once this document is connected to a recording
+   * — recording, with a bar, and its token in hand. A field that already had
+   * focus then (an autofocused password box; the one the author was in when
+   * Record was pressed; a page busy at load whose token came late) fired its
+   * focus event before anyone was listening. The recorder forgets a
+   * document's report between recordings, so the last one sent is no guide.
+   */
+  function focusReportAfterConnect() {
+    if (!state.recording || !state.bar || token === null) return;
+    var el = null;
+    try {
+      el = document.hasFocus() ? focusedElement() : null;
+    } catch (err) {
+      el = null;
+    }
+    tbLocal.lastFocusSecret = false;
+    reportFocus(el, el !== null);
   }
 
   // ── Pick mode: the outline and its label, in every frame ───────────────

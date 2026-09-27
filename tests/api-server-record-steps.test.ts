@@ -144,7 +144,7 @@ vi.mock('../src/report/generator.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
-import { clickToolbar, readToolbar, until } from './record-toolbar-cdp.js';
+import { clickToolbar, readToolbar, stepBoxValue, until } from './record-toolbar-cdp.js';
 import { addLogCallback, getLogLevel, logger, setLogLevel } from '../src/utils/logger.js';
 import {
   RECORD_STEPS_HEADLESS_MESSAGE,
@@ -1664,5 +1664,169 @@ describe('the browser toolbar — on the wire', () => {
     expect(blank.json.ignored).toMatch(/every line is blank/);
     await control(id, { action: 'cancel' });
     await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+});
+
+// ── The fix round (review of the toolbar's server half) ───────────────────
+
+/** Every spelling a value could leak in: as is, inside JSON, inside HTML. */
+function spellings(value: string): string[] {
+  const html = value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return [...new Set([value, JSON.stringify(value).slice(1, -1), JSON.stringify(JSON.stringify(value)).slice(1, -1), html])];
+}
+
+describe('what is accepted before Stop is carried out (finding 1)', () => {
+  it('a step accepted while the one before it waits for its catch-up is written; one sent after Stop is refused, and says so', async () => {
+    await restartApp({ draftSettleMs: NEVER_SETTLES_MS });
+    const id = 'fix-before-stop';
+    const s = await started(id);
+    await pageOf().click('#reports');
+    await s.waitForCount('record:action', 1);
+    const open = holdCalls();
+    expect((await control(id, { action: 'add-step', text: 'Verify A', source: 'panel' })).json).toEqual({ ok: true });
+    await callInFlight(); // A's catch-up, held
+    expect((await control(id, { action: 'add-step', text: 'Verify B', source: 'panel' })).json).toEqual({ ok: true });
+    expect((await control(id, { action: 'stop' })).json).toEqual({ ok: true });
+    const late = await control(id, { action: 'add-step', text: 'Verify C', source: 'panel' });
+    expect(late.json.ignored).toMatch(/already been stopped/);
+    open();
+    const result = await s.waitFor((f) => f.event === 'record:result', 'record:result');
+    expect(result.data.steps).toEqual(['Did click Reports', 'Verify A', 'Verify B']);
+    expect(s.of('record:step').map((f) => f.text)).toEqual(['Verify A', 'Verify B']);
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('from the toolbar: a step entered just before Stop is written; one entered after it is not, and the author is told', async () => {
+    await restartApp({ draftSettleMs: NEVER_SETTLES_MS });
+    const id = 'fix-before-stop-toolbar';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#reports');
+    await s.waitForCount('record:action', 1);
+    const open = holdCalls();
+    expect((await control(id, { action: 'add-step', text: 'Verify A', source: 'panel' })).status).toBe(202);
+    await callInFlight();
+    await page.keyboard.press('Alt+Shift+S');
+    await toolbarShows(page, 'Enter to add');
+    await page.keyboard.type('Verify B');
+    await page.keyboard.press('Enter');
+    await clickToolbar(page, 'stop');
+    // Stop is in; the bar has not been told yet. A step now is too late.
+    await sleep(300);
+    await page.keyboard.press('Alt+Shift+S');
+    await toolbarShows(page, 'Enter to add');
+    await page.keyboard.type('Verify C');
+    await page.keyboard.press('Enter');
+    await sleep(300);
+    open();
+    const result = await s.waitFor((f) => f.event === 'record:result', 'record:result');
+    expect(result.data.steps).toEqual(['Did click Reports', 'Verify A', 'Verify B']);
+    expect(s.of('record:step').map((f) => f.text)).toEqual(['Verify A', 'Verify B']);
+    const warned = s.of('output').filter((o) => o.kind === 'warn').map((o) => o.msg as string);
+    expect(warned).toEqual([
+      'A step typed in the browser after Stop was not added to the recording: "Verify C". Add it to the test by hand.',
+    ]);
+    await s.waitFor((f) => f.event === 'done', 'done');
+    await toolbarShows(page, 'Done · 3 steps written to pay-by-cash.md');
+    expect((await readToolbar(page))!.sub).toContain('not added');
+  }, 60_000);
+});
+
+describe('the step box while "Adding…" (finding 3)', () => {
+  it('reopened, it is empty: the step just sent is not offered again', async () => {
+    await restartApp({ draftSettleMs: NEVER_SETTLES_MS });
+    const id = 'fix-box-text';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#reports');
+    await s.waitForCount('record:action', 1);
+    const open = holdCalls();
+    await page.keyboard.press('Alt+Shift+S');
+    await toolbarShows(page, 'Enter to add');
+    await page.keyboard.type('Verify the balance');
+    await sleep(700); // the box's unsent text reaches the server
+    await page.keyboard.press('Enter');
+    await callInFlight();
+    await toolbarShows(page, 'Adding…');
+    await page.keyboard.press('Alt+Shift+S');
+    await toolbarShows(page, 'Enter to add');
+    expect(await stepBoxValue(page)).toBe('');
+    await page.keyboard.press('Escape');
+    open();
+    await s.waitFor((f) => f.event === 'record:step', 'record:step');
+    await sleep(300);
+    expect(s.of('record:step')).toHaveLength(1);
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+});
+
+describe("a secret in a step of the author's (finding 5)", () => {
+  const PW = 'pw-from-env-77';
+  const KEY = 'sk-env<&"SECRET>-42';
+
+  it('is written as {{name}} with its .env reference — from the panel and the toolbar — and never crosses in clear; from the editor it is refused', async () => {
+    const lines: string[] = [];
+    const remove = addLogCallback((_level, message) => lines.push(message));
+    try {
+      const id = 'fix-author-secret';
+      const s = await started(id, recordBody({ env: { PASSWORD: PW, STRIPE_API_KEY: KEY } }));
+      const page = pageOf();
+      expect(
+        (await control(id, { action: 'add-step', text: `Type ${PW} into the Password field`, source: 'panel' })).json,
+      ).toEqual({ ok: true });
+      await s.waitForCount('record:step', 1);
+      expect(s.of('record:step')[0].text).toBe('Type {{password}} into the Password field');
+      await page.keyboard.press('Alt+Shift+S');
+      await toolbarShows(page, 'Enter to add');
+      await page.keyboard.type(`Verify the key reads ${KEY}`);
+      await page.keyboard.press('Enter');
+      await s.waitForCount('record:step', 2);
+      // A line typed in the file is the author's own text: refused, and why.
+      const editor = await control(id, { action: 'add-step', text: `Type ${PW} again`, source: 'editor' });
+      expect(editor.status).toBe(202);
+      expect(editor.json).toMatchObject({ ok: true, ignored: expect.stringContaining('{{password}}') });
+      await page.click('#signin');
+      await s.waitForCount('record:action', 1);
+      await control(id, { action: 'stop' });
+      const result = await s.waitFor((f) => f.event === 'record:result', 'record:result');
+      await s.waitFor((f) => f.event === 'done', 'done');
+
+      const written = ['Type {{password}} into the Password field', 'Verify the key reads {{STRIPE_API_KEY}}'];
+      expect(s.of('record:step').map((f) => f.text)).toEqual(written);
+      expect(result.data.steps).toEqual([...written, 'Did click Sign in']);
+      // A name the file has no parameter for gets one reading the .env; the
+      // file's own `- password: $PASSWORD` already defines {{password}}.
+      expect(result.data.parameters).toEqual([{ name: 'STRIPE_API_KEY', value: '$STRIPE_API_KEY' }]);
+      expect(JSON.stringify(result.data.notes ?? [])).not.toContain('no parameter defines');
+      const everything = JSON.stringify([s.frames, ai.requests, lines]);
+      for (const secret of [PW, KEY]) {
+        for (const spelling of spellings(secret)) expect(everything).not.toContain(spelling);
+      }
+    } finally {
+      remove();
+    }
+  }, 60_000);
+});
+
+describe('a run after the recording (finding 6)', () => {
+  it("the Done bar is gone before the run's first step: the model never sees it", async () => {
+    const id = 'fix-done-bar-run';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#reports');
+    await s.draftThrough(1);
+    await control(id, { action: 'stop' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+    const doneAt = Date.now();
+    await toolbarShows(page, 'Done · 1 step written');
+    ai.responder = () => new Error('scripted: no model for this run');
+    const open = holdCalls();
+    const run = post(`/sessions/${id}/steps`, { steps: ['Click the Sign in button'], testFilePath });
+    await callInFlight();
+    expect(Date.now() - doneAt).toBeLessThan(5_000); // not the bar's own six seconds
+    expect(await page.evaluate(() => document.querySelector('aiui-recorder') === null)).toBe(true);
+    open();
+    await run;
   }, 60_000);
 });

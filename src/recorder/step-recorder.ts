@@ -131,7 +131,10 @@ export type ToolbarCommand =
   /** The box's unsent text, so a navigation under the open box keeps it. */
   | { kind: 'box-text'; text: string }
   /** A secret field took focus in some frame, or focus left it. */
-  | { kind: 'typing-hidden'; hidden: boolean };
+  | { kind: 'typing-hidden'; hidden: boolean }
+  /** Pause, Resume or Add check from the toolbar after Stop: refused here,
+   *  and the recording says so to the author. */
+  | { kind: 'late'; command: 'pause' | 'resume' | 'check' };
 
 export interface StepRecorderOptions {
   /** The session's active browser — its context is what is watched. */
@@ -158,8 +161,19 @@ export interface StepRecorderOptions {
    *  {@link StepRecorder.setToolbar}). Off (the default here), the page
    *  shows none, and its shortcuts, check-ins and focus reports are off. */
   toolbar?: Record<string, unknown> | null;
-  /** A toolbar command that is the recording's to carry out. */
-  onToolbar?: (command: ToolbarCommand) => void;
+  /**
+   * A toolbar command that is the recording's to carry out. Answers whether
+   * it was taken — false (a step after Stop, say) is a refusal, which the
+   * page is told so it can take back what it showed ahead of the answer.
+   * No answer counts as taken.
+   */
+  onToolbar?: (command: ToolbarCommand) => boolean | void;
+  /**
+   * Stop has been received: from now on the toolbar's Pause, Resume and Add
+   * check are refused on arrival (the rest reach `onToolbar`, whose own
+   * answer decides). Read at every message.
+   */
+  isStopping?: () => boolean;
   /** Override {@link TOOLBAR_CHECK_IN_MS} — tests only. */
   checkInMs?: number;
 }
@@ -180,36 +194,83 @@ interface ContextHook {
   current: StepRecorder | null;
   ready: Promise<void>;
   /**
+   * The control key written into this context's page script: every method
+   * of the script's control object wants it, and only the server has it
+   * (src/recorder/page-script.ts). One per context — the init script is
+   * installed once per context and cannot change.
+   */
+  key: string;
+  /**
    * Each frame's token: the one its CURRENT document's script accepted
    * (stories/testbench-record-toolbar.md, "The page cannot drive the
    * toolbar"). Kept per context, not per recording: a document's script
    * accepts one token for its whole life, across recordings.
    */
   tokens: WeakMap<Frame, string>;
+  /** Per frame: the number of the last claim made for it… */
+  claimSeq: WeakMap<Frame, number>;
+  /** …and of the last one registered. A claim that lands late registers
+   *  only when no LATER claim for the frame has been registered first. */
+  registeredSeq: WeakMap<Frame, number>;
 }
 
 const hooks = new WeakMap<BrowserContext, ContextHook>();
 
 /**
+ * Call a method of the page script's control object in `frame`, with the
+ * context's control key — passed as an evaluate ARGUMENT, never in the
+ * expression, a page global or the binding. Answers null where the frame has
+ * no script (or the call is refused); rejects as `frame.evaluate` does.
+ */
+export function callControl<T>(
+  frame: Frame,
+  key: string,
+  method: 'setState' | 'claim' | 'flush' | 'fieldRects' | 'toolbar',
+  args: unknown[],
+): Promise<T | null> {
+  return frame.evaluate(
+    ([name, m, k, a]: [string, string, string, unknown[]]) => {
+      const ctl = (globalThis as unknown as Record<string, Record<string, unknown> | undefined>)[name];
+      const fn = ctl ? ctl[m] : undefined;
+      return typeof fn === 'function' ? (fn as (...x: unknown[]) => unknown)(...a, k) : null;
+    },
+    [RECORD_CONTROL_NAME, method, key, args] as [string, string, string, unknown[]],
+  ) as Promise<T | null>;
+}
+
+/**
  * Give the document that just said hello a token. Not in the hello answer —
  * any page script can call the binding and say hello — but by calling
  * `claim` on the script's frozen control object, which takes one token per
- * document and never hands it out. The recorder's script says hello at
- * document start, before the page's scripts run, so the first claim is its
- * own; a page script's hello leads to a claim the script refuses, and the
- * token it was made for is never registered.
+ * document, never hands it out, and answers only a caller with the control
+ * key. The recorder's script says hello at document start, before the page's
+ * scripts run, so the first claim is its own; a page script's hello leads to
+ * a claim the script refuses, and the token it was made for is never
+ * registered.
+ *
+ * The hello's answer waits for the claim at most {@link PAGE_CALL_MS} — but
+ * the claim is registered whenever it LANDS. A document whose own scripts
+ * keep it busy while it loads answers the claim late, and from then on holds
+ * the token: registering only an answer that came in time left such a
+ * document with a token the recorder did not know, and every command of its
+ * toolbar refused (review, finding 2). Each claim is numbered per frame, so
+ * a late one cannot overwrite a newer document's token.
  */
 async function claimToken(hook: ContextHook, frame: Frame): Promise<void> {
   const token = randomBytes(18).toString('base64url');
-  const ctl = JSON.stringify(RECORD_CONTROL_NAME);
-  const accepted = await briefly<unknown>(
-    frame
-      .evaluate(`(window[${ctl}] && typeof window[${ctl}].claim === 'function' && window[${ctl}].claim(${JSON.stringify(token)})) === true`)
-      .catch(() => false),
-    PAGE_CALL_MS,
-    false,
+  const seq = (hook.claimSeq.get(frame) ?? 0) + 1;
+  hook.claimSeq.set(frame, seq);
+  const registered = callControl<boolean>(frame, hook.key, 'claim', [token]).then(
+    (accepted) => {
+      if (accepted !== true) return false;
+      if ((hook.registeredSeq.get(frame) ?? 0) > seq) return false;
+      hook.registeredSeq.set(frame, seq);
+      hook.tokens.set(frame, token);
+      return true;
+    },
+    () => false,
   );
-  if (accepted === true) hook.tokens.set(frame, token);
+  await briefly(registered, PAGE_CALL_MS, false);
 }
 
 const NOT_RECORDING = { recording: false, pick: false, paused: false, bar: false };
@@ -217,7 +278,14 @@ const NOT_RECORDING = { recording: false, pick: false, paused: false, bar: false
 function ensureHook(context: BrowserContext): Promise<ContextHook> {
   let hook = hooks.get(context);
   if (!hook) {
-    const created: ContextHook = { current: null, ready: Promise.resolve(), tokens: new WeakMap() };
+    const created: ContextHook = {
+      current: null,
+      ready: Promise.resolve(),
+      key: randomBytes(24).toString('base64url'),
+      tokens: new WeakMap(),
+      claimSeq: new WeakMap(),
+      registeredSeq: new WeakMap(),
+    };
     created.ready = (async () => {
       // Binding FIRST: Playwright installs a binding with its own init script,
       // so registering it before ours puts it on `window` by the time ours
@@ -231,7 +299,7 @@ function ensureHook(context: BrowserContext): Promise<ContextHook> {
         if (!recorder) return hello ? NOT_RECORDING : null;
         return recorder.onMessage(source, message, created.tokens.get(source.frame));
       });
-      await context.addInitScript({ content: recordStepsPageScript() });
+      await context.addInitScript({ content: recordStepsPageScript(created.key) });
     })();
     hooks.set(context, created);
     hook = created;
@@ -246,6 +314,26 @@ function ensureHook(context: BrowserContext): Promise<ContextHook> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** The frame's page, or null when it cannot say. */
+function pageOf(frame: Frame): Page | null {
+  try {
+    return frame.page();
+  } catch {
+    return null;
+  }
+}
+
+/** A frame that is detached, or whose page has closed. */
+function frameGone(frame: Frame): boolean {
+  try {
+    if (frame.isDetached()) return true;
+    const page = pageOf(frame);
+    return page === null || page.isClosed();
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -621,10 +709,15 @@ export class StepRecorder {
   private readonly barEnabled: boolean;
   /** The block the page's toolbar shows, as the recording last set it. */
   private toolbarView: Record<string, unknown> | null;
-  /** Frames whose focused field is secret ("Typing hidden"). */
+  /** Frames whose focused field is secret ("Typing hidden"). An entry goes
+   *  when its frame's next document says hello, when the frame is detached,
+   *  and when its page closes. */
   private readonly secretFocus = new Map<Frame, boolean>();
   private pushTimer: NodeJS.Timeout | null = null;
   private readonly checkInMs: number;
+  /** The bar was taken out of the pages for good (a run started on the
+   *  session): nothing brings it back. */
+  private toolbarDismissed = false;
 
   constructor(private readonly opts: StepRecorderOptions) {
     this.context = opts.browser.context;
@@ -763,7 +856,7 @@ export class StepRecorder {
    * changes is one push; {@link flushToolbar} pushes now.
    */
   setToolbar(view: Record<string, unknown> | null): void {
-    if (!this.barEnabled) return;
+    if (!this.barEnabled || this.toolbarDismissed) return;
     this.toolbarView = view;
     this.schedulePush();
   }
@@ -771,6 +864,25 @@ export class StepRecorder {
   /** Push the toolbar's state now — the last word as a recording ends. Not
    *  once another recording has taken this browser over: the page is its. */
   async flushToolbar(): Promise<void> {
+    if (this.pushTimer) {
+      clearTimeout(this.pushTimer);
+      this.pushTimer = null;
+    }
+    if (this.hook && this.hook.current !== null && this.hook.current !== this) return;
+    await this.pushState();
+  }
+
+  /**
+   * Take the bar out of every page now, and keep it out — a run is about to
+   * start on this browser (review, finding 6): its clicks must not land on a
+   * Done bar, and its screenshots must not show one. A no-op while a
+   * recording is running here (this one, or one that has taken the browser
+   * over since).
+   */
+  async dismissToolbar(): Promise<void> {
+    if (!this.barEnabled || this.toolbarDismissed || this.active) return;
+    this.toolbarDismissed = true;
+    this.toolbarView = null;
     if (this.pushTimer) {
       clearTimeout(this.pushTimer);
       this.pushTimer = null;
@@ -789,8 +901,33 @@ export class StepRecorder {
   }
 
   private typingHidden(): boolean {
-    for (const hidden of this.secretFocus.values()) if (hidden) return true;
+    for (const [frame, hidden] of this.secretFocus) {
+      // A frame that is gone says nothing about where focus is now.
+      if (hidden && !frameGone(frame)) return true;
+    }
     return false;
+  }
+
+  /**
+   * A frame's focus report no longer counts — its frame was detached, or its
+   * page closed (an OAuth popup that signs in and closes itself: its
+   * password box had focus, and no document of it will ever say hello
+   * again). Before this "Typing hidden" stayed for the rest of the recording
+   * (review, finding 4).
+   */
+  private forgetFocus(frames: Iterable<Frame>): void {
+    // Not "did typingHidden() change": it already skips a frame that is gone,
+    // so by the time a page's close is heard it reads as it will — but the
+    // pages were last told otherwise.
+    let hadSecret = false;
+    for (const frame of frames) {
+      if (this.secretFocus.get(frame) === true) hadSecret = true;
+      this.secretFocus.delete(frame);
+    }
+    if (this.active && hadSecret) {
+      this.opts.onToolbar?.({ kind: 'typing-hidden', hidden: this.typingHidden() });
+      this.schedulePush();
+    }
   }
 
   /** The state one frame is pushed (and told in its hello answer). */
@@ -849,11 +986,12 @@ export class StepRecorder {
    * them is reported before them.
    */
   private async collectTyping(): Promise<void> {
-    const ctl = JSON.stringify(RECORD_CONTROL_NAME);
+    const key = this.hook?.key;
+    if (key === undefined) return;
     for (const page of this.context.pages()) {
       for (const frame of page.frames()) {
         const pending = await briefly<unknown>(
-          frame.evaluate(`(window[${ctl}] && window[${ctl}].flush()) || []`),
+          callControl<unknown>(frame, key, 'flush', []).catch(() => []),
           PAGE_CALL_MS,
           [],
         );
@@ -897,8 +1035,9 @@ export class StepRecorder {
     if (!isRecord(message)) return null;
     const type = message['type'];
     if (type === 'hello') {
-      // A new document: whatever the frame's old one said about focus is gone.
-      this.secretFocus.delete(source.frame);
+      // A new document: whatever the frame's old one said about focus is gone
+      // (and the other tabs' bars are told, when that was "Typing hidden").
+      this.forgetFocus([source.frame]);
       // Without CDP, a new top document says how it came to be. Only one that
       // started during the recording counts — the frames already open when
       // Record was pressed say hello too, about how THEY arrived.
@@ -964,6 +1103,13 @@ export class StepRecorder {
    * wire"): commands, a step, the box's unsent text, focus reports and the
    * check-in. Each must carry this document's token; a step must also come
    * from a top-level frame. Anything else is refused, and said in the log.
+   *
+   * The answer (review, finding 2): `{ ok: true }` when the message was
+   * taken; `{ ok: false, state }` when it was this document's and was not —
+   * a Pause while paused, anything that changes the recording after Stop —
+   * with the state the page should show instead; null for a message that is
+   * not this document's at all. The page takes back what it showed ahead of
+   * the answer on anything but `ok: true`.
    */
   private onToolbarMessage(source: BindingSource, message: Record<string, unknown>, token: string | undefined): unknown {
     const type = message['type'];
@@ -973,9 +1119,13 @@ export class StepRecorder {
       return null;
     }
     const top = source.frame === source.page.mainFrame();
+    const OK = { ok: true };
+    const refused = (): unknown => ({ ok: false, state: this.stateFor(source.frame) });
+    const carryOut = (command: ToolbarCommand): unknown => (this.opts.onToolbar?.(command) === false ? refused() : OK);
+    const stopping = this.opts.isStopping?.() === true;
     switch (type) {
       case 'checkin':
-        return { ok: true };
+        return OK;
       case 'focus': {
         const hidden = message['secret'] === true;
         const was = this.typingHidden();
@@ -984,7 +1134,7 @@ export class StepRecorder {
           this.opts.onToolbar?.({ kind: 'typing-hidden', hidden: this.typingHidden() });
           this.schedulePush();
         }
-        return null;
+        return OK;
       }
       case 'step': {
         if (!top) {
@@ -992,57 +1142,56 @@ export class StepRecorder {
           return null;
         }
         const text = typeof message['text'] === 'string' ? message['text'].slice(0, MAX_STEP_TEXT) : '';
-        if (text.trim() !== '') this.opts.onToolbar?.({ kind: 'step', text });
-        return null;
+        if (text.trim() === '') return refused();
+        return carryOut({ kind: 'step', text });
       }
       case 'box-text': {
         if (!top) return null;
         const text = typeof message['text'] === 'string' ? message['text'].slice(0, MAX_STEP_TEXT) : '';
-        this.opts.onToolbar?.({ kind: 'box-text', text });
-        return null;
+        return carryOut({ kind: 'box-text', text });
       }
     }
     const command = message['command'];
     switch (command) {
       case 'pause':
-        if (this.pause()) this.opts.onToolbar?.({ kind: 'paused', paused: true });
-        return null;
       case 'resume':
-        if (this.resume()) this.opts.onToolbar?.({ kind: 'paused', paused: false });
-        return null;
-      case 'check':
-        this.armPick();
-        return null;
+      case 'check': {
+        // After Stop these would change a recording that is being written.
+        if (stopping) {
+          this.opts.onToolbar?.({ kind: 'late', command });
+          return refused();
+        }
+        if (command === 'check') return this.armPick() ? OK : refused();
+        const paused = command === 'pause';
+        if (!(paused ? this.pause() : this.resume())) return refused();
+        this.opts.onToolbar?.({ kind: 'paused', paused });
+        return OK;
+      }
       case 'cancel-check':
         this.cancelPick();
-        return null;
+        return OK;
       case 'undo':
       case 'restore':
       case 'stop':
       case 'cancel':
       case 'toggle-minimised':
-        this.opts.onToolbar?.({ kind: command });
-        return null;
+        return carryOut({ kind: command });
       case 'minimise':
-        this.opts.onToolbar?.({ kind: 'minimise', minimised: message['minimised'] === true });
-        return null;
+        return carryOut({ kind: 'minimise', minimised: message['minimised'] === true });
       case 'dock': {
         const dock = message['dock'];
-        if (typeof dock === 'string' && TOOLBAR_DOCKS.has(dock as ToolbarDock)) {
-          this.opts.onToolbar?.({ kind: 'dock', dock: dock as ToolbarDock });
-        }
-        return null;
+        if (typeof dock !== 'string' || !TOOLBAR_DOCKS.has(dock as ToolbarDock)) return refused();
+        return carryOut({ kind: 'dock', dock: dock as ToolbarDock });
       }
       case 'open-step':
       case 'focus-bar': {
         // A shortcut pressed inside a frame: the bar is in this tab's top
         // document, so that is where the box opens or focus goes.
-        const ctl = JSON.stringify(RECORD_CONTROL_NAME);
-        void source.page
-          .mainFrame()
-          .evaluate(`(window[${ctl}] && window[${ctl}].toolbar(${JSON.stringify(command)})) || false`)
-          .catch(() => undefined);
-        return null;
+        const key = this.hook?.key;
+        if (key !== undefined) {
+          void callControl(source.page.mainFrame(), key, 'toolbar', [command]).catch(() => undefined);
+        }
+        return OK;
       }
     }
     return null;
@@ -1348,9 +1497,11 @@ export class StepRecorder {
    */
   private async secretBoxes(page: Page): Promise<Box[]> {
     const known = this.secretValuesNow().filter((v) => v.length >= 3);
-    const ctl = JSON.stringify(RECORD_CONTROL_NAME);
+    // Without the key (not installed) every frame answers null, which fails
+    // closed below like a frame with no script.
+    const key = this.hook?.key ?? '';
     // Text is asked for only when there is something to look for in it.
-    const ask = JSON.stringify({ text: known.length > 0 });
+    const ask = { text: known.length > 0 };
     const out: Box[] = [];
     const holds = (value: string): boolean => known.some((k) => value.includes(k));
     const grow = (b: Box, dx: number, dy: number): Box => ({
@@ -1362,9 +1513,7 @@ export class StepRecorder {
     await Promise.all(
       page.frames().map(async (frame) => {
         const found = await briefly<unknown>(
-          frame
-            .evaluate(`(window[${ctl}] && window[${ctl}].fieldRects && window[${ctl}].fieldRects(${ask})) || null`)
-            .catch(() => GONE),
+          callControl<unknown>(frame, key, 'fieldRects', [ask]).catch(() => GONE),
           FIELD_RECTS_MS,
           TIMED_OUT,
         );
@@ -1443,6 +1592,16 @@ export class StepRecorder {
 
   private async attachPage(page: Page, skipFirstCommitUntil = 0): Promise<void> {
     if (this.watches.has(page)) return;
+    // "Typing hidden" from a frame that is gone, or a page that closed, no
+    // longer counts (see `forgetFocus`).
+    const onFrameDetached = (frame: Frame): void => this.forgetFocus([frame]);
+    const onPageClose = (): void => this.forgetFocus([...this.secretFocus.keys()].filter((f) => frameGone(f) || pageOf(f) === page));
+    page.on('framedetached', onFrameDetached);
+    page.on('close', onPageClose);
+    const offFocus = (): void => {
+      page.off('framedetached', onFrameDetached);
+      page.off('close', onPageClose);
+    };
     const watch: PageWatch = {
       page,
       cdp: null,
@@ -1536,6 +1695,7 @@ export class StepRecorder {
       cdp.on('Page.navigatedWithinDocument', onWithinDocument);
       watch.cdp = cdp;
       watch.detach = () => {
+        offFocus();
         cdp.off('Page.frameRequestedNavigation', onRequested);
         cdp.off('Page.frameStartedNavigating', onStartedNavigating);
         cdp.off('Page.frameStartedLoading', onStartedLoading);
@@ -1552,7 +1712,10 @@ export class StepRecorder {
       if (frame === page.mainFrame()) this.onMainCommit(watch, frame.url(), false);
     };
     page.on('framenavigated', onFrameNavigated);
-    watch.detach = () => page.off('framenavigated', onFrameNavigated);
+    watch.detach = () => {
+      offFocus();
+      page.off('framenavigated', onFrameNavigated);
+    };
   }
 
   /**
@@ -1689,18 +1852,20 @@ export class StepRecorder {
    *  (a frame a previous recording left its script in skips the install and
    *  would otherwise stay inert). */
   private async injectIntoOpenFrames(): Promise<void> {
-    const script = recordStepsPageScript();
+    const key = this.hook?.key;
+    if (key === undefined) return;
+    const script = recordStepsPageScript(key);
     await this.eachFrame((frame) => frame.evaluate(script).catch(() => undefined));
     await this.pushState();
   }
 
   /** Tell every frame the state — top frames with the toolbar's block. */
   private pushState(): Promise<void> {
-    const ctl = JSON.stringify(RECORD_CONTROL_NAME);
-    return this.eachFrame((frame) => {
-      const state = JSON.stringify(this.stateFor(frame));
-      return frame.evaluate(`(window[${ctl}] && window[${ctl}].setState(${state})) || false`).catch(() => undefined);
-    });
+    const key = this.hook?.key;
+    if (key === undefined) return Promise.resolve();
+    return this.eachFrame((frame) =>
+      callControl(frame, key, 'setState', [this.stateFor(frame)]).catch(() => undefined),
+    );
   }
 
   private async deactivate(): Promise<void> {

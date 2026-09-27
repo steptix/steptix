@@ -975,6 +975,21 @@ page globals (`JSON.stringify`, `Map`, `Promise`) looked up at call time, so
 such a page can read what crosses the binding. That is out of reach for any
 page script design, and the design only claimed the first kind.
 
+Two holes in that, found in review and closed. The hello's answer waited for
+the claim 2.5 s and registered only a claim that answered in time — but the
+claim's evaluate still ran when the page got to it, so a document whose own
+`<head>` script kept it busy for 3.5 s ended up holding a token the recorder
+had never registered, and every command of its bar was refused (in the debug
+log only). A claim is now registered whenever it lands, numbered per frame so
+a late one cannot overwrite a newer document's. And the control object is on
+`window`, so a `<head>` script calling `claim('x')` first took the document's
+token and the bar was dead for that document. Every method of the object now
+wants a control key the server writes into the script's closure (a variable,
+not a literal in the method, whose source the page can read) and passes as an
+evaluate argument — once per browser context, since the init script is
+installed once. The key crosses by evaluate, which was not measured the way
+the binding was; it is assumed no better against an attacking page.
+
 **The gate is the first listener only in documents loaded during the
 recording.** An init script runs before the page's scripts, so in every
 document created after Record its capture listener on `window` is the first,
@@ -1050,7 +1065,36 @@ Everything in the design fell out of that:
   the author's line and moves nothing after it. Actions a failed call left
   behind still wait for the next action to be retried, as they always have: an
   added step does not retry on its own (the first version did, and a test
-  caught it).
+  caught it — but the catch-up's own clean-up still asked for the gap at once,
+  which that test missed because its next action cleared the timer; found in
+  review, and pinned now by one with no next action). Stop drafts the gap
+  regardless.
+- Everything accepted before Stop is carried out before the result: an Add
+  step waiting behind another's catch-up call, an Undo, a Restore. The first
+  version checked for Stop again inside each, so a step answered 202 (or
+  entered in the box a moment before Stop) was silently dropped (review). What
+  arrives after Stop is refused on arrival: the control route answers
+  `stopping`, the bar says the step, Undo, Restore, Pause or Add check came
+  after Stop, and a step's words go to the panel as a warning and onto the end
+  line (`Done · 12 steps written to pay-by-cash.md · 1 step typed after Stop
+  was not added`).
+- Two lines typed in the editor under the same step of the same draft land in
+  the order they were sent: `afterStep` is read against that draft, then
+  moved past any step of the author's that joined right there since.
+- A step typed between two recorded steps, dropped, then restored after its
+  stretch changed goes back after the step that was before it — where the
+  file still has it — not to where its lock sits in the recording (the end of
+  what was drafted when it was typed), which moved it below steps it was typed
+  above and made TestBench take the recording out of the file (review;
+  proved by a test before the fix).
+- A secret the recording knows, typed into a step from the toolbar or the
+  panel, is written as a typed one is: `{{name}}` for the parameter it came
+  from, and `name: $NAME` in the draft unless the file defines `name`. The
+  value was in `record:step`, every draft and the result — so in the file —
+  while the model saw `***` and the bar masked it. From the editor the step is
+  answered `ignored`, with what to write in its place: that line is the
+  author's text, and TestBench knows it by the text it sent, so the recording
+  cannot rewrite it.
 - A step typed between two recorded steps goes in at that index with no call.
   The open stretch closes after the last action the draft covers, so what is
   not drafted yet goes after the whole block. `afterStep` is read against the
@@ -1108,9 +1152,15 @@ check and Undo are carried out there; Add step and "focus the bar" are carried
 out in that tab's top document by an `evaluate` of the control object's
 `toolbar()`; minimise toggles on the server. "Typing hidden" is a yes-or-no
 `focus` message from any frame, aggregated on the server. A frame's report is
-forgotten when its next document says hello, and only the booleans cross
-(tested: a password typed in the page and in a frame, and the chip on and off
-for both).
+forgotten when its next document says hello, when the frame is detached and
+when its page closes — an OAuth-style popup whose password box had focus and
+that closes itself on sign-in otherwise left "Typing hidden" up for the rest
+of the recording, over the notices and the last step (found in review). Only
+the booleans cross (tested: a password typed in the page and in a frame, and
+the chip on and off for both). A document reports where focus is once it is
+connected — recording, with a bar, and its token in hand — so an autofocused
+password box, or the one the author was in when Record was pressed, lights the
+chip too; before, that needed a focus event nobody was listening for.
 
 **The words at the end.** Stop: `Done · 12 steps written to pay-by-cash.md`
 (the file's name from the request), or "Nothing was recorded, so no steps were
@@ -1125,7 +1175,20 @@ page six seconds later, or when Close is pressed.
 
 **Check-in** is every 2 s. Two unanswered in a row show the not-connected
 state. After four the question is asked again, so a lost answer is not waited
-on forever. An answer clears the state.
+on forever. An answer clears the state. A refusal counts as unanswered, and
+so does a document with no token to ask with: before, a document the recorder
+did not know got a refusal every 2 s, took it for an answer, and looked
+connected while every command it sent was refused.
+
+**Commands the page shows before the answer.** Pause flips the bar and stops
+the page recording at once, so what the author does straight after is not
+recorded; minimise, a move, Esc out of Add check and a step leaving the box
+are shown at once too. Every toolbar message now gets an answer — `{ ok: true
+}`, or `{ ok: false, state }` for one that was this document's and was not
+taken — and each of those commands is taken back on anything but `ok: true`:
+to the state given, or, with no answer in 3 s, to what the page had, unless
+the server has pushed a state since. Before, a Pause the server refused left
+the bar saying Paused, and the page recording nothing, for good.
 
 **The session is released before the toolbar's last push.** The first version
 awaited the final "Done" push before giving the session back, and under the
@@ -1141,7 +1204,20 @@ since, so it cannot write over that recording's bar.
   animation.
 - Whether the step box is open belongs to the document. A navigation under
   the open box closes it; its text is kept by the server and comes back the
-  next time the box opens, in any tab.
+  next time the box opens, in any tab. It is emptied the moment a step
+  arrives: kept until the step had joined, a push during "Adding…" handed the
+  page the sent text back, reopening the box offered it again, and Enter added
+  it twice (review).
+- Once the recording is not recording (writing, done, ended) the bar takes no
+  pointer events but Close's, so the page under it gets every click; and the
+  next run on the session takes it out of every page before its first step.
+  Before, the Done bar caught clicks for its six seconds — a run started right
+  after Stop timed out on "`<aiui-recorder popover=manual>` intercepts pointer
+  events" and had the bar in its screenshots (review).
+- Clicking a toolbar button closes a native `popover="auto"` the page has open
+  (a menu): HTML light-dismisses it on the pointer going down, before any
+  listener runs, so the gate cannot stop it. Use the shortcut instead —
+  Alt+Shift+C arms Add check with the menu still open.
 - A page's modal dialog: per decision 4 the bar is not moved into the dialog.
   It is put back on top of the top layer (hidden and shown again) when a
   `toggle` event, a change to an `open` attribute or a one-second check sees a
@@ -1156,3 +1232,16 @@ Counts: `npm run build` clean. The record-steps files: 45 in the HTTP suite
 (12 new, and the old `pause`-is-a-400 case now a 404), 19 toolbar, 8
 draft-lock, and the recorder and prompt files unchanged at 83, all green. Root
 `npx vitest run`: 270 files, 6780 tests, all passing (baseline 268 / 6741).
+
+Review fix round (the findings above marked "review"): 19 new tests, each run
+against the unfixed commit first and seen failing for the reason the review
+gave — 5 in the HTTP suite (a step accepted before Stop, from the route and
+from the bar; the box during "Adding…"; a secret in the author's step; the
+Done bar and a run), 9 in the toolbar suite (a page busy at load; a Pause
+refused and one never answered; a refused check-in; the closing popup; focus
+already in a password box; a notice over the chip; clicks through the Done
+bar; a `<head>` script at the control object; and the popover measurement)
+and 5 engine cases (the failed catch-up with no next action, the secret
+substitution, two editor steps at one place, the restore that moved a line).
+The popover one is a measurement, not a fix: it pins what the text above says.
+Root `npx vitest run`: 270 files, 6799 tests, all passing.

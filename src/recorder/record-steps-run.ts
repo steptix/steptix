@@ -21,6 +21,7 @@ import type {
   ToolbarDock,
 } from './types.js';
 import { DraftEngine } from './draft-engine.js';
+import { envReferenceFor } from './write-steps.js';
 
 /**
  * One recording, from `POST /sessions/:id/record-steps` to its `done` frame
@@ -97,6 +98,57 @@ export function authorStepLines(text: string): string[] {
     .filter((line) => line !== '');
 }
 
+const PARAMETER_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The lines of a step the author wrote, with every secret the recording knows
+ * written as a typed one is (decision 7; review, finding 5): the value — in
+ * each spelling the recording masks — becomes `{{name}}`, the parameter the
+ * secret came from, and a parameter `name: $NAME` reads it from the project's
+ * `.env` (the `P4` rule's name, {@link envReferenceFor}) unless the file
+ * already has a parameter of that name, which already says where it comes
+ * from. A secret with no usable name cannot be written that way: `unnamed`,
+ * and the caller refuses the step rather than send the value anywhere.
+ */
+export function authorStepSecrets(
+  lines: readonly string[],
+  known: readonly KnownSecret[],
+  fileParameters: ReadonlyArray<{ name: string }>,
+): { lines: string[]; parameters: Array<{ name: string; value: string }>; names: string[]; unnamed: boolean } {
+  const nameOf = new Map<string, string | null>();
+  for (const s of known) {
+    if (s.value === '') continue;
+    for (const spelling of secretSpellings([s.value])) if (!nameOf.has(spelling)) nameOf.set(spelling, s.name);
+  }
+  if (nameOf.size === 0) return { lines: [...lines], parameters: [], names: [], unnamed: false };
+  // One pass, longest spelling first: a secret that holds another is
+  // replaced whole, and nothing written in its place is looked at again.
+  const pattern = new RegExp(
+    [...nameOf.keys()].sort((a, b) => b.length - a.length).map(escapeRegExp).join('|'),
+    'g',
+  );
+  const names: string[] = [];
+  let unnamed = false;
+  const out = lines.map((line) =>
+    line.replace(pattern, (hit) => {
+      const name = nameOf.get(hit) ?? null;
+      if (name === null || !PARAMETER_NAME.test(name)) {
+        unnamed = true;
+        return hit;
+      }
+      if (!names.includes(name)) names.push(name);
+      return `{{${name}}}`;
+    }),
+  );
+  const existing = new Set(fileParameters.map((p) => p.name));
+  const parameters = names.filter((n) => !existing.has(n)).map((name) => ({ name, value: envReferenceFor(name) }));
+  return { lines: out, parameters, names, unnamed };
+}
+
 /** The toolbar's status line while it shows something other than the last step. */
 interface ToolbarNotice {
   kind: 'adding' | 'added' | 'removed' | 'error' | 'info';
@@ -105,6 +157,9 @@ interface ToolbarNotice {
   /** Date.now() when it stops showing; undefined: until replaced. */
   until?: number;
   restore?: boolean;
+  /** Something the author did after Stop that was not carried out: it stays
+   *  through "Writing the steps…". */
+  late?: boolean;
 }
 
 export class RecordStepsRun {
@@ -154,7 +209,14 @@ export class RecordStepsRun {
   private readonly ready = new Promise<void>((resolve) => {
     this.markReady = resolve;
   });
-  private secretValues: () => string[] = () => [];
+  /** The file the steps go into, as the prompt is told about it. */
+  private readonly file: TargetFileSummary;
+  /** Every secret this recording knows, by name — read fresh per use. */
+  private readonly namedSecrets: () => KnownSecret[];
+  /** …and every spelling of each one, for masking. */
+  private readonly secretValues: () => string[];
+  /** Steps typed in the browser's box after Stop, not added: the end says so. */
+  private lateSteps = 0;
 
   constructor(private readonly deps: RecordStepsRunDeps) {
     this.ended = new Promise<EndReason>((resolve) => {
@@ -164,6 +226,19 @@ export class RecordStepsRun {
     this.toolbarEnabled = prefs?.enabled !== false;
     this.dock = prefs?.dock ?? 'bc';
     this.minimised = prefs?.minimised === true;
+    const { target } = deps.request;
+    const file = summarizeTargetFile(target.fileText, target.mode, target.cursorLine);
+    this.file = file;
+    // Known from the first action: what the session holds, the file's own
+    // secret-named literals, and what the request's `.env` says — its
+    // secret-named keys, and whatever a `$VAR` parameter of the file will
+    // resolve to (review, finding 7). Known from the constructor on, so an
+    // Add step that arrives before the browser is up is held to them too.
+    const fromEnv = envSecrets(file, deps.request.env);
+    this.namedSecrets = () => [...this.safeKnownSecrets(), ...fileSecrets(file), ...fromEnv];
+    // Every spelling — as typed, JSON-escaped, URL-encoded — for everything
+    // this run masks: the frames, the prompt, the log lines.
+    this.secretValues = () => secretSpellings(this.namedSecrets().map((s) => s.value));
   }
 
   /** Where this recording is — for the session's refusals and for tests. */
@@ -196,6 +271,16 @@ export class RecordStepsRun {
    */
   sessionClosed(): void {
     this.abortRun('session-closed');
+  }
+
+  /**
+   * A run is starting on this session: the ended recording's bar (Done,
+   * cancelled, ended — shown six seconds) leaves every page now, before the
+   * run's first step. Its clicks must not land on it, and its screenshots
+   * must not show it (review, finding 6). Nothing while recording.
+   */
+  async dismissToolbar(): Promise<void> {
+    await this.recorder?.dismissToolbar().catch(() => undefined);
   }
 
   /** The `done` frame of an abandoned recording — and the toolbar's last word. */
@@ -274,7 +359,12 @@ export class RecordStepsRun {
   private endWith(kind: 'done' | 'nothing' | 'cancelled' | 'ended', text: string): void {
     this.toolbarPhase = kind === 'ended' ? 'ended' : 'done';
     this.endKind = kind;
-    this.endText = text;
+    // Written up: a step typed in the browser after Stop is not among them.
+    const late = this.lateSteps;
+    this.endText =
+      (kind === 'done' || kind === 'nothing') && late > 0
+        ? `${text.replace(/\.$/, '')} · ${late} step${late === 1 ? '' : 's'} typed after Stop ${late === 1 ? 'was' : 'were'} not added`
+        : text;
     this.notice = null;
     this.updating = false;
     this.pushView();
@@ -287,44 +377,94 @@ export class RecordStepsRun {
     });
   }
 
-  /** A command from the page's toolbar, its token already checked. */
-  private onToolbar(command: ToolbarCommand): void {
+  /** Stop has been received: the recording's content is settled. Whatever
+   *  was accepted before it still runs to completion (`run`, "Stop"). */
+  private get stopping(): boolean {
+    return this.endReason !== null || this.phase === 'writing';
+  }
+
+  /**
+   * Something the author did in the browser's toolbar after Stop — too late
+   * to change the recording. Refused up front, as `control` answers
+   * `stopping`, and said where the author is looking: the bar (through
+   * "Writing the steps…"), and for a step, the panel and the end of the bar,
+   * so the words they typed are not lost without a trace (review, finding 1).
+   */
+  private refuseLate(what: 'step' | 'undo' | 'restore' | 'pause' | 'resume' | 'check', text?: string): false {
+    const said: Record<typeof what, string> = {
+      step: 'Your step came after Stop, so it was not added.',
+      undo: 'Undo came after Stop, so nothing was removed.',
+      restore: 'Restore came after Stop, so nothing was put back.',
+      pause: 'Stop came first: the steps are already being written.',
+      resume: 'Stop came first: the steps are already being written.',
+      check: 'Add check came after Stop, so no check was added.',
+    };
+    if (what === 'step' && text !== undefined) {
+      this.lateSteps++;
+      this.out({
+        type: 'output',
+        msg: redact(
+          `A step typed in the browser after Stop was not added to the recording: "${text.trim()}". ` +
+            'Add it to the test by hand.',
+          this.secretValues(),
+        ),
+        kind: 'warn',
+      });
+    }
+    this.notice = { kind: 'error', text: said[what], seq: ++this.noticeSeq, late: true };
+    this.pushView();
+    return false;
+  }
+
+  /** A command from the page's toolbar, its token already checked. Answers
+   *  whether it was taken (the page takes back what it showed if not). */
+  private onToolbar(command: ToolbarCommand): boolean {
     switch (command.kind) {
       case 'paused':
         this.afterPaused(command.paused, 'toolbar');
-        return;
+        return true;
+      case 'late':
+        return this.refuseLate(command.command);
       case 'undo':
+        if (this.stopping) return this.refuseLate('undo');
         this.enqueueOp(() => this.undo());
-        return;
+        return true;
       case 'restore':
+        if (this.stopping) return this.refuseLate('restore');
         this.enqueueOp(() => this.restoreLast());
-        return;
+        return true;
       case 'stop':
-        this.control({ action: 'stop' });
-        return;
+        return this.control({ action: 'stop' }) === 'accepted';
       case 'cancel':
         this.cancelSource ??= 'browser';
-        this.control({ action: 'cancel' });
-        return;
+        return this.control({ action: 'cancel' }) === 'accepted';
       case 'minimise':
       case 'toggle-minimised':
         this.minimised = command.kind === 'minimise' ? command.minimised : !this.minimised;
         this.out({ type: 'record:toolbar', dock: this.dock, minimised: this.minimised });
         this.pushView();
-        return;
+        return true;
       case 'dock':
         this.dock = command.dock;
         this.out({ type: 'record:toolbar', dock: this.dock, minimised: this.minimised });
         this.pushView();
-        return;
-      case 'step':
-        this.addStep(command.text, 'toolbar');
-        return;
+        return true;
+      case 'step': {
+        // The box is empty from the moment its step arrives: a push made
+        // while the step is being added ("Adding…") must not hand the page
+        // the sent text back, or reopening the box offers it again and Enter
+        // adds it twice (review, finding 3).
+        this.boxText = '';
+        if (this.stopping) return this.refuseLate('step', command.text);
+        const outcome = this.addStep(command.text, 'toolbar');
+        this.pushView();
+        return outcome === 'accepted';
+      }
       case 'box-text':
         this.boxText = command.text;
-        return;
+        return true;
       case 'typing-hidden':
-        return;
+        return true;
     }
   }
 
@@ -360,15 +500,34 @@ export class RecordStepsRun {
     afterStep?: number,
     revision?: number,
   ): RecordControlOutcome {
-    const lines = authorStepLines(text);
-    if (lines.length === 0) return 'ignored';
+    const typed = authorStepLines(text);
+    if (typed.length === 0) return 'ignored';
+    // A secret the recording knows goes in as `{{name}}`, never in clear
+    // (review, finding 5). Not from the editor: that line is the author's own
+    // text in the file, which the recording does not rewrite, and TestBench
+    // knows it by the text it sent — so it is refused, saying what to write.
+    const safe = authorStepSecrets(typed, this.namedSecrets(), this.file.parameters);
+    const refs = safe.names.map((n) => `{{${n}}}`).join(', ');
+    if (safe.unnamed || (source === 'editor' && safe.names.length > 0)) {
+      const reason = safe.unnamed
+        ? 'The step holds a secret value this recording knows, with no parameter name to write in its place, so it was not added.'
+        : `The step holds the value of ${refs}, a secret this recording knows, so it was not added and the line stays yours. ` +
+          `Write ${refs} in its place to add it.`;
+      if (source === 'toolbar') this.setNotice({ kind: 'error', text: reason });
+      return { ignored: reason };
+    }
+    const lines = safe.lines;
     this.enqueueOp(async () => {
       await this.ready;
       const engine = this.engine;
       const recorder = this.recorder;
-      if (!engine || !recorder || this.endReason || this.cancelled()) return;
+      // Accepted before Stop, so carried out whether Stop has come since or
+      // not: `run` waits for this work before it writes anything. Checking
+      // for Stop here dropped a step that had been answered 202 (review,
+      // finding 1). Only Cancel — nothing is written then — abandons it.
+      if (!engine || !recorder || this.cancelled()) return;
       await recorder.flushTyping();
-      if (this.endReason || this.cancelled()) return;
+      if (this.cancelled()) return;
       const boundary = engine.recordedCount;
       const atMs = recorder.clockMs;
       const added = await engine.addAuthorSteps(lines, {
@@ -377,6 +536,7 @@ export class RecordStepsRun {
         atMs,
         afterStep,
         revision,
+        parameters: safe.parameters,
         onCatchUp: () => this.setNotice({ kind: 'adding', text: 'Adding…' }),
         onJoined: (list) => {
           for (const a of list) {
@@ -392,14 +552,15 @@ export class RecordStepsRun {
         },
       });
       if (added.length === 0) return;
-      if (source === 'toolbar') this.boxText = '';
       const first = added[0]!.index + 1;
       const last = added[added.length - 1]!.index + 1;
       const where = first === last ? `Added as step ${first}` : `Added as steps ${first}–${last}`;
       const above = first - 1;
       this.setNotice({
         kind: 'added',
-        text: above === 0 ? where : `${where} · ${above === 1 ? 'step 1' : `steps 1–${above}`} locked`,
+        text:
+          (above === 0 ? where : `${where} · ${above === 1 ? 'step 1' : `steps 1–${above}`} locked`) +
+          (refs ? ` · the secret is written as ${refs}` : ''),
         ms: ADDED_NOTICE_MS,
       });
       logger.info(
@@ -411,11 +572,12 @@ export class RecordStepsRun {
   }
 
   /** The toolbar's Undo: take out the most recent entry still in — an
-   *  action, a check or a step of the author's — as the panel's ✕ does. */
+   *  action, a check or a step of the author's — as the panel's ✕ does.
+   *  Accepted before Stop, it is carried out after it too (finding 1). */
   private async undo(): Promise<void> {
     const engine = this.engine;
     const recorder = this.recorder;
-    if (!engine || !recorder || this.endReason) return;
+    if (!engine || !recorder || this.cancelled()) return;
     await recorder.flushTyping();
     const entry = engine.latestLiveEntry();
     if (!entry) {
@@ -437,7 +599,7 @@ export class RecordStepsRun {
    *  the panel restored meanwhile is passed over). */
   private async restoreLast(): Promise<void> {
     const engine = this.engine;
-    if (!engine || this.endReason) return;
+    if (!engine || this.cancelled()) return;
     while (this.undoStack.length > 0) {
       const id = this.undoStack.pop()!;
       if (!engine.restore(id)) continue;
@@ -546,17 +708,9 @@ export class RecordStepsRun {
     if (signal.aborted) onClientGone();
     signal.addEventListener('abort', onClientGone, { once: true });
 
-    const file = summarizeTargetFile(request.target.fileText, request.target.mode, request.target.cursorLine);
-    // Known from the first action: what the session holds, the file's own
-    // secret-named literals, and what the request's `.env` says — its
-    // secret-named keys, and whatever a `$VAR` parameter of the file will
-    // resolve to (review, finding 7).
-    const fromEnv = envSecrets(file, request.env);
-    const secrets = (): KnownSecret[] => [...this.safeKnownSecrets(), ...fileSecrets(file), ...fromEnv];
-    // Every spelling — as typed, JSON-escaped, URL-encoded — for everything
-    // this run masks: the frames, the prompt, the log lines.
-    const secretValues = (): string[] => secretSpellings(secrets().map((s) => s.value));
-    this.secretValues = secretValues;
+    const file = this.file;
+    const secrets = this.namedSecrets;
+    const secretValues = this.secretValues;
 
     // Warnings the server logs while this recording runs reach the author as
     // `output` frames, as a run's do. Warnings and errors only: an info line
@@ -650,6 +804,7 @@ export class RecordStepsRun {
         onWarning: (msg) => emit({ type: 'output', msg, kind: 'warn' }),
         toolbar: this.toolbarEnabled ? this.toolbarView() : null,
         onToolbar: (command) => this.onToolbar(command),
+        isStopping: () => this.stopping,
         ...recorderKnobs,
       });
       this.recorder = recorder;
@@ -690,14 +845,18 @@ export class RecordStepsRun {
         return;
       }
 
-      // Stop: nothing new is scheduled; a step being added, or an Undo being
-      // made, finishes first; a field still being typed into is collected (its
-      // action frame goes out now, before record:writing); the Stop's own
-      // `dropped` joins the live drops.
+      // Stop: nothing new is scheduled; every Add step, Undo and Restore
+      // accepted before it — one waiting behind another's catch-up included
+      // — finishes first (anything that arrives from now on is refused up
+      // front: `control` answers `stopping`, the toolbar `refuseLate`); a
+      // field still being typed into is collected (its action frame goes out
+      // now, before record:writing); the Stop's own `dropped` joins the live
+      // drops.
       engine.close();
       await this.ops;
       this.toolbarPhase = 'writing';
-      this.notice = null;
+      // A confirmation is over; a "came after Stop" stays through Writing.
+      if (!this.notice?.late) this.notice = null;
       this.pushView();
       const all = await recorder.stop();
       if (this.cancelled()) {
