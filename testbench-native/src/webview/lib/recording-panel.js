@@ -1,12 +1,13 @@
 /**
  * Pure helpers for the panel's Recording block (stories/testbench-record-steps.md,
- * decision 13).
+ * decision 13; stories/testbench-record-toolbar.md).
  *
- * Inline copies of `formatRecordTime` and `recordingStatusText` in
- * src/extension/record-steps-core.ts: the webview bundle cannot import the
- * extension's TypeScript, and the status bar and the panel describe the same
- * recording to the same person, so the two must read alike.
- * tests/record-steps.test.js pins the copies to the originals.
+ * Inline copies of `formatRecordTime`, `recordingStatusText` and
+ * `draftStepMarks` in src/extension/record-steps-core.ts: the webview bundle
+ * cannot import the extension's TypeScript, and the status bar and the panel
+ * describe the same recording to the same person, so the two must read alike.
+ * tests/record-steps.test.js and tests/record-steps-authored.test.js pin the
+ * copies to the originals.
  */
 
 /** `m:ss` since the recording started. */
@@ -22,5 +23,13 @@ export function recordingStatusTextInline(state) {
   if (state.phase === "finishing") return "Finishing…";
   if (state.phase === "starting") return "Recording — starting…";
   const n = state.actions.filter((a) => !a.dropped && a.action !== false).length;
-  return `Recording — ${n} ${n === 1 ? "action" : "actions"}`;
+  return `${state.paused ? "Recording paused" : "Recording"} — ${n} ${n === 1 ? "action" : "actions"}`;
+}
+
+/** Steps so far, marked: a lock on each locked step, "yours" on the author's. */
+export function draftStepMarksInline(draft) {
+  if (!draft) return [];
+  const locked = Number.isFinite(draft.locked) ? Number(draft.locked) : 0;
+  const yours = new Set(Array.isArray(draft.authored) ? draft.authored : []);
+  return draft.steps.map((_, i) => ({ locked: i < locked, yours: yours.has(i) }));
 }

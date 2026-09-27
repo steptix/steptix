@@ -42,6 +42,7 @@ import {
   type FrameInfo,
   type HostRowsMsg,
   type HostToWebviewMsg,
+  type RecordControlAnswer,
   type RecordControlRequest,
   type RecordDoneEvent,
   type RecordResultEvent,
@@ -164,8 +165,10 @@ export interface ApiClientLike {
     signal: AbortSignal,
     onOpen?: () => void,
   ): AsyncIterable<RecordStepsEvent>;
-  /** Record Steps: stop / check / cancel-check / cancel. */
-  controlRecordSteps?(sessionId: string, body: RecordControlRequest): Promise<void>;
+  /** Record Steps: stop / check / cancel-check / cancel / drop / restore /
+   *  pause / resume / add-step. The real client answers `{ ignored }`; a fake
+   *  that answers nothing reads as `{}`. */
+  controlRecordSteps?(sessionId: string, body: RecordControlRequest): Promise<RecordControlAnswer | void>;
 }
 
 /** Record refused while a run executes — docs/specs/SPEC-record-steps.md §10,
@@ -189,8 +192,10 @@ export type RecordStepsOutcome =
       envKeys: string[];
     }
   /** `reason`: the server ended it — the session was closed under it (another
-   *  window's Run, Close Session, the idle reaper) — and said so. */
-  | { status: 'cancelled'; reason?: string }
+   *  window's Run, Close Session, the idle reaper) — and said so. `by:
+   *  'browser'`: the author pressed Cancel in the browser's toolbar
+   *  (stories/testbench-record-toolbar.md) — a Cancel like TestBench's own. */
+  | { status: 'cancelled'; reason?: string; by?: 'browser' }
   | { status: 'error'; error: string };
 
 /** Shape returned by {@link ApiClientLike.getLastRun} (mirrors runner-core). */
@@ -5462,6 +5467,9 @@ export class RunController {
   async recordSteps(args: {
     target: { mode: 'cursor' | 'new'; cursorLine?: number };
     onEvent: (event: RecordStepsEvent) => void;
+    /** The browser toolbar's preferences for the start body
+     *  (stories/testbench-record-toolbar.md §"The wire, exactly"). */
+    toolbar?: RecordStepsRequest['toolbar'];
     /**
      * A step-paused run was stopped a moment ago to make way. Its server-side
      * run lets go of the session's queue shortly after the stream closes, so a
@@ -5530,6 +5538,7 @@ export class RunController {
         target: { mode, fileText: text, ...(cursorLine !== undefined && { cursorLine }) },
         env,
         ...(target.envName && { envName: target.envName }),
+        ...(args.toolbar && { toolbar: args.toolbar }),
       };
       log(
         `recording on ${serverUrl}` +
@@ -5611,6 +5620,9 @@ export class RunController {
       }
       if (done?.status === 'error') return { status: 'error', error: done.error ?? 'The recording failed.' };
       if (done?.status === 'aborted') {
+        // Cancel pressed in the browser's toolbar: the author's own Cancel,
+        // made somewhere else — quiet, the drafts taken out as for any Cancel.
+        if (done.cancelledBy === 'browser') return { status: 'cancelled', by: 'browser' };
         if (!done.error) return { status: 'cancelled' };
         // An abort the server explains is the session closing under the
         // recording ("The session was closed while recording.", the one such
@@ -5634,7 +5646,9 @@ export class RunController {
    * Before the client exists nothing has reached the server's recorder, so a
    * stop or a cancel just ends the stream there.
    */
-  async controlRecording(body: RecordControlRequest): Promise<{ ok: true } | { ok: false; error: string }> {
+  async controlRecording(
+    body: RecordControlRequest,
+  ): Promise<{ ok: true; ignored?: boolean; reason?: string } | { ok: false; error: string }> {
     const rec = this.recording;
     if (!rec) return { ok: false, error: 'No recording is running.' };
     if (!rec.client || typeof rec.client.controlRecordSteps !== 'function') {
@@ -5646,7 +5660,9 @@ export class RunController {
       return { ok: false, error: 'The recording has not started yet.' };
     }
     try {
-      await rec.client.controlRecordSteps(rec.sessionId, body);
+      const answer = await rec.client.controlRecordSteps(rec.sessionId, body);
+      // 202 with `ignored`: taken, and it did nothing — the server says why.
+      if (answer && answer.ignored === true) return { ok: true, ignored: true, ...(answer.reason && { reason: answer.reason }) };
       return { ok: true };
     } catch (err) {
       if (asApiClientError(err)?.kind === 'not-found') {

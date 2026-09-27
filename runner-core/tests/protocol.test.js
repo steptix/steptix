@@ -76,6 +76,9 @@ test('isWebviewMsg: accepts every webview variant', () => {
     'recordCancel',
     'recordCheck',
     'recordDrop',
+    // The browser toolbar's panel parity (stories/testbench-record-toolbar.md).
+    'recordPause',
+    'recordAddStep',
   ]) {
     assert.equal(isWebviewMsg({ type }), true, type);
   }

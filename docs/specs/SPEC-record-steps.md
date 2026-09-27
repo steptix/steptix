@@ -48,9 +48,20 @@ per line, values as parameters.
 | **TestBench: Add Check** | while recording | Arms pick mode: the next click becomes a check (§6) |
 | **TestBench: Stop Recording** | while recording | Ends the recording and writes the steps |
 | **TestBench: Cancel Recording** | while recording | Ends it and writes nothing |
+| **TestBench: Pause Recording** / **Resume Recording** | while recording | Nothing is recorded, and no draft call starts, until Resume (stories/testbench-record-toolbar.md §"Pause and resume, in detail") |
+| **TestBench: Add Step to Recording** | while recording, palette, panel | Asks for a step and adds it exactly as typed; several lines are several steps (§7.6) |
 
-While recording, the editor title bar shows Stop and Add check in place of
-Run and Record, and the context key `testbench-native.recording` is set.
+While recording, the editor title bar shows Stop, Add check and Pause (Resume
+while paused) in place of Run and Record, and the context key
+`testbench-native.recording` is set; `testbench-native.recordingPaused` is set
+while paused.
+
+The same controls — Pause, Add check, Add step, Undo, Stop, Cancel — are in a
+toolbar inside the recorded page (stories/testbench-record-toolbar.md), the
+server's half. The setting `testbench-native.recordSteps.browserToolbar`
+(default on) turns it off; where the author docks it, and whether it is
+minimised, is remembered in the workspace's state between recordings and sent
+in the next start body (§9.1).
 
 ### 3.2 The panel while recording
 
@@ -61,12 +72,29 @@ Run and Record, and the context key `testbench-native.recording` is set.
 - **Steps so far** — the draft the model has written from those actions
   (§8), numbered, updated a moment after each action, with an **updating…**
   marker while a draft call is running.
-- **Add check** as a toggle that shows whether pick mode is armed.
+- **Add check** as a toggle that shows whether pick mode is armed — disabled
+  while paused ("Resume to add a check").
+- **Pause** / **Resume**, a toggle showing what the server's `record:paused`
+  said (the browser's toolbar can pause too). The action list gets a
+  `❚❚ Paused` or `▶ Resumed` row where it happened; markers are not actions
+  and have no ✕.
+- An **Add step** box: Enter adds what is in it (Shift+Enter starts another
+  line — one step per line), exactly as typed. Each step of the author's —
+  from the box, the palette, the browser's toolbar or the test file (§7.6) —
+  is a `✎ Your step: …` row in the action list, with a ✕ that drops it by its
+  id like an action. A drop or restore made in the browser (its Undo,
+  Restore) strikes or restores the row (`record:dropped`).
+- **Steps so far** marks each locked step with a lock (the model can no
+  longer rewrite it) and each of the author's with a `yours` tag.
 - **Stop** and **Cancel**.
 - After Stop, **Finishing…** until the result arrives — immediate when the
   draft already covers every action.
 
-The status bar reads `● Recording — N actions`.
+The status bar reads `● Recording — N actions`, and `❚❚ Recording paused — N
+actions` while paused. A Cancel pressed in the browser ends the recording as
+TestBench's own Cancel does, quietly: the drafts come out of the file and the
+log says "Recording cancelled in the browser — nothing was written." — no
+notification, no error.
 
 The **file** shows the draft too, as it grows (§7): each draft is written
 into the test where the steps will go — numbered, the rest of the flow
@@ -345,7 +373,9 @@ checked to be where the recording left it (§7.4).
   above the block. Typing at the start of the line after the block is that
   line's. A line break typed at the end of the last recorded line (End,
   Enter) starts a line of the author's **below** the block: a step typed on
-  it stays, and the next draft writes above it.
+  it stays, and — until it counts as a step (§7.6) — the next draft writes
+  above it. Whole lines put in between two recorded lines are the author's
+  too (§7.6), not an edit inside the recorded lines.
 - **Later steps.** A later step's number belongs to the recording while its
   line starts with exactly the number the recording gave it. Anything that
   touches the line's start or its number — text typed in front of it, the
@@ -544,6 +574,75 @@ each later step whose line is exact given its number back) or **Keep them**.
 One whose lines were edited since, or are gone, is not offered. The kept
 record is forgotten either way.
 
+### 7.6 Steps the author writes
+
+The author can write steps into the recording themselves
+(stories/testbench-record-toolbar.md §"Steps you write"). Each is **locked**
+with everything recorded before it (§8), goes in exactly as written — a
+leading number or list marker is the recording's to give — and is a
+`✎ Your step` row in the panel (§3.2).
+
+- **From the panel, the palette or the browser's toolbar:** the step is the
+  recording's text, like any other — the drafts write it into the block, and
+  Cancel takes it out.
+- **In the test file:** a line typed below the last recorded line (End,
+  Enter), or put in between two recorded lines. Lines above the first
+  recorded line stay outside the recording. The line **counts** when the
+  cursor leaves it (moves to another line, Enter, or the file is shown in no
+  editor) with a step on it; a blank line, or a bare number, never counts, and
+  one a cursor is on is still being typed. Then TestBench sends `add-step`
+  with `source: 'editor'`, `afterStep` the index of the step it follows in
+  the draft last written into the file (absent when nothing the recording
+  wrote is below it) and `revision` that draft's (§9.3). Lines next to each
+  other that count together are one `add-step`, several lines in order. A
+  call that fails, or that the server answers `ignored`, leaves the line the
+  author's text in the file — said in the log, never sent again.
+
+A line the author typed in the file is **theirs**: the recording never writes
+it and never takes it out. Drafts are laid out around it. Until a draft holds
+its step (`record:draft.authored` / `authoredIds`, the id `record:step` named —
+or, when the draft arrives first, the step whose text is what the line was sent
+as), it divides the draft by count: as many steps above it as the file has now
+(for a line below the block, all of them — "the next draft writes above it").
+Once a draft holds it, that step IS the line: it is not written beside it; the
+steps before it go above, the ones after it below. Its **leading number**
+follows the recording's numbering while the draft holds it — the digits of an
+`N.` line (after any indentation), or a list marker, `N)` or nothing replaced by
+`N. ` (an indented line with no number is left alone) — and is given back when
+the draft no longer holds it, and by Cancel. A number the author changes after
+the recording set it is theirs for good, as a later step's is.
+
+- **Locked steps are never rewritten.** Each draft changes a block only where
+  it differs from what is there, line by line, and a line whose only change is
+  its leading number has only the number replaced — so a draft that keeps the
+  locked steps touches none of them. An edit the author makes inside a
+  recorded line is still written over by the next draft, warned once, locked
+  or not (unchanged in this change).
+- **Cancel** (and the empty draft) takes out everything the recording wrote —
+  the author's toolbar and panel steps included — and keeps every line the
+  author typed, with the number they gave it. **One Ctrl+Z after Stop** lands
+  on the file without the recording, the typed lines still there: typing in
+  the file split the recording's undo step, so the result was written as two
+  (§7).
+- **The result** (`record:result`) does not say which of its steps are the
+  author's: they are where the last draft had them — or, if the final call
+  moved one, the next step with the same text — and their lines are adopted
+  as a draft's are.
+- **Found by text** (§7.4): the block and the author's lines in it are looked
+  for together, as one run of lines. A record holding lines of the author's is
+  never "nothing of it left" while one of those lines is still in the file (a
+  draft written afresh would put that step in a second time, beside it): the
+  recording stops writing live instead. A draft that holds the author's lines
+  in an order the file does not have them in is not written either.
+- **A line the author deletes** closes the block up again; a step the draft
+  still holds for it is written by the recording from then on, as its own —
+  the ✕ on its row leaves it out.
+- **After a window reload** (§7.5) what is kept names the author's lines too,
+  and "Remove the unfinished recording's steps" keeps them.
+- The one-shot insertion at Stop after the recording gave up on the file
+  (§7.4) inserts the whole result, the author's steps included; what is left
+  in the file is the author's to tidy, as for the drafts.
+
 ## 8. Writing the steps
 
 The steps are **drafted live**. Each action goes to the model shortly after
@@ -625,6 +724,11 @@ every route.
     fileText: string;          // the document as it stands, for the prompt
     cursorLine?: number;       // 1-based; mode 'cursor' only
   };
+  toolbar?: {                  // the browser toolbar; absent = { enabled: true, dock: 'bc', minimised: false }
+    enabled: boolean;          // TestBench: the testbench-native.recordSteps.browserToolbar setting
+    dock?: 'tl' | 'tc' | 'tr' | 'bl' | 'bc' | 'br';   // TestBench: where the last record:toolbar left it
+    minimised?: boolean;
+  };
 }
 ```
 
@@ -652,14 +756,32 @@ every route.
   steps: string[];
   parameters: Array<{ name: string; value: string }>;
   notes?: string[];
-  through?: string }           // id of the last action the draft covers
+  through?: string;            // id of the last action the draft covers
+  locked: number;              // how many leading steps are locked (§7.6)
+  authored: number[];          // indices of the author's own steps
+  authoredIds?: string[] }     // their ids (record:step's), parallel to `authored`
+{ type: 'record:paused'; paused: boolean; atMs: number; source: 'toolbar' | 'panel' }
+{ type: 'record:step'; id: string; text: string;       // a step of the author's joined
+  source: 'toolbar' | 'editor' | 'panel';
+  afterStep: number;           // the index of the draft step it follows (-1: the very start)
+  atMs: number }
+{ type: 'record:dropped'; id: string; dropped: boolean; source: 'toolbar' | 'panel' }
+{ type: 'record:toolbar'; dock: 'tl' | 'tc' | 'tr' | 'bl' | 'bc' | 'br'; minimised: boolean }
 { type: 'record:writing' }     // Stop received; finishing the draft
 { type: 'record:result'; steps: string[];
   parameters: Array<{ name: string; value: string }>;
   notes?: string[] }
 { type: 'output'; … }          // warnings, as on the steps route
-{ type: 'done'; status: 'passed' | 'error' | 'aborted'; error?: string }
+{ type: 'done'; status: 'passed' | 'error' | 'aborted'; error?: string;
+  cancelledBy?: 'browser' }    // `aborted` by Cancel in the browser's toolbar: no error, ends quietly
 ```
+
+TestBench reads an absent `locked` as 0 and absent `authored` as none (a
+server that predates the toolbar). `record:step` comes before the draft that
+holds the step; a client that meets them the other way round still maps an
+editor step to its line by the text it sent (§7.6). `record:toolbar` is not the
+panel's: TestBench keeps it for the next start body. A Stop pressed in the
+browser needs no frame of its own (`record:writing`, `record:result`, `done`).
 
 Frames arrive in this order: `record:started`; then, as the author works,
 `record:action` and `record:pick`, each burst of actions followed by
@@ -678,14 +800,25 @@ while recording."`. `done` is always the last frame.
 
 ```ts
 { action: 'stop'; dropped?: string[] }   // write the steps, leaving these action ids out
-{ action: 'drop'; id: string }           // leave this action out; redraft now
+{ action: 'drop'; id: string }           // leave this action (or step of the author's) out; redraft now
 { action: 'restore'; id: string }        // put it back; redraft now
 { action: 'check' }                      // arm pick mode
 { action: 'cancel-check' }               // disarm it
 { action: 'cancel' }                     // end without writing
+{ action: 'pause' }                      // record nothing, start no draft call, until…
+{ action: 'resume' }
+{ action: 'add-step';                    // a step the author wrote (§7.6)
+  text: string;                          // one line; several lines = several steps, in order
+  source: 'editor' | 'panel';            // the toolbar's box goes through the page instead
+  afterStep?: number;                    // the 0-based index of the step it goes after, in the draft
+                                         //   the author saw; absent = at the end
+  revision?: number }                    // the record:draft revision `afterStep` refers to
 ```
 
-`202` accepted; `404` when no recording is running for the session.
+`202` accepted — with `{ ignored: "<why>" }` when the call did nothing (a
+pause while paused, anything but `cancel` after `stop`), which TestBench says
+where the author asked (an `add-step` from the file leaves the line theirs);
+`404` when no recording is running for the session.
 
 ## 10. Errors the author can meet
 
@@ -697,6 +830,7 @@ while recording."`. `done` is always the last frame.
 | No model configured | "Record Steps needs a model to write the steps; configure ai in aiui.config.json or .env." |
 | The model's answer could not be read | "The steps could not be written: <reason>. Nothing was inserted." |
 | The author edits a line being recorded | "Lines being recorded are rewritten as the model updates them — edit them after Stop." — a warning, once per recording |
+| A step typed in the file that the server does not take (§7.6) | "Your step "<text>" was not added to the recording (<why>); it stays in the file as you wrote it." — in the log |
 | What the recording wrote can no longer be found in the file (§7.4) | "The recorded steps could not be found in the file any more, so they are no longer written live; the panel keeps them and Stop will insert them at your cursor line." — a warning, once per recording |
 | A recording was cut off by a window reload and its draft is still in the file | "Record Steps: a recording was still running when the window closed, and its draft steps are still in <file>." with **Remove the unfinished recording's steps** and **Keep them** (§7.5) |
 | A parameter name conflicts | "Parameter <name> already exists with a different value; the recorded value was not added." |

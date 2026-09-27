@@ -465,8 +465,22 @@ export interface RecordInsertionPlan {
    * text inserted for `## Parameters` ('' when nothing is added), and the new
    * ordinal of each later step of the flow that is renumbered (0-based line
    * in the planned text).
+   *
+   * `lines` is the block's numbered step lines one by one, and `blankBefore`,
+   * `blankAfter`, `eol` and `lineEnd` how `block` is made of them — so a
+   * block the author's own lines split into parts can be laid out part by
+   * part (`liveRecordWrite`).
    */
-  parts: { block: string; params: string; renumber: Array<{ line: number; text: string }> };
+  parts: {
+    block: string;
+    params: string;
+    renumber: Array<{ line: number; text: string }>;
+    lines: string[];
+    blankBefore: boolean;
+    blankAfter: boolean;
+    eol: string;
+    lineEnd: boolean;
+  };
   /** 1-based lines the inserted steps occupy once the edits are applied. */
   insertedLines: number[];
   /** The flow the steps joined. */
@@ -560,7 +574,16 @@ export function planRecordInsertion(
   const firstStep = insertAt + 1 + (blankBefore ? 1 : 0) + shift;
   return {
     edits,
-    parts: { block: blockText, params: params.edit?.text ?? '', renumber },
+    parts: {
+      block: blockText,
+      params: params.edit?.text ?? '',
+      renumber,
+      lines: newLines,
+      blankBefore,
+      blankAfter,
+      eol,
+      lineEnd: at.lineEnd,
+    },
     insertedLines: newLines.map((_, k) => firstStep + k),
     section,
     fellBack,
@@ -1096,9 +1119,16 @@ export function applyRecordEdits(text: string, edits: RecordEdit[]): string {
  *  - `tail`: the number of one later step of the same flow, which the block
  *    renumbers — `start` is its line's start, `end` the end of its digits.
  *    `original` is what the file had, and what the empty draft writes back.
+ *  - `mine`: a line the AUTHOR wrote into the recorded lines while recording
+ *    (stories/testbench-record-toolbar.md §"Steps typed in the editor") —
+ *    below the last recorded line (End, Enter) or between two of them. It is
+ *    the author's text: never written, never taken out, followed so the
+ *    recording writes around it. The block is then several `block` slots,
+ *    one between each two of the author's lines ("the run": block, mine,
+ *    block, …, block — each part of it possibly empty).
  */
 export interface RecordSlot {
-  kind: 'params' | 'block' | 'tail';
+  kind: 'params' | 'block' | 'tail' | 'mine';
   start: number;
   end: number;
   /** The slot hangs off the END of a line — its text starts with a line
@@ -1123,6 +1153,36 @@ export interface RecordSlot {
   /** `block`/`params`: an edit wholly inside since the last write — the slot
    *  no longer reads `wrote`, and the next draft writes over it (warned). */
   touched?: boolean;
+  /** `mine`: names the line across writes (`m1`, `m2`…). For `mine`, `wrote`
+   *  is the line as it reads now — the author's text, followed as they type. */
+  key?: string;
+  /**
+   * `mine`: `typing` until the author leaves the line with text on it — it is
+   * not a step yet, and the recording writes around it; `sent` once it went
+   * to the server as an `add-step`; `kept` when the server did not take it
+   * (it stays in the file as the author's text, and is never sent again).
+   */
+  status?: 'typing' | 'sent' | 'kept';
+  /** `mine`, `sent`: the id the server gave the step (`record:step`). */
+  stepId?: string;
+  /** `mine`, `sent`: the step as it was sent — what the server's step for it
+   *  reads, whatever the author does to the line afterwards. */
+  sentText?: string;
+  /** `mine`: its step was one of the draft last written (`authoredIds`). */
+  inDraft?: boolean;
+  /**
+   * `mine`: the line's leading number as the recording numbered it — the
+   * author's line takes the recording's numbering once the draft holds its
+   * step (stories/testbench-record-toolbar.md §"Locking in": "a leading number
+   * or list marker you typed is removed and replaced by the recording's
+   * numbering"). `digits`: only the number of an `N.` line is replaced;
+   * `marker`: a list marker, `N)` or nothing is replaced by `N. `. `author` is
+   * what was there before, given back when the draft no longer holds the step
+   * and at the empty draft; `wrote` what the recording put there. `'author'`:
+   * the author changed it since — the number is theirs again, for good, as a
+   * later step's is (§7).
+   */
+  number?: { mode: 'digits' | 'marker'; author: string; wrote: string } | 'author';
 }
 
 /**
@@ -1264,14 +1324,25 @@ export interface LiveRecordWrite {
  * written afresh at the anchor — `opts.anchor`, the anchor as the caller has
  * followed it, else the record's own found by its text — as the first write
  * was; the empty draft then has nothing to take out.
+ *
+ * The author's own lines inside the recorded block (`mine` slots —
+ * stories/testbench-record-toolbar.md §"Steps typed in the editor") are never
+ * written: the draft is laid out AROUND them (`layoutRun`). One whose step the
+ * draft holds (`authored`/`authoredIds` name it) IS that step — the draft's
+ * text for it is not written again beside it; one the draft does not hold
+ * yet divides the draft by how many of its steps are above it in the file.
+ * Every block part is changed only where it differs (`slotEdits`), so steps
+ * the draft left as they were — the locked ones — are not rewritten, bar a
+ * number the author's line pushed on. The empty draft takes every block part
+ * out and leaves the author's lines where they are.
  */
 export function liveRecordWrite(
   live: LiveRecord,
   current: string,
-  draft: { steps: unknown[]; parameters: unknown[] },
+  draft: LiveDraft,
   opts: { anchor?: RecordAnchor | null } = {},
 ): LiveRecordWrite | { error: string; lost?: boolean } {
-  const steps = cleanSteps(draft.steps);
+  const { steps, authoredAt } = draftSteps(draft);
   const where = locateLiveRecord(live, current, opts.anchor);
   if (where.status === 'lost') return { error: where.reason, lost: true };
   let record: LiveRecord;
@@ -1292,17 +1363,25 @@ export function liveRecordWrite(
     record = where.record;
     prior = holdsSteps(record) ? [...record.history, stateOf(record)] : record.history;
   }
+  record = adoptStepIds(record, steps, authoredAt, draft.foreignIds ?? []);
 
   let plan: RecordInsertionPlan | null = null;
   let want: (slot: RecordSlot) => string = (slot) => (slot.kind === 'tail' ? (slot.original ?? '') : '');
+  /** `mine` slots the draft holds the step of, each with its number. */
+  let joined = new Map<RecordSlot, string>();
   if (steps.length > 0) {
     const planned = planRecordInsertion(record.base, { anchor: record.anchor, steps, parameters: draft.parameters });
     if ('error' in planned) return planned;
     plan = planned;
+    const layout = layoutRun(record.slots, planned.parts, authoredAt);
+    // The draft places the author's lines in an order the file does not have
+    // them in: nothing written can be proved right.
+    if (layout === null) return { error: RECORDING_NOT_FOUND, lost: true };
+    joined = layout.joined;
     const renumbered = new Map(planned.parts.renumber.map((r) => [r.line, r.text]));
     want = (slot) =>
       slot.kind === 'block'
-        ? planned.parts.block
+        ? (layout.blocks.get(slot) ?? '')
         : slot.kind === 'params'
           ? planned.parts.params
           : (renumbered.get(slot.line ?? -1) ?? slot.original ?? '');
@@ -1317,13 +1396,32 @@ export function liveRecordWrite(
     // A later step whose line is not where it was and could not be found by
     // its text is the author's now: not written, not renumbered.
     if (slot.kind === 'tail' && slot.placed === false) continue;
+    // A line of the author's: never written — bar its leading number, which
+    // follows the recording's numbering while the draft holds its step — it
+    // moves with the writes above it, and says whether the draft holds it.
+    if (slot.kind === 'mine') {
+      floor = Math.max(floor, slot.end);
+      const renumbered = numberAuthorLine(slot, joined.get(slot) ?? null);
+      if (renumbered.edit) {
+        edits.push(renumbered.edit);
+        shifts.push({ at: slot.end, delta: renumbered.wrote.length - slot.wrote.length });
+      }
+      const start = slot.start + delta;
+      const next: RecordSlot = { ...slot, start, end: start + renumbered.wrote.length, wrote: renumbered.wrote, inDraft: joined.has(slot) };
+      if (renumbered.number === undefined) delete next.number;
+      else next.number = renumbered.number;
+      written.push(next);
+      delta += renumbered.wrote.length - slot.wrote.length;
+      continue;
+    }
     // Overlapping slots cannot come out of the tracker or the search; one that
     // did would be written twice, so it is left alone.
     if (slot.start < floor) continue;
     floor = slot.end;
     const text = want(slot);
-    if (current.slice(slot.start, slot.end) !== text) {
-      edits.push({ start: slot.start, end: slot.end, text, kind: slot.kind });
+    const now = current.slice(slot.start, slot.end);
+    if (now !== text) {
+      edits.push(...slotEdits(slot, now, text));
       shifts.push({ at: slot.end, delta: text.length - (slot.end - slot.start) });
     }
     const start = slot.start + delta;
@@ -1347,6 +1445,344 @@ export function liveRecordWrite(
     plan,
     relocated,
   };
+}
+
+/**
+ * A draft as the live writer takes it: `record:draft`'s steps and parameters,
+ * and — since the browser toolbar — which of its steps the author wrote. The
+ * empty draft is `{ steps: [], parameters: [] }`.
+ */
+export interface LiveDraft {
+  steps: unknown[];
+  parameters: unknown[];
+  /** Indices into `steps` of the author's own steps (`record:draft.authored`). */
+  authored?: unknown;
+  /** Their ids, parallel to `authored` (`record:draft.authoredIds`). */
+  authoredIds?: unknown;
+  /** Ids `record:step` said came from the toolbar or the panel: never taken
+   *  for a line the author typed in the file. */
+  foreignIds?: string[];
+}
+
+/** The draft's steps as they will be written (blanks dropped), and where each
+ *  of the author's steps is among them, by its id. */
+function draftSteps(draft: LiveDraft): { steps: string[]; authoredAt: Map<string, number> } {
+  const raw = Array.isArray(draft.steps) ? draft.steps : [];
+  const steps: string[] = [];
+  const cleanIndex = new Map<number, number>();
+  raw.forEach((r, i) => {
+    const s = cleanStepText(r);
+    if (s === '') return;
+    cleanIndex.set(i, steps.length);
+    steps.push(s);
+  });
+  const authored = Array.isArray(draft.authored) ? draft.authored : [];
+  const ids = Array.isArray(draft.authoredIds) ? draft.authoredIds : [];
+  const authoredAt = new Map<string, number>();
+  authored.forEach((idx, k) => {
+    const id = ids[k];
+    const at = cleanIndex.get(Number(idx));
+    if (typeof id === 'string' && id !== '' && at !== undefined) authoredAt.set(id, at);
+  });
+  return { steps, authoredAt };
+}
+
+/**
+ * Name each line of the author's that was sent and has no id yet by the
+ * draft step that is it: an id of the draft's author steps not known to be
+ * the toolbar's or the panel's, whose text is that line's as it was sent. A
+ * draft can arrive before the `record:step` that names the id, and a line
+ * taken for none of the draft's steps would be written a second time as the
+ * recording's.
+ */
+function adoptStepIds(record: LiveRecord, steps: string[], authoredAt: Map<string, number>, foreign: string[]): LiveRecord {
+  const named = new Set(record.slots.flatMap((s) => (s.kind === 'mine' && s.stepId ? [s.stepId] : [])));
+  let slots = record.slots;
+  for (const [id, idx] of authoredAt) {
+    if (named.has(id) || foreign.includes(id)) continue;
+    const text = steps[idx];
+    const k = slots.findIndex((s) => s.kind === 'mine' && s.status === 'sent' && !s.stepId && s.sentText === text);
+    if (k < 0) continue;
+    slots = slots.map((s, i) => (i === k ? { ...s, stepId: id } : s));
+    named.add(id);
+  }
+  return slots === record.slots ? record : { ...record, slots };
+}
+
+/**
+ * The draft laid out around the author's lines: the text of every block part
+ * of the run (block, mine, block, …, block), and which of the author's lines
+ * the draft holds. Null when the draft holds the author's lines in an order
+ * the file does not (the writer then writes nothing).
+ *
+ * A line whose step the draft holds (its id among `authoredAt`) is that step:
+ * the steps before it go above it, the ones after below, and it is not
+ * written. A line the draft does not hold divides the draft by count: as many
+ * steps above it as the file has above it now (the draft the author saw) —
+ * or, at the end of the run with none of the recording's lines below it, all
+ * of them, as a line typed below the block always had.
+ */
+function layoutRun(
+  slots: RecordSlot[],
+  parts: RecordInsertionPlan['parts'],
+  authoredAt: Map<string, number>,
+): { blocks: Map<RecordSlot, string>; joined: Map<RecordSlot, string> } | null {
+  const run = slots.filter(isRun);
+  const n = parts.lines.length;
+  const mines = run.flatMap((s, i) => (s.kind === 'mine' ? [i] : []));
+  // block, mine, block, …, block — what `settleRun` leaves.
+  if (run.length !== 2 * mines.length + 1 || run.some((s, i) => (i % 2 === 0) !== (s.kind === 'block'))) return null;
+  const at = (s: RecordSlot): number | undefined => (s.stepId ? authoredAt.get(s.stepId) : undefined);
+  const cuts: Array<{ cut: number; consumes: boolean }> = [];
+  /** The author's lines the draft holds, each with the number its step takes. */
+  const joined = new Map<RecordSlot, string>();
+  let floor = 0;
+  for (let j = 0; j < mines.length; j++) {
+    const i = mines[j]!;
+    const mine = run[i]!;
+    const idx = at(mine);
+    if (idx !== undefined) {
+      if (idx < floor) return null;
+      cuts.push({ cut: idx, consumes: true });
+      joined.set(mine, LEADING_ORDINAL_RE.exec(parts.lines[idx] ?? '')?.[1] ?? String(idx + 1));
+      floor = idx + 1;
+      continue;
+    }
+    let cut: number;
+    if (atRunEnd(run, i)) {
+      cut = n;
+    } else {
+      let upper = n;
+      for (let k = j + 1; k < mines.length; k++) {
+        const below = at(run[mines[k]!]!);
+        if (below !== undefined) {
+          upper = below;
+          break;
+        }
+      }
+      cut = Math.min(Math.max(stepsAbove(run, i), floor), Math.max(upper, floor));
+    }
+    cuts.push({ cut, consumes: false });
+    floor = cut;
+  }
+  const blocks = new Map<RecordSlot, string>();
+  let from = 0;
+  for (let j = 0; j <= mines.length; j++) {
+    const block = run[2 * j]!;
+    const to = j < mines.length ? cuts[j]!.cut : n;
+    const lines = [
+      ...(j === 0 && parts.blankBefore ? [''] : []),
+      ...parts.lines.slice(from, Math.max(from, to)),
+      ...(j === mines.length && parts.blankAfter ? [''] : []),
+    ];
+    blocks.set(block, linesText(lines, block.lineEnd, parts.eol));
+    if (j < mines.length) from = cuts[j]!.cut + (cuts[j]!.consumes ? 1 : 0);
+  }
+  return { blocks, joined };
+}
+
+/**
+ * A line of the author's, numbered as the recording numbers its steps while
+ * the draft holds its step (`want`: that step's number), or given back the
+ * number it had when the draft no longer does (`want` null — the empty draft
+ * too). Only the leading number is ever touched: the digits of an `N.` line,
+ * else the list marker (or nothing) in front of the text, replaced by `N. `.
+ * A number the author changed after the recording set it is theirs from then
+ * on (`'author'`), and a number the recording never changed is not given
+ * anything back.
+ */
+function numberAuthorLine(
+  slot: RecordSlot,
+  want: string | null,
+): { wrote: string; number?: RecordSlot['number']; edit?: OffsetEdit } {
+  const lead = slot.lineEnd ? (slot.wrote.startsWith('\r\n') ? 2 : slot.wrote.startsWith('\n') ? 1 : 0) : 0;
+  const state = slot.number;
+  if (state === 'author') return { wrote: slot.wrote, number: 'author' };
+  const cur = authorLinePrefix(slot.wrote.slice(lead));
+  // The number sits after the line's indentation, which is the author's.
+  const from = lead + (cur?.indent ?? 0);
+  const line = slot.wrote.slice(from);
+  const intact =
+    state === undefined ||
+    (state.mode === 'digits' ? cur?.mode === 'digits' && cur.text === state.wrote : line.startsWith(state.wrote));
+  if (!intact) return { wrote: slot.wrote, number: 'author' };
+  const at = slot.start + from;
+  const replace = (was: string, to: string): { wrote: string; edit: OffsetEdit } => ({
+    wrote: slot.wrote.slice(0, from) + to + line.slice(was.length),
+    edit: { start: at, end: at + was.length, text: to, kind: 'mine' },
+  });
+  if (want === null) {
+    if (state === undefined) return { wrote: slot.wrote };
+    return replace(state.wrote, state.author);
+  }
+  // An indented line with no number of its own is left as it is.
+  if (!state && !cur) return { wrote: slot.wrote };
+  const mode = state ? state.mode : cur!.mode;
+  const now = state ? state.wrote : cur!.text;
+  const target = mode === 'digits' ? want : `${want}. `;
+  if (now === target) return { wrote: slot.wrote, ...(state && { number: state }) };
+  return { ...replace(now, target), number: { mode, author: state ? state.author : cur!.text, wrote: target } };
+}
+
+/**
+ * The leading number of a line the author typed: the digits of `N.` (after
+ * any indentation), or — unindented — the list marker (`-`, `*`, `+`, `N)`)
+ * with the space after it, or ''. Null for an indented line with no number.
+ */
+function authorLinePrefix(line: string): { mode: 'digits' | 'marker'; text: string; indent: number } | null {
+  const digits = /^([ \t]*)(\d{1,9})(?=\.(?:[ \t]|\r?\n|$))/.exec(line);
+  if (digits) return { mode: 'digits', text: digits[2]!, indent: digits[1]!.length };
+  if (/^[ \t]/.test(line)) return null;
+  const marker = /^(?:\d{1,9}\)|[-*+])[ \t]+/.exec(line);
+  return { mode: 'marker', text: marker ? marker[0] : '', indent: 0 };
+}
+
+/** Lines as a slot's text: each ended by `eol`, or — a slot hanging off the
+ *  end of a line (`lineEnd`) — each begun by it. */
+function linesText(lines: string[], lineEnd: boolean, eol: string): string {
+  return lineEnd ? lines.map((l) => eol + l).join('') : lines.map((l) => l + eol).join('');
+}
+
+/** A part of the run: the recorded block's, or a line of the author's. */
+const isRun = (s: RecordSlot): boolean => s.kind === 'block' || s.kind === 'mine';
+
+/** The steps a block part holds: its non-blank lines (the blank ones are the
+ *  spacing a table or a following heading needs). */
+const stepCount = (text: string): number => text.split(/\r?\n/).filter((l) => l.trim() !== '').length;
+
+/**
+ * How many of the draft last written are above the run's part `i`: the steps
+ * of the block parts above, and the author's lines above whose step that
+ * draft held.
+ */
+function stepsAbove(run: RecordSlot[], i: number): number {
+  let n = 0;
+  for (let k = 0; k < i; k++) {
+    const s = run[k]!;
+    n += s.kind === 'block' ? stepCount(s.wrote) : s.inDraft ? 1 : 0;
+  }
+  return n;
+}
+
+/**
+ * The run's part `i` is at its end: none of the recording's steps below it,
+ * and none of the author's lines below it that went to the server. A line
+ * typed there is "below the block": every step goes above it until the
+ * server places it.
+ */
+function atRunEnd(run: RecordSlot[], i: number): boolean {
+  for (let k = i + 1; k < run.length; k++) {
+    const s = run[k]!;
+    if (s.kind === 'block' ? stepCount(s.wrote) > 0 : s.status === 'sent') return false;
+  }
+  return true;
+}
+
+/**
+ * The edits that turn a slot reading `now` into `next`. A block part changes
+ * only where it differs, line by line — the lines both share at its start and
+ * end are not touched, and a line whose only change is its leading number
+ * has only the number replaced — so steps the draft kept as they were (the
+ * locked ones) are never rewritten. Parameters and later numbers are
+ * replaced whole, as they always were.
+ */
+function slotEdits(slot: RecordSlot, now: string, next: string): OffsetEdit[] {
+  if (slot.kind !== 'block' || now === '' || next === '') {
+    return [{ start: slot.start, end: slot.end, text: next, kind: slot.kind }];
+  }
+  const a = unitsOf(now, slot.lineEnd);
+  const b = unitsOf(next, slot.lineEnd);
+  let p = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let q = 0;
+  while (q < a.length - p && q < b.length - p && a[a.length - 1 - q] === b[b.length - 1 - q]) q++;
+  const midA = a.slice(p, a.length - q);
+  const midB = b.slice(p, b.length - q);
+  let at = slot.start + a.slice(0, p).join('').length;
+  if (midA.length !== midB.length) {
+    const len = midA.join('').length;
+    return [{ start: at, end: at + len, text: midB.join(''), kind: 'block' }];
+  }
+  const out: OffsetEdit[] = [];
+  for (let k = 0; k < midA.length; k++) {
+    const x = midA[k]!;
+    const y = midB[k]!;
+    if (x !== y) {
+      const lead = slot.lineEnd ? (x.startsWith('\r\n') ? 2 : x.startsWith('\n') ? 1 : 0) : 0;
+      const dx = /^\d+(?=\.)/.exec(x.slice(lead))?.[0];
+      const dy = /^\d+(?=\.)/.exec(y.slice(lead))?.[0];
+      const sameLead = x.slice(0, lead) === y.slice(0, lead);
+      if (dx !== undefined && dy !== undefined && sameLead && x.slice(lead + dx.length) === y.slice(lead + dy.length)) {
+        out.push({ start: at + lead, end: at + lead + dx.length, text: dy, kind: 'block' });
+      } else {
+        out.push({ start: at, end: at + x.length, text: y, kind: 'block' });
+      }
+    }
+    at += x.length;
+  }
+  return out;
+}
+
+/**
+ * A slot's text as its lines, each with its line break: ended by it, or — a
+ * slot hanging off the end of a line (`lineEnd`) — begun by it. Joined, the
+ * units are the text again.
+ */
+function unitsOf(text: string, lineEnd: boolean): string[] {
+  const out: string[] = [];
+  if (!lineEnd) {
+    let from = 0;
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === '\n') {
+        out.push(text.slice(from, i + 1));
+        from = i + 1;
+      }
+    }
+    if (from < text.length) out.push(text.slice(from));
+    return out;
+  }
+  const starts: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\n') starts.push(i > 0 && text[i - 1] === '\r' ? i - 1 : i);
+  }
+  if (starts[0] !== 0) starts.unshift(0);
+  return starts.map((s, k) => text.slice(s, starts[k + 1] ?? text.length)).filter((u) => u !== '');
+}
+
+/** A unit's line, without its line break. */
+function unitLine(unit: string): string {
+  return unit.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+}
+
+/** The author's line a `mine` slot holds, without its line break. */
+function mineLineText(slot: RecordSlot): string {
+  return unitLine(slot.wrote);
+}
+
+/**
+ * A line the author typed, as the step it becomes: whitespace collapsed, and
+ * a leading number (`8.`, `8)`) or list marker (`-`, `*`, `+`) taken off —
+ * the recording numbers its steps itself (stories/testbench-record-toolbar.md
+ * §"Locking in"). '' when nothing is left: not a step.
+ */
+export function cleanAuthorLine(raw: unknown): string {
+  return String(raw ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(?:\d{1,9}[.)]|[-*+])(?:\s+|$)/, '')
+    .trim();
+}
+
+/**
+ * Text the author gave as steps — the Add step box, the Add Step to Recording
+ * command — as the steps it is: one per non-blank line, in order, each
+ * cleaned as `cleanAuthorLine` cleans a line typed in the file.
+ */
+export function splitAuthorSteps(text: unknown): string[] {
+  return String(text ?? '')
+    .split(/\r?\n/)
+    .map(cleanAuthorLine)
+    .filter((s) => s !== '');
 }
 
 /** `text` with offset edits applied, all in `text`'s offsets. At one start, a
@@ -1404,12 +1840,20 @@ export function trackRecordSlots(
   const ordered = [...changes].sort((a, b) => b.offset - a.offset);
   for (const c of ordered) {
     const delta = c.text.length - c.length;
+    // The run's last part with text in it: a line opened under it (End,
+    // Enter) is the author's new line below the block — one of theirs from
+    // here on (stories/testbench-record-toolbar.md §"Steps typed in the
+    // editor"), which the recording writes around rather than below.
+    const last = [...out].reverse().find((s) => isRun(s) && s.end > s.start);
+    let opened: RecordSlot | null = null;
     for (const slot of out) {
       if (slot.kind === 'tail') {
         trackTail(slot, c, delta);
         continue;
       }
-      switch (regionRelation(slot, c)) {
+      const relation = regionRelation(slot, c);
+      if (slot === last && relation === 'after' && opensLineBelow(slot, c)) opened = lineOpenedBelow(slot, c);
+      switch (relation) {
         case 'before':
           slot.start += delta;
           slot.end += delta;
@@ -1417,8 +1861,11 @@ export function trackRecordSlots(
         case 'after':
           break;
         case 'inside':
-          touched = true;
-          slot.touched = true;
+          // The author's own line is theirs to edit: nothing to warn about.
+          if (slot.kind !== 'mine') {
+            touched = true;
+            slot.touched = true;
+          }
           slot.end += delta;
           break;
         case 'across':
@@ -1427,8 +1874,40 @@ export function trackRecordSlots(
           break;
       }
     }
+    if (opened && last) out.splice(out.indexOf(last) + 1, 0, opened);
   }
   return { slots: out, touched, uncertain };
+}
+
+/** `c` is End, Enter on the last line of `slot`: a line break typed at that
+ *  line's end, starting a new line below it (`regionRelation`'s case). */
+function opensLineBelow(slot: RecordSlot, c: OffsetChange): boolean {
+  if (c.length !== 0) return false;
+  if (slot.lineEnd) return c.offset === slot.end && startsWithBreak(c.text);
+  const eol = slot.wrote.endsWith('\r\n') ? '\r\n' : '\n';
+  return slot.wrote.endsWith(eol) && c.offset === slot.end - eol.length && c.text.startsWith(eol);
+}
+
+/** The author's new line `c` opened under `slot` (see `opensLineBelow`), as
+ *  the change leaves it: right after the slot, typing. */
+function lineOpenedBelow(slot: RecordSlot, c: OffsetChange): RecordSlot {
+  const eol = c.text.startsWith('\r\n') ? '\r\n' : '\n';
+  return {
+    kind: 'mine',
+    start: slot.end,
+    end: slot.end + c.text.length,
+    lineEnd: slot.lineEnd,
+    wrote: slot.lineEnd ? c.text : c.text.slice(eol.length) + eol,
+    key: nextMineKey(),
+    status: 'typing',
+  };
+}
+
+let mineKeys = 0;
+/** A fresh name for a line of the author's. */
+function nextMineKey(): string {
+  mineKeys += 1;
+  return `m${mineKeys}`;
 }
 
 function regionRelation(slot: RecordSlot, c: OffsetChange): 'before' | 'after' | 'inside' | 'across' {
@@ -1439,6 +1918,9 @@ function regionRelation(slot: RecordSlot, c: OffsetChange): 'before' | 'after' |
   if (c.length > 0) {
     if (cEnd === s) return 'before';
     if (c.offset === e) return 'after';
+    // A line of the author's: anything wholly within it is theirs, the whole
+    // line deleted or typed over included.
+    if (slot.kind === 'mine' && c.offset >= s && cEnd <= e) return 'inside';
     // Inside only when some of the slot's text is left on one side of it:
     // the whole slot replaced is the author's text in its place.
     if (s < e && c.offset >= s && cEnd <= e && (c.offset > s || cEnd < e)) return 'inside';
@@ -1529,7 +2011,9 @@ export function locateLiveRecord(live: LiveRecord, current: string, anchor?: Rec
   let m: LineModel | null = null;
   const model = (): LineModel => (m ??= modelOf(current));
   if (!record.uncertain) {
-    const inPlace = verifyInPlace(record, current, model);
+    // The author's lines inside the block, as the offsets followed them.
+    const settled = settleRun(record, current);
+    const inPlace = settled && verifyInPlace(settled, current, model);
     if (inPlace) return { status: 'found', record: inPlace, moved: false };
   }
   const found = anchor !== undefined ? anchor : record.anchor && { ...record.anchor, tracked: false };
@@ -1553,11 +2037,54 @@ export function locateLiveRecord(live: LiveRecord, current: string, anchor?: Rec
   for (const state of states) {
     const slots = findWritten(current, model, state.slots, state.section, anchorIdx, paramsPoint(state.base));
     if (slots && nothingLeft(record, current, slots)) {
-      return { status: 'found', record: { ...state, slots, uncertain: false, history: record.history }, moved: true };
+      // What became of the author's lines since (sent, their ids) is not
+      // undone with the text: a line sent once is never sent again.
+      const found: LiveRecord = { ...state, slots, uncertain: false, history: record.history };
+      return { status: 'found', record: carryAuthorState(record, found), moved: true };
     }
   }
-  if (!touched && nothingLeft(record, current)) return { status: 'absent' };
+  // Nothing of the recording's left — unless a line of the author's is: a
+  // draft written afresh would put its step in a second time, beside it.
+  if (!touched && nothingLeft(record, current) && !authorLinesLeft(record, current)) return { status: 'absent' };
   return { status: 'lost', reason: RECORDING_NOT_FOUND };
+}
+
+/**
+ * `to` with each of the author's lines carrying what `from` knows about the
+ * same line (by its key): whether it was sent, and the id the server gave it.
+ * A write planned before the author left a line, or an undo that brought an
+ * earlier state back, must not forget that the line went to the server.
+ */
+export function carryAuthorState(from: LiveRecord, to: LiveRecord): LiveRecord {
+  const known = new Map(from.slots.flatMap((s) => (s.kind === 'mine' && s.key ? [[s.key, s] as const] : [])));
+  if (known.size === 0) return to;
+  let changed = false;
+  const slots = to.slots.map((s) => {
+    const k = s.kind === 'mine' && s.key ? known.get(s.key) : undefined;
+    if (!k || (k.status === s.status && k.stepId === s.stepId && k.sentText === s.sentText)) return s;
+    changed = true;
+    return {
+      ...s,
+      status: k.status,
+      ...(k.stepId !== undefined && { stepId: k.stepId }),
+      ...(k.sentText !== undefined && { sentText: k.sentText }),
+    };
+  });
+  return changed ? { ...to, slots } : to;
+}
+
+/** A line of the author's — one any state of the record holds — is in the file
+ *  more often than the base it was written into had it. */
+function authorLinesLeft(record: LiveRecord, current: string): boolean {
+  const count = (text: string, line: string): number => text.split(/\r?\n/).filter((l) => l === line).length;
+  for (const state of [record, ...record.history]) {
+    for (const slot of state.slots) {
+      if (slot.kind !== 'mine') continue;
+      const line = mineLineText(slot);
+      if (line.trim() !== '' && count(current, line) > count(state.base, line)) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -1580,11 +2107,339 @@ export function followLiveRecord(
     ? { slots: live.slots, touched: false, uncertain: true }
     : trackRecordSlots(live.slots, changes);
   let record: LiveRecord = { ...live, slots: tracked.slots, uncertain: live.uncertain || tracked.uncertain };
+  let touched = tracked.touched && !tracked.uncertain;
+  // Only an edit inside the block, or a run that holds lines of the author's
+  // (or just opened one), has anything to settle: every other keystroke is
+  // followed by offsets alone, without reading the document.
+  if (!record.uncertain && (tracked.touched || record.slots.some((s) => s.kind === 'mine'))) {
+    // Whole lines typed between the recorded ones are the author's new lines,
+    // not an edit of the recording's: only what is still an edit inside a
+    // recorded line is warned about.
+    const settled = settleRun(record, opts.text());
+    if (settled) {
+      record = settled;
+      touched = touched && settled.slots.some((s) => s.touched === true);
+    } else {
+      record = { ...record, uncertain: true };
+      touched = false;
+    }
+  }
   if (record.uncertain) {
     const where = locateLiveRecord(record, opts.text(), opts.anchor);
     if (where.status === 'found') record = where.record;
   }
-  return { record, touched: tracked.touched && !tracked.uncertain };
+  return { record, touched };
+}
+
+/**
+ * The run — the recorded block and the author's lines in it — made to read as
+ * the offsets followed it, after the author's edits
+ * (stories/testbench-record-toolbar.md §"Steps typed in the editor"):
+ *
+ *  - each line of the author's reads what the author has typed on it (a line
+ *    Enter split into several is several lines; one deleted whole is gone,
+ *    and the block parts on either side of it are one again);
+ *  - a block part edited only by WHOLE lines put in between its lines — End,
+ *    Enter on a recorded line and typing, or a paste — is split around them,
+ *    and they are the author's new lines; above the first recorded line they
+ *    are not (§7: lines above the block are outside it), and an edit of a
+ *    recorded line itself stays one inside the block (`touched`, warned);
+ *  - whole lines that appeared between two parts of the run are the author's
+ *    new lines too;
+ *  - and the run is block, mine, block, …, block again, an empty block part
+ *    kept right after each line of the author's.
+ *
+ * Offsets only: null when they do not describe whole lines any more — the
+ * caller then looks for the recording by its text.
+ */
+function settleRun(record: LiveRecord, text: string): LiveRecord | null {
+  const sorted = sortSlots(record.slots);
+  const run = sorted.filter(isRun);
+  if (run.length === 0) return record;
+  const others = sorted.filter((s) => !isRun(s));
+  const firstBlock = run[0];
+  const parts: RecordSlot[] = [];
+  for (const slot of run) {
+    if (slot.start < 0 || slot.end > text.length || slot.start > slot.end) return null;
+    const now = text.slice(slot.start, slot.end);
+    if (slot.kind === 'mine') {
+      if (now === '') continue; // deleted: the author's to delete
+      if (!wholeLines(text, slot.start, slot.end, slot.lineEnd)) return null;
+      const units = unitsOf(now, slot.lineEnd);
+      // The unit that still reads as the line did keeps its name; the rest are
+      // new lines of the author's.
+      let own = units.indexOf(slot.wrote);
+      if (own < 0) own = Math.max(0, units.findIndex((u) => unitLine(u).trim() !== ''));
+      let at = slot.start;
+      units.forEach((unit, k) => {
+        parts.push(
+          k === own
+            ? { ...slot, start: at, end: at + unit.length, wrote: unit }
+            : typingLine(at, unit, slot.lineEnd),
+        );
+        at += unit.length;
+      });
+      continue;
+    }
+    if (!slot.touched || now === slot.wrote) {
+      parts.push(now === slot.wrote ? { ...slot, touched: false } : slot);
+      continue;
+    }
+    const split = insertedLines(slot.wrote, now, slot.lineEnd);
+    // Above the first recorded line: outside the block, not a line of the
+    // author's inside it — left as an edit inside, as it always was.
+    const above = slot === firstBlock ? firstStepUnit(slot.wrote, slot.lineEnd) : -1;
+    if (!split || split.some((p) => p.mine && p.before <= above)) {
+      parts.push(slot);
+      continue;
+    }
+    let at = slot.start;
+    for (const p of split) {
+      parts.push(
+        p.mine
+          ? typingLine(at, p.text, slot.lineEnd)
+          : { ...slot, start: at, end: at + p.text.length, wrote: p.text, touched: false },
+      );
+      at += p.text.length;
+    }
+  }
+  // Whole lines between two parts of the run: the author's new lines. Above
+  // every recorded line — nothing but empty block parts before them — they
+  // are outside the block: the empty parts move down past them.
+  const withGaps: RecordSlot[] = [];
+  for (const slot of parts) {
+    const prev = withGaps[withGaps.length - 1];
+    if (prev && prev.end > slot.start) return null;
+    if (prev && prev.end < slot.start) {
+      if (withGaps.every((s) => s.kind === 'block' && s.start === s.end)) {
+        for (const s of withGaps) s.start = s.end = slot.start;
+      } else {
+        const lineEnd = prev.lineEnd && !atLineStart(text, prev.end);
+        if (!wholeLines(text, prev.end, slot.start, lineEnd)) return null;
+        let at = prev.end;
+        for (const unit of unitsOf(text.slice(prev.end, slot.start), lineEnd)) {
+          withGaps.push(typingLine(at, unit, lineEnd));
+          at += unit.length;
+        }
+      }
+    }
+    withGaps.push({ ...slot });
+  }
+  // block, mine, block, …, block.
+  const out: RecordSlot[] = [];
+  for (const slot of withGaps) {
+    const prev = out[out.length - 1];
+    if (slot.kind === 'block') {
+      if (prev?.kind === 'block') {
+        // A line of the author's between them was deleted: one part again.
+        if (prev.end !== slot.start || (prev.lineEnd !== slot.lineEnd && prev.end > prev.start && slot.end > slot.start)) {
+          return null;
+        }
+        if (prev.end === prev.start) prev.lineEnd = slot.lineEnd;
+        prev.end = slot.end;
+        prev.wrote += slot.wrote;
+        prev.touched = prev.touched === true || slot.touched === true;
+        continue;
+      }
+      out.push(slot);
+      continue;
+    }
+    if (!prev || prev.kind === 'mine') out.push(emptyBlock(slot.start, slot.lineEnd));
+    out.push(slot);
+  }
+  if (out[out.length - 1]?.kind === 'mine') {
+    const lastMine = out[out.length - 1]!;
+    out.push(emptyBlock(lastMine.end, lastMine.lineEnd));
+  }
+  // An empty block part sits right after the author's line before it — or,
+  // the first one, right in front of the line after it.
+  for (let i = 0; i < out.length; i++) {
+    const slot = out[i]!;
+    if (slot.kind !== 'block' || slot.start !== slot.end) continue;
+    const before = out[i - 1];
+    const after = out[i + 1];
+    if (before?.kind === 'mine') {
+      slot.start = slot.end = before.end;
+      slot.lineEnd = before.lineEnd;
+    } else if (!before && after?.kind === 'mine') {
+      slot.start = slot.end = after.start;
+      slot.lineEnd = after.lineEnd;
+    }
+  }
+  return { ...record, slots: sortSlots([...others, ...out]) };
+}
+
+/** One `add-step` for lines the author finished writing in the file. */
+export interface AuthorStepCommit {
+  /** The keys of the author's lines it carries, in order. */
+  keys: string[];
+  /** Their steps, one per line, as sent (`cleanAuthorLine`). */
+  lines: string[];
+  /**
+   * The step of the draft last written that the first of them follows — its
+   * 0-based index in that draft (the server puts them at `afterStep + 1`).
+   * Absent when they are at the end of the run, below everything recorded:
+   * the server puts them after all of it.
+   */
+  afterStep?: number;
+}
+
+/**
+ * The author's lines that count as WRITTEN now (stories/testbench-record-toolbar.md
+ * §"Steps typed in the editor"): lines not counted yet (`typing`) with a step
+ * on them that no cursor is on — the author left the line, by moving the
+ * cursor or pressing Enter. A blank line never counts, and a line a cursor is
+ * on is still being typed: a half-finished sentence is not locked in.
+ *
+ * Each counted line becomes `sent`; lines next to each other that count at
+ * once are ONE add-step, several lines in order. `cursors` are offsets into
+ * `text`, the document as it is; a record whose offsets cannot be trusted
+ * (`uncertain`) counts nothing.
+ */
+export function commitAuthorLines(
+  live: LiveRecord,
+  text: string,
+  cursors: number[],
+): { record: LiveRecord; commits: AuthorStepCommit[] } {
+  if (live.uncertain) return { record: live, commits: [] };
+  const run = live.slots.filter(isRun);
+  const now = new Map<RecordSlot, string>();
+  for (let i = 0; i < run.length; i++) {
+    const s = run[i]!;
+    if (s.kind !== 'mine' || s.status !== 'typing' || !s.key) continue;
+    if (text.slice(s.start, s.end) !== s.wrote) continue; // not where it was followed to
+    const step = cleanAuthorLine(mineLineText(s));
+    if (step === '') continue;
+    // Above every step the recording holds (they were all dropped since the
+    // line was typed): not a place in the recording — lines above the block
+    // are outside it.
+    if (!atRunEnd(run, i) && stepsAbove(run, i) === 0) continue;
+    const brk = s.lineEnd ? (s.wrote.startsWith('\r\n') ? 2 : 1) : s.wrote.endsWith('\r\n') ? 2 : s.wrote.endsWith('\n') ? 1 : 0;
+    const from = s.lineEnd ? s.start + brk : s.start;
+    const to = s.lineEnd ? s.end : s.end - brk;
+    if (cursors.some((c) => c >= from && c <= to)) continue;
+    now.set(s, step);
+  }
+  if (now.size === 0) return { record: live, commits: [] };
+  const commits: AuthorStepCommit[] = [];
+  let open: AuthorStepCommit | null = null;
+  for (let i = 0; i < run.length; i++) {
+    const s = run[i]!;
+    if (s.kind === 'block') {
+      if (s.end > s.start) open = null;
+      continue;
+    }
+    const step = now.get(s);
+    if (step === undefined) {
+      open = null;
+      continue;
+    }
+    if (open === null) {
+      open = { keys: [], lines: [], ...(!atRunEnd(run, i) && { afterStep: stepsAbove(run, i) - 1 }) };
+      commits.push(open);
+    }
+    open.keys.push(s.key!);
+    open.lines.push(step);
+  }
+  const slots = live.slots.map((s) => {
+    const step = now.get(s);
+    return step === undefined ? s : { ...s, status: 'sent' as const, sentText: step };
+  });
+  return { record: { ...live, slots }, commits };
+}
+
+/**
+ * `record:step` named a step from the editor: the line of the author's that
+ * was sent as that text, and has no id yet, is that step.
+ */
+export function assignAuthorStepId(live: LiveRecord, id: string, text: unknown): LiveRecord {
+  if (live.slots.some((s) => s.kind === 'mine' && s.stepId === id)) return live;
+  const want = cleanStepText(text);
+  const k = live.slots.findIndex((s) => s.kind === 'mine' && s.status === 'sent' && !s.stepId && s.sentText === want);
+  if (k < 0) return live;
+  return { ...live, slots: live.slots.map((s, i) => (i === k ? { ...s, stepId: id } : s)) };
+}
+
+/**
+ * The server did not take these lines (the add-step failed, or did nothing):
+ * they stay the author's text in the file — `kept`, never sent again — and
+ * the recording keeps writing around them.
+ */
+export function keepAuthorLines(live: LiveRecord, keys: string[]): LiveRecord {
+  const slots = live.slots.map((s) =>
+    s.kind === 'mine' && s.key && keys.includes(s.key) && s.status === 'sent' && !s.stepId ? { ...s, status: 'kept' as const } : s,
+  );
+  return { ...live, slots };
+}
+
+/** The author's lines in the recorded block, in order — for the panel's tests
+ *  and the log. */
+export function authorLinesOf(
+  live: LiveRecord,
+): Array<{ key: string; line: string; status: 'typing' | 'sent' | 'kept'; stepId?: string; inDraft: boolean }> {
+  return live.slots
+    .filter((s) => s.kind === 'mine')
+    .map((s) => ({
+      key: s.key ?? '',
+      line: mineLineText(s),
+      status: s.status ?? 'typing',
+      ...(s.stepId !== undefined && { stepId: s.stepId }),
+      inDraft: s.inDraft === true,
+    }));
+}
+
+/** `text[start, end)` is whole lines: each ended by its line break, or — a
+ *  region hanging off the end of a line — each begun by one. */
+function wholeLines(text: string, start: number, end: number, lineEnd: boolean): boolean {
+  if (start === end) return true;
+  const part = text.slice(start, end);
+  return lineEnd ? atLineEnd(text, start) && startsWithBreak(part) && atLineEnd(text, end) : atLineStart(text, start) && part.endsWith('\n');
+}
+
+/** A new line of the author's at `at`, reading `unit`, not counted yet. */
+function typingLine(at: number, unit: string, lineEnd: boolean): RecordSlot {
+  return { kind: 'mine', start: at, end: at + unit.length, lineEnd, wrote: unit, key: nextMineKey(), status: 'typing' };
+}
+
+function emptyBlock(at: number, lineEnd: boolean): RecordSlot {
+  return { kind: 'block', start: at, end: at, lineEnd, wrote: '' };
+}
+
+/** The index of the first unit of `text` holding a step (a non-blank line), or
+ *  the number of units when there is none. */
+function firstStepUnit(text: string, lineEnd: boolean): number {
+  const units = unitsOf(text, lineEnd);
+  const i = units.findIndex((u) => unitLine(u).trim() !== '');
+  return i < 0 ? units.length : i;
+}
+
+/**
+ * `now` as `was` with whole lines put in between its lines, and nothing else
+ * changed — each piece in order, `mine` for an inserted line (`before`: how
+ * many of `was`'s lines are above it), the recording's runs of lines
+ * otherwise. Null when `now` is anything else.
+ */
+function insertedLines(
+  was: string,
+  now: string,
+  lineEnd: boolean,
+): Array<{ text: string; mine: boolean; before: number }> | null {
+  const a = unitsOf(was, lineEnd);
+  const b = unitsOf(now, lineEnd);
+  if (b.length <= a.length || b.join('') !== now) return null;
+  const out: Array<{ text: string; mine: boolean; before: number }> = [];
+  let i = 0;
+  for (const unit of b) {
+    if (i < a.length && unit === a[i]) {
+      const last = out[out.length - 1];
+      if (last && !last.mine) last.text += unit;
+      else out.push({ text: unit, mine: false, before: i });
+      i++;
+    } else {
+      out.push({ text: unit, mine: true, before: i });
+    }
+  }
+  return i === a.length ? out : null;
 }
 
 /**
@@ -1614,7 +2469,9 @@ function verifyInPlace(record: LiveRecord, current: string, model: () => LineMod
     if (slot.kind === 'tail') continue;
     if (!regionInPlace(current, slot)) return null;
     regions.push({ ...slot });
-    if (slot.kind === 'block') blockEnd = slot.end;
+    // Later steps are looked for below the whole run, the author's lines in it
+    // included.
+    if (isRun(slot)) blockEnd = Math.max(blockEnd, slot.end);
   }
   const tails = placeTails(
     record.slots.filter((s) => s.kind === 'tail'),
@@ -1708,18 +2565,27 @@ function findWritten(
   anchorIdx: number,
   paramsPoint: () => { at: number; lineEnd: boolean } | null,
 ): RecordSlot[] | null {
-  const block = snapshot.find((s) => s.kind === 'block');
+  // The run — the block, and the author's lines in it — as one text: it is
+  // one run of whole lines in the file.
+  const run = sortSlots(snapshot).filter(isRun);
   const params = snapshot.find((s) => s.kind === 'params');
-  if (!block || block.wrote === '') return null;
-  const blockAt = uniqueAt(current, block.wrote, block.lineEnd);
+  const block = run.find((s) => s.wrote !== '');
+  if (!block || !run.some((s) => s.kind === 'block' && s.wrote !== '')) return null;
+  const runText = run.map((s) => s.wrote).join('');
+  const blockAt = uniqueAt(current, runText, block.lineEnd);
   if (blockAt === null) return null;
-  const blockEnd = blockAt + block.wrote.length;
+  const blockEnd = blockAt + runText.length;
   if (anchorIdx >= 0) {
     const lead = block.lineEnd ? (block.wrote.startsWith('\r\n') ? 2 : 1) : 0;
     const first = lineAtOffset(lineStarts(current), blockAt + lead);
     if (first <= anchorIdx) return null;
   }
-  const regions: RecordSlot[] = [{ ...block, start: blockAt, end: blockEnd, touched: false }];
+  const regions: RecordSlot[] = [];
+  let pos = blockAt;
+  for (const part of run) {
+    regions.push({ ...part, start: pos, end: pos + part.wrote.length, touched: false });
+    pos += part.wrote.length;
+  }
   if (params) {
     if (params.wrote !== '') {
       const at = uniqueAt(current, params.wrote, params.lineEnd);
@@ -1789,6 +2655,8 @@ function nothingLeft(record: LiveRecord, current: string, found: RecordSlot[] | 
         if (slot.wrote !== slot.original) ours.add(slot.wrote + (slot.rest ?? ''));
         continue;
       }
+      // The author's lines are theirs, not the recording's.
+      if (slot.kind === 'mine') continue;
       for (const line of slot.wrote.split(/\r?\n/)) if (line.trim() !== '') ours.add(line);
     }
     for (const line of ours) if ((now.get(line) ?? 0) > (base.get(line) ?? 0)) return false;
@@ -1800,7 +2668,10 @@ function nothingLeft(record: LiveRecord, current: string, found: RecordSlot[] | 
  *  the block before the step it is inserted ahead of — the order the text
  *  reads in (a stable sort of slots listed in that order). */
 function sortSlots(slots: RecordSlot[]): RecordSlot[] {
-  const rank = { params: 0, block: 1, tail: 2 } as const;
+  // The run's parts (block and mine) share a rank: at one offset — an empty
+  // block part against the author's line after it — they keep the order they
+  // are listed in, which is the run's (a stable sort).
+  const rank = { params: 0, block: 1, mine: 1, tail: 2 } as const;
   return [...slots].sort((a, b) => a.start - b.start || rank[a.kind] - rank[b.kind]);
 }
 
@@ -1838,8 +2709,17 @@ export function recordedLines(
  * next activation. Text only: offsets mean nothing after a restart.
  */
 export interface UnfinishedRecording {
+  /** The recorded block as one run of lines — the author's own lines in it
+   *  included, when `parts` says there are any. */
   block: string;
   blockLineEnd: boolean;
+  /**
+   * `block` in order, when lines of the author's are in it
+   * (stories/testbench-record-toolbar.md §"Steps typed in the editor"): the
+   * removal takes out the recording's parts and keeps the author's. Absent:
+   * all of `block` is the recording's.
+   */
+  parts?: Array<{ text: string; mine: boolean }>;
   params: string;
   paramsLineEnd: boolean;
   section: string | null;
@@ -1852,12 +2732,15 @@ export interface UnfinishedRecording {
  *  file (no steps written, or not where the offsets say). */
 export function unfinishedRecordingOf(live: LiveRecord): UnfinishedRecording | null {
   if (live.uncertain) return null;
-  const block = live.slots.find((s) => s.kind === 'block');
+  const run = live.slots.filter(isRun);
+  const block = run.find((s) => s.wrote !== '');
   const params = live.slots.find((s) => s.kind === 'params');
-  if (!block || block.wrote === '') return null;
+  if (!block || !run.some((s) => s.kind === 'block' && s.wrote !== '')) return null;
+  const mine = run.some((s) => s.kind === 'mine');
   return {
-    block: block.wrote,
+    block: run.map((s) => s.wrote).join(''),
     blockLineEnd: block.lineEnd,
+    ...(mine && { parts: run.filter((s) => s.wrote !== '').map((s) => ({ text: s.wrote, mine: s.kind === 'mine' })) }),
     params: params?.wrote ?? '',
     paramsLineEnd: params?.lineEnd ?? false,
     section: live.section,
@@ -1881,9 +2764,18 @@ export function removeUnfinishedRecording(
 ): { edits: OffsetEdit[]; text: string } | null {
   const eol = current.includes('\r\n') ? '\r\n' : '\n';
   const convert = (s: string): string => s.replace(/\r?\n/g, eol);
+  const run: RecordSlot[] = Array.isArray(unfinished.parts)
+    ? unfinished.parts.map((p) => ({
+        kind: p.mine ? ('mine' as const) : ('block' as const),
+        start: 0,
+        end: 0,
+        lineEnd: unfinished.blockLineEnd,
+        wrote: convert(String(p.text ?? '')),
+      }))
+    : [{ kind: 'block', start: 0, end: 0, lineEnd: unfinished.blockLineEnd, wrote: convert(unfinished.block) }];
   const snapshot: RecordSlot[] = [
     { kind: 'params', start: 0, end: 0, lineEnd: unfinished.paramsLineEnd, wrote: convert(unfinished.params) },
-    { kind: 'block', start: 0, end: 0, lineEnd: unfinished.blockLineEnd, wrote: convert(unfinished.block) },
+    ...run,
     ...unfinished.tails.map(
       (t): RecordSlot => ({ kind: 'tail', start: 0, end: 0, lineEnd: false, wrote: t.wrote, original: t.original, rest: t.rest }),
     ),
@@ -1904,7 +2796,8 @@ export function removeUnfinishedRecording(
       if (slot.placed && slot.wrote !== slot.original) {
         edits.push({ start: slot.start, end: slot.end, text: slot.original ?? '', kind: 'tail' });
       }
-    } else if (slot.end > slot.start) {
+    } else if (slot.kind !== 'mine' && slot.end > slot.start) {
+      // The author's own lines in the block stay.
       edits.push({ start: slot.start, end: slot.end, text: '', kind: slot.kind });
     }
   }
@@ -2183,12 +3076,14 @@ export function formatRecordTime(atMs: number): string {
  */
 export function recordingStatusText(state: {
   phase: string;
+  paused?: boolean;
   actions: Array<{ dropped: boolean; action?: boolean }>;
 }): string {
   if (state.phase === 'finishing') return 'Finishing…';
   if (state.phase === 'starting') return 'Recording — starting…';
   const n = state.actions.filter((a) => !a.dropped && a.action !== false).length;
-  return `Recording — ${n} ${n === 1 ? 'action' : 'actions'}`;
+  // stories/testbench-record-toolbar.md §"Pause and resume, in detail".
+  return `${state.paused ? 'Recording paused' : 'Recording'} — ${n} ${n === 1 ? 'action' : 'actions'}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2264,9 +3159,30 @@ export function applyRecordFrame(state: RecordingPanelState, event: { type: stri
       if (!Number.isFinite(revision)) return false;
       if (state.draft !== null && revision <= state.draft.revision) return false;
       const through = event['through'];
+      // Blank steps are dropped, so the author's indices are mapped onto the
+      // steps as kept.
+      const raw = Array.isArray(event['steps']) ? event['steps'] : [];
+      const steps: string[] = [];
+      const kept = new Map<number, number>();
+      raw.forEach((r, i) => {
+        const s = cleanStepText(r);
+        if (s === '') return;
+        kept.set(i, steps.length);
+        steps.push(s);
+      });
+      const ids = Array.isArray(event['authoredIds']) ? event['authoredIds'] : [];
+      const authored: number[] = [];
+      const authoredIds: string[] = [];
+      (Array.isArray(event['authored']) ? event['authored'] : []).forEach((idx, k) => {
+        const at = kept.get(Number(idx));
+        if (at === undefined || authored.includes(at)) return;
+        authored.push(at);
+        authoredIds.push(typeof ids[k] === 'string' ? (ids[k] as string) : '');
+      });
+      const locked = Number(event['locked']);
       state.draft = {
         revision,
-        steps: (Array.isArray(event['steps']) ? event['steps'] : []).map(cleanStepText).filter((s) => s !== ''),
+        steps,
         parameters: (Array.isArray(event['parameters']) ? event['parameters'] : [])
           .map((p) => {
             const o = (p ?? {}) as { name?: unknown; value?: unknown };
@@ -2275,6 +3191,10 @@ export function applyRecordFrame(state: RecordingPanelState, event: { type: stri
           .filter((p) => p.name !== ''),
         notes: (Array.isArray(event['notes']) ? event['notes'] : []).map(String).filter((n) => n.trim() !== ''),
         ...(typeof through === 'string' && through !== '' && { through }),
+        // Locking (stories/testbench-record-toolbar.md §"Locking in"): the
+        // steps the model can no longer rewrite, and the author's own.
+        ...(Number.isFinite(locked) && locked > 0 && { locked: Math.min(Math.floor(locked), steps.length) }),
+        ...(authored.length > 0 && { authored, authoredIds }),
       };
       return true;
     }
@@ -2282,7 +3202,101 @@ export function applyRecordFrame(state: RecordingPanelState, event: { type: stri
       state.phase = 'finishing';
       state.pickArmed = false;
       return true;
+    case 'record:paused': {
+      // stories/testbench-record-toolbar.md §"Pause and resume, in detail":
+      // a `❚❚ Paused` / `▶ Resumed` row where it happened, and the status.
+      const paused = event['paused'] === true;
+      if ((state.paused === true) === paused) return false;
+      state.paused = paused;
+      if (paused) state.pickArmed = false;
+      const n = state.actions.filter((a) => a.kind === 'pause' || a.kind === 'resume').length;
+      state.actions.push({
+        id: `${paused ? 'pause' : 'resume'}-${n + 1}`,
+        kind: paused ? 'pause' : 'resume',
+        action: false,
+        summary: paused ? 'Paused' : 'Resumed',
+        atMs: Number(event['atMs']) || 0,
+        dropped: false,
+      });
+      return true;
+    }
+    case 'record:step': {
+      // A step of the author's joined the recording: `✎ Your step: …`, with
+      // a ✕ that drops it by its id like an action's.
+      const id = String(event['id'] ?? '');
+      const text = cleanStepText(event['text']);
+      if (id === '' || text === '') return false;
+      const raw = event['source'];
+      const source: 'toolbar' | 'editor' | 'panel' | undefined =
+        raw === 'toolbar' || raw === 'editor' || raw === 'panel' ? raw : undefined;
+      const entry = {
+        id,
+        kind: 'step' as const,
+        action: false,
+        summary: text,
+        atMs: Number(event['atMs']) || 0,
+        dropped: false,
+        ...(source !== undefined && { source }),
+      };
+      const at = state.actions.findIndex((a) => a.id === id);
+      if (at >= 0) state.actions[at] = { ...entry, dropped: state.actions[at]!.dropped };
+      else state.actions.push(entry);
+      return true;
+    }
+    case 'record:dropped': {
+      // A drop or restore made in the browser (the toolbar's Undo, Restore).
+      const row = state.actions.find((a) => a.id === String(event['id'] ?? ''));
+      const dropped = event['dropped'] === true;
+      if (!row || row.kind === 'pause' || row.kind === 'resume' || row.dropped === dropped) return false;
+      row.dropped = dropped;
+      return true;
+    }
     default:
       return false;
   }
+}
+
+/**
+ * Steps so far, marked (stories/testbench-record-toolbar.md): a lock on each
+ * locked step — the model can no longer rewrite it — and "yours" on each
+ * step the author wrote.
+ */
+export function draftStepMarks(
+  draft: { steps: string[]; locked?: number; authored?: number[] } | null,
+): Array<{ locked: boolean; yours: boolean }> {
+  if (!draft) return [];
+  const locked = Number.isFinite(draft.locked) ? Number(draft.locked) : 0;
+  const yours = new Set(Array.isArray(draft.authored) ? draft.authored : []);
+  return draft.steps.map((_, i) => ({ locked: i < locked, yours: yours.has(i) }));
+}
+
+/**
+ * The author's steps of the last draft, placed in the RESULT: `record:result`
+ * does not say which of its steps are the author's, and the result is the
+ * last draft with its open steps brought up to date — the author's steps are
+ * all in the locked part, so each is where the draft had it, or (a model that
+ * moved things anyway) the next step on with the same text. One not found is
+ * left out: its line in the file is then the author's text beside the result.
+ */
+export function authoredForResult(
+  draft: { steps: string[]; authored?: number[]; authoredIds?: string[] } | null,
+  resultSteps: unknown[],
+): { authored: number[]; authoredIds: string[] } {
+  const result = (Array.isArray(resultSteps) ? resultSteps : []).map(cleanStepText).filter((s) => s !== '');
+  const authored: number[] = [];
+  const authoredIds: string[] = [];
+  if (!draft?.authored || !draft.authoredIds) return { authored, authoredIds };
+  let from = 0;
+  draft.authored.forEach((idx, k) => {
+    const id = draft.authoredIds?.[k] ?? '';
+    const text = draft.steps[idx];
+    if (id === '' || text === undefined) return;
+    let at = result[idx] === text && idx >= from ? idx : -1;
+    if (at < 0) at = result.indexOf(text, from);
+    if (at < 0) return;
+    authored.push(at);
+    authoredIds.push(id);
+    from = at + 1;
+  });
+  return { authored, authoredIds };
 }

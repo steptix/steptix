@@ -814,6 +814,72 @@ export interface RecordDraftEvent {
   notes?: string[];
   /** Id of the last action the draft covers. */
   through?: string;
+  /**
+   * How many leading steps are LOCKED: the model can no longer rewrite them
+   * (stories/testbench-record-toolbar.md §"Locking in"). Everything up to and
+   * including the author's last step. A client reads an absent value as 0 —
+   * a server that predates locking.
+   */
+  locked?: number;
+  /** Indices (into `steps`) of the steps the author wrote — from the
+   *  toolbar's box, the editor, or the panel. Absent reads as none. */
+  authored?: number[];
+  /** Their ids (the `record:step` id), parallel to `authored`. */
+  authoredIds?: string[];
+}
+
+/**
+ * Pause or Resume — from the toolbar or the panel. While paused nothing is
+ * recorded and no draft call starts (stories/testbench-record-toolbar.md
+ * §"Pause and resume, in detail").
+ */
+export interface RecordPausedEvent {
+  type: 'record:paused';
+  paused: boolean;
+  /** Milliseconds since `record:started`. */
+  atMs: number;
+  source: 'toolbar' | 'panel';
+}
+
+/**
+ * A step the author wrote joined the recording — typed in the toolbar's box,
+ * in the test file (the editor), or given to the panel. Its id is dropped and
+ * restored like an action's.
+ */
+export interface RecordStepEvent {
+  type: 'record:step';
+  id: string;
+  /** The step as it goes in: one line, no leading number. */
+  text: string;
+  source: 'toolbar' | 'editor' | 'panel';
+  /** Where it sits: the 0-based index of the draft step it follows in the
+   *  draft it joined (-1 at the very start) — it is step `afterStep + 1` of
+   *  the next `record:draft`, whose `authored` says the same. */
+  afterStep: number;
+  atMs: number;
+}
+
+/**
+ * An action or a step of the author's was removed from the recording, or put
+ * back, somewhere other than this client (the toolbar's Undo / Restore) — the
+ * panel strikes the row through, or restores it.
+ */
+export interface RecordDroppedEvent {
+  type: 'record:dropped';
+  id: string;
+  dropped: boolean;
+  source: 'toolbar' | 'panel';
+}
+
+/** Where the browser toolbar docks: top or bottom, left, centre or right. */
+export type RecordToolbarDock = 'tl' | 'tc' | 'tr' | 'bl' | 'bc' | 'br';
+
+/** The toolbar was moved or minimised — TestBench remembers it for the next
+ *  recording and sends it back in the start body's `toolbar`. */
+export interface RecordToolbarEvent {
+  type: 'record:toolbar';
+  dock: RecordToolbarDock;
+  minimised: boolean;
 }
 
 /** Stop was received; the draft is being finished (one more call only when
@@ -846,6 +912,11 @@ export interface RecordDoneEvent {
   type: 'done';
   status: 'passed' | 'error' | 'aborted';
   error?: string;
+  /**
+   * `aborted` by Cancel pressed in the browser's toolbar: no error text, and
+   * TestBench takes the drafts out quietly, as for its own Cancel.
+   */
+  cancelledBy?: 'browser';
 }
 
 export type RecordStepsEvent =
@@ -854,6 +925,10 @@ export type RecordStepsEvent =
   | RecordPickEvent
   | RecordDraftingEvent
   | RecordDraftEvent
+  | RecordPausedEvent
+  | RecordStepEvent
+  | RecordDroppedEvent
+  | RecordToolbarEvent
   | RecordWritingEvent
   | RecordResultEvent
   | OutputEvent
@@ -870,6 +945,13 @@ export function isRecordStepsEvent(value: unknown): value is RecordStepsEvent {
     // drops what it rejects, so a frame missing here never reaches the panel.
     t === 'record:drafting' ||
     t === 'record:draft' ||
+    // The browser toolbar (stories/testbench-record-toolbar.md §"The wire,
+    // exactly"): pause markers, the author's steps, drops made in the page,
+    // and where the toolbar sits.
+    t === 'record:paused' ||
+    t === 'record:step' ||
+    t === 'record:dropped' ||
+    t === 'record:toolbar' ||
     t === 'record:writing' ||
     t === 'record:result' ||
     t === 'output' ||
@@ -902,6 +984,20 @@ export interface RecordStepsRequest {
   env?: Record<string, string>;
   /** The selected environment, as `StreamStepsRequest.envName`. */
   envName?: string;
+  /**
+   * The browser toolbar (stories/testbench-record-toolbar.md). Absent means
+   * `{ enabled: true, dock: 'bc', minimised: false }`. TestBench sends the
+   * `testbench-native.recordSteps.browserToolbar` setting as `enabled`, and
+   * the dock and minimised state the last recording's `record:toolbar` left.
+   */
+  toolbar?: {
+    /** false: no toolbar in the page. */
+    enabled: boolean;
+    /** Default `bc`. */
+    dock?: RecordToolbarDock;
+    /** Default false. */
+    minimised?: boolean;
+  };
 }
 
 /** `POST /sessions/:id/record-steps/control` — JSON, answers 202. */
@@ -910,11 +1006,44 @@ export type RecordControlRequest =
   | { action: 'check' }
   | { action: 'cancel-check' }
   | { action: 'cancel' }
-  /** Leave this action out, and redraft now (decision 9). The server also
-   *  unions `stop`'s `dropped` with these. */
+  /** Leave this action — or step of the author's — out, and redraft now
+   *  (decision 9). The server also unions `stop`'s `dropped` with these. */
   | { action: 'drop'; id: string }
-  /** Put a dropped action back, and redraft now. */
-  | { action: 'restore'; id: string };
+  /** Put a dropped action or step back, and redraft now. */
+  | { action: 'restore'; id: string }
+  /** Stop recording and drafting until `resume`. */
+  | { action: 'pause' }
+  | { action: 'resume' }
+  /**
+   * A step the author wrote — in the test file (`editor`) or given to the
+   * panel / the Add Step to Recording command (`panel`); the toolbar's box
+   * goes through the page, not here. One line is one step; several lines are
+   * several steps, in order. Everything drafted up to it is locked.
+   */
+  | {
+      action: 'add-step';
+      text: string;
+      source: 'editor' | 'panel';
+      /**
+       * Where it goes, in the draft the author saw (`revision`): the 0-based
+       * index of the step it goes AFTER (0 or more). Absent: at the end,
+       * after everything recorded so far.
+       */
+      afterStep?: number;
+      /** The `record:draft` revision `afterStep` refers to. */
+      revision?: number;
+    };
+
+/**
+ * What a control call answered: `ignored` when the server accepted the call
+ * but it did nothing (a pause while paused, an add-step after Stop), with the
+ * server's sentence for why as `reason` when it sent one (`{ ok: true,
+ * ignored: "<why>" }`). A server that sends no body is read as `{}`.
+ */
+export interface RecordControlAnswer {
+  ignored?: boolean;
+  reason?: string;
+}
 
 /**
  * The panel's Recording block, as the host holds it. The host is the source of
@@ -935,18 +1064,31 @@ export interface RecordingPanelState {
   phase: 'starting' | 'recording' | 'finishing';
   /** Add check is armed — from the last `record:pick`. */
   pickArmed: boolean;
+  /** Paused — from the last `record:paused` (the toolbar's or the panel's).
+   *  Absent until the first one: not paused. */
+  paused?: boolean;
   /** Where the browser was when recording started. */
   startedUrl?: string;
+  /**
+   * The action list, in the order things happened: each action (`record:action`),
+   * and — since the browser toolbar — a `pause` / `resume` marker per
+   * `record:paused` and a `step` row per step of the author's (`record:step`).
+   * Markers are not actions (`action: false`) and cannot be dropped; a step
+   * row is dropped and restored by its id, like an action.
+   */
   actions: Array<{
     id: string;
-    kind: RecordActionKind;
+    kind: RecordingEntryKind;
     /** `record:action.action`: false for an event that rides with the next
-     *  action (typing, selecting, ticking…). */
+     *  action (typing, selecting, ticking…), and for markers and steps. */
     action: boolean;
+    /** The action's summary; a step's text; a marker's word. */
     summary: string;
     atMs: number;
     tab?: string;
     dropped: boolean;
+    /** `step` rows: where the author wrote it. */
+    source?: 'toolbar' | 'editor' | 'panel';
   }>;
   /**
    * Steps so far: the latest `record:draft`, whole — each newer revision
@@ -958,10 +1100,21 @@ export interface RecordingPanelState {
     parameters: Array<{ name: string; value: string }>;
     notes: string[];
     through?: string;
+    /** How many leading steps are locked. Absent when the frame said none
+     *  (a server that predates locking). */
+    locked?: number;
+    /** Indices into `steps` of the author's own steps, when there are any. */
+    authored?: number[];
+    /** Their ids, parallel to `authored` ('' where the server sent none). */
+    authoredIds?: string[];
   } | null;
   /** A draft call is running — the "updating…" marker (`record:drafting`). */
   drafting: boolean;
 }
+
+/** A row of the panel's action list: an action, or one of the toolbar's
+ *  additions — a pause or resume marker, or a step of the author's. */
+export type RecordingEntryKind = RecordActionKind | 'pause' | 'resume' | 'step';
 
 // ---------------------------------------------------------------------------
 // Per-document state snapshot (sent host → webview)
@@ -1646,6 +1799,24 @@ export interface WebviewRecordDropMsg {
   dropped: boolean;
 }
 
+/**
+ * The Recording block's Pause / Resume (stories/testbench-record-toolbar.md
+ * §"VS Code alongside"). Carries the state wanted, like `recordDrop`: the
+ * button shows what `record:paused` said, and a double click that crosses a
+ * re-post cannot flip it back.
+ */
+export interface WebviewRecordPauseMsg {
+  type: 'recordPause';
+  paused: boolean;
+}
+
+/** The Recording block's Add step box: one line is one step, several lines
+ *  are several steps, in order. */
+export interface WebviewRecordAddStepMsg {
+  type: 'recordAddStep';
+  text: string;
+}
+
 export type WebviewToHostMsg =
   | WebviewRecordStepsMsg
   | WebviewRecordNewTestMsg
@@ -1653,6 +1824,8 @@ export type WebviewToHostMsg =
   | WebviewRecordCancelMsg
   | WebviewRecordCheckMsg
   | WebviewRecordDropMsg
+  | WebviewRecordPauseMsg
+  | WebviewRecordAddStepMsg
   | WebviewCompileMsg
   | WebviewReadyMsg
   | WebviewRunMsg
@@ -1733,7 +1906,10 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'recordStop' ||
     t === 'recordCancel' ||
     t === 'recordCheck' ||
-    t === 'recordDrop'
+    t === 'recordDrop' ||
+    // The browser toolbar's panel parity (stories/testbench-record-toolbar.md).
+    t === 'recordPause' ||
+    t === 'recordAddStep'
   );
 }
 

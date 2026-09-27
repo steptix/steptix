@@ -47,7 +47,7 @@ import {
   setRowsFor,
   variablesHeaderSuffix,
 } from "./lib/rows-panel.js";
-import { formatRecordTimeInline, recordingStatusTextInline } from "./lib/recording-panel.js";
+import { draftStepMarksInline, formatRecordTimeInline, recordingStatusTextInline } from "./lib/recording-panel.js";
 
 // Inline narrowing helper. The webview can't import named exports from
 // runner-core directly because Vite's CJS interop drops names through
@@ -244,10 +244,44 @@ function CompileStrip({ state }) {
   );
 }
 
+/** A small padlock, in the text colour: a step the model can no longer
+ *  rewrite (stories/testbench-record-toolbar.md §"Locking in"). */
+function LockIcon() {
+  return (
+    <svg viewBox="0 0 12 12" width={11} height={11} aria-hidden="true" style={{ flexShrink: 0, verticalAlign: "-0.1em" }}>
+      <rect x="2.5" y="5.2" width="7" height="5" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M4 5.2V3.8a2 2 0 0 1 4 0v1.4" fill="none" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+/** The author's own step, marked in Steps so far. */
+function YoursTag() {
+  return (
+    <span
+      style={{
+        flexShrink: 0,
+        fontSize: "0.78em",
+        fontWeight: 600,
+        letterSpacing: "0.3px",
+        padding: "0 5px",
+        borderRadius: 3,
+        background: "var(--vscode-badge-background, #4d4d4d)",
+        color: "var(--vscode-badge-foreground, #fff)",
+      }}
+    >
+      yours
+    </span>
+  );
+}
+
 /**
  * The Recording block (stories/testbench-record-steps.md, decisions 9 and 13;
  * SPEC-record-steps.md §3.2): the live action list, the Steps so far the model
- * is drafting as the author works, Add check, Stop and Cancel.
+ * is drafting as the author works, Add check, Stop and Cancel — and, for
+ * parity with the browser toolbar (stories/testbench-record-toolbar.md §"VS
+ * Code alongside"), Pause / Resume, an Add step box, the pause markers and the
+ * author's own steps in the action list, and the locks in Steps so far.
  *
  * Everything shown comes from the host's `recording` message — the ✕ asks the
  * host to drop a row and the host re-posts the list — so what Stop sends as
@@ -258,6 +292,7 @@ function CompileStrip({ state }) {
 function RecordingPanel({ state }) {
   const listRef = useRef(null);
   const draftRef = useRef(null);
+  const [stepText, setStepText] = useState("");
   const count = state ? state.actions.length : 0;
   const revision = state?.draft ? state.draft.revision : 0;
   // Follow the newest action, and the newest draft, as a log does.
@@ -272,7 +307,15 @@ function RecordingPanel({ state }) {
   if (!state) return null;
   const finishing = state.phase === "finishing";
   const starting = state.phase === "starting";
+  const recordingNow = state.phase === "recording";
+  const paused = state.paused === true;
   const draft = state.draft;
+  const marks = draftStepMarksInline(draft);
+  const addStep = () => {
+    if (!recordingNow || stepText.trim() === "") return;
+    hostBridge.postRecordAddStep(stepText);
+    setStepText("");
+  };
   return (
     <div
       data-testid="recording-panel"
@@ -286,6 +329,8 @@ function RecordingPanel({ state }) {
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
         {finishing ? (
           <Spinner />
+        ) : paused ? (
+          <span aria-hidden="true" style={{ color: "var(--vscode-editorWarning-foreground, #cca700)" }}>❚❚</span>
         ) : (
           <span aria-hidden="true" style={{ color: "var(--vscode-debugIcon-breakpointForeground, #e51400)" }}>●</span>
         )}
@@ -307,6 +352,11 @@ function RecordingPanel({ state }) {
           Click the element to check in the browser. That click is not performed.
         </div>
       )}
+      {paused && recordingNow && (
+        <div data-testid="recording-paused" style={{ fontSize: "0.9em", marginBottom: 4, color: "var(--vscode-editorWarning-foreground, #cca700)" }}>
+          Paused. Nothing you do in the browser is recorded until you resume.
+        </div>
+      )}
       {finishing && (
         <div style={{ opacity: 0.75, fontSize: "0.9em", marginBottom: 4 }}>
           Bringing the draft up to date. It goes into the file as one edit, so one undo takes it back.
@@ -314,7 +364,62 @@ function RecordingPanel({ state }) {
       )}
       {state.actions.length > 0 && (
         <div ref={listRef} style={{ maxHeight: 180, overflowY: "auto", marginBottom: 6 }}>
-          {state.actions.map((a) => (
+          {state.actions.map((a) =>
+            a.kind === "pause" || a.kind === "resume" ? (
+              // `❚❚ Paused` / `▶ Resumed` where it happened — a marker, not an
+              // action: nothing to drop.
+              <div
+                key={a.id}
+                className="tb-step"
+                style={{ cursor: "default", opacity: 0.8, fontStyle: "italic" }}
+                title={a.kind === "pause" ? "Recording paused here" : "Recording resumed here"}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{ flexShrink: 0, color: a.kind === "pause" ? "var(--vscode-editorWarning-foreground, #cca700)" : "inherit" }}
+                >
+                  {a.kind === "pause" ? "❚❚" : "▶"}
+                </span>
+                <span style={{ flex: 1, minWidth: 0 }}>{a.summary}</span>
+                <span style={{ flexShrink: 0, opacity: 0.6, fontVariantNumeric: "tabular-nums", fontSize: "0.85em" }}>
+                  {formatRecordTimeInline(a.atMs)}
+                </span>
+              </div>
+            ) : a.kind === "step" ? (
+              // `✎ Your step: …` — a step the author wrote; ✕ drops it by its id.
+              <div
+                key={a.id}
+                className="tb-step"
+                style={{
+                  cursor: "default",
+                  opacity: a.dropped ? 0.5 : 1,
+                  textDecoration: a.dropped ? "line-through" : "none",
+                }}
+                title={
+                  a.dropped
+                    ? "Dropped — this step of yours is left out"
+                    : `Your step${a.source === "editor" ? ", typed in the test file" : a.source === "toolbar" ? ", added in the browser" : ""}: ${a.summary}`
+                }
+              >
+                <span aria-hidden="true" style={{ flexShrink: 0 }}>✎</span>
+                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <span style={{ opacity: 0.7 }}>Your step: </span>
+                  {a.summary}
+                </span>
+                <span style={{ flexShrink: 0, opacity: 0.6, fontVariantNumeric: "tabular-nums", fontSize: "0.85em" }}>
+                  {formatRecordTimeInline(a.atMs)}
+                </span>
+                <button
+                  className="tb-btn"
+                  disabled={finishing}
+                  onClick={() => hostBridge.postRecordDrop(a.id, !a.dropped)}
+                  title={a.dropped ? "Put this step back" : "Drop this step of yours"}
+                  style={{ padding: "0 6px", textDecoration: "none" }}
+                >
+                  {a.dropped ? "↺" : "✕"}
+                </button>
+              </div>
+            ) : (
             <div
               key={a.id}
               className="tb-step"
@@ -346,11 +451,14 @@ function RecordingPanel({ state }) {
                 {a.dropped ? "↺" : "✕"}
               </button>
             </div>
-          ))}
+            ),
+          )}
         </div>
       )}
       {/* Steps so far — the latest draft, whole: each one REPLACES the list
-          (the model may have rewritten its last steps), numbered 1..n. */}
+          (the model may have rewritten its last steps), numbered 1..n. A lock
+          on the steps the model can no longer rewrite, "yours" on the
+          author's own (stories/testbench-record-toolbar.md). */}
       {!starting && (
         <div data-testid="recording-draft" style={{ marginBottom: 6 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.85em", letterSpacing: "0.5px", textTransform: "uppercase", opacity: 0.8, marginBottom: 2 }}>
@@ -364,7 +472,17 @@ function RecordingPanel({ state }) {
           {draft && draft.steps.length > 0 ? (
             <ol ref={draftRef} style={{ margin: 0, paddingLeft: 26, maxHeight: 200, overflowY: "auto" }}>
               {draft.steps.map((step, i) => (
-                <li key={i} style={{ padding: "1px 0", overflowWrap: "anywhere" }}>{step}</li>
+                <li key={i} style={{ padding: "1px 0", overflowWrap: "anywhere" }}>
+                  <span style={{ display: "inline-flex", alignItems: "baseline", gap: 5, flexWrap: "wrap" }}>
+                    <span style={{ opacity: marks[i]?.locked && !marks[i]?.yours ? 0.75 : 1 }}>{step}</span>
+                    {marks[i]?.yours && <YoursTag />}
+                    {marks[i]?.locked && (
+                      <span title="Locked: the model can no longer rewrite this step" style={{ opacity: 0.7 }}>
+                        <LockIcon />
+                      </span>
+                    )}
+                  </span>
+                </li>
               ))}
             </ol>
           ) : (
@@ -384,19 +502,63 @@ function RecordingPanel({ state }) {
           ))}
         </div>
       )}
+      {/* Add step: the author's own step, exactly as typed — everything
+          recorded so far is locked in above it. Enter adds (not while an
+          input method is composing), Shift+Enter starts another line: one line
+          per step. */}
+      {!starting && (
+        <div style={{ display: "flex", gap: 4, marginBottom: 6, alignItems: "flex-start" }}>
+          <textarea
+            data-testid="recording-add-step"
+            aria-label="Add a step"
+            value={stepText}
+            onChange={(e) => setStepText(e.target.value)}
+            rows={1}
+            disabled={!recordingNow}
+            placeholder={'Verify the balance shows "$1,234.56"'}
+            title="Add a step to the recording, exactly as it should read. Enter adds it; Shift+Enter for several steps."
+            style={{ flex: 1, minWidth: 0, padding: "3px 6px", fontFamily: "inherit", fontSize: "0.92em", background: "var(--vscode-input-background)", color: "var(--vscode-input-foreground)", border: "1px solid var(--vscode-input-border, transparent)", borderRadius: 2, outline: "none", boxSizing: "border-box", resize: "vertical" }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                addStep();
+              }
+            }}
+          />
+          <button
+            className="tb-btn"
+            disabled={!recordingNow || stepText.trim() === ""}
+            onClick={addStep}
+            title="Add this step to the recording"
+          >
+            ✎ Add step
+          </button>
+        </div>
+      )}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
         <button
           className={state.pickArmed ? "tb-btn tb-btn--primary" : "tb-btn"}
           aria-pressed={state.pickArmed}
-          disabled={state.phase !== "recording"}
+          disabled={!recordingNow || (paused && !state.pickArmed)}
           onClick={() => hostBridge.postRecordCheck()}
           title={
             state.pickArmed
               ? "Cancel Add check — the next click is performed as usual"
-              : "Add check: the next click in the browser picks the element to verify instead of clicking it"
+              : paused
+                ? "Resume to add a check"
+                : "Add check: the next click in the browser picks the element to verify instead of clicking it"
           }
         >
           ◎ {state.pickArmed ? "Picking…" : "Add check"}
+        </button>
+        <button
+          className={paused ? "tb-btn tb-btn--primary" : "tb-btn"}
+          aria-pressed={paused}
+          disabled={!recordingNow}
+          onClick={() => hostBridge.postRecordPause(!paused)}
+          title={paused ? "Resume recording" : "Pause recording: nothing you do in the browser is recorded until you resume"}
+        >
+          {paused ? "▶ Resume" : "❚❚ Pause"}
         </button>
         <button
           className="tb-btn tb-btn--primary"

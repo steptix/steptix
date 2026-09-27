@@ -9,6 +9,7 @@ import { SseParser, type SseFrame } from './sse-parser.js';
 import type {
   CompileEvent,
   CompileRequest,
+  RecordControlAnswer,
   RecordControlRequest,
   RecordStepsEvent,
   RecordStepsRequest,
@@ -542,13 +543,15 @@ export class ApiClient {
 
   /**
    * Steer a running recording: `stop` (write the steps, leaving `dropped`
-   * out), `check` / `cancel-check` (Add check), `cancel` (end, write nothing).
-   * The server answers 202; what happens next arrives on the record stream.
+   * out), `check` / `cancel-check` (Add check), `cancel` (end, write nothing),
+   * `drop` / `restore`, `pause` / `resume`, `add-step`. The server answers
+   * 202 — with `{ ignored: true }` when the call did nothing, which is what
+   * this returns; what happens next arrives on the record stream.
    *
    * 404 — no recording is running — is `not-found`, which a caller racing the
    * stream's own end can ignore.
    */
-  async controlRecordSteps(sessionId: string, body: RecordControlRequest): Promise<void> {
+  async controlRecordSteps(sessionId: string, body: RecordControlRequest): Promise<RecordControlAnswer> {
     const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}/record-steps/control`;
     let response: Response;
     try {
@@ -576,6 +579,16 @@ export class ApiClient {
         status: response.status,
         ...(excerpt !== undefined && { bodyExcerpt: excerpt }),
       });
+    }
+    // 202, with a body or none: only `ignored` is read from it — the server
+    // sends why (a sentence), or just `true`.
+    const answer = await readBody(response);
+    try {
+      const ignored = (answer ? (JSON.parse(answer) as { ignored?: unknown } | null) : null)?.ignored;
+      if (typeof ignored === 'string' && ignored !== '') return { ignored: true, reason: ignored };
+      return ignored === true ? { ignored: true } : {};
+    } catch {
+      return {};
     }
   }
 
@@ -911,6 +924,15 @@ function errorFrom(bodyExcerpt: string | undefined): string | undefined {
     const parsed: unknown = JSON.parse(bodyExcerpt);
     const message = (parsed as { error?: unknown })?.error;
     return typeof message === 'string' ? message : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A whole (small) response body, or undefined when it cannot be read. */
+async function readBody(response: Response): Promise<string | undefined> {
+  try {
+    return await response.text();
   } catch {
     return undefined;
   }

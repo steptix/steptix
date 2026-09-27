@@ -855,3 +855,84 @@ Recording*, *Resume Recording*, *Add Step to Recording*, a Pause/Resume and an
 Add step box in the panel, pause markers and `✎ Your step: …` rows (with ✕) in
 the action list, strikes rows on `record:dropped`, and a setting
 `testbench-native.recordSteps.browserToolbar` (boolean, default true).
+
+## What the TestBench half built
+
+TestBench 0.5.155. The wire is as above, with two readings made exact while
+building against the server half. `afterStep` in `add-step` is the index of
+the step the new one goes **after** in the draft the author saw (0 or more;
+absent means at the end), which is how the server reads it
+(`src/recorder/draft-engine.ts`); it is sent with the `revision` of the draft
+last written into the file, since that is the draft the author was looking at.
+And a control answered `202 { ignored: "<why>" }` comes back from runner-core's
+`controlRecordSteps` as `{ ignored: true, reason }`, so TestBench can say why a
+step was not taken.
+
+**Controls.** The three commands, the context key
+`testbench-native.recordingPaused` (Pause shows in the editor title bar while
+recording, Resume while paused), the setting, and the panel's Pause/Resume
+toggle, Add step box (Enter adds, Shift+Enter for several steps) and new rows
+all went in as designed. The toggle and the rows show what the server's frames
+said, not what was asked for, because the toolbar can pause or drop things too.
+Add check is refused while paused, in the panel and the command. The status bar
+reads `❚❚ Recording paused — N actions`. Where the toolbar was left is kept in
+the workspace's state. A `done` with `cancelledBy: 'browser'` ends like
+TestBench's own Cancel, with one info line in the log and no notification.
+
+**Steps typed in the editor** were the real work, because the recording's
+fail-safe rule had to hold with the author's lines inside what it writes. The
+recorded block is now a run of parts: block, the author's line, block, and so
+on. The author's line is a slot of its own (`mine`) that the recording follows
+but never writes or removes. A line counts as written when the cursor leaves it
+with a step on it. It then goes out as one `add-step` from the editor, or one
+per group of neighbouring lines, sent one after another. Until a draft holds
+that step, the draft is divided around the line by count: as many steps above
+it as the file had, or all of them for a line below the block, which is today's
+"the next draft writes above it". Once a draft holds it (by the id `record:step`
+named, or by the text it was sent as if the draft comes first), that step is
+the line and is never written beside it. Steps before it go above, steps after
+it go below.
+
+Three rules were decided here, not in the design:
+
+1. **The author's line takes the recording's number** while the draft holds its
+   step. Only the digits of an `N.` line change, or a list marker (or nothing)
+   becomes `N. `. The line gets its own number back when the draft stops holding
+   it and at Cancel. This follows the design's "replaced by the recording's
+   numbering". Without it, a line typed while more actions were being drafted
+   above it kept a stale number, a duplicate of a recorded one. A number the
+   author edits afterwards is theirs for good, as a later step's is.
+2. **Locked lines are protected by writing less, not by a lock of their own.**
+   Each draft now changes a block only where it differs, line by line, and a
+   line whose only change is its number has just the digits replaced. So a
+   draft that keeps its locked steps touches none of them. An edit the author
+   makes inside a recorded line is still written over, locked or not. That is
+   today's rule, and changing it is the next change.
+3. **A deleted line of the author's closes the block up.** A step the draft
+   still holds for it is written by the recording from then on, as its own, and
+   the ✕ leaves it out. Treating the deletion as a drop would be the "deleting
+   a recorded line drops it" question, which belongs to the next change.
+
+The fail-safe rule was extended in three places. The block and the author's
+lines are found by text together, as one run. A record holding lines of the
+author's is never "nothing left" while one of them is still in the file,
+because writing afresh would duplicate the step, so the recording stops
+writing live instead. A draft that places the author's steps in an order the
+file does not have is not written. Cancel keeps the typed lines with the
+numbers the author gave them, and the one Ctrl+Z after Stop lands on the file
+without the recording but with those lines. The reload recovery (§7.5) keeps
+them too.
+
+**Tests.** `tests/record-steps-authored.test.js` holds 22 cases against the
+pure core. They cover the end-of-block and between-steps lines, CRLF, a block
+that ends the file, pasted groups, blank and half-typed lines, lines above the
+block, refused lines, edits after sending, numbers, toolbar ids never taken
+for typed lines, deletion, the no-fresh-write rule and reload removal. There is
+also a 300-seed property run: a write never replaces a character the author
+typed (bar a held line's number), an adopted step is never in the file twice,
+Cancel leaves only the author's lines, and the writing never loses its place.
+The panel's frames, marks and text are covered as well. Six host cases were
+added to the integration suite: Pause/Resume, Add Step and its rows, a line at
+the end, a line between steps (with the undo after Stop), the remembered
+toolbar and the setting, and a browser Cancel. runner-core adds the frame guard,
+the two webview messages and the `ignored` answer.

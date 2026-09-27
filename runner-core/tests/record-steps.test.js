@@ -57,6 +57,14 @@ test('isRecordStepsEvent: accepts every frame the record stream carries', () => 
   }
 });
 
+test('isRecordStepsEvent: accepts the browser toolbar\'s frames (stories/testbench-record-toolbar.md)', () => {
+  // The run controller drops whatever this guard rejects, so a frame missing
+  // here would never reach the panel: no pause marker, no ✎ row, no strike.
+  for (const type of ['record:paused', 'record:step', 'record:dropped', 'record:toolbar']) {
+    assert.equal(isRecordStepsEvent({ type }), true, type);
+  }
+});
+
 test('isRecordStepsEvent: rejects run frames and garbage', () => {
   assert.equal(isRecordStepsEvent({ type: 'step:pass' }), false);
   assert.equal(isRecordStepsEvent({ type: 'record:crop' }), false);
@@ -71,15 +79,11 @@ test('isHostMsg: the Recording block message is a host message', () => {
 test('isWebviewMsg: every Recording control the panel posts is accepted', () => {
   // runner-view.ts drops whatever this guard rejects, so a button whose type is
   // missing here would do nothing at all.
-  for (const type of ['recordSteps', 'recordNewTest', 'recordStop', 'recordCancel', 'recordCheck', 'recordDrop']) {
+  for (const type of ['recordSteps', 'recordNewTest', 'recordStop', 'recordCancel', 'recordCheck', 'recordDrop', 'recordPause', 'recordAddStep']) {
     assert.equal(isWebviewMsg({ type }), true, type);
   }
   assert.equal(isWebviewMsg({ type: 'recordToggle' }), false);
 });
-
-// ---------------------------------------------------------------------------
-// streamRecordSteps
-// ---------------------------------------------------------------------------
 
 test('streamRecordSteps: posts the record-steps route with SSE headers and the body verbatim', async () => {
   let captured;
@@ -271,6 +275,22 @@ test('controlRecordSteps: posts each control action as JSON to the control route
     assert.equal(c.headers['x-api-key'], 'k');
     assert.equal(c.headers['Content-Type'], 'application/json');
   }
+});
+
+test('controlRecordSteps: answers {} for a bare 202, { ignored: true } when the server says the call did nothing', async () => {
+  const answering = (body) =>
+    new ApiClient({ serverUrl: 'http://x', apiKey: 'k', fetch: async () => new Response(body, { status: 202 }) });
+  assert.deepEqual(await answering(null).controlRecordSteps('s', { action: 'pause' }), {});
+  assert.deepEqual(await answering('{"accepted":true}').controlRecordSteps('s', { action: 'pause' }), {});
+  assert.deepEqual(await answering('{"ignored":true}').controlRecordSteps('s', { action: 'pause' }), { ignored: true });
+  // The server's own shape: why, as a sentence.
+  const why = 'The recording has already been stopped and its steps are being written; only "cancel" still applies.';
+  assert.deepEqual(
+    await answering(JSON.stringify({ ok: true, ignored: why })).controlRecordSteps('s', { action: 'add-step', text: 'x', source: 'panel' }),
+    { ignored: true, reason: why },
+  );
+  assert.deepEqual(await answering('{"ok":true,"ignored":false}').controlRecordSteps('s', { action: 'pause' }), {});
+  assert.deepEqual(await answering('not json').controlRecordSteps('s', { action: 'pause' }), {});
 });
 
 test('controlRecordSteps: 404 (no recording running) is not-found; 401 unauthorized; 500 server-error', async () => {

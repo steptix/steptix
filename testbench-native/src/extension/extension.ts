@@ -1988,6 +1988,15 @@ export interface TestBenchTestHooks {
   recoverUnfinishedRecording: (choice: string | undefined) => Promise<'none' | 'not-found' | 'kept' | 'removed'>;
   /** Record Steps: what `deactivate` does with a recording in flight. */
   shutdownRecording: () => Promise<void>;
+  /** Record Steps: the lines the author wrote into the recorded block, and
+   *  what became of each — typed, sent, its step's id, held by the draft
+   *  (stories/testbench-record-toolbar.md §"Steps typed in the editor"). */
+  recordingAuthorLines: () => Array<{ key: string; line: string; status: string; stepId?: string; inDraft: boolean }>;
+  /** Record Steps: where the browser toolbar was last left (`record:toolbar`),
+   *  as the next start body sends it. */
+  recordingToolbar: () => { dock: string; minimised: boolean } | undefined;
+  /** Record Steps: set or forget where the toolbar was left. */
+  setRecordingToolbar: (value: { dock: 'tl' | 'tc' | 'tr' | 'bl' | 'bc' | 'br'; minimised: boolean } | undefined) => Promise<void>;
 }
 
 export interface TestBenchExports {
@@ -2475,6 +2484,9 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       setRecordingPersisted: (value) => registry.recorder.setPersisted(value),
       recoverUnfinishedRecording: (choice) => registry.recorder.recoverUnfinished(async () => choice),
       shutdownRecording: () => registry.recorder.shutdown(),
+      recordingAuthorLines: () => registry.recorder.authorLines,
+      recordingToolbar: () => registry.recorder.rememberedToolbar,
+      setRecordingToolbar: (value) => registry.recorder.setRememberedToolbar(value),
     },
   };
 }
@@ -2530,6 +2542,18 @@ async function handleWebviewMessage(
     case 'recordDrop':
       // Shown at once and sent as `drop` / `restore` (decision 9: redraft now).
       await registry.recorder.setDropped(msg.id, msg.dropped === true);
+      return;
+    // The browser toolbar's panel parity (stories/testbench-record-toolbar.md
+    // §"VS Code alongside"): the same commands the palette runs.
+    case 'recordPause':
+      await vscode.commands.executeCommand(
+        msg.paused === true ? 'testbench-native.pauseRecording' : 'testbench-native.resumeRecording',
+      );
+      return;
+    case 'recordAddStep':
+      // A box with nothing in it adds nothing; the command would ask instead.
+      if (typeof msg.text !== 'string' || msg.text.trim() === '') return;
+      await vscode.commands.executeCommand('testbench-native.addStepToRecording', { text: msg.text });
       return;
     case 'run': {
       const controller = registry.active();

@@ -29,10 +29,11 @@ export interface RecordRegistry {
 }
 
 /**
- * Record Steps, Record New Test, and the three controls a recording is
- * steered with (stories/testbench-record-steps.md). The panel's buttons post
- * messages that execute these same commands, so there is one implementation
- * of each gesture.
+ * Record Steps, Record New Test, and the controls a recording is steered
+ * with (stories/testbench-record-steps.md; Pause, Resume and Add Step to
+ * Recording from stories/testbench-record-toolbar.md). The panel's buttons
+ * post messages that execute these same commands, so there is one
+ * implementation of each gesture.
  *
  * A paused run that Record ends (decision 12) is ended the way Stop ends it —
  * the yellow ▶, the spinners, the keep-alive and the parked state all go, or
@@ -237,6 +238,15 @@ export function registerRecordCommands(deps: {
     vscode.commands.registerCommand('testbench-native.stopRecording', () => recorder.stop()),
     vscode.commands.registerCommand('testbench-native.recordAddCheck', () => recorder.toggleCheck()),
     vscode.commands.registerCommand('testbench-native.cancelRecording', () => recorder.cancel()),
+    // The browser toolbar's controls, in VS Code too
+    // (stories/testbench-record-toolbar.md §"VS Code alongside").
+    vscode.commands.registerCommand('testbench-native.pauseRecording', () => recorder.setPaused(true)),
+    vscode.commands.registerCommand('testbench-native.resumeRecording', () => recorder.setPaused(false)),
+    // `text` in the argument skips the input box — the panel's Add step box,
+    // a keybinding's args, or a test.
+    vscode.commands.registerCommand('testbench-native.addStepToRecording', (arg?: { text?: string }) =>
+      recorder.addStep(typeof arg?.text === 'string' ? arg.text : undefined),
+    ),
   ];
 }
 

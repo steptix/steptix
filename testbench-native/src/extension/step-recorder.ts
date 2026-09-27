@@ -4,15 +4,24 @@ import type {
   HostToWebviewMsg,
   RecordingPanelState,
   RecordStepsEvent,
+  RecordStepsRequest,
+  RecordToolbarDock,
 } from 'ai-ui-automation-runner-core';
 import type { RecordStepsOutcome, RunController } from './run-controller.js';
 import { getOutputChannel } from './output-channel.js';
 import {
   applyRecordFrame,
+  assignAuthorStepId,
+  authorLinesOf,
+  authoredForResult,
   beginLiveRecord,
+  carryAuthorState,
   cleanStepText,
+  commitAuthorLines,
   followLiveRecord,
+  keepAuthorLines,
   liveRecordWrite,
+  splitAuthorSteps,
   newRecordingState,
   planRecordInsertion,
   plainNotificationText,
@@ -22,6 +31,8 @@ import {
   removeUnfinishedRecording,
   trackAnchorThroughChanges,
   unfinishedRecordingOf,
+  type AuthorStepCommit,
+  type LiveDraft,
   type LiveRecord,
   type RecordAnchor,
   type RecordInsertionPlan,
@@ -59,6 +70,8 @@ export interface RecordingReport {
   /** `empty`: the result had no steps (nothing recorded, or every action
    *  dropped) — said, not an error. */
   status: 'inserted' | 'empty' | 'cancelled' | 'error';
+  /** `cancelled` by Cancel pressed in the browser's toolbar. */
+  by?: 'browser';
   /** Steps inserted, when `inserted`. */
   steps?: number;
   /** Each notification as shown: plain text (`plainNotificationText`), with
@@ -91,6 +104,12 @@ interface ActiveRecording {
    *  error is not printed twice. */
   loggedErrors: string[];
   live: LiveFile;
+  /** Ids of steps `record:step` said came from the toolbar or the panel —
+   *  never taken for a line the author typed in the file. */
+  foreignIds: Set<string>;
+  /** The add-steps for lines typed in the file, sent one after another, in
+   *  the order the author left the lines. */
+  authorSends: Promise<void>;
 }
 
 /**
@@ -180,6 +199,25 @@ export const KEEP_UNFINISHED = 'Keep them';
 /** workspaceState key: what an in-flight recording has written, and where. */
 const UNFINISHED_KEY = 'testbench-native.recordSteps.unfinished';
 
+/** workspaceState key: where the browser toolbar was docked, and whether it
+ *  was minimised, when the last recording's `record:toolbar` said so. */
+const TOOLBAR_KEY = 'testbench-native.recordSteps.toolbar';
+
+/** The setting that turns the browser toolbar off. */
+export const BROWSER_TOOLBAR_SETTING = 'recordSteps.browserToolbar';
+
+const DOCKS: readonly RecordToolbarDock[] = ['tl', 'tc', 'tr', 'bl', 'bc', 'br'];
+
+/** What `TOOLBAR_KEY` holds. */
+export interface RememberedToolbar {
+  dock: RecordToolbarDock;
+  minimised: boolean;
+}
+
+/** stories/testbench-record-toolbar.md §"VS Code alongside": a Cancel pressed
+ *  in the browser ends quietly. */
+export const CANCELLED_IN_BROWSER = 'Recording cancelled in the browser — nothing was written.';
+
 /** What `UNFINISHED_KEY` holds. */
 export interface PersistedRecording extends UnfinishedRecording {
   uri: string;
@@ -196,6 +234,8 @@ export class StepRecorder implements vscode.Disposable {
   private lastLive: LiveFile | null = null;
   private readonly statusItem: vscode.StatusBarItem;
   private lastContextValue = false;
+  /** `testbench-native.recordingPaused`, as last set. */
+  private lastPausedValue = false;
   /** The workspace's state, where an in-flight recording's writes are kept
    *  (`attachStorage`). Absent in a recorder nobody gave one. */
   private storage: vscode.Memento | null = null;
@@ -249,6 +289,25 @@ export class StepRecorder implements vscode.Disposable {
   /** Test-only: put a kept recording back, as a window reload leaves it. */
   async setPersisted(value: PersistedRecording | undefined): Promise<void> {
     await this.storage?.update(UNFINISHED_KEY, value);
+  }
+
+  /** Test-only: the lines the author wrote into the recorded block of the
+   *  current (or last) recording, and what became of each. */
+  get authorLines(): ReturnType<typeof authorLinesOf> {
+    const record = this.lastLive?.record;
+    return record ? authorLinesOf(record) : [];
+  }
+
+  /** Where the browser toolbar was last left (`record:toolbar`), as the next
+   *  recording's start body sends it — or undefined before any. */
+  get rememberedToolbar(): RememberedToolbar | undefined {
+    const kept = this.storage?.get<RememberedToolbar>(TOOLBAR_KEY);
+    return kept && DOCKS.includes(kept.dock) ? { dock: kept.dock, minimised: kept.minimised === true } : undefined;
+  }
+
+  /** Test-only: forget (or set) where the toolbar was left. */
+  async setRememberedToolbar(value: RememberedToolbar | undefined): Promise<void> {
+    await this.storage?.update(TOOLBAR_KEY, value);
   }
 
   /**
@@ -345,6 +404,8 @@ export class StepRecorder implements vscode.Disposable {
       watch: null,
       stopSent: false,
       loggedErrors: [],
+      foreignIds: new Set(),
+      authorSends: Promise.resolve(),
       state: newRecordingState({
         uri: doc.uri.toString(),
         file: path.basename(doc.uri.fsPath),
@@ -452,9 +513,10 @@ export class StepRecorder implements vscode.Disposable {
         if (pending && !pending.matched && e.document.getText() === pending.text) {
           // Our own write: the record is what the write made it — and the
           // highlight moves with the text, not a moment after it (the edit's
-          // promise settles after this event).
+          // promise settles after this event). A line of the author's sent
+          // while the write was in flight stays sent.
           pending.matched = true;
-          live.record = pending.record;
+          live.record = live.record ? carryAuthorState(live.record, pending.record) : pending.record;
           this.highlight(rec);
           return;
         }
@@ -484,6 +546,9 @@ export class StepRecorder implements vscode.Disposable {
           rec.controller.postRecordLog(notice.text, 'warn');
           void this.notify(notice.level, notice.text);
         }
+        // Lines of the author's are counted when the cursor leaves them — the
+        // selection event that follows this one (Enter included) — not here,
+        // where the editor's selection can still be the one before the edit.
         this.highlight(rec);
       }),
       // A rename closes the old document and opens the new one with the same
@@ -507,14 +572,21 @@ export class StepRecorder implements vscode.Disposable {
         live.closed = true;
         this.highlight(rec);
       }),
-      vscode.window.onDidChangeVisibleTextEditors(() => this.highlight(rec)),
+      vscode.window.onDidChangeVisibleTextEditors(() => {
+        this.highlight(rec);
+        // No editor shows the file any more: nobody is typing on its lines.
+        this.countAuthorLines(rec);
+      }),
       // A cursor the author moves closes the open undo step (measured with
       // `cursorDown`). Every selection change that carries a kind counts —
       // one set through the API carries one too (a command's) and does not
       // close the step, but a false alarm only costs a split result, and a
       // missed one leaves a draft behind one Ctrl+Z.
       vscode.window.onDidChangeTextEditorSelection((e) => {
-        if (e.kind !== undefined && live.wroteAny && e.textEditor.document.uri.toString() === rec.key) live.split = true;
+        if (e.textEditor.document.uri.toString() !== rec.key) return;
+        if (e.kind !== undefined && live.wroteAny) live.split = true;
+        // The cursor left a line the author typed: it counts as written.
+        this.countAuthorLines(rec);
       }),
       vscode.workspace.onDidSaveTextDocument((saved) => {
         if (live.wroteAny && saved.uri.toString() === rec.key) live.split = true;
@@ -628,10 +700,133 @@ export class StepRecorder implements vscode.Disposable {
       );
       return;
     }
+    // A check is recording: paused, there is nothing to pick
+    // (stories/testbench-record-toolbar.md §"Its states", Paused).
+    if (rec.state.paused && !rec.state.pickArmed) {
+      vscode.window.setStatusBarMessage('TestBench: resume the recording to add a check', 2000);
+      return;
+    }
     const sent = await rec.controller.controlRecording({
       action: rec.state.pickArmed ? 'cancel-check' : 'check',
     });
     if (!sent.ok) void this.notify('warn', `Record Steps: ${sent.error}`);
+  }
+
+  /**
+   * Pause or Resume (stories/testbench-record-toolbar.md §"Pause and resume,
+   * in detail"): nothing is recorded, and no draft call starts, until Resume.
+   * The panel and the status bar show what the server's `record:paused` said,
+   * not what was asked for — the toolbar in the browser can pause too.
+   */
+  async setPaused(paused: boolean): Promise<void> {
+    const rec = this.current;
+    if (!rec) {
+      vscode.window.setStatusBarMessage('TestBench: nothing is recording', 2000);
+      return;
+    }
+    if (rec.state.phase !== 'recording' || rec.stopSent) {
+      vscode.window.setStatusBarMessage(
+        rec.state.phase === 'starting' ? 'TestBench: the recording is still starting' : 'TestBench: the recording is finishing',
+        2000,
+      );
+      return;
+    }
+    if ((rec.state.paused === true) === paused) return;
+    const sent = await rec.controller.controlRecording({ action: paused ? 'pause' : 'resume' });
+    if (!sent.ok) void this.notify('warn', `Record Steps: could not ${paused ? 'pause' : 'resume'} the recording — ${sent.error}`);
+  }
+
+  /**
+   * Add Step to Recording — the command, and the panel's Add step box
+   * (stories/testbench-record-toolbar.md §"Steps you write"). One line is one
+   * step, several lines several steps, in order; a leading number or list
+   * marker is the recording's to give, so it is taken off. Asks for the text
+   * when none is given. Paused, it still works: it records nothing.
+   *
+   * Returns whether the steps went to the server, for the panel's box.
+   */
+  async addStep(text?: string): Promise<boolean> {
+    const rec = this.current;
+    if (!rec) {
+      vscode.window.setStatusBarMessage('TestBench: nothing is recording', 2000);
+      return false;
+    }
+    if (rec.state.phase !== 'recording' || rec.stopSent) {
+      vscode.window.setStatusBarMessage(
+        rec.state.phase === 'starting' ? 'TestBench: the recording is still starting' : 'TestBench: the recording is finishing',
+        2000,
+      );
+      return false;
+    }
+    const raw =
+      text ??
+      (await vscode.window.showInputBox({
+        title: 'TestBench: Add Step to Recording',
+        prompt: 'The step exactly as it should read in the test. Everything recorded so far is locked in above it.',
+        placeHolder: 'Verify the balance shows "$1,234.56"',
+      }));
+    if (raw === undefined) return false; // dismissed
+    const steps = splitAuthorSteps(raw);
+    if (steps.length === 0) {
+      vscode.window.setStatusBarMessage('TestBench: an empty step adds nothing', 2000);
+      return false;
+    }
+    if (this.current !== rec) return false;
+    const sent = await rec.controller.controlRecording({ action: 'add-step', text: steps.join('\n'), source: 'panel' });
+    if (!sent.ok || sent.ignored) {
+      void this.notify(
+        'warn',
+        `Record Steps: the step was not added — ${sent.ok ? (sent.reason ?? 'the recording is no longer taking steps') : sent.error}`,
+      );
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * The lines the author typed into the recorded block that count as WRITTEN
+   * now — left by the cursor, with a step on them (`commitAuthorLines`) — go
+   * to the server as `add-step` from the editor, with where they sit in the
+   * draft the author was looking at (stories/testbench-record-toolbar.md
+   * §"Steps typed in the editor"). Only while recording: after Stop a line is
+   * the author's text, as it always was.
+   */
+  private countAuthorLines(rec: ActiveRecording): void {
+    const live = rec.live;
+    if (this.current !== rec || rec.state.phase !== 'recording' || rec.stopSent) return;
+    // A write in flight is fine: what is sent now is carried into the record
+    // that write leaves (`carryAuthorState`).
+    if (!live.record || live.detached || live.closed || live.stopped || rec.doc.isClosed) return;
+    if (!live.record.slots.some((s) => s.kind === 'mine' && s.status === 'typing')) return;
+    const doc = rec.doc;
+    const cursors = vscode.window.visibleTextEditors
+      .filter((e) => e.document.uri.toString() === rec.key)
+      .flatMap((e) => e.selections.map((sel) => doc.offsetAt(sel.active)));
+    const counted = commitAuthorLines(live.record, doc.getText(), cursors);
+    if (counted.commits.length === 0) return;
+    live.record = counted.record;
+    for (const commit of counted.commits) {
+      rec.authorSends = rec.authorSends.then(() => this.sendAuthorStep(rec, commit)).catch(() => undefined);
+    }
+  }
+
+  /** One add-step for lines the author wrote in the file. A server that does
+   *  not take it leaves them the author's text, said once in the log. */
+  private async sendAuthorStep(rec: ActiveRecording, commit: AuthorStepCommit): Promise<void> {
+    const sent = await rec.controller.controlRecording({
+      action: 'add-step',
+      text: commit.lines.join('\n'),
+      source: 'editor',
+      ...(commit.afterStep !== undefined && { afterStep: commit.afterStep }),
+      ...(rec.live.written > 0 && { revision: rec.live.written }),
+    });
+    if (sent.ok && !sent.ignored) return;
+    if (rec.live.record) rec.live.record = keepAuthorLines(rec.live.record, commit.keys);
+    rec.controller.postRecordLog(
+      `Your step "${commit.lines.join(' / ')}" was not added to the recording (${sent.ok ? (sent.reason ?? 'the server did not take it') : sent.error}); ` +
+        'it stays in the file as you wrote it.',
+      'warn',
+    );
   }
 
   /**
@@ -646,7 +841,8 @@ export class StepRecorder implements vscode.Disposable {
   async setDropped(id: string, dropped: boolean): Promise<void> {
     const rec = this.current;
     const action = rec?.state.actions.find((a) => a.id === id);
-    if (!rec || !action || action.dropped === dropped) return;
+    // A pause marker is not in the recording: nothing to drop.
+    if (!rec || !action || action.dropped === dropped || action.kind === 'pause' || action.kind === 'resume') return;
     if (rec.state.phase === 'finishing' || rec.stopSent) return;
     action.dropped = dropped;
     this.publish();
@@ -690,6 +886,7 @@ export class StepRecorder implements vscode.Disposable {
         ...(opts.cursorLine !== undefined && { cursorLine: opts.cursorLine }),
       },
       onEvent: (event) => this.onEvent(rec, event),
+      toolbar: this.toolbarPreferences(),
       ...(opts.retryConflict && { retryConflict: true }),
     });
     // The recording is over, however it ended: take the block down before
@@ -701,6 +898,14 @@ export class StepRecorder implements vscode.Disposable {
       await this.clearLive(rec);
     }
     if (outcome.status === 'cancelled') {
+      if (outcome.by === 'browser') {
+        // Cancel pressed in the browser's toolbar: the author's own Cancel,
+        // made there — quiet, no notification.
+        rec.controller.postRecordLog(CANCELLED_IN_BROWSER, 'info');
+        this.finish('cancelled', []);
+        if (this.lastReport) this.lastReport.by = 'browser';
+        return;
+      }
       if (outcome.reason) {
         // The server ended it — the session was closed under the recording
         // (another window's Run, Close Session, the idle reaper). The author
@@ -734,11 +939,49 @@ export class StepRecorder implements vscode.Disposable {
       rec.controller.postRecordLog(event.msg, event.kind);
       return;
     }
+    if (event.type === 'record:toolbar') {
+      // Where the author left the browser toolbar: the next recording's start
+      // body puts it back there (stories/testbench-record-toolbar.md).
+      this.rememberToolbar(event.dock, event.minimised);
+      return;
+    }
+    if (event.type === 'record:step') {
+      if (event.source === 'editor') {
+        // The server's name for a line the author typed in the file.
+        if (rec.live.record) rec.live.record = assignAuthorStepId(rec.live.record, event.id, event.text);
+      } else {
+        rec.foreignIds.add(event.id);
+      }
+    }
     // The block's state is folded by the pure core, where it is pinned.
     const changed = applyRecordFrame(rec.state, event as unknown as { type: string } & Record<string, unknown>);
     if (changed && this.current === rec) this.publish();
     // A newer draft goes into the file too (a stale one changed nothing).
     if (changed && event.type === 'record:draft') this.queueDraftWrite(rec);
+  }
+
+  /** The start body's `toolbar`: the setting, and where the last recording
+   *  left the toolbar. */
+  private toolbarPreferences(): NonNullable<RecordStepsRequest['toolbar']> {
+    const enabled = vscode.workspace.getConfiguration('testbench-native').get<boolean>(BROWSER_TOOLBAR_SETTING) !== false;
+    const kept = this.rememberedToolbar;
+    return { enabled, ...(kept && { dock: kept.dock, minimised: kept.minimised }) };
+  }
+
+  private rememberToolbar(dock: unknown, minimised: unknown): void {
+    if (!DOCKS.includes(dock as RecordToolbarDock)) return;
+    void this.storage?.update(TOOLBAR_KEY, { dock, minimised: minimised === true });
+  }
+
+  /** A draft as the file writer takes it: its steps, and which of them are
+   *  the author's (to be laid out around their lines in the file). */
+  private liveDraftOf(rec: ActiveRecording, draft: NonNullable<RecordingPanelState['draft']>): LiveDraft {
+    return {
+      steps: draft.steps,
+      parameters: draft.parameters,
+      ...(draft.authored && { authored: draft.authored, authoredIds: draft.authoredIds ?? [] }),
+      foreignIds: [...rec.foreignIds],
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -759,9 +1002,11 @@ export class StepRecorder implements vscode.Disposable {
         live.queued = false;
         const draft = rec.state.draft;
         if (live.stopped || live.closed || live.detached || !draft || draft.revision <= live.written) return;
-        const written = await this.writeLive(rec, draft, 'draft');
+        const written = await this.writeLive(rec, this.liveDraftOf(rec, draft), 'draft');
         if (written.ok) {
           live.written = draft.revision;
+          // A line the author left while the write was in flight.
+          this.countAuthorLines(rec);
         } else if (written.lost) {
           this.detach(rec);
         } else if (live.unwritable !== written.reason) {
@@ -802,7 +1047,7 @@ export class StepRecorder implements vscode.Disposable {
    */
   private async writeLive(
     rec: ActiveRecording,
-    draft: { steps: unknown[]; parameters: unknown[] },
+    draft: LiveDraft,
     kind: 'draft' | 'final' | 'clear',
   ): Promise<
     | { ok: true; plan: RecordInsertionPlan | null; editor: vscode.TextEditor | null }
@@ -885,8 +1130,9 @@ export class StepRecorder implements vscode.Disposable {
       } finally {
         const matched = live.pending?.matched ?? false;
         live.pending = null;
-        // An edit that changed nothing sends no change event to match.
-        if (applied && !matched) live.record = write.record;
+        // An edit that changed nothing sends no change event to match. What
+        // became of the author's lines meanwhile is kept.
+        if (applied && !matched) live.record = live.record ? carryAuthorState(live.record, write.record) : write.record;
       }
       if (applied) {
         if (kind === 'draft') this.persist(rec);
@@ -1058,7 +1304,19 @@ export class StepRecorder implements vscode.Disposable {
     let plan: RecordInsertionPlan | null;
     let editor: vscode.TextEditor | null;
     let lines: number[];
-    const written = await this.writeLive(rec, outcome, 'final');
+    // The author's steps in the result are where the last draft had them
+    // (`record:result` does not say): their lines in the file are adopted,
+    // not written a second time.
+    const written = await this.writeLive(
+      rec,
+      {
+        steps: outcome.steps,
+        parameters: outcome.parameters,
+        ...authoredForResult(rec.state.draft, outcome.steps),
+        foreignIds: [...rec.foreignIds],
+      },
+      'final',
+    );
     if (written.ok) {
       plan = written.plan;
       editor = written.editor;
@@ -1203,6 +1461,12 @@ export class StepRecorder implements vscode.Disposable {
       this.lastContextValue = recording;
       void vscode.commands.executeCommand('setContext', 'testbench-native.recording', recording);
     }
+    // Pause / Resume in the editor title bar and the palette.
+    const paused = state !== null && state.paused === true && state.phase === 'recording';
+    if (paused !== this.lastPausedValue) {
+      this.lastPausedValue = paused;
+      void vscode.commands.executeCommand('setContext', 'testbench-native.recordingPaused', paused);
+    }
     if (!state) {
       this.statusItem.hide();
       return;
@@ -1210,7 +1474,7 @@ export class StepRecorder implements vscode.Disposable {
     this.statusItem.text =
       state.phase === 'finishing'
         ? `$(loading~spin) ${recordingStatusText(state)}`
-        : `● ${recordingStatusText(state)}`;
+        : `${paused ? '❚❚' : '●'} ${recordingStatusText(state)}`;
     this.statusItem.tooltip = `Recording steps into ${state.file}. Click to show the TestBench panel.`;
     this.statusItem.show();
   }
@@ -1228,6 +1492,8 @@ function snapshotOf(state: RecordingPanelState): RecordingPanelState {
           steps: [...state.draft.steps],
           parameters: state.draft.parameters.map((p) => ({ ...p })),
           notes: [...state.draft.notes],
+          ...(state.draft.authored && { authored: [...state.draft.authored] }),
+          ...(state.draft.authoredIds && { authoredIds: [...state.draft.authoredIds] }),
         }
       : null,
   };

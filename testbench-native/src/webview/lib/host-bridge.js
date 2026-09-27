@@ -112,6 +112,11 @@ export const hostBridge = {
   postRecordCancel() { post({ type: 'recordCancel' }); },
   /** Add check: arms pick mode, or disarms it when armed. */
   postRecordCheck() { post({ type: 'recordCheck' }); },
-  /** The ✕ on an action row (`dropped: true`), or putting it back. */
+  /** The ✕ on an action row (`dropped: true`), or putting it back. Also a
+   *  `✎ Your step` row's, by the step's id. */
   postRecordDrop(id, dropped) { post({ type: 'recordDrop', id, dropped }); },
+  /** Pause (`paused: true`) or Resume (stories/testbench-record-toolbar.md). */
+  postRecordPause(paused) { post({ type: 'recordPause', paused }); },
+  /** The Add step box: one line is one step, several lines several steps. */
+  postRecordAddStep(text) { post({ type: 'recordAddStep', text }); },
 };
