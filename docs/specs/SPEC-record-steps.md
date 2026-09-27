@@ -1103,7 +1103,7 @@ more state with no `toolbar` block, which takes the bar out of the page.
 | The model's answer could not be read | "The steps could not be written: <reason>. Nothing was inserted." |
 | A step entered in the browser's toolbar after Stop (§3.4) | "A step typed in the browser after Stop was not added to the recording: "<text>". Add it to the test by hand." — a warning; the bar's last line says it too |
 | The author edits a line being recorded | "Lines being recorded are rewritten as the model updates them — edit them after Stop." — a warning, once per recording |
-| A step typed in the file that the server does not take (§7.6) | "Your step "<text>" was not added to the recording (<why>); it stays in the file as you wrote it." — in the log |
+| A step typed in the file that the server does not take (§7.6) | "Your step on line <n> was not added to the recording (<why>); it stays in the file as you wrote it." — in the log. By line, never quoting the step: the server refuses a line holding a secret it knows, and TestBench cannot tell which |
 | What the recording wrote can no longer be found in the file (§7.4) | "The recorded steps could not be found in the file any more, so they are no longer written live; the panel keeps them and Stop will insert them at your cursor line." — a warning, once per recording |
 | A recording was cut off by a window reload and its draft is still in the file | "Record Steps: a recording was still running when the window closed, and its draft steps are still in <file>." with **Remove the unfinished recording's steps** and **Keep them** (§7.5) |
 | A parameter name conflicts | "Parameter <name> already exists with a different value; the recorded value was not added." |

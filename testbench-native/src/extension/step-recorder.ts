@@ -877,7 +877,9 @@ export class StepRecorder implements vscode.Disposable {
 
   /** One add-step for lines the author wrote in the file, naming the draft
    *  they were counted against. A server that does not take it leaves them
-   *  the author's text, said once in the log. */
+   *  the author's text, said once in the log — by line number, never by
+   *  quoting it: the server refuses a line holding a secret it knows
+   *  (SPEC-record-steps §7.6), and TestBench cannot tell which that is. */
   private async sendAuthorStep(rec: ActiveRecording, commit: AuthorStepCommit): Promise<void> {
     const sent = await rec.controller.controlRecording({
       action: 'add-step',
@@ -888,9 +890,15 @@ export class StepRecorder implements vscode.Disposable {
     });
     if (sent.ok && !sent.ignored) return;
     if (rec.live.record) rec.live.record = keepAuthorLines(rec.live.record, commit.keys);
+    const first = commit.lines[0] ?? '';
+    const at = rec.doc.isClosed || !first ? -1 : rec.doc.getText().split(/\r?\n/).findIndex((l) => l.includes(first));
+    const many = commit.lines.length > 1;
+    const which = many
+      ? `Your ${commit.lines.length} steps${at >= 0 ? ` from line ${at + 1}` : ''} were`
+      : `Your step${at >= 0 ? ` on line ${at + 1}` : ''} was`;
     rec.controller.postRecordLog(
-      `Your step "${commit.lines.join(' / ')}" was not added to the recording (${sent.ok ? (sent.reason ?? 'the server did not take it') : sent.error}); ` +
-        'it stays in the file as you wrote it.',
+      `${which} not added to the recording ` +
+        `(${sent.ok ? (sent.reason ?? 'the server did not take it') : sent.error}); it stays in the file as you wrote it.`,
       'warn',
     );
     // A line waiting on this one may go now.

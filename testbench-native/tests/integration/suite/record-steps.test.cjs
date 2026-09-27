@@ -1761,6 +1761,37 @@ describe('TestBench Record Steps', function () {
     assert.equal(editor.document.getText(), fixtureWith({ insert: { 11: [mine] } }));
   });
 
+  it('a typed line the server does not take is logged by its line number, never quoted — it may hold a secret the server refused', async () => {
+    const editor = await openFixture();
+    await recordDraft1(editor);
+    const secret = 'pw-from-env-77';
+    playToolbarControls(async (body) =>
+      body.action === 'add-step' ? { ignored: true, reason: 'it holds a secret — write {{password}} in its place' } : undefined,
+    );
+    const mark = hooks.hostMessageCount();
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    editor.selection = new vscode.Selection(11, 13, 11, 13);
+    await vscode.commands.executeCommand('type', { text: '\n' });
+    await vscode.commands.executeCommand('type', { text: `Type ${secret} into the Password field` });
+    editor.selection = new vscode.Selection(0, 0, 0, 0);
+    const warned = () =>
+      hooks
+        .hostMessagesSince(mark)
+        .filter((m) => m.type === 'runEvent' && m.event.type === 'output' && m.event.kind === 'warn')
+        .map((m) => m.event.msg);
+    await waitFor('the refusal logged', () => warned().some((msg) => msg.includes('was not added')));
+    assert.deepEqual(
+      warned().filter((msg) => msg.includes('was not added')),
+      [
+        'Your step on line 13 was not added to the recording (it holds a secret — write {{password}} in its place); ' +
+          'it stays in the file as you wrote it.',
+      ],
+    );
+    assert.ok(!JSON.stringify(hooks.hostMessagesSince(mark)).includes(secret), 'the value is in no message to the panel');
+    assert.ok(editor.document.lineAt(12).text.includes(secret), 'the line stays the author\'s');
+    await cancelRecording();
+  });
+
   it('a line typed between two recorded steps: add-step with afterStep and revision; locked lines only renumbered; one Ctrl+Z after Stop leaves the typed line', async () => {
     const editor = await openFixture();
     await recordDraft1(editor, D2);
