@@ -289,6 +289,16 @@ export interface ParsedTest {
   envData?: import('./interpolate-env-data.js').EnvDataContext;
   /** Pre/post-step hook instructions (skills already expanded). */
   hooks: TestHooks;
+  /**
+   * Parallel to `hooks`: each hook line as the AUTHOR wrote it, `${env.X}` /
+   * `${data.x}` intact. `hooks` has those references substituted at parse
+   * (a hook is not shown to the model as authored text), so it holds the
+   * values — an environment's password included. Kept for the one reader that
+   * must record the step as written, the scoreboard
+   * (docs/specs/SPEC-scoreboard.md §5.7). Absent when the parse substituted
+   * nothing, which leaves `hooks` authored already.
+   */
+  authoredHooks?: TestHooks;
   /** Parallel to `hooks` — tool-call markers per hook instruction. */
   hookToolCalls: HookToolCalls;
   /** Parallel to `hooks` — source-skill attribution per hook instruction. */

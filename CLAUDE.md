@@ -286,8 +286,14 @@ included, which is why `--shards=1` is the usual companion:
 
 ```powershell
 cd <worktree>
+$env:AIUI_STATS_SUITE = 'live'
 node dist/index.js serve -p <n> --idle-timeout 60
 ```
+
+`AIUI_STATS_SUITE=live` tags every line that server writes to the first-try
+scoreboard (docs/specs/SPEC-scoreboard.md), so test runs stay out of
+`aiui stats`'s default view. The parallel runner sets it on the servers it
+starts; a server you start yourself records as `user` unless you set it.
 
 ```powershell
 cd <worktree>\testbench-native
@@ -409,10 +415,12 @@ test. So the gate is in the suite, not in the runner: the file is discovered
 and scheduled like any other, costs a few seconds, and reports as a `pending`
 row (an `o`) rather than vanishing.
 
-Run it alone, one shard, against a server you started:
+Run it alone, one shard, against a server you started (tagged `live` for the
+scoreboard, as above):
 
 ```powershell
 cd <worktree>
+$env:AIUI_STATS_SUITE = 'live'
 node dist/index.js serve -p <n> --idle-timeout 60
 ```
 

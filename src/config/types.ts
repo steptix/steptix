@@ -486,6 +486,22 @@ export interface McpConfig {
 }
 
 /**
+ * This project's part in the scoreboard — the machine-local record of every
+ * AI action and step, read with `aiui stats` (docs/specs/SPEC-scoreboard.md).
+ */
+export interface StatsConfig {
+  /**
+   * Record this project's runs. Default true.
+   *
+   * `false` keeps them out of `<user root>/stats/` entirely — for a project
+   * whose step text should not be kept even locally. Other projects on the
+   * machine still record. `AIUI_STATS=off` (environment or the machine-wide
+   * `.env`) turns recording off for every project at once (§6.4).
+   */
+  enabled?: boolean;
+}
+
+/**
  * What gets photographed during a run — the TOOL's vocabulary, not a config
  * key (stories/run-settings.md §3).
  *
@@ -599,6 +615,12 @@ export interface Config {
    * declaration is documentation and schema, not the read path.
    */
   mcp?: McpConfig;
+  /**
+   * The scoreboard (docs/specs/SPEC-scoreboard.md §6.4). Optional and without
+   * a `defaults.ts` entry, like `mcp`: absent means "record", and absence
+   * survives `deepMerge` so nothing has to tell an unset switch from a true one.
+   */
+  stats?: StatsConfig;
 }
 
 /** Deeply partial version of Config for user-provided overrides */

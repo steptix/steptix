@@ -17,6 +17,15 @@ export interface ResolvedHooks extends TestHooks {
   toolCalls: HookToolCalls;
   /** Parallel-to-`hooks` source-skill attribution for report rendering. */
   sourceSkills: HookSourceSkills;
+  /**
+   * Parallel to `hooks`: each line as authored, `${…}` intact — the test's
+   * `ParsedTest.authoredHooks` where the parse substituted its references, the
+   * line itself otherwise (a project default hook is never substituted). What
+   * the scoreboard records as a hook step's text. Optional so a hand-built
+   * `ResolvedHooks` (a test's stub) need not carry it; a reader falls back to
+   * the line in `hooks`.
+   */
+  authored?: TestHooks;
 }
 
 /**
@@ -60,13 +69,23 @@ export async function resolveHooks(
     after: [...defaults.sourceSkills.after, ...test.hookSourceSkills.after],
   };
 
+  // The test's own lines as written, beside the defaults, which were never
+  // substituted. Parallel to `merged` by construction.
+  const testAuthored = test.authoredHooks ?? test.hooks;
+  const authored: TestHooks = {
+    before: [...defaults.steps.before, ...testAuthored.before],
+    beforeEach: [...defaults.steps.beforeEach, ...testAuthored.beforeEach],
+    afterEach: [...defaults.steps.afterEach, ...testAuthored.afterEach],
+    after: [...defaults.steps.after, ...testAuthored.after],
+  };
+
   const hasAny =
     merged.before.length > 0 ||
     merged.beforeEach.length > 0 ||
     merged.afterEach.length > 0 ||
     merged.after.length > 0;
 
-  return { ...merged, hasAny, toolCalls, sourceSkills };
+  return { ...merged, hasAny, toolCalls, sourceSkills, authored };
 }
 
 /** Internal — defaults expanded with parallel toolCalls + sourceSkills metadata. */

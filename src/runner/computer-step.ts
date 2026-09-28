@@ -94,6 +94,7 @@ import { unknownWholeStepBracketError } from '../parser/whole-step-bracket.js';
 import { parseUseAiStep, parseUseStep } from '../parser/use-step.js';
 import { parseSetStep } from '../parser/set-step.js';
 import { planAtGuard, type ControlRecord, type ControlState } from './control-flow.js';
+import { recordExecutedStep } from './run-stats.js';
 
 /** Options for a computer-mode step: a step's ordinary options, with the
  *  surface's own context guaranteed present. */
@@ -1183,8 +1184,37 @@ function textOf(message: ChatMessage): string {
  * Returns the same {@link StepResult} `executeStep` returns, so every consumer
  * — the two run loops, the report, the recording, the wire events — needs no
  * knowledge of this surface beyond the `surface: 'computer'` field it stamps.
+ * That includes the scoreboard: the step records its lines when it ends, as
+ * `executeStep` does (docs/specs/SPEC-scoreboard.md §7).
  */
 export async function executeComputerStep(
+  stepIndex: number,
+  totalSteps: number,
+  instruction: string,
+  opts: ComputerStepOptions,
+  authoredInstruction?: string,
+): Promise<StepResult> {
+  const result = await executeComputerStepUnrecorded(
+    stepIndex,
+    totalSteps,
+    instruction,
+    opts,
+    authoredInstruction,
+  );
+  if (opts.stats?.enabled) {
+    recordExecutedStep(result, opts.stats, {
+      stepText: authoredInstruction ?? instruction,
+      // No `rules`: this surface is answered from its own prompt
+      // (`buildComputerSystemPrompt`), not the step prompt the fingerprint is
+      // taken of, so its lines carry no fingerprint rather than the wrong one.
+      maskValues: secretsFor(opts),
+    });
+  }
+  return result;
+}
+
+/** {@link executeComputerStep} without the scoreboard line. */
+async function executeComputerStepUnrecorded(
   stepIndex: number,
   totalSteps: number,
   instruction: string,
@@ -1197,6 +1227,10 @@ export async function executeComputerStep(
   let priorAssertions: AssertionResult[] = [];
   let mergedFailure: unknown;
   let attemptsMade = 0;
+  /** The attempt under way, so a Stop — which passes through
+   *  `finalAttemptError` untouched, carrying nothing — can still report the
+   *  turns it cut short. */
+  let currentProgress: AttemptProgress | undefined;
   // Per STEP, not per attempt: a retry does not buy another minute of waiting.
   const waits: WaitBudget = {
     budgetMs: opts.computer.waitBudgetMs ?? COMPUTER_WAIT_BUDGET_MS,
@@ -1206,6 +1240,8 @@ export async function executeComputerStep(
   const attempt = async (attemptNumber: number): Promise<StepResult> => {
     attemptsMade = attemptNumber;
     if (attemptNumber === 2) retried = true;
+    const progress: AttemptProgress = { touchedScreen: false, turns: [] };
+    currentProgress = progress;
     return computerAttempt(
       stepIndex,
       totalSteps,
@@ -1215,6 +1251,7 @@ export async function executeComputerStep(
       retried,
       attemptNumber,
       waits,
+      progress,
       authoredInstruction,
     );
   };
@@ -1240,15 +1277,22 @@ export async function executeComputerStep(
     const durationMs = Date.now() - startTime;
     const errorMessage = err instanceof Error ? err.message : String(err);
 
+    // A Stop, reported as one (`interrupted`) — the page surface's answer, for
+    // its reasons: the run loops, the report and the scoreboard all read a
+    // stopped step, not a failed one. The stopped attempt's turns ride along,
+    // since its calls were made; `retried` is whether a second attempt began.
     if (opts.signal?.aborted) {
+      const stopped =
+        err !== mergedFailure && currentProgress !== undefined ? turnsSoFar(currentProgress) : [];
       return {
         index: stepIndex,
         instruction,
         status: 'failed',
         surface: 'computer',
-        turns: priorAttemptTurns,
+        turns: [...priorAttemptTurns, ...stopped],
         durationMs,
-        retried: true,
+        retried,
+        interrupted: true,
         error: 'Aborted by client',
         aiExplanation: 'Step aborted by client (run stopped).',
       };
@@ -1312,6 +1356,21 @@ interface AttemptProgress {
   touchedScreen: boolean;
   /** The attempt's turns, pushed as each one is recorded. */
   turns: TurnResult[];
+  /**
+   * The turn under way, from the moment its model call is about to be made
+   * until it is pushed onto {@link turns} — so a throw or a Stop in between
+   * still reports the call the model answered and the actions that ran,
+   * rather than leaving them out of every result.
+   */
+  inFlight?: TurnResult | undefined;
+}
+
+/** The attempt's turns, with the one a throw or a Stop cut short when it had
+ *  done anything — a call answered, an action run. */
+function turnsSoFar(progress: AttemptProgress): TurnResult[] {
+  const cut = progress.inFlight;
+  const useful = cut !== undefined && (cut.aiInteractions.length > 0 || cut.subActions.length > 0);
+  return useful && !progress.turns.includes(cut) ? [...progress.turns, cut] : progress.turns;
 }
 
 /**
@@ -1330,6 +1389,11 @@ function finalAttemptError(
   signal: AbortSignal | undefined,
 ): unknown {
   if (signal?.aborted) return err;
+  // The turn a throw cut short, onto the attempt's turns — the array a
+  // failure constructed in the loop already holds, so it is carried either way.
+  const turns = turnsSoFar(progress);
+  if (turns !== progress.turns) progress.turns.push(progress.inFlight!);
+  progress.inFlight = undefined;
   const failure =
     err instanceof ComputerStepFailure
       ? err
@@ -1354,9 +1418,9 @@ async function computerAttempt(
   retried: boolean,
   attemptNumber: number,
   waits: WaitBudget,
+  progress: AttemptProgress,
   authoredInstruction?: string,
 ): Promise<StepResult> {
-  const progress: AttemptProgress = { touchedScreen: false, turns: [] };
   try {
     return await computerTurns(
       stepIndex,
@@ -1501,6 +1565,15 @@ async function computerTurns(
     priorFailure = undefined;
 
     const recordShot = computer.reportScreenshots;
+    // The same arrays the turn fills, so a throw or a Stop reports what it did.
+    progress.inFlight = {
+      turnNumber: currentTurn,
+      attemptNumber,
+      timestamp: turnTimestamp,
+      aiInteractions: turnAiInteractions,
+      subActions: turnSubActions,
+      computer: computerTurnRecord(shownView, recordShot),
+    };
     let completion: CompleteResult;
     try {
       throwIfAborted();
@@ -1528,20 +1601,24 @@ async function computerTurns(
         subActions: turnSubActions,
         computer: computerTurnRecord(shownView, recordShot),
       });
+      progress.inFlight = undefined;
       throw new ComputerStepFailure(blind, allTurns, false);
     }
-    // A Stop that landed while the model was answering: nothing it asked for
-    // runs.
-    throwIfAborted();
+    // The answer is recorded before the Stop check below: the call was made
+    // and paid for whether or not anything it asked for runs.
     turnAiInteractions.push({
       purpose: 'computer-action-plan',
       attemptNumber,
       requestMessages: messages.map((m) => ({ role: m.role, content: textOf(m) })),
       response: completion.text,
       ...(completion.model !== undefined && { model: completion.model }),
+      ...(completion.usage !== undefined && { usage: completion.usage }),
       ...(recordShot && { screenshotBase64: shownView.pngBase64 }),
       timestamp: turnTimestamp,
     });
+    // A Stop that landed while the model was answering: nothing it asked for
+    // runs.
+    throwIfAborted();
 
     let parsed;
     try {
@@ -1557,6 +1634,7 @@ async function computerTurns(
         subActions: turnSubActions,
         computer: computerTurnRecord(shownView, recordShot),
       });
+      progress.inFlight = undefined;
       throw new ComputerStepFailure(
         `Step failed: ${err instanceof Error ? err.message : String(err)}`,
         allTurns,
@@ -1602,6 +1680,7 @@ async function computerTurns(
         subActions: turnSubActions,
         computer: computerTurnRecord(shownView, recordShot),
       });
+      progress.inFlight = undefined;
       throw new ComputerStepFailure(computerStallMessage(instruction), allTurns, false);
     }
 
@@ -1968,6 +2047,7 @@ async function computerTurns(
         ...(screenPoint && { screenPoint }),
       },
     });
+    progress.inFlight = undefined;
 
     if (turnFailed) {
       throw new ComputerStepFailure(

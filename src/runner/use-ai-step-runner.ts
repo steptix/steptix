@@ -23,6 +23,7 @@ import {
 } from '../utils/secrets.js';
 import { applyTailOutcome } from './failure-tail-outcome.js';
 import { logger } from '../utils/logger.js';
+import { recordExecutedStep, type RunStats } from './run-stats.js';
 
 /**
  * Running one `[use ai] <step>` (stories/use-ai-step.md).
@@ -63,7 +64,7 @@ export interface UseAiModel {
   complete(
     messages: ChatMessage[],
     signal?: AbortSignal,
-  ): Promise<{ text: string; model?: string | undefined }>;
+  ): Promise<{ text: string; model?: string | undefined; usage?: AiInteraction['usage'] }>;
 }
 
 export interface UseAiStepArgs {
@@ -92,6 +93,9 @@ export interface UseAiStepArgs {
   /** The line's `… otherwise …` tail, parsed off the authored line by the
    *  loop. Stripped from what the model reads and applied to the outcome. */
   failureTail?: ParsedFailureTail | null | undefined;
+  /** Who is running, for the scoreboard — the step records its lines when it
+   *  ends, as `executeStep` does (docs/specs/SPEC-scoreboard.md §7). */
+  stats?: RunStats | undefined;
 }
 
 /** The errors that are about THIS MACHINE, not the reply: asking again cannot
@@ -318,6 +322,15 @@ function textMaskSet(
 }
 
 export async function runUseAiStep(args: UseAiStepArgs): Promise<UseAiStepOutcome> {
+  const outcome = await askTheModel(args);
+  // No `rules`: this step is asked through its own prompt (`buildUseAiPrompt`),
+  // not the step prompt the rules fingerprint is taken of.
+  recordExecutedStep(outcome.result, args.stats, { stepText: args.instruction, maskValues: args.secrets });
+  return outcome;
+}
+
+/** {@link runUseAiStep} without the scoreboard line. */
+async function askTheModel(args: UseAiStepArgs): Promise<UseAiStepOutcome> {
   const startedAt = Date.now();
   const { parsed, index, instruction, scope, signal } = args;
   const values = { parameters: scope, ...(args.envData ? { envData: args.envData } : {}) };
@@ -424,13 +437,14 @@ export async function runUseAiStep(args: UseAiStepArgs): Promise<UseAiStepOutcom
     const messages = buildUseAiPrompt(resolved.text, explicitName, retryNote, hidAnything(hidden));
     const timestamp = new Date().toISOString();
 
-    let completion: { text: string; model?: string | undefined };
+    let completion: Awaited<ReturnType<UseAiModel['complete']>>;
     try {
       completion = await args.aiClient.complete(messages, signal);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       // A stop is a stop, not a failure: no tail, no retry. The loops read
-      // `signal.aborted` after the step and record the run as aborted.
+      // `signal.aborted` after the step and record the run as aborted; the
+      // result says so itself too (`interrupted`), as a page step's does.
       if (signal?.aborted || error.name === 'AbortError') {
         return {
           result: {
@@ -440,6 +454,7 @@ export async function runUseAiStep(args: UseAiStepArgs): Promise<UseAiStepOutcom
             turns,
             durationMs: Date.now() - startedAt,
             retried: attempt > 1,
+            interrupted: true,
             error: 'Aborted by client',
             aiExplanation: 'Step aborted by client (run stopped).',
           },
@@ -461,6 +476,7 @@ export async function runUseAiStep(args: UseAiStepArgs): Promise<UseAiStepOutcom
       requestMessages: messages.map((m) => ({ role: m.role, content: contentBlocksToText(m.content) })),
       response: completion.text,
       ...(completion.model !== undefined && { model: completion.model }),
+      ...(completion.usage !== undefined && { usage: completion.usage }),
       timestamp,
     };
     // One turn per attempt, holding the call and no actions — the `guardResult`

@@ -399,6 +399,11 @@ export class CodeBehindCompiler {
             // session may hold a retained `ai: off`, and this must neither obey
             // it nor overwrite it.
             bypassAiPolicy: true,
+            // The record and the replays are the compiler's own runs: tagged so
+            // the scoreboard's default view leaves them out (§5.6 of
+            // docs/specs/SPEC-scoreboard.md) — a replay fails by design while
+            // the compiler iterates.
+            statsSuite: 'compile',
             codeBehind: {
               expansion: {
                 steps: test.steps,

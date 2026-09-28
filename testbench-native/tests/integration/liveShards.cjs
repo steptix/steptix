@@ -297,7 +297,13 @@ function buildFramework(repoRoot) {
  * process could satisfy or break by accident. Separate processes make the
  * question not arise, for the price of a node process per shard.
  */
-async function startServer({ repoRoot, port, logPath }) {
+/**
+ * `env` is laid over this process's environment for the server alone — the
+ * live runner tags every server it starts `AIUI_STATS_SUITE=live`, so the
+ * scoreboard files the suite's runs apart from the user's own
+ * (docs/specs/SPEC-scoreboard.md §5.6).
+ */
+async function startServer({ repoRoot, port, logPath, env = {} }) {
   const entry = path.join(repoRoot, 'dist', 'index.js');
   if (!fs.existsSync(entry)) {
     throw new Error(
@@ -311,7 +317,7 @@ async function startServer({ repoRoot, port, logPath }) {
   const proc = cp.spawn(
     process.execPath,
     [entry, 'serve', '-p', String(port), '--idle-timeout', '60'],
-    { cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'] },
+    { cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } },
   );
   proc.stdout.pipe(log);
   proc.stderr.pipe(log);
@@ -472,8 +478,40 @@ async function runPool(workers, items, task) {
   );
 }
 
+/**
+ * What the live runner prints, once, when the suite drives a server it did not
+ * start — `--server=<url>`, `LIVE_SERVER_URL`, or the serial `--shards=1`
+ * path, which always uses an already-running server.
+ *
+ * The scoreboard tags a line with the suite of the PROCESS that wrote it
+ * (`AIUI_STATS_SUITE`, docs/specs/SPEC-scoreboard.md §5.6). The servers this
+ * runner starts get `live`; a server someone else started has whatever its own
+ * environment says, which is usually nothing — and then every live-suite step
+ * lands in `aiui stats`'s default view as the user's own run. The runner
+ * cannot see that server's environment, so it says so and names the command
+ * that starts it tagged.
+ */
+function sharedServerStatsWarning(serverUrl) {
+  let port = '<port>';
+  try {
+    port = new URL(serverUrl).port || port;
+  } catch {
+    /* not a URL the runner can read a port from — keep the placeholder */
+  }
+  const serve = `node dist/index.js serve -p ${port} --idle-timeout 60`;
+  return [
+    `  scoreboard: ${serverUrl} was not started by this runner, so the lines it`,
+    '              writes to the scoreboard are tagged by ITS OWN AIUI_STATS_SUITE.',
+    "              Unless that is 'live', this suite's runs count as your own in",
+    "              `aiui stats`. Start it tagged, from the repo root:",
+    `                PowerShell:  $env:AIUI_STATS_SUITE = 'live'; ${serve}`,
+    `                bash:        AIUI_STATS_SUITE=live ${serve}`,
+  ].join('\n');
+}
+
 module.exports = {
   WORKSPACE_COPY_SKIP,
+  sharedServerStatsWarning,
   copyWorkspace,
   rebaseConfigPaths,
   pointEnvAtServer,

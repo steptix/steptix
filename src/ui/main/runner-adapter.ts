@@ -71,13 +71,14 @@ import {
   skippedResult,
   SkipQueue,
 } from '../../runner/control-runtime.js';
-import { redact, redactReport, runSecrets, runSecretsWithInputs } from '../../utils/secrets.js';
+import { redact, redactReport, runSecretsWithInputs } from '../../utils/secrets.js';
 import { AiClient } from '../../ai/client.js';
 import { formatStepHistoryEntry } from '../../ai/prompts.js';
 import { TokenTracker } from '../../utils/tokens.js';
 import { ApiResponseStore } from '../../api/response-store.js';
 import { generateReport } from '../../report/generator.js';
 import { setLogCallback } from '../../utils/logger.js';
+import { openRunStats, projectStatsSwitch, recordRunEnd, type RunStats } from '../../runner/run-stats.js';
 
 // ---------------------------------------------------------------------------
 // Patterns mirrored from test-runner.ts (not exported there)
@@ -232,6 +233,10 @@ export class UIRunnerAdapter {
    *  it the fence would collapse to the test's own folder, refusing a
    *  `../shared/logo.png` the CLI accepts. */
   private uploadProjectRoot: string | null = null;
+  /** The run, for the scoreboard (docs/specs/SPEC-scoreboard.md §7): opened
+   *  once the test is parsed, carried on every step's options, and closed with
+   *  the run line beside the report. Steers are steps of the same run. */
+  private runStats: RunStats | undefined;
 
   constructor(emit: EmitFn) {
     this.emit = emit;
@@ -344,7 +349,7 @@ export class UIRunnerAdapter {
     const shownSteer = (): string =>
       `(steering) ${redact(
         resolvedInstruction,
-        runSecrets({ parameters: this.resolvedParameters, envData: this.test?.envData }),
+        this.secretsNow(),
       )}`;
 
     // Emit step-start for the steering step
@@ -388,6 +393,9 @@ export class UIRunnerAdapter {
       // hold, matching the server and the CLI: a key IS present on the policy
       // path, so "no key" would send the reader to fix a correct line.
       ...(this.config.ai.allowInRuns === false && { keylessReason: 'policy' as const }),
+      // The report files a steer under a slot past the test's last step (the
+      // push below), so its lines are filed there too.
+      stats: this.statsNow((this.test?.steps.length ?? 0) + this.steeringCount + 1),
     },
     // The steer as TYPED, tokens intact, for the run loop's reason: a
     // `${env.PASSWORD}` typed here is shown to the model masked, not resolved.
@@ -448,6 +456,38 @@ export class UIRunnerAdapter {
   // -----------------------------------------------------------------------
   // Internal — run loop
   // -----------------------------------------------------------------------
+
+  /**
+   * What this run must never print, as it stands now: its secret-named
+   * parameters and env/data secrets (`runSecrets`), plus the secrets among the
+   * values expansion wrote into STEP TEXT — each skill call's arguments and
+   * each looped section's row (`ExpandedFrame.inputs`). No variable map holds
+   * those, so without them a `password` column printed in clear in the panel,
+   * the model's `## Prior Steps`, the report and the scoreboard (issue 060).
+   * The CLI's `secretsNow` and the server's are the same set. Read per call:
+   * captures and `[input:]` answers grow it.
+   */
+  private secretsNow(): string[] {
+    const test = this.test;
+    const frameInputs = Object.values(test?.expansion?.frames ?? {}).flatMap((frame) =>
+      frame.inputs ? [frame.inputs] : [],
+    );
+    return runSecretsWithInputs({ parameters: this.resolvedParameters, envData: test?.envData }, frameInputs);
+  }
+
+  /** What each step's options carry: this run, masked with its secrets as they
+   *  are now — the executor adds what the step itself captures. `reportAs` is
+   *  the number the report files the step under, when that is not the one the
+   *  executor is handed (a steer). */
+  private statsNow(reportAs?: number): RunStats | undefined {
+    const stats = this.runStats;
+    if (stats === undefined) return undefined;
+    return {
+      ...stats,
+      ...(stats.enabled && { maskValues: this.secretsNow() }),
+      ...(reportAs !== undefined && { reportIndex: () => reportAs }),
+    };
+  }
 
   /**
    * A step's text as the model reads it: `${env.X}` / `${data.x}` first —
@@ -515,6 +555,14 @@ export class UIRunnerAdapter {
         : initial;
     this.test = parsedTest;
     this.uploadProjectRoot = await resolveProjectRoot(parsedTest.filePath);
+    this.runStats = openRunStats({
+      projectRoot: this.uploadProjectRoot,
+      testFilePath: parsedTest.filePath,
+      // The TEST's project's switch: `loadConfig()` above read the working
+      // directory's config, and this test's lines are filed under the root its
+      // own path resolves to — the CLI's rule (§6.4).
+      projectEnabled: await projectStatsSwitch(this.uploadProjectRoot, this.config),
+    });
 
     // 3. Expand test instances (take first for the UI — no data-driven in UI v1)
     const instances = await expandTestInstances(parsedTest, this.config);
@@ -711,7 +759,7 @@ export class UIRunnerAdapter {
        * answer during this step adds a secret the lines after it must hide.
        */
       const shown = (text: string): string =>
-        redact(text, runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData }));
+        redact(text, this.secretsNow());
 
       // ── Flow control, in two halves (stories/step-flow-control.md) ───────
       // Split because the ORDER matters to a watching UI: the returning step
@@ -821,7 +869,7 @@ export class UIRunnerAdapter {
           // never could. Masked on the same terms as every other string this
           // runner emits.
           redact: (text) =>
-            redact(text, runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData })),
+            redact(text, this.secretsNow()),
           executorOptions: {
             page: this.page,
             config: this.config,
@@ -979,15 +1027,11 @@ export class UIRunnerAdapter {
           // With the skill arguments and looped-section rows the expander
           // wrote into step text, which no variable map holds — the runner
           // masks them in the text it sends (issue 060).
-          secrets: runSecretsWithInputs(
-            { parameters: this.resolvedParameters, envData: parsedTest.envData },
-            Object.values(parsedTest.expansion?.frames ?? {}).flatMap((frame) =>
-              frame.inputs ? [frame.inputs] : [],
-            ),
-          ),
+          secrets: this.secretsNow(),
           aiClient: this.aiClient!,
           retries: this.config.execution.retries,
           failureTail,
+          stats: this.statsNow(),
         });
         const result = outcome.result;
         const stepLoop = loops.markerFor(i);
@@ -1038,7 +1082,7 @@ export class UIRunnerAdapter {
             (text) =>
               redact(
                 text,
-                runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData }),
+                this.secretsNow(),
               ),
           );
       if (dottedRefError) {
@@ -1112,7 +1156,7 @@ export class UIRunnerAdapter {
           instruction,
           redact(
             deliberateFailError(flowControlClaim, instruction),
-            runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData }),
+            this.secretsNow(),
           ),
         );
         if (this.config?.execution.screenshotOnFailure && this.page) {
@@ -1313,6 +1357,7 @@ export class UIRunnerAdapter {
         // This step's `… otherwise …` tail, applied at one seam over a step
         // that has finally failed (decision 4).
         ...(failureTail && { failureTail }),
+        stats: this.statsNow(),
       },
       // The step as AUTHORED, tokens intact: what the model reads, beside a
       // `## Values` block in which a secret is masked. Without it the executor
@@ -1451,13 +1496,25 @@ export class UIRunnerAdapter {
           ...(Object.keys(this.resolvedParameters).length > 0 && { parameters: this.resolvedParameters }),
         };
         reportPath = await generateReport(
-          redactReport(report, runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData })),
+          redactReport(report, this.secretsNow()),
           this.config.reports.outputDir,
         );
       } catch {
         // Report generation failure should not affect run result
       }
     }
+
+    // The run line, beside the report it links (docs/specs/SPEC-scoreboard.md
+    // §8.2), with the report's own token totals.
+    recordRunEnd(this.runStats, {
+      status: overallStatus,
+      aborted: this.stopped,
+      ...(this.tokenTracker && {
+        tokensIn: this.tokenTracker.inputTotal,
+        tokensOut: this.tokenTracker.outputTotal,
+      }),
+      report: reportPath !== undefined ? pathResolve(reportPath) : null,
+    });
 
     this.emit('runner:complete', { status: overallStatus, ...(reportPath !== undefined && { reportPath }) });
   }
@@ -1557,6 +1614,7 @@ export class UIRunnerAdapter {
     this.structureMemo = createStructureMemo();
     this.resolvedParameters = {};
     this.test = null;
+    this.runStats = undefined;
     this.config = null;
     this.aiClient = null;
     this.tokenTracker = null;

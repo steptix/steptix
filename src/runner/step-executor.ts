@@ -95,6 +95,7 @@ import type { DesktopAdapter } from '../desktop/index.js';
 import { captureView } from '../desktop/index.js';
 import { buildComputerConditionJudgeMessages } from '../desktop/judge-prompt.js';
 import { imageInputUnsupportedMessage } from '../desktop/vision-route.js';
+import { recordExecutedStep, type RunStats } from './run-stats.js';
 
 /**
  * Actions that may mutate the page and therefore warrant a post-action settle
@@ -382,6 +383,16 @@ export interface StepExecutorOptions {
    * step, which is every step of every test written before computer mode.
    */
   computer?: ComputerStepContext | undefined;
+  /**
+   * Who is running this step, for the scoreboard
+   * (docs/specs/SPEC-scoreboard.md §7): the run id, project, test, suite and
+   * the run's mask set, from `openRunStats` (src/runner/run-stats.ts). The step
+   * records its lines when it ends. Absent, or with recording off, it records
+   * nothing — and a test pins that every call site in `src/` passes it
+   * (tests/stats-call-sites.test.ts), so a new loop cannot record lines with
+   * no run.
+   */
+  stats?: RunStats | undefined;
 }
 
 /**
@@ -445,6 +456,20 @@ class StepFailureError extends Error {
    * error is the one place the run's secrets are applied (decision 3).
    */
   deliberate?: { why: string };
+  /**
+   * The assertions this attempt evaluated before it failed. The attempt's
+   * `assertionResults` never reach a `StepResult` of their own — only the
+   * attempt that decides the step keeps its assertions — but their code
+   * generations were model calls, and the step still made them.
+   */
+  assertions: AssertionResult[] = [];
+  /**
+   * Model calls this attempt made that nothing else on the error holds: the
+   * code generations of an assertion whose evaluation threw (code that never
+   * parsed, or threw every time it ran), which therefore produced no
+   * `AssertionResult` to carry them.
+   */
+  discardedCalls: AiInteraction[] = [];
   constructor(
     message: string,
     failures: PriorFailureContext[],
@@ -459,6 +484,20 @@ class StepFailureError extends Error {
     this.retryable = retryable;
     if (deliberate) this.deliberate = deliberate;
   }
+}
+
+/**
+ * The model calls a failed attempt made that its turns do not hold — its
+ * assertions' code generations, and those of an assertion that threw — for the
+ * step's `discardedAiInteractions`. Empty for any other error.
+ */
+function discardedCallsOf(err: unknown): AiInteraction[] {
+  if (!(err instanceof StepFailureError)) return [];
+  const fromAssertions = err.assertions.flatMap((a) => [
+    ...(a.supersededAiInteractions ?? []),
+    ...(a.aiInteraction !== undefined ? [a.aiInteraction] : []),
+  ]);
+  return [...fromAssertions, ...err.discardedCalls];
 }
 
 
@@ -709,6 +748,40 @@ export async function executeStep(
   opts: StepExecutorOptions,
   authoredInstruction?: string,
 ): Promise<StepResult> {
+  const result = await executeStepUnrecorded(stepIndex, totalSteps, instruction, opts, authoredInstruction);
+  // The scoreboard's one line per executed step (docs/specs/SPEC-scoreboard.md
+  // §7), from the FINAL result, so every exit is covered: a code-behind replay,
+  // the AI flow's pass or failure, a stop. An exit that asked the model nothing
+  // — a condition decided from the run's values, a step the run's lack of AI
+  // failed before any call — writes nothing (`recordable`). A nested call (a
+  // watch group's matched step) is a step of its own and records itself;
+  // nothing that merges one result into another records twice. Not awaited,
+  // and never throws.
+  if (opts.stats?.enabled) {
+    recordExecutedStep(result, opts.stats, {
+      // AS AUTHORED — the text the model was shown, placeholders intact (§5.7).
+      stepText: authoredInstruction ?? instruction,
+      // The options every prompt this step built was made with.
+      rules: { dismissalGuidance: opts.dismissalGuidance ?? false },
+      // Read now, so a secret this step captured is masked in its own lines.
+      // The loop's own set on `stats.maskValues` is merged in beside it, and
+      // that is the one that holds the values expansion wrote into the step
+      // text (skill arguments, a looped section's row) — no option here
+      // carries them (`runSecretsWithInputs`, src/utils/secrets.ts).
+      maskValues: secretsFor(opts),
+    });
+  }
+  return result;
+}
+
+/** {@link executeStep} without the scoreboard line: every exit of a step. */
+async function executeStepUnrecorded(
+  stepIndex: number,
+  totalSteps: number,
+  instruction: string,
+  opts: StepExecutorOptions,
+  authoredInstruction?: string,
+): Promise<StepResult> {
   const startTime = Date.now();
   let retried = false;
   let priorFailures: PriorFailureContext[] = [];
@@ -724,6 +797,20 @@ export async function executeStep(
    * through `onFailure`, so the catch is still where those turns arrive.
    */
   let mergedFailure: unknown;
+  /**
+   * Model calls made by attempts that failed, which no turn holds: their
+   * assertions' code generations, and those of an assertion that threw
+   * (`discardedCallsOf`). Carried onto whatever the step ends with, so the
+   * step's call count and tokens include every call it paid for
+   * (docs/specs/SPEC-scoreboard.md §7.1). Taken from exactly the failures
+   * whose turns are merged, for the reason `mergedFailure` gives.
+   */
+  let discardedCalls: AiInteraction[] = [];
+  /** `result` with the discarded calls on it, when there are any. */
+  const withDiscarded = (result: StepResult): StepResult =>
+    discardedCalls.length > 0
+      ? { ...result, discardedAiInteractions: [...(result.discardedAiInteractions ?? []), ...discardedCalls] }
+      : result;
 
   // --- Code-behind attempt (ahead of the AI flow) ---
   //
@@ -806,6 +893,7 @@ export async function executeStep(
         if (err instanceof StepFailureError) {
           priorFailures = [...priorFailures, ...err.failures];
           priorAttemptTurns = [...priorAttemptTurns, ...err.turns];
+          discardedCalls = [...discardedCalls, ...discardedCallsOf(err)];
           mergedFailure = err;
         }
       },
@@ -819,12 +907,12 @@ export async function executeStep(
     // If a prior attempt failed, merge its turns into the successful result
     // so the report shows all attempts, not just the one that succeeded
     if (priorAttemptTurns.length > 0) {
-      return withStale({
+      return withStale(withDiscarded({
         ...result,
         turns: [...priorAttemptTurns, ...result.turns],
-      });
+      }));
     }
-    return withStale(result);
+    return withStale(withDiscarded(result));
   } catch (err) {
     // All attempts failed
     const durationMs = Date.now() - startTime;
@@ -840,18 +928,30 @@ export async function executeStep(
     // merely cancelled. (The server's abort path drops the flag anyway —
     // `recordInterruptedStep` rebuilds the row — so this is about the CLI
     // path and about not implying an invariant that isn't there.)
+    //
+    // `interrupted`, so every reader of the result — the run loops, the report,
+    // the scoreboard — sees a step the user stopped rather than one that
+    // failed (issue 021's state, and docs/specs/SPEC-scoreboard.md §5.2). The
+    // stopped attempt's turns ride along: its model calls were made, and the
+    // actions it ran before the Stop ran. `retried` says what happened — a
+    // second attempt started — not the allowance.
     if (opts.signal?.aborted) {
-      return {
+      if (err instanceof StepFailureError && err !== mergedFailure) {
+        priorAttemptTurns = [...priorAttemptTurns, ...err.turns];
+        discardedCalls = [...discardedCalls, ...discardedCallsOf(err)];
+      }
+      return withDiscarded({
         index: stepIndex,
         instruction,
         status: 'failed',
         turns: priorAttemptTurns,
         durationMs,
-        retried: true,
+        retried,
+        interrupted: true,
         pageUrl: opts.page.url(),
         error: 'Aborted by client',
         aiExplanation: 'Step aborted by client (run stopped).',
-      };
+      });
     }
 
     logger.error(
@@ -865,9 +965,10 @@ export async function executeStep(
 
     // Collect turns from the final failed attempt too — unless `onFailure`
     // already took them, which it does for a failure `withRetry` declined to
-    // retry. See `mergedFailure`.
+    // retry. See `mergedFailure`. Its discarded calls on the same terms.
     if (err instanceof StepFailureError && err !== mergedFailure) {
       priorAttemptTurns = [...priorAttemptTurns, ...err.turns];
+      discardedCalls = [...discardedCalls, ...discardedCallsOf(err)];
     }
 
     // The step's own text asked for this failure (decision 2). `error` is already
@@ -881,7 +982,7 @@ export async function executeStep(
     // step's entry threw, dropping the flag on failure would erase the
     // code-behind error entirely — the client would see the AI failure and
     // nothing about the crash that caused the fall-through.
-    return applyFailureTail(withStale({
+    return applyFailureTail(withStale(withDiscarded({
       index: stepIndex,
       instruction,
       status: 'failed',
@@ -899,7 +1000,7 @@ export async function executeStep(
         : attemptsMade <= 1
           ? `Failed to execute step. Last error: ${errorMessage}`
           : `Failed to execute step after ${attemptsMade} attempts. Last error: ${errorMessage}`,
-    }), opts);
+    })), opts);
   }
 }
 
@@ -1858,6 +1959,12 @@ interface ReadTableOutcome {
    * every read that needed no question.
    */
   mapping?: TableReadMapping;
+  /**
+   * Set when `result.error` quotes the model's answer to the structure
+   * question — words the model wrote, which the scoreboard must not read for
+   * Playwright's wording, so the sub-action is not tagged as Playwright's.
+   */
+  quotesModel?: true;
 }
 
 interface ReadTableArgs {
@@ -2037,6 +2144,7 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
     requestMessages: messages.map((m) => ({ role: m.role, content: contentBlocksToText(m.content) })),
     response: completion.text,
     ...(completion.model !== undefined && { model: completion.model }),
+    ...(completion.usage !== undefined && { usage: completion.usage }),
     pageUrl: page.url(),
     timestamp: new Date().toISOString(),
   });
@@ -2077,6 +2185,7 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
   } catch (err) {
     return {
       result: spent(first.result, `${refusal.message} ${bothAnswers((err as Error).message)}`),
+      quotesModel: true,
     };
   }
 
@@ -2086,6 +2195,7 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
     );
     return {
       result: spent(first.result, `${refusal.message} ${bothAnswers(`none — ${answer.reason}`)}`),
+      quotesModel: true,
     };
   }
 
@@ -2098,6 +2208,7 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
         first.result,
         `${refusal.message} ${bothAnswers(`${JSON.stringify(answer)} — ${(err as Error).message}`)}`,
       ),
+      quotesModel: true,
     };
   }
 
@@ -2116,6 +2227,7 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
         second.result,
         `${second.result.error ?? refusal.message} ` + bothAnswers(JSON.stringify(answer)),
       ),
+      quotesModel: true,
     };
   }
   // Validated against the live page, so the rest of this run may reuse it —
@@ -2207,6 +2319,22 @@ async function executeStepAttempt(
 
   /** Accumulated assertion results across all turns of this step */
   const assertionResults: AssertionResult[] = [];
+  /**
+   * The code generations of the assertion being evaluated right now. Emptied
+   * once it returns a result, which then carries them; if it throws instead,
+   * they are the only record of calls that were made, and ride out on the
+   * attempt's failure (`StepFailureError.discardedCalls`).
+   */
+  let assertionCallsInFlight: AiInteraction[] = [];
+  /**
+   * The turn under way, from the moment its accumulators exist until it is
+   * pushed onto `allTurns`. A throw in between — the model call itself, a
+   * readTable question, an assertion whose code never ran, a DOM capture —
+   * would otherwise leave the turn's completed calls and the actions it ran out
+   * of every result, and a step whose calls vanish reads as cheaper than it
+   * was. The catch below pushes it.
+   */
+  let inFlightTurn: TurnResult | undefined;
   /** Running counter for assertIndex within this step (0-based) */
   let assertCounter = 0;
   let stepFailed = false;
@@ -2363,6 +2491,14 @@ async function executeStepAttempt(
     // Per-turn accumulators
     const turnAiInteractions: AiInteraction[] = [];
     const turnSubActions: SubActionResult[] = [];
+    // The same arrays, so what the turn has done so far is what a throw pushes.
+    inFlightTurn = {
+      turnNumber: currentTurn,
+      attemptNumber,
+      timestamp: turnTimestamp,
+      aiInteractions: turnAiInteractions,
+      subActions: turnSubActions,
+    };
 
 
 
@@ -2466,6 +2602,7 @@ async function executeStepAttempt(
       requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
       response: rawResponse,
       model: completion.model,
+      ...(completion.usage !== undefined && { usage: completion.usage }),
       ...(screenshotBase64 !== undefined && { screenshotBase64 }),
       pageUrl: currentUrl,
       timestamp: turnTimestamp,
@@ -2492,6 +2629,7 @@ async function executeStepAttempt(
           aiInteractions: turnAiInteractions,
           subActions: turnSubActions,
         });
+        inFlightTurn = undefined;
         break;
       }
       const outcome = await promptUserWithReplEscape({
@@ -2523,6 +2661,7 @@ async function executeStepAttempt(
           aiInteractions: turnAiInteractions,
           subActions: turnSubActions,
         });
+        inFlightTurn = undefined;
         break;
       }
 
@@ -2542,6 +2681,7 @@ async function executeStepAttempt(
         requestMessages: clarificationMessages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
         response: clarifiedResponse,
         model: clarifiedCompletion.model,
+        ...(clarifiedCompletion.usage !== undefined && { usage: clarifiedCompletion.usage }),
         timestamp: new Date().toISOString(),
       });
       aiResponse = parseAIResponse(clarifiedResponse);
@@ -2789,6 +2929,7 @@ async function executeStepAttempt(
         const expected = against === 'predicate' ? undefined : (action.expected ?? '');
         const description = action.description;
 
+        assertionCallsInFlight = [];
         const assertResult = await evaluateAssertion({
           page,
           stepIndex,
@@ -2810,7 +2951,10 @@ async function executeStepAttempt(
           fullPageScreenshots: config.browser.fullPageScreenshots,
           sendScreenshots: config.ai.sendScreenshots,
           ...(opts.signal && { signal: opts.signal }),
+          onCodeGenerated: (interaction) => assertionCallsInFlight.push(interaction),
         });
+        // The result carries every call it made now.
+        assertionCallsInFlight = [];
 
         assertionResults.push(assertResult);
 
@@ -3315,6 +3459,10 @@ async function executeStepAttempt(
       const preSignal = isMutatingAction(action)
         ? await capturePageSignal(page).catch(() => undefined)
         : undefined;
+      // Where the action ran, for the scoreboard's `site`: `pageUrl` below is
+      // taken after the action, so a link click would otherwise be filed under
+      // the page it led to.
+      const actionUrl = page.url();
 
       // Selector measurement (stories/codebehind-selector-ambiguity.md) rides
       // the same gate as `captureStepContext`: generation is its only consumer,
@@ -3328,6 +3476,8 @@ async function executeStepAttempt(
         ambiguousTarget: config.browser.ambiguousTarget,
         ...(opts.uploadPaths !== undefined && { uploadPaths: opts.uploadPaths }),
       };
+      /** Set when a readTable's error quotes the model's structure answer. */
+      let errorQuotesModel = false;
       const result = await traceOp(`action.${action.action}: ${action.description}`, async () => {
         if (action.action !== 'readTable') {
           return executeAction(page, action, baseUrl, opts.signal, execOptions);
@@ -3361,6 +3511,7 @@ async function executeStepAttempt(
           recordedEmitted = { ...emitted, mapping: outcome.mapping };
           aiResponse.actions[emittedIndex] = recordedEmitted;
         }
+        if (outcome.quotesModel) errorQuotesModel = true;
         return outcome.result;
       });
       const subDuration = Date.now() - subStartTime;
@@ -3478,7 +3629,13 @@ async function executeStepAttempt(
         ...(result.upload !== undefined && { upload: result.upload }),
         durationMs: subDuration,
         ...(result.error !== undefined && { error: result.error }),
+        // The one site whose error is the browser action layer's own —
+        // Playwright's text, which the scoreboard's outcome patterns read
+        // (`SubActionResult.errorSource`). Every other error in this loop is
+        // the framework's, a page's, a server's or the model's.
+        ...(result.error !== undefined && !errorQuotesModel && { errorSource: 'playwright' as const }),
         pageUrl: postUrl,
+        ...(actionUrl !== postUrl && { actionPageUrl: actionUrl }),
         timestamp: new Date().toISOString(),
       });
 
@@ -3568,6 +3725,7 @@ async function executeStepAttempt(
       aiInteractions: turnAiInteractions,
       subActions: turnSubActions,
     });
+    inFlightTurn = undefined;
 
     if (turnFailed) {
       // The turn is finalised above before this throws, so a deliberate failure's
@@ -3609,9 +3767,25 @@ async function executeStepAttempt(
   // post-turn assertion phase.)
 
   } catch (err) {
-    if (err instanceof StepFailureError) throw err;
-    const message = err instanceof Error ? err.message : String(err);
-    throw new StepFailureError(message, collectedFailures, allTurns);
+    // The turn a throw cut short still happened: push what it did — a model
+    // call answered, the actions run before the throw — unless it did nothing
+    // at all, which is a throw before the model was asked.
+    if (
+      inFlightTurn !== undefined
+      && (inFlightTurn.aiInteractions.length > 0 || inFlightTurn.subActions.length > 0)
+    ) {
+      allTurns.push(inFlightTurn);
+    }
+    inFlightTurn = undefined;
+    const failure =
+      err instanceof StepFailureError
+        ? err
+        : new StepFailureError(err instanceof Error ? err.message : String(err), collectedFailures, allTurns);
+    // What this attempt asked the model beyond its turns — its assertions'
+    // code, and the code of an assertion that threw — for the step to count.
+    failure.assertions = [...assertionResults];
+    failure.discardedCalls = [...assertionCallsInFlight];
+    throw failure;
   } finally {
     for (const t of activityTrackers.values()) t.dispose();
     activityTrackers = new Map();
@@ -3776,6 +3950,12 @@ interface EvaluateAssertionParams {
   sendScreenshots: boolean;
   /** Run abort signal — forwarded to the assertion code-gen AI call. See issues/020. */
   signal?: AbortSignal;
+  /**
+   * Told of each code generation as it is made — the caller's only record of
+   * those calls if the evaluation then throws, since a throw returns no
+   * `AssertionResult` to carry them.
+   */
+  onCodeGenerated?: (interaction: AiInteraction) => void;
 }
 
 const DEFAULT_POLL_TIMEOUT_MS = 5000;
@@ -3794,6 +3974,9 @@ const MAX_ASSERTION_CODE_ATTEMPTS = 2;
 async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionResult> {
   let assertionCode: string | null = null;
   let aiInteraction: AiInteraction | undefined;
+  /** Every code generation before the current one — calls made and paid for,
+   *  which the result must still count (`supersededAiInteractions`). */
+  const superseded: AiInteraction[] = [];
   let evalResult: { pass: boolean; actual: string } | null = null;
   let lastErr: string | undefined;
 
@@ -3847,6 +4030,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
         codeMsg,
       ], p.signal, { profile: 'authoring' });
 
+      if (aiInteraction !== undefined) superseded.push(aiInteraction);
       aiInteraction = {
         purpose: `assertion[${p.assertIndex}]`,
         attemptNumber: p.attemptNumber,
@@ -3856,10 +4040,12 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
         ],
         response: codeCompletion.text,
         model: codeCompletion.model,
+        ...(codeCompletion.usage !== undefined && { usage: codeCompletion.usage }),
         ...(finalShot?.base64 !== undefined && { screenshotBase64: finalShot.base64 }),
         pageUrl: p.page.url(),
         timestamp: new Date().toISOString(),
       };
+      p.onCodeGenerated?.(aiInteraction);
 
       try {
         assertionCode = parseAssertionCode(codeCompletion.text);
@@ -3908,6 +4094,7 @@ async function evaluateAssertion(p: EvaluateAssertionParams): Promise<AssertionR
     explanation: evalResult.pass ? 'Assertion passed' : failureExplanation,
     ...(assertionCode !== null && { assertionCode }),
     ...(aiInteraction !== undefined && { aiInteraction }),
+    ...(superseded.length > 0 && { supersededAiInteractions: superseded }),
   };
 }
 
@@ -4336,6 +4523,7 @@ export async function evaluateConditions(
       requestMessages: messages.map((m) => ({ role: m.role, content: extractTextFromMessage(m) })),
       response: completion.text,
       ...(completion.model !== undefined && { model: completion.model }),
+      ...(completion.usage !== undefined && { usage: completion.usage }),
       ...(screenshotBase64 !== null && recordShot && { screenshotBase64 }),
       pageUrl: currentUrl,
       timestamp: new Date().toISOString(),

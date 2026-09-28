@@ -98,8 +98,12 @@ export function mergeRowReports(rows: RowReport[], unrun: UnrunRow[] = []): Test
       // An inner loop's marker wins: a section iteration inside a run row is
       // the loop the step's own values came from, and that is what the band
       // above it should read. The enclosing row stays legible from the matrix
-      // table and the frames.
-      steps.push(marker && !step.loop ? { ...step, loop: marker } : step);
+      // table and the frames — and from `dataRow`, which every step of a row
+      // carries whatever its band says, because the step's anchor names its
+      // row (src/report/anchors.ts).
+      steps.push(
+        marker ? { ...step, dataRow: marker.index, ...(!step.loop && { loop: marker }) } : step,
+      );
     }
 
     totalSteps += r.totalSteps;

@@ -317,6 +317,14 @@ function applyEnvDataInterpolation(parsed: ParsedTest, ctx: EnvDataContext): voi
   // the model in clear.
   const hookEnvData = (s: string): string =>
     parseSetStep(s) || parseUseAiStep(s) ? s : interpolateEnvData(s, ctx);
+  // The lines as written, before the bake — what the scoreboard records as a
+  // hook step's text (`ParsedTest.authoredHooks`).
+  parsed.authoredHooks = {
+    before: [...parsed.hooks.before],
+    beforeEach: [...parsed.hooks.beforeEach],
+    afterEach: [...parsed.hooks.afterEach],
+    after: [...parsed.hooks.after],
+  };
   parsed.hooks = {
     before: parsed.hooks.before.map(hookEnvData),
     beforeEach: parsed.hooks.beforeEach.map(hookEnvData),

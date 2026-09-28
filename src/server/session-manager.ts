@@ -171,6 +171,8 @@ import { ApiResponseStore } from '../api/response-store.js';
 import { parseTimeoutMs } from '../runner/test-runner.js';
 import { generateReport, buildReportBaseName, videoBaseNameFor } from '../report/generator.js';
 import { mergeRowReports, type RowReport, type UnrunRow } from '../report/merge-rows.js';
+import { openRunStats, recordRunEnd, statsEnabledIn, type RunStats } from '../runner/run-stats.js';
+import type { StatsSuite } from '../stats/types.js';
 
 /**
  * The rows of one data-driven run, gathered across the batches that ran them
@@ -181,6 +183,13 @@ interface RowRunAccumulator {
   /** Where the report goes — captured from the session that ran row 1, since
    *  the session is closed and recreated between rows. */
   reportOutputDir: string;
+  /**
+   * The scoreboard run the rows record under — ONE for the whole row run,
+   * because they write one report (docs/specs/SPEC-scoreboard.md §8.1).
+   * Opened by row 1's batch; rows 2..N continue it (same run id, same tally)
+   * and `finalizeRowRun` writes its run line.
+   */
+  stats?: RunStats | undefined;
 }
 import {
   logger,
@@ -1161,6 +1170,13 @@ export interface InternalRunOptions {
    * standing `off` for every later run.
    */
   bypassAiPolicy?: boolean;
+  /**
+   * The scoreboard suite this batch records under, over `AIUI_STATS_SUITE`
+   * (docs/specs/SPEC-scoreboard.md §5.6): `compile` for the record and replay
+   * runs `POST /codebehind/compile` drives. A batch carrying `compile` or
+   * `withinCompileRun` on the wire is tagged the same way without it.
+   */
+  statsSuite?: StatsSuite;
 }
 
 export interface StepResultResponse {
@@ -2858,7 +2874,14 @@ export class SessionManager {
    * previous run's rows — the same reason `postSteps` deletes `lastRunInfo` at
    * run start.
    */
-  private accumulateRow(sessionId: string, row: RowReport, outputDir: string): void {
+  private accumulateRow(
+    sessionId: string,
+    row: RowReport,
+    outputDir: string,
+    /** The scoreboard run this row recorded under — kept by the run's first
+     *  accumulated row, for the rows after it and the finalise. */
+    stats?: RunStats,
+  ): void {
     const key = this.sessionKey(sessionId);
     const index = (row.dataRowIndex ?? 0) + 1;
     if (index === 1) this.rowRuns.delete(key);
@@ -2866,9 +2889,10 @@ export class SessionManager {
     const existing = this.rowRuns.get(key);
     if (existing) {
       existing.rows.push(row);
+      existing.stats ??= stats;
       return;
     }
-    this.rowRuns.set(key, { rows: [row], reportOutputDir: outputDir });
+    this.rowRuns.set(key, { rows: [row], reportOutputDir: outputDir, stats });
     if (this.rowRuns.size > SessionManager.ROW_RUN_LIMIT) {
       const oldest = this.rowRuns.keys().next().value;
       if (oldest !== undefined) this.rowRuns.delete(oldest);
@@ -2896,6 +2920,15 @@ export class SessionManager {
     const merged = mergeRowReports(acc.rows, notRun);
     const reportPath = await generateReport(merged, acc.reportOutputDir);
     logger.info(`Report saved: ${reportPath} (${acc.rows.length} row(s))`);
+    // The row run's ONE run line, beside its one report (§8.2) — the stop
+    // path included: a stopped client still posts this finalise.
+    recordRunEnd(acc.stats, {
+      status: merged.status,
+      aborted: merged.aborted,
+      tokensIn: merged.inputTokens,
+      tokensOut: merged.outputTokens,
+      report: pathResolve(reportPath),
+    });
 
     // The stop path is exactly the one that must still produce a report: a
     // client that stopped mid-run closed its SSE stream and will recover this
@@ -4104,6 +4137,40 @@ export class SessionManager {
         { parameters: resolvedParameters, envData: envDataCtx },
         Object.values(frameInputs),
       );
+
+    // Who is running this batch, for the scoreboard (docs/specs/SPEC-scoreboard.md
+    // §7, §8). A batch is a run — it writes its own report — except a data row,
+    // whose rows are ONE run with one report: row 1 opens it and rows 2..N
+    // continue it off the row accumulator, run id and tally together. The
+    // project switch is THIS project's (`projectConfig`, the bundle resolved
+    // from the test file), never the server's own config.
+    const rowRunStats =
+      request.dataRow !== undefined && request.dataRow > 1
+        ? this.rowRuns.get(this.sessionKey(sessionId))?.stats
+        : undefined;
+    // A compile's runs are the compiler's, not the author's (§5.6): the boxed
+    // compile's record and replays (`internal.statsSuite`), a Run & Compile or
+    // Compile This Step, and the rows of one that compiles only on row 1.
+    const statsSuite: StatsSuite | undefined =
+      request.compile !== undefined || request.withinCompileRun !== undefined
+        ? 'compile'
+        : internal?.statsSuite;
+    const batchStats: RunStats = rowRunStats
+      ? { ...rowRunStats, row: request.dataRow }
+      : openRunStats({
+          projectRoot: projectBundle.projectRoot,
+          testFilePath: request.testFilePath,
+          projectEnabled: statsEnabledIn(projectConfig),
+          ...(statsSuite !== undefined && { suite: statsSuite }),
+          ...(request.dataRow !== undefined && { row: request.dataRow }),
+        });
+    /** What each step's options carry. The report numbers a row by its place in
+     *  the expanded list (`index: i + 1`, below), not by the source line the
+     *  executor is handed, so the lines are filed under that number too. */
+    const statsForStep = (index0: number): RunStats => ({
+      ...(batchStats.enabled ? { ...batchStats, maskValues: secretsNow() } : batchStats),
+      reportIndex: () => index0 + 1,
+    });
 
     // `## Config: unmask: keyword, data.keys.public` — names and `${…}` refs
     // this test declares are NOT secrets, despite `isSecretName` matching them
@@ -6216,6 +6283,16 @@ export class SessionManager {
               // other, so it shares this run's structure memo (§7.10).
               structureMemo,
               ...(signal && { signal }),
+              // The group's own 0-based positions, numbered as every other row
+              // of this report is numbered. `card: false` because this loop
+              // writes no report row for a branched step (only the MCP-facing
+              // `results` entry below), so a line's link would name an anchor
+              // the report does not have — the reader prints none for these.
+              stats: {
+                ...statsForStep(i),
+                reportIndex: (index0: number) => index0 + 1,
+                card: false,
+              },
             });
           } catch (err) {
             // An aborted branch throws (cancelled AI call / abort check in the
@@ -7047,6 +7124,7 @@ export class SessionManager {
               retries: runConfig.execution.retries,
               signal,
               failureTail,
+              stats: statsForStep(i),
             });
             stepResult = outcome.result;
             if (outcome.name !== undefined && outcome.value !== undefined) {
@@ -7227,6 +7305,7 @@ export class SessionManager {
                 ...(failureTail && { failureTail }),
                 ...(signal && { signal }),
                 computer: computerContextFor(session.desktopConfig, session.computerAdapter),
+                stats: statsForStep(i),
               },
               originalStep,
             );
@@ -7348,6 +7427,7 @@ export class SessionManager {
                 // Run abort signal — cancels in-flight AI calls and stops the
                 // step's turn loop the instant the client stops. See issues/020.
                 ...(signal && { signal }),
+                stats: statsForStep(i),
               },
               // The step as WRITTEN — `{{}}` and `${}` intact, skill renames
               // applied. The server has held this form all along and threw it
@@ -8326,6 +8406,7 @@ export class SessionManager {
               secrets: secretsNow(),
             },
             session.reportOutputDir,
+            batchStats,
           );
           // The row's own `.webm` still finalises at the close between rows.
           // There is no per-row report to re-render, so the saved path is
@@ -8651,6 +8732,22 @@ export class SessionManager {
       tokens: runTokens,
       ...(reportPath !== undefined && { reportPath }),
     });
+
+    // The scoreboard's run line, where the report was (or was not) written
+    // (docs/specs/SPEC-scoreboard.md §8.2): a stopped batch included, since it
+    // still writes its report. The tokens are the report's own frozen totals.
+    // A data row writes none here — its run is the whole row run, and
+    // `finalizeRowRun` writes that run's one line beside its one report.
+    if (request.dataRow === undefined) {
+      recordRunEnd(batchStats, {
+        // The report's own reading: a StepStatus, with a stop as its flag.
+        status: overallStatus === 'passed' ? 'passed' : 'failed',
+        aborted: overallStatus === 'aborted',
+        tokensIn: runTokens.input,
+        tokensOut: runTokens.output,
+        report: reportPath !== undefined ? pathResolve(reportPath) : null,
+      });
+    }
 
     // Unwind any frames still on the stack — happens on early exit (fail,
     // error, abort) and on a clean finish where the last executed step was

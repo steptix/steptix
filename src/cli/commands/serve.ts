@@ -7,6 +7,7 @@ import { nonNegativeInt } from '../parse-args.js';
 import { startServer } from '../../server/api-server.js';
 import { setLogLevel, type ConsoleLogLevel } from '../../utils/logger.js';
 import type { LoggingConfig } from '../../config/types.js';
+import { pruneStatsFiles, statsSettings } from '../../stats/store.js';
 
 const VALID_LEVELS: readonly ConsoleLogLevel[] = ['silent', 'error', 'warn', 'info', 'debug'];
 const VALID_FILES: readonly LoggingConfig['serverFileLogLevel'][] = ['off', 'compact', 'full'];
@@ -84,6 +85,13 @@ export function registerServeCommand(program: Command): void {
 
       // Apply the configured threshold to the logger before any session runs.
       setLogLevel(config.logging.consoleLogLevel);
+
+      // The scoreboard's retention (docs/specs/SPEC-scoreboard.md §6.3): month
+      // files older than AIUI_STATS_RETAIN_MONTHS go at every server start. Not
+      // awaited — it never throws, and a slow disk must not hold the port — and
+      // here rather than in `startServer`, which the test suites call directly
+      // and must never reach the real user root through.
+      void pruneStatsFiles({ retainMonths: statsSettings().retainMonths });
 
       await startServer(config);
     });

@@ -342,6 +342,7 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
   // Before the merge, on the file's own values: after it, a key the file left
   // out and a key the file got right are indistinguishable.
   assertDesktopSection(userConfig['desktop'], resolvedPath);
+  assertStatsSection(userConfig['stats'], resolvedPath);
   const typed = userConfig as UserConfig;
   const merged = withMachineAiFloor(
     withEnvDefaults(mergeConfig(baseDefaults, typed)),
@@ -440,6 +441,39 @@ function assertDesktopSection(desktop: unknown, configPath: string): void {
         `Invalid desktop.${key} in ${configPath}: expected a number, got ${describeValue(value)}.`,
       );
     }
+  }
+}
+
+/**
+ * The `stats` section's value types, checked at LOAD
+ * (docs/specs/SPEC-scoreboard.md §6.4).
+ *
+ * `stats.enabled: false` is how a project keeps its step text off the machine's
+ * scoreboard, so it is a privacy switch and must not fall through to a guess.
+ * The store reads it as `!== false`, so without this the string `"false"`, the
+ * number `0`, `"off"` — and `"stats": false`, which reads as "off" to a person
+ * — all KEPT RECORDING. A refusal naming the file, the key and the value costs
+ * one edit; the same rule `assertDesktopSection` applies to the other switch
+ * that must not be guessed.
+ *
+ * Exported for the CLI's per-test lookup of a project's switch
+ * (`projectStatsSwitch`, src/runner/run-stats.ts), which reads the section of
+ * a config it did not load through here.
+ */
+export function assertStatsSection(stats: unknown, configPath: string): void {
+  if (stats === undefined) return;
+  if (!isPlainObject(stats)) {
+    throw new Error(
+      `Invalid "stats" in ${configPath}: expected an object, got ${describeValue(stats)}. ` +
+        'To stop recording this project\'s runs, write "stats": { "enabled": false }.',
+    );
+  }
+  const enabled = stats['enabled'];
+  if (enabled !== undefined && typeof enabled !== 'boolean') {
+    throw new Error(
+      `Invalid stats.enabled in ${configPath}: expected true or false, got ${describeValue(enabled)}. ` +
+        'Write the JSON boolean, without quotes — only `false` turns recording off.',
+    );
   }
 }
 

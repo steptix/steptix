@@ -14,6 +14,10 @@ declare module '@pkent/aigateway' {
     input_tokens: number;
     output_tokens: number;
     total_tokens?: number;
+    /** Input tokens the provider served from its prompt cache, normalised by
+     *  the library from OpenAI's `prompt_tokens_details.cached_tokens` and
+     *  Anthropic's `cache_read_input_tokens`. Absent when not reported. */
+    cached_input_tokens?: number;
   }
 
   /** A single normalized content block; only `type:'text'` blocks carry `text`. */

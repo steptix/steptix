@@ -59,6 +59,17 @@ export interface SubActionResult {
   aiReasoning?: string;
   durationMs: number;
   error?: string;
+  /**
+   * Set beside {@link error} when the error came from the browser action layer
+   * (`executeAction`, src/browser/actions.ts): Playwright's own text, or that
+   * layer's refusals on its behalf. The scoreboard reads Playwright's wording
+   * (a timeout, strict mode, a selector that did not parse, an element that
+   * intercepted the click) only off an error carrying this, so page text an
+   * assertion quoted, a message an API returned or the model's own words can
+   * never be read as one (docs/specs/SPEC-scoreboard.md §5.4). Absent on every
+   * other error, and on a sub-action with none.
+   */
+  errorSource?: 'playwright';
   /** Populated for api_call sub-actions */
   apiCallData?: ApiCallData;
   /**
@@ -81,6 +92,13 @@ export interface SubActionResult {
   upload?: { via: 'input' | 'chooser' };
   /** Page URL at the time the screenshot was captured */
   pageUrl?: string;
+  /**
+   * The page URL the action RAN on, set only when the action moved the page
+   * elsewhere (a link click, a submit), so `pageUrl` is the destination. The
+   * scoreboard's `site` is where the selector was used, not where it led
+   * (docs/specs/SPEC-scoreboard.md §5.1).
+   */
+  actionPageUrl?: string;
   /** ISO 8601 timestamp when this sub-action completed */
   timestamp?: string;
 }
@@ -108,6 +126,16 @@ export interface AssertionResult extends AssertionEvaluation {
   assertionCode?: string | undefined;
   /** AI interaction that generated the JS code */
   aiInteraction?: AiInteraction | undefined;
+  /**
+   * The code generations before the one in {@link aiInteraction}, oldest
+   * first: code that did not parse or threw was regenerated, and those calls
+   * were made and paid for too. Not rendered — the report shows the code that
+   * decided the assertion — but counted wherever a step's model calls are
+   * (`getAllAiInteractions`: the model summary, the scoreboard's `calls` and
+   * tokens, docs/specs/SPEC-scoreboard.md §7.1). Absent when the first code
+   * generation was the only one.
+   */
+  supersededAiInteractions?: AiInteraction[] | undefined;
 }
 
 /** A single captured AI response during step execution */
@@ -128,6 +156,19 @@ export interface AiInteraction {
   pageUrl?: string;
   /** ISO 8601 timestamp when the AI was called */
   timestamp?: string;
+  /**
+   * What this call cost, from the value `complete()` returns — `estimated`
+   * when the stream omitted usage and the client counted it itself. The
+   * scoreboard sums it per step (docs/specs/SPEC-scoreboard.md §7.1). Absent
+   * where it was not carried through, and on reports written before it.
+   */
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    /** Input tokens the provider served from its prompt cache, when reported. */
+    cachedInputTokens?: number;
+    estimated?: boolean;
+  };
 }
 
 /** A single turn within a step (AI decision + resulting actions) */
@@ -180,6 +221,14 @@ export interface StepResult {
   /** Set when this step ran inside a loop. Absent on an ordinary step, so a
    *  report with no loops is byte-identical to one from before the feature. */
   loop?: LoopMarker;
+  /**
+   * The data row this step ran in, 1-based — stamped by `mergeRowReports` on
+   * every step of a data-row report, including one whose {@link loop} is an
+   * inner iteration's marker, which hides the row. What the step card's anchor
+   * is built from (`row-3-step-11`, src/report/anchors.ts), so a scoreboard
+   * line's link finds the step in any row. Absent outside a data-row report.
+   */
+  dataRow?: number;
   /**
    * Which surface answered this step (docs/specs/SPEC-use-computer.md §4.5).
    *
@@ -423,6 +472,27 @@ export interface StepResult {
   interactiveResumed?: boolean;
   /** Hook metadata — absent for regular steps, set for hook executions. */
   hookScope?: 'before' | 'beforeEach' | 'afterEach' | 'after';
+  /**
+   * Which line of its hook scope this step is, 1-based. Every line of a scope
+   * shares one {@link index} — the step it runs beside — so this is what tells
+   * them apart: in the report's anchors (`hook-beforeEach-2-step-5`,
+   * src/report/anchors.ts) and on the scoreboard's lines, which carry it as
+   * `hookIndex` (docs/specs/SPEC-scoreboard.md §8.3). Set beside
+   * {@link hookScope}; absent for regular steps.
+   */
+  hookIndex?: number;
+  /**
+   * Model calls this step made and paid for whose results nothing else on the
+   * result holds: the assertion code generations of an attempt that failed
+   * (only the attempt that decided the step keeps its {@link assertions}), and
+   * those of an assertion whose code never ran to a verdict because generating
+   * or running it threw. Not rendered — the report shows the turns and the
+   * deciding attempt's assertions — but counted wherever a step's calls are
+   * (`getAllAiInteractions`: the report's model summary, the scoreboard's
+   * `calls` and tokens, docs/specs/SPEC-scoreboard.md §7.1). Absent when there
+   * were none.
+   */
+  discardedAiInteractions?: AiInteraction[];
   /**
    * Out-of-band control signal from `executeStep` to the test-runner step loop.
    * Currently set only when the user takes control inside the AI clarification REPL.
@@ -679,11 +749,13 @@ export function getAllSubActions(step: StepResult): SubActionResult[] {
   return step.turns.flatMap((t) => t.subActions);
 }
 
-/** Extract all AI interactions from a step's turns + assertion code generations */
+/** Extract all AI interactions from a step's turns + assertion code generations,
+ *  and the calls whose results the step discarded (`discardedAiInteractions`). */
 export function getAllAiInteractions(step: StepResult): AiInteraction[] {
   const fromTurns = step.turns.flatMap((t) => t.aiInteractions);
-  const fromAssertions = (step.assertions ?? [])
-    .map((a) => a.aiInteraction)
-    .filter((i): i is AiInteraction => i !== undefined);
-  return [...fromTurns, ...fromAssertions];
+  const fromAssertions = (step.assertions ?? []).flatMap((a) => [
+    ...(a.supersededAiInteractions ?? []),
+    ...(a.aiInteraction !== undefined ? [a.aiInteraction] : []),
+  ]);
+  return [...fromTurns, ...fromAssertions, ...(step.discardedAiInteractions ?? [])];
 }

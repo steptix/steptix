@@ -20,6 +20,7 @@ const {
   pointEnvAtServer,
   scheduleOrder,
   runPool,
+  sharedServerStatsWarning,
 } = require("../tests/integration/liveShards.cjs");
 
 function tmpDir() {
@@ -373,4 +374,24 @@ test("pointEnvAtServer: a missing .env is an error, not a silent no-op", () => {
     () => pointEnvAtServer(path.join(dir, ".env"), "http://localhost:3207"),
     /no \.env/,
   );
+});
+
+// ─── sharedServerStatsWarning ──────────────────────────────────────────────
+
+test("sharedServerStatsWarning: says whose tag a shared server's lines carry, and how to start it tagged", () => {
+  // A server the runner did not start is tagged by its OWN environment, so an
+  // untagged one files every live-suite step as the user's own run.
+  const text = sharedServerStatsWarning("http://localhost:3217");
+  assert.match(text, /http:\/\/localhost:3217 was not started by this runner/);
+  assert.match(text, /ITS OWN AIUI_STATS_SUITE/);
+  assert.match(text, /aiui stats/);
+  // Both shells, on the server's own port.
+  assert.match(text, /\$env:AIUI_STATS_SUITE = 'live'; node dist\/index\.js serve -p 3217 --idle-timeout 60/);
+  assert.match(text, /AIUI_STATS_SUITE=live node dist\/index\.js serve -p 3217 --idle-timeout 60/);
+});
+
+test("sharedServerStatsWarning: a URL with no readable port still names the command", () => {
+  assert.match(sharedServerStatsWarning("not a url"), /serve -p <port>/);
+  // The default port is implicit in the URL, so it cannot be read back either.
+  assert.match(sharedServerStatsWarning("http://localhost"), /serve -p <port>/);
 });

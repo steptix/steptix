@@ -43,6 +43,7 @@ const {
   writeDurations,
   scheduleOrder,
   runPool,
+  sharedServerStatsWarning,
 } = require('./liveShards.cjs');
 
 const VERSION = '1.95.0';
@@ -344,6 +345,8 @@ async function main() {
     console.log('  workspace:', templatesDir);
     console.log('  test suite:', extensionTestsPath);
     console.log('  server:', serverUrl);
+    // This path never starts a server, so the scoreboard tag is that server's.
+    console.warn(sharedServerStatsWarning(serverUrl));
 
     const reportPath = path.resolve(__dirname, 'live-test-report.json');
     const logPath = path.resolve(__dirname, 'live-test-output.log');
@@ -401,6 +404,9 @@ async function main() {
       `  server:    ${sharedServer} (shared by all shards — note that a shared ` +
         `server interleaves every session's log lines)`,
     );
+    // Not started here, so not tagged here — the shards' own servers get
+    // `AIUI_STATS_SUITE=live` below, this one has whatever it was started with.
+    console.warn(sharedServerStatsWarning(sharedServer));
   }
 
   const serversFile = path.resolve(__dirname, 'live-servers.json');
@@ -432,6 +438,10 @@ async function main() {
         repoRoot,
         port: ports[i],
         logPath: path.join(dir, 'server.log'),
+        // The scoreboard's suite tag (docs/specs/SPEC-scoreboard.md §5.6):
+        // four servers against the fixture app would otherwise swamp the
+        // user's own numbers in the default `aiui stats` view.
+        env: { AIUI_STATS_SUITE: 'live' },
       });
       teardown.push(server.stop);
       servers.push(server);
