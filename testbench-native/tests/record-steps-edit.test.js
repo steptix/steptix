@@ -143,7 +143,7 @@ class Session {
   /** The author's lines no cursor is on (`cursors`: offsets) — add-steps and
    *  the edits of steps, as the recorder sends them. */
   commit(cursors = [], opts = {}) {
-    const adds = core.commitAuthorLines(this.live, this.text, cursors, opts);
+    const adds = core.commitAuthorLines(this.live, this.text, cursors, { ...opts, book: this.book });
     this.live = adds.record;
     const edits = core.commitLineEdits(this.live, this.text, cursors, { ...opts, book: this.book });
     this.live = edits.record;
@@ -843,7 +843,14 @@ test('the one-shot insertion after the file was given up on leaves out the rewor
   s.commit([]);
   const result = ['Click Menu', 'Click Payments now', 'Sign out'];
   const once1 = core.oneShotSteps(s.live, s.text, { steps: result, ids: ['d1', 'd2', ''] });
-  assert.deepEqual(once1, { steps: ['Click Menu', 'Sign out'], kept: ['Click Payments now'] });
+  // "Click Menu" is still in the file as the recording wrote it: not put in
+  // twice either (review of 0.5.158); "Sign out" goes after the line of the
+  // step before it.
+  assert.deepEqual(once1, {
+    steps: ['Sign out'],
+    kept: ['Click Menu', 'Click Payments now'],
+    groups: [{ steps: ['Sign out'], after: s.text.split('\n').indexOf('4. Click Payments now') }],
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -949,4 +956,553 @@ test('the panel\'s Steps so far rows: numbered steps with an id to delete by, th
   assert.deepEqual(panel.stepsSoFarRowsInline({ steps: ['A'] }, []).map((r) => r.id), [null]);
   // The marks copy matches the core.
   assert.deepEqual(panel.draftStepMarksInline(draft), core.draftStepMarks(draft));
+});
+
+// ---------------------------------------------------------------------------
+// Review of tb 0.5.158 (the fix round, tb 0.5.159): each case is a scenario the
+// reviewer ran in the host (P1–P12, D1, D3, C1, E, F1–F4), pinned here on the
+// core. The host halves are in tests/integration/suite/record-steps.test.cjs.
+// ---------------------------------------------------------------------------
+
+/**
+ * Stop, both ways the recorder writes the result: over the last draft (one
+ * undo step), and — the author typed while recording, which split the undo
+ * step — after the drafts were taken out first (`CANCEL`, the clear-out).
+ * Each runs `build` afresh and returns the file after the result.
+ */
+function stopBothWays(build) {
+  const out = {};
+  for (const split of [false, true]) {
+    const { s, last } = build();
+    const result = [...last.steps];
+    if (split) s.write(CANCEL);
+    const w = s.write({
+      steps: result,
+      parameters: [],
+      ...core.authoredForResult(last, result),
+      ...core.idsForResult(last, result),
+      adoptSentByText: true,
+    });
+    assert.ok(!('error' in w), `the result is written (${split ? 'after the clear-out' : 'over the draft'})`);
+    out[split ? 'split' : 'whole'] = s.text;
+  }
+  return out;
+}
+
+test('P2: an edit refused, then the model rewrote its step — at Stop the author\'s line stays between the steps around it, after the clear-out too', () => {
+  const build = () => {
+    const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+    const s = new Session();
+    s.write(server.draft());
+    const from = s.text.indexOf('Click Payments');
+    s.author([change(from, 'Click Payments'.length, 'Type pw-9981 into Password')]);
+    const { edits } = s.commit([]);
+    assert.deepEqual(edits.map((e) => [e.action, e.id]), [['edit-step', 'd2']]);
+    s.live = core.editRefused(s.live, edits[0], s.book);
+    server.rewrite(1, 'Click the Payments tab');
+    s.write(server.draft());
+    return { s, last: server.draft() };
+  };
+  // The runner reads the steps in file order; a number the model's line and
+  // the author's share is cosmetic (the line the result does not hold keeps
+  // the number it had).
+  const expected = withLines(['3. Click Menu', '4. Type pw-9981 into Password', '4. Click the Payments tab', '5. Tick Cash'], 6);
+  const { whole, split } = stopBothWays(build);
+  assert.equal(whole, expected);
+  assert.equal(split, expected, 'the clear-out does not move the author\'s line to the top of the block');
+});
+
+test('P1: the model rewrote the step being edited and the author reworded its new line too — at Stop both lines keep their places', () => {
+  const build = () => {
+    const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+    const s = new Session();
+    s.write(server.draft());
+    s.type(endOf(s.text, '4. Click Payments'), ' now');
+    server.rewrite(1, 'Click the Payments tab');
+    s.write(server.draft());
+    s.type(endOf(s.text, 'Click the Payments tab'), ' please');
+    const { edits } = s.commit([]);
+    assert.deepEqual(edits.map((e) => [e.id, e.text]), [['d2', 'Click Payments now'], ['d4', 'Click the Payments tab please']]);
+    // The server: the first edit lands on d4 (it stands for d2's actions now)
+    // under d2, the second back on it under d4 — one step, the last words.
+    server.steps[1] = { text: 'Click the Payments tab please', id: 'd4', edited: true };
+    server.emit();
+    s.edited({ id: 'd2', text: 'Click Payments now', source: 'editor' });
+    s.edited({ id: 'd4', text: 'Click the Payments tab please', source: 'editor' });
+    s.write(server.draft());
+    return { s, last: server.draft() };
+  };
+  const expected = withLines(['3. Click Menu', '4. Click Payments now', '4. Click the Payments tab please', '5. Tick Cash'], 6);
+  const { whole, split } = stopBothWays(build);
+  assert.equal(whole, expected);
+  assert.equal(split, expected);
+});
+
+test('P3: the drawer deleted a step whose line the author was rewording — at Stop the line stays where it was', () => {
+  const build = () => {
+    const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+    const s = new Session();
+    s.write(server.draft());
+    s.type(endOf(s.text, '4. Click Payments'), ' now');
+    server.drop('d2');
+    const w = s.write({ ...server.draft(), droppedIds: ['d2'] });
+    assert.equal(w.left.length, 1, 'the author was editing it: it stays');
+    s.commit([]);
+    return { s, last: server.draft() };
+  };
+  const expected = withLines(['3. Click Menu', '4. Click Payments now', '4. Tick Cash'], 5);
+  const { whole, split } = stopBothWays(build);
+  assert.equal(whole, expected);
+  assert.equal(split, expected);
+});
+
+test('P10: Ctrl+Z of a rewording the server took sends the words back at once — wherever the cursor is — so a second Ctrl+Z (the recording\'s own write) cannot leave the server holding the undone words', () => {
+  const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+  const s = new Session();
+  s.write(server.draft());
+  // Multi-cursor: " now" typed at the end of lines 3 and 5, in one event.
+  const a = endOf(s.text, '3. Click Menu');
+  const b = endOf(s.text, '5. Tick Cash');
+  s.author([change(b, 0, ' now'), change(a, 0, ' now')]);
+  const { edits } = s.commit([]);
+  assert.deepEqual(edits.map((e) => [e.id, e.text]), [['d1', 'Click Menu now'], ['d3', 'Tick Cash now']]);
+  server.edit('d1', 'Click Menu now');
+  server.edit('d3', 'Tick Cash now');
+  s.edited({ id: 'd1', text: 'Click Menu now', source: 'editor' });
+  s.edited({ id: 'd3', text: 'Tick Cash now', source: 'editor' });
+  const w = s.write(server.draft());
+  assert.equal(w.edits.length, 0, 'the draft that shows the edits changes nothing');
+  // Ctrl+Z: VS Code reports the exact inverse, as an undo; the cursors come
+  // back onto both lines.
+  const a2 = endOf(s.text, '3. Click Menu');
+  const b2 = endOf(s.text, '5. Tick Cash');
+  s.author([change(b2, 4, ''), change(a2, 4, '')], { uncertain: true, undo: true });
+  assert.equal(s.text, recorded('3. Click Menu', '4. Click Payments', '5. Tick Cash'));
+  const back = s.commit([endOf(s.text, '3. Click Menu'), endOf(s.text, '5. Tick Cash')]).edits;
+  assert.deepEqual(back.map((e) => [e.action, e.id, e.text]), [['edit-step', 'd1', 'Click Menu'], ['edit-step', 'd3', 'Tick Cash']], 'sent at once, the cursors on the lines');
+  assert.deepEqual(s.commit([]).edits, [], 'once');
+  // The server releases both edits: the model's steps again — and their lines
+  // the recording's again.
+  server.steps[0] = { text: 'Click Menu', id: 'd1' };
+  server.steps[2] = { text: 'Tick Cash', id: 'd3' };
+  server.emit();
+  s.edited({ id: 'd1', text: 'Click Menu', source: 'editor' });
+  s.edited({ id: 'd3', text: 'Tick Cash', source: 'editor' });
+  assert.deepEqual(s.lines(), [], 'the recording\'s lines again');
+  server.rewrite(2, 'Tick the Cash box');
+  s.write(server.draft());
+  assert.equal(s.text, recorded('3. Click Menu', '4. Click Payments', '5. Tick the Cash box'), 'the model may rewrite them, as any of its own');
+});
+
+test('an edit of a typed step that the server refuses: the line still stands for its step — the draft does not write the step a second time beside it (found by the random run once it refused edits)', () => {
+  const { s, server } = heldA();
+  s.type(endOf(s.text, '4. Verify A'), ' twice');
+  const { edits } = s.commit([]);
+  assert.deepEqual(edits.map((e) => [e.action, e.id, e.text]), [['edit-step', 's1', 'Verify A twice']]);
+  s.live = core.editRefused(s.live, edits[0], s.book);
+  server.record('Tick Cash');
+  s.write(server.draft());
+  assert.equal(s.text, recorded('3. Click Menu', '4. Verify A twice', '5. Click Payments', '6. Tick Cash'));
+  assert.deepEqual(s.commit([]).edits, [], 'not sent again until changed again');
+});
+
+/**
+ * Alt+Down on the line holding `needle`, as VS Code 1.95 reports it (measured):
+ * one event, the line below deleted from the end of this line's text and put
+ * in front of this line — both in the text's offsets before the change.
+ */
+function moveDownChanges(text, needle) {
+  const at = text.indexOf(needle);
+  assert.ok(at >= 0, `no ${JSON.stringify(needle)}`);
+  const start = text.lastIndexOf('\n', at) + 1;
+  const end = text.indexOf('\n', at); // this line's break
+  const nextEnd = text.indexOf('\n', end + 1);
+  const next = text.slice(end + 1, nextEnd);
+  return [change(end, 1 + next.length, ''), change(start, 0, `${next}\n`)];
+}
+
+test('D1: Alt+Down on a recorded line keeps each line\'s step — nothing is sent, the next draft keeps the author\'s order, and Stop does too', () => {
+  const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+  const s = new Session();
+  s.write(server.draft());
+  s.author(moveDownChanges(s.text, '4. Click Payments'));
+  assert.equal(s.text, recorded('3. Click Menu', '5. Tick Cash', '4. Click Payments'));
+  assert.deepEqual(s.commit([]), { adds: [], edits: [] }, 'no edit-step: the words are the steps\'');
+  assert.deepEqual(s.controls(), []);
+  assert.deepEqual(s.lines().map((l) => [l.line, l.stepId]), [['4. Click Payments', 'd2']], 'the moved line is its own step\'s');
+  assert.equal(s.live.uncertain, false);
+  // The next draft: the model recorded one more step. The author's order
+  // stays, the numbers follow it.
+  server.record('Click Pay');
+  s.write(server.draft());
+  assert.equal(s.text, recorded('3. Click Menu', '4. Tick Cash', '5. Click Payments', '6. Click Pay'));
+  // Stop, both ways: the order the author gave.
+  const result = server.draft().steps;
+  const mapped = core.idsForResult(server.draft(), result);
+  s.write({ steps: result, parameters: [], ...mapped });
+  assert.equal(s.text, recorded('3. Click Menu', '4. Tick Cash', '5. Click Payments', '6. Click Pay'));
+  s.write(CANCEL);
+  assert.equal(s.text, FIXTURE, 'Cancel takes the moved line out with the rest');
+});
+
+test('P12: Alt+Down, then the moved-over line deleted — the step dropped is the one whose words went', () => {
+  const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+  const s = new Session();
+  s.write(server.draft());
+  s.author(moveDownChanges(s.text, '4. Click Payments'));
+  s.deleteLine('Tick Cash');
+  assert.deepEqual(s.controls(), [{ action: 'drop', id: 'd3' }], 'Tick Cash\'s step, not Payments\'');
+  server.drop('d3');
+  s.write(server.draft());
+  assert.equal(s.text, recorded('3. Click Menu', '4. Click Payments'));
+});
+
+test('E: a recorded line deleted and typed again with the same words is its step restored — not a new step with no actions; a Restore from the panel after it does not put it in twice', () => {
+  const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+  const s = new Session();
+  s.write(server.draft());
+  s.deleteLine('4. Click Payments');
+  assert.deepEqual(s.controls(), [{ action: 'drop', id: 'd2' }]);
+  server.drop('d2');
+  s.write(server.draft());
+  assert.equal(s.text, recorded('3. Click Menu', '4. Tick Cash'));
+  // End, Enter on "3. Click Menu", and the words typed again.
+  s.author([change(endOf(s.text, '3. Click Menu'), 0, '\n')]);
+  s.type(endOf(s.text, '3. Click Menu') + 1, '4. Click Payments');
+  const { adds, edits } = s.commit([]);
+  assert.deepEqual(adds, [], 'no add-step');
+  assert.deepEqual(edits, []);
+  assert.deepEqual(s.controls(), [{ action: 'restore', id: 'd2' }], 'its restore');
+  assert.deepEqual(s.lines().map((l) => [l.line, l.stepId]), [['4. Click Payments', 'd2']]);
+  server.restore('d2');
+  s.write(server.draft());
+  assert.equal(s.text, recorded('3. Click Menu', '4. Click Payments', '5. Tick Cash'));
+  once(s.text, ['Click Payments']);
+  // The panel's Restore of the same step, late (the server says it is not
+  // deleted): a draft holding it writes it once.
+  core.noteStepRestored('d2', s.book);
+  server.record('Click Pay');
+  s.write(server.draft());
+  assert.equal(s.text, recorded('3. Click Menu', '4. Click Payments', '5. Tick Cash', '6. Click Pay'));
+  once(s.text, ['Click Payments']);
+});
+
+test('E, quicker: a line deleted and typed again before its drop went sends neither', () => {
+  const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+  const s = new Session();
+  s.write(server.draft());
+  s.deleteLine('4. Click Payments');
+  s.author([change(endOf(s.text, '3. Click Menu'), 0, '\n4. Click Payments')]);
+  assert.deepEqual(s.commit([]), { adds: [], edits: [] });
+  assert.deepEqual(s.controls(), [], 'the drop never went, so no restore either');
+  server.record('Click Pay');
+  s.write(server.draft());
+  assert.equal(s.text, recorded('3. Click Menu', '4. Click Payments', '5. Tick Cash', '6. Click Pay'));
+});
+
+test('P: a recorded line cut and pasted between two others is its step restored where the author put it — the server\'s draft puts it back where it was, the file keeps it where it is', () => {
+  const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+  const s = new Session();
+  s.write(server.draft());
+  const cut = s.deleteLine('3. Click Menu');
+  assert.deepEqual(s.controls(), [{ action: 'drop', id: 'd1' }]);
+  // Pasted at the start of "5. Tick Cash" (now line 4 of the block's two).
+  s.author([change(s.text.indexOf('5. Tick Cash'), 0, cut.removed)]);
+  assert.equal(s.text, withLines(['4. Click Payments', '3. Click Menu', '5. Tick Cash'], 6));
+  const { adds } = s.commit([]);
+  assert.deepEqual(adds, [], 'no add-step');
+  assert.deepEqual(s.controls(), [{ action: 'restore', id: 'd1' }], 'the cut went as a drop; the paste is its restore');
+  server.drop('d1');
+  server.restore('d1');
+  s.write(server.draft());
+  assert.deepEqual(server.draft().steps, ['Click Menu', 'Click Payments', 'Tick Cash'], 'the server has it back where it was');
+  assert.equal(s.text, recorded('3. Click Payments', '4. Click Menu', '5. Tick Cash'), 'the file keeps the author\'s order');
+  once(s.text, ['Click Menu']);
+});
+
+test('a moved line whose step the model rewrites: its words go as an edit-step, so the model\'s new step is not left beside it', () => {
+  const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+  const s = new Session();
+  s.write(server.draft());
+  s.author(moveDownChanges(s.text, '4. Click Payments'));
+  server.rewrite(1, 'Open the Payments tab');
+  s.write(server.draft());
+  const { edits } = s.commit([endOf(s.text, 'Click Payments')]);
+  assert.deepEqual(edits.map((e) => [e.action, e.id, e.text]), [['edit-step', 'd2', 'Click Payments']], 'at once, the cursor on it');
+  // The server puts the words back on the step that stands for d2's actions,
+  // under d2.
+  server.steps[1] = { text: 'Click Payments', id: 'd2', edited: true };
+  server.emit();
+  s.edited({ id: 'd2', text: 'Click Payments', source: 'editor' });
+  s.write(server.draft());
+  assert.equal(s.text, recorded('3. Click Menu', '4. Tick Cash', '5. Click Payments'));
+  assert.ok(!s.text.includes('Open the Payments tab'));
+});
+
+/** Stop over the last draft: the result is `extra` more steps after it. */
+function stopWith(s, server, extra = []) {
+  const last = server.draft();
+  const result = [...last.steps, ...extra];
+  const w = s.write({ steps: result, parameters: [], ...core.authoredForResult(last, result), ...core.idsForResult(last, result), adoptSentByText: true });
+  assert.ok(!('error' in w), 'the result goes over the draft — not the one-shot insertion');
+  return result;
+}
+
+test('P6: Backspace at the start of the first recorded line joins it to the line above — that step\'s line, being edited; the recording keeps writing live, and Stop puts nothing in twice', () => {
+  const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+  const s = new Session();
+  s.write(server.draft());
+  const at = s.text.indexOf('3. Click Menu');
+  s.author([change(at - 1, 1, '')]);
+  assert.equal(s.live.uncertain, false, 'followed');
+  assert.deepEqual(s.lines().map((l) => [l.line, l.stepId, l.origin, l.status]), [['2. Click Sign in3. Click Menu', 'd1', 'edit', 'typing']]);
+  assert.deepEqual(s.controls(), []);
+  const { edits } = s.commit([]);
+  assert.deepEqual(edits.map((e) => [e.action, e.id, e.text]), [['edit-step', 'd1', 'Click Sign in3. Click Menu']]);
+  server.edit('d1', 'Click Sign in3. Click Menu');
+  s.edited({ id: 'd1', text: 'Click Sign in3. Click Menu', source: 'editor' });
+  server.record('Click Pay');
+  const w = s.write(server.draft());
+  assert.ok(!('error' in w), 'written live');
+  const live = FIXTURE.replace(
+    '2. Click Sign in\n3. Open the dashboard',
+    '2. Click Sign in3. Click Menu\n4. Click Payments\n5. Tick Cash\n6. Click Pay\n7. Open the dashboard',
+  );
+  assert.equal(s.text, live);
+  stopWith(s, server, ['Sign out']);
+  assert.equal(s.text, live.replace('6. Click Pay\n7.', '6. Click Pay\n7. Sign out\n8.'));
+  once(s.text, ['Click Payments', 'Tick Cash', 'Click Pay\n', 'Click Menu']);
+  // Cancel leaves the joined line: it holds the author's own step too.
+  s.write(CANCEL);
+  assert.equal(s.text, FIXTURE.replace('2. Click Sign in\n', '2. Click Sign in3. Click Menu\n'));
+});
+
+test('P7: Delete at the end of the last recorded line joins the step below to it — the recorded step\'s line, being edited; nothing is lost or put in twice', () => {
+  const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+  const s = new Session();
+  s.write(server.draft());
+  s.author([change(endOf(s.text, '5. Tick Cash'), 1, '')]);
+  assert.equal(s.live.uncertain, false);
+  assert.deepEqual(s.lines().map((l) => [l.line, l.stepId, l.origin]), [['5. Tick Cash6. Open the dashboard', 'd3', 'edit']]);
+  const { edits } = s.commit([]);
+  assert.deepEqual(edits.map((e) => [e.id, e.text]), [['d3', 'Tick Cash6. Open the dashboard']]);
+  server.edit('d3', 'Tick Cash6. Open the dashboard');
+  s.edited({ id: 'd3', text: 'Tick Cash6. Open the dashboard', source: 'editor' });
+  server.record('Click Pay');
+  s.write(server.draft());
+  const live = recorded('3. Click Menu', '4. Click Payments', '5. Tick Cash6. Open the dashboard', '6. Click Pay').replace('\n7. Open the dashboard', '');
+  assert.equal(s.text, live);
+  stopWith(s, server);
+  assert.equal(s.text, live);
+  once(s.text, ['Click Payments', 'Click Pay\n', 'Open the dashboard']);
+});
+
+test('D3: Alt+Down on the last recorded line (past the step below the block) — the step moved in is the author\'s line among the recorded ones; Cancel gives it its number back', () => {
+  const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+  const s = new Session();
+  s.write(server.draft());
+  s.author(moveDownChanges(s.text, '5. Tick Cash'));
+  assert.equal(s.live.uncertain, false);
+  assert.equal(
+    s.text,
+    FIXTURE.replace('2. Click Sign in\n3. Open the dashboard\n', '2. Click Sign in\n3. Click Menu\n4. Click Payments\n6. Open the dashboard\n5. Tick Cash\n'),
+  );
+  assert.deepEqual(s.lines().map((l) => [l.line, l.origin ?? 'typed', l.status]), [['6. Open the dashboard', 'typed', 'typing']]);
+  const { adds } = s.commit([]);
+  assert.deepEqual(adds.map((c) => [c.lines, c.afterStep]), [[['Open the dashboard'], 1]]);
+  const [made] = server.addStep(adds[0]);
+  s.live = core.assignAuthorStepId(s.live, made.id, made.text, s.book);
+  server.record('Click Pay');
+  s.write(server.draft());
+  const live = FIXTURE.replace(
+    '2. Click Sign in\n3. Open the dashboard\n',
+    '2. Click Sign in\n3. Click Menu\n4. Click Payments\n5. Open the dashboard\n6. Tick Cash\n7. Click Pay\n',
+  );
+  assert.equal(s.text, live);
+  stopWith(s, server);
+  assert.equal(s.text, live);
+  s.write(CANCEL);
+  assert.equal(s.text, FIXTURE, 'the recorded lines out, the step below back with its number');
+});
+
+test('C1: a selection from above the block into a recorded line, typed over — the line left is that step\'s, being edited; the lines wholly inside are deleted; the file is not given up on', () => {
+  const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+  const s = new Session();
+  s.write(server.draft());
+  const from = s.text.indexOf('Sign in');
+  const to = s.text.indexOf('Payments');
+  s.author([change(from, to - from, 'X')]);
+  assert.equal(s.live.uncertain, false);
+  assert.deepEqual(s.controls(), [{ action: 'drop', id: 'd1' }]);
+  assert.deepEqual(s.lines().map((l) => [l.line, l.stepId, l.origin]), [['2. Click XPayments', 'd2', 'edit']]);
+  assert.deepEqual(s.commit([]).edits.map((e) => [e.id, e.text]), [['d2', 'Click XPayments']]);
+  server.drop('d1');
+  server.edit('d2', 'Click XPayments');
+  s.edited({ id: 'd2', text: 'Click XPayments', source: 'editor' });
+  server.record('Click Pay');
+  s.write(server.draft());
+  const live = FIXTURE.replace('2. Click Sign in\n3. Open the dashboard', '2. Click XPayments\n4. Tick Cash\n5. Click Pay\n6. Open the dashboard');
+  assert.equal(s.text, live);
+  stopWith(s, server);
+  assert.equal(s.text, live);
+  once(s.text, ['Tick Cash', 'Click Pay']);
+});
+
+test('belt and braces: the one-shot insertion after the file was given up on leaves out steps whose recorded lines are still in it, word for word, and puts the rest after them — nothing twice (the reviewer\'s P6/P7/D3 file states)', () => {
+  const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+  const s = new Session();
+  s.write(server.draft());
+  const record = s.live;
+  // The file as the reviewer left it in P6 (the recording given up on before
+  // this fix round): the first recorded line joined to the one above.
+  s.move([change(s.text.indexOf('3. Click Menu') - 1, 1, '')]);
+  const result = ['Click Menu', 'Click Payments', 'Tick Cash', 'Click Pay'];
+  const p6 = core.oneShotSteps(record, s.text, { steps: result, ids: ['d1', 'd2', 'd3', ''] });
+  assert.deepEqual(p6.kept, ['Click Payments', 'Tick Cash'], 'still there word for word');
+  assert.deepEqual(p6.steps, ['Click Menu', 'Click Pay'], 'the joined line is not word for word: its step goes in');
+  // Each where the result has it: Click Menu at the anchor (before the lines
+  // still there), Click Pay after Tick Cash.
+  assert.deepEqual(p6.groups, [
+    { steps: ['Click Menu'], after: null },
+    { steps: ['Click Pay'], after: s.text.split('\n').indexOf('5. Tick Cash') },
+  ]);
+  // P7's: the last recorded line joined to the step below — the first two
+  // are still there; the rest goes after them.
+  const t = new Session();
+  t.write(server.draft());
+  t.move([change(endOf(t.text, '5. Tick Cash'), 1, '')]);
+  const p7 = core.oneShotSteps(t.live, t.text, { steps: result, ids: ['d1', 'd2', 'd3', ''] });
+  assert.deepEqual(p7, {
+    steps: ['Tick Cash', 'Click Pay'],
+    kept: ['Click Menu', 'Click Payments'],
+    groups: [{ steps: ['Tick Cash', 'Click Pay'], after: t.text.split('\n').indexOf('4. Click Payments') }],
+  });
+  // D3's: the last recorded line moved below the step below: all three
+  // still there, the new one after the last of them.
+  const u = new Session();
+  u.write(server.draft());
+  u.move(moveDownChanges(u.text, '5. Tick Cash'));
+  const d3 = core.oneShotSteps(u.live, u.text, { steps: result, ids: ['d1', 'd2', 'd3', ''] });
+  assert.deepEqual(d3, {
+    steps: ['Click Pay'],
+    kept: ['Click Menu', 'Click Payments', 'Tick Cash'],
+    groups: [{ steps: ['Click Pay'], after: u.text.split('\n').indexOf('5. Tick Cash') }],
+  });
+  // A step the author had in the file before recording is no recorded line.
+  const base = new Session(FIXTURE.replace('3. Open the dashboard', '3. Click Pay\n4. Open the dashboard'));
+  base.write(server.draft());
+  base.move([change(base.text.indexOf('3. Click Menu') - 1, 1, '')]);
+  assert.deepEqual(core.oneShotSteps(base.live, base.text, { steps: result, ids: ['d1', 'd2', 'd3', ''] }).steps, ['Click Menu', 'Click Pay']);
+});
+
+test('a line of the author\'s moved past a recorded line (Alt+Down across the two) keeps its step, and the recording keeps writing live', () => {
+  const { s, server } = heldA();
+  s.author(moveDownChanges(s.text, '4. Verify A'));
+  assert.equal(s.live.uncertain, false);
+  assert.equal(s.text, recorded('3. Click Menu', '5. Click Payments', '4. Verify A'));
+  assert.deepEqual(s.commit([]), { adds: [], edits: [] });
+  assert.deepEqual(s.controls(), []);
+  server.record('Tick Cash');
+  s.write(server.draft());
+  assert.equal(s.text, recorded('3. Click Menu', '4. Click Payments', '5. Verify A', '6. Tick Cash'));
+  once(s.text, ['Verify A', 'Click Payments']);
+  s.write(CANCEL);
+  assert.equal(s.text, FIXTURE.replace('3. Open the dashboard', '4. Verify A\n3. Open the dashboard'), 'Cancel keeps the typed line');
+});
+
+test('one Ctrl+Z brings a deleted line back: the server\'s answer to the delete only renumbers, and is not written while the delete is the last change (numbersLater) — the next write catches the numbers up', () => {
+  const server = new EditServer(['Click Menu', 'Click Help', 'Click Pay']);
+  const s = new Session();
+  s.write(server.draft());
+  const before = s.text;
+  const del = s.deleteLine('4. Click Help');
+  assert.deepEqual(s.controls(), [{ action: 'drop', id: 'd2' }]);
+  server.drop('d2');
+  const afterDelete = s.text;
+  // The echo: nothing but numbers to write — so nothing is written.
+  const echo = core.liveRecordWrite(s.live, s.text, server.draft(), { anchor: s.anchor, book: s.book, numbersLater: true });
+  assert.ok(!('error' in echo));
+  assert.equal(echo.postponed, true);
+  assert.deepEqual(echo.edits, []);
+  s.live = echo.record;
+  assert.equal(s.text, afterDelete, 'the numbers wait');
+  assert.equal(s.live.revision, server.revision, 'the record has the draft\'s revision');
+  // ONE Ctrl+Z: the delete undone — its step restored.
+  s.undoDelete(del);
+  assert.equal(s.text, before);
+  assert.ok(!s.lost);
+  assert.deepEqual(s.controls(), [{ action: 'restore', id: 'd2' }]);
+  // Without the undo, the next draft (a new step) writes the numbers too.
+  const t = new Session();
+  const server2 = new EditServer(['Click Menu', 'Click Help', 'Click Pay']);
+  t.write(server2.draft());
+  t.deleteLine('4. Click Help');
+  server2.drop('d2');
+  const later = core.liveRecordWrite(t.live, t.text, server2.draft(), { anchor: t.anchor, book: t.book, numbersLater: true });
+  t.live = later.record;
+  server2.record('Sign out');
+  t.write(server2.draft());
+  assert.equal(t.text, recorded('3. Click Menu', '4. Click Pay', '5. Sign out'));
+  // A draft that changes more than numbers is written as ever.
+  const u = new Session();
+  const server3 = new EditServer(['Click Menu', 'Click Help']);
+  u.write(server3.draft());
+  u.deleteLine('4. Click Help');
+  server3.drop('d2');
+  server3.record('Sign out');
+  const more = core.liveRecordWrite(u.live, u.text, server3.draft(), { anchor: u.anchor, book: u.book, numbersLater: true });
+  assert.ok(!more.postponed && more.edits.length > 0);
+});
+
+test('server round 2, finding 3: an edit naming a step the model merged into another takes over only what it stood for — the merged step keeps its id and is redrafted; the author\'s line is its step, the merged one the recording\'s line, nothing twice', () => {
+  const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+  const s = new Session();
+  s.write(server.draft());
+  s.type(endOf(s.text, '4. Click Payments'), ' now');
+  // The model merges d2 and d3 into d4 while the author is typing.
+  server.steps.splice(1, 2, { text: 'Pay with the Cash box ticked', id: 'd4' });
+  server.emit();
+  s.write(server.draft());
+  assert.equal(s.text, withLines(['3. Click Menu', '4. Click Payments now', '4. Pay with the Cash box ticked'], 5), 'beside it until the edit lands');
+  const { edits } = s.commit([]);
+  assert.deepEqual(edits.map((e) => [e.id, e.text]), [['d2', 'Click Payments now']]);
+  // The server: the edit takes over what d2 stood for, under d2; d4 keeps the
+  // rest and is redrafted.
+  server.steps.splice(1, 1, { text: 'Click Payments now', id: 'd2', edited: true }, { text: 'Tick Cash', id: 'd4' });
+  server.emit();
+  s.edited({ id: 'd2', text: 'Click Payments now', source: 'editor' });
+  s.write(server.draft());
+  assert.equal(s.text, recorded('3. Click Menu', '4. Click Payments now', '5. Tick Cash'));
+  assert.deepEqual(s.lines().map((l) => [l.line, l.stepId, l.inDraft]), [['4. Click Payments now', 'd2', true]], 'the author\'s line is d2');
+  // d4's line is the recording's: redrafted again, it is rewritten in place.
+  server.steps[2] = { text: 'Tick the Cash box', id: 'd4' };
+  server.emit();
+  s.write(server.draft());
+  assert.equal(s.text, recorded('3. Click Menu', '4. Click Payments now', '5. Tick the Cash box'));
+  // A drop of the stale id later strikes only its own actions (the panel), and
+  // the file loses only the author's line.
+  s.deleteLine('4. Click Payments now');
+  assert.deepEqual(s.controls(), [{ action: 'drop', id: 'd2' }]);
+  server.drop('d2');
+  s.write(server.draft());
+  assert.equal(s.text, recorded('3. Click Menu', '4. Tick the Cash box'));
+});
+
+test('P4: a line typed between two recorded steps that the server did not take — at Stop it stays between them', () => {
+  const build = () => {
+    const server = new EditServer(['Click Menu', 'Click Payments', 'Tick Cash']);
+    const s = new Session();
+    s.write(server.draft());
+    s.type(endOf(s.text, '3. Click Menu'), '\n4. Verify A');
+    const { adds } = s.commit([]);
+    assert.deepEqual(adds.map((c) => [c.lines, c.afterStep]), [[['Verify A'], 0]]);
+    s.live = core.keepAuthorLines(s.live, adds[0].keys);
+    server.record('Click Pay');
+    s.write(server.draft());
+    return { s, last: server.draft() };
+  };
+  const expected = withLines(['3. Click Menu', '4. Verify A', '4. Click Payments', '5. Tick Cash', '6. Click Pay'], 7);
+  const { whole, split } = stopBothWays(build);
+  assert.equal(whole, expected);
+  assert.equal(split, expected);
 });

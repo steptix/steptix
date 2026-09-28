@@ -1265,6 +1265,58 @@ export interface RecordSlot {
    * Its words back on it — Ctrl+Z of the emptying — are that step restored.
    */
   emptiedOf?: { id: string; words: string; reworded: boolean };
+  /**
+   * `block`: the steps this part held when the recording's clear-out
+   * (`LiveDraft.clear`) took them out — Stop after the author typed takes the
+   * drafts out, then writes the result. Until the next draft is written the
+   * part counts as holding them, so a line of the author's between two parts
+   * keeps its place among the steps: the result is laid out as it would have
+   * been over the draft (`stepsAbove`, `atRunEnd`, `layoutByCount`).
+   */
+  clearedSteps?: number;
+  /** `mine`: the draft last written held its step when the clear-out ran
+   *  (`inDraft`, which the clear-out resets) — counted as it was, as above. */
+  clearedHeld?: boolean;
+  /**
+   * `mine`: an undo or redo left the line with words that are not what the
+   * server holds for its step from the file — the author's rewording undone.
+   * It counts at once, wherever the cursor is (`commitLineEdits`): an undo is
+   * not typing, and a second Ctrl+Z (the recording's own write, say) before
+   * the cursor leaves the line would leave the server with the undone words.
+   */
+  commitNow?: boolean;
+  /**
+   * `mine`, `edit`: a recorded line the author MOVED — Alt+Up/Down, or cut
+   * and pasted back among the recorded lines (a line whose words are a step
+   * this file deleted is that step restored) — with its step's words. It is
+   * the author's line where they put it: the recording never writes its
+   * words, and lays the draft out around it by what the file has above it
+   * (`layoutByCount`), not by where the draft has its step. `held`: a draft
+   * has held its step since — one that later does not (the model rewrote the
+   * step) is answered with an `edit-step` of the line's words, which puts the
+   * step back under its id, so it is not written a second time beside it.
+   */
+  moved?: 'waiting' | 'held';
+  /**
+   * `mine`: the line took in text from outside the recorded lines — a
+   * recorded line joined with the line above the block (`above`: Backspace at
+   * its start, or a selection from above it typed over) or below it
+   * (`below`: Delete at its end) (`rereadRun`). It is the recorded step's
+   * line, being edited; but it holds a line of the author's too, so the
+   * recording's clear-out (Cancel) leaves it rather than take their text out
+   * with it, and it keeps its own leading number. `above`: it holds the line
+   * the steps go after, so it stays the run's first line — no step is ever
+   * written above it (`layoutRun`).
+   */
+  joined?: 'above' | 'below';
+  /**
+   * `mine`: newer words for its step came from the drawer or the panel and
+   * the line did not take them (the author had changed it since — the file
+   * wins), while its words were already what went from the file: they go
+   * again when the author leaves the line, so the server does not keep the
+   * drawer's words the file does not have.
+   */
+  resend?: boolean;
 }
 
 /**
@@ -1329,11 +1381,16 @@ export interface LineBook {
   /** Lines the author typed, sent, and deleted before their step had an id:
    *  the text each went as — dropped once `record:step` names it. */
   unnamed: string[];
+  /** The words each step in `deleted` had in the file when its line went,
+   *  and whether that line was one the author typed: a line with those words
+   *  back among the recorded lines (cut and pasted, or typed again) is that
+   *  step restored, not a new step. */
+  deletedWords: Map<string, { words: string; typed: boolean }>;
 }
 
 /** An empty book, for a recording that has just begun. */
 export function newLineBook(): LineBook {
-  return { deleted: new Set(), queue: [], told: new Map(), fromFile: new Set(), unnamed: [] };
+  return { deleted: new Set(), queue: [], told: new Map(), fromFile: new Set(), unnamed: [], deletedWords: new Map() };
 }
 
 /** Take the controls waiting in `book`, in order. */
@@ -1388,6 +1445,13 @@ export interface LiveRecord extends LiveState {
    *  absent — a server that predates editing — and an edit inside the
    *  recorded lines is written over by the next draft, warned, as before. */
   editable?: boolean;
+  /**
+   * Lines the recording wrote that the author moved out of it — above the
+   * line the steps go after (`rereadRun`) — as they read then: theirs from
+   * then on. When what the recording wrote is looked for by its text, these
+   * are not "the recording's text left elsewhere" (`nothingLeft`).
+   */
+  outside?: string[];
 }
 
 /** The state part of a record, for its history. */
@@ -1401,14 +1465,16 @@ function stateOf(record: LiveState): LiveState {
   };
 }
 
-/** The state holds steps the recording wrote. */
+/** The state holds steps the recording wrote — or lines of the author's
+ *  among them: a state an undo can bring back all the same. */
 const holdsSteps = (state: LiveState): boolean =>
   state.slots.some(
     (s) =>
       (s.kind === 'block' && s.wrote !== '') ||
       // Every recorded line reworded, or deleted with later steps renumbered
-      // for them: a state an undo can bring back all the same.
-      (s.kind === 'mine' && s.origin === 'edit' && s.wrote !== '') ||
+      // for them, or with only the author's own lines left (their typed ones,
+      // lines they emptied): an undo can bring that state back.
+      (s.kind === 'mine' && s.wrote !== '') ||
       (s.kind === 'tail' && s.placed !== false && s.wrote !== s.original),
   );
 
@@ -1502,6 +1568,10 @@ export interface LiveRecordWrite {
    *  that stayed in the file because the author had edited them — the line
    *  as it reads, for the one sentence that says so. */
   left: Array<{ key: string; line: string }>;
+  /** `numbersLater`: the draft only renumbered, and nothing was written —
+   *  the record takes the draft's revision; the numbers catch up with the
+   *  next write that changes anything else. */
+  postponed?: boolean;
 }
 
 /**
@@ -1559,7 +1629,7 @@ export function liveRecordWrite(
   live: LiveRecord,
   current: string,
   draft: LiveDraft,
-  opts: { anchor?: RecordAnchor | null; book?: LineBook } = {},
+  opts: { anchor?: RecordAnchor | null; book?: LineBook; numbersLater?: boolean } = {},
 ): LiveRecordWrite | { error: string; lost?: boolean } {
   const book = opts.book ?? newLineBook();
   const where = locateLiveRecord(live, current, opts.anchor, book);
@@ -1579,7 +1649,7 @@ export function liveRecordWrite(
       const k = book.unnamed.indexOf(d.steps[idx] ?? '');
       if (k < 0) continue;
       book.unnamed.splice(k, 1);
-      stepGone(book, id);
+      stepGone(book, id, d.steps[idx], true);
     }
     d = draftSteps(draft, droppedNow());
   }
@@ -1596,7 +1666,11 @@ export function liveRecordWrite(
     const anchor = opts.anchor !== undefined ? opts.anchor : live.anchor && { ...live.anchor, tracked: false };
     const begun = beginLiveRecord(current, anchor, { strict: true });
     if ('error' in begun) return { error: `${RECORDING_NOT_FOUND} (${begun.error})`, lost: true };
-    record = { ...begun, ...(live.editable !== undefined && { editable: live.editable }) };
+    record = {
+      ...begun,
+      ...(live.editable !== undefined && { editable: live.editable }),
+      ...(live.outside !== undefined && { outside: live.outside }),
+    };
     prior = holdsSteps(live) ? [...live.history, stateOf(live)] : live.history;
     relocated = 'fresh';
   } else {
@@ -1663,6 +1737,21 @@ export function liveRecordWrite(
 
   const edits: OffsetEdit[] = [];
   const written: RecordSlot[] = [];
+  /** A part of the run as this write leaves it — with, at the recording's
+   *  clear-out, what it held until then (`clearedSteps`, `clearedHeld`): the
+   *  next draft (the result at Stop) lays the author's lines out among the
+   *  steps as they were, not at the top of the block. */
+  const push = (was: RecordSlot, next: RecordSlot): void => {
+    delete next.clearedSteps;
+    delete next.clearedHeld;
+    if (clearing && was.kind === 'block') {
+      const held = blockSteps(was);
+      if (held > 0) next.clearedSteps = held;
+    } else if (clearing && was.kind === 'mine' && (was.inDraft === true || was.clearedHeld === true)) {
+      next.clearedHeld = true;
+    }
+    written.push(next);
+  };
   const shifts: Array<{ at: number; delta: number }> = [];
   let delta = 0;
   let floor = 0;
@@ -1690,7 +1779,7 @@ export function liveRecordWrite(
         }
         const next: RecordSlot = { ...slot, start, end: start, wrote: '', hiddenText: text, cleared: true, inDraft: false };
         delete next.follow;
-        written.push(next);
+        push(slot, next);
         delta -= len;
         continue;
       }
@@ -1701,7 +1790,7 @@ export function liveRecordWrite(
           edits.push({ start: slot.start, end: slot.end, text: '', kind: 'mine', why: 'hide' });
           shifts.push({ at: slot.end, delta: -len });
         }
-        written.push({ ...slot, start, end: start, wrote: '', hiddenText: slot.wrote, dropped: 'hidden', inDraft: false });
+        push(slot, { ...slot, start, end: start, wrote: '', hiddenText: slot.wrote, dropped: 'hidden', inDraft: false });
         delta -= len;
         continue;
       }
@@ -1710,11 +1799,11 @@ export function liveRecordWrite(
         // out, as a dropped step's line.
         const next: RecordSlot = { ...slot, start, end: start, inDraft: false, dropped: 'hidden' };
         delete next.cleared;
-        written.push(next);
+        push(slot, next);
         continue;
       }
       if ((slot.dropped === 'hidden' || slot.cleared === true) && act !== 'reveal') {
-        written.push({ ...slot, start, end: start, inDraft: false });
+        push(slot, { ...slot, start, end: start, inDraft: false });
         continue;
       }
       // Put back where it was — its step restored, the clear-out, or a draft
@@ -1724,7 +1813,9 @@ export function liveRecordWrite(
       const shown: RecordSlot = revealing
         ? { ...slot, wrote: slot.hiddenText ?? '', end: slot.start + (slot.hiddenText ?? '').length }
         : slot;
-      const number = joined.get(slot) ?? null;
+      // A line that took in a line from outside the block keeps the number
+      // it has: it came with that line.
+      const number = slot.joined !== undefined ? null : (joined.get(slot) ?? null);
       // Newer words for its step from the drawer or the panel: put on the
       // line — only while it reads as the recording last held it; the author
       // changed it since, and the file wins.
@@ -1761,6 +1852,7 @@ export function liveRecordWrite(
         shifts.push({ at: slot.end, delta: renumbered.wrote.length - len });
       }
       const next: RecordSlot = { ...slot, start, end: start + renumbered.wrote.length, wrote: renumbered.wrote, inDraft: joined.has(slot) };
+      if (slot.moved === 'waiting' && joined.has(slot)) next.moved = 'held';
       if (renumbered.number === undefined) delete next.number;
       else next.number = renumbered.number;
       delete next.hiddenText;
@@ -1780,7 +1872,7 @@ export function liveRecordWrite(
       // it since the recording last did: then it stays changed.
       const changed = revealing || renumbered.wrote !== slot.wrote;
       if (!followed && changed && hasStep(slot) && (revealing || slot.wrote === slot.recAs)) next.recAs = renumbered.wrote;
-      written.push(next);
+      push(slot, next);
       delta += renumbered.wrote.length - len;
       continue;
     }
@@ -1802,7 +1894,7 @@ export function liveRecordWrite(
       else if (d.hasIds || empty) next.ids = unitsOf(text, slot.lineEnd).map(() => null);
       else delete next.ids;
     }
-    written.push(next);
+    push(slot, next);
     delta += text.length - (slot.end - slot.start);
   }
   // Steps the author has taken over keep their place as a hint, moved past
@@ -1815,6 +1907,24 @@ export function liveRecordWrite(
   const slots = sortSlots(written);
   const history = prior.slice(-HISTORY_LIMIT);
   const revision = typeof draft.revision === 'number' && Number.isFinite(draft.revision) ? draft.revision : record.revision;
+  // `numbersLater` (the author's own edit is the last change, so what Ctrl+Z
+  // undoes next): a draft that would only give steps their numbers — the
+  // server's answer to a line they deleted, say — is not written now. Written,
+  // it is an undo step of its own on top of theirs, and one Ctrl+Z would take
+  // back the renumbering instead of their delete. The record is as it was,
+  // but for the draft's revision; the next write catches the numbers up.
+  if (opts.numbersLater === true && relocated === 'no' && edits.length > 0 && edits.every((e) => /^\d+$/.test(e.text) && /^\d+$/.test(current.slice(e.start, e.end))) && sameShape(record.slots, slots)) {
+    return {
+      edits: [],
+      slots: record.slots,
+      record: { ...record, uncertain: false, ...(revision !== undefined && { revision }) },
+      text: current,
+      plan,
+      relocated,
+      left,
+      postponed: true,
+    };
+  }
   return {
     edits,
     slots,
@@ -1826,10 +1936,33 @@ export function liveRecordWrite(
   };
 }
 
+/** Two sets of slots that differ at most in the text they hold (the numbers
+ *  written on them): the same parts, in order, standing for the same steps,
+ *  held by the draft or not alike. */
+function sameShape(a: RecordSlot[], b: RecordSlot[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((x, i) => {
+    const y = b[i]!;
+    return (
+      x.kind === y.kind &&
+      x.key === y.key &&
+      x.stepId === y.stepId &&
+      x.inDraft === y.inDraft &&
+      x.dropped === y.dropped &&
+      x.placed === y.placed &&
+      x.moved === y.moved &&
+      JSON.stringify(x.ids ?? null) === JSON.stringify(y.ids ?? null)
+    );
+  });
+}
+
 /** A line of the author's that the empty draft takes out with the steps: a
  *  recorded line they reworded, or one they emptied of its step and left with
  *  no words (`RecordSlot.emptied`). */
 function goesWithSteps(s: RecordSlot): boolean {
+  // A line that took in a line of the author's from outside the block stays:
+  // taking it out would take their text with it.
+  if (s.joined !== undefined) return false;
   return s.origin === 'edit' || (s.emptied === true && cleanAuthorLine(mineLineText(s)) === '');
 }
 
@@ -2166,6 +2299,12 @@ function layoutRun(
   // block, mine, block, …, block — what `settleRun` leaves.
   if (run.length !== 2 * mines.length + 1 || run.some((s, i) => (i % 2 === 0) !== (s.kind === 'block'))) return null;
   const held = mines.map((i) => heldAt(run[i]!));
+  // A line the author moved is where they put it, not where the draft has
+  // its step: laid out by count, around what the file has above it. So is a
+  // line that took in the line the steps go after: nothing goes above it.
+  if (mines.some((i, j) => (held[j] !== undefined && run[i]!.moved !== undefined) || run[i]!.joined === 'above')) {
+    return layoutByCount(run, mines, held, parts, ids, placed);
+  }
   return layoutByDraft(run, mines, held, parts, ids, placed) ?? layoutByCount(run, mines, held, parts, ids, placed);
 }
 
@@ -2283,13 +2422,21 @@ function layoutByCount(
   mines.forEach((i, j) => {
     const h = held[j];
     let want: number;
-    if (h !== undefined) {
+    if (run[i]!.joined === 'above') {
+      // It holds the line the steps go after: the run starts with it.
+      want = 0;
+    } else if (h !== undefined && run[i]!.moved !== undefined) {
+      // Moved there by the author: as many of the recording's steps above it
+      // as the file has.
+      want = 0;
+      for (let k = 0; k < i; k++) if (run[k]!.kind === 'block') want += blockSteps(run[k]!);
+    } else if (h !== undefined) {
       want = rest.filter((k) => k < h).length;
     } else if (run[i]!.origin !== 'edit' && atRunEnd(run, i, placed)) {
       want = rest.length;
     } else {
       want = 0;
-      for (let k = 0; k < i; k++) if (run[k]!.kind === 'block') want += stepCount(run[k]!.wrote);
+      for (let k = 0; k < i; k++) if (run[k]!.kind === 'block') want += blockSteps(run[k]!);
     }
     const cut = Math.min(Math.max(want, floor), rest.length);
     cuts.push(cut);
@@ -2382,11 +2529,14 @@ function numberAuthorLine(
  * The sentence for a line of the author's that stayed in the file when its
  * step was dropped, because they had edited it (stories/testbench-record-toolbar.md
  * §"Undo and locked steps"): the step named by the number the line carries,
- * else by its text.
+ * else by the line it is on in the file (`fileLine`, 0-based; -1 or absent
+ * when not known). Never by its words: a line the server refused may hold a
+ * secret (SPEC-record-steps §7.6).
  */
-export function leftInFileText(line: string): string {
+export function leftInFileText(line: string, fileLine = -1): string {
   const prefix = authorLinePrefix(line);
-  const name = prefix?.mode === 'digits' ? `Your step ${prefix.text}` : `Your step "${cleanAuthorLine(line)}"`;
+  const name =
+    prefix?.mode === 'digits' ? `Your step ${prefix.text}` : fileLine >= 0 ? `Your step on line ${fileLine + 1}` : 'A step of yours';
   return `${name} was left in the file because you edited it — delete it if you meant to.`;
 }
 
@@ -2416,16 +2566,21 @@ const isRun = (s: RecordSlot): boolean => s.kind === 'block' || s.kind === 'mine
  *  spacing a table or a following heading needs). */
 const stepCount = (text: string): number => text.split(/\r?\n/).filter((l) => l.trim() !== '').length;
 
+/** The steps a block part holds — or, emptied by the recording's clear-out
+ *  since the last draft, held until then (`RecordSlot.clearedSteps`). */
+const blockSteps = (s: RecordSlot): number => (s.wrote === '' && s.clearedSteps !== undefined ? s.clearedSteps : stepCount(s.wrote));
+
 /**
  * How many of the draft last written are above the run's part `i`: the steps
  * of the block parts above, and the author's lines above whose step that
- * draft held.
+ * draft held — as they were before the recording's clear-out, when it ran
+ * since (Stop: the drafts out, then the result).
  */
 function stepsAbove(run: RecordSlot[], i: number): number {
   let n = 0;
   for (let k = 0; k < i; k++) {
     const s = run[k]!;
-    n += s.kind === 'block' ? stepCount(s.wrote) : s.inDraft ? 1 : 0;
+    n += s.kind === 'block' ? blockSteps(s) : s.inDraft || s.clearedHeld ? 1 : 0;
   }
   return n;
 }
@@ -2444,7 +2599,7 @@ function stepsAbove(run: RecordSlot[], i: number): number {
 function atRunEnd(run: RecordSlot[], i: number, placed: (s: RecordSlot) => boolean = placedLine): boolean {
   for (let k = i + 1; k < run.length; k++) {
     const s = run[k]!;
-    if (s.kind === 'block' ? stepCount(s.wrote) > 0 : placed(s)) return false;
+    if (s.kind === 'block' ? blockSteps(s) > 0 : placed(s)) return false;
   }
   return true;
 }
@@ -2923,14 +3078,17 @@ function runShape(record: LiveRecord): string {
 function lineGone(book: LineBook, slot: RecordSlot): void {
   if (slot.kind !== 'mine' || slot.dropped !== undefined || slot.cleared === true) return;
   if (slot.stepId !== undefined && hasStep(slot)) {
-    stepGone(book, slot.stepId);
+    stepGone(book, slot.stepId, cleanAuthorLine(mineLineText(slot)), slot.origin !== 'edit');
   } else if (slot.origin !== 'edit' && slot.status === 'sent' && slot.sentText !== undefined) {
     book.unnamed.push(slot.sentText);
   }
 }
 
-/** A step's line was deleted from the file: `drop` it, once. */
-function stepGone(book: LineBook, id: string): void {
+/** A step's line was deleted from the file: `drop` it, once. `words`: what
+ *  the line said, for a line with them back to restore it by; `typed`: the
+ *  line was one the author typed (a restored one is theirs again). */
+function stepGone(book: LineBook, id: string, words?: string, typed = false): void {
+  if (words !== undefined && words !== '') book.deletedWords.set(id, { words, typed });
   if (book.deleted.has(id)) return;
   book.deleted.add(id);
   // A restore of it still waiting to go is moot.
@@ -3042,6 +3200,7 @@ export function locateLiveRecord(
       uncertain: false,
       history: record.history,
       ...(record.editable !== undefined && { editable: record.editable }),
+      ...(record.outside !== undefined && { outside: record.outside }),
     };
     return { status: 'found', record: reconcileLines(record, carryAuthorState(record, found), book), moved: true };
   }
@@ -3077,6 +3236,10 @@ export function carryAuthorState(from: LiveRecord, to: LiveRecord): LiveRecord {
       k.unacked === s.unacked &&
       k.follow === s.follow &&
       k.emptied === s.emptied &&
+      k.commitNow === s.commitNow &&
+      k.resend === s.resend &&
+      // Moved (a write may have seen it held since: `to`'s is the newer).
+      (k.moved === undefined || s.moved !== undefined) &&
       JSON.stringify(k.emptiedOf) === JSON.stringify(s.emptiedOf) &&
       recAs === s.recAs;
     if (!k || same) return s;
@@ -3090,9 +3253,14 @@ export function carryAuthorState(from: LiveRecord, to: LiveRecord): LiveRecord {
       ...(k.origin !== undefined && { origin: k.origin }),
       ...(k.editOf !== undefined && { editOf: k.editOf }),
       ...(recAs !== undefined && { recAs }),
+      ...(k.moved !== undefined && s.moved === undefined && { moved: k.moved }),
     };
     if (k.unacked !== undefined) next.unacked = k.unacked;
     else delete next.unacked;
+    if (k.commitNow === true) next.commitNow = true;
+    else delete next.commitNow;
+    if (k.resend === true) next.resend = true;
+    else delete next.resend;
     if (k.follow !== undefined) next.follow = k.follow;
     else delete next.follow;
     if (k.emptied === true) next.emptied = true;
@@ -3223,11 +3391,13 @@ function reconcileLines(prev: LiveRecord, found: LiveRecord, book: LineBook): Li
  *  more often than the base it was written into had it. */
 function authorLinesLeft(record: LiveRecord, current: string): boolean {
   const count = (text: string, line: string): number => text.split(/\r?\n/).filter((l) => l === line).length;
+  // A line the author moved out of the recording is no step of it any more.
+  const out = (line: string): number => (record.outside ?? []).filter((l) => l === line).length;
   for (const state of [record, ...record.history]) {
     for (const slot of state.slots) {
       if (slot.kind !== 'mine') continue;
       const line = mineLineText(slot);
-      if (line.trim() !== '' && count(current, line) > count(state.base, line)) return true;
+      if (line.trim() !== '' && count(current, line) - out(line) > count(state.base, line)) return true;
     }
   }
   return false;
@@ -3269,7 +3439,7 @@ export function followLiveRecord(
   if (opts.uncertain === true && !inTheirLine) {
     const uncertain: LiveRecord = { ...live, uncertain: true };
     const where = locateLiveRecord(uncertain, opts.text(), opts.anchor, book);
-    if (where.status === 'found') return { record: where.record, touched: false };
+    if (where.status === 'found') return { record: opts.undo === true ? commitUndone(where.record, book) : where.record, touched: false };
     const followable =
       where.status === 'lost' &&
       opts.undo === true &&
@@ -3277,6 +3447,14 @@ export function followLiveRecord(
       changes.length > 0 &&
       changes.every((c) => insideOneLine(live.slots, c, editable));
     if (!followable) return { record: uncertain, touched: false };
+  }
+  // Alt+Up/Down (a line deleted and put in again on the other side of its
+  // neighbour, in one event): read as a move, line by line — by offsets alone
+  // the line put in at the block's first line reads as one typed above it,
+  // and its old place as its step deleted.
+  if (editable && opts.undo !== true && !live.uncertain && isLineMove(changes)) {
+    const reread = rereadRun(live, changes, opts.text(), book, opts.anchor);
+    if (reread) return { record: { ...reread, history: [...live.history, stateOf(live)].slice(-HISTORY_LIMIT) }, touched: false };
   }
   const tracked = trackRecordSlots(live.slots, changes, { editable, ...(editable && changes.length === 1 && { text: opts.text() }) });
   let record: LiveRecord = { ...live, slots: tracked.slots, uncertain: live.uncertain || tracked.uncertain };
@@ -3305,11 +3483,372 @@ export function followLiveRecord(
       touched = false;
     }
   }
+  // An edit of the author's the offsets could not follow — reaching across
+  // the edge of the recorded lines, or of a line of theirs among them — with
+  // step ids: the run is read again line by line (`rereadRun`), each line
+  // still some step's, rather than given up on (review of 0.5.158: P6, P7,
+  // D3, C1 detached the recording, and Stop then put steps in twice).
+  if (editable && opts.undo !== true && !live.uncertain && (record.uncertain || !runOnLines(record, opts.text()))) {
+    const reread = rereadRun(live, changes, opts.text(), book, opts.anchor);
+    if (reread) {
+      record = { ...reread, history: [...live.history, stateOf(live)].slice(-HISTORY_LIMIT) };
+      touched = false;
+    }
+  }
   if (record.uncertain) {
     const where = locateLiveRecord(record, opts.text(), opts.anchor, book);
     if (where.status === 'found') record = where.record;
   }
+  if (opts.undo === true) record = commitUndone(record, book);
   return { record, touched };
+}
+
+/**
+ * One event that moves whole lines past their neighbour, as VS Code 1.95
+ * reports Alt+Up/Down (measured): the lines put in again (`T\n` at a line's
+ * start, or `\nT` at a line's end) and their old place deleted (`T` with one
+ * line break), nothing else.
+ */
+function isLineMove(changes: OffsetChange[]): boolean {
+  if (changes.length !== 2) return false;
+  const put = changes.find((c) => c.length === 0 && c.text !== '');
+  const cut = changes.find((c) => c.length > 0 && c.text === '');
+  if (!put || !cut) return false;
+  const body = put.text.endsWith('\n') ? put.text.slice(0, -1) : put.text.startsWith('\n') ? put.text.slice(1) : null;
+  return body !== null && cut.length === body.length + 1;
+}
+
+/** Every part of the run starts at a line's start and holds whole lines — as
+ *  a write needs it to (`verifyInPlace`). A run hanging off the end of the
+ *  file's last line (`lineEnd`) is not checked here. */
+function runOnLines(record: LiveRecord, text: string): boolean {
+  for (const s of record.slots) {
+    if (!isRun(s) || s.lineEnd) continue;
+    if (s.start < 0 || s.end > text.length || s.start > s.end) return false;
+    if (!atLineStart(text, s.start)) return false;
+    if (s.end > s.start && text[s.end - 1] !== '\n') return false;
+  }
+  return true;
+}
+
+/**
+ * The run read again, line by line, after a change the offsets could not
+ * follow (see `followLiveRecord`) — with step ids only. The recorded text is
+ * mapped through the change: each line the run had either survives on some
+ * line now (moved, renumbered, or edited), or is gone; a new line with no
+ * old line on it is the author's own.
+ *
+ *  - A line that took in text from outside the recorded lines — Backspace at
+ *    the start of the first, Delete at the end of the last, a selection from
+ *    above the block typed over — is the recorded step's line being edited
+ *    (`joined`: it holds a line of the author's too, so the clear-out leaves
+ *    it). Two recorded lines made one are the first one's, the second gone,
+ *    as inside the block.
+ *  - A line that is back with the words of one that went (Alt+Up/Down across
+ *    a line of the author's or past the block's edge) is that line, moved.
+ *  - A line moved in from outside (the step below the block, Alt+Down on the
+ *    last recorded line) is the author's, as a line typed there would be;
+ *    one that is a later step the recording renumbered keeps the number it
+ *    had, for Cancel to give back.
+ *
+ *  - A recorded line moved above the line the steps go after (`anchor`, as
+ *    the caller followed it) has left the recording, as lines above the
+ *    block are outside it (§7): its step is deleted, its text the author's.
+ *
+ * Null when this cannot follow it either — no ids, a run hanging off the end
+ * of the file, the parameters touched, nothing of the run left — and the
+ * caller looks for the recording by its text, as before.
+ */
+function rereadRun(
+  live: LiveRecord,
+  changes: OffsetChange[],
+  text: string,
+  book: LineBook,
+  anchor?: RecordAnchor | null,
+): LiveRecord | null {
+  if (live.editable !== true || live.uncertain || changes.length === 0) return null;
+  const sorted = sortSlots(live.slots);
+  const run = sorted.filter(isRun);
+  if (run.length === 0 || run.some((s) => s.lineEnd)) return null;
+  const R0 = run[0]!.start;
+  const R1 = run[run.length - 1]!.end;
+  if (R1 <= R0) return null;
+  const params = sorted.find((s) => s.kind === 'params');
+  if (params && changes.some((c) => regionRelation(params, c) !== 'before' && regionRelation(params, c) !== 'after')) return null;
+
+  /** The run's lines as the recording last knew them. */
+  interface Old {
+    start: number;
+    end: number;
+    text: string;
+    /** A recorded line: its step's id (null: a blank spacing line). */
+    rec?: string | null;
+    /** A line of the author's. */
+    mine?: RecordSlot;
+  }
+  const olds: Old[] = [];
+  /** Lines of the author's taken out of the file (a dropped step's, the
+   *  clear-out's), kept where they were: before the line `before`. */
+  const zeros: Array<{ slot: RecordSlot; before: number }> = [];
+  for (const part of run) {
+    if (part.kind === 'mine') {
+      if (part.start === part.end) zeros.push({ slot: part, before: olds.length });
+      else olds.push({ start: part.start, end: part.end, text: part.wrote, mine: part });
+      continue;
+    }
+    if (part.wrote === '') continue;
+    const units = unitsOf(part.wrote, false);
+    if (!part.ids || part.ids.length !== units.length) return null;
+    let at = part.start;
+    units.forEach((u, k) => {
+      olds.push({ start: at, end: at + u.length, text: u, rec: part.ids![k] ?? null });
+      at += u.length;
+    });
+  }
+  if (olds.length === 0) return null;
+
+  // Positions through the change: `after` a text put in right there (whole
+  // lines typed at the start of the first recorded line go above the block),
+  // `before` it (typing at the start of the line after the block is that
+  // line's); a position inside a replaced range goes to that range's end or
+  // start.
+  const asc = [...changes].sort((a, b) => a.offset - b.offset);
+  const map = (p: number, bias: 'before' | 'after'): number => {
+    let shift = 0;
+    for (const c of asc) {
+      const end = c.offset + c.length;
+      if (end < p || (c.length > 0 && end === p) || (c.length === 0 && c.offset === p && bias === 'after')) {
+        shift += c.text.length - c.length;
+        continue;
+      }
+      if (c.offset >= p) break;
+      return c.offset + shift + (bias === 'after' ? c.text.length : 0);
+    }
+    return p + shift;
+  };
+  // Lines put in right at the run's start are read with it: one that is a
+  // line of the run moved there is the run's first line now; any other is
+  // above the run, as before (`first`, below).
+  const newR0 = map(R0, 'before');
+  const newR1 = map(R1, 'before');
+  if (newR1 < newR0) return null;
+  const S = text.lastIndexOf('\n', newR0 - 1) + 1;
+  let E = newR1;
+  if (!atLineStart(text, E)) {
+    const nl = text.indexOf('\n', E);
+    if (nl < 0) return null;
+    E = nl + 1;
+  }
+  if (E <= S || text[E - 1] !== '\n') return null;
+  const lines = unitsOf(text.slice(S, E), false);
+  const lineStartsNow: number[] = [];
+  {
+    let at = S;
+    for (const u of lines) {
+      lineStartsNow.push(at);
+      at += u.length;
+    }
+  }
+  const lineOf = (pos: number): number => {
+    let k = 0;
+    while (k + 1 < lineStartsNow.length && lineStartsNow[k + 1]! <= pos) k++;
+    return k;
+  };
+
+  // Where each old line's text is now: the line its start lands on, when any
+  // of its text is left (or was typed over).
+  const owners: Array<Old[]> = lines.map(() => []);
+  const gone: Old[] = [];
+  for (const o of olds) {
+    const brk = o.text.endsWith('\r\n') ? 2 : o.text.endsWith('\n') ? 1 : 0;
+    const from = map(o.start, 'after');
+    const to = map(o.end - brk, 'before');
+    const blank = o.end - brk === o.start;
+    if (from < S || from >= E || (!blank && to <= from)) {
+      gone.push(o);
+      continue;
+    }
+    const k = lineOf(from);
+    // A blank line survives only as a blank line where it was.
+    if (blank && unitLine(lines[k]!) !== '') {
+      gone.push(o);
+      continue;
+    }
+    owners[k]!.push(o);
+  }
+  /** Each line now: the old line it is (first of those on it: two made one
+   *  are the first's), whether it is word for word that line, and whether it
+   *  took in text from outside the run. */
+  const now: Array<{ old: Old | null; same: boolean; joined?: 'above' | 'below' }> = lines.map((u, k) => {
+    const on = owners[k]!;
+    const old = on[0] ?? null;
+    for (const extra of on.slice(1)) gone.push(extra);
+    const start = lineStartsNow[k]!;
+    const joined = old === null ? undefined : start < newR0 ? 'above' : start + unitLine(u).length > newR1 ? 'below' : undefined;
+    return { old, same: old !== null && old.text === u, ...(joined && { joined }) };
+  });
+  // A line with no old line on it but the words of one that went is that one
+  // — moved (Alt+Up/Down reports the line put in again, and its old place
+  // deleted).
+  now.forEach((n, k) => {
+    if (n.old !== null) return;
+    const words = stepWords(lines[k]!);
+    if (words === '') return;
+    const g = gone.findIndex((o) => stepWords(o.text) === words && (o.rec != null || o.mine !== undefined));
+    if (g < 0) return;
+    n.old = gone.splice(g, 1)[0]!;
+    n.same = n.old.text === lines[k];
+  });
+  // Above the line the steps go after: outside the recording (§7) — a line
+  // of the run moved there has left it.
+  /** Where the steps go when every line of the run has left it that way:
+   *  the start of the line after the anchor's. */
+  let emptyAt = -1;
+  const movedOut: string[] = [];
+  if (anchor) {
+    const at = locateAnchor(modelOf(text), anchor);
+    const starts = lineStarts(text);
+    const anchorStart = at ? (starts[at.idx] ?? -1) : -1;
+    now.forEach((n, k) => {
+      if (n.old === null || lineStartsNow[k]! >= anchorStart) return;
+      gone.push(n.old);
+      n.old = null;
+      movedOut.push(unitLine(lines[k]!));
+      if (at) emptyAt = starts[at.idx + 1] ?? text.length;
+    });
+  }
+  // The first line of the run now is the first with an old line on it: the
+  // new lines above it are outside the recording (§7, "Edges").
+  let first = now.findIndex((n) => n.old !== null);
+  if (first < 0 && emptyAt < 0) return null;
+  if (first < 0) first = lines.length;
+  // A later step the recording renumbered, moved above the run (Alt+Down on
+  // its only line): outside it, the author's line — its number is no longer
+  // the recording's to give back, nor its text the recording's.
+  const renumbered = new Set(
+    sorted.filter((t) => t.kind === 'tail' && t.wrote !== t.original).map((t) => `${t.wrote}${t.rest ?? ''}`),
+  );
+  for (let k = 0; k < first; k++) if (renumbered.has(unitLine(lines[k]!))) movedOut.push(unitLine(lines[k]!));
+  // Of the lines that are old ones, the most still in their order stay where
+  // the recording has them; the rest were moved by the author.
+  const oldIndex = new Map(olds.map((o, i) => [o, i] as const));
+  const inOrder = keptInOrder(now.flatMap((n, k) => (n.old ? [[k, oldIndex.get(n.old)!] as const] : [])));
+
+  for (const o of gone) {
+    if (o.mine) lineGone(book, o.mine);
+    else if (o.rec) stepGone(book, o.rec, cleanAuthorLine(unitLine(o.text)));
+  }
+
+  const tails = sorted.filter((s) => s.kind === 'tail');
+  const parts: RecordSlot[] = [];
+  let block: RecordSlot | null = null;
+  const closeBlock = (): void => {
+    if (block) parts.push(block);
+    block = null;
+  };
+  /** Lines of the author's taken out of the file, put back before `k`'s line. */
+  const zerosBefore = (k: number | null, at: number): void => {
+    for (const z of zeros) {
+      const target = z.before < olds.length ? now.findIndex((n) => n.old === olds[z.before]) : -1;
+      if ((k === null && target < 0) || (k !== null && target === k)) {
+        closeBlock();
+        parts.push({ ...z.slot, start: at, end: at });
+      }
+    }
+  };
+  let at = first < lines.length ? lineStartsNow[first]! : emptyAt;
+  for (let k = first; k < lines.length; k++) {
+    const u = lines[k]!;
+    const n = now[k]!;
+    zerosBefore(k, at);
+    const o = n.old;
+    if (o && o.mine) {
+      closeBlock();
+      const moved = !inOrder.has(k) && hasStep(o.mine) && o.mine.stepId !== undefined;
+      const next: RecordSlot = { ...o.mine, start: at, end: at + u.length, wrote: u };
+      if (moved && next.moved === undefined) next.moved = next.inDraft === true ? 'held' : 'waiting';
+      // Holding the anchor's line stays so, whatever else joins it.
+      if (n.joined) next.joined = next.joined === 'above' ? 'above' : n.joined;
+      parts.push(next);
+    } else if (o && o.rec !== undefined && o.rec !== null && !n.same && stepWords(u) !== stepWords(o.text)) {
+      // Its words changed: the step's line, being edited.
+      closeBlock();
+      parts.push({
+        kind: 'mine',
+        start: at,
+        end: at + u.length,
+        lineEnd: false,
+        wrote: u,
+        key: nextMineKey(),
+        origin: 'edit',
+        stepId: o.rec,
+        status: 'typing',
+        editOf: cleanAuthorLine(unitLine(o.text)),
+        inDraft: true,
+        ...(n.joined && { joined: n.joined }),
+      });
+    } else if (o && o.rec !== undefined && o.rec !== null && !inOrder.has(k)) {
+      closeBlock();
+      parts.push(movedLine(at, u, false, o.rec, 'held'));
+    } else if (o && o.rec !== undefined) {
+      // The recording's line, where it was (renumbered at most).
+      if (!block) block = { kind: 'block', start: at, end: at, lineEnd: false, wrote: '', ids: [], touched: false };
+      block.end += u.length;
+      block.wrote += u;
+      block.ids!.push(o.rec);
+    } else {
+      // A line of the author's: typed, pasted, or moved in from outside.
+      closeBlock();
+      const line = typingLine(at, u, false);
+      const tail = tails.find((t) => t.wrote !== t.original && `${t.wrote}${t.rest ?? ''}` === unitLine(u));
+      if (tail) line.number = { mode: 'digits', author: tail.original ?? tail.wrote, wrote: tail.wrote };
+      parts.push(line);
+    }
+    at += u.length;
+  }
+  zerosBefore(null, at);
+  closeBlock();
+  // Every line moved out: the run is empty, where the steps go.
+  if (!parts.some((p) => p.kind === 'block')) parts.unshift({ ...emptyBlock(first < lines.length ? lineStartsNow[first]! : at, false), ids: [] });
+
+  // The rest of the record by offsets: later steps (their lines touched are
+  // the author's now), the parameters (untouched).
+  const tracked = trackRecordSlots(live.slots, changes, { editable: true });
+  const others = tracked.slots.filter((s) => !isRun(s));
+  const rebuilt: LiveRecord = {
+    ...live,
+    slots: sortSlots([...others, ...parts]),
+    uncertain: false,
+    ...(movedOut.length > 0 && { outside: [...(live.outside ?? []), ...movedOut] }),
+  };
+  const settled = settleRun(rebuilt, text, book);
+  if (!settled || !runOnLines(settled.record, text)) return null;
+  return settled.record;
+}
+
+/**
+ * After an undo or redo: each line standing for a step whose words are no
+ * longer what the server holds for it from the file (`LineBook.told`) — the
+ * author's rewording undone, back to the model's words or an earlier one —
+ * counts at once (`RecordSlot.commitNow`). An `edit-step` back to the model's
+ * words releases the rewording on the server; without it, a second Ctrl+Z
+ * before the cursor left the line (the recording's own write undone) left the
+ * server holding words the file no longer has, and Stop wrote them back
+ * (review of tb 0.5.158, P10).
+ */
+function commitUndone(record: LiveRecord, book: LineBook): LiveRecord {
+  if (record.uncertain || record.editable !== true) return record;
+  let changed = false;
+  const slots = record.slots.map((s) => {
+    if (s.kind !== 'mine' || s.commitNow === true || !s.stepId || s.dropped !== undefined || s.cleared === true || s.wrote === '') return s;
+    if (!hasStep(s) || !book.fromFile.has(s.stepId)) return s;
+    const told = book.told.get(s.stepId);
+    const words = cleanAuthorLine(mineLineText(s));
+    if (told === undefined || words === told || words === '') return s;
+    changed = true;
+    return { ...s, commitNow: true };
+  });
+  return changed ? { ...record, slots } : record;
 }
 
 /**
@@ -3400,7 +3939,7 @@ function settleRun(record: LiveRecord, text: string, book: LineBook = newLineBoo
     if (editable && slot.ids !== undefined) {
       const diff = diffBlock(slot, now, slot === firstBlock);
       if (!diff) return null;
-      for (const id of diff.gone) stepGone(book, id);
+      for (const g of diff.gone) stepGone(book, g.id, g.words);
       if (diff.stale) warn = true;
       let at = slot.start;
       for (const p of diff.pieces) {
@@ -3419,6 +3958,8 @@ function settleRun(record: LiveRecord, text: string, book: LineBook = newLineBoo
             editOf: p.was ?? '',
             inDraft: true,
           });
+        } else if (p.kind === 'moved') {
+          parts.push(movedLine(at, p.text, slot.lineEnd, p.id!, 'held'));
         } else if (p.kind === 'new') {
           parts.push(typingLine(at, p.text, slot.lineEnd));
         } else {
@@ -3559,8 +4100,8 @@ function diffBlock(
   now: string,
   first: boolean,
 ): {
-  pieces: Array<{ text: string; kind: 'rec' | 'edit' | 'new'; id?: string; was?: string; ids?: Array<string | null> }>;
-  gone: string[];
+  pieces: Array<{ text: string; kind: 'rec' | 'edit' | 'new' | 'moved'; id?: string; was?: string; ids?: Array<string | null> }>;
+  gone: Array<{ id: string; words: string }>;
   stale: boolean;
 } | null {
   if (now !== '' && !(slot.lineEnd ? startsWithBreak(now) : now.endsWith('\n'))) return null;
@@ -3573,31 +4114,64 @@ function diffBlock(
   while (p < a.length && p < b.length && a[p] === b[p]) p++;
   let q = 0;
   while (q < a.length - p && q < b.length - p && a[a.length - 1 - q] === b[b.length - 1 - q]) q++;
-  const flat: Array<{ text: string; kind: 'rec' | 'edit' | 'new'; id: string | null; was?: string }> = [];
-  const gone: string[] = [];
+  const flat: Array<{ text: string; kind: 'rec' | 'edit' | 'new' | 'moved'; id: string | null; was?: string }> = [];
+  const gone: Array<{ id: string; words: string }> = [];
   let stale = false;
   for (let i = 0; i < p; i++) flat.push({ text: a[i]!, kind: 'rec', id: ids[i] ?? null });
   const midA = a.slice(p, a.length - q);
   const midB = b.slice(p, b.length - q);
-  for (let j = 0; j < Math.max(midA.length, midB.length); j++) {
-    const old = midA[j];
-    const nu = midB[j];
-    const id = ids[p + j] ?? null;
-    if (old !== undefined && nu !== undefined) {
-      if (id === null) {
-        flat.push({ text: nu, kind: 'rec', id: null });
-        stale = true;
-      } else if (stepWords(nu) !== '' && stepWords(nu) === stepWords(old)) {
-        flat.push({ text: nu, kind: 'rec', id });
-      } else {
-        flat.push({ text: nu, kind: 'edit', id, was: cleanAuthorLine(unitLine(old)) });
-      }
-    } else if (old !== undefined) {
-      if (id !== null) gone.push(id);
-      else stale = true;
-    } else if (nu !== undefined) {
-      flat.push({ text: nu, kind: 'new', id: null });
+  const idA = (i: number): string | null => ids[p + i] ?? null;
+  // First, a changed line whose words (its number aside) a recorded line of
+  // the stretch had is that line — renumbered, or MOVED (Alt+Up/Down): it
+  // keeps its step's id (review of 0.5.158, D1: pairing by position read a
+  // swap as two rewordings, each step then standing for the other's action).
+  const byWords = new Map<number, number>();
+  const taken = new Set<number>();
+  midB.forEach((nu, j) => {
+    const w = stepWords(nu);
+    if (w === '') return;
+    const i = midA.findIndex((old, k) => !taken.has(k) && idA(k) !== null && stepWords(old) === w);
+    if (i < 0) return;
+    byWords.set(j, i);
+    taken.add(i);
+  });
+  // Of those, the most that are still in their order stay the recording's;
+  // the rest moved, and are the author's lines where they put them.
+  const inOrder = keptInOrder([...byWords.keys()].sort((x, y) => x - y).map((j) => [j, byWords.get(j)!] as const));
+  // The others, paired in order: a line whose words changed is its step's
+  // rewording; one with no counterpart is gone, or new.
+  const restA = midA.map((_, i) => i).filter((i) => !taken.has(i));
+  const restB = midB.map((_, j) => j).filter((j) => !byWords.has(j));
+  const byPlace = new Map<number, number>();
+  restB.forEach((j, k) => {
+    if (k < restA.length) byPlace.set(j, restA[k]!);
+  });
+  midB.forEach((nu, j) => {
+    const w = byWords.get(j);
+    if (w !== undefined) {
+      flat.push({ text: nu, kind: inOrder.has(j) ? 'rec' : 'moved', id: idA(w) });
+      return;
     }
+    const i = byPlace.get(j);
+    if (i === undefined) {
+      flat.push({ text: nu, kind: 'new', id: null });
+      return;
+    }
+    const old = midA[i]!;
+    const id = idA(i);
+    if (id === null) {
+      flat.push({ text: nu, kind: 'rec', id: null });
+      stale = true;
+    } else if (stepWords(nu) !== '' && stepWords(nu) === stepWords(old)) {
+      flat.push({ text: nu, kind: 'rec', id });
+    } else {
+      flat.push({ text: nu, kind: 'edit', id, was: cleanAuthorLine(unitLine(old)) });
+    }
+  });
+  for (const i of restA.slice(restB.length)) {
+    const id = idA(i);
+    if (id !== null) gone.push({ id, words: cleanAuthorLine(unitLine(midA[i]!)) });
+    else stale = true;
   }
   for (let i = a.length - q; i < a.length; i++) flat.push({ text: a[i]!, kind: 'rec', id: ids[i] ?? null });
   // Above the run's first recorded line: outside the recording, left as an
@@ -3611,7 +4185,7 @@ function diffBlock(
       }
     }
   }
-  const pieces: Array<{ text: string; kind: 'rec' | 'edit' | 'new'; id?: string; was?: string; ids?: Array<string | null> }> = [];
+  const pieces: Array<{ text: string; kind: 'rec' | 'edit' | 'new' | 'moved'; id?: string; was?: string; ids?: Array<string | null> }> = [];
   // Every line of it gone: the part stays, empty, where the steps go.
   if (flat.length === 0) pieces.push({ text: '', kind: 'rec', ids: [] });
   for (const f of flat) {
@@ -3625,6 +4199,31 @@ function diffBlock(
     else pieces.push({ text: f.text, kind: f.kind, ...(f.id !== null && { id: f.id }), ...(f.was !== undefined && { was: f.was }) });
   }
   return { pieces, gone, stale };
+}
+
+/**
+ * Of lines paired with where they were (`[new index, old index]`, in new
+ * order), the most that are still in their old order — a longest increasing
+ * run of old indices, the earlier lines kept on a tie (so after Alt+Down the
+ * line that went down is the one that moved). Returns their new indices.
+ */
+function keptInOrder(pairs: ReadonlyArray<readonly [number, number]>): Set<number> {
+  const n = pairs.length;
+  const len = new Array<number>(n).fill(1);
+  const prev = new Array<number>(n).fill(-1);
+  for (let k = 0; k < n; k++) {
+    for (let m = 0; m < k; m++) {
+      if (pairs[m]![1] < pairs[k]![1] && len[m]! + 1 > len[k]!) {
+        len[k] = len[m]! + 1;
+        prev[k] = m;
+      }
+    }
+  }
+  let end = -1;
+  for (let k = 0; k < n; k++) if (end < 0 || len[k]! > len[end]!) end = k;
+  const out = new Set<number>();
+  for (let k = end; k >= 0; k = prev[k]!) out.add(pairs[k]![0]);
+  return out;
 }
 
 /** One `add-step` for lines the author finished writing in the file. */
@@ -3679,13 +4278,15 @@ export function commitAuthorLines(
   live: LiveRecord,
   text: string,
   cursors: number[],
-  opts: { final?: boolean } = {},
+  opts: { final?: boolean; book?: LineBook } = {},
 ): { record: LiveRecord; commits: AuthorStepCommit[] } {
   if (live.uncertain) return { record: live, commits: [] };
   const run = live.slots.filter(isRun);
   let model: LineModel | null = null;
   let starts: number[] | null = null;
   const ready = new Map<RecordSlot, string>();
+  /** Lines that are a step this file deleted, back: restored, not added. */
+  const restored = new Map<RecordSlot, string>();
   for (let i = 0; i < run.length; i++) {
     const s = run[i]!;
     // A reworded recorded line is not a new step: `commitLineEdits` sends it.
@@ -3704,7 +4305,46 @@ export function commitAuthorLines(
     model ??= modelOf(text);
     starts ??= lineStarts(text);
     if (!authorLineIsStep(model, lineAtOffset(starts, from))) continue;
+    // The words of a step whose line this file deleted (and that is not back
+    // yet): a line cut and pasted, or deleted and typed again, is that step
+    // restored — its actions with it — not a new step of the author's with
+    // none (review of 0.5.158, P and E).
+    const book = opts.book;
+    const back = book
+      ? [...book.deleted].find((id) => book.deletedWords.get(id)?.words === step && ![...restored.values()].includes(id))
+      : undefined;
+    if (back !== undefined) {
+      restored.set(s, back);
+      continue;
+    }
     ready.set(s, step);
+  }
+  if (restored.size > 0 && opts.book) {
+    const book = opts.book;
+    const typed = new Set<string>();
+    for (const id of restored.values()) {
+      if (book.deletedWords.get(id)?.typed === true) typed.add(id);
+      book.deleted.delete(id);
+      book.deletedWords.delete(id);
+      // A drop of it not sent yet is moot; otherwise it goes back.
+      const waiting = book.queue.findIndex((q) => q.action === 'drop' && q.id === id);
+      if (waiting >= 0) book.queue.splice(waiting, 1);
+      else book.queue.push({ action: 'restore', id });
+    }
+    live = {
+      ...live,
+      slots: live.slots.map((s) => {
+        const id = restored.get(s);
+        if (id === undefined) return s;
+        const line = { ...movedLine(s.start, s.wrote, s.lineEnd, id, 'waiting'), key: s.key! };
+        // A line the author typed, back: theirs again, as it went (Cancel keeps it).
+        if (typed.has(id)) {
+          delete line.origin;
+          delete line.editOf;
+        }
+        return line;
+      }),
+    };
   }
   if (ready.size === 0) return { record: live, commits: [] };
   const commits: AuthorStepCommit[] = [];
@@ -3785,7 +4425,7 @@ export function assignAuthorStepId(live: LiveRecord, id: string, text: unknown, 
     const gone = book?.unnamed.indexOf(want) ?? -1;
     if (book && gone >= 0) {
       book.unnamed.splice(gone, 1);
-      stepGone(book, id);
+      stepGone(book, id, want, true);
     }
     return live;
   }
@@ -3851,7 +4491,7 @@ export function commitLineEdits(
   live: LiveRecord,
   text: string,
   cursors: number[],
-  opts: { final?: boolean; book?: LineBook } = {},
+  opts: { final?: boolean; book?: LineBook; onlyUndone?: boolean } = {},
 ): { record: LiveRecord; commits: LineEditCommit[] } {
   if (live.uncertain || live.editable !== true) return { record: live, commits: [] };
   const book = opts.book ?? newLineBook();
@@ -3860,21 +4500,34 @@ export function commitLineEdits(
   const absorb: string[] = [];
   for (const s of live.slots) {
     if (s.kind !== 'mine' || !s.key || !s.stepId || s.dropped !== undefined || s.cleared === true || s.wrote === '') continue;
+    // `onlyUndone`: the lines an undo left with words the server does not
+    // hold, which count wherever the cursor is (`RecordSlot.commitNow`).
+    if (opts.onlyUndone === true && s.commitNow !== true) continue;
     const reworded = s.origin === 'edit';
     if (!reworded && s.status !== 'sent') continue;
     if (text.slice(s.start, s.end) !== s.wrote) continue; // not where it was followed to
     const words = cleanAuthorLine(mineLineText(s));
     const typing = reworded && s.status === 'typing';
-    if (!typing && words === s.sentText) continue; // what the server has
+    // A line the author moved whose step a draft held and the one written
+    // since does not (the model rewrote it): its words go, wherever the
+    // cursor is — the server puts them back under the step's id, and the
+    // model's new step is not left beside the line.
+    const pin = s.moved === 'held' && s.inDraft === false && s.status === 'sent' && s.unacked !== true && words !== '';
+    if (!typing && words === s.sentText && !pin && s.resend !== true) {
+      // What the server has: nothing to send.
+      if (s.commitNow === true) patch.set(s.key, withoutCommitNow(s));
+      continue;
+    }
     const lead = lineBreakLead(s);
     const from = s.start + lead;
     const to = from + mineLineText(s).length;
-    if (!opts.final && cursors.some((c) => c >= from && c <= to)) continue;
+    if (!opts.final && s.commitNow !== true && !pin && cursors.some((c) => c >= from && c <= to)) continue;
     const id = s.stepId;
     if (words === '') {
       commits.push({ key: s.key, action: 'drop', id });
       book.deleted.add(id);
       const had = s.sentText ?? (reworded ? (book.told.get(id) ?? s.editOf) : undefined);
+      if (had !== undefined && had !== '') book.deletedWords.set(id, { words: had, typed: !reworded });
       patch.set(s.key, {
         kind: 'mine',
         start: s.start,
@@ -3889,9 +4542,9 @@ export function commitLineEdits(
       continue;
     }
     const server = book.told.get(id) ?? (reworded ? s.editOf : s.sentText);
-    if (words === server) {
-      if (reworded && !book.told.has(id)) absorb.push(s.key);
-      else patch.set(s.key, { ...s, status: 'sent', sentText: words });
+    if (words === server && !pin) {
+      if (reworded && !book.told.has(id) && s.moved === undefined) absorb.push(s.key);
+      else patch.set(s.key, withoutCommitNow({ ...s, status: 'sent', sentText: words }));
       continue;
     }
     const told = book.told.get(id);
@@ -3906,7 +4559,7 @@ export function commitLineEdits(
     });
     book.told.set(id, words);
     book.fromFile.add(id);
-    const next: RecordSlot = { ...s, status: 'sent', sentText: words, recAs: s.wrote, unacked: true };
+    const next: RecordSlot = withoutCommitNow({ ...s, status: 'sent', sentText: words, recAs: s.wrote, unacked: true });
     delete next.follow;
     patch.set(s.key, next);
   }
@@ -3917,6 +4570,16 @@ export function commitLineEdits(
   };
   for (const key of absorb) record = absorbLine(record, key);
   return { record, commits };
+}
+
+/** A line of the author's that no longer has anything waiting to go: to
+ *  count at once (`commitNow`), or its words to go again (`resend`). */
+function withoutCommitNow(s: RecordSlot): RecordSlot {
+  if (s.commitNow === undefined && s.resend === undefined) return s;
+  const next = { ...s };
+  delete next.commitNow;
+  delete next.resend;
+  return next;
 }
 
 /**
@@ -3952,7 +4615,10 @@ function absorbLine(record: LiveRecord, key: string): LiveRecord {
  * The server did not take an `edit-step` (it answered `ignored` — a secret it
  * knows, say — or the call failed): the line stays as the author wrote it,
  * standing for its step, and is sent again only when they change it again;
- * the server still holds the words it had.
+ * the server still holds the words it had. A reworded recorded line is `kept`;
+ * a line the author typed stays `sent` — for a typed line `kept` means its
+ * add-step was refused and it stands for nothing, and the draft would then
+ * write its step a second time beside it.
  */
 export function editRefused(live: LiveRecord, commit: LineEditCommit, book: LineBook): LiveRecord {
   if (commit.action !== 'edit-step') return live;
@@ -3962,7 +4628,9 @@ export function editRefused(live: LiveRecord, commit: LineEditCommit, book: Line
     if (commit.wasFromFile !== true) book.fromFile.delete(commit.id);
   }
   const slots = live.slots.map((s) =>
-    s.kind === 'mine' && s.key === commit.key && s.sentText === commit.text ? { ...s, status: 'kept' as const, unacked: false } : s,
+    s.kind === 'mine' && s.key === commit.key && s.sentText === commit.text
+      ? { ...s, status: s.origin === 'edit' ? ('kept' as const) : ('sent' as const), unacked: false }
+      : s,
   );
   return { ...live, slots };
 }
@@ -4002,6 +4670,26 @@ export function noteStepEdited(
       lines.find((s) => s.unacked === true && s.stepId === id && s.sentText === text) ??
       lines.find((s) => s.unacked === true && s.sentText === text);
     if (k) slots = slots.map((s) => (s === k ? { ...s, unacked: false, stepId: id } : s));
+    // A reworded line sent back to the model's words (an undo of the
+    // rewording, or the words typed again): the server released the edit —
+    // the step is the model's again, and so is its line, which the recording
+    // writes (and the model may rewrite) as any other. Not while another line
+    // of the author's stands for the same step: that one holds it.
+    const shared = (x: RecordSlot): boolean =>
+      x.kind === 'mine' && x.key !== k?.key && x.stepId === id && x.wrote !== '' && x.dropped === undefined;
+    if (
+      k &&
+      k.origin === 'edit' &&
+      k.moved === undefined &&
+      k.editOf === text &&
+      cleanAuthorLine(mineLineText(k)) === text &&
+      k.key &&
+      !slots.some(shared)
+    ) {
+      book.told.delete(id);
+      book.fromFile.delete(id);
+      return absorbLine({ ...live, slots }, k.key);
+    }
   }
   // Words from the file are that line's: never put on another one (two lines
   // can stand for one step — the model rewrote the step one was being edited
@@ -4012,7 +4700,15 @@ export function noteStepEdited(
   // these first, so theirs are the newer), or they have changed the line since
   // the recording last held it (the file wins: `followDeclined`).
   const k = slots.find((s) => s.kind === 'mine' && s.dropped === undefined && s.cleared !== true && s.wrote !== '' && s.stepId === id && hasStep(s));
-  if (!k || k.unacked === true || changedSince(k)) return slots === live.slots ? live : { ...live, slots };
+  // A line that took in a line from outside the block never takes words from
+  // elsewhere: they would write over the author's line inside it.
+  const keeps = (s: RecordSlot): boolean => changedSince(s) || s.joined !== undefined;
+  if (k && k.unacked !== true && keeps(k) && cleanAuthorLine(mineLineText(k)) !== text && cleanAuthorLine(mineLineText(k)) === k.sentText) {
+    // The file wins, and its words already went: they go again (after these),
+    // or the server would keep words the file does not have.
+    return { ...live, slots: slots.map((s) => (s === k ? { ...s, resend: true } : s)) };
+  }
+  if (!k || k.unacked === true || keeps(k)) return slots === live.slots ? live : { ...live, slots };
   const follow = cleanAuthorLine(mineLineText(k)) === text ? undefined : text;
   if (follow === k.follow) return slots === live.slots ? live : { ...live, slots };
   return {
@@ -4045,7 +4741,7 @@ export function followDeclined(live: LiveRecord, event: { id?: unknown; text?: u
   const id = String(event.id ?? '');
   const text = cleanStepText(event.text);
   const k = live.slots.find((s) => s.kind === 'mine' && s.dropped === undefined && s.cleared !== true && s.wrote !== '' && s.stepId === id && hasStep(s));
-  if (!k || k.unacked === true || !changedSince(k) || cleanAuthorLine(mineLineText(k)) === text) return null;
+  if (!k || k.unacked === true || !(changedSince(k) || k.joined !== undefined) || cleanAuthorLine(mineLineText(k)) === text) return null;
   return k.key ?? null;
 }
 
@@ -4102,6 +4798,34 @@ function wholeLines(text: string, start: number, end: number, lineEnd: boolean):
 /** A new line of the author's at `at`, reading `unit`, not counted yet. */
 function typingLine(at: number, unit: string, lineEnd: boolean): RecordSlot {
   return { kind: 'mine', start: at, end: at + unit.length, lineEnd, wrote: unit, key: nextMineKey(), status: 'typing' };
+}
+
+/**
+ * A recorded line the author moved (`RecordSlot.moved`), at `at`, reading
+ * `unit`: the step `id`'s line, with its words — nothing to send for it. The
+ * recording no longer writes its words; its number stays the recording's.
+ * `held`: the draft last written holds the step (a line moved among the
+ * recorded ones); `waiting`: not yet (a deleted step's line put back, whose
+ * restore is on its way).
+ */
+function movedLine(at: number, unit: string, lineEnd: boolean, id: string, moved: 'waiting' | 'held'): RecordSlot {
+  const words = cleanAuthorLine(unitLine(unit));
+  return {
+    kind: 'mine',
+    start: at,
+    end: at + unit.length,
+    lineEnd,
+    wrote: unit,
+    key: nextMineKey(),
+    origin: 'edit',
+    stepId: id,
+    status: 'sent',
+    editOf: words,
+    sentText: words,
+    recAs: unit,
+    inDraft: moved === 'held',
+    moved,
+  };
 }
 
 function emptyBlock(at: number, lineEnd: boolean): RecordSlot {
@@ -4316,7 +5040,9 @@ function findWritten(
   if (anchorIdx >= 0) {
     const lead = block.lineEnd ? (block.wrote.startsWith('\r\n') ? 2 : 1) : 0;
     const first = lineAtOffset(lineStarts(current), blockAt + lead);
-    if (first <= anchorIdx) return null;
+    // The run starts below the anchor line — or ON it, when its first line is
+    // a recorded line that took the anchor line in (Backspace at its start).
+    if (first < anchorIdx || (first === anchorIdx && !(block.kind === 'mine' && block.joined === 'above'))) return null;
   }
   const regions: RecordSlot[] = [];
   let pos = blockAt;
@@ -4384,6 +5110,8 @@ function nothingLeft(record: LiveRecord, current: string, found: RecordSlot[] | 
       slot.kind === 'tail' ? (slot.placed ? [slot.wrote + (slot.rest ?? '')] : []) : slot.wrote.split(/\r?\n/);
     for (const line of lines) now.set(line, (now.get(line) ?? 0) - 1);
   }
+  // Lines the author moved out of the recording are theirs.
+  for (const line of record.outside ?? []) now.set(line, (now.get(line) ?? 0) - 1);
   // Each state against the base it was written into.
   for (const state of [record, ...record.history]) {
     const base = counts(state.base);
@@ -5198,7 +5926,7 @@ export function oneShotSteps(
   live: LiveRecord | null,
   current: string,
   result: { steps: unknown[]; authored?: number[]; authoredIds?: string[]; ids?: string[] },
-): { steps: string[]; kept: string[] } {
+): { steps: string[]; kept: string[]; groups: Array<{ steps: string[]; after: number | null }> } {
   const steps = cleanSteps(result.steps);
   const lines = current.split(/\r?\n/);
   const inFile = (s: RecordSlot): boolean => {
@@ -5214,10 +5942,16 @@ export function oneShotSteps(
     const idx = stepIds.indexOf(s.stepId);
     if (idx >= 0 && inFile(s)) skip.add(idx);
   }
+  const done = (): { steps: string[]; kept: string[]; groups: Array<{ steps: string[]; after: number | null }> } => {
+    recordedStillThere(live, current, steps, skip);
+    return {
+      steps: steps.filter((_, i) => !skip.has(i)),
+      kept: steps.filter((_, i) => skip.has(i)),
+      groups: insertionGroups(live, current, steps, skip),
+    };
+  };
   const mines = (live?.slots ?? []).filter((s) => s.kind === 'mine' && s.origin !== 'edit' && s.status === 'sent' && s.dropped !== 'hidden');
-  if (mines.length === 0) {
-    return { steps: steps.filter((_, i) => !skip.has(i)), kept: steps.filter((_, i) => skip.has(i)) };
-  }
+  if (mines.length === 0) return done();
   const used = new Set<RecordSlot>();
   const authored = result.authored ?? [];
   const ids = result.authoredIds ?? [];
@@ -5240,5 +5974,92 @@ export function oneShotSteps(
     const idx = steps.findIndex((t, i) => t === mine.sentText && !theirs.has(i) && !skip.has(i));
     if (idx >= 0) skip.add(idx);
   }
-  return { steps: steps.filter((_, i) => !skip.has(i)), kept: steps.filter((_, i) => skip.has(i)) };
+  return done();
+}
+
+/**
+ * Belt and braces for the one-shot insertion (review of 0.5.158: P6, P7, D3
+ * duplicated steps at Stop): a step of the result whose line the recording
+ * wrote is still in the file, word for word (its number aside), is not put in
+ * a second time. A line counts when the recording wrote lines with those
+ * words in any state it kept, and the file has more lines with them than it
+ * had before the recording began — as many steps as that are left out.
+ */
+function recordedStillThere(live: LiveRecord | null, current: string, steps: string[], skip: Set<number>): void {
+  if (!live) return;
+  const written = new Set<string>();
+  for (const state of [live, ...live.history]) {
+    for (const s of state.slots) {
+      if (s.kind !== 'block') continue;
+      for (const u of unitsOf(s.wrote, s.lineEnd)) {
+        const w = cleanAuthorLine(unitLine(u));
+        if (w !== '') written.add(w);
+      }
+    }
+  }
+  const count = (text: string): Map<string, number> => {
+    const out = new Map<string, number>();
+    for (const line of text.split(/\r?\n/)) {
+      const w = cleanAuthorLine(line);
+      if (w !== '') out.set(w, (out.get(w) ?? 0) + 1);
+    }
+    return out;
+  };
+  const now = count(current);
+  const before = count(live.base);
+  const left = new Map<string, number>();
+  for (const [w, n] of now) if (written.has(w)) left.set(w, n - (before.get(w) ?? 0));
+  // What the other rules left out already used up lines with its words.
+  skip.forEach((i) => {
+    const w = steps[i];
+    if (w !== undefined && left.has(w)) left.set(w, left.get(w)! - 1);
+  });
+  steps.forEach((w, i) => {
+    if (skip.has(i) || (left.get(w) ?? 0) <= 0) return;
+    left.set(w, left.get(w)! - 1);
+    skip.add(i);
+  });
+}
+
+/**
+ * Where the one-shot insertion puts what is left of the result, when steps of
+ * it are left out because their lines are still in the file: each run of
+ * steps going in, after the line of the step left out just before it in the
+ * result (the 0-based line), or — none before it — at the anchor (`null`), so
+ * the file keeps the result's order around the lines still there. A left-out
+ * step's line is the first one, below the one before, with its words (a line
+ * of the author's by what it reads, else by what it went as).
+ */
+function insertionGroups(
+  live: LiveRecord | null,
+  current: string,
+  steps: string[],
+  skip: Set<number>,
+): Array<{ steps: string[]; after: number | null }> {
+  const lines = current.split(/\r?\n/).map((l) => cleanAuthorLine(l));
+  const mines = (live?.slots ?? []).filter((s) => s.kind === 'mine' && s.wrote !== '');
+  const groups: Array<{ steps: string[]; after: number | null }> = [];
+  let after: number | null = null;
+  let group: { steps: string[]; after: number | null } | null = null;
+  steps.forEach((step, i) => {
+    if (!skip.has(i)) {
+      if (!group) {
+        group = { steps: [], after };
+        groups.push(group);
+      }
+      group.steps.push(step);
+      return;
+    }
+    // Its words, or those of a line of the author's that is this step.
+    const words = new Set([step, ...mines.filter((m) => m.sentText === step || m.editOf === step).map((m) => cleanAuthorLine(mineLineText(m)))]);
+    const from = after === null ? 0 : after + 1;
+    let at = lines.findIndex((l, k) => k >= from && words.has(l));
+    if (at < 0) at = lines.findIndex((l) => words.has(l));
+    // Its line not found: the run around it stays one (two runs after the
+    // same line would go in the other way round).
+    if (at < 0) return;
+    after = at;
+    group = null;
+  });
+  return groups;
 }

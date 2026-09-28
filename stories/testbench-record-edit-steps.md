@@ -450,3 +450,87 @@ refused keeps its line standing for its step; if the model later rewrites that
 step, its new step goes in beside the line. The halves have not been run
 against each other or a real model yet: the fake server in the property run
 places steps by id, not by the actions they stand for.
+
+### Review round (TestBench 0.5.159)
+
+A review drove 0.5.158 in the host (VS Code 1.95, FakeApiClient) and found
+these; each is now a case that failed on 0.5.158 first — core cases in
+`tests/record-steps-edit.test.js`, host cases in
+`tests/integration/suite/record-steps.test.cjs`.
+
+- **Stop moved the author's line.** With the drafts taken out before the
+  result (the author typed while recording, so the undo step was split), the
+  block parts were empty, and a line of the author's the result does not hold
+  — an edit the server refused, a reworded line whose step the model rewrote
+  or the drawer deleted, a typed line the server did not take — went to the
+  top of the block, or its end: the test's steps silently reordered. Each part
+  of the run now counts as holding what it held until the clear-out
+  (`clearedSteps`, `clearedHeld`). The property run gained the invariant: Stop
+  never changes the relative order of a line of the author's and the steps
+  around it.
+- **A move swapped step ids.** Alt+Down read as two rewordings, each step then
+  standing for the other's action (deleting one dropped the other's click).
+  A changed line with a recorded line's words is now that line; of the lines
+  moved, the most still in order stay the recording's and the rest are the
+  author's where they put them (`moved`), laid out around by the file's count,
+  so the next draft keeps their order. A cut-and-paste, or a line deleted and
+  typed again with the same words, is its step restored, not a new step with
+  no actions.
+- **One keystroke at the block's edge gave up on the file** (Backspace at the
+  start of the first recorded line, Delete at the end of the last, Alt+Down on
+  the last, a selection from above typed over), and Stop's one-shot insertion
+  then put steps in twice. Edits the offsets cannot follow, and every
+  Alt+Up/Down, are now read again line by line (`rereadRun`): a joined line
+  is its recorded step's, being edited (`joined` — Cancel leaves it, it holds
+  the author's line too); a step moved in from below the block is the
+  author's line, keeping its number for Cancel; a line moved above the line
+  the steps go after has left the recording. And the one-shot insertion never
+  puts in a step whose recorded line is still there word for word, putting
+  the rest in around those lines in the result's order.
+- **Smaller ones.** A `drop` from the file the server did not take stayed
+  struck and Stop re-sent it; it is struck no more. Two Ctrl+Z after an acked
+  multi-cursor rewording left the server with the undone words; an undo's
+  words now go at once, and a rewording undone to the model's words makes the
+  line the recording's again. The "left in the file" sentence quoted a line
+  with no number; it names the line number now.
+- **Two presses to get a deleted line back** (found by the live tests against
+  the real server): the server answers a delete with a draft that only
+  renumbers, and writing it made an undo step on top of the author's. Joining
+  the author's undo step is not possible (measured: `editor.edit` with
+  `undoStopBefore: false` does not join `deleteLines`' step, a WorkspaceEdit
+  never joins one), so a draft that only renumbers waits while the author's
+  own edit is the last change; the numbers catch up with the next real write.
+  One Ctrl+Z is the Restore the story promised.
+
+Found by the property run once its script moved and joined lines and its
+server refused and deleted: a typed line whose edit the server refused was
+written a second time beside itself (it stays `sent` now); drawer words a line
+declined while its words had already gone left the server with the drawer's
+words (they go again); a state holding only the author's lines was not kept
+for an undo; a line joined with the anchor's line could have steps written
+above it.
+
+Decided: the model's line beside an author's line that stands for a rewritten
+step (gap 1) keeps the same number as it — numbering it apart would renumber
+every later step the draft planned, not a cheap change; the runner ignores
+the numbers. Lines moved above the anchor leave the recording (their step
+deleted, their text the author's). Deleting the line the steps go after once it
+is joined into a recorded line is §7's "anchor gone" case: the recording stops
+writing live, and the property run does not script it.
+
+Also pinned, from the server half's second round: an edit or delete naming a
+step the model merged into another takes over only what it stood for, the
+merged step keeping its id and being redrafted — the author's line is held by
+the id the edit named, the merged step's line is the recording's, nothing
+twice; the browser's Undo of the action behind a reworded step
+(`record:dropped` for the step's id, from the toolbar, with its actions)
+strikes the step and its actions and takes its line out, Restore puts both
+back; the server's "Your reworded step N stays" line goes to the log as it
+came.
+
+Counts: `npm test` 1238 + 1 skipped (1218 + 1 before; 20 new); the
+record-steps files 189, the id property run now 300 seeds of edits, deletes,
+undos, drawer edits and deletes, refusals, 232 moves and 258 joins, 0 lost.
+Host: the record-steps suite 74 (7 new; 2 lost-path cases changed, since the
+one-shot insertion no longer puts a step in twice); the whole integration run
+517, all passing. runner-core unchanged (654).

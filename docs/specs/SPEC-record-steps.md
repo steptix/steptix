@@ -556,7 +556,12 @@ checked to be where the recording left it (§7.4).
   Enter) starts a line of the author's **below** the block: a step typed on
   it stays, and — until it counts as a step (§7.6) — the next draft writes
   above it. Whole lines put in between two recorded lines are the author's
-  too (§7.6), not an edit inside the recorded lines.
+  too (§7.6), not an edit inside the recorded lines. With step ids, a
+  recorded line joined across the edge — Backspace at the start of the first
+  recorded line, Delete at the end of the last, a selection from above the
+  block typed over — is that step's line, being edited (§7.6), and a line
+  moved past the edge (Alt+Up/Down) is followed as a move: neither stops the
+  writing.
 - **Later steps.** A later step's number belongs to the recording while its
   line starts with exactly the number the recording gave it. Anything that
   touches the line's start or its number — text typed in front of it, the
@@ -588,6 +593,16 @@ steps — the drafts taken out, then the result — so the one Ctrl+Z still land
 on the file without the recording, the author's own edits kept (the file
 stays marked unsaved). An undo or redo during the recording is one of those
 too: one Ctrl+Z after Stop still lands on the file without the recording.
+While recording, a draft that would only give steps their numbers, arriving
+while the author's own edit is the last change to the file — the server's
+answer to a line they deleted — is not written then: written, it would be the
+undo step on top of theirs, and their Ctrl+Z would take back the renumbering
+instead of their delete. Measured in VS Code 1.95: an editor edit with
+`undoStopBefore: false` does not join the undo step `editor.action.deleteLines`
+leaves (one Ctrl+Z then undid only the edit), it joins only typing that no
+cursor move has closed, and a WorkspaceEdit never joins one. So one Ctrl+Z of
+a deleted line brings it back (and restores its step, §7.6); the numbers catch
+up with the next write that changes anything else, or at Stop.
 Undoing further walks back through the drafts. After Cancel the file reads as
 it did, still marked unsaved; its history then holds one undo step that
 changes nothing. A result inserted once at the anchor (§7.4) is an undo step
@@ -729,10 +744,16 @@ after converting the recording's text to the file's.
   otherwise it inserts the result once at the anchor, into the file as it is
   — the one-shot insertion every result used before drafts were written live
   (the anchor where it was followed to, else by its text, else the end of its
-  flow, said) — and what is left of the drafts is left for the author. When
-  even that cannot be written, the result is rescued (§7.1). **Cancel** takes
-  out only what it can still find; when it finds nothing, nothing is taken
-  out, and the panel's log says so.
+  flow, said) — and what is left of the drafts is left for the author. It
+  never puts a step in twice: a step whose line the recording wrote is still
+  in the file word for word (its number aside, and more often than the file
+  had that line before recording) is left out, as the author's own lines are
+  (§7.6), and each run of what is left goes in after the line of the step
+  before it in the result — at the anchor when none is — so the file keeps
+  the result's order around the lines still there; all of it one undo step.
+  When even that cannot be written, the result is rescued (§7.1). **Cancel**
+  takes out only what it can still find; when it finds nothing, nothing is
+  taken out, and the panel's log says so.
 
 With the author editing recorded lines (§7.6), the states an undo can bring
 back are more than the drafts', and the search knows them all
@@ -762,8 +783,29 @@ back are more than the drafts', and the search knows them all
   once is never sent again, a step whose line is gone again is deleted again,
   and a line reworded, whose rewording went to the server, that an undo put
   back as the recording wrote it is the author's line again — its words go to
-  the server when they leave it, rather than the next draft writing the
-  rewording back over the undo.
+  the server at once (§7.6), rather than the next draft writing the rewording
+  back over the undo.
+- **Read again, line by line.** An edit of the author's the offsets cannot
+  follow — one reaching across the edge of the recorded lines or of a line of
+  theirs among them, or Alt+Up/Down (VS Code reports a line deleted and put
+  in again on the other side of its neighbour, in one event) — is not given
+  up on: the run is read again (`rereadRun`). The recorded text is mapped
+  through the change; each line the run had either survives on some line now
+  (moved, renumbered or edited — two made one are the first's) or is gone,
+  its step deleted; a new line with no old line on it is the author's, and
+  one with the words of a line that went is that line, moved. Only when that
+  cannot follow it either (no ids, the parameters touched, nothing of the run
+  left) is the recording looked for by its text.
+- **Moved out.** A line of the run moved above the line the steps go after
+  has left the recording, as lines above the block are outside it (§7): its
+  step is deleted and its text is the author's — kept on the record
+  (`LiveRecord.outside`), so that looking for the recording by its text does
+  not count it as the recording's text left elsewhere. So is a later step the
+  recording renumbered, moved above the run. A recorded line that took in the
+  anchor's own line (Backspace at its start) is found at that line.
+- The states kept for an undo include one holding only lines of the
+  author's (every recorded line deleted, their typed lines left): Ctrl+Z of
+  the recording's next write brings it back, found by those lines.
 
 ### 7.5 A window closed while recording
 
@@ -859,7 +901,9 @@ theirs for good, as a later step's is.
   file agree. Restore (↺, or Restore in the browser) puts it back where it
   was, and Cancel puts it back with the number the author gave it. A line the
   author has edited since stays, and the log says so once: "Your step N was
-  left in the file because you edited it — delete it if you meant to."
+  left in the file because you edited it — delete it if you meant to." (a
+  line with no number of its own: "Your step on line N …" — never its words,
+  which may hold a secret the server refused).
   A step from the toolbar or the panel that is dropped comes out of the file
   at once too (it is the recording's line).
 
@@ -903,8 +947,17 @@ theirs for good, as a later step's is.
   in the file (known by id, or by the text they were sent as) — those lines
   stay where they were typed, and are never put in twice — nor the steps whose
   recorded lines they reworded and are still there (known by the last
-  draft's ids, placed in the result). What is left of the drafts is the
-  author's to tidy, as before.
+  draft's ids, placed in the result), nor those whose recorded lines are
+  still there word for word; the rest goes in around them in the result's
+  order (§7.4). What is left of the drafts is the author's to tidy, as before.
+- **Stop keeps the order.** A line of the author's the result does not hold
+  (a typed line the server did not take, a reworded one whose step was
+  rewritten or deleted since) stays among the steps where it was. When the
+  drafts are taken out before the result goes in (the author typed while
+  recording, §7), each part of the run counts as holding what it held until
+  then (`RecordSlot.clearedSteps`, `clearedHeld`), so the result is laid out
+  around the line as it would have been over the draft — not with the line at
+  the top of the block, or at its end.
 
 **Editing and deleting recorded lines** (stories/testbench-record-edit-steps.md
 §"In the file"). With a server whose drafts name their steps
@@ -942,10 +995,44 @@ no step is locked against the author:
   then on, so a draft already on its way does not put it back.
 - **Ctrl+Z** of a deletion, or of emptying a line, is a Restore: the line back
   is its step back — `restore` with its id, or, when the `drop` has not gone
-  yet, neither.
+  yet, neither. One press does it: the server's answer to the delete, which
+  only renumbers, waits (§7, "Undo").
+- **Moved** — Alt+Up/Down, or a line cut and pasted back among the recorded
+  ones: a changed line whose words (its number aside) a recorded line had is
+  that line; it keeps its step's id, and nothing is sent. Of the lines
+  moved, the most still in their order stay the recording's; the others are
+  the author's where they put them (`RecordSlot.moved`): the recording writes
+  their number, never their words, and lays the draft out around them by what
+  the file has above them, not by where the draft has their step, so the next
+  draft keeps the author's order. If the model later rewrites the step of
+  such a line, its words go as an `edit-step`, which puts the step back under
+  its id — rather than leaving the model's new step beside it.
+- **A line with the words of a step this file deleted** (and not restored),
+  back among the recorded lines — cut and pasted, or deleted and typed again —
+  is that step restored, where the author put it (`restore`, or neither
+  control when the `drop` had not gone), not a new step with no actions. A
+  Restore of the same step from the panel afterwards cannot put it in twice:
+  the line holds it by its id.
+- **Joined across the block's edge** (Backspace at the start of the first
+  recorded line, Delete at the end of the last, a selection from above the
+  block typed over): the line is the recorded step's, being edited
+  (`RecordSlot.joined`), sent as its edit when the author leaves it; the
+  recorded lines wholly inside the change are deleted. It holds a line of the
+  author's too, so the recording keeps its leading number as it is, never
+  puts drawer words on it (the file wins; its words go again), and Cancel
+  leaves it — taking it out would take their line with it. One that took in
+  the line the steps go after stays the run's first line: no step is written
+  above it.
 - **A line of the author's typed and sent**, changed afterwards, goes as
   `edit-step` with its step's id at the same moments (with a server that
   names no steps it stays their text, as before: sent once).
+- **Ctrl+Z of a rewording the server took** (the author's, from the file):
+  the words the line has now go at once, wherever the cursor is — an undo is
+  not typing — as an `edit-step`: back to the model's words, which releases
+  the rewording on the server (the line is then the recording's again, which
+  the model may rewrite), or to an earlier rewording. A second Ctrl+Z before
+  the cursor left the line (the recording's own write undone) must not leave
+  the server holding words the file no longer has.
 - **Newer words from elsewhere** — the browser's drawer or the panel
   (`record:edited` from `toolbar` or `panel`) — for a step a line of the
   author's stands for (a recorded line they reworded, or a line they typed:
@@ -958,7 +1045,10 @@ no step is locked against the author:
   once for the line, by its number: "A step was reworded in the browser while
   you were changing it in the file (line <n>); the line keeps what you
   wrote." Nor are they put on a line whose edit of the author's is still on
-  its way (the server took the drawer's first, so theirs are the newer).
+  its way (the server took the drawer's first, so theirs are the newer). When
+  the line the file wins for already said what went from the file, those
+  words go again — the server does not keep the drawer's words the file does
+  not have.
   Words from the file are never put on another line: two lines can stand for
   one step (the model rewrote the step one was being edited for, and the
   author reworded its new line too), and each keeps its own. A step deleted in
@@ -970,12 +1060,18 @@ no step is locked against the author:
   the step's `record:dropped` says where (§9.3; a server that predates it
   ignores the field). One the server does not take (`ignored`: the step was
   restored some other way, or its actions came back one by one) leaves the
-  panel's row as the recording has it, said in the log.
+  panel's row as the recording has it, said in the log — a `drop` from the
+  file it did not take is struck no more (unless the server said the step is
+  deleted already), and Stop's `dropped` list does not send it again over the
+  server's answer; the line stays out of the file, where the author deleted
+  it.
 - **An edit the server does not take** (`ignored` — a secret it knows, a step
   no longer there — or a failed call) leaves the line as the author wrote it,
   still standing for its step, said in the log by its line number, never
   quoted: "Your edit on line <n> was not taken by the recording (<why>); it
-  stays in the file as you wrote it." Changed again, it is sent again.
+  stays in the file as you wrote it." Changed again, it is sent again. (A line
+  the author typed stays `sent`: it still stands for its step, so the draft
+  never writes that step a second time beside it.)
 - **The result** carries no ids: the last draft's are placed in it by their
   steps' words (as the author's steps are), so a reworded line is the
   result's step, written once. Cancel and the one Ctrl+Z after Stop take the

@@ -663,8 +663,9 @@ test('a line sent at Stop that no draft held yet is the result\'s step with its 
   const result = ['Click Menu', 'Click Payments', 'Verify B'];
   const authored = core.authoredForResult({ steps: ['Click Menu', 'Click Payments'] }, result);
   const expected = withSteps('3. Click Menu', '4. Click Payments', '5. Verify B').replace('3. Open the dashboard', '6. Open the dashboard');
-  // The one-shot insertion knows it too.
-  assert.deepEqual(core.oneShotSteps(s.live, s.text, { steps: result, ...authored }).kept, ['Verify B']);
+  // The one-shot insertion knows it too — and, since the review of 0.5.158,
+  // leaves out the recorded lines still in the file word for word as well.
+  assert.deepEqual(core.oneShotSteps(s.live, s.text, { steps: result, ...authored }).kept, ['Click Menu', 'Click Payments', 'Verify B']);
   const fin = s.write({ steps: result, parameters: [], ...authored, adoptSentByText: true });
   assert.ok(!fin.lost);
   assert.equal(s.text, expected);
@@ -700,13 +701,22 @@ test('the one-shot insertion at Stop leaves out the author\'s steps whose lines 
   assert.deepEqual(authored, { authored: [1, 2], authoredIds: ['s1', ''] }, 'a step with no id keeps its place, by text');
   const lost = s.write({ steps: result, parameters: [], ...authored });
   assert.equal(lost.lost, true);
+  // The recorded lines still in the file (twice, here) are not put in a third
+  // time either (review of 0.5.158); what is left goes after the line of the
+  // step before it — the first copy's, found in order.
+  const payments = s.text
+    .split('\n')
+    .map((l) => core.cleanAuthorLine(l))
+    .indexOf('Click Payments');
+  assert.ok(payments > 0);
   assert.deepEqual(core.oneShotSteps(s.live, s.text, { steps: result, ...authored }), {
-    steps: ['Click Menu', 'Click Payments', 'Tick Cash'],
-    kept: ['Verify A', 'Other'],
+    steps: ['Tick Cash'],
+    kept: ['Click Menu', 'Verify A', 'Other', 'Click Payments'],
+    groups: [{ steps: ['Tick Cash'], after: payments }],
   });
   // A line the author deleted is not in the file: its step goes in.
   const gone = s.text.replace('\n4. Verify A\n', '\n');
-  assert.deepEqual(core.oneShotSteps(s.live, gone.split('4. Verify A').join(''), { steps: result, ...authored }).kept, ['Other']);
+  assert.deepEqual(core.oneShotSteps(s.live, gone.split('4. Verify A').join(''), { steps: result, ...authored }).kept, ['Click Menu', 'Other', 'Click Payments']);
   assert.deepEqual(core.oneShotSteps(null, s.text, { steps: result, ...authored }).steps, result);
 });
 
@@ -805,7 +815,10 @@ test('Undo of a step typed in the file whose line the author has edited since: t
   const gone = s.write({ ...heldAgain, droppedIds: ['s1'] });
   assert.deepEqual(gone.left, []);
   assert.ok(!s.text.includes('Verify A'));
-  assert.equal(core.leftInFileText('Check it'), 'Your step "Check it" was left in the file because you edited it — delete it if you meant to.');
+  // A line with no number of its own is named by the line it is on — never
+  // quoted: a line the server refused may hold a secret (review of 0.5.158).
+  assert.equal(core.leftInFileText('Type hunter2 into Password', 12), 'Your step on line 13 was left in the file because you edited it — delete it if you meant to.');
+  assert.equal(core.leftInFileText('Type hunter2 into Password'), 'A step of yours was left in the file because you edited it — delete it if you meant to.');
 });
 
 // ---------------------------------------------------------------------------
@@ -1226,6 +1239,15 @@ class IdServer {
     return {};
   }
 
+  /** The drawer's ✕ on a step: `record:dropped` from the toolbar, before the
+   *  draft without it. */
+  drawerDrop(id) {
+    if (!this.steps.some((x) => x.id === id)) return false;
+    this.stream.push({ type: 'frame', frame: { type: 'record:dropped', id, dropped: true, source: 'toolbar' } });
+    this.drop(id);
+    return true;
+  }
+
   restore(id) {
     let k = this.gone.findIndex((g) => g.step.id === id);
     if (k < 0) k = this.gone.findIndex((g) => g.step.replaces?.includes(id));
@@ -1265,7 +1287,23 @@ class IdServer {
 test('random edits, deletes and undos of recorded lines, with step ids, drafts lagging and a server that takes edit-step, drop and restore: the author\'s words are never overwritten, no step is written twice, the writing never stops, Stop converges on the result and Cancel leaves the author\'s lines', () => {
   const MODEL = ['Click Menu', 'Click Payments', 'Tick Cash', 'Click Pay', 'Sign out', 'Open Reports', 'Close Reports', 'Open Help'];
   let lostCount = 0;
-  const seen = { edits: 0, adoptedEdits: 0, drops: 0, restores: 0, undos: 0, follows: 0, numberOnly: 0, emptied: 0, stops: 0, cancels: 0 };
+  const seen = {
+    edits: 0,
+    adoptedEdits: 0,
+    drops: 0,
+    restores: 0,
+    undos: 0,
+    follows: 0,
+    numberOnly: 0,
+    emptied: 0,
+    refused: 0,
+    drawerDeletes: 0,
+    moves: 0,
+    joins: 0,
+    stops: 0,
+    splitStops: 0,
+    cancels: 0,
+  };
   // For a failure's story: RECORD_SEED=n runs that seed alone; RECORD_VERBOSE=1
   // prints the file around the steps after each op (2: and the run's parts,
   // RECORD_MINES=1: and the author's lines whole), the seeds that lost the
@@ -1293,6 +1331,9 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
     const texts = new Set(MODEL);
     const drawer = new Set();
     const adopted = new Set();
+    /** Words of recorded lines the author moved out of the recording (above
+     *  the line the steps go after): theirs, which Cancel does not take. */
+    const movedOut = new Set();
     /** VS Code's undo stack: each change of the author's, and each write,
      *  with the changes that undo it. Measured in VS Code 1.95: an undo
      *  reports the exact inverse of the edits it undoes — typing, a line
@@ -1338,6 +1379,9 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
           /^(?:\d+|\d+\. |(?:\d+\)|[-*+])[ \t]+|)$/.test(e.text);
         const followed = e.kind === 'mine' && e.why === 'follow' && !was.includes('\n') && drawer.has(core.cleanAuthorLine(e.text));
         const revealed = e.kind === 'mine' && e.why === 'reveal' && e.start === e.end;
+        // The drawer deleted the step of a line of the author's that reads as
+        // the recording last left it: the line comes out (SPEC §7.6).
+        const hidden = e.kind === 'mine' && e.why === 'hide' && e.text === '' && !was.slice(0, -1).includes('\n');
         const cleared = e.kind === 'mine' && e.why === 'clear' && opts.clear === true && e.text === '';
         // A recorded line's number the author changed is the recording's to
         // write ("numbers stay the recording's"): of theirs, a block edit may
@@ -1353,7 +1397,7 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
           });
         if (followed) seen.follows++;
         assert.ok(
-          recOnly || (digits && lineStart && e.kind !== 'mine') || numbersOnly || heldNumber || followed || revealed || cleared,
+          recOnly || (digits && lineStart && e.kind !== 'mine') || numbersOnly || heldNumber || followed || revealed || hidden || cleared,
           label(`${op}: a write replaced ${JSON.stringify(was)} (${[...new Set(replaced.map((x) => x.own))]}) with ${JSON.stringify(e.text)} [${e.kind}/${e.why}]`),
         );
       }
@@ -1381,6 +1425,30 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
       undo.push({ kind: 'author', ...before, inverse: inverseOf(before.text, changes) });
       sendQueued();
     };
+    /** The author's change event whose characters keep who wrote them — a
+     *  line moved is the same text in another place, a join the same text
+     *  run together. `apply` makes `chars` read as the change leaves it. */
+    const authorKeep = (changes, apply) => {
+      const before = snapshot();
+      apply();
+      s.author(changes, {});
+      undo.push({ kind: 'author', ...before, inverse: inverseOf(before.text, changes) });
+      sendQueued();
+    };
+    /** The step each line of the run stands for, by its words (words on one
+     *  line only). */
+    const idsByWords = () => {
+      const out = new Map();
+      const twice = new Set();
+      for (const l of runLines()) {
+        const w = core.cleanAuthorLine(l.text);
+        if (!l.id || w === '') continue;
+        if (out.has(w)) twice.add(w);
+        out.set(w, l.id);
+      }
+      for (const w of twice) out.delete(w);
+      return out;
+    };
     // `Session.author` follows with no book; this one does, as the recorder.
     s.author = function (changes, opts = {}) {
       this.move(changes);
@@ -1403,7 +1471,7 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
     };
     /** The author leaves their lines: what counts goes. */
     const count = (opts = {}) => {
-      const adds = core.commitAuthorLines(s.live, s.text, [], opts);
+      const adds = core.commitAuthorLines(s.live, s.text, [], { ...opts, book });
       s.live = adds.record;
       const edits = core.commitLineEdits(s.live, s.text, [], { ...opts, book });
       s.live = edits.record;
@@ -1415,19 +1483,39 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
       }
       sendQueued();
     };
-    /** The server takes the first `n` controls sent — answering at once. */
+    /** Steps whose last edit from the file the server refused: their line
+     *  keeps the author's words, the server its own (SPEC §7.6). */
+    const refusedEdit = new Set();
+    /** The server takes the first `n` controls sent — answering at once. Now
+     *  and then it refuses an add-step or an edit-step (a secret it knows):
+     *  the line then stays the author's, standing for nothing new. */
     const serve = (n) => {
       for (const item of inbox.splice(0, n)) {
         let answer;
-        if (item.kind === 'add') answer = server.addStep(item.commit);
+        if ((item.kind === 'add' || item.kind === 'edit') && rnd() < 0.08) {
+          answer = { ignored: 'it holds a secret' };
+          seen.refused++;
+        } else if (item.kind === 'add') answer = server.addStep(item.commit);
         else if (item.kind === 'edit') answer = server.editStep(item.commit.id, item.commit.text, 'editor');
         else if (item.kind === 'drop') answer = server.drop(item.id);
         else answer = server.restore(item.id);
+        if (item.kind === 'edit') {
+          if (answer.ignored === undefined) refusedEdit.delete(item.commit.id);
+          else refusedEdit.add(item.commit.id);
+        }
+        if (process.env.RECORD_VERBOSE === '2') {
+          process.stderr.write(`    served ${item.kind} ${item.id ?? ''} ${JSON.stringify(item.commit?.text ?? item.commit?.lines ?? '')} → ${JSON.stringify(answer)}\n`);
+        }
         if (answer.ignored === undefined) continue;
         if (item.kind === 'add') s.live = core.keepAuthorLines(s.live, item.commit.keys);
         if (item.kind === 'edit') s.live = core.editRefused(s.live, item.commit, book);
       }
     };
+    /** Steps deleted in the browser's drawer and not restored: what the
+     *  recorder hands every write as `droppedIds` (bar those whose line the
+     *  author deleted in the file, which are the book's). */
+    const drawerDropped = new Set();
+    const droppedIds = () => [...drawerDropped].filter((id) => !book.deleted.has(id));
     /** The client reads `n` more of the stream (all: Infinity); the latest
      *  draft goes into the file, and the lines left meanwhile are counted. */
     const read = (n, op, opts = {}) => {
@@ -1436,15 +1524,25 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
         const item = server.stream[delivered];
         if (item.type === 'draft') {
           latest = item.draft;
+          if (process.env.RECORD_VERBOSE === '2') process.stderr.write(`    draft ${latest.revision} ${JSON.stringify(latest.ids)}\n`);
+          // A deleted step the draft holds again was restored (applyRecordFrame).
+          for (const id of [...drawerDropped]) if (latest.ids.includes(id)) drawerDropped.delete(id);
           continue;
         }
         const f = item.frame;
+        if (process.env.RECORD_VERBOSE === '2') process.stderr.write(`    frame ${JSON.stringify(f)}\n`);
         if (f.type === 'record:step') s.live = core.assignAuthorStepId(s.live, f.id, f.text, book);
-        else s.live = core.noteStepEdited(s.live, f, book);
+        else if (f.type === 'record:dropped') {
+          if (f.dropped) drawerDropped.add(f.id);
+          else {
+            drawerDropped.delete(f.id);
+            core.noteStepRestored(f.id, book);
+          }
+        } else s.live = core.noteStepEdited(s.live, f, book);
       }
       sendQueued();
       if (!latest || latest.revision <= written) return true;
-      if (!write(latest, op, opts)) return false;
+      if (!write({ ...latest, droppedIds: droppedIds() }, op, opts)) return false;
       written = latest.revision;
       // A reworded line the draft now shows as the author's rewording, held.
       for (const l of core.authorLinesOf(s.live)) {
@@ -1467,7 +1565,15 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
             at += unit.length;
           });
         } else if (slot.kind === 'mine' && slot.end > slot.start) {
-          out.push({ start: slot.start, text: slot.wrote.replace(/\n$/, ''), id: slot.stepId ?? null, kind: 'mine', origin: slot.origin });
+          out.push({
+            start: slot.start,
+            text: slot.wrote.replace(/\n$/, ''),
+            id: slot.stepId ?? null,
+            kind: 'mine',
+            origin: slot.origin,
+            // Holds the line the steps go after (joined into it from above).
+            anchor: slot.joined === 'above' && slot.wrote.includes('Click Sign in'),
+          });
         }
       }
       return out.filter((l) => l.text.trim() !== '');
@@ -1531,7 +1637,11 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
         }
       } else if (r < 0.68 && lines.length > 0) {
         name += ' delete';
+        // Not the line the steps go after (joined into a recorded line):
+        // deleting it is §7's other case — the anchor gone, the recording
+        // stops writing live — which this run does not script.
         const line = pick(lines);
+        if (line.anchor) continue;
         author([change(line.start, line.text.length + 1, '')]);
       } else if (r < 0.74 && lines.length > 0) {
         name += ' new line';
@@ -1547,6 +1657,15 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
         const tail = ` m${++words}`;
         texts.add(core.cleanAuthorLine(line.text + tail));
         author([change(line.start + line.text.length, 0, tail)]);
+      } else if (r < 0.81) {
+        // The drawer's ✕ on a step — one of the author's lines' steps, half
+        // the time: its line comes out if it reads as the recording left it,
+        // else it stays (said once).
+        name += ' drawer delete';
+        const theirs = core.authorLinesOf(s.live).filter((l) => l.stepId && server.steps.some((x) => x.id === l.stepId));
+        const target = theirs.length > 0 && rnd() < 0.5 ? theirs[Math.floor(rnd() * theirs.length)].stepId : server.steps[Math.floor(rnd() * server.steps.length)]?.id;
+        if (target === undefined || !server.drawerDrop(target)) continue;
+        seen.drawerDeletes++;
       } else if (r < 0.86) {
         name += ' drawer';
         if (server.steps.length === 0) continue;
@@ -1558,7 +1677,7 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
         texts.add(text);
         drawer.add(text);
         server.editStep(target.id, text, 'toolbar');
-      } else if (r < 0.95) {
+      } else if (r < 0.93) {
         name += ' undo';
         const top = undo.pop();
         if (!top) continue;
@@ -1568,9 +1687,84 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
         s.author(top.inverse, { uncertain: true, undo: true });
         assert.equal(s.text, top.text, label(`${name}: the undo put the text back`));
         sendQueued();
-      } else {
+      } else if (r < 0.95) {
         name += ' above';
         author([change(0, 0, 'x')]);
+      } else if (r < 0.975 && lines.length > 0) {
+        // Alt+Down or Alt+Up on a line of the run — past the line next to it,
+        // which may be outside the run (the step above the block, or below):
+        // as VS Code 1.95 reports it (measured), the neighbour deleted and put
+        // in again on the other side. The characters are the same ones.
+        const line = pick(lines);
+        const all = s.text.split('\n');
+        const li = s.text.slice(0, line.start).split('\n').length - 1;
+        const starts = [];
+        all.reduce((at, l) => (starts.push(at), at + l.length + 1), 0);
+        const down = rnd() < 0.5;
+        const idsBefore = idsByWords();
+        const runBefore = lines.map((l) => core.cleanAuthorLine(l.text));
+        if (down) {
+          if (li + 1 >= all.length - 1) continue;
+          name += ' move down';
+          const Ls = starts[li];
+          const Le = Ls + all[li].length;
+          const Ns = Le + 1;
+          const Ne = Ns + all[li + 1].length;
+          // Each line keeps its own characters, its line break too (which
+          // "\n" VS Code moved does not show in the text).
+          authorKeep([change(Le, 1 + all[li + 1].length, ''), change(Ls, 0, `${all[li + 1]}\n`)], () => {
+            const l = chars.slice(Ls, Le + 1).map((x) => ({ ...x }));
+            const n = chars.slice(Ns, Ne + 1).map((x) => ({ ...x }));
+            chars.splice(Ls, Ne + 1 - Ls, ...n, ...l);
+          });
+        } else {
+          if (li < 1) continue;
+          name += ' move up';
+          const Ps = starts[li - 1];
+          const Pe = Ps + all[li - 1].length;
+          const Ls = Pe + 1;
+          const Le = Ls + all[li].length;
+          authorKeep([change(Le, 0, `\n${all[li - 1]}`), change(Ps, Ls - Ps, '')], () => {
+            const p = chars.slice(Ps, Pe + 1).map((x) => ({ ...x }));
+            const l = chars.slice(Ls, Le + 1).map((x) => ({ ...x }));
+            chars.splice(Ps, Le + 1 - Ps, ...l, ...p);
+          });
+        }
+        seen.moves++;
+        // A move keeps every line's step: the line with a step's words still
+        // stands for that step (review of 0.5.158, D1/P12).
+        if (!s.live.uncertain) {
+          const after = idsByWords();
+          for (const [w, id] of idsBefore) {
+            if (!after.has(w)) continue;
+            assert.equal(after.get(w), id, label(`${name}: the line ${JSON.stringify(w)} stood for ${id}, now for ${after.get(w)}`));
+          }
+          // A line moved above the line the steps go after has left the
+          // recording: its text is the author's from then on.
+          const inRun = new Set(runLines().map((l) => core.cleanAuthorLine(l.text)));
+          for (const w of runBefore) if (!inRun.has(w)) movedOut.add(w);
+        }
+      } else if (lines.length > 0) {
+        // Backspace at the start of a line of the run, or Delete at the end of
+        // one — the first and last included: joined to the line outside.
+        const line = pick(lines);
+        if (process.env.RECORD_VERBOSE === '2') process.stderr.write(`    join on ${JSON.stringify(line)}\n`);
+        if (rnd() < 0.5) {
+          if (line.start === 0) continue;
+          name += ' join up';
+          authorKeep([change(line.start - 1, 1, '')], () => chars.splice(line.start - 1, 1));
+        } else {
+          const end = line.start + line.text.length;
+          if (end >= s.text.length - 1) continue;
+          name += ' join down';
+          // Onto a blank line: the same as deleting that line — whose line
+          // break it is does not show in the text; the model keeps the line's.
+          const blankBelow = s.text[end + 1] === '\n';
+          authorKeep([change(end, 1, '')], () => chars.splice(blankBelow ? end + 1 : end, 1));
+        }
+        seen.joins++;
+      } else {
+        continue;
       }
       if (s.lost) break;
       if (process.env.RECORD_VERBOSE) process.stderr.write(`--- ${name}\n${s.text.split('\n').slice(9, 24).join('\n')}\n`);
@@ -1599,11 +1793,12 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
       if (process.env.RECORD_VERBOSE) process.stderr.write(`LOST seed ${seed}\n`);
       continue;
     }
-    // The words of every line the author typed and left.
-    const theirs = () =>
+    // The words of every line the author typed and left — `hidden` too: the
+    // lines whose step the drawer deleted, which Cancel puts back.
+    const theirs = (hidden = false) =>
       core
         .authorLinesOf(s.live)
-        .filter((l) => l.origin !== 'edit' && l.dropped !== 'hidden' && core.cleanAuthorLine(l.line) !== '')
+        .filter((l) => l.origin !== 'edit' && (hidden || l.dropped !== 'hidden') && core.cleanAuthorLine(l.line) !== '')
         .map((l) => core.cleanAuthorLine(l.line));
     const wordsInFile = () => s.text.split('\n').map((l) => core.cleanAuthorLine(l));
     if (rnd() < 0.5) {
@@ -1616,62 +1811,149 @@ test('random edits, deletes and undos of recorded lines, with step ids, drafts l
       serve(inbox.length);
       if (!read(Infinity, 'last draft')) {
         lostCount++;
+        if (process.env.RECORD_VERBOSE) process.stderr.write(`LOST (at Stop or Cancel) seed ${seed}\n`);
         continue;
       }
       serve(inbox.length);
       if (!read(Infinity, 'last draft again')) {
         lostCount++;
+        if (process.env.RECORD_VERBOSE) process.stderr.write(`LOST (at Stop or Cancel) seed ${seed}\n`);
         continue;
       }
       const typed = theirs();
       const last = latest;
       const result = [...last.steps, 'Stopped'];
       texts.add('Stopped');
-      if (rnd() < 0.5 && !write({ ...EMPTY, clear: true }, 'Stop: the drafts out', { clear: true })) {
+      if (process.env.RECORD_VERBOSE === '2') {
+        process.stderr.write(`--- before Stop\n${s.text.split('\n').slice(9, 24).join('\n')}\n`);
+        if (process.env.RECORD_MINES) process.stderr.write(`    ${JSON.stringify(s.live.slots.filter((x) => x.kind === 'mine'))}\n`);
+      }
+      // The steps' words in file order, and which of them are lines of the
+      // author's (typed, or reworded) — before Stop, for the order below.
+      const stepOrder = () => s.text.split('\n').map((l) => core.cleanAuthorLine(l)).filter((x) => texts.has(x));
+      const orderBefore = stepOrder();
+      const authorBefore = new Set(
+        core
+          .authorLinesOf(s.live)
+          .filter((l) => l.dropped !== 'hidden' && l.cleared !== true)
+          .map((l) => core.cleanAuthorLine(l.line))
+          .filter((x) => x !== ''),
+      );
+      const split = rnd() < 0.5;
+      if (split) seen.splitStops++;
+      if (split && !write({ ...EMPTY, clear: true }, 'Stop: the drafts out', { clear: true })) {
         lostCount++;
+        if (process.env.RECORD_VERBOSE) process.stderr.write(`LOST (at Stop or Cancel) seed ${seed}\n`);
         continue;
       }
       const w = write(
-        { steps: result, parameters: [], ...core.authoredForResult(last, result), ...core.idsForResult(last, result), adoptSentByText: true },
+        {
+          steps: result,
+          parameters: [],
+          ...core.authoredForResult(last, result),
+          ...core.idsForResult(last, result),
+          droppedIds: droppedIds(),
+          adoptSentByText: true,
+        },
         'Stop',
       );
       assert.ok(w, label('Stop: the result is written over the draft'));
+      if (process.env.RECORD_VERBOSE) {
+        process.stderr.write(
+          `Stop${split ? ' (split)' : ''}: result ${JSON.stringify(result)} ids ${JSON.stringify(last.ids)} dropped ${JSON.stringify(droppedIds())}\n` +
+            `  before ${JSON.stringify(orderBefore)}\n  after:\n${s.text.split('\n').slice(9, 24).join('\n')}\n`,
+        );
+      }
       onceEach('Stop');
+      // Stop never changes the relative order of a line of the author's and
+      // the steps around it — the drafts taken out first or not (review of
+      // tb 0.5.158, P1–P4: the clear-out emptied the block parts, and the
+      // author's line went to the top of the block, or to its end).
+      const orderAfter = stepOrder();
+      const both = orderBefore.filter((x) => orderAfter.includes(x));
+      const at = (seq) => new Map(seq.filter((x) => both.includes(x)).map((x, k) => [x, k]));
+      const was = at(orderBefore);
+      const now = at(orderAfter);
+      for (const a of both) {
+        if (!authorBefore.has(a)) continue;
+        for (const b of both) {
+          if (a === b) continue;
+          assert.equal(
+            Math.sign(now.get(a) - now.get(b)),
+            Math.sign(was.get(a) - was.get(b)),
+            label(`Stop${split ? ' (the drafts out first)' : ''}: the author's ${JSON.stringify(a)} moved across ${JSON.stringify(b)}`),
+          );
+        }
+      }
       // Each step of the result is in the file once — the recording's own in
       // the result's order. The author's lines (typed, or reworded) keep their
       // places in the file: a server that holds two of them the other way round
       // (Stop sent them together; a step restored where its actions are) is
       // laid out by count around them.
+      // A step whose line holds words of the author's the server refused
+      // stands for that step with their words, not the result's (SPEC §7.6,
+      // "an edit the server does not take").
+      const resultIds = core.idsForResult(last, result).ids ?? [];
+      const expected = result.filter((_, k) => !refusedEdit.has(resultIds[k]));
       const inFile = wordsInFile().filter((w) => result.includes(w));
-      for (const step of result) assert.ok(inFile.includes(step), label(`Stop: ${JSON.stringify(step)} is not in the file`));
+      for (const step of expected) assert.ok(inFile.includes(step), label(`Stop: ${JSON.stringify(step)} is not in the file`));
       const theirWords = new Set([
         ...typed,
         ...core.authorLinesOf(s.live).filter((l) => l.origin === 'edit').map((l) => core.cleanAuthorLine(l.line)),
       ]);
       assert.deepEqual(
         inFile.filter((w) => !theirWords.has(w)),
-        result.filter((w) => !theirWords.has(w)),
+        expected.filter((w) => !theirWords.has(w)),
         label('Stop: the recording\'s steps are not in the result\'s order'),
       );
       for (const words of typed) assert.ok(wordsInFile().includes(words), label(`Stop: the author's ${JSON.stringify(words)} is gone`));
       continue;
     }
     seen.cancels++;
-    const typed = theirs();
+    const typed = theirs(true);
+    // A recorded line joined with a line outside the block holds the
+    // author's text too: Cancel leaves it (`RecordSlot.joined`).
+    const joinedLines = new Set(s.live.slots.filter((x) => x.kind === 'mine' && x.joined && x.wrote !== '').map((x) => x.wrote.replace(/\n$/, '')));
+    // So does a recorded line the author moved out of the recording.
+    const runWords = new Set(runLines().map((l) => core.cleanAuthorLine(l.text)));
+    for (const line of s.text.split('\n')) {
+      const w = core.cleanAuthorLine(line);
+      if (movedOut.has(w) && !runWords.has(w)) joinedLines.add(line);
+    }
     if (process.env.RECORD_VERBOSE) process.stderr.write(`Cancel: typed ${JSON.stringify(typed)} lines ${JSON.stringify(core.authorLinesOf(s.live))}\n`);
     const w = write({ ...EMPTY, clear: true }, 'Cancel', { clear: true });
     if (process.env.RECORD_VERBOSE) process.stderr.write(`after Cancel:\n${s.text}\n`);
     if (!w) {
       lostCount++;
+      if (process.env.RECORD_VERBOSE) process.stderr.write(`LOST (at Stop or Cancel) seed ${seed}\n`);
       continue;
     }
     // Nothing of the recording's: no model step, no reworded line — only the
     // lines the author typed, with their words.
     for (const line of s.text.split('\n')) {
       const w2 = core.cleanAuthorLine(line);
+      if (joinedLines.has(line)) continue;
       assert.ok(!(texts.has(w2) && !typed.includes(w2)), label(`Cancel left ${JSON.stringify(line)}`));
     }
-    assert.ok(!chars.some((x) => x.own === 'rec' && !/\d/.test(x.c)), label('Cancel left the recording\'s text'));
+    {
+      let line = [];
+      const leftover = [];
+      for (const x of [...chars, { c: '\n', own: 'base' }]) {
+        if (x.c !== '\n') {
+          line.push(x);
+          continue;
+        }
+        const text = line.map((y) => y.c).join('');
+        // A line that holds the author's text too — two lines joined, theirs
+        // and the recording's — is theirs to keep: Cancel never takes their
+        // text out with the recording's. A line all of the recording's goes.
+        const words = line.filter((y) => !/[\d\s.]/.test(y.c));
+        const recOnly = words.length > 0 && words.every((y) => y.own === 'rec');
+        if (!joinedLines.has(text) && recOnly) leftover.push(text);
+        line = [];
+      }
+      assert.deepEqual(leftover, [], label('Cancel left the recording\'s text'));
+    }
     for (const words of typed) assert.ok(wordsInFile().includes(words), label(`Cancel: the author's ${JSON.stringify(words)} is gone`));
   }
   assert.equal(lostCount, 0, `lost: ${lostCount}`);
