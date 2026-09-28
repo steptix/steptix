@@ -1993,7 +1993,10 @@ async function runReadTableAction(args: ReadTableArgs): Promise<ReadTableOutcome
   let regionSnapshot: string | undefined;
   if (refusal.sketch.candidates.length === 0) {
     const subtree = await expandDomSubtree(page, action.selector ?? '').catch(() => '');
-    if (subtree !== '') {
+    // Every failure `expandDomSubtree` reports in band starts "[expand] ". Sent
+    // on, the error text became the region's markup and cost the step its one
+    // structure question (issue 062 review).
+    if (subtree !== '' && !subtree.startsWith('[expand] ')) {
       regionSnapshot = redact(subtree, maskValues).slice(0, GRID_STRUCTURE_SNAPSHOT_CHARS);
     }
   }
