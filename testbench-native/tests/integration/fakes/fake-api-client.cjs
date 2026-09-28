@@ -83,6 +83,115 @@ class FakeApiClient {
      * `compileThrows`.
      */
     this.streamThrows = null;
+
+    // ---- Record Steps (stories/testbench-record-steps.md) ----------------
+    /** Each body passed to streamRecordSteps(), in call order. */
+    this.recordRequests = [];
+    /** Session ids passed to streamRecordSteps(), in call order. */
+    this.recordSessionIds = [];
+    /** The open record stream, or null. Separate from `activeStream` so a
+     *  test can hold a run stream and a record stream apart. */
+    this.activeRecordStream = null;
+    /** Each controlRecordSteps() call: `{ sessionId, body }`. */
+    this.recordControlCalls = [];
+    /**
+     * Optional `(sessionId, body) => Promise<void | { ignored, reason }>` run
+     * for every control call — where a test plays the server, pushing the
+     * frames a real one would answer with (`record:pick` after `check`,
+     * `record:writing` after `stop`). Throw from it to make the control call
+     * fail; return `{ ignored: true, reason }` for a 202 that did nothing.
+     */
+    this.recordControlImpl = null;
+    /** What successive streamRecordSteps() calls throw before streaming:
+     *  each entry an ApiClientError kind, an Error, or null for "no throw". */
+    this.recordThrows = [];
+    /**
+     * When set, a Promise the next streamRecordSteps() call waits on BEFORE it
+     * "answers 200" (calls `onOpen`) — a server still creating the session.
+     * An abort while waiting ends the call as the real client's does, with no
+     * answer. Cleared once used.
+     */
+    this.recordAnswerGate = null;
+    /** How many streamRecordSteps() calls got their 200 (`onOpen`). */
+    this.recordAnswers = 0;
+  }
+
+  /**
+   * Async generator matching ApiClient.streamRecordSteps. Answers "200"
+   * (`onOpen`) unless a `recordThrows` entry refuses it, then streams whatever
+   * the test pushes with `pushRecord`, until `endRecord` or an abort.
+   */
+  async *streamRecordSteps(sessionId, request, signal, onOpen) {
+    this.recordSessionIds.push(sessionId);
+    this.recordRequests.push(request);
+    const toThrow = this.recordThrows.shift();
+    if (toThrow) {
+      if (toThrow instanceof Error) throw toThrow;
+      throw new ApiClientError(toThrow, `fake record error: ${toThrow}`);
+    }
+    const gate = this.recordAnswerGate;
+    if (gate) {
+      this.recordAnswerGate = null;
+      await new Promise((resolve) => {
+        if (signal.aborted) return resolve();
+        signal.addEventListener('abort', () => resolve(), { once: true });
+        gate.then(resolve, resolve);
+      });
+    }
+    if (signal.aborted) throw new ApiClientError('aborted', 'aborted');
+    this.recordAnswers++;
+    onOpen?.();
+    const stream = { queue: [], waiters: [], ended: false, aborted: false };
+    this.activeRecordStream = stream;
+    const onAbort = () => {
+      stream.aborted = true;
+      const w = stream.waiters.shift();
+      if (w) w.resolve();
+    };
+    signal.addEventListener('abort', onAbort);
+    try {
+      while (true) {
+        if (stream.aborted) throw new ApiClientError('aborted', 'aborted');
+        if (stream.queue.length > 0) {
+          yield stream.queue.shift();
+          continue;
+        }
+        if (stream.ended) return;
+        await new Promise((resolve) => stream.waiters.push({ resolve }));
+      }
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+      if (this.activeRecordStream === stream) this.activeRecordStream = null;
+    }
+  }
+
+  /** Matching ApiClient.controlRecordSteps (`POST …/record-steps/control`). */
+  async controlRecordSteps(sessionId, body) {
+    this.recordControlCalls.push({ sessionId, body });
+    const answer = this.recordControlImpl ? await this.recordControlImpl(sessionId, body) : undefined;
+    return answer && answer.ignored === true ? answer : undefined;
+  }
+
+  /** Push the next frame onto the open record stream. */
+  pushRecord(event) {
+    const stream = this.activeRecordStream;
+    if (!stream) throw new Error('FakeApiClient: pushRecord() called with no record stream');
+    stream.queue.push(event);
+    const w = stream.waiters.shift();
+    if (w) w.resolve();
+  }
+
+  /** End the open record stream cleanly. Safe to call when there is none. */
+  endRecord() {
+    const stream = this.activeRecordStream;
+    if (!stream) return;
+    stream.ended = true;
+    const w = stream.waiters.shift();
+    if (w) w.resolve();
+  }
+
+  get hasActiveRecordStream() {
+    return this.activeRecordStream !== null;
   }
 
   /** Liveness probe used by the re-run pre-flight (GET /sessions/:id). */

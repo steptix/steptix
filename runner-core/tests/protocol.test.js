@@ -31,6 +31,10 @@ test('isHostMsg: accepts every host variant', () => {
     // extension host ever posted.
     'compileProgress',
     'compileRunEvent',
+    // The Recording block (stories/testbench-record-steps.md, decision 13).
+    'recording',
+    // The answer to the Add step box, by the press's id.
+    'recordAddStepResult',
   ]) {
     assert.equal(isHostMsg({ type }), true, type);
   }
@@ -67,6 +71,16 @@ test('isWebviewMsg: accepts every webview variant', () => {
     'webviewState',
     'rerunSkillStep',
     'compile',
+    // Record Steps (stories/testbench-record-steps.md).
+    'recordSteps',
+    'recordNewTest',
+    'recordStop',
+    'recordCancel',
+    'recordCheck',
+    'recordDrop',
+    // The browser toolbar's panel parity (stories/testbench-record-toolbar.md).
+    'recordPause',
+    'recordAddStep',
   ]) {
     assert.equal(isWebviewMsg({ type }), true, type);
   }

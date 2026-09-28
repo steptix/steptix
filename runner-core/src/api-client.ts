@@ -6,7 +6,16 @@
  */
 
 import { SseParser, type SseFrame } from './sse-parser.js';
-import type { CompileEvent, CompileRequest, RunEvent, StepMode } from './protocol.js';
+import type {
+  CompileEvent,
+  CompileRequest,
+  RecordControlAnswer,
+  RecordControlRequest,
+  RecordStepsEvent,
+  RecordStepsRequest,
+  RunEvent,
+  StepMode,
+} from './protocol.js';
 
 export type LogLevel = 'silent' | 'error' | 'warn' | 'info' | 'debug';
 export type LogFileMode = 'off' | 'compact' | 'full';
@@ -367,6 +376,27 @@ export function isUserAbort(err: unknown): boolean {
 }
 
 /**
+ * The sentence a refusal carried, for a caller that shows it to a person.
+ *
+ * An express route refuses with `{ "error": "…" }`, and `postSse` keeps the
+ * first 240 characters of that body as `bodyExcerpt` while its `message` is
+ * only `HTTP 400`. A long reason is therefore truncated JSON that
+ * `JSON.parse` rejects, so the `"error"` string is also read by pattern
+ * before falling back to the message. Duck-typed like `isUserAbort`, for the
+ * same cross-bundle reason.
+ */
+export function apiErrorReason(err: unknown): string {
+  if (!err || typeof err !== 'object') return String(err);
+  const e = err as { message?: unknown; bodyExcerpt?: unknown };
+  const excerpt = typeof e.bodyExcerpt === 'string' ? e.bodyExcerpt : undefined;
+  const parsed = errorFrom(excerpt);
+  if (parsed) return parsed;
+  const partial = excerpt ? /"error"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(excerpt) : null;
+  if (partial && partial[1]) return partial[1].replace(/\\(.)/g, '$1');
+  return typeof e.message === 'string' && e.message !== '' ? e.message : String(err);
+}
+
+/**
  * What a `fetch()` rejection actually says, with the cause Node hides.
  *
  * Undici reports every transport failure — connection refused, DNS miss, TLS
@@ -478,9 +508,95 @@ export class ApiClient {
   }
 
   /**
+   * Record Steps (stories/testbench-record-steps.md §On the wire): hold the
+   * session while the author clicks through the app, and stream one
+   * `record:action` per action, then `record:result` and `done` once
+   * `controlRecordSteps({ action: 'stop' })` arrives.
+   *
+   * The same SSE framing as `streamSteps`. Refusals surface as the usual
+   * `ApiClientError` kinds: `conflict` (409) when a run holds the session's
+   * queue, `server-error` with the server's reason in `bodyExcerpt` (400) on
+   * a headless server — `apiErrorReason` reads it out — and `not-found` (404)
+   * from a server that predates the route.
+   *
+   * Aborting `signal` closes the stream, which the server takes as `cancel`.
+   */
+  async *streamRecordSteps(
+    sessionId: string,
+    request: RecordStepsRequest,
+    signal: AbortSignal,
+    /**
+     * Called once the server has answered 200, before any frame is read. By
+     * then the server holds a session for this id — created with this
+     * request's `config` when it carried one — even if the recording is
+     * cancelled before its first frame (the browser still launching).
+     */
+    onOpen?: () => void,
+  ): AsyncIterable<RecordStepsEvent> {
+    yield* this.postSse<RecordStepsEvent>(
+      `/sessions/${encodeURIComponent(sessionId)}/record-steps`,
+      request,
+      signal,
+      onOpen,
+    );
+  }
+
+  /**
+   * Steer a running recording: `stop` (write the steps, leaving `dropped`
+   * out), `check` / `cancel-check` (Add check), `cancel` (end, write nothing),
+   * `drop` / `restore` (of an action, or a step by its id), `pause` /
+   * `resume`, `add-step`, `edit-step`. The server answers 202 — with
+   * `{ ignored: true }` when the call did nothing, which is what this
+   * returns; what happens next arrives on the record stream.
+   *
+   * 404 — no recording is running — is `not-found`, which a caller racing the
+   * stream's own end can ignore.
+   */
+  async controlRecordSteps(sessionId: string, body: RecordControlRequest): Promise<RecordControlAnswer> {
+    const url = `${this.serverUrl}/sessions/${encodeURIComponent(sessionId)}/record-steps/control`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': this.apiKey },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      throw new ApiClientError('connect-failed', describeFetchError(err));
+    }
+    if (response.status === 401) {
+      throw new ApiClientError('unauthorized', 'Unauthorized', { status: 401 });
+    }
+    if (response.status === 404) {
+      const excerpt = await safeReadBodyExcerpt(response);
+      throw new ApiClientError('not-found', errorFrom(excerpt) ?? 'No recording is running', {
+        status: 404,
+        ...(excerpt !== undefined && { bodyExcerpt: excerpt }),
+      });
+    }
+    if (response.status >= 400) {
+      const excerpt = await safeReadBodyExcerpt(response);
+      throw new ApiClientError('server-error', `HTTP ${response.status}`, {
+        status: response.status,
+        ...(excerpt !== undefined && { bodyExcerpt: excerpt }),
+      });
+    }
+    // 202, with a body or none: only `ignored` is read from it — the server
+    // sends why (a sentence), or just `true`.
+    const answer = await readBody(response);
+    try {
+      const ignored = (answer ? (JSON.parse(answer) as { ignored?: unknown } | null) : null)?.ignored;
+      if (typeof ignored === 'string' && ignored !== '') return { ignored: true, reason: ignored };
+      return ignored === true ? { ignored: true } : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /**
    * POST a JSON body, read the SSE response, yield one parsed event per frame.
    *
-   * Shared by the two streaming clients rather than written twice: the error
+   * Shared by the streaming clients rather than written twice: the error
    * mapping, the abort handling and the reader teardown are all load-bearing in
    * ways that are not obvious from reading them, and two copies is how one of
    * them quietly loses a fix.
@@ -489,6 +605,8 @@ export class ApiClient {
     route: string,
     request: unknown,
     signal: AbortSignal,
+    /** Called once a 2xx answer arrives, before the body is read. */
+    onOpen?: () => void,
   ): AsyncIterable<T> {
     const url = `${this.serverUrl}${route}`;
     let response: Response;
@@ -539,6 +657,7 @@ export class ApiClient {
         status: response.status,
       });
     }
+    onOpen?.();
 
     const parser = new SseParser();
     const reader = response.body.getReader();
@@ -806,6 +925,15 @@ function errorFrom(bodyExcerpt: string | undefined): string | undefined {
     const parsed: unknown = JSON.parse(bodyExcerpt);
     const message = (parsed as { error?: unknown })?.error;
     return typeof message === 'string' ? message : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A whole (small) response body, or undefined when it cannot be read. */
+async function readBody(response: Response): Promise<string | undefined> {
+  try {
+    return await response.text();
   } catch {
     return undefined;
   }

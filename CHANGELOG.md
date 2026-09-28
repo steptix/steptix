@@ -6,6 +6,64 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — Record Steps: write a test by using the app (TestBench)
+
+Press **Record** in TestBench (or run **Record New Test**), use the application
+in the test's own browser, and the numbered steps appear in the file at the
+cursor as you work, in the handbook's style — the model drafts them a moment
+after each action and the recorded lines are highlighted while it does. Press
+**Stop** for the final version; one Ctrl+Z after Stop takes the whole recording
+back, and **Cancel** removes it. Each draft call is sent
+the page's own description of what you clicked plus a cropped screenshot around
+it. An action is a click or a drag, Enter or Tab, or the browser's Back,
+Forward or Refresh; typing, selecting and ticking ride with the next action.
+Every typed value becomes a `{{parameter}}` with its value under
+`## Parameters`; a password never leaves the browser — its step reads
+`{{password}}` and its value comes from `.env` — and secret fields are painted
+out of every screenshot. **Add check** turns your next click into a
+`Verify …` step instead of a click. A ✕ drops a misclick. See
+docs/specs/SPEC-record-steps.md.
+
+The recording also has **controls in the browser**: a small bar docked in the
+page (bottom-centre by default; drag it to any corner or edge, or minimise it
+to a pill — it remembers) with the time and action count, **Pause** (browse
+anywhere, nothing is recorded; resume where you left off), **Add check**,
+**Add step** (type any step — a `Verify …` or anything else — and it goes in
+exactly as written, locked in with everything recorded before it), **Undo**,
+**Stop** and **Cancel**, a status line with the last step, and a Steps so far
+drawer. Shortcuts: Alt+Shift+P/C/S/Z/M/R. It works on strict-CSP pages, is
+painted out of every screenshot the model sees, and its own clicks and keys are
+never recorded. A step you **type in the test file** during a recording joins
+it the same way: it is kept exactly as you wrote it, the recording numbers
+around it, and the next steps go after it. Pause, Resume and Add Step to
+Recording are also commands; `testbench-native.recordSteps.browserToolbar`
+turns the bar off. See stories/testbench-record-toolbar.md.
+
+You can also **change what has been recorded** while you record, and no step
+is ever locked against you. In the bar's Steps so far drawer, click a step to
+reword it, press ✕ to delete it, or `+` between two steps to add one there;
+in the test file, just edit or delete the line. A reworded step keeps your
+wording through every later draft and the model writes no second step for
+what it describes; deleting a step the model wrote also drops the recorded
+actions behind it, so no redraft brings it back, and Restore (or Ctrl+Z in the
+file) puts both back. See stories/testbench-record-edit-steps.md. Server:
+rebuild and restart; TestBench 0.5.159.
+
+### Added — `drag` and `reload` steps
+
+A step can now drag one element onto another and reload the page:
+`Drag the Invoice 1043 card onto the Paid column` and `Reload the page` run like
+any other step. The model has two new actions for them — `drag` (the element
+dragged and the element it is dropped on, both by selector; it drives HTML5
+drag-and-drop and pointer-event sortables alike) and `reload` (the browser's
+reload button, waiting for the page as a navigation does). Both compile to
+code-behind (`dragTo`, `page.reload()`), and a report row for a drag says which
+element went onto which. Before this, a drag had no action at all, and a
+reload — deferred when back and forward were added — could only be written as a
+navigation to the same address, which is not the same thing. Added because
+Record Steps records both (docs/specs/SPEC-record-steps.md §4), and a recorded
+step has to be able to run.
+
 ### Fixed — the selector rules no longer steer the model into selectors that match nothing
 
 Rule 3 of the step prompt recommended `tag:text-is("label")` for short labels

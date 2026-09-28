@@ -1,0 +1,1490 @@
+<title>Record Steps Toolbar</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  /* ── Mockup chrome: theme-aware tokens ─────────────────────────────── */
+  :root {
+    --paper: #EEF0EC;
+    --paper-2: #E5E8E3;
+    --ink: #16191B;
+    --ink-2: #4B5357;
+    --line: #CBD0CA;
+    --chip: #FFFFFF;
+    --chip-on-bg: #16191B;
+    --chip-on-fg: #F3F5F2;
+    --frame: #DADED8;
+    --frame-2: #CDD2CB;
+    --tab: #F4F6F3;
+    --addr: #FFFFFF;
+    --infobar: #E8ECF3;
+    --infobar-ink: #3B4452;
+    --focus: #2F6FEB;
+    --note: #FFFFFF;
+
+    /* The toolbar's own palette: fixed, never borrowed from the page. */
+    --tb-bg: #1B1E23;
+    --tb-raise: #292D34;
+    --tb-press: #323741;
+    --tb-field: #121418;
+    --tb-line: #3A4049;
+    --tb-text: #EDEFF2;
+    --tb-dim: #A7AFB9;
+    --tb-faint: #7D8691;
+    --tb-rec: #FF5A5F;
+    --tb-paused: #F2B544;
+    --tb-pick: #5CB8FF;
+    --tb-pick-strong: #2E9BFF;
+    --tb-ok: #6FD6A0;
+    --tb-yours: #8FE0B5;
+    --tb-err: #FF8A80;
+
+    --ui-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --chrome-font: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --app-font: "Figtree", "Segoe UI", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --paper: #111315;
+      --paper-2: #181B1E;
+      --ink: #E7EAEC;
+      --ink-2: #9BA4AA;
+      --line: #2C3136;
+      --chip: #1C2024;
+      --chip-on-bg: #E7EAEC;
+      --chip-on-fg: #111315;
+      --frame: #22262A;
+      --frame-2: #2C3136;
+      --tab: #30353B;
+      --addr: #16191C;
+      --infobar: #1E2530;
+      --infobar-ink: #B7C2D2;
+      --focus: #6EA4FF;
+      --note: #181B1E;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --paper: #111315;
+    --paper-2: #181B1E;
+    --ink: #E7EAEC;
+    --ink-2: #9BA4AA;
+    --line: #2C3136;
+    --chip: #1C2024;
+    --chip-on-bg: #E7EAEC;
+    --chip-on-fg: #111315;
+    --frame: #22262A;
+    --frame-2: #2C3136;
+    --tab: #30353B;
+    --addr: #16191C;
+    --infobar: #1E2530;
+    --infobar-ink: #B7C2D2;
+    --focus: #6EA4FF;
+    --note: #181B1E;
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--chrome-font);
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .page {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding-inline: max(16px, 3vw);
+    padding-block: 28px 56px;
+    display: grid;
+    gap: 20px;
+  }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+  /* ── Intro ─────────────────────────────────────────────────────────── */
+  .intro { display: grid; gap: 6px; max-width: 72ch; }
+  .eyebrow {
+    margin: 0;
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+    font-weight: 600;
+  }
+  .intro h1 {
+    margin: 0;
+    font-size: clamp(24px, 3.2vw, 34px);
+    line-height: 1.15;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    text-wrap: balance;
+  }
+  .intro p.lede { margin: 0; color: var(--ink-2); }
+
+  /* ── State switcher (mockup-only) ──────────────────────────────────── */
+  .switcher {
+    border: 1px dashed var(--line);
+    border-radius: 10px;
+    padding: 14px 16px 16px;
+    display: grid;
+    gap: 12px;
+    background: var(--paper-2);
+    background: color-mix(in srgb, var(--paper-2) 60%, transparent);
+  }
+  .switcher-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 6px 16px;
+  }
+  .switcher-title {
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+  .switcher-title small {
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 400;
+    color: var(--ink-2);
+    margin-left: 6px;
+    font-size: 12.5px;
+  }
+  .switcher-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; color: var(--ink-2); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+  .seg button {
+    border: 0;
+    background: var(--chip);
+    padding: 3px 11px;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .seg button[aria-pressed="true"] { background: var(--chip-on-bg); color: var(--chip-on-fg); }
+  .tool-btn {
+    border: 1px solid var(--line);
+    background: var(--chip);
+    border-radius: 999px;
+    padding: 3px 11px;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    border: 1px solid var(--line);
+    background: var(--chip);
+    border-radius: 999px;
+    padding: 5px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    line-height: 1.2;
+  }
+  .chip:hover { border-color: var(--ink-2); }
+  .chip[aria-checked="true"] { background: var(--chip-on-bg); color: var(--chip-on-fg); border-color: var(--chip-on-bg); }
+  .caption { margin: 0; font-size: 14px; color: var(--ink-2); max-width: 90ch; min-height: 3em; }
+  .caption b { color: var(--ink); font-weight: 600; }
+
+  /* ── Fake browser window ───────────────────────────────────────────── */
+  .browser {
+    border: 1px solid var(--frame-2);
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--frame);
+    box-shadow: 0 1px 0 rgba(0,0,0,.03), 0 18px 40px -24px rgba(0,0,0,.35);
+  }
+  .tabs { display: flex; align-items: flex-end; gap: 4px; padding: 8px 10px 0; }
+  .tab {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--tab);
+    border-radius: 8px 8px 0 0;
+    padding: 7px 12px;
+    font-size: 12.5px;
+    max-width: 260px;
+    min-width: 0;
+  }
+  .tab span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tab .fav { width: 14px; height: 14px; border-radius: 3px; background: #0E6B5B; flex: none; }
+  .tab .x { color: var(--ink-2); flex: none; }
+  .newtab { color: var(--ink-2); padding: 6px 8px; font-size: 16px; line-height: 1; }
+  .addr-row { display: flex; align-items: center; gap: 10px; background: var(--tab); padding: 7px 10px; }
+  .nav-ico { display: flex; gap: 10px; color: var(--ink-2); flex: none; }
+  .addr {
+    flex: 1; min-width: 0;
+    background: var(--addr);
+    border-radius: 999px;
+    padding: 5px 14px;
+    font-size: 13px;
+    color: var(--ink-2);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .addr b { color: var(--ink); font-weight: 500; }
+  .infobar {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--infobar);
+    color: var(--infobar-ink);
+    font-size: 12.5px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--frame-2);
+  }
+  .infobar svg { flex: none; }
+
+  .viewport {
+    position: relative;
+    height: clamp(560px, 74vh, 700px);
+    overflow: hidden;
+    container-type: inline-size;
+    container-name: vp;
+    background: #F4F7F6;
+  }
+  .app-scroll { position: absolute; inset: 0; overflow: auto; }
+
+  /* ── The bank app under test (its own brand; theme via its own toggle) */
+  .app {
+    --sb-bg: #F4F7F6;
+    --sb-surface: #FFFFFF;
+    --sb-ink: #0D2624;
+    --sb-muted: #5A6D6A;
+    --sb-line: #DCE5E2;
+    --sb-brand: #0E6B5B;
+    --sb-brand-ink: #FFFFFF;
+    --sb-soft: #E3F3EE;
+    --sb-neg: #B4232C;
+    --sb-pos: #16794A;
+    --sb-focus: #0E6B5B;
+    color-scheme: light;
+    min-height: 100%;
+    background: var(--sb-bg);
+    color: var(--sb-ink);
+    font-family: var(--app-font);
+    font-size: 14px;
+    line-height: 1.45;
+    padding-bottom: 120px;
+  }
+  .app[data-app-theme="dark"] {
+    --sb-bg: #0C1413;
+    --sb-surface: #131E1C;
+    --sb-ink: #DDEBE8;
+    --sb-muted: #8CA29E;
+    --sb-line: #22322F;
+    --sb-brand: #35BFA0;
+    --sb-brand-ink: #062019;
+    --sb-soft: #15302A;
+    --sb-neg: #FF7C80;
+    --sb-pos: #5AD69A;
+    --sb-focus: #35BFA0;
+    color-scheme: dark;
+  }
+  .sb-top {
+    display: flex; align-items: center; gap: 12px 28px; flex-wrap: wrap;
+    padding: 12px 24px;
+    background: var(--sb-surface);
+    border-bottom: 1px solid var(--sb-line);
+  }
+  .sb-brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; letter-spacing: -.01em; }
+  .sb-brand svg { color: var(--sb-brand); }
+  .sb-nav { display: flex; gap: 4px; flex-wrap: wrap; }
+  .sb-nav a {
+    color: var(--sb-muted); text-decoration: none; font-weight: 500;
+    padding: 6px 10px; border-radius: 6px;
+  }
+  .sb-nav a:hover { color: var(--sb-ink); background: var(--sb-soft); }
+  .sb-nav a.on { color: var(--sb-brand); background: var(--sb-soft); }
+  .sb-user { margin-left: auto; display: flex; align-items: center; gap: 12px; color: var(--sb-muted); font-size: 13px; }
+  .sb-btn {
+    border: 1px solid var(--sb-line);
+    background: var(--sb-surface);
+    color: var(--sb-ink);
+    border-radius: 7px;
+    padding: 6px 12px;
+    font: 500 13px var(--app-font);
+    cursor: pointer;
+  }
+  .sb-btn:hover { border-color: var(--sb-muted); }
+  .sb-btn.primary { background: var(--sb-brand); border-color: var(--sb-brand); color: var(--sb-brand-ink); }
+  .sb-main { padding: 22px 24px; display: grid; gap: 18px; max-width: 1100px; }
+  .sb-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; }
+  .sb-head h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -.01em; }
+  .sb-head p { margin: 0; color: var(--sb-muted); }
+  .sb-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+  .sb-card {
+    background: var(--sb-surface);
+    border: 1px solid var(--sb-line);
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: grid; gap: 2px;
+    cursor: pointer;
+  }
+  .sb-card h2 { margin: 0; font-size: 14px; font-weight: 600; }
+  .sb-card .acct { margin: 0; color: var(--sb-muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .sb-card .bal { margin: 6px 0 0; font-size: 24px; font-weight: 700; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+  .sb-card .avail { margin: 0; color: var(--sb-muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .sb-card .neg { color: var(--sb-neg); }
+  .sb-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+  .sb-side { display: grid; gap: 14px; }
+  .sb-panel {
+    background: var(--sb-surface);
+    border: 1px solid var(--sb-line);
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: grid; gap: 10px;
+    min-width: 0;
+  }
+  .sb-panel h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .panel-head label { display: flex; align-items: center; gap: 8px; color: var(--sb-muted); font-size: 13px; }
+  .sb-select, .sb-input {
+    font: 14px var(--app-font);
+    color: var(--sb-ink);
+    background: var(--sb-surface);
+    border: 1px solid var(--sb-line);
+    border-radius: 7px;
+    padding: 6px 9px;
+    min-width: 0;
+  }
+  .sb-input:focus, .sb-select:focus, .sb-input.fake-focus { outline: 2px solid var(--sb-focus); outline-offset: 1px; }
+  .tx-wrap { overflow-x: auto; }
+  .tx { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  .tx th { text-align: left; font-size: 12px; font-weight: 600; color: var(--sb-muted); padding: 6px 8px; border-bottom: 1px solid var(--sb-line); }
+  .tx td { padding: 9px 8px; border-bottom: 1px solid var(--sb-line); white-space: nowrap; }
+  .tx td.amt { text-align: right; font-weight: 600; }
+  .tx td.amt.neg { color: var(--sb-neg); }
+  .tx td.amt.pos { color: var(--sb-pos); }
+  .tx td.act { width: 40px; text-align: right; }
+  .icon-btn {
+    border: 0; background: transparent; color: var(--sb-muted);
+    border-radius: 6px; padding: 4px; cursor: pointer; display: inline-flex;
+  }
+  .icon-btn:hover { background: var(--sb-soft); color: var(--sb-neg); }
+  .pm { margin: 0; font-size: 18px; font-weight: 700; }
+  .muted { margin: 0; color: var(--sb-muted); font-size: 13px; }
+  .form { display: grid; gap: 10px; }
+  .field { display: grid; gap: 4px; font-size: 13px; color: var(--sb-muted); }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+  @container vp (max-width: 780px) {
+    .sb-grid { grid-template-columns: minmax(0, 1fr); }
+    .sb-user .who { display: none; }
+  }
+  @container vp (max-width: 520px) {
+    .sb-top { padding: 10px 14px; }
+    .sb-main { padding: 16px 14px; }
+    .sb-user { margin-left: 0; }
+  }
+
+  /* ── The toolbar (the product) ─────────────────────────────────────── */
+  .tb-host {
+    position: absolute;
+    z-index: 30;
+    width: max-content;
+    max-width: calc(100% - 32px);
+    font-family: var(--ui-font);
+    font-size: 13px;
+    line-height: 1.25;
+    color: var(--tb-text);
+    font-variant-numeric: tabular-nums;
+  }
+  .tb-host[data-dock="tl"] { top: 16px; left: 16px; }
+  .tb-host[data-dock="tc"] { top: 16px; left: 50%; transform: translateX(-50%); }
+  .tb-host[data-dock="tr"] { top: 16px; right: 16px; }
+  .tb-host[data-dock="bl"] { bottom: 16px; left: 16px; }
+  .tb-host[data-dock="bc"] { bottom: 16px; left: 50%; transform: translateX(-50%); }
+  .tb-host[data-dock="br"] { bottom: 16px; right: 16px; }
+  .tb-host.dragging { cursor: grabbing; }
+  .tb-host.dragging .tb, .tb-host.dragging .tb-pill { box-shadow: 0 0 0 1px var(--ring), 0 18px 40px rgba(0,0,0,.45); }
+
+  .tb {
+    --ring: rgba(255,255,255,.16);
+    display: flex;
+    flex-direction: column;
+    background: var(--tb-bg);
+    border-radius: 10px;
+    box-shadow: 0 0 0 1px var(--ring), 0 10px 28px rgba(0,0,0,.34), 0 2px 6px rgba(0,0,0,.22);
+    overflow: hidden;
+  }
+  .tb-host[data-edge="bottom"] .tb { flex-direction: column-reverse; }
+  .tb[data-kind="rec"] { --ring: rgba(255,90,95,.62); }
+  .tb[data-kind="paused"] { --ring: rgba(242,181,68,.7); }
+  .tb[data-kind="pick"] { --ring: rgba(92,184,255,.8); }
+  .tb[data-kind="warn"] { --ring: rgba(242,181,68,.7); }
+  .tb[data-kind="done"] { --ring: rgba(111,214,160,.6); }
+
+  .tb-main { display: flex; align-items: center; gap: 2px; padding: 4px; min-height: 40px; }
+  .tb-grip {
+    display: grid; place-items: center;
+    width: 20px; height: 32px;
+    border: 0; background: transparent; color: var(--tb-faint);
+    cursor: grab; border-radius: 5px; padding: 0;
+    touch-action: none;
+  }
+  .tb-grip:hover { color: var(--tb-dim); background: var(--tb-raise); }
+  .tb-status { display: flex; align-items: center; gap: 7px; padding: 0 10px 0 6px; white-space: nowrap; }
+  .tb-dot { position: relative; width: 10px; height: 10px; border-radius: 50%; background: var(--tb-rec); flex: none; }
+  .tb-dot::after {
+    content: ""; position: absolute; inset: -4px; border-radius: 50%;
+    border: 2px solid var(--tb-rec); opacity: 0;
+    animation: pulse 1.8s ease-out infinite;
+  }
+  @keyframes pulse { 0% { transform: scale(.6); opacity: .7; } 100% { transform: scale(1.35); opacity: 0; } }
+  .tb-dot[data-kind="paused"] { background: transparent; width: 10px; }
+  .tb-dot[data-kind="paused"]::before {
+    content: ""; position: absolute; inset: 0 1px;
+    border-left: 3px solid var(--tb-paused); border-right: 3px solid var(--tb-paused);
+  }
+  .tb-dot[data-kind="paused"]::after,
+  .tb-dot[data-kind="static"]::after,
+  .tb-dot[data-kind="offline"]::after,
+  .tb-dot[data-kind="done"]::after,
+  .tb-dot[data-kind="ended"]::after,
+  .tb-dot[data-kind="writing"]::after { display: none; }
+  .tb-dot[data-kind="offline"] { background: transparent; box-shadow: inset 0 0 0 2px var(--tb-paused); }
+  .tb-dot[data-kind="done"] { background: var(--tb-ok); }
+  .tb-dot[data-kind="ended"] { background: var(--tb-faint); }
+  .tb-dot[data-kind="writing"] {
+    background: transparent;
+    border: 2px solid var(--tb-line); border-top-color: var(--tb-text);
+    animation: spin .9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .tb-rec { font-weight: 700; letter-spacing: .08em; font-size: 12px; }
+  .tb-rec[data-kind="rec"] { color: #FF7B7F; }
+  .tb-rec[data-kind="paused"], .tb-rec[data-kind="offline"] { color: var(--tb-paused); }
+  .tb-rec[data-kind="done"] { color: var(--tb-ok); }
+  .tb-rec[data-kind="ended"], .tb-rec[data-kind="writing"] { color: var(--tb-dim); }
+  .tb-time { color: var(--tb-text); font-weight: 500; }
+  .tb-count { color: var(--tb-dim); }
+  .tb-sep { width: 1px; height: 20px; background: var(--tb-line); margin: 0 4px; flex: none; }
+
+  .tb-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 32px; padding: 0 10px;
+    border: 0; border-radius: 6px;
+    background: transparent; color: var(--tb-text);
+    font: 500 13px var(--ui-font);
+    cursor: pointer; white-space: nowrap;
+  }
+  .tb-btn svg { flex: none; color: var(--tb-dim); }
+  .tb-btn:hover:not(:disabled) { background: var(--tb-raise); }
+  .tb-btn:hover:not(:disabled) svg { color: var(--tb-text); }
+  .tb-btn:focus-visible, .tb-grip:focus-visible, .tb-mini:focus-visible, .tb-pill:focus-visible, .tb-toggle:focus-visible {
+    outline: 2px solid var(--tb-pick); outline-offset: -2px;
+  }
+  .tb-btn:disabled { color: var(--tb-faint); cursor: default; }
+  .tb-btn:disabled svg { color: var(--tb-faint); opacity: .7; }
+  #bPause[aria-pressed="true"] { background: rgba(242,181,68,.16); color: #FFD27A; }
+  #bPause[aria-pressed="true"] svg { color: #FFD27A; }
+  #bCheck[aria-pressed="true"] { background: rgba(92,184,255,.18); color: #A8D8FF; }
+  #bCheck[aria-pressed="true"] svg { color: #A8D8FF; }
+  #bStep[aria-pressed="true"] { background: var(--tb-press); }
+  .tb-stop { background: #E9ECEF; color: #16191D; margin-left: 2px; }
+  .tb-stop svg { color: #D93A40; }
+  .tb-btn.tb-stop:hover:not(:disabled) { background: #FFFFFF; }
+  .tb-btn.tb-stop:hover:not(:disabled) svg { color: #D93A40; }
+  .tb-stop:disabled { background: var(--tb-raise); color: var(--tb-faint); }
+  .tb-quiet { color: var(--tb-dim); }
+  .tb-quiet .tb-x { display: none; }
+  .tb-icon { padding: 0; width: 30px; justify-content: center; }
+
+  .tb-sub {
+    width: 0; min-width: 100%;
+    display: flex; align-items: center; gap: 8px;
+    min-height: 34px;
+    padding: 5px 10px 5px 12px;
+    border-top: 1px solid var(--tb-line);
+    font-size: 12.5px;
+    color: var(--tb-dim);
+  }
+  .tb-host[data-edge="bottom"] .tb-sub { border-top: 0; border-bottom: 1px solid var(--tb-line); }
+  .tb-sub .n { font-family: var(--mono); font-size: 11.5px; color: var(--tb-faint); flex: none; min-width: 1.4em; text-align: right; }
+  .tb-sub .t { color: var(--tb-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+  .tb-sub .msg { color: var(--tb-text); flex: 1; min-width: 0; }
+  .tb-sub .msg.dim { color: var(--tb-dim); }
+  .tb-sub .msg.pick { color: #BFE2FF; }
+  .tb-sub .msg.warn { color: #FFD27A; }
+  .tb-sub .upd { color: var(--tb-dim); font-style: italic; flex: none; }
+  .tb-sub kbd, .legend kbd {
+    font-family: var(--mono); font-size: 11px;
+    border: 1px solid var(--tb-line); border-bottom-width: 2px;
+    border-radius: 4px; padding: 0 4px; color: var(--tb-text); background: var(--tb-raise);
+  }
+  .tb-sub .ico { flex: none; display: inline-flex; }
+  .tb-sub .ico.ok { color: var(--tb-ok); }
+  .tb-sub .ico.warn { color: var(--tb-paused); }
+  .tb-sub .ico.lock { color: var(--tb-yours); }
+  .tb-sub .yours {
+    flex: none; font-size: 10.5px; font-weight: 600; letter-spacing: .04em;
+    color: #0F2A1D; background: var(--tb-yours); border-radius: 4px; padding: 1px 5px;
+  }
+  .chip-lock {
+    display: inline-flex; align-items: center; gap: 5px; flex: none;
+    border: 1px solid rgba(143,224,181,.5); color: var(--tb-yours);
+    border-radius: 999px; padding: 2px 8px 2px 6px; font-weight: 600; font-size: 12px;
+  }
+  .tb-toggle {
+    flex: none; display: inline-flex; align-items: center; gap: 4px;
+    border: 0; background: transparent; color: var(--tb-dim);
+    font: 500 12px var(--ui-font); padding: 3px 6px; border-radius: 5px; cursor: pointer;
+  }
+  .tb-toggle:hover { background: var(--tb-raise); color: var(--tb-text); }
+  .tb-toggle svg { transition: transform .15s; }
+  .tb-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+  .tb-host[data-edge="bottom"] .tb-toggle svg { transform: rotate(180deg); }
+  .tb-host[data-edge="bottom"] .tb-toggle[aria-expanded="true"] svg { transform: none; }
+  .tb-mini {
+    flex: none; border: 1px solid var(--tb-line); background: var(--tb-raise); color: var(--tb-text);
+    font: 500 12px var(--ui-font); border-radius: 5px; padding: 3px 9px; cursor: pointer;
+  }
+  .tb-mini:hover { background: var(--tb-press); }
+  .tb-mini.danger { background: #5A1E22; border-color: #7A2A30; color: #FFD9D9; }
+  .tb-mini.danger:hover { background: #6E252A; }
+  .tb-input {
+    flex: 1; min-width: 0;
+    height: 28px;
+    background: var(--tb-field); color: var(--tb-text);
+    border: 1px solid var(--tb-line); border-radius: 6px;
+    padding: 0 9px;
+    font: 13px var(--ui-font);
+  }
+  .tb-input::placeholder { color: var(--tb-faint); }
+  .tb-input:focus { outline: 2px solid var(--tb-pick); outline-offset: -1px; border-color: transparent; }
+  .tb-hint { flex: none; color: var(--tb-faint); font-size: 11.5px; white-space: nowrap; }
+  .tb-spin {
+    width: 12px; height: 12px; border-radius: 50%; flex: none;
+    border: 2px solid var(--tb-line); border-top-color: var(--tb-text);
+    animation: spin .9s linear infinite;
+  }
+
+  .tb-drawer {
+    width: 0; min-width: 100%;
+    max-height: 214px; overflow: auto;
+    border-top: 1px solid var(--tb-line);
+    padding: 6px 4px;
+  }
+  .tb-host[data-edge="bottom"] .tb-drawer { border-top: 0; border-bottom: 1px solid var(--tb-line); }
+  .tb-drawer ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+  .tb-drawer li {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 8px; border-radius: 5px; font-size: 12.5px; color: var(--tb-text);
+  }
+  .tb-drawer li .n { font-family: var(--mono); font-size: 11px; color: var(--tb-faint); min-width: 1.6em; text-align: right; flex: none; }
+  .tb-drawer li .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tb-drawer li.is-locked .t { color: var(--tb-dim); }
+  .tb-drawer li.is-yours .t { color: var(--tb-text); }
+  .tb-drawer li.is-last { background: var(--tb-raise); }
+  .tb-drawer li .lk { color: var(--tb-faint); display: inline-flex; flex: none; }
+  .tb-drawer li .yours { flex: none; font-size: 10px; font-weight: 600; letter-spacing: .04em; color: #0F2A1D; background: var(--tb-yours); border-radius: 4px; padding: 0 5px; }
+  .tb-drawer .foot { color: var(--tb-faint); font-size: 11.5px; padding: 6px 8px 2px; }
+
+  .tb-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    height: 34px; padding: 0 6px 0 12px;
+    background: var(--tb-bg); color: var(--tb-text);
+    border: 0; border-radius: 999px;
+    box-shadow: 0 0 0 1px var(--ring, rgba(255,255,255,.16)), 0 8px 22px rgba(0,0,0,.34);
+    font: 500 13px var(--ui-font);
+    cursor: grab;
+    touch-action: none;
+  }
+  .tb-pill .exp { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--tb-raise); color: var(--tb-dim); }
+  .tb-pill .pickword { color: #A8D8FF; font-weight: 600; }
+
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* Compact toolbar when the page is narrow */
+  @container vp (max-width: 660px) {
+    .tb-label { display: none; }
+    .tb-btn { padding: 0 8px; }
+    .tb-quiet .tb-x { display: inline; }
+    .tb-count { display: none; }
+    .tb-hint { display: none; }
+  }
+  @container vp (max-width: 400px) {
+    .tb-btn { padding: 0 6px; }
+    .tb-status { padding: 0 6px 0 4px; }
+    .tb-time { display: none; }
+    .tb-sep { margin: 0 1px; }
+  }
+
+  /* ── Pick mode overlay (drawn by the recorder in the page) ────────── */
+  .viewport.picking .app, .viewport.picking .app * { cursor: crosshair !important; }
+  .pick-outline {
+    position: absolute; z-index: 25; pointer-events: none;
+    border: 2px solid var(--tb-pick-strong);
+    border-radius: 4px;
+    background: rgba(46,155,255,.10);
+    box-shadow: 0 0 0 1px rgba(255,255,255,.95), inset 0 0 0 1px rgba(255,255,255,.55);
+  }
+  .pick-label {
+    position: absolute; z-index: 26; pointer-events: none;
+    display: flex; align-items: center; gap: 6px;
+    max-width: min(380px, calc(100% - 16px));
+    background: var(--tb-bg); color: var(--tb-text);
+    font: 500 12px var(--ui-font);
+    padding: 5px 9px; border-radius: 6px;
+    box-shadow: 0 0 0 1px rgba(92,184,255,.6), 0 6px 16px rgba(0,0,0,.3);
+  }
+  .pick-label::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--tb-pick); flex: none; }
+  .pick-label span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Dock targets while dragging */
+  .guides { position: absolute; inset: 0; z-index: 29; pointer-events: none; }
+  .guide {
+    position: absolute; width: 96px; height: 26px; border-radius: 8px;
+    border: 1.5px dashed rgba(92,184,255,.55); background: rgba(92,184,255,.06);
+  }
+  .guide.on { border-style: solid; border-color: var(--tb-pick-strong); background: rgba(46,155,255,.16); }
+  .g-tl { top: 16px; left: 16px; } .g-tc { top: 16px; left: calc(50% - 48px); } .g-tr { top: 16px; right: 16px; }
+  .g-bl { bottom: 16px; left: 16px; } .g-bc { bottom: 16px; left: calc(50% - 48px); } .g-br { bottom: 16px; right: 16px; }
+
+  /* Mockup note shown after the toolbar leaves the page */
+  .gone {
+    position: absolute; z-index: 30; left: 50%; bottom: 20px; transform: translateX(-50%);
+    width: max-content; max-width: calc(100% - 32px);
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    background: var(--note); color: var(--ink);
+    border: 1px dashed var(--ink-2); border-radius: 10px;
+    padding: 9px 12px; font: 13px var(--chrome-font);
+  }
+
+  /* ── Legend under the browser ──────────────────────────────────────── */
+  .legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px 32px; }
+  .legend h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; font-weight: 600; color: var(--ink-2); }
+  .keys { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; font-size: 14px; }
+  .keys dt { white-space: nowrap; }
+  .keys dd { margin: 0; color: var(--ink-2); }
+  .legend kbd { color: var(--ink); background: var(--chip); border-color: var(--line); font-size: 12px; padding: 1px 5px; }
+  .legend ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 14px; color: var(--ink-2); max-width: 62ch; }
+  .legend ul b { color: var(--ink); font-weight: 600; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tb-dot::after { display: none; }
+    .tb-dot[data-kind="writing"], .tb-spin { animation: none; border-top-color: var(--tb-dim); }
+    .tb-toggle svg { transition: none; }
+  }
+</style>
+
+<div class="page">
+  <header class="intro">
+    <p class="eyebrow">TestBench · Record Steps · design mockup</p>
+    <h1>Recording controls inside the recorded page</h1>
+    <p class="lede">The dark bar floating over the bank dashboard is the proposal. Use it the way you would while recording: click around the app, pause, add a check, type a step. Or flip through its states with the controls below.</p>
+  </header>
+
+  <section class="switcher" aria-labelledby="switcher-title">
+    <div class="switcher-head">
+      <span class="switcher-title" id="switcher-title">Mockup controls <small>not part of the product</small></span>
+      <div class="switcher-tools">
+        <span>App theme</span>
+        <span class="seg" role="group" aria-label="App theme">
+          <button type="button" id="appLight" aria-pressed="true">Light</button>
+          <button type="button" id="appDark" aria-pressed="false">Dark</button>
+        </span>
+        <button type="button" class="tool-btn" id="resetPos">Reset position</button>
+      </div>
+    </div>
+    <div class="chips" role="radiogroup" aria-label="Toolbar state" id="chips"></div>
+    <p class="caption" id="caption" aria-live="polite"></p>
+  </section>
+
+  <section class="browser" aria-label="The test's browser, with the toolbar">
+    <div class="tabs">
+      <div class="tab"><span class="fav" aria-hidden="true"></span><span>SecureBank · Accounts</span><span class="x" aria-hidden="true">×</span></div>
+      <span class="newtab" aria-hidden="true">+</span>
+    </div>
+    <div class="addr-row">
+      <span class="nav-ico" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3 5 8l5 5"/></svg>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m6 3 5 5-5 5"/></svg>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 3v3h-3"/></svg>
+      </span>
+      <div class="addr">localhost:8787/<b>dashboard.html</b></div>
+    </div>
+    <div class="infobar">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v4M8 4.8v.4" stroke-linecap="round"/></svg>
+      Chrome is being controlled by automated test software.
+    </div>
+
+    <div class="viewport" id="viewport">
+      <div class="app-scroll" id="appScroll">
+        <div class="app" id="app" data-app-theme="light">
+          <header class="sb-top">
+            <div class="sb-brand">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 2 3.5 4.5v5c0 4 2.8 7.1 6.5 8.5 3.7-1.4 6.5-4.5 6.5-8.5v-5L10 2Z" fill="currentColor" opacity=".18"/><path d="M10 2 3.5 4.5v5c0 4 2.8 7.1 6.5 8.5 3.7-1.4 6.5-4.5 6.5-8.5v-5L10 2Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m7 10 2 2 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              SecureBank
+            </div>
+            <nav class="sb-nav" aria-label="Main menu">
+              <a href="#" class="on" data-step="Click Accounts in the main menu">Accounts</a>
+              <a href="#" data-step="Click Payments in the main menu">Payments</a>
+              <a href="#" data-step="Click Transfers in the main menu">Transfers</a>
+              <a href="#" data-step="Click Documents in the main menu">Documents</a>
+            </nav>
+            <div class="sb-user">
+              <span class="who">demo@securebank.com</span>
+              <button type="button" class="sb-btn" data-step="Click the Sign out button">Sign out</button>
+            </div>
+          </header>
+
+          <main class="sb-main">
+            <div class="sb-head">
+              <h1>Accounts overview</h1>
+              <p>Friday, 27 September</p>
+            </div>
+
+            <div class="sb-cards">
+              <article class="sb-card" data-step="Click the Everyday account" data-summary='Clicked account card "Everyday"' data-check='account card "Everyday" · "$1,234.56"' data-verify='Verify the Everyday account shows "$1,234.56"'>
+                <h2>Everyday</h2>
+                <p class="acct">•••• 4821</p>
+                <p class="bal">$1,234.56</p>
+                <p class="avail">Available $1,184.56</p>
+              </article>
+              <article class="sb-card" data-step="Click the Savings account" data-summary='Clicked account card "Savings"' data-check='account card "Savings" · "$8,420.00"' data-verify='Verify the Savings account shows "$8,420.00"'>
+                <h2>Savings</h2>
+                <p class="acct">•••• 7310</p>
+                <p class="bal">$8,420.00</p>
+                <p class="avail">2.10% interest</p>
+              </article>
+              <article class="sb-card" data-step="Click the Credit card account" data-summary='Clicked account card "Credit card"' data-check='account card "Credit card" · "−$312.40"' data-verify='Verify the Credit card account shows "−$312.40"'>
+                <h2>Credit card</h2>
+                <p class="acct">•••• 0096</p>
+                <p class="bal neg">−$312.40</p>
+                <p class="avail">Due 12 October</p>
+              </article>
+            </div>
+
+            <div class="sb-grid">
+              <section class="sb-panel" aria-labelledby="tx-h">
+                <div class="panel-head">
+                  <h2 id="tx-h">Recent transactions</h2>
+                  <label>Period
+                    <select class="sb-select" id="period" data-step-select="Period">
+                      <option>Last 7 days</option>
+                      <option selected>Last 30 days</option>
+                      <option>Last 90 days</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="tx-wrap">
+                  <table class="tx">
+                    <thead><tr><th>Date</th><th>Description</th><th style="text-align:right">Amount</th><th><span class="sr">Actions</span></th></tr></thead>
+                    <tbody>
+                      <tr data-check='row "Coffee Roasters" · "−$4.80"' data-verify='Verify the Coffee Roasters row shows "−$4.80"'>
+                        <td>26 Sep</td><td>Coffee Roasters</td><td class="amt neg">−$4.80</td>
+                        <td class="act"><button type="button" class="icon-btn" aria-label="Delete" data-step='Click the delete (trash can) icon on the "Coffee Roasters" row' data-summary='Clicked button "Delete" (icon)'><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg></button></td>
+                      </tr>
+                      <tr data-check='row "Salary" · "+$2,450.00"' data-verify='Verify the Salary row shows "+$2,450.00"'>
+                        <td>25 Sep</td><td>Salary</td><td class="amt pos">+$2,450.00</td>
+                        <td class="act"><button type="button" class="icon-btn" aria-label="Delete" data-step='Click the delete (trash can) icon on the "Salary" row' data-summary='Clicked button "Delete" (icon)'><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg></button></td>
+                      </tr>
+                      <tr data-check='row "City Power" · "−$96.12"' data-verify='Verify the City Power row shows "−$96.12"'>
+                        <td>24 Sep</td><td>City Power</td><td class="amt neg">−$96.12</td>
+                        <td class="act"><button type="button" class="icon-btn" aria-label="Delete" data-step='Click the delete (trash can) icon on the "City Power" row' data-summary='Clicked button "Delete" (icon)'><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg></button></td>
+                      </tr>
+                      <tr data-check='row "Transfer to Savings" · "−$200.00"' data-verify='Verify the Transfer to Savings row shows "−$200.00"'>
+                        <td>23 Sep</td><td>Transfer to Savings</td><td class="amt neg">−$200.00</td>
+                        <td class="act"><button type="button" class="icon-btn" aria-label="Delete" data-step='Click the delete (trash can) icon on the "Transfer to Savings" row' data-summary='Clicked button "Delete" (icon)'><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg></button></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div><button type="button" class="sb-btn" data-step="Click Show more under Recent transactions">Show more</button></div>
+              </section>
+
+              <div class="sb-side">
+                <section class="sb-panel" id="payPanel" aria-labelledby="pm-h" data-check='panel "Payment method" · "Paid in cash"' data-verify='Verify the Payment method panel says "Paid in cash"'>
+                  <h2 id="pm-h">Payment method</h2>
+                  <p class="pm">Paid in cash</p>
+                  <p class="muted">Last bill: City Power, 24 Sep</p>
+                  <div><button type="button" class="sb-btn" data-step="Click Change method in the Payment method panel">Change method</button></div>
+                </section>
+
+                <section class="sb-panel" aria-labelledby="qt-h">
+                  <h2 id="qt-h">Quick transfer</h2>
+                  <form class="form" id="qtForm" novalidate>
+                    <div class="row2">
+                      <label class="field">From
+                        <select class="sb-select" data-step-select="From"><option>Everyday</option><option>Savings</option></select>
+                      </label>
+                      <label class="field">To
+                        <select class="sb-select" data-step-select="To"><option selected>Savings</option><option>Everyday</option></select>
+                      </label>
+                    </div>
+                    <label class="field">Amount
+                      <input class="sb-input" id="amount" inputmode="decimal" placeholder="0.00" data-step-type="Type {{amount}} into the Amount field" data-summary='Typed into field "Amount"'>
+                    </label>
+                    <label class="field">Transfer password
+                      <input class="sb-input" id="tpw" type="password" autocomplete="off" data-secret="true" data-step-type="Type {{transfer_password}} into the Transfer password field" data-summary='Typed into field "Transfer password" (hidden)'>
+                    </label>
+                    <div><button type="submit" class="sb-btn primary" data-step="Click the Transfer button">Transfer</button></div>
+                  </form>
+                </section>
+              </div>
+            </div>
+          </main>
+        </div>
+      </div>
+
+      <div class="pick-outline" id="pickOutline" hidden></div>
+      <div class="pick-label" id="pickLabel" hidden><span id="pickLabelText"></span></div>
+
+      <div class="guides" id="guides" hidden>
+        <div class="guide g-tl" data-g="tl"></div><div class="guide g-tc" data-g="tc"></div><div class="guide g-tr" data-g="tr"></div>
+        <div class="guide g-bl" data-g="bl"></div><div class="guide g-bc" data-g="bc"></div><div class="guide g-br" data-g="br"></div>
+      </div>
+
+      <!-- The toolbar. In the product this is <aiui-recorder> with a closed shadow root, a manual popover in the top layer. -->
+      <div class="tb-host" id="tbHost" data-dock="bc" data-edge="bottom">
+        <div class="tb" id="tb" role="toolbar" aria-label="Record Steps" data-kind="rec">
+          <div class="tb-main">
+            <button type="button" class="tb-grip" id="bGrip" aria-label="Move the toolbar" title="Drag to move">
+              <svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor" aria-hidden="true"><circle cx="3" cy="4" r="1.3"/><circle cx="7" cy="4" r="1.3"/><circle cx="3" cy="8" r="1.3"/><circle cx="7" cy="8" r="1.3"/><circle cx="3" cy="12" r="1.3"/><circle cx="7" cy="12" r="1.3"/></svg>
+            </button>
+            <div class="tb-status" id="tbStatus">
+              <span class="tb-dot" id="tbDot" data-kind="rec" aria-hidden="true"></span>
+              <span class="tb-rec" id="tbRec" data-kind="rec">REC</span>
+              <span class="tb-time" id="tbTime">02:14</span>
+              <span class="tb-count" id="tbCount">· 8 actions</span>
+            </div>
+            <span class="tb-sep" aria-hidden="true"></span>
+            <button type="button" class="tb-btn" id="bPause" aria-pressed="false" aria-keyshortcuts="Alt+Shift+P" title="Pause recording (Alt+Shift+P)">
+              <svg id="icoPause" width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3.5" y="3" width="3" height="10" rx="1"/><rect x="9.5" y="3" width="3" height="10" rx="1"/></svg>
+              <svg id="icoPlay" width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" hidden><path d="M4.5 2.8v10.4c0 .5.6.8 1 .5l8-5.2a.6.6 0 0 0 0-1L5.5 2.3c-.4-.3-1 0-1 .5Z"/></svg>
+              <span class="tb-label" id="bPauseLabel">Pause</span>
+            </button>
+            <button type="button" class="tb-btn" id="bCheck" aria-pressed="false" aria-keyshortcuts="Alt+Shift+C" title="Add check: the next click picks what to verify (Alt+Shift+C)">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 5V3.5a1 1 0 0 1 1-1H5M11 2.5h1.5a1 1 0 0 1 1 1V5M13.5 11v1.5a1 1 0 0 1-1 1H11M5 13.5H3.5a1 1 0 0 1-1-1V11"/><path d="m5.5 8.2 1.8 1.8 3.4-3.6"/></svg>
+              <span class="tb-label">Add check</span>
+            </button>
+            <button type="button" class="tb-btn" id="bStep" aria-pressed="false" aria-keyshortcuts="Alt+Shift+S" title="Add a step by hand (Alt+Shift+S)">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2.5 4h8M2.5 8h5M2.5 12h4M12 8.5v5M9.5 11h5"/></svg>
+              <span class="tb-label">Add step</span>
+            </button>
+            <button type="button" class="tb-btn" id="bUndo" aria-keyshortcuts="Alt+Shift+Z" title="Undo last action (Alt+Shift+Z)">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 3.5 2.5 6.5l3 3"/><path d="M2.8 6.5h6.7a4 4 0 0 1 0 8H7"/></svg>
+              <span class="tb-label">Undo</span>
+            </button>
+            <span class="tb-sep" aria-hidden="true"></span>
+            <button type="button" class="tb-btn tb-stop" id="bStop" title="Stop and write the steps">
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="1" y="1" width="10" height="10" rx="2"/></svg>
+              <span class="tb-label">Stop</span>
+            </button>
+            <button type="button" class="tb-btn tb-quiet" id="bCancel" title="Cancel: end without writing anything" aria-label="Cancel recording">
+              <svg class="tb-x" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="m3 3 8 8M11 3l-8 8"/></svg>
+              <span class="tb-label">Cancel</span>
+            </button>
+            <button type="button" class="tb-btn tb-icon" id="bMin" aria-label="Minimise the toolbar" aria-keyshortcuts="Alt+Shift+M" title="Minimise (Alt+Shift+M)">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 7h8"/></svg>
+            </button>
+          </div>
+          <div class="tb-sub" id="tbSub"></div>
+          <div class="tb-drawer" id="tbDrawer" hidden>
+            <ol id="tbDrawerList" aria-label="Steps so far"></ol>
+            <p class="foot">Read-only here. Drop individual actions in the TestBench panel.</p>
+          </div>
+        </div>
+        <button type="button" class="tb-pill" id="tbPill" hidden aria-label="Record Steps, minimised. Open the toolbar">
+          <span class="tb-dot" id="pillDot" data-kind="rec" aria-hidden="true"></span>
+          <span class="tb-rec" id="pillRec" data-kind="rec">REC</span>
+          <span class="tb-time" id="pillTime">02:14</span>
+          <span class="exp" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m3 7.5 3-3 3 3"/></svg></span>
+        </button>
+        <div class="sr" id="tbLive" aria-live="polite"></div>
+      </div>
+
+      <div class="gone" id="tbGone" hidden>
+        <span>The toolbar has left the page, as it does once a recording ends.</span>
+        <button type="button" class="tool-btn" id="showAgain">Show it again</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="legend" aria-label="Notes">
+    <div>
+      <h2>Shortcuts</h2>
+      <dl class="keys">
+        <dt><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd></dt><dd>Pause or resume</dd>
+        <dt><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd></dt><dd>Add check (again to cancel)</dd>
+        <dt><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></dt><dd>Add step</dd>
+        <dt><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></dt><dd>Undo last action</dd>
+        <dt><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd></dt><dd>Minimise or open</dd>
+        <dt><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></dt><dd>Move focus to the toolbar</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Close the step box, or cancel Add check</dd>
+      </dl>
+    </div>
+    <div>
+      <h2>Kept out of the recording</h2>
+      <ul>
+        <li><b>Its clicks and keys</b> never reach the recorder or the app. Every recorder listener checks for the toolbar first, and its key handler runs before the page's.</li>
+        <li><b>Screenshot crops</b> have it painted out, the way secret fields are, so it never blinks and the model never names it.</li>
+        <li><b>Page CSS, z-index and a strict CSP</b> can't touch it. It lives in a closed shadow root in the browser's top layer, styled by an adopted stylesheet, in the system font because it can load nothing.</li>
+      </ul>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const vp = $('#viewport'), scroller = $('#appScroll'), app = $('#app');
+  const host = $('#tbHost'), tb = $('#tb'), sub = $('#tbSub');
+  const drawer = $('#tbDrawer'), drawerList = $('#tbDrawerList');
+  const pill = $('#tbPill'), live = $('#tbLive'), gone = $('#tbGone');
+  const outline = $('#pickOutline'), plabel = $('#pickLabel'), plabelText = $('#pickLabelText');
+  const guides = $('#guides');
+  const caption = $('#caption'), chipsEl = $('#chips');
+  const bPause = $('#bPause'), bCheck = $('#bCheck'), bStep = $('#bStep'), bUndo = $('#bUndo');
+  const bStop = $('#bStop'), bCancel = $('#bCancel'), bMin = $('#bMin'), bGrip = $('#bGrip');
+
+  const ICON = {
+    lock: '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2.5" y="5.2" width="7" height="5" rx="1.2"/><path d="M4 5.2V3.8a2 2 0 0 1 4 0v1.4"/></svg>',
+    tick: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m2.8 7.4 2.8 2.8 5.6-6"/></svg>',
+    warn: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M7 1.8 12.8 12H1.2L7 1.8Z"/><path d="M7 5.6v3M7 10.2v.3" stroke-linecap="round"/></svg>',
+    chev: '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>'
+  };
+
+  const BASE = [
+    { text: 'Navigate to login.html', summary: 'Went to login.html' },
+    { text: 'Type {{email}} into the Email field', summary: 'Typed into field "Email"' },
+    { text: 'Type {{password}} into the Password field', summary: 'Typed into field "Password" (hidden)' },
+    { text: 'Click the Sign in button', summary: 'Clicked button "Sign in"' },
+    { text: 'Verify the Everyday account shows "$1,234.56"', yours: true },
+    { text: 'Select "Last 30 days" from the Period list', summary: 'Chose "Last 30 days" in "Period"' },
+    { text: 'Click Show more under Recent transactions', summary: 'Clicked button "Show more"' }
+  ];
+
+  const STATES = [
+    ['recording', 'Recording', 'The resting state: red dot, REC, recording time and action count, with the last step the model wrote in the status line. Click things in the bank app to record them.'],
+    ['updating', 'Updating', 'A draft call is running. "updating…" sits beside the last step, the same word the panel uses.'],
+    ['paused', 'Paused', 'Nothing is recorded and no drafts are made. Add check is disabled. Add step, Undo, Stop and Cancel still work. Resume trusts that you came back to the same place.'],
+    ['pick', 'Add check', 'Pick mode. The element under the pointer is outlined and labelled with what the click will pick, built from the description the model gets. The click itself is swallowed. Esc, or Add check again, cancels.'],
+    ['step', 'Add step', 'Type any step. Enter adds it exactly as typed and locks in the steps so far. Esc closes the box and keeps what you typed.'],
+    ['added', 'Step added', 'The confirmation after Enter. Your line is step 8 and steps 1–7 are locked. The model is told about your step so it does not write it again.'],
+    ['undo', 'Undo', 'The most recent action is taken out of the recording. Restore puts it back, the same as clicking its struck-through row in the panel.'],
+    ['secret', 'Typing hidden', 'Focus is in a secret field. The chip shows the recorder recognised it: the value never leaves the browser.'],
+    ['drawer', 'Steps so far', 'The whole draft, read-only. A lock marks steps the model can no longer rewrite, and "yours" marks steps you wrote.'],
+    ['minimised', 'Minimised', 'Folded into a pill so it covers less of the page. It still shows paused, pick mode and errors. Drag it, or click to open.'],
+    ['confirm', 'Cancel?', 'Cancel throws work away, so it asks in the status line first. Stop never asks.'],
+    ['writing', 'Writing', 'After Stop. Nothing on the page is recorded any more while the final draft is written.'],
+    ['done', 'Done', 'The result. It fades after a few seconds and then the toolbar leaves the page.'],
+    ['error', "Couldn't update", 'A draft call failed. The previous draft stands, and the next action catches up.'],
+    ['disconnected', 'Not connected', 'Two check-ins with the server went unanswered. This clears on its own when the server answers again.'],
+    ['ended', 'Ended elsewhere', 'The recording ended outside this toolbar. Here the session was closed under it, so nothing was written.']
+  ];
+  const STATE_INFO = Object.fromEntries(STATES.map(([k, l, c]) => [k, { label: l, caption: c }]));
+
+  const clone = (a) => a.map((x) => ({ ...x }));
+  const S = {
+    state: 'recording', min: false, drawer: false, cancelled: false,
+    time: 134, actions: 8, draft: clone(BASE), removed: [], pending: [],
+    stepDraft: '', lastRemovedMsg: '', lastAddedMsg: '', dock: 'bc'
+  };
+  let timer = null, pendingTimer = null, pickTarget = null;
+
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const fmt = (t) => String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0');
+  const announce = (msg) => { live.textContent = ''; setTimeout(() => { live.textContent = msg; }, 30); };
+  const lockIndex = () => { for (let i = S.draft.length - 1; i >= 0; i--) if (S.draft[i].yours) return i; return -1; };
+
+  const RECORDING_LIKE = new Set(['recording', 'updating', 'step', 'added', 'undo', 'secret', 'error', 'disconnected']);
+  const TICKING = new Set(['recording', 'updating', 'pick', 'step', 'added', 'undo', 'secret', 'confirm', 'error', 'disconnected']);
+  const CLOSED = new Set(['writing', 'done', 'ended']);
+
+  function statusKind() {
+    switch (S.state) {
+      case 'paused': return 'paused';
+      case 'writing': return 'writing';
+      case 'done': return 'done';
+      case 'ended': return 'ended';
+      case 'disconnected': return 'offline';
+      default: return 'rec';
+    }
+  }
+  function ringKind() {
+    if (S.state === 'pick') return 'pick';
+    if (S.state === 'paused') return 'paused';
+    if (S.state === 'error' || S.state === 'disconnected') return 'warn';
+    if (S.state === 'done') return 'done';
+    if (S.state === 'writing' || S.state === 'ended') return 'none';
+    return 'rec';
+  }
+  const REC_WORD = { rec: 'REC', paused: 'PAUSED', writing: 'WRITING', done: 'DONE', ended: 'ENDED', offline: 'REC' };
+
+  function lastStepHTML(extra) {
+    const i = S.draft.length - 1;
+    const toggle = `<button type="button" class="tb-toggle" id="drawerToggle" aria-expanded="${S.drawer}" aria-controls="tbDrawer">Steps so far ${ICON.chev}</button>`;
+    if (i < 0) return `<span class="msg dim">No steps yet. They appear here as you work.</span>${toggle}`;
+    const s = S.draft[i];
+    const locked = i <= lockIndex();
+    return `<span class="n">${i + 1}</span><span class="t">${esc(s.text)}</span>` +
+      (s.yours ? `<span class="ico lock">${ICON.lock}</span><span class="yours">yours</span>` : (locked ? `<span class="ico lock">${ICON.lock}</span>` : '')) +
+      (extra || '') + toggle;
+  }
+
+  function subHTML() {
+    switch (S.state) {
+      case 'updating': return lastStepHTML('<span class="upd">updating…</span>');
+      case 'paused': return `<span class="msg">Paused. Nothing you do is recorded.</span><button type="button" class="tb-toggle" id="drawerToggle" aria-expanded="${S.drawer}" aria-controls="tbDrawer">Steps so far ${ICON.chev}</button>`;
+      case 'pick': return `<span class="msg pick">Click what to check. <kbd>Esc</kbd> to cancel.</span>`;
+      case 'step': return `<label class="sr" for="stepInput">Add a step</label><input class="tb-input" id="stepInput" type="text" autocomplete="off" spellcheck="true" placeholder='Verify the balance shows "$1,234.56"' aria-describedby="stepHint" value="${esc(S.stepDraft)}"><button type="button" class="tb-mini" id="stepAdd">Add</button><span class="tb-hint" id="stepHint">Enter to add · Esc to close</span>`;
+      case 'added': return `<span class="ico ok">${ICON.tick}</span><span class="msg">${esc(S.lastAddedMsg)}</span>`;
+      case 'undo': return `<span class="msg">${esc(S.lastRemovedMsg)}</span>` + (S.removed.length ? `<button type="button" class="tb-mini" id="restore">Restore</button>` : '');
+      case 'secret': return `<span class="chip-lock">${ICON.lock} Typing hidden</span><span class="msg dim">The value stays in this browser.</span>`;
+      case 'confirm': return `<span class="msg">Discard this recording? The steps won't be written.</span><button type="button" class="tb-mini danger" id="discard">Discard</button><button type="button" class="tb-mini" id="keep">Keep recording</button>`;
+      case 'writing': return `<span class="tb-spin" aria-hidden="true"></span><span class="msg">Writing the steps…</span>`;
+      case 'done': return S.cancelled
+        ? `<span class="msg">Recording cancelled. Nothing was written.</span><button type="button" class="tb-mini" id="closeTb">Close</button>`
+        : (S.draft.length
+          ? `<span class="ico ok">${ICON.tick}</span><span class="msg">Done · ${S.draft.length} steps written to pay-by-cash.md</span><button type="button" class="tb-mini" id="closeTb">Close</button>`
+          : `<span class="msg">Nothing was recorded, so no steps were written.</span><button type="button" class="tb-mini" id="closeTb">Close</button>`);
+      case 'error': return `<span class="ico warn">${ICON.warn}</span><span class="msg warn">Couldn't update the steps. They'll catch up with your next action.</span>`;
+      case 'disconnected': return `<span class="ico warn">${ICON.warn}</span><span class="msg warn">The recorder isn't answering. What you do now may not be recorded.</span>`;
+      case 'ended': return `<span class="msg">Recording ended: the session was closed while recording. Nothing was written.</span><button type="button" class="tb-mini" id="closeTb">Close</button>`;
+      default: return lastStepHTML('');
+    }
+  }
+
+  function renderDrawer() {
+    const li = lockIndex();
+    const last = S.draft.length - 1;
+    drawerList.innerHTML = S.draft.map((s, i) => {
+      const locked = i <= li;
+      const cls = [locked ? 'is-locked' : '', s.yours ? 'is-yours' : '', i === last ? 'is-last' : ''].join(' ');
+      return `<li class="${cls}"><span class="n">${i + 1}</span><span class="t">${esc(s.text)}</span>` +
+        (s.yours ? '<span class="yours">yours</span>' : '') +
+        (locked ? `<span class="lk" title="Locked">${ICON.lock}</span>` : '') + '</li>';
+    }).join('') + (S.pending.length ? `<li><span class="n">${S.draft.length + 1}</span><span class="t" style="color:var(--tb-faint);font-style:italic">updating…</span></li>` : '');
+  }
+
+  function render() {
+    const sk = statusKind();
+    tb.dataset.kind = ringKind();
+    for (const [dotId, recId] of [['#tbDot', '#tbRec'], ['#pillDot', '#pillRec']]) {
+      const dot = $(dotId), rec = $(recId);
+      dot.dataset.kind = sk;
+      rec.dataset.kind = sk;
+      rec.textContent = REC_WORD[sk];
+    }
+    $('#tbTime').textContent = fmt(S.time);
+    $('#pillTime').textContent = fmt(S.time);
+    $('#tbCount').textContent = `· ${S.actions} action${S.actions === 1 ? '' : 's'}`;
+    const pillRec = $('#pillRec');
+    if (S.state === 'pick') { pillRec.textContent = 'PICK…'; pillRec.dataset.kind = 'pick'; pillRec.classList.add('pickword'); }
+    else pillRec.classList.remove('pickword');
+    pill.style.setProperty('--ring', { pick: 'rgba(92,184,255,.8)', paused: 'rgba(242,181,68,.7)', warn: 'rgba(242,181,68,.7)', rec: 'rgba(255,90,95,.62)', done: 'rgba(111,214,160,.6)' }[ringKind()] || 'rgba(255,255,255,.16)');
+
+    const closed = CLOSED.has(S.state);
+    const paused = S.state === 'paused';
+    bPause.setAttribute('aria-pressed', String(paused));
+    $('#bPauseLabel').textContent = paused ? 'Resume' : 'Pause';
+    bPause.title = paused ? 'Resume recording (Alt+Shift+P)' : 'Pause recording (Alt+Shift+P)';
+    $('#icoPause').hidden = paused;
+    $('#icoPlay').hidden = !paused;
+    bCheck.setAttribute('aria-pressed', String(S.state === 'pick'));
+    bCheck.title = paused ? 'Resume to add a check' : 'Add check: the next click picks what to verify (Alt+Shift+C)';
+    bStep.setAttribute('aria-pressed', String(S.state === 'step'));
+    for (const b of [bPause, bStep, bUndo, bStop, bCancel]) b.disabled = closed;
+    bCheck.disabled = closed || paused;
+    bPause.disabled = closed;
+
+    sub.innerHTML = subHTML();
+    drawer.hidden = !S.drawer || closed || S.state === 'step' || S.state === 'confirm';
+    if (!drawer.hidden) renderDrawer();
+
+    tb.hidden = S.min;
+    pill.hidden = !S.min;
+
+    vp.classList.toggle('picking', S.state === 'pick');
+    if (S.state !== 'pick') hideOutline();
+    $('#tpw').classList.toggle('fake-focus', S.state === 'secret');
+
+    const shown = S.min ? 'minimised' : (S.drawer && S.state === 'recording' ? 'drawer' : S.state);
+    for (const c of chipsEl.children) c.setAttribute('aria-checked', String(c.dataset.state === shown));
+    const info = STATE_INFO[shown];
+    caption.innerHTML = info ? `<b>${esc(info.label)}.</b> ${esc(info.caption)}` : '';
+
+    if (S.state === 'step') {
+      const input = $('#stepInput');
+      if (input) {
+        input.addEventListener('input', () => { S.stepDraft = input.value; });
+        requestAnimationFrame(() => { input.focus(); input.setSelectionRange(input.value.length, input.value.length); });
+      }
+    }
+  }
+
+  function clearTimers() { clearTimeout(timer); timer = null; }
+  function go(state, opts = {}) {
+    clearTimers();
+    S.state = state;
+    if (opts.after) timer = setTimeout(() => { if (S.state === state) go(opts.after.state); }, opts.after.ms);
+    render();
+    if (opts.say) announce(opts.say);
+  }
+
+  // ── Actions in the app ──────────────────────────────────────────────
+  function record(step, summary) {
+    if (!RECORDING_LIKE.has(S.state)) return;
+    S.actions++;
+    S.pending.push({ text: step, summary });
+    if (S.state === 'step') $('#tbCount').textContent = `· ${S.actions} actions`;
+    else go('updating');
+    clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(commitPending, 850);
+  }
+  function commitPending() {
+    S.draft.push(...S.pending);
+    S.pending = [];
+    if (S.state === 'updating') go('recording');
+    else if (S.state !== 'step') render();
+  }
+  function revealInApp(el) {
+    const r = el.getBoundingClientRect(), s = scroller.getBoundingClientRect();
+    if (r.top < s.top + 60 || r.bottom > s.bottom - 140) {
+      scroller.scrollTop += (r.top - s.top) - Math.max(60, (s.height - r.height) / 2 - 60);
+    }
+  }
+  function summaryFor(el) {
+    if (el.dataset.summary) return el.dataset.summary;
+    const text = el.textContent.trim().replace(/\s+/g, ' ');
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'a') return `Clicked link "${text}"`;
+    if (tag === 'button') return `Clicked button "${text}"`;
+    return `Clicked "${text.slice(0, 40)}"`;
+  }
+
+  scroller.addEventListener('click', (e) => {
+    if (S.state === 'pick') {
+      e.preventDefault(); e.stopPropagation();
+      const t = pickTargetFor(e.target);
+      if (!t) return;
+      S.actions++;
+      const verify = t.dataset.verify || `Verify the page shows "${t.textContent.trim().replace(/\s+/g, ' ').slice(0, 60)}"`;
+      hideOutline();
+      S.pending.push({ text: verify, summary: `Checked ${t.dataset.check || 'an element'}` });
+      go('updating', { say: 'Check recorded' });
+      clearTimeout(pendingTimer);
+      pendingTimer = setTimeout(commitPending, 850);
+      return;
+    }
+    const el = e.target.closest('[data-step]');
+    if (!el) return;
+    if (el.tagName === 'A' || el.type === 'submit') e.preventDefault();
+    record(el.dataset.step, summaryFor(el));
+  }, true);
+  $('#qtForm').addEventListener('submit', (e) => e.preventDefault());
+  scroller.addEventListener('change', (e) => {
+    const el = e.target;
+    if (el.matches('select[data-step-select]')) {
+      const opt = el.options[el.selectedIndex].text;
+      record(`Select "${opt}" from the ${el.dataset.stepSelect} list`, `Chose "${opt}" in "${el.dataset.stepSelect}"`);
+    } else if (el.matches('input[data-step-type]') && el.value.trim() !== '') {
+      record(el.dataset.stepType, el.dataset.summary);
+    }
+  });
+  const tpw = $('#tpw');
+  tpw.addEventListener('focus', () => { if (RECORDING_LIKE.has(S.state) && S.state !== 'step') go('secret', { say: 'Typing hidden' }); });
+  tpw.addEventListener('blur', () => { if (S.state === 'secret') go('recording'); });
+
+  // ── Pick mode outline ───────────────────────────────────────────────
+  function pickTargetFor(el) {
+    if (!el || !app.contains(el)) return null;
+    return el.closest('[data-check]') || el.closest('h1,h2,td,th,button,a,label,select,input,p') || null;
+  }
+  function pickLabelFor(t) {
+    if (t.dataset.check) return 'Check · ' + t.dataset.check;
+    const tag = t.tagName.toLowerCase();
+    const role = { h1: 'heading', h2: 'heading', td: 'cell', th: 'column header', button: 'button', a: 'link', select: 'list', input: 'field', label: 'label', p: 'text' }[tag] || tag;
+    if (tag === 'input') return `Check · ${role} · ${t.type === 'password' ? 'value hidden' : '"' + (t.value || '') + '"'}`;
+    return `Check · ${role} · "${t.textContent.trim().replace(/\s+/g, ' ').slice(0, 48)}"`;
+  }
+  function showOutline(t) {
+    pickTarget = t;
+    const v = vp.getBoundingClientRect(), r = t.getBoundingClientRect();
+    outline.hidden = false;
+    outline.style.left = (r.left - v.left - 3) + 'px';
+    outline.style.top = (r.top - v.top - 3) + 'px';
+    outline.style.width = (r.width + 6) + 'px';
+    outline.style.height = (r.height + 6) + 'px';
+    plabelText.textContent = pickLabelFor(t);
+    plabel.hidden = false;
+    const lw = plabel.offsetWidth, lh = plabel.offsetHeight;
+    let top = r.top - v.top - lh - 8;
+    if (top < 6) top = r.bottom - v.top + 8;
+    let left = Math.min(Math.max(6, r.left - v.left - 3), v.width - lw - 8);
+    plabel.style.left = left + 'px';
+    plabel.style.top = top + 'px';
+  }
+  function hideOutline() { outline.hidden = true; plabel.hidden = true; pickTarget = null; }
+  scroller.addEventListener('pointermove', (e) => {
+    if (S.state !== 'pick') return;
+    const t = pickTargetFor(e.target);
+    if (t) { if (t !== pickTarget) showOutline(t); } else hideOutline();
+  });
+  scroller.addEventListener('pointerleave', () => { if (S.state === 'pick') hideOutline(); });
+  scroller.addEventListener('scroll', () => { if (S.state === 'pick' && pickTarget) showOutline(pickTarget); }, { passive: true });
+
+  // ── Toolbar controls ────────────────────────────────────────────────
+  function togglePause() {
+    if (CLOSED.has(S.state)) return;
+    if (S.state === 'paused') go('recording', { say: 'Recording resumed' });
+    else go('paused', { say: 'Recording paused' });
+  }
+  function toggleCheck() {
+    if (CLOSED.has(S.state) || S.state === 'paused') return;
+    if (S.state === 'pick') go('recording', { say: 'Add check cancelled' });
+    else go('pick', { say: 'Add check armed. Click what to check.' });
+  }
+  function openStep() {
+    if (CLOSED.has(S.state)) return;
+    if (S.state === 'step') { const i = $('#stepInput'); if (i) i.focus(); return; }
+    S.min = false;
+    go('step');
+  }
+  function addStep() {
+    const input = $('#stepInput');
+    const raw = (input ? input.value : S.stepDraft).trim();
+    if (!raw) { if (input) input.focus(); return; }
+    const text = raw.replace(/^\s*(\d+[.)]|[-*+])\s+/, '');
+    S.draft.push(...S.pending); S.pending = [];
+    S.draft.push({ text, yours: true });
+    S.stepDraft = '';
+    const n = S.draft.length;
+    S.lastAddedMsg = n > 1 ? `Added as step ${n} · steps 1–${n - 1} locked` : `Added as step ${n}`;
+    go('added', { after: { state: 'recording', ms: 4000 }, say: S.lastAddedMsg });
+  }
+  function undo() {
+    if (CLOSED.has(S.state)) return;
+    if (S.pending.length) { S.draft.push(...S.pending); S.pending = []; clearTimeout(pendingTimer); }
+    const item = S.draft.pop();
+    if (!item) { S.lastRemovedMsg = 'Nothing to undo.'; go('undo', { after: { state: 'recording', ms: 3000 } }); return; }
+    S.removed.push(item);
+    if (!item.yours) S.actions = Math.max(0, S.actions - 1);
+    S.lastRemovedMsg = item.yours ? `Removed your step: ${item.text}` : `Removed: ${item.summary || item.text}`;
+    go('undo', { after: { state: 'recording', ms: 8000 }, say: S.lastRemovedMsg });
+  }
+  function restore() {
+    const item = S.removed.pop();
+    if (!item) return;
+    S.draft.push(item);
+    if (!item.yours) S.actions++;
+    go('recording', { say: 'Restored' });
+  }
+  function stop() {
+    if (CLOSED.has(S.state)) return;
+    S.draft.push(...S.pending); S.pending = []; clearTimeout(pendingTimer);
+    S.min = false; S.drawer = false; S.cancelled = false;
+    go('writing', { after: { state: 'done', ms: 1600 }, say: 'Writing the steps' });
+  }
+  function closeToolbar() { host.hidden = true; gone.hidden = false; hideOutline(); }
+
+  bPause.addEventListener('click', togglePause);
+  bCheck.addEventListener('click', toggleCheck);
+  bStep.addEventListener('click', openStep);
+  bUndo.addEventListener('click', undo);
+  bStop.addEventListener('click', stop);
+  bCancel.addEventListener('click', () => { if (!CLOSED.has(S.state)) go('confirm'); });
+  bMin.addEventListener('click', () => { S.min = true; render(); announce('Toolbar minimised'); });
+
+  sub.addEventListener('click', (e) => {
+    const id = e.target.closest('button') && e.target.closest('button').id;
+    if (id === 'drawerToggle') { S.drawer = !S.drawer; render(); }
+    else if (id === 'stepAdd') addStep();
+    else if (id === 'restore') restore();
+    else if (id === 'discard') { S.cancelled = true; S.drawer = false; go('done', { say: 'Recording cancelled' }); }
+    else if (id === 'keep') go('recording');
+    else if (id === 'closeTb') closeToolbar();
+  });
+  sub.addEventListener('keydown', (e) => {
+    if (e.target.id !== 'stepInput') return;
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); addStep(); }
+    else if (e.key === 'Escape') { e.preventDefault(); S.stepDraft = e.target.value; go('recording'); bStep.focus(); }
+  });
+  $('#showAgain').addEventListener('click', () => applySwitcher('recording'));
+
+  // Keep toolbar buttons from taking focus on mouse press, as the product does.
+  tb.addEventListener('pointerdown', (e) => {
+    const b = e.target.closest('button');
+    if (b && b !== bGrip && e.pointerType === 'mouse') e.preventDefault();
+  });
+
+  // Arrow keys move between toolbar buttons (roving focus).
+  tb.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    if (e.target.id === 'stepInput') return;
+    const btns = [...tb.querySelectorAll('.tb-main button:not(:disabled)')];
+    const i = btns.indexOf(document.activeElement);
+    if (i < 0) return;
+    e.preventDefault();
+    btns[(i + (e.key === 'ArrowRight' ? 1 : btns.length - 1)) % btns.length].focus();
+  });
+
+  // ── Shortcuts (the product runs these in its first window listener) ─
+  document.addEventListener('keydown', (e) => {
+    if (host.hidden) return;
+    if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey) {
+      const map = { KeyP: togglePause, KeyC: toggleCheck, KeyS: openStep, KeyZ: undo,
+        KeyM: () => { S.min = !S.min; render(); },
+        KeyR: () => { S.min = false; render(); (tb.querySelector('.tb-main button:not(:disabled):not(.tb-grip)') || bGrip).focus(); } };
+      const fn = map[e.code];
+      if (fn) { e.preventDefault(); e.stopPropagation(); fn(); }
+      return;
+    }
+    if (e.key === 'Escape') {
+      if (S.state === 'pick') { e.preventDefault(); go('recording', { say: 'Add check cancelled' }); }
+      else if (S.state === 'confirm') { e.preventDefault(); go('recording'); }
+    }
+  }, true);
+
+  // ── Dragging and docking ────────────────────────────────────────────
+  const DOCK_KEY = 'record-steps-toolbar-dock';
+  function setDock(d) {
+    S.dock = d;
+    host.dataset.dock = d;
+    host.dataset.edge = d[0] === 'b' ? 'bottom' : 'top';
+    try { localStorage.setItem(DOCK_KEY, d); } catch (err) { /* storage unavailable: position is not remembered */ }
+  }
+  function nearestDock(cx, cy, v) {
+    const col = cx < v.width / 3 ? 'l' : (cx > v.width * 2 / 3 ? 'r' : 'c');
+    const row = cy < v.height / 2 ? 't' : 'b';
+    return row + col;
+  }
+  function startDrag(e, handle) {
+    if (e.button !== 0) return;
+    const v = vp.getBoundingClientRect(), h = host.getBoundingClientRect();
+    const off = { x: e.clientX - h.left, y: e.clientY - h.top };
+    const sx = e.clientX, sy = e.clientY;
+    let moved = false;
+    try { handle.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    const onMove = (ev) => {
+      if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 4) return;
+      if (!moved) {
+        moved = true;
+        host.classList.add('dragging');
+        host.dataset.dock = 'free';
+        host.style.transform = 'none';
+        guides.hidden = false;
+      }
+      const w = host.offsetWidth, hh = host.offsetHeight;
+      const x = Math.min(Math.max(8, ev.clientX - v.left - off.x), v.width - w - 8);
+      const y = Math.min(Math.max(8, ev.clientY - v.top - off.y), v.height - hh - 8);
+      host.style.left = x + 'px';
+      host.style.top = y + 'px';
+      const d = nearestDock(x + w / 2, y + hh / 2, v);
+      for (const g of guides.children) g.classList.toggle('on', g.dataset.g === d);
+    };
+    const onUp = (ev) => {
+      handle.removeEventListener('pointermove', onMove);
+      handle.removeEventListener('pointerup', onUp);
+      handle.removeEventListener('pointercancel', onUp);
+      if (!moved) { if (handle === pill) { S.min = false; render(); } return; }
+      const w = host.offsetWidth, hh = host.offsetHeight;
+      const x = parseFloat(host.style.left), y = parseFloat(host.style.top);
+      host.classList.remove('dragging');
+      host.style.left = ''; host.style.top = ''; host.style.transform = '';
+      guides.hidden = true;
+      setDock(nearestDock(x + w / 2, y + hh / 2, v));
+      announce('Toolbar moved');
+    };
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
+    handle.addEventListener('pointercancel', onUp);
+    e.preventDefault();
+  }
+  bGrip.addEventListener('pointerdown', (e) => startDrag(e, bGrip));
+  pill.addEventListener('pointerdown', (e) => startDrag(e, pill));
+  pill.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); S.min = false; render(); } });
+  bGrip.addEventListener('keydown', (e) => {
+    const order = ['tl', 'tc', 'tr', 'bl', 'bc', 'br'];
+    const moves = { ArrowUp: (d) => 't' + d[1], ArrowDown: (d) => 'b' + d[1],
+      ArrowLeft: (d) => d[0] + ({ r: 'c', c: 'l', l: 'l' }[d[1]]), ArrowRight: (d) => d[0] + ({ l: 'c', c: 'r', r: 'r' }[d[1]]) };
+    if (moves[e.key] && order.includes(S.dock)) { e.preventDefault(); e.stopPropagation(); setDock(moves[e.key](S.dock)); bGrip.focus(); }
+  });
+  $('#resetPos').addEventListener('click', () => setDock('bc'));
+
+  // ── State switcher ──────────────────────────────────────────────────
+  for (const [key, label] of STATES) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip';
+    b.setAttribute('role', 'radio');
+    b.dataset.state = key;
+    b.textContent = label;
+    b.addEventListener('click', () => applySwitcher(key));
+    chipsEl.appendChild(b);
+  }
+  chipsEl.addEventListener('keydown', (e) => {
+    if (!['ArrowRight', 'ArrowLeft'].includes(e.key)) return;
+    const list = [...chipsEl.children];
+    const i = list.indexOf(document.activeElement);
+    if (i < 0) return;
+    e.preventDefault();
+    const next = list[(i + (e.key === 'ArrowRight' ? 1 : list.length - 1)) % list.length];
+    next.focus(); next.click();
+  });
+
+  function applySwitcher(key) {
+    clearTimers(); clearTimeout(pendingTimer);
+    host.hidden = false; gone.hidden = true;
+    S.draft = clone(BASE); S.removed = []; S.pending = [];
+    S.actions = 8; S.min = false; S.drawer = false; S.cancelled = false;
+    S.stepDraft = '';
+    if (document.activeElement === tpw) tpw.blur();
+    switch (key) {
+      case 'minimised': S.min = true; go('recording'); break;
+      case 'drawer': S.drawer = true; go('recording'); break;
+      case 'updating':
+        S.actions = 9;
+        S.pending = [{ text: 'Click Payments in the main menu', summary: 'Clicked link "Payments"' }];
+        go('updating'); break;
+      case 'step': S.stepDraft = 'Verify the balance shows "$1,234.56"'; go('step'); break;
+      case 'added':
+        S.draft.push({ text: 'Verify the balance shows "$1,234.56"', yours: true });
+        S.lastAddedMsg = `Added as step ${S.draft.length} · steps 1–${S.draft.length - 1} locked`;
+        go('added'); break;
+      case 'undo': {
+        S.draft.push({ text: 'Click Reports in the main menu', summary: 'Clicked link "Reports"' });
+        S.actions = 9;
+        const item = S.draft.pop(); S.removed.push(item); S.actions = 8;
+        S.lastRemovedMsg = `Removed: ${item.summary}`;
+        go('undo'); break;
+      }
+      case 'pick':
+        go('pick');
+        revealInApp($('#payPanel'));
+        requestAnimationFrame(() => showOutline($('#payPanel')));
+        break;
+      case 'secret': revealInApp(tpw); go('secret'); break;
+      case 'done': go('done'); break;
+      default: go(key);
+    }
+  }
+
+  // ── App theme ───────────────────────────────────────────────────────
+  const appLight = $('#appLight'), appDark = $('#appDark');
+  function setAppTheme(t) {
+    app.dataset.appTheme = t;
+    vp.style.background = t === 'dark' ? '#0C1413' : '#F4F7F6';
+    appLight.setAttribute('aria-pressed', String(t === 'light'));
+    appDark.setAttribute('aria-pressed', String(t === 'dark'));
+    if (S.state === 'pick' && pickTarget) showOutline(pickTarget);
+  }
+  appLight.addEventListener('click', () => setAppTheme('light'));
+  appDark.addEventListener('click', () => setAppTheme('dark'));
+
+  // ── Clock ───────────────────────────────────────────────────────────
+  setInterval(() => {
+    if (!host.hidden && TICKING.has(S.state)) {
+      S.time++;
+      $('#tbTime').textContent = fmt(S.time);
+      $('#pillTime').textContent = fmt(S.time);
+    }
+  }, 1000);
+
+  let saved = 'bc';
+  try { saved = localStorage.getItem(DOCK_KEY) || 'bc'; } catch (err) { saved = 'bc'; }
+  setDock(['tl', 'tc', 'tr', 'bl', 'bc', 'br'].includes(saved) ? saved : 'bc');
+  render();
+})();
+</script>

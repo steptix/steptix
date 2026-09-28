@@ -434,6 +434,15 @@ export async function executeAction(
         await executeHistory(page, eff);
         break;
 
+      case 'reload':
+        // Page-level for back/forward's reason: the tab reloads, not a frame.
+        await executeReload(page);
+        break;
+
+      case 'drag':
+        await executeDrag(root, eff, remainingMs);
+        break;
+
       case 'upload':
         uploadRoute = await executeUpload(page, root, eff, uploadFiles ?? [], remainingMs);
         break;
@@ -609,12 +618,14 @@ export async function executeAction(
       // when the refusal was a shape reason, which is what tells a caller it
       // may spend a model call on the structure.
       ...(err instanceof TableShapeError && err.sketch !== null && { sketch: err.sketch }),
-      // A history move that did not happen cannot be fixed by re-planning,
-      // so a retry only burns an AI turn — the upload path takes the same
+      // A history move (or a reload) that did not happen cannot be fixed by
+      // re-planning, so a retry only burns an AI turn — the upload path takes the same
       // flag for the same reason. Worse here: the re-ask hands the model a
       // failure it can satisfy with a `navigate` or a `noop`, turning the
       // loud failure §4.3 chose back into the quiet pass §2 is about.
-      ...((eff.action === 'back' || eff.action === 'forward') && { retryable: false as const }),
+      ...((eff.action === 'back' || eff.action === 'forward' || eff.action === 'reload') && {
+        retryable: false as const,
+      }),
       ...(eff.selector !== undefined && { failedSelector: eff.selector }),
       ...(matchCount !== undefined && { matchCount }),
       ...(targeting !== undefined && { targeting }),
@@ -636,6 +647,8 @@ const SELECT_BY_VALUE_TIMEOUT_MS = 5_000;
 const SELECT_BY_LABEL_TIMEOUT_MS = 10_000;
 const UPLOAD_TIMEOUT_MS = 10_000;
 const HOVER_TIMEOUT_MS = 10_000;
+/** A drag waits for both ends to be actionable, then moves; click's budget. */
+const DRAG_TIMEOUT_MS = 10_000;
 /** `read` passes no timeout today, so its budget is Playwright's own default. */
 const READ_TIMEOUT_MS = 30_000;
 /** Floor on what the hoisted wait hands back, so a slow measurement can never
@@ -782,6 +795,52 @@ async function executeHistory(page: Page, action: AIAction): Promise<void> {
       ? "forward: the browser has no page ahead in this tab's history"
       : "back: the browser has no previous page in this tab's history",
   );
+}
+
+/**
+ * The browser's reload button, on the active tab (SPEC-browser-history.md §9,
+ * taken up by docs/specs/SPEC-record-steps.md §4).
+ *
+ * The same arrival rule as `navigate`, `back` and `forward` — `domcontentloaded`
+ * within 30 s — for their reason: one page must not be quick to reach one way
+ * and slow another for a cause no author could see. The post-action settle
+ * runs as for them (`reload` is in MUTATING_ACTIONS).
+ *
+ * Unlike `back`, a reload cannot fail to move: there is always a current page
+ * to reload, so there is no "did it happen?" check to make. A form POST behind
+ * the page is re-sent or not as the browser decides; that is the application's
+ * behaviour under test, not something to smooth over.
+ */
+async function executeReload(page: Page): Promise<void> {
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+}
+
+/**
+ * Drag `selector` onto `target`, in the action's frame
+ * (docs/specs/SPEC-record-steps.md §4).
+ *
+ * Both ends are resolved the way a click resolves its element — the first
+ * VISIBLE match — so a hidden duplicate is never picked up or dropped onto.
+ * Playwright's `dragTo` moves the pointer from one to the other, which drives
+ * both kinds of drag an application implements: pointer-event sortables and
+ * HTML5 drag-and-drop (Chromium dispatches the drag events for it).
+ *
+ * A drag the application ignored still "succeeds" here, exactly as a click on a
+ * dead button does: the next `Verify` is what says whether it worked.
+ */
+async function executeDrag(
+  root: Page | FrameLocator,
+  action: AIAction,
+  timeoutMs?: number,
+): Promise<void> {
+  const selector = requireSelector(action);
+  const target = action.target !== undefined ? sanitizeCssSelector(action.target) : '';
+  if (!target) {
+    throw new Error('drag action requires a "target": the CSS selector of the element to drop onto');
+  }
+  const source = root.locator(selector).locator('visible=true').first();
+  const destination = root.locator(target).locator('visible=true').first();
+  await source.dragTo(destination, { timeout: timeoutMs ?? DRAG_TIMEOUT_MS });
 }
 
 /**
@@ -1026,6 +1085,10 @@ function singularTargetOf(root: Page | FrameLocator, action: AIAction): Singular
       return { target: visibleFirst(), state: 'visible', budgetMs: SELECT_BY_VALUE_TIMEOUT_MS };
     case 'hover':
       return { target: visibleFirst(), state: 'visible', budgetMs: HOVER_TIMEOUT_MS };
+    // The element DRAGGED is the one measured and gated; the drop target is a
+    // second selector with the same visible-first rule (`executeDrag`).
+    case 'drag':
+      return { target: visibleFirst(), state: 'visible', budgetMs: DRAG_TIMEOUT_MS };
     case 'upload':
       // `attached`, not `visible`: the styled uploader's <input type="file"> is
       // `display:none` and is still the right target. The gate compensates —

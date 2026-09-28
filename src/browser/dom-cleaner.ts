@@ -343,7 +343,26 @@ function substitute(template: string, bindings: Record<string, string>): string 
   return out;
 }
 
-const CAPTURE_DOM_TEMPLATE = loadScript('capture-dom.js');
+/**
+ * The page-side "is this a secret field?" rule — `isSecretField` and the
+ * regexes it reads — as source text to splice into a page script.
+ *
+ * One file, ./scripts/secret-field.js, for every script that decides whether a
+ * field's value may leave the page: the whole-page snapshot (capture-dom.js),
+ * the `expand` walk below, and the step recorder
+ * (src/recorder/page-script.ts). They used to carry hand-kept copies; a third
+ * copy for the recorder, where a miss sends a typed password over a binding,
+ * is the one that would have drifted. Exported for that third consumer and for
+ * tests/secret-field-parity.test.ts.
+ */
+export function loadSecretFieldRule(): string {
+  return SECRET_FIELD_RULE;
+}
+
+const SECRET_FIELD_RULE = loadScript('secret-field.js');
+const CAPTURE_DOM_TEMPLATE = loadScript('capture-dom.js')
+  .split('__SECRET_FIELD_RULE__')
+  .join(SECRET_FIELD_RULE);
 const FIND_IN_DOM_TEMPLATE = loadScript('find-in-dom.js');
 
 /** Options for captureDomSnapshot. */
@@ -960,61 +979,14 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
     // a shape (\`checked=""\` against its own empty-skip rule, or
     // \`checked="true"\`) rather than fixing a staleness.
     //
-    // SECRET_NAME_RE mirrors \`isSecretName\` in src/utils/secrets.ts, and
-    // PASSWORD_FIELD_RE is the wider FIELD-only test beside it (a parameter
-    // name decides masking of a value the run owns; a field name decides
-    // whether a value the run does not own is disclosed). Both copied for the
-    // same reason capture-dom.js copies them — this string is evaluated in
-    // the page and can import nothing. Keep all three files in step.
-    const SECRET_NAME_RE = /password|secret|token|key/i;
-    // PASSWORD_FIELD_RE is SECRET_NAME_RE plus the password family, minus the
-    // bare \`key\` that makes the name rule over-match. \`pass\` is fenced by
-    // lookarounds so \`passenger1_name\` / \`passportNumber\` / \`bypass_cache\` /
-    // \`compass_heading\` keep their live value (review 5, finding 2) while
-    // \`passwd\`, \`user_pass\`, \`pass1\` still mask — a \`\\b\` fence let those
-    // leak, because \`_\` and digits are word characters (review 6, finding 1).
-    // Mirror of capture-dom.js; keep the two identical.
-    const PASSWORD_FIELD_RE =
-      /pwd|(?<!by|com)pass(?!enger|port)|credential|secret|token/i;
-    // \`pin\` is matched on TOKENS (camelCase split, non-letters as
-    // separators, whole token \`pin\` / \`mpin\` / \`pincode\`): \`\\bpin\\b\` leaked
-    // \`pin_code\` and \`pin1\` (review 7, finding 1) and a bare \`pin\` would
-    // mask \`shipping\` and \`spinner\`. Mirror of capture-dom.js's hasPinToken.
-    function hasPinToken(text) {
-      const tokens = String(text)
-        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-        .toLowerCase()
-        .split(/[^a-z]+/);
-      return tokens.some((t) => t === 'pin' || t === 'mpin' || t === 'pincode');
-    }
-    const SECRET_NAME_ATTRS = ['name', 'id', 'aria-label', 'autocomplete'];
-    // Prose, so only the harsh test applies: a placeholder is not an
-    // identifier ("Search by keyword"), but it is often the ONLY thing naming
-    // a password box on a minimal sign-in form (review 5, finding 1). Neither
-    // rule has an \`unmask\` hatch — this string is evaluated in the page with
-    // no config input.
-    const PASSWORD_ONLY_ATTRS = ['placeholder'];
+    // The secret-field rule — SECRET_NAME_RE, PASSWORD_FIELD_RE, hasPinToken
+    // and isSecretField — is the ONE copy in scripts/secret-field.js, the text
+    // capture-dom.js and the step recorder splice in too. This string is
+    // evaluated in the page and can import nothing, so it is interpolated.
+    ${SECRET_FIELD_RULE}
     const STATIC_VALUE_INPUT_TYPES = new Set([
       'password', 'file', 'hidden', 'submit', 'reset', 'button', 'image',
     ]);
-
-    function isSecretField(el) {
-      if (String(el.getAttribute('type') || '').toLowerCase() === 'password') return true;
-      const autocomplete = String(el.getAttribute('autocomplete') || '').toLowerCase();
-      if (autocomplete.indexOf('current-password') !== -1) return true;
-      if (autocomplete.indexOf('new-password') !== -1) return true;
-      for (const name of SECRET_NAME_ATTRS) {
-        const named = el.getAttribute(name);
-        if (!named) continue;
-        if (SECRET_NAME_RE.test(named) || PASSWORD_FIELD_RE.test(named) || hasPinToken(named)) return true;
-      }
-      for (const name of PASSWORD_ONLY_ATTRS) {
-        const prose = el.getAttribute(name);
-        if (!prose) continue;
-        if (PASSWORD_FIELD_RE.test(prose) || hasPinToken(prose)) return true;
-      }
-      return false;
-    }
 
     /** "This attribute is OFF: print nothing, and drop what the markup says."
      *  The snapshot says this with \`{ value: null }\` from \`liveState\`, which

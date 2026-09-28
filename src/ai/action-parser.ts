@@ -12,6 +12,10 @@ const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   'click', 'type', 'select', 'navigate', 'upload',
   // docs/specs/SPEC-browser-history.md §4 — the browser's own history.
   'back', 'forward',
+  // The browser's reload button, and a drag of one element onto another —
+  // both recordable by Record Steps, so both must run
+  // (docs/specs/SPEC-record-steps.md §4).
+  'reload', 'drag',
   'hover', 'wait', 'scroll', 'switchFrame', 'switchPage', 'closePage', 'openPage',
   'openBrowser', 'switchBrowser', 'closeBrowser',
   'dismiss',
@@ -58,6 +62,24 @@ const ACTION_TYPE_ALIASES: Record<string, ActionType> = {
   navigate_forward: 'forward',
   historyForward: 'forward',
   history_forward: 'forward',
+  // The same trap for the two actions Record Steps added: an unknown type is
+  // a no-op that reports success, so `refresh` must not fall through.
+  refresh: 'reload',
+  reloadPage: 'reload',
+  reload_page: 'reload',
+  refreshPage: 'reload',
+  refresh_page: 'reload',
+  browserReload: 'reload',
+  browser_reload: 'reload',
+  browserRefresh: 'reload',
+  browser_refresh: 'reload',
+  dragTo: 'drag',
+  drag_to: 'drag',
+  dragAndDrop: 'drag',
+  drag_and_drop: 'drag',
+  dragDrop: 'drag',
+  drag_drop: 'drag',
+  dragAndDropTo: 'drag',
   'api': 'api_call',
   'http': 'api_call',
   'request': 'api_call',
@@ -681,6 +703,17 @@ function parseAction(raw: unknown, index: number): AIAction {
 
   // Optional fields — only add if present
   if (typeof obj['selector'] === 'string') action.selector = obj['selector'];
+  // `drag`'s drop target. On the allow-list, because a field this copy does not
+  // name never reaches the executor — which would then fail every drag for a
+  // missing target the model DID send. The spellings a model reaches for are
+  // read too, for a drag only: `to` is a scroll's and a switchBrowser's field,
+  // and `source` an extract_csrf's, everywhere else.
+  if (actionType === 'drag') {
+    const target = [obj['target'], obj['targetSelector'], obj['dropTarget'], obj['dropSelector'], obj['to']]
+      .find((v): v is string => typeof v === 'string' && v.trim() !== '' && v !== 'top' && v !== 'bottom');
+    if (target !== undefined) action.target = target;
+    if (action.selector === undefined && typeof obj['source'] === 'string') action.selector = obj['source'];
+  }
   if (typeof obj['value'] === 'string') action.value = obj['value'];
   if (typeof obj['url'] === 'string') action.url = obj['url'];
   // Upload paths (stories/upload-action.md §2). Normalised here so the cached

@@ -101,4 +101,23 @@ export const hostBridge = {
   /** Compile this test's code-behind — from this file's last run when it can
    *  be the recording, recording in this file's session otherwise. */
   postCompile() { post({ type: 'compile' }); },
+  // Record Steps (stories/testbench-record-steps.md). Each is a command on the
+  // host side; the host owns the recording's state and re-posts it whole as a
+  // `recording` message, so none of these change anything here directly.
+  /** ● Record — record at the active editor's cursor. */
+  postRecordSteps() { post({ type: 'recordSteps' }); },
+  /** Record a new test (asks for its name). */
+  postRecordNewTest() { post({ type: 'recordNewTest' }); },
+  postRecordStop() { post({ type: 'recordStop' }); },
+  postRecordCancel() { post({ type: 'recordCancel' }); },
+  /** Add check: arms pick mode, or disarms it when armed. */
+  postRecordCheck() { post({ type: 'recordCheck' }); },
+  /** The ✕ on an action row (`dropped: true`), or putting it back. Also a
+   *  `✎ Your step` row's, by the step's id. */
+  postRecordDrop(id, dropped) { post({ type: 'recordDrop', id, dropped }); },
+  /** Pause (`paused: true`) or Resume (stories/testbench-record-toolbar.md). */
+  postRecordPause(paused) { post({ type: 'recordPause', paused }); },
+  /** The Add step box: one line is one step, several lines several steps.
+   *  `id` names the press; the host answers it with `recordAddStepResult`. */
+  postRecordAddStep(text, id) { post({ type: 'recordAddStep', text, ...(id !== undefined && { id }) }); },
 };

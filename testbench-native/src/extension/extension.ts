@@ -29,6 +29,7 @@ import type { ApiClientFactory, SkillDebugContext } from './run-controller.js';
 import { registerCommands } from './commands/index.js';
 import type { SkillRunTarget } from './skill-run-targets.js';
 import { CodeBehindDiffs } from './codebehind-diff.js';
+import { StepRecorder, type PersistedRecording, type RecordingReport } from './step-recorder.js';
 import { disposeOutputChannel, getOutputChannel } from './output-channel.js';
 import { EnvSelector } from './env-selector.js';
 import { frameTargetUri, workspaceFolderFor } from './workspace.js';
@@ -168,6 +169,14 @@ class RunControllerRegistry implements vscode.Disposable {
    */
   readonly compileTailSignals = new CompileTailSignals();
 
+  /**
+   * The window's one Record Steps recorder (stories/testbench-record-steps.md).
+   * Here, beside the controllers, because the commands and the panel's
+   * messages both reach it through the registry, and the recording it runs
+   * lives in a controller's session.
+   */
+  readonly recorder: StepRecorder;
+
   constructor(
     private readonly view: TestBenchRunnerView,
     private readonly tracker: ActiveFileTracker,
@@ -181,6 +190,7 @@ class RunControllerRegistry implements vscode.Disposable {
       setProbe(probe: HealthProbe): void;
     },
   ) {
+    this.recorder = new StepRecorder((msg) => this.view.post(msg));
     // The run-state context keys describe the ACTIVE EDITOR's document, so
     // they have to be recomputed when the active editor changes — not only
     // when a run starts or ends. Without this, switching between two tests
@@ -1298,6 +1308,13 @@ class RunControllerRegistry implements vscode.Disposable {
     this.refreshRunningContext();
   }
 
+  /** `clearStepPaused` for a caller outside the router: Record Steps ending
+   *  ONE test's paused run, where Stop's `clearAllStepPausedMarkers` would
+   *  also wipe other tests' markers. */
+  clearStepPausedFor(controllerUri: vscode.Uri): void {
+    this.clearStepPaused(controllerUri);
+  }
+
   /**
    * On the first `step:start` inside a non-test frame, open the frame's
    * file in a non-preview tab next to the user's current editor. Without
@@ -1705,6 +1722,7 @@ class RunControllerRegistry implements vscode.Disposable {
   lastDoneStatus: 'passed' | 'failed' | 'error' | 'aborted' | null = null;
 
   dispose(): void {
+    this.recorder.dispose();
     this.compileTailSignals.dispose();
     this.trackerSub.dispose();
     this.editSub.dispose();
@@ -1939,6 +1957,56 @@ export interface TestBenchTestHooks {
   /** Re-read the bridge settings now, instead of waiting on the configuration
    *  event. Returns once the listen attempt has settled. */
   syncLmBridge: () => Promise<void>;
+  /** Record Steps: the panel's Recording block as the host holds it, or null
+   *  when nothing is recording (stories/testbench-record-steps.md). */
+  recordingState: () => import('ai-ui-automation-runner-core').RecordingPanelState | null;
+  /** Record Steps: the status bar text while recording, or null. */
+  recordingStatusText: () => string | null;
+  /** Record Steps: how the last recording ended and what the author was told
+   *  — notifications are not readable from the extension host. */
+  recordingReport: () => RecordingReport | null;
+  /** Record Steps: why the last Record gesture was refused, or null. */
+  recordingRefusal: () => string | null;
+  /** Record Steps: settles when the current recording, insertion included,
+   *  is over. */
+  recordingSettled: () => Promise<void>;
+  /** Record Steps: the 1-based lines the recording highlights in its file
+   *  now, or null when no highlight exists (it comes off when the recording
+   *  ends) — decorations are not readable from the extension host. */
+  recordingHighlight: () => number[] | null;
+  /** Record Steps: the notifications the most recent recording showed while
+   *  it ran (the warning about editing the lines being recorded). */
+  recordingNotices: () => Array<{ level: 'info' | 'warn' | 'error'; text: string }>;
+  /** Record Steps: what the in-flight recording has written, as kept in the
+   *  workspace's state for a window reload, or undefined. */
+  recordingPersisted: () => PersistedRecording | undefined;
+  /** Record Steps: put a kept recording back — the state a window reload that
+   *  cut a recording off leaves behind. */
+  setRecordingPersisted: (value: PersistedRecording | undefined) => Promise<void>;
+  /** Record Steps: what activation does with a kept recording, the offer
+   *  answered with `choice` (the button's text, or undefined for dismissed). */
+  recoverUnfinishedRecording: (choice: string | undefined) => Promise<'none' | 'not-found' | 'kept' | 'removed'>;
+  /** Record Steps: what `deactivate` does with a recording in flight. */
+  shutdownRecording: () => Promise<void>;
+  /** Record Steps: the lines the author wrote into the recorded block, and
+   *  what became of each — typed, sent, its step's id, held by the draft
+   *  (stories/testbench-record-toolbar.md §"Steps typed in the editor"). */
+  recordingAuthorLines: () => Array<{
+    key: string;
+    line: string;
+    status: string;
+    stepId?: string;
+    inDraft: boolean;
+    dropped?: 'hidden' | 'left';
+  }>;
+  /** Record Steps: where the browser toolbar was last left (`record:toolbar`),
+   *  as the next start body sends it. */
+  recordingToolbar: () => { dock: string; minimised: boolean } | undefined;
+  /** Record Steps: set or forget where the toolbar was left. */
+  setRecordingToolbar: (value: { dock: 'tl' | 'tc' | 'tr' | 'bl' | 'bc' | 'br'; minimised: boolean } | undefined) => Promise<void>;
+  /** Record Steps: the window's focus changing, as `onDidChangeWindowState`
+   *  reports it — a test cannot unfocus the window it runs in. */
+  recordingWindowFocus: (focused: boolean) => void;
 }
 
 export interface TestBenchExports {
@@ -2002,6 +2070,16 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
   const view = new TestBenchRunnerView(context, tracker);
   const serverStatusBar = new ServerStatusBar(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
   const registry = new RunControllerRegistry(view, tracker, serverLogPath, serverStatusBar);
+  // Record Steps keeps an in-flight recording's writes in the workspace's
+  // state; one a reload cut off is offered for removal now
+  // (SPEC-record-steps.md §7).
+  registry.recorder.attachStorage(context.workspaceState);
+  recorderAtShutdown = registry.recorder;
+  void registry.recorder.recoverUnfinished().catch((err: unknown) => {
+    out.appendLine(
+      `[${ts()}] Record Steps: checking for an unfinished recording failed — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
   const discovery = new TestDiscovery();
   const testController = new TestBenchTestController(discovery, registry, {
     // Forward batch progress to the sidebar webview banner. `null` clears
@@ -2405,6 +2483,21 @@ export function activate(context: vscode.ExtensionContext): TestBenchExports {
       configureLmBridge: (opts) => lmBridge.configureForTests(opts),
       lmBridgeToken: () => lmBridge.ensureToken(),
       syncLmBridge: () => lmBridge.sync(),
+      recordingState: () => registry.recorder.state,
+      recordingStatusText: () => registry.recorder.statusText,
+      recordingReport: () => registry.recorder.lastReport,
+      recordingRefusal: () => registry.recorder.lastRefusal,
+      recordingSettled: () => registry.recorder.settled,
+      recordingHighlight: () => registry.recorder.highlightedLines,
+      recordingNotices: () => registry.recorder.liveNotices,
+      recordingPersisted: () => registry.recorder.persisted,
+      setRecordingPersisted: (value) => registry.recorder.setPersisted(value),
+      recoverUnfinishedRecording: (choice) => registry.recorder.recoverUnfinished(async () => choice),
+      shutdownRecording: () => registry.recorder.shutdown(),
+      recordingAuthorLines: () => registry.recorder.authorLines,
+      recordingToolbar: () => registry.recorder.rememberedToolbar,
+      setRecordingToolbar: (value) => registry.recorder.setRememberedToolbar(value),
+      recordingWindowFocus: (focused) => registry.recorder.windowFocusChanged(focused),
     },
   };
 }
@@ -2434,7 +2527,50 @@ async function handleWebviewMessage(
 ): Promise<void> {
   switch (msg.type) {
     case 'ready':
-      // Tracker.onChange already pushed a snapshot; nothing more to do.
+      // Tracker.onChange already pushed a snapshot. A panel rebuilt mid-
+      // recording has lost its Recording block, though, and nothing else
+      // would re-send it until the next action.
+      registry.recorder.republish();
+      return;
+    // Record Steps (stories/testbench-record-steps.md). Delegated to the
+    // commands, like Stop and Pause below, so the panel and the editor title
+    // bar are one implementation each.
+    case 'recordSteps':
+      await vscode.commands.executeCommand('testbench-native.recordSteps');
+      return;
+    case 'recordNewTest':
+      await vscode.commands.executeCommand('testbench-native.recordNewTest');
+      return;
+    case 'recordStop':
+      await vscode.commands.executeCommand('testbench-native.stopRecording');
+      return;
+    case 'recordCancel':
+      await vscode.commands.executeCommand('testbench-native.cancelRecording');
+      return;
+    case 'recordCheck':
+      await vscode.commands.executeCommand('testbench-native.recordAddCheck');
+      return;
+    case 'recordDrop':
+      // Shown at once and sent as `drop` / `restore` (decision 9: redraft now).
+      await registry.recorder.setDropped(msg.id, msg.dropped === true);
+      return;
+    // The browser toolbar's panel parity (stories/testbench-record-toolbar.md
+    // §"VS Code alongside"): the same commands the palette runs.
+    case 'recordPause':
+      await vscode.commands.executeCommand(
+        msg.paused === true ? 'testbench-native.pauseRecording' : 'testbench-native.resumeRecording',
+      );
+      return;
+    case 'recordAddStep':
+      // A box with nothing in it adds nothing; the command would ask instead.
+      if (typeof msg.text !== 'string' || msg.text.trim() === '') return;
+      // The box keeps its text until the answer comes back by its id: cleared
+      // when the server took the steps, kept with the reason otherwise.
+      if (typeof msg.id === 'string' && msg.id !== '') {
+        await registry.recorder.addStepFromPanel(msg.text, msg.id);
+        return;
+      }
+      await vscode.commands.executeCommand('testbench-native.addStepToRecording', { text: msg.text });
       return;
     case 'run': {
       const controller = registry.active();
@@ -2644,6 +2780,16 @@ function notifyNoActive(): void {
   );
 }
 
-export function deactivate(): void {
+/** The recorder `deactivate` gives a moment to take an in-flight recording's
+ *  draft back out of its file. */
+let recorderAtShutdown: StepRecorder | null = null;
+
+export async function deactivate(): Promise<void> {
+  const recorder = recorderAtShutdown;
+  recorderAtShutdown = null;
+  // Called before the subscriptions are disposed: the recording is cancelled
+  // here, and its draft taken out if the host lives that long (best effort —
+  // what is left is offered for removal at the next activation).
+  await recorder?.shutdown().catch(() => undefined);
   disposeOutputChannel();
 }

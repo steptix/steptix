@@ -218,8 +218,20 @@ only that the entry navigates.
 
 ## 9. Deferred
 
-- `reload` (§3). Same shape, same seams, its own decision about what a
-  reload means for a form post.
+- ~~`reload` (§3). Same shape, same seams, its own decision about what a
+  reload means for a form post.~~ **Built** (2026-09-26), because Record Steps
+  records a Refresh and a recorded step has to run
+  (docs/specs/SPEC-record-steps.md §4). `{ "action": "reload" }`, no other
+  fields; `page.reload()` with this spec's arrival rule (`domcontentloaded`,
+  30 s, then the ordinary settle — it is in `MUTATING_ACTIONS`); prompt rule
+  16b beside 16a; `page.reload()` in code-behind via the same conditional
+  rule 7b; `refresh` and the other near-miss spellings aliased. The form-post
+  decision is the browser's: a reload after a POST re-sends or not as the
+  browser does, which is the application's behaviour under test. There is no
+  "did it move?" failure — a current page can always be reloaded; one that
+  fails anyway (the server gone, a timeout) is not retryable, as §4.3's are. Pinned by
+  `tests/drag-reload-actions.test.ts`, where the three checks §12 found
+  toothless here are mutation-checked for `reload` and `drag` too.
 - A `times` field, or "go back to the start of the history". Two steps do
   it; a field is cheaper to add once someone wants it than to design now.
 - Asserting on history depth, or on whether back is available. A test that

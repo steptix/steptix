@@ -96,8 +96,13 @@ export function isRecordSecretKey(key: string): boolean {
  * `redact` then replaced every dash and every seven in every output — the run
  * log, the report, and the DOM snapshot the model plans from. A parameter the
  * author named keeps no floor: that name is a deliberate instruction.
+ *
+ * Record Steps uses the same floor for the `.env` values a recording learns
+ * from its request (`envSecrets`, src/recorder/record-steps-run.ts) and for the
+ * secrets its page script remembers (`TYPED_SECRET_MIN` in
+ * src/browser/scripts/record-steps.js), for the same reason.
  */
-const RECORD_SECRET_MIN_LENGTH = 4;
+export const RECORD_SECRET_MIN_LENGTH = 4;
 
 /**
  * The loop-binding registry lives in its own module (./loop-bindings.js) so

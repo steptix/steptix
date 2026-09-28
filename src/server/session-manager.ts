@@ -149,11 +149,13 @@ import type { CompilePhase, CompileStatus, CompileSummary } from '../codebehind/
 import { compileLock, compileLockKey } from './compile-lock.js';
 import {
   inheritLoopBindings,
+  isSecretName,
   loopBindingsOf,
   redact,
   redactReport,
   runSecrets,
 } from '../utils/secrets.js';
+import type { ChatMessage } from '../ai/types.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
 import { executeToolStep } from '../tools/executor.js';
 import type { ToolStepOutcome } from '../tools/types.js';
@@ -189,6 +191,9 @@ import {
   type ConsoleLogLevel,
 } from '../utils/logger.js';
 import { openRunLogFile, attachRunLogBridges } from '../utils/run-log.js';
+import { RecordStepsRun, type RecordStepsRunDeps } from '../recorder/record-steps-run.js';
+import type { KnownSecret } from '../recorder/step-recorder.js';
+import type { RecordControl, RecordControlOutcome, RecordStepsRequest } from '../recorder/types.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1031,6 +1036,65 @@ export type RunEvent =
 export type RunEventListener = (event: RunEvent) => void;
 
 /**
+ * The frames of a Record Steps stream (stories/testbench-record-steps.md, On
+ * the wire) — a sibling of {@link RunEvent}, defined beside the recorder in
+ * src/recorder/types.ts and re-exported here so the server's event types are
+ * named in one place.
+ */
+export type { RecordEvent, RecordStreamEvent } from '../recorder/types.js';
+
+/**
+ * A steps request reached a session whose queue a recording holds.
+ *
+ * Refused rather than queued (stories/testbench-record-steps.md, "What the
+ * server half decided"): a run that waited behind a recording would sit with
+ * its stream open and nothing on it for as long as the author keeps clicking,
+ * and then run in a browser the author has moved on from. `POST
+ * /sessions/:id/steps` answers 409 with this message.
+ */
+export class RecordingInProgressError extends Error {
+  constructor(sessionId: string) {
+    super(
+      `A Record Steps recording is running in session "${sessionId}". ` +
+        'Stop or cancel it before running steps in this session.',
+    );
+    this.name = 'RecordingInProgressError';
+  }
+}
+
+/** Whether a recording may start — and when not, the route's status and message. */
+export type RecordStepsBegin =
+  | { ok: true; run: RecordStepsRun }
+  | { ok: false; status: 400 | 409; error: string };
+
+/**
+ * What `POST /sessions/:id/record-steps` says on a server whose browsers are
+ * headless (decision 2). `browser.headed` is server-global — the launcher reads
+ * the server's own config — so no project or test can change the answer.
+ */
+export const RECORD_STEPS_HEADLESS_MESSAGE =
+  'Record Steps needs a visible browser: this server runs headless (browser.headed: false).';
+
+/** The same refusal for one browser: `openBrowser` opened it headless. */
+export const RECORD_STEPS_HEADLESS_BROWSER_MESSAGE =
+  "Record Steps needs a visible browser: this session's active browser was opened headless " +
+  '(headed: false). Switch to a headed browser, or close the session, and record again.';
+
+/**
+ * What the start route says when no model could write the steps
+ * (docs/specs/SPEC-record-steps.md §8, §10) — decided before a browser is
+ * launched or a script installed, because a recording nobody can write up is
+ * the author's time spent for nothing. 400, like headless: it is configuration
+ * the author has to change, not a moment to retry.
+ */
+export const RECORD_STEPS_NO_MODEL_MESSAGE =
+  'Record Steps needs a model to write the steps; configure ai in aiui.config.json or .env.';
+
+/** §10's sentence for a run holding the session. */
+export const RECORD_STEPS_RUN_EXECUTING_MESSAGE =
+  'Stop the run before recording: a run is executing in this session.';
+
+/**
  * What one server-driven run left behind, beyond the folded `StepResponse`.
  *
  * The HTTP response deliberately reduces each step to `StepResultResponse`;
@@ -1358,6 +1422,10 @@ export interface SessionManagerDeps {
   /** §5.1 item 1b / §15.4 — the vision-route check, so a test never reaches
    *  the network. Defaults to `checkVisionRoute` (src/desktop/vision-route.ts). */
   checkVisionRoute?: (ai: VisionRouteAi) => Promise<VisionRouteResult>;
+  /** Record Steps' recorder knobs (the typed-navigation window, a tap on the
+   *  binding) — tests only, so a route test can drive a typed navigation
+   *  without waiting out the real window. */
+  recorder?: RecordStepsRunDeps['recorderOptions'];
 }
 
 /**
@@ -1652,11 +1720,47 @@ interface ManagedSession {
    * skill edit had just orphaned went unreported for the rest of the session.
    */
   deadSectionsReported: Set<string>;
+  /**
+   * Step batches enqueued on `queueTail` and not yet finished — queued ones
+   * included, which is what `status === 'executing'` cannot say. Record Steps
+   * reads it to answer 409 when "a run holds the session's queue"
+   * (stories/testbench-record-steps.md, On the wire).
+   */
+  activeBatches: number;
+  /**
+   * The recording holding this session's queue, while one does
+   * (stories/testbench-record-steps.md, decision 3). A steps request is refused
+   * for as long as it is set — see {@link RecordingInProgressError}.
+   */
+  recording?: RecordStepsRun | undefined;
+  /**
+   * The last recording in this session, kept after it ends: its toolbar may
+   * still be in the page (Done shows for six seconds), and the next batch
+   * takes it out before its first step (stories/testbench-record-toolbar.md;
+   * review, finding 6).
+   */
+  lastRecording?: RecordStepsRun | undefined;
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * The secrets a session already holds, by name — what a recording masks out of
+ * everything it shows and sends, and what lets a value typed into an
+ * innocently-named field still come out as `{{password}}`
+ * (stories/testbench-record-steps.md, decision 7). The author rule
+ * (`isSecretName`) on the session's variable map: every name in it is one the
+ * test chose.
+ */
+function knownSecretsOf(outputs: Record<string, string>): KnownSecret[] {
+  const out: KnownSecret[] = [];
+  for (const [name, value] of Object.entries(outputs)) {
+    if (typeof value === 'string' && value !== '' && isSecretName(name)) out.push({ name, value });
+  }
+  return out;
+}
 
 /**
  * True iff this request carries usable section definitions.
@@ -2005,6 +2109,267 @@ export class SessionManager {
     };
   }
 
+  // -------------------------------------------------------------------------
+  // Record Steps (stories/testbench-record-steps.md)
+  // -------------------------------------------------------------------------
+
+  /** Is a recording holding this session's queue? The steps route asks before
+   *  it opens a stream, so the ordinary refusal is a 409 rather than a frame. */
+  isRecordingSteps(sessionId: string): boolean {
+    return this.sessions.get(this.sessionKey(sessionId))?.recording !== undefined;
+  }
+
+  /** The 409 a busy session answers a recording with, or null when it is free. */
+  private recordRefusal(session: ManagedSession): RecordStepsBegin | null {
+    if (session.recording) {
+      return { ok: false, status: 409, error: 'A recording is already running in this session.' };
+    }
+    if (session.activeBatches > 0 || session.status === 'executing') {
+      return { ok: false, status: 409, error: RECORD_STEPS_RUN_EXECUTING_MESSAGE };
+    }
+    return null;
+  }
+
+  /**
+   * Could the session's model write the steps? Asked of the config the
+   * recording's call would actually use: this request's `.env` over the server
+   * base with the session's model override when the request brought one (that
+   * is what `prepareRecordingBrowser` points the client at), else the client as
+   * the last batch left it — or, for a session that does not exist yet, the
+   * `.env` over the server base, which is what its client will be built from.
+   */
+  private recordingHasModel(session: ManagedSession | undefined, request: RecordStepsRequest): boolean {
+    if (session && !request.env) return session.aiClient.isConfigured();
+    const desiredAi = applyEnvToAiConfig(this.config.ai, request.env);
+    const override = session?.runSettings.model;
+    const model = typeof override === 'string' && override.trim() !== '' ? override.trim() : desiredAi.model;
+    return aiConfigured({ ...desiredAi, model });
+  }
+
+  /**
+   * Decide whether a recording may start and, when it may, take what it holds
+   * — all BEFORE the route opens its stream, so every refusal is a status code
+   * (On the wire: 400 headless, 409 a run holds the queue, and the steps
+   * route's own 400 for `config` on an existing session).
+   *
+   * What a started recording holds until its `finish`:
+   *  - the session's queue — a promise joined onto `queueTail`, so anything
+   *    queued in-process behind it waits (a steps REQUEST is refused instead:
+   *    see {@link RecordingInProgressError});
+   *  - one in-flight run on the idle reaper's count, as an errand holds one;
+   *  - the session's `recording` slot, which is what `control` reaches.
+   *
+   * The session is created here when it does not exist, exactly as the first
+   * steps request creates it: the same `config` (baseUrl, viewport, …), the same
+   * per-project recording outputs, the same deferred launcher. So the session a
+   * recording creates is the one the next Run uses — which is why TestBench
+   * marks the config sent (decision 3).
+   */
+  async beginRecordSteps(sessionId: string, request: RecordStepsRequest): Promise<RecordStepsBegin> {
+    // Server-global and decided first: no project can make a headless server's
+    // browser visible, so nothing below is worth doing.
+    if (this.config.browser.headed === false) {
+      return { ok: false, status: 400, error: RECORD_STEPS_HEADLESS_MESSAGE };
+    }
+    const key = this.sessionKey(sessionId);
+    let session = this.sessions.get(key);
+    if (session && session.status === 'closed') {
+      this.sessions.delete(key);
+      session = undefined;
+    }
+    const configRefusal: RecordStepsBegin = {
+      ok: false,
+      status: 400,
+      // The steps route's sentence, word for word: one rule, one message.
+      error:
+        'Config can only be provided on the first request for a session. ' +
+        'This session already has a config set.',
+    };
+    if (session && request.config) return configRefusal;
+    if (session) {
+      const busy = this.recordRefusal(session);
+      if (busy) return busy;
+    }
+    // Before anything is created, launched or installed (§8).
+    if (!this.recordingHasModel(session, request)) {
+      return { ok: false, status: 400, error: RECORD_STEPS_NO_MODEL_MESSAGE };
+    }
+    if (!session) {
+      if (request.config?.cdp) {
+        return {
+          ok: false,
+          status: 400,
+          error:
+            'Record Steps does not record in a CDP-attached browser yet ' +
+            '(stories/testbench-record-steps.md, "Not in the first version").',
+        };
+      }
+      const outputs = await this.resolveSessionOutput({
+        steps: [],
+        testFilePath: request.testFilePath,
+        ...(request.env && { env: request.env }),
+      });
+      // Someone else may have created it while that resolved.
+      const raced = this.sessions.get(key);
+      if (raced && raced.status !== 'closed') {
+        if (request.config) return configRefusal;
+        session = raced;
+      } else {
+        try {
+          session = await this.createSession(
+            sessionId,
+            request.config,
+            request.env,
+            outputs.videoMode,
+            outputs.reportOutputDir,
+          );
+        } catch (err) {
+          // An invalid `## Config: viewport:` and its kin — the author's to fix.
+          return { ok: false, status: 400, error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+    }
+    if (session.sessionConfig.cdp) {
+      return {
+        ok: false,
+        status: 400,
+        error:
+          'Record Steps does not record in a CDP-attached browser yet ' +
+          '(stories/testbench-record-steps.md, "Not in the first version").',
+      };
+    }
+    // Again, after every await above: the slot is taken synchronously from here.
+    const busy = this.recordRefusal(session);
+    if (busy) return busy;
+    // Per browser, too: `openBrowser` can open a headless one on a headed
+    // server, and the recording follows the session's active browser.
+    if (session.browserTracker.hasActive() && session.browserTracker.getActive().headed === false) {
+      return { ok: false, status: 400, error: RECORD_STEPS_HEADLESS_BROWSER_MESSAGE };
+    }
+
+    const held = session;
+    const releaseRun = this.beginExternalRun();
+    let releaseQueue: () => void = () => {};
+    const holding = new Promise<void>((resolve) => {
+      releaseQueue = resolve;
+    });
+    held.queueTail = held.queueTail.then(() => holding);
+
+    let finished = false;
+    const run: RecordStepsRun = new RecordStepsRun({
+      sessionId,
+      request,
+      prepareBrowser: () => this.prepareRecordingBrowser(held, request),
+      complete: (messages, signal) => this.completeForRecording(held, sessionId, messages, signal),
+      knownSecrets: () => knownSecretsOf(held.outputs),
+      finish: () => {
+        if (finished) return;
+        finished = true;
+        if (held.recording === run) held.recording = undefined;
+        releaseQueue();
+        releaseRun();
+      },
+      ...(this.deps.recorder && { recorderOptions: this.deps.recorder }),
+    });
+    held.recording = run;
+    held.lastRecording = run;
+    return { ok: true, run };
+  }
+
+  /**
+   * `POST /sessions/:id/record-steps/control` — deliver one control to the
+   * recording running in this session.
+   */
+  controlRecordSteps(sessionId: string, control: RecordControl): RecordControlOutcome {
+    const run = this.sessions.get(this.sessionKey(sessionId))?.recording;
+    if (!run) return 'no-recording';
+    return run.control(control);
+  }
+
+  /**
+   * What the top of a batch does before its first step, for a recording:
+   * the project's browser settings onto the session (the deferred launcher
+   * reads `launchArgs` off it), the `.env`'s AI route when the request brought
+   * one, and the launch itself when the session has no browser — which goes to
+   * `baseUrl` because the launcher does, exactly as step 1 of a run would.
+   */
+  private async prepareRecordingBrowser(
+    session: ManagedSession,
+    request: RecordStepsRequest,
+  ): Promise<{ browser: BrowserSession; sendScreenshots: boolean; launched: boolean }> {
+    const bundle = await this.resolveProjectBundle(request.testFilePath, null);
+    session.browserConfig = bundle.config.browser;
+    session.desktopConfig = bundle.config.desktop ?? this.config.desktop;
+
+    const desiredAi = applyEnvToAiConfig(this.config.ai, request.env);
+    if (request.env) {
+      // The batch's own re-pointing (`executeStepsInternal`), for the same
+      // reason: a saved `.env` edit reaches the next model call without a
+      // session recycle, and the run setting's model still beats it.
+      const override = session.runSettings.model;
+      const model = typeof override === 'string' && override.trim() !== '' ? override.trim() : desiredAi.model;
+      const change = session.aiClient.syncAuth(model, desiredAi.apiKey, desiredAi.gatewayUrl);
+      if (change) logger.info(`Session "${session.id}": ${change} (Record Steps)`);
+    }
+    // `ai.sendScreenshots` as a batch would resolve it: server → project → the
+    // session's retained run setting. The AI switch is bypassed — this is
+    // settings resolution for a request FOR AI, not a run.
+    const settings = resolveRunSettings(this.config, bundle.config, desiredAi.model, session.runSettings, {
+      ai: desiredAi,
+      bypassAiPolicy: true,
+    });
+
+    let launched = false;
+    if (!session.browserTracker.hasActive()) {
+      const browser = await session.browserTracker.ensureLaunched();
+      session.browserSession = browser;
+      session.mainPage ??= browser.page;
+      launched = true;
+    }
+    const active = session.browserTracker.getActive();
+    session.browserSession = active;
+    if (active.cdp) {
+      throw new Error('Record Steps does not record in a CDP-attached browser yet.');
+    }
+    // Checked again at the browser the recording will actually use — the
+    // route's check saw only what was active before this launch.
+    if (active.headed === false) throw new Error(RECORD_STEPS_HEADLESS_BROWSER_MESSAGE);
+    return { browser: active, sendScreenshots: settings.effective.sendScreenshots, launched };
+  }
+
+  /**
+   * The one model call of a recording, on the session's client with the run AI
+   * switch LIFTED for its duration and put back as it was.
+   *
+   * Recording is a request FOR AI (decision 9), like compile and errands, so a
+   * project with `ai.allowInRuns: false` — or a session whose last batch ran
+   * with `ai: "off"` and left the veil up — still gets its steps written. The
+   * veil is restored rather than lowered for good because it is the last
+   * batch's statement about the session and the recording does not get to
+   * change it; the next batch re-decides it at its top anyway. Safe to toggle:
+   * the recording holds the queue, so no batch is using this client.
+   */
+  private async completeForRecording(
+    session: ManagedSession,
+    sessionId: string,
+    messages: ChatMessage[],
+    signal: AbortSignal,
+  ): Promise<{ text: string }> {
+    const before = session.aiClient.aiPolicyAllowed;
+    if (!before) {
+      logger.info(
+        `Session "${sessionId}": AI allowed for Record Steps — a recording is a request for AI, ` +
+          'so the run AI switch does not gate it.',
+      );
+    }
+    session.aiClient.setAiPolicy(true);
+    try {
+      return await session.aiClient.complete(messages, signal, { profile: 'authoring' });
+    } finally {
+      session.aiClient.setAiPolicy(before);
+    }
+  }
+
   /**
    * Resolve the per-project recording outputs for a NEW session from the test
    * file's own project config: the video-record mode (`browser.video`) and the
@@ -2266,6 +2631,10 @@ export class SessionManager {
       );
     }
 
+    // A recording holds the queue; a run does not wait behind it (the route
+    // answers 409 before this in the ordinary case — this is the race).
+    if (session?.recording) throw new RecordingInProgressError(sessionId);
+
     // Create session if it does not exist. The session's AiClient is built with
     // the per-request env applied here; on a reused session, `AI_MODEL` /
     // `AI_API_KEY` / `AI_GATEWAY_URL` are re-applied per batch in
@@ -2300,9 +2669,18 @@ export class SessionManager {
 
     // Queue the work onto the session's promise chain so requests execute sequentially
     const resultPromise = new Promise<StepResponse>((resolve, reject) => {
+      // Counted from the moment it joins the queue, so a batch waiting behind
+      // another already answers Record Steps' "a run holds the queue".
+      session.activeBatches++;
       session.queueTail = session.queueTail
         .then(async () => {
           try {
+            // A recording that ended just before may still show its bar
+            // (Done, for six seconds): out of the page before the first step,
+            // so the run neither clicks it nor has it in a screenshot.
+            const last = session.lastRecording;
+            session.lastRecording = undefined;
+            if (last) await last.dismissToolbar();
             return await this.executeStepsInternal(
               session,
               sessionId,
@@ -2319,6 +2697,7 @@ export class SessionManager {
             await this.discardLiveCompile(session, 'the run threw');
             throw err;
           } finally {
+            session.activeBatches--;
             // Guarantee a FINALIZED last-run record on EVERY run exit — including
             // early run-setup failures (malformed bundle, missing skill,
             // re-run-anchor-not-found, partial-rerun refusal) that return/throw
@@ -2840,6 +3219,12 @@ export class SessionManager {
   async closeSession(sessionId: string): Promise<void> {
     const session = this.sessions.get(this.sessionKey(sessionId));
     if (!session) return;
+    // A recording in this session ends here, writing nothing — even one past
+    // Stop whose final draft is still being written. Its browser is about to
+    // close under it anyway (which it would report as an error); ending it
+    // first makes the close the reason (`done: aborted` saying so), and covers
+    // a recording whose browser is still launching.
+    session.recording?.sessionClosed();
     // Before the browser goes: an open compile has a queue running, and the
     // session is the only thing that still knows about it.
     await this.discardLiveCompile(session, 'the session is closing');
@@ -3113,6 +3498,7 @@ export class SessionManager {
         pauseAtNextTool: false,
         pauseAtNextCodeBehind: false,
         deadSectionsReported: new Set<string>(),
+        activeBatches: 0,
       };
 
       // What the deferred launcher reads `launchArgs` off when it eventually

@@ -31,9 +31,15 @@ import {
   isSkillDocument,
   type SkillRunTarget,
 } from '../skill-run-targets.js';
+import type { StepRecorder } from '../step-recorder.js';
+import { registerRecordCommands } from './record-steps.js';
 
 interface Registry {
   active(): RunController | undefined;
+  /** Get-or-create the controller for a document (Record New Test's new file). */
+  get(document: vscode.TextDocument): RunController | undefined;
+  /** The window's one Record Steps recorder (stories/testbench-record-steps.md). */
+  readonly recorder: StepRecorder;
   /** The currently-running controller, if any. Prefer this over
    *  `active()` for step commands when a run is in flight — see
    *  `dispatchStep` for the routing rule. */
@@ -43,6 +49,9 @@ interface Registry {
   /** Phase 3.1 — drop step-paused yellow ▶ markers across every URI
    *  they live on (test file AND any skill file the run descended into). */
   clearAllStepPausedMarkers(): void;
+  /** Drop ONE controller's step-paused ▶, wherever it is painted — Record
+   *  Steps ending the paused run it records from, and nothing else. */
+  clearStepPausedFor(controllerUri: vscode.Uri): void;
   /** Phase 3.1.b — distinguish step-paused (server blocked on
    *  pendingRunControl) from running-but-not-step-paused (server is
    *  mid-step). dispatchStep uses this to give a clean diagnostic
@@ -760,7 +769,12 @@ export function registerCommands(
    * (or paused awaiting Continue) must first tear the run down, otherwise
    * spinners and the yellow ▶ stay painted with no session behind them.
    */
-  const performStop = (opts: { setSkillDebug?: boolean; preferRunning?: boolean } = {}): void => {
+  const performStop = (
+    opts: {
+      setSkillDebug?: boolean;
+      preferRunning?: boolean;
+    } = {},
+  ): void => {
     // Normally the ACTIVE editor's controller — Close Session shares this
     // function and then closes `registry.active()`, so widening the reach
     // unconditionally made it stop one test and close another.
@@ -821,6 +835,10 @@ export function registerCommands(
   };
 
   return [
+    // Record Steps, Record New Test, Stop Recording, Add Check, Cancel
+    // Recording (stories/testbench-record-steps.md).
+    ...registerRecordCommands({ registry, tracker }),
+
     vscode.commands.registerCommand('testbench-native.runSelected', runSelected),
 
     // "Run This Row" — the gutter's one-row gesture
@@ -971,7 +989,15 @@ export function registerCommands(
       tracker.markAllRunningStopped();
     }),
 
-    vscode.commands.registerCommand('testbench-native.stop', () => {
+    vscode.commands.registerCommand('testbench-native.stop', async () => {
+      // While the active test is recording, Stop means Stop Recording: write
+      // the steps. The run teardown below would abort the recording's stream,
+      // which the server reads as a cancel — silently throwing the recording
+      // away (stories/testbench-record-steps.md).
+      if (registry.active()?.isRecording) {
+        await registry.recorder.stop();
+        return;
+      }
       performStop({ setSkillDebug: true, preferRunning: true });
     }),
 

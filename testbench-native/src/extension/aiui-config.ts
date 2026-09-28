@@ -18,6 +18,9 @@ export interface ProjectDirs {
   /** Raw `tests.dataDir` string (relative to the config dir, or absolute), or
    *  null if undeclared. The caller applies the `data` default. */
   dataDir: string | null;
+  /** Absolute path to `tests.dir`, or null if undeclared — where Record New
+   *  Test creates its file (stories/testbench-record-steps.md). */
+  testsDir: string | null;
 }
 
 const CONFIG_FILENAMES = ['aiui.config.json'];

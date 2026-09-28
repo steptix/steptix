@@ -47,6 +47,17 @@ test("parseProjectDirs: tests.dataDir is surfaced raw (relative string) for env 
   assert.equal(dirs.dataDir, "./data");
 });
 
+test("parseProjectDirs: tests.dir resolves to an absolute testsDir (Record New Test's folder), null when absent", () => {
+  const dir = tmpDir();
+  const configPath = path.join(dir, "aiui.config.json");
+  assert.equal(
+    parseProjectDirs(JSON.stringify({ tests: { dir: "./fixtures/tests" } }), configPath).testsDir,
+    path.resolve(dir, "./fixtures/tests"),
+  );
+  assert.equal(parseProjectDirs(JSON.stringify({ tests: { dataDir: "./data" } }), configPath).testsDir, null);
+  assert.equal(parseProjectDirs(JSON.stringify({ tests: { dir: "" } }), configPath).testsDir, null);
+});
+
 test("parseProjectDirs: dataDir missing / empty / non-string → null (caller applies the `data` default)", () => {
   const configPath = path.join(tmpDir(), "aiui.config.json");
   assert.equal(parseProjectDirs(JSON.stringify({ tests: { dir: "./tests" } }), configPath).dataDir, null);

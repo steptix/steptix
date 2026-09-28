@@ -361,6 +361,26 @@ export class AiClient {
   }
 
   /**
+   * Whether the veil is down right now — read by a caller that lifts it for one
+   * request FOR AI and must put it back as it found it (Record Steps,
+   * stories/testbench-record-steps.md, decision 9), rather than guess.
+   */
+  get aiPolicyAllowed(): boolean {
+    return !this.aiForbidden;
+  }
+
+  /**
+   * Does the route this client is pointed at have a model it can call — a key,
+   * or a provider that authenticates itself (`aiConfigured`)? For a caller that
+   * must refuse BEFORE doing work a model will later be needed for (Record
+   * Steps refuses to start a recording nobody can write up), and that holds a
+   * session's client rather than the config it was built from.
+   */
+  isConfigured(): boolean {
+    return aiConfigured(this.config);
+  }
+
+  /**
    * Re-point the client at a new `model` / `apiKey` / `gatewayUrl` — used when
    * a saved `.env` edit changes `AI_MODEL` / `AI_API_KEY` / `AI_GATEWAY_URL`
    * between runs on a reused session. Only these three fields are env-mutable;

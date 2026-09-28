@@ -724,6 +724,464 @@ export interface CompileRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Record Steps stream (stories/testbench-record-steps.md §On the wire)
+// ---------------------------------------------------------------------------
+
+/**
+ * What one recorded action was. `check` is the one an Add check pick produces;
+ * every other kind is something the author did to the page.
+ */
+export type RecordActionKind =
+  | 'click'
+  | 'type'
+  | 'select'
+  | 'tick'
+  | 'untick'
+  | 'key'
+  | 'upload'
+  | 'navigate'
+  | 'tab'
+  | 'check'
+  // The browser's own gestures (decision 4, as widened 2026-09-26).
+  | 'drag'
+  | 'back'
+  | 'forward'
+  | 'reload';
+
+/** The recorder is installed and listening; the browser is on `url`. */
+export interface RecordStartedEvent {
+  type: 'record:started';
+  url: string;
+  title: string;
+}
+
+/**
+ * One action, as it happened — the panel's live list. `id` is what the client
+ * names in `dropped` on Stop; `summary` is one line with secrets already
+ * masked by the server, so the client prints it as it comes.
+ */
+export interface RecordActionEvent {
+  type: 'record:action';
+  id: string;
+  kind: RecordActionKind;
+  /**
+   * True for an ACTION — a click or a drag, Enter or Tab, Back / Forward /
+   * Refresh, an Add check pick, Enter in the address bar — which sends the
+   * draft to the model; false for an EVENT (typing, selecting, ticking,
+   * choosing files, a tab change) that rides with the next action
+   * (decision 4). Required on the wire; a client reads an absent flag as
+   * `true`, which is what every frame meant before the flag existed.
+   */
+  action: boolean;
+  summary: string;
+  /** Milliseconds since `record:started`. */
+  atMs: number;
+  /** The PageTracker label of the tab, when it is not `main`. */
+  tab?: string;
+}
+
+/** Add check was armed (the next click is picked, not performed) or disarmed. */
+export interface RecordPickEvent {
+  type: 'record:pick';
+  armed: boolean;
+}
+
+/**
+ * A draft call started (`busy: true`) or finished (`busy: false`) — the
+ * panel's "updating…" marker (stories/testbench-record-steps.md, decision 9:
+ * the steps are drafted live, as the author works).
+ */
+export interface RecordDraftingEvent {
+  type: 'record:drafting';
+  busy: boolean;
+}
+
+/**
+ * The draft as it stands. It REPLACES the previous one — the model may have
+ * rewritten the last few steps as well as appended — so a client renders it
+ * whole and never merges. `revision` increases by one per draft; a client
+ * ignores one that is not newer than the draft it holds.
+ *
+ * What the panel shows while recording. What goes into the file is
+ * `record:result`, not the last draft.
+ */
+export interface RecordDraftEvent {
+  type: 'record:draft';
+  revision: number;
+  /** Step texts in order, WITHOUT their numbers. */
+  steps: string[];
+  parameters: Array<{ name: string; value: string }>;
+  notes?: string[];
+  /** Id of the last action the draft covers. */
+  through?: string;
+  /**
+   * How many leading steps are LOCKED: the model can no longer rewrite them
+   * (stories/testbench-record-toolbar.md §"Locking in"). Everything up to and
+   * including the author's last step. A client reads an absent value as 0 —
+   * a server that predates locking.
+   */
+  locked?: number;
+  /** Indices (into `steps`) of the steps the author wrote — from the
+   *  toolbar's box, the editor, or the panel. Absent reads as none. */
+  authored?: number[];
+  /** Their ids (the `record:step` id), parallel to `authored`. */
+  authoredIds?: string[];
+  /**
+   * One stable id per step, parallel to `steps` (stories/testbench-record-edit-steps.md
+   * §"The wire, exactly"): kept while the step is unchanged in place, new when
+   * the model writes or rewrites it; an author step keeps its `s` id. Never
+   * collides with an action id. What `edit-step`, `drop` and `restore` name a
+   * step by. Absent from a server that predates editing: a client then offers
+   * no edit or delete of the model's steps.
+   */
+  ids?: string[];
+  /** Indices (into `steps`) of the steps whose text is the author's edit — a
+   *  subset of what the panel marks as the author's. Absent reads as none. */
+  edited?: number[];
+}
+
+/**
+ * A step's text was changed by the author (stories/testbench-record-edit-steps.md):
+ * in the browser toolbar's drawer, in the test file, or in the panel. `id` is
+ * the step that now holds `text` — the one named in `edit-step`, or, when the
+ * model rewrote that one meanwhile, whichever step now stands for the same
+ * actions.
+ */
+export interface RecordEditedEvent {
+  type: 'record:edited';
+  id: string;
+  text: string;
+  source: 'toolbar' | 'editor' | 'panel';
+}
+
+/**
+ * Pause or Resume — from the toolbar or the panel. While paused nothing is
+ * recorded and no draft call starts (stories/testbench-record-toolbar.md
+ * §"Pause and resume, in detail").
+ */
+export interface RecordPausedEvent {
+  type: 'record:paused';
+  paused: boolean;
+  /** Milliseconds since `record:started`. */
+  atMs: number;
+  source: 'toolbar' | 'panel';
+}
+
+/**
+ * A step the author wrote joined the recording — typed in the toolbar's box,
+ * in the test file (the editor), or given to the panel. Its id is dropped and
+ * restored like an action's.
+ */
+export interface RecordStepEvent {
+  type: 'record:step';
+  id: string;
+  /** The step as it goes in: one line, no leading number. */
+  text: string;
+  source: 'toolbar' | 'editor' | 'panel';
+  /** Where it sits: the 0-based index of the draft step it follows in the
+   *  draft it joined (-1 at the very start) — it is step `afterStep + 1` of
+   *  the next `record:draft`, whose `authored` says the same. */
+  afterStep: number;
+  atMs: number;
+}
+
+/**
+ * An action or a step was removed from the recording, or put back — the
+ * toolbar's Undo / Restore, a step deleted in its drawer, the panel or the
+ * test file — and the panel strikes the row through, or restores it.
+ */
+export interface RecordDroppedEvent {
+  type: 'record:dropped';
+  /** An action's id, or a step's (`record:draft.ids`, or an author step's). */
+  id: string;
+  dropped: boolean;
+  source: 'toolbar' | 'panel' | 'editor';
+  /**
+   * A step deleted (or restored): the actions it stood for, dropped (or
+   * restored) with it (stories/testbench-record-edit-steps.md, decision 2).
+   * Absent for an action, and from a server that predates step deletes.
+   */
+  actions?: string[];
+}
+
+/** Where the browser toolbar docks: top or bottom, left, centre or right. */
+export type RecordToolbarDock = 'tl' | 'tc' | 'tr' | 'bl' | 'bc' | 'br';
+
+/** The toolbar was moved or minimised — TestBench remembers it for the next
+ *  recording and sends it back in the start body's `toolbar`. */
+export interface RecordToolbarEvent {
+  type: 'record:toolbar';
+  dock: RecordToolbarDock;
+  minimised: boolean;
+}
+
+/** Stop was received; the draft is being finished (one more call only when
+ *  it does not already cover every remaining action). */
+export interface RecordWritingEvent {
+  type: 'record:writing';
+}
+
+/**
+ * What the recording wrote. The client does the editing: it numbers `steps`
+ * after the cursor, renumbers the rest, and adds each parameter the file does
+ * not already have.
+ */
+export interface RecordResultEvent {
+  type: 'record:result';
+  /** Step texts in order, WITHOUT their numbers. */
+  steps: string[];
+  /** A secret's value is `$NAME` — the `.env` variable that holds it. */
+  parameters: Array<{ name: string; value: string }>;
+  /** Anything the author should know. */
+  notes?: string[];
+}
+
+/**
+ * The record stream's last frame. Its own shape rather than `DoneEvent`:
+ * the vocabulary is narrower (a recording has no `failed`) and it carries the
+ * reason an `error` ended it, which a run's `done` does not.
+ */
+export interface RecordDoneEvent {
+  type: 'done';
+  status: 'passed' | 'error' | 'aborted';
+  error?: string;
+  /**
+   * `aborted` by Cancel pressed in the browser's toolbar: no error text, and
+   * TestBench takes the drafts out quietly, as for its own Cancel.
+   */
+  cancelledBy?: 'browser';
+}
+
+export type RecordStepsEvent =
+  | RecordStartedEvent
+  | RecordActionEvent
+  | RecordPickEvent
+  | RecordDraftingEvent
+  | RecordDraftEvent
+  | RecordPausedEvent
+  | RecordStepEvent
+  | RecordEditedEvent
+  | RecordDroppedEvent
+  | RecordToolbarEvent
+  | RecordWritingEvent
+  | RecordResultEvent
+  | OutputEvent
+  | RecordDoneEvent;
+
+export function isRecordStepsEvent(value: unknown): value is RecordStepsEvent {
+  if (!value || typeof value !== 'object') return false;
+  const t = (value as { type?: unknown }).type;
+  return (
+    t === 'record:started' ||
+    t === 'record:action' ||
+    t === 'record:pick' ||
+    // Live drafting (decision 9). The run controller consumes this guard and
+    // drops what it rejects, so a frame missing here never reaches the panel.
+    t === 'record:drafting' ||
+    t === 'record:draft' ||
+    // The browser toolbar (stories/testbench-record-toolbar.md §"The wire,
+    // exactly"): pause markers, the author's steps, drops made in the page,
+    // and where the toolbar sits.
+    t === 'record:paused' ||
+    t === 'record:step' ||
+    // Edits of recorded steps (stories/testbench-record-edit-steps.md).
+    t === 'record:edited' ||
+    t === 'record:dropped' ||
+    t === 'record:toolbar' ||
+    t === 'record:writing' ||
+    t === 'record:result' ||
+    t === 'output' ||
+    t === 'done'
+  );
+}
+
+/** `POST /sessions/:id/record-steps` — always SSE. */
+export interface RecordStepsRequest {
+  /** The session's file; also resolves the project. */
+  testFilePath: string;
+  /**
+   * Only on the session's FIRST request — the same write-once object and rule
+   * as the steps route's `config` (`StreamStepsRequest.config`).
+   */
+  config?: { baseUrl?: string; timeout?: string; viewport?: string };
+  target: {
+    mode: 'cursor' | 'new';
+    /** The document as it stands, for the prompt. */
+    fileText: string;
+    /** 1-based; mode `cursor` only. The line the steps go after. */
+    cursorLine?: number;
+  };
+  /**
+   * The project's `.env` as the client resolved it — the same map, and the
+   * same reason, as `StreamStepsRequest.env`: a recording can be the request
+   * that CREATES the session, and a session's model client is built from it.
+   * Beyond the story's wire block; see its "What the TestBench half decided".
+   */
+  env?: Record<string, string>;
+  /** The selected environment, as `StreamStepsRequest.envName`. */
+  envName?: string;
+  /**
+   * The browser toolbar (stories/testbench-record-toolbar.md). Absent means
+   * `{ enabled: true, dock: 'bc', minimised: false }`. TestBench sends the
+   * `testbench-native.recordSteps.browserToolbar` setting as `enabled`, and
+   * the dock and minimised state the last recording's `record:toolbar` left.
+   */
+  toolbar?: {
+    /** false: no toolbar in the page. */
+    enabled: boolean;
+    /** Default `bc`. */
+    dock?: RecordToolbarDock;
+    /** Default false. */
+    minimised?: boolean;
+  };
+}
+
+/** `POST /sessions/:id/record-steps/control` — JSON, answers 202. */
+export type RecordControlRequest =
+  | { action: 'stop'; dropped?: string[] }
+  | { action: 'check' }
+  | { action: 'cancel-check' }
+  | { action: 'cancel' }
+  /** Leave this action — or step — out, and redraft now (decision 9). A step
+   *  (`record:draft.ids`) is deleted, and the actions it stood for are
+   *  dropped with it (stories/testbench-record-edit-steps.md). The server also
+   *  unions `stop`'s `dropped` with these. `source`: where a step's delete was
+   *  made, echoed in its `record:dropped` (`panel` when absent); a server that
+   *  predates it ignores it. */
+  | { action: 'drop'; id: string; source?: 'editor' | 'panel' }
+  /** Put a dropped action or step back (a step with its actions). */
+  | { action: 'restore'; id: string; source?: 'editor' | 'panel' }
+  /**
+   * The author reworded a step (stories/testbench-record-edit-steps.md): in
+   * the test file (`editor`) or the panel. `text` is one line, kept exactly;
+   * the model neither rewords it nor writes another step for its actions.
+   * `revision` is the `record:draft` the author was looking at. An empty text
+   * is not an edit — send `drop`.
+   */
+  | { action: 'edit-step'; id: string; text: string; source: 'editor' | 'panel'; revision?: number }
+  /** Stop recording and drafting until `resume`. */
+  | { action: 'pause' }
+  | { action: 'resume' }
+  /**
+   * A step the author wrote — in the test file (`editor`) or given to the
+   * panel / the Add Step to Recording command (`panel`); the toolbar's box
+   * goes through the page, not here. One line is one step; several lines are
+   * several steps, in order. Everything drafted up to it is locked.
+   */
+  | {
+      action: 'add-step';
+      text: string;
+      source: 'editor' | 'panel';
+      /**
+       * Where it goes, in the draft the author saw (`revision`): the 0-based
+       * index of the step it goes AFTER (0 or more). Absent: at the end,
+       * after everything recorded so far.
+       */
+      afterStep?: number;
+      /** The `record:draft` revision `afterStep` refers to. */
+      revision?: number;
+    };
+
+/**
+ * What a control call answered: `ignored` when the server accepted the call
+ * but it did nothing (a pause while paused, an add-step after Stop), with the
+ * server's sentence for why as `reason` when it sent one (`{ ok: true,
+ * ignored: "<why>" }`). A server that sends no body is read as `{}`.
+ */
+export interface RecordControlAnswer {
+  ignored?: boolean;
+  reason?: string;
+}
+
+/**
+ * The panel's Recording block, as the host holds it. The host is the source of
+ * truth — the ✕ on a row asks the host to drop it, and the host re-posts the
+ * whole state — so what Stop sends as `dropped` is always what the panel shows.
+ */
+export interface RecordingPanelState {
+  /** The document being recorded into (`vscode.Uri.toString()`). */
+  uri: string;
+  /** Its basename, for the heading. */
+  file: string;
+  mode: 'cursor' | 'new';
+  /**
+   * `starting` until `record:started` (the browser may be launching),
+   * `recording` while actions stream, `finishing` after `record:writing` —
+   * the panel's "Finishing…" (SPEC-record-steps.md §3.2).
+   */
+  phase: 'starting' | 'recording' | 'finishing';
+  /** Add check is armed — from the last `record:pick`. */
+  pickArmed: boolean;
+  /** Paused — from the last `record:paused` (the toolbar's or the panel's).
+   *  Absent until the first one: not paused. */
+  paused?: boolean;
+  /** Where the browser was when recording started. */
+  startedUrl?: string;
+  /**
+   * The action list, in the order things happened: each action (`record:action`),
+   * and — since the browser toolbar — a `pause` / `resume` marker per
+   * `record:paused` and a `step` row per step of the author's (`record:step`).
+   * Markers are not actions (`action: false`) and cannot be dropped; a step
+   * row is dropped and restored by its id, like an action.
+   */
+  actions: Array<{
+    id: string;
+    kind: RecordingEntryKind;
+    /** `record:action.action`: false for an event that rides with the next
+     *  action (typing, selecting, ticking…), and for markers and steps. */
+    action: boolean;
+    /** The action's summary; a step's text; a marker's word. */
+    summary: string;
+    atMs: number;
+    tab?: string;
+    dropped: boolean;
+    /** `step` rows: where the author wrote it. `edit` rows: where the step
+     *  was reworded. */
+    source?: 'toolbar' | 'editor' | 'panel';
+    /** An action struck because the step it stood for was deleted
+     *  (`record:dropped.actions`): that step's id. Its ✕ restores it alone. */
+    droppedWith?: string;
+  }>;
+  /**
+   * Steps deleted from Steps so far — by the panel's ✕, the browser drawer,
+   * or a line deleted in the test file — shown struck, with Restore, where
+   * they were: after the step `after` names (null: at the top). Gone again
+   * when restored. Absent: none.
+   */
+  deletedSteps?: Array<{ id: string; text: string; after: string | null }>;
+  /**
+   * Steps so far: the latest `record:draft`, whole — each newer revision
+   * replaces it. Null until the first draft arrives.
+   */
+  draft: {
+    revision: number;
+    steps: string[];
+    parameters: Array<{ name: string; value: string }>;
+    notes: string[];
+    through?: string;
+    /** How many leading steps are locked. Absent when the frame said none
+     *  (a server that predates locking). */
+    locked?: number;
+    /** Indices into `steps` of the author's own steps, when there are any. */
+    authored?: number[];
+    /** Their ids, parallel to `authored` ('' where the server sent none). */
+    authoredIds?: string[];
+    /** Each step's id, parallel to `steps` — absent from a server that
+     *  predates editing, which leaves the panel no ✕ on a step. */
+    ids?: string[];
+    /** Indices into `steps` of the steps the author reworded. */
+    edited?: number[];
+  } | null;
+  /** A draft call is running — the "updating…" marker (`record:drafting`). */
+  drafting: boolean;
+}
+
+/** A row of the panel's action list: an action, or one of the toolbar's
+ *  additions — a pause or resume marker, or a step of the author's — or a
+ *  step the author reworded (`edit`, a marker: `✎ Edited step 4`). */
+export type RecordingEntryKind = RecordActionKind | 'pause' | 'resume' | 'step' | 'edit';
+
+// ---------------------------------------------------------------------------
 // Per-document state snapshot (sent host → webview)
 // ---------------------------------------------------------------------------
 
@@ -1177,6 +1635,29 @@ export interface HostCompileRunEventMsg {
   event: RunEvent;
 }
 
+/**
+ * The Recording block (stories/testbench-record-steps.md, decision 13). One
+ * recording at a time per window, so the state is window-wide rather than
+ * per file: the panel shows it whichever editor is active, because the author
+ * is clicking in a browser, not reading the editor. `null` takes it down.
+ */
+export interface HostRecordingMsg {
+  type: 'recording';
+  state: RecordingPanelState | null;
+}
+
+/**
+ * The answer to the Add step box's `recordAddStep` (by its `id`): whether the
+ * server took the steps. The box clears only when it did; otherwise it keeps
+ * the text and shows `reason`.
+ */
+export interface HostRecordAddStepResultMsg {
+  type: 'recordAddStepResult';
+  id: string;
+  accepted: boolean;
+  reason?: string;
+}
+
 export type HostToWebviewMsg =
   | HostActiveFileMsg
   | HostRunEventMsg
@@ -1192,7 +1673,9 @@ export type HostToWebviewMsg =
   | HostSkillRerunAvailableMsg
   | HostCompileEventMsg
   | HostCompileProgressMsg
-  | HostCompileRunEventMsg;
+  | HostCompileRunEventMsg
+  | HostRecordingMsg
+  | HostRecordAddStepResultMsg;
 
 // ---------------------------------------------------------------------------
 // Webview → host
@@ -1358,7 +1841,71 @@ export interface WebviewRerunFailedRowsMsg {
   table: 'run' | { section: string };
 }
 
+/** The panel's ● Record button — record at the active editor's cursor. */
+export interface WebviewRecordStepsMsg {
+  type: 'recordSteps';
+}
+
+/** The panel's Record New Test button. */
+export interface WebviewRecordNewTestMsg {
+  type: 'recordNewTest';
+}
+
+/** The Recording block's Stop — write the steps. */
+export interface WebviewRecordStopMsg {
+  type: 'recordStop';
+}
+
+/** The Recording block's Cancel — end without writing anything. */
+export interface WebviewRecordCancelMsg {
+  type: 'recordCancel';
+}
+
+/** The Recording block's Add check toggle — arms or disarms pick mode. */
+export interface WebviewRecordCheckMsg {
+  type: 'recordCheck';
+}
+
+/**
+ * The ✕ on an action row (or the restore on a struck-through one). Carries
+ * the state wanted rather than "toggle", so a double click that crosses a
+ * re-post cannot flip it back.
+ */
+export interface WebviewRecordDropMsg {
+  type: 'recordDrop';
+  id: string;
+  dropped: boolean;
+}
+
+/**
+ * The Recording block's Pause / Resume (stories/testbench-record-toolbar.md
+ * §"VS Code alongside"). Carries the state wanted, like `recordDrop`: the
+ * button shows what `record:paused` said, and a double click that crosses a
+ * re-post cannot flip it back.
+ */
+export interface WebviewRecordPauseMsg {
+  type: 'recordPause';
+  paused: boolean;
+}
+
+/** The Recording block's Add step box: one line is one step, several lines
+ *  are several steps, in order. `id` names this press: the host answers it
+ *  with `recordAddStepResult`, and the box keeps its text until then. */
+export interface WebviewRecordAddStepMsg {
+  type: 'recordAddStep';
+  text: string;
+  id?: string;
+}
+
 export type WebviewToHostMsg =
+  | WebviewRecordStepsMsg
+  | WebviewRecordNewTestMsg
+  | WebviewRecordStopMsg
+  | WebviewRecordCancelMsg
+  | WebviewRecordCheckMsg
+  | WebviewRecordDropMsg
+  | WebviewRecordPauseMsg
+  | WebviewRecordAddStepMsg
   | WebviewCompileMsg
   | WebviewReadyMsg
   | WebviewRunMsg
@@ -1404,7 +1951,9 @@ export function isHostMsg(value: unknown): value is HostToWebviewMsg {
     t === 'skillRerunAvailable' ||
     t === 'compileEvent' ||
     t === 'compileProgress' ||
-    t === 'compileRunEvent'
+    t === 'compileRunEvent' ||
+    t === 'recording' ||
+    t === 'recordAddStepResult'
   );
 }
 
@@ -1429,7 +1978,19 @@ export function isWebviewMsg(value: unknown): value is WebviewToHostMsg {
     t === 'clearStatus' ||
     t === 'webviewState' ||
     t === 'rerunSkillStep' ||
-    t === 'compile'
+    t === 'compile' ||
+    // Record Steps (stories/testbench-record-steps.md). `runner-view.ts` drops
+    // anything this guard rejects, so a panel button whose type is missing
+    // here does nothing at all — silently.
+    t === 'recordSteps' ||
+    t === 'recordNewTest' ||
+    t === 'recordStop' ||
+    t === 'recordCancel' ||
+    t === 'recordCheck' ||
+    t === 'recordDrop' ||
+    // The browser toolbar's panel parity (stories/testbench-record-toolbar.md).
+    t === 'recordPause' ||
+    t === 'recordAddStep'
   );
 }
 

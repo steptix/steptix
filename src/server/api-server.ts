@@ -26,12 +26,21 @@ import { userRootDir } from '../env/user-root.js';
 import { loadConfig } from '../config/loader.js';
 import fs from 'node:fs';
 import {
+  RecordingInProgressError,
   SessionManager,
   type RunEvent,
   type RunEventListener,
   type SessionManagerDeps,
   type StepRequest,
 } from './session-manager.js';
+import {
+  TOOLBAR_DOCKS,
+  type RecordControl,
+  type RecordEventListener,
+  type RecordStepsRequest,
+  type RecordStreamEvent,
+  type ToolbarDock,
+} from '../recorder/types.js';
 import { ErrandRunner, type ErrandRequest } from './errand-runner.js';
 import {
   CodeBehindCompiler,
@@ -274,7 +283,7 @@ function respondToPageCaptureError(err: unknown, res: Response): boolean {
 }
 
 /** Write a single SSE frame. */
-function writeSseEvent(res: Response, event: RunEvent | CompileWireEvent): void {
+function writeSseEvent(res: Response, event: RunEvent | CompileWireEvent | RecordStreamEvent): void {
   res.write(`event: ${event.type}\n`);
   res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
@@ -283,7 +292,7 @@ function writeSseEvent(res: Response, event: RunEvent | CompileWireEvent): void 
  *  left. */
 interface SseStream {
   /** Write one frame, unless the client has already gone. */
-  emit: RunEventListener & CompileEventListener;
+  emit: RunEventListener & CompileEventListener & RecordEventListener;
   /** Aborted on client disconnect, so a run can stop instead of burning
    *  through every remaining step. */
   signal: AbortSignal;
@@ -345,7 +354,7 @@ function openSseStream(res: Response): SseStream {
   }, 25_000);
 
   return {
-    emit: (event: RunEvent | CompileWireEvent) => {
+    emit: (event: RunEvent | CompileWireEvent | RecordStreamEvent) => {
       if (clientGone) return;
       writeSseEvent(res, event);
     },
@@ -1073,6 +1082,17 @@ export function createApiServer(
         request.runSettings = parsed;
       }
 
+      // A Record Steps recording holds this session's queue
+      // (stories/testbench-record-steps.md, decision 3). A run is REFUSED
+      // rather than queued behind it: it would sit on an open stream with
+      // nothing on it for as long as the author keeps clicking, then run in a
+      // browser the author has moved on from. Before the stream opens, so it
+      // is a status code; the session manager refuses the race too.
+      if (sessionManager.isRecordingSteps(sessionId)) {
+        res.status(409).json({ error: new RecordingInProgressError(sessionId).message });
+        return;
+      }
+
       // One compile per test file at a time, shared with
       // `POST /codebehind/compile`. Decided BEFORE the stream opens, for the
       // reason that route takes its lock in the handler: once `flushHeaders`
@@ -1114,9 +1134,109 @@ export function createApiServer(
         res.status(400).json({ error: message });
         return;
       }
+      if (err instanceof RecordingInProgressError) {
+        res.status(409).json({ error: message });
+        return;
+      }
 
       next(err);
     }
+  });
+
+  // POST /sessions/:id/record-steps (stories/testbench-record-steps.md, On the
+  // wire).
+  //
+  // Always SSE. Everything that can refuse is decided BEFORE the stream opens,
+  // so a refusal is a status code: 400 for a malformed body, a headless server,
+  // `config` on a session that already has one, or a CDP-attached browser; 409
+  // when a run holds the session's queue or a recording already does. Once the
+  // stream is open, the recording runs until a control ends it — or the client
+  // closes the stream, which is `cancel`.
+  app.post('/sessions/:id/record-steps', async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const sessionId = String(req.params.id);
+      if (sessionId.length > 1024) {
+        res.status(400).json({ error: 'Session ID must be 1024 characters or fewer' });
+        return;
+      }
+      const parsed = parseRecordStepsRequest(req.body);
+      if (typeof parsed === 'string') {
+        res.status(400).json({ error: parsed });
+        return;
+      }
+      const begun = await sessionManager.beginRecordSteps(sessionId, parsed);
+      if (!begun.ok) {
+        res.status(begun.status).json({ error: begun.error });
+        return;
+      }
+      let sse: SseStream;
+      try {
+        sse = openSseStream(res);
+      } catch (err) {
+        // The slot, the queue and the in-flight count were taken above; a
+        // stream that never opened must not strand them.
+        begun.run.abandon();
+        throw err;
+      }
+      try {
+        await begun.run.run(sse.emit, sse.signal);
+      } finally {
+        sse.close();
+      }
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // POST /sessions/:id/record-steps/control — Stop, Drop, Restore, Add check,
+  // Cancel check, Cancel, Pause, Resume, Add step and Edit step, for the
+  // recording running in this session. 202 when accepted, 404 when no
+  // recording is running (SPEC-record-steps.md §9.3), 400 for a body that is
+  // none of the ten. Drop and Restore also take a step of the draft's id
+  // (record:draft.ids): a delete of that step and the actions behind it
+  // (stories/testbench-record-edit-steps.md). An edit-step that cannot apply
+  // (an unknown step, a secret from the editor, an empty text) is a 202 that
+  // says why in `ignored`.
+  //
+  // Some 202s do nothing, and say so in `ignored`: anything but `cancel` once
+  // Stop has been received (only `cancel` still applies — it abandons the call
+  // in flight); a `drop` / `restore` of an id the recording does not have or
+  // that is already in that state; `pause` while paused and `resume` while
+  // not; Add check while paused; an `add-step` whose every line is blank, or
+  // one from the editor that holds a secret the recording knows (the line is
+  // the author's text; the reason says what to write in its place).
+  // They are still 202 because the recording IS running, and the contract has
+  // two answers; a 404 for an unknown ACTION id would read to a client as "no
+  // recording". `add-step` is accepted at once and carried out after: the
+  // draft is brought up to date first, which is a model call.
+  app.post('/sessions/:id/record-steps/control', (req: Request, res: Response) => {
+    const sessionId = String(req.params.id);
+    const control = parseRecordControl(req.body);
+    if (typeof control === 'string') {
+      res.status(400).json({ error: control });
+      return;
+    }
+    const outcome = sessionManager.controlRecordSteps(sessionId, control);
+    if (outcome === 'no-recording') {
+      res.status(404).json({ error: 'No recording is running for this session.' });
+      return;
+    }
+    if (outcome === 'stopping') {
+      res.status(202).json({
+        ok: true,
+        ignored: 'The recording has already been stopped and its steps are being written; only "cancel" still applies.',
+      });
+      return;
+    }
+    if (outcome === 'ignored') {
+      res.status(202).json({ ok: true, ignored: ignoredControlMessage(control) });
+      return;
+    }
+    if (typeof outcome === 'object') {
+      res.status(202).json({ ok: true, ignored: outcome.ignored });
+      return;
+    }
+    res.status(202).json({ ok: true });
   });
 
   // POST /codebehind/compile (stories/codebehind-compile.md §Server)
@@ -2936,4 +3056,211 @@ function parseErrandRequest(raw: unknown): ErrandRequest | string {
   }
 
   return request;
+}
+
+/**
+ * Validate a `POST /sessions/:id/record-steps` body
+ * (stories/testbench-record-steps.md, On the wire). Answers the request, or the
+ * 400's sentence.
+ *
+ * Built field by field from an allow-list, as the steps route builds
+ * `StepRequest`: a key this function does not name does not travel.
+ */
+export function parseRecordStepsRequest(raw: unknown): RecordStepsRequest | string {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return 'Request body must be a JSON object.';
+  }
+  const body = raw as Record<string, unknown>;
+  if (typeof body.testFilePath !== 'string' || body.testFilePath.trim() === '') {
+    return '"testFilePath" is required: the session\'s test file, which also resolves the project.';
+  }
+  const target = body.target;
+  if (target === null || typeof target !== 'object' || Array.isArray(target)) {
+    return '"target" is required: { mode: "cursor" | "new", fileText: string, cursorLine?: number }.';
+  }
+  const t = target as Record<string, unknown>;
+  if (t.mode !== 'cursor' && t.mode !== 'new') {
+    return '"target.mode" must be "cursor" or "new".';
+  }
+  if (typeof t.fileText !== 'string') {
+    return '"target.fileText" must be the document\'s text, as a string.';
+  }
+  const request: RecordStepsRequest = {
+    testFilePath: body.testFilePath,
+    target: { mode: t.mode, fileText: t.fileText },
+  };
+  if (t.mode === 'cursor') {
+    if (!Number.isInteger(t.cursorLine) || (t.cursorLine as number) < 1) {
+      return '"target.cursorLine" must be a positive integer (1-based) when "target.mode" is "cursor".';
+    }
+    request.target.cursorLine = t.cursorLine as number;
+  }
+  if (body.config !== undefined && body.config !== null) {
+    if (typeof body.config !== 'object' || Array.isArray(body.config)) {
+      return '"config" must be an object.';
+    }
+    // The steps route's one validated config key, validated the same way.
+    const unmask = (body.config as Record<string, unknown>)['unmask'];
+    if (unmask !== undefined && typeof unmask !== 'string') {
+      return 'config.unmask must be a comma-separated string.';
+    }
+    // Cast like the steps route's: the session manager owns the validators
+    // (viewport, cdp) and refuses a bad value before it launches anything.
+    request.config = body.config as NonNullable<RecordStepsRequest['config']>;
+  }
+  if (body.env !== undefined && body.env !== null) {
+    if (typeof body.env !== 'object' || Array.isArray(body.env)) {
+      return '"env" must be an object of string values.';
+    }
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(body.env as Record<string, unknown>)) {
+      if (typeof v === 'string') env[k] = v;
+    }
+    request.env = env;
+  }
+  // The browser toolbar (stories/testbench-record-toolbar.md, "The wire,
+  // exactly"). Absent: on, docked bottom centre, not minimised.
+  if (body.toolbar !== undefined && body.toolbar !== null) {
+    if (typeof body.toolbar !== 'object' || Array.isArray(body.toolbar)) {
+      return '"toolbar" must be an object: { enabled: boolean, dock?: "tl" | "tc" | "tr" | "bl" | "bc" | "br", minimised?: boolean }.';
+    }
+    const tb = body.toolbar as Record<string, unknown>;
+    if (typeof tb.enabled !== 'boolean') return '"toolbar.enabled" must be true or false.';
+    const toolbar: NonNullable<RecordStepsRequest['toolbar']> = { enabled: tb.enabled };
+    if (tb.dock !== undefined && tb.dock !== null) {
+      if (typeof tb.dock !== 'string' || !TOOLBAR_DOCKS.has(tb.dock as ToolbarDock)) {
+        return '"toolbar.dock" must be one of: tl, tc, tr, bl, bc, br.';
+      }
+      toolbar.dock = tb.dock as ToolbarDock;
+    }
+    if (tb.minimised !== undefined && tb.minimised !== null) {
+      if (typeof tb.minimised !== 'boolean') return '"toolbar.minimised" must be true or false.';
+      toolbar.minimised = tb.minimised;
+    }
+    request.toolbar = toolbar;
+  }
+  return request;
+}
+
+/** Why a control that the running recording answered with `ignored` did nothing. */
+function ignoredControlMessage(control: RecordControl): string {
+  switch (control.action) {
+    case 'restore':
+      return `${control.id} is not dropped, so there is nothing to restore.`;
+    case 'drop':
+      return `There is no action or step ${control.id} to drop, or it is already dropped.`;
+    case 'pause':
+      return 'The recording is already paused.';
+    case 'resume':
+      return 'The recording is not paused.';
+    case 'check':
+      return 'The recording is paused; resume it to add a check.';
+    case 'add-step':
+      return 'The text holds no step: every line is blank.';
+    case 'edit-step':
+      return `There is no step ${control.id} to change.`;
+    default:
+      return 'Nothing to do.';
+  }
+}
+
+/** Validate a `POST /sessions/:id/record-steps/control` body. */
+export function parseRecordControl(raw: unknown): RecordControl | string {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return (
+      'Request body must be a JSON object: { action: "stop" | "drop" | "restore" | "check" | "cancel-check" | ' +
+      '"cancel" | "pause" | "resume" | "add-step" | "edit-step" }.'
+    );
+  }
+  const body = raw as Record<string, unknown>;
+  switch (body.action) {
+    case 'stop': {
+      if (body.dropped === undefined || body.dropped === null) return { action: 'stop' };
+      if (!Array.isArray(body.dropped) || !body.dropped.every((d) => typeof d === 'string')) {
+        return '"dropped" must be an array of action ids (strings).';
+      }
+      return { action: 'stop', dropped: body.dropped as string[] };
+    }
+    case 'drop':
+    case 'restore': {
+      if (typeof body.id !== 'string' || body.id === '') {
+        return (
+          `"${body.action}" needs "id": the id of the record:action, the record:step or the step ` +
+          `(record:draft.ids) to ${body.action}.`
+        );
+      }
+      // Not in the story's wire, and optional: where a step's delete came
+      // from, echoed in its record:dropped ('panel' when absent).
+      if (body.source !== undefined && body.source !== null && body.source !== 'editor' && body.source !== 'panel') {
+        return '"source" must be "editor" or "panel" when it is given.';
+      }
+      return {
+        action: body.action,
+        id: body.id,
+        ...((body.source === 'editor' || body.source === 'panel') && { source: body.source }),
+      };
+    }
+    case 'edit-step': {
+      if (typeof body.id !== 'string' || body.id === '') {
+        return '"edit-step" needs "id": the id of the step (record:draft.ids) the author changed.';
+      }
+      if (typeof body.text !== 'string') {
+        return '"edit-step" needs "text": the step as the author changed it (one line).';
+      }
+      if (body.source !== 'editor' && body.source !== 'panel') {
+        return '"edit-step" needs "source": "editor" or "panel" (the drawer\'s edits go through the page).';
+      }
+      const control: Extract<RecordControl, { action: 'edit-step' }> = {
+        action: 'edit-step',
+        id: body.id,
+        text: body.text,
+        source: body.source,
+      };
+      if (body.revision !== undefined && body.revision !== null) {
+        if (!Number.isInteger(body.revision) || (body.revision as number) < 0) {
+          return '"revision" must be a whole number: the record:draft revision the author saw.';
+        }
+        control.revision = body.revision as number;
+      }
+      return control;
+    }
+    case 'check':
+      return { action: 'check' };
+    case 'cancel-check':
+      return { action: 'cancel-check' };
+    case 'cancel':
+      return { action: 'cancel' };
+    case 'pause':
+      return { action: 'pause' };
+    case 'resume':
+      return { action: 'resume' };
+    case 'add-step': {
+      if (typeof body.text !== 'string') {
+        return '"add-step" needs "text": the step as the author wrote it (several lines are several steps).';
+      }
+      if (body.source !== 'editor' && body.source !== 'panel') {
+        return '"add-step" needs "source": "editor" or "panel" (the toolbar\'s box goes through the page).';
+      }
+      const control: Extract<RecordControl, { action: 'add-step' }> = {
+        action: 'add-step',
+        text: body.text,
+        source: body.source,
+      };
+      if (body.afterStep !== undefined && body.afterStep !== null) {
+        if (!Number.isInteger(body.afterStep) || (body.afterStep as number) < 0) {
+          return '"afterStep" must be a whole number, 0 or more: the index in the draft the step goes after.';
+        }
+        control.afterStep = body.afterStep as number;
+      }
+      if (body.revision !== undefined && body.revision !== null) {
+        if (!Number.isInteger(body.revision) || (body.revision as number) < 0) {
+          return '"revision" must be a whole number: the record:draft revision "afterStep" refers to.';
+        }
+        control.revision = body.revision as number;
+      }
+      return control;
+    }
+    default:
+      return '"action" must be one of: stop, drop, restore, check, cancel-check, cancel, pause, resume, add-step, edit-step.';
+  }
 }
