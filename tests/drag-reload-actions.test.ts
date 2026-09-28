@@ -5,8 +5,9 @@
  * Built the way `back` / `forward` were (docs/specs/SPEC-browser-history.md),
  * and tested the way their review said they had to be: three of that feature's
  * tests did not bite until they were mutation-checked — the VALID_ACTION_TYPES
- * entry (an unknown type is KEPT and runs as a no-op that reports success, so
- * nothing else notices the list losing one), a code-generation rule asserted as
+ * entry (an unknown type was KEPT and ran as a no-op that reported success, so
+ * nothing else noticed the list losing one; `executeAction` now refuses it —
+ * tests/unknown-action-type.test.ts), a code-generation rule asserted as
  * if it were conditional while it was emitted on every compile, and the claim
  * that the actions are not on the compile's refusal list. Each is pinned here
  * with its control.
@@ -41,7 +42,7 @@ describe('drag and reload — the parser', () => {
     }
   });
 
-  it('normalises the spellings a model reaches for — each would otherwise be a silent no-op', () => {
+  it('normalises the spellings a model reaches for — each would otherwise cost a failed attempt', () => {
     for (const [raw, canonical] of [
       ['refresh', 'reload'], ['reloadPage', 'reload'], ['browserRefresh', 'reload'],
       ['dragTo', 'drag'], ['dragAndDrop', 'drag'], ['drag_and_drop', 'drag'], ['dragDrop', 'drag'],

@@ -6,6 +6,73 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Fixed — an action the framework does not have fails the step instead of passing it
+
+A model that answered "Tick the I agree box" with `{"action": "check"}` used to
+pass the step green with the box unticked: the parser kept the unknown type
+with a warning, and the executor's fallback reported success. The next step
+then failed on the wrong line, or the test passed having done nothing. It had
+only ever been patched one near-miss at a time (`goBack` → `back`,
+`refresh` → `reload`).
+
+Now a reply holding an unknown action type is refused as a whole, before any of
+its actions touches the page, so a retry never starts from a half-changed page.
+The step's error is one short sentence (`Unknown action type "check" — the
+framework has no such action, so nothing was done on the page`), and the
+model's reply stays in the report with the ✗ on that action. The retry lists
+the actions that act on the page, leaving out the ones that can end a step
+having done nothing (`noop`, `prompt` and the like), keeps the selector in its
+account of what failed without telling the model to pick another one, and gives
+it an honest way out: when no action does what the step asks, it reports the
+step unachievable with an `assert` whose `holds` is false, rather than typing
+or clicking something the step never asked for. The page loop now honours that
+`holds: false`, which rule 24 already described but the parser used to reject,
+by failing the step with the model's evidence and no retry. Measured with the
+real model: `check` recovered as `click` 5 times out of 5, and a misplaced
+`[use ai]` line (which the model turns into an `ai` action) went from passing on
+an invented name typed into a field 4 times out of 5 to failing honestly 5 times
+out of 5 with the page untouched.
+
+Action names are also matched regardless of case and separators (`Click`,
+`SWITCH_PAGE`, `read_table`). The action types the step loop handles itself are
+refused as a framework bug if they ever reach the page executor, and its
+`switch` is now checked for completeness at compile time, so a new action type
+cannot be added unwired.
+
+### Fixed — a `[use ai]` step that needs a secret fails instead of storing `***`
+
+A `[use ai]` step's text reaches the model with secret-named values masked as
+`***`, but the model was not told what that meant. "Repeat {{password}} back
+and store it in echo" stored the literal `***` and passed, and every later step
+used three asterisks. When a step's text had a value masked, the model is now
+told `***` is a value hidden from it and to reply with an error if it needs it.
+A value that still contains the mask is refused rather than stored, in the
+spellings an echo takes too (`* * *`, `\*\*\*`, `＊＊＊`, `*-*-*`). Whether the
+model refuses or answers, the error names what was hidden (never its value),
+and a variable hidden only by its name is said to be: `{{keyword}}` contains
+"key", and renaming it lifts the mask. A step that masked nothing is unchanged,
+so an answer that legitimately contains asterisks still passes.
+
+Inside a skill or a looped `### Section`, the step never got that far: a skill
+argument or a row value is written into the step's text before the step runs,
+so no placeholder was left to mask, and a `password` column reached the model
+in clear. The step's own words are now masked with the run's secret set, the
+same set the report is masked with. See
+[issue 060](issues/resolved/060-use-ai-step-stores-a-masked-secret-and-passes.md).
+
+### Fixed — skill arguments and looped-section rows stay masked in the run's output
+
+The CLI never counted a skill call's arguments or a looped section's row values
+as secrets, so a `password` column printed in clear on the console, in the
+report and in the run log. The Sessions API did count them, but merged them
+with the test's variables into one map, which keeps one value per name. The
+second row's `password` evicted the first row's from the mask set, and
+`[skill: login password="{{password}}"]`, the usual way to hand a login skill
+the test's password, evicted the real password in favour of the placeholder
+text, so it printed in clear for the whole run. Both now pool each call's and
+each row's values into the secret set instead. The Electron app does the same
+for a `[use ai]` step's text; its other output still leaves them out.
+
 ### Added — Record Steps: write a test by using the app (TestBench)
 
 Press **Record** in TestBench (or run **Record New Test**), use the application

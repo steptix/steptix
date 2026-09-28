@@ -1,10 +1,10 @@
-# 061 — `[use ai]` review: eleven user-facing findings, not yet fixed
+# 061 — `[use ai]` review: twelve user-facing findings, not yet fixed
 
 **Status:** open / known issues. Found by a review of PR #157 on 2026-09-24;
 the user decided they are not a priority to fix now.
 **Area:** the `[use ai]` step ([stories/use-ai-step.md](../stories/use-ai-step.md))
 and the paths around it.
-**Related:** [060](060-use-ai-step-stores-a-masked-secret-and-passes.md)
+**Related:** [060](resolved/060-use-ai-step-stores-a-masked-secret-and-passes.md)
 (a secret masked as `***` is stored).
 **Opened:** 2026-09-24
 
@@ -22,7 +22,8 @@ Finding 1 was a step-cache bug: a short generated value rewrote later steps'
 cached text. It was dropped when the step cache was removed. Code-behind, now
 the only replay mechanism, only uses the names a step references
 (`generate.ts:901`). The other findings keep their numbers so they still match
-the triage page.
+the triage page. Finding 13 is not on that page: a later review, of the fix
+for issue 060, found it on 2026-09-29.
 
 ## The findings
 
@@ -39,6 +40,15 @@ Ranked by user impact. Line references are as of commit 197c50c.
    an unknown action as success (`src/browser/actions.ts:566`). The fix is
    twofold: make an unknown action type fail the step, and call
    `useStepError` in the session, errand and hook loops.
+
+   *Half fixed 2026-09-29:* the invented `ai` action is refused before it
+   runs, and the retry offers the model an honest way out (an `assert` with
+   `holds: false`) instead of inviting a substitute. Measured with the real
+   model, the step went from passing on a name typed into an unrelated field 4
+   times in 5 to failing with the page untouched 5 times in 5. That failure
+   says the step cannot be done, not that `[use ai]` was misplaced; calling
+   `useStepError` in the session, errand and hook loops, which would say so
+   and make no model call, is still open.
 
 3. **A secret-named generated value is sent in clear** (high). It appears in
    the step-pass `output`, which reaches TestBench's Output log and Test
@@ -93,6 +103,18 @@ Ranked by user impact. Line references are as of commit 197c50c.
     - `test-writing-handbook.md:333` and `SPEC.md:163` say a skill's
       `[store as:]` is renamed per call, which holds only for the exact
       spelling.
+
+13. **With no explicit name, a value can be stored under the wrong case**
+    (medium). `[use ai] Write the single word OK and store it in ok`, answered
+    `{"as": "ok", "value": "OK"}`, stored the value as `{{OK}}`, not `{{ok}}`.
+    `nameTheStepGives` returns the spelling of the FIRST case-insensitive
+    whole-word match in the step (`use-ai-step-runner.ts:114-118` as of
+    b700473), and here that is the word the step quotes, "OK", which comes
+    before the name. Variable names are case-sensitive, so a later `{{ok}}` is
+    left literal with only a warning and fails somewhere else. Found by the
+    review of the issue-060 fix on 2026-09-29. The fix is to prefer a
+    whole-word match in the model's exact spelling, and to fall back to the
+    case-insensitive match only when there is none.
 
 ## Revisit when
 

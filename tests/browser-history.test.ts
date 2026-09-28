@@ -108,9 +108,10 @@ describe('back and forward — the parser (§4.1)', () => {
 
   /**
    * The list the parser validates against is its own pin: an unknown action
-   * type is KEPT verbatim and only warned about, then executed as a no-op that
-   * reports success — so without this, deleting `back` from
-   * `VALID_ACTION_TYPES` changes nothing any other test can see.
+   * type is KEPT verbatim and warned about. (It used to run as a no-op that
+   * reported success; `executeAction` now refuses it, so a missing `back`
+   * would fail loudly — see tests/unknown-action-type.test.ts. The parser's
+   * half is pinned here.)
    */
   it('are known action types, so the parser does not warn about them', () => {
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
@@ -330,10 +331,11 @@ describe('back and forward over a real page (§4.3, the same-document cases)', (
 });
 
 /**
- * The parser keeps an UNKNOWN action type verbatim, warns, and then the
- * executor runs it as a no-op that reports success — so a near-miss spelling
- * is the §2 defect through a different door, and `goBack` is the likeliest
- * miss of all: it is the Playwright call the code-generation prompt teaches.
+ * The parser keeps an UNKNOWN action type verbatim, and the executor refuses
+ * it, so a near-miss spelling costs a failed attempt and a retry — and `goBack`
+ * is the likeliest miss of all: it is the Playwright call the code-generation
+ * prompt teaches. (Before the refusal it was the §2 defect through a different
+ * door: a no-op that reported success.)
  */
 describe('back and forward — the spellings a model reaches for (§4.1)', () => {
   const warn = () => vi.spyOn(console, 'warn').mockImplementation(() => {});

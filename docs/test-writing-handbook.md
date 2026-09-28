@@ -333,8 +333,17 @@ call its value can be stored under any word of its sentence (`Write a paragraph
 about Australia` may become `{{paragraph}}`), so always name it. Inside a
 skill the name must be `[store as: name]` or `store as {{name}}`, which the
 skill's scoping renames per call. A secret-named value filled into the step
-reaches the model as `***`, exactly as in the `## Values` block (§4.4), so a
-step cannot compute from a secret.
+reaches the model as `***`, exactly as in the `## Values` block (§4.4), and so
+does a secret that a skill argument or a looped section's row writes into the
+step's text, so a step cannot compute from a secret. It fails instead of
+guessing: the model is told `***` is a value hidden from it, and an answer that
+still contains the mask, however it is spelled (`* * *`, `\*\*\*`), is refused.
+The error names what was hidden but never its value, whether the model refused
+or answered. A variable hidden only because its name contains `password`,
+`secret`, `token` or `key` is sent as itself once renamed; `{{keyword}}` is
+the usual surprise. The step's own words are masked with the same set the
+report uses, so a short secret value is also masked wherever those characters
+appear in the step, as it is in the report.
 
 `[use ai]` goes at the start of the step; anywhere else is a parse error, and
 so is `[use ai]` as the step a control line runs (put it in a `### Section`

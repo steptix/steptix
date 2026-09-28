@@ -153,6 +153,16 @@ export interface AIAction {
   condition?: string;
   /** Expected value for assertion */
   expected?: string;
+  /**
+   * `assert` only, and only ever `false`: the model conceding, in its own
+   * judgment, that the step cannot be done (system prompt rule 24; the retry
+   * after an unknown action type). Nothing is evaluated — the step loop fails
+   * the step with {@link evidence} and does not retry it. The parser drops
+   * `"holds": true`: a model certifying its own pass is not believed.
+   */
+  holds?: false;
+  /** With `holds: false`: why the step cannot be done, in the model's words. */
+  evidence?: string;
   /** Scroll direction */
   direction?: 'up' | 'down' | 'left' | 'right';
   /** Scroll amount in pixels */

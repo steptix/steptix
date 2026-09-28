@@ -1,11 +1,18 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Page, FrameLocator, Locator } from 'playwright';
-import type { AIAction, TableReadColumn, TableReadMapping } from '../ai/types.js';
+import type { AIAction, ActionType, TableReadColumn, TableReadMapping } from '../ai/types.js';
 // §9.2: one validator for both paths into the table extractor. The dependency
 // points this way because the parser owns the §6.2 rules and their wording;
-// nothing in `action-parser.ts` reaches back here.
-import { validateTableRead, MAX_TABLE_ROWS } from '../ai/action-parser.js';
+// nothing in `action-parser.ts` reaches back here. The action vocabulary comes
+// from the same place, for the same reason: the parser owns the list, and the
+// refusal below is worded once, there.
+import {
+  validateTableRead,
+  MAX_TABLE_ROWS,
+  isKnownActionType,
+  unknownActionTypeError,
+} from '../ai/action-parser.js';
 import { logger } from '../utils/logger.js';
 import { resolveUploadPaths, uploadPathsOf, type UploadPathContext } from './upload-paths.js';
 
@@ -220,6 +227,17 @@ export interface ActionExecutionResult {
    * so a retry only burns an AI turn (stories/upload-action.md §5).
    */
   retryable?: false;
+  /**
+   * The action was refused for its TYPE, before anything touched the page:
+   * a type the framework does not have (the model's mistake — retryable), or
+   * one the step loop runs and this function never should (a framework bug —
+   * not retryable). Either way the selector was never tried, so the step loop
+   * keeps it out of the retry's "Failed selectors … choose a different
+   * selector" line — which would steer the model off a target it had right,
+   * when the only thing wrong was the action's name — while the failure line
+   * itself still names it.
+   */
+  typeRefused?: true;
   /** How an `upload` delivered its files: straight onto an `<input
    *  type="file">`, or by answering the picker a control opened. Recorded so a
    *  compiled code-behind entry writes the shape that actually worked. */
@@ -253,6 +271,21 @@ export async function executeAction(
   options?: ExecuteActionOptions,
 ): Promise<ActionExecutionResult> {
   logger.subAction(action.description);
+
+  // ── The action's type, before anything touches the page ───────────────────
+  // A type the framework does not have fails HERE rather than in the switch's
+  // default, because everything between here and the switch — iframe
+  // promotion's `count()`, the frame check, the hoisted measurement wait —
+  // talks to the browser on behalf of an action that is not going to run. It
+  // used to reach a default that warned and answered `success: true`, so
+  // "Tick the I agree box" answered with `check` passed with the box unticked
+  // and the next step failed on the wrong line. The parser keeps such an
+  // action on purpose (the transcript shows what the model sent), and the step
+  // loop refuses the whole turn before calling here; this is the same answer
+  // for any other caller, so no path gets the old silent pass back.
+  if (!isKnownActionType(action.action)) {
+    return refuseUnknownType(action.action);
+  }
 
   // ── Upload paths, before anything touches the page ────────────────────────
   // Deliberately the FIRST thing an upload does. Everything below — selector
@@ -464,21 +497,6 @@ export async function executeAction(
         logger.debug(`switchFrame ignored — use the "frame" field on individual actions instead`);
         break;
 
-      case 'switchPage':
-        // Handled at the step executor level — it needs to update the active page reference
-        logger.debug(`switchPage action: target="${eff.page}" — ${eff.description}`);
-        break;
-
-      case 'closePage':
-        // Handled at the step executor level — it needs to close the page and update the active reference
-        logger.debug(`closePage action: target="${eff.page}" — ${eff.description}`);
-        break;
-
-      case 'openPage':
-        // Handled at the step executor level — it needs to spawn a new page and promote it as active
-        logger.debug(`openPage action: url="${eff.url}" — ${eff.description}`);
-        break;
-
       case 'dismiss':
         await executeDismiss(root, eff);
         break;
@@ -487,16 +505,6 @@ export async function executeAction(
       case 'keypress':
         // Keyboard events go to the focused element — always page-level
         await executeKeyboard(page, eff);
-        break;
-
-      case 'assert':
-        // Assertions are evaluated by the AI — no Playwright action needed
-        logger.debug(`assert action: ${eff.description}`);
-        break;
-
-      case 'prompt':
-        // Prompt actions are handled at the step executor level
-        logger.debug(`prompt action: ${eff.question ?? eff.description}`);
         break;
 
       case 'read': {
@@ -559,25 +567,46 @@ export async function executeAction(
         logger.debug(`noop action: ${eff.description}`);
         break;
 
-      // A no-op on the PAGE, exactly like `noop`. The flow-control decision is
-      // made by the step executor — the only place that knows whether the
-      // step's authored text claimed the form — and acted on by the run loop,
-      // which knows the frame (stories/step-flow-control.md). Listed rather
-      // than left to `default` so the unknown-action warning keeps its meaning.
+      // ── Types the step loop runs, never this function ─────────────────────
+      // Each needs something this layer does not have: the step's authored
+      // text (`return` and `fail` — stories/step-flow-control.md,
+      // stories/step-failure-outcomes.md), the AI client (`assert`), the
+      // person at the console (`prompt`), the page and browser trackers (the
+      // tab and browser actions), the API response store and CSRF cache
+      // (`api_call`, `extract_csrf`, `extract_value`), or the next turn's
+      // prompt (`find`, `expand`). So `executeStepAttempt` intercepts every one
+      // before it calls here. Had one arrived anyway, seven would have
+      // answered `success: true` from a no-op case here and the other eight
+      // from the default, having done nothing — the silent pass the
+      // unknown-type refusal closes, through another door. Named one by one,
+      // so the `never` below makes a new type choose between running here and
+      // being intercepted there.
+      case 'prompt':
       case 'return':
-        logger.debug(`return action: ${eff.description}`);
-        break;
-
-      // Also a no-op on the PAGE (stories/step-failure-outcomes.md, decision 1):
-      // the step executor composes the author's error and throws, and in practice
-      // it intercepts `fail` before the action loop hands it over. Listed for the
-      // reason `return` is — so a known action never trips the unknown-action warning.
       case 'fail':
-        logger.debug(`fail action: ${eff.description}`);
-        break;
+      case 'assert':
+      case 'openPage':
+      case 'switchPage':
+      case 'closePage':
+      case 'openBrowser':
+      case 'switchBrowser':
+      case 'closeBrowser':
+      case 'api_call':
+      case 'extract_csrf':
+      case 'extract_value':
+      case 'find':
+      case 'expand':
+        return refuseStepLoopType(eff.action);
 
-      default:
-        logger.warn(`Unknown action type: ${(eff as AIAction).action}`);
+      default: {
+        // Every ActionType has a case above, and `never` keeps it that way: a
+        // type added to the union without one does not compile. At run time
+        // the check at the top of this function has already refused any
+        // string the parser kept; this gives the same answer to a caller that
+        // got here some other way, instead of the old warn-and-succeed.
+        const unhandled: never = eff.action;
+        return refuseUnknownType(unhandled);
+      }
     }
 
     return {
@@ -631,6 +660,31 @@ export async function executeAction(
       ...(targeting !== undefined && { targeting }),
     };
   }
+}
+
+/**
+ * The model named an action the framework does not have. Retryable: a caller
+ * that retries puts the types the model may send instead into the retry prompt
+ * (`buildRetryContext`), so the model can answer with a real one. The error
+ * itself is the short sentence a person reads.
+ */
+function refuseUnknownType(type: unknown): ActionExecutionResult {
+  logger.error(`Action refused: unknown action type ${JSON.stringify(String(type))}`);
+  return { success: false, error: unknownActionTypeError(type), typeRefused: true };
+}
+
+/**
+ * A known type that only the step loop can run reached `executeAction` — see
+ * the case group at the end of its switch. A framework bug rather than a
+ * model mistake, so NOT retryable: a re-plan cannot fix the wiring, and asking
+ * the model to try again is how a workaround that does nothing gets found.
+ */
+function refuseStepLoopType(type: ActionType): ActionExecutionResult {
+  const error =
+    `"${type}" is run by the step loop, never by executeAction — reaching executeAction ` +
+    'with it is a framework bug, and nothing was done';
+  logger.error(`Action refused [${type}]: ${error}`);
+  return { success: false, error, typeRefused: true, retryable: false };
 }
 
 /**

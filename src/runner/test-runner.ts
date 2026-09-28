@@ -118,7 +118,14 @@ import { lastRunStaleMemberRow, writeLastRun, type LastRunStep } from '../codebe
 import { writeRecording } from '../codebehind/recording.js';
 import { envDataSecretValues, interpolateEnvData } from '../parser/interpolate-env-data.js';
 import { captureScreenshot } from '../browser/screenshot.js';
-import { maskRecordSecrets, redact, redactDeep, redactReport, runSecrets } from '../utils/secrets.js';
+import {
+  maskRecordSecrets,
+  redact,
+  redactDeep,
+  redactReport,
+  runSecrets,
+  runSecretsWithInputs,
+} from '../utils/secrets.js';
 
 /**
  * What the report says in place of a root-cause analysis when the run had no
@@ -488,7 +495,18 @@ export async function runTest(
   // What this run must never print (stories/secret-redaction.md): the values
   // of its secret-named parameters and of the env/data secrets its `${…}`
   // references resolved against. Read fresh each time — captures add to it.
-  const secretsNow = (): string[] => runSecrets({ parameters: resolvedParameters, envData: test.envData });
+  //
+  // And the skill arguments and looped-section rows the expander wrote into
+  // step TEXT, which are in no variable map: without them a `password` column
+  // printed in clear on the step line, in the report, and — in a `[use ai]`
+  // step — in what the model was sent (issue 060). The session loop has held
+  // them since data-driven rows; the CLI never did. Pooled per frame, not
+  // merged into one map (`runSecretsWithInputs` says why).
+  const frameInputs = Object.values(test.expansion?.frames ?? {}).flatMap((frame) =>
+    frame.inputs ? [frame.inputs] : [],
+  );
+  const secretsNow = (): string[] =>
+    runSecretsWithInputs({ parameters: resolvedParameters, envData: test.envData }, frameInputs);
   // `## Config: unmask: keyword, data.keys.public` — names this test declares
   // are not secrets, despite `isSecretName` matching them
   // (stories/placeholder-preserving-actions.md, decision 2). Read only by the

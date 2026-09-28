@@ -110,7 +110,7 @@ const INVENTORY: Record<string, { why: Classification; calls: number }> = {
   // Five: `substituteText`, `substituteAction` and `substituteAsLiterals`
   // themselves, and the calls `substituteAction` and `resolveSetTemplate`
   // make on `substituteText`.
-  // `resolveUseAiText` substitutes too, through its own `.replace` over the
+  // `resolveUseAiText` substitutes too, through its own walk over the
   // same grammar — which this detector does not count, so it is named here
   // instead: it builds the MASKED text a `[use ai]` step sends to the model,
   // from a line `parseUseAiStep` has already read, and nothing it returns is

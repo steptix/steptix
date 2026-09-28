@@ -469,6 +469,8 @@ carries a fresh capture, and an earlier release aliased it to `noop`, which
 ends the step — measured, "Click Print" passed with zero clicks after one
 model call.
 
+> **Update (2026-09-29):** the page surface now refuses an unknown action type too, failing the step instead of passing it; see CHANGELOG.
+
 **A directive nobody dispatched never reaches the model.** On the computer
 surface, a step that is a `[tool: …]` line the loop did not dispatch fails
 with a message naming the cause, without a capture or a model call. That
