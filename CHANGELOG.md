@@ -47,7 +47,7 @@ wording through every later draft and the model writes no second step for
 what it describes; deleting a step the model wrote also drops the recorded
 actions behind it, so no redraft brings it back, and Restore (or Ctrl+Z in the
 file) puts both back. See stories/testbench-record-edit-steps.md. Server:
-rebuild and restart; TestBench 0.5.158.
+rebuild and restart; TestBench 0.5.159.
 
 ### Added — `drag` and `reload` steps
 

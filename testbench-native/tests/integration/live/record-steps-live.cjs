@@ -616,11 +616,14 @@ function recordingSummary(hooks) {
 }
 
 /** The file's numbered steps read `expected` in order, numbered 1..n. */
-function stepsRead(text, expected) {
+/** The file's steps read `expected`, in order. `numbers: false` ignores the
+ *  step numbers — right after the author deletes a line, a write that would
+ *  only renumber waits, so one Ctrl+Z still brings the line back. */
+function stepsRead(text, expected, { numbers = true } = {}) {
   const steps = stepsOf(text);
   return (
     steps.length === expected.length &&
-    steps.every((s, i) => s.n === i + 1 && s.text === expected[i])
+    steps.every((s, i) => (!numbers || s.n === i + 1) && s.text === expected[i])
   );
 }
 

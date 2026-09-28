@@ -129,6 +129,7 @@ describe('TestBench live — Record Steps: edit, delete and type steps in the te
     )}\nfile:\n${fileText()}`;
   /** The file's steps: those before the block, the draft, then the tail — numbered 1..n. */
   const fileIsDraft = () => L.stepsRead(fileText(), [...pre, ...draft().steps, TAIL]);
+  const fileHasDraftSteps = () => L.stepsRead(fileText(), [...pre, ...draft().steps, TAIL], { numbers: false });
   const struckWith = (id) => (state()?.actions ?? []).filter((a) => a.droppedWith === id);
   const edits = () => (state()?.actions ?? []).filter((a) => a.kind === 'edit');
 
@@ -314,8 +315,37 @@ describe('TestBench live — Record Steps: edit, delete and type steps in the te
         60_000,
         summary,
       );
-      await L.waitFor('the file is the draft without it', fileIsDraft, 30_000, summary);
+      // The numbers below it may stay as they were: a write that would only
+      // renumber waits while the author's delete is the last change, so that
+      // ONE Ctrl+Z brings the line back (checked next).
+      await L.waitFor('the file holds the draft\'s steps without it', fileHasDraftSteps, 30_000, summary);
       const struck = struckWith(id);
+
+      // One Ctrl+Z, straight after the delete, brings it back — a restore.
+      await focusEditor();
+      await vscode.commands.executeCommand('undo');
+      assert.ok(fileText().includes(text), `ONE Ctrl+Z brought the line back:\n${fileText()}`);
+      await L.waitFor(
+        'the first undo is a restore: the step back, its actions un-struck',
+        () =>
+          !(state().deletedSteps ?? []).some((x) => x.id === id) &&
+          draft().steps.includes(text) &&
+          struck.every((a) => state().actions.find((b) => b.id === a.id)?.dropped === false),
+        60_000,
+        summary,
+      );
+      await L.waitFor('the file is the draft again', fileIsDraft, 30_000, summary);
+
+      // Deleted again, for the rest of this test.
+      cursorTo(await focusEditor(), lineOfStep(text), 2);
+      await vscode.commands.executeCommand('editor.action.deleteLines');
+      assert.ok(!fileText().includes(text), 'the line is gone again');
+      await L.waitFor(
+        'deleted again',
+        () => (state().deletedSteps ?? []).some((x) => x.id === id) && !draft().steps.includes(text) && struckWith(id).length > 0,
+        60_000,
+        summary,
+      );
       L.say(`deleting line "${text}" (${id}) struck: ${JSON.stringify(struck.map((a) => `${a.id} ${a.kind}: ${a.summary}`))}`);
       assert.ok(struck.every((a) => a.dropped));
       assert.ok(struck.some((a) => a.id === dashClick.id), `the Dashboard click is among them: ${JSON.stringify(struck)}`);
@@ -350,7 +380,8 @@ describe('TestBench live — Record Steps: edit, delete and type steps in the te
         summary,
       );
       await L.draftSettled(hooks, 'after the restore');
-      await L.waitFor('the file is the draft, every step once', fileIsDraft, 30_000, summary);
+      // Numbers may lag until the recording's next write that changes words.
+      await L.waitFor('the file holds the draft\'s steps, every step once', fileHasDraftSteps, 30_000, summary);
       L.say(`after Ctrl+Z: ${summary()}`);
       const steps = draft().steps;
       assert.equal(steps.filter((s) => s === text).length, 1, 'the restored step once');
