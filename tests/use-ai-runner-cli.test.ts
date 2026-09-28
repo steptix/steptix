@@ -87,14 +87,17 @@ vi.mock('../src/browser/screenshot.js', () => ({ captureScreenshot: async () => 
 let hooksStub: ResolvedHooks;
 vi.mock('../src/runner/hooks.js', () => ({ resolveHooks: vi.fn(async () => hooksStub) }));
 
-/** The model: a queue of replies, and every request it was sent. */
-const model = vi.hoisted(() => ({ replies: [] as string[], requests: [] as ChatMessage[][] }));
+/** The model: a queue of replies, and every request it was sent. With `echo`
+ *  it answers every call with its own user message as the value instead — the
+ *  bluntest form of what the real model did with issue 060's probe. */
+const model = vi.hoisted(() => ({ replies: [] as string[], requests: [] as ChatMessage[][], echo: false }));
 vi.mock('../src/ai/client.js', () => ({
   AiClient: class {
     setAiPolicy = vi.fn();
     syncAuth = vi.fn(() => null);
     async complete(messages: ChatMessage[]): Promise<{ text: string; model: string }> {
       model.requests.push(messages);
+      if (model.echo) return { text: JSON.stringify({ value: messages[1]!.content }), model: 'stub-model' };
       const text = model.replies.shift();
       if (text === undefined) throw new Error('the model was asked more times than scripted');
       return { text, model: 'stub-model' };
@@ -148,10 +151,14 @@ function config(): Config {
   };
 }
 
-async function instanceOf(markdown: string, name = 'use-ai.md'): Promise<TestInstance> {
+async function instanceOf(
+  markdown: string,
+  name = 'use-ai.md',
+  options: { skillsDir?: string } = {},
+): Promise<TestInstance> {
   const filePath = path.join(dir, name);
   await fs.writeFile(filePath, markdown);
-  const test: ParsedTest = await parseTestFile(filePath);
+  const test: ParsedTest = await parseTestFile(filePath, options);
   return { test, resolvedParameters: {} };
 }
 
@@ -173,6 +180,7 @@ beforeEach(async () => {
   executeStepCalls.length = 0;
   model.replies = [];
   model.requests = [];
+  model.echo = false;
   hooksStub = hooks();
   launchBrowserMock.mockReset();
   launchBrowserMock.mockResolvedValue({
@@ -321,6 +329,70 @@ describe('a data-row run', () => {
       'Type Sunny Perth into the notes',
       'Type Cool Hobart into the notes',
     ]);
+  });
+});
+
+describe('a secret the expander wrote into the step text (issue 060)', () => {
+  const SENTENCE = 'stands for a value that is hidden from you';
+  const IN_TEXT = "The value contains `***` — the mask for a secret written into the step's text";
+
+  it('masks a looped section row\'s secret column in every row, and an echo fails each one', async () => {
+    const md = [
+      '# t',
+      '',
+      '## Steps',
+      '1. Echo each password',
+      '',
+      '### Echo each password',
+      '| password |',
+      '|----------|',
+      '| cli-row-SECRET-1 |',
+      '| cli-row-SECRET-2 |',
+      '',
+      '1. [use ai] Repeat {{password}} exactly [store as: copy] otherwise continue',
+      '',
+    ].join('\n');
+    model.echo = true;
+    const { value: report, lines } = await logged(async () => runTest(await instanceOf(md), config()));
+
+    expect(model.requests.map((r) => r[1]!.content)).toEqual(['Repeat *** exactly', 'Repeat *** exactly']);
+    for (const request of model.requests) expect(request[0]!.content).toContain(SENTENCE);
+    expect(report.steps.map((s) => [s.status, s.tolerated])).toEqual([
+      ['failed', true],
+      ['failed', true],
+    ]);
+    for (const step of report.steps) expect(step.error).toContain(IN_TEXT);
+    // Nothing stored, and — now that `secretsNow()` holds the rows — neither
+    // value on the console or in the report, where the CLI used to print them.
+    expect(lines).not.toContain('[ai] copy');
+    const everything = lines + JSON.stringify(report) + JSON.stringify(model.requests);
+    expect(everything).not.toContain('cli-row-SECRET-1');
+    expect(everything).not.toContain('cli-row-SECRET-2');
+  });
+
+  it('masks a skill argument, and an echo fails the step', async () => {
+    const skillsDir = path.join(dir, 'skills');
+    await fs.mkdir(skillsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(skillsDir, 'echo.md'),
+      [
+        '---', 'type: skill', '---', '# echo', '',
+        '## Parameters', '- password: the value to repeat', '',
+        '## Steps', '1. [use ai] Repeat {{password}} exactly [store as: copy]', '',
+      ].join('\n'),
+    );
+    model.echo = true;
+    const instance = await instanceOf(stepsDoc('[skill: echo password="cli-skill-SECRET"]'), 'skill.md', {
+      skillsDir,
+    });
+    const { value: report, lines } = await logged(() => runTest(instance, config()));
+
+    expect(model.requests).toHaveLength(1);
+    expect(model.requests[0]![1]!.content).toBe('Repeat *** exactly');
+    expect(model.requests[0]![0]!.content).toContain(SENTENCE);
+    expect(report.status).toBe('failed');
+    expect(report.steps[0]!.error).toContain(IN_TEXT);
+    expect(lines + JSON.stringify(report) + JSON.stringify(model.requests)).not.toContain('cli-skill-SECRET');
   });
 });
 

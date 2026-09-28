@@ -23,7 +23,14 @@ import type { PriorFailureContext, RetryDiagnostics, ApiPromptContext, BranchOut
 import { diagnosePageState, waitForPageStability, waitForPostActionSettle, capturePageSignal, PageActivityTracker } from '../browser/page-state.js';
 import type { PageStateDiagnosis } from '../browser/page-state.js';
 import type { ChatMessage } from '../ai/types.js';
-import { parseAIResponse, parseAssertionCode, parseBranchedResponse, extractJson } from '../ai/action-parser.js';
+import {
+  parseAIResponse,
+  parseAssertionCode,
+  parseBranchedResponse,
+  extractJson,
+  isKnownActionType,
+  unknownActionTypeError,
+} from '../ai/action-parser.js';
 import { captureDomSnapshot, findInDom, expandDomSubtree, formatFindResults, formatExpandResult } from '../browser/dom-cleaner.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { executeAction } from '../browser/actions.js';
@@ -404,6 +411,15 @@ export const FAIL_NOT_CLAIMED =
   '"If <condition> then fail the test with error \'…\'", or a step that is ' +
   'just "Fail the test with error \'…\'", may fail the run on purpose. Do what ' +
   'this step asks instead.';
+
+/**
+ * What a step fails with when the model concedes it — an `assert` with
+ * `"holds": false` (see `AIAction.holds`) — carrying the model's own evidence,
+ * already masked. Says whose judgment it is, because nothing evaluated it.
+ */
+export function concededStepError(evidence: string): string {
+  return `The model reported that this step cannot be done: ${evidence}`;
+}
 
 /** Extract text-only content from a ChatMessage (strips base64 image blocks) */
 function extractTextFromMessage(msg: ChatMessage): string {
@@ -2538,6 +2554,45 @@ async function executeStepAttempt(
     let turnNonRetryable = false;
     let turnError: string | undefined;
 
+    // Every action's TYPE, checked for the whole turn before any of it runs —
+    // the reference rule below, applied to the action's name. Before this,
+    // `[click #add, check #gift]` ran the click and then refused `check`, and
+    // the retry re-planned from a page the step had half changed: a cart that
+    // ends on 2 where the step asked for 1. Checked after the reply is recorded
+    // (step 6), so the report keeps what the model sent, and the ✗ lands on a
+    // sub-action row for the unknown action itself. Retryable: the retry prompt
+    // lists the types the model may send instead (`buildRetryContext`), which
+    // is how a `check` becomes a `click` on attempt 2. Ahead of the reference
+    // check, because an action with no type cannot run whatever it references.
+    const unknownAction = aiResponse.actions.find((a) => !isKnownActionType(a.action));
+    if (unknownAction !== undefined) {
+      const unknownError = unknownActionTypeError(unknownAction.action);
+      turnFailed = true;
+      turnError = unknownError;
+      logger.warn(`Step ${stepIndex}: ${unknownError}`);
+      turnSubActions.push({
+        index: ++globalSubActionIndex,
+        action: unknownAction,
+        ...(config.reports.includeAiReasoning && { aiReasoning: aiResponse.reasoning }),
+        durationMs: 0,
+        pageUrl: page.url(),
+        timestamp: new Date().toISOString(),
+        error: unknownError,
+      });
+      collectedFailures.push({
+        // Named in the retry's failure line, which tells the model its target
+        // was right; `typeRefused` keeps it out of "Failed selectors", because
+        // it was never tried.
+        selector: unknownAction.selector ?? '',
+        typeRefused: true,
+        error: unknownError,
+        actionType: unknownAction.action,
+        startUrl: attemptStartUrl,
+        failureUrl: page.url(),
+        navigated: page.url() !== attemptStartUrl,
+      });
+    }
+
     // Every reference in every action of THIS turn, checked before any of them
     // runs (stories/placeholder-preserving-actions.md, decision 4). One bad
     // reference and none of the turn's actions execute — a sign-in step cannot
@@ -2545,11 +2600,13 @@ async function executeStepAttempt(
     // `needs_reeval` second turn is checked when it arrives and turn 1's
     // actions stand. Retryable: the failure text names the correct key, and the
     // retry prompt carries it, so `{{ email }}` can be fixed on attempt 2.
-    const refusal = checkTurnReferences(aiResponse.actions, {
-      known: new Set(Object.keys(opts.resolvedParameters ?? {})),
-      definedLater,
-      ...(opts.envData !== undefined && { envData: opts.envData }),
-    });
+    const refusal = unknownAction !== undefined
+      ? undefined
+      : checkTurnReferences(aiResponse.actions, {
+          known: new Set(Object.keys(opts.resolvedParameters ?? {})),
+          definedLater,
+          ...(opts.envData !== undefined && { envData: opts.envData }),
+        });
     if (refusal !== undefined) {
       turnFailed = true;
       turnError = refusal;
@@ -2564,7 +2621,8 @@ async function executeStepAttempt(
       });
     }
 
-    for (const [emittedIndex, emitted] of (refusal === undefined ? aiResponse.actions : []).entries()) {
+    const turnRefused = unknownAction !== undefined || refusal !== undefined;
+    for (const [emittedIndex, emitted] of (turnRefused ? [] : aiResponse.actions).entries()) {
       // What the page gets: a COPY with `{{name}}` and `${…}` resolved. The
       // emitted object is never written to — the transcript and the recording
       // keep it as the model wrote it, which is the whole point of asking for
@@ -2682,6 +2740,42 @@ async function executeStepAttempt(
           failureUrl: page.url(),
           navigated: page.url() !== attemptStartUrl,
         });
+        break;
+      }
+
+      // ── assert with "holds": false: the model concedes the step ───────────
+      // Rule 24's answer to a step asking to change surface, and the retry's
+      // answer when no action does what the step asks (`buildRetryContext`).
+      // Nothing is evaluated: handed to `evaluateAssertion`, a SECOND model
+      // would write code for a "condition" that is really a confession, and
+      // could answer it with a pass. The step fails with the model's evidence,
+      // from the emitted action — its own words, placeholders unresolved — and
+      // masked like the `fail` action's `why`.
+      //
+      // Not retried, for the reason `fail` is not: a retry hands the model
+      // "this failed, try something else", and that is the nudge that turned a
+      // misplaced `[use ai]` step's retry into typing an invented first name
+      // into a field the step never mentioned — measured, 4 runs in 5, before
+      // this concession was offered.
+      if (action.action === 'assert' && emitted.holds === false) {
+        const evidence = redact(
+          emitted.evidence ?? emitted.condition ?? 'the model gave no reason',
+          secretsNow(),
+        );
+        const conceded = concededStepError(evidence);
+        turnSubActions.push({
+          index: ++globalSubActionIndex,
+          action: emitted,
+          ...(aiReasoningVal !== undefined && { aiReasoning: aiReasoningVal }),
+          durationMs: Date.now() - subStartTime,
+          pageUrl: page.url(),
+          timestamp: new Date().toISOString(),
+          error: conceded,
+        });
+        turnFailed = true;
+        turnNonRetryable = true;
+        turnError = conceded;
+        logger.error(`Step ${stepIndex}: ${conceded}`);
         break;
       }
 
@@ -3432,6 +3526,13 @@ async function executeStepAttempt(
         if (result.retryable === false) turnNonRetryable = true;
         collectedFailures.push({
           selector: result.failedSelector ?? action.selector ?? '',
+          // A type refusal never tried its selector. The failure line still
+          // names it — "Action "check" with selector `#agree` failed" tells the
+          // model its target was right — but `buildRetryContext` keeps it out
+          // of "Failed selectors … choose a different selector", which would
+          // steer the model off the right checkbox when all it got wrong was
+          // `check` for `click`.
+          ...(result.typeRefused && { typeRefused: true as const }),
           error: result.error ?? 'Unknown error',
           ...(result.matchCount !== undefined && { matchCount: result.matchCount }),
           actionType: action.action,

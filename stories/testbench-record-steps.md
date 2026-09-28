@@ -1264,8 +1264,8 @@ step that closes a banner, popup or dialog, on every redraft.
 **`drag` and `reload` in the runtime** (so recorded steps run). Built the way
 `back`/`forward` were (docs/specs/SPEC-browser-history.md): in
 `VALID_ACTION_TYPES` with the near-miss spellings aliased (`refresh`,
-`dragTo`, `dragAndDrop`, …) because an unknown type is a no-op that reports
-success; `{ action: 'drag', selector, target }` — the parser also reads a
+`dragTo`, `dragAndDrop`, …) because an unknown type was then a no-op that
+reported success (since 2026-09-29 it fails the step; see CHANGELOG); `{ action: 'drag', selector, target }` — the parser also reads a
 drag's target from `dropTarget`, `targetSelector` or `to`, and its source from
 `source`, for a drag only — executed as
 `locator(selector).dragTo(locator(target))`, both ends visible-first in the

@@ -75,6 +75,8 @@ executor then runs it as a no-op that REPORTS SUCCESS — so a model answering
 `goBack` would reproduce §2's defect exactly, and `goBack` is the likeliest
 miss of all, being the Playwright call the code-generation prompt teaches.
 
+> **Update (2026-09-29):** an unknown action type now fails the step instead of passing it, so a missed alias costs a retry; see CHANGELOG.
+
 `description` is required as it is for every action, and is what the report
 row and the log line show.
 
@@ -268,6 +270,8 @@ passthrough the other template tests need.
    ABSENCE of the "Unknown action type" warning, with a genuinely unknown type
    as the control — an unknown type is kept verbatim, so nothing else would
    notice the list losing an entry. Every alias of §4.1 normalises.
+
+   > **Update (2026-09-29):** an unknown action type now fails the step, so a lost entry would also surface as a refusal; see CHANGELOG.
 2. Executor calls `page.goBack()` / `page.goForward()` on the active page,
    not on a frame locator.
 3. §4.3, against a REAL browser rather than a mock, because the defect was a

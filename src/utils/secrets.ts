@@ -442,6 +442,37 @@ export function runSecrets(run: {
   return secretValues(run.parameters, run.envData ? envDataSecretValues(run.envData) : []);
 }
 
+/**
+ * {@link runSecrets}, plus the secrets among the values a run holds only in
+ * its STEP TEXT: each skill call's arguments and each looped section's row
+ * (`ExpandedFrame.inputs`, src/skills/expander.ts). The expander writes those
+ * into the body's text rather than into the variable map, so the map alone
+ * never learns them — a `password` column printed in clear in the step line
+ * and the report, and reached the model in a `[use ai]` step (issue 060).
+ *
+ * Each input map is judged ON ITS OWN and the answers pooled. Merging the maps
+ * first, `{ ...parameters, ...inputs }`, keeps one value per name, which is
+ * two leaks: a second row's `password` evicts the first row's, and a skill
+ * argument written `password="{{password}}"` — the ordinary way to hand a
+ * login skill the test's password — evicts the test's real password in favour
+ * of the placeholder text.
+ */
+export function runSecretsWithInputs(
+  run: { parameters: Record<string, string>; envData?: EnvDataContext | null | undefined },
+  inputs: Iterable<Readonly<Record<string, string>>>,
+): string[] {
+  const all = runSecrets(run);
+  for (const map of inputs) {
+    // A copy carries none of the live map's loop marks, and a pass binding
+    // (`row.keyword`) in it would take the author rule — the reason
+    // {@link inheritLoopBindings} exists.
+    const copy = { ...map };
+    inheritLoopBindings(run.parameters, copy);
+    all.push(...secretValues(copy));
+  }
+  return [...new Set(all)];
+}
+
 /** Every occurrence of a secret value, replaced. Longest first, so a value
  *  that contains another is masked whole.
  *

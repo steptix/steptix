@@ -1,8 +1,11 @@
 # Asking the model for a value: `[use ai]`
 
 Status: built 2026-09-24. The live test (`use-ai.test.cjs`) passed on its
-first run. Known issue: [060](../issues/060-use-ai-step-stores-a-masked-secret-and-passes.md),
-where a step that needs a secret stores `***` and passes.
+first run. Issue [060](../issues/resolved/060-use-ai-step-stores-a-masked-secret-and-passes.md),
+where a step that needs a secret stored `***` and passed, was fixed on
+2026-09-29: the step now fails and names what was hidden, never its value.
+The fix also masks a secret that a skill argument or a looped section's row
+writes into the step's text, which used to reach the model in clear.
 
 ## In plain terms
 

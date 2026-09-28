@@ -153,7 +153,7 @@ import {
   loopBindingsOf,
   redact,
   redactReport,
-  runSecrets,
+  runSecretsWithInputs,
 } from '../utils/secrets.js';
 import type { ChatMessage } from '../ai/types.js';
 import { parseToolCall } from '../tools/tool-call-parser.js';
@@ -4092,15 +4092,18 @@ export class SessionManager {
     //
     // Read fresh on every call, as the parameter half already is: frames are
     // built after this assignment, and captures keep adding to the map.
-    secretsNow = () => {
-      const merged = { ...resolvedParameters, ...Object.assign({}, ...Object.values(frameInputs)) };
-      // A copy carries none of the loop's marks (the registry is by object
-      // identity), and unmarked, every `row.<column>` in it would take the
-      // author rule — `AU` back in the mask set because a column is called
-      // `keyword`, the round-2 defect through a new door (§7.6).
-      inheritLoopBindings(resolvedParameters, merged);
-      return runSecrets({ parameters: merged, envData: envDataCtx });
-    };
+    //
+    // Pooled per frame, not merged into one map: merged, a name kept one
+    // value, so the second row of a `password` column evicted the first's,
+    // and `[skill: login password="{{password}}"]` evicted the test's own
+    // password in favour of the placeholder text — for every step of the run
+    // (issue 060). `runSecretsWithInputs` also carries the loop marks onto
+    // each copy, for the round-2 reason (§7.6).
+    secretsNow = () =>
+      runSecretsWithInputs(
+        { parameters: resolvedParameters, envData: envDataCtx },
+        Object.values(frameInputs),
+      );
 
     // `## Config: unmask: keyword, data.keys.public` — names and `${…}` refs
     // this test declares are NOT secrets, despite `isSecretName` matching them

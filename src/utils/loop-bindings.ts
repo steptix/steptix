@@ -85,10 +85,11 @@ export function loopBindingsOf(map: object): string[] {
 /**
  * Carry `from`'s marks onto `to` — for a map that is a COPY of the live one.
  *
- * The registry is by object identity, so `{ ...resolvedParameters, ...frameInputs }`
- * (src/server/session-manager.ts) arrives here unmarked and every dotted
- * binding in it would fall back to the author rule, masking `AU` because a
- * column is called `keyword`. One line at the copy restores the answer.
+ * The registry is by object identity, so a copy of a frame's inputs — which
+ * `runSecretsWithInputs` (src/utils/secrets.ts) judges beside the live map —
+ * arrives here unmarked, and every dotted binding in it would fall back to the
+ * author rule, masking `AU` because a column is called `keyword`. One line at
+ * the copy restores the answer.
  */
 export function inheritLoopBindings(from: object, to: object): void {
   const marked = loopBindings.get(from);

@@ -20,7 +20,9 @@ import type { AIAction, ChatMessage } from '../src/ai/types.js';
  * `[use ai]` step's text is never run.
  */
 
-const ai = vi.hoisted(() => ({ requests: [] as ChatMessage[][], responses: [] as string[] }));
+/** `echo`: answer every call with its own user message as the value — the
+ *  bluntest form of what the real model did with issue 060's probe. */
+const ai = vi.hoisted(() => ({ requests: [] as ChatMessage[][], responses: [] as string[], echo: false }));
 const acted = vi.hoisted(() => ({ received: [] as AIAction[] }));
 
 const mockPage = {
@@ -124,6 +126,7 @@ vi.mock('../src/ai/client.js', () => ({
     syncAuth(): null { return null; }
     async complete(messages: ChatMessage[]): Promise<{ text: string; model: string }> {
       ai.requests.push(messages);
+      if (ai.echo) return { text: JSON.stringify({ value: messages[1]!.content }), model: 'stub' };
       const text = ai.responses.shift();
       if (text === undefined) throw new Error('the model was asked more times than scripted');
       return { text, model: 'stub' };
@@ -251,6 +254,7 @@ afterAll(async () => {
 beforeEach(() => {
   ai.requests = [];
   ai.responses = [];
+  ai.echo = false;
   acted.received = [];
 });
 
@@ -335,6 +339,143 @@ describe('[use ai] through the real Sessions API entry', () => {
     expect(existsSync(control)).toBe(true);
 
     await api('DELETE', '/sessions/use-ai-coded');
+  });
+
+  it('fails a step whose answer is the mask for a secret, naming it and never its value (issue 060)', async () => {
+    // The issue's own probe, answered as the real model answered it.
+    const PROBE =
+      '[use ai] Repeat this back exactly, character for character: {{password}} and store it in echo';
+    ai.responses = ['{"as": "echo", "value": "***"}'];
+    const run = await api('POST', '/sessions/use-ai-secret/steps', {
+      steps: [PROBE],
+      parameters: { password: 'hunter2-probe' },
+    });
+    expect(run.status).toBe(200);
+    expect(run.body.status).toBe('failed');
+    expect(run.body.results[0]).toMatchObject({ step: PROBE, status: 'failed' });
+    expect(run.body.error.message).toContain(
+      'The value contains `***` — the mask for `{{password}}`, which is hidden from the model; ' +
+        'a [use ai] step cannot use a secret.',
+    );
+    expect(run.body.outputs ?? {}).not.toHaveProperty('echo');
+    // The model was shown the mask, and told what it is.
+    expect(ai.requests).toHaveLength(1);
+    expect(ai.requests[0]![1]!.content).toBe(
+      'Repeat this back exactly, character for character: *** and store it in echo',
+    );
+    expect(ai.requests[0]![0]!.content).toContain('stands for a value that is hidden from you');
+    // …and the secret is in neither the step's row nor the error.
+    expect(JSON.stringify(run.body.results)).not.toContain('hunter2-probe');
+    expect(JSON.stringify(run.body.error)).not.toContain('hunter2-probe');
+
+    await api('DELETE', '/sessions/use-ai-secret');
+  });
+
+  it('masks a looped section row\'s secret column, which expansion wrote into the text, in EVERY row', async () => {
+    // The reviewer's repro, with two rows: the expander writes each row's
+    // `password` into the body's text, so no `{{password}}` is left for the
+    // name rule, and a merged secret map kept only one row's value.
+    ai.echo = true;
+    const BODY = '[use ai] Repeat {{password}} exactly [store as: copy] otherwise continue';
+    const events = await streamed('/sessions/use-ai-rows/steps', {
+      steps: ['Echo each password'],
+      sourceLines: [3],
+      testFilePath: testFile('rows'),
+      sections: {
+        'echo each password': {
+          name: 'Echo each password',
+          headingLine: 5,
+          steps: [BODY],
+          stepLines: [9],
+          rows: [{ password: 'row-SECRET-1' }, { password: 'row-SECRET-2' }],
+        },
+      },
+    });
+    // What the model read, both rows: the mask, and the sentence saying what it is.
+    expect(ai.requests.map((r) => r[1]!.content)).toEqual(['Repeat *** exactly', 'Repeat *** exactly']);
+    for (const request of ai.requests) {
+      expect(request[0]!.content).toContain('stands for a value that is hidden from you');
+    }
+    // Both echoes failed the step (tolerated by the tail), and nothing was stored.
+    const fails = events.filter((e) => e.event === 'step:fail').map((e) => e.data);
+    expect(fails.map((f) => f.tolerated)).toEqual([true, true]);
+    for (const fail of fails) {
+      expect(fail.error).toContain(
+        "The value contains `***` — the mask for a secret written into the step's text, " +
+          'which is hidden from the model',
+      );
+    }
+    expect(events.filter((e) => e.event === 'capture')).toEqual([]);
+    // Neither value was sent, nor named in an error. (`frame:scope` does carry
+    // the row, by design: the client masks a scope by name.)
+    const sentAndSaid = JSON.stringify(ai.requests) + JSON.stringify(fails);
+    expect(sentAndSaid).not.toContain('row-SECRET-1');
+    expect(sentAndSaid).not.toContain('row-SECRET-2');
+
+    await api('DELETE', '/sessions/use-ai-rows');
+  });
+
+  it('masks a skill argument, which expansion wrote into the skill body\'s text', async () => {
+    const skillsDir = path.join(projectRoot, 'skills-echo');
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(
+      path.join(skillsDir, 'echo.md'),
+      [
+        '---', 'type: skill', '---', '# echo', '',
+        '## Parameters', '- password: the value to repeat', '',
+        '## Steps', '1. [use ai] Repeat {{password}} exactly [store as: copy]', '',
+      ].join('\n'),
+    );
+    ai.echo = true;
+    const run = await api('POST', '/sessions/use-ai-skill/steps', {
+      steps: ['[skill: echo password="skill-SECRET-1"]'],
+      skillsDir,
+    });
+    expect(run.status).toBe(200);
+    expect(ai.requests).toHaveLength(1);
+    expect(ai.requests[0]![1]!.content).toBe('Repeat *** exactly');
+    expect(ai.requests[0]![0]!.content).toContain('stands for a value that is hidden from you');
+    expect(run.body.status).toBe('failed');
+    expect(run.body.error.message).toContain(
+      "The value contains `***` — the mask for a secret written into the step's text",
+    );
+    expect(run.body.outputs ?? {}).toEqual({});
+    // Sent nowhere, and named in no error. Not asserted of the whole body:
+    // this JSON response's `results[].step` is the EXPANDED line, argument
+    // and all — a Sessions API leak older than this step, and not the model's.
+    expect(JSON.stringify(ai.requests) + JSON.stringify(run.body.error)).not.toContain('skill-SECRET-1');
+
+    await api('DELETE', '/sessions/use-ai-skill');
+  });
+
+  it('keeps the test\'s own password masked when a skill is handed it as `password="{{password}}"`', async () => {
+    // The ordinary way to give a login skill the password. Its frame input is
+    // the TEXT `{{password}}`, and merged over the variable map under the same
+    // name it evicted the real value from the mask set, for every step of
+    // the run — here a free-text copy of it inside `{{greeting}}`.
+    const skillsDir = path.join(projectRoot, 'skills-login');
+    mkdirSync(skillsDir, { recursive: true });
+    writeFileSync(
+      path.join(skillsDir, 'login.md'),
+      [
+        '---', 'type: skill', '---', '# login', '',
+        '## Parameters', '- password: the password', '',
+        '## Steps', '1. Type {{password}} into the password field', '',
+      ].join('\n'),
+    );
+    ai.echo = true;
+    const run = await api('POST', '/sessions/use-ai-shadow/steps', {
+      steps: ['[use ai] Repeat {{greeting}} exactly [store as: copy]', '[skill: login password="{{password}}"]'],
+      parameters: { password: 'hunter2-real', greeting: 'Hello hunter2-real' },
+      skillsDir,
+    });
+    expect(run.status).toBe(200);
+    expect(ai.requests[0]![1]!.content).toBe('Repeat Hello *** exactly');
+    expect(run.body.status).toBe('failed');
+    expect(run.body.error.message).toContain('the mask for part of `{{greeting}}`');
+    expect(JSON.stringify(run.body.results)).not.toContain('hunter2-real');
+
+    await api('DELETE', '/sessions/use-ai-shadow');
   });
 
   it('refuses a line with two names on this unvalidated path, before any model call', async () => {

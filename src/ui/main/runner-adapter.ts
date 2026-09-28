@@ -71,7 +71,7 @@ import {
   skippedResult,
   SkipQueue,
 } from '../../runner/control-runtime.js';
-import { redact, redactReport, runSecrets } from '../../utils/secrets.js';
+import { redact, redactReport, runSecrets, runSecretsWithInputs } from '../../utils/secrets.js';
 import { AiClient } from '../../ai/client.js';
 import { formatStepHistoryEntry } from '../../ai/prompts.js';
 import { TokenTracker } from '../../utils/tokens.js';
@@ -976,7 +976,15 @@ export class UIRunnerAdapter {
           instruction,
           scope: this.resolvedParameters,
           envData: parsedTest.envData,
-          secrets: runSecrets({ parameters: this.resolvedParameters, envData: parsedTest.envData }),
+          // With the skill arguments and looped-section rows the expander
+          // wrote into step text, which no variable map holds — the runner
+          // masks them in the text it sends (issue 060).
+          secrets: runSecretsWithInputs(
+            { parameters: this.resolvedParameters, envData: parsedTest.envData },
+            Object.values(parsedTest.expansion?.frames ?? {}).flatMap((frame) =>
+              frame.inputs ? [frame.inputs] : [],
+            ),
+          ),
           aiClient: this.aiClient!,
           retries: this.config.execution.retries,
           failureTail,

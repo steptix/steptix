@@ -8,7 +8,19 @@ import type {
 import { logger } from '../utils/logger.js';
 import { normaliseUploadPath } from '../browser/upload-paths.js';
 
-const VALID_ACTION_TYPES: Set<ActionType> = new Set([
+/**
+ * Every action type the framework runs — the parser's vocabulary, and the
+ * list the step loop and `executeAction` check a type against before anything
+ * touches the page.
+ *
+ * Exported so there is ONE list: the step loop refuses exactly what is missing
+ * from it, {@link RETRY_ACTION_TYPES} is drawn from it for the retry prompt,
+ * and tests/unknown-action-type.test.ts walks it to prove every member has a
+ * route — either a case in `executeAction` or an interception in the step loop
+ * ahead of it. A type added here without wiring fails that test instead of
+ * failing at runtime.
+ */
+export const VALID_ACTION_TYPES: ReadonlySet<ActionType> = new Set<ActionType>([
   'click', 'type', 'select', 'navigate', 'upload',
   // docs/specs/SPEC-browser-history.md §4 — the browser's own history.
   'back', 'forward',
@@ -36,16 +48,97 @@ const VALID_ACTION_TYPES: Set<ActionType> = new Set([
   'fail',
 ]);
 
+/** Is `type` one of {@link VALID_ACTION_TYPES}? */
+export function isKnownActionType(type: unknown): type is ActionType {
+  return typeof type === 'string' && VALID_ACTION_TYPES.has(type as ActionType);
+}
+
+/**
+ * Why an action whose type the framework does not have failed — the sentence
+ * a PERSON reads: the ✗ in TestBench, the MCP reason, the report.
+ *
+ * Short on purpose. The model needs more than this — which types it may send
+ * instead, and what to do when none of them does what the step asks — and
+ * `buildRetryContext` adds that to the retry prompt, the one place it is read
+ * by the reader it is for. A list of action names is noise on a red step.
+ */
+export function unknownActionTypeError(type: unknown): string {
+  return (
+    `Unknown action type ${JSON.stringify(String(type))} — the framework has no such action, ` +
+    'so nothing was done on the page'
+  );
+}
+
+/**
+ * Valid types the retry does NOT offer a model whose type was unknown, because
+ * each can end a step green having done nothing — the one outcome that retry
+ * must not produce:
+ *
+ *  - `noop`, `switchFrame` and `extract_value` do nothing and report success;
+ *  - `prompt` asks the person at the console, and with
+ *    `execution.promptOnAmbiguity` off it is skipped and the step passes;
+ *  - `find` and `expand` only look: the NEXT turn decides, and its prompt no
+ *    longer carries the retry's guidance;
+ *  - `return` and `fail` are flow control, legal only on a step written to
+ *    return or fail.
+ *
+ * Measured on gpt-5.6-luna (2026-09-29): offered all 35 types and told to
+ * "use one of the valid action types instead", a misplaced `[use ai]` step's
+ * retry typed an invented first name into a field the step never mentioned,
+ * and passed, 4 runs in 5 — once ending on `noop` after the typing.
+ */
+const NOT_OFFERED_ON_RETRY: ReadonlySet<ActionType> = new Set<ActionType>([
+  'noop', 'switchFrame', 'extract_value', 'prompt', 'find', 'expand', 'return', 'fail',
+]);
+
+/**
+ * The types `buildRetryContext` lists after an unknown-type refusal: every
+ * member of {@link VALID_ACTION_TYPES} except {@link NOT_OFFERED_ON_RETRY}, in
+ * the same order. Derived rather than written out, so a type added to the
+ * vocabulary is offered unless it is excluded on purpose.
+ */
+export const RETRY_ACTION_TYPES: readonly ActionType[] = [...VALID_ACTION_TYPES].filter(
+  (type) => !NOT_OFFERED_ON_RETRY.has(type),
+);
+
+/**
+ * Fold an action name to one canonical spelling: lower-case, with `_`, `-`
+ * and spaces removed. `switchFrame`, `switch_frame` and `Switch Frame` are one
+ * name, which is what lets one table cover every spelling a model reaches for
+ * instead of a row per variant.
+ *
+ * Shared with the computer surface's parser (src/desktop/action-parser.ts),
+ * which imports it from here as it imports `extractJson`, so the two surfaces
+ * fold a name the same way.
+ */
+export function foldActionName(name: string): string {
+  return name.trim().toLowerCase().replace(/[_\-\s]/g, '');
+}
+
 /**
  * Normalise common AI action type variants to canonical types.
  * AI models sometimes return "api", "http", "request" etc. instead of "api_call".
+ *
+ * Looked up FOLDED ({@link canonicalActionType}), so each row also covers its
+ * other capitalisations and its snake_case, kebab-case and spaced forms — and
+ * the canonical types get the same treatment: `"Click"`, `"SWITCH_PAGE"` and
+ * `"read_table"` are `click`, `switchPage` and `readTable`.
+ *
+ * A convenience, not the safety net. A type that is neither canonical nor
+ * listed here is kept as the model wrote it, so the transcript shows what it
+ * returned, and the step loop refuses the whole turn before any of it runs:
+ * the step fails naming the type, and the retry prompt lists the types that
+ * may be sent instead. An alias only saves that retry. (Until the refusal
+ * existed an unknown type ran as a no-op that REPORTED SUCCESS, which is why
+ * the history, reload and drag spellings below were added one at a time.)
+ *
+ * Exported so tests/unknown-action-type.test.ts can prove folding merges no
+ * two meanings.
  */
-const ACTION_TYPE_ALIASES: Record<string, ActionType> = {
-  // docs/specs/SPEC-browser-history.md §4.1. An unrecognised action type is
-  // kept with a WARN and then executed as a no-op that REPORTS SUCCESS, so a
-  // near-miss spelling here reproduces the exact defect these actions close.
-  // `goBack` is the likeliest miss of all: it is the Playwright call the
-  // code-generation prompt teaches two screens away.
+export const ACTION_TYPE_ALIASES: Readonly<Record<string, ActionType>> = {
+  // docs/specs/SPEC-browser-history.md §4.1. `goBack` is the likeliest miss of
+  // all: it is the Playwright call the code-generation prompt teaches two
+  // screens away.
   goBack: 'back',
   go_back: 'back',
   browserBack: 'back',
@@ -62,8 +155,8 @@ const ACTION_TYPE_ALIASES: Record<string, ActionType> = {
   navigate_forward: 'forward',
   historyForward: 'forward',
   history_forward: 'forward',
-  // The same trap for the two actions Record Steps added: an unknown type is
-  // a no-op that reports success, so `refresh` must not fall through.
+  // The same for the two actions Record Steps added: `refresh` and the drag
+  // spellings are what a model reaches for first.
   refresh: 'reload',
   reloadPage: 'reload',
   reload_page: 'reload',
@@ -124,6 +217,31 @@ const ACTION_TYPE_ALIASES: Record<string, ActionType> = {
   'setFiles': 'upload',
   'setInputFiles': 'upload',
 };
+
+/**
+ * Every spelling the parser resolves, folded: each alias under its folded
+ * name, then each valid type under its own — last, so a canonical name always
+ * resolves to itself even if an alias were ever added that folds onto it.
+ *
+ * A Map rather than an object, so a type the model named "constructor" or
+ * "toString" finds nothing instead of the prototype's function (which JSON
+ * then drops, taking the transcript's record of what the model sent with it).
+ */
+const FOLDED_ACTION_TYPES: ReadonlyMap<string, ActionType> = new Map<string, ActionType>([
+  ...Object.entries(ACTION_TYPE_ALIASES).map(
+    ([alias, type]) => [foldActionName(alias), type] as [string, ActionType],
+  ),
+  ...[...VALID_ACTION_TYPES].map((type) => [foldActionName(type), type] as [string, ActionType]),
+]);
+
+/**
+ * The canonical type the model meant by `raw` — itself, an alias, or either
+ * in another case or separator style — or `undefined` when it names nothing
+ * the framework has.
+ */
+export function canonicalActionType(raw: string): ActionType | undefined {
+  return FOLDED_ACTION_TYPES.get(foldActionName(raw));
+}
 
 /**
  * A file path a model copied out of a step is the one place its JSON reliably
@@ -642,14 +760,26 @@ function parseAction(raw: unknown, index: number): AIAction {
     throw new Error(`Action at index ${index} missing required "action" field`);
   }
 
-  // Normalise common AI variants to canonical action types
-  const actionType = ACTION_TYPE_ALIASES[rawActionType] ?? rawActionType;
+  // Normalise to the canonical type: the name itself, an alias, or either in
+  // another case or separator style ("Click", "SWITCH_PAGE", "read_table").
+  // Before folding, those three were refused as unknown and cost a retry.
+  const actionType = canonicalActionType(rawActionType) ?? rawActionType;
   if (actionType !== rawActionType) {
     logger.info(`Normalised action type "${rawActionType}" → "${actionType}" at index ${index}`);
   }
 
-  if (!VALID_ACTION_TYPES.has(actionType as ActionType)) {
-    logger.warn(`Unknown action type "${actionType}" at index ${index} — treating as unknown`);
+  // Kept, not thrown. The parser is shared (the condition judge and the branch
+  // poller read `matched` and ignore actions), and the step loop has not yet
+  // recorded this turn's reply when it parses it: a throw here would drop the
+  // reply from the report and reach the retry with no failure to describe.
+  // The refusal is the step loop's: it refuses the whole turn before any of it
+  // runs, records the ✗ against this action, and the retry prompt lists the
+  // types the model may send instead.
+  if (!isKnownActionType(actionType)) {
+    logger.warn(
+      `Unknown action type "${actionType}" at index ${index} — kept as the model wrote it; ` +
+        'the step loop refuses the turn',
+    );
   }
 
   const description =
@@ -857,6 +987,29 @@ function parseAction(raw: unknown, index: number): AIAction {
 
   // Assert-specific optional fields
   if (action.action === 'assert') {
+    // A CONCESSION: `"holds": false` is the model reporting, in its own
+    // judgment, that the step cannot be done — the shape rule 24 of the system
+    // prompt teaches for a step asking to change surface, and the one the
+    // retry after an unknown action type offers when no action does what the
+    // step asks. Nothing is evaluated, so none of an evaluated assert's fields
+    // is required. Measured on gpt-5.6-luna, the reply is
+    // `{"action":"assert","holds":false,"evidence":"…"}` and nothing more, and
+    // requiring `description` threw it away: the step failed in the parser's
+    // words, and the model's evidence never reached the report.
+    // The step loop fails the step with the evidence and does not retry it.
+    //
+    // Only `false` is believed. `"holds": true` would be the model certifying
+    // its own pass, so it is dropped and the assert is evaluated like any other.
+    if (obj['holds'] === false) {
+      action.holds = false;
+      const evidence = typeof obj['evidence'] === 'string' ? obj['evidence'].trim() : '';
+      if (evidence !== '') action.evidence = evidence;
+      if (typeof obj['description'] !== 'string' || !obj['description'].trim()) {
+        action.description = 'Report the step as unachievable';
+      }
+      return action;
+    }
+
     const rawPoll = obj['poll'];
     if (typeof rawPoll === 'object' && rawPoll !== null && !Array.isArray(rawPoll)) {
       const pollObj = rawPoll as Record<string, unknown>;

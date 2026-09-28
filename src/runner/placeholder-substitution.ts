@@ -825,6 +825,15 @@ function unresolvedReferenceError(
  * `defines` — the names the step writes in prose (`store as {{x}}`) — are
  * definitions: neither refused nor filled, so a second pass through a loop
  * does not hand the model the value the first pass stored.
+ *
+ * `literal` is the same idea for everything BETWEEN the references: the
+ * step's own words, which are not always the author's. A skill argument and a
+ * looped section's row value are written into the body's text at expansion
+ * (`src/skills/expander.ts`), so by the time the step runs they are prose, no
+ * `{{…}}` is left to route them through `show`, and a `password` column would
+ * reach the model in clear (issue 060). The runner masks them here. A
+ * reference is never handed to `literal`, so masking cannot break a `{{…}}`
+ * token and cannot touch a value `show` already decided about.
  */
 export function resolveUseAiText(
   text: string,
@@ -835,6 +844,8 @@ export function resolveUseAiText(
     /** The value as the model may see it. `kind` says which syntax named it,
      *  because the two are masked by different rules (by name, by path). */
     show: (kind: 'placeholder' | 'env', name: string, value: string) => string;
+    /** The step's own text between references, as the model may see it. */
+    literal?: ((text: string) => string) | undefined;
   },
 ): { text: string } | { error: string } {
   const error = unresolvedReferenceError('The [use ai] step', text, values, {
@@ -843,21 +854,29 @@ export function resolveUseAiText(
     envAlways: true,
   });
   if (error !== undefined) return { error };
-  if (!text.includes('{{') && !text.includes('${')) return { text };
-  const filled = text.replace(
-    SUBSTITUTE_RE,
-    (match: string, name: string | undefined, ref: string | undefined) => {
-      if (name !== undefined) {
-        if (opts.defines?.has(name)) return match;
-        const value = boundValue(values.parameters, name);
-        return value === undefined ? match : opts.show('placeholder', name, value);
-      }
-      if (ref !== undefined && values.envData) {
-        const value = resolveEnvDataRef(ref, values.envData);
-        return value === undefined ? match : opts.show('env', ref, value);
-      }
-      return match;
-    },
-  );
+  const literal = opts.literal ?? ((words: string): string => words);
+  if (!text.includes('{{') && !text.includes('${')) return { text: literal(text) };
+  const fill = (match: string, name: string | undefined, ref: string | undefined): string => {
+    if (name !== undefined) {
+      if (opts.defines?.has(name)) return match;
+      const value = boundValue(values.parameters, name);
+      return value === undefined ? match : opts.show('placeholder', name, value);
+    }
+    if (ref !== undefined && values.envData) {
+      const value = resolveEnvDataRef(ref, values.envData);
+      return value === undefined ? match : opts.show('env', ref, value);
+    }
+    return match;
+  };
+  // One walk over the matches rather than a `.replace`, because the text
+  // between them has to go through `literal` too. Group 1 is a `{{name}}`,
+  // group 2 a `${ref}` — the two alternatives of `SUBSTITUTE_RE`.
+  let filled = '';
+  let last = 0;
+  for (const found of text.matchAll(SUBSTITUTE_RE)) {
+    filled += literal(text.slice(last, found.index)) + fill(found[0], found[1], found[2]);
+    last = found.index + found[0].length;
+  }
+  filled += literal(text.slice(last));
   return { text: filled };
 }

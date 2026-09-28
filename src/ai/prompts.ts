@@ -17,6 +17,7 @@ import {
 } from '../utils/secrets.js';
 import type { RecordedAction } from '../recorder/types.js';
 import type { TargetFileSummary } from '../recorder/target-file.js';
+import { isKnownActionType, RETRY_ACTION_TYPES } from './action-parser.js';
 
 /**
  * What a step's placeholders hold right now — the `## Values` block the model
@@ -626,6 +627,12 @@ export interface PriorFailureContext {
   failureUrl?: string;
   /** Whether navigation occurred during the failed attempt */
   navigated?: boolean;
+  /**
+   * The action was refused for its TYPE before it ran, so `selector` names its
+   * target but was never tried: the failure line keeps it (the target may well
+   * be right), and the "Failed selectors" instruction leaves it out.
+   */
+  typeRefused?: true;
 }
 
 /** Full diagnostics passed to buildRetryContext on retry attempts */
@@ -639,6 +646,33 @@ export interface RetryDiagnostics {
    *  Only enabled when the test has hooks configured — without hooks, we assume
    *  dialogs the AI sees are intentional UI, not obstacles. */
   dismissalGuidance?: boolean;
+}
+
+/**
+ * What the retry tells a model whose action type the framework does not have:
+ * the types it may send instead, and what to answer when none of them does
+ * what the step asks. Written for the model only — the step's own error, which
+ * a person reads, is the short `unknownActionTypeError` sentence.
+ *
+ * Both halves are measured (gpt-5.6-luna, 2026-09-29, five runs each: `check`
+ * scripted on "Tick the I agree box", `ai` on a misplaced "Generate a random
+ * first name [use ai] [store as: first]"). The earlier "use one of the valid
+ * action types instead", over all 35 types, recovered `check` 5/5 and turned
+ * `ai` into typing an invented name into the Name field 4/5 — the step passing.
+ * So the list leaves out the types that can end a step having done nothing
+ * (`RETRY_ACTION_TYPES`), and the way out is rule 24's concession, which the
+ * step loop fails without evaluating and does not retry: `check` 5/5 still,
+ * and `ai` conceded 5/5 with the page untouched.
+ */
+function unknownTypeGuidance(type: string): string {
+  return (
+    `${JSON.stringify(type)} is not an action. The actions that act on the page are: ` +
+    `${RETRY_ACTION_TYPES.join(', ')}. If one of them does what the step asks, answer with it. ` +
+    'If none of them does, do not put a different action in its place: nothing the step did not ' +
+    'ask for may be typed, clicked, read or stored. Report the step as unachievable instead — a ' +
+    'single "assert" with "holds": false and an "evidence" saying what the step asks for that no ' +
+    'action can do — and never answer "noop", which reports success for a step that did nothing.'
+  );
 }
 
 /**
@@ -672,6 +706,9 @@ export function buildRetryContext(input: PriorFailureContext[] | RetryDiagnostic
     let failDetail = `Action "${f.actionType}"`;
     if (f.selector) failDetail += ` with selector \`${f.selector}\``;
     failDetail += ` failed: ${f.error}`;
+    if (f.typeRefused && !isKnownActionType(f.actionType)) {
+      failDetail += `\n  → ${unknownTypeGuidance(f.actionType)}`;
+    }
     if (f.matchCount !== undefined) {
       if (f.matchCount === 0) {
         failDetail += `\n  → No elements matched this selector.`;
@@ -754,7 +791,9 @@ export function buildRetryContext(input: PriorFailureContext[] | RetryDiagnostic
   instructions.push(`${step++}. If the page has navigated, check whether the step is already partially or fully complete.`);
   instructions.push(`${step++}. Do NOT blindly repeat the same actions — assess what has already been accomplished.`);
 
+  // A type refusal's selector was never tried, so it is not a failed one.
   const failedSelectors = diagnostics.failures
+    .filter((f) => !f.typeRefused)
     .map((f) => f.selector)
     .filter(Boolean);
   if (failedSelectors.length > 0) {
@@ -2453,6 +2492,13 @@ const USE_AI_AS_ASKED =
 /** …and when it does, so the framework already holds the name. */
 const USE_AI_AS_KNOWN = 'The framework already knows the variable\'s name; omit "as".';
 
+/** What the runner's mask means, for a step it hid a value in (issue 060).
+ *  Built from `MASK` so the sentence cannot name a different mask from the
+ *  one `maskValueForPrompt` writes. */
+const USE_AI_MASK_RULE =
+  `Each ${MASK} in the step stands for a value that is hidden from you. If the ` +
+  'step needs a hidden value, reply with "error" and say so.';
+
 /**
  * The messages for one `[use ai]` step: exactly one system message and one
  * user message, and the user message is `text` and nothing else
@@ -2472,11 +2518,20 @@ const USE_AI_AS_KNOWN = 'The framework already knows the variable\'s name; omit 
  * SYSTEM message, not as a third message, so a retry is still one system and
  * one user message — the shape rule 1 promises for every call this step makes
  * — and the user message is still the step's own text, byte for byte.
+ *
+ * `masked` says the runner hid a value in `text` behind `***`, and adds the
+ * sentence that says so beside the do-not-guess rule (issue 060): told
+ * nothing, a model asked to repeat `{{password}}` repeats the three asterisks
+ * it was shown. It explains the framework's own mask and adds nothing about
+ * the test. Said only when true, because said to every step it would tell a
+ * model asked for "a row of ***" that the author's own asterisks are a value
+ * it cannot see — a refusal the step did nothing to earn.
  */
 export function buildUseAiPrompt(
   text: string,
   explicitName?: string | undefined,
   retryNote?: string | undefined,
+  masked = false,
 ): ChatMessage[] {
   const system = [
     'You produce the value of one variable in an automated test. There is no ' +
@@ -2491,7 +2546,8 @@ export function buildUseAiPrompt(
     explicitName !== undefined ? USE_AI_AS_KNOWN : USE_AI_AS_ASKED,
     'If the step cannot be done from its own words (for example, it needs ' +
       "today's date and does not give it), reply with \"error\" and say what is " +
-      'missing. Do not guess to fill the gap.',
+      'missing. Do not guess to fill the gap.' +
+      (masked ? ` ${USE_AI_MASK_RULE}` : ''),
     ...(retryNote !== undefined
       ? [
           `Your previous reply could not be used: ${retryNote}. Reply again ` +

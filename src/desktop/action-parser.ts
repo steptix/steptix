@@ -20,7 +20,10 @@
  * its next turn. A response that is not JSON at all still throws, as on the
  * page surface — there is no action to refuse and the turn is lost either way.
  */
-import { extractJson } from '../ai/action-parser.js';
+// `foldActionName` too: the page parser folds a name the same way (so "Click"
+// and "read_table" resolve there as well), and one definition is what keeps the
+// two surfaces from drifting.
+import { extractJson, foldActionName as foldName } from '../ai/action-parser.js';
 import { logger } from '../utils/logger.js';
 import { parseChord } from './keys.js';
 import type { ClickCount, ImageRegion, MouseButton, ScrollDirection } from './adapter.js';
@@ -45,16 +48,6 @@ export interface ParsedComputerActions {
   refused: ComputerActionRefusal[];
   /** The envelope's `reasoning`, as on the page surface. */
   reasoning: string;
-}
-
-/**
- * Fold an action name to one canonical spelling: lower-case, with `_`, `-`
- * and spaces removed. `switchFrame`, `switch_frame` and `Switch Frame` are one
- * name, which is what lets a single table cover every spelling a model reaches
- * for instead of a row per variant.
- */
-function foldName(name: string): string {
-  return name.trim().toLowerCase().replace(/[_\-\s]/g, '');
 }
 
 /** What an alias resolves to, plus any fields the alias itself implies. */

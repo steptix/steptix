@@ -100,6 +100,11 @@ describe('parseUseAiReply', () => {
 // buildUseAiPrompt
 // ---------------------------------------------------------------------------
 
+/** The sentence that says what the mask is (issue 060), word for word. */
+const MASK_SENTENCE =
+  'Each *** in the step stands for a value that is hidden from you. If the step ' +
+  'needs a hidden value, reply with "error" and say so.';
+
 describe('buildUseAiPrompt', () => {
   it('is one system message and one user message, the user message the text alone', () => {
     const messages = buildUseAiPrompt('Give me a name');
@@ -120,6 +125,16 @@ describe('buildUseAiPrompt', () => {
     expect(messages).toHaveLength(2);
     expect(messages[0]!.content).toContain('Your previous reply could not be used: "value" was empty.');
     expect(messages[1]!.content).toBe('Give me a name');
+  });
+
+  it('says what *** is, beside the do-not-guess rule, only when a value was hidden (issue 060)', () => {
+    const [masked] = buildUseAiPrompt('Repeat *** back', undefined, undefined, true);
+    expect(masked!.content).toContain(`Do not guess to fill the gap. ${MASK_SENTENCE}`);
+    // A step that hid nothing gets the prompt it always had: told otherwise,
+    // a model asked for "a row of ***" could refuse the author's own stars.
+    const [plain] = buildUseAiPrompt('Write a row of *** as a divider');
+    expect(plain!.content).toContain('Do not guess to fill the gap.');
+    expect(plain!.content).not.toContain('hidden from you');
   });
 });
 
@@ -192,6 +207,8 @@ describe('runUseAiStep — what the model is sent', () => {
     expect(all).not.toContain('Prior Steps');
     expect(all).not.toContain(realToday);
     expect(all).not.toContain(String(new Date().getFullYear()));
+    // Nothing was hidden, so the model is not told anything was.
+    expect(calls[0]![0]!.content).not.toContain('hidden from you');
   });
 
   it('an unresolved reference fails the step before any model call, in Set\'s words', async () => {
@@ -219,6 +236,7 @@ describe('runUseAiStep — what the model is sent', () => {
       { scope },
     );
     expect(userText(calls)).toBe('Pick a colour and store it as {{colour}}');
+    expect(calls[0]![0]!.content).not.toContain('hidden from you');
     expect(outcome.result.status).toBe('passed');
     expect(scope.colour).toBe('plum');
   });
@@ -256,6 +274,7 @@ describe('runUseAiStep — what the model is sent', () => {
       failureTail: parseFailureTail(line),
     });
     expect(userText(calls)).toBe('Write a line');
+    expect(calls[0]![0]!.content).not.toContain('hidden from you');
   });
 });
 
@@ -397,5 +416,392 @@ describe('runUseAiStep — errors and retries', () => {
     });
     expect(outcome.result.error).toBe('no name for Ada');
     expect(outcome.result.aiExplanation).toContain('What failed:');
+  });
+});
+
+/**
+ * A model that echoes its input: the user message back, verbatim, as the
+ * value. The bluntest form of what the real model did with the issue-060
+ * probe, which answered `***`. Records what it was sent.
+ */
+function echoModel(): { model: UseAiModel; calls: ChatMessage[][] } {
+  const calls: ChatMessage[][] = [];
+  return {
+    calls,
+    model: {
+      async complete(messages) {
+        calls.push(messages);
+        return { text: JSON.stringify({ value: messages[1]!.content }), model: 'echo-model' };
+      },
+    },
+  };
+}
+
+describe('runUseAiStep — a value hidden from the model (issue 060)', () => {
+  const PROBE =
+    '[use ai] Repeat this back exactly, character for character: {{password}} and store it in echo';
+  const SECRET = 'hunter2-probe';
+  /** What a name-rule mask adds to either error: the name is the reason. */
+  const PASSWORD_HINT =
+    ' `{{password}}` is hidden by its name, which contains "password"; if it is not a secret, rename it.';
+  const PASSWORD_ERROR =
+    'The value contains `***` — the mask for `{{password}}`, which is hidden from the model; ' +
+    'a [use ai] step cannot use a secret.' +
+    PASSWORD_HINT;
+
+  it('a model that echoes its input fails the step, naming {{password}} and never its value', async () => {
+    const echo = echoModel();
+    const { outcome, scope } = await run(PROBE, [], {
+      scope: { password: SECRET },
+      aiClient: echo.model,
+      retries: 3,
+    });
+    // What the model read: the mask, as designed, and the sentence saying what it is.
+    expect(userText(echo.calls)).toBe(
+      'Repeat this back exactly, character for character: *** and store it in echo',
+    );
+    expect(echo.calls[0]![0]!.content).toContain(MASK_SENTENCE);
+    // The step failed on that answer: not retried, nothing stored or reported.
+    // The echo names no variable and the step pins none, so this also holds
+    // the order: the mask is checked before the name, whose failure retries.
+    expect(outcome.result.status).toBe('failed');
+    expect(outcome.result.error).toBe(PASSWORD_ERROR);
+    expect(echo.calls).toHaveLength(1);
+    expect(scope).toEqual({ password: SECRET });
+    expect(outcome.name).toBeUndefined();
+    expect(outcome.result.outputs).toBeUndefined();
+    // The secret is in nothing the step reports, and was in nothing it sent.
+    expect(JSON.stringify(outcome)).not.toContain(SECRET);
+    expect(JSON.stringify(echo.calls)).not.toContain(SECRET);
+  });
+
+  it('so does the real model\'s recorded answer to the probe, {"as": "echo", "value": "***"}', async () => {
+    const { outcome, scope } = await run(PROBE, ['{"as": "echo", "value": "***"}'], {
+      scope: { password: SECRET },
+    });
+    expect(outcome.result.status).toBe('failed');
+    expect(outcome.result.error).toBe(PASSWORD_ERROR);
+    expect(scope).toEqual({ password: SECRET });
+  });
+
+  it('a model that says it needs the hidden value fails the step with its own reason, not retried', async () => {
+    const { outcome, calls, scope } = await run(
+      PROBE,
+      ['{"error": "The value to repeat is hidden from me."}', '{"as": "echo", "value": "hunter2"}'],
+      { scope: { password: SECRET }, retries: 3 },
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0]!.content).toContain(MASK_SENTENCE);
+    expect(outcome.result.status).toBe('failed');
+    // The model's reason says THAT something is hidden; the framework adds WHAT.
+    expect(outcome.result.error).toBe(
+      'The model could not do the [use ai] step as written: The value to repeat is hidden from me. ' +
+        '(Hidden from the model: `{{password}}`.)' +
+        PASSWORD_HINT,
+    );
+    expect(outcome.result.aiExplanation).toBe('The model declined: The value to repeat is hidden from me.');
+    expect(scope).toEqual({ password: SECRET });
+  });
+
+  it('…and says the NAME is the reason when a name only looks secret, as `{{keyword}}` does', async () => {
+    // The likeliest false positive: `keyword` contains `key`. Renaming is the
+    // fix under every client; `unmask:` is honoured only by `aiui run`.
+    const { outcome } = await run(
+      '[use ai] Write a search phrase that uses {{keyword}} [store as: phrase]',
+      ['{"error": "The keyword is hidden"}'],
+      { scope: { keyword: 'AU' } },
+    );
+    expect(outcome.result.error).toBe(
+      'The model could not do the [use ai] step as written: The keyword is hidden. ' +
+        '(Hidden from the model: `{{keyword}}`.) ' +
+        '`{{keyword}}` is hidden by its name, which contains "key"; if it is not a secret, rename it.',
+    );
+  });
+
+  it('a declined step that hid nothing keeps the model\'s reason alone', async () => {
+    const { outcome } = await run('[use ai] Give tomorrow as yyyymmdd [store as: d]', [
+      '{"error": "The step does not say what today is."}',
+    ]);
+    expect(outcome.result.error).toBe(
+      'The model could not do the [use ai] step as written: The step does not say what today is.',
+    );
+  });
+
+  it('with nothing hidden, an answer holding *** is stored, and the prompt never mentions a mask', async () => {
+    const { outcome, calls, scope } = await run(
+      '[use ai] Write the word "hello" in Markdown bold italic [store as: styled]',
+      ['{"value": "***hello***"}'],
+    );
+    expect(outcome.result.status).toBe('passed');
+    expect(scope).toEqual({ styled: '***hello***' });
+    expect(calls[0]![0]!.content).not.toContain('hidden from you');
+  });
+
+  it('…as it is when a value merely holds asterisks, or an unmask: name is shown as itself', async () => {
+    // Neither was masked — the model saw the real text — so neither is a mask.
+    // And the model is not told a value is hidden: the text it reads holds
+    // `***`, but nothing was hidden to put it there.
+    const rating = await run('[use ai] Repeat {{rating}} exactly [store as: copy]', ['{"value": "***"}'], {
+      scope: { rating: '***' },
+    });
+    expect(userText(rating.calls)).toBe('Repeat *** exactly');
+    expect(rating.calls[0]![0]!.content).not.toContain('hidden from you');
+    expect(rating.outcome.result.status).toBe('passed');
+    expect(rating.scope.copy).toBe('***');
+
+    const keyword = await run('[use ai] Repeat {{keyword}} exactly [store as: copy]', ['{"value": "AU***"}'], {
+      scope: { keyword: 'AU***' },
+      unmask: new Set(['keyword']),
+    });
+    expect(userText(keyword.calls)).toBe('Repeat AU*** exactly');
+    expect(keyword.calls[0]![0]!.content).not.toContain('hidden from you');
+    expect(keyword.outcome.result.status).toBe('passed');
+    expect(keyword.scope.copy).toBe('AU***');
+  });
+
+  it('a known secret inside a value whose name says nothing is named as PART of it', async () => {
+    // The free-text rule: `{{greeting}}` is not secret-named, but the run
+    // knows `hunter2` as a password, so the model reads it masked in place.
+    const scope = { password: 'hunter2', greeting: 'Hello hunter2' };
+    const echo = echoModel();
+    const { outcome } = await run('[use ai] Repeat {{greeting}} exactly [store as: copy]', [], {
+      scope,
+      aiClient: echo.model,
+    });
+    expect(userText(echo.calls)).toBe('Repeat Hello *** exactly');
+    expect(echo.calls[0]![0]!.content).toContain(MASK_SENTENCE);
+    // No name hint: the name is not the reason, and renaming would not help.
+    expect(outcome.result.error).toBe(
+      'The value contains `***` — the mask for part of `{{greeting}}`, which is hidden from the model; ' +
+        'a [use ai] step cannot use a secret.',
+    );
+    expect(JSON.stringify(outcome)).not.toContain('hunter2');
+  });
+
+  it('a value that IS a known secret, under a name that says nothing, is named without the name hint', async () => {
+    const echo = echoModel();
+    const { outcome } = await run('[use ai] Repeat {{saved}} exactly [store as: copy]', [], {
+      scope: { password: 'hunter2', saved: 'hunter2' },
+      aiClient: echo.model,
+    });
+    expect(userText(echo.calls)).toBe('Repeat *** exactly');
+    expect(outcome.result.error).toBe(
+      'The value contains `***` — the mask for `{{saved}}`, which is hidden from the model; ' +
+        'a [use ai] step cannot use a secret.',
+    );
+  });
+
+  it('inside a skill, names the variable as the author wrote it, not as `__skill1_…`', async () => {
+    // `applySkillScope` renames a skill-internal `{{token}}` per call.
+    const echo = echoModel();
+    const { outcome } = await run('[use ai] Repeat {{__skill1_token}} exactly [store as: __skill1_copy]', [], {
+      scope: { __skill1_token: 'tok-SECRET-9' },
+      aiClient: echo.model,
+    });
+    expect(outcome.result.error).toBe(
+      'The value contains `***` — the mask for `{{token}}`, which is hidden from the model; ' +
+        'a [use ai] step cannot use a secret. ' +
+        '`{{token}}` is hidden by its name, which contains "token"; if it is not a secret, rename it.',
+    );
+    expect(outcome.result.error).not.toContain('__skill');
+  });
+
+  it('a secret inside a record is named as PART of the reference that holds it', async () => {
+    const echo = echoModel();
+    const { outcome } = await run('[use ai] Repeat {{account}} exactly [store as: copy]', [], {
+      scope: { account: '{"user":"bob","password":"abc12"}' },
+      aiClient: echo.model,
+    });
+    expect(userText(echo.calls)).toBe('Repeat {"user":"bob","password":"***"} exactly');
+    expect(outcome.result.status).toBe('failed');
+    expect(outcome.result.error).toBe(
+      'The value contains `***` — the mask for part of `{{account}}`, which is hidden from the model; ' +
+        'a [use ai] step cannot use a secret.',
+    );
+    expect(JSON.stringify(outcome)).not.toContain('abc12');
+  });
+
+  it('holds the mask however an echo spells it: spaced, escaped, punctuated, or in a lookalike', async () => {
+    // Each was stored, and the step passed, before the value was normalised.
+    const echoes = [
+      '* * *',
+      '*  *  *',
+      '\\*\\*\\*',
+      '\\\\*\\\\*\\\\*', // escaped twice: two backslashes between, more than one separator
+      '*-*-*',
+      '* - * - *',
+      '*.*.*',
+      '*_*_*',
+      '\uFF0A\uFF0A\uFF0A', // ＊ fullwidth
+      '\u2217\u2217\u2217', // ∗ asterisk operator
+      '\u204E\u204E\u204E', // ⁎ low asterisk
+      '\u2731\u2731\u2731', // ✱ heavy asterisk
+      '\uFE61\uFE61\uFE61', // ﹡ small asterisk
+      '\u2042', // ⁂ asterism: three asterisks in one character
+      '\u2051*', // ⁑ two, and one more
+      'Your password is *\uFF0A* ok',
+    ];
+    for (const value of echoes) {
+      const { outcome, scope } = await run(PROBE, [JSON.stringify({ as: 'echo', value })], {
+        scope: { password: SECRET },
+      });
+      expect(outcome.result.status, value).toBe('failed');
+      expect(outcome.result.error, value).toBe(PASSWORD_ERROR);
+      expect(scope, value).toEqual({ password: SECRET });
+    }
+  });
+
+  it('…but two asterisks are not three, and with nothing hidden none of it is asked about', async () => {
+    const hid = await run(
+      '[use ai] Write the word bold in Markdown bold. Unrelated, do not use it: {{password}} [store as: b]',
+      ['{"value": "**bold**"}'],
+      { scope: { password: SECRET } },
+    );
+    expect(hid.calls[0]![0]!.content).toContain(MASK_SENTENCE);
+    expect(hid.outcome.result.status).toBe('passed');
+    expect(hid.scope.b).toBe('**bold**');
+
+    for (const value of ['**bold**', '* * *', '\\*\\*\\*', '\u2042', '***']) {
+      const plain = await run('[use ai] Write a divider line [store as: divider]', [JSON.stringify({ value })]);
+      expect(plain.calls[0]![0]!.content, value).not.toContain('hidden from you');
+      expect(plain.outcome.result.status, value).toBe('passed');
+      expect(plain.scope.divider, value).toBe(value);
+    }
+  });
+
+  it('a step that hides a value it does not need still passes', async () => {
+    const { outcome, calls, scope } = await run(
+      '[use ai] Write a one-line greeting for the user in {{account}} [store as: greeting]',
+      ['{"value": "Hello, bob!"}'],
+      { scope: { account: '{"user":"bob","password":"abc12"}' } },
+    );
+    expect(calls[0]![0]!.content).toContain(MASK_SENTENCE);
+    expect(outcome.result.status).toBe('passed');
+    expect(scope.greeting).toBe('Hello, bob!');
+  });
+
+  it('names every hidden reference once, ${…} included, in the step\'s order', async () => {
+    const envData = { env: { PASSWORD: 'env-SECRET-pw' } };
+    const scope = { api_token: 'tok-SECRET-123' };
+    const echo = echoModel();
+    const { outcome } = await run(
+      '[use ai] Join {{api_token}}, ${env.PASSWORD} and {{api_token}} with dashes [store as: joined]',
+      [],
+      { scope, envData, secrets: runSecrets({ parameters: scope, envData }), aiClient: echo.model },
+    );
+    expect(userText(echo.calls)).toBe('Join ***, *** and *** with dashes');
+    expect(outcome.result.error).toBe(
+      'The value contains `***` — the mask for `{{api_token}}` and `${env.PASSWORD}`, which are ' +
+        'hidden from the model; a [use ai] step cannot use a secret. ' +
+        '`{{api_token}}` and `${env.PASSWORD}` are hidden by their names, which contain "token" and ' +
+        '"PASSWORD"; rename any that is not a secret.',
+    );
+    const reported = JSON.stringify(outcome);
+    expect(reported).not.toContain('tok-SECRET-123');
+    expect(reported).not.toContain('env-SECRET-pw');
+  });
+
+  it('once a value is hidden, asterisks of the model\'s own fail too — the chosen trade-off', async () => {
+    const { outcome, scope } = await run(
+      '[use ai] Write a Markdown bold-italic welcome for the user whose password is {{password}} [store as: welcome]',
+      ['{"value": "***Welcome back!***"}'],
+      { scope: { password: SECRET } },
+    );
+    expect(outcome.result.status).toBe('failed');
+    expect(outcome.result.error).toBe(PASSWORD_ERROR);
+    expect(scope).toEqual({ password: SECRET });
+  });
+
+  it('an `otherwise continue` tail tolerates the failure, and still stores nothing', async () => {
+    const line = '[use ai] Repeat {{password}} exactly [store as: copy] otherwise continue with warning "no copy"';
+    const { outcome, scope } = await run(line, ['{"value": "***"}'], {
+      scope: { password: SECRET },
+      failureTail: parseFailureTail(line),
+    });
+    expect(outcome.result.status).toBe('failed');
+    expect(outcome.result.tolerated).toBe(true);
+    expect(outcome.result.warning).toBe('no copy');
+    expect(scope).toEqual({ password: SECRET });
+  });
+});
+
+describe('runUseAiStep — a secret written into the step\'s own words (issue 060)', () => {
+  // What a skill argument or a looped section's row leaves behind: the
+  // expander wrote the value into the text, so no `{{…}}` is left to name it,
+  // and the loop's mask set (`runSecretsWithInputs`) is the only thing that
+  // knows it. Here the set is handed over as a loop would hand it.
+  const ROW_SECRET = 'row-SECRET-9';
+  const IN_TEXT_HINT =
+    " A secret's value is masked wherever it appears in the step's text, including where a " +
+    "skill's argument or a looped section's row put it.";
+
+  it('reaches the model masked, with the sentence, and an echo fails the step', async () => {
+    const echo = echoModel();
+    const { outcome, scope } = await run(`[use ai] Repeat ${ROW_SECRET} exactly [store as: copy]`, [], {
+      secrets: [ROW_SECRET],
+      aiClient: echo.model,
+    });
+    expect(userText(echo.calls)).toBe('Repeat *** exactly');
+    expect(echo.calls[0]![0]!.content).toContain(MASK_SENTENCE);
+    expect(outcome.result.status).toBe('failed');
+    expect(outcome.result.error).toBe(
+      "The value contains `***` — the mask for a secret written into the step's text, which is hidden " +
+        'from the model; a [use ai] step cannot use a secret.' +
+        IN_TEXT_HINT,
+    );
+    expect(scope).toEqual({});
+    expect(JSON.stringify(echo.calls)).not.toContain(ROW_SECRET);
+    // The report row keeps the authored line, as for any step: masking that is
+    // each loop's job, with the same set.
+    expect(JSON.stringify({ ...outcome.result, instruction: undefined })).not.toContain(ROW_SECRET);
+  });
+
+  it('is named beside a hidden reference, and in a declined step\'s error', async () => {
+    const { outcome } = await run(
+      `[use ai] Join {{password}} and ${ROW_SECRET} [store as: joined]`,
+      ['{"error": "Both values are hidden."}'],
+      { scope: { password: 'hunter2-probe' }, secrets: ['hunter2-probe', ROW_SECRET] },
+    );
+    expect(outcome.result.error).toBe(
+      'The model could not do the [use ai] step as written: Both values are hidden. ' +
+        "(Hidden from the model: `{{password}}` and a secret written into the step's text.) " +
+        '`{{password}}` is hidden by its name, which contains "password"; if it is not a secret, rename it.' +
+        IN_TEXT_HINT,
+    );
+  });
+
+  it('never touches a reference: a `{{…}}` token survives a secret that matches inside it', async () => {
+    // `word` is a (short) secret value; the defined name `keyword_list` holds
+    // it too. The token is left for the framework, the prose is masked.
+    const { calls, outcome, scope } = await run(
+      '[use ai] Pick a word and store it as {{keyword_list}}',
+      ['{"value": "plum"}'],
+      { secrets: ['word'] },
+    );
+    expect(userText(calls)).toBe('Pick a *** and store it as {{keyword_list}}');
+    expect(outcome.result.status).toBe('passed');
+    expect(scope).toEqual({ keyword_list: 'plum' });
+  });
+
+  it('masks a short secret wherever its characters occur, as the report does — unless `unmask:` names it', async () => {
+    // The mask set has no floor for a name the author chose, so a `keyword` of
+    // `AU` hides the "AU" in "AUstralia" here exactly as it does in the
+    // report, and the model is told something is hidden.
+    const scope = { keyword: 'AU' };
+    const masked = await run('[use ai] Describe AUstralia in one line [store as: d]', ['{"value": "Big."}'], {
+      scope,
+    });
+    expect(userText(masked.calls)).toBe('Describe ***stralia in one line');
+    expect(masked.calls[0]![0]!.content).toContain(MASK_SENTENCE);
+
+    // `unmask: keyword` exempts the value in the step's words too, not only
+    // where `{{keyword}}` names it.
+    const unmasked = await run('[use ai] Describe AUstralia in one line [store as: d]', ['{"value": "Big."}'], {
+      scope: { ...scope },
+      unmask: new Set(['keyword']),
+    });
+    expect(userText(unmasked.calls)).toBe('Describe AUstralia in one line');
+    expect(unmasked.calls[0]![0]!.content).not.toContain('hidden from you');
+    expect(unmasked.outcome.result.status).toBe('passed');
   });
 });

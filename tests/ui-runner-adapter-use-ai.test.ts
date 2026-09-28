@@ -149,6 +149,41 @@ describe('UIRunnerAdapter runs a [use ai] step beside Set', () => {
     expect(executeStepMock).not.toHaveBeenCalled();
   });
 
+  it('masks a looped section row\'s secret column, which expansion wrote into the text (issue 060)', async () => {
+    const file = writeTest(
+      [
+        '# Use ai',
+        '',
+        '## Steps',
+        '1. Echo each password',
+        '',
+        '### Echo each password',
+        '| password |',
+        '|----------|',
+        '| ui-row-SECRET-1 |',
+        '| ui-row-SECRET-2 |',
+        '',
+        '1. [use ai] Repeat {{password}} exactly [store as: copy] otherwise continue',
+        '',
+      ].join('\n'),
+    );
+    // What an echoing model answers, once per row.
+    model.replies = ['{"value": "***"}', '{"value": "***"}'];
+    const events = await run(file);
+    const sent = model.requests as Array<Array<{ role: string; content: string }>>;
+    expect(sent.map((messages) => messages[1]!.content)).toEqual(['Repeat *** exactly', 'Repeat *** exactly']);
+    for (const messages of sent) {
+      expect(messages[0]!.content).toContain('stands for a value that is hidden from you');
+    }
+    const completes = events.filter((e) => e.channel === 'runner:step-complete').map((e) => e.data);
+    expect(completes.map((c) => [c['status'], c['tolerated']])).toEqual([
+      ['failed', true],
+      ['failed', true],
+    ]);
+    expect(String(completes[0]!['error'])).toContain("the mask for a secret written into the step's text");
+    expect(JSON.stringify(sent)).not.toContain('ui-row-SECRET');
+  });
+
   it('an `otherwise continue` tail carries the run past a failure, as on any step', async () => {
     const file = writeTest(
       [
