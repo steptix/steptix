@@ -65,6 +65,63 @@ test('isRecordStepsEvent: accepts the browser toolbar\'s frames (stories/testben
   }
 });
 
+test('isRecordStepsEvent: accepts record:edited (stories/testbench-record-edit-steps.md)', () => {
+  // Dropped by the guard, a step reworded in the browser's drawer would never
+  // reach the panel's row, nor the file line that follows it.
+  assert.equal(isRecordStepsEvent({ type: 'record:edited', id: 'd4', text: 'Open Payments from the side menu', source: 'toolbar' }), true);
+});
+
+test('streamRecordSteps: a draft\'s ids and edited, record:edited, and the actions a step delete dropped all cross the wire', async () => {
+  const client = new ApiClient({
+    serverUrl: 'http://x',
+    apiKey: 'k',
+    fetch: async () =>
+      streamingResponse([
+        frame({
+          type: 'record:draft',
+          revision: 3,
+          steps: ['Navigate to login.html', 'Open Payments from the side menu', 'Verify the total'],
+          parameters: [],
+          locked: 3,
+          authored: [2],
+          authoredIds: ['s1'],
+          ids: ['d1', 'd2', 's1'],
+          edited: [1],
+        }),
+        frame({ type: 'record:edited', id: 'd2', text: 'Open Payments from the side menu', source: 'editor' }),
+        frame({ type: 'record:dropped', id: 'd3', dropped: true, source: 'editor', actions: ['a4', 'a5'] }),
+        frame({ type: 'done', status: 'passed' }),
+      ]),
+  });
+  const events = await collect(client.streamRecordSteps('s', MINIMAL, new AbortController().signal));
+  assert.deepEqual(events[0].ids, ['d1', 'd2', 's1']);
+  assert.deepEqual(events[0].edited, [1]);
+  assert.deepEqual(events[1], { type: 'record:edited', id: 'd2', text: 'Open Payments from the side menu', source: 'editor' });
+  assert.deepEqual(events[2].actions, ['a4', 'a5']);
+  assert.equal(events[2].source, 'editor');
+});
+
+test('controlRecordSteps: edit-step, and drop / restore of a step by its id, go as sent', async () => {
+  const calls = [];
+  const client = new ApiClient({
+    serverUrl: 'http://x',
+    apiKey: 'k',
+    fetch: async (_url, init) => {
+      calls.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ ok: true, ignored: 'it holds a secret — write {{password}} in its place' }), { status: 202 });
+    },
+  });
+  const answer = await client.controlRecordSteps('s', { action: 'edit-step', id: 'd2', text: 'Type hunter2 into Password', source: 'editor', revision: 7 });
+  assert.deepEqual(answer, { ignored: true, reason: 'it holds a secret — write {{password}} in its place' });
+  await client.controlRecordSteps('s', { action: 'drop', id: 'd3', source: 'editor' });
+  await client.controlRecordSteps('s', { action: 'restore', id: 'd3', source: 'panel' });
+  assert.deepEqual(calls, [
+    { action: 'edit-step', id: 'd2', text: 'Type hunter2 into Password', source: 'editor', revision: 7 },
+    { action: 'drop', id: 'd3', source: 'editor' },
+    { action: 'restore', id: 'd3', source: 'panel' },
+  ]);
+});
+
 test('isRecordStepsEvent: rejects run frames and garbage', () => {
   assert.equal(isRecordStepsEvent({ type: 'step:pass' }), false);
   assert.equal(isRecordStepsEvent({ type: 'record:crop' }), false);

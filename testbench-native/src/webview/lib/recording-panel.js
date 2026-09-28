@@ -26,12 +26,47 @@ export function recordingStatusTextInline(state) {
   return `${state.paused ? "Recording paused" : "Recording"} — ${n} ${n === 1 ? "action" : "actions"}`;
 }
 
-/** Steps so far, marked: a lock on each locked step, "yours" on the author's. */
+/** Steps so far, marked: "yours" on each step the author wrote or reworded.
+ *  No step is locked against the author, so no lock is shown
+ *  (stories/testbench-record-edit-steps.md, decision 1). */
 export function draftStepMarksInline(draft) {
   if (!draft) return [];
-  const locked = Number.isFinite(draft.locked) ? Number(draft.locked) : 0;
-  const yours = new Set(Array.isArray(draft.authored) ? draft.authored : []);
-  return draft.steps.map((_, i) => ({ locked: i < locked, yours: yours.has(i) }));
+  const yours = new Set([
+    ...(Array.isArray(draft.authored) ? draft.authored : []),
+    ...(Array.isArray(draft.edited) ? draft.edited : []),
+  ]);
+  return draft.steps.map((_, i) => ({ yours: yours.has(i) }));
+}
+
+/**
+ * Steps so far as the panel lists it (stories/testbench-record-edit-steps.md
+ * §"The panel"): the draft's steps, numbered, each with the id its ✕ deletes
+ * it by (null from a server that sends no ids: no ✕) and "yours" on the
+ * author's; and each deleted step (`deletedSteps`) struck, with Restore, after
+ * the step that was before it — or at the top — until the draft holds it again.
+ */
+export function stepsSoFarRowsInline(draft, deleted) {
+  const steps = Array.isArray(draft?.steps) ? draft.steps : [];
+  const ids = Array.isArray(draft?.ids) ? draft.ids : null;
+  const marks = draftStepMarksInline(draft ? { ...draft, steps } : null);
+  const rows = steps.map((text, i) => ({
+    kind: "step",
+    number: i + 1,
+    text,
+    id: ids && ids[i] ? ids[i] : null,
+    yours: marks[i]?.yours === true,
+  }));
+  for (const d of Array.isArray(deleted) ? deleted : []) {
+    if (!d || (ids && ids.includes(d.id))) continue;
+    let at = 0;
+    if (d.after !== null && d.after !== undefined) {
+      const before = rows.findIndex((r) => r.id === d.after);
+      at = before >= 0 ? before + 1 : rows.length;
+    }
+    while (at < rows.length && rows[at].kind === "deleted") at++;
+    rows.splice(at, 0, { kind: "deleted", text: String(d.text ?? ""), id: String(d.id) });
+  }
+  return rows;
 }
 
 // ---------------------------------------------------------------------------

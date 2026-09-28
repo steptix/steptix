@@ -1112,6 +1112,575 @@ test('random author lines, drafts that lag behind the lines sent, and a server t
 });
 
 // ---------------------------------------------------------------------------
+// Random edits of the recorded lines themselves, with step ids
+// (stories/testbench-record-edit-steps.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * The server's side with step ids, as the draft engine keeps them: every step
+ * an id — `dN` the model's, `sN` the author's — kept while it is unchanged in
+ * place; add-steps placed as FakeServer places them; `edit-step` keeps the id
+ * and marks the step reworded (a step the model rewrote meanwhile: the one
+ * that stands for its actions now); `drop` / `restore` of a step; the model
+ * rewriting its last open step (a new id, standing for the same actions); the
+ * drawer rewording a step. Everything it says is one STREAM, in order —
+ * `record:step` and `record:edited` frames, each before the draft that holds
+ * what it says, and the drafts — which the client reads a stretch at a time.
+ */
+class IdServer {
+  constructor(steps) {
+    this.dseq = 0;
+    this.sseq = 0;
+    this.steps = steps.map((text) => ({ text, id: `d${++this.dseq}` }));
+    this.revision = 0;
+    this.history = new Map();
+    this.gone = [];
+    this.stream = [];
+    this.emit();
+  }
+
+  emit() {
+    this.revision += 1;
+    this.history.set(this.revision, this.steps.map((s) => s.text));
+    this.stream.push({ type: 'draft', draft: this.draft() });
+  }
+
+  draft() {
+    const authored = [];
+    const authoredIds = [];
+    const edited = [];
+    this.steps.forEach((s, i) => {
+      if (s.author) {
+        authored.push(i);
+        authoredIds.push(s.id);
+      }
+      if (s.edited) edited.push(i);
+    });
+    return {
+      steps: this.steps.map((s) => s.text),
+      parameters: [],
+      ids: this.steps.map((s) => s.id),
+      ...(edited.length > 0 && { edited }),
+      ...(authored.length > 0 && { authored, authoredIds }),
+      locked: this.steps.length,
+      revision: this.revision,
+    };
+  }
+
+  record(text) {
+    this.steps.push({ text, id: `d${++this.dseq}` });
+    this.emit();
+  }
+
+  /** The model rewrites its last step that is neither the author's nor reworded. */
+  rewrite(text) {
+    let i = this.steps.length - 1;
+    while (i >= 0 && (this.steps[i].author || this.steps[i].edited)) i--;
+    if (i < 0) return false;
+    const old = this.steps[i];
+    this.steps[i] = { text, id: `d${++this.dseq}`, replaces: [old.id, ...(old.replaces ?? [])] };
+    this.emit();
+    return true;
+  }
+
+  mapIndex(afterStep, revision) {
+    const clamp = (i) => Math.max(0, Math.min(i, this.steps.length - 1));
+    if (revision === undefined || revision === this.revision) return afterStep;
+    const text = this.history.get(revision)?.[afterStep];
+    if (text === undefined) return clamp(afterStep);
+    let best = -1;
+    this.steps.forEach((s, i) => {
+      if (s.text === text && (best < 0 || Math.abs(i - afterStep) < Math.abs(best - afterStep))) best = i;
+    });
+    return best >= 0 ? best : clamp(afterStep);
+  }
+
+  addStep(commit) {
+    const at = commit.afterStep === undefined ? undefined : this.mapIndex(commit.afterStep, commit.revision);
+    const made = commit.lines.map((text) => ({ text, id: `s${++this.sseq}`, author: true }));
+    if (at === undefined || at >= this.steps.length - 1) this.steps.push(...made);
+    else this.steps.splice(at + 1, 0, ...made);
+    for (const s of made) this.stream.push({ type: 'frame', frame: { type: 'record:step', id: s.id, text: s.text, source: 'editor' } });
+    this.emit();
+    return {};
+  }
+
+  editStep(id, text, source) {
+    const s = this.steps.find((x) => x.id === id) ?? this.steps.find((x) => x.replaces?.includes(id));
+    if (!s) return { ignored: 'no step stands for its actions any more' };
+    s.text = text;
+    s.edited = true;
+    this.stream.push({ type: 'frame', frame: { type: 'record:edited', id: s.id, text, source } });
+    this.emit();
+    return {};
+  }
+
+  drop(id) {
+    // A step the model rewrote since: the one that stands for its actions now.
+    let i = this.steps.findIndex((x) => x.id === id);
+    if (i < 0) i = this.steps.findIndex((x) => x.replaces?.includes(id));
+    if (i < 0) return { ignored: 'no such step' };
+    this.gone.push({ step: this.steps[i], after: this.steps[i - 1]?.id ?? null });
+    this.steps.splice(i, 1);
+    this.emit();
+    return {};
+  }
+
+  restore(id) {
+    let k = this.gone.findIndex((g) => g.step.id === id);
+    if (k < 0) k = this.gone.findIndex((g) => g.step.replaces?.includes(id));
+    if (k < 0) return { ignored: 'not dropped' };
+    const [g] = this.gone.splice(k, 1);
+    let at = 0;
+    if (g.after !== null) {
+      const before = this.steps.findIndex((x) => x.id === g.after);
+      at = before >= 0 ? before + 1 : this.steps.length;
+    }
+    this.steps.splice(at, 0, g.step);
+    this.emit();
+    return {};
+  }
+}
+
+/**
+ * Every character with who put it there, as in the test above — `base`,
+ * `author`, `rec` — through a recording whose drafts carry step ids and whose
+ * author rewords recorded lines (a few words, the number alone, the whole line
+ * emptied or left a bare number), deletes whole lines of the run (recorded or
+ * theirs), rewords their own, types new lines, and presses Ctrl+Z — which
+ * undoes the most recent change, theirs or the recording's, as VS Code's undo
+ * stack does. The server takes the controls a stretch at a time, rewrites its
+ * last open step now and then, and the drawer rewords a step; the client reads
+ * the stream a stretch at a time, so drafts lag behind everything sent.
+ *
+ * A write may replace the recording's own text, the digits of a step's number
+ * at a line's start, the leading number of a line of the author's that a
+ * draft holds, or — words from the drawer — the words of a line the author is
+ * not editing; the empty draft takes reworded lines out. Nothing else of the
+ * author's, ever. No step's words are in the file twice. The file is never
+ * given up on. At Stop the file holds the result, each step once, in order; at
+ * Cancel nothing of the recording's is left, and every line the author typed
+ * is.
+ */
+test('random edits, deletes and undos of recorded lines, with step ids, drafts lagging and a server that takes edit-step, drop and restore: the author\'s words are never overwritten, no step is written twice, the writing never stops, Stop converges on the result and Cancel leaves the author\'s lines', () => {
+  const MODEL = ['Click Menu', 'Click Payments', 'Tick Cash', 'Click Pay', 'Sign out', 'Open Reports', 'Close Reports', 'Open Help'];
+  let lostCount = 0;
+  const seen = { edits: 0, adoptedEdits: 0, drops: 0, restores: 0, undos: 0, follows: 0, numberOnly: 0, emptied: 0, stops: 0, cancels: 0 };
+  // For a failure's story: RECORD_SEED=n runs that seed alone; RECORD_VERBOSE=1
+  // prints the file around the steps after each op (2: and the run's parts,
+  // RECORD_MINES=1: and the author's lines whole), the seeds that lost the
+  // file, and at the end how much of each kind of op the run did.
+  const only = Number(process.env.RECORD_SEED) || 0;
+  for (let seed = only || 1; seed <= (only || 300); seed++) {
+    const rnd = prng(seed * 7919);
+    const pick = (list) => list[Math.floor(rnd() * list.length)];
+    const label = (op) => `seed ${seed}, ${op}`;
+    const server = new IdServer(MODEL.slice(0, 2));
+    let modelNext = 2;
+    let words = 0;
+    const s = new Session(FIXTURE, '2. Click Sign in');
+    const book = core.newLineBook();
+    let chars = [...FIXTURE].map((c) => ({ c, own: 'base' }));
+    const textOf = () => chars.map((x) => x.c).join('');
+    /** Controls the client sent and the server has not taken yet, in order. */
+    const inbox = [];
+    let delivered = 0;
+    let written = 0;
+    /** The latest draft the client has read. */
+    let latest = null;
+    /** Words the author typed, reworded, or had from the drawer — each must
+     *  never be in the file twice. */
+    const texts = new Set(MODEL);
+    const drawer = new Set();
+    const adopted = new Set();
+    /** VS Code's undo stack: each change of the author's, and each write,
+     *  with the changes that undo it. Measured in VS Code 1.95: an undo
+     *  reports the exact inverse of the edits it undoes — typing, a line
+     *  deleted, a write of two ranges alike — as an Undo event. */
+    const undo = [];
+    const snapshot = () => ({ text: s.text, chars: chars.map((x) => ({ ...x })) });
+    /** The changes that turn the text `edits` made back into `before`, in
+     *  the new text's offsets. */
+    const inverseOf = (before, edits) => {
+      const sorted = [...edits].sort((a, b) => a.offset - b.offset);
+      let shift = 0;
+      return sorted.map((c) => {
+        const inv = { offset: c.offset + shift, length: c.text.length, text: before.slice(c.offset, c.offset + c.length) };
+        shift += c.text.length - c.length;
+        return inv;
+      });
+    };
+
+    const write = (draft, op, opts = {}) => {
+      if (!s.live) {
+        const begun = core.beginLiveRecord(s.text, s.anchor);
+        assert.ok(!('error' in begun));
+        s.live = begun;
+      }
+      const before = snapshot();
+      const w = core.liveRecordWrite(s.live, s.text, draft, { anchor: s.anchor, book });
+      if ('error' in w) {
+        assert.ok(w.lost, label(`${op}: ${w.error}`));
+        s.lost = true;
+        return null;
+      }
+      for (const e of w.edits) {
+        const replaced = chars.slice(e.start, e.end);
+        const was = replaced.map((x) => x.c).join('');
+        const recOnly = replaced.every((x) => x.own === 'rec');
+        const digits = /^\d+$/.test(e.text) && replaced.every((x) => /\d/.test(x.c));
+        const lineStart = e.start === 0 || chars[e.start - 1]?.c === '\n';
+        const heldNumber =
+          e.kind === 'mine' &&
+          e.why === 'number' &&
+          lineStart &&
+          /^(?:\d+|\d+\. |(?:\d+\)|[-*+])[ \t]+|)$/.test(was) &&
+          /^(?:\d+|\d+\. |(?:\d+\)|[-*+])[ \t]+|)$/.test(e.text);
+        const followed = e.kind === 'mine' && e.why === 'follow' && !was.includes('\n') && drawer.has(core.cleanAuthorLine(e.text));
+        const revealed = e.kind === 'mine' && e.why === 'reveal' && e.start === e.end;
+        const cleared = e.kind === 'mine' && e.why === 'clear' && opts.clear === true && e.text === '';
+        // A recorded line's number the author changed is the recording's to
+        // write ("numbers stay the recording's"): of theirs, a block edit may
+        // take the digits at a line's start, nothing else.
+        const numbersOnly =
+          e.kind === 'block' &&
+          replaced.every((x, k) => {
+            if (x.own === 'rec') return true;
+            if (!/\d/.test(x.c)) return false;
+            let at = e.start + k - 1;
+            while (at >= 0 && /\d/.test(chars[at].c)) at--;
+            return at < 0 || chars[at].c === '\n';
+          });
+        if (followed) seen.follows++;
+        assert.ok(
+          recOnly || (digits && lineStart && e.kind !== 'mine') || numbersOnly || heldNumber || followed || revealed || cleared,
+          label(`${op}: a write replaced ${JSON.stringify(was)} (${[...new Set(replaced.map((x) => x.own))]}) with ${JSON.stringify(e.text)} [${e.kind}/${e.why}]`),
+        );
+      }
+      const ordered = w.edits.map((e, i) => ({ e, i })).sort((a, b) => b.e.start - a.e.start || b.e.end - a.e.end || b.i - a.i);
+      for (const { e } of ordered) chars.splice(e.start, e.end - e.start, ...[...e.text].map((c) => ({ c, own: e.kind === 'mine' ? 'author' : 'rec' })));
+      const applied = w.edits.map((x) => change(x.start, x.end - x.start, x.text));
+      s.move(applied);
+      s.live = w.record;
+      assert.equal(s.text, textOf(), label(`${op}: the model and the session agree`));
+      if (w.edits.length > 0) undo.push({ kind: 'write', ...before, inverse: inverseOf(before.text, applied) });
+      return w;
+    };
+
+    /** The author's change event, with its undo. `lineBelow`: the change is
+     *  a line opened at the end of a line's text ("\ntext" before its line
+     *  break) — the same text as the line and ITS break after the old line's
+     *  break, which is the author's line as it reads. */
+    const author = (changes, opts = {}) => {
+      const before = snapshot();
+      for (const c of [...changes].sort((a, b) => b.offset - a.offset)) {
+        if (opts.lineBelow) chars.splice(c.offset + 1, c.length, ...[...`${c.text.slice(1)}\n`].map((ch) => ({ c: ch, own: 'author' })));
+        else chars.splice(c.offset, c.length, ...[...c.text].map((ch) => ({ c: ch, own: 'author' })));
+      }
+      s.author(changes, {});
+      undo.push({ kind: 'author', ...before, inverse: inverseOf(before.text, changes) });
+      sendQueued();
+    };
+    // `Session.author` follows with no book; this one does, as the recorder.
+    s.author = function (changes, opts = {}) {
+      this.move(changes);
+      if (!this.live) return;
+      const followed = core.followLiveRecord(this.live, changes, {
+        text: () => this.text,
+        uncertain: opts.uncertain === true,
+        undo: opts.undo === true,
+        anchor: this.anchor,
+        book,
+      });
+      this.live = followed.record;
+    };
+    const sendQueued = () => {
+      for (const c of core.takeLineControls(book)) {
+        inbox.push({ kind: c.action, id: c.id });
+        if (c.action === 'drop') seen.drops++;
+        else seen.restores++;
+      }
+    };
+    /** The author leaves their lines: what counts goes. */
+    const count = (opts = {}) => {
+      const adds = core.commitAuthorLines(s.live, s.text, [], opts);
+      s.live = adds.record;
+      const edits = core.commitLineEdits(s.live, s.text, [], { ...opts, book });
+      s.live = edits.record;
+      for (const c of adds.commits) inbox.push({ kind: 'add', commit: c });
+      for (const c of edits.commits) {
+        inbox.push({ kind: c.action === 'drop' ? 'drop' : 'edit', commit: c, id: c.id });
+        if (c.action === 'edit-step') seen.edits++;
+        else seen.emptied++;
+      }
+      sendQueued();
+    };
+    /** The server takes the first `n` controls sent — answering at once. */
+    const serve = (n) => {
+      for (const item of inbox.splice(0, n)) {
+        let answer;
+        if (item.kind === 'add') answer = server.addStep(item.commit);
+        else if (item.kind === 'edit') answer = server.editStep(item.commit.id, item.commit.text, 'editor');
+        else if (item.kind === 'drop') answer = server.drop(item.id);
+        else answer = server.restore(item.id);
+        if (answer.ignored === undefined) continue;
+        if (item.kind === 'add') s.live = core.keepAuthorLines(s.live, item.commit.keys);
+        if (item.kind === 'edit') s.live = core.editRefused(s.live, item.commit, book);
+      }
+    };
+    /** The client reads `n` more of the stream (all: Infinity); the latest
+     *  draft goes into the file, and the lines left meanwhile are counted. */
+    const read = (n, op, opts = {}) => {
+      const end = Math.min(server.stream.length, delivered + n);
+      for (; delivered < end; delivered++) {
+        const item = server.stream[delivered];
+        if (item.type === 'draft') {
+          latest = item.draft;
+          continue;
+        }
+        const f = item.frame;
+        if (f.type === 'record:step') s.live = core.assignAuthorStepId(s.live, f.id, f.text, book);
+        else s.live = core.noteStepEdited(s.live, f, book);
+      }
+      sendQueued();
+      if (!latest || latest.revision <= written) return true;
+      if (!write(latest, op, opts)) return false;
+      written = latest.revision;
+      // A reworded line the draft now shows as the author's rewording, held.
+      for (const l of core.authorLinesOf(s.live)) {
+        const at = latest.ids.indexOf(l.stepId);
+        if (l.origin !== 'edit' || !l.inDraft || at < 0 || !(latest.edited ?? []).includes(at) || adopted.has(l.key)) continue;
+        adopted.add(l.key);
+        seen.adoptedEdits++;
+      }
+      count();
+      return true;
+    };
+    /** The run's lines now: each with the step id it holds, if any. */
+    const runLines = () => {
+      const out = [];
+      for (const slot of s.live.slots) {
+        if (slot.kind === 'block') {
+          let at = slot.start;
+          (slot.wrote.match(/[^\n]*\n|[^\n]+$/g) ?? []).forEach((unit, k) => {
+            out.push({ start: at, text: unit.replace(/\n$/, ''), id: slot.ids?.[k] ?? null, kind: 'block' });
+            at += unit.length;
+          });
+        } else if (slot.kind === 'mine' && slot.end > slot.start) {
+          out.push({ start: slot.start, text: slot.wrote.replace(/\n$/, ''), id: slot.stepId ?? null, kind: 'mine', origin: slot.origin });
+        }
+      }
+      return out.filter((l) => l.text.trim() !== '');
+    };
+    /** No words of a step in the file twice. */
+    const onceEach = (op) => {
+      const counts = new Map();
+      for (const line of s.text.split('\n')) {
+        const w = core.cleanAuthorLine(line);
+        if (texts.has(w)) counts.set(w, (counts.get(w) ?? 0) + 1);
+      }
+      for (const [w, n] of counts) assert.ok(n <= 1, label(`${op}: ${JSON.stringify(w)} is in the file ${n} times`));
+    };
+
+    s.live = null;
+    read(Infinity, 'first');
+    for (let op = 0; op < 40 && !s.lost; op++) {
+      const r = rnd();
+      // Not where the offsets say while the record looks for itself: the
+      // author's edits below aim at lines by them.
+      const lines = s.live.uncertain ? [] : runLines();
+      const recordedLines = lines.filter((l) => l.kind === 'block' && l.id);
+      let name = `op ${op}`;
+      if (r < 0.1) {
+        name += ' record';
+        if (modelNext < MODEL.length) server.record(MODEL[modelNext++]);
+      } else if (r < 0.14) {
+        name += ' rewrite';
+        const text = `${MODEL[Math.floor(rnd() * MODEL.length)]} v${++words}`;
+        if (server.rewrite(text)) texts.add(text);
+      } else if (r < 0.28) {
+        name += ' read';
+        if (!read(rnd() < 0.5 ? 1 + Math.floor(rnd() * 4) : Infinity, name)) break;
+      } else if (r < 0.38) {
+        name += ' serve';
+        serve(rnd() < 0.5 ? 1 : inbox.length);
+      } else if (r < 0.46) {
+        name += ' count';
+        count();
+      } else if (r < 0.58 && recordedLines.length > 0) {
+        // The author rewords a recorded line: a few words, the number alone,
+        // or all of it, left empty or a bare number.
+        const line = pick(recordedLines);
+        const num = /^\d+/.exec(line.text)?.[0] ?? '';
+        const k = rnd();
+        if (k < 0.55) {
+          name += ' reword';
+          const tail = ` e${++words}`;
+          texts.add(core.cleanAuthorLine(line.text + tail));
+          author([change(line.start + line.text.length, 0, tail)]);
+        } else if (k < 0.75 && num !== '') {
+          name += ' renumber';
+          seen.numberOnly++;
+          author([change(line.start, num.length, String(Number(num) + 10))]);
+        } else {
+          name += ' empty';
+          const left = rnd() < 0.5 ? '' : `${num || 1}.`;
+          author([change(line.start, line.text.length, left)]);
+          // The line is theirs now, its break included.
+          chars[line.start + left.length].own = 'author';
+        }
+      } else if (r < 0.68 && lines.length > 0) {
+        name += ' delete';
+        const line = pick(lines);
+        author([change(line.start, line.text.length + 1, '')]);
+      } else if (r < 0.74 && lines.length > 0) {
+        name += ' new line';
+        const line = pick(lines);
+        const text = `Check ${++words}`;
+        texts.add(text);
+        author([change(line.start + line.text.length, 0, `\n${text}`)], { lineBelow: true });
+      } else if (r < 0.8) {
+        name += ' mine';
+        const mine = lines.filter((l) => l.kind === 'mine');
+        if (mine.length === 0) continue;
+        const line = pick(mine);
+        const tail = ` m${++words}`;
+        texts.add(core.cleanAuthorLine(line.text + tail));
+        author([change(line.start + line.text.length, 0, tail)]);
+      } else if (r < 0.86) {
+        name += ' drawer';
+        if (server.steps.length === 0) continue;
+        // Half the time a step the author wrote or reworded — the drawer
+        // rewording a line of theirs.
+        const theirsOnServer = server.steps.filter((x) => x.author || x.edited);
+        const target = theirsOnServer.length > 0 && rnd() < 0.5 ? pick(theirsOnServer) : pick(server.steps);
+        const text = `Drawer ${++words}`;
+        texts.add(text);
+        drawer.add(text);
+        server.editStep(target.id, text, 'toolbar');
+      } else if (r < 0.95) {
+        name += ' undo';
+        const top = undo.pop();
+        if (!top) continue;
+        seen.undos++;
+        // VS Code puts the text back as it was, reporting the inverse edits.
+        chars = top.chars;
+        s.author(top.inverse, { uncertain: true, undo: true });
+        assert.equal(s.text, top.text, label(`${name}: the undo put the text back`));
+        sendQueued();
+      } else {
+        name += ' above';
+        author([change(0, 0, 'x')]);
+      }
+      if (s.lost) break;
+      if (process.env.RECORD_VERBOSE) process.stderr.write(`--- ${name}\n${s.text.split('\n').slice(9, 24).join('\n')}\n`);
+      if (process.env.RECORD_VERBOSE === '2') {
+        const shape = s.live.slots
+          .filter((x) => x.kind === 'block' || x.kind === 'mine')
+          .map((x) => (x.kind === 'block' ? `[${(x.ids ?? []).join(',')}]` : `<${x.origin ?? 'typed'}:${x.status}:${x.stepId ?? '-'}${x.unacked ? ':u' : ''}>`))
+          .join(' ');
+        process.stderr.write(`    ${shape}${s.live.uncertain ? ' UNCERTAIN' : ''} deleted=${[...book.deleted]} told=${JSON.stringify([...book.told])}\n`);
+        if (process.env.RECORD_MINES) process.stderr.write(`    ${JSON.stringify(s.live.slots.filter((x) => x.kind === 'mine'))}\n`);
+      }
+      assert.equal(s.text, textOf(), label(`${name}: the model and the session agree`));
+      onceEach(name);
+      // What the record says is where: each part of the run reads, at its
+      // offsets, what the record holds for it (unless it is looking for it).
+      if (!s.live.uncertain) {
+        for (const slot of s.live.slots) {
+          if (slot.kind !== 'block' && slot.kind !== 'mine') continue;
+          if (slot.touched) continue;
+          assert.equal(s.text.slice(slot.start, slot.end), slot.wrote, label(`${name}: a ${slot.kind} part is not where the record says`));
+        }
+      }
+    }
+    if (s.lost) {
+      lostCount++;
+      if (process.env.RECORD_VERBOSE) process.stderr.write(`LOST seed ${seed}\n`);
+      continue;
+    }
+    // The words of every line the author typed and left.
+    const theirs = () =>
+      core
+        .authorLinesOf(s.live)
+        .filter((l) => l.origin !== 'edit' && l.dropped !== 'hidden' && core.cleanAuthorLine(l.line) !== '')
+        .map((l) => core.cleanAuthorLine(l.line));
+    const wordsInFile = () => s.text.split('\n').map((l) => core.cleanAuthorLine(l));
+    if (rnd() < 0.5) {
+      seen.stops++;
+      // Stop: every line that counts goes, the server takes everything, the
+      // client reads to the end, and the result is the last draft with one
+      // more step — written over it, sometimes after the drafts were taken out
+      // first (the one Ctrl+Z after Stop).
+      count({ final: true });
+      serve(inbox.length);
+      if (!read(Infinity, 'last draft')) {
+        lostCount++;
+        continue;
+      }
+      serve(inbox.length);
+      if (!read(Infinity, 'last draft again')) {
+        lostCount++;
+        continue;
+      }
+      const typed = theirs();
+      const last = latest;
+      const result = [...last.steps, 'Stopped'];
+      texts.add('Stopped');
+      if (rnd() < 0.5 && !write({ ...EMPTY, clear: true }, 'Stop: the drafts out', { clear: true })) {
+        lostCount++;
+        continue;
+      }
+      const w = write(
+        { steps: result, parameters: [], ...core.authoredForResult(last, result), ...core.idsForResult(last, result), adoptSentByText: true },
+        'Stop',
+      );
+      assert.ok(w, label('Stop: the result is written over the draft'));
+      onceEach('Stop');
+      // Each step of the result is in the file once — the recording's own in
+      // the result's order. The author's lines (typed, or reworded) keep their
+      // places in the file: a server that holds two of them the other way round
+      // (Stop sent them together; a step restored where its actions are) is
+      // laid out by count around them.
+      const inFile = wordsInFile().filter((w) => result.includes(w));
+      for (const step of result) assert.ok(inFile.includes(step), label(`Stop: ${JSON.stringify(step)} is not in the file`));
+      const theirWords = new Set([
+        ...typed,
+        ...core.authorLinesOf(s.live).filter((l) => l.origin === 'edit').map((l) => core.cleanAuthorLine(l.line)),
+      ]);
+      assert.deepEqual(
+        inFile.filter((w) => !theirWords.has(w)),
+        result.filter((w) => !theirWords.has(w)),
+        label('Stop: the recording\'s steps are not in the result\'s order'),
+      );
+      for (const words of typed) assert.ok(wordsInFile().includes(words), label(`Stop: the author's ${JSON.stringify(words)} is gone`));
+      continue;
+    }
+    seen.cancels++;
+    const typed = theirs();
+    if (process.env.RECORD_VERBOSE) process.stderr.write(`Cancel: typed ${JSON.stringify(typed)} lines ${JSON.stringify(core.authorLinesOf(s.live))}\n`);
+    const w = write({ ...EMPTY, clear: true }, 'Cancel', { clear: true });
+    if (process.env.RECORD_VERBOSE) process.stderr.write(`after Cancel:\n${s.text}\n`);
+    if (!w) {
+      lostCount++;
+      continue;
+    }
+    // Nothing of the recording's: no model step, no reworded line — only the
+    // lines the author typed, with their words.
+    for (const line of s.text.split('\n')) {
+      const w2 = core.cleanAuthorLine(line);
+      assert.ok(!(texts.has(w2) && !typed.includes(w2)), label(`Cancel left ${JSON.stringify(line)}`));
+    }
+    assert.ok(!chars.some((x) => x.own === 'rec' && !/\d/.test(x.c)), label('Cancel left the recording\'s text'));
+    for (const words of typed) assert.ok(wordsInFile().includes(words), label(`Cancel: the author's ${JSON.stringify(words)} is gone`));
+  }
+  assert.equal(lostCount, 0, `lost: ${lostCount}`);
+  if (only) return;
+  if (process.env.RECORD_VERBOSE) process.stderr.write(`${JSON.stringify(seen)}\n`);
+  for (const [k, n] of Object.entries(seen)) assert.ok(n > 20, `${k}: ${n} — the random script did too little of it to prove anything`);
+});
+
+// ---------------------------------------------------------------------------
 // Text the author gives as steps
 // ---------------------------------------------------------------------------
 
@@ -1209,20 +1778,19 @@ test('record:draft: locked steps and the author\'s, mapped onto the steps as kep
   core.applyRecordFrame(s, { type: 'record:draft', revision: 2, steps: ['A'], parameters: [], locked: 7 });
   assert.equal(s.draft.locked, 1, 'never more than the steps');
   assert.equal(s.draft.authored, undefined);
-  assert.deepEqual(core.draftStepMarks(s.draft), [{ locked: true, yours: false }]);
+  // Locks are the draft engine's business: never shown to the author
+  // (stories/testbench-record-edit-steps.md, decision 1).
+  assert.deepEqual(core.draftStepMarks(s.draft), [{ yours: false }]);
 });
 
-test('Steps so far marks: a lock on each locked step, "yours" on the author\'s', () => {
+test('Steps so far marks: "yours" on the author\'s steps and rewordings, no lock', () => {
+  // No lock on any (stories/testbench-record-edit-steps.md, decision 1);
+  // "yours" on the author's steps and their rewordings.
   assert.deepEqual(
-    core.draftStepMarks({ steps: ['a', 'b', 'c', 'd'], locked: 3, authored: [1] }),
-    [
-      { locked: true, yours: false },
-      { locked: true, yours: true },
-      { locked: true, yours: false },
-      { locked: false, yours: false },
-    ],
+    core.draftStepMarks({ steps: ['a', 'b', 'c', 'd'], locked: 3, authored: [1], edited: [3] }),
+    [{ yours: false }, { yours: true }, { yours: false }, { yours: true }],
   );
-  assert.deepEqual(core.draftStepMarks({ steps: ['a'] }), [{ locked: false, yours: false }]);
+  assert.deepEqual(core.draftStepMarks({ steps: ['a'] }), [{ yours: false }]);
   assert.deepEqual(core.draftStepMarks(null), []);
 });
 
@@ -1280,6 +1848,7 @@ test('the panel copies of the heading text and the draft marks match the core (r
   }
   for (const draft of [
     { steps: ['a', 'b', 'c'], locked: 2, authored: [0] },
+    { steps: ['a', 'b', 'c'], authored: [0], edited: [2] },
     { steps: ['a'] },
     { steps: [], locked: 0 },
     null,

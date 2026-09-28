@@ -1668,7 +1668,7 @@ describe('TestBench Record Steps', function () {
 
     // The ✕ on a step row drops it by the step's id.
     await hooks.dispatchWebviewMessage({ type: 'recordDrop', id: 'p2', dropped: true });
-    assert.deepEqual(controlBodies()[2], { action: 'drop', id: 'p2' });
+    assert.deepEqual(controlBodies()[2], { action: 'drop', id: 'p2', source: 'panel' });
     assert.equal(hooks.recordingState().actions.find((a) => a.id === 'p2').dropped, true);
     // Undo in the browser strikes another; Restore puts the first back.
     fake.pushRecord({ type: 'record:dropped', id: 'p3', dropped: true, source: 'toolbar' });
@@ -2061,7 +2061,7 @@ describe('TestBench Record Steps', function () {
     // The panel's ✕, and its ↺.
     await hooks.dispatchWebviewMessage({ type: 'recordDrop', id: 's1', dropped: true });
     await waitFor('out by the panel', () => editor.document.getText() === recorded(D2));
-    assert.deepEqual(controlBodies().slice(-1), [{ action: 'drop', id: 's1' }]);
+    assert.deepEqual(controlBodies().slice(-1), [{ action: 'drop', id: 's1', source: 'panel' }]);
     await hooks.dispatchWebviewMessage({ type: 'recordDrop', id: 's1', dropped: false });
     await waitFor('back by the panel', () => editor.document.getText().includes(`3. Click Menu\n${mine}\n`));
     fake.pushRecord({ type: 'record:draft', revision: 12, steps: ['Click Menu', 'Verify A', 'Click Payments'], parameters: [], authored: [1], authoredIds: ['s1'] });
@@ -2170,5 +2170,279 @@ describe('TestBench Record Steps', function () {
       JSON.stringify(logged),
     );
     assert.ok(!logged.some((e) => e.kind === 'error'), JSON.stringify(logged));
+  });
+
+  // ---- Editing, deleting and restoring steps while recording
+  // (stories/testbench-record-edit-steps.md). Drafts carry step ids from here
+  // on: a server that sends none is the cases above.
+
+  /** A draft with its steps' ids (and `extra`: edited, authored…). */
+  function pushIdDraft(revision, steps, ids, extra = {}) {
+    fake.pushRecord({ type: 'record:drafting', busy: true });
+    fake.pushRecord({ type: 'record:draft', revision, steps, parameters: [], ids, ...extra });
+    fake.pushRecord({ type: 'record:drafting', busy: false });
+  }
+
+  /** Record at line 11 with the actions a1…an, and write the first draft of
+   *  `steps` with ids d1…dn. */
+  async function recordWithIds(editor, steps) {
+    await recordAt(editor, 11);
+    fake.pushRecord({ type: 'record:started', url: 'https://example.test/', title: '' });
+    steps.forEach((_, k) => fake.pushRecord({ type: 'record:action', id: `a${k + 1}`, kind: 'click', action: true, summary: `Clicked ${k + 1}`, atMs: 1000 * (k + 1) }));
+    pushIdDraft(1, steps, steps.map((_, k) => `d${k + 1}`));
+    await waitFor('draft 1 in the file', () => editor.document.getText() === recorded(steps));
+  }
+
+  const logged = (mark, kind) =>
+    hooks
+      .hostMessagesSince(mark)
+      .filter((m) => m.type === 'runEvent' && m.event.type === 'output' && (kind === undefined || m.event.kind === kind))
+      .map((m) => m.event.msg);
+
+  it('a recorded line reworded in the file is the author\'s from the first keystroke: drafts only renumber it; leaving it sends edit-step by its id; the draft showing the edit adopts it — never twice — and Cancel takes it out', async () => {
+    const editor = await openFixture();
+    await recordWithIds(editor, D2);
+    playToolbarControls();
+    // Select the words of "4. Click Payments" and type over them.
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    editor.selection = new vscode.Selection(12, 3, 12, 17);
+    await vscode.commands.executeCommand('type', { text: 'Open Payments' });
+    assert.equal(editor.document.lineAt(12).text, '4. Open Payments');
+    // A draft meanwhile — a step the model put above it: the line is
+    // renumbered, its words untouched, not written beside it.
+    pushIdDraft(2, ['Click Menu', 'Close the banner', 'Click Payments'], ['d1', 'd3', 'd2']);
+    await waitFor('draft 2 around the reworded line', () =>
+      editor.document.getText() === recorded(['Click Menu', 'Close the banner', 'Open Payments']),
+    );
+    assert.deepEqual(hooks.recordingNotices(), [], 'no warning: an edit is kept now');
+    assert.ok(!controlBodies().some((b) => b.action === 'edit-step'), 'not while the cursor is on it');
+    assert.deepEqual(hooks.recordingAuthorLines().map((l) => [l.line, l.origin, l.stepId]), [['5. Open Payments', 'edit', 'd2']]);
+
+    // The cursor leaves the line: one edit-step, naming the draft in the file.
+    editor.selection = new vscode.Selection(0, 0, 0, 0);
+    await waitFor('edit-step sent', () => controlBodies().some((b) => b.action === 'edit-step'));
+    assert.deepEqual(controlBodies().filter((b) => b.action === 'edit-step'), [
+      { action: 'edit-step', id: 'd2', text: 'Open Payments', source: 'editor', revision: 2 },
+    ]);
+
+    // The server takes it; the draft that shows it holds the line.
+    fake.pushRecord({ type: 'record:edited', id: 'd2', text: 'Open Payments', source: 'editor' });
+    pushIdDraft(3, ['Click Menu', 'Close the banner', 'Open Payments', 'Tick Cash'], ['d1', 'd3', 'd2', 'd4'], { edited: [2] });
+    const adopted = recorded(['Click Menu', 'Close the banner', 'Open Payments', 'Tick Cash']);
+    await waitFor('adopted', () => editor.document.getText() === adopted);
+    await sleep(100);
+    assert.equal(editor.document.getText().split('Open Payments').length, 2, 'once');
+    assert.ok(!editor.document.getText().includes('Click Payments'), 'the model\'s words never come back');
+    const state = hooks.recordingState();
+    assert.deepEqual(state.draft.edited, [2]);
+    assert.deepEqual(
+      state.actions.filter((a) => a.kind === 'edit').map((a) => [a.summary, a.source]),
+      [['Edited step 3: Open Payments', 'editor']],
+    );
+    // Cancel: every step the recording wrote goes — the reworded one too.
+    await cancelRecording();
+    assert.equal(editor.document.getText(), FIXTURE);
+  });
+
+  it('a recorded line deleted in the file is a drop at once — a draft in flight still holding it does not put it back, the panel strikes it and the actions it stood for — and Ctrl+Z of the deletion is a restore', async () => {
+    const editor = await openFixture();
+    await recordWithIds(editor, D3);
+    playToolbarControls();
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    editor.selection = new vscode.Selection(12, 2, 12, 2); // "4. Click Payments"
+    await vscode.commands.executeCommand('editor.action.deleteLines');
+    await waitFor('drop sent', () => controlBodies().some((b) => b.action === 'drop'));
+    assert.deepEqual(controlBodies(), [{ action: 'drop', id: 'd2', source: 'editor' }], 'at once, by its id');
+    assert.deepEqual(hooks.recordingState().deletedSteps, [{ id: 'd2', text: 'Click Payments', after: 'd1' }]);
+    // A draft that left the server before the drop: still holds d2.
+    pushIdDraft(2, [...D3, 'Click Pay'], ['d1', 'd2', 'd3', 'd4']);
+    const without = recorded(['Click Menu', 'Tick Cash', 'Click Pay']);
+    await waitFor('the lagging draft, without the deleted step', () => editor.document.getText() === without);
+    // The server's word on it: the action it stood for, struck.
+    fake.pushRecord({ type: 'record:dropped', id: 'd2', dropped: true, source: 'panel', actions: ['a2'] });
+    await waitFor('its action struck', () => hooks.recordingState().actions.find((a) => a.id === 'a2')?.dropped === true);
+    assert.equal(hooks.recordingState().actions.find((a) => a.id === 'a2').droppedWith, 'd2');
+    assert.equal(hooks.recordingStatusText(), '● Recording — 2 actions');
+    assert.deepEqual(hooks.recordingNotices(), [], 'the file was never given up on');
+
+    // Ctrl+Z: VS Code takes back the recording's write first, then the
+    // deletion — which is a Restore.
+    await vscode.commands.executeCommand('undo');
+    await vscode.commands.executeCommand('undo');
+    await waitFor('restore sent', () => controlBodies().some((b) => b.action === 'restore'));
+    assert.deepEqual(controlBodies().filter((b) => b.action === 'restore'), [{ action: 'restore', id: 'd2', source: 'editor' }]);
+    assert.equal(editor.document.getText(), recorded(D3), 'the line back where it was');
+    assert.deepEqual(hooks.recordingState().deletedSteps, []);
+    fake.pushRecord({ type: 'record:dropped', id: 'd2', dropped: false, source: 'panel', actions: ['a2'] });
+    pushIdDraft(3, [...D3, 'Click Pay'], ['d1', 'd2', 'd3', 'd4']);
+    await waitFor('the draft with it', () => editor.document.getText() === recorded([...D3, 'Click Pay']));
+    assert.equal(hooks.recordingState().actions.find((a) => a.id === 'a2').dropped, false);
+    assert.deepEqual(hooks.recordingNotices(), []);
+    await cancelRecording();
+    assert.equal(editor.document.getText(), FIXTURE);
+  });
+
+  it('the panel\'s ✕ on a Steps so far row deletes the step — its line out of the file at once — and Restore puts both back', async () => {
+    const editor = await openFixture();
+    await recordWithIds(editor, D3);
+    playToolbarControls();
+    await hooks.dispatchWebviewMessage({ type: 'recordDrop', id: 'd2', dropped: true });
+    assert.deepEqual(controlBodies(), [{ action: 'drop', id: 'd2', source: 'panel' }]);
+    await waitFor('its line out', () => editor.document.getText() === recorded(['Click Menu', 'Tick Cash']));
+    assert.deepEqual(hooks.recordingState().deletedSteps.map((d) => d.id), ['d2']);
+    await hooks.dispatchWebviewMessage({ type: 'recordDrop', id: 'd2', dropped: false });
+    assert.deepEqual(controlBodies().slice(-1), [{ action: 'restore', id: 'd2', source: 'panel' }]);
+    await waitFor('back', () => editor.document.getText() === recorded(D3));
+    assert.deepEqual(hooks.recordingState().deletedSteps, []);
+    await cancelRecording();
+    assert.equal(editor.document.getText(), FIXTURE);
+  });
+
+  it('the drawer rewords and deletes steps: a recorded line takes the new words with the next draft; a line the author reworded takes them at once — unless they are editing it; ✎ rows and struck rows in the panel', async () => {
+    const editor = await openFixture();
+    await recordWithIds(editor, D3);
+    playToolbarControls();
+    // The drawer rewords d1 (a recorded line): the next draft writes it.
+    fake.pushRecord({ type: 'record:edited', id: 'd1', text: 'Open the menu', source: 'toolbar' });
+    pushIdDraft(2, ['Open the menu', 'Click Payments', 'Tick Cash'], ['d1', 'd2', 'd3'], { edited: [0] });
+    await waitFor('the drawer\'s words in the file', () => editor.document.getText() === recorded(['Open the menu', 'Click Payments', 'Tick Cash']));
+    // The author rewords d2 in the file and leaves it; the server takes it.
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    editor.selection = new vscode.Selection(12, 17, 12, 17);
+    await vscode.commands.executeCommand('type', { text: ' now' });
+    editor.selection = new vscode.Selection(0, 0, 0, 0);
+    await waitFor('edit-step', () => controlBodies().some((b) => b.action === 'edit-step'));
+    fake.pushRecord({ type: 'record:edited', id: 'd2', text: 'Click Payments now', source: 'editor' });
+    pushIdDraft(3, ['Open the menu', 'Click Payments now', 'Tick Cash'], ['d1', 'd2', 'd3'], { edited: [0, 1] });
+    await waitFor('held', () => editor.document.getText() === recorded(['Open the menu', 'Click Payments now', 'Tick Cash']));
+    // Then the drawer rewords d2 too: the author's line follows at once.
+    fake.pushRecord({ type: 'record:edited', id: 'd2', text: 'Open Payments', source: 'toolbar' });
+    await waitFor('the line follows', () => editor.document.lineAt(12).text === '4. Open Payments');
+    // While the author is editing a line, the drawer's words wait — the file wins.
+    editor.selection = new vscode.Selection(13, 12, 13, 12);
+    await vscode.commands.executeCommand('type', { text: ' twice' });
+    fake.pushRecord({ type: 'record:edited', id: 'd3', text: 'Tick the Cash box', source: 'toolbar' });
+    await sleep(150);
+    assert.equal(editor.document.lineAt(13).text, '5. Tick Cash twice', 'the file wins');
+    editor.selection = new vscode.Selection(0, 0, 0, 0);
+    await waitFor('the file\'s words sent', () => controlBodies().some((b) => b.action === 'edit-step' && b.id === 'd3'));
+    assert.deepEqual(controlBodies().filter((b) => b.id === 'd3').map((b) => b.text), ['Tick Cash twice']);
+    assert.deepEqual(
+      hooks.recordingState().actions.filter((a) => a.kind === 'edit').map((a) => [a.summary, a.source]),
+      [
+        ['Edited step 1: Open the menu', 'toolbar'],
+        ['Edited step 2: Click Payments now', 'editor'],
+        ['Edited step 2: Open Payments', 'toolbar'],
+        ['Edited step 3: Tick the Cash box', 'toolbar'],
+      ],
+    );
+    // The drawer deletes d1: its line out at once, its action struck.
+    fake.pushRecord({ type: 'record:dropped', id: 'd1', dropped: true, source: 'toolbar', actions: ['a1'] });
+    await waitFor('d1 out', () => !editor.document.getText().includes('Open the menu'));
+    assert.equal(hooks.recordingState().actions.find((a) => a.id === 'a1').dropped, true);
+    assert.deepEqual(hooks.recordingState().deletedSteps.map((d) => d.id), ['d1']);
+    assert.deepEqual(hooks.recordingNotices(), []);
+    await cancelRecording();
+    assert.equal(editor.document.getText(), FIXTURE);
+  });
+
+  it('the drawer rewords a step typed in the file: its line takes the words at once; one the author changed since keeps theirs, said once by its line number', async () => {
+    const editor = await openFixture();
+    await recordWithIds(editor, D2);
+    playToolbarControls(async (body) => {
+      if (body.action !== 'add-step') return;
+      fake.pushRecord({ type: 'record:step', id: 's1', text: body.text, source: 'editor', afterStep: 0, atMs: 3_000 });
+      pushIdDraft(2, ['Click Menu', body.text, 'Click Payments'], ['d1', 's1', 'd2'], { authored: [1], authoredIds: ['s1'] });
+    });
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    editor.selection = new vscode.Selection(11, 13, 11, 13); // the end of "3. Click Menu"
+    await vscode.commands.executeCommand('type', { text: '\n' });
+    await vscode.commands.executeCommand('type', { text: '4. Verify A' });
+    editor.selection = new vscode.Selection(0, 0, 0, 0);
+    await waitFor('held', () => editor.document.getText() === recorded(['Click Menu', 'Verify A', 'Click Payments']));
+    // The drawer rewords the author's step: the line takes the words, its
+    // number kept — the one line of theirs the recording writes.
+    fake.pushRecord({ type: 'record:edited', id: 's1', text: 'Verify the menu', source: 'toolbar' });
+    await waitFor('the line follows', () => editor.document.lineAt(12).text === '4. Verify the menu');
+    // Changed by the author since: the drawer's next words are not put on it.
+    const mark = hooks.hostMessageCount();
+    editor.selection = new vscode.Selection(12, 18, 12, 18);
+    await vscode.commands.executeCommand('type', { text: ' now' });
+    fake.pushRecord({ type: 'record:edited', id: 's1', text: 'Check the menu', source: 'toolbar' });
+    fake.pushRecord({ type: 'record:edited', id: 's1', text: 'Check the menu twice', source: 'toolbar' });
+    const said = () => logged(mark, 'info').filter((m) => m.includes('reworded in the browser while you were changing it'));
+    await waitFor('said', () => said().length > 0);
+    await sleep(150);
+    assert.deepEqual(said(), ['A step was reworded in the browser while you were changing it in the file (line 13); the line keeps what you wrote.'], 'once, by line number');
+    assert.equal(editor.document.lineAt(12).text, '4. Verify the menu now', 'the file wins');
+    // Left: their words go as the edit.
+    editor.selection = new vscode.Selection(0, 0, 0, 0);
+    await waitFor('edit-step', () => controlBodies().some((b) => b.action === 'edit-step'));
+    assert.deepEqual(controlBodies().filter((b) => b.action === 'edit-step').map((b) => [b.id, b.text]), [['s1', 'Verify the menu now']]);
+    // Cancel keeps a line the author typed, with the number they gave it.
+    await cancelRecording();
+    assert.equal(editor.document.getText(), fixtureWith({ insert: { 11: ['4. Verify the menu now'] } }));
+  });
+
+  it('an edit the server does not take is logged by its line number, never quoted — it may hold a secret — and the line stays as the author wrote it', async () => {
+    const editor = await openFixture();
+    await recordWithIds(editor, ['Click Menu', 'Type {{password}} into the Password field']);
+    const secret = 'pw-from-env-91';
+    playToolbarControls(async (body) =>
+      body.action === 'edit-step' ? { ignored: true, reason: 'it holds a secret — write {{password}} in its place' } : undefined,
+    );
+    const mark = hooks.hostMessageCount();
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    editor.selection = new vscode.Selection(12, 8, 12, 20); // "{{password}}"
+    await vscode.commands.executeCommand('type', { text: secret });
+    editor.selection = new vscode.Selection(0, 0, 0, 0);
+    await waitFor('the refusal logged', () => logged(mark, 'warn').some((m) => m.includes('was not taken')));
+    assert.deepEqual(
+      logged(mark, 'warn').filter((m) => m.includes('was not taken')),
+      ['Your edit on line 13 was not taken by the recording (it holds a secret — write {{password}} in its place); it stays in the file as you wrote it.'],
+    );
+    assert.ok(!JSON.stringify(hooks.hostMessagesSince(mark)).includes(secret), 'the value is in no message to the panel');
+    // A later draft does not write over it.
+    pushIdDraft(2, ['Click Menu', 'Type {{password}} into the Password field', 'Click Sign in'], ['d1', 'd2', 'd3']);
+    await waitFor('draft 2', () => editor.document.getText().includes('5. Click Sign in'));
+    assert.equal(editor.document.lineAt(12).text, `4. Type ${secret} into the Password field`);
+    await cancelRecording();
+    assert.equal(editor.document.getText(), FIXTURE);
+  });
+
+  it('Stop with a reworded line: the result goes over the draft with the line as its step, once; one Ctrl+Z after Stop takes the recording out — the reworded line with it', async () => {
+    const editor = await openFixture();
+    await recordWithIds(editor, D2);
+    playToolbarControls();
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    editor.selection = new vscode.Selection(12, 17, 12, 17);
+    await vscode.commands.executeCommand('type', { text: ' now' });
+    editor.selection = new vscode.Selection(0, 0, 0, 0);
+    await waitFor('edit-step', () => controlBodies().some((b) => b.action === 'edit-step'));
+    fake.pushRecord({ type: 'record:edited', id: 'd2', text: 'Click Payments now', source: 'editor' });
+    pushIdDraft(2, ['Click Menu', 'Click Payments now'], ['d1', 'd2'], { edited: [1] });
+    await waitFor('held', () => editor.document.getText() === recorded(['Click Menu', 'Click Payments now']));
+    answerStopWith({ steps: ['Click Menu', 'Click Payments now', 'Tick Cash'] });
+    await vscode.commands.executeCommand('testbench-native.stopRecording');
+    await hooks.recordingSettled();
+    assert.equal(hooks.recordingReport().status, 'inserted');
+    assert.equal(editor.document.getText(), recorded(['Click Menu', 'Click Payments now', 'Tick Cash']));
+    await vscode.commands.executeCommand('undo');
+    await waitFor('one undo removes the recording', () => editor.document.getText() === FIXTURE);
+  });
+
+  it('a server that names no steps: said once in the log; Steps so far offers no ✕; an edit inside the recorded lines is still written over', async () => {
+    const editor = await openFixture();
+    const mark = hooks.hostMessageCount();
+    await recordDraft1(editor, D2);
+    pushDraft(2, D2);
+    await sleep(100);
+    assert.equal(
+      logged(mark, 'info').filter((m) => m.startsWith('This server does not name its steps')).length,
+      1,
+      'once',
+    );
+    assert.equal(hooks.recordingState().draft.ids, undefined);
+    await cancelRecording();
   });
 });

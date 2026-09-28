@@ -18,10 +18,18 @@ import {
   carryAuthorState,
   cleanStepText,
   commitAuthorLines,
+  commitLineEdits,
+  editRefused,
+  followDeclined,
   followLiveRecord,
+  idsForResult,
   keepAuthorLines,
   leftInFileText,
   liveRecordWrite,
+  markStepDeleted,
+  newLineBook,
+  noteStepEdited,
+  noteStepRestored,
   oneShotSteps,
   splitAuthorSteps,
   newRecordingState,
@@ -31,9 +39,12 @@ import {
   recordedStepsText,
   recordingStatusText,
   removeUnfinishedRecording,
+  takeLineControls,
   trackAnchorThroughChanges,
   unfinishedRecordingOf,
   type AuthorStepCommit,
+  type LineBook,
+  type LineEditCommit,
   type LiveDraft,
   type LiveRecord,
   type RecordAnchor,
@@ -115,6 +126,16 @@ interface ActiveRecording {
   /** Lines of the author's already said to have stayed in the file when
    *  their step was dropped (by key) — said once each. */
   leftSaid: Set<string>;
+  /**
+   * What the author did to the recording's steps in the file — lines
+   * reworded, deleted, brought back by Ctrl+Z — as far as the server has to
+   * hear it, and the words it holds for each step
+   * (stories/testbench-record-edit-steps.md).
+   */
+  book: LineBook;
+  /** A draft came with steps and no ids — a server that predates editing —
+   *  and the log said so. */
+  idlessSaid: boolean;
 }
 
 /**
@@ -192,9 +213,19 @@ interface LiveFile {
 const COPY_STEPS = 'Copy steps';
 const SHOW_OUTPUT = 'Show output';
 
-/** SPEC-record-steps.md §7: said once per recording. */
+/** SPEC-record-steps.md §7: said once per recording — when an edit inside
+ *  the recorded lines is written over by the next draft, which is now only
+ *  with a server whose drafts name no steps (`IDLESS_SERVER`), or a blank
+ *  spacing line the recording keeps typed on. */
 export const EDITED_WHILE_RECORDING =
   'Lines being recorded are rewritten as the model updates them — edit them after Stop.';
+
+/** stories/testbench-record-edit-steps.md: said once, to a server whose
+ *  drafts carry no step ids — the author's edits of recorded lines cannot be
+ *  kept then, and are written over as they always were. */
+export const IDLESS_SERVER =
+  'This server does not name its steps, so recorded lines cannot be edited or deleted while recording: ' +
+  'an edit inside them is rewritten by the next draft — edit them after Stop.';
 
 /** SPEC-record-steps.md §7: the recording stopped writing into its file. */
 export const NO_LONGER_LIVE =
@@ -416,6 +447,8 @@ export class StepRecorder implements vscode.Disposable {
       foreignIds: new Set(),
       authorSends: Promise.resolve(),
       leftSaid: new Set(),
+      book: newLineBook(),
+      idlessSaid: false,
       state: newRecordingState({
         uri: doc.uri.toString(),
         file: path.basename(doc.uri.fsPath),
@@ -541,12 +574,18 @@ export class StepRecorder implements vscode.Disposable {
           e.contentChanges.map((c) => ({ offset: c.rangeOffset, length: c.rangeLength, text: c.text })),
           {
             text: () => e.document.getText(),
-            // VS Code reports an undo, a redo, a revert and a reload from disk
-            // as line diffs that can reach across the recorded lines: offsets
-            // are not trusted for them. A revert or reload is the change that
-            // leaves the document clean without the recording having saved it.
+            // An undo, a redo, a revert and a reload from disk are not
+            // followed by offsets alone: what the recording wrote is looked
+            // for by its text (a revert or reload is the change that leaves
+            // the document clean without the recording having saved it).
             uncertain: e.reason !== undefined || !e.document.isDirty,
+            // Measured in VS Code 1.95: an undo reports the exact inverse of
+            // the edits it undoes. One inside a line of the author's is their
+            // typing undone, followed as it was typed; Ctrl+Z of emptying a
+            // line of a step is that step restored.
+            undo: e.reason !== undefined,
             anchor: rec.state.mode === 'new' ? null : rec.anchor,
+            book: rec.book,
           },
         );
         live.record = followed.record;
@@ -557,6 +596,9 @@ export class StepRecorder implements vscode.Disposable {
           rec.controller.postRecordLog(notice.text, 'warn');
           void this.notify(notice.level, notice.text);
         }
+        // A line of a step deleted is a drop as soon as it is gone, and one
+        // back (Ctrl+Z) is a restore (stories/testbench-record-edit-steps.md).
+        this.sendLineControls(rec);
         // Lines of the author's are counted when the cursor leaves them — the
         // selection event that follows this one (Enter included) — not here,
         // where the editor's selection can still be the one before the edit.
@@ -691,7 +733,13 @@ export class StepRecorder implements vscode.Disposable {
     // server holds, and where a new one goes).
     await this.flushAuthorLines(rec);
     if (this.current !== rec) return;
-    const dropped = rec.state.actions.filter((a) => a.dropped).map((a) => a.id);
+    // Belt and braces, as for actions: the steps deleted too.
+    const dropped = [
+      ...new Set([
+        ...rec.state.actions.filter((a) => a.dropped).map((a) => a.id),
+        ...(rec.state.deletedSteps ?? []).map((d) => d.id),
+      ]),
+    ];
     const sent = await rec.controller.controlRecording({
       action: 'stop',
       ...(dropped.length > 0 && { dropped }),
@@ -846,7 +894,7 @@ export class StepRecorder implements vscode.Disposable {
     // A write in flight is fine: what is sent now is carried into the record
     // that write leaves (`carryAuthorState`).
     if (!live.record || live.detached || live.closed || live.stopped || rec.doc.isClosed) return;
-    if (!live.record.slots.some((s) => s.kind === 'mine' && s.status === 'typing')) return;
+    if (!live.record.slots.some((s) => s.kind === 'mine')) return;
     const doc = rec.doc;
     const cursors =
       opts.ignoreCursors || opts.final
@@ -854,12 +902,97 @@ export class StepRecorder implements vscode.Disposable {
         : vscode.window.visibleTextEditors
             .filter((e) => e.document.uri.toString() === rec.key)
             .flatMap((e) => e.selections.map((sel) => doc.offsetAt(sel.active)));
-    const counted = commitAuthorLines(live.record, doc.getText(), cursors, { final: opts.final === true });
-    if (counted.commits.length === 0) return;
+    const text = doc.getText();
+    const counted = commitAuthorLines(live.record, text, cursors, { final: opts.final === true });
     live.record = counted.record;
     for (const commit of counted.commits) {
       rec.authorSends = rec.authorSends.then(() => this.sendAuthorStep(rec, commit)).catch(() => undefined);
     }
+    // Recorded lines the author reworded, and the lines of their steps they
+    // changed after sending, count at the same moments
+    // (stories/testbench-record-edit-steps.md §"In the file").
+    const edited = commitLineEdits(live.record, text, cursors, { final: opts.final === true, book: rec.book });
+    live.record = edited.record;
+    for (const commit of edited.commits) {
+      if (commit.action === 'drop') this.markDeleted(rec, commit.id, true);
+      rec.authorSends = rec.authorSends.then(() => this.sendLineEdit(rec, commit)).catch(() => undefined);
+    }
+  }
+
+  /**
+   * The deletes and restores the file asked for — lines of steps deleted, and
+   * Ctrl+Z bringing one back — sent at once, in order, after what is already
+   * on its way; the panel strikes (or restores) the step as they go.
+   */
+  private sendLineControls(rec: ActiveRecording): void {
+    if (this.current !== rec || rec.state.phase !== 'recording') {
+      // After Stop the server takes nothing but `cancel`: what the file does
+      // then is the author's text, as it always was.
+      takeLineControls(rec.book);
+      return;
+    }
+    for (const control of takeLineControls(rec.book)) {
+      this.markDeleted(rec, control.id, control.action === 'drop');
+      rec.authorSends = rec.authorSends.then(() => this.sendStepControl(rec, control)).catch(() => undefined);
+    }
+  }
+
+  /** Strike a step in Steps so far (or put it back), and show it. */
+  private markDeleted(rec: ActiveRecording, id: string, deleted: boolean): void {
+    if (markStepDeleted(rec.state, id, deleted) && this.current === rec) this.publish();
+  }
+
+  /** A `drop` / `restore` of a step whose line was deleted in the file (or
+   *  brought back). One the server does not take is said in the log — by the
+   *  step's number, never its words. */
+  private async sendStepControl(rec: ActiveRecording, control: { action: 'drop' | 'restore'; id: string }): Promise<void> {
+    const sent = await rec.controller.controlRecording({ action: control.action, id: control.id, source: 'editor' });
+    if (sent.ok && !sent.ignored) return;
+    if (this.current !== rec) return;
+    const why = sent.ok ? (sent.reason ?? 'the server did not take it') : sent.error;
+    rec.controller.postRecordLog(
+      control.action === 'drop'
+        ? `A step whose line you deleted from the file was not taken out of the recording (${why}).`
+        : `A step whose line you brought back in the file was not put back in the recording (${why}).`,
+      'warn',
+    );
+  }
+
+  /**
+   * One edit of a step made in the file: its new words (`edit-step`), or —
+   * the line emptied — its delete (`drop`). A server that does not take an
+   * edit leaves the line as the author wrote it, said once in the log by its
+   * line number, never by quoting it: the server refuses words holding a
+   * secret it knows, and TestBench cannot tell which those are.
+   */
+  private async sendLineEdit(rec: ActiveRecording, commit: LineEditCommit): Promise<void> {
+    if (commit.action === 'drop') {
+      await this.sendStepControl(rec, { action: 'drop', id: commit.id });
+      return;
+    }
+    const sent = await rec.controller.controlRecording({
+      action: 'edit-step',
+      id: commit.id,
+      text: commit.text ?? '',
+      source: 'editor',
+      ...(commit.revision !== undefined && { revision: commit.revision }),
+    });
+    if (sent.ok && !sent.ignored) return;
+    if (rec.live.record) rec.live.record = editRefused(rec.live.record, commit, rec.book);
+    const at = this.lineOf(rec, commit.key);
+    rec.controller.postRecordLog(
+      `Your edit${at >= 0 ? ` on line ${at + 1}` : ''} was not taken by the recording ` +
+        `(${sent.ok ? (sent.reason ?? 'the server did not take it') : sent.error}); it stays in the file as you wrote it.`,
+      'warn',
+    );
+  }
+
+  /** The 0-based line a line of the author's is on now, or -1. */
+  private lineOf(rec: ActiveRecording, key: string): number {
+    const slot = rec.live.record?.slots.find((s) => s.kind === 'mine' && s.key === key);
+    if (!slot || rec.doc.isClosed) return -1;
+    const lead = slot.lineEnd ? (slot.wrote.startsWith('\r\n') ? 2 : slot.wrote.startsWith('\n') ? 1 : 0) : 0;
+    return rec.doc.positionAt(slot.start + lead).line;
   }
 
   /**
@@ -916,17 +1049,53 @@ export class StepRecorder implements vscode.Disposable {
    */
   async setDropped(id: string, dropped: boolean): Promise<void> {
     const rec = this.current;
-    const action = rec?.state.actions.find((a) => a.id === id);
-    // A pause marker is not in the recording: nothing to drop.
-    if (!rec || !action || action.dropped === dropped || action.kind === 'pause' || action.kind === 'resume') return;
-    if (rec.state.phase === 'finishing' || rec.stopSent) return;
+    if (!rec || rec.state.phase === 'finishing' || rec.stopSent) return;
+    const action = rec.state.actions.find((a) => a.id === id);
+    // A step of the draft — the ✕ or Restore on a Steps so far row
+    // (stories/testbench-record-edit-steps.md §"The panel"): the step goes (or
+    // comes back) with the actions it stands for; the file follows at once.
+    const isStep = rec.state.draft?.ids?.includes(id) === true || (rec.state.deletedSteps ?? []).some((d) => d.id === id);
+    if (!action && isStep) {
+      const text = rec.state.draft?.steps[rec.state.draft.ids?.indexOf(id) ?? -1];
+      const after = rec.state.deletedSteps?.find((d) => d.id === id)?.after;
+      if (!markStepDeleted(rec.state, id, dropped)) return;
+      if (!dropped) noteStepRestored(id, rec.book);
+      this.publish();
+      this.queueDraftWrite(rec, { rewrite: true });
+      const sent = await rec.controller.controlRecording({ action: dropped ? 'drop' : 'restore', id, source: 'panel' });
+      if (this.current !== rec || (sent.ok && !sent.ignored)) return;
+      // Not done: the row shows what the recording has — and the file with it.
+      if (dropped) markStepDeleted(rec.state, id, false);
+      else if (!rec.state.draft?.ids?.includes(id)) {
+        rec.state.deletedSteps = [...(rec.state.deletedSteps ?? []), { id, text: text ?? '', after: after ?? null }];
+      }
+      this.publish();
+      this.queueDraftWrite(rec, { rewrite: true });
+      rec.controller.postRecordLog(
+        `Could not ${dropped ? 'delete' : 'restore'} that step (${sent.ok ? (sent.reason ?? 'the server did not take it') : sent.error}).`,
+        'warn',
+      );
+      return;
+    }
+    // A pause marker or an edit row is not in the recording: nothing to drop.
+    if (!action || action.dropped === dropped || action.kind === 'pause' || action.kind === 'resume' || action.kind === 'edit') return;
     action.dropped = dropped;
+    if (!dropped) delete action.droppedWith;
+    // A step of the author's: struck in Steps so far too, where it was.
+    if (action.kind === 'step') {
+      markStepDeleted(rec.state, id, dropped);
+      if (!dropped) noteStepRestored(id, rec.book);
+    }
     this.publish();
     // A step of the author's: the file follows the row at once — its line
     // (typed in the file) comes out or goes back, or (the toolbar's or the
     // panel's) the recording's line for it.
     if (action.kind === 'step') this.queueDraftWrite(rec, { rewrite: true });
-    const sent = await rec.controller.controlRecording({ action: dropped ? 'drop' : 'restore', id });
+    const sent = await rec.controller.controlRecording({
+      action: dropped ? 'drop' : 'restore',
+      id,
+      ...(action.kind === 'step' && { source: 'panel' as const }),
+    });
     if (!sent.ok && this.current === rec) {
       rec.controller.postRecordLog(
         `Could not ${dropped ? 'drop' : 'restore'} that action now (${sent.error}); it is still ${dropped ? 'left out' : 'included'} when you press Stop.`,
@@ -1027,11 +1196,40 @@ export class StepRecorder implements vscode.Disposable {
     }
     if (event.type === 'record:step') {
       if (event.source === 'editor') {
-        // The server's name for a line the author typed in the file.
-        if (rec.live.record) rec.live.record = assignAuthorStepId(rec.live.record, event.id, event.text);
+        // The server's name for a line the author typed in the file — or for
+        // one they deleted before it came, whose step then goes too.
+        if (rec.live.record) rec.live.record = assignAuthorStepId(rec.live.record, event.id, event.text, rec.book);
+        this.sendLineControls(rec);
       } else {
         rec.foreignIds.add(event.id);
       }
+    }
+    let rewrite = false;
+    if (event.type === 'record:edited' && rec.live.record) {
+      // A step reworded — an edit of ours taken, or newer words from the
+      // drawer or the panel, which a line of the author's standing for it
+      // takes at the next write (stories/testbench-record-edit-steps.md) —
+      // unless they changed that line since the recording last held it: the
+      // file wins, said once, by the line's number, never its words.
+      const declined = followDeclined(rec.live.record, event);
+      if (declined !== null && !rec.leftSaid.has(`follow:${declined}`)) {
+        rec.leftSaid.add(`follow:${declined}`);
+        const at = this.lineOf(rec, declined);
+        rec.controller.postRecordLog(
+          `A step was reworded in the browser while you were changing it in the file${at >= 0 ? ` (line ${at + 1})` : ''}; the line keeps what you wrote.`,
+          'info',
+        );
+      }
+      const before = rec.live.record;
+      rec.live.record = noteStepEdited(before, event, rec.book);
+      rewrite = rec.live.record !== before;
+    }
+    // A step restored anywhere is no longer one whose line was deleted here.
+    if (event.type === 'record:dropped' && event.dropped === false) noteStepRestored(event.id, rec.book);
+    if (event.type === 'record:draft' && !rec.idlessSaid && !Array.isArray(event.ids) && event.steps.some((s) => cleanStepText(s) !== '')) {
+      // A server that predates editing: say once what that means here.
+      rec.idlessSaid = true;
+      rec.controller.postRecordLog(IDLESS_SERVER, 'info');
     }
     // Stop pressed in the browser: the lines typed in the file that have not
     // gone yet go now, the cursor's included. The server may no longer take
@@ -1042,9 +1240,10 @@ export class StepRecorder implements vscode.Disposable {
     if (changed && this.current === rec) this.publish();
     // A newer draft goes into the file too (a stale one changed nothing).
     if (changed && event.type === 'record:draft') this.queueDraftWrite(rec);
-    // A step of the author's dropped or restored in the browser: its line in
-    // the file follows at once.
-    if (changed && event.type === 'record:dropped') this.queueDraftWrite(rec, { rewrite: true });
+    // A step dropped or restored elsewhere (the browser's Undo, the drawer's
+    // ✕): its line in the file follows at once — and a line of the author's
+    // takes newer words for its step.
+    if ((changed && event.type === 'record:dropped') || rewrite) this.queueDraftWrite(rec, { rewrite: true });
   }
 
   /** The start body's `toolbar`: the setting, and where the last recording
@@ -1067,16 +1266,25 @@ export class StepRecorder implements vscode.Disposable {
       steps: draft.steps,
       parameters: draft.parameters,
       ...(draft.authored && { authored: draft.authored, authoredIds: draft.authoredIds ?? [] }),
+      ...(draft.ids && { ids: draft.ids }),
+      ...(draft.edited && { edited: draft.edited }),
       foreignIds: [...rec.foreignIds],
       revision: draft.revision,
       droppedIds: this.droppedStepIds(rec),
     };
   }
 
-  /** The author's steps struck in the panel now — its ✕, or the browser's
-   *  Undo (`record:dropped`). */
+  /**
+   * The steps dropped now elsewhere than the file: the author's steps struck
+   * in the panel (its ✕, or the browser's Undo — `record:dropped`), and the
+   * steps deleted from Steps so far in the panel or the browser's drawer. A
+   * step whose line the author deleted in the file is the book's to leave out
+   * (`LineBook.deleted`): it never takes another line of theirs with it.
+   */
   private droppedStepIds(rec: ActiveRecording): string[] {
-    return rec.state.actions.filter((a) => a.kind === 'step' && a.dropped).map((a) => a.id);
+    const struck = rec.state.actions.filter((a) => a.kind === 'step' && a.dropped).map((a) => a.id);
+    const deleted = (rec.state.deletedSteps ?? []).map((d) => d.id);
+    return [...new Set([...struck, ...deleted])].filter((id) => !rec.book.deleted.has(id));
   }
 
   // -------------------------------------------------------------------------
@@ -1107,6 +1315,9 @@ export class StepRecorder implements vscode.Disposable {
         if (written.ok) {
           live.written = Math.max(live.written, draft.revision);
           this.sayLeft(rec, written.left);
+          // What finding the file again told the book (a line an undo brought
+          // back is its step restored).
+          this.sendLineControls(rec);
           // A line the author left while the write was in flight — or one
           // that waited for the line above it to be held.
           this.countAuthorLines(rec);
@@ -1190,7 +1401,7 @@ export class StepRecorder implements vscode.Disposable {
       // the recording's: the offsets are not trusted at all.
       const record = live.detached ? { ...live.record, uncertain: true } : live.record;
       const current = doc.getText();
-      const write = liveRecordWrite(record, current, draft, { anchor });
+      const write = liveRecordWrite(record, current, draft, { anchor, book: rec.book });
       if ('error' in write) return { ok: false, reason: write.error, lost: write.lost === true };
       // The final write closes the undo step the drafts left open — which
       // takes an edit even when the draft already said it all: a replace of
@@ -1314,7 +1525,7 @@ export class StepRecorder implements vscode.Disposable {
     live.stopped = true;
     await live.chain;
     if (!live.record || live.closed) return;
-    const cleared = await this.writeLive(rec, { steps: [], parameters: [] }, 'clear');
+    const cleared = await this.writeLive(rec, { steps: [], parameters: [], clear: true }, 'clear');
     // The edit itself did not go through — not "not found", not "closed":
     // what the drafts wrote is still in the buffer, and kept for a reload.
     live.keepUnfinished = !cleared.ok && !cleared.lost && !live.closed;
@@ -1422,7 +1633,7 @@ export class StepRecorder implements vscode.Disposable {
     // the result goes in as a step of its own — so the state one undo returns
     // to is the file without the recording, the author's own edits kept.
     if (rec.live.split && !rec.live.detached) {
-      const cleared = await this.writeLive(rec, { steps: [], parameters: [] }, 'clear');
+      const cleared = await this.writeLive(rec, { steps: [], parameters: [], clear: true }, 'clear');
       // Not found: the final write below looks once more, then inserts once.
       if (!cleared.ok && !cleared.lost) return cleared;
     }
@@ -1433,12 +1644,16 @@ export class StepRecorder implements vscode.Disposable {
     // (`record:result` does not say): their lines in the file are adopted,
     // not written a second time.
     const authored = authoredForResult(rec.state.draft, outcome.steps);
+    // The last draft's step ids, placed in the result (which carries none): a
+    // line the author reworded is its step, never written a second time.
+    const stepIds = idsForResult(rec.state.draft, outcome.steps);
     const written = await this.writeLive(
       rec,
       {
         steps: outcome.steps,
         parameters: outcome.parameters,
         ...authored,
+        ...stepIds,
         foreignIds: [...rec.foreignIds],
         droppedIds: this.droppedStepIds(rec),
         // A line sent as Stop went, which no draft held yet, is its step.
@@ -1458,7 +1673,7 @@ export class StepRecorder implements vscode.Disposable {
       // result goes in once, at the anchor, and what is left of the drafts is
       // not touched — nor are the author's own lines, whose steps are not put
       // in a second time.
-      const once = await this.insertOnce(rec, outcome, authored);
+      const once = await this.insertOnce(rec, outcome, { ...authored, ...(stepIds.ids && { ids: stepIds.ids }) });
       if (!once.ok) return once;
       if (!once.plan) {
         const text = `Every recorded step is one you typed in ${file}, and they are all still there; nothing more was inserted.`;
@@ -1521,7 +1736,7 @@ export class StepRecorder implements vscode.Disposable {
   private async insertOnce(
     rec: ActiveRecording,
     outcome: Extract<RecordStepsOutcome, { status: 'result' }>,
-    authored: { authored: number[]; authoredIds: string[] },
+    authored: { authored: number[]; authoredIds: string[]; ids?: string[] },
   ): Promise<{ ok: true; plan: RecordInsertionPlan | null; editor: vscode.TextEditor } | { ok: false; reason: string }> {
     const file = rec.state.file;
     const doc = rec.doc;

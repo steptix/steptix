@@ -272,3 +272,127 @@ against the unchanged code first and seen failing: 41 of the 42 engine cases (th
 unchanged drop of an author step), all 8 HTTP cases, all 11 drawer cases, and
 the four existing cases whose expectations changed (the prompt's `actions`,
 "locked" gone from the bar, the drawer's hint).
+
+## What the TestBench half built
+
+TestBench 0.5.158. Built in `testbench-native/` — the file rules in
+`src/extension/record-steps-core.ts`, the recorder in
+`src/extension/step-recorder.ts`, the panel in `src/webview/testbench-runner.jsx`
+and `src/webview/lib/recording-panel.js` — and the wire in `runner-core`
+(`record:draft.ids` / `edited`, `record:edited`, `record:dropped.actions`,
+`edit-step`). The wire is as above, with the server half's one addition: a
+`drop` or `restore` made in the file carries `source: 'editor'`, one from the
+panel `source: 'panel'`.
+
+**Recorded lines keyed to step ids.** Each block part of what the recording
+wrote carries the id of the step on each of its lines. The first keystroke
+that changes a recorded line's words makes it a line of the author's (a `mine`
+slot of `edit` origin) standing for that step: the recording writes the lines
+around it and its number, never its words, and a draft holding the step's id
+holds the line, so nothing is written beside it. It goes as `edit-step` at the
+moments a typed line counts; a draft showing the step `edited` with those
+words, or a `record:edited` naming them, is the line. Whole lines deleted —
+one, several, recorded and typed together — are a `drop` each as soon as they
+are gone, and the step is left out of every draft written from then on, so one
+already on its way does not put the line back. Deleting a line the author
+typed is its step's `drop` too now (with a server that names its steps).
+
+Decided here, where the story left it open:
+
+1. **A line changed back** to its words before anything was sent is the
+   recording's line again, and **its number alone changed** is no edit — the
+   next draft gives it its number back.
+2. **An emptied line** (or one left a bare number) is a delete: `drop`, and
+   the line stays as the author left it, standing for nothing. Cancel takes it
+   out while it has no words (it was the recording's line; nothing of the
+   author's is lost); words typed on it make a new line of theirs. **Ctrl+Z of
+   emptying it** is a Restore: the line stands for its step again.
+3. **The model rewriting a step the author is editing** writes its new step
+   beside the line, where the old one was, until the edit lands on it (by the
+   id `record:edited` names, or by the words the draft shows `edited`); then
+   the model's line goes. The author's words are never written twice.
+4. **The drawer and the file on one step.** Words from the drawer or the panel
+   are put on a line of the author's standing for the step — a reworded
+   recorded line, or one they typed — while it still reads as the recording
+   last held it: the one time the recording writes words onto a line of
+   theirs. Changed since, the file wins: the line keeps what they wrote, it
+   goes as their edit when they leave it, and the log says so once, by the
+   line's number. An echo of an older edit of a line does not answer its newer
+   one, and drawer words that arrive while an edit of theirs is on its way are
+   not put on it (the server took them first). Words from the file are never
+   put on another line: when two lines come to stand for one step (the author
+   reworded both the line the model rewrote and its new one), each keeps its
+   own.
+5. **A step deleted in the file never takes another line of theirs with it.**
+   Only a delete made elsewhere (drawer, panel, Undo) takes out a line that
+   reads as the recording last left it, as Undo of a typed step always did.
+6. **The recording's own clear-out is named** (`LiveDraft.clear`: Cancel, an
+   error, the drafts taken out before the result). A draft of the server's
+   with no steps — the author deleted every one — takes out only the
+   recording's lines; before, it was treated as Cancel and took the author's
+   emptied line out from under their cursor.
+7. **An old server** (no `ids`): nothing changes — edits inside the recorded
+   lines are written over and warned, typed lines edited after sending are
+   not sent, deleting one is not a drop — the log says once why, and Steps so
+   far shows no ✕.
+8. **The panel** keeps a deleted step struck, with Restore, until it is
+   restored — not until the next step lands, as the drawer does: the panel is
+   the whole record. `✎ Edited step 4: <words>` rows say where the edit was
+   made. A delete or restore from the panel the server does not take puts the
+   row back as the recording has it, said in the log. Reworded lines are not
+   highlighted in the editor: they are the author's, like the lines they type.
+
+**Undo, measured** (VS Code 1.95, in the host): an undo reports the exact
+inverse of the edits it undoes — typing, `editor.action.deleteLines`, a write
+of two ranges — never line diffs. So an undo within one line of the author's
+is followed by position, as their typing was; others are looked for by text,
+now among the states just before each of the author's edits too (a deleted
+line's undo finds the state that held it, which restores its step). §7.4 of
+the spec has the rules.
+
+**What the random run found.** The 300-seed property run with ids — recorded
+lines reworded, renumbered, emptied and deleted, typed lines, Ctrl+Z of
+anything (the author's or the recording's, as VS Code's undo stack gives it),
+the drawer rewording steps, the model rewriting the step being edited, drafts
+lagging, a fake server applying edit-step, drop and restore — failed on each of
+these before it was fixed; the last four are pinned by their own cases in
+`tests/record-steps-edit.test.js`. A write inserting lines and fixing a number
+replaced the whole stretch (lines are now matched by their words, number
+aside, and only what differs is written). A run of the author's lines alone
+could not be found by its text. An undo within a line of theirs was matched by
+an older state that dropped a neighbouring line. An echo of an older edit
+acked a newer one. The undo of a deleted line at the run's edge was not seen:
+the newest state still fitted (the state that explains more of the file now
+wins). A run of blank lines was never unique (it is looked for where the steps
+go), and a state holding only renumbered later steps was not kept for an undo.
+A step's delete made through another line hid the author's line; a draft with
+no steps acted as Cancel; Ctrl+Z of emptying a line made a new typed line with
+the recording's words. And one race found by reading: a line emptied while a
+write was on its way came back as a reworded line and was dropped twice.
+
+**Tests.** `tests/record-steps-edit.test.js` (32 cases against the core and
+the panel helpers) and a second 300-seed property run in
+`tests/record-steps-authored.test.js`. Its invariants: a write never replaces
+the author's characters, bar a held line's number, a recorded line's number
+the author changed, drawer words on a line they have not changed, or the
+clear-out's reworded lines; no step's words are in the file twice; the file
+is never given up on; Stop leaves the result, each step once, the recording's
+in order; Cancel leaves only the author's typed lines. Its last run: 453
+edits, 969 drops, 225 restores, 1046 undos, 26 drawer follows, 0 lost. Every
+core case failed against the unchanged core first (the harness needs the new
+book, so some fail for that alone). Eight host cases in
+`tests/integration/suite/record-steps.test.cjs` — reworded by cursor-leave,
+deleted and Ctrl+Z, the panel's ✕/Restore, the drawer rewording and deleting
+(a reworded line and a typed one), an ignored edit logged by line number,
+Stop with a reworded line and the one Ctrl+Z after it, an old server — all
+eight run against the unchanged extension and seen failing. runner-core adds
+the frame guard and the wire cases.
+
+**Known gaps.** Two lines standing for one step each keep their words, so the
+file ends with one line more than the result has. An undo that no state of the
+file explains and that is not within one line is still looked for by text only
+(and gives up on the file when not found, as before). An edit the server
+refused keeps its line standing for its step; if the model later rewrites that
+step, its new step goes in beside the line. The halves have not been run
+against each other or a real model yet: the fake server in the property run
+places steps by id, not by the actions they stand for.

@@ -826,6 +826,32 @@ export interface RecordDraftEvent {
   authored?: number[];
   /** Their ids (the `record:step` id), parallel to `authored`. */
   authoredIds?: string[];
+  /**
+   * One stable id per step, parallel to `steps` (stories/testbench-record-edit-steps.md
+   * §"The wire, exactly"): kept while the step is unchanged in place, new when
+   * the model writes or rewrites it; an author step keeps its `s` id. Never
+   * collides with an action id. What `edit-step`, `drop` and `restore` name a
+   * step by. Absent from a server that predates editing: a client then offers
+   * no edit or delete of the model's steps.
+   */
+  ids?: string[];
+  /** Indices (into `steps`) of the steps whose text is the author's edit — a
+   *  subset of what the panel marks as the author's. Absent reads as none. */
+  edited?: number[];
+}
+
+/**
+ * A step's text was changed by the author (stories/testbench-record-edit-steps.md):
+ * in the browser toolbar's drawer, in the test file, or in the panel. `id` is
+ * the step that now holds `text` — the one named in `edit-step`, or, when the
+ * model rewrote that one meanwhile, whichever step now stands for the same
+ * actions.
+ */
+export interface RecordEditedEvent {
+  type: 'record:edited';
+  id: string;
+  text: string;
+  source: 'toolbar' | 'editor' | 'panel';
 }
 
 /**
@@ -860,15 +886,22 @@ export interface RecordStepEvent {
 }
 
 /**
- * An action or a step of the author's was removed from the recording, or put
- * back, somewhere other than this client (the toolbar's Undo / Restore) — the
- * panel strikes the row through, or restores it.
+ * An action or a step was removed from the recording, or put back — the
+ * toolbar's Undo / Restore, a step deleted in its drawer, the panel or the
+ * test file — and the panel strikes the row through, or restores it.
  */
 export interface RecordDroppedEvent {
   type: 'record:dropped';
+  /** An action's id, or a step's (`record:draft.ids`, or an author step's). */
   id: string;
   dropped: boolean;
-  source: 'toolbar' | 'panel';
+  source: 'toolbar' | 'panel' | 'editor';
+  /**
+   * A step deleted (or restored): the actions it stood for, dropped (or
+   * restored) with it (stories/testbench-record-edit-steps.md, decision 2).
+   * Absent for an action, and from a server that predates step deletes.
+   */
+  actions?: string[];
 }
 
 /** Where the browser toolbar docks: top or bottom, left, centre or right. */
@@ -927,6 +960,7 @@ export type RecordStepsEvent =
   | RecordDraftEvent
   | RecordPausedEvent
   | RecordStepEvent
+  | RecordEditedEvent
   | RecordDroppedEvent
   | RecordToolbarEvent
   | RecordWritingEvent
@@ -950,6 +984,8 @@ export function isRecordStepsEvent(value: unknown): value is RecordStepsEvent {
     // and where the toolbar sits.
     t === 'record:paused' ||
     t === 'record:step' ||
+    // Edits of recorded steps (stories/testbench-record-edit-steps.md).
+    t === 'record:edited' ||
     t === 'record:dropped' ||
     t === 'record:toolbar' ||
     t === 'record:writing' ||
@@ -1006,11 +1042,23 @@ export type RecordControlRequest =
   | { action: 'check' }
   | { action: 'cancel-check' }
   | { action: 'cancel' }
-  /** Leave this action — or step of the author's — out, and redraft now
-   *  (decision 9). The server also unions `stop`'s `dropped` with these. */
-  | { action: 'drop'; id: string }
-  /** Put a dropped action or step back, and redraft now. */
-  | { action: 'restore'; id: string }
+  /** Leave this action — or step — out, and redraft now (decision 9). A step
+   *  (`record:draft.ids`) is deleted, and the actions it stood for are
+   *  dropped with it (stories/testbench-record-edit-steps.md). The server also
+   *  unions `stop`'s `dropped` with these. `source`: where a step's delete was
+   *  made, echoed in its `record:dropped` (`panel` when absent); a server that
+   *  predates it ignores it. */
+  | { action: 'drop'; id: string; source?: 'editor' | 'panel' }
+  /** Put a dropped action or step back (a step with its actions). */
+  | { action: 'restore'; id: string; source?: 'editor' | 'panel' }
+  /**
+   * The author reworded a step (stories/testbench-record-edit-steps.md): in
+   * the test file (`editor`) or the panel. `text` is one line, kept exactly;
+   * the model neither rewords it nor writes another step for its actions.
+   * `revision` is the `record:draft` the author was looking at. An empty text
+   * is not an edit — send `drop`.
+   */
+  | { action: 'edit-step'; id: string; text: string; source: 'editor' | 'panel'; revision?: number }
   /** Stop recording and drafting until `resume`. */
   | { action: 'pause' }
   | { action: 'resume' }
@@ -1087,9 +1135,20 @@ export interface RecordingPanelState {
     atMs: number;
     tab?: string;
     dropped: boolean;
-    /** `step` rows: where the author wrote it. */
+    /** `step` rows: where the author wrote it. `edit` rows: where the step
+     *  was reworded. */
     source?: 'toolbar' | 'editor' | 'panel';
+    /** An action struck because the step it stood for was deleted
+     *  (`record:dropped.actions`): that step's id. Its ✕ restores it alone. */
+    droppedWith?: string;
   }>;
+  /**
+   * Steps deleted from Steps so far — by the panel's ✕, the browser drawer,
+   * or a line deleted in the test file — shown struck, with Restore, where
+   * they were: after the step `after` names (null: at the top). Gone again
+   * when restored. Absent: none.
+   */
+  deletedSteps?: Array<{ id: string; text: string; after: string | null }>;
   /**
    * Steps so far: the latest `record:draft`, whole — each newer revision
    * replaces it. Null until the first draft arrives.
@@ -1107,14 +1166,20 @@ export interface RecordingPanelState {
     authored?: number[];
     /** Their ids, parallel to `authored` ('' where the server sent none). */
     authoredIds?: string[];
+    /** Each step's id, parallel to `steps` — absent from a server that
+     *  predates editing, which leaves the panel no ✕ on a step. */
+    ids?: string[];
+    /** Indices into `steps` of the steps the author reworded. */
+    edited?: number[];
   } | null;
   /** A draft call is running — the "updating…" marker (`record:drafting`). */
   drafting: boolean;
 }
 
 /** A row of the panel's action list: an action, or one of the toolbar's
- *  additions — a pause or resume marker, or a step of the author's. */
-export type RecordingEntryKind = RecordActionKind | 'pause' | 'resume' | 'step';
+ *  additions — a pause or resume marker, or a step of the author's — or a
+ *  step the author reworded (`edit`, a marker: `✎ Edited step 4`). */
+export type RecordingEntryKind = RecordActionKind | 'pause' | 'resume' | 'step' | 'edit';
 
 // ---------------------------------------------------------------------------
 // Per-document state snapshot (sent host → webview)

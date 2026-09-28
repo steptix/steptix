@@ -544,9 +544,10 @@ export class ApiClient {
   /**
    * Steer a running recording: `stop` (write the steps, leaving `dropped`
    * out), `check` / `cancel-check` (Add check), `cancel` (end, write nothing),
-   * `drop` / `restore`, `pause` / `resume`, `add-step`. The server answers
-   * 202 — with `{ ignored: true }` when the call did nothing, which is what
-   * this returns; what happens next arrives on the record stream.
+   * `drop` / `restore` (of an action, or a step by its id), `pause` /
+   * `resume`, `add-step`, `edit-step`. The server answers 202 — with
+   * `{ ignored: true }` when the call did nothing, which is what this
+   * returns; what happens next arrives on the record stream.
    *
    * 404 — no recording is running — is `not-found`, which a caller racing the
    * stream's own end can ignore.

@@ -52,9 +52,9 @@ import {
   addStepBoxAnswer,
   addStepBoxEdit,
   addStepBoxSend,
-  draftStepMarksInline,
   formatRecordTimeInline,
   recordingStatusTextInline,
+  stepsSoFarRowsInline,
 } from "./lib/recording-panel.js";
 
 // Inline narrowing helper. The webview can't import named exports from
@@ -254,18 +254,9 @@ function CompileStrip({ state }) {
   );
 }
 
-/** A small padlock, in the text colour: a step the model can no longer
- *  rewrite (stories/testbench-record-toolbar.md §"Locking in"). */
-function LockIcon() {
-  return (
-    <svg viewBox="0 0 12 12" width={11} height={11} aria-hidden="true" style={{ flexShrink: 0, verticalAlign: "-0.1em" }}>
-      <rect x="2.5" y="5.2" width="7" height="5" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M4 5.2V3.8a2 2 0 0 1 4 0v1.4" fill="none" stroke="currentColor" strokeWidth="1.4" />
-    </svg>
-  );
-}
-
-/** The author's own step, marked in Steps so far. */
+/** The author's own step — written or reworded — marked in Steps so far.
+ *  No step is locked against the author, so no lock is shown
+ *  (stories/testbench-record-edit-steps.md, decision 1). */
 function YoursTag() {
   return (
     <span
@@ -291,7 +282,10 @@ function YoursTag() {
  * is drafting as the author works, Add check, Stop and Cancel — and, for
  * parity with the browser toolbar (stories/testbench-record-toolbar.md §"VS
  * Code alongside"), Pause / Resume, an Add step box, the pause markers and the
- * author's own steps in the action list, and the locks in Steps so far.
+ * author's own steps in the action list — and, for rewording and deleting
+ * steps (stories/testbench-record-edit-steps.md §"The panel"), a ✕ / Restore on
+ * each Steps so far row, "yours" on a reworded one, `✎ Edited step N` rows, and
+ * the actions a deleted step dropped struck in the action list.
  *
  * Everything shown comes from the host's `recording` message — the ✕ asks the
  * host to drop a row and the host re-posts the list — so what Stop sends as
@@ -330,7 +324,9 @@ function RecordingPanel({ state }) {
   const recordingNow = state.phase === "recording";
   const paused = state.paused === true;
   const draft = state.draft;
-  const marks = draftStepMarksInline(draft);
+  // Steps so far: the draft's steps, and the deleted ones struck where they
+  // were (stories/testbench-record-edit-steps.md §"The panel").
+  const rows = stepsSoFarRowsInline(draft, state.deletedSteps);
   const addStep = () => {
     if (!recordingNow) return;
     pressRef.current += 1;
@@ -409,6 +405,23 @@ function RecordingPanel({ state }) {
                   {formatRecordTimeInline(a.atMs)}
                 </span>
               </div>
+            ) : a.kind === "edit" ? (
+              // `✎ Edited step 4: …` where it happened — a step reworded in
+              // the browser's drawer, the test file or the panel. A marker: an
+              // edit is undone where it was made, not from here.
+              <div
+                key={a.id}
+                className="tb-step"
+                data-testid="recording-edit-row"
+                style={{ cursor: "default", opacity: 0.85 }}
+                title={`Reworded ${a.source === "editor" ? "in the test file" : a.source === "toolbar" ? "in the browser" : "in the panel"}`}
+              >
+                <span aria-hidden="true" style={{ flexShrink: 0 }}>✎</span>
+                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.summary}</span>
+                <span style={{ flexShrink: 0, opacity: 0.6, fontSize: "0.85em" }}>
+                  {a.source === "editor" ? "file" : a.source === "toolbar" ? "browser" : "panel"}
+                </span>
+              </div>
             ) : a.kind === "step" ? (
               // `✎ Your step: …` — a step the author wrote; ✕ drops it by its id.
               <div
@@ -452,7 +465,13 @@ function RecordingPanel({ state }) {
                 opacity: a.dropped ? 0.5 : 1,
                 textDecoration: a.dropped ? "line-through" : "none",
               }}
-              title={a.dropped ? "Dropped — no step will be written for this action" : a.summary}
+              title={
+                a.dropped
+                  ? a.droppedWith
+                    ? "Dropped with the step you deleted — ↺ puts this action back on its own"
+                    : "Dropped — no step will be written for this action"
+                  : a.summary
+              }
             >
               {/* `● Clicked button "Sign in"  0:07` — SPEC-record-steps.md §3.2. */}
               {/* ◎ a check, ● an action, ○ an event that rides with the next
@@ -480,9 +499,11 @@ function RecordingPanel({ state }) {
         </div>
       )}
       {/* Steps so far — the latest draft, whole: each one REPLACES the list
-          (the model may have rewritten its last steps), numbered 1..n. A lock
-          on the steps the model can no longer rewrite, "yours" on the
-          author's own (stories/testbench-record-toolbar.md). */}
+          (the model may have rewritten its last steps), numbered 1..n, "yours"
+          on the author's own and their rewordings. Each has a ✕ that deletes
+          it — with the actions it stands for — and a deleted one stays struck
+          where it was, with Restore (stories/testbench-record-edit-steps.md
+          §"The panel"). Editing stays in the file and the browser's drawer. */}
       {!starting && (
         <div data-testid="recording-draft" style={{ marginBottom: 6 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.85em", letterSpacing: "0.5px", textTransform: "uppercase", opacity: 0.8, marginBottom: 2 }}>
@@ -493,22 +514,58 @@ function RecordingPanel({ state }) {
               </span>
             )}
           </div>
-          {draft && draft.steps.length > 0 ? (
-            <ol ref={draftRef} style={{ margin: 0, paddingLeft: 26, maxHeight: 200, overflowY: "auto" }}>
-              {draft.steps.map((step, i) => (
-                <li key={i} style={{ padding: "1px 0", overflowWrap: "anywhere" }}>
-                  <span style={{ display: "inline-flex", alignItems: "baseline", gap: 5, flexWrap: "wrap" }}>
-                    <span style={{ opacity: marks[i]?.locked && !marks[i]?.yours ? 0.75 : 1 }}>{step}</span>
-                    {marks[i]?.yours && <YoursTag />}
-                    {marks[i]?.locked && (
-                      <span title="Locked: the model can no longer rewrite this step" style={{ opacity: 0.7 }}>
-                        <LockIcon />
-                      </span>
+          {rows.length > 0 ? (
+            <div ref={draftRef} role="list" style={{ maxHeight: 200, overflowY: "auto" }}>
+              {rows.map((row) =>
+                row.kind === "deleted" ? (
+                  <div
+                    key={`x-${row.id}`}
+                    role="listitem"
+                    data-testid="recording-draft-deleted"
+                    className="tb-step"
+                    style={{ cursor: "default", opacity: 0.55, padding: "1px 0" }}
+                    title="Deleted — the actions it stood for are left out too"
+                  >
+                    <span style={{ flexShrink: 0, width: 22, textAlign: "right", opacity: 0.7 }} aria-hidden="true">–</span>
+                    <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere", textDecoration: "line-through" }}>{row.text}</span>
+                    <button
+                      className="tb-btn"
+                      disabled={finishing}
+                      onClick={() => hostBridge.postRecordDrop(row.id, false)}
+                      title="Put this step back, with the actions it stood for"
+                      style={{ padding: "0 6px" }}
+                    >
+                      ↺ Restore
+                    </button>
+                  </div>
+                ) : (
+                  <div
+                    key={`s-${row.id ?? row.number}`}
+                    role="listitem"
+                    className="tb-step"
+                    style={{ cursor: "default", padding: "1px 0" }}
+                  >
+                    <span style={{ flexShrink: 0, width: 22, textAlign: "right", opacity: 0.7, fontVariantNumeric: "tabular-nums" }}>{row.number}.</span>
+                    <span style={{ flex: 1, minWidth: 0, display: "inline-flex", alignItems: "baseline", gap: 5, flexWrap: "wrap", overflowWrap: "anywhere" }}>
+                      <span>{row.text}</span>
+                      {row.yours && <YoursTag />}
+                    </span>
+                    {row.id !== null && (
+                      <button
+                        className="tb-btn"
+                        disabled={finishing}
+                        onClick={() => hostBridge.postRecordDrop(row.id, true)}
+                        title="Delete this step — and the actions it stands for"
+                        aria-label={`Delete step ${row.number}`}
+                        style={{ padding: "0 6px" }}
+                      >
+                        ✕
+                      </button>
                     )}
-                  </span>
-                </li>
-              ))}
-            </ol>
+                  </div>
+                ),
+              )}
+            </div>
           ) : (
             <div style={{ opacity: 0.65, fontSize: "0.9em" }}>
               {state.drafting ? "Writing the first steps…" : "The steps appear here a moment after each action."}
