@@ -409,6 +409,221 @@ async function clickToolbar(page, cmd, timeoutMs = 10_000) {
   await page.mouse.click(at.x, at.y);
 }
 
+// ── The Steps so far drawer (stories/testbench-record-edit-steps.md) ───────
+// A port of readDrawer / drawerAt / clickDrawer / barFocus in
+// tests/record-toolbar-cdp.ts, the server suite's helper.
+
+/** The lock icon's shackle — the path only the lock glyph draws. */
+const LOCK_SHACKLE = 'M4 5.2V3.8a2 2 0 0 1 4 0v1.4';
+
+const hasClass = (n, cls) => n.nodeType === 1 && (attr(n, 'class') ?? '').split(/\s+/).includes(cls);
+
+async function valueOf(cdp, nodeId) {
+  const { object } = await cdp.send('DOM.resolveNode', { nodeId });
+  const { result } = await cdp.send('Runtime.callFunctionOn', {
+    objectId: object.objectId,
+    functionDeclaration: 'function () { return this.value; }',
+    returnByValue: true,
+  });
+  return result.value;
+}
+
+async function centreOf(cdp, nodeId) {
+  try {
+    const { model } = await cdp.send('DOM.getBoxModel', { nodeId });
+    const q = model.content;
+    return { x: (q[0] + q[2] + q[4] + q[6]) / 4, y: (q[1] + q[3] + q[5] + q[7]) / 4 };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The drawer of the toolbar in `page`, read inside its closed root, or null
+ * when there is no toolbar: `{ open, rows: [{ id, kind, text, n, yours,
+ * editing }], foot, lock, lockInBar }`. `kind` is live | deleted | restoring |
+ * pending; `text` is what the row's box holds while it is edited. `lock`: a
+ * lock glyph anywhere in the drawer; `lockInBar`: anywhere in the bar (the
+ * status row's "Typing hidden" chip draws one on purpose).
+ */
+function readDrawer(page) {
+  return withCdp(page, async (cdp, root) => {
+    const host = hostOf(root);
+    const shadow = host?.shadowRoots?.[0];
+    if (!shadow) return null;
+    const isLock = (n) => n.localName === 'path' && attr(n, 'd') === LOCK_SHACKLE;
+    const lockInBar = find(shadow, isLock) !== null;
+    const drawer = find(shadow, (n) => hasClass(n, 'drawer'));
+    if (!drawer) return { open: false, rows: [], foot: '', lock: false, lockInBar };
+    const rows = [];
+    const walk = async (n) => {
+      if (n.localName === 'li' && hasClass(n, 'row')) {
+        const cls = (attr(n, 'class') ?? '').split(/\s+/);
+        const kind = ['live', 'deleted', 'restoring', 'pending'].find((k) => cls.includes(k)) ?? 'live';
+        const t = find(n, (c) => hasClass(c, 't'));
+        const input = find(n, (c) => c.localName === 'input');
+        const num = find(n, (c) => hasClass(c, 'n'));
+        let text = t ? textOf(t).replace(/\s+/g, ' ').trim() : '';
+        if (input) text = await valueOf(cdp, input.nodeId);
+        rows.push({
+          id: attr(n, 'data-row-id') ?? '',
+          kind,
+          text,
+          n: num ? textOf(num).trim() : '',
+          yours: find(n, (c) => hasClass(c, 'yours')) !== null,
+          editing: input !== null,
+        });
+        return;
+      }
+      for (const c of n.children ?? []) await walk(c);
+    };
+    await walk(drawer);
+    const foot = find(drawer, (n) => hasClass(n, 'foot'));
+    return {
+      open: attr(drawer, 'hidden') === undefined,
+      rows,
+      foot: foot ? textOf(foot).replace(/\s+/g, ' ').trim() : '',
+      lock: find(drawer, isLock) !== null,
+      lockInBar,
+    };
+  });
+}
+
+/** Where a drawer row (`cmd` null) or one of its controls is on screen:
+ *  `row-edit` (its words), `row-delete` (✕), `row-restore`, `row-insert` (the
+ *  + in the gap below it). */
+function drawerAt(page, id, cmd) {
+  return withCdp(page, async (cdp, root) => {
+    const host = hostOf(root);
+    const node = host
+      ? find(
+          host,
+          (n) =>
+            n.nodeType === 1 &&
+            (cmd === null
+              ? n.localName === 'li' && attr(n, 'data-row-id') === id
+              : attr(n, 'data-cmd') === cmd && attr(n, 'data-id') === id),
+        )
+      : null;
+    return node ? centreOf(cdp, node.nodeId) : null;
+  });
+}
+
+/** Use a drawer row's control with the real mouse: the pointer goes over the
+ *  row first — its ✕ and + show on hover — then onto the control, once the
+ *  bar has stopped moving (a push that adds a row moves every row). */
+async function clickDrawer(page, id, cmd) {
+  const row = await drawerAt(page, id, null);
+  assert.ok(row, `the drawer has no row for ${id}`);
+  await page.mouse.move(row.x, row.y);
+  await sleep(80);
+  let at = await drawerAt(page, id, cmd);
+  for (let i = 0; i < 10 && at; i++) {
+    await sleep(60);
+    const again = await drawerAt(page, id, cmd);
+    if (again && Math.abs(again.x - at.x) < 0.5 && Math.abs(again.y - at.y) < 0.5) break;
+    at = again;
+  }
+  assert.ok(at, `the row for ${id} has no "${cmd}"`);
+  await page.mouse.move(at.x, at.y, { steps: 3 });
+  await sleep(50);
+  await page.mouse.click(at.x, at.y);
+}
+
+/** Where keyboard focus is inside the bar, and whether it shows. */
+function barFocus(page) {
+  return withCdp(page, async (cdp, root) => {
+    const shadow = hostOf(root)?.shadowRoots?.[0];
+    if (!shadow) return null;
+    const { object } = await cdp.send('DOM.resolveNode', { nodeId: shadow.nodeId });
+    const { result } = await cdp.send('Runtime.callFunctionOn', {
+      objectId: object.objectId,
+      functionDeclaration:
+        'function () { const a = this.activeElement; if (!a) return null; return { cmd: a.getAttribute("data-cmd"), ' +
+        'id: a.getAttribute("data-row-id") || a.getAttribute("data-id"), row: a.localName === "li", ' +
+        'visible: a.matches(":focus-visible") }; }',
+      returnByValue: true,
+    });
+    return result.value;
+  });
+}
+
+/** Open Steps so far (it is closed in every new document), and wait for it. */
+async function openDrawer(page, timeoutMs = 30_000) {
+  const d = await readDrawer(page);
+  if (d?.open) return;
+  await clickToolbar(page, 'drawer', timeoutMs);
+  await waitFor('the drawer opens', async () => (await readDrawer(page))?.open === true, 10_000, async () =>
+    JSON.stringify(await readToolbar(page)),
+  );
+}
+
+/**
+ * Put keyboard focus on the drawer row for `id` the way a person does:
+ * Alt+Shift+R into the bar, Tab round it to the first row, then the arrow
+ * keys to the one wanted. Returns the focus as the bar has it.
+ */
+async function focusDrawerRow(page, id) {
+  await page.keyboard.press('Alt+Shift+R');
+  await waitFor('focus in the bar', async () => (await barFocus(page)) !== null, 10_000);
+  let f = await barFocus(page);
+  for (let i = 0; i < 40 && !f?.row; i++) {
+    await page.keyboard.press('Tab');
+    f = await barFocus(page);
+  }
+  assert.ok(f?.row, `Tab never reached a drawer row: ${JSON.stringify(f)}`);
+  for (let i = 0; i < 40 && f?.id !== id; i++) {
+    const order = ((await readDrawer(page))?.rows ?? []).filter((r) => r.kind !== 'pending').map((r) => r.id);
+    const from = order.indexOf(f?.id);
+    const to = order.indexOf(id);
+    assert.ok(to >= 0, `no drawer row ${id}: ${JSON.stringify(order)}`);
+    await page.keyboard.press(from < to ? 'ArrowDown' : 'ArrowUp');
+    f = await barFocus(page);
+  }
+  assert.equal(f?.id, id, `the arrow keys reach row ${id}: ${JSON.stringify(f)}`);
+  return f;
+}
+
+// ── Reading the recording, for assertions and for the report ──────────────
+
+/** The recording as TestBench holds it, compact: the draft, the struck
+ *  steps and the action list — what an assertion message should show. */
+function recordingSummary(hooks) {
+  const s = hooks.recordingState();
+  if (!s) return 'no recording';
+  const d = s.draft;
+  return JSON.stringify(
+    {
+      phase: s.phase,
+      drafting: s.drafting,
+      draft: d && {
+        revision: d.revision,
+        steps: d.steps,
+        ids: d.ids,
+        edited: d.edited,
+        authored: d.authored,
+        parameters: d.parameters,
+        through: d.through,
+      },
+      deletedSteps: s.deletedSteps,
+      actions: s.actions.map((a) =>
+        [a.id, a.kind, a.summary, a.dropped ? 'DROPPED' : '', a.droppedWith ?? '', a.source ?? ''].filter(Boolean).join(' | '),
+      ),
+    },
+    null,
+    1,
+  );
+}
+
+/** The file's numbered steps read `expected` in order, numbered 1..n. */
+function stepsRead(text, expected) {
+  const steps = stepsOf(text);
+  return (
+    steps.length === expected.length &&
+    steps.every((s, i) => s.n === i + 1 && s.text === expected[i])
+  );
+}
+
 /** The toolbar host's box and whether it is in the top layer (light DOM, so the page can say). */
 function hostState(page) {
   return page.evaluate(() => {
@@ -462,4 +677,12 @@ module.exports = {
   toolbarButtonAt,
   clickToolbar,
   hostState,
+  readDrawer,
+  drawerAt,
+  clickDrawer,
+  barFocus,
+  openDrawer,
+  focusDrawerRow,
+  recordingSummary,
+  stepsRead,
 };
