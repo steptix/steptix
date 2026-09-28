@@ -2222,3 +2222,172 @@ describe('the drawer in the recorded page, over the wire', () => {
     await s.waitFor((f) => f.event === 'done', 'done');
   }, 60_000);
 });
+
+// ── Review round 2 of editing and deleting steps (the server half) ────────
+
+describe('a click into a field that the model folds into the typing after it (review round 2, finding 2)', () => {
+  it("is dropped with the typing's step when that step is deleted, and no later redraft writes it back", async () => {
+    await restartApp({ draftSettleMs: 1_000 });
+    // As a real model answers: the typing is the step; the click into the field is not in it.
+    ai.responder = (m) => {
+      const typing = recordingOf(m).find((a) => a['kind'] === 'type');
+      if (!typing) return echoMapped(m);
+      return JSON.stringify({
+        replaceFrom: draftOf(m).length,
+        steps: ['Type {{email}} into the Email field'],
+        stepActions: [[typing['n']]],
+        parameters: [{ name: 'email', value: 'someone@example.test' }],
+      });
+    };
+    const id = 'focus-click';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#email');
+    await page.keyboard.type('someone@example.test');
+    await page.keyboard.press('Tab');
+    const typed = await s.draftThrough(3);
+    expect(typed.data.steps).toEqual(['Type {{email}} into the Email field']);
+    expect(s.of('record:action').map((a) => a.kind)).toEqual(['click', 'type', 'key']);
+    const behind = s.of('record:action').map((a) => a.id as string);
+    expect((await control(id, { action: 'drop', id: 'd1' })).json).toEqual({ ok: true });
+    const dropped = await s.waitFor((f) => f.event === 'record:dropped', 'record:dropped');
+    expect(dropped.data).toEqual({ type: 'record:dropped', id: 'd1', dropped: true, source: 'panel', actions: behind });
+    // One more action, then a redraft of everything left.
+    await page.click('#signin');
+    await s.draftThrough(4);
+    const calls = ai.requests.length;
+    const before = s.of('record:draft').at(-1).revision as number;
+    expect((await control(id, { action: 'drop', id: s.of('record:action')[3].id })).json).toEqual({ ok: true });
+    await s.waitFor((f) => f.event === 'record:draft' && f.data.revision > before, 'the redraft');
+    await sleep(300);
+    for (const r of ai.requests.slice(calls)) expect(recordingOf(r)).toEqual([]);
+    expect(s.of('record:draft').at(-1).steps).toEqual([]);
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+});
+
+describe('a password typed on the page, then into the drawer or the Add step box (review round 2, finding 5)', () => {
+  const PW = 'Hunter2-Page-Secret';
+  const REFUSED = 'That has a password typed on this page in it';
+
+  it('is refused in the page, which says what to write instead — it is in no frame, prompt or log line', async () => {
+    const lines: string[] = [];
+    const remove = addLogCallback((_level, message) => lines.push(message));
+    try {
+      ai.responder = (m) => echoMapped(m);
+      const id = 'page-secret-edit';
+      const s = await started(id);
+      const page = pageOf();
+      await page.click('#reports');
+      await s.draftThrough(1);
+      await page.click('#pw');
+      await page.keyboard.type(PW);
+      await page.click('#signin');
+      await s.draftThrough(4);
+      // The drawer: an edit holding it.
+      await clickToolbar(page, 'drawer');
+      await until(() => readDrawer(page), (d) => d !== null && d.open && d.rows.length >= 2, 'the drawer');
+      await clickDrawer(page, 'd1', 'row-edit');
+      await until(() => readDrawer(page), (d) => d !== null && d.rows[0]!.editing, 'the step in a box');
+      await page.keyboard.press('Control+A');
+      await page.keyboard.type(`Type ${PW} into the Password field`);
+      await page.keyboard.press('Enter');
+      await toolbarShows(page, REFUSED);
+      expect((await readDrawer(page))!.rows[0]!.editing).toBe(true);
+      await page.keyboard.press('Escape');
+      // The Add step box: a step holding it.
+      await page.keyboard.press('Alt+Shift+S');
+      await toolbarShows(page, 'Enter to add');
+      await page.keyboard.type(`Sign in with ${PW}`);
+      await sleep(600); // past the box's unsent-text pause
+      await page.keyboard.press('Enter');
+      await toolbarShows(page, REFUSED);
+      await page.keyboard.press('Escape');
+      await sleep(300);
+      expect(s.of('record:edited')).toEqual([]);
+      expect(s.of('record:step')).toEqual([]);
+      await control(id, { action: 'stop' });
+      await s.waitFor((f) => f.event === 'record:result', 'record:result');
+      await s.waitFor((f) => f.event === 'done', 'done');
+      const everything = JSON.stringify([s.frames, ai.requests, lines]);
+      for (const spelling of spellings(PW)) expect(everything).not.toContain(spelling);
+    } finally {
+      remove();
+    }
+  }, 60_000);
+});
+
+describe('Undo of the last action behind a reworded step (review round 2, finding 6)', () => {
+  it("the toolbar's Undo takes the step out with it and Restore brings both back; the panel's ✕ on the action keeps the step and says so, once", async () => {
+    ai.responder = (m) => echoMapped(m);
+    const id = 'undo-reworded';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#reports');
+    await s.draftThrough(1);
+    await page.click('#signin');
+    await s.draftThrough(2);
+    expect((await control(id, { action: 'edit-step', id: 'd2', text: 'Sign in now', source: 'panel' })).json).toEqual({ ok: true });
+    const edited = await s.waitFor((f) => f.event === 'record:draft' && f.data.steps[1] === 'Sign in now', 'the edit');
+    const signin = s.of('record:action')[1].id as string;
+    const mark = s.frames.length;
+    await clickToolbar(page, 'undo');
+    const out = await s.waitFor((f) => f.event === 'record:dropped' && f.data.id === 'd2', 'the step taken out');
+    expect(out.data).toEqual({ type: 'record:dropped', id: 'd2', dropped: true, source: 'toolbar', actions: [signin] });
+    const without = await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.revision > edited.data.revision,
+      'the draft without it',
+    );
+    expect(without.data.steps).toEqual(['Did click Reports']);
+    const order = framesAfter(s, mark).map((f) => f.event);
+    expect(order.indexOf('record:dropped')).toBeLessThan(order.indexOf('record:draft'));
+    await toolbarShows(page, 'your step "Sign in now"');
+    await clickToolbar(page, 'restore');
+    const back = await s.waitFor(
+      (f) => f.event === 'record:dropped' && f.data.id === 'd2' && f.data.dropped === false,
+      'both back',
+    );
+    expect(back.data).toEqual({ type: 'record:dropped', id: 'd2', dropped: false, source: 'toolbar', actions: [signin] });
+    const restored = await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.revision > without.data.revision,
+      'the draft with both',
+    );
+    expect(restored.data).toMatchObject({ steps: ['Did click Reports', 'Sign in now'], ids: ['d1', 'd2'], edited: [1] });
+
+    // The panel's ✕ on the action: the reworded step stays, and the author is told — once.
+    const said = 'Your reworded step 2 stays — delete it if you meant to.';
+    expect((await control(id, { action: 'drop', id: signin })).json).toEqual({ ok: true });
+    await s.waitFor((f) => f.event === 'output' && f.data.msg === said, 'the note');
+    expect((await control(id, { action: 'restore', id: signin })).json).toEqual({ ok: true });
+    expect((await control(id, { action: 'drop', id: signin })).json).toEqual({ ok: true });
+    await sleep(300);
+    expect(s.of('output').filter((o) => o.msg === said)).toHaveLength(1);
+    expect(s.of('record:draft').at(-1).steps).toEqual(['Did click Reports', 'Sign in now']);
+    await control(id, { action: 'stop' });
+    const result = await s.waitFor((f) => f.event === 'record:result', 'record:result');
+    expect(result.data.steps).toEqual(['Did click Reports', 'Sign in now']);
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+});
+
+describe('a lone number or list marker (review round 2, finding 10)', () => {
+  it('is no step: an edit to it is not made, an Add step of it adds nothing', async () => {
+    const id = 'bare-marker';
+    const s = await started(id);
+    await pageOf().click('#reports');
+    await s.draftThrough(1);
+    expect((await control(id, { action: 'edit-step', id: 'd1', text: '3.', source: 'editor' })).json.ignored).toMatch(
+      /delete the step instead/,
+    );
+    expect((await control(id, { action: 'edit-step', id: 'd1', text: '-', source: 'panel' })).json.ignored).toMatch(
+      /delete the step instead/,
+    );
+    expect((await control(id, { action: 'add-step', text: '4)', source: 'panel' })).json.ignored).toBeDefined();
+    await sleep(300);
+    expect(s.of('record:edited')).toEqual([]);
+    expect(s.of('record:step')).toEqual([]);
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+});

@@ -171,7 +171,12 @@ take the shortcuts.
 - **Add step** is §7.6's step from the toolbar's box. **Undo** takes out the
   most recent entry still in — an action, an event, a check or a step of the
   author's — as the panel's ✕ does, and walks further back when pressed again;
-  **Restore** puts the last one back.
+  **Restore** puts the last one back. When that entry is the last one a step
+  the author reworded stands for, Undo takes the step out with it — one Undo,
+  the action and its step, deleted as the drawer's ✕ deletes it (the bar says
+  `Removed: … and your step "…"`) — and Restore brings both back. (The panel's
+  ✕ on that action keeps the reworded step instead, and says once, as an
+  `output` line, "Your reworded step N stays — delete it if you meant to.")
 - **Steps so far**, the drawer the status row opens, lists the draft
   numbered, `yours` on the author's own steps and on the ones they reworded,
   and no lock: nothing is locked against the author
@@ -189,6 +194,25 @@ take the shortcuts.
   and focus shows. A change shows at once and is taken back when the server
   refuses it. The drawer scrolls past about eight rows and opens away from the
   docked edge.
+- **The drawer keeps focus and words.** A re-render never drops keyboard
+  focus into the page, where the next Tab or Enter would be recorded: focus
+  stays on the same row or button, else on the row now at its place (a
+  redraft replaced the step, a struck row went), else on the Steps so far
+  toggle or the bar's first button; the + in a gap shows while the keyboard is
+  on it. While a step is edited in place the other rows go on changing around
+  it — a ✕ elsewhere strikes its row at once, a new draft shows — and the box
+  keeps its words, caret and focus; a step the model rewrote meanwhile keeps
+  its box where it was, and Enter sends the edit with the id it had. An open
+  edit with changed words is **saved**, as leaving a field saves it, by +, Add
+  step, the Steps so far toggle, Stop, Cancel, a click on another step's words,
+  and the page going away (sent as the document goes, `pagehide`); only Esc
+  throws it away, and a stray click on the page leaves it open. A save of
+  nothing of the author's — empty, or a lone number or list marker such as
+  `3.` or `-` — is a delete. A double-click on ✕ deletes once: the second
+  click is not a Restore, and the struck row's Restore does not show where the
+  ✕ was until the pointer moves; the second click of a double-click on + never
+  reaches the page. A key the bar used (Enter saving an edit) held down does
+  not repeat into the page's field.
 - **Stop.** Every Add step, Undo and Restore accepted before Stop is carried
   out before the steps are written — one waiting behind another's model call
   included; an edit or a removal from the drawer is carried out the moment it
@@ -453,6 +477,16 @@ break still matches, and one that crossed the cut leaves no prefix behind.
 They are masked out of every panel line, `record:started`, the server
 warnings forwarded as `output`, and the recording's own log lines. One the
 author types into a step of their own is written as `{{name}}` (§7.6).
+
+A value typed into a secret field **on the page** is not one the server
+knows — the page never sends it — so the server could not keep it out of a
+step the author writes. The page does instead: an edit in the drawer or an
+Add step from the toolbar's box holding one of the values it remembers (the
+memory above, the same match its masking uses) is refused before anything is
+sent, and the bar says `That has a password typed on this page in it — write
+{{password}} (or the field's parameter) instead.`; the edit or the box stays
+open to put it right. The box's unsent text goes to the server with those
+values masked.
 
 ## 6. Checks
 
@@ -1022,9 +1056,13 @@ a "Click Payments in the main menu" opened); a step kept unchanged in place
 keeps what it stood for; never an action to a step of an earlier call. Either
 way an event the answer left out goes with the step that claimed the action
 it rode with, and an action no step claimed goes with its events when one
-step claimed them all. An action no step describes stands for no step. The
-mapping is kept across appends, tail rewrites, stretch redrafts and full
-redrafts.
+step claimed them all; a click no step claimed goes with the step that
+claimed what came next when that is on the same element (the page's
+selector, else its tag, role, name, id and `name` attribute, one of those
+not empty; same tab and frame) — the click into a field that a "Type … into
+the Email field" step folded away is that step's. An action no step
+describes stands for no step. The mapping is kept across appends, tail
+rewrites, stretch redrafts and full redrafts.
 
 **Step ids.** Every step of the draft has an id (`record:draft.ids`): an
 author step its `s` id; a step the model wrote a `d` id, kept while the step
@@ -1043,12 +1081,21 @@ rewrites it — a redraft of its stretch keeps it and puts it back among the new
 steps by where its actions are — and writes no other step for its actions:
 they are left out of every call (a redraft's prompt lists the step with them,
 A4), and a step an answer ties to nothing but them is not written; without a
-mapping that holds up, an exact copy of its words is taken for one too. Edited
-back to the model's exact words, it is the model's again. A step of the
-author's own has its text replaced. An edit naming a step the model has
-rewritten since replaces whatever steps stand for the same actions now — one
-step, the author's words, holding all their actions, under the id the edit
-named: never lost, never written twice. No call is made for an edit; the next
+mapping that holds up, an exact copy of its words is taken for one too — in
+an ordinary call's answer as in a redraft's. Edited back to the model's exact
+words, it is the model's again. A step of the author's own has its text
+replaced (and a redraft of its stretch in flight, shown the old words, is
+thrown away and made again). An edit naming a step the model has rewritten
+since takes over what THAT step stood for, from whatever steps stand for it
+now — one step, the author's words, under the id the edit named: never lost,
+never written twice. A step that stood for nothing else goes (the first is
+replaced where it stands); one the model merged it into ("Click Two, then
+Four" for an edit of "Click Two") keeps the rest of its actions — the author
+never saw them in the step they named — and its stretch is redrafted, so the
+model writes those actions into a step of their own; merged into a step the
+author had reworded too, that step keeps their words for what is left of it.
+With no step that stood for nothing else, the edit goes among the steps by
+where its actions are. No call is made for an edit bar that redraft; the next
 one is shown it. One that arrives while a call is in flight that could rewrite
 that step makes the call's answer be thrown away and the call made again: a
 redraft of its stretch at once; an ordinary call when its answer comes, if
@@ -1061,19 +1108,29 @@ since stays, where it was: the author's words are never lost.
 model wrote — reworded or not — leaves the draft at once, with no call, and
 every recorded action behind it is dropped with it, as the panel's ✕ drops an
 action: struck through in the panel, never shown to the model again, so no
-redraft brings the step back. A step of the author's goes as Undo takes it
+redraft brings the step back. So are the entries just before its first action
+that no step stands for and that are on the same element (the click into the
+field its typing went into, which the model folded away): left behind, the
+next redraft wrote them back as a step of their own. `record:dropped.actions`
+lists them all. A step of the author's goes as Undo takes it
 (below). A parameter no remaining step uses leaves the draft's list — after an
 edit that stops using it too; an edit naming a `{{name}}` no parameter
 defines is written as it is (the author's business; the draft's notes say
 so). **Restore** puts the step back with its actions: exactly where it was,
-with no call, when nothing has touched its stretch since; otherwise after the
-step that was before it, when that step is with its actions, else among the
-steps of the stretch its actions are in, by where they are. One of its actions
+with no call, when nothing has touched its stretch since; otherwise among the
+steps of the stretch its actions are in, by where they are — no earlier than
+just after the step that was before it, when that step is there too (so two
+neighbours deleted one after the other come back in the order they were
+recorded, whatever order they are restored in); a step that stands for no
+action goes after the step that was before it. One of its actions
 restored on its own from the panel is an action like any other: its stretch
 is redrafted and the model writes a step for it — and the deleted step can no
 longer come back as it was (Restore answers why), even should that action be
-dropped again. A delete naming a step the model has rewritten since deletes
-whatever stands for the same actions now.
+dropped again. A delete naming a step the model has rewritten since drops
+what THAT step stood for, as an edit takes it over (above): a step that stood
+for nothing else goes, one the model merged it into keeps the rest and is
+redrafted; Restore puts the named step back in the words the author last saw,
+by where its actions are.
 
 **Locks** (stories/testbench-record-toolbar.md, "Steps you write"). A step of
 the author's locks everything before it. The draft is kept as STRETCHES — the
@@ -1244,12 +1301,17 @@ the recording last held it (§7.6).
 
 `record:dropped` goes out for a step of the draft deleted or restored from
 anywhere — the drawer, the control route (`source` as the control gave it,
-`panel` when it gave none), Restore on the bar — with `actions`, before the
-draft without (or with) the step. For an action or a step of the author's it
-goes out, without `actions`, only when the browser's toolbar did it (Undo,
-Restore, the drawer's ✕ on the author's step), after the draft, as before: the
-panel's own drops are the panel's. `record:edited` goes out for every edit,
-from anywhere, before the draft that shows it.
+`panel` when it gave none), Restore on the bar, the toolbar's Undo of the last
+action behind a reworded step (`source: 'toolbar'`, the step's id, §3.4) —
+with `actions`, before the draft without (or with) the step. For an action or
+a step of the author's it goes out, without `actions`, only when the
+browser's toolbar did it (Undo, Restore, the drawer's ✕ on the author's
+step), after the draft, as before: the panel's own drops are the panel's.
+`record:edited` goes out for every edit, from anywhere, before the draft that
+shows it. An edit or a delete naming a step the model had merged into
+another (§8) is followed by a draft that still holds the merged step, now
+standing for the rest of its actions, and then by the redraft that replaces
+it.
 
 Frames arrive in this order: `record:started`; then, as the author works,
 `record:action` and `record:pick`, each burst of actions followed by
@@ -1299,7 +1361,8 @@ recording does not have or that is already in that state, a `restore` of a
 deleted step one of whose actions came back on its own since (§8), an
 `edit-step` of a step the recording does not have, one that is deleted, one
 whose actions no step stands for any more, an empty or several-line text (an
-empty text is not an edit — send `drop`), the step's own words, or — from the
+empty text, or a lone number or list marker such as `3.` or `-`, is not an
+edit — send `drop`), the step's own words, or — from the
 editor — a secret the recording knows (from the panel it is written
 `{{name}}`, with `name: $NAME`, as in §7.6), anything but `cancel` after
 `stop`), which TestBench says where the author asked (an `add-step` or an
@@ -1309,7 +1372,11 @@ running for the session; `400` for a body that is none of these (an
 other than `editor` or `panel`, an `afterStep` or `revision` that is not a
 whole number 0 or more). An `edit-step`, a `drop` and a `restore` are carried
 out the moment they arrive: none needs a model call, so the answer says
-whether it applied. `add-step` is
+whether it applied. `edit-step`'s `revision` is advisory: it is checked (a
+whole number) and otherwise unused — a step id names one wording of one step,
+never reused, and what each id stood for is remembered, so the id alone finds
+it; the draft the author saw adds nothing to that. An `add-step` of only lone
+numbers or markers adds nothing (`ignored`). `add-step` is
 answered at once and carried out after: bringing the draft up to date is a
 model call, and `record:step` says when the step joined. An `add-step`
 answered `202` without `ignored` is always carried out, and before the result:
@@ -1327,11 +1394,14 @@ drawer's `delete-step` and `restore-step` with a step's id, and from a frame
 from a drawer row's +, the step it goes after (`afterId`, with the index and
 draft revision the drawer had, for when the model has rewritten that step
 since) — an edit (`edit-step`: a step's id and its new words), the box's
-unsent text, a focus report — a yes or no for "the focused field is secret",
-from any frame, never a value — and a check-in. A step, an edit and the
-drawer's commands come from top-level frames only. Each carries the
-document's **token**; a message without the right one is refused (and said
-in the log).
+unsent text (the page's typed secrets masked, §5), a focus report — a yes or
+no for "the focused field is secret", from any frame, never a value — and a
+check-in. A step, an edit and the drawer's commands come from top-level
+frames only. Each carries the document's **token**; a message without the
+right one is refused (and said in the log). An edit still open in the drawer
+when the document goes is sent from its `pagehide` (§3.4): the binding call
+leaves before the document does, and the frame's token is still that
+document's then — the next document's claim comes after its hello.
 
 The answer says whether it was taken: `{ ok: true }`; `{ ok: false, state }`
 when it was this document's and was not (a Pause while paused, Add check while

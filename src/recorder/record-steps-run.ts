@@ -89,12 +89,16 @@ const MAX_TOOLBAR_STEPS = 500;
 /**
  * The lines of a step the author wrote, each one step: exactly as typed, bar a
  * leading number (`8.`) or list marker, which the recording's numbering
- * replaces, and the whitespace at the ends. A blank line adds nothing.
+ * replaces, and the whitespace at the ends. A blank line adds nothing — nor
+ * does a lone number or marker (`3.`, `-`): the number is the recording's, so
+ * nothing of the author's is left (review round 2, finding 10). An edit to one
+ * is therefore not an edit (delete the step instead), and an Add step of one
+ * adds nothing.
  */
 export function authorStepLines(text: string): string[] {
   return text
     .split(/\r\n|\r|\n/)
-    .map((line) => line.trim().replace(/^(?:\d+[.)]|[-*+])\s+/, '').trim())
+    .map((line) => line.trim().replace(/^(?:\d+[.)]|[-*+])(?:\s+|$)/, '').trim())
     .filter((line) => line !== '');
 }
 
@@ -217,6 +221,9 @@ export class RecordStepsRun {
   private updating = false;
   /** What the toolbar's Undo took out, most recent last — Restore's list. */
   private readonly undoStack: string[] = [];
+  /** Reworded steps the author has been told stay when the panel dropped
+   *  the last action behind them: said once each. */
+  private readonly toldStays = new Set<string>();
   /** Add step, Undo and Restore, one at a time and in order. */
   private ops: Promise<void> = Promise.resolve();
   /** Resolved once the recording is up (or will never be): an Add step that
@@ -731,7 +738,13 @@ export class RecordStepsRun {
 
   /** The toolbar's Undo: take out the most recent entry still in — an
    *  action, a check or a step of the author's — as the panel's ✕ does.
-   *  Accepted before Stop, it is carried out after it too (finding 1). */
+   *  Accepted before Stop, it is carried out after it too (finding 1).
+   *
+   *  The last entry a step the author REWORDED stands for goes with that
+   *  step: one Undo is the action and its step, deleted as the drawer's ✕
+   *  deletes it, and Restore brings both back (review round 2, finding 6).
+   *  Left in, the reworded step described an action that was gone, and was
+   *  written. */
   private async undo(): Promise<void> {
     const engine = this.engine;
     const recorder = this.recorder;
@@ -740,6 +753,18 @@ export class RecordStepsRun {
     const entry = engine.latestLiveEntry();
     if (!entry) {
       this.setNotice({ kind: 'info', text: 'Nothing to undo.', ms: NOTHING_TO_UNDO_MS });
+      return;
+    }
+    const step = entry.kind === 'action' ? engine.editedStepLeftBy(entry.id) : null;
+    if (step) {
+      if (this.dropOrRestore(step.id, true, 'toolbar') !== true) return;
+      this.undoStack.push(step.id);
+      this.setNotice({
+        kind: 'removed',
+        text: `Removed: ${entry.summary} and your step "${step.text}"`,
+        ms: REMOVED_NOTICE_MS,
+        restore: true,
+      });
       return;
     }
     if (this.dropOrRestore(entry.id, true, 'toolbar') !== true) return;
@@ -821,12 +846,24 @@ export class RecordStepsRun {
         const dropping = control.action === 'drop';
         const kind = this.engine?.kindOf(control.id);
         const text = kind === 'step' ? this.engine?.describeStep(control.id)?.text : undefined;
+        // The panel's ✕ on the last action a reworded step stands for: the
+        // step stays (the author's words are never lost) — said once
+        // (review round 2, finding 6).
+        const left = dropping && kind === 'action' ? this.engine?.editedStepLeftBy(control.id) : null;
         const r = this.dropOrRestore(control.id, dropping, control.source ?? 'panel');
         if (r === true) {
           // A step of the draft deleted from the panel or the file: the bar
           // says so too, with Restore (stories/testbench-record-edit-steps.md, "Delete").
           if (kind === 'step' && dropping) this.removedNotice(control.id, text);
           else if (kind === 'step') this.setNotice(null);
+          if (left && !this.toldStays.has(left.id)) {
+            this.toldStays.add(left.id);
+            this.out({
+              type: 'output',
+              msg: redact(`Your reworded step ${left.index + 1} stays — delete it if you meant to.`, this.secretValues()),
+              kind: 'info',
+            });
+          }
           return 'accepted';
         }
         return r === false ? 'ignored' : r;

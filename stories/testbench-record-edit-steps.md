@@ -193,7 +193,8 @@ Decided while building, where the story left it open:
   unchanged in place keeps what it stood for. The story's "nearest step first"
   is read that way. Riding events the answer left out go with the step that
   claimed their action; an action no step claimed goes with its events when one
-  step claimed them all.
+  step claimed them all; and a click no step claimed goes with the step that
+  claimed what came next, when that is on the same element (review round 2).
 - **An edited step locks nothing, but is a floor.** An ordinary call may not
   reach back past it (as past a step of the author's); a redraft keeps it and
   puts it back among the new steps by where its actions are. Its actions are
@@ -202,18 +203,34 @@ Decided while building, where the story left it open:
   nothing but them is not written either. An exact copy of its words is dropped
   only when the answer's mapping does not hold up: with one that does, the same
   words for a repeat of the action are a step of their own (I10).
-- **An edit or a delete naming a step the model has since rewritten** replaces
-  (or deletes) every step that now stands for any of the actions the named one
-  stood for. An edit puts one step there — the author's words, all their
-  actions, **under the id the edit named** — so `record:edited.id` is always the
-  id that was sent, and TestBench's line keeps its id. An edit to a step whose
-  actions no step stands for any more is `ignored`, saying so.
+- **An edit or a delete naming a step the model has since rewritten** takes
+  over (or deletes) only what the named step stood for, from the steps that
+  stand for it now (review round 2 — before, it took every action of those
+  steps, so an edit of "Click Two" swallowed the Four click the model had
+  merged in, and the author never saw it go). An edit puts one step there —
+  the author's words, those actions, **under the id the edit named** — so
+  `record:edited.id` is always the id that was sent, and TestBench's line
+  keeps its id. A step that stood for nothing else goes; one the model merged
+  the named step into keeps the rest of its actions and its stretch is
+  redrafted, so its now-wrong words are replaced by a step for what is left;
+  merged into a step the author reworded too, that step keeps their words for
+  its rest (their words are never lost — so an edit from the drawer and one
+  from the file each keep their own, where before the last won). A delete's
+  Restore puts the named step back in the words the author last saw. An edit
+  to a step whose actions no step stands for any more is `ignored`, saying so.
 - **Restoring one action of a deleted step** (the panel's ✕ on a struck action)
   redrafts its stretch, and the model writes a step for it; the deleted step
   stays deleted and can no longer come back as it was — Restore answers why —
   even if that action is dropped again later. Its other actions stay struck.
 - **A reworded step whose actions are all dropped since stays** where it was,
   in the result too: the author's words are never lost. Deleting it is the ✕.
+  Decided in review round 2: the **toolbar's Undo** that takes out the LAST
+  action a reworded step stands for takes the step out with it — one Undo is
+  the action and its step (`record:dropped` for the step, with `actions`, as
+  the drawer's ✕ sends), and Restore brings both back. The **panel's ✕** on
+  that action keeps the reworded step and says so once per step, as an
+  `output` frame (`info`): "Your reworded step N stays — delete it if you
+  meant to."
 - **Edits, deletes and restores are carried out the moment they arrive**, not
   queued behind an Add step as the checklist had it: none needs a model call,
   so the control route can answer exactly whether each applied (`ignored` and
@@ -244,7 +261,21 @@ Decided while building, where the story left it open:
   delete from any source. An edit in place that loses focus to the page stays
   open when its words changed (a stray click does not throw them away) and
   closes when they did not. The bar's "Added as step 8" no longer says "steps
-  1–7 locked".
+  1–7 locked". Review round 2 added: an open, changed edit is **saved** — not
+  thrown away — by +, Add step, the Steps so far toggle, Stop, Cancel, a
+  click on another step's words and the page going away (sent from
+  `pagehide`, while the document's token still holds; the drawer suite
+  navigates with one open to prove the server gets it); only Esc cancels. The
+  other rows go on re-rendering around an open edit without touching its box.
+  A re-render never drops focus into the page (the row now at its place, else
+  the toggle or the first button); the gap's + shows while the keyboard is on
+  it (hidden, Tab onto it had dropped focus). A double-click on ✕ deletes
+  once, and on + never reaches the page. A save of a lone `3.` or `-` is a
+  delete. Enter held after saving an edit does not repeat into the page. An
+  edit or Add step holding a value typed into a secret field on the page —
+  which the server never learns — is refused in the page: "That has a
+  password typed on this page in it — write {{password}} (or the field's
+  parameter) instead."
 
 **A bug the property run found, older than this change.** An author step that
 waited for a call which had taken in actions recorded after the step was sent
@@ -258,11 +289,34 @@ deleted step's Restore checked only that its actions were still dropped, so an
 action restored on its own, redrafted, and dropped again let the step back in
 beside the new one — now the delete remembers that its actions came back.
 
+**Review round 2** (a reviewer's proof scripts, each turned into a case that
+failed on 0b8b8fe first). Restore of two neighbours in the order they were
+deleted put them back swapped (Restore now goes by where the step's actions
+are, after the step that was before it). Against a real model a deleted
+`Type … into the Email field` came back as `Click the Email field` on the
+next redraft: the click into the field was nobody's (now the typing's step
+claims it, and a delete takes such a click with it either way). An edit or a
+delete naming a stale id took over actions the author never saw (above). An
+ordinary call's answer skipped A4 (a step tied only to a reworded step's
+action, or an exact copy of its words, was written); an edit of an author
+step did not throw away a redraft of its stretch already asked, which copied
+the old words beside the new. `authorStepLines` took a lone `3.` or `-` as
+the step's text. The drawer items are listed above. Counts after it: 53
+engine cases (11 new; the three stale-id cases' expectations changed with
+the decision, and failed on the old code too), 62 in the HTTP suite (4 new),
+48 in the toolbar suite (9 new) — 260 across the six record-steps files — and
+root `npx vitest run` 271 files, 6885 tests, all passing. The property run
+also held over seeds 151–700.
+
 Known gaps: the mapping is only as good as the model's answer or the
 inference (a step the model tied to the wrong actions deletes the wrong ones —
 struck and restorable in the panel); a step of the author's typed inside a
 stretch still keeps its index through a redraft, the approximation the toolbar
-story noted; none of this was run against a real model yet.
+story noted; the real-model run in review round 2 was the reviewer's, and the
+fixes were pinned against scripted models only. Keys the drawer uses are
+still heard by listeners a page registered before Record was pressed (the
+evaluate path, as the toolbar story says of the step box); the page's own
+modal dialog still makes the drawer inert.
 
 Counts: `npm run build` clean. The record-steps files: 42 engine cases (the
 property run among them), 58 in the HTTP suite (8 new), 39 in the toolbar

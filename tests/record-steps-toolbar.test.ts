@@ -1134,4 +1134,257 @@ describe('the Steps so far drawer', () => {
     await sleep(200);
     expect(commands).toEqual([]);
   }, 30_000);
+
+  // ── Review round 2 (the server half's drawer) ──────────────────────────
+
+  /** Tab round the bar from the page until `pred` holds for what has focus. */
+  async function tabTo(pred: (f: NonNullable<Awaited<ReturnType<typeof barFocus>>>) => boolean): Promise<void> {
+    let focus = await barFocus(page);
+    for (let i = 0; i < 30 && !(focus && pred(focus)); i++) {
+      await page.keyboard.press('Tab');
+      focus = await barFocus(page);
+    }
+    expect(focus && pred(focus)).toBe(true);
+  }
+
+  /** What the page heard, without modifiers pressed alone and focus moves. */
+  async function heardKeys(): Promise<string[]> {
+    return (await heardBesidesModifiers()).filter((h) => !/focusin/.test(h));
+  }
+
+  it('keyboard focus on a row a redraft replaces stays in the bar — on the row now there — and the next Tab and Enter are never recorded or heard (finding 4)', async () => {
+    await drawerOpen();
+    await page.focus('#email');
+    await page.keyboard.press('Alt+Shift+R');
+    await tabTo((f) => f.row);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    expect(await barFocus(page)).toMatchObject({ row: true, id: 'd2' });
+    await page.evaluate('window.heard = []');
+    const before = actions.length;
+    // The model rewrites the last step: d2 becomes d3.
+    recorder.setToolbar({ ...WITH_STEPS, revision: 8, steps: [STEPS[0], STEPS[1], { id: 'd3', text: 'Click the Go button', yours: false }] });
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[2]!.id === 'd3', 'the redraft');
+    expect(await barFocus(page)).toMatchObject({ row: true, id: 'd3' });
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Enter');
+    await until(async () => commands.length, (n) => n === 1, 'the ✕ pressed from the keyboard');
+    expect(commands).toEqual([{ kind: 'delete-step', id: 'd3' }]);
+    await sleep(200);
+    expect(actions.slice(before)).toEqual([]);
+    expect(await heardKeys()).toEqual([]);
+  }, 45_000);
+
+  it('keyboard focus on a struck row\'s Restore stays in the bar when the row goes (finding 4)', async () => {
+    await drawerOpen();
+    recorder.setToolbar({ ...WITH_STEPS, steps: [STEPS[0], STEPS[2]], deleted: [{ id: 's1', text: 'Verify the balance', afterId: 'd1' }] });
+    await until(() => readDrawer(page), (d) => d !== null && d.rows.some((r) => r.kind === 'deleted'), 'the struck row');
+    await page.focus('#email');
+    await page.keyboard.press('Alt+Shift+R');
+    await tabTo((f) => f.cmd === 'row-restore');
+    await page.evaluate('window.heard = []');
+    const before = actions.length;
+    // The next step lands: the struck row goes.
+    recorder.setToolbar({ ...WITH_STEPS, revision: 8, steps: [STEPS[0], STEPS[2], { id: 'd3', text: 'Click Next', yours: false }], deleted: [] });
+    await until(() => readDrawer(page), (d) => d !== null && d.rows.every((r) => r.kind === 'live') && d.rows.length === 3, 'the row gone');
+    expect(await barFocus(page)).not.toBeNull();
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
+    await sleep(200);
+    expect(actions.slice(before)).toEqual([]);
+    expect(await heardKeys()).toEqual([]);
+  }, 45_000);
+
+  it('a password typed on the page is refused in an edit and in the Add step box: nothing carries it, and the bar says what to write (finding 5)', async () => {
+    await drawerOpen();
+    await page.click('#pw');
+    await page.keyboard.type('Hunter2Secret!');
+    await page.click('#email');
+    await clickDrawer(page, 'd1', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[0]!.editing, 'the step in a box');
+    await page.keyboard.press('Control+A');
+    await page.keyboard.type('Type Hunter2Secret! into Password');
+    await page.keyboard.press('Enter');
+    const said = 'That has a password typed on this page in it — write {{password}} (or the field\'s parameter) instead.';
+    await until(() => readToolbar(page), (t) => t !== null && t.all.includes(said), 'the refusal');
+    // Still open, to be put right.
+    expect((await readDrawer(page))!.rows[0]).toMatchObject({ editing: true, text: 'Type Hunter2Secret! into Password' });
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Alt+Shift+S');
+    await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Enter to add'), 'the box');
+    await page.keyboard.type('Sign in with Hunter2Secret!');
+    await sleep(600); // past the box's unsent-text pause
+    await page.keyboard.press('Enter');
+    await until(() => readToolbar(page), (t) => t !== null && t.all.includes(said), 'the refusal in the box');
+    await sleep(200);
+    expect(commands.filter((c) => c.kind === 'edit-step' || c.kind === 'step')).toEqual([]);
+    expect(JSON.stringify(commands)).not.toContain('Hunter2Secret!');
+  }, 45_000);
+
+  it('an open, changed edit is saved — not thrown away — by +, Add step, the drawer toggle and Stop (finding 7b)', async () => {
+    await drawerOpen();
+    const edit = async (id: string, row: number, words: string): Promise<void> => {
+      await clickDrawer(page, id, 'row-edit');
+      await until(() => readDrawer(page), (d) => d !== null && d.rows[row]!.editing, 'the step in a box');
+      await page.keyboard.press('Control+A');
+      await page.keyboard.type(words);
+      // A stray click on the page: the changed edit stays open.
+      await page.click('h1');
+      await sleep(100);
+      expect((await readDrawer(page))!.rows[row]!.editing).toBe(true);
+    };
+    await edit('d1', 0, 'Words one');
+    await clickDrawer(page, 's1', 'row-insert');
+    await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Goes after step 2'), 'the aimed box');
+    expect(commands.filter((c) => c.kind !== 'typing-hidden')).toEqual([{ kind: 'edit-step', id: 'd1', text: 'Words one' }]);
+    await page.keyboard.press('Escape');
+    await until(() => readDrawer(page), (d) => d !== null && d.open, 'the drawer again');
+
+    await edit('d2', 2, 'Words two');
+    await clickToolbar(page, 'step');
+    await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Enter to add'), 'the box');
+    expect(commands.at(-1)).toEqual({ kind: 'edit-step', id: 'd2', text: 'Words two' });
+    await page.keyboard.press('Escape');
+    await until(() => readDrawer(page), (d) => d !== null && d.open, 'the drawer again');
+
+    await edit('s1', 1, 'Words three');
+    await clickToolbar(page, 'drawer');
+    await until(() => readDrawer(page), (d) => d !== null && !d.open, 'the drawer closed');
+    expect(commands.at(-1)).toEqual({ kind: 'edit-step', id: 's1', text: 'Words three' });
+    await clickToolbar(page, 'drawer');
+    await until(() => readDrawer(page), (d) => d !== null && d.open, 'the drawer again');
+
+    await edit('d1', 0, 'Words four');
+    await clickToolbar(page, 'stop');
+    await until(async () => commands.filter((c) => c.kind === 'stop').length, (n) => n === 1, 'Stop');
+    const tail = commands.filter((c) => c.kind === 'edit-step' || c.kind === 'stop').slice(-2);
+    expect(tail).toEqual([{ kind: 'edit-step', id: 'd1', text: 'Words four' }, { kind: 'stop' }]);
+  }, 60_000);
+
+  it('an open, changed edit is sent when the page navigates away (finding 7b)', async () => {
+    await drawerOpen();
+    await clickDrawer(page, 'd1', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[0]!.editing, 'the step in a box');
+    await page.keyboard.press('Control+A');
+    await page.keyboard.type('Words before leaving');
+    await page.click('h1');
+    await sleep(100);
+    await Promise.all([page.waitForURL('**/other.html'), page.click('#to-other')]);
+    await until(
+      async () => commands.filter((c) => c.kind === 'edit-step'),
+      (list) => list.length === 1,
+      'the edit, sent as the page went',
+    );
+    expect(commands.filter((c) => c.kind === 'edit-step')).toEqual([{ kind: 'edit-step', id: 'd1', text: 'Words before leaving' }]);
+  }, 45_000);
+
+  it('while a step is being edited the other rows still change — a ✕ strikes its row at once, a push re-renders them — and the box keeps its words, caret and focus (finding 7c)', async () => {
+    await drawerOpen();
+    await clickDrawer(page, 'd1', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[0]!.editing, 'the step in a box');
+    await page.keyboard.press('End');
+    await page.keyboard.type(' now');
+    for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowLeft');
+    await clickDrawer(page, 'd2', 'row-delete');
+    await until(async () => commands.length, (n) => n === 1, 'the delete');
+    expect(commands).toEqual([{ kind: 'delete-step', id: 'd2' }]);
+    let d = (await readDrawer(page))!;
+    expect(d.rows.map((r) => [r.id, r.kind, r.editing])).toEqual([
+      ['d1', 'live', true],
+      ['s1', 'live', false],
+      ['d2', 'deleted', false],
+    ]);
+    // The server agrees, and a new step lands meanwhile.
+    recorder.setToolbar({
+      ...WITH_STEPS,
+      revision: 8,
+      steps: [STEPS[0], STEPS[1], { id: 'd4', text: 'Click Next', yours: false }],
+      deleted: [{ id: 'd2', text: 'Click Go', afterId: 's1' }],
+    });
+    await until(() => readDrawer(page), (dd) => dd !== null && dd.rows.some((r) => r.id === 'd4'), 'the push shown');
+    d = (await readDrawer(page))!;
+    expect(d.rows.map((r) => [r.id, r.kind, r.n])).toEqual([
+      ['d1', 'live', '1'],
+      ['s1', 'live', '2'],
+      ['d2', 'deleted', ''],
+      ['d4', 'live', '3'],
+    ]);
+    // Typing goes on where the caret was.
+    await page.keyboard.type('X');
+    await page.keyboard.press('Enter');
+    await until(async () => commands.length, (n) => n === 2, 'the edit');
+    expect(commands[1]).toEqual({ kind: 'edit-step', id: 'd1', text: 'Click Reports in the main menu Xnow' });
+    expect(actions).toEqual([]);
+  }, 45_000);
+
+  it('a double-click on ✕ removes the step once — Restore takes no click until the pointer moves; one on + never reaches the page (finding 7a)', async () => {
+    await drawerOpen();
+    const dbl = async (id: string, cmd: string): Promise<{ x: number; y: number }> => {
+      const row = (await drawerAt(page, id, null))!;
+      await page.mouse.move(row.x, row.y);
+      await sleep(100);
+      const at = (await drawerAt(page, id, cmd))!;
+      await page.mouse.move(at.x, at.y, { steps: 3 });
+      await sleep(80);
+      await page.mouse.dblclick(at.x, at.y);
+      return at;
+    };
+    const x = await dbl('s1', 'row-delete');
+    await sleep(400);
+    expect(commands).toEqual([{ kind: 'delete-step', id: 's1' }]);
+    expect((await readDrawer(page))!.rows[1]).toMatchObject({ id: 's1', kind: 'deleted' });
+    // A click there without moving still does nothing…
+    await page.mouse.click(x.x, x.y);
+    await sleep(200);
+    expect(commands).toHaveLength(1);
+    // …and once the pointer has moved, Restore works.
+    await clickDrawer(page, 's1', 'row-restore');
+    await until(async () => commands.length, (n) => n === 2, 'the restore');
+    expect(commands[1]).toEqual({ kind: 'restore-step', id: 's1' });
+
+    await page.evaluate('window.heard = []');
+    const before = actions.length;
+    await dbl('d1', 'row-insert');
+    await sleep(400);
+    expect(actions.slice(before)).toEqual([]);
+    expect(await heardKeys()).toEqual([]);
+    expect((await readToolbar(page))!.sub).toContain('Goes after step 1');
+  }, 45_000);
+
+  it('a step saved as a lone number or list marker is a delete (finding 10a)', async () => {
+    await drawerOpen();
+    await clickDrawer(page, 'd1', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[0]!.editing, 'the step in a box');
+    await page.keyboard.press('Control+A');
+    await page.keyboard.type('3.');
+    await page.keyboard.press('Enter');
+    await until(async () => commands.length, (n) => n === 1, 'the delete');
+    expect(commands).toEqual([{ kind: 'delete-step', id: 'd1' }]);
+    await clickDrawer(page, 'd2', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[2]!.editing, 'the step in a box');
+    await page.keyboard.press('Control+A');
+    await page.keyboard.type('- ');
+    await page.keyboard.press('Enter');
+    await until(async () => commands.length, (n) => n === 2, 'the second delete');
+    expect(commands[1]).toEqual({ kind: 'delete-step', id: 'd2' });
+  }, 45_000);
+
+  it('holding Enter to save an edit opened with the mouse records nothing, and the page hears nothing (finding 10b)', async () => {
+    await drawerOpen();
+    await page.focus('#email');
+    await sleep(100);
+    const before = actions.length;
+    await clickDrawer(page, 'd1', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[0]!.editing, 'the step in a box');
+    await page.keyboard.type(' now');
+    await page.evaluate('window.heard = []');
+    await page.keyboard.down('Enter');
+    await page.keyboard.down('Enter'); // the key repeating
+    await page.keyboard.down('Enter');
+    await page.keyboard.up('Enter');
+    await sleep(400);
+    expect(commands).toEqual([{ kind: 'edit-step', id: 'd1', text: 'Click Reports in the main menu now' }]);
+    expect(actions.slice(before)).toEqual([]);
+    expect(await heardKeys()).toEqual([]);
+  }, 45_000);
 });

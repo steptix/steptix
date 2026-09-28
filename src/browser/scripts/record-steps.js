@@ -1743,9 +1743,15 @@
       },
       toolbar: function (command, key) {
         if (key !== CONTROL_KEY || !IS_TOP || !tb || !state.recording) return false;
-        if (command === 'open-step') tbOpenBox();
-        else if (command === 'focus-bar') tbFocusBar();
-        else return false;
+        if (command === 'open-step') {
+          // As Add step from the bar: an open edit in the drawer is saved first.
+          if (!tbLocal.box) tbCommitEdit(false);
+          tbOpenBox();
+        } else if (command === 'focus-bar') {
+          tbFocusBar();
+        } else {
+          return false;
+        }
         return true;
       },
       fieldRects: function (ask, key) {

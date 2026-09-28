@@ -16,6 +16,7 @@ import { describe, it, expect } from 'vitest';
 import { buildRecordStepsPrompt, RECORD_STEPS_SYSTEM } from '../src/ai/prompts.js';
 import type { ChatMessage, MessageContentBlock } from '../src/ai/types.js';
 import { DraftEngine } from '../src/recorder/draft-engine.js';
+import { authorStepLines } from '../src/recorder/record-steps-run.js';
 import { summarizeTargetFile } from '../src/recorder/target-file.js';
 import type { RecordStreamEvent, RecordedAction } from '../src/recorder/types.js';
 import { parseDraftAnswer } from '../src/recorder/write-steps.js';
@@ -94,6 +95,34 @@ function act(n: number, name: string): RecordedAction {
     tab: 'main',
     action: true,
     target: { tag: 'button', role: 'button', name },
+  };
+}
+
+/** A click that only put the caret in a text field. */
+function focusClick(n: number, name: string): RecordedAction {
+  return {
+    id: `a${n}`,
+    kind: 'click',
+    atMs: n * 1000,
+    summary: `Clicked textbox "${name}" (into the field)`,
+    tab: 'main',
+    action: true,
+    focusOnly: true,
+    target: { tag: 'input', role: 'textbox', name },
+  };
+}
+
+/** Tab (or another key) pressed in a text field: an action. */
+function keyIn(n: number, name: string, key = 'Tab'): RecordedAction {
+  return {
+    id: `a${n}`,
+    kind: 'key',
+    atMs: n * 1000,
+    summary: `Pressed ${key} in textbox "${name}"`,
+    tab: 'main',
+    action: true,
+    key,
+    target: { tag: 'input', role: 'textbox', name },
   };
 }
 
@@ -474,7 +503,7 @@ describe('an edit', () => {
     });
   });
 
-  it("of a step the model rewrote meanwhile: replaces whatever stands for the same actions now, under the id it named — once", async () => {
+  it("of a step the model rewrote meanwhile: takes over only the actions it named, under that id; the rest is redrafted into a step of its own", async () => {
     const h = harness();
     h.engine.addAction(act(1, 'Menu'));
     await settled(h, 1);
@@ -484,13 +513,19 @@ describe('an edit', () => {
     h.engine.addAction(act(2, 'Payments'));
     await settled(h, 2);
     expect(h.last()).toMatchObject({ steps: ['Click Payments in the main menu'], ids: ['d2'] });
-    // The author's edit of "Click Menu", typed against the draft before.
+    // The author's edit of "Click Menu", typed against the draft before. The
+    // Payments click is not theirs to take: the author never saw it in d1.
     expect(h.engine.editStep('d1', 'Open the Payments menu', { source: 'editor' })).toBe(true);
-    expect(h.last()).toMatchObject({ steps: ['Open the Payments menu'], ids: ['d1'], edited: [0] });
-    expect(actionsOf(h, 'd1')).toEqual(['a1', 'a2']);
+    expect(h.last()).toMatchObject({ ids: ['d1', 'd2'], edited: [0] });
+    expect(actionsOf(h, 'd1')).toEqual(['a1']);
+    expect(actionsOf(h, 'd2')).toEqual(['a2']);
+    // …and the merged step's words no longer fit: its stretch is redrafted.
+    await settled(h, 3);
+    expect(recordingOf(h.calls[2]!).map((a) => a['target'].name)).toEqual(['Payments']);
+    expect(h.last()).toMatchObject({ steps: ['Open the Payments menu', 'Step for Payments'], edited: [0] });
   });
 
-  it('from two sources for one step — the drawer, then the file naming the id the model has since rewritten — the last wins, once', async () => {
+  it('from two sources for one step — the drawer, then the file naming the id the model has since rewritten — each keeps its own words, once', async () => {
     const h = harness();
     h.engine.addAction(act(1, 'Menu'));
     await settled(h, 1);
@@ -499,7 +534,13 @@ describe('an edit', () => {
     await settled(h, 2);
     expect(h.engine.editStep('d2', 'From the drawer', { source: 'toolbar' })).toBe(true);
     expect(h.engine.editStep('d1', 'From the file', { source: 'editor' })).toBe(true);
-    expect(h.last()).toMatchObject({ steps: ['From the file'], edited: [0] });
+    // The file's edit named d1, which stood for the Menu click alone; the
+    // drawer's words stay the author's, for what is left of theirs.
+    expect(h.last()).toMatchObject({ steps: ['From the file', 'From the drawer'], ids: ['d1', 'd2'], edited: [0, 1] });
+    expect(actionsOf(h, 'd1')).toEqual(['a1']);
+    expect(actionsOf(h, 'd2')).toEqual(['a2']);
+    await sleep(60);
+    expect(h.calls).toHaveLength(2);
   });
 
   it('while an ordinary call that rewrites it is in flight: that answer is thrown away and asked again; the edit stands', async () => {
@@ -676,7 +717,7 @@ describe('a delete', () => {
     expect(h.drafts().every((d) => !d.steps.includes('Rewritten three'))).toBe(true);
   });
 
-  it("of a step the model rewrote meanwhile: deletes whatever stands for the same actions now; Restore puts that back", async () => {
+  it("of a step the model rewrote meanwhile: drops only the actions it named — the rest is redrafted — and Restore puts it back as the author saw it", async () => {
     const h = harness();
     h.engine.addAction(act(1, 'Menu'));
     await settled(h, 1);
@@ -686,11 +727,16 @@ describe('a delete', () => {
     const before = h.frames.length;
     expect(h.engine.drop('d1', 'editor')).toBe(true);
     expect(h.frames.slice(before)[0]).toEqual({
-      type: 'record:dropped', id: 'd1', dropped: true, source: 'editor', actions: ['a1', 'a2'],
+      type: 'record:dropped', id: 'd1', dropped: true, source: 'editor', actions: ['a1'],
     });
-    expect(h.last().steps).toEqual([]);
+    expect(h.engine.inspect().dropped).toEqual(['a1']);
+    await settled(h, 3);
+    expect(recordingOf(h.calls[2]!).map((a) => a['target'].name)).toEqual(['Payments']);
+    expect(h.last().steps).toEqual(['Step for Payments']);
     expect(h.engine.restore('d1')).toBe(true);
-    expect(h.last()).toMatchObject({ steps: ['Click Payments in the main menu'], ids: ['d2'] });
+    expect(h.last()).toMatchObject({ steps: ['Step for Menu', 'Step for Payments'] });
+    expect(h.last().ids[0]).toBe('d1');
+    expect(h.engine.inspect().dropped).toEqual([]);
   });
 
   it('a parameter no step uses any more leaves the list — after a delete, and after an edit', async () => {
@@ -791,6 +837,219 @@ describe('Stop', () => {
     h.engine.close();
     const result = await h.engine.finish();
     expect(result.steps).toEqual(['Mine one', 'Step for Three', 'Step for Four']);
+  });
+});
+
+// ── Review round 2 (the server half's findings) ──────────────────────────
+
+describe('restoring steps deleted one after another (review, finding 1)', () => {
+  async function four(h: Harness): Promise<void> {
+    for (const [n, name] of [[1, 'One'], [2, 'Two'], [3, 'Three'], [4, 'Four']] as const) {
+      h.engine.addAction(act(n, name));
+      await settled(h, n);
+    }
+  }
+
+  it('two neighbours deleted top to bottom and restored in that order go back in recording order — in the draft and the result', async () => {
+    const h = harness();
+    await four(h);
+    expect(h.engine.drop('d2')).toBe(true);
+    expect(h.engine.drop('d3')).toBe(true);
+    expect(h.last().steps).toEqual(['Step for One', 'Step for Four']);
+    expect(h.engine.restore('d2')).toBe(true);
+    expect(h.engine.restore('d3')).toBe(true);
+    const all = ['Step for One', 'Step for Two', 'Step for Three', 'Step for Four'];
+    expect(h.last()).toMatchObject({ steps: all, ids: ['d1', 'd2', 'd3', 'd4'] });
+    h.engine.close();
+    expect((await h.engine.finish()).steps).toEqual(all);
+  });
+
+  it('… and with a step landing between the two deletes', async () => {
+    const h = harness();
+    await four(h);
+    h.engine.drop('d2');
+    h.engine.addAction(act(5, 'Five'));
+    await settled(h, 5);
+    h.engine.drop('d3');
+    h.engine.restore('d2');
+    h.engine.restore('d3');
+    expect(h.last().steps).toEqual(['Step for One', 'Step for Two', 'Step for Three', 'Step for Four', 'Step for Five']);
+  });
+});
+
+describe('a focus click the model folded into the typing after it (review, finding 2)', () => {
+  it('goes with the step that claimed the typing into the same field; deleting that step drops it; no redraft brings it back', async () => {
+    const h = harness();
+    // As a real model answers: the typing is the step; the click into the field is folded away.
+    h.script.set(1, answer(['Click One', 'Type {{email}} into the Email field'], [[1], [3]]));
+    h.engine.setPaused(true);
+    h.engine.addAction(act(1, 'One'));
+    h.engine.addAction(focusClick(2, 'Email'));
+    h.engine.addAction(typed(3, 'Email', 'a@b.test'));
+    h.engine.addAction(keyIn(4, 'Email'));
+    h.engine.setPaused(false);
+    await settled(h, 1);
+    expect(actionsOf(h, 'd2')).toEqual(['a2', 'a3', 'a4']);
+    const before = h.frames.length;
+    expect(h.engine.drop('d2')).toBe(true);
+    expect(h.frames.slice(before)[0]).toEqual({
+      type: 'record:dropped', id: 'd2', dropped: true, source: 'panel', actions: ['a2', 'a3', 'a4'],
+    });
+    h.engine.addAction(act(5, 'Next'));
+    await settled(h, 2);
+    // A redraft of everything left: the click into the field is not in it.
+    h.engine.drop('a1');
+    await settled(h, 3);
+    expect(recordingOf(h.calls[2]!).map((a) => a['target'].name)).toEqual(['Next']);
+    expect(h.last().steps).toEqual(['Step for Next']);
+  });
+
+  it('one no step claimed, just before a deleted step\'s first action on the same field, is dropped with it — and Restore puts it back', async () => {
+    const h = harness();
+    h.engine.addAction(act(1, 'One'));
+    await settled(h, 1);
+    // The click into the field is drafted on its own call, and folded away.
+    h.script.set(2, answer([], [], 1));
+    h.engine.addAction(focusClick(2, 'Email'));
+    await settled(h, 2);
+    expect(h.last().steps).toEqual(['Step for One']);
+    h.engine.addAction(typed(3, 'Email'));
+    h.engine.addAction(keyIn(4, 'Email'));
+    await settled(h, 3);
+    expect(actionsOf(h, 'd2')).toEqual(['a3', 'a4']);
+    const before = h.frames.length;
+    expect(h.engine.drop('d2')).toBe(true);
+    expect(h.frames.slice(before)[0]).toEqual({
+      type: 'record:dropped', id: 'd2', dropped: true, source: 'panel', actions: ['a2', 'a3', 'a4'],
+    });
+    expect(h.engine.restore('d2')).toBe(true);
+    expect(h.engine.inspect().dropped).toEqual([]);
+    expect(h.last().steps).toEqual(['Step for One', 'Step for Email+Email']);
+    // Deleted again, then a redraft of what is left: the click is not in it.
+    h.engine.drop('d2');
+    h.engine.addAction(act(5, 'Next'));
+    await settled(h, 4);
+    h.engine.drop('a1');
+    await settled(h, 5);
+    expect(recordingOf(h.calls[4]!).map((a) => a['target'].name)).toEqual(['Next']);
+  });
+
+  it('a click on another element before the step is not taken', async () => {
+    const h = harness();
+    h.engine.addAction(act(1, 'One'));
+    await settled(h, 1);
+    h.script.set(2, answer([], [], 1));
+    h.engine.addAction(act(2, 'Search'));
+    await settled(h, 2);
+    h.engine.addAction(typed(3, 'Email'));
+    h.engine.addAction(keyIn(4, 'Email'));
+    await settled(h, 3);
+    const before = h.frames.length;
+    h.engine.drop('d2');
+    expect(h.frames.slice(before)[0]).toMatchObject({ id: 'd2', actions: ['a3', 'a4'] });
+  });
+});
+
+describe('an edit or a delete naming a step the model has since merged into another (review, finding 3)', () => {
+  /** d1..d3 for One..Three; then the model merges Two and Four into one step. */
+  async function merged(h: Harness): Promise<void> {
+    await three(h);
+    h.script.set(4, answer(['Click Two, then Four'], [[2, 4]], 1));
+    h.engine.addAction(act(4, 'Four'));
+    await settled(h, 4);
+    expect(h.last()).toMatchObject({ steps: ['Step for One', 'Click Two, then Four'], ids: ['d1', 'd4'] });
+  }
+
+  it("an edit takes over only the actions the named step stood for; the merged step's others are redrafted into a step — none is lost", async () => {
+    const h = harness();
+    await merged(h);
+    expect(h.engine.editStep('d2', 'Click the Two button', { source: 'editor' })).toBe(true);
+    expect(actionsOf(h, 'd2')).toEqual(['a2']);
+    await settled(h, 5);
+    // The redraft is not asked about the edited step's click, and not shown the merged words as the author's.
+    expect(recordingOf(h.calls[4]!).map((a) => a['target'].name)).toEqual(['One', 'Three', 'Four']);
+    expect(h.last()).toMatchObject({
+      steps: ['Step for One', 'Click the Two button', 'Step for Three', 'Step for Four'],
+      edited: [1],
+    });
+    expect(h.drafts().at(-1)!.steps).not.toContain('Click Two, then Four');
+    h.engine.addAction(act(5, 'Five'));
+    await settled(h, 6);
+    h.engine.close();
+    expect((await h.engine.finish()).steps).toEqual([
+      'Step for One', 'Click the Two button', 'Step for Three', 'Step for Four', 'Step for Five',
+    ]);
+  });
+
+  it('a delete drops only those actions — the rest is redrafted — and Restore puts the step back as the author saw it', async () => {
+    const h = harness();
+    await merged(h);
+    const before = h.frames.length;
+    expect(h.engine.drop('d2', 'editor')).toBe(true);
+    expect(h.frames.slice(before)[0]).toEqual({
+      type: 'record:dropped', id: 'd2', dropped: true, source: 'editor', actions: ['a2'],
+    });
+    expect(h.engine.inspect().dropped).toEqual(['a2']);
+    await settled(h, 5);
+    expect(recordingOf(h.calls[4]!).map((a) => a['target'].name)).toEqual(['One', 'Three', 'Four']);
+    expect(h.last().steps).toEqual(['Step for One', 'Step for Three', 'Step for Four']);
+    expect(h.engine.restore('d2')).toBe(true);
+    expect(h.last().steps).toEqual(['Step for One', 'Step for Two', 'Step for Three', 'Step for Four']);
+    expect(h.engine.inspect().dropped).toEqual([]);
+  });
+});
+
+describe('an ordinary call that re-describes a reworded step (review, finding 8)', () => {
+  it('a step the answer ties only to the reworded step\'s action is not written', async () => {
+    const h = harness();
+    await three(h);
+    h.engine.editStep('d3', 'My words for Three', { source: 'panel' });
+    h.script.set(4, answer(['Click Three', 'Step for Four'], [[3], [4]], 3));
+    h.engine.addAction(act(4, 'Four'));
+    await settled(h, 4);
+    expect(h.last().steps).toEqual(['Step for One', 'Step for Two', 'My words for Three', 'Step for Four']);
+    expect(actionsOf(h, h.last().ids[3]!)).toEqual(['a4']);
+  });
+
+  it('with no mapping that holds up, an exact copy of its words is not written', async () => {
+    const h = harness();
+    await three(h);
+    h.engine.editStep('d3', 'My words for Three', { source: 'panel' });
+    h.script.set(4, answer(['My words for Three', 'Step for Four'], undefined, 3));
+    h.engine.addAction(act(4, 'Four'));
+    await settled(h, 4);
+    expect(h.last().steps).toEqual(['Step for One', 'Step for Two', 'My words for Three', 'Step for Four']);
+  });
+});
+
+describe("an edit of a step of the author's while a redraft of its stretch is in flight (review, finding 9)", () => {
+  it('throws that answer away: no copy of the old words is written beside the new ones', async () => {
+    const h = harness();
+    await three(h);
+    await h.engine.addAuthorSteps(['Verify the total'], { source: 'editor', boundary: 3, atMs: 3500 });
+    h.engine.addAction(act(4, 'Four'));
+    await settled(h, 4);
+    const open = h.hold();
+    const n0 = h.calls.length;
+    h.engine.drop('a1');
+    await h.inFlight();
+    // The model, shown the author's step, copies its words as they were when it was asked.
+    h.script.set(n0 + 1, answer(['Step for Two', 'Step for Three', 'Verify the total'], [[1], [2], []], 0));
+    expect(h.engine.editStep('s1', 'Verify the order total is 12', { source: 'editor' })).toBe(true);
+    const since = h.drafts().length;
+    open();
+    await settled(h, n0 + 2);
+    expect(h.last().steps).toEqual(['Step for Two', 'Step for Three', 'Verify the order total is 12', 'Step for Four']);
+    expect(h.drafts().slice(since).every((d) => !d.steps.includes('Verify the total'))).toBe(true);
+  });
+});
+
+describe('a lone number or list marker (review, finding 10)', () => {
+  it('is no step: an edit of it is a delete, an Add step of it adds nothing', () => {
+    for (const t of ['3.', ' 3. ', '12)', '-', '* ', '+', '1)\n-']) expect(authorStepLines(t)).toEqual([]);
+    expect(authorStepLines('3. Click Go')).toEqual(['Click Go']);
+    expect(authorStepLines('-5 degrees is the limit')).toEqual(['-5 degrees is the limit']);
+    expect(authorStepLines('3.5 kg')).toEqual(['3.5 kg']);
   });
 });
 

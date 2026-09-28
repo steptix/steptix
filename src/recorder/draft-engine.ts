@@ -278,6 +278,30 @@ function trailingAuthorStart(items: readonly Item[]): number {
   return i;
 }
 
+/**
+ * Two recorded entries are on the same element: the click into a field and
+ * the typing or the Tab in it after. By the page's selector when both have
+ * one and it matches; else by what names the element — tag, role, name, id,
+ * `name` attribute — with at least one of those not empty, so two nameless
+ * inputs are never taken for one. Same tab, same frame.
+ */
+function sameElement(a: RecordedAction | undefined, b: RecordedAction | undefined): boolean {
+  const x = a?.target;
+  const y = b?.target;
+  if (!a || !b || !x || !y) return false;
+  if (a.tab !== b.tab || (a.frame?.url ?? '') !== (b.frame?.url ?? '')) return false;
+  if (x.selector !== undefined && x.selector === y.selector) return true;
+  const named = (x.name ?? '') !== '' || (x.id ?? '') !== '' || (x.nameAttr ?? '') !== '';
+  return (
+    named &&
+    x.tag === y.tag &&
+    (x.role ?? '') === (y.role ?? '') &&
+    (x.name ?? '') === (y.name ?? '') &&
+    (x.id ?? '') === (y.id ?? '') &&
+    (x.nameAttr ?? '') === (y.nameAttr ?? '')
+  );
+}
+
 /** The `{{name}}` roots a text uses. */
 function placeholderRoots(text: string): Set<string> {
   const out = new Set<string>();
@@ -297,6 +321,9 @@ export class DraftEngine {
    *  or a delete that names a step the model has since rewritten applies to
    *  whatever stands for the same actions now. */
   private readonly idActions = new Map<string, string[]>();
+  /** …and the words it had then: what a delete naming it puts back on
+   *  Restore when the model had merged it into another step. */
+  private readonly idTexts = new Map<string, string>();
   /** Deleted steps of the model's, by the id their delete named. */
   private readonly stepDrops = new Map<string, StepDrop>();
   private readonly settleMs: number;
@@ -646,6 +673,23 @@ export class DraftEngine {
   }
 
   /**
+   * The step the author reworded whose last recorded entry still in is `id`
+   * — the one dropping `id` would leave standing for nothing — or null. The
+   * toolbar's Undo of that entry takes the step out with it, and the panel's
+   * ✕ of it says the step stays (review round 2, finding 6).
+   */
+  editedStepLeftBy(id: string): { id: string; text: string; index: number } | null {
+    if (this.dropped.has(id)) return null;
+    const flat = this.flatItems();
+    for (let i = 0; i < flat.length; i++) {
+      const item = flat[i]!;
+      if (!item.edited || !item.actions.includes(id)) continue;
+      if (item.actions.every((a) => a === id || this.dropped.has(a))) return { id: item.id, text: item.text, index: i };
+    }
+    return null;
+  }
+
+  /**
    * Leave an action — or a step the author wrote, or a step of the draft —
    * out. Answers false for an id the recording does not have, or one already
    * dropped.
@@ -947,6 +991,78 @@ export class DraftEngine {
   }
 
   /**
+   * An edit or a delete naming a step the model has since rewritten: the
+   * steps that stand for what it stood for now, split into those that stand
+   * for nothing else (`whole`) and those the model merged it into, which
+   * also stand for actions the author never saw in the step they named
+   * (`partial`). Only what the named step stood for — `take` — is the
+   * author's to reword or delete (review round 2, finding 3): the Four click
+   * of "Click Two, then Four" is not taken over by an edit of "Click Two".
+   */
+  private splitStale(stood: readonly string[]): { take: string[]; whole: Item[]; partial: Item[] } {
+    const named = new Set(stood.filter((a) => !this.dropped.has(a)));
+    const targets = this.standingFor(stood);
+    const whole = targets.filter((t) => t.actions.every((a) => named.has(a) || this.dropped.has(a)));
+    const partial = targets.filter((t) => !whole.includes(t));
+    const take = this.byOrder(targets.flatMap((t) => t.actions.filter((a) => named.has(a))));
+    return { take, whole, partial };
+  }
+
+  /**
+   * A step the model merged a named step into gives the named step's actions
+   * up and keeps the rest. Its words described both, so a step of the
+   * model's is redrafted — its stretch is dirty, and the model writes those
+   * actions into a step of their own; one the author reworded keeps their
+   * words for what is left of it (their words are never lost). Answers
+   * whether a redraft is due.
+   */
+  private giveUp(partial: readonly Item[], take: ReadonlySet<string>): boolean {
+    let redraft = false;
+    for (const t of partial) {
+      t.actions = t.actions.filter((a) => !take.has(a));
+      if (t.edited) continue;
+      const where = this.findItem(t.id);
+      if (where) {
+        where.stretch.dirty = true;
+        redraft = true;
+      }
+    }
+    return redraft;
+  }
+
+  /** Put `item` among the steps of the stretch its actions are in, by where
+   *  they are (before any steps of the author's at the stretch's edge). */
+  private placeByActions(item: Item): Stretch {
+    const order = this.firstOrder(item);
+    const home = order !== undefined ? this.stretchOfIndex(order) : this.openStretch;
+    const at = order !== undefined ? this.slotFor(home.items, order) : home.items.length;
+    home.items.splice(Math.min(at, trailingAuthorStart(home.items)), 0, item);
+    return home;
+  }
+
+  /**
+   * Recorded entries no step stands for, directly before `first` and on the
+   * same element: the click into a field the model folded into the typing
+   * after it (review round 2, finding 2). A delete of the typing's step takes
+   * them too — left behind, the next redraft would write "Click the Email
+   * field" back as a step of its own.
+   */
+  private foldedBefore(first: string): string[] {
+    const start = this.indexOfAction(first);
+    if (start < 0) return [];
+    const at = this.actions[start]!;
+    const owned = new Set(this.flatItems().flatMap((i) => i.actions));
+    const out: string[] = [];
+    for (let i = start - 1; i >= 0; i--) {
+      const a = this.actions[i]!;
+      if (this.dropped.has(a.id)) continue;
+      if (owned.has(a.id) || !sameElement(a, at)) break;
+      out.push(a.id);
+    }
+    return out;
+  }
+
+  /**
    * The author reworded a step (stories/testbench-record-edit-steps.md, "An
    * edited step is yours"). `text` is one line, already the recording's to
    * write (a leading number taken off, a secret written as `{{name}}`).
@@ -956,12 +1072,15 @@ export class DraftEngine {
    *   other step for them. Edited back to the model's exact words, it is the
    *   model's again.
    * - A step of the author's: its text is replaced.
-   * - A step the model has rewritten since (its id is gone): the edit
-   *   replaces whatever steps stand for the same actions now — one step, the
-   *   author's text, holding all their actions, under the id the edit named.
-   *   The author's text is never lost, and never written twice.
+   * - A step the model has rewritten since (its id is gone): the edit takes
+   *   over what that step stood for, from whatever steps stand for it now —
+   *   one step, the author's text, under the id the edit named. A step that
+   *   stood for nothing else goes; one the model merged it into keeps the
+   *   rest of its actions and is redrafted ({@link giveUp}). The author's
+   *   text is never lost, and never written twice.
    *
-   * No call: the next one is shown the step as the author left it.
+   * No call, bar that redraft: the next one is shown the step as the author
+   * left it.
    */
   editStep(id: string, text: string, opts: { source: RecordStepSource; parameters?: Params }): StepChange {
     const params = (opts.parameters ?? []).filter((p) => text.includes(`{{${p.name}}}`)).map((p) => ({ ...p }));
@@ -973,6 +1092,10 @@ export class DraftEngine {
       author.text = text;
       author.parameters = params;
       found.item.text = text;
+      // A redraft of its stretch in flight was shown the old words, and may
+      // copy them — no longer the author's, so written beside the new ones
+      // (review round 2, finding 9). It is asked again.
+      this.staleIfTouched(new Set([found.stretch]), []);
       return this.edited(id, text, opts.source);
     }
     if (this.stepDrops.has(id)) return { ignored: STEP_DELETED_MESSAGE };
@@ -994,30 +1117,38 @@ export class DraftEngine {
     // Gone: the model rewrote it while the author was typing.
     const stood = this.idActions.get(id);
     if (!stood) return { ignored: STEP_UNKNOWN_MESSAGE };
-    const targets = this.standingFor(stood);
-    if (targets.length === 0) return { ignored: STEP_GONE_MESSAGE };
-    const first = targets[0]!;
-    const modelText = first.edited ? first.edited.modelText : first.text;
+    const { take, whole, partial } = this.splitStale(stood);
+    if (take.length === 0) return { ignored: STEP_GONE_MESSAGE };
+    const first = whole[0];
+    // "The model's words" to edit back to: the step that now stands for
+    // exactly those actions, else the named step's own last words.
+    const modelText = first
+      ? first.edited
+        ? first.edited.modelText
+        : first.text
+      : (this.idTexts.get(id) ?? '');
     const item: Item = {
       id,
       text,
-      actions: this.byOrder(targets.flatMap((t) => t.actions).filter((a) => !this.dropped.has(a))),
+      actions: take,
       ...(text !== modelText && { edited: { modelText, parameters: params } }),
     };
     const touched = new Set<Stretch>();
-    for (const t of targets) {
-      const where = this.findItem(t.id)!;
-      touched.add(where.stretch);
-    }
+    for (const t of [...whole, ...partial]) touched.add(this.findItem(t.id)!.stretch);
     this.staleIfTouched(touched, []);
-    // The later ones out; the first replaced where it stands.
-    for (const t of [...targets].reverse()) {
+    const redraft = this.giveUp(partial, new Set(take));
+    // The later whole ones out; the first replaced where it stands — or,
+    // with none, the step goes where its actions are.
+    for (const t of [...whole].reverse()) {
       const where = this.findItem(t.id)!;
       if (t === first) where.stretch.items.splice(where.local, 1, item);
       else where.stretch.items.splice(where.local, 1);
     }
+    if (!first) touched.add(this.placeByActions(item));
     for (const s of touched) s.version++;
-    return this.edited(id, text, opts.source);
+    const done = this.edited(id, text, opts.source);
+    if (redraft) this.invalidate();
+    return done;
   }
 
   private edited(id: string, text: string, source: RecordStepSource): true {
@@ -1030,30 +1161,48 @@ export class DraftEngine {
    * Delete a step of the model's (reworded or not): it leaves the draft at
    * once, with no model call, and every recorded action behind it — the
    * events riding with them included — is dropped, as the panel's ✕ drops an
-   * action, so no redraft ever brings it back. An id the model has since
-   * rewritten deletes whatever steps stand for the same actions now.
+   * action, so no redraft ever brings it back; so is a click into the same
+   * field just before them that no step stands for ({@link foldedBefore}).
+   * An id the model has since rewritten deletes what that step stood for,
+   * from whatever steps stand for it now: a step that stood for nothing else
+   * goes, one the model merged it into keeps the rest and is redrafted
+   * ({@link giveUp}).
    */
   private deleteStep(id: string, source: RecordStepSource): StepChange {
     if (this.stepDrops.has(id)) return false;
     const found = this.findItem(id);
     let targets: Item[];
+    let partial: Item[] = [];
+    let take: string[];
     if (found) {
       targets = [found.item];
+      take = found.item.actions.filter((a) => !this.dropped.has(a));
     } else {
       const stood = this.idActions.get(id);
       if (!stood) return false;
-      targets = this.standingFor(stood);
-      if (targets.length === 0) return { ignored: STEP_GONE_MESSAGE };
+      const split = this.splitStale(stood);
+      if (split.take.length === 0) return { ignored: STEP_GONE_MESSAGE };
+      targets = split.whole;
+      partial = split.partial;
+      take = split.take;
     }
     const flat = this.flatItems();
-    const actions = this.byOrder(targets.flatMap((t) => t.actions).filter((a) => !this.dropped.has(a)));
+    const firstTaken = this.byOrder(take)[0];
+    const folded = firstTaken !== undefined ? this.foldedBefore(firstTaken) : [];
+    const actions = this.byOrder([...take, ...folded]);
     const alsoHad = this.byOrder(targets.flatMap((t) => t.actions).filter((a) => this.dropped.has(a)));
-    const entries = targets
+    const taken = new Set(take);
+    const entries: StepDrop['entries'] = targets
       .map((item) => {
         const where = this.findItem(item.id)!;
         const at = flat.indexOf(item);
-        // What it stands for when it comes back: what this delete dropped.
-        const kept = { ...cloneItem(item), actions: item.actions.filter((a) => !this.dropped.has(a)) };
+        // What it stands for when it comes back: what this delete dropped —
+        // and, for the author's rewording, all it stood for, so an action
+        // Undo took before it comes back to it (review round 2, finding 6).
+        const kept = {
+          ...cloneItem(item),
+          actions: item.edited ? [...item.actions] : item.actions.filter((a) => !this.dropped.has(a)),
+        };
         return {
           item: kept,
           stretch: where.stretch,
@@ -1063,9 +1212,30 @@ export class DraftEngine {
         };
       })
       .sort((a, b) => a.flatAt - b.flatAt);
+    // What a merged step gave up comes back as the step the author deleted:
+    // with the first whole one, else as that step, in the words they saw.
+    const fromMerged = this.byOrder(partial.flatMap((t) => t.actions.filter((a) => taken.has(a))));
+    if (fromMerged.length > 0) {
+      if (entries.length > 0) {
+        entries[0]!.item.actions = this.byOrder([...entries[0]!.item.actions, ...fromMerged]);
+      } else {
+        const host = partial[0]!;
+        const at = flat.indexOf(host);
+        entries.push({
+          item: { id, text: this.idTexts.get(id) ?? host.text, actions: fromMerged },
+          stretch: this.findItem(host.id)!.stretch,
+          // Never "exactly where it was": it goes back by where its actions are.
+          local: -1,
+          prevId: at > 0 ? flat[at - 1]!.id : null,
+          flatAt: at,
+        });
+      }
+    }
     const touched = new Set(entries.map((e) => e.stretch));
+    for (const t of partial) touched.add(this.findItem(t.id)!.stretch);
     this.staleIfTouched(touched, actions);
-    for (const e of [...entries].reverse()) e.stretch.items.splice(e.local, 1);
+    for (const e of [...entries].reverse()) if (e.local >= 0) e.stretch.items.splice(e.local, 1);
+    this.giveUp(partial, taken);
     for (const s of touched) s.version++;
     for (const a of actions) this.dropped.add(a);
     this.stepDrops.set(id, {
@@ -1100,7 +1270,7 @@ export class DraftEngine {
     for (const a of memo.actions) this.dropped.delete(a);
     this.breakDeletesOf(memo.actions);
     const exact = memo.entries.every(
-      (e) => this.stretches.includes(e.stretch) && e.stretch.version === memo.versions.get(e.stretch),
+      (e) => e.local >= 0 && this.stretches.includes(e.stretch) && e.stretch.version === memo.versions.get(e.stretch),
     );
     const touched = new Set<Stretch>();
     for (const e of memo.entries) {
@@ -1138,25 +1308,33 @@ export class DraftEngine {
     }
   }
 
-  /** Where a restored step goes once the draft has moved on: after the step
-   *  before it, when that one is with its actions; else among the steps of the
-   *  stretch its actions are in, by where they are; else at its old index. */
+  /**
+   * Where a restored step goes once the draft has moved on. One that stands
+   * for actions goes among the steps of the stretch they are in, by where they
+   * are — no earlier than just after the step that was before it, when that
+   * one is there too. By its actions, not merely "after the one before it":
+   * two neighbours deleted top to bottom both had the first step before
+   * them, and restored in that order the second went in above the first
+   * (review round 2, finding 1). One that stands for none goes after the
+   * step before it; else at its old index.
+   */
   private placeRestored(item: Item, prevId: string | null, flatAt: number): Stretch {
     const order = this.firstOrder(item);
     const home = order !== undefined ? this.stretchOfIndex(order) : null;
     const flat = this.flatItems();
     const prevAt = prevId !== null ? flat.findIndex((i) => i.id === prevId) : -1;
-    if (prevAt >= 0) {
-      const { stretch, local } = this.locate(prevAt);
-      if (home === null || stretch === home) {
-        stretch.items.splice(local + 1, 0, item);
-        return stretch;
-      }
-    }
+    const prev = prevAt >= 0 ? this.locate(prevAt) : null;
     if (home) {
-      const at = Math.min(this.slotFor(home.items, order!), trailingAuthorStart(home.items));
+      const start = prev && prev.stretch === home ? prev.local + 1 : 0;
+      const edge = trailingAuthorStart(home.items);
+      let at = start + this.slotFor(home.items.slice(start), order!);
+      if (start <= edge) at = Math.min(at, edge);
       home.items.splice(at, 0, item);
       return home;
+    }
+    if (prev) {
+      prev.stretch.items.splice(prev.local + 1, 0, item);
+      return prev.stretch;
     }
     if (flat.length === 0 || Math.min(flatAt, flat.length) === 0) {
       const s = this.stretches[0]!;
@@ -1881,24 +2059,44 @@ export class DraftEngine {
 
   /** The events that ride with an action go with the step that claimed it —
    *  and when no step claimed the action but one step claimed the rest of its
-   *  group, the action goes there too. */
+   *  group, the action goes there too. A click no step claimed goes with the
+   *  step that claimed what came next, when that is on the same element: the
+   *  click into a field that a "Type … into the Email field" step folded
+   *  away is that step's (review round 2, finding 2) — else a delete of the
+   *  step left it behind, and the next redraft wrote it back as "Click the
+   *  Email field". */
   private withRiders(lists: string[][], available: readonly string[]): string[][] {
     const owner = new Map<string, number>();
     lists.forEach((l, k) => l.forEach((id) => owner.set(id, k)));
     const out = lists.map((l) => [...l]);
-    for (const group of this.groupsOf(available)) {
+    const groups = this.groupsOf(available);
+    const ownerOf = (group: readonly string[]): number | undefined => {
       const action = group.find((id) => this.isAction(id));
-      let target = action !== undefined ? owner.get(action) : undefined;
-      if (target === undefined) {
-        const owners = new Set(group.map((id) => owner.get(id)).filter((o): o is number => o !== undefined));
-        if (owners.size === 1) target = [...owners][0];
-      }
+      const direct = action !== undefined ? owner.get(action) : undefined;
+      if (direct !== undefined) return direct;
+      const owners = new Set(group.map((id) => owner.get(id)).filter((o): o is number => o !== undefined));
+      return owners.size === 1 ? [...owners][0] : undefined;
+    };
+    for (const group of groups) {
+      const target = ownerOf(group);
       if (target === undefined) continue;
       for (const id of group) {
         if (owner.has(id)) continue;
         owner.set(id, target);
         out[target]!.push(id);
       }
+    }
+    // From the last back, so a run of clicks into one field all follow.
+    for (let g = groups.length - 2; g >= 0; g--) {
+      const action = groups[g]!.find((id) => this.isAction(id));
+      if (action === undefined || owner.has(action)) continue;
+      const click = this.actions[this.indexOfAction(action)];
+      if (click?.kind !== 'click') continue;
+      const next = groups[g + 1]!;
+      const target = ownerOf(next);
+      if (target === undefined || !sameElement(click, this.actions[this.indexOfAction(next[0]!)])) continue;
+      owner.set(action, target);
+      out[target]!.push(action);
     }
     return out.map((l) => this.byOrder(l));
   }
@@ -1950,7 +2148,11 @@ export class DraftEngine {
         const available = this.byOrder([...region.flatMap((i) => i.actions), ...callIds]).filter(
           (a) => !this.dropped.has(a) && !held.has(a),
         );
-        const made = this.mapSteps(answer.steps, answer.stepActions, region, available, new Set(), numberOf);
+        // A4 holds here too (review round 2, finding 8): a step tied to
+        // nothing but a rewording's actions, or — with no mapping that holds
+        // up — an exact copy of its words, re-describes it, and is not written.
+        const reworded = new Set(open.items.filter((i) => i.edited).map((i) => i.text.trim()));
+        const made = this.mapSteps(answer.steps, answer.stepActions, region, available, held, numberOf, reworded);
         open.items = [...open.items.slice(0, tail), ...made];
         for (const a of callIds) open.covered.add(a);
         open.version++;
@@ -2055,8 +2257,13 @@ export class DraftEngine {
       if (item.authorId !== undefined) continue;
       this.idActions.delete(item.id);
       this.idActions.set(item.id, [...item.actions]);
+      this.idTexts.set(item.id, item.text);
     }
-    while (this.idActions.size > MAX_REMEMBERED_IDS) this.idActions.delete(this.idActions.keys().next().value!);
+    while (this.idActions.size > MAX_REMEMBERED_IDS) {
+      const oldest = this.idActions.keys().next().value!;
+      this.idActions.delete(oldest);
+      this.idTexts.delete(oldest);
+    }
     if (this.silent) return;
     const notes = this.notes();
     const through = [...this.remaining].reverse().find((a) => this.isCovered(a.id))?.id;

@@ -45,6 +45,16 @@
    *  server's answer before taking its own change back. */
   var COMMAND_ANSWER_MS = 3000;
   var SHORTCUTS = { KeyP: 'pause', KeyC: 'check', KeyS: 'step', KeyZ: 'undo', KeyM: 'minimise', KeyR: 'focus' };
+  /** A second click this soon, this close, after a drawer row's ✕ or + is
+   *  the second half of a double-click — not a Restore, and never the page's. */
+  var DOUBLE_CLICK_MS = 500;
+  var DOUBLE_CLICK_PX = 4;
+  /** How long a refusal the page makes on its own stays on the bar. */
+  var LOCAL_NOTICE_MS = 8000;
+  /** An edit or a step holding a value typed into a secret field on this
+   *  page: the server does not know that value, so the page refuses it
+   *  (review round 2, finding 5). */
+  var SECRET_IN_STEP = "That has a password typed on this page in it — write {{password}} (or the field's parameter) instead.";
 
   var tb = null;
   var tbView = null;
@@ -61,6 +71,11 @@
     // yes); and where the Add step box puts its step ({ id, index, revision,
     // n }) when a row's + opened it.
     editing: null, overrides: {}, insertAfter: null,
+    // A refusal the page made on its own ({ kind, text, seq, until,
+    // serverSeq }), shown until a newer word from the server; and the point
+    // of the last pointer click on a row's ✕ or + ({ x, y, id, at }) until
+    // the pointer moves (`tbShieldHit`).
+    localNotice: null, localSeq: 0, shield: null,
   };
   var tbCheck = { timer: 0, every: 0, pending: false, missed: 0 };
   var swallowKeyUp = null;
@@ -220,6 +235,7 @@
     '.input::placeholder{color:var(--faint)}',
     '.input:focus{outline:2px solid var(--pick);outline-offset:-1px;border-color:transparent}',
     '.hint{flex:none;color:var(--faint);font-size:11.5px;white-space:nowrap}',
+    '.hint.warn{flex:1;min-width:0;color:#FFD27A;white-space:normal}',
     '.spin{width:12px;height:12px;border-radius:50%;flex:none;border:2px solid var(--line);',
     'border-top-color:var(--text);animation:aiui-spin .9s linear infinite}',
     '.drawer{position:relative;width:0;min-width:100%;max-height:214px;overflow:auto;border-top:1px solid var(--line);',
@@ -248,13 +264,16 @@
     'visibility:hidden}',
     '.drawer .ins:hover{background:var(--press)}',
     '.drawer li.gap:hover .ins,.drawer li.row:hover+li.gap .ins,.drawer li.row:focus-within+li.gap .ins,',
-    '.drawer .ins:focus-visible{visibility:visible}',
+    '.drawer .ins:focus-visible,.drawer li.gap.kbd .ins{visibility:visible}',
     '.drawer .rb:focus-visible,.drawer .ins:focus-visible,.drawer .mini:focus-visible{outline:2px solid var(--pick);',
     'outline-offset:-1px}',
     '.drawer .rowedit{flex:1;min-width:0;height:24px;background:var(--field);color:var(--text);border:1px solid var(--line);',
     'border-radius:5px;padding:0 7px;font:12.5px var(--ui);margin:0;user-select:text;-webkit-user-select:text;cursor:text}',
     '.drawer .rowedit:focus{outline:2px solid var(--pick);outline-offset:-1px;border-color:transparent}',
     '.drawer .foot{color:var(--faint);font-size:11.5px;padding:6px 8px 2px;margin:0}',
+    // A struck row's Restore, where the ✕ just pressed was, waits for the
+    // pointer to move: the second click of a double-click is not a Restore.
+    '.drawer .mini.held{visibility:hidden}',
     '.pill{--ring:rgba(255,255,255,.16);display:inline-flex;align-items:center;gap:7px;height:34px;',
     'padding:0 6px 0 12px;background:var(--bg);color:var(--text);border:0;border-radius:999px;',
     'box-shadow:0 0 0 1px var(--ring),0 8px 22px rgba(0,0,0,.34);font:500 13px var(--ui);cursor:grab;',
@@ -263,7 +282,7 @@
     'background:var(--raise);color:var(--dim)}',
     '.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}',
     '@media (max-width:559px){.label{display:none}.btn{padding:0 8px}.quiet .x{display:block}',
-    '.count{display:none}.hint{display:none}.input{width:180px}}',
+    '.count{display:none}.hint:not(.warn){display:none}.input{width:180px}}',
     '@media (max-width:400px){.btn{padding:0 6px}.status{padding:0 6px 0 4px}.time{display:none}.sep{margin:0 1px}}',
     '@media (prefers-reduced-motion:reduce){.dot::after{display:none}',
     '.dot[data-kind="writing"],.spin{animation:none;border-top-color:var(--dim)}.toggle svg{transition:none}}',
@@ -639,6 +658,8 @@
     tbLocal.editing = null;
     tbLocal.overrides = {};
     tbLocal.insertAfter = null;
+    tbLocal.localNotice = null;
+    tbLocal.shield = null;
     try {
       if (t.host.matches(':popover-open')) t.host.hidePopover();
     } catch (err) { /* ignore */ }
@@ -684,6 +705,8 @@
       tbLocal.editing = null;
       tbLocal.overrides = {};
       tbLocal.insertAfter = null;
+      tbLocal.localNotice = null;
+      tbLocal.shield = null;
     }
     // A row this page changed ahead of the server, and the server said yes:
     // this push (or an earlier one) already shows it.
@@ -753,6 +776,10 @@
       tbLocal.noticeUntil = 0;
       tbRender();
     }
+    if (tbLocal.localNotice && nowMs() >= tbLocal.localNotice.until) {
+      tbLocal.localNotice = null;
+      tbRender();
+    }
   }
 
   function tbDock() {
@@ -797,10 +824,40 @@
   }
 
   function tbNotice() {
+    // The page's own refusal, until it runs out or the server says something newer.
+    var mine = tbLocal.localNotice;
+    if (mine) {
+      if (nowMs() < mine.until && mine.serverSeq === tbLocal.noticeSeq) return mine;
+      tbLocal.localNotice = null;
+    }
     var n = tbView && tbView.notice && typeof tbView.notice === 'object' ? tbView.notice : null;
     if (!n) return null;
     if (tbLocal.noticeUntil && nowMs() >= tbLocal.noticeUntil) return null;
     return n;
+  }
+
+  /** Say something on the bar that only this page knows — a refusal it made
+   *  without asking the server. In the Add step box it takes the hint's
+   *  place (the box is not rebuilt under the caret). */
+  function tbSay(text) {
+    if (!tb) return;
+    tbLocal.localNotice = {
+      kind: 'error', text: text, seq: 'page-' + (++tbLocal.localSeq),
+      until: nowMs() + LOCAL_NOTICE_MS, serverSeq: tbLocal.noticeSeq,
+    };
+    tbAnnounce(text);
+    if (tbLocal.box && tb.hint && tb.hint.isConnected) {
+      tb.hint.textContent = text;
+      tb.hint.setAttribute('class', 'hint warn');
+    }
+    tbRender();
+  }
+
+  /** Nothing of the author's in it: empty, or a lone number or list marker
+   *  (`3.`, `-`), which the recording's numbering replaces. Saved, that is a
+   *  delete (review round 2, finding 10). */
+  function tbBare(text) {
+    return /^\s*(?:\d+[.)]|[-*+])?\s*$/.test(text);
   }
 
   function tbWritingNotice() {
@@ -1033,6 +1090,7 @@
         var hint = add(tbEl('span', 'hint',
           (target ? 'Goes after step ' + target.n + ' · ' : '') + 'Enter to add · Esc to close'));
         hint.setAttribute('id', 'aiui-hint');
+        tb.hint = hint;
         break;
       }
       case 'offline':
@@ -1083,10 +1141,11 @@
       }
     }
     if (keepCmd) {
-      var again = sub.querySelector('[data-cmd="' + keepCmd + '"]');
-      if (again) {
-        try { again.focus({ preventScroll: true }); } catch (err) { /* ignore */ }
-      }
+      // Gone from the row (a confirmation took its place): focus stays in the
+      // bar — out in the page, the next Tab or Enter would be recorded
+      // (review round 2, finding 4).
+      var again = sub.querySelector('[data-cmd="' + keepCmd + '"]') || tbFirstButton();
+      try { again.focus({ preventScroll: true }); } catch (err) { /* ignore */ }
     }
   }
 
@@ -1103,26 +1162,60 @@
    * The Steps so far drawer: every step, editable and deletable in place,
    * with a + in the gap below each to add one there, and the steps deleted
    * since the last one landed, struck through, with Restore
-   * (stories/testbench-record-edit-steps.md, "The drawer"). Not rebuilt while
-   * a step is being edited in it — that would take the caret away.
+   * (stories/testbench-record-edit-steps.md, "The drawer").
+   *
+   * A step being edited in it keeps its row as it is — the box, its words,
+   * its caret and its focus — and the other rows are rebuilt around it: a ✕
+   * elsewhere strikes its row at once, and a new draft shows (review round
+   * 2, finding 7c). Keyboard focus in the list stays on the same row or
+   * button, else on the row now at its place, else on the bar: a re-render
+   * never drops it into the page, where the next Tab or Enter would be
+   * recorded (finding 4).
    */
   function tbRenderDrawer(v) {
-    if (tbLocal.editing) return;
     var rows = tbDrawerRows(v);
-    var key = JSON.stringify([rows, v.updating === true]);
+    var e = tbLocal.editing;
+    var shield = tbLocal.shield;
+    var key = JSON.stringify([rows, v.updating === true, e ? e.id : null, shield ? shield.id : null]);
     if (key === tb.listKey) return;
     tb.listKey = key;
-    // Keyboard focus stays on the same row, or the same button of it.
-    var had = tb.root.activeElement;
-    var keep = had && tb.list.contains(had)
-      ? { id: had.getAttribute('data-row-id') || had.getAttribute('data-id'), cmd: had.getAttribute('data-cmd') }
-      : null;
     var list = tb.list;
-    while (list.firstChild) list.removeChild(list.firstChild);
+    var editLi = e && e.input.parentNode && list.contains(e.input) ? e.input.parentNode : null;
+    var had = tb.root.activeElement;
+    var keep = null;
+    if (had && list.contains(had) && !(editLi && editLi.contains(had))) {
+      var hadLi = had.closest ? had.closest('li') : null;
+      var before = Array.prototype.slice.call(list.querySelectorAll('li.row:not(.pending)'));
+      var hadAt = before.indexOf(hadLi);
+      // A gap's +: the row above it.
+      if (hadAt < 0 && hadLi) hadAt = before.indexOf(hadLi.previousElementSibling);
+      keep = { id: had.getAttribute('data-row-id') || had.getAttribute('data-id'), cmd: had.getAttribute('data-cmd'), at: hadAt };
+    }
+    var old = Array.prototype.slice.call(list.childNodes);
+    for (var o = 0; o < old.length; o++) if (old[o] !== editLi) list.removeChild(old[o]);
+    var nodes = [];
+    var rowNodes = [];
+    var placed = false;
     var liveCount = 0;
     for (var c = 0; c < rows.length; c++) if (rows[c].kind === 'live') liveCount++;
     for (var i = 0; i < rows.length; i++) {
       var r = rows[i];
+      if (editLi && !placed && r.id === e.id) {
+        // The row being edited, as it is: only its number follows the draft.
+        var num = editLi.querySelector('.n');
+        if (num && r.kind === 'live') num.textContent = String(r.n);
+        if (r.kind === 'live') e.n = r.n;
+        e.at = rowNodes.length;
+        placed = true;
+        rowNodes.push(nodes.length);
+        nodes.push(editLi);
+        if (r.kind === 'live') {
+          var editGap = tbEl('li', 'gap');
+          editGap.appendChild(tbRowButton('row-insert', 'ins', 'plus', r.id, 'Add a step after step ' + r.n));
+          nodes.push(editGap);
+        }
+        continue;
+      }
       var li = tbEl('li', 'row ' + r.kind + (r.kind === 'live' && r.n === liveCount ? ' last' : ''));
       li.tabIndex = -1;
       li.setAttribute('data-row-id', r.id);
@@ -1137,28 +1230,61 @@
         li.appendChild(tbRowButton('row-delete', 'rb', 'xs', r.id, 'Remove step ' + r.n));
       } else if (r.kind === 'deleted') {
         li.setAttribute('aria-label', 'Removed: ' + r.text);
-        var restore = tbMini('row-restore', 'Restore');
+        // Where its ✕ was just clicked, Restore waits for the pointer to move.
+        var restore = tbMini('row-restore', 'Restore', shield && shield.id === r.id ? 'mini held' : 'mini');
         restore.setAttribute('data-id', r.id);
         restore.setAttribute('aria-label', 'Restore "' + r.text + '"');
         li.appendChild(restore);
       }
-      list.appendChild(li);
+      rowNodes.push(nodes.length);
+      nodes.push(li);
       if (r.kind === 'live') {
         var gap = tbEl('li', 'gap');
         gap.appendChild(tbRowButton('row-insert', 'ins', 'plus', r.id, 'Add a step after step ' + r.n));
-        list.appendChild(gap);
+        nodes.push(gap);
       }
+    }
+    if (editLi && !placed) {
+      // Its step left the draft (the model rewrote it): the box stays where it
+      // was, and Enter sends the edit with the id it had — the server finds
+      // what that step stood for.
+      var slot = e.at !== undefined && e.at < rowNodes.length ? rowNodes[e.at] : nodes.length;
+      nodes.splice(slot, 0, editLi);
     }
     if (v.updating === true) {
       var pending = tbEl('li', 'row pending');
       pending.appendChild(tbEl('span', 'n', String(liveCount + 1)));
       pending.appendChild(tbEl('span', 't', 'updating…'));
-      list.appendChild(pending);
+      nodes.push(pending);
     }
-    if (keep && keep.id) {
-      var back = tbDrawerFind(keep.id, keep.cmd) || tbDrawerFind(keep.id, null);
+    // In order around the row being edited, which is never moved: moving it
+    // would take its caret and focus away.
+    var anchor = editLi && editLi.parentNode === list ? editLi : null;
+    var above = true;
+    for (var j = 0; j < nodes.length; j++) {
+      if (nodes[j] === editLi) {
+        above = false;
+        continue;
+      }
+      if (anchor && above) list.insertBefore(nodes[j], anchor);
+      else list.appendChild(nodes[j]);
+    }
+    if (keep) {
+      var back = keep.id ? tbDrawerFind(keep.id, keep.cmd) || tbDrawerFind(keep.id, null) : null;
+      if (!back) {
+        var now = list.querySelectorAll('li.row:not(.pending)');
+        if (now.length > 0) back = now[Math.max(0, Math.min(keep.at < 0 ? 0 : keep.at, now.length - 1))];
+      }
       if (back) tbFocusIn(back);
+      else tbKeepFocusInBar();
     }
+  }
+
+  /** Focus had to leave what it was on: the Steps so far toggle, else the
+   *  first button of the bar — never the page. */
+  function tbKeepFocusInBar() {
+    var el = tb.sub.querySelector('[data-cmd="drawer"]') || tbFirstButton();
+    try { el.focus({ preventScroll: true }); } catch (err) { /* ignore */ }
   }
 
   /** A drawer row by its step id — or, given `cmd`, that button of it. */
@@ -1178,6 +1304,11 @@
   /** Focus an element of the drawer, scrolled into the drawer's view (not
    *  the page's: the bar is fixed, and the page must not move). */
   function tbFocusIn(el) {
+    // A gap's + shows only on hover — hidden, it cannot take focus, and Tab
+    // onto it dropped focus into the page. Shown while the keyboard is on it.
+    var shown = tb.list.querySelectorAll('li.gap.kbd');
+    for (var g = 0; g < shown.length; g++) shown[g].classList.remove('kbd');
+    if (el.classList && el.classList.contains('ins') && el.parentNode) el.parentNode.classList.add('kbd');
     try { el.focus({ preventScroll: true }); } catch (err) { /* ignore */ }
     var row = el.closest ? el.closest('li') : null;
     var d = tb.drawer;
@@ -1197,6 +1328,7 @@
         var el = list[i];
         if (el.disabled || el.hidden) continue;
         if (el.closest && el.closest('[hidden]')) continue;
+        if (el.classList && el.classList.contains('held')) continue;
         out.push(el);
       }
     };
@@ -1226,7 +1358,8 @@
     input.setAttribute('spellcheck', 'true');
     input.setAttribute('aria-label', 'Change step ' + row.n + '. Enter saves, Esc cancels; empty removes it.');
     input.value = row.text;
-    tbLocal.editing = { id: id, input: input, viaKeyboard: !!viaKeyboard, original: row.text, n: row.n };
+    var at = Array.prototype.indexOf.call(tb.list.querySelectorAll('li.row:not(.pending)'), li);
+    tbLocal.editing = { id: id, input: input, viaKeyboard: !!viaKeyboard, original: row.text, n: row.n, at: at };
     li.replaceChild(input, span);
     try {
       input.focus({ preventScroll: true });
@@ -1234,16 +1367,32 @@
     } catch (err) { /* ignore */ }
   }
 
+  /** Saved, what the edit would send — a delete for nothing of the author's
+   *  in it, an edit for changed words, nothing for unchanged ones — or
+   *  `secret` for words holding a value typed into a secret field on this
+   *  page: the server does not know that value, so it could not keep it out
+   *  of the panel, the log or the model (review round 2, finding 5). */
+  function tbEditOutcome(e) {
+    var text = e.input.value;
+    if (tbBare(text)) return 'delete';
+    if (text.trim() === e.original.trim()) return 'same';
+    return holdsTypedSecret(text) ? 'secret' : 'edit';
+  }
+
   function tbFinishEdit(save) {
     var e = tbLocal.editing;
     if (!e || !tb) return;
+    var outcome = save ? tbEditOutcome(e) : 'same';
+    if (outcome === 'secret') {
+      // Refused here, never sent; the box stays open to be put right.
+      tbSay(SECRET_IN_STEP);
+      try { e.input.focus({ preventScroll: true }); } catch (err) { /* ignore */ }
+      return;
+    }
     tbLocal.editing = null;
     tb.listKey = '';
-    var text = e.input.value;
-    if (save) {
-      if (!/\S/.test(text)) tbDeleteRow(e.id);
-      else if (text.trim() !== e.original.trim()) tbEditRow(e.id, text, e.n);
-    }
+    if (outcome === 'delete') tbDeleteRow(e.id);
+    else if (outcome === 'edit') tbEditRow(e.id, e.input.value, e.n);
     tbRender();
     if (e.viaKeyboard) {
       var li = tbDrawerFind(e.id, null);
@@ -1252,6 +1401,35 @@
     } else {
       tbGiveFocusBack();
     }
+  }
+
+  /**
+   * An edit in place left some other way than Enter or Esc — the author
+   * pressed +, Add step, the Steps so far toggle, Stop or Cancel, clicked
+   * another step's words, or the page is going away: its words are SAVED,
+   * as leaving a field saves it, not thrown away (review round 2, finding
+   * 7b). Unchanged words just close it; words holding a secret typed on
+   * this page are refused, and said. `unloading`: the document is going —
+   * sent straight away, with nothing to show.
+   */
+  function tbCommitEdit(unloading) {
+    var e = tbLocal.editing;
+    if (!e || !tb) return;
+    var outcome = tbEditOutcome(e);
+    var hadFocus = tb.root.activeElement === e.input;
+    tbLocal.editing = null;
+    tb.listKey = '';
+    if (unloading) {
+      if (outcome === 'edit') void sendCmd({ type: 'edit-step', id: e.id, text: e.input.value.slice(0, 4000) });
+      else if (outcome === 'delete') void sendCmd({ type: 'toolbar', command: 'delete-step', id: e.id });
+      return;
+    }
+    if (outcome === 'delete') tbDeleteRow(e.id);
+    else if (outcome === 'edit') tbEditRow(e.id, e.input.value, e.n);
+    else if (outcome === 'secret') tbSay(SECRET_IN_STEP);
+    tbRender();
+    // Its box is gone: focus goes back where it came from, not into nowhere.
+    if (hadFocus) tbGiveFocusBack();
   }
 
   /**
@@ -1420,6 +1598,14 @@
       try { tb.input.focus(); } catch (err) { /* ignore */ }
       return;
     }
+    // A value typed into a secret field on this page: the server does not
+    // know it, so it would go out in clear — refused here, never sent, and
+    // the box stays open to put it right (review round 2, finding 5).
+    if (holdsTypedSecret(text)) {
+      tbSay(SECRET_IN_STEP);
+      try { tb.input.focus({ preventScroll: true }); } catch (err) { /* ignore */ }
+      return;
+    }
     clearTimeout(tbLocal.boxTimer);
     // Where it goes: after the row whose + opened the box — by that step's
     // id, and the index and draft it had, for when the model has since
@@ -1447,7 +1633,10 @@
   function tbBoxInput() {
     if (!tb || tb.root.activeElement !== tb.input) return;
     clearTimeout(tbLocal.boxTimer);
-    var value = tb.input.value;
+    // Kept by the server for the box's next opening — never with a value
+    // typed into a secret field on this page in it (finding 5).
+    var value = maskTyped(tb.input.value);
+    if (holdsTypedSecret(value)) value = '';
     tbLocal.boxTimer = setTimeout(function () {
       void sendCmd({ type: 'box-text', text: value.slice(0, 4000) });
     }, BOX_TEXT_MS);
@@ -1525,6 +1714,13 @@
     }
     if (!tbView || tbView.phase !== 'recording') return;
     var id = el && el.getAttribute ? el.getAttribute('data-id') : null;
+    // What takes the author away from an edit in place saves it first
+    // (review round 2, finding 7b). A ✕, a Restore, Undo or Pause elsewhere
+    // leaves it open: the drawer goes on changing around it.
+    if (cmd === 'row-insert' || cmd === 'drawer' || cmd === 'stop' || cmd === 'cancel' ||
+        (cmd === 'step' && !tbLocal.box) || (cmd === 'row-edit' && tbLocal.editing && tbLocal.editing.id !== id)) {
+      tbCommitEdit(false);
+    }
     switch (cmd) {
       case 'row-edit':
         if (id) tbStartEdit(id, false);
@@ -1792,7 +1988,40 @@
     if (!button || button.disabled) return;
     var cmd = button.getAttribute('data-cmd');
     if (cmd === 'grip') return;
+    var pointer = event.detail > 0;
+    // The second click of a double-click on a row's ✕ or +: not a second
+    // command on that row — a ✕ then Restore took the delete straight back
+    // (review round 2, finding 7a).
+    var s = tbLocal.shield;
+    if (pointer && s && button.getAttribute('data-id') === s.id && nowMs() - s.at < DOUBLE_CLICK_MS) return;
+    if (pointer && (cmd === 'row-delete' || cmd === 'row-insert')) {
+      tbLocal.shield = { x: event.clientX, y: event.clientY, id: button.getAttribute('data-id'), at: nowMs() };
+    }
     tbCommand(cmd, button);
+  }
+
+  /** A pointer event where the last click on a row's ✕ or + was, the pointer
+   *  not moved since, within a double-click's time: the second half of that
+   *  double-click. Out on the page it is swallowed — the + opens the box and
+   *  the drawer with it goes, so the second click would land on the page. */
+  function tbShieldHit(event) {
+    var s = tbLocal.shield;
+    if (!s || typeof event.clientX !== 'number') return false;
+    if (nowMs() - s.at >= DOUBLE_CLICK_MS) return false;
+    return Math.abs(event.clientX - s.x) <= DOUBLE_CLICK_PX && Math.abs(event.clientY - s.y) <= DOUBLE_CLICK_PX;
+  }
+
+  /** The pointer moved away from where a row's ✕ or + was clicked: Restore
+   *  shows there again. */
+  function tbShieldMoved(event) {
+    var s = tbLocal.shield;
+    if (!s || typeof event.clientX !== 'number') return;
+    if (Math.abs(event.clientX - s.x) <= DOUBLE_CLICK_PX && Math.abs(event.clientY - s.y) <= DOUBLE_CLICK_PX) return;
+    tbLocal.shield = null;
+    if (tb) {
+      tb.listKey = '';
+      tbRender();
+    }
   }
 
   function tbPointerDown(event) {
@@ -1951,7 +2180,25 @@
     'copy', 'cut', 'dragstart', 'drag', 'dragend', 'dragenter', 'dragover', 'dragleave', 'drop', 'selectstart',
   ];
 
+  /** The pointer events the second click of a double-click is made of. */
+  var DOUBLE_CLICK_PARTS = { pointerdown: 1, pointerup: 1, mousedown: 1, mouseup: 1, click: 1, dblclick: 1 };
+
   function onGate(event) {
+    // A key the bar just used (Enter saving an edit, say) held down: its
+    // repeats land wherever focus went back to — the page's field — and
+    // would be recorded and heard there (review round 2, finding 10b).
+    if (event.type === 'keydown' && event.repeat && swallowKeyUp !== null && event.code === swallowKeyUp) {
+      swallow(event);
+      return;
+    }
+    if (IS_TOP && tbLocal.shield) {
+      if (event.type === 'pointermove' || event.type === 'mousemove') {
+        tbShieldMoved(event);
+      } else if (DOUBLE_CLICK_PARTS[event.type] === 1 && event.isTrusted && !isOurs(event) && tbShieldHit(event)) {
+        swallow(event);
+        return;
+      }
+    }
     if (event.type === 'keydown') {
       if (onShortcut(event)) return;
       if (!isOurs(event) && onPickEscape(event)) return;
@@ -1976,6 +2223,13 @@
     for (var i = 0; i < GATE_EVENTS.length; i++) {
       window.addEventListener(GATE_EVENTS[i], onGate, { capture: true });
     }
+    // The page is going (a link clicked with a changed edit still open in the
+    // drawer): the edit goes now, while this document can still send it —
+    // the binding call leaves before the document does (review round 2,
+    // finding 7b; the drawer suite navigates with one open to prove it).
+    window.addEventListener('pagehide', function () {
+      if (IS_TOP && tb && tbLocal.editing && state.recording) tbCommitEdit(true);
+    }, { capture: true });
   }
 
   // ── Check-in ───────────────────────────────────────────────────────────
