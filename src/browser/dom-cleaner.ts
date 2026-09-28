@@ -794,19 +794,119 @@ export async function findInDom(
   searchText: string,
   containerSelector?: string,
 ): Promise<DomSearchResult> {
-  const containerJson = containerSelector ? JSON.stringify(containerSelector) : null;
+  let stamp: StampedElement | null = null;
+  if (containerSelector) {
+    try {
+      stamp = await stampFirstMatch(page, containerSelector);
+    } catch (err) {
+      // The shape the in-page catch has always used for a selector it could
+      // not run, so the formatter and the model see the same thing as before.
+      return {
+        matches: [{ selector: '', tag: 'error', text: String(err), attributes: '', context: '' }],
+        totalMatches: 1,
+        hitHardMax: false,
+      };
+    }
+  }
   const script = substitute(FIND_IN_DOM_TEMPLATE, {
     SEARCH_TEXT: JSON.stringify(searchText),
-    CONTAINER_EXPR: containerJson ? `document.querySelector(${containerJson})` : 'document.body',
-    CONTAINER_LABEL: containerJson ?? '""',
+    // `null` when the container matched nothing: the script then answers with
+    // its own "No element matches container selector" error.
+    CONTAINER_EXPR: !containerSelector
+      ? 'document.body'
+      : stamp
+        ? `document.querySelector(${JSON.stringify(stamp.css)})`
+        : 'null',
+    CONTAINER_LABEL: containerSelector ? JSON.stringify(containerSelector) : '""',
     DISPLAY_CAP: String(FIND_DISPLAY_CAP),
     HARD_MAX: String(FIND_HARD_MAX),
   });
-  return await page.evaluate(script) as DomSearchResult;
+  try {
+    return await page.evaluate(script) as DomSearchResult;
+  } finally {
+    await stamp?.release();
+  }
 }
 
 /**
- * Expand the full DOM subtree for a given CSS selector.
+ * The attribute {@link stampFirstMatch} writes. `expand` prints every other
+ * `data-*` attribute, so it skips this one by name.
+ */
+const TARGET_STAMP = 'data-aiui-target';
+
+interface StampedElement {
+  /** Plain CSS that finds the stamped element with `document.querySelector`. */
+  css: string;
+  /** Remove the stamp. Never throws: the page may have navigated meanwhile. */
+  release: () => Promise<void>;
+}
+
+/**
+ * Resolve `selector` through Playwright — exactly as every action does, so
+ * `role=`, `text=` and " >> " chains work — and stamp the first match, so an
+ * in-page script, which can only run `document.querySelector`, finds that same
+ * element with plain CSS.
+ *
+ * `expand` and `find`'s scope used to hand the model's selector straight to
+ * `document.querySelector`, which threw on the `role=` form rule 3 now
+ * recommends (issue 062). A stamp keeps those long in-page scripts unchanged,
+ * where passing an element handle into them would mean rewriting both.
+ *
+ * Returns `null` when nothing matches (or the match vanished before it could
+ * be stamped). An invalid selector throws, at once, from the count. Bounded by
+ * the same budget as the evaluates it stands in front of, so a page with a
+ * wedged JS thread cannot hold an HTTP caller of `expand` open forever.
+ */
+async function stampFirstMatch(page: Page, selector: string): Promise<StampedElement | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      stampNow(page, selector),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new EvaluateTimeout(`resolving the selector timed out after ${PAGE_EVALUATE_TIMEOUT_MS}ms`)),
+          PAGE_EVALUATE_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function stampNow(page: Page, selector: string): Promise<StampedElement | null> {
+  const target = page.locator(selector);
+  if ((await target.count()) === 0) return null;
+  const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const stamped = await target
+    .first()
+    .evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el: any, [name, value]: [string, string]) => {
+        el.setAttribute(name, value);
+        return true;
+      },
+      [TARGET_STAMP, token] as [string, string],
+      { timeout: 2_000 },
+    )
+    .catch(() => false);
+  if (!stamped) return null;
+  return {
+    css: `[${TARGET_STAMP}="${token}"]`,
+    release: async () => {
+      await page
+        .evaluate(([name, value]: [string, string]) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const doc = (globalThis as any).document;
+          for (const el of doc.querySelectorAll(`[${name}="${value}"]`)) el.removeAttribute(name);
+        }, [TARGET_STAMP, token] as [string, string])
+        .catch(() => undefined);
+    },
+  };
+}
+
+/**
+ * Expand the full DOM subtree for a given selector (CSS or any Playwright form).
  * Returns a detailed snapshot of that element's children — every visible
  * element with attributes and text. Used by the "expand" action, typically
  * after the AI sees a "N similar elements omitted" marker and wants to
@@ -824,10 +924,24 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
   // `expand` action abort a step that used to survive — same page, same
   // budget, opposite contract — while the new endpoint gets the same
   // classification either way via `domCaptureFailure`.
+  //
+  // The selector is resolved through Playwright first, so it means here what
+  // it means in every action — `role=`, `text=`, " >> " included — and the
+  // walk below finds the same element by its stamp (issue 062). The messages
+  // still name the selector the caller wrote.
+  let stamp: StampedElement | null;
+  try {
+    stamp = await stampFirstMatch(page, selector);
+  } catch (err) {
+    return `${EXPAND_ERROR_MARKER}${String(err)}`;
+  }
+  if (!stamp) return `${EXPAND_MISS_MARKER}${selector}`;
+
   let result: string;
   try {
     result = await evaluateWithTimeout<string>(page, `(() => {
-    const selector = ${JSON.stringify(selector)};
+    const selector = ${JSON.stringify(stamp.css)};
+    const label = ${JSON.stringify(selector)};
     const SKIP = new Set(['script', 'style', 'noscript', 'svg', 'meta', 'link', 'base', 'title']);
 
     // ── Live \`value\`, the same rule capture-dom.js uses ──────────────────
@@ -975,7 +1089,8 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
       //   - data-*  (test/state hooks; expand is zoomed-in so full fidelity)
       // Skip data-testid and data-aiui-row since both are already in the named
       // list above — emitted here too, a row a readTable had numbered came out
-      // as data-aiui-row="8" data-aiui-row="8".
+      // as data-aiui-row="8" data-aiui-row="8". Skip the framework's own
+      // lookup stamp too: it is on the element only while this walk runs.
       const allAttrs = el.attributes;
       for (let i = 0; i < allAttrs.length; i++) {
         const a = allAttrs[i];
@@ -986,6 +1101,7 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
           a.name.indexOf('data-') === 0
           && a.name !== 'data-testid'
           && a.name !== 'data-aiui-row'
+          && a.name !== '${TARGET_STAMP}'
         ) {
           // A field whose \`value\` was just masked must not hand the same
           // string back in \`data-value\`: a page that mirrors its input into
@@ -1055,11 +1171,11 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
 
     try {
       const el = document.querySelector(selector);
-      if (!el) return '[expand] No element found for selector: ' + selector;
+      if (!el) return '[expand] No element found for selector: ' + label;
       // processEl filters invisible elements to '', which at the top level is
       // indistinguishable from "this element is empty" — the exact conflation
       // the text path raises 'not-rendered' to avoid. Say so instead.
-      if (!isVisible(el)) return '[expand] Not rendered: ' + selector;
+      if (!isVisible(el)) return '[expand] Not rendered: ' + label;
       return processEl(el, 0);
     } catch (err) {
       return '[expand] Error: ' + String(err);
@@ -1067,6 +1183,8 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
   })()`, PAGE_EVALUATE_TIMEOUT_MS);
   } catch (err) {
     return `${EXPAND_ERROR_MARKER}${String(err)}`;
+  } finally {
+    await stamp.release();
   }
 
   return result;

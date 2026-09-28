@@ -569,6 +569,32 @@ describe('the structure question through the real Sessions API entry', () => {
     await api('DELETE', `/sessions/ts-collection`);
   });
 
+  it('sends no region markup, rather than expand\'s error text, when the region cannot be expanded', async () => {
+    // expandDomSubtree answers a failure IN BAND, as "[expand] …" text. Passed
+    // on, that text stood in for the region's markup and the step spent its
+    // one structure question on it (issue 062 review).
+    extractor.subtree = '[expand] Error: SyntaxError: bad selector';
+    ai.plans = [readTablePlan({ selector: '#account-cards' })];
+    ai.structures = [
+      JSON.stringify({
+        kind: 'collection',
+        item: '.account-card',
+        fields: { payee: '.card-title', amount: '.field-amount .value' },
+      }),
+    ];
+    extractor.handle = (action) => {
+      if (!action.mapping) throw shapeRefusal(CARD_REFUSAL, CARD_SKETCH);
+      return PAYEE_RECORDS;
+    };
+
+    await run('ts-expand-miss', newTestFile());
+    const asked = ai.sent.find((t) => t.includes(STRUCTURE_MARKER))!;
+    expect(asked).not.toContain('[expand]');
+    expect(asked).toMatch(/\\?"regionMarkup\\?":\s*\\?"\\?"/);
+
+    await api('DELETE', `/sessions/ts-expand-miss`);
+  });
+
   it('fails with the original refusal and the reason when the model answers none', async () => {
     ai.plans = [readTablePlan({ selector: '#site-nav' })];
     ai.structures = [
