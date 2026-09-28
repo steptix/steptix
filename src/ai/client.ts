@@ -210,6 +210,21 @@ export interface CompleteOptions {
   profile?: CompleteProfile;
 }
 
+/**
+ * What one call cost — the same numbers the call added to the run's
+ * `TokenTracker`, handed back so a caller can file them on the
+ * `AiInteraction` it builds (docs/specs/SPEC-scoreboard.md §7.1). The shape of
+ * `AiInteraction.usage`, so a caller copies it across as it is.
+ */
+export interface CompleteUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** Input tokens the provider served from its prompt cache, when reported. */
+  cachedInputTokens?: number;
+  /** The stream omitted usage and these are the client's own estimate. */
+  estimated?: true;
+}
+
 /** Result of a single AI completion, including which model the gateway actually served. */
 export interface CompleteResult {
   /** The assembled text response from the AI */
@@ -221,6 +236,23 @@ export interface CompleteResult {
    * so this is effectively the configured `AI_MODEL`.
    */
   model: string;
+  /**
+   * What the call cost, exactly as it was added to the token tracker. Absent
+   * only when the non-streamed envelope carried no usage block, in which case
+   * the tracker was not told anything either.
+   */
+  usage?: CompleteUsage;
+}
+
+/** A v2 usage block as {@link CompleteUsage}; a missing cache count is absent,
+ *  not zero, because "not reported" and "none cached" are different answers. */
+function usageFromV2(usage: { input_tokens: number; output_tokens: number; cached_input_tokens?: number }): CompleteUsage {
+  const cached = usage.cached_input_tokens;
+  return {
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    ...(typeof cached === 'number' && Number.isFinite(cached) && { cachedInputTokens: cached }),
+  };
 }
 
 export class AiClient {
@@ -533,7 +565,7 @@ export class AiClient {
       throw new Error('AI response contained no content');
     }
 
-    return { text, model };
+    return { text, model, ...(v2.usage && { usage: usageFromV2(v2.usage) }) };
   }
 
   /** Streaming chat completion, accumulated into a single response. */
@@ -562,6 +594,7 @@ export class AiClient {
     let model = this.config.model;
     let inputTokens = 0;
     let outputTokens = 0;
+    let cachedInputTokens: number | undefined;
     let haveUsage = false;
 
     try {
@@ -578,6 +611,7 @@ export class AiClient {
       if (final.usage && (final.usage.input_tokens || final.usage.output_tokens)) {
         inputTokens = final.usage.input_tokens;
         outputTokens = final.usage.output_tokens;
+        cachedInputTokens = usageFromV2(final.usage).cachedInputTokens;
         haveUsage = true;
       }
     } catch (err) {
@@ -588,13 +622,15 @@ export class AiClient {
       throw err;
     }
 
-    if (haveUsage) {
-      this.tokenTracker.addUsage(inputTokens, outputTokens);
-      this.tokenTracker.checkStepBudget(this.config.maxInputTokens);
-    } else {
-      // Estimate tokens if the stream omitted usage (matches the old behavior).
-      this.tokenTracker.addUsage(0, Math.ceil(text.length / 4));
-    }
+    // One value for both the tracker and the caller, so the interaction a
+    // caller files and the run's total cannot disagree about a call.
+    const usage: CompleteUsage = haveUsage
+      ? { inputTokens, outputTokens, ...(cachedInputTokens !== undefined && { cachedInputTokens }) }
+      // Estimate tokens if the stream omitted usage (matches the old behavior),
+      // and say so: an average must never be quietly part guess (§7.1).
+      : { inputTokens: 0, outputTokens: Math.ceil(text.length / 4), estimated: true };
+    this.tokenTracker.addUsage(usage.inputTokens, usage.outputTokens);
+    if (haveUsage) this.tokenTracker.checkStepBudget(this.config.maxInputTokens);
 
     logger.trace(`ai.response#${requestId}`, {
       ok: true,
@@ -608,7 +644,7 @@ export class AiClient {
       throw new Error('AI stream produced no content');
     }
 
-    return { text, model };
+    return { text, model, usage };
   }
 
   /**

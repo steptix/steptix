@@ -3220,6 +3220,12 @@ export function createTestFileRunner(options: CompileOptions): CompileRunner {
         // steps to replay.
         bypassAiPolicy: true,
         ...(request.signal && { signal: request.signal }),
+        // The record and the replays are the compiler's own runs, not the
+        // author's: tagged so they stay out of the default scoreboard view
+        // (docs/specs/SPEC-scoreboard.md §5.6). A replay fails by design while
+        // the compiler iterates, which is exactly what must not read as the
+        // user's code-behind being flaky.
+        statsSuite: 'compile',
       },
     );
     return reportToOutcome(report, options.test.steps.length);

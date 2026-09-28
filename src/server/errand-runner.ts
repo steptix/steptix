@@ -37,6 +37,7 @@ import {
 import { runSetStep } from '../runner/set-step-runner.js';
 import { runUseAiStep } from '../runner/use-ai-step-runner.js';
 import { createStructureMemo } from '../runner/structure-memo.js';
+import { openRunStats, recordRunEnd, statsEnabledIn, type RunStats } from '../runner/run-stats.js';
 import { redact, runSecrets } from '../utils/secrets.js';
 import { interpolateEnvData, type EnvDataContext } from '../parser/interpolate-env-data.js';
 import { formatStepHistoryEntry } from '../ai/prompts.js';
@@ -341,6 +342,15 @@ export class ErrandRunner {
         : null;
 
       const context = await loadContextFiles(this.config.tests.contextDir);
+      // An errand is a run for the scoreboard too (docs/specs/SPEC-scoreboard.md
+      // §7, §8.2): ad hoc steps with no test, recorded against the project the
+      // errand resolved, under that project's own switch. It writes no report,
+      // so its run line says `report: null` — its lines still count.
+      const errandStats = openRunStats({
+        projectRoot: bundle.projectRoot ?? request.root,
+        testFilePath: null,
+        projectEnabled: statsEnabledIn(bundle.config),
+      });
       const tokenTracker = new TokenTracker();
       // Built from `desiredAi`, not the resolved config: the request's env is
       // where an AI_API_KEY would arrive, and `resolveRunSettings` only ever
@@ -514,6 +524,7 @@ export class ErrandRunner {
           browserTracker,
           emit,
           signal,
+          stats: errandStats,
         });
       } catch (err) {
         // Belt and braces over the per-step guard: nothing in `act` is meant to
@@ -546,6 +557,13 @@ export class ErrandRunner {
 
       // No report is EVER written — the receipt IS the report
       // (stories/errands.md §Tool surface). Nothing calls `generateReport`.
+      recordRunEnd(errandStats, {
+        status: outcome.status === 'passed' ? 'passed' : 'failed',
+        aborted: outcome.status === 'aborted',
+        tokensIn: tokenTracker.inputTotal,
+        tokensOut: tokenTracker.outputTotal,
+        report: null,
+      });
       emit({
         type: 'done',
         status: outcome.status,
@@ -597,6 +615,8 @@ export class ErrandRunner {
     browserTracker: BrowserTracker;
     emit: (event: RunEvent) => void;
     signal: AbortSignal | undefined;
+    /** The errand's scoreboard run (`openRunStats`). */
+    stats: RunStats;
   }): Promise<void> {
     const { errandId, lease, outcome, steps, emit, signal, browserTracker } = args;
 
@@ -618,6 +638,12 @@ export class ErrandRunner {
      * `run_steps` would leave an unknown placeholder.
      */
     const scope: Record<string, string> = {};
+    /** What each step's options carry: the errand's scoreboard run, masked
+     *  with the errand's own secrets as they are now. */
+    const statsNow = (): RunStats =>
+      args.stats.enabled
+        ? { ...args.stats, maskValues: runSecrets({ parameters: scope, envData: args.envDataCtx }) }
+        : args.stats;
     const conversationHistory: string[] = [];
     const apiResponseStore = new ApiResponseStore();
     const csrfTokens: Record<string, string> = {};
@@ -925,6 +951,7 @@ export class ErrandRunner {
           retries: args.runConfig.execution.retries,
           signal,
           failureTail,
+          stats: statsNow(),
         });
         stepResult = aiOutcome.result;
         if (aiOutcome.name !== undefined && aiOutcome.value !== undefined) {
@@ -973,6 +1000,7 @@ export class ErrandRunner {
             // that has finally failed (decision 4).
             ...(failureTail && { failureTail }),
             ...(signal && { signal }),
+            stats: statsNow(),
           },
           // The step as the caller wrote it, `{{}}` and `${}` intact — the model
           // reads that beside a `## Values` block and names the placeholder in

@@ -4,6 +4,7 @@ import Handlebars from 'handlebars';
 import type { TestReport, StepResult, SubActionResult, AiInteraction, TurnResult, ApiCallData, FailureDiagnosis, AssertionResult } from './types.js';
 import type { AIAction } from '../ai/types.js';
 import { getAllAiInteractions, isHealedStep } from './types.js';
+import { stepAnchor } from './anchors.js';
 import { getReportTemplate } from './template.js';
 import { toDataUri } from '../browser/screenshot.js';
 import { logger } from '../utils/logger.js';
@@ -505,8 +506,38 @@ ${body}
 </div>`;
 }
 
+/**
+ * The anchor a step card is rendered with (docs/specs/SPEC-scoreboard.md
+ * §8.3), from the fields a scoreboard line records about the same step: its
+ * number, its data row and its hook scope.
+ */
+function canonicalStepAnchor(step: StepResult): string {
+  return stepAnchor({
+    step: step.index,
+    row: step.dataRow ?? (step.loop?.kind === 'row' ? step.loop.index : undefined),
+    hook: step.hookScope,
+    hookIndex: step.hookIndex,
+  });
+}
+
+/**
+ * Unique ids for one report's step cards: the first card to claim an id keeps
+ * it, a later one takes `-2`, `-3`… — a loop body runs a step once per pass,
+ * and a `beforeEach` runs beside every pass of it.
+ */
+function stepAnchorIds(): (step: StepResult) => string {
+  const used = new Map<string, number>();
+  return (step) => {
+    const id = canonicalStepAnchor(step);
+    const seen = used.get(id) ?? 0;
+    used.set(id, seen + 1);
+    return seen === 0 ? id : `${id}-${seen + 1}`;
+  };
+}
+
 function renderSteps(steps: StepResult[]): string {
   const out: string[] = [];
+  const anchorFor = stepAnchorIds();
   let previousLoop: StepResult['loop'] = undefined;
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]!;
@@ -520,25 +551,30 @@ function renderSteps(steps: StepResult[]): string {
     const interactiveMatch = step.instruction.match(/^\[interactive\]\s*(.*)$/i);
     if (interactiveMatch) {
       const hint = interactiveMatch[1]!.trim();
-      out.push(renderInteractiveBanner(step.index, hint));
+      out.push(renderInteractiveBanner(step.index, hint, anchorFor(step)));
       let subIdx = 1;
       while (i + 1 < steps.length && steps[i + 1]!.interactiveChild) {
         const child = steps[++i]!;
         const typed = child.instruction.replace(/^\(interactive\s+\d+\)\s*/i, '');
-        out.push(renderStep(child, { numberLabel: `Step ${step.index}.${subIdx}`, displayInstruction: typed }));
+        out.push(renderStep(child, {
+          numberLabel: `Step ${step.index}.${subIdx}`,
+          displayInstruction: typed,
+          anchorId: anchorFor(child),
+        }));
         subIdx++;
       }
       continue;
     }
 
-    out.push(renderStep(step));
+    out.push(renderStep(step, { anchorId: anchorFor(step) }));
   }
   return out.join('\n');
 }
 
-function renderInteractiveBanner(stepIndex: number, hint: string): string {
+function renderInteractiveBanner(stepIndex: number, hint: string, anchorId?: string): string {
   const hintHtml = hint ? `<span class="interactive-banner-hint">${escapeHtml(hint)}</span>` : '';
-  return `<div class="interactive-banner">
+  const idAttr = anchorId !== undefined ? ` id="${escapeHtml(anchorId)}"` : '';
+  return `<div class="interactive-banner"${idAttr}>
     <span class="interactive-banner-label">Step ${stepIndex} · Interactive prompt</span>
     ${hintHtml}
   </div>`;
@@ -563,6 +599,9 @@ function formatTime(isoString?: string): string {
 interface RenderStepOverrides {
   numberLabel?: string;
   displayInstruction?: string;
+  /** The card's `id` — unique within the report, from `renderSteps`. Absent,
+   *  the step's canonical anchor (`step-11`, src/report/anchors.ts). */
+  anchorId?: string;
 }
 
 /**
@@ -580,13 +619,13 @@ interface RenderStepOverrides {
  *
  * Exported for unit-test use; not part of the report's public API.
  */
-export function renderModeStep(step: StepResult, numberLabel: string): string {
+export function renderModeStep(step: StepResult, numberLabel: string, anchorId?: string): string {
   const failed = step.status === 'failed';
   const marker = failed ? '✗' : `→ ${step.surface ?? 'browser'}`;
   const detail = failed
     ? `<div class="failure-message">${escapeHtml(step.error ?? 'the surface switch failed')}</div>`
     : '';
-  return `<div class="step step-mode${failed ? ' step-mode-failed' : ''}">
+  return `<div class="step step-mode${failed ? ' step-mode-failed' : ''}" id="${escapeHtml(anchorId ?? canonicalStepAnchor(step))}">
   <div class="step-header">
     <span class="step-number">${escapeHtml(numberLabel)}</span>
     <span class="step-instruction">${escapeHtml(step.instruction)}</span>
@@ -600,7 +639,7 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
   // §10.1 — the surface-switch row has its own shape and leaves before any of
   // the step chrome below is built.
   if (step.stepKind === 'mode') {
-    return renderModeStep(step, overrides.numberLabel ?? `Step ${step.index}`);
+    return renderModeStep(step, overrides.numberLabel ?? `Step ${step.index}`, overrides.anchorId);
   }
   // The interrupted step (run stopped here — issue 021) is its own state, not a
   // failure: amber "ABORTED" badge, no red failure block. Checked first so it
@@ -788,7 +827,10 @@ function renderStep(step: StepResult, overrides: RenderStepOverrides = {}): stri
       }</span>`
     : '';
 
-  return `<div class="step${childStepClass}">
+  // The anchor a scoreboard line links to (docs/specs/SPEC-scoreboard.md §8.3).
+  const anchorId = overrides.anchorId ?? canonicalStepAnchor(step);
+
+  return `<div class="step${childStepClass}" id="${escapeHtml(anchorId)}">
   <div class="step-header">
     <span class="step-number">${escapeHtml(stepNumberLabel)}</span>
     <span class="step-instruction">${escapeHtml(displayedInstruction)}</span>

@@ -731,6 +731,32 @@ describe('POST /errands', () => {
     expect(settled.runsInFlight).toBe(0);
   });
 
+  it('hands every step the errand\'s scoreboard run: ad hoc (no test), the resolved project, one run id', async () => {
+    // docs/specs/SPEC-scoreboard.md §7: an errand is a run like any other, and
+    // its steps record under one run id with `test: null`. (The suite runs with
+    // AIUI_STATS=off, so the context arrives switched off — the wiring is what
+    // this pins; tests/stats-api-seam.test.ts pins what gets written.)
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    vi.mocked(executeStepMock).mockImplementation(async (idx: number, _total, instruction, opts) => {
+      seen.push(opts.stats as Record<string, unknown> | undefined);
+      return {
+        index: idx as number,
+        instruction: instruction as string,
+        status: 'passed',
+        turns: [],
+        durationMs: 1,
+        retried: false,
+      };
+    });
+
+    const { body } = await api('POST', '/errands', errandBody({ steps: ['Open the page', 'Read the title'] }));
+    expect(body.status).toBe('passed');
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatchObject({ test: null, project: path.resolve(projectRoot), suite: 'user' });
+    expect(seen[0]!['runId']).toMatch(/^r-\d{8}-\d{6}-[0-9a-f]{4}$/);
+    expect(seen[1]!['runId']).toBe(seen[0]!['runId']);
+  });
+
   // -------------------------------------------------------------------------
   // (b) The receipt
   // -------------------------------------------------------------------------

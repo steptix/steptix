@@ -80,6 +80,9 @@ export async function diagnoseFailure(
       ],
       response: responseText,
       model: completion.model,
+      // A call that belongs to the run, not a step: the scoreboard's run line
+      // counts it through the token tracker (docs/specs/SPEC-scoreboard.md §7.1).
+      ...(completion.usage !== undefined && { usage: completion.usage }),
       timestamp: requestStartedAt,
       ...(finalScreenshot !== undefined && { screenshotBase64: finalScreenshot }),
       ...(pageUrl !== undefined && { pageUrl }),

@@ -6,6 +6,7 @@ import type { StepExecutorOptions } from './step-executor.js';
 import { executeStep } from './step-executor.js';
 import { captureScreenshot } from '../browser/screenshot.js';
 import { logger } from '../utils/logger.js';
+import { adHocStats } from './run-stats.js';
 
 /**
  * Decision returned to the test-runner when the REPL loop ends.
@@ -262,7 +263,13 @@ export async function runInteractiveRepl(ctx: InteractiveReplContext): Promise<I
       // Ad-hoc Flick step — execute against the live page.
       const index = adHocStepIndex();
       logger.info(`Interactive ad-hoc step: ${line}`);
-      const result = await executeStep(index, index, line, ctx.executorOptions);
+      const result = await executeStep(index, index, line, {
+        ...ctx.executorOptions,
+        // The run's scoreboard context, minus what the caller set for the step
+        // the prompt interrupted: a typed line is not a hook step, and the
+        // report files it under its own number (docs/specs/SPEC-scoreboard.md §7).
+        stats: adHocStats(ctx.executorOptions.stats),
+      });
       result.interactiveAdHoc = true;
       ctx.adHocResults.push(result);
       if (result.status === 'passed') {

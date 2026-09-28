@@ -6,6 +6,30 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Added — a first-try scoreboard: `aiui stats`
+
+Every run now keeps a short record, on this machine only, of each AI action
+and step: the kind of selector the model chose, whether it worked the first
+time, the model, the site, and each step's model calls and tokens. The lines go
+to `%LOCALAPPDATA%\aiui\stats\actions-YYYY-MM.jsonl` (one file a month, kept six
+months), are never sent anywhere, and are masked with the same secret set as
+the report. `aiui stats` adds them up: first-try success by selector form,
+site, model, rules version or test; `--failures` and `--costly` list the steps
+behind the numbers, each with a `file:///…#step-N` link that opens the report
+at that step; `--json` gives the same to other tools. Recording costs about
+0.65 ms a step and no extra model or page calls. Steps that asked no model are
+not counted, a step you stop is not counted as a failure, and test-suite and
+compile runs are tagged so they stay out of the default view. `AIUI_STATS=off`
+turns it off for the machine, `"stats": { "enabled": false }` for one project.
+See [the spec](docs/specs/SPEC-scoreboard.md).
+
+Along the way: every model call now records its token usage on the report's
+interaction, including regenerated assertion code and the calls of failed
+attempts, which were dropped before; report step cards carry anchors
+(`id="step-11"`); and the Electron runner masks section-row and skill-argument
+secrets in its report, panel and prompt history, as the CLI and Sessions API
+now do.
+
 ### Fixed — an action the framework does not have fails the step instead of passing it
 
 A model that answered "Tick the I agree box" with `{"action": "check"}` used to

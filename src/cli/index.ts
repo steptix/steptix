@@ -13,6 +13,7 @@ import { registerUiCommand } from './commands/ui.js';
 import { registerServeCommand } from './commands/serve.js';
 import { registerStatusCommand } from './commands/status.js';
 import { registerStopCommand } from './commands/stop.js';
+import { registerStatsCommand } from './commands/stats.js';
 
 export function createCli(): Command {
   const program = new Command();
@@ -31,6 +32,7 @@ export function createCli(): Command {
   registerServeCommand(program);
   registerStatusCommand(program);
   registerStopCommand(program);
+  registerStatsCommand(program);
 
   // Listed so `aiui --help` shows it, but deliberately given no action: the
   // real `mcp` entry is intercepted in `src/index.ts` before commander is

@@ -126,6 +126,15 @@ import {
   runSecrets,
   runSecretsWithInputs,
 } from '../utils/secrets.js';
+import {
+  flushRunStats,
+  openRunStats,
+  projectStatsSwitch,
+  recordRunEnd,
+  statsEnabledIn,
+  type RunStats,
+} from './run-stats.js';
+import type { StatsSuite } from '../stats/types.js';
 
 /**
  * What the report says in place of a root-cause analysis when the run had no
@@ -362,6 +371,17 @@ export interface RunTestExtras {
   /** §5.1 item 1b / §15.4 — the vision-route check. Overridden by tests so
    *  they never reach the network. Defaults to `checkVisionRoute`. */
   checkVisionRoute?: (ai: VisionRouteAi) => Promise<VisionRouteResult>;
+  /**
+   * The scoreboard run this call is one row of (docs/specs/SPEC-scoreboard.md
+   * §8.1). `runTests` opens one per TEST — its rows are one run with one
+   * report — and writes the run line where it writes that report. Absent, this
+   * call is a run of its own: it opens the context and writes the run line
+   * itself, with no report (a compile's record and replay runs).
+   */
+  stats?: RunStats;
+  /** The suite a run this call opens records under, over `AIUI_STATS_SUITE`:
+   *  `compile` for a compile's runs (§5.6). Ignored when `stats` is given. */
+  statsSuite?: StatsSuite;
 }
 
 /**
@@ -520,6 +540,24 @@ export async function runTest(
   );
   /** The executor options every call site shares for this feature. */
   const placeholderOpts = unmaskNames.size > 0 ? { unmask: unmaskNames } : {};
+  // Who is running, for the scoreboard (docs/specs/SPEC-scoreboard.md §7). The
+  // caller's run when `runTests` opened one for the whole test; otherwise this
+  // call is a run of its own and writes its own run line below. `config` is
+  // the config this run uses, so its `stats.enabled` is the project switch.
+  const ownsStats = extras.stats === undefined;
+  const runStats: RunStats =
+    extras.stats ??
+    openRunStats({
+      projectRoot,
+      testFilePath: test.filePath,
+      projectEnabled: statsEnabledIn(config),
+      ...(extras.statsSuite !== undefined && { suite: extras.statsSuite }),
+      ...(dataRowIndex !== undefined && { row: dataRowIndex + 1 }),
+    });
+  /** What each step's options carry: the run, masked with the secrets as they
+   *  are now — the executor adds what the step itself captures. */
+  const statsFor = (): RunStats =>
+    runStats.enabled ? { ...runStats, maskValues: secretsNow() } : runStats;
   const removeFileBridges = runLog
     ? attachRunLogBridges(runLog, fileMode, secretsNow)
     : () => {};
@@ -762,8 +800,10 @@ export async function runTest(
      */
     let timedOut = false;
     /** The run was stopped by its `extras.signal` rather than finishing. Set
-     *  only by the guard's abort catch below — the CLI has no other abort
-     *  path (issues/020). */
+     *  by the guard's abort catch below, by a step that comes back
+     *  `interrupted` (the executors' answer to a Stop mid-step), and once more
+     *  before the report for any interrupted row a hook scope left
+     *  (issues/020). */
     let aborted = false;
 
     /**
@@ -1122,6 +1162,7 @@ export async function runTest(
             retries: config.execution.retries,
             signal: extras.signal,
             failureTail: hookFailureTail,
+            stats: { ...statsFor(), hook: scope, hookIndex: idx + 1 },
           });
           result = aiOutcome.result;
           if (aiOutcome.name !== undefined) {
@@ -1169,6 +1210,18 @@ export async function runTest(
             // fail the hook scope, so it does not abort the run — see the
             // `!result.tolerated` on the scope's own failure check below.
             ...(hookFailureTail && { failureTail: hookFailureTail }),
+            // The scope and the line's place in it ride along: `hookScope` and
+            // `hookIndex` are stamped below, after the step recorded its lines.
+            // And the line as the author wrote it, `${…}` intact: `raw` had its
+            // references substituted at parse, so it holds the values — an
+            // environment's password included — and it is what the scoreboard
+            // would otherwise record as the step's text (§5.7).
+            stats: {
+              ...statsFor(),
+              hook: scope,
+              hookIndex: idx + 1,
+              stepText: hooks.authored?.[scope]?.[idx] ?? raw,
+            },
           },
           // A hook's authored form is `raw`: its `${…}` was substituted at
           // parse (hooks are not shown to the model as authored text the way
@@ -1177,6 +1230,9 @@ export async function runTest(
         }
 
         result.hookScope = scope;
+        // Which line of the scope this is: the scope's lines share `index`, and
+        // the report's anchors and the scoreboard's lines tell them apart by it.
+        result.hookIndex = idx + 1;
         if (sourceSkill) result.sourceSkill = sourceSkill;
         const hookCaptures = computeStepCaptures(result, resolvedParameters);
         if (hookCaptures) result.outputs = hookCaptures;
@@ -1761,6 +1817,10 @@ export async function runTest(
           // and needs the run's env context to resolve `${…}` as well
           // (stories/placeholder-preserving-actions.md §Executor).
           ...(test.envData && { envData: test.envData }),
+          // The group's steps arrive 0-based and are made 1-based below, after
+          // they recorded their lines — so they record under the number the
+          // report will show.
+          stats: { ...statsFor(), reportIndex: (index0) => index0 + 1 },
         });
 
         for (const result of branchedResults) {
@@ -2050,6 +2110,7 @@ export async function runTest(
           retries: config.execution.retries,
           signal: extras.signal,
           failureTail,
+          stats: statsFor(),
         });
         stepResult = aiOutcome.result;
         if (aiOutcome.name !== undefined) {
@@ -2115,6 +2176,7 @@ export async function runTest(
             pageTracker: session.pageTracker,
             browserTracker,
             dismissalGuidance: hooks.hasAny,
+            stats: statsFor(),
           },
           adHocResults,
         });
@@ -2218,6 +2280,7 @@ export async function runTest(
           // This step's own tail, read at one seam over a step that has finally
           // failed (stories/step-failure-outcomes.md, decision 4).
           ...(failureTail && { failureTail }),
+          stats: statsFor(),
         },
         // Authored: the executor applies the `[output:]` enrichment to it too,
         // so the model reads `… [store as: total]` rather than a raw
@@ -2296,6 +2359,7 @@ export async function runTest(
             ...(failureTail && { failureTail }),
             ...(extras.signal && { signal: extras.signal }),
             computer: computerContextFor(config.desktop, surfaceState.adapter),
+            stats: statsFor(),
           },
           rawInstruction,
         );
@@ -2329,6 +2393,7 @@ export async function runTest(
           // This step's own tail (decision 4). Never both: `failureTail` is
           // null whenever a claim was read off the line.
           ...(failureTail && { failureTail }),
+          stats: statsFor(),
         },
         rawInstruction);
       }
@@ -2434,7 +2499,15 @@ export async function runTest(
         continue;
       }
 
-      if (stepResult.status === 'failed' && stepResult.tolerated) {
+      if (stepResult.interrupted) {
+        // A Stop that landed mid-step (issues/020): the executor answers it
+        // with an `interrupted` row, not a failure. The run ends the way the
+        // guard's abort catch ends it — the report marked `aborted` — and
+        // nobody is asked about a step the user ended.
+        logger.info(`Run stopped at step ${i + 1}`);
+        aborted = true;
+        bail = true;
+      } else if (stepResult.status === 'failed' && stepResult.tolerated) {
         // `otherwise continue` (stories/step-failure-outcomes.md, decision 6). The
         // row stays a failure but nothing else happens: no `bail`, no failure REPL,
         // no `overallStatus` change, and the `afterEach` hooks below run as for any
@@ -2466,6 +2539,7 @@ export async function runTest(
             pageTracker: session.pageTracker,
             browserTracker,
             dismissalGuidance: hooks.hasAny,
+            stats: statsFor(),
           };
           const adHocResults: StepResult[] = [];
           // §5.9 — the failure REPL waits for a person too.
@@ -2644,6 +2718,11 @@ export async function runTest(
       await writeLastRun(test.filePath, lastRunSteps);
     }
 
+    // A hook step a Stop cut short comes back `interrupted` too, and ends its
+    // scope as a failure would — without passing the main loop's check above.
+    // Whichever row it was, a stopped run reports as stopped.
+    if (stepResults.some((s) => s.interrupted === true)) aborted = true;
+
     const durationMs = Date.now() - startTime;
     const passedSteps = stepResults.filter((s) => s.status === 'passed').length;
     // `&& !s.interrupted`, the same filter the server uses
@@ -2805,6 +2884,20 @@ export async function runTest(
       };
     }
 
+    // A run of its own writes its run line here (§8.2): a compile's runs,
+    // which write no report. Counted after the diagnosis, whose call belongs to
+    // the run. Flushed in the `finally` below, because the process may exit
+    // straight after — `aiui compile` does, on success and on a throw alike.
+    if (ownsStats) {
+      recordRunEnd(runStats, {
+        status: report.status,
+        aborted: report.aborted,
+        tokensIn: report.inputTokens,
+        tokensOut: report.outputTokens,
+        report: null,
+      });
+    }
+
     return report;
   } finally {
     // The computer lock, before anything else in this teardown
@@ -2879,6 +2972,10 @@ export async function runTest(
       runLog.stream.write(`# endedAt=${new Date().toISOString()}\n`);
       runLog.dispose();
     }
+    // A run of its own flushes its scoreboard lines, pass or throw, bounded so
+    // a stalled append cannot hold the process. A row of `runTests` leaves it
+    // to `runTests`, which flushes once for the whole test.
+    if (ownsStats) await flushRunStats();
   }
 }
 
@@ -2971,6 +3068,23 @@ export async function runTests(
     runTestFn?: typeof runTest;
   } = {},
 ): Promise<RunSummary> {
+  // `aiui run` exits as soon as this returns — and calls `process.exit(1)` the
+  // moment it throws — so an append still queued would die with the process.
+  // Flushed in a `finally`, bounded, so a run that throws keeps the lines of
+  // the steps it did run and a stalled disk cannot hold the exit.
+  try {
+    return await runTestsUnflushed(tests, config, options);
+  } finally {
+    await flushRunStats();
+  }
+}
+
+/** {@link runTests} without the final scoreboard flush. */
+async function runTestsUnflushed(
+  tests: ParsedTest[],
+  config: Config,
+  options: Parameters<typeof runTests>[2] = {},
+): Promise<RunSummary> {
   const runOne = options.runTestFn ?? runTest;
   const context = await loadContextFiles(config.tests.contextDir);
 
@@ -2994,6 +3108,20 @@ export async function runTests(
     // redaction; only the writing is folded.
     const rowReports: RowReport[] = [];
     const unrun: Array<{ index: number; values: Record<string, string>; reason: string }> = [];
+    // …and one scoreboard run, for the same reason: every row's lines carry
+    // one run id, and the run line links the one report (SPEC-scoreboard.md
+    // §8.1). Each row runs under a copy that adds its row number and shares
+    // the tally the run line counts from.
+    //
+    // The switch is the TEST's project's, read from the root its lines are
+    // filed under — not `config`'s, which is whichever `aiui.config.json` the
+    // working directory holds (§6.4).
+    const projectRoot = await resolveProjectRoot(test.filePath);
+    const testStats = openRunStats({
+      projectRoot,
+      testFilePath: test.filePath,
+      projectEnabled: await projectStatsSwitch(projectRoot, config),
+    });
 
     for (const [position, instance] of instances.entries()) {
       if (bailed) {
@@ -3010,7 +3138,12 @@ export async function runTests(
         continue;
       }
 
-      const report = await runOne(instance, config, context.combined);
+      const report = await runOne(instance, config, context.combined, {
+        stats:
+          instance.dataRowIndex === undefined
+            ? testStats
+            : { ...testStats, row: instance.dataRowIndex + 1 },
+      });
       rowReports.push({
         report,
         ...(instance.dataRowIndex !== undefined && {
@@ -3042,6 +3175,15 @@ export async function runTests(
     const reportPath = await generateReport(merged, config.reports.outputDir);
     lastReportPath = reportPath;
     logger.info(`Report saved: ${path.relative(process.cwd(), reportPath)}`);
+    // The run line, beside the report it links (§8.2), with the merged
+    // report's own token counts — what the report shows is what it records.
+    recordRunEnd(testStats, {
+      status: merged.status,
+      aborted: merged.aborted,
+      tokensIn: merged.inputTokens,
+      tokensOut: merged.outputTokens,
+      report: path.resolve(reportPath),
+    });
 
     // Once per test, not once per row: a five-row run used to spend five of
     // the ten-entry history cap on one execution.
