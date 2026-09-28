@@ -2549,11 +2549,30 @@ export interface RecordStepsPromptInput {
         /** Steps the author wrote by hand INSIDE the stretch this call
          *  rewrites; they stay as written. */
         alsoByAuthor?: readonly string[] | undefined;
+        /**
+         * The recorded actions each step stands for, by the numbers the
+         * recording gives them — parallel to `steps`; null (or absent) for a
+         * step of the author's, which stands for none
+         * (stories/testbench-record-edit-steps.md, "Which actions a step
+         * stands for").
+         */
+        stepActions?: ReadonlyArray<readonly number[] | null> | undefined;
+        /** Indices of the steps the author REWORDED: their text is the
+         *  author's, and no step is written for their actions (A4). */
+        edited?: readonly number[] | undefined;
+        /** Steps the author reworded INSIDE the stretch this call rewrites,
+         *  with the actions they stand for — left out of this call's
+         *  recording; they stay as written. */
+        alsoEdited?: ReadonlyArray<{ step: string; actions: readonly number[] }> | undefined;
       }
     | undefined;
   /** 1-based number of `actions[0]` in the recording as it stands (dropped
    *  actions not counted). Defaults to 1. */
   firstActionNumber?: number | undefined;
+  /** Each action's number, parallel to `actions` — for a call whose actions
+   *  are not one run (a redraft that leaves out what a reworded step stands
+   *  for). Absent: `firstActionNumber` counting up. */
+  actionNumbers?: readonly number[] | undefined;
   /** `atMs` of the kept action just before `actions[0]`, for its gap.
    *  Defaults to 0 (the start of the recording). */
   previousAtMs?: number | undefined;
@@ -2587,9 +2606,10 @@ export const RECORD_STEPS_SYSTEM = `You write the steps of an automated UI test 
 You are called again and again during the recording. Each call gives you the DRAFT SO FAR — the steps already written, each with its index — and the actions the author took since. You answer with the draft's new tail.
 
 Reply with ONE JSON object and nothing else:
-{ "replaceFrom": <index>, "steps": ["<step>", "<step>"], "parameters": [{ "name": "<name>", "value": "<value>" }], "notes": ["<for the author>"] }
-- "replaceFrom": the index in the draft so far where your "steps" begin. Every step before it is kept exactly as it is; every step from it to the end is replaced by your "steps". To only add steps, use the draft's length. You may reach back at most ${RECORD_DRAFT_REWRITE_LIMIT} steps (replaceFrom ≥ draft length − ${RECORD_DRAFT_REWRITE_LIMIT}), to rewrite a step the new actions changed the meaning of (I1–I4). When the draft so far is empty, replaceFrom is 0. Never reach back past a LOCKED step or a step the author wrote (A1): the draft says the furthest back you may start. When the draft marks where your steps go ("yourStepsGoHere"), replaceFrom is that index and your steps are inserted there: every step already in the draft stays.
+{ "replaceFrom": <index>, "steps": ["<step>", "<step>"], "stepActions": [[<n>], [<n>, <n>]], "parameters": [{ "name": "<name>", "value": "<value>" }], "notes": ["<for the author>"] }
+- "replaceFrom": the index in the draft so far where your "steps" begin. Every step before it is kept exactly as it is; every step from it to the end is replaced by your "steps". To only add steps, use the draft's length. You may reach back at most ${RECORD_DRAFT_REWRITE_LIMIT} steps (replaceFrom ≥ draft length − ${RECORD_DRAFT_REWRITE_LIMIT}), to rewrite a step the new actions changed the meaning of (I1–I4). When the draft so far is empty, replaceFrom is 0. Never reach back past a LOCKED step, a step the author wrote or a step the author reworded (A1, A4): the draft says the furthest back you may start. When the draft marks where your steps go ("yourStepsGoHere"), replaceFrom is that index and your steps are inserted there: every step already in the draft stays.
 - "steps": the new tail, in the order the author acted, without numbers, one instruction per string, never a line break inside one. An empty list is a valid answer when the new actions add no step and change none.
+- "stepActions": beside "steps", one list for each step you write, in the same order: the numbers (n) of the recorded actions that step describes, typing and choices included — [] for a step that describes none. An action goes in one step at most, in the order the author acted. Only the actions this call shows, and the ones the draft steps you replace stood for: each draft step lists its own as "actions".
 - "parameters": the WHOLE list of parameters the draft uses after your change (rules P1–P5) — not only new ones.
 - "notes": optional short sentences for the author — an action you could not turn into a step, a target you had to describe from its picture. Omit it when there is nothing to say.
 
@@ -2626,10 +2646,11 @@ I8. Keep every step that closes a cookie, consent or other banner, popup or dial
 I9. An action marked afterPause is the first thing the author did after pausing the recording and resuming it. The time across the pause is not a wait the app needed, and the pause is no reason to write a Navigate or any other step.
 I10. In an EXISTING test, every line in aroundTheCursor is already in the file — the steps before the cursor AND the ones after it. They are context, never copied into the draft: the draft is only the steps for the actions in THIS recording. The browser is where the step at the cursor left it, so write no Navigate, sign-in or banner step the author did not do in this recording. But every action the author did take gets its step, even when a line in aroundTheCursor already does the same thing — doing it again is a new step.
 
-STEPS THE AUTHOR WROTE, AND LOCKED STEPS
+STEPS THE AUTHOR WROTE OR REWORDED, AND LOCKED STEPS
 A1. A LOCKED step is in the test file already and final: never repeat it, reword it or write it again, and never reach back past one.
 A2. A step marked "author" was written by hand by the author at that point in the recording, word for word as they want it. The author may then carry it out in the browser: the actions right after it that only do what it says are covered by it, so write nothing for them (the author wrote "Click Pay now", then clicked Pay now: no step for that click).
 A3. Never write a Verify that repeats one of the author's steps, not even for a check action that picked the same thing.
+A4. A step marked "edited" is the author's own rewording of a step: keep it exactly as it is, never write another step for the actions it lists, and never reach back past it.
 
 PARAMETERS
 P1. Every value the author TYPED becomes a {{name}} placeholder and a parameter: "Type {{email}} into the Email field" with {"name": "email", "value": "demo@securebank.com"}. Name it from the field — its label, else its placeholder, else its name attribute — in lower snake_case. The same value typed twice into the same kind of field uses one name.
@@ -2714,18 +2735,24 @@ export function buildRecordStepsPrompt(input: RecordStepsPromptInput): ChatMessa
   const first = input.firstActionNumber ?? 1;
   const draftSteps = input.draft?.steps ?? [];
   const alsoByAuthor = input.draft?.alsoByAuthor ?? [];
-  const full = draftSteps.length === 0 && alsoByAuthor.length === 0;
+  const full =
+    draftSteps.length === 0 && alsoByAuthor.length === 0 && (input.draft?.alsoEdited ?? []).length === 0;
   const locked = Math.max(0, Math.min(input.draft?.locked ?? 0, draftSteps.length));
   const authored = new Set((input.draft?.authored ?? []).filter((i) => i >= 0 && i < draftSteps.length));
+  const edited = new Set((input.draft?.edited ?? []).filter((i) => i >= 0 && i < draftSteps.length));
+  const stepActions = input.draft?.stepActions;
+  const alsoEdited = input.draft?.alsoEdited ?? [];
   const insertAt =
     input.draft?.insertAt === undefined ? undefined : Math.max(0, Math.min(input.draft.insertAt, draftSteps.length));
   // The furthest back an ordinary call may start: three steps, and never past
-  // a locked step or one the author wrote (§8, stories/testbench-record-toolbar.md).
+  // a locked step, one the author wrote or one they reworded (§8,
+  // stories/testbench-record-toolbar.md, stories/testbench-record-edit-steps.md).
   const floor = Math.max(
     0,
     draftSteps.length - RECORD_DRAFT_REWRITE_LIMIT,
     locked,
     ...[...authored].map((i) => i + 1),
+    ...[...edited].map((i) => i + 1),
   );
 
   const where =
@@ -2745,16 +2772,20 @@ export function buildRecordStepsPrompt(input: RecordStepsPromptInput): ChatMessa
     }),
   };
 
-  // Each step as the model reads it: its index, and whether it is locked or
-  // the author's. A call that INSERTS shows where its steps go.
+  // Each step as the model reads it: its index, whether it is locked, the
+  // author's or reworded by the author, and the actions it stands for. A call
+  // that INSERTS shows where its steps go.
   const stepEntries: Array<Record<string, unknown>> = [];
   draftSteps.forEach((step, index) => {
     if (insertAt === index) stepEntries.push({ yourStepsGoHere: true });
+    const actions = stepActions?.[index];
     stepEntries.push({
       index,
       step,
       ...(index < locked && { locked: true }),
       ...(authored.has(index) && { author: true }),
+      ...(edited.has(index) && { edited: true }),
+      ...(actions !== undefined && actions !== null && !authored.has(index) && { actions: [...actions] }),
     });
   });
   if (insertAt === draftSteps.length) stepEntries.push({ yourStepsGoHere: true });
@@ -2766,6 +2797,15 @@ export function buildRecordStepsPrompt(input: RecordStepsPromptInput): ChatMessa
   const authoredLine =
     authored.size > 0
       ? 'Steps marked "author": true were written by hand by the author at that point in the recording (A2, A3).\n'
+      : '';
+  const editedLine =
+    edited.size > 0
+      ? 'Steps marked "edited": true are the author\'s own rewording: keep them exactly as they are, and write no ' +
+        'step for the actions they list (A4).\n'
+      : '';
+  const actionsLine =
+    stepActions !== undefined && draftSteps.length > 0
+      ? 'Each step\'s "actions" are the numbers (n) of the recorded actions it stands for.\n'
       : '';
   const whereLine =
     insertAt !== undefined
@@ -2779,14 +2819,25 @@ export function buildRecordStepsPrompt(input: RecordStepsPromptInput): ChatMessa
       ? `Among the steps you write now, the author also wrote these by hand; they stay exactly as written, so do ` +
         `not write them again: ${JSON.stringify(maskDeep([...alsoByAuthor]))}\n`
       : '';
+  const editedInsideLine =
+    alsoEdited.length > 0
+      ? 'Among the steps you write now, the author also reworded these; each stands for the actions it lists, which ' +
+        'are left out of the recording below. They stay exactly as written, so do not write them again or write ' +
+        `any step for those actions (A4): ${JSON.stringify(
+          maskDeep(alsoEdited.map((e) => ({ step: e.step, actions: [...e.actions] }))),
+        )}\n`
+      : '';
 
   const draftBlock = full
     ? '## The draft so far\nEmpty: write the draft from the start, over every action below (replaceFrom 0).\n\n'
     : `## The draft so far: ${draftSteps.length} step${draftSteps.length === 1 ? '' : 's'}\n` +
       lockedLine +
       authoredLine +
+      editedLine +
+      actionsLine +
       whereLine +
       insideLine +
+      editedInsideLine +
       `\`\`\`json\n${JSON.stringify(
         maskDeep({
           steps: stepEntries,
@@ -2797,8 +2848,9 @@ export function buildRecordStepsPrompt(input: RecordStepsPromptInput): ChatMessa
       )}\n\`\`\`\n\n`;
 
   let previous = input.previousAtMs ?? 0;
+  const numberOf = (i: number): number => input.actionNumbers?.[i] ?? first + i;
   const recording = input.actions.map((a, i) => {
-    const entry = actionForPrompt(a, first + i, previous);
+    const entry = actionForPrompt(a, numberOf(i), previous);
     previous = a.atMs;
     return entry;
   });
@@ -2829,7 +2881,7 @@ export function buildRecordStepsPrompt(input: RecordStepsPromptInput): ChatMessa
       blocks.push({
         type: 'text',
         text:
-          `Screenshot for action ${first + i} (${a.kind}): the target is outlined in red at ` +
+          `Screenshot for action ${numberOf(i)} (${a.kind}): the target is outlined in red at ` +
           `x=${b.x}, y=${b.y}, ${b.width}×${b.height} in this ${a.crop.width}×${a.crop.height} image.`,
       });
       blocks.push({ type: 'image_url', image_url: { url: a.crop.dataUrl } });
@@ -2841,7 +2893,7 @@ export function buildRecordStepsPrompt(input: RecordStepsPromptInput): ChatMessa
       blocks.push({
         type: 'text',
         text:
-          `Screenshot for action ${first + i} (drag — where it was dropped): the drop target is outlined in red at ` +
+          `Screenshot for action ${numberOf(i)} (drag — where it was dropped): the drop target is outlined in red at ` +
           `x=${b.x}, y=${b.y}, ${b.width}×${b.height} in this ${a.dropCrop.width}×${a.dropCrop.height} image.`,
       });
       blocks.push({ type: 'image_url', image_url: { url: a.dropCrop.dataUrl } });

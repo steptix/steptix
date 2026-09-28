@@ -483,8 +483,12 @@ server. Body, frames and statuses: [SPEC-record-steps.md §9](SPEC-record-steps.
 ### POST /sessions/:id/record-steps/control
 
 Steer a running recording: `stop` (with the ids of any actions to drop),
-`check` / `cancel-check` (pick mode for a check step), `cancel`. `202`
-accepted, `404` when no recording is running.
+`drop` / `restore` (an action, a step the author wrote, or a step of the
+draft — deleting a step drops the actions behind it), `check` /
+`cancel-check` (pick mode for a check step), `pause` / `resume`, `add-step`
+(a step the author wrote), `edit-step` (a step the author reworded),
+`cancel`. `202` accepted — with `ignored` when it did nothing, and why —
+`404` when no recording is running, `400` for a body that is none of these.
 [SPEC-record-steps.md §9.3](SPEC-record-steps.md#93-post-sessionsidrecord-stepscontrol).
 
 ---

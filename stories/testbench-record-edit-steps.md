@@ -166,3 +166,109 @@ New frames:
 TestBench keys file lines to step ids from `record:draft.ids`, sends
 `edit-step` / `drop` / `restore` with those ids, and shows `record:edited` and
 `record:dropped` in the panel's action list.
+
+## What the server half built
+
+Built in `src/`: the draft engine (`src/recorder/draft-engine.ts`) keeps an id
+and the actions it stands for on every step, and gained edits, step deletes and
+step restores; the prompt (`src/ai/prompts.ts`) asks for `stepActions`, shows
+each step's `actions`, marks `edited` steps and has rule A4; the run
+(`src/recorder/record-steps-run.ts`) takes `edit-step` and step ids on
+`drop` / `restore` from the route and from the drawer; the drawer itself is in
+`src/browser/scripts/record-toolbar.js`. The wire is as above. Pinned by
+`tests/record-steps-edit.test.ts` (the engine, the prompt and the answer, and a
+150-seed random interleaving), eight new cases in
+`tests/api-server-record-steps.test.ts` (the real routes, page and bar) and
+eleven drawer cases in `tests/record-steps-toolbar.test.ts` (real Chromium,
+read and driven through DevTools, `tests/record-toolbar-cdp.ts`).
+
+Decided while building, where the story left it open:
+
+- **The inferred mapping.** When the model's `stepActions` is missing or does
+  not check out, each action with the events recorded before it is one group,
+  and the groups go to the call's steps one each **from the last** — the newest
+  step is the one the newest action asked for — with any earlier groups left
+  over going to the first step (a focus click a `Type` step folded away, the
+  menu a "Click Payments in the main menu" opened). A step the call left
+  unchanged in place keeps what it stood for. The story's "nearest step first"
+  is read that way. Riding events the answer left out go with the step that
+  claimed their action; an action no step claimed goes with its events when one
+  step claimed them all.
+- **An edited step locks nothing, but is a floor.** An ordinary call may not
+  reach back past it (as past a step of the author's); a redraft keeps it and
+  puts it back among the new steps by where its actions are. Its actions are
+  **left out of every call** — the prompt lists the step and their numbers
+  instead — so the model cannot describe them again; a step an answer ties to
+  nothing but them is not written either. An exact copy of its words is dropped
+  only when the answer's mapping does not hold up: with one that does, the same
+  words for a repeat of the action are a step of their own (I10).
+- **An edit or a delete naming a step the model has since rewritten** replaces
+  (or deletes) every step that now stands for any of the actions the named one
+  stood for. An edit puts one step there — the author's words, all their
+  actions, **under the id the edit named** — so `record:edited.id` is always the
+  id that was sent, and TestBench's line keeps its id. An edit to a step whose
+  actions no step stands for any more is `ignored`, saying so.
+- **Restoring one action of a deleted step** (the panel's ✕ on a struck action)
+  redrafts its stretch, and the model writes a step for it; the deleted step
+  stays deleted and can no longer come back as it was — Restore answers why —
+  even if that action is dropped again later. Its other actions stay struck.
+- **A reworded step whose actions are all dropped since stays** where it was,
+  in the result too: the author's words are never lost. Deleting it is the ✕.
+- **Edits, deletes and restores are carried out the moment they arrive**, not
+  queued behind an Add step as the checklist had it: none needs a model call,
+  so the control route can answer exactly whether each applied (`ignored` and
+  why), and one accepted before Stop is trivially complete before the steps
+  are written. A call in flight that could rewrite the changed step is thrown
+  away and made again — a redraft of its stretch at once; an ordinary call when
+  its answer comes, which now lands by the ids of the steps it replaces, so a
+  change before them moves nothing and costs no call.
+- **Parameters no step uses leave the draft's list** at every draft, not only
+  after a delete — the model is asked for "the whole list the draft uses"
+  anyway.
+- **`record:draft.edited` lists reworded steps of the model's only.** A step of
+  the author's is `authored` already; editing it replaces its text.
+- **Frame order.** A step's `record:dropped` (with `actions`) goes out before
+  the draft without it, as `record:step` goes before the draft with it. An
+  action's or an author step's goes out after, from the toolbar only, as Undo
+  always did — unchanged.
+- **One addition beyond the wire:** `drop` and `restore` accept an optional
+  `source: 'editor' | 'panel'`, echoed in a step's `record:dropped` (`panel`
+  when absent). The frame's union names `editor`, and the server cannot know it
+  otherwise. Nothing depends on it.
+- **The drawer.** Rows are focusable in the bar's own Tab cycle (buttons,
+  status row, rows and their ✕ and +), which never leaves for the page; the
+  arrows move between rows; Enter or F2 edits; Delete or Backspace removes; Esc
+  gives focus back to the page. A struck row stays — for deletes from anywhere,
+  Undo of an author's step included — until a draft brings a step that was not
+  there since the delete; the bar says `Removed "…"` with Restore for a step's
+  delete from any source. An edit in place that loses focus to the page stays
+  open when its words changed (a stray click does not throw them away) and
+  closes when they did not. The bar's "Added as step 8" no longer says "steps
+  1–7 locked".
+
+**A bug the property run found, older than this change.** An author step that
+waited for a call which had taken in actions recorded after the step was sent
+(a refused answer's retry does) closed the stretch at the step's boundary: the
+later actions' coverage moved below the line and was redrafted there, while
+the steps already describing them stayed above it — the same action written
+twice, on both the "between" and "at the end" paths. The stretch now closes
+after every step that starts before the line, and steps drafted over later
+actions move below the line as they are, with no redraft. A second one: a
+deleted step's Restore checked only that its actions were still dropped, so an
+action restored on its own, redrafted, and dropped again let the step back in
+beside the new one — now the delete remembers that its actions came back.
+
+Known gaps: the mapping is only as good as the model's answer or the
+inference (a step the model tied to the wrong actions deletes the wrong ones —
+struck and restorable in the panel); a step of the author's typed inside a
+stretch still keeps its index through a redraft, the approximation the toolbar
+story noted; none of this was run against a real model yet.
+
+Counts: `npm run build` clean. The record-steps files: 42 engine cases (the
+property run among them), 58 in the HTTP suite (8 new), 39 in the toolbar
+suite (11 new), 236 across the six record-steps files, all green. Root
+`npx vitest run`: 271 files, 6861 tests, all passing. Every new case was run
+against the unchanged code first and seen failing: 41 of the 42 engine cases (the other pins Undo's
+unchanged drop of an author step), all 8 HTTP cases, all 11 drawer cases, and
+the four existing cases whose expectations changed (the prompt's `actions`,
+"locked" gone from the bar, the drawer's hint).

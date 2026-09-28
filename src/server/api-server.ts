@@ -1189,9 +1189,14 @@ export function createApiServer(
   });
 
   // POST /sessions/:id/record-steps/control — Stop, Drop, Restore, Add check,
-  // Cancel check, Cancel, Pause, Resume and Add step, for the recording running
-  // in this session. 202 when accepted, 404 when no recording is running
-  // (SPEC-record-steps.md §9.3), 400 for a body that is none of the nine.
+  // Cancel check, Cancel, Pause, Resume, Add step and Edit step, for the
+  // recording running in this session. 202 when accepted, 404 when no
+  // recording is running (SPEC-record-steps.md §9.3), 400 for a body that is
+  // none of the ten. Drop and Restore also take a step of the draft's id
+  // (record:draft.ids): a delete of that step and the actions behind it
+  // (stories/testbench-record-edit-steps.md). An edit-step that cannot apply
+  // (an unknown step, a secret from the editor, an empty text) is a 202 that
+  // says why in `ignored`.
   //
   // Some 202s do nothing, and say so in `ignored`: anything but `cancel` once
   // Stop has been received (only `cancel` still applies — it abandons the call
@@ -3152,6 +3157,8 @@ function ignoredControlMessage(control: RecordControl): string {
       return 'The recording is paused; resume it to add a check.';
     case 'add-step':
       return 'The text holds no step: every line is blank.';
+    case 'edit-step':
+      return `There is no step ${control.id} to change.`;
     default:
       return 'Nothing to do.';
   }
@@ -3162,7 +3169,7 @@ export function parseRecordControl(raw: unknown): RecordControl | string {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     return (
       'Request body must be a JSON object: { action: "stop" | "drop" | "restore" | "check" | "cancel-check" | ' +
-      '"cancel" | "pause" | "resume" | "add-step" }.'
+      '"cancel" | "pause" | "resume" | "add-step" | "edit-step" }.'
     );
   }
   const body = raw as Record<string, unknown>;
@@ -3177,9 +3184,45 @@ export function parseRecordControl(raw: unknown): RecordControl | string {
     case 'drop':
     case 'restore': {
       if (typeof body.id !== 'string' || body.id === '') {
-        return `"${body.action}" needs "id": the id of the record:action or record:step to ${body.action}.`;
+        return (
+          `"${body.action}" needs "id": the id of the record:action, the record:step or the step ` +
+          `(record:draft.ids) to ${body.action}.`
+        );
       }
-      return { action: body.action, id: body.id };
+      // Not in the story's wire, and optional: where a step's delete came
+      // from, echoed in its record:dropped ('panel' when absent).
+      if (body.source !== undefined && body.source !== null && body.source !== 'editor' && body.source !== 'panel') {
+        return '"source" must be "editor" or "panel" when it is given.';
+      }
+      return {
+        action: body.action,
+        id: body.id,
+        ...((body.source === 'editor' || body.source === 'panel') && { source: body.source }),
+      };
+    }
+    case 'edit-step': {
+      if (typeof body.id !== 'string' || body.id === '') {
+        return '"edit-step" needs "id": the id of the step (record:draft.ids) the author changed.';
+      }
+      if (typeof body.text !== 'string') {
+        return '"edit-step" needs "text": the step as the author changed it (one line).';
+      }
+      if (body.source !== 'editor' && body.source !== 'panel') {
+        return '"edit-step" needs "source": "editor" or "panel" (the drawer\'s edits go through the page).';
+      }
+      const control: Extract<RecordControl, { action: 'edit-step' }> = {
+        action: 'edit-step',
+        id: body.id,
+        text: body.text,
+        source: body.source,
+      };
+      if (body.revision !== undefined && body.revision !== null) {
+        if (!Number.isInteger(body.revision) || (body.revision as number) < 0) {
+          return '"revision" must be a whole number: the record:draft revision the author saw.';
+        }
+        control.revision = body.revision as number;
+      }
+      return control;
     }
     case 'check':
       return { action: 'check' };
@@ -3218,6 +3261,6 @@ export function parseRecordControl(raw: unknown): RecordControl | string {
       return control;
     }
     default:
-      return '"action" must be one of: stop, drop, restore, check, cancel-check, cancel, pause, resume, add-step.';
+      return '"action" must be one of: stop, drop, restore, check, cancel-check, cancel, pause, resume, add-step, edit-step.';
   }
 }

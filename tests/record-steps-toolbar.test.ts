@@ -15,7 +15,18 @@ import { chromium, type Browser, type BrowserContext, type Page } from 'playwrig
 import { PageTracker, type BrowserSession } from '../src/browser/manager.js';
 import { StepRecorder, type ToolbarCommand } from '../src/recorder/step-recorder.js';
 import type { RecordedAction } from '../src/recorder/types.js';
-import { clickToolbar, readToolbar, stepBoxValue, toolbarButtonAt, until } from './record-toolbar-cdp.js';
+import {
+  barBoxes,
+  barFocus,
+  clickDrawer,
+  clickToolbar,
+  drawerAt,
+  readDrawer,
+  readToolbar,
+  stepBoxValue,
+  toolbarButtonAt,
+  until,
+} from './record-toolbar-cdp.js';
 
 /** Every page listens to everything it can, the way apps with keyboard
  *  shortcuts and "click outside to close" do — registered by the PAGE, after
@@ -293,8 +304,8 @@ describe('the toolbar is kept out of the recording', () => {
     expect(commands).toEqual([{ kind: 'undo' }]);
     expect(actions).toEqual([]);
     expect(await heard()).toEqual([]);
-    // The drawer opened: read-only, and says so.
-    expect((await readToolbar(page))!.all).toContain('Read-only here.');
+    // The drawer opened: it says how to change the steps in it.
+    expect((await readToolbar(page))!.all).toContain('Click a step to change it · ✕ removes it · + adds one below');
     // The control: the page itself is still recorded, and still hears its own.
     await page.click('#go');
     await until(async () => actions.length, (n) => n === 1, 'the click on Go');
@@ -847,5 +858,280 @@ describe('the control object (finding 11)', () => {
     await page.keyboard.press('Alt+Shift+Z');
     await until(async () => commands.length, (n) => n === 1, 'Undo from the bar');
     expect(commands).toEqual([{ kind: 'undo' }]);
+  }, 30_000);
+});
+
+// ── The drawer: edit, delete and insert steps (stories/testbench-record-edit-steps.md) ──
+
+describe('the Steps so far drawer', () => {
+  const STEPS = [
+    { id: 'd1', text: 'Click Reports in the main menu', yours: false },
+    { id: 's1', text: 'Verify the balance', yours: true },
+    { id: 'd2', text: 'Click Go', yours: true, edited: true },
+  ];
+  const WITH_STEPS = { ...VIEW, steps: STEPS, revision: 7, deleted: [] as unknown[] };
+
+  /** Start on `path` with three steps in the draft, and open the drawer. */
+  async function drawerOpen(path = '/app.html', recorderOpts: Parameters<typeof newRecorder>[0] = {}): Promise<void> {
+    await startOn(path, recorderOpts);
+    recorder.setToolbar({ ...WITH_STEPS });
+    await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Click Go'), 'the last step');
+    await clickToolbar(page, 'drawer');
+    await until(() => readDrawer(page), (d) => d !== null && d.open && d.rows.length === 3, 'the drawer');
+    await page.evaluate('window.heard = []');
+  }
+
+  it('shows every step numbered, "yours" on the author\'s and the reworded one, a hint to change them — and no lock', async () => {
+    await drawerOpen();
+    const d = (await readDrawer(page))!;
+    expect(d.rows.map((r) => [r.n, r.text, r.yours])).toEqual([
+      ['1', 'Click Reports in the main menu', false],
+      ['2', 'Verify the balance', true],
+      ['3', 'Click Go', true],
+    ]);
+    expect(d.foot).toBe('Click a step to change it · ✕ removes it · + adds one below');
+    expect(d.lock).toBe(false);
+    // An older server's `locked` flags draw no lock either.
+    recorder.setToolbar({ ...WITH_STEPS, steps: STEPS.map((s) => ({ ...s, locked: true })) });
+    await sleep(200);
+    expect((await readDrawer(page))!.lock).toBe(false);
+    expect((await readToolbar(page))!.sub).toContain('yours');
+  }, 30_000);
+
+  it('with the mouse: click a step, change it, Enter — an edit-step with its id, shown at once; never an action, never heard', async () => {
+    await drawerOpen();
+    await clickDrawer(page, 'd1', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[0]!.editing, 'the step in a box');
+    expect((await readDrawer(page))!.rows[0]!.text).toBe('Click Reports in the main menu');
+    await page.keyboard.press('Control+A');
+    await page.keyboard.type('Open Reports from the side menu');
+    await page.keyboard.press('Enter');
+    await until(async () => commands.length, (n) => n === 1, 'the edit');
+    expect(commands).toEqual([{ kind: 'edit-step', id: 'd1', text: 'Open Reports from the side menu' }]);
+    const d = (await readDrawer(page))!;
+    expect(d.rows[0]).toMatchObject({ text: 'Open Reports from the side menu', yours: true, editing: false });
+    expect(actions).toEqual([]);
+    expect(await heardBesidesModifiers()).toEqual([]);
+  }, 30_000);
+
+  it('Esc leaves the step as it was; an empty save removes it', async () => {
+    await drawerOpen();
+    await clickDrawer(page, 'd2', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[2]!.editing, 'the step in a box');
+    await page.keyboard.type(' and more');
+    await page.keyboard.press('Escape');
+    await until(() => readDrawer(page), (d) => d !== null && !d.rows[2]!.editing, 'the box gone');
+    expect((await readDrawer(page))!.rows[2]!.text).toBe('Click Go');
+    expect(commands).toEqual([]);
+    await clickDrawer(page, 'd2', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[2]!.editing, 'the step in a box again');
+    await page.keyboard.press('Control+A');
+    await page.keyboard.press('Backspace');
+    await page.keyboard.press('Enter');
+    await until(async () => commands.length, (n) => n === 1, 'the delete');
+    expect(commands).toEqual([{ kind: 'delete-step', id: 'd2' }]);
+    expect(actions).toEqual([]);
+  }, 30_000);
+
+  it('✕ removes a step: struck through at once, with Restore; Restore puts it back', async () => {
+    await drawerOpen();
+    await clickDrawer(page, 's1', 'row-delete');
+    await until(async () => commands.length, (n) => n === 1, 'the delete');
+    expect(commands).toEqual([{ kind: 'delete-step', id: 's1' }]);
+    let d = (await readDrawer(page))!;
+    expect(d.rows.map((r) => [r.kind, r.n, r.text])).toEqual([
+      ['live', '1', 'Click Reports in the main menu'],
+      ['deleted', '', 'Verify the balance'],
+      ['live', '2', 'Click Go'],
+    ]);
+    // The server's push agrees: the step is out of the draft, and in its
+    // struck list after the step that was before it.
+    recorder.setToolbar({
+      ...WITH_STEPS,
+      steps: [STEPS[0], STEPS[2]],
+      deleted: [{ id: 's1', text: 'Verify the balance', afterId: 'd1' }],
+    });
+    await sleep(200);
+    d = (await readDrawer(page))!;
+    expect(d.rows.map((r) => [r.kind, r.text])).toEqual([
+      ['live', 'Click Reports in the main menu'],
+      ['deleted', 'Verify the balance'],
+      ['live', 'Click Go'],
+    ]);
+    await clickDrawer(page, 's1', 'row-restore');
+    await until(async () => commands.length, (n) => n === 2, 'the restore');
+    expect(commands[1]).toEqual({ kind: 'restore-step', id: 's1' });
+    expect((await readDrawer(page))!.rows[1]!.kind).toBe('restoring');
+    expect(actions).toEqual([]);
+    expect(await heardBesidesModifiers()).toEqual([]);
+  }, 30_000);
+
+  it('+ below a step opens Add step aimed there: the step names the step it goes after, its index and the draft', async () => {
+    await drawerOpen();
+    await clickDrawer(page, 'd1', 'row-insert');
+    await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Goes after step 1'), 'the aimed box');
+    await page.keyboard.type('Verify the Reports page is shown');
+    await page.keyboard.press('Enter');
+    await until(async () => commands.length, (n) => n === 1, 'the step');
+    expect(commands).toEqual([
+      { kind: 'step', text: 'Verify the Reports page is shown', after: { id: 'd1', index: 0, revision: 7 } },
+    ]);
+    // Add step from its own button aims at the end again.
+    await page.keyboard.press('Alt+Shift+S');
+    await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Enter to add'), 'the box');
+    expect((await readToolbar(page))!.sub).not.toContain('Goes after');
+    await page.keyboard.type('At the end');
+    await page.keyboard.press('Enter');
+    await until(async () => commands.length, (n) => n === 2, 'the second step');
+    expect(commands[1]).toEqual({ kind: 'step', text: 'At the end' });
+    expect(actions).toEqual([]);
+  }, 30_000);
+
+  it('with the keyboard: Tab reaches the rows, with visible focus; arrows move; Enter edits and saves; Delete removes', async () => {
+    await drawerOpen();
+    await page.focus('#email');
+    await page.keyboard.press('Alt+Shift+R');
+    // Tab round the bar until a row has focus.
+    let focus = await barFocus(page);
+    for (let i = 0; i < 20 && !(focus?.row); i++) {
+      await page.keyboard.press('Tab');
+      focus = await barFocus(page);
+    }
+    expect(focus).toMatchObject({ row: true, id: 'd1', visible: true });
+    await page.keyboard.press('ArrowDown');
+    expect(await barFocus(page)).toMatchObject({ row: true, id: 's1', visible: true });
+    await page.keyboard.press('ArrowDown');
+    expect(await barFocus(page)).toMatchObject({ row: true, id: 'd2' });
+    await page.keyboard.press('ArrowUp');
+    expect(await barFocus(page)).toMatchObject({ row: true, id: 's1' });
+    await page.keyboard.press('Enter');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[1]!.editing, 'the step in a box');
+    await page.keyboard.press('End');
+    await page.keyboard.type(' is "$10"');
+    await page.keyboard.press('Enter');
+    await until(async () => commands.length, (n) => n === 1, 'the edit');
+    expect(commands[0]).toEqual({ kind: 'edit-step', id: 's1', text: 'Verify the balance is "$10"' });
+    // Focus is back on the row, to go on from there.
+    expect(await barFocus(page)).toMatchObject({ row: true, id: 's1' });
+    await page.keyboard.press('Delete');
+    await until(async () => commands.length, (n) => n === 2, 'the delete');
+    expect(commands[1]).toEqual({ kind: 'delete-step', id: 's1' });
+    // Esc gives focus back to the page.
+    await page.keyboard.press('Escape');
+    await until(async () => page.evaluate(() => document.activeElement?.id), (id) => id === 'email', 'focus back');
+    expect(actions.filter((a) => a.kind !== 'click')).toEqual([]);
+    expect((await heardBesidesModifiers()).filter((h) => !/focusin/.test(h))).toEqual([]);
+  }, 45_000);
+
+  it('a change the recorder refuses is taken back in the page: the words, and the struck row', async () => {
+    recorder = new StepRecorder({
+      browser: session,
+      sendScreenshots: false,
+      knownSecrets: () => [],
+      onAction: (a) => actions.push(a),
+      onPick: (armed) => picks.push(armed),
+      toolbar: { ...VIEW },
+      onToolbar: (c) => {
+        commands.push(c);
+        return c.kind === 'edit-step' || c.kind === 'delete-step' ? false : undefined;
+      },
+    });
+    await recorder.start();
+    await page.goto(`${origin}/app.html`);
+    await until(() => hostState(page), (s) => s.present && s.width > 0, 'the toolbar');
+    recorder.setToolbar({ ...WITH_STEPS });
+    await until(() => readToolbar(page), (t) => t !== null && t.sub.includes('Click Go'), 'the last step');
+    await clickToolbar(page, 'drawer');
+    await until(() => readDrawer(page), (d) => d !== null && d.open && d.rows.length === 3, 'the drawer');
+    await clickDrawer(page, 'd1', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[0]!.editing, 'the step in a box');
+    await page.keyboard.press('Control+A');
+    await page.keyboard.type('Refused words');
+    await page.keyboard.press('Enter');
+    await until(async () => commands.length, (n) => n === 1, 'the edit');
+    await until(
+      () => readDrawer(page),
+      (d) => d !== null && d.rows[0]!.text === 'Click Reports in the main menu' && !d.rows[0]!.editing,
+      'the words taken back',
+    );
+    await clickDrawer(page, 'd2', 'row-delete');
+    await until(async () => commands.length, (n) => n === 2, 'the delete');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows.every((r) => r.kind === 'live'), 'the row back');
+  }, 30_000);
+
+  it('a draft that arrives while a step is being edited does not take the box away', async () => {
+    await drawerOpen();
+    await clickDrawer(page, 'd2', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[2]!.editing, 'the step in a box');
+    await page.keyboard.type(' twice');
+    recorder.setToolbar({
+      ...WITH_STEPS,
+      revision: 8,
+      steps: [...STEPS, { id: 'd3', text: 'Click Next', yours: false }],
+      updating: true,
+    });
+    await sleep(250);
+    const d = (await readDrawer(page))!;
+    expect(d.rows[2]).toMatchObject({ editing: true, text: 'Click Go twice' });
+    await page.keyboard.press('Enter');
+    await until(async () => commands.length, (n) => n === 1, 'the edit');
+    expect(commands[0]).toEqual({ kind: 'edit-step', id: 'd2', text: 'Click Go twice' });
+    await until(() => readDrawer(page), (dd) => dd !== null && dd.rows.some((r) => r.id === 'd3'), 'the new draft shown');
+  }, 30_000);
+
+  it('opens away from the docked edge, inside the bar the crops paint out', async () => {
+    await drawerOpen();
+    let b = (await barBoxes(page))!;
+    // Docked at the bottom: the drawer above the buttons.
+    expect(b.drawer.y + b.drawer.height).toBeLessThanOrEqual(b.main.y + 1);
+    for (const box of [b.drawer, b.main]) {
+      expect(box.x).toBeGreaterThanOrEqual(b.host.x - 1);
+      expect(box.y).toBeGreaterThanOrEqual(b.host.y - 1);
+      expect(box.x + box.width).toBeLessThanOrEqual(b.host.x + b.host.width + 1);
+      expect(box.y + box.height).toBeLessThanOrEqual(b.host.y + b.host.height + 1);
+    }
+    recorder.setToolbar({ ...WITH_STEPS, dock: 'tl' });
+    await sleep(250);
+    b = (await barBoxes(page))!;
+    expect(b.drawer.y).toBeGreaterThanOrEqual(b.main.y + b.main.height - 1);
+    expect(b.host.y).toBeLessThan(40);
+    // A long draft scrolls inside the drawer rather than growing past it.
+    recorder.setToolbar({
+      ...WITH_STEPS,
+      dock: 'tl',
+      steps: Array.from({ length: 30 }, (_x, i) => ({ id: `d${i + 10}`, text: `Step number ${i + 1}`, yours: false })),
+    });
+    await sleep(250);
+    b = (await barBoxes(page))!;
+    expect(b.drawer.height).toBeLessThan(260);
+    const last = await drawerAt(page, 'd39', null);
+    expect(last).not.toBeNull();
+  }, 30_000);
+
+  it('works under a strict Content-Security-Policy with Trusted Types', async () => {
+    await drawerOpen('/strict-tt.html');
+    await clickDrawer(page, 'd1', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[0]!.editing, 'the step in a box');
+    await page.keyboard.press('Control+A');
+    await page.keyboard.type('Changed under CSP');
+    await page.keyboard.press('Enter');
+    await until(async () => commands.length, (n) => n === 1, 'the edit');
+    expect(commands).toEqual([{ kind: 'edit-step', id: 'd1', text: 'Changed under CSP' }]);
+    await clickDrawer(page, 'd2', 'row-delete');
+    await until(async () => commands.length, (n) => n === 2, 'the delete');
+    expect(commands[1]).toEqual({ kind: 'delete-step', id: 'd2' });
+  }, 30_000);
+
+  it('the page cannot drive it: a page script sending an edit or a delete without the token changes nothing', async () => {
+    await drawerOpen();
+    await page.evaluate(`(async () => {
+      const b = window.__aiuiRecordSteps;
+      await b({ type: 'edit-step', id: 'd1', text: 'Injected' });
+      await b({ type: 'edit-step', id: 'd1', text: 'Injected', token: 'guess' });
+      await b({ type: 'toolbar', command: 'delete-step', id: 'd1', token: 'guess' });
+      await b({ type: 'step', text: 'Injected step', afterId: 'd1', token: 'guess' });
+    })()`);
+    await sleep(200);
+    expect(commands).toEqual([]);
   }, 30_000);
 });

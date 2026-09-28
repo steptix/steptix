@@ -54,6 +54,13 @@
     boxText: '', boxTimer: 0, returnFocus: null, drag: null, suppressClick: false,
     noticeSeq: -1, noticeUntil: 0, closedByUser: false, removeTimer: 0,
     lastPaused: false, lastPick: false, lastPhase: '', lastFocusSecret: false,
+    // The drawer (stories/testbench-record-edit-steps.md, "The drawer"): the
+    // step being edited in place ({ id, input, viaKeyboard, original });
+    // what this page has done to a row ahead of the server's answer, by step
+    // id ({ text } | { deleted } | { restored }, `confirmed` once answered
+    // yes); and where the Add step box puts its step ({ id, index, revision,
+    // n }) when a row's + opened it.
+    editing: null, overrides: {}, insertAfter: null,
   };
   var tbCheck = { timer: 0, every: 0, pending: false, missed: 0 };
   var swallowKeyUp = null;
@@ -189,7 +196,6 @@
     '.ico{flex:none;display:inline-flex}',
     '.ico.ok{color:var(--ok)}',
     '.ico.warn{color:var(--paused)}',
-    '.ico.lock{color:var(--yours)}',
     '.yours{flex:none;font-size:10.5px;font-weight:600;letter-spacing:.04em;color:#0F2A1D;background:var(--yours);',
     'border-radius:4px;padding:1px 5px}',
     '.chip{display:inline-flex;align-items:center;gap:5px;flex:none;border:1px solid rgba(143,224,181,.5);',
@@ -216,19 +222,38 @@
     '.hint{flex:none;color:var(--faint);font-size:11.5px;white-space:nowrap}',
     '.spin{width:12px;height:12px;border-radius:50%;flex:none;border:2px solid var(--line);',
     'border-top-color:var(--text);animation:aiui-spin .9s linear infinite}',
-    '.drawer{width:0;min-width:100%;max-height:214px;overflow:auto;border-top:1px solid var(--line);padding:6px 4px}',
+    '.drawer{position:relative;width:0;min-width:100%;max-height:214px;overflow:auto;border-top:1px solid var(--line);',
+    'padding:6px 4px}',
     '.wrap[data-edge="bottom"] .drawer{border-top:0;border-bottom:1px solid var(--line)}',
-    '.drawer ol{list-style:none;margin:0;padding:0;display:grid;gap:1px}',
-    '.drawer li{display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:5px;font-size:12.5px;',
-    'color:var(--text)}',
+    '.drawer ol{list-style:none;margin:0;padding:0 0 4px;display:grid}',
+    '.drawer li.row{display:flex;align-items:center;gap:8px;min-height:26px;padding:2px 4px 2px 8px;border-radius:5px;',
+    'font-size:12.5px;color:var(--text)}',
+    '.drawer li.row:hover{background:var(--raise)}',
+    '.drawer li.row:focus{outline:none}',
+    '.drawer li.row:focus-visible{outline:2px solid var(--pick);outline-offset:-2px}',
     '.drawer li .n{font-family:var(--mono);font-size:11px;color:var(--faint);min-width:1.6em;text-align:right;flex:none}',
-    '.drawer li .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-    '.drawer li.locked .t{color:var(--dim)}',
-    '.drawer li.mine .t{color:var(--text)}',
+    '.drawer li .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text}',
     '.drawer li.last{background:var(--raise)}',
-    '.drawer li.pending .t{color:var(--faint);font-style:italic}',
-    '.drawer li .lk{color:var(--faint);display:inline-flex;flex:none}',
+    '.drawer li.pending .t{color:var(--faint);font-style:italic;cursor:default}',
+    '.drawer li.deleted .t{color:var(--faint);text-decoration:line-through;cursor:default}',
+    '.drawer li.restoring .t{color:var(--dim);cursor:default}',
     '.drawer li .yours{font-size:10px;padding:0 5px}',
+    '.drawer .rb{flex:none;display:inline-grid;place-items:center;width:22px;height:22px;border:0;border-radius:5px;',
+    'background:transparent;color:var(--dim);cursor:pointer;padding:0;visibility:hidden}',
+    '.drawer .rb:hover{background:var(--press);color:var(--text)}',
+    '.drawer li.row:hover .rb,.drawer li.row:focus-within .rb,.drawer .rb:focus-visible{visibility:visible}',
+    '.drawer li.gap{position:relative;height:5px;padding:0}',
+    '.drawer .ins{position:absolute;left:6px;top:-8px;z-index:1;display:grid;place-items:center;width:20px;height:20px;',
+    'border:1px solid var(--line);border-radius:50%;background:var(--raise);color:var(--text);cursor:pointer;padding:0;',
+    'visibility:hidden}',
+    '.drawer .ins:hover{background:var(--press)}',
+    '.drawer li.gap:hover .ins,.drawer li.row:hover+li.gap .ins,.drawer li.row:focus-within+li.gap .ins,',
+    '.drawer .ins:focus-visible{visibility:visible}',
+    '.drawer .rb:focus-visible,.drawer .ins:focus-visible,.drawer .mini:focus-visible{outline:2px solid var(--pick);',
+    'outline-offset:-1px}',
+    '.drawer .rowedit{flex:1;min-width:0;height:24px;background:var(--field);color:var(--text);border:1px solid var(--line);',
+    'border-radius:5px;padding:0 7px;font:12.5px var(--ui);margin:0;user-select:text;-webkit-user-select:text;cursor:text}',
+    '.drawer .rowedit:focus{outline:2px solid var(--pick);outline-offset:-1px;border-color:transparent}',
     '.drawer .foot{color:var(--faint);font-size:11.5px;padding:6px 8px 2px;margin:0}',
     '.pill{--ring:rgba(255,255,255,.16);display:inline-flex;align-items:center;gap:7px;height:34px;',
     'padding:0 6px 0 12px;background:var(--bg);color:var(--text);border:0;border-radius:999px;',
@@ -284,6 +309,8 @@
     warn: { w: 14, h: 14, shapes: [['path', { d: 'M7 1.8 12.8 12H1.2L7 1.8Z' }], ['path', { d: 'M7 5.6v3M7 10.2v.3' }]] },
     chev: { w: 12, h: 12, sw: 1.6, shapes: [['path', { d: 'm3 4.5 3 3 3-3' }]] },
     up: { w: 12, h: 12, sw: 1.6, shapes: [['path', { d: 'm3 7.5 3-3 3 3' }]] },
+    plus: { w: 10, h: 10, sw: 1.6, shapes: [['path', { d: 'M5 1.5v7M1.5 5h7' }]] },
+    xs: { w: 10, h: 10, sw: 1.6, shapes: [['path', { d: 'm2 2 6 6M8 2 2 8' }]] },
   };
 
   function tbIcon(name, cls) {
@@ -437,7 +464,7 @@
     var list = tbEl('ol');
     list.setAttribute('aria-label', 'Steps so far');
     drawer.appendChild(list);
-    drawer.appendChild(tbEl('p', 'foot', 'Read-only here. Drop individual actions in the TestBench panel.'));
+    drawer.appendChild(tbEl('p', 'foot', 'Click a step to change it · ✕ removes it · + adds one below'));
     drawer.setAttribute('id', 'aiui-drawer');
 
     bar.appendChild(main);
@@ -609,6 +636,9 @@
     tbLocal.confirm = false;
     tbLocal.drawer = false;
     tbLocal.drag = null;
+    tbLocal.editing = null;
+    tbLocal.overrides = {};
+    tbLocal.insertAfter = null;
     try {
       if (t.host.matches(':popover-open')) t.host.hidePopover();
     } catch (err) { /* ignore */ }
@@ -651,6 +681,16 @@
       tbLocal.confirm = false;
       tbLocal.drawer = false;
       tbLocal.offline = false;
+      tbLocal.editing = null;
+      tbLocal.overrides = {};
+      tbLocal.insertAfter = null;
+    }
+    // A row this page changed ahead of the server, and the server said yes:
+    // this push (or an earlier one) already shows it.
+    for (var oid in tbLocal.overrides) {
+      if (Object.prototype.hasOwnProperty.call(tbLocal.overrides, oid) && tbLocal.overrides[oid].confirmed) {
+        delete tbLocal.overrides[oid];
+      }
     }
     if ((view.phase === 'done' || view.phase === 'ended') && !tbLocal.removeTimer) {
       tbLocal.removeTimer = setTimeout(function () {
@@ -825,6 +865,11 @@
 
     tbRenderSub(v, closed, paused, pick, offline, notice);
     var showDrawer = tbLocal.drawer && !closed && !tbLocal.box && !tbLocal.confirm;
+    // An edit in place ends when its row can no longer be seen: nothing saved.
+    if (!showDrawer && tbLocal.editing) {
+      tbLocal.editing = null;
+      tb.listKey = '';
+    }
     tb.drawer.hidden = !showDrawer;
     if (showDrawer) tbRenderDrawer(v);
 
@@ -834,9 +879,64 @@
     tbPlace();
   }
 
-  function tbStepFlags(v, index) {
-    var s = Array.isArray(v.steps) ? v.steps[index] : null;
-    return s && typeof s === 'object' ? s : null;
+  function tbOwn(obj, key) {
+    return Object.prototype.hasOwnProperty.call(obj, key);
+  }
+
+  /**
+   * The drawer's rows, in order: each step of the draft (numbered), and each
+   * step deleted since the last one landed, struck through where it was —
+   * with what this page did ahead of the server's answer applied on top: an
+   * edit shows its new words, a delete strikes the row at once, a Restore
+   * un-strikes it.
+   */
+  function tbDrawerRows(v) {
+    var steps = Array.isArray(v.steps) ? v.steps : [];
+    var deleted = Array.isArray(v.deleted) ? v.deleted : [];
+    var ov = tbLocal.overrides;
+    var rows = [];
+    var seen = {};
+    var n = 0;
+    for (var i = 0; i < steps.length; i++) {
+      var s = steps[i] && typeof steps[i] === 'object' ? steps[i] : {};
+      var id = typeof s.id === 'string' ? s.id : '';
+      var o = id && tbOwn(ov, id) ? ov[id] : null;
+      if (id) seen[id] = true;
+      if (o && o.deleted) {
+        rows.push({ kind: 'deleted', id: id, text: String(s.text || ''), index: i });
+        continue;
+      }
+      n++;
+      var edited = o && typeof o.text === 'string';
+      rows.push({
+        kind: 'live', id: id, n: n, index: i,
+        text: edited ? o.text : String(s.text || ''),
+        yours: s.yours === true || !!edited,
+      });
+    }
+    for (var d = 0; d < deleted.length; d++) {
+      var row = deleted[d] && typeof deleted[d] === 'object' ? deleted[d] : null;
+      if (!row || typeof row.id !== 'string' || seen[row.id]) continue;
+      seen[row.id] = true;
+      var back = tbOwn(ov, row.id) && ov[row.id].restored;
+      var at = rows.length;
+      if (row.afterId === null) {
+        at = 0;
+      } else {
+        for (var k = 0; k < rows.length; k++) {
+          if (rows[k].id === row.afterId) {
+            at = k + 1;
+            break;
+          }
+        }
+      }
+      rows.splice(at, 0, { kind: back ? 'restoring' : 'deleted', id: row.id, text: String(row.text || '') });
+    }
+    return rows;
+  }
+
+  function tbLiveRows(v) {
+    return tbDrawerRows(v).filter(function (r) { return r.kind === 'live'; });
   }
 
   function tbToggleButton() {
@@ -863,6 +963,7 @@
       mode = 'confirm';
     } else if (tbLocal.box) {
       mode = 'box';
+      parts.push(tbLocal.insertAfter ? tbLocal.insertAfter.n : 0);
     } else if (offline) {
       mode = 'offline';
     } else if (pick) {
@@ -881,16 +982,22 @@
       mode = 'secret';
     } else {
       mode = 'last';
-      var steps = Array.isArray(v.steps) ? v.steps : [];
-      var last = steps.length ? steps[steps.length - 1] : null;
-      parts.push(steps.length, last ? last.text : '', last ? last.locked : '', last ? last.yours : '',
-        v.updating === true, tbLocal.drawer);
+      var live = tbLiveRows(v);
+      var last = live.length ? live[live.length - 1] : null;
+      parts.push(live.length, last ? last.text : '', last ? last.yours : '', v.updating === true, tbLocal.drawer);
     }
     var key = mode + '|' + JSON.stringify(parts);
     if (key === tb.subKey) return;
-    if (tb.subKey.indexOf('box|') === 0 && mode === 'box') return;
+    // The box is not rebuilt under the caret — unless a row's + has just
+    // aimed it somewhere else.
+    if (tb.subKey.indexOf('box|') === 0 && mode === 'box' && !tbLocal.boxRetarget) return;
+    tbLocal.boxRetarget = false;
     tb.subKey = key;
     var sub = tb.sub;
+    // A control of this row that has keyboard focus keeps it through the
+    // rebuild (the Steps so far toggle, pressed with Enter).
+    var had = tb.root.activeElement;
+    var keepCmd = had && had !== tb.input && sub.contains(had) ? had.getAttribute('data-cmd') : null;
     while (sub.firstChild) sub.removeChild(sub.firstChild);
     var add = function (node) { sub.appendChild(node); return node; };
     var ico = function (name, cls) {
@@ -922,7 +1029,9 @@
       case 'box': {
         add(tb.input);
         add(tbMini('add', 'Add'));
-        var hint = add(tbEl('span', 'hint', 'Enter to add · Esc to close'));
+        var target = tbLocal.insertAfter;
+        var hint = add(tbEl('span', 'hint',
+          (target ? 'Goes after step ' + target.n + ' · ' : '') + 'Enter to add · Esc to close'));
         hint.setAttribute('id', 'aiui-hint');
         break;
       }
@@ -958,53 +1067,263 @@
         add(tbToggleButton());
         break;
       default: {
-        var list = Array.isArray(v.steps) ? v.steps : [];
+        // The last step as the drawer has it. No lock: nothing is locked
+        // against the author (stories/testbench-record-edit-steps.md).
+        var list = tbLiveRows(v);
         if (list.length === 0) {
           add(tbEl('span', 'msg dim', 'No steps yet. They appear here as you work.'));
         } else {
-          var last2 = tbStepFlags(v, list.length - 1) || {};
+          var last2 = list[list.length - 1];
           add(tbEl('span', 'n', String(list.length)));
           add(tbEl('span', 't', String(last2.text || '')));
-          if (last2.yours === true) {
-            add(ico('lock', 'lock'));
-            add(tbEl('span', 'yours', 'yours'));
-          } else if (last2.locked === true) {
-            add(ico('lock', 'lock'));
-          }
+          if (last2.yours === true) add(tbEl('span', 'yours', 'yours'));
         }
         if (v.updating === true) add(tbEl('span', 'upd', 'updating…'));
         add(tbToggleButton());
       }
     }
+    if (keepCmd) {
+      var again = sub.querySelector('[data-cmd="' + keepCmd + '"]');
+      if (again) {
+        try { again.focus({ preventScroll: true }); } catch (err) { /* ignore */ }
+      }
+    }
   }
 
+  /** A small button on a drawer row. Out of the page's Tab order like every
+   *  button of the bar; Tab inside the bar reaches it. */
+  function tbRowButton(cmd, cls, icon, id, label) {
+    var b = tbButton(cmd, cls, icon, null, label);
+    b.setAttribute('data-id', id);
+    b.setAttribute('aria-label', label);
+    return b;
+  }
+
+  /**
+   * The Steps so far drawer: every step, editable and deletable in place,
+   * with a + in the gap below each to add one there, and the steps deleted
+   * since the last one landed, struck through, with Restore
+   * (stories/testbench-record-edit-steps.md, "The drawer"). Not rebuilt while
+   * a step is being edited in it — that would take the caret away.
+   */
   function tbRenderDrawer(v) {
-    var steps = Array.isArray(v.steps) ? v.steps : [];
-    var key = JSON.stringify([steps, v.updating === true]);
+    if (tbLocal.editing) return;
+    var rows = tbDrawerRows(v);
+    var key = JSON.stringify([rows, v.updating === true]);
     if (key === tb.listKey) return;
     tb.listKey = key;
+    // Keyboard focus stays on the same row, or the same button of it.
+    var had = tb.root.activeElement;
+    var keep = had && tb.list.contains(had)
+      ? { id: had.getAttribute('data-row-id') || had.getAttribute('data-id'), cmd: had.getAttribute('data-cmd') }
+      : null;
     var list = tb.list;
     while (list.firstChild) list.removeChild(list.firstChild);
-    for (var i = 0; i < steps.length; i++) {
-      var s = steps[i] || {};
-      var cls = (s.locked ? 'locked ' : '') + (s.yours ? 'mine ' : '') + (i === steps.length - 1 ? 'last' : '');
-      var li = tbEl('li', cls.trim() || null);
-      li.appendChild(tbEl('span', 'n', String(i + 1)));
-      li.appendChild(tbEl('span', 't', String(s.text || '')));
-      if (s.yours) li.appendChild(tbEl('span', 'yours', 'yours'));
-      if (s.locked) {
-        var lk = tbEl('span', 'lk');
-        lk.title = 'Locked';
-        lk.appendChild(tbIcon('lock'));
-        li.appendChild(lk);
+    var liveCount = 0;
+    for (var c = 0; c < rows.length; c++) if (rows[c].kind === 'live') liveCount++;
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var li = tbEl('li', 'row ' + r.kind + (r.kind === 'live' && r.n === liveCount ? ' last' : ''));
+      li.tabIndex = -1;
+      li.setAttribute('data-row-id', r.id);
+      li.appendChild(tbEl('span', 'n', r.kind === 'live' ? String(r.n) : ''));
+      var t = li.appendChild(tbEl('span', 't', r.text));
+      if (r.kind === 'live') {
+        t.setAttribute('data-cmd', 'row-edit');
+        t.setAttribute('data-id', r.id);
+        t.title = 'Click to change this step';
+        li.setAttribute('aria-label', 'Step ' + r.n + ': ' + r.text + (r.yours ? ' (yours)' : ''));
+        if (r.yours) li.appendChild(tbEl('span', 'yours', 'yours'));
+        li.appendChild(tbRowButton('row-delete', 'rb', 'xs', r.id, 'Remove step ' + r.n));
+      } else if (r.kind === 'deleted') {
+        li.setAttribute('aria-label', 'Removed: ' + r.text);
+        var restore = tbMini('row-restore', 'Restore');
+        restore.setAttribute('data-id', r.id);
+        restore.setAttribute('aria-label', 'Restore "' + r.text + '"');
+        li.appendChild(restore);
       }
       list.appendChild(li);
+      if (r.kind === 'live') {
+        var gap = tbEl('li', 'gap');
+        gap.appendChild(tbRowButton('row-insert', 'ins', 'plus', r.id, 'Add a step after step ' + r.n));
+        list.appendChild(gap);
+      }
     }
     if (v.updating === true) {
-      var pending = tbEl('li', 'pending');
-      pending.appendChild(tbEl('span', 'n', String(steps.length + 1)));
+      var pending = tbEl('li', 'row pending');
+      pending.appendChild(tbEl('span', 'n', String(liveCount + 1)));
       pending.appendChild(tbEl('span', 't', 'updating…'));
       list.appendChild(pending);
+    }
+    if (keep && keep.id) {
+      var back = tbDrawerFind(keep.id, keep.cmd) || tbDrawerFind(keep.id, null);
+      if (back) tbFocusIn(back);
+    }
+  }
+
+  /** A drawer row by its step id — or, given `cmd`, that button of it. */
+  function tbDrawerFind(id, cmd) {
+    var all = tb.list.querySelectorAll(cmd ? '[data-cmd]' : 'li.row');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (cmd) {
+        if (el.getAttribute('data-cmd') === cmd && el.getAttribute('data-id') === id) return el;
+      } else if (el.getAttribute('data-row-id') === id) {
+        return el;
+      }
+    }
+    return null;
+  }
+
+  /** Focus an element of the drawer, scrolled into the drawer's view (not
+   *  the page's: the bar is fixed, and the page must not move). */
+  function tbFocusIn(el) {
+    try { el.focus({ preventScroll: true }); } catch (err) { /* ignore */ }
+    var row = el.closest ? el.closest('li') : null;
+    var d = tb.drawer;
+    if (!row || !d) return;
+    if (row.offsetTop < d.scrollTop) d.scrollTop = row.offsetTop;
+    else if (row.offsetTop + row.offsetHeight > d.scrollTop + d.clientHeight) {
+      d.scrollTop = row.offsetTop + row.offsetHeight - d.clientHeight;
+    }
+  }
+
+  /** Every place Tab stops in the bar: its buttons, then the status row's,
+   *  then the drawer's rows and their buttons, in order. */
+  function tbFocusStops() {
+    var out = [];
+    var add = function (list) {
+      for (var i = 0; i < list.length; i++) {
+        var el = list[i];
+        if (el.disabled || el.hidden) continue;
+        if (el.closest && el.closest('[hidden]')) continue;
+        out.push(el);
+      }
+    };
+    add(tb.main.querySelectorAll('button'));
+    add(tb.sub.querySelectorAll('button, input'));
+    if (!tb.drawer.hidden) add(tb.list.querySelectorAll('li.row:not(.pending), button'));
+    return out;
+  }
+
+  // ── Editing, deleting and inserting in the drawer ──────────────────────
+
+  /** Edit a step in place: its text becomes a box. Enter saves (an empty
+   *  save is a delete), Esc cancels. */
+  function tbStartEdit(id, viaKeyboard) {
+    if (!tb || !tbView || tbView.phase !== 'recording' || tbLocal.editing) return;
+    var row = null;
+    var rows = tbLiveRows(tbView);
+    for (var i = 0; i < rows.length; i++) if (rows[i].id === id) row = rows[i];
+    var li = tbDrawerFind(id, null);
+    var span = li ? li.querySelector('.t') : null;
+    if (!row || !li || !span) return;
+    if (!tbHasFocus()) tbLocal.returnFocus = tbPageFocus();
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.setAttribute('class', 'rowedit');
+    input.setAttribute('autocomplete', 'off');
+    input.setAttribute('spellcheck', 'true');
+    input.setAttribute('aria-label', 'Change step ' + row.n + '. Enter saves, Esc cancels; empty removes it.');
+    input.value = row.text;
+    tbLocal.editing = { id: id, input: input, viaKeyboard: !!viaKeyboard, original: row.text, n: row.n };
+    li.replaceChild(input, span);
+    try {
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(input.value.length, input.value.length);
+    } catch (err) { /* ignore */ }
+  }
+
+  function tbFinishEdit(save) {
+    var e = tbLocal.editing;
+    if (!e || !tb) return;
+    tbLocal.editing = null;
+    tb.listKey = '';
+    var text = e.input.value;
+    if (save) {
+      if (!/\S/.test(text)) tbDeleteRow(e.id);
+      else if (text.trim() !== e.original.trim()) tbEditRow(e.id, text, e.n);
+    }
+    tbRender();
+    if (e.viaKeyboard) {
+      var li = tbDrawerFind(e.id, null);
+      if (li) tbFocusIn(li);
+      else tbGiveFocusBack();
+    } else {
+      tbGiveFocusBack();
+    }
+  }
+
+  /**
+   * Send a drawer change the row already shows. The server's yes keeps it
+   * until a push shows the same; anything else takes it back — to the state
+   * the refusal carries, or to what the server last pushed (the pattern of
+   * `sendOptimistic`, per row).
+   */
+  function tbRowSend(message, id, change) {
+    tbLocal.overrides[id] = change;
+    var done = false;
+    var timer = 0;
+    var finish = function (answer) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      // A newer change to the same row has taken over.
+      if (tbLocal.overrides[id] !== change) return;
+      if (answer && answer.ok === true) {
+        change.confirmed = true;
+        return;
+      }
+      delete tbLocal.overrides[id];
+      if (answer && answer.state && typeof answer.state === 'object') {
+        applyState(answer.state);
+      } else if (tb) {
+        tb.listKey = '';
+        tbRender();
+      }
+    };
+    timer = setTimeout(function () { finish(null); }, COMMAND_ANSWER_MS);
+    void sendCmd(message).then(finish, function () { finish(null); });
+    if (tb) {
+      tb.listKey = '';
+      tbRender();
+    }
+  }
+
+  function tbEditRow(id, text, n) {
+    tbRowSend({ type: 'edit-step', id: id, text: text.slice(0, 4000) }, id, { text: text, confirmed: false });
+    tbAnnounce('Step ' + n + ' changed');
+  }
+
+  function tbDeleteRow(id) {
+    // The ✕ of the row being edited: the edit ends, unsaved — the step goes.
+    var wasEditing = !!tbLocal.editing && tbLocal.editing.id === id;
+    if (wasEditing) tbLocal.editing = null;
+    tbRowSend({ type: 'toolbar', command: 'delete-step', id: id }, id, { deleted: true, confirmed: false });
+    if (wasEditing) tbGiveFocusBack();
+    tbAnnounce('Step removed');
+  }
+
+  function tbRestoreRow(id) {
+    tbRowSend({ type: 'toolbar', command: 'restore-step', id: id }, id, { restored: true, confirmed: false });
+    tbAnnounce('Step restored');
+  }
+
+  /** A row's +: the Add step box, aimed at the place below that row. */
+  function tbInsertAt(id) {
+    if (!tbView) return;
+    var rows = tbLiveRows(tbView);
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].id !== id) continue;
+      tbLocal.insertAfter = {
+        id: id,
+        index: rows[i].index,
+        revision: typeof tbView.revision === 'number' ? tbView.revision : undefined,
+        n: rows[i].n,
+      };
+      tbLocal.boxRetarget = true;
+      tbOpenBox(true);
+      return;
     }
   }
 
@@ -1062,9 +1381,15 @@
     try { tbFirstButton().focus({ preventScroll: true }); } catch (err) { /* ignore */ }
   }
 
-  function tbOpenBox() {
+  /** Open the Add step box — at the end of the steps, or (`aimed`) where a
+   *  drawer row's + put it. */
+  function tbOpenBox(aimed) {
     if (!tb || !tbView || tbView.phase !== 'recording') return;
     if (!tbHasFocus()) tbLocal.returnFocus = tbPageFocus();
+    if (!aimed && tbLocal.insertAfter) {
+      tbLocal.insertAfter = null;
+      tbLocal.boxRetarget = true;
+    }
     tbLocal.confirm = false;
     tbLocal.expanded = true;
     if (!tbLocal.box) {
@@ -1083,6 +1408,7 @@
     if (!tb) return;
     tbLocal.boxText = tb.input.value;
     tbLocal.box = false;
+    tbLocal.insertAfter = null;
     tbGiveFocusBack();
     tbRender();
   }
@@ -1095,14 +1421,25 @@
       return;
     }
     clearTimeout(tbLocal.boxTimer);
+    // Where it goes: after the row whose + opened the box — by that step's
+    // id, and the index and draft it had, for when the model has since
+    // rewritten it — else at the end.
+    var target = tbLocal.insertAfter;
+    var message = { type: 'step', text: text.slice(0, 4000) };
+    if (target) {
+      message.afterId = target.id;
+      message.afterStep = target.index;
+      if (typeof target.revision === 'number') message.revision = target.revision;
+    }
     // Not taken: the text goes back into the box for the next time it opens
     // (a step refused because Stop came first is said by the server instead).
-    sendOptimistic({ type: 'step', text: text.slice(0, 4000) }, function () {
+    sendOptimistic(message, function () {
       if (!tbLocal.box && tbLocal.boxText === '') tbLocal.boxText = text;
     });
     tb.input.value = '';
     tbLocal.boxText = '';
     tbLocal.box = false;
+    tbLocal.insertAfter = null;
     tbGiveFocusBack();
     tbRender();
   }
@@ -1180,14 +1517,27 @@
     });
   }
 
-  function tbCommand(cmd) {
+  function tbCommand(cmd, el) {
     if (cmd === 'close') {
       tbLocal.closedByUser = true;
       tbRemove();
       return;
     }
     if (!tbView || tbView.phase !== 'recording') return;
+    var id = el && el.getAttribute ? el.getAttribute('data-id') : null;
     switch (cmd) {
+      case 'row-edit':
+        if (id) tbStartEdit(id, false);
+        break;
+      case 'row-delete':
+        if (id) tbDeleteRow(id);
+        break;
+      case 'row-restore':
+        if (id) tbRestoreRow(id);
+        break;
+      case 'row-insert':
+        if (id) tbInsertAt(id);
+        break;
       case 'pause':
         if (state.paused) void sendCmd({ type: 'toolbar', command: 'resume' });
         else pauseLocally();
@@ -1342,6 +1692,21 @@
       // Every other key types into the box: its default action is untouched.
       return;
     }
+    if (tbLocal.editing && active === tbLocal.editing.input) {
+      if (event.key === 'Enter' && !event.isComposing && event.keyCode !== 229) {
+        event.preventDefault();
+        swallowKeyUp = event.code;
+        tbFinishEdit(true);
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        swallowKeyUp = event.code;
+        tbFinishEdit(false);
+      } else if (event.key === 'Tab') {
+        // Stays in the edit: Enter or Esc ends it.
+        event.preventDefault();
+      }
+      return;
+    }
     if (event.key === 'Escape') {
       event.preventDefault();
       swallowKeyUp = event.code;
@@ -1366,6 +1731,52 @@
       event.preventDefault();
       var next = list[(i + (event.key === 'ArrowRight' ? 1 : list.length - 1)) % list.length];
       try { next.focus(); } catch (err) { /* ignore */ }
+      return;
+    }
+    // The drawer: Enter (or F2) changes the focused step, Delete removes it,
+    // Up and Down move from row to row.
+    if (active && tb.list.contains(active)) {
+      var li = active.closest ? active.closest('li') : null;
+      var rowId = active.getAttribute('data-row-id');
+      var live = rowId !== null && active.classList.contains('live');
+      if (live && (event.key === 'Enter' || event.key === 'F2')) {
+        event.preventDefault();
+        swallowKeyUp = event.code;
+        tbStartEdit(rowId, true);
+        return;
+      }
+      if (live && (event.key === 'Delete' || event.key === 'Backspace')) {
+        event.preventDefault();
+        swallowKeyUp = event.code;
+        tbDeleteRow(rowId);
+        return;
+      }
+      if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && li) {
+        var rows = Array.prototype.slice.call(tb.list.querySelectorAll('li.row:not(.pending)'));
+        var down = event.key === 'ArrowDown';
+        var from = rows.indexOf(li);
+        if (from < 0) {
+          // A gap's +: the row above it, or the one below.
+          var sib = down ? li.nextElementSibling : li.previousElementSibling;
+          from = rows.indexOf(sib);
+          if (from >= 0) from += down ? -1 : 1;
+        }
+        var to = from + (down ? 1 : -1);
+        event.preventDefault();
+        if (to >= 0 && to < rows.length) tbFocusIn(rows[to]);
+        return;
+      }
+    }
+    // Tab moves round the bar — its buttons, the status row, the drawer — and
+    // never out into the page (its buttons are out of the page's Tab order,
+    // so a recorded Tab lands where a run's does). Esc gives focus back.
+    if (event.key === 'Tab' && !event.altKey && !event.ctrlKey && !event.metaKey) {
+      var stops = tbFocusStops();
+      if (stops.length === 0) return;
+      event.preventDefault();
+      var at = stops.indexOf(active);
+      var goTo = at < 0 ? 0 : (at + (event.shiftKey ? stops.length - 1 : 1)) % stops.length;
+      tbFocusIn(stops[goTo]);
     }
   }
 
@@ -1381,7 +1792,7 @@
     if (!button || button.disabled) return;
     var cmd = button.getAttribute('data-cmd');
     if (cmd === 'grip') return;
-    tbCommand(cmd);
+    tbCommand(cmd, button);
   }
 
   function tbPointerDown(event) {
@@ -1397,7 +1808,7 @@
       settleEnter();
       flushAllExcept(null);
     }
-    if (el === tb.input) return;
+    if (tbIsTextBox(el)) return;
     // The buttons do not take focus: the app's field keeps it, and its open
     // menu stays open.
     if (event.cancelable) event.preventDefault();
@@ -1423,7 +1834,17 @@
         tbDragEnd(event);
         break;
       case 'mousedown':
-        if (tbAt(event.clientX, event.clientY) !== tb.input && event.cancelable) event.preventDefault();
+        if (!tbIsTextBox(tbAt(event.clientX, event.clientY)) && event.cancelable) event.preventDefault();
+        break;
+      case 'focusout':
+        // An edit in place the author clicked away from: kept open when they
+        // changed something (their words are not thrown away by a stray
+        // click), closed when they did not.
+        setTimeout(function () {
+          var e = tbLocal.editing;
+          if (!e || !tb || tb.root.activeElement === e.input) return;
+          if (e.input.value === e.original) tbFinishEdit(false);
+        }, 0);
         break;
       case 'click':
         tbClick(event);
@@ -1435,9 +1856,15 @@
         tbBoxInput();
         break;
       case 'contextmenu':
-        if (tb.root.activeElement !== tb.input && event.cancelable) event.preventDefault();
+        if (!tbIsTextBox(tb.root.activeElement) && event.cancelable) event.preventDefault();
         break;
     }
+  }
+
+  /** The step box, or a step being edited in the drawer: where typing,
+   *  selecting and the caret are the author's. */
+  function tbIsTextBox(el) {
+    return !!el && (el === tb.input || (tbLocal.editing !== null && el === tbLocal.editing.input));
   }
 
   // ── The shortcuts, in every frame ──────────────────────────────────────

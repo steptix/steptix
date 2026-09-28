@@ -43,6 +43,23 @@ function isEnvReference(value: string): boolean {
 }
 
 /**
+ * The model's step texts as they go into the file — each with the index it
+ * had in the answer, so a list parallel to `steps` (`stepActions`) stays
+ * parallel once the empty ones are gone.
+ */
+function cleanSteps(raw: readonly string[]): Array<{ text: string; from: number }> {
+  return (
+    raw
+      // A step is one physical line (handbook §2): a wrapped one would be seen
+      // by TestBench as a step and a stray line.
+      .map((s, from) => ({ text: s.replace(/\s*[\r\n]+\s*/g, ' ').trim(), from }))
+      // Numbers are TestBench's to assign.
+      .map((s) => ({ text: s.text.replace(/^\d+[.)]\s+/, ''), from: s.from }))
+      .filter((s) => s.text !== '')
+  );
+}
+
+/**
  * Read the JSON answer `{ steps, parameters, notes? }`.
  *
  * Forgiving about the envelope — a Markdown fence, prose around the object, a
@@ -79,13 +96,7 @@ export function parseRecordStepsAnswer(text: string): RecordStepsAnswer {
     );
   }
   const notes: string[] = [];
-  const steps = (rawSteps as string[])
-    // A step is one physical line (handbook §2): a wrapped one would be seen by
-    // TestBench as a step and a stray line.
-    .map((s) => s.replace(/\s*[\r\n]+\s*/g, ' ').trim())
-    // Numbers are TestBench's to assign.
-    .map((s) => s.replace(/^\d+[.)]\s+/, ''))
-    .filter((s) => s !== '');
+  const steps = cleanSteps(rawSteps as string[]).map((s) => s.text);
 
   const parameters: Array<{ name: string; value: string }> = [];
   const rawParams = obj['parameters'];
@@ -129,16 +140,38 @@ export interface DraftAnswer extends RecordStepsAnswer {
    * engine refuses that exactly as it refuses one that reaches back too far.
    */
   replaceFrom: number | undefined;
+  /**
+   * Which recorded actions each step describes, by the numbers the prompt
+   * showed — parallel to `steps` (stories/testbench-record-edit-steps.md, "The
+   * wire, exactly"). Undefined when the model left it out, or gave anything
+   * that is not one list of whole numbers per step: the engine then infers the
+   * mapping. Read only for its shape here; whether the numbers make sense for
+   * the call is the engine's to check.
+   */
+  stepActions: number[][] | undefined;
 }
 
-/** Read a draft call's JSON answer `{ replaceFrom, steps, parameters, notes? }`. */
+/** Read a draft call's JSON answer `{ replaceFrom, steps, stepActions?, parameters, notes? }`. */
 export function parseDraftAnswer(text: string): DraftAnswer {
   const answer = parseRecordStepsAnswer(text);
   // Valid JSON by now — `parseRecordStepsAnswer` threw otherwise.
   const obj = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)) as Record<string, unknown>;
   const raw = obj['replaceFrom'];
   const replaceFrom = typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 ? raw : undefined;
-  return { ...answer, replaceFrom };
+  return { ...answer, replaceFrom, stepActions: readStepActions(obj['steps'] as string[], obj['stepActions']) };
+}
+
+/** `stepActions` beside the raw `steps`, kept parallel to the cleaned ones —
+ *  or undefined when it is not one list of whole numbers (1 or more) per step. */
+function readStepActions(rawSteps: readonly string[], raw: unknown): number[][] | undefined {
+  if (!Array.isArray(raw) || raw.length !== rawSteps.length) return undefined;
+  const lists: number[][] = [];
+  for (const entry of raw as unknown[]) {
+    if (!Array.isArray(entry)) return undefined;
+    if (!entry.every((n) => typeof n === 'number' && Number.isInteger(n) && n >= 1)) return undefined;
+    lists.push([...(entry as number[])]);
+  }
+  return cleanSteps(rawSteps).map((s) => lists[s.from]!);
 }
 
 /** `password` → `$PASSWORD`, `apiKey` → `$API_KEY`. */
@@ -270,6 +303,8 @@ export interface AskForDraftArgs {
    *  locked and authored steps, and where an inserting call's steps go. */
   draft: NonNullable<RecordStepsPromptInput['draft']>;
   firstActionNumber: number;
+  /** Each action's number, parallel to `actions`. */
+  actionNumbers?: readonly number[];
   previousAtMs: number;
   file: TargetFileSummary;
   /** Send the covered actions' crops (`ai.sendScreenshots`, and the model has
@@ -298,6 +333,7 @@ export async function askForDraft(args: AskForDraftArgs): Promise<DraftAnswer> {
         actions: args.actions,
         draft: args.draft,
         firstActionNumber: args.firstActionNumber,
+        ...(args.actionNumbers !== undefined && { actionNumbers: args.actionNumbers }),
         previousAtMs: args.previousAtMs,
         file: args.file,
         includeImages,

@@ -81,7 +81,20 @@ export type RecordEvent =
       locked: number;
       authored: number[];
       authoredIds?: string[];
+      /**
+       * One stable id per step (stories/testbench-record-edit-steps.md, "The
+       * wire, exactly"): kept while the step is unchanged in place, new when
+       * the model writes or rewrites it; an author step keeps its `s` id.
+       * Never an action's id or another step's.
+       */
+      ids: string[];
+      /** Indices of the steps whose text is the author's rewording of a step
+       *  the model wrote (a subset of what the drawer shows as `yours`). */
+      edited: number[];
     }
+  /** A step's text was changed by the author — from the browser's drawer,
+   *  the test file or the panel. The draft that shows it comes after. */
+  | { type: 'record:edited'; id: string; text: string; source: RecordStepSource }
   /** Stop received; finishing the draft. */
   | { type: 'record:writing' }
   | {
@@ -109,9 +122,20 @@ export type RecordEvent =
       afterStep: number;
       atMs: number;
     }
-  /** An action or an author step was dropped or restored from the browser's
-   *  toolbar (Undo / Restore), so the panel can strike it through. */
-  | { type: 'record:dropped'; id: string; dropped: boolean; source: 'toolbar' | 'panel' }
+  /**
+   * An action or an author step was dropped or restored from the browser's
+   * toolbar (Undo / Restore), so the panel can strike it through — or a step
+   * of the draft was deleted or restored from anywhere, with the recorded
+   * actions its delete dropped (or its restore put back) in `actions`. A step's
+   * frame comes before the draft without (or with) it.
+   */
+  | {
+      type: 'record:dropped';
+      id: string;
+      dropped: boolean;
+      source: RecordStepSource;
+      actions?: string[];
+    }
   /** The toolbar was moved or minimised: TestBench keeps it for the next start body. */
   | { type: 'record:toolbar'; dock: ToolbarDock; minimised: boolean }
   | {
@@ -176,10 +200,24 @@ export interface RecordStepsRequest {
 /** `POST /sessions/:id/record-steps/control` body, validated. */
 export type RecordControl =
   | { action: 'stop'; dropped?: string[] }
-  /** Leave this action — or author step — out, and redraft now (decision 9). */
-  | { action: 'drop'; id: string }
-  /** Put it back, and redraft now. */
-  | { action: 'restore'; id: string }
+  /**
+   * Leave this action — or author step — out, and redraft now (decision 9).
+   * A step of the draft (a `record:draft.ids` id) is deleted at once, with the
+   * recorded actions behind it (stories/testbench-record-edit-steps.md).
+   * `source` is not in that story's wire: optional, and only echoed in the
+   * `record:dropped` a step's delete sends ('panel' when absent).
+   */
+  | { action: 'drop'; id: string; source?: 'editor' | 'panel' }
+  /** Put it back — an action or author step redrafts now; a step of the
+   *  draft goes back where it was, with its actions. */
+  | { action: 'restore'; id: string; source?: 'editor' | 'panel' }
+  /**
+   * The author reworded a step of the draft. The text is theirs from now on:
+   * the step keeps the actions it stands for, and the model neither rewrites
+   * it nor writes another step for them. `revision` is the draft the author
+   * saw.
+   */
+  | { action: 'edit-step'; id: string; text: string; source: 'editor' | 'panel'; revision?: number }
   | { action: 'check' }
   | { action: 'cancel-check' }
   | { action: 'cancel' }

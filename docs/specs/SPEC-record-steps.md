@@ -160,10 +160,12 @@ take the shortcuts.
   **Restore** puts the last one back.
 - **Stop.** Every Add step, Undo and Restore accepted before Stop is carried
   out before the steps are written — one waiting behind another's model call
-  included. From the toolbar after Stop, a step, Undo, Restore, Pause or Add
-  check is refused: the bar says so (through "Writing the steps…"), and a
-  step's words go to the panel as a warning and onto the end line ("Done · 12
-  steps written to pay-by-cash.md · 1 step typed after Stop was not added").
+  included; an edit or a removal from the drawer is carried out the moment it
+  arrives. From the toolbar after Stop, a step, Undo, Restore, Pause, Add
+  check, an edit or a removal is refused: the bar says so (through "Writing
+  the steps…"), a step's words go to the panel as a warning and onto the end
+  line ("Done · 12 steps written to pay-by-cash.md · 1 step typed after Stop
+  was not added"), and an edit's words go to the panel as a warning.
 - **Typing hidden** shows while a secret field (§5) has focus in any frame of
   any tab — also one that already had focus when the recording reached its
   document (an autofocused password box, the one the author was in when
@@ -172,6 +174,23 @@ take the shortcuts.
   (Added…, Removed… Restore, Couldn't update…) and the paused line show over
   it.
 - **Once it is not recording** (writing, done, ended) the bar takes no pointer
+- **Steps so far**, the drawer the status row opens, lists the draft
+  numbered, `yours` on the author's own steps and on the ones they reworded,
+  and no lock: nothing is locked against the author
+  (stories/testbench-record-edit-steps.md). Clicking a step's words — or
+  Enter on a focused row — edits it in place: Enter saves (§8, "The author's
+  edits"), Esc cancels, an empty save removes it. **✕** removes a step — one
+  the model wrote with the recorded actions behind it (§8) — and the row stays
+  struck through where it was, with **Restore**, until the next step lands;
+  the bar says `Removed "…"` with Restore too, whoever removed it (the drawer,
+  the panel or the test file). The **+** in the gap below a row opens Add step
+  aimed there ("Goes after step 3"): the step joins between the two, as a line
+  typed there in the file does (§7.6). Tab moves round the bar — its buttons,
+  the status row, the drawer's rows and their ✕ and + — and never out into the
+  page; the arrow keys move from row to row, Delete removes the focused one,
+  and focus shows. A change shows at once and is taken back when the server
+  refuses it. The drawer scrolls past about eight rows and opens away from the
+  docked edge.
   events but its Close button's: a click on the page under it lands on the
   page. A run started on the session takes the bar out of every page before
   its first step, so the run never clicks it and no screenshot shows it.
@@ -258,7 +277,8 @@ page stops at once, and what it sends anyway (a frame the pause has not
 reached yet) is refused on arrival, in the order the binding delivered it:
 what the page sent before its pause is kept.
 
-**The recorder's own toolbar is never captured.** Its host is a closed shadow
+**The recorder's own toolbar is never captured** — its drawer, its step box
+and a step being edited in place included. Its host is a closed shadow
 root, so every event from it reaches the page retargeted to the host; the
 recorder's first listener on `window` (an init script's, so the first one
 registered in every document loaded during the recording) handles those
@@ -811,7 +831,9 @@ well as append:
 
 **Input of a draft call:** the handbook's step-writing rules; the draft so
 far (its steps, numbered, and its parameters) — each LOCKED step marked final,
-each of the author's marked as written by hand at that point (§7.6); the NEW
+each of the author's marked as written by hand at that point (§7.6), each the
+author reworded marked `edited`, and every step but the author's own with the
+numbers of the recorded actions it stands for (`actions`); the NEW
 actions, each with its description (§4.1), its crop (§4.2), the time since the
 previous action (paused time left out) and its tab, and `afterPause` on the
 first one after a Resume; the file around the cursor — `baseUrl`, existing
@@ -820,11 +842,13 @@ the steps just before and after the insertion point. The rules add: never
 repeat, reword or reach back past a locked step (A1); the actions right after
 a step of the author's that only carry it out are covered by it — write
 nothing for them (A2); never a Verify that repeats one of the author's (A3);
-a pause is not a wait the app needed nor a reason to navigate (I9); a solid
-dark box in a crop is a secret or the recorder's controls (D2).
+a step the author reworded is theirs — keep it exactly, write no other step
+for its actions, never reach back past it (A4); a pause is not a wait the app
+needed nor a reason to navigate (I9); a solid dark box in a crop is a secret
+or the recorder's controls (D2).
 
-**Output of a draft call:** JSON only — the draft's new tail and the whole
-parameter list.
+**Output of a draft call:** JSON only — the draft's new tail, which recorded
+actions each of its steps describes, and the whole parameter list.
 
 ```json
 {
@@ -840,11 +864,80 @@ parameter list.
 
 `replaceFrom` is the 0-based index in the current draft where `steps`
 begins; everything before it is kept. It may reach back neither more than
-three steps nor past the last locked step (or step of the author's): a value
-that does is refused and the call is retried once as a redraft of the OPEN
-steps only — the steps after the last lock, over the actions since it —
-never of the whole recording. Without locks that is the whole draft, as
-before. `steps` carry no numbers. `notes` are shown to the author.
+three steps nor past the last locked step (or step of the author's, or step
+they reworded): a value that does is refused and the call is retried once as
+a redraft of the OPEN steps only — the steps after the last lock, over the
+actions since it — never of the whole recording. Without locks that is the
+whole draft, as before. `steps` carry no numbers. `stepActions` is parallel
+to `steps`: for each, the numbers (`n`, as the recording in the prompt gives
+them — an action's place among the ones still in) of the actions it
+describes, typing and choices included. `notes` are shown to the author.
+
+**Which actions a step stands for** (stories/testbench-record-edit-steps.md).
+The engine checks `stepActions`: every number one this call may give out —
+its own actions, and the ones the steps it replaces stood for — each action in
+one step at most, and in the order the author acted. An answer that does not
+hold up, or has none, is mapped conservatively instead: each ACTION with the
+events recorded before it (they ride with it) is one group, and the groups go
+to this call's steps one each from the LAST — the newest step is the one the
+newest action asked for — with any earlier groups left over going to the
+nearest step, the first (the focus click a `Type` step folded away, the menu
+a "Click Payments in the main menu" opened); a step kept unchanged in place
+keeps what it stood for; never an action to a step of an earlier call. Either
+way an event the answer left out goes with the step that claimed the action
+it rode with, and an action no step claimed goes with its events when one
+step claimed them all. An action no step describes stands for no step. The
+mapping is kept across appends, tail rewrites, stretch redrafts and full
+redrafts.
+
+**Step ids.** Every step of the draft has an id (`record:draft.ids`): an
+author step its `s` id; a step the model wrote a `d` id, kept while the step
+stays unchanged in place (the same words at the same place among the steps a
+call replaces) and new each time the model writes or rewrites it. No id is
+ever an action's or another step's. The engine remembers what each `d` id
+stood for after the model rewrote it, so an edit or a delete naming a step the
+author saw a moment ago still lands (below).
+
+**The author's edits** (`edit-step`, §9.3, and the drawer, §3.4). A step the
+model wrote becomes the author's: its text is theirs, exactly (a leading
+number or list marker aside), it keeps the actions it stands for, and it is
+`edited` in the draft. It locks nothing: it is a floor for an ordinary call's
+`replaceFrom`, as a step of the author's is, and that is all. The model never
+rewrites it — a redraft of its stretch keeps it and puts it back among the new
+steps by where its actions are — and writes no other step for its actions:
+they are left out of every call (a redraft's prompt lists the step with them,
+A4), and a step an answer ties to nothing but them is not written; without a
+mapping that holds up, an exact copy of its words is taken for one too. Edited
+back to the model's exact words, it is the model's again. A step of the
+author's own has its text replaced. An edit naming a step the model has
+rewritten since replaces whatever steps stand for the same actions now — one
+step, the author's words, holding all their actions, under the id the edit
+named: never lost, never written twice. No call is made for an edit; the next
+one is shown it. One that arrives while a call is in flight that could rewrite
+that step makes the call's answer be thrown away and the call made again: a
+redraft of its stretch at once; an ordinary call when its answer comes, if
+the steps it replaces are no longer the ones it was shown (every answer of
+an ordinary call lands by the ids of the steps it replaces, so a change
+before them moves nothing). A reworded step whose actions were all dropped
+since stays, where it was: the author's words are never lost.
+
+**The author's deletes** (`drop` of a step id, the drawer's ✕). A step the
+model wrote — reworded or not — leaves the draft at once, with no call, and
+every recorded action behind it is dropped with it, as the panel's ✕ drops an
+action: struck through in the panel, never shown to the model again, so no
+redraft brings the step back. A step of the author's goes as Undo takes it
+(below). A parameter no remaining step uses leaves the draft's list — after an
+edit that stops using it too; an edit naming a `{{name}}` no parameter
+defines is written as it is (the author's business; the draft's notes say
+so). **Restore** puts the step back with its actions: exactly where it was,
+with no call, when nothing has touched its stretch since; otherwise after the
+step that was before it, when that step is with its actions, else among the
+steps of the stretch its actions are in, by where they are. One of its actions
+restored on its own from the panel is an action like any other: its stretch
+is redrafted and the model writes a step for it — and the deleted step can no
+longer come back as it was (Restore answers why), even should that action be
+dropped again. A delete naming a step the model has rewritten since deletes
+whatever stands for the same actions now.
 
 **Locks** (stories/testbench-record-toolbar.md, "Steps you write"). A step of
 the author's locks everything before it. The draft is kept as STRETCHES — the
@@ -865,12 +958,17 @@ and an exact copy of one in the answer is not written a second time.
   still goes in where it was put, and the next call an ACTION causes drafts
   the actions before it into the space above it (as any failed call's
   actions wait for the next action — it is not retried on its own); nothing
-  after it moves. Stop drafts them regardless.
-- **A step between two recorded steps** (the editor): it goes in there, with
-  no call; everything drafted so far is locked, on both sides of it; actions
-  not drafted yet go after the whole block. `afterStep` is read against the
-  draft the author saw (`revision`): that step's text, found in the draft as
-  it is now.
+  after it moves. Stop drafts them regardless. A step the model had already
+  written for actions recorded after it (a call it waited for took them in)
+  goes below it, as it is; one written over actions on both sides of it stays
+  whole, above it.
+- **A step between two recorded steps** (the editor, or the drawer's +): it
+  goes in there, with no call; everything drafted so far is locked, on both
+  sides of it — actions recorded after the step was sent included, when a
+  call it waited for drafted them; actions not drafted yet go after the whole
+  block. `afterStep` is read against the draft the author saw (`revision`):
+  that step — by its id, else its text — found in the draft as it is now; the
+  drawer's + names it by its id directly (`afterId`).
 
 **When a draft call fails** (the model errors or answers something
 unreadable), the author is told in the panel, the previous draft stands, and
@@ -887,6 +985,15 @@ step (it may have left them unwritten, A2). Restoring it puts the two
 stretches back exactly as they were when nothing touched them since — no call
 — and otherwise puts its lock back where it was in the recording and redrafts
 both sides; the line goes back at the edge of the stretch it closes, or — one
+`record:dropped` goes out for a step of the draft deleted or restored from
+anywhere — the drawer, the control route (`source` as the control gave it,
+`panel` when it gave none), Restore on the bar — with `actions`, before the
+draft without (or with) the step. For an action or a step of the author's it
+goes out, without `actions`, only when the browser's toolbar did it (Undo,
+Restore, the drawer's ✕ on the author's step), after the draft, as before: the
+panel's own drops are the panel's. `record:edited` goes out for every edit,
+from anywhere, before the draft that shows it.
+
 typed between two recorded steps — after the step that was before it, where
 the file still has it.
 
@@ -953,21 +1060,28 @@ every route.
   atMs: number;                // since record:started
   tab?: string }               // the tab's label when not `main`
 { type: 'record:pick'; armed: boolean }
+  "stepActions": [[7, 8], [9, 10]],
 { type: 'record:drafting'; busy: boolean }   // a draft call started / finished
 { type: 'record:draft'; revision: number;    // REPLACES the previous draft
   steps: string[];
   parameters: Array<{ name: string; value: string }>;
   notes?: string[];
   through?: string;            // id of the last action the draft covers
-  locked: number;              // how many leading steps are locked (§7.6)
+  locked: number;              // how many leading steps are locked (§7.6) — the engine's, never shown to the author
   authored: number[];          // indices of the author's own steps
-  authoredIds?: string[] }     // their ids (record:step's), parallel to `authored`
+  authoredIds?: string[];      // their ids (record:step's), parallel to `authored`
+  ids: string[];               // one stable id per step (§8, "Step ids")
+  edited: number[] }           // indices of the steps the author reworded (§8)
+{ type: 'record:edited'; id: string; text: string;     // a step reworded by the author, before the draft that shows it
+  source: 'toolbar' | 'editor' | 'panel' }             // `id`: the id the edit named, which now holds `text`
 { type: 'record:paused'; paused: boolean; atMs: number; source: 'toolbar' | 'panel' }
 { type: 'record:step'; id: string; text: string;       // a step of the author's joined
   source: 'toolbar' | 'editor' | 'panel';
   afterStep: number;           // the index of the draft step it follows (-1: the very start)
   atMs: number }
-{ type: 'record:dropped'; id: string; dropped: boolean; source: 'toolbar' | 'panel' }
+{ type: 'record:dropped'; id: string; dropped: boolean;
+  source: 'toolbar' | 'panel' | 'editor';
+  actions?: string[] }         // a step of the draft deleted (or restored): the actions dropped (or restored) with it
 { type: 'record:toolbar'; dock: 'tl' | 'tc' | 'tr' | 'bl' | 'bc' | 'br'; minimised: boolean }
 { type: 'record:writing' }     // Stop received; finishing the draft
 { type: 'record:result'; steps: string[];
@@ -988,6 +1102,7 @@ browser needs no frame of its own (`record:writing`, `record:result`, `done`).
 Frames arrive in this order: `record:started`; then, as the author works,
 `record:action` and `record:pick`, each burst of actions followed by
 `record:drafting` `busy: true`, a `record:draft`, and `record:drafting`
+| A step changed in the browser's drawer after Stop (§3.4) | "A change to a step made in the browser after Stop was not made: "<text>". Change the step in the test by hand." — a warning; the bar says "Your change came after Stop, so it was not made." |
 `busy: false`; then — after `stop` — `record:writing`, `record:result` (the
 final draft, with parameter conflicts settled), `done`. An action can still
 arrive after `stop` (a field being typed into is collected then), until
@@ -1002,8 +1117,16 @@ while recording."`. `done` is always the last frame.
 
 ```ts
 { action: 'stop'; dropped?: string[] }   // write the steps, leaving these action ids out
-{ action: 'drop'; id: string }           // leave this action (or step of the author's) out; redraft now
-{ action: 'restore'; id: string }        // put it back; redraft now
+{ action: 'drop'; id: string;            // leave this action (or step of the author's) out; redraft now —
+  source?: 'editor' | 'panel' }          //   or delete a step of the draft (a record:draft.ids id) and the
+                                         //   actions behind it, with no call (§8); `source` only names where
+                                         //   a step's delete came from, in its record:dropped
+{ action: 'restore'; id: string;         // put it back; redraft now — a step of the draft goes back with
+  source?: 'editor' | 'panel' }          //   its actions (§8)
+{ action: 'edit-step'; id: string;       // the author reworded a step of the draft (§8): one line, kept
+  text: string;                          //   exactly (a leading number or list marker aside)
+  source: 'editor' | 'panel';
+  revision?: number }                    // the record:draft the author saw
 { action: 'check' }                      // arm pick mode
 { action: 'cancel-check' }               // disarm it
 { action: 'cancel' }                     // end without writing
@@ -1021,12 +1144,21 @@ while recording."`. `done` is always the last frame.
 pause while paused, a resume while recording, `check` while paused, an
 `add-step` whose every line is blank, an `add-step` from the editor holding a
 secret the recording knows (§7.6), a `drop` or `restore` of an id the
-recording does not have or that is already in that state, anything but
-`cancel` after `stop`), which TestBench says where the author asked (an
-`add-step` from the file leaves the line theirs); `404` when no recording is
+recording does not have or that is already in that state, a `restore` of a
+deleted step one of whose actions came back on its own since (§8), an
+`edit-step` of a step the recording does not have, one that is deleted, one
+whose actions no step stands for any more, an empty or several-line text (an
+empty text is not an edit — send `drop`), the step's own words, or — from the
+editor — a secret the recording knows (from the panel it is written
+`{{name}}`, with `name: $NAME`, as in §7.6), anything but `cancel` after
+`stop`), which TestBench says where the author asked (an `add-step` or an
+`edit-step` from the file leaves the line theirs); `404` when no recording is
 running for the session; `400` for a body that is none of these (an
-`add-step` with no `text`, a `source` other than `editor` or `panel`, an
-`afterStep` or `revision` that is not a whole number 0 or more). `add-step` is
+`add-step` with no `text`, an `edit-step` with no `id` or `text`, a `source`
+other than `editor` or `panel`, an `afterStep` or `revision` that is not a
+whole number 0 or more). An `edit-step`, a `drop` and a `restore` are carried
+out the moment they arrive: none needs a model call, so the answer says
+whether it applied. `add-step` is
 answered at once and carried out after: bringing the draft up to date is a
 model call, and `record:step` says when the step joined. An `add-step`
 answered `202` without `ignored` is always carried out, and before the result:
@@ -1038,19 +1170,25 @@ waits for it.
 The page script talks to the server through the recorder's one binding; this
 is the server half's own business, listed so the client half knows what
 exists. The toolbar's messages: a command (`pause`, `resume`, `check`,
-`cancel-check`, `undo`, `restore`, `stop`, `cancel`, `minimise`, `dock`, and
-from a frame `open-step`, `focus-bar`, `toggle-minimised`), a step with its
-text (top-level frames only), the box's unsent text, a focus report — a yes or
-no for "the focused field is secret", from any frame, never a value — and a
-check-in. Each carries the document's **token**; a message without the right
-one is refused (and said in the log).
+`cancel-check`, `undo`, `restore`, `stop`, `cancel`, `minimise`, `dock`, the
+drawer's `delete-step` and `restore-step` with a step's id, and from a frame
+`open-step`, `focus-bar`, `toggle-minimised`), a step with its text — and,
+from a drawer row's +, the step it goes after (`afterId`, with the index and
+draft revision the drawer had, for when the model has rewritten that step
+since) — an edit (`edit-step`: a step's id and its new words), the box's
+unsent text, a focus report — a yes or no for "the focused field is secret",
+from any frame, never a value — and a check-in. A step, an edit and the
+drawer's commands come from top-level frames only. Each carries the
+document's **token**; a message without the right one is refused (and said
+in the log).
 
 The answer says whether it was taken: `{ ok: true }`; `{ ok: false, state }`
 when it was this document's and was not (a Pause while paused, Add check while
 paused, anything that would change the recording after Stop), with the state
 the page should show; `null` for a message that is not this document's. The
 page shows some commands before the answer (Pause, minimise, a move, Esc out
-of Add check, a step leaving the box) and takes each back on anything but
+of Add check, a step leaving the box, the drawer's edit, removal and Restore
+of a row) and takes each back on anything but
 `ok: true` — to the `state` given, or, with none (no answer within 3 s, or no
 token to send with), to what it showed before, unless the server has pushed a
 state since. A check-in answered with anything but `ok: true` counts as
@@ -1084,8 +1222,11 @@ evaluate, which was not measured and is assumed to be no better).
 The server's push to each frame (`setState`, and the `hello` answer) is `{
 recording, pick, paused, bar }`; a top-level frame also gets the `toolbar`
 block — phase (`recording`, `writing`, `done`, `ended`), the clock and whether
-it runs, the action count, the steps with their locked and yours flags, whether
-a draft call is running, the current confirmation or error with how long it
+it runs, the action count, the steps with their ids and `yours` (the author's
+own, or reworded) — no locked flag, since nothing is locked against the
+author — the draft's revision, the steps deleted since the last one landed
+(each with the id of the step before it), whether a draft call is running,
+the current confirmation or error with how long it
 has left, "Typing hidden", dock, minimised, the box's unsent text (empty from
 the moment its step arrives) and, at the end, what to say. Everything in it
 is text the panel already shows, masked again with the recording's secrets.

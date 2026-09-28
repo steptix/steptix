@@ -20,7 +20,7 @@ import type {
   RecordedAction,
   ToolbarDock,
 } from './types.js';
-import { DraftEngine } from './draft-engine.js';
+import { DraftEngine, type StepChange } from './draft-engine.js';
 import { envReferenceFor } from './write-steps.js';
 
 /**
@@ -197,7 +197,23 @@ export class RecordStepsRun {
   private notice: ToolbarNotice | null = null;
   private noticeSeq = 0;
   private boxText = '';
-  private draftView: { steps: string[]; locked: number; authored: number[] } = { steps: [], locked: 0, authored: [] };
+  private draftView: { steps: string[]; ids: string[]; authored: number[]; edited: number[]; revision: number } = {
+    steps: [],
+    ids: [],
+    authored: [],
+    edited: [],
+    revision: 0,
+  };
+  /**
+   * Steps deleted since the last step landed, for the drawer: struck through
+   * where they were, with Restore (stories/testbench-record-edit-steps.md,
+   * "The drawer"). From any source — the drawer, the panel, the file, Undo.
+   */
+  private deletedRows: Array<{ id: string; text: string; afterId: string | null }> = [];
+  /** The draft's ids right after the last delete or restore: a draft with an
+   *  id not among them is the next step landing, and the rows go. */
+  private idsAtDelete: Set<string> | null = null;
+  private deletePending = false;
   private updating = false;
   /** What the toolbar's Undo took out, most recent last — Restore's list. */
   private readonly undoStack: string[] = [];
@@ -310,17 +326,28 @@ export class RecordStepsRun {
     const secrets = this.secretValues();
     const now = Date.now();
     const notice = this.notice && (this.notice.until === undefined || now < this.notice.until) ? this.notice : null;
-    const locked = this.draftView.locked;
     const authored = new Set(this.draftView.authored);
+    const edited = new Set(this.draftView.edited);
+    // No lock: "locked" is the engine's word for what the MODEL may not
+    // rewrite, and nothing is locked against the author
+    // (stories/testbench-record-edit-steps.md, decision 1). `yours`: a step
+    // the author wrote, or one they reworded.
     const steps = this.draftView.steps.slice(0, MAX_TOOLBAR_STEPS).map((text, i) => ({
+      id: this.draftView.ids[i] ?? '',
       text: redact(text, secrets),
-      locked: i < locked,
-      yours: authored.has(i),
+      yours: authored.has(i) || edited.has(i),
+      ...(edited.has(i) && { edited: true }),
     }));
     return {
       phase: this.toolbarPhase,
       actions: this.engine?.actionCount ?? 0,
       steps,
+      revision: this.draftView.revision,
+      deleted: this.deletedRows.slice(-MAX_TOOLBAR_STEPS).map((r) => ({
+        id: r.id,
+        text: redact(r.text, secrets),
+        afterId: r.afterId,
+      })),
       updating: this.updating,
       dock: this.dock,
       minimised: this.minimised,
@@ -390,7 +417,10 @@ export class RecordStepsRun {
    * "Writing the steps…"), and for a step, the panel and the end of the bar,
    * so the words they typed are not lost without a trace (review, finding 1).
    */
-  private refuseLate(what: 'step' | 'undo' | 'restore' | 'pause' | 'resume' | 'check', text?: string): false {
+  private refuseLate(
+    what: 'step' | 'undo' | 'restore' | 'pause' | 'resume' | 'check' | 'edit' | 'delete',
+    text?: string,
+  ): false {
     const said: Record<typeof what, string> = {
       step: 'Your step came after Stop, so it was not added.',
       undo: 'Undo came after Stop, so nothing was removed.',
@@ -398,6 +428,8 @@ export class RecordStepsRun {
       pause: 'Stop came first: the steps are already being written.',
       resume: 'Stop came first: the steps are already being written.',
       check: 'Add check came after Stop, so no check was added.',
+      edit: 'Your change came after Stop, so it was not made.',
+      delete: 'Removing a step came after Stop, so nothing was removed.',
     };
     if (what === 'step' && text !== undefined) {
       this.lateSteps++;
@@ -406,6 +438,18 @@ export class RecordStepsRun {
         msg: redact(
           `A step typed in the browser after Stop was not added to the recording: "${text.trim()}". ` +
             'Add it to the test by hand.',
+          this.secretValues(),
+        ),
+        kind: 'warn',
+      });
+    }
+    if (what === 'edit' && text !== undefined) {
+      // The author's words are not lost without a trace (as a late step's).
+      this.out({
+        type: 'output',
+        msg: redact(
+          `A change to a step made in the browser after Stop was not made: "${text.trim()}". ` +
+            'Change the step in the test by hand.',
           this.secretValues(),
         ),
         kind: 'warn',
@@ -456,9 +500,46 @@ export class RecordStepsRun {
         // adds it twice (review, finding 3).
         this.boxText = '';
         if (this.stopping) return this.refuseLate('step', command.text);
-        const outcome = this.addStep(command.text, 'toolbar');
+        const after = command.after;
+        const outcome = this.addStep(command.text, 'toolbar', after?.index, after?.revision, after?.id);
         this.pushView();
         return outcome === 'accepted';
+      }
+      case 'edit-step': {
+        if (this.stopping) return this.refuseLate('edit', command.text);
+        const outcome = this.editStep(command.id, command.text, 'toolbar');
+        if (outcome === 'accepted') {
+          const now = this.engine?.describeStep(command.id);
+          this.setNotice({
+            kind: 'added',
+            text: now ? `Changed step ${now.index + 1}` : 'Changed the step',
+            ms: ADDED_NOTICE_MS,
+          });
+          return true;
+        }
+        this.setNotice({ kind: 'error', text: typeof outcome === 'object' ? outcome.ignored : 'The step was not changed.' });
+        return false;
+      }
+      case 'delete-step': {
+        if (this.stopping) return this.refuseLate('delete');
+        const text = this.engine?.describeStep(command.id)?.text;
+        const r = this.dropOrRestore(command.id, true, 'toolbar');
+        if (r !== true) {
+          if (typeof r === 'object') this.setNotice({ kind: 'error', text: r.ignored });
+          return false;
+        }
+        this.removedNotice(command.id, text);
+        return true;
+      }
+      case 'restore-step': {
+        if (this.stopping) return this.refuseLate('restore');
+        const r = this.dropOrRestore(command.id, false, 'toolbar');
+        if (r !== true) {
+          if (typeof r === 'object') this.setNotice({ kind: 'error', text: r.ignored });
+          return false;
+        }
+        this.setNotice(null);
+        return true;
       }
       case 'box-text':
         this.boxText = command.text;
@@ -499,6 +580,7 @@ export class RecordStepsRun {
     source: RecordStepSource,
     afterStep?: number,
     revision?: number,
+    afterId?: string,
   ): RecordControlOutcome {
     const typed = authorStepLines(text);
     if (typed.length === 0) return 'ignored';
@@ -536,6 +618,7 @@ export class RecordStepsRun {
         atMs,
         afterStep,
         revision,
+        afterId,
         parameters: safe.parameters,
         onCatchUp: () => this.setNotice({ kind: 'adding', text: 'Adding…' }),
         onJoined: (list) => {
@@ -555,12 +638,11 @@ export class RecordStepsRun {
       const first = added[0]!.index + 1;
       const last = added[added.length - 1]!.index + 1;
       const where = first === last ? `Added as step ${first}` : `Added as steps ${first}–${last}`;
-      const above = first - 1;
+      // Nothing is locked against the author (stories/testbench-record-edit-steps.md,
+      // decision 1), so the bar no longer says "steps 1–7 locked".
       this.setNotice({
         kind: 'added',
-        text:
-          (above === 0 ? where : `${where} · ${above === 1 ? 'step 1' : `steps 1–${above}`} locked`) +
-          (refs ? ` · the secret is written as ${refs}` : ''),
+        text: where + (refs ? ` · the secret is written as ${refs}` : ''),
         ms: ADDED_NOTICE_MS,
       });
       logger.info(
@@ -569,6 +651,82 @@ export class RecordStepsRun {
       );
     });
     return 'accepted';
+  }
+
+  /**
+   * The author reworded a step (stories/testbench-record-edit-steps.md) — from
+   * the drawer, the file or the panel. One line, exactly as written bar a
+   * leading number or list marker. A secret the recording knows is written as
+   * `{{name}}`, as in a step the author adds; from the editor it is refused
+   * instead, with what to write in its place — that line is the author's own
+   * text, which the recording does not rewrite.
+   *
+   * Carried out at once, not queued behind an Add step's catch-up: an edit
+   * needs no model call, so whether it applies is known when it arrives, and
+   * the answer says so. Before Stop it is therefore always complete by the
+   * time Stop writes the steps; after Stop `control` refuses it up front.
+   */
+  private editStep(id: string, text: string, source: RecordStepSource): RecordControlOutcome {
+    const lines = authorStepLines(text);
+    if (lines.length === 0) {
+      return { ignored: 'An empty step is not a change: delete the step instead.' };
+    }
+    if (lines.length > 1) {
+      return { ignored: 'A change is one line: add the other lines as steps of their own.' };
+    }
+    const safe = authorStepSecrets(lines, this.namedSecrets(), this.file.parameters);
+    const refs = safe.names.map((n) => `{{${n}}}`).join(', ');
+    if (safe.unnamed || (source === 'editor' && safe.names.length > 0)) {
+      return {
+        ignored: safe.unnamed
+          ? 'The change holds a secret value this recording knows, with no parameter name to write in its place, so it was not made.'
+          : `The change holds the value of ${refs}, a secret this recording knows, so it was not made and the line ` +
+            `stays as you typed it. Write ${refs} in its place to make it.`,
+      };
+    }
+    const engine = this.engine;
+    if (!engine) return { ignored: 'The recording is still starting: it has no steps to change yet.' };
+    const r = engine.editStep(id, safe.lines[0]!, { source, parameters: safe.parameters });
+    if (r !== true) return r === false ? 'ignored' : r;
+    logger.info(`Session "${this.deps.sessionId}": Record Steps — step ${id} reworded by the author (${source})`);
+    return 'accepted';
+  }
+
+  /**
+   * Drop or restore by id — an action, a step the author wrote, a step of the
+   * draft. A step of the draft's frame is the engine's (before the draft
+   * without it). An action's or an author step's is said here, after it, when
+   * it came from the toolbar — as Undo always has; the panel's own are not
+   * echoed.
+   */
+  private dropOrRestore(id: string, dropped: boolean, source: RecordStepSource): StepChange {
+    const engine = this.engine;
+    if (!engine) return false;
+    const kind = engine.kindOf(id);
+    const r = dropped ? engine.drop(id, source) : engine.restore(id, source);
+    if (r === true && source === 'toolbar' && (kind === 'action' || kind === 'author')) {
+      this.out({ type: 'record:dropped', id, dropped, source: 'toolbar' });
+    }
+    return r;
+  }
+
+  /** "Removed …" with Restore on the bar — which puts back the last thing
+   *  taken out (the toolbar's Restore). */
+  private removedNotice(id: string, text: string | undefined): void {
+    this.undoStack.push(id);
+    this.setNotice({
+      kind: 'removed',
+      text: text !== undefined ? `Removed "${text}"` : 'Removed the step',
+      ms: REMOVED_NOTICE_MS,
+      restore: true,
+    });
+  }
+
+  /** A step came and went in the draft: the drawer's struck-through rows. */
+  private onStepDropped(change: { id: string; text: string; afterId: string | null; dropped: boolean }): void {
+    this.deletedRows = this.deletedRows.filter((r) => r.id !== change.id);
+    if (change.dropped) this.deletedRows.push({ id: change.id, text: change.text, afterId: change.afterId });
+    this.deletePending = true;
   }
 
   /** The toolbar's Undo: take out the most recent entry still in — an
@@ -584,9 +742,8 @@ export class RecordStepsRun {
       this.setNotice({ kind: 'info', text: 'Nothing to undo.', ms: NOTHING_TO_UNDO_MS });
       return;
     }
-    if (!engine.drop(entry.id)) return;
+    if (this.dropOrRestore(entry.id, true, 'toolbar') !== true) return;
     this.undoStack.push(entry.id);
-    this.out({ type: 'record:dropped', id: entry.id, dropped: true, source: 'toolbar' });
     this.setNotice({
       kind: 'removed',
       text: entry.kind === 'author' ? `Removed your step: ${entry.summary}` : `Removed: ${entry.summary}`,
@@ -602,9 +759,11 @@ export class RecordStepsRun {
     if (!engine || this.cancelled()) return;
     while (this.undoStack.length > 0) {
       const id = this.undoStack.pop()!;
-      if (!engine.restore(id)) continue;
-      this.out({ type: 'record:dropped', id, dropped: false, source: 'toolbar' });
-      this.setNotice(null);
+      const r = this.dropOrRestore(id, false, 'toolbar');
+      if (r === false) continue;
+      // A deleted step some of whose actions came back on their own since.
+      if (r !== true) this.setNotice({ kind: 'error', text: r.ignored });
+      else this.setNotice(null);
       return;
     }
   }
@@ -658,9 +817,22 @@ export class RecordStepsRun {
         this.abortRun('cancel');
         return 'accepted';
       case 'drop':
-        return this.engine?.drop(control.id) ? 'accepted' : 'ignored';
-      case 'restore':
-        return this.engine?.restore(control.id) ? 'accepted' : 'ignored';
+      case 'restore': {
+        const dropping = control.action === 'drop';
+        const kind = this.engine?.kindOf(control.id);
+        const text = kind === 'step' ? this.engine?.describeStep(control.id)?.text : undefined;
+        const r = this.dropOrRestore(control.id, dropping, control.source ?? 'panel');
+        if (r === true) {
+          // A step of the draft deleted from the panel or the file: the bar
+          // says so too, with Restore (stories/testbench-record-edit-steps.md, "Delete").
+          if (kind === 'step' && dropping) this.removedNotice(control.id, text);
+          else if (kind === 'step') this.setNotice(null);
+          return 'accepted';
+        }
+        return r === false ? 'ignored' : r;
+      }
+      case 'edit-step':
+        return this.editStep(control.id, control.text, control.source);
       case 'check':
       case 'cancel-check': {
         const arm = control.action === 'check';
@@ -761,7 +933,22 @@ export class RecordStepsRun {
           this.updating = event.busy;
           this.pushView();
         } else if (event.type === 'record:draft') {
-          this.draftView = { steps: [...event.steps], locked: event.locked, authored: [...event.authored] };
+          this.draftView = {
+            steps: [...event.steps],
+            ids: [...event.ids],
+            authored: [...event.authored],
+            edited: [...event.edited],
+            revision: event.revision,
+          };
+          // The drawer's struck rows stay "until the next step lands": a
+          // draft with a step no draft since the delete had.
+          if (this.deletePending) {
+            this.idsAtDelete = new Set(event.ids);
+            this.deletePending = false;
+          } else if (this.idsAtDelete && event.ids.some((id) => !this.idsAtDelete!.has(id))) {
+            this.deletedRows = [];
+            this.idsAtDelete = null;
+          }
           if (this.notice?.kind === 'error') this.notice = null;
           this.pushView();
         }
@@ -775,6 +962,7 @@ export class RecordStepsRun {
         emit: engineEmit,
         onCallFailed: () =>
           this.setNotice({ kind: 'error', text: "Couldn't update the steps. They'll catch up with your next action." }),
+        onStepDropped: (change) => this.onStepDropped(change),
         ...(draftSettleMs !== undefined && { settleMs: draftSettleMs }),
       });
       this.engine = engine;
@@ -872,7 +1060,9 @@ export class RecordStepsRun {
           `${all.length - engine.remainingCount} dropped; finishing the draft`,
       );
 
-      if (engine.remainingCount === 0 && engine.authorCount === 0) {
+      // A step the author reworded is kept even when every action behind it
+      // was dropped since: their words are never lost.
+      if (engine.remainingCount === 0 && engine.authorCount === 0 && engine.editedCount === 0) {
         engine.abandon();
         this.endWith('nothing', 'Nothing was recorded, so no steps were written.');
         this.resultSent = true;

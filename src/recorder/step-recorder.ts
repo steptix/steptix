@@ -126,8 +126,14 @@ export type ToolbarCommand =
   | { kind: 'minimise'; minimised: boolean }
   | { kind: 'toggle-minimised' }
   | { kind: 'dock'; dock: ToolbarDock }
-  /** The step box: one line or several, exactly as typed. */
-  | { kind: 'step'; text: string }
+  /** The step box: one line or several, exactly as typed — after the drawer
+   *  step `after` names (its `+`), else at the end. */
+  | { kind: 'step'; text: string; after?: { id?: string; index?: number; revision?: number } }
+  /** The drawer: a step reworded in place (stories/testbench-record-edit-steps.md). */
+  | { kind: 'edit-step'; id: string; text: string }
+  /** The drawer: a step's ✕, and a struck row's Restore. */
+  | { kind: 'delete-step'; id: string }
+  | { kind: 'restore-step'; id: string }
   /** The box's unsent text, so a navigation under the open box keeps it. */
   | { kind: 'box-text'; text: string }
   /** A secret field took focus in some frame, or focus left it. */
@@ -334,6 +340,16 @@ function frameGone(frame: Frame): boolean {
   } catch {
     return true;
   }
+}
+
+/** A step id from the page (`d12`, `s3`): a short word, or undefined. */
+function stepId(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value) ? value : undefined;
+}
+
+/** A whole number, 0 or more, from the page — or undefined. */
+function wholeNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 /**
@@ -1055,7 +1071,14 @@ export class StepRecorder {
       return this.stateFor(source.frame);
     }
     if (!this.active) return null;
-    if (type === 'checkin' || type === 'focus' || type === 'toolbar' || type === 'step' || type === 'box-text') {
+    if (
+      type === 'checkin' ||
+      type === 'focus' ||
+      type === 'toolbar' ||
+      type === 'step' ||
+      type === 'box-text' ||
+      type === 'edit-step'
+    ) {
       return this.onToolbarMessage(source, message, token);
     }
     // Paused: the page records nothing, and anything it sends anyway — a
@@ -1143,7 +1166,27 @@ export class StepRecorder {
         }
         const text = typeof message['text'] === 'string' ? message['text'].slice(0, MAX_STEP_TEXT) : '';
         if (text.trim() === '') return refused();
-        return carryOut({ kind: 'step', text });
+        // The drawer's `+`: after this step.
+        const afterId = stepId(message['afterId']);
+        const index = wholeNumber(message['afterStep']);
+        const revision = wholeNumber(message['revision']);
+        const after =
+          afterId !== undefined || index !== undefined
+            ? {
+                ...(afterId !== undefined && { id: afterId }),
+                ...(index !== undefined && { index }),
+                ...(revision !== undefined && { revision }),
+              }
+            : undefined;
+        return carryOut({ kind: 'step', text, ...(after && { after }) });
+      }
+      case 'edit-step': {
+        // The drawer lives in the top document only.
+        if (!top) return null;
+        const id = stepId(message['id']);
+        const text = typeof message['text'] === 'string' ? message['text'].slice(0, MAX_STEP_TEXT) : '';
+        if (id === undefined || text.trim() === '') return refused();
+        return carryOut({ kind: 'edit-step', id, text });
       }
       case 'box-text': {
         if (!top) return null;
@@ -1178,6 +1221,13 @@ export class StepRecorder {
         return carryOut({ kind: command });
       case 'minimise':
         return carryOut({ kind: 'minimise', minimised: message['minimised'] === true });
+      case 'delete-step':
+      case 'restore-step': {
+        if (!top) return null;
+        const id = stepId(message['id']);
+        if (id === undefined) return refused();
+        return carryOut({ kind: command, id });
+      }
       case 'dock': {
         const dock = message['dock'];
         if (typeof dock !== 'string' || !TOOLBAR_DOCKS.has(dock as ToolbarDock)) return refused();

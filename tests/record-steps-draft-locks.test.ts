@@ -361,7 +361,7 @@ describe('the prompt with locks (buildRecordStepsPrompt)', () => {
 
   it('the rules for locked and authored steps, a pause, and painted boxes', () => {
     for (const rule of [
-      'Never reach back past a LOCKED step or a step the author wrote (A1)',
+      'Never reach back past a LOCKED step, a step the author wrote or a step the author reworded (A1, A4)',
       'A1. A LOCKED step is in the test file already and final',
       'A2. A step marked "author" was written by hand by the author at that point in the recording',
       'the actions right after it that only do what it says are covered by it, so write nothing for them',

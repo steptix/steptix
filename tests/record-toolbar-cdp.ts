@@ -138,6 +138,183 @@ export function stepBoxValue(page: Page): Promise<string | null> {
   });
 }
 
+/** One row of the Steps so far drawer, as it shows. */
+export interface DrawerRow {
+  /** The step id the row is for. */
+  id: string;
+  kind: 'live' | 'deleted' | 'restoring' | 'pending';
+  /** Its words — or, while it is being edited, what is in its box. */
+  text: string;
+  /** The number shown ('' for a struck row). */
+  n: string;
+  yours: boolean;
+  /** It is being edited in place. */
+  editing: boolean;
+}
+
+export interface DrawerSnapshot {
+  open: boolean;
+  rows: DrawerRow[];
+  foot: string;
+  /** Any lock glyph anywhere in the bar (the drawer, the status row). */
+  lock: boolean;
+}
+
+/** The lock icon's shackle — the path only the lock glyph draws. */
+const LOCK_SHACKLE = 'M4 5.2V3.8a2 2 0 0 1 4 0v1.4';
+
+/** The drawer of the toolbar in `page`, or null when there is no toolbar. */
+export function readDrawer(page: Page): Promise<DrawerSnapshot | null> {
+  return withCdp(page, async (cdp, root) => {
+    const host = hostOf(root);
+    const shadow = host?.shadowRoots?.[0];
+    if (!shadow) return null;
+    const hasClass = (n: DomNode, cls: string): boolean =>
+      n.nodeType === 1 && (attr(n, 'class') ?? '').split(/\s+/).includes(cls);
+    const drawer = find(shadow, (n) => hasClass(n, 'drawer'));
+    const lock = find(shadow, (n) => n.localName === 'path' && attr(n, 'd') === LOCK_SHACKLE) !== null;
+    if (!drawer) return { open: false, rows: [], foot: '', lock };
+    const rows: DrawerRow[] = [];
+    const walk = async (n: DomNode): Promise<void> => {
+      if (n.localName === 'li' && hasClass(n, 'row')) {
+        const cls = (attr(n, 'class') ?? '').split(/\s+/);
+        const kind = (['live', 'deleted', 'restoring', 'pending'] as const).find((k) => cls.includes(k)) ?? 'live';
+        const t = find(n, (c) => hasClass(c, 't'));
+        const input = find(n, (c) => c.localName === 'input');
+        const num = find(n, (c) => hasClass(c, 'n'));
+        let text = t ? textOf(t).replace(/\s+/g, ' ').trim() : '';
+        if (input) text = await valueOf(cdp, input.nodeId);
+        rows.push({
+          id: attr(n, 'data-row-id') ?? '',
+          kind,
+          text,
+          n: num ? textOf(num).trim() : '',
+          yours: find(n, (c) => hasClass(c, 'yours')) !== null,
+          editing: input !== null,
+        });
+        return;
+      }
+      for (const c of n.children ?? []) await walk(c);
+    };
+    await walk(drawer);
+    const foot = find(drawer, (n) => hasClass(n, 'foot'));
+    return {
+      open: attr(drawer, 'hidden') === undefined,
+      rows,
+      foot: foot ? textOf(foot).replace(/\s+/g, ' ').trim() : '',
+      lock,
+    };
+  });
+}
+
+async function valueOf(cdp: CDPSession, nodeId: number): Promise<string> {
+  const { object } = (await cdp.send('DOM.resolveNode', { nodeId })) as { object: { objectId: string } };
+  const { result } = (await cdp.send('Runtime.callFunctionOn', {
+    objectId: object.objectId,
+    functionDeclaration: 'function () { return this.value; }',
+    returnByValue: true,
+  })) as { result: { value: string } };
+  return result.value;
+}
+
+async function centreOf(cdp: CDPSession, nodeId: number): Promise<{ x: number; y: number } | null> {
+  try {
+    const { model } = (await cdp.send('DOM.getBoxModel', { nodeId })) as { model: { content: number[] } };
+    const q = model.content;
+    return { x: (q[0]! + q[2]! + q[4]! + q[6]!) / 4, y: (q[1]! + q[3]! + q[5]! + q[7]!) / 4 };
+  } catch {
+    return null;
+  }
+}
+
+/** Where a drawer row (`cmd` null) or one of its controls is on screen:
+ *  `row-edit` (its words), `row-delete` (✕), `row-restore`, `row-insert` (the
+ *  + in the gap below it). */
+export function drawerAt(page: Page, id: string, cmd: string | null): Promise<{ x: number; y: number } | null> {
+  return withCdp(page, async (cdp, root) => {
+    const host = hostOf(root);
+    const node = host
+      ? find(host, (n) =>
+          n.nodeType === 1 &&
+          (cmd === null
+            ? n.localName === 'li' && attr(n, 'data-row-id') === id
+            : attr(n, 'data-cmd') === cmd && attr(n, 'data-id') === id),
+        )
+      : null;
+    return node ? centreOf(cdp, node.nodeId) : null;
+  });
+}
+
+/** Use a drawer row's control with the real mouse: the pointer goes over
+ *  the row first — its ✕ and + show on hover — then onto the control. */
+export async function clickDrawer(page: Page, id: string, cmd: string): Promise<void> {
+  const row = await drawerAt(page, id, null);
+  if (!row) throw new Error(`the drawer has no row for ${id}`);
+  await page.mouse.move(row.x, row.y);
+  await new Promise((r) => setTimeout(r, 80));
+  // Where the control is once the bar has stopped moving: a push that adds a
+  // row ("updating…") grows a bottom-docked bar upward, and every row moves.
+  let at = await drawerAt(page, id, cmd);
+  for (let i = 0; i < 10 && at; i++) {
+    await new Promise((r) => setTimeout(r, 60));
+    const again = await drawerAt(page, id, cmd);
+    if (again && Math.abs(again.x - at.x) < 0.5 && Math.abs(again.y - at.y) < 0.5) break;
+    at = again;
+  }
+  if (!at) throw new Error(`the row for ${id} has no "${cmd}"`);
+  await page.mouse.move(at.x, at.y, { steps: 3 });
+  await new Promise((r) => setTimeout(r, 50));
+  await page.mouse.click(at.x, at.y);
+}
+
+/** Where keyboard focus is inside the bar, and whether it shows. */
+export function barFocus(page: Page): Promise<{ cmd: string | null; id: string | null; row: boolean; visible: boolean } | null> {
+  return withCdp(page, async (cdp, root) => {
+    const shadow = hostOf(root)?.shadowRoots?.[0];
+    if (!shadow) return null;
+    const { object } = (await cdp.send('DOM.resolveNode', { nodeId: shadow.nodeId })) as { object: { objectId: string } };
+    const { result } = (await cdp.send('Runtime.callFunctionOn', {
+      objectId: object.objectId,
+      functionDeclaration:
+        'function () { const a = this.activeElement; if (!a) return null; return { cmd: a.getAttribute("data-cmd"), ' +
+        'id: a.getAttribute("data-row-id") || a.getAttribute("data-id"), row: a.localName === "li", ' +
+        'visible: a.matches(":focus-visible") }; }',
+      returnByValue: true,
+    })) as { result: { value: { cmd: string | null; id: string | null; row: boolean; visible: boolean } | null } };
+    return result.value;
+  });
+}
+
+/** The boxes of the bar's main row and its drawer, and of the host. */
+export function barBoxes(page: Page): Promise<{ main: DOMRectLike; drawer: DOMRectLike; host: DOMRectLike } | null> {
+  return withCdp(page, async (cdp, root) => {
+    const host = hostOf(root);
+    const shadow = host?.shadowRoots?.[0];
+    if (!host || !shadow) return null;
+    const byClass = (cls: string): DomNode | null =>
+      find(shadow, (n) => n.nodeType === 1 && (attr(n, 'class') ?? '').split(/\s+/).includes(cls));
+    const box = async (n: DomNode | null): Promise<DOMRectLike | null> => {
+      if (!n) return null;
+      try {
+        const { model } = (await cdp.send('DOM.getBoxModel', { nodeId: n.nodeId })) as { model: { border: number[] } };
+        const q = model.border;
+        return { x: q[0]!, y: q[1]!, width: q[2]! - q[0]!, height: q[5]! - q[1]! };
+      } catch {
+        return null;
+      }
+    };
+    const [m, d, h] = await Promise.all([box(byClass('main')), box(byClass('drawer')), box(host)]);
+    return m && d && h ? { main: m, drawer: d, host: h } : null;
+  });
+}
+
+export interface DOMRectLike {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 /** Wait until `check` answers true, or throw saying what was last seen. */
 export async function until<T>(
   read: () => Promise<T>,

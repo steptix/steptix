@@ -144,7 +144,7 @@ vi.mock('../src/report/generator.js', () => ({
 }));
 
 import { createApiServer } from '../src/server/api-server.js';
-import { clickToolbar, readToolbar, stepBoxValue, until } from './record-toolbar-cdp.js';
+import { clickDrawer, clickToolbar, readDrawer, readToolbar, stepBoxValue, until } from './record-toolbar-cdp.js';
 import { addLogCallback, getLogLevel, logger, setLogLevel } from '../src/utils/logger.js';
 import {
   RECORD_STEPS_HEADLESS_MESSAGE,
@@ -1376,7 +1376,9 @@ describe('the browser toolbar — on the wire', () => {
     // record:step arrives before the draft that holds it.
     const at = (pred: (f: Frame) => boolean): number => s.frames.findIndex(pred);
     expect(at((f) => f.event === 'record:step')).toBeLessThan(at((f) => f === withStep));
-    await toolbarShows(page, 'Added as step 3 · steps 1–2 locked');
+    // Nothing is locked against the author (stories/testbench-record-edit-steps.md): no "locked" on the bar.
+    await toolbarShows(page, 'Added as step 3');
+    expect((await readToolbar(page))!.all).not.toContain('locked');
 
     // The next call is shown the locks and the author's step, and the rules for them.
     await page.check('#cash');
@@ -1424,7 +1426,7 @@ describe('the browser toolbar — on the wire', () => {
     const retry = ai.requests[2]!;
     expect(textOf(retry)).toContain('answer with replaceFrom 2');
     expect(draftEntriesOf(retry)).toEqual([
-      { index: 0, step: 'Did click Reports', locked: true },
+      { index: 0, step: 'Did click Reports', locked: true, actions: [1] },
       { index: 1, step: 'Verify the page says "Sign in"', locked: true, author: true },
       { yourStepsGoHere: true },
     ]);
@@ -1568,7 +1570,7 @@ describe('the browser toolbar — on the wire', () => {
     expect(draftEntriesOf(call)).toEqual([
       { yourStepsGoHere: true },
       { index: 0, step: 'Check the form', locked: true, author: true },
-      { index: 1, step: 'Did click Email' },
+      { index: 1, step: 'Did click Email', actions: [2] },
     ]);
     expect(stretch.data).toMatchObject({
       steps: ['Did click Sign in', 'Check the form', 'Did click Email'],
@@ -1828,5 +1830,395 @@ describe('a run after the recording (finding 6)', () => {
     expect(await page.evaluate(() => document.querySelector('aiui-recorder') === null)).toBe(true);
     open();
     await run;
+  }, 60_000);
+});
+
+// ── Editing and deleting steps (stories/testbench-record-edit-steps.md) ────
+
+/** The model, saying which actions each step stands for: one step per
+ *  ACTION, the events before it riding along, `stepActions` beside them. */
+function echoMapped(messages: ChatMessage[]): string {
+  const draft = draftOf(messages);
+  const insert = /answer with replaceFrom (\d+)/.exec(textOf(messages));
+  const steps: string[] = [];
+  const stepActions: number[][] = [];
+  let pending: number[] = [];
+  for (const a of recordingOf(messages)) {
+    pending.push(a['n'] as number);
+    if (['type', 'select', 'tick', 'untick', 'upload', 'tab'].includes(a['kind'] as string)) continue;
+    steps.push(`Did ${a['kind']} ${a['target']?.name ?? a['target']?.text ?? ''}`.trim());
+    stepActions.push(pending);
+    pending = [];
+  }
+  if (pending.length > 0 && stepActions.length > 0) stepActions[stepActions.length - 1]!.push(...pending);
+  return JSON.stringify({ replaceFrom: insert ? Number(insert[1]) : draft.length, steps, stepActions, parameters: [] });
+}
+
+/** Frames of one type from index `from` on. */
+function framesAfter(s: Stream, from: number): Frame[] {
+  return s.frames.slice(from);
+}
+
+describe('edit-step, and drop / restore of a step, through the control route', () => {
+  it('an edit is the author\'s at once — record:edited, then the draft, same id, no call; the next call is shown it; Stop writes it', async () => {
+    ai.responder = (m) => echoMapped(m);
+    const id = 'edit-route';
+    const s = await started(id);
+    await pageOf().click('#reports');
+    await s.draftThrough(1);
+    await pageOf().click('#signin');
+    const two = await s.draftThrough(2);
+    expect(two.data.steps).toEqual(['Did click Reports', 'Did click Sign in']);
+    expect(two.data.ids).toEqual(['d1', 'd2']);
+    expect(two.data.edited).toEqual([]);
+    const calls = ai.requests.length;
+    const mark = s.frames.length;
+    const r = await control(id, {
+      action: 'edit-step',
+      id: 'd1',
+      text: '1. Open Reports from the main menu',
+      source: 'editor',
+      revision: two.data.revision,
+    });
+    expect(r).toEqual({ status: 202, json: { ok: true } });
+    const edited = await s.waitFor((f) => f.event === 'record:edited', 'record:edited');
+    expect(edited.data).toEqual({ type: 'record:edited', id: 'd1', text: 'Open Reports from the main menu', source: 'editor' });
+    const after = await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.revision > two.data.revision,
+      'the draft with the edit',
+    );
+    expect(after.data).toMatchObject({
+      steps: ['Open Reports from the main menu', 'Did click Sign in'],
+      ids: ['d1', 'd2'],
+      edited: [0],
+      authored: [],
+    });
+    const order = framesAfter(s, mark).map((f) => f.event);
+    expect(order.indexOf('record:edited')).toBeLessThan(order.indexOf('record:draft'));
+    await sleep(300);
+    expect(ai.requests).toHaveLength(calls);
+
+    await pageOf().click('#email');
+    await s.draftThrough(3);
+    const next = ai.requests[calls]!;
+    expect(draftEntriesOf(next)[0]).toEqual({ index: 0, step: 'Open Reports from the main menu', edited: true, actions: [1] });
+    expect(recordingOf(next).map((a) => a['target'].name)).toEqual(['Email']);
+    expect(textOf(next)).toContain('A4. A step marked "edited"');
+    await control(id, { action: 'stop' });
+    const result = await s.waitFor((f) => f.event === 'record:result', 'record:result');
+    expect(result.data.steps).toEqual(['Open Reports from the main menu', 'Did click Sign in', 'Did click Email']);
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('drop of a step id deletes it and the actions behind it — record:dropped with them, before the draft, no call; restore puts both back', async () => {
+    ai.responder = (m) => echoMapped(m);
+    const id = 'delete-route';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#reports');
+    await s.draftThrough(1);
+    await page.fill('#email', 'someone@example.test');
+    await page.click('#signin');
+    const two = await s.draftThrough(3);
+    expect(two.data.steps).toEqual(['Did click Reports', 'Did click Sign in']);
+    const behind = s.of('record:action').slice(1).map((a) => a.id);
+    expect(behind).toHaveLength(2); // the typing, and the click it rode with
+    const calls = ai.requests.length;
+    const mark = s.frames.length;
+    expect((await control(id, { action: 'drop', id: 'd2', source: 'editor' })).json).toEqual({ ok: true });
+    const dropped = await s.waitFor((f) => f.event === 'record:dropped', 'record:dropped');
+    expect(dropped.data).toEqual({ type: 'record:dropped', id: 'd2', dropped: true, source: 'editor', actions: behind });
+    const without = await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.revision > two.data.revision,
+      'the draft without it',
+    );
+    expect(without.data).toMatchObject({ steps: ['Did click Reports'], ids: ['d1'] });
+    const order = framesAfter(s, mark).map((f) => f.event);
+    expect(order.indexOf('record:dropped')).toBeLessThan(order.indexOf('record:draft'));
+    // The bar says so, with Restore.
+    await toolbarShows(page, 'Removed "Did click Sign in"');
+    expect((await readToolbar(page))!.all).toContain('Restore');
+    await sleep(300);
+    expect(ai.requests).toHaveLength(calls);
+    // Twice: nothing more to do.
+    expect((await control(id, { action: 'drop', id: 'd2' })).json.ignored).toBeDefined();
+
+    expect((await control(id, { action: 'restore', id: 'd2' })).json).toEqual({ ok: true });
+    await s.waitForCount('record:dropped', 2);
+    expect(s.of('record:dropped')[1]).toEqual({ type: 'record:dropped', id: 'd2', dropped: false, source: 'panel', actions: behind });
+    const back = await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.revision > without.data.revision,
+      'the draft with it back',
+    );
+    expect(back.data).toMatchObject({ steps: ['Did click Reports', 'Did click Sign in'], ids: ['d1', 'd2'] });
+    await sleep(300);
+    expect(ai.requests).toHaveLength(calls);
+    await control(id, { action: 'stop' });
+    const result = await s.waitFor((f) => f.event === 'record:result', 'record:result');
+    expect(result.data.steps).toEqual(['Did click Reports', 'Did click Sign in']);
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('a deleted step stays out of the result, and no later redraft brings it back', async () => {
+    ai.responder = (m) => echoMapped(m);
+    const id = 'delete-stays';
+    const s = await started(id);
+    await pageOf().click('#reports');
+    await s.draftThrough(1);
+    await pageOf().click('#signin');
+    await s.draftThrough(2);
+    await pageOf().click('#email');
+    await s.draftThrough(3);
+    await control(id, { action: 'drop', id: 'd2' });
+    const without = await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.steps.join('|') === 'Did click Reports|Did click Email',
+      'the draft without it',
+    );
+    // An action dropped from the panel: a redraft of everything left.
+    const calls = ai.requests.length;
+    await control(id, { action: 'drop', id: s.of('record:action')[0].id });
+    await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.revision > without.data.revision && f.data.steps.length === 1,
+      'the redraft',
+    );
+    expect(recordingOf(ai.requests[calls]!).map((a) => a['target'].name)).toEqual(['Email']);
+    await control(id, { action: 'stop' });
+    const result = await s.waitFor((f) => f.event === 'record:result', 'record:result');
+    expect(result.data.steps).toEqual(['Did click Email']);
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('says why it did nothing, and refuses a body that is none of these', async () => {
+    const id = 'edit-refusals';
+    const s = await started(id);
+    await pageOf().click('#reports');
+    await s.draftThrough(1);
+    expect((await control(id, { action: 'edit-step', id: 'd9', text: 'x', source: 'panel' })).json).toEqual({
+      ok: true,
+      ignored: 'The recording has no step with that id.',
+    });
+    expect((await control(id, { action: 'edit-step', id: 'd1', text: '  ', source: 'panel' })).json.ignored).toMatch(
+      /delete the step instead/,
+    );
+    expect((await control(id, { action: 'edit-step', id: 'd1', text: 'Did click Reports', source: 'panel' })).json.ignored).toBe(
+      'The step already reads that way.',
+    );
+    expect((await control(id, { action: 'edit-step', text: 'x', source: 'panel' })).status).toBe(400);
+    expect((await control(id, { action: 'edit-step', id: 'd1', source: 'panel' })).status).toBe(400);
+    expect((await control(id, { action: 'edit-step', id: 'd1', text: 'x', source: 'toolbar' })).status).toBe(400);
+    expect((await control(id, { action: 'edit-step', id: 'd1', text: 'x', source: 'panel', revision: -1 })).status).toBe(400);
+    expect((await control(id, { action: 'drop', id: 'd1', source: 'toolbar' })).status).toBe(400);
+    expect((await control('nobody', { action: 'edit-step', id: 'd1', text: 'x', source: 'panel' })).status).toBe(404);
+    expect((await control(id, { action: 'drop', id: 'd9' })).json.ignored).toMatch(/no action or step d9/);
+    // After Stop: refused up front, with the reason.
+    expect((await control(id, { action: 'stop' })).json).toEqual({ ok: true });
+    expect((await control(id, { action: 'edit-step', id: 'd1', text: 'Late', source: 'editor' })).json.ignored).toMatch(
+      /already been stopped/,
+    );
+    expect((await control(id, { action: 'drop', id: 'd1' })).json.ignored).toMatch(/already been stopped/);
+    const result = await s.waitFor((f) => f.event === 'record:result', 'record:result');
+    expect(result.data.steps).toEqual(['Did click Reports']);
+    expect(s.of('record:edited')).toEqual([]);
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+});
+
+describe("a secret in an edit (the story's \"Secrets\")", () => {
+  const PW = 'pw-edit-<&"77>';
+  const KEY = "sk-edit'&<SECRET>\"-42";
+
+  it('is written as {{name}} — from the panel and from the drawer — and refused from the editor; in no frame, prompt or log line, in any spelling', async () => {
+    const lines: string[] = [];
+    const remove = addLogCallback((_level, message) => lines.push(message));
+    try {
+      ai.responder = (m) => echoMapped(m);
+      const id = 'edit-secret';
+      const s = await started(id, recordBody({ env: { PASSWORD: PW, STRIPE_API_KEY: KEY } }));
+      const page = pageOf();
+      await page.click('#reports');
+      await s.draftThrough(1);
+      await page.click('#signin');
+      await s.draftThrough(2);
+      // From the panel: {{password}}, which the file already defines.
+      expect(
+        (await control(id, { action: 'edit-step', id: 'd1', text: `Type ${PW} into the Password field`, source: 'panel' })).json,
+      ).toEqual({ ok: true });
+      await s.waitForCount('record:edited', 1);
+      expect(s.of('record:edited')[0].text).toBe('Type {{password}} into the Password field');
+      // From the editor: that line is the author's own text — refused, saying what to write.
+      const editor = await control(id, { action: 'edit-step', id: 'd2', text: `Use ${KEY} here`, source: 'editor' });
+      expect(editor.json).toMatchObject({ ok: true, ignored: expect.stringContaining('{{STRIPE_API_KEY}}') });
+      // From the drawer: {{STRIPE_API_KEY}}, with a parameter reading the .env.
+      await clickToolbar(page, 'drawer');
+      await until(() => readDrawer(page), (d) => d !== null && d.open && d.rows.length === 2, 'the drawer');
+      await clickDrawer(page, 'd2', 'row-edit');
+      await until(() => readDrawer(page), (d) => d !== null && d.rows[1]!.editing, 'the step in a box');
+      await page.keyboard.press('Control+A');
+      await page.keyboard.type(`Send ${KEY} as the key`);
+      await page.keyboard.press('Enter');
+      await s.waitForCount('record:edited', 2);
+      expect(s.of('record:edited')[1]).toEqual({
+        type: 'record:edited', id: 'd2', text: 'Send {{STRIPE_API_KEY}} as the key', source: 'toolbar',
+      });
+      const draft = await s.waitFor(
+        (f) => f.event === 'record:draft' && f.data.steps[1] === 'Send {{STRIPE_API_KEY}} as the key',
+        'the draft with both',
+      );
+      expect(draft.data.parameters).toEqual([{ name: 'STRIPE_API_KEY', value: '$STRIPE_API_KEY' }]);
+      // A call after: the model is shown the steps as {{…}}.
+      await page.click('#email');
+      await s.draftThrough(3);
+      expect(textOf(ai.requests[ai.requests.length - 1]!)).toContain('Type {{password}} into the Password field');
+      await control(id, { action: 'stop' });
+      const result = await s.waitFor((f) => f.event === 'record:result', 'record:result');
+      expect(result.data.steps.slice(0, 2)).toEqual([
+        'Type {{password}} into the Password field',
+        'Send {{STRIPE_API_KEY}} as the key',
+      ]);
+      await s.waitFor((f) => f.event === 'done', 'done');
+      const everything = JSON.stringify([s.frames, ai.requests, lines]);
+      for (const secret of [PW, KEY]) {
+        for (const spelling of spellings(secret)) expect(everything).not.toContain(spelling);
+      }
+    } finally {
+      remove();
+    }
+  }, 60_000);
+});
+
+describe('the drawer in the recorded page, over the wire', () => {
+  it('an edit, a delete and its Restore, and + between two steps — each through the bar, none of them recorded', async () => {
+    ai.responder = (m) => echoMapped(m);
+    const id = 'drawer-wire';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#reports');
+    await s.draftThrough(1);
+    await page.click('#signin');
+    const two = await s.draftThrough(2);
+    expect(two.data.ids).toEqual(['d1', 'd2']);
+    await clickToolbar(page, 'drawer');
+    await until(() => readDrawer(page), (d) => d !== null && d.open && d.rows.length === 2, 'the drawer');
+
+    // Edit step 1 in place.
+    await clickDrawer(page, 'd1', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[0]!.editing, 'the step in a box');
+    await page.keyboard.press('Control+A');
+    await page.keyboard.type('Open Reports');
+    await page.keyboard.press('Enter');
+    const edited = await s.waitFor((f) => f.event === 'record:edited', 'record:edited');
+    expect(edited.data).toEqual({ type: 'record:edited', id: 'd1', text: 'Open Reports', source: 'toolbar' });
+    await s.waitFor((f) => f.event === 'record:draft' && f.data.steps[0] === 'Open Reports', 'the draft');
+
+    // ✕ on step 2: out with its click, struck in the drawer, Restore on the bar.
+    await clickDrawer(page, 'd2', 'row-delete');
+    const dropped = await s.waitFor((f) => f.event === 'record:dropped', 'record:dropped');
+    expect(dropped.data).toEqual({
+      type: 'record:dropped', id: 'd2', dropped: true, source: 'toolbar', actions: [s.of('record:action')[1].id],
+    });
+    const out = await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.steps.join('|') === 'Open Reports',
+      'the draft without it',
+    );
+    await toolbarShows(page, 'Removed "Did click Sign in"');
+    await until(
+      () => readDrawer(page),
+      (d) => d !== null && d.rows.map((r) => r.kind).join() === 'live,deleted',
+      'the struck row',
+    );
+    await clickToolbar(page, 'restore');
+    await s.waitForCount('record:dropped', 2);
+    expect(s.of('record:dropped')[1]).toMatchObject({ id: 'd2', dropped: false, source: 'toolbar' });
+    const back = await s.waitFor(
+      (f) => f.event === 'record:draft' && f.data.revision > out.data.revision,
+      'the step back',
+    );
+    expect(back.data).toMatchObject({ steps: ['Open Reports', 'Did click Sign in'], ids: ['d1', 'd2'] });
+
+    // + below step 1: a step of the author's, between the two.
+    await until(() => readDrawer(page), (d) => d !== null && d.open && d.rows.length === 2, 'the drawer again');
+    await clickDrawer(page, 'd1', 'row-insert');
+    await toolbarShows(page, 'Goes after step 1');
+    await page.keyboard.type('Verify the Reports page is shown');
+    await page.keyboard.press('Enter');
+    const step = await s.waitFor((f) => f.event === 'record:step', 'record:step');
+    expect(step.data).toMatchObject({ text: 'Verify the Reports page is shown', source: 'toolbar', afterStep: 0 });
+    const between = await s.waitFor((f) => f.event === 'record:draft' && f.data.authored?.length === 1, 'the draft with it');
+    expect(between.data.steps).toEqual(['Open Reports', 'Verify the Reports page is shown', 'Did click Sign in']);
+
+    // None of it was an action.
+    expect(s.of('record:action')).toHaveLength(2);
+    await control(id, { action: 'stop' });
+    const result = await s.waitFor((f) => f.event === 'record:result', 'record:result');
+    expect(result.data.steps).toEqual(['Open Reports', 'Verify the Reports page is shown', 'Did click Sign in']);
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('a struck row stays until the next step lands', async () => {
+    ai.responder = (m) => echoMapped(m);
+    const id = 'drawer-struck';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#reports');
+    await s.draftThrough(1);
+    await page.click('#signin');
+    await s.draftThrough(2);
+    await clickToolbar(page, 'drawer');
+    await control(id, { action: 'drop', id: 'd1' });
+    await until(
+      () => readDrawer(page),
+      (d) => d !== null && d.rows.map((r) => `${r.kind}:${r.text}`).join('|') === 'deleted:Did click Reports|live:Did click Sign in',
+      'struck where it was',
+    );
+    await page.click('#email');
+    await s.draftThrough(3);
+    await until(
+      () => readDrawer(page),
+      (d) => d !== null && d.rows.every((r) => r.kind === 'live') && d.rows.length === 2,
+      'gone once the next step landed',
+    );
+    await control(id, { action: 'cancel' });
+    await s.waitFor((f) => f.event === 'done', 'done');
+  }, 60_000);
+
+  it('a change made in the drawer after Stop is refused, and its words go to the panel', async () => {
+    ai.responder = (m) => echoMapped(m);
+    const id = 'drawer-late';
+    const s = await started(id);
+    const page = pageOf();
+    await page.click('#reports');
+    await s.draftThrough(1);
+    await clickToolbar(page, 'drawer');
+    await until(() => readDrawer(page), (d) => d !== null && d.open && d.rows.length === 1, 'the drawer');
+    // A call held open, and a step waiting behind it: Stop waits for the
+    // step, and the bar has not been told yet.
+    const open = holdCalls();
+    await page.click('#signin');
+    await callInFlight();
+    // The drawer shows "updating…" as a row of its own, and — docked at the
+    // bottom — grows upward by it: wait for it, so the rows stay put for the click.
+    await until(() => readDrawer(page), (d) => d !== null && d.rows.some((r) => r.kind === 'pending'), 'updating…');
+    expect((await control(id, { action: 'add-step', text: 'Verify A', source: 'panel' })).status).toBe(202);
+    expect((await control(id, { action: 'stop' })).json).toEqual({ ok: true });
+    await clickDrawer(page, 'd1', 'row-edit');
+    await until(() => readDrawer(page), (d) => d !== null && d.rows[0]!.editing, 'the step in a box');
+    await page.keyboard.press('Control+A');
+    await page.keyboard.type('Too late to change');
+    await page.keyboard.press('Enter');
+    await toolbarShows(page, 'Your change came after Stop, so it was not made.');
+    await until(
+      () => readDrawer(page),
+      (d) => d === null || !d.open || d.rows[0]!.text === 'Did click Reports',
+      'the words taken back in the page',
+    );
+    open();
+    const result = await s.waitFor((f) => f.event === 'record:result', 'record:result');
+    expect(result.data.steps).toEqual(['Did click Reports', 'Did click Sign in', 'Verify A']);
+    expect(s.of('record:edited')).toEqual([]);
+    const warned = s.of('output').filter((o) => o.kind === 'warn').map((o) => o.msg as string);
+    expect(warned).toContain(
+      'A change to a step made in the browser after Stop was not made: "Too late to change". Change the step in the test by hand.',
+    );
+    await s.waitFor((f) => f.event === 'done', 'done');
   }, 60_000);
 });
