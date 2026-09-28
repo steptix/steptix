@@ -37,8 +37,17 @@ never recorded. A step you **type in the test file** during a recording joins
 it the same way: it is kept exactly as you wrote it, the recording numbers
 around it, and the next steps go after it. Pause, Resume and Add Step to
 Recording are also commands; `testbench-native.recordSteps.browserToolbar`
-turns the bar off. See stories/testbench-record-toolbar.md. Server: rebuild and
-restart; TestBench 0.5.157.
+turns the bar off. See stories/testbench-record-toolbar.md.
+
+You can also **change what has been recorded** while you record, and no step
+is ever locked against you. In the bar's Steps so far drawer, click a step to
+reword it, press ✕ to delete it, or `+` between two steps to add one there;
+in the test file, just edit or delete the line. A reworded step keeps your
+wording through every later draft and the model writes no second step for
+what it describes; deleting a step the model wrote also drops the recorded
+actions behind it, so no redraft brings it back, and Restore (or Ctrl+Z in the
+file) puts both back. See stories/testbench-record-edit-steps.md. Server:
+rebuild and restart; TestBench 0.5.158.
 
 ### Added — `drag` and `reload` steps
 
