@@ -6,6 +6,24 @@ does not yet use semantic version numbers, so entries are grouped by date.
 
 ## Unreleased
 
+### Fixed — the selector rules no longer steer the model into selectors that match nothing
+
+Rule 3 of the step prompt recommended `tag:text-is("label")` for short labels
+and `[role="button"][name="..."]` as "accessible role + name". The first
+matches nothing when the label sits in a child element, which is how component
+libraries write buttons (`<a role="button"><span>Join</span></a>`). The second
+is plain CSS, looks for an HTML `name` attribute, and matches nothing on most
+buttons. On 17 runs against a real site, all 19 failed actions used one of the
+two. Each one waited out a 10-second timeout before a retry, and a dropdown
+option whose text sat three elements deep never passed at all.
+
+The rule now recommends Playwright's `role=button[name="..."]` form, which
+matches the name a screen reader announces however deeply the text is
+wrapped. It keeps `:text-is` for elements with no role whose text sits
+directly inside, tells the model to copy the name from the DOM snapshot rather
+than the screenshot, and scopes with ` >> `. See
+[issue 062](issues/062-selector-rules-steer-the-model-into-selectors-that-match-nothing.md).
+
 ### Added — files that loop and decide now compile, conditions included
 
 `aiui compile` refused any file with a `While`, `Repeat … until` or `For each`,

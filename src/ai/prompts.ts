@@ -192,13 +192,13 @@ Plan your next action based on the observed result — do not batch multiple act
    Step B — pick the highest-ranked stable handle available ON that element, in this order:
      1. [data-testid="..."] — author-intended test handle (also accept data-test, data-qa, data-cy if the app uses them)
      2. #id — only if the id looks stable. Skip ids that look auto-generated (:r1a:, radix-:r3:, react-aria-:rb4:, long random strings). Those change on every render
-     3. [role="button"][name="..."] or [role="link"][name="..."] — accessible role + name; very stable across framework changes
+     3. role=button[name="..."], role=link[name="..."], role=option[name="..."], role=menuitem[name="..."], role=tab[name="..."] — Playwright's role selector: the element's role (its role attribute, or the native one: a <button> is a button, an <a href> is a link) plus the name a screen reader announces. The name is built from ALL the text inside the element however deeply it is wrapped (or from aria-label / aria-labelledby), so it matches <button>Save</button> and <a role="button"><span>Join</span></a> alike. It must match the WHOLE name with the same capitalisation: copy it from the DOM snapshot, not the screenshot (CSS can display "Join" as "JOIN"). Write it in exactly this form — [role="button"][name="..."] is plain CSS, where [name] is the HTML name attribute, and matches nothing on most buttons. Scope it with " >> ", never a plain space: nav >> role=link[name="New"]. expand, a find's "selector" scope and count/attribute waits need plain CSS instead
      4. [aria-label="..."] — accessible name (especially for icon-only buttons)
      5. [name="..."] — form-field name attribute
      6. a[href="/route"] — anchor to a known route path. Only when the href is a meaningful path (/logout, /dashboard, /settings), NOT a tracking URL or absolute URL with query parameters
-     7. tag:text-is("exact label") — visible text, EXACT match. Preferred for short labels like "New", "OK", "Save", "Login" where substring match would overreach (e.g. "New" matching "News", "Renewal", "Newer")
+     7. tag:text-is("exact label") — visible text, EXACT match, for an element with no role (item 3 covers the ones that have one), and ONLY when the text sits directly inside that element: h3:text-is("Join super") for <h3>Join super</h3>. :text-is matches only the innermost element holding the text, so a:text-is("Join") does NOT match <a><span>Join</span></a>
      8. tag:has-text("substring") — visible text, substring match. Use only when the exact label is long enough that substring is unambiguous, or when :text-is is not practical
-     9. Parent-scoped combinations — #site-nav a:text-is("Login"), [data-testid="toolbar"] button:has-text("Save"). Use when the element itself has no stable handle but a nearby ancestor does
+     9. Parent-scoped combinations — #site-nav >> role=link[name="Login"], [data-testid="toolbar"] button:has-text("Save"). Use when the element itself has no stable handle but a nearby ancestor does
      10. nth=N or :nth-child(N) — LAST RESORT. Use only when the page genuinely has multiple interchangeable elements and you need the Nth. Do NOT use nth= to disambiguate between elements that have distinguishing attributes or text — scope to a parent instead
 
    Pick ONE handle from this ladder. Do NOT glue a class selector onto an attribute selector for "extra specificity" (e.g. a.prc-ActionList-Item[href="/logout"]) — the attribute alone uniquely identifies the element, the class adds no disambiguation, and framework-generated class names like Primer's prc-* or emotion-* change between releases. Use just a[href="/logout"] instead.
@@ -212,12 +212,13 @@ Plan your next action based on the observed result — do not batch multiple act
    - State pseudo-classes (:visible, :hidden, :disabled) — see rule 12; use waitType for state
 
    Cookbook — canonical patterns:
-   - Button with a unique label → button:text-is("Sign in"), or [role="button"][name="Sign in"]
-   - Link in a nav with a short label → nav a:text-is("New") (scoped + exact-match)
+   - Button → role=button[name="Sign in"]
+   - Link in a nav with a short label → nav >> role=link[name="New"] (scoped + exact name)
+   - Option in a custom dropdown or listbox → role=option[name="Mr"] (a native <select> uses the select action, rule 11)
    - Link to a known route → a[href="/logout"] (attribute alone is sufficient; don't prefix with the class)
    - Input by its label → label:text-is("Email") + input, or input[name="email"] if available
    - Row in a table → tr:has-text("paul@example.com") (substring OK here — the value is specific)
-   - Dismissing a dialog → [role="dialog"] button:text-is("Cancel")
+   - Dismissing a dialog → [role="dialog"] >> role=button[name="Cancel"]
    - Icon-only button → [aria-label="Close"]
 4. Many pages render duplicate elements for mobile and desktop layouts. Use the viewport size and device mode (see Test Information) to target the correct variant. In the DOM snapshot, duplicates hidden with display:none or aria-hidden are collapsed to tag-only placeholders marked <!-- hidden: ... --> with their attributes dropped — never target those. ONE exception: a hidden \`<input type="file">\` keeps its attributes and IS a valid target — that is what a styled uploader looks like, and rule 10a covers it. When more than one rendered candidate remains, use the screenshot to confirm which variant is actually visible
 5. Only include an "assert" action when the step instruction's *intent* is verification — i.e. the user wants to check that a specific value or state matches an expectation. Action verbs that overlap with verification words ("Confirm by clicking the Submit button", "Check the box", "Ensure the toggle is on") are NOT verifications — they are clicks, and you should emit only the click action. Do NOT add an assert to self-verify that a click or other action succeeded — you will see the result in the next screenshot. A failed assert immediately fails the step, so be deliberate${dismissalRule}
