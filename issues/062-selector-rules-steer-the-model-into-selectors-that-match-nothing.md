@@ -1,8 +1,10 @@
 # 062 — The selector rules steer the model into selectors that match nothing
 
-**Status:** partly fixed. Rule 3 is rewritten on branch
-`claude/selector-role-names` (see [The fix](#the-fix-rule-3-rewritten)). The
-two follow-ups under [Not done](#not-done) are open.
+**Status:** partly fixed. Rule 3 is rewritten, and every path that takes a
+model-written selector now resolves it through Playwright, on branch
+`claude/selector-role-names` (PR #162, after one review round; see
+[The fix](#the-fix-rule-3-rewritten-and-every-selector-path-taught-playwright)).
+The follow-ups under [Not done](#not-done) are open.
 **Area:** [src/ai/prompts.ts](../src/ai/prompts.ts), rule 3 of
 `buildSystemPrompt` ("SELECTOR STRATEGY"): ladder items 3, 7 and 9 and the
 cookbook.
@@ -139,56 +141,92 @@ What that establishes:
 
 - `:text-is` skips any element whose child element also matches, so wrapping a
   label in a `<span>` moves the match onto the `<span>`.
-- Playwright's `role=` selector matches the accessible name, which is built from
-  all the text inside the element however deeply it is wrapped (or from
-  `aria-label` / `aria-labelledby`). It matches the whole name, and
+- Playwright's `role=` selector matches the accessible name: the
+  `aria-labelledby` text if there is one, else `aria-label`, else all the
+  text inside the element however deeply it is wrapped. The attributes REPLACE
+  the text: `<a href="/join" aria-label="Join Example super today">Join</a>` is not
+  matched by `role=link[name="Join"]`. It matches the whole name, and
   capitalisation counts: `role=button[name="join"]` matched nothing.
-- Whitespace does not matter. Spaces around the label, newlines and indentation,
-  non-breaking spaces and zero-width spaces all still matched
-  `role=button[name="Join"]`, and so did `role=button[name=" Join "]`.
-- The name comes from the page's text, not from how it is drawn. With
-  `text-transform: uppercase` the page shows "JOIN", but
-  `role=button[name="Join"]` matched and `role=button[name="JOIN"]` did not. So
-  the model has to copy the name from the DOM snapshot, not the screenshot.
+- Whitespace is normalised on both sides: spaces around the label, newlines,
+  indentation and non-breaking spaces are trimmed or collapsed, zero-width
+  spaces are deleted, and `role=button[name=" Join "]` matches too. Missing
+  whitespace is not added: `<span>Save</span><span>draft</span>` shows as
+  "Save draft" but its name is "Savedraft".
+- CSS `text-transform` is not part of the name: the page shows "JOIN" and
+  `role=button[name="Join"]` matches, `name="JOIN"` does not. So the model
+  copies the name from the DOM snapshot, not the screenshot. CSS-generated
+  content IS part of the name, though: `::before`/`::after` text, icon-font
+  glyphs, CSS-drawn arrows and required-field asterisks, and an SVG `<title>`.
+  None of those appear in the snapshot, so for those elements the exact name
+  cannot be copied and the rule falls back to `:has-text`.
+- An element has a role only through its `role` attribute or its tag:
+  `<button>`, `<input type="submit|button">`, an `<a>` WITH `href`. An `<a>`
+  without `href` or a clickable `<div>` has none, so a `role=` selector finds
+  nothing and the text forms are right.
 - `:has(:text-is("..."))` only works when the text is wrapped, and fails when it
   is not. It cannot be the general answer.
 - To scope a `role=` selector to a container, Playwright needs ` >> `:
   `nav >> role=link[name="New"]` matched 1. With a plain space,
   `nav role=link[name="New"]` is invalid CSS, and Playwright throws a parse
   error in about 5 ms instead of waiting out the timeout.
+- A name containing a double quote goes in single quotes:
+  `role=button[name='Say "hi"']`.
 
-## The fix: rule 3 rewritten
+## The fix: rule 3 rewritten, and every selector path taught Playwright
 
-- **Item 3** now recommends Playwright's `role=` form (`role=button[name="..."]`,
-  `role=link`, `role=option`, `role=menuitem`, `role=tab`). It explains that the
-  name comes from all the text inside, must match whole, and must be copied from
-  the snapshot. It warns that `[role="button"][name="..."]` is a different, CSS
-  selector, says to scope with ` >> `, and lists the actions that need plain CSS
-  (below).
-- **Item 7** keeps `tag:text-is("...")` only for elements with no role, and only
-  when the text sits directly inside the element.
+In `src/ai/prompts.ts`:
+
+- **Item 3** recommends Playwright's `role=` form (`role=button[name="..."]`,
+  and link, option, menuitem, tab). It says which elements have a role, where
+  the name comes from (aria-labelledby, else aria-label, else the text inside),
+  that it must match whole and be copied from the snapshot, that
+  `[role="button"][name="..."]` is the CSS look-alike, to scope with ` >> `,
+  how to quote a name with a double quote, and — the fallback — that a name
+  which matches nothing has parts the snapshot cannot show, so use item 8.
+- **Item 7** keeps `tag:text-is("...")` for elements item 3 does not cover, and
+  only when the text sits directly inside the element.
 - **Item 9's** example becomes `#site-nav >> role=link[name="Login"]`.
 - **The cookbook** changes its button, nav-link and dialog lines to the `role=`
   form, and gains a line for options in custom dropdowns.
+- **Rules 12, 13, 14, 19 and 20** stop saying "CSS selector": every one of
+  those actions now takes any form.
+- **Code-behind rule 7** says a `role=` selector from the transcript is exact:
+  keep it as written, or pass `exact: true` to `getByRole`, whose default
+  matches any name containing the text, in any capitalisation.
 
-Where a `role=` selector is accepted, from reading the action code: click, type,
-select, hover, upload, `read` (single and `multiple`), `count`, `readTable`,
-and `wait` with `waitType` `selector` or `hidden` all resolve through
-Playwright locators (`root.locator(selector)` in `src/browser/actions.ts`). Four places run the selector through
-`document.querySelector` in the page, so they need plain CSS and would throw on
-`role=`:
+In the code, so the advice is true everywhere a model-written selector goes:
 
-- `expand` (`expandDomSubtree` in `src/browser/dom-cleaner.ts`)
-- `find`'s optional `selector` scope (`findInDom`)
-- `wait` with `waitType` `count`
-- `wait` with `waitType` `attribute`
-
-The new rule names these, and rules 12, 19 and 20 already asked for CSS there.
+- **`expand` and `find`'s scope** (`expandDomSubtree`, `findInDom` in
+  `src/browser/dom-cleaner.ts`) resolve the selector through
+  `page.locator(...)`, stamp the first match with a temporary
+  `data-aiui-target` attribute, and let their in-page scripts find it by that
+  stamp. They used to call `document.querySelector` on the model's selector,
+  which throws on `role=` and ` >> `. The readTable structure question expands
+  its region the same way, so it is fixed by the same change.
+- **`wait` with `waitType` `count` or `attribute`** polls `root.locator(...)`
+  instead of running `document.querySelector` in `page.waitForFunction`. It now
+  also honours `frame`, which it ignored before.
+- **`inferWaitType`** recognises `role=`, `text=`, `css=`, `xpath=` and
+  ` >> ` as selectors. A `role=` condition with no `waitType` used to be taken
+  for a text wait and ran out its whole timeout.
+- **`promoteIframeFromSelector`** (`src/browser/actions.ts`), the safety net
+  that moves an iframe written into `selector` over to `frame`, split on
+  whitespace only. `#pay-frame >> role=button[name="Pay now"]` came out as the
+  selector `>> role=button[name="Pay now"]`, which Playwright rejects. It now
+  splits the first segment off at whitespace or ` >> ` and keeps the rest
+  verbatim.
+- **The readTable structure question** no longer sends `expand`'s in-band
+  error text ("[expand] …") to the model as the region's markup
+  (`src/runner/step-executor.ts`).
 
 `tests/selector-role-names.test.ts` pins the Playwright measurements above on a
-real page, drives a click through `executeAction` with the new form, and checks
-that the prompt carries the new guidance and no longer recommends the CSS
-look-alike.
+real page, including the limits (aria-label, CSS content, run-together spans,
+`<a>` without href, quotes). It clicks through `executeAction` with the role
+form, inside one iframe and two, with and without the `frame` field; runs the
+count, attribute and inferred waits with role selectors; checks `expand` and
+`find` take the role form and leave no stamp behind; and checks the prompt
+text. Nine of its tests fail against the code before this change.
+`tests/api-server-table-structure.test.ts` gains the structure-question case.
 
 ### Checked on the real site after the fix
 
@@ -203,7 +241,13 @@ model, on 2026-09-28:
 | `gemini-3.8-flash` | 4/4 passed, no retries, 101 s | `role=button[name="Join"]`, `header >> role=link[name="Super"]`, `role=link[name="Join super"]` |
 
 All 12 clicks worked on the first try. The same steps in the morning's 06:59 run
-(`gpt-6-luna`, old rule) took 115 s, with two clicks failing first. The "Mr"
+(`gpt-6-luna`, old rule) took 115 s, with two clicks failing first.
+
+Re-run after the review round's rewording, same steps and models: all three
+passed 4/4 again with no failed action (48 s, 56 s, 64 s), choosing
+`role=button[name="Join"]` or `header >> role=button[name="Join"]`,
+`role=link[name="Super"]` with or without `header >>`, and
+`role=link[name="Join super"]`. The "Mr"
 option was not re-run live: it sits behind the join form's personal-details
 steps. The test file covers its markup instead.
 
@@ -217,9 +261,11 @@ steps. The test file covers its markup instead.
   small suite of simple steps on real sites, so rule changes are judged by
   numbers rather than a single run. The storage design is still under
   discussion.
-- **Let the four CSS-only paths accept Playwright selectors.** That would remove
-  the exception from the rule.
 - **The page-not-settled failure** from the 07:03 run.
+- **Names the snapshot cannot show.** The fallback to `:has-text` covers CSS
+  content, icon glyphs and run-together words, but the model only learns it
+  needed the fallback after a miss. A snapshot that showed the name Playwright
+  computed (its accessibility snapshot does) would remove the guess.
 
 ## Revisit when
 

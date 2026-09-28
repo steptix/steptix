@@ -19,9 +19,24 @@ option whose text sat three elements deep never passed at all.
 
 The rule now recommends Playwright's `role=button[name="..."]` form, which
 matches the name a screen reader announces however deeply the text is
-wrapped. It keeps `:text-is` for elements with no role whose text sits
-directly inside, tells the model to copy the name from the DOM snapshot rather
-than the screenshot, and scopes with ` >> `. See
+wrapped. It says which elements have a role (an `<a>` without `href` or a
+clickable `<div>` has none), that `aria-labelledby` or `aria-label` replaces
+the text as the name, to copy the name from the DOM snapshot rather than the
+screenshot, and to scope with ` >> `. When a name matches nothing because it
+holds something the snapshot cannot show (an icon glyph, a CSS-drawn arrow or
+asterisk), the model falls back to `:has-text`. `:text-is` stays for elements
+item 3 does not cover whose text sits directly inside.
+
+The rest of the framework now takes that form everywhere a model-written
+selector goes. `expand`, `find`'s scope, the readTable structure question and
+the `count` and `attribute` waits used to run the selector through
+`document.querySelector`, which throws on `role=` and ` >> `; they resolve it
+through Playwright now, and the two waits honour `frame` as well. A `role=`
+condition on a wait with no `waitType` is recognised as a selector instead of
+waiting out its timeout as text. And an iframe written into the selector with
+` >> ` (`#pay-frame >> role=button[name="Pay now"]`) is moved into `frame`
+correctly; it used to leave the selector as `>> role=…`, which Playwright
+rejects. See
 [issue 062](issues/062-selector-rules-steer-the-model-into-selectors-that-match-nothing.md).
 
 ### Added — files that loop and decide now compile, conditions included

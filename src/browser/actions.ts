@@ -43,16 +43,23 @@ function resolveLocatorRoot(page: Page, frameSelector?: string): Page | FrameLoc
  *
  * Example: frame="#advisor-frame", selector="#chat-frame #chat-input"
  *       → frame="#advisor-frame >> #chat-frame", selector="#chat-input"
+ *
+ * The first segment ends at whitespace OR at a Playwright " >> " chain, and
+ * everything after it is kept verbatim. Splitting on whitespace alone turned
+ * `#pay-frame >> role=button[name="Pay now"]` into the selector
+ * `>> role=button[name="Pay now"]`, which Playwright rejects — and rule 3 now
+ * tells the model to scope with " >> " (issue 062). Keeping the rest verbatim
+ * also stops a name like `name="a  b"` having its spaces collapsed.
  */
 async function promoteIframeFromSelector(
   page: Page,
   frame: string | undefined,
   selector: string,
 ): Promise<{ frame: string | undefined; selector: string }> {
-  const parts = selector.trim().split(/\s+/);
-  if (parts.length < 2) return { frame, selector };
+  const split = /^(\S+?)(?:\s*>>\s*|\s+)(\S[\s\S]*)$/.exec(selector.trim());
+  if (!split) return { frame, selector };
 
-  const candidate = parts[0]!;
+  const candidate = split[1]!;
   // Check if the candidate matches an iframe in the current frame context
   const root = resolveLocatorRoot(page, frame);
   const isIframe = await root
@@ -62,7 +69,7 @@ async function promoteIframeFromSelector(
 
   if (isIframe > 0) {
     const newFrame = frame ? `${frame} >> ${candidate}` : candidate;
-    const newSelector = parts.slice(1).join(' ');
+    const newSelector = split[2]!;
     logger.debug(`Promoted iframe from selector: frame="${newFrame}", selector="${newSelector}"`);
     // Recurse in case there are multiple nested iframes in the selector
     return promoteIframeFromSelector(page, newFrame, newSelector);
@@ -1436,6 +1443,33 @@ export function withAbort<T>(work: Promise<T>, signal?: AbortSignal): Promise<T>
   });
 }
 
+/**
+ * Ask `check` every 100 ms until it answers true, or fail once `timeout` has
+ * passed. The error is named `TimeoutError`, like the Playwright waits beside
+ * it, so nothing downstream can tell the two kinds of wait apart. Stops asking
+ * once the run is aborted: `withAbort` has already rejected by then, and a
+ * poll left running would keep querying a page nobody is waiting on.
+ */
+async function pollUntil(
+  check: () => Promise<boolean>,
+  timeout: number,
+  what: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    if (signal?.aborted) return;
+    if (await check()) return;
+    const left = deadline - Date.now();
+    if (left <= 0) {
+      const err = new Error(`Timeout ${timeout}ms exceeded waiting for ${what}`);
+      err.name = 'TimeoutError';
+      throw err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(100, left)));
+  }
+}
+
 // Exported for unit tests (issue 022) — verifies the clamped `timeout` is the
 // value actually forwarded into Playwright's wait calls. Not part of the public
 // API; `executeAction` is the entry point in normal use.
@@ -1522,38 +1556,58 @@ export async function executeWait(
       }
       break;
 
+    // `count` and `attribute` poll through `root.locator` rather than running
+    // `document.querySelector` inside `page.waitForFunction`. The in-page form
+    // spoke CSS only, so the `role=` selector rule 3 recommends — the same one
+    // the model just clicked with — threw a SyntaxError here (issue 062). The
+    // locator form accepts every selector an action accepts, and scopes the
+    // wait to `frame` the way `selector` and `hidden` already did.
     case 'count': {
       // Wait until a selector matches at least N elements (default 1)
       const expectedCount = parseInt(action.expected ?? '1', 10);
-      await page.waitForFunction(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ({ sel, min }) => (globalThis as any).document.querySelectorAll(sel).length >= min,
-        { sel: condition, min: expectedCount },
-        { timeout },
+      const target = root.locator(sanitizeCssSelector(condition));
+      await pollUntil(
+        async () => (await target.count()) >= expectedCount,
+        timeout,
+        `${condition} to match at least ${expectedCount} element(s)`,
+        signal,
       );
       break;
     }
 
     case 'attribute': {
       // Wait for an element's attribute to reach an expected value
-      // condition = CSS selector, expected = "attribute=value" or "!disabled"
+      // condition = selector, expected = "attribute=value" or "!disabled"
       const selector = action.selector ?? condition;
       const expr = action.expected ?? condition;
       const negate = expr.startsWith('!');
       const attr = negate ? expr.slice(1) : expr.split('=')[0]!;
       const val = negate ? null : (expr.split('=').slice(1).join('=') || null);
+      const target = root.locator(sanitizeCssSelector(selector));
 
-      await page.waitForFunction(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ({ sel, attribute, expected, shouldBeAbsent }) => {
-          const el = (globalThis as any).document.querySelector(sel);
-          if (!el) return false;
-          if (shouldBeAbsent) return !el.hasAttribute(attribute);
-          if (expected === null) return el.hasAttribute(attribute);
-          return el.getAttribute(attribute) === expected;
+      await pollUntil(
+        async () => {
+          // A bad selector throws here, at once, rather than timing out.
+          if ((await target.count()) === 0) return false;
+          try {
+            return await target.first().evaluate(
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (el: any, { attribute, expected, shouldBeAbsent }) => {
+                if (shouldBeAbsent) return !el.hasAttribute(attribute);
+                if (expected === null) return el.hasAttribute(attribute);
+                return el.getAttribute(attribute) === expected;
+              },
+              { attribute: attr, expected: val, shouldBeAbsent: negate },
+              { timeout: 1_000 },
+            );
+          } catch {
+            // Detached between the count and the read — ask again next poll.
+            return false;
+          }
         },
-        { sel: selector, attribute: attr, expected: val, shouldBeAbsent: negate },
-        { timeout },
+        timeout,
+        `${selector} to have ${expr}`,
+        signal,
       );
       break;
     }
@@ -1616,6 +1670,10 @@ function inferWaitType(condition: string): NonNullable<AIAction['waitType']> {
   if (condition === 'networkidle' || condition === 'load' || condition === 'domcontentloaded') return 'load';
   if (condition.startsWith('http') || condition.startsWith('*')) return 'url';
   if (/^[#.\[]/.test(condition)) return 'selector';
+  // Playwright's own selector forms, which rule 3 now recommends (issue 062).
+  // Without this a `role=` condition fell through to 'text' and waited out its
+  // whole timeout for the literal string "role=button[…]" to appear on screen.
+  if (/^(?:role|text|css|xpath)=/.test(condition) || /\s>>\s/.test(condition)) return 'selector';
   // Tag-like selector: starts with a tag name immediately followed by a selector char (no space)
   if (/^[a-z][a-z0-9]*[#.\[:]/.test(condition)) return 'selector';
   return 'text';
