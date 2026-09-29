@@ -16,7 +16,8 @@
                                          AIUI_*/TESTBENCH_* .env keys -> STEPTIX_*
     2. User environment variables       AIUI_* / TESTBENCH_* -> STEPTIX_*
     3. VS Code user settings            "testbench-native.*" / "testbench.*"
-                                         keys -> "steptix.*" (backup beside it)
+                                         keys -> "steptix.*", and keybindings'
+                                         command ids (backups beside them)
     4. Each -Path (a checkout or test project, default the main checkout):
          testbench-native\ leftovers    (ignored files git did not move) ->
                                          steptix-vscode\; node_modules, dist and
@@ -28,6 +29,11 @@
          .aiui\, .testbench\            -> .steptix\ (merged)
          .aiui-profile (CDP profiles)   -> .steptix-profile
          .aiui-codebehind-cache\, .aiui-tool-cache\   -> .steptix-*
+         .vscode\settings.json          workspace keys -> steptix.* (the
+                                         selected environment lives there)
+         code (.ts/.js/...)             imports of 'ai-ui-automation/...' ->
+                                         'steptix/...'; any other old name
+                                         in code is listed for a hand check
     5. -UninstallOldExtension           uninstalls pkent.testbench-native
 
   Nothing is overwritten: where the new name already exists (a file, a key, a
@@ -154,6 +160,47 @@ function Join-StatsFiles([string] $oldStats, [string] $newStats) {
   }
 }
 
+# Renames "testbench-native.X" / "testbench.X" setting keys to "steptix.X" in a
+# VS Code settings file (user or workspace). Only keys ("name": ...), and never
+# one whose steptix.X is already set or was produced a moment ago from the
+# other old prefix — either would leave two copies of one key.
+function Rename-SettingsKeys([string] $file) {
+  if (-not (Test-Path -LiteralPath $file)) { return }
+  $text = [IO.File]::ReadAllText($file)
+  $taken = @{}
+  foreach ($m in [regex]::Matches($text, '"(steptix\.[^"]+)"(?=\s*:)')) { $taken[$m.Groups[1].Value] = $true }
+  $new = [regex]::Replace($text, '"testbench(?:-native)?\.([^"]+)"(?=\s*:)', {
+    param($m)
+    $target = 'steptix.' + $m.Groups[1].Value
+    if ($taken.ContainsKey($target)) {
+      Write-Warning "$file already has `"$target`"; left $($m.Value) as it is"
+      return $m.Value
+    }
+    $taken[$target] = $true
+    return "`"$target`""
+  })
+  if ($new -ne $text -and $PSCmdlet.ShouldProcess($file, 'rename testbench settings to steptix.*')) {
+    Copy-Item -LiteralPath $file -Destination "$file.pre-steptix.bak"
+    [IO.File]::WriteAllText($file, $new)
+    Write-Host "  settings renamed: $file (backup beside it)"
+  }
+}
+
+# Tool files and code-behind (.steps.ts) import the framework by package name;
+# the old name no longer resolves, and a code-behind that fails to load falls
+# back to AI without failing the run. Only import specifiers are rewritten.
+$CodeFile = '\.(ts|mts|cts|js|mjs|cjs)$'
+# The checkout folder keeps its old name for now, so a path to it is not a leftover.
+$OldNamePattern = '(?<!vibe[\\/]+)ai-ui-automation|aiui|testbench'
+function Rename-Imports([string] $file) {
+  $text = [IO.File]::ReadAllText($file)
+  $new = [regex]::Replace($text, '(?<q>[''"`])ai-ui-automation(?=[/''"`])', '${q}steptix')
+  if ($new -ne $text -and $PSCmdlet.ShouldProcess($file, "import from 'steptix' instead of 'ai-ui-automation'")) {
+    [IO.File]::WriteAllText($file, $new)
+    Write-Host "  imports renamed: $file"
+  }
+}
+
 # Every CDP profile the framework made carries this marker, and `reset`
 # refuses to delete a profile without it, so it is renamed, not dropped.
 function Rename-ProfileMarker([string] $file) {
@@ -230,25 +277,20 @@ if (-not $ProjectsOnly) {
     }
   }
 
-  # 3. VS Code user settings. Only keys ("name": ...), and not one whose
-  # steptix.* twin is already set — that would leave two copies of one key.
+  # 3. VS Code user settings and keybindings.
   Write-Host '3. VS Code user settings'
-  $settings = Join-Path $env:APPDATA 'Code\User\settings.json'
-  if (Test-Path -LiteralPath $settings) {
-    $text = [IO.File]::ReadAllText($settings)
-    $new = [regex]::Replace($text, '"testbench(?:-native)?\.([^"]+)"(?=\s*:)', {
-      param($m)
-      $twin = '"steptix.' + $m.Groups[1].Value + '"'
-      if ($text -match ([regex]::Escape($twin) + '\s*:')) {
-        Write-Warning "settings.json already has $twin; left $($m.Value) as it is"
-        return $m.Value
-      }
-      return $twin
-    })
-    if ($new -ne $text -and $PSCmdlet.ShouldProcess($settings, 'rename testbench settings to steptix.*')) {
-      Copy-Item -LiteralPath $settings -Destination "$settings.pre-steptix.bak"
-      [IO.File]::WriteAllText($settings, $new)
-      Write-Host "  settings renamed (backup: $settings.pre-steptix.bak)"
+  $userDir = Join-Path $env:APPDATA 'Code\User'
+  Rename-SettingsKeys (Join-Path $userDir 'settings.json')
+  $keys = Join-Path $userDir 'keybindings.json'
+  if (Test-Path -LiteralPath $keys) {
+    $text = [IO.File]::ReadAllText($keys)
+    # Command ids are values here ("command": "testbench-native.runAll"; a
+    # leading - removes a default binding).
+    $new = [regex]::Replace($text, '("command"\s*:\s*"-?)testbench(?:-native)?\.', '${1}steptix.')
+    if ($new -ne $text -and $PSCmdlet.ShouldProcess($keys, 'point keybindings at steptix.* commands')) {
+      Copy-Item -LiteralPath $keys -Destination "$keys.pre-steptix.bak"
+      [IO.File]::WriteAllText($keys, $new)
+      Write-Host "  keybindings renamed (backup: $keys.pre-steptix.bak)"
     }
   }
 }
@@ -319,6 +361,22 @@ foreach ($given in $Path) {
   foreach ($f in $items | Where-Object { -not $_.PSIsContainer -and $_.Name -eq '.aiui-profile' }) {
     Rename-ProfileMarker $f.FullName
   }
+  # A workspace's settings hold its selected environment (steptix.activeEnv).
+  foreach ($f in $items | Where-Object { -not $_.PSIsContainer -and $_.Name -eq 'settings.json' -and $_.Directory.Name -eq '.vscode' }) {
+    Rename-SettingsKeys $f.FullName
+  }
+  $code = @($items | Where-Object { -not $_.PSIsContainer -and $_.Name -match $CodeFile })
+  foreach ($f in $code) { Rename-Imports $f.FullName }
+  # Anything else in code that still names the old product is the author's
+  # call (a hard-coded aiui.config.json, say), so it is listed, not rewritten.
+  if (-not $WhatIfPreference) {
+    $left = $code | Where-Object { Select-String -LiteralPath $_.FullName -Pattern $OldNamePattern -Quiet }
+    foreach ($f in $left) {
+      $hits = Select-String -LiteralPath $f.FullName -Pattern $OldNamePattern |
+        ForEach-Object { "line $($_.LineNumber)" }
+      Write-Warning "still names the old product, check by hand: $($f.FullName) ($($hits -join ', '))"
+    }
+  }
   # Deepest first, so a parent's move cannot strand a child's path.
   $dirs = $items | Where-Object { $_.PSIsContainer } | Sort-Object { $_.FullName.Length } -Descending
   foreach ($d in $dirs) {
@@ -350,8 +408,8 @@ Still yours to do, in the checkout:
   - Install the new extension with the CLI shim, not plain `code`:
       & "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd" `
           --install-extension steptix-vscode-<version>.vsix --force
-  - Run "Steptix: Use Copilot for AI" once; the bridge token was in the old
-    extension's storage.
+  - Run "Steptix: Use Copilot for AI" once. The bridge token lived in the old
+    extension's storage, so any .env that command wrote gets 401s until then.
   - Claude Code will ask to approve the project MCP server again: .mcp.json now
     names it "steptix" instead of "aiui".
   - Restart open terminals and VS Code so they see the renamed variables.
