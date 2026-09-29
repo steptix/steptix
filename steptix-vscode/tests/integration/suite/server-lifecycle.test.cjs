@@ -238,7 +238,7 @@ describe('Steptix server lifecycle (pre-run check + auto-start)', function () {
     // A Test Explorer batch re-runs the whole pre-run phase per test. With a
     // broken command that would mean one detached shell and one full
     // readyTimeoutSeconds stall PER TEST, so a 40-test batch spawns 40 shells
-    // and stalls for minutes before reporting 40 identical TB028s.
+    // and stalls for minutes before reporting 40 identical STX028s.
     probeResult = { kind: 'down', detail: 'ECONNREFUSED' };
     await setAutoStart({ command: 'node dist/index.js serve', cwd: FIXTURES_DIR, readyTimeoutSeconds: 1 });
 

@@ -415,7 +415,7 @@ const AUTO_START_BACKOFF_MS = 60_000;
  * Without this, a broken `serverAutoStart.command` (a `dist/` that isn't
  * built, say) turns a 40-test Test Explorer batch into 40 detached shell
  * spawns and 40 × readyTimeoutSeconds of stalling before reporting 40
- * identical TB028s — each test re-runs the whole pre-run phase, and nothing
+ * identical STX028s — each test re-runs the whole pre-run phase, and nothing
  * connects one failure to the next.
  *
  * Keyed by server URL, and cleared on a success, so fixing the problem and
