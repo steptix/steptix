@@ -42,6 +42,14 @@ Steptix is licensed under the Apache License, Version 2.0, as Playwright is.
 `LICENSE` so it ships inside each `.vsix`, and every `package.json` declares
 `"license": "Apache-2.0"`.
 
+The Steptix extension's bundles carry copies of third-party code (today
+React, React DOM, scheduler and jsonc-parser, all MIT), and their licences
+require the notices to travel with it. `npm run build` now ends by writing
+`dist/THIRD-PARTY-NOTICES.txt`, which ships in the `.vsix`. The list is read
+from the bundles' source maps, so it is exactly what was bundled, and the
+build stops on a bundled package with no licence file or with a licence
+outside MIT, ISC, BSD, 0BSD and Apache-2.0.
+
 ### Added — a first-try scoreboard: `aiui stats`
 
 Every run now keeps a short record, on this machine only, of each AI action
