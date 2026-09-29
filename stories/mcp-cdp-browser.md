@@ -75,7 +75,7 @@ two points in its life — which is why one `start_cdp_browser` suffices.
 [mcp-server.md](mcp-server.md) already locks *"One server owns
 browsers, sessions, cache and lifecycle"* and makes the MCP layer a
 pure HTTP client of the Sessions API. Spawning from the MCP process
-would create a second owner — invisible to flick, to TestBench, to the
+would create a second owner — invisible to flick, to Steptix, to the
 CLI, and duplicated across every MCP process. So launching lives behind
 new Sessions API routes (§4) and every client, MCP included, is a
 client of those.
@@ -87,7 +87,7 @@ silently contradicted.
 
 | Story | Was | Now |
 | --- | --- | --- |
-| [mcp-server.md](mcp-server.md) §2/§3 and [assemble.ts:83](../src/mcp/assemble.ts:83) | "No `cdp`: that selects a live browser to attach to, which is not an agent's decision to make." Tool-arg `config` is `{baseUrl?, timeout?}` only | An agent **may** select a browser **this project's framework launched** (§3). Any other browser requires a human editing `aiui.config.json` (§6). The rationale is preserved, not dropped: the agent chooses among browsers it owns; a human decides whether it can reach anything else |
+| [mcp-server.md](mcp-server.md) §2/§3 and [assemble.ts:83](../src/mcp/assemble.ts:83) | "No `cdp`: that selects a live browser to attach to, which is not an agent's decision to make." Tool-arg `config` is `{baseUrl?, timeout?}` only | An agent **may** select a browser **this project's framework launched** (§3). Any other browser requires a human editing `steptix.config.json` (§6). The rationale is preserved, not dropped: the agent chooses among browsers it owns; a human decides whether it can reach anything else |
 | [cdp-connection.md](cdp-connection.md) §"Why CDP doesn't auto-launch Chrome" | The harness never launches a browser for CDP; auto-launching against a fresh `--user-data-dir` would defeat every reason CDP was added | Correct for the *user's* profile, which we still never touch. It does **not** hold for a **persistent framework-owned** profile: a dir that survives relaunch accumulates exactly the logged-in state the original argument wanted. The rule is now scoped to "never launch against the user's own profile" |
 | [flick-vscode-cdp-attach.md](flick-vscode-cdp-attach.md) locked row 4 | Dedicated profile, "trade-off is **no logged-in sessions** in the launched browser" | True only on the **first** launch. The stated trade-off is wrong for every launch after the user signs in once, and this story depends on that. Row 4's *decision* stands; its rationale is amended |
 
@@ -97,9 +97,9 @@ silently contradicted.
   spawns a browser — not MCP, not flick, not the CLI. This is the
   existing "one server owns browsers" decision applied, not a new one.
 - **Framework-owned profiles only.**
-  `<project_root>/.aiui/cdp-profiles/<engine>-<name>/`. The user's real
+  `<project_root>/.steptix/cdp-profiles/<engine>-<name>/`. The user's real
   profile is never read, copied, or passed as `--user-data-dir`.
-  `.aiui/` is already gitignored ([.gitignore:14](../.gitignore:14)).
+  `.steptix/` is already gitignored ([.gitignore:14](../.gitignore:14)).
 - **Profiles are named** (§1), defaulting to `default`. One profile per
   engine cannot express admin-vs-user, uat-vs-prod, or a
   deliberately-signed-out profile — and without names "start a *new*
@@ -109,7 +109,7 @@ silently contradicted.
   without a way to empty one half-solves the sign-in-flow case, which
   is one of the three the feature exists for. It is the only
   destructive operation here and carries five guards, of which the
-  `.aiui-profile` marker is the one that does not depend on path logic
+  `.steptix-profile` marker is the one that does not depend on path logic
   being right.
 - **Ownership is proved from disk** (§3), never from process memory.
   Both the server and the MCP process restart independently of the
@@ -159,7 +159,7 @@ silently contradicted.
 ### 1. Profile layout
 
 ```
-<project_root>/.aiui/cdp-profiles/<engine>-<profile>/
+<project_root>/.steptix/cdp-profiles/<engine>-<profile>/
 ```
 
 **Always `<engine>-<name>`**, with the default name `default` — one
@@ -193,7 +193,7 @@ profile, and later a recursive delete (§12), somewhere else entirely.
 `mkdirSync(dir, {recursive:true})` at launch. Whether the directory
 existed **before** that call is what separates
 `launched_into_new_profile` from `launched_into_existing_profile` (§4),
-so it must be read first. **Write a marker file `.aiui-profile` into
+so it must be read first. **Write a marker file `.steptix-profile` into
 every profile at creation** — §12 refuses to delete any directory that
 lacks it, so a reset can never remove a directory this framework did
 not create.
@@ -211,7 +211,7 @@ process can read back with no bookkeeping.
 
 ```
 knownProfiles(projectRoot) =
-  for each <engine>-<name> dir under .aiui/cdp-profiles/:
+  for each <engine>-<name> dir under .steptix/cdp-profiles/:
     read DevToolsActivePort line 1 → port
     live  := port is reachable AND /json/version's engine matches <engine>
     emit { engine, profile: name, profileDir, live, port: live ? port : null }
@@ -243,8 +243,8 @@ lists are what make that impossible to confuse.
   the only one.
 - **Survives every restart** — server, MCP host, VS Code.
 - **It proves the profile, not the process.** Anything that can write
-  into `.aiui/cdp-profiles/` can forge a claim. That is the same trust
-  boundary as `.env` and `aiui.config.json`, both already read without
+  into `.steptix/cdp-profiles/` can forge a claim. That is the same trust
+  boundary as `.env` and `steptix.config.json`, both already read without
   further proof, so it adds no new exposure. Stated so it is a
   decision.
 
@@ -265,7 +265,7 @@ lists are what make that impossible to confuse.
 > | a stale port answers `/json/version` | no — the reachability probe drops it cleanly |
 >
 > The fixed-port fallback (9222, 9223, 9224 … skipping 9229, with a
-> collision walk and a `.aiui/cdp-browsers.json` written at launch) is
+> collision walk and a `.steptix/cdp-browsers.json` written at launch) is
 > therefore **not needed**, and §7 does not regain the two error rows
 > it would have carried. (The pre-W0 text pointed at §5 for those rows;
 > errors are §7.)
@@ -459,8 +459,8 @@ than solved; it is not a new boundary.
 ### 5. MCP tools
 
 Thin HTTP clients of §4, like every other MCP tool. Bare names (the
-host prefixes them, so an `aiui_` prefix would render as
-`mcp__aiui__aiui_…`), zod `outputSchema`, every nullable field
+host prefixes them, so a `steptix_` prefix would render as
+`mcp__steptix__steptix_…`), zod `outputSchema`, every nullable field
 explicit — `tabs`, `error`, `profileDir` are all nullable, and
 [mcp-server.md](mcp-server.md) §2's rule that a missing required key is
 fatal to `validateToolOutput` applies unchanged.
@@ -531,7 +531,7 @@ surprise:
 ### 6. The gate
 
 **The gate is MCP-side, not server-side.** The server cannot tell an
-agent from a human — TestBench and flick are authenticated clients too,
+agent from a human — Steptix and flick are authenticated clients too,
 and constraining them would be wrong. What needs constraining is an
 *agent* choosing a browser, so the check lives where that choice is
 made.
@@ -546,7 +546,7 @@ found, and the opt-in.
 { "mcp": { "cdp": { "allowUnowned": false, "ports": [9222, 9223] } } }
 ```
 
-Read directly from the parsed `aiui.config.json` on the MCP path (the
+Read directly from the parsed `steptix.config.json` on the MCP path (the
 loader is banned there, [mcp-server.md](mcp-server.md) §3).
 `allowUnowned: true` permits attaching to any discovered browser and
 un-withholds foreign tabs. `ports` overrides the foreign-scan list
@@ -558,7 +558,7 @@ framework even though the MCP path reads raw.
 precedent is `allow_foreign_session` — the right *shape*, the wrong
 *gate* here. An agent sets its own boolean, so it stops accidents, not
 a page that talks the agent into setting one; and behind this gate sits
-a browser holding live sessions. `aiui.config.json` is the only gate a
+a browser holding live sessions. `steptix.config.json` is the only gate a
 human actually holds. `allow_foreign_session` is unchanged for
 sessions; this is a second, stricter gate for browsers.
 
@@ -592,10 +592,10 @@ is an incomplete implementation.
 | engine not installed | the engine, the paths searched, and the copy-paste manual command (as the extension's error already does) | install it, or use the other engine |
 | spawned but no `DevToolsActivePort` within budget | the profile dir, the pid, the budget — this is §3's mechanism failing, so the message must name the file rather than say "browser did not start" | retry; if it persists, the §3 mechanism is broken on this machine and that is worth reporting rather than working around |
 | `DevToolsActivePort` present but the port does not answer | the port read from the file, and the last probe error | retry — a stale file from a crashed browser is the usual cause and the next launch clears it |
-| profile dir not writable | the resolved dir | fix permissions on `.aiui/cdp-profiles/` |
+| profile dir not writable | the resolved dir | fix permissions on `.steptix/cdp-profiles/` |
 | `profile` fails §1's charset rule | the value and the permitted characters | use a plain name — `admin`, `uat`, `signup-test` |
 | `reset` while a browser is live on that profile | the profile, its port, and that it must be closed first | close that browser (or `close_session` if a run holds it), then retry |
-| `reset` on a directory with no `.aiui-profile` marker | the resolved dir, and that the framework will not delete what it did not create | delete it by hand if that is genuinely intended — this refusal is not worked around in code |
+| `reset` on a directory with no `.steptix-profile` marker | the resolved dir, and that the framework will not delete what it did not create | delete it by hand if that is genuinely intended — this refusal is not worked around in code |
 | `reset` rename failed (files open / permissions) | the OS error, and that **nothing was deleted** — the atomicity guarantee is only useful if the message states it | close anything holding files in that profile, then retry; the profile is intact |
 | `cdp.tab` matches no tab | the selector and the open tabs — the runner already produces this; surface it unchanged | pick one of the listed tabs, or use `tab: 'new'` |
 
@@ -643,7 +643,7 @@ tracker.
 >    on both paths. What the CLI runner special-cases is only which
 >    teardown *route* it takes — and
 >    `SessionManager.closeSession` has no such special case, so it calls
->    `closeAll()` on CDP sessions every time. That is the path TestBench,
+>    `closeAll()` on CDP sessions every time. That is the path Steptix,
 >    flick and MCP all use.
 > 2. **The consequence was the opposite of the one feared.** Measured on
 >    both engines: `context.close()` on a `connectOverCDP` default
@@ -702,7 +702,7 @@ spaces.
 
 One optional flag joined them later (2026-08-23):
 `--disable-blink-features=AutomationControlled`, behind
-`browser.cdp.hideAutomation` in `aiui.config.json` (default `false`).
+`browser.cdp.hideAutomation` in `steptix.config.json` (default `false`).
 Measured on Chrome 151: `--remote-debugging-port` on its own makes every
 page read `navigator.webdriver === true`, with nothing attached — the same
 profile without the port flag reads `false` — and some sites refuse a
@@ -714,7 +714,7 @@ announcing itself is a human's decision, and an agent cannot write the
 config file. The server reads the file of the root the launch goes into
 (the project's, or the user root's for a machine-wide browser) — exactly
 there, no walk-up — and records the choice in the profile's
-`.aiui-profile` marker, so a later `reused_running_browser` can warn when
+`.steptix-profile` marker, so a later `reused_running_browser` can warn when
 the running browser and the config disagree; the flag only applies at
 launch.
 
@@ -797,7 +797,7 @@ alongside it, resolved in `addPage`.
 is a new optional field on the same three. Safe for existing consumers:
 the MCP client validates only `line` and `frame` shape and ignores
 extra keys, and unknown *event types* are already dropped rather than
-fatal. TestBench and flick consume the same stream and are unaffected
+fatal. Steptix and flick consume the same stream and are unaffected
 by an optional addition.
 
 Flows to the MCP step payload (a new field alongside `frameKind`,
@@ -861,12 +861,12 @@ specified in more detail than its size suggests.
    `cdp-profiles` root, and compare on segment boundaries** — the §4a
    rules from [mcp-server.md](mcp-server.md), applied here because
    `path.resolve` does not follow symlinks. Without the realpath, a
-   symlink at `.aiui/cdp-profiles/edge-admin` pointing anywhere on disk
+   symlink at `.steptix/cdp-profiles/edge-admin` pointing anywhere on disk
    turns a reset into a recursive delete of the target.
 3. **Require exactly one level below the root.** The resolved dir must
    be a direct child of `cdp-profiles`, never the root itself and never
    deeper.
-4. **Require the `.aiui-profile` marker** (§1) inside it. This is the
+4. **Require the `.steptix-profile` marker** (§1) inside it. This is the
    guard that does not depend on getting path logic right: a directory
    without the marker is not one we created, and is never deleted
    whatever the path check concluded.
@@ -874,7 +874,7 @@ specified in more detail than its size suggests.
    terms. Deleting under a running browser pulls the floor out from a
    live session. The error names the port so the caller can close it.
 6. **Rename, then delete.** `fs.rename` the profile to
-   `.aiui/cdp-profiles/.trash-<engine>-<name>-<n>`, then remove the
+   `.steptix/cdp-profiles/.trash-<engine>-<name>-<n>`, then remove the
    renamed directory best-effort. Rename on one filesystem is atomic,
    so the real path is either wholly present or wholly gone — **never
    half-deleted**, which a direct recursive delete can leave behind on
@@ -883,7 +883,7 @@ specified in more detail than its size suggests.
    error; a failed *rename* aborts with nothing touched.
 7. **Launch as normal**, reporting
    `outcome: 'launched_after_reset'` and recreating the
-   `.aiui-profile` marker.
+   `.steptix-profile` marker.
 
 **Windows will refuse a rename while files are open**, which is a
 useful backstop for the case step 5 cannot see — a browser process
@@ -900,7 +900,7 @@ than solved, consistent with how 039 is already handled.
 ## Out of scope
 
 - Converting flick to the new routes (§10), and any change to the
-  TestBench extensions or `runner-core`.
+  Steptix extensions or `runner-core`.
 - Using the user's real browser profile. Unchanged from
   [flick-vscode-cdp-attach.md](flick-vscode-cdp-attach.md), now locked
   here too.
@@ -921,7 +921,7 @@ than solved, consistent with how 039 is already handled.
   or [002](../issues/002-cdp-and-multi-browser-interaction.md).
 - Headless CDP, non-loopback CDP hosts, one-click launch for
   Brave/Opera/Vivaldi/Arc (still discoverable as `engine:'unknown'`).
-- A `cdp:` default in `aiui.config.json` for the CLI path — still
+- A `cdp:` default in `steptix.config.json` for the CLI path — still
   future. `mcp.cdp.*` is MCP-only.
 
 ## Composition
@@ -984,7 +984,7 @@ them.
   it is the one whose absence produces a *wrong* conclusion rather than
   merely an unhelpful one.
 - **Reset** — one test per guard, since each closes a different hole:
-  live browser ⇒ refused; missing `.aiui-profile` marker ⇒ refused
+  live browser ⇒ refused; missing `.steptix-profile` marker ⇒ refused
   (**even when the path check passes** — assert this against a
   legitimate-looking dir inside `cdp-profiles`); a symlinked profile
   dir pointing outside ⇒ refused, and the **target still exists**
@@ -1067,7 +1067,7 @@ unit suite is not a substitute and does not close this story.
 >    reply. The tool descriptions (§5) are where they get fixed, and
 >    iterating on that wording against real prompts is the remaining work.
 >
-> The scripts live in `.aiui/w0/` (gitignored). They are not a substitute
+> The scripts live in `.steptix/w0/` (gitignored). They are not a substitute
 > for the by-prompt rows below — they prove the machine does the right
 > thing, not that the agent says the right thing.
 
@@ -1104,7 +1104,7 @@ last column is the one that fails silently.
 
 | Prompt | Expected MCP call | Expected result |
 | --- | --- | --- |
-| "Start Edge with a profile named admin" | `start_cdp_browser {engine:'edge', profile:'admin'}` | `.aiui/cdp-profiles/edge-admin/`, its **own** port, running alongside `default` |
+| "Start Edge with a profile named admin" | `start_cdp_browser {engine:'edge', profile:'admin'}` | `.steptix/cdp-profiles/edge-admin/`, its **own** port, running alongside `default` |
 | "Start Edge with profile admin" *(exists)* | same | **No error.** `outcome: launched_into_existing_profile`, and the agent says it already existed and may still be signed in |
 | "Create a new Chrome CDP profile named admin" *(exists)* | `start_cdp_browser {engine:'chrome', profile:'admin'}` | Same as above. **Check the agent's wording** — it must not report this as newly created |
 | "Create a new Chrome and open facebook.com" | `start_cdp_browser` with a **new** profile name, then `run_steps` | A genuinely new browser. If the agent reuses `default` and calls it new, that is a description failure |
@@ -1137,7 +1137,7 @@ relays it rather than retrying or inventing a workaround.
 
 | Prompt | Expected result |
 | --- | --- |
-| "Attach to the browser on port 9222" *(started by TestBench/flick)* | Refused before any HTTP call. Names the port, that it is `foreign`, and `mcp.cdp.allowUnowned` |
+| "Attach to the browser on port 9222" *(started by Steptix/flick)* | Refused before any HTTP call. Names the port, that it is `foreign`, and `mcp.cdp.allowUnowned` |
 | Same, after setting `allowUnowned: true` | Allowed, and `foreign` tabs are no longer withheld |
 | "Start Edge with profile `../../secrets`" | Refused on the charset rule, naming the permitted characters |
 | "Reset the admin profile" *(browser open)* | Refused, naming the port to close |
@@ -1170,7 +1170,7 @@ relays it rather than retrying or inventing a workaround.
   and nothing can be found by scanning. The README must say where to
   look.
 - **Ownership is forgeable** by anything that can write into
-  `.aiui/cdp-profiles/` — same boundary as `.env`, so no new exposure,
+  `.steptix/cdp-profiles/` — same boundary as `.env`, so no new exposure,
   but it is a claim rather than proof.
 - **Parallel sessions cross-contaminate tabs** (§11) — **confirmed by
   W0**, not merely expected. Both sessions take the same underlying
@@ -1242,7 +1242,7 @@ W4 — MCP: api-client,        W5 — assemble.ts gated cdp              │
 
 W4 and W5 are parallel — disjoint files, both depend only on W3.
 **W6 is independent of the whole chain** — it is runner-side and
-improves CLI and TestBench runs too, so it can start any time after W0
+improves CLI and Steptix runs too, so it can start any time after W0
 tells it what to surface, or ship separately if this story stalls.
 PRs: **PR-1** = W1+W2+W3 (framework + routes, independently useful),
 **PR-2** = W4+W5, **PR-3** = W6, **PR-4** = W7.
@@ -1253,7 +1253,7 @@ PRs: **PR-1** = W1+W2+W3 (framework + routes, independently useful),
 
 No production code — three experiments whose output is a spec edit.
 Run on Windows 11, **Chrome 150.0.7871.187** and **Edge
-151.0.4129.59**. Scripts are under `.aiui/w0/` — gitignored, so they
+151.0.4129.59**. Scripts are under `.steptix/w0/` — gitignored, so they
 live on the machine that ran them and are not part of the build; they
 are cheap to rewrite from this section if a future Chromium makes it
 worth re-checking. Both engines agreed on every result.
@@ -1331,7 +1331,7 @@ the comment to state the new two-source rule.
 `src/browser/manager.ts` (surface the `PageTracker` label and resolve
 each page's `targetId`), the step event payload, the report renderer,
 and `src/mcp/run-fold.ts` to carry `tab` through to the MCP result.
-Independent of W1–W5 and useful on its own — CLI and TestBench runs get
+Independent of W1–W5 and useful on its own — CLI and Steptix runs get
 the same diagnostics. **Read the report renderer before committing to
 the timeline**; ship the per-step badge and the unexpected-tab flag
 regardless.
@@ -1342,7 +1342,7 @@ Seam tests, the §8 tracker invariant, README (the sign-in-once model,
 where to find a port, the parallel-sessions model and what it does not
 guarantee, the compromised-by-default guidance), and the note on issue
 006. **No extension version bump** — nothing under
-`testbench-*`/`runner-core` is touched, and flick's originals are left
+`steptix-*`/`runner-core` is touched, and flick's originals are left
 alone.
 
 **Then run every row of §Acceptance criteria by hand, on both

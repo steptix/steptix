@@ -91,10 +91,10 @@ describe('nutLoadFailureMessage — a package that is not installed says where t
     const message = nutLoadFailureMessage(
       notFound('MODULE_NOT_FOUND', "Cannot find module '@nut-tree-fork/libnut-win32'\nRequire stack: …"),
       'win32',
-      '/srv/aiui',
+      '/srv/steptix',
     );
     expect(message).toContain('a package it needs (@nut-tree-fork/libnut-win32) is not');
-    expect(message).toContain('Run `npm install` in /srv/aiui');
+    expect(message).toContain('Run `npm install` in /srv/steptix');
   });
 
   it('keeps the prebuilt-binary message for every other load failure', () => {

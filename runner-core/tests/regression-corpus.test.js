@@ -55,7 +55,7 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.
 const CORPUS_ROOTS = [
   'fixtures',
   'templates',
-  path.join('testbench-native', 'tests', 'integration', 'fixtures'),
+  path.join('steptix-vscode', 'tests', 'integration', 'fixtures'),
 ];
 
 /**

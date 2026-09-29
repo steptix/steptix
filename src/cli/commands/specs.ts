@@ -13,7 +13,7 @@ export function registerSpecsCommand(program: Command): void {
   specs
     .command('sync [name]')
     .description('Download / re-download specs. Optionally filter by partial name match.')
-    .option('-c, --config <path>', 'Path to config file (default: auto-discover aiui.config.json)')
+    .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
     .action(async (name: string | undefined, opts: { config?: string }) => {
       await syncSpecs(name, opts.config);
     });
@@ -21,7 +21,7 @@ export function registerSpecsCommand(program: Command): void {
   specs
     .command('list')
     .description('List all cached specs with source URLs and last-synced date')
-    .option('-c, --config <path>', 'Path to config file (default: auto-discover aiui.config.json)')
+    .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
     .action(async (opts: { config?: string }) => {
       await listSpecs(opts.config);
     });
@@ -87,7 +87,7 @@ async function listSpecs(configPath?: string): Promise<void> {
 
   if (summaries.length === 0) {
     console.log(chalk.yellow('No cached specs found.'));
-    console.log(chalk.dim('Run "aiui specs sync" to download them.'));
+    console.log(chalk.dim('Run "steptix specs sync" to download them.'));
     return;
   }
 

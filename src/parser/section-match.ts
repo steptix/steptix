@@ -64,7 +64,7 @@ export function matchInput(
  * Validate a section name, throwing with a file+line pointer on refusal.
  *
  * One list, three enforcement points (contract §2.5): this parser raises a
- * parse error, testbench-native's pre-flight refuses the run before building
+ * parse error, steptix-vscode's pre-flight refuses the run before building
  * a request, and the authoring diagnostics mirror each as an Error row. They
  * must agree, or a file the CLI rejects runs anyway in the editor.
  */

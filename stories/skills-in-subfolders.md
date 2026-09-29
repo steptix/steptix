@@ -90,7 +90,7 @@ What deliberately does **not** change:
   name is a file locator; the H1 is the display/validation name
   (`validateCall` messages). Unchanged relationship.
 - **Frames carry `uri: skill.filePath`** — already absolute, so breakpoints,
-  step-into, call-stack, codebehind snapshots (`.aiui-codebehind-cache`
+  step-into, call-stack, codebehind snapshots (`.steptix-codebehind-cache`
   beside the skill file, now beside it *in its subfolder*) all work untouched.
 - **Skill cache keys** are the resolved absolute path + env name. Unchanged.
 - **runner-core** — treats skill names as opaque display strings
@@ -101,7 +101,7 @@ What deliberately does **not** change:
   which calls the parser rather than matching a prefix — see
   [optional-invocation-colon.md](optional-invocation-colon.md).)*
 
-## Editor support (testbench-native)
+## Editor support (steptix-vscode)
 
 Three things in the extension know the shape of a skill name and need to learn
 slashes; this is bundled-extension code, so **bump the patch version** per the
@@ -149,7 +149,7 @@ Root vitest suite:
   detection treats `[skill: a/x]` and `[skill: /a/x]` as the same skill
   (mutual recursion across the two spellings still errors).
 
-Extension suite (`node --test`, testbench-native):
+Extension suite (`node --test`, steptix-vscode):
 
 - `tests/invocation-target-core.test.js` — the providers' file-resolution rules
   now live in `src/extension/invocation-target-core.ts` (vscode-free, same
@@ -160,7 +160,7 @@ Extension suite (`node --test`, testbench-native):
   (`auth/login/`) and malformed (`auth//login` → `null`) cases;
   `canonicalSkillName` against the parser's accept/reject table; and
   `collectSkillNames` against a tmp tree covering subfolders, skipped
-  (`.aiui-codebehind-cache/`, `node_modules/`) and unlexable (`bad dir/`) names.
+  (`.steptix-codebehind-cache/`, `node_modules/`) and unlexable (`bad dir/`) names.
 
 Manual F12/completion checks still cover the vscode half (which `Location` gets
 returned, which warning toast fires).

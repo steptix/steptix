@@ -8,7 +8,7 @@ import { loadSecretFieldRule } from '../browser/dom-cleaner.js';
  * expose a name once and never again, so every recording on one session's
  * browser shares the binding the first one installed.
  */
-export const RECORD_BINDING_NAME = '__aiuiRecordSteps';
+export const RECORD_BINDING_NAME = '__steptixRecordSteps';
 
 /**
  * The non-enumerable `window` property the page script exposes for the server:
@@ -21,7 +21,7 @@ export const RECORD_BINDING_NAME = '__aiuiRecordSteps';
  * {@link recordStepsPageScript}): the object is on `window`, so the page's own
  * scripts can call it.
  */
-export const RECORD_CONTROL_NAME = '__aiuiRecordStepsCtl';
+export const RECORD_CONTROL_NAME = '__steptixRecordStepsCtl';
 
 let cached: string | null = null;
 
@@ -37,7 +37,7 @@ let cached: string | null = null;
  * object's methods answer only a caller that passes it, and the server passes
  * it as an evaluate ARGUMENT — never through the binding, never in a page
  * global. One per browser context, because the init script is installed once
- * per context and cannot be changed (stories/testbench-record-toolbar.md,
+ * per context and cannot be changed (stories/steptix-record-toolbar.md,
  * "The page cannot drive the toolbar"). A page script that calls `claim('x')`
  * before the recorder's own claim therefore gets `false`, and cannot take the
  * document's toolbar away from it.
@@ -50,7 +50,7 @@ function baseScript(): string {
   if (cached !== null) return cached;
   const url = new URL('../browser/scripts/record-steps.js', import.meta.url);
   const template = readFileSync(fileURLToPath(url), 'utf8');
-  // The toolbar (stories/testbench-record-toolbar.md) lives in its own file
+  // The toolbar (stories/steptix-record-toolbar.md) lives in its own file
   // and is spliced into the recorder's closure: it shares that script's
   // state, its token and its describers.
   const toolbar = readFileSync(fileURLToPath(new URL('../browser/scripts/record-toolbar.js', import.meta.url)), 'utf8');

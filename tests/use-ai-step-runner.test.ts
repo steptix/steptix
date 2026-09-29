@@ -505,7 +505,7 @@ describe('runUseAiStep — a value hidden from the model (issue 060)', () => {
 
   it('…and says the NAME is the reason when a name only looks secret, as `{{keyword}}` does', async () => {
     // The likeliest false positive: `keyword` contains `key`. Renaming is the
-    // fix under every client; `unmask:` is honoured only by `aiui run`.
+    // fix under every client; `unmask:` is honoured only by `steptix run`.
     const { outcome } = await run(
       '[use ai] Write a search phrase that uses {{keyword}} [store as: phrase]',
       ['{"error": "The keyword is hidden"}'],

@@ -26,7 +26,7 @@ import {
 
 test('a skipped step wears the neutral ◌, not the error ⚠', () => {
   assert.equal(statusGlyph('skipped'), '◌');
-  // The same glyph TestBench paints. Two clients showing one run must not
+  // The same glyph Steptix paints. Two clients showing one run must not
   // disagree about the mark for a line neither of them ran.
   assert.equal(statusGlyph('passed'), '✓');
   assert.equal(statusGlyph('failed'), '✗');

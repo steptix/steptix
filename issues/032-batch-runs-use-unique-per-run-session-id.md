@@ -1,13 +1,13 @@
 # 032 — Batch runs use a unique per-run session id (so the same test can run in two sessions)
 
 **Status:** 🟢 implemented (fast integration suite green; live verification pending)
-**Area:** [testbench-native/src/extension/run-controller.ts](../testbench-native/src/extension/run-controller.ts) (session-id derivation), [testbench-native/src/extension/test-controller.ts](../testbench-native/src/extension/test-controller.ts) (per-test post-close), [src/server/session-manager.ts](../src/server/session-manager.ts) (report/log names from `testFilePath`)
+**Area:** [steptix-vscode/src/extension/run-controller.ts](../steptix-vscode/src/extension/run-controller.ts) (session-id derivation), [steptix-vscode/src/extension/test-controller.ts](../steptix-vscode/src/extension/test-controller.ts) (per-test post-close), [src/server/session-manager.ts](../src/server/session-manager.ts) (report/log names from `testFilePath`)
 **Related:** video recording (the work that surfaced this — a session must close for its `.webm` to finalise)
 **Opened:** 2026-06-05
 
 ## Summary
 
-A TestBench server session used to be keyed by the **test file path**. That conflated three different identities and meant the **same test could not run in two sessions**, and a batch run would **clobber an open interactive session** of the same file. Batch runs now use a **unique per-run session id** (`<path>::run-N`); interactive runs keep the stable file-path id. The server names reports/logs from the separately-sent `testFilePath`, so the suffix never leaks into filenames.
+A Steptix server session used to be keyed by the **test file path**. That conflated three different identities and meant the **same test could not run in two sessions**, and a batch run would **clobber an open interactive session** of the same file. Batch runs now use a **unique per-run session id** (`<path>::run-N`); interactive runs keep the stable file-path id. The server names reports/logs from the separately-sent `testFilePath`, so the suffix never leaks into filenames.
 
 ## Context — two run flows, one id
 
@@ -53,8 +53,8 @@ Two runs of the same file produce reports that differ by **timestamp** (`2026-�
 
 | File | Change |
 |---|---|
-| [run-controller.ts](../testbench-native/src/extension/run-controller.ts) | New `activeSessionId` field (set per run, **reset when idle** so out-of-band ops fall back to `filePath`); batch derives `…::run-N` and **closes its own session in `runLines`' `finally`** (finalises video, frees the browser); pre-close gated on `!batchMode`; `resolveClient` returns `activeSessionId ?? filePath`. |
-| [test-controller.ts](../testbench-native/src/extension/test-controller.ts) | Removed the old cancellation-path `closeSession()` — batch session teardown is now owned by `runLines`, so the test loop does nothing extra. |
+| [run-controller.ts](../steptix-vscode/src/extension/run-controller.ts) | New `activeSessionId` field (set per run, **reset when idle** so out-of-band ops fall back to `filePath`); batch derives `…::run-N` and **closes its own session in `runLines`' `finally`** (finalises video, frees the browser); pre-close gated on `!batchMode`; `resolveClient` returns `activeSessionId ?? filePath`. |
+| [test-controller.ts](../steptix-vscode/src/extension/test-controller.ts) | Removed the old cancellation-path `closeSession()` — batch session teardown is now owned by `runLines`, so the test loop does nothing extra. |
 | [session-manager.ts](../src/server/session-manager.ts) | Report `testName`, `report.filePath`, and the run-log name use `request.testFilePath ?? sessionId`. |
 
 **Not touched:** code-behind is keyed by the test file (not session id), so unique session ids do **not** break code-behind replay — a batch re-run of a file still uses its compiled steps. (When this was written the step cache was also keyed by `testFilePath`; it has since been removed.)

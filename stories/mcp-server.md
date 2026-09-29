@@ -7,9 +7,9 @@
 > frontmatter env/dataSources resolved, inline sections executed, report
 > written — and its result carries per-step status, per-step error text,
 > the report path and token totals; (3) with no server running, the first
-> tool call auto-starts `aiui serve` on the port `SERVER_URL` names, with
+> tool call auto-starts `steptix serve` on the port `SERVER_URL` names, with
 > the project's API key, and the run proceeds — no terminal involved,
-> **and `aiui status --url $SERVER_URL` can still see the server it
+> **and `steptix status --url $SERVER_URL` can still see the server it
 > started**; (4) two
 > successive `run_steps` calls with the same `session_id` share page
 > state and captured variables; (5) cancelling a call mid-run aborts the
@@ -26,7 +26,7 @@
 Agents (Claude Code, OpenAI Codex, GitHub Copilot) should be able to
 drive this framework: send a handful of steps to a live browser session,
 or run a whole `.md` test file, and read structured results back. Today
-the only programmatic clients are the TestBench extensions and the CLI.
+the only programmatic clients are the Steptix extensions and the CLI.
 
 The execution machinery already exists behind the Sessions API
 ([src/server/api-server.ts](../src/server/api-server.ts)):
@@ -34,8 +34,8 @@ The execution machinery already exists behind the Sessions API
 streams per-step SSE events; sessions auto-create on first request and
 stay open for reuse; `/health`, auto-start and the idle timeout are done
 (story [server-lifecycle.md](server-lifecycle.md)). The MCP server is a
-translation layer over that seam — the position TestBench occupies (the
-"TestBench extensions are HTTP clients" rule).
+translation layer over that seam — the position Steptix occupies (the
+"Steptix extensions are HTTP clients" rule).
 
 Target hosts, all stdio, all on the same machine as the browser:
 
@@ -57,7 +57,7 @@ unrelated.)
   Handlers are transport-agnostic so HTTP could be added later.
 - **HTTP client of the Sessions API** — never runs tests in-process. One
   server owns browsers, sessions, cache and lifecycle; agent and
-  TestBench sessions coexist.
+  Steptix sessions coexist.
 - **Sync calls with progress notifications.** One call = one run. No
   async job model in v1 (the named escape hatch if hosts time out).
 - **`run_test_file` takes a single path.** No glob/batch in v1.
@@ -71,7 +71,7 @@ unrelated.)
   give unexpanded steps, `stepLines`, and a `matchText`-keyed `sections`
   map whose `ParsedSection` carries the four fields
   `validateSectionEntry` demands — and it throws on duplicate/reserved/
-  empty section names, the pre-flight TestBench implements separately.
+  empty section names, the pre-flight Steptix implements separately.
   `matchText` is at [src/parser/section-match.ts](../src/parser/section-match.ts)
   (the copy `api-server.ts` uses); `discoverTestFiles` and the env
   readers are in-package. The dep would have cost a CJS package inside
@@ -79,7 +79,7 @@ unrelated.)
   no `/sessions` or `/health` method, and a TB catalogue naming VS Code
   settings that do not exist here. **No TB codes**; the MCP emits its
   own messages (§7).
-- **`aiui mcp` never builds the commander program.** Registering it
+- **`steptix mcp` never builds the commander program.** Registering it
   inside `createCli()` makes `cli/index.ts → serve.ts → api-server.ts →
   session-manager.ts → browser/manager.ts` a static value-import chain,
   so every MCP startup would eagerly load playwright — measured
@@ -91,8 +91,8 @@ unrelated.)
   config-derived path. Without it an agent, or web content that
   prompt-injects one, points the framework at any directory on disk to
   run its tool code and read its secrets.
-- **A project root is required.** No `aiui.config.json` within the
-  allowed root ⇒ invalid-params naming `AIUI_MCP_ROOTS` first, then the
+- **A project root is required.** No `steptix.config.json` within the
+  allowed root ⇒ invalid-params naming `STEPTIX_MCP_ROOTS` first, then the
   directories searched.
 - **`isError` is reserved for pre-flight.** A run that reached the
   server returns a normal result whose `status` says what happened.
@@ -113,7 +113,7 @@ unrelated.)
 
 ## Design
 
-### 1. `aiui mcp` (entry, and why it bypasses the CLI)
+### 1. `steptix mcp` (entry, and why it bypasses the CLI)
 
 [src/index.ts](../src/index.ts) today is exactly five lines: shebang, a
 **static** `import { createCli } from './cli/index.js'`,
@@ -146,7 +146,7 @@ if (process.argv[2] === 'mcp') {
 
 Notes, each closing something an implementer would otherwise get wrong:
 
-- The shebang is **retained** (`bin.aiui → dist/index.js`). Verified:
+- The shebang is **retained** (`bin.steptix → dist/index.js`). Verified:
   `tsc` preserves it and vitest imports a shebang'd `.ts` entry with
   top-level `await` without complaint (`module: NodeNext`,
   `target: ES2022`).
@@ -155,7 +155,7 @@ Notes, each closing something an implementer would otherwise get wrong:
   not `.parseAsync()` — async handlers stay detached and exit codes keep
   coming from commander and from handlers that call `process.exit`
   themselves.
-- **The help guard is wider than `--help`**: `aiui mcp help`,
+- **The help guard is wider than `--help`**: `steptix mcp help`,
   `--version`, `-V` would all otherwise fall through and start a stdio
   server that hangs a human's terminal.
 - `process.exitCode`, **not** `process.exit(0)` — stderr to a pipe is
@@ -166,15 +166,15 @@ Notes, each closing something an implementer would otherwise get wrong:
   the entry would defeat the bypass on every CLI invocation; a literal
   in the entry would drift from the W6 README.
 - A **description-only `.command('mcp')` stub** is still registered
-  inside `createCli()` so `aiui --help` lists it. Verified against
-  commander 14.0.3: `aiui mcp` with no action handler returns normally
-  and exits 0; `aiui bogus` still errors; `aiui help mcp` prints the
+  inside `createCli()` so `steptix --help` lists it. Verified against
+  commander 14.0.3: `steptix mcp` with no action handler returns normally
+  and exits 0; `steptix bogus` still errors; `steptix help mcp` prints the
   stub. It is never reached, since argv is intercepted first. One
   residual, theoretical today (there are no global pre-subcommand
   options): an invocation where `mcp` is not argv[2] reaches the stub
-  and silently exits 0. Because the stub answers `aiui help mcp` on
-  **stdout** while the guard answers `aiui mcp --help` on stderr, point
-  the stub's `.description()` at `aiui mcp --help` as the canonical
+  and silently exits 0. Because the stub answers `steptix help mcp` on
+  **stdout** while the guard answers `steptix mcp --help` on stderr, point
+  the stub's `.description()` at `steptix mcp --help` as the canonical
   text.
 
 **stdout is the protocol channel** — any non-JSON-RPC byte corrupts the
@@ -215,8 +215,8 @@ be *called*).
 
 ### 2. Tool surface
 
-Fifteen tools, **bare names** — the host prefixes them, so an `aiui_`
-prefix would render as `mcp__aiui__aiui_run_steps`. The seven enumerated
+Fifteen tools, **bare names** — the host prefixes them, so a `steptix_`
+prefix would render as `mcp__steptix__steptix_run_steps`. The seven enumerated
 below are this story's; the eight added since are specced elsewhere —
 `start_cdp_browser` and `list_cdp_browsers` in
 [mcp-cdp-browser.md](mcp-cdp-browser.md), `close_cdp_tab` in
@@ -239,19 +239,19 @@ v1 — every target host gives the agent filesystem access.
   Assembles the **same project fields as `run_test_file`** (§3) so
   `[skill: x]`/`[tool: x]` lines execute instead of shipping to the AI
   as prose. Sends a synthetic `testFilePath` of
-  `<project_root>/.aiui-mcp-steps.md` — load-bearing, because the server
+  `<project_root>/.steptix-mcp-steps.md` — load-bearing, because the server
   derives project root, env/data bundle, report dir and cache anchor
   entirely from it. *(Verified: no server path reads `testFilePath` from
-  disk. Deliberate — TestBench buffers may be unsaved.)* Reports are
+  disk. Deliberate — Steptix buffers may be unsaved.)* Reports are
   named from that basename, so `reportPath` reads
-  `<root>/reports/.aiui-mcp-steps-*.html` — harmless, agent-visible.
+  `<root>/reports/.steptix-mcp-steps-*.html` — harmless, agent-visible.
   Synthesizes `sourceLines: [1..n]`.
 - **`run_test_file`** — `{ path, env_name?, parameters?, config?,
   session_id?, project_root?, allow_foreign_session?,
   include_screenshot? }`.
 - **`list_test_files`** — `{ project_root? }`. Wraps
   `discoverTestFiles(dir, pattern)` — **both args required**; read
-  `tests.dir`/`tests.pattern` from `aiui.config.json`, falling back to
+  `tests.dir`/`tests.pattern` from `steptix.config.json`, falling back to
   the `defaults.ts` literals (`'./tests'`, `'**/*.md'`; the key is
   `tests.dir`, not `tests.directory`). Returns **absolute, sorted**
   paths and does **not** filter `type: skill` files (that needs
@@ -265,7 +265,7 @@ v1 — every target host gives the agent filesystem access.
 - **`close_session`** — `{ sessionId, closed: true }`; unknown id
   succeeds (idempotent route).
 - **`get_last_run`** — **polls** until `finalized` or ~12 s with
-  backoff, as TestBench does; a pass-through returns
+  backoff, as Steptix does; a pass-through returns
   `{finalized:false}` right after a cancel, which is the tool's purpose.
   Schema: `{ finalized, reportPath: string|null, tokens: {total, input,
   output} | null }`.
@@ -429,7 +429,7 @@ sent array, or `null`.
   **before any `step:start`**, and a narrower window drops exactly the
   messages that matter. We deliberately send **no `logging` override**:
   the server implements it as a process-global `setLogLevel`, so
-  quieting our run would silently downgrade a concurrent TestBench run's
+  quieting our run would silently downgrade a concurrent Steptix run's
   SSE output. For the same reason (logger callbacks are process-global)
   `messages[]` and the `output`-derived `error` fallback may contain
   another session's lines: **best-effort**, documented in the tool
@@ -479,7 +479,7 @@ its own.
 | --- | --- |
 | 400 (empty/non-string `steps`, malformed `sections`, `sections` without `testFilePath`, id > 1024) — fires **before** headers flush, so real HTTP JSON even with `?stream=1` | `isError:true`, quoting the server's `error` |
 | 401 | `isError:true`, naming **both** key sources |
-| 503 `Server is shutting down` (gate precedes auth — a concurrent `aiui stop`) | `isError:true`, says to retry |
+| 503 `Server is shutting down` (gate precedes auth — a concurrent `steptix stop`) | `isError:true`, says to retry |
 | 500 | `isError:true`. The error middleware hardcodes 500 and ignores `err.status`, so body-parser's **413 arrives as a 500** `request entity too large`; `express.json()` is bare, so a ~100 kb ceiling covers `steps`+`sections`+`env`+`parameters` combined. Say so |
 | reader ends **after** a `done` event | normal fold |
 | reader ends **without** `done` | `status:'error'`, `streamDropped:true`, one `get_last_run` poll, text saying the run may still be executing server-side |
@@ -496,7 +496,7 @@ that caused it (the only abort source is `res.on('close')`, and every
 them, and resolves the env before it knows which env to use. Steps
 marked **(file)** apply to `run_test_file` only; `run_steps` skips them
 and instead builds its synthetic `testFilePath` by joining the
-already-confined `project_root` with `.aiui-mcp-steps.md`. **That path
+already-confined `project_root` with `.steptix-mcp-steps.md`. **That path
 is never realpath'd or existence-checked** — it does not exist on disk,
 and running it through step 2 would ENOENT and return §7's missing-file
 error for every `run_steps` call.
@@ -507,7 +507,7 @@ error for every `run_steps` call.
    does not exist on the promises API; use the sync form or promisify
    the callback one.)* Re-format its `ENOENT` into §7's wording.
 3. **(file)** Assert inside the allowed roots (§4a).
-4. Walk up for `aiui.config.json`, **bounded by the root** (§4a rule 4).
+4. Walk up for `steptix.config.json`, **bounded by the root** (§4a rule 4).
 5. Read that JSON directly (not `loadConfig`).
 6. Resolve and re-check `skillsDir`/`toolsDir`/`tests.dir` (§4a rule 5).
 7. `readDefaultEnvVars(root)` — the base `.env` only.
@@ -551,7 +551,7 @@ numbered line inside a code fence will hit.
 | `config` | `## Config`, projected; tool arg merged over it **per key**; the merged result then interpolated | below |
 | `parameters` | `## Parameters` as the base; tool arg overrides **per key**; the merged result interpolated | undeclared keys are still sent, and produce the §7 warning on `run_test_file` only |
 | `dataSources` | frontmatter, **verbatim** | server resolves against `dirname(testFilePath)`; throws if one is named `env` or `data`. **Silently ignored unless `envName` is sent** — declaring them with no resolvable env name is a `warnings[]` entry |
-| `skillsDir`, `toolsDir` | `aiui.config.json`, else the `defaults.ts` literals (`./skills`, `./tools/src`), resolved absolute, sent only if present on disk | the literal fallback is required: a project that omits `tests.skillsDir` but *has* `./skills` would otherwise get no skills dir and every `[skill: x]` would ship to the AI as prose. This repo's own config declares both, so the live smoke would not catch it |
+| `skillsDir`, `toolsDir` | `steptix.config.json`, else the `defaults.ts` literals (`./skills`, `./tools/src`), resolved absolute, sent only if present on disk | the literal fallback is required: a project that omits `tests.skillsDir` but *has* `./skills` would otherwise get no skills dir and every `[skill: x]` would ship to the AI as prose. This repo's own config declares both, so the live smoke would not catch it |
 | `cacheEnabled` | `cache.enabled === true`, overridden by `## Config: cache:` — **mirror `resolveCacheOverride`'s value set** (`on\|true\|yes\|enabled` / `off\|false\|no\|disabled`), not just `on\|off` | without it a test saying `cache: off` gets cached MCP runs |
 | `testFilePath` | absolute | |
 
@@ -579,9 +579,9 @@ would navigate to the literal. Call
 from [src/parser/interpolate-env-data.ts](../src/parser/interpolate-env-data.ts)
 — **not** `applyEnvDataInterpolation`, which is module-private — and
 additionally resolve whole-value `$VAR`. Each existing client covers one
-syntax (the CLI `${env.X}`/`${data.X}`; TestBench whole-value `$VAR`);
+syntax (the CLI `${env.X}`/`${data.X}`; Steptix whole-value `$VAR`);
 the MCP deliberately covers both, which also means `- baseUrl: $BASE_URL`
-behaves differently under `aiui run`.
+behaves differently under `steptix run`.
 
 Four consequences to state rather than discover:
 
@@ -589,7 +589,7 @@ Four consequences to state rather than discover:
   a pre-flight `isError:true` carrying the message verbatim (CLI
   fail-fast). Catching and passing through is forbidden.
 - **An unresolvable whole-value `$VAR`** is *not* an error — it stays
-  literal with a `warnings[]` entry, matching TestBench's `resolveValue`.
+  literal with a `warnings[]` entry, matching Steptix's `resolveValue`.
   The asymmetry with `${env.X}` is deliberate: `$FOO` is ambiguous with
   ordinary prose in a way `${env.FOO}` is not.
 - **`${data.X}` / `${<source>.X}` cannot be resolved client-side** —
@@ -610,10 +610,10 @@ rather than the project map, and **prompts on stdin/stdout by default**
 — which on a stdio transport writes `Enter value for "x":` into the
 JSON-RPC channel and steals stdin from the transport.
 
-**Config source is `aiui.config.json`, read directly — not
+**Config source is `steptix.config.json`, read directly — not
 `loadConfig`**, which always populates relative `tests.skillsDir`/
 `toolsDir` and folds `process.env` (`AI_API_KEY`, `AI_MODEL`,
-`AIUI_SERVER_API_KEY`) into its result, so "the project's config" would
+`STEPTIX_SERVER_API_KEY`) into its result, so "the project's config" would
 include the MCP process's environment. The ban is on the *loader*, not
 its default literals, which §3's table and `list_test_files` both reuse.
 
@@ -668,38 +668,38 @@ with no `env_name` and otherwise ship the whole MCP host environment as
 the request's `env` field and into the spawned child — the egress §5
 arm 2 exists to prevent. Cited as contrast, not as the recipe.
 
-**Discovery-only fallback.** `SERVER_URL` and `AIUI_SERVER_API_KEY` may also
+**Discovery-only fallback.** `SERVER_URL` and `STEPTIX_SERVER_API_KEY` may also
 come from `process.env`, at **lowest precedence** (`.env.<name>` >
 `.env` > `process.env`) and **never merged into the `env` map sent to
 the server**. This is required, not a convenience: for Codex CLI and
 Copilot CLI the host config's `env` block is the only per-server
-configuration surface a user has, and `AIUI_MCP_ROOTS` is already read
+configuration surface a user has, and `STEPTIX_MCP_ROOTS` is already read
 from exactly that channel — refusing the other two would be
 inconsistent and would make those hosts unconfigurable.
 
-Note `aiui stop` does neither — it reads `process.env` and derives its
+Note `steptix stop` does neither — it reads `process.env` and derives its
 URL from `loadConfig().server.host/port`, never `SERVER_URL`. No
 `SERVER_URL` in scope ⇒ pre-flight error naming both files and the env
-var. **No `AIUI_SERVER_API_KEY`** ⇒ its own pre-flight error (§7): `serve`
+var. **No `STEPTIX_SERVER_API_KEY`** ⇒ its own pre-flight error (§7): `serve`
 hard-exits before binding without it, so otherwise a missing key costs a
 full 20 s poll and reports "auto-start failed" instead of the truth.
 
 ### 4a. Roots confinement
 
-Allowed roots: the **`path.delimiter`**-separated `AIUI_MCP_ROOTS` if
+Allowed roots: the **`path.delimiter`**-separated `STEPTIX_MCP_ROOTS` if
 set, else the MCP process cwd. **Required for Codex CLI and Copilot
 CLI** — machine-global configs whose spawn cwd is not the project. It is
 **not** set in the checked-in `.mcp.json`: the value is an absolute
 path, so a committed one points at someone else's disk in every other
 clone, and Claude Code expands only `${VAR}`, not a workspace token.
-`.vscode/mcp.json` sets `"AIUI_MCP_ROOTS": "${workspaceFolder}"`, which
+`.vscode/mcp.json` sets `"STEPTIX_MCP_ROOTS": "${workspaceFolder}"`, which
 VS Code does expand.
 
 **Selecting `project_root`** (distinct from the allow-list): `path`'s
 bounded upward walk for `run_test_file`; else the given `project_root`;
 else cwd when inside or equal to an allowed root; else the single
 allowed root when exactly one is configured; else invalid-params naming
-`AIUI_MCP_ROOTS` and the candidates. When both `path` and
+`STEPTIX_MCP_ROOTS` and the candidates. When both `path` and
 `project_root` are given, `path` must be inside `project_root`.
 
 **Confinement algorithm**, each rule closing a real hole:
@@ -709,11 +709,11 @@ allowed root when exactly one is configured; else invalid-params naming
    allowed root pointing at `~/.ssh` would otherwise pass; `.native`
    also canonicalises win32 case and 8.3 short names (`C:\PROJ~1`).
    `ENOENT` on a supplied `path` maps to §7's missing-file row; `ENOENT`
-   on an `AIUI_MCP_ROOTS` entry is a startup error naming the variable.
+   on a `STEPTIX_MCP_ROOTS` entry is a startup error naming the variable.
 2. **Segment-boundary compare**, not `startsWith` — which would let
    `C:\proj-evil` through an allowlist of `C:\proj`.
 3. **Case-insensitive on win32**, case-sensitive elsewhere.
-4. **Bound the `aiui.config.json` upward walk at the allowed root.** The
+4. **Bound the `steptix.config.json` upward walk at the allowed root.** The
    server's own `resolveProjectRoot` walks 50 levels to the filesystem
    root; unbounded here it would land *outside* confinement and pull
    `skillsDir`, `toolsDir` and `.env` from there — a straight bypass.
@@ -749,11 +749,11 @@ reports an auto-start failure instead of a cancellation.
 *(An earlier draft added a `foreign` arm. Dropped: the tree below
 refuses `foreign` and `unrecognized` identically, so it buys nothing —
 `unrecognized.detail` already carries `service is "x", not
-"ai-ui-automation"` — and adding it would silently regress two shipped
-behaviours, because `aiui status` and `aiui stop` test
+"steptix"` — and adding it would silently regress two shipped
+behaviours, because `steptix status` and `steptix stop` test
 `kind === 'unrecognized'` with an `if`, not an exhaustive switch. A
 missed update makes `status` exit 1 instead of its documented 2, and
-makes `stop` fall past its refusal and POST `AIUI_SERVER_API_KEY` to the
+makes `stop` fall past its refusal and POST `STEPTIX_SERVER_API_KEY` to the
 foreign process.)*
 
 **`SERVER_URL` validation.** Refuse with a §7 row, *before the probe*, a
@@ -763,7 +763,7 @@ and lands in arm 2 with a misleading message).
 
 Two more are refused **only on the down-and-about-to-spawn path**, not
 up front — a reachable server that arm 1 accepts must keep working, and
-an aiui behind an HTTPS reverse proxy is a configuration TestBench
+a Steptix behind an HTTPS reverse proxy is a configuration Steptix
 already allows:
 
 - a non-`http:` protocol — `serve` has no TLS, so spawning for an
@@ -779,10 +779,10 @@ Decision tree:
 1. Healthy + `service` matches ⇒ proceed.
 2. `unrecognized` (foreign service, non-2xx, or non-JSON) ⇒ pre-flight
    error naming the port and what it reported. **Never spawn, never
-   proceed.** *(Changed from an earlier draft's "probably an older aiui
-   server, proceed": our next act sends `AIUI_SERVER_API_KEY` **and the
+   proceed.** *(Changed from an earlier draft's "probably an older steptix
+   server, proceed": our next act sends `STEPTIX_SERVER_API_KEY` **and the
    entire composed `.env` map** as `env` — for this repo, AI, banking
-   and GitHub credentials. `aiui stop` already checks `service` before
+   and GitHub credentials. `steptix stop` already checks `service` before
    sending merely the key.)*
 3. Down + host not loopback ⇒ pre-flight error. Loopback set is exactly
    `localhost`, `127.0.0.1`, `::1`, `[::1]` — **not** `0.0.0.0`, and not
@@ -814,12 +814,12 @@ Every part of that is load-bearing:
 
 - **`--host` must be normalized**, and this repo is the proof. Its
   `.env` says `SERVER_URL=http://localhost:3100` while its
-  `aiui.config.json` says `"host": "127.0.0.1"`. Passing `--host
+  `steptix.config.json` says `"host": "127.0.0.1"`. Passing `--host
   localhost` makes `serve` override the config and `app.listen(3100,
   'localhost')` resolve via `dns.lookup`, which on this machine returns
   `::1` first — so the child binds **IPv6 loopback only**. The MCP's own
   `fetch` still works (happy eyeballs), so the smoke test passes, but
-  `aiui status`/`aiui stop` derive their URL from
+  `steptix status`/`steptix stop` derive their URL from
   `loadConfig().server.host/port` = `http://127.0.0.1:3100`, get
   connection-refused, and report **"not running"** — an MCP-started
   server unstoppable from the CLI. Normalize `localhost`/`127.0.0.1` →
@@ -839,16 +839,16 @@ Every part of that is load-bearing:
   in an MCP server that drops the host connection entirely. Attach one
   that appends to the log so §7's tail explains it.
 - **Explicit `env`.** `serve` hard-exits before binding when
-  `AIUI_SERVER_API_KEY` is unset, and `loadDefaultEnvFileSync` reads only the
+  `STEPTIX_SERVER_API_KEY` is unset, and `loadDefaultEnvFileSync` reads only the
   base `.env` — never the overlay — and does not override keys already
   in `process.env`. Inheritance alone gives either an instantly-dead
   child or a live child holding the *base* key while the client sends
   the *overlay* key: a permanent 401. On win32, merge keys
   case-insensitively — `process.env` reads case-insensitively but
-  spreading preserves the parent's casing, so a `AIUI_SERVER_API_KEY` vs
+  spreading preserves the parent's casing, so a `STEPTIX_SERVER_API_KEY` vs
   `server_api_key` collision would silently pick a winner.
 - **`--inspect=0`.** Both clients share one server; whoever starts it
-  decides whether TestBench's tool step-into works (`/health` reporting
+  decides whether Steptix's tool step-into works (`/health` reporting
   `inspector: null` makes the extension refuse to attach).
 
 **Resolving `<dist>/index.js`** — reuse the trick
@@ -872,7 +872,7 @@ the poll goes green anyway on the winner's server, so the race
 self-resolves. `--idle-timeout` is in **minutes**; 60 is a deliberate
 product choice — long enough that an agent returning after a break
 still has its session, at the cost of holding a browser for an hour
-after one walks away, and it also decides whether TestBench finds a live
+after one walks away, and it also decides whether Steptix finds a live
 server later.
 
 **Failure suppression** is a **module-level** `Map<string, number>`
@@ -903,7 +903,7 @@ safe:
   silently override the 60 s backoff, which is the single suppression
   mechanism.
 
-**Log file** `<project_root>/.aiui/mcp-server.log`:
+**Log file** `<project_root>/.steptix/mcp-server.log`:
 `mkdirSync(dirname, {recursive:true})`, then
 `fs.openSync(logPath, 'a', 0o600)`, pass the fd as `stdio: ['ignore',
 fd, fd]`, and `closeSync` it in a `finally` (the child holds its own
@@ -913,8 +913,8 @@ express the read-only bit — so on this project's primary platform the
 log is readable by every user on the box. Keep the mode (correct and
 free on POSIX) but do **not** cite it as the mitigation that justifies
 logging resolved values. The mode also applies only at creation; an
-existing looser file keeps its permissions. Add `.aiui/` to
-`.gitignore` (only `.aiui-tool-cache/` is listed today).
+existing looser file keeps its permissions. Add `.steptix/` to
+`.gitignore` (only `.steptix-tool-cache/` is listed today).
 
 **Idle-timer interaction.** A long run is pinned by `runsInFlight()`
 (server-lifecycle §3's maintained counter), not by MCP traffic, so a
@@ -1018,10 +1018,10 @@ a dozen literals.
 
 | Condition | Message names |
 | --- | --- |
-| path/root outside allowed roots; unresolvable `project_root` | the root, the candidates, and `AIUI_MCP_ROOTS` |
-| no `aiui.config.json` within the root | `AIUI_MCP_ROOTS` first, then every directory searched |
+| path/root outside allowed roots; unresolvable `project_root` | the root, the candidates, and `STEPTIX_MCP_ROOTS` |
+| no `steptix.config.json` within the root | `STEPTIX_MCP_ROOTS` first, then every directory searched |
 | no `SERVER_URL` | both env files and the env var |
-| no `AIUI_SERVER_API_KEY` | both env files and the env var |
+| no `STEPTIX_SERVER_API_KEY` | both env files and the env var |
 | `SERVER_URL` non-`http:`, portless, or path-bearing | the URL and the rule |
 | unrecognized service on the port | the port and what it reported |
 | server down, remote URL | the URL; only loopback auto-starts |
@@ -1056,17 +1056,17 @@ that part of the test cannot execute unattended.
   the SDK: `@modelcontextprotocol/server@2.x` is a separate in-progress
   rename. Commit the lockfile in the same change. *(Measured: a warm
   SDK import is ~250 ms and pulls in ajv but not express/hono/jose.)*
-- **No extension bump** — nothing under `testbench-*`/`runner-core` is
+- **No extension bump** — nothing under `steptix-*`/`runner-core` is
   touched.
 - `.mcp.json` and `.vscode/mcp.json` checked in (only the latter sets
-  `AIUI_MCP_ROOTS`, via `${workspaceFolder}`); README with copy-paste
+  `STEPTIX_MCP_ROOTS`, via `${workspaceFolder}`); README with copy-paste
   config for all four hosts. Four caveats: a fresh clone is broken until
   `npm run build` (the configs point at gitignored `dist/`); the Codex
   VS Code extension has an open bug detecting `config.toml` MCP servers
   (verify via Codex CLI first); Windows Codex setups may need
   `startup_timeout_ms` raised; and **if you auto-start via MCP, use
-  `aiui status --url $SERVER_URL`** — `status`/`stop` otherwise derive
-  their target from `aiui.config.json`, which can disagree with
+  `steptix status --url $SERVER_URL`** — `status`/`stop` otherwise derive
+  their target from `steptix.config.json`, which can disagree with
   `SERVER_URL` on host *or* port.
 
 ## Out of scope
@@ -1079,7 +1079,7 @@ that part of the test cannot execute unattended.
   particular, making the config-on-existing-session check tolerant, and
   moving session creation inside `queueTail`. Both are recommended
   follow-ups (§3, §6).
-- Any change to the TestBench extensions, Monaco, or `runner-core`.
+- Any change to the Steptix extensions, Monaco, or `runner-core`.
 
 ## Composition
 
@@ -1159,7 +1159,7 @@ does not typecheck them.
   explicit case that `get_page_content` does **not** ship the page twice
   in `content`. It needs a real project on disk (`list_test_files`
   confines `tests.dir` against `allowedRoots()`, and `run_test_file`
-  reads a file), so: tmpdir + `aiui.config.json` + `AIUI_MCP_ROOTS`, as
+  reads a file), so: tmpdir + `steptix.config.json` + `STEPTIX_MCP_ROOTS`, as
   the real-app seam does.
 - **Retry-without-config**: first call sends config, second omits; a
   session recreated out-of-process triggers the retry; a connect failure
@@ -1169,8 +1169,8 @@ does not typecheck them.
   `allow_foreign_session` permits.
 - **Real-app seam** (client-seam rule): drive **`run_test_file`**
   through the real `createApiServer` app over HTTP with deep modules
-  mocked. The tmpdir fixture needs an `aiui.config.json` (§Locked "a
-  project root is required") **and** `AIUI_MCP_ROOTS` pointed at it —
+  mocked. The tmpdir fixture needs a `steptix.config.json` (§Locked "a
+  project root is required") **and** `STEPTIX_MCP_ROOTS` pointed at it —
   the cwd default would refuse the tmp path. Two further traps: the
   existing logger mock omits `subAction`,
   `assertion`, `testStart`, `testEnd`, `tokenWarning`, `setVerbose`,
@@ -1178,11 +1178,11 @@ does not typecheck them.
   reach via the parser and skill expander — extend it or do not mock
   the logger here; and **port ordering** — mkdtemp → `createApiServer` →
   `listenOnRandomPort` → *then* write `.env` with the resulting
-  `SERVER_URL` and a matching `AIUI_SERVER_API_KEY` → then call the tool.
+  `SERVER_URL` and a matching `STEPTIX_SERVER_API_KEY` → then call the tool.
   Scope note: with `step-executor` mocked, per-step statuses are
   synthetic, so this is a **field-drop** test (`envName`, `sections`,
   `sourceLines`, `dataSources` against the allow-list), not a fold test.
-- **Roots confinement**: outside-cwd refused; `AIUI_MCP_ROOTS` honoured
+- **Roots confinement**: outside-cwd refused; `STEPTIX_MCP_ROOTS` honoured
   with `path.delimiter`; `..` refused; **symlink escape refused**;
   `C:\proj-evil` vs `C:\proj` refused; win32 case/short-name accepted;
   config walk stopping at the root; `toolsDir`, `tests.dir` and
@@ -1230,11 +1230,11 @@ Accepted without a test, explicitly: Windows detached-spawn semantics
 
 - Claude Code via this repo's `.mcp.json`: `run_steps`;
   `run_test_file` with an env; kill the server and watch a call
-  auto-start it on the `SERVER_URL` port; **then `aiui status --url
-  $SERVER_URL` and `aiui stop`** (verification rule 3); cancel mid-run
+  auto-start it on the `SERVER_URL` port; **then `steptix status --url
+  $SERVER_URL` and `steptix stop`** (verification rule 3); cancel mid-run
   then `get_last_run`; confirm `/health` reports an inspector so
-  TestBench step-into still works.
-- Codex CLI and Copilot CLI (both with `AIUI_MCP_ROOTS` set): register,
+  Steptix step-into still works.
+- Codex CLI and Copilot CLI (both with `STEPTIX_MCP_ROOTS` set): register,
   list tools, one `run_test_file` each. Codex VS Code extension:
   attempt; a no-show is the known upstream bug.
 
@@ -1251,7 +1251,7 @@ Accepted without a test, explicitly: Windows detached-spawn semantics
   `messages[]` is error/warn-only, but an agent that can run steps can
   navigate anywhere and read anything interpolated into them. The
   product working as designed — stated so it is a decision.
-- **The `.aiui/` log is world-readable on Windows** (`0o600` is inert
+- **The `.steptix/` log is world-readable on Windows** (`0o600` is inert
   there) and holds step text and resolved values.
 - **`messages[]` may contain another session's output** (process-global
   logger callbacks); best-effort, documented in the tool description.
@@ -1302,13 +1302,13 @@ disagree with the sections above, **these are what shipped**.
   spawn-host normalisation are one rule seen twice, and W1 could not otherwise
   compile its own key function without W4.
 - **Two probe budgets, not one.** The poll keeps the specified 1 s per probe,
-  but the *arm-deciding* probe gets 2 s (matching `aiui status`/`stop`). Their
+  but the *arm-deciding* probe gets 2 s (matching `steptix status`/`stop`). Their
   failure modes are opposite: a slow poll probe costs 250 ms, while a busy
   server misread as `down` costs a doomed EADDRINUSE spawn plus the full 20 s.
 - **The healthy arm clears the backoff record too**, not only a successful
   start, so a server that failed to start, came up by other means, and later
   fails again is not suppressed by a stale record.
-- **`AIUI_SERVER_API_KEY` is pinned explicitly into the child's environment**
+- **`STEPTIX_SERVER_API_KEY` is pinned explicitly into the child's environment**
   rather than relying on the composed map: §4's discovery fallback means the
   key may live only in `process.env`, and that value is deliberately kept out
   of the map sent to the server — but client and child must still agree.
@@ -1353,7 +1353,7 @@ Two bugs that the unit tests could not reach, because both need a real run:
 
 Security, all fixed:
 
-- **Three tools sent `AIUI_SERVER_API_KEY` to an unidentified listener.**
+- **Three tools sent `STEPTIX_SERVER_API_KEY` to an unidentified listener.**
   `list_sessions`, `close_session` and `get_last_run` never reach
   `ensureServerReady`, so nothing checked `service` first — an agent's
   harmless "what's running?" probe would hand the key to a port squatter.
@@ -1369,10 +1369,10 @@ Security, all fixed:
 - **The auto-start failure message could quote a previous server's log** —
   which contains step text with `${env.X}` already resolved. `readLogTail` now
   takes an offset floor recorded when the attempt opened the log.
-- **The base `.env` and `aiui.config.json` were the only unconfined reads.**
+- **The base `.env` and `steptix.config.json` were the only unconfined reads.**
   A symlinked `.env` inside an allowed root could point at `~/.aws/credentials`
   and be parsed, shipped as the request's `env`, and interpolated into step
-  text. Both are confined now, and an `AIUI_MCP_ROOTS` entry must be a
+  text. Both are confined now, and a `STEPTIX_MCP_ROOTS` entry must be a
   directory.
 - **`SERVER_URL` accepted a query, fragment or embedded credentials**; the
   check is now `origin`-based, and messages echo a credential-stripped form.
@@ -1412,7 +1412,7 @@ Known and accepted, tracked in `issues/` rather than fixed:
 
 - **[038](../issues/038-server-identity-is-a-public-constant.md)** —
   identification is by a public constant, so any local process answering
-  `/health` with `{"service":"ai-ui-automation"}` takes arm 1 and receives the
+  `/health` with `{"service":"steptix"}` takes arm 1 and receives the
   key and the composed `.env`. The check catches collisions, not attackers.
 - **[039](../issues/039-toctou-between-confinement-check-and-read.md)** —
   every §4a rule is check-then-read-by-path, so a symlink swapped into the
@@ -1461,8 +1461,8 @@ coexist cleanly).
 ### W6 — docs + ship
 
 `.mcp.json`, `.vscode/mcp.json`, README host setup (4 hosts,
-`AIUI_MCP_ROOTS` required for the two global ones, four caveats). Root
-`npm run build`; assert no `testbench-*`/`runner-core` changes.
+`STEPTIX_MCP_ROOTS` required for the two global ones, four caveats). Root
+`npm run build`; assert no `steptix-*`/`runner-core` changes.
 
 ## Code review
 
@@ -1472,7 +1472,7 @@ coexist cleanly).
    silent field-drops live — the `envName` lesson), with §3's table and
    §2's folding rules as the checklist.
 4. `security-review` before merge — §4a's six rules, the spawn, arm 2's
-   refusal, key handling (never log `AIUI_SERVER_API_KEY` or the composed
+   refusal, key handling (never log `STEPTIX_SERVER_API_KEY` or the composed
    `env`, including to stderr), and the result payload as egress.
 
 ## Repo gotchas (from project memory — real, previously hit)

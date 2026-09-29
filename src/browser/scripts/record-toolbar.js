@@ -1,4 +1,4 @@
-  // ── The toolbar (stories/testbench-record-toolbar.md) ───────────────────
+  // ── The toolbar (stories/steptix-record-toolbar.md) ───────────────────
   //
   // Spliced into record-steps.js's closure by src/recorder/page-script.ts, at
   // the __RECORD_TOOLBAR__ placeholder, so it shares that script's state and
@@ -7,7 +7,7 @@
   // What lives here:
   //
   //   - the bar itself, in the TOP frame of each tab only: an
-  //     `<aiui-recorder>` element with a CLOSED shadow root, a manual popover
+  //     `<steptix-recorder>` element with a CLOSED shadow root, a manual popover
   //     on `<html>` (the browser's top layer), styled by one constructable
   //     sheet adopted into the root and by per-property `style.setProperty`
   //     on the host — no `<style>`, no `cssText`, no `innerHTML`, so a strict
@@ -27,8 +27,8 @@
   // Nothing is kept in the page's own storage — the dock and the minimised
   // state come from the server and go back to it.
 
-  var TB_TAG = 'aiui-recorder';
-  var PICK_TAG = 'aiui-recorder-pick';
+  var TB_TAG = 'steptix-recorder';
+  var PICK_TAG = 'steptix-recorder-pick';
   var SVG_NS = 'http://www.w3.org/2000/svg';
   var IS_TOP = window === window.top;
   var DOCKS = { tl: 1, tc: 1, tr: 1, bl: 1, bc: 1, br: 1 };
@@ -64,7 +64,7 @@
     boxText: '', boxTimer: 0, returnFocus: null, drag: null, suppressClick: false,
     noticeSeq: -1, noticeUntil: 0, closedByUser: false, removeTimer: 0,
     lastPaused: false, lastPick: false, lastPhase: '', lastFocusSecret: false,
-    // The drawer (stories/testbench-record-edit-steps.md, "The drawer"): the
+    // The drawer (stories/steptix-record-edit-steps.md, "The drawer"): the
     // step being edited in place ({ id, input, viaKeyboard, original });
     // what this page has done to a row ahead of the server's answer, by step
     // id ({ text } | { deleted } | { restored }, `confirmed` once answered
@@ -151,8 +151,8 @@
     '.status{display:flex;align-items:center;gap:7px;padding:0 10px 0 6px;white-space:nowrap}',
     '.dot{position:relative;width:10px;height:10px;border-radius:50%;background:var(--rec);flex:none}',
     '.dot::after{content:"";position:absolute;inset:-4px;border-radius:50%;border:2px solid var(--rec);opacity:0;',
-    'animation:aiui-pulse 1.8s ease-out infinite}',
-    '@keyframes aiui-pulse{0%{transform:scale(.6);opacity:.7}100%{transform:scale(1.35);opacity:0}}',
+    'animation:steptix-pulse 1.8s ease-out infinite}',
+    '@keyframes steptix-pulse{0%{transform:scale(.6);opacity:.7}100%{transform:scale(1.35);opacity:0}}',
     '.dot[data-kind="paused"]{background:transparent}',
     '.dot[data-kind="paused"]::before{content:"";position:absolute;inset:0 1px;border-left:3px solid var(--paused);',
     'border-right:3px solid var(--paused)}',
@@ -162,8 +162,8 @@
     '.dot[data-kind="done"]{background:var(--ok)}',
     '.dot[data-kind="ended"]{background:var(--faint)}',
     '.dot[data-kind="writing"]{background:transparent;border:2px solid var(--line);border-top-color:var(--text);',
-    'animation:aiui-spin .9s linear infinite}',
-    '@keyframes aiui-spin{to{transform:rotate(360deg)}}',
+    'animation:steptix-spin .9s linear infinite}',
+    '@keyframes steptix-spin{to{transform:rotate(360deg)}}',
     '.rec{font-weight:700;letter-spacing:.08em;font-size:12px}',
     '.rec[data-kind="rec"]{color:#FF7B7F}',
     '.rec[data-kind="paused"],.rec[data-kind="offline"]{color:var(--paused)}',
@@ -237,7 +237,7 @@
     '.hint{flex:none;color:var(--faint);font-size:11.5px;white-space:nowrap}',
     '.hint.warn{flex:1;min-width:0;color:#FFD27A;white-space:normal}',
     '.spin{width:12px;height:12px;border-radius:50%;flex:none;border:2px solid var(--line);',
-    'border-top-color:var(--text);animation:aiui-spin .9s linear infinite}',
+    'border-top-color:var(--text);animation:steptix-spin .9s linear infinite}',
     '.drawer{position:relative;width:0;min-width:100%;max-height:214px;overflow:auto;border-top:1px solid var(--line);',
     'padding:6px 4px}',
     '.wrap[data-edge="bottom"] .drawer{border-top:0;border-bottom:1px solid var(--line)}',
@@ -484,7 +484,7 @@
     list.setAttribute('aria-label', 'Steps so far');
     drawer.appendChild(list);
     drawer.appendChild(tbEl('p', 'foot', 'Click a step to change it · ✕ removes it · + adds one below'));
-    drawer.setAttribute('id', 'aiui-drawer');
+    drawer.setAttribute('id', 'steptix-drawer');
 
     bar.appendChild(main);
     bar.appendChild(sub);
@@ -514,7 +514,7 @@
     input.setAttribute('autocomplete', 'off');
     input.setAttribute('spellcheck', 'true');
     input.setAttribute('aria-label', 'Add a step');
-    input.setAttribute('aria-describedby', 'aiui-hint');
+    input.setAttribute('aria-describedby', 'steptix-hint');
     input.placeholder = 'Verify the balance shows "$1,234.56"';
 
     wrap.appendChild(bar);
@@ -1001,7 +1001,7 @@
     t.appendChild(tbEl('span', null, 'Steps so far'));
     t.appendChild(tbIcon('chev'));
     t.setAttribute('aria-expanded', String(tbLocal.drawer));
-    t.setAttribute('aria-controls', 'aiui-drawer');
+    t.setAttribute('aria-controls', 'steptix-drawer');
     return t;
   }
 
@@ -1089,7 +1089,7 @@
         var target = tbLocal.insertAfter;
         var hint = add(tbEl('span', 'hint',
           (target ? 'Goes after step ' + target.n + ' · ' : '') + 'Enter to add · Esc to close'));
-        hint.setAttribute('id', 'aiui-hint');
+        hint.setAttribute('id', 'steptix-hint');
         tb.hint = hint;
         break;
       }
@@ -1126,7 +1126,7 @@
         break;
       default: {
         // The last step as the drawer has it. No lock: nothing is locked
-        // against the author (stories/testbench-record-edit-steps.md).
+        // against the author (stories/steptix-record-edit-steps.md).
         var list = tbLiveRows(v);
         if (list.length === 0) {
           add(tbEl('span', 'msg dim', 'No steps yet. They appear here as you work.'));
@@ -1162,7 +1162,7 @@
    * The Steps so far drawer: every step, editable and deletable in place,
    * with a + in the gap below each to add one there, and the steps deleted
    * since the last one landed, struck through, with Restore
-   * (stories/testbench-record-edit-steps.md, "The drawer").
+   * (stories/steptix-record-edit-steps.md, "The drawer").
    *
    * A step being edited in it keeps its row as it is — the box, its words,
    * its caret and its focus — and the other rows are rebuilt around it: a ✕

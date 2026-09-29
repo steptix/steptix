@@ -26,7 +26,7 @@ const envDataCtx = session.envBundle
 The `!session.envBundle` guard means: load once, freeze for the session.
 Edits to `.env.<envName>` or `data/<envName>.json` during a paused run
 are not picked up until the user explicitly closes the session
-(`testbench-native.restartSession`).
+(`steptix.restartSession`).
 
 This is the same class of bug as [009 (skill cache)](#) — module-level
 caching with no invalidation surface — but it's now the *only*

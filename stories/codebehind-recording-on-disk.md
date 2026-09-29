@@ -21,7 +21,7 @@ After this story:
   with the gutter painting, as it does now — and *that* run is the recording.
   Every compile records again; the steps already compiled run as code at no
   cost, so a re-record costs the steps you were going to compile anyway.
-- **The recording is files beside the test.** `.aiui-codebehind-cache/
+- **The recording is files beside the test.** `.steptix-codebehind-cache/
   <name>.recording/`: one JSON per step — what it did, where it was, whether
   it passed — and the DOM before and after it as files you can open. The
   server holds nothing on the session; the recording is written when the run
@@ -50,13 +50,13 @@ Compile checkout.md
   Write       dry run — nothing written
 
 ✓ Compiled checkout.md: 9 of 9 step(s) as code.
-  Recording: tests/.aiui-codebehind-cache/checkout.recording/
+  Recording: tests/.steptix-codebehind-cache/checkout.recording/
 ```
 
 and on disk, beside the test:
 
 ```
-tests/.aiui-codebehind-cache/
+tests/.steptix-codebehind-cache/
   checkout.recording/
     recording.json               the run: test, status, step count, parameter names
     step-01.json                 index, text, status, url before/after, actions, outputs
@@ -76,7 +76,7 @@ what the diff will offer.
 
 ## Context — what the in-memory design gets wrong
 
-codebehind-compile-as-a-run.md made every TestBench run capture the DOM
+codebehind-compile-as-a-run.md made every Steptix run capture the DOM
 either side of each step so that "the run you just did is the recording" and
 a compile would skip Record. Three things are wrong with that, and the first
 live use found all three:
@@ -106,7 +106,7 @@ that wrote something surprising leaves nothing to inspect but the diff.
 
 ### Ordinary runs capture nothing
 
-TestBench stops sending `captureStepContext` on runs. The wire field stays —
+Steptix stops sending `captureStepContext` on runs. The wire field stays —
 it is how the compile's own Record asks for the capture, and nothing stops
 another client asking — but nothing sends it by default. The cache-hit
 capture rule (a hit takes the turn-1 snapshot when context is asked for)
@@ -139,7 +139,7 @@ it goes and written when it ends, which is before Generate starts, so the
 author can read the recording while the model works. (A Record the author
 stops mid-run writes what it has.)
 
-`.aiui-codebehind-cache/<name>.recording/`, beside the test's cache sidecar,
+`.steptix-codebehind-cache/<name>.recording/`, beside the test's cache sidecar,
 replaced wholesale by each new recording:
 
 - `recording.json` — `{ test, startedAt, finishedAt, status, steps,
@@ -165,7 +165,7 @@ write it as `step.getVar(...)` anyway, which is what it is told to do.
 
 ### The candidate trail
 
-`.aiui-codebehind-cache/<name>.steps.ts.candidate` is written after
+`.steptix-codebehind-cache/<name>.steps.ts.candidate` is written after
 Generate, after Review, after every repair, and at the end — on green as
 well as red — so it is always the compile's latest proposal. It is no longer
 deleted by a green compile: after Apply it is identical to
@@ -200,7 +200,7 @@ follows reports the real error.
   says where the recording went.
 - The summary carries `recordingDir`, and the compile notification (green,
   partial or failed) gains **Open recording**, which reveals the directory in
-  the Explorer. `aiui compile` prints `Recording: <dir>`.
+  the Explorer. `steptix compile` prints `Recording: <dir>`.
 - The files themselves, in the Explorer, beside the test's other cache
   artifacts.
 
@@ -220,7 +220,7 @@ follows reports the real error.
 ## What was built
 
 Everything above, as written. Verified by running: root 2728 (vitest),
-runner-core 435, testbench-native unit 223 and the code-behind integration
+runner-core 435, steptix-vscode unit 223 and the code-behind integration
 group 15; live through the extension against `fixtures/test-app` — Compile
 with no prior run records in the editor's session, Apply, and the next run
 serves every step as code; and Run then Compile, where the stream now shows
@@ -234,12 +234,12 @@ showed the same directory, with the stream naming it ("Recording to …").
 Two things the first real project found, the same day:
 
 - **A project that never installed the framework ran every step under AI.**
-  The generated file imports `ai-ui-automation/codebehind`, and the bundler
+  The generated file imports `steptix/codebehind`, and the bundler
   left that for Node to resolve from the project's cache dir — which, in a
-  tests-only project driven from TestBench, has no `node_modules` above it.
+  tests-only project driven from Steptix, has no `node_modules` above it.
   The loader warned and fell back. The server (or CLI) loading the file *is*
   the framework and knows where its own modules are, so the bundler now
-  resolves `ai-ui-automation` and its subpaths to the running framework's
+  resolves `steptix` and its subpaths to the running framework's
   export — read off its `package.json` — whenever the project cannot resolve
   it, and leaves the bare specifier alone when it can (an install, or the
   framework's own checkout). A `package.json` dependency is still the right
@@ -274,7 +274,7 @@ the write happens on every exit path that writes the sidecar.
   it on green; write replay failures; `recordingDir` in the summary.
 - `src/cli/commands/compile.ts` — print the recording dir.
 - `runner-core` — `CompileSummary.recordingDir`.
-- `testbench-native` — stop sending `captureStepContext`; **Open recording**
+- `steptix-vscode` — stop sending `captureStepContext`; **Open recording**
   on the compile notification. Patch bump.
 
 ## Tests
@@ -297,8 +297,8 @@ the write happens on every exit path that writes the sidecar.
 
 ## Non-goals
 
-- Reusing a fresh on-disk recording instead of re-recording (`aiui compile
+- Reusing a fresh on-disk recording instead of re-recording (`steptix compile
   --from-recording`). The format is shaped for it; the decision was to
   re-record every time.
 - Per-step streaming of the recording to disk during the run.
-- A recording viewer in TestBench beyond revealing the files.
+- A recording viewer in Steptix beyond revealing the files.

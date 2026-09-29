@@ -30,7 +30,7 @@ navigates to `undefined`, and the repair round gives up:
 
 ```ts
 {
-  // Kept as AI by `aiui compile`: The step requires the dynamic value ${data.url}, but no url or data
+  // Kept as AI by `steptix compile`: The step requires the dynamic value ${data.url}, but no url or data
   // parameter is in scope, so a valid destination URL cannot be obtained via step.getVar.
   source: 'Navigate to ${data.url}',
   ai: true,
@@ -115,7 +115,7 @@ over what `${data.url}` means.
 bundle the caller resolved plus the test's own `dataSources`, loaded from
 frontmatter. It now keeps that context on the result as `ParsedTest.envData`,
 so every path that runs a parsed test has it without another argument:
-`aiui run`, `aiui compile`'s own runs, and the compile's generator. The
+`steptix run`, `steptix compile`'s own runs, and the compile's generator. The
 server's step loop builds its context itself from the request (the client
 forwards `dataSources` over the wire) and hands it to the executor the same
 way it hands the code-behind binding.
@@ -230,7 +230,7 @@ No extension change: the client already forwards `envName` and
 Built as specified; the outline above is the change. What the live proof
 showed, and the few places the build went beyond the outline:
 
-- **The live case compiles.** `aiui compile "tests/github with sections.md"
+- **The live case compiles.** `steptix compile "tests/github with sections.md"
   --env uat --steps 1` against the project that surfaced this wrote
 
   ```ts

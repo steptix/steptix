@@ -28,7 +28,7 @@ export function registerRunCommand(program: Command): void {
   program
     .command('run [target]')
     .description('Run test files. Target can be a file path or directory.')
-    .option('-c, --config <path>', 'Path to config file (default: auto-discover aiui.config.json)')
+    .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
     .option('-t, --tag <tags>', 'Filter tests by tag (comma-separated, AND logic)')
     .option('--headless', 'Run browser in headless mode', false)
     .option('--timeout <ms>', 'Test timeout in milliseconds', parseInt)
@@ -300,7 +300,7 @@ function printSummary(summary: RunSummary): void {
       console.log(
         chalk.yellow(
           `            ${origins.stale} step(s) ran under AI because their code-behind failed${cost} — ` +
-            `recompile with \`aiui compile <test.md> --only-stale\`.`,
+            `recompile with \`steptix compile <test.md> --only-stale\`.`,
         ),
       );
     }

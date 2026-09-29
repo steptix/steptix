@@ -1,8 +1,8 @@
 import type { Configuration } from 'electron-builder';
 
 const config: Configuration = {
-  appId: 'com.ai-ui-automation.runner',
-  productName: 'AI UI Automation Runner',
+  appId: 'com.steptix.runner',
+  productName: 'Steptix Runner',
   directories: {
     output: 'dist-electron',
   },

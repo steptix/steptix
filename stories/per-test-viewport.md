@@ -5,9 +5,9 @@
 Sites that respond to CSS breakpoints render a genuinely different UI at phone
 width — the nav collapses into a hamburger, tables stack into cards, whole
 sections appear or disappear. Today there is no way to test that UI without
-editing the server's own `aiui.config.json` and restarting it, which flips
+editing the server's own `steptix.config.json` and restarting it, which flips
 *every* test on that server to the new size. And even that only works headless:
-the headed browser (the default, and what TestBench users watch) ignores
+the headed browser (the default, and what Steptix users watch) ignores
 `browser.viewport` entirely and takes its size from the window.
 
 This story adds one line to a test file:
@@ -66,7 +66,7 @@ same time.
 **You get:** today's behavior exactly — desktop size from the server's config.
 
 > **Verification rule for this story.** "Done" means: (1) a test declaring
-> `viewport: mobile`, run through TestBench against a server whose own config
+> `viewport: mobile`, run through Steptix against a server whose own config
 > is the desktop default, renders its page at exactly 390 CSS px
 > (`window.innerWidth`) in **headed** mode; (2) editing the value and
 > re-running on a live session gets the new size without a manual Restart
@@ -91,9 +91,9 @@ What exists today, and why each piece forces a design choice:
   lands naturally as "per session launch" (§4).
 - Per-session `config` on the wire (`baseUrl`, `timeout`, `cdp`) is
   **write-once**: a batch carrying `config` to an existing session throws
-  ([session-manager.ts:1318](../src/server/session-manager.ts)). TestBench
+  ([session-manager.ts:1318](../src/server/session-manager.ts)). Steptix
   cooperates by omitting `config` after the first send
-  (`configSentForSession`, [run-controller.ts:2221](../testbench-native/src/extension/run-controller.ts)).
+  (`configSentForSession`, [run-controller.ts:2221](../steptix-vscode/src/extension/run-controller.ts)).
   Viewport joins this write-once block — but unlike `baseUrl`, a stale value
   defeats the feature's whole point, so the *client* recycles the session on a
   mismatch (§5).
@@ -101,7 +101,7 @@ What exists today, and why each piece forces a design choice:
   ([markdown.ts:489](../src/parser/markdown.ts),
   [test-meta.ts:62](../runner-core/src/test-meta.ts)), so the new key parses
   everywhere for free; only types and consumers change. `$VAR` resolution
-  (TestBench) and `${env.X}` interpolation (server/CLI) apply to Config values
+  (Steptix) and `${env.X}` interpolation (server/CLI) apply to Config values
   already, so `viewport: $VIEWPORT` works without new code.
 - The MCP `run_test` path builds its wire `config` from an explicit whitelist
   ([assemble.ts:567](../src/mcp/assemble.ts)) — viewport must be added there
@@ -119,7 +119,7 @@ One `## Config` key, `viewport:`, whose value is a preset name or
 - Bounds: each dimension 100–10000 inclusive. Outside that, or anything else
   unparseable, is a refusal with the error text shown above — always naming
   the offending value and listing the accepted forms.
-- Interpolation: values may arrive via `$VAR` (TestBench `.env` resolution) or
+- Interpolation: values may arrive via `$VAR` (Steptix `.env` resolution) or
   `${env.X}` (server/CLI interpolation); validation runs on the resolved
   string.
 - `viewport:` alongside `cdp:` in one file is an error at the same layer that
@@ -136,7 +136,7 @@ A new optional `BrowserConfig` field carries the resolved size:
 /** When set, every context this launch creates gets EXACTLY this viewport —
  *  headed or headless — instead of the viewport/windowSize pair. Set by the
  *  runner/server from a test's `## Config: viewport:`; settable in
- *  aiui.config.json to pin a whole project (§8). */
+ *  steptix.config.json to pin a whole project (§8). */
 fixedViewport?: { width: number; height: number };
 ```
 
@@ -170,7 +170,7 @@ The step request's `config` block gains one optional string:
 ```
 
 - The **raw spec string** travels; the server resolves and validates it. One
-  validator, one error message, and dumb clients — TestBench forwards whatever
+  validator, one error message, and dumb clients — Steptix forwards whatever
   the file says, like it does `baseUrl`.
 - Write-once semantics are unchanged: `config` is still refused on an existing
   session. The resolved value is retained on `sessionConfig` (like `cdp`) so
@@ -190,10 +190,10 @@ names the size and its source:
 Launching chromium (headed) — viewport 390×844 (mobile, from test config)
 ```
 
-## §5 TestBench
+## §5 Steptix
 
 - Forward `viewport` from `parseConfig` into the request's `config`, through
-  `resolveValue` like `baseUrl` ([run-controller.ts:1826](../testbench-native/src/extension/run-controller.ts)).
+  `resolveValue` like `baseUrl` ([run-controller.ts:1826](../steptix-vscode/src/extension/run-controller.ts)).
 - **Recycle on change:** the controller already tracks whether config was sent
   (`configSentForSession`); extend that to remember *which* viewport value was
   sent. On Run, if a live session exists and the file's (resolved) viewport
@@ -225,7 +225,7 @@ parity, unchanged by this story.
 
 ## §8 Project-wide pin (bonus knob)
 
-`fixedViewport` lives on `BrowserConfig`, so `aiui.config.json` can set it:
+`fixedViewport` lives on `BrowserConfig`, so `steptix.config.json` can set it:
 
 ```jsonc
 "browser": { "fixedViewport": { "width": 390, "height": 844 } }
@@ -235,7 +235,7 @@ meaning *every* test in the project renders at exactly that size, headed or
 headless — a mobile-only test suite in one line. A test's own `viewport:` key
 overrides it per §1 precedence. Document the distinction from the legacy pair:
 `viewport` (headless-only), `windowSize` (headed window), `fixedViewport`
-(exact page size, both modes). Regenerate `schema/aiui.config.schema.json`.
+(exact page size, both modes). Regenerate `schema/steptix.config.schema.json`.
 
 ## §9 Non-goals
 
@@ -263,7 +263,7 @@ overrides it per §1 precedence. Document the distinction from the legacy pair:
   the startup config.
 - **runner-core** (`node --test`): the request type carries `viewport`; the
   suite that pins the wire shape covers it.
-- **TestBench** (integration harness, FakeApiClient): viewport forwarded on
+- **Steptix** (integration harness, FakeApiClient): viewport forwarded on
   first send; changed value closes the old session before the next run;
   unchanged value does not.
 - **MCP**: assemble tests — file `viewport` reaches the wire config; tool

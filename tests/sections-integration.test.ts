@@ -11,7 +11,7 @@ import { clearSkillCache, expandSkills } from '../src/skills/expander.js';
  * resolution, expansion, frames, origins and both provenance tags — against a
  * real file on disk rather than an inline string.
  *
- * This is the rich internal fixture. The self-contained file that `aiui init`
+ * This is the rich internal fixture. The self-contained file that `steptix init`
  * ships to users is a *different* file (no skill dependency); it is guarded
  * separately in the final `describe` block below so it can't silently drift.
  */
@@ -129,16 +129,16 @@ describe('fixtures/tests/sections-demo.md', () => {
 });
 
 /**
- * The file `aiui init` scaffolds into every new project. It is self-contained
+ * The file `steptix init` scaffolds into every new project. It is self-contained
  * — a section is defined and called twice, with no skill dependency — so a
  * fresh project can run it immediately. These assertions pin the exact shape
  * users receive: if an edit to the template breaks parsing or provenance,
- * every new project's `aiui run` would break silently, and this catches it.
+ * every new project's `steptix run` would break silently, and this catches it.
  *
  * Deliberately mirrors nothing from the fixture above: the two files diverge
  * on purpose (see the header comment), so they need independent guards.
  */
-describe('templates/init/tests/sections-demo.md (the file `aiui init` ships)', () => {
+describe('templates/init/tests/sections-demo.md (the file `steptix init` ships)', () => {
   const signInBody = [
     'Navigate to the login page',
     'Enter "{{email}}" in the email field',

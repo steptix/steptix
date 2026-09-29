@@ -102,7 +102,7 @@ route, one MCP tool.
 - **Foreign sessions are gated exactly like `close_session`.** This is the
   decision most worth being explicit about: page content is *more* sensitive
   than the ids and counts the other read-only tools hand out. A session the
-  developer opened in TestBench may be driving a CDP browser holding real
+  developer opened in Steptix may be driving a CDP browser holding real
   logins, and its active tab may be their bank. The repo already withholds
   foreign CDP tab *titles and URLs* by default; handing an agent the full text
   of that page unprompted would undo that policy through a side door.
@@ -220,7 +220,7 @@ where they were thrown.
 `checkSessionOwnership(session_id, allow_foreign_session)`
 ([tools.ts](../src/mcp/tools.ts)) is applied in the MCP tool handler — the same
 layer `close_session` gates at. The Sessions API server does not gate: it serves
-TestBench and flick too, and cannot tell an agent from a human. Not asking is
+Steptix and flick too, and cannot tell an agent from a human. Not asking is
 the withholding, exactly as with `includeForeignTabs`.
 
 The helper gains an optional **consequence** clause — *added during
@@ -590,7 +590,7 @@ W1 capture helpers ──> W2 server method + route ──> W3 MCP tool
 ```
 
 Strictly sequential — each layer's tests need the one below it — but each lands
-independently useful: W2 alone gives TestBench and flick the endpoint.
+independently useful: W2 alone gives Steptix and flick the endpoint.
 
 ## Workstreams
 
@@ -611,7 +611,7 @@ an extra.
 - **Rebuild `dist/` and restart the Sessions API server.** The running server
   executes compiled `dist/`, and the MCP server the host (e.g. Claude Code)
   spawns runs `dist/` too — a `src/` edit is not live for either until
-  `npm run build`. No TestBench extension version bump is needed: this is
+  `npm run build`. No Steptix extension version bump is needed: this is
   server-side, and the extensions are HTTP clients.
 - **Output schemas are SDK-validated.** Every new field `.nullable()`, never
   optional — a missing key degrades the result to `isError` with no structured

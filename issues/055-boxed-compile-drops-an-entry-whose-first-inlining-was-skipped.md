@@ -1,4 +1,4 @@
-# 055 — `aiui compile` drops an entry whose FIRST inlining a return skipped
+# 055 — `steptix compile` drops an entry whose FIRST inlining a return skipped
 
 **Status:** open / correctness — pre-existing in
 [#140](https://github.com/pkent/ai-ui-automation/pull/140), not introduced by
@@ -58,7 +58,7 @@ Condition holds on **call 1**, so call 1 skips lines 2–3 and call 2 runs them.
 
 | | `Enter the username` / `Click Sign in` |
 |---|---|
-| `aiui compile` (boxed) | dropped from the selection, `notAttempted: [3, 4]`, no entry written, `partial` |
+| `steptix compile` (boxed) | dropped from the selection, `notAttempted: [3, 4]`, no entry written, `partial` |
 | Run & Compile (live) | generated from call 2, `notAttempted: []`, entries in the proposal |
 
 The live answer is the intended one, and both compilers agree on the forward
@@ -96,6 +96,6 @@ riding along.
 
 ## Revisit when
 
-- Someone reports `aiui compile` writing no entry for a section-body line that
+- Someone reports `steptix compile` writing no entry for a section-body line that
   a Run & Compile of the same test does write, or
 - `selectSteps` is touched for any other reason.

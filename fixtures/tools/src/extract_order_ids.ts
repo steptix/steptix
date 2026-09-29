@@ -1,4 +1,4 @@
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 /**
  * Calls the test-app's `/api/orders` endpoint via the browser context's

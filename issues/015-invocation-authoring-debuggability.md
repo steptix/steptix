@@ -2,7 +2,7 @@
 
 **Status:** open / medium priority (one item already shipped)
 **Area:** [src/parser/invocation-parser.ts](../src/parser/invocation-parser.ts) — shared invocation grammar; [src/tools/executor.ts:241](../src/tools/executor.ts#L241) — unknown-parameter error; [src/tools/registry.ts:78-118](../src/tools/registry.ts#L78-L118) — tool-not-found message
-**Related:** [testbench-native/src/extension/aiui-config.ts](../testbench-native/src/extension/aiui-config.ts) — config resolution the diagnostics would reuse
+**Related:** [steptix-vscode/src/extension/steptix-config.ts](../steptix-vscode/src/extension/steptix-config.ts) — config resolution the diagnostics would reuse
 **Opened:** 2026-05-20
 
 ## Summary
@@ -41,7 +41,7 @@ mismatches:
 
 Cheap, and directly collapses steps 1–2 above.
 
-### 2. Static `aiui validate` / editor diagnostics (medium, highest value)
+### 2. Static `steptix validate` / editor diagnostics (medium, highest value)
 Walk every `[tool: ...]` / `[skill: ...]` in a test and check —
 **without** launching a browser or calling the AI — that:
 - the tool/skill exists in the catalogue resolved from `toolsDir` /
@@ -52,17 +52,17 @@ Walk every `[tool: ...]` / `[skill: ...]` in a test and check —
 - `{{vars}}` are quoted and resolvable.
 
 Two surfaces:
-- A CLI command (`aiui validate [glob]`) for CI / pre-run.
-- TestBench-native **editor diagnostics** (squigglies) so the mistakes
+- A CLI command (`steptix validate [glob]`) for CI / pre-run.
+- Steptix **editor diagnostics** (squigglies) so the mistakes
   in steps 1–3 are visible before Run is ever pressed. Reuses the
   existing config resolution + `loadToolCatalogue` + `parseInvocation`.
 
 ### 3. Stale-server guard (medium)
 The original confusion in this saga was a server running pre-migration
-code (`aiui.config.ts` in an error string the source no longer emits).
+code (`steptix.config.ts` in an error string the source no longer emits).
 Have the extension fetch a build stamp / version from the server and
-warn when it's older than the workspace's, e.g. "TestBench server is
-running an older build — restart `aiui serve`." Kills a whole class of
+warn when it's older than the workspace's, e.g. "Steptix server is
+running an older build — restart `steptix serve`." Kills a whole class of
 "why is it saying X when the code says Y?" debugging.
 
 ## Revisit when

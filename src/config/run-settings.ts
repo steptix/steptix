@@ -236,7 +236,7 @@ export function resolveRunSettings(
   // Re-sourced for the same reason the capture settings are, and it is easy to
   // miss why it has to be: `config.browser` below is spread from the SERVER's
   // startup config, so any key not named there silently keeps the server's
-  // answer no matter what the project's `aiui.config.json` says. Routing the
+  // answer no matter what the project's `steptix.config.json` says. Routing the
   // value onto the project bundle is necessary but NOT sufficient — this is the
   // second place it would be dropped, and the only one the executor reads.
   // Whether an ambiguous click fails belongs to the suite under test, not to
@@ -266,7 +266,7 @@ export function resolveRunSettings(
   // The AI switch (stories/run-settings.md §9). `allowInRuns` re-sourced here
   // for the reason `ambiguousTarget` is — `config.ai` below is spread from the
   // SERVER's startup config, so a key not named here silently keeps the
-  // server's answer whatever the project's aiui.config.json says. `!== false`
+  // server's answer whatever the project's steptix.config.json says. `!== false`
   // so absence stays "allowed", which is exactly today's behaviour.
   const allowBase = base(
     serverConfig.ai.allowInRuns !== false,

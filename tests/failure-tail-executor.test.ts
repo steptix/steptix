@@ -429,7 +429,7 @@ describe('the tail`s own words', () => {
 
   it('puts the warning on its own field as well as in the explanation', async () => {
     // Structural: the explanation does not travel on the `step:fail` wire event
-    // and the warning has to — it is the TestBench hover's first line.
+    // and the warning has to — it is the Steptix hover's first line.
     const { result } = await runStep(WARN_TAIL, failing('#missing-footer'));
     expect(result.warning).toBe('Footer build number missing');
 

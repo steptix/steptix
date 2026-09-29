@@ -10,7 +10,7 @@
 - [src/mcp/run-fold.ts](../src/mcp/run-fold.ts) (warning text for dropped streams)
 
 **Opened:** 2026-08-09  
-**Reported from:** live Agent Fleet / MCP session driving OpenRouter Credits purchase on a persistent Chrome CDP profile. Investigation used `.aiui/mcp-server.log` + tool results from that session.
+**Reported from:** live Agent Fleet / MCP session driving OpenRouter Credits purchase on a persistent Chrome CDP profile. Investigation used `.steptix/mcp-server.log` + tool results from that session.
 
 ---
 
@@ -37,7 +37,7 @@ The stream-drop warning’s “run may still be executing” branch is **mislead
 
 The Sessions API process **crashed with an uncaught exception** while retrying a click on OpenRouter’s Purchase Credits UI.
 
-### Exact crash (verbatim from `.aiui/mcp-server.log`)
+### Exact crash (verbatim from `.steptix/mcp-server.log`)
 
 ```text
 [2026-08-09 03:32:07] Step 4/4: Click the Purchase button to complete the $5 credit purchase
@@ -152,9 +152,9 @@ For a **process crash**, “may still be executing” is false. A better signal 
 - **OS:** Windows  
 - **Node:** v22.22.0 (from crash dump)  
 - **Project:** `C:\Projects\vibe\ai-ui-automation`  
-- **Server log:** `.aiui/mcp-server.log` (full crash + restart present; file was ~546 KB at investigation time)  
+- **Server log:** `.steptix/mcp-server.log` (full crash + restart present; file was ~546 KB at investigation time)  
 - **Browser:** project-owned CDP Chrome profile `default`, port **16839**  
-  - profileDir: `.aiui/cdp-profiles/chrome-default`  
+  - profileDir: `.steptix/cdp-profiles/chrome-default`  
 - **Tab:** `https://openrouter.ai/settings/credits`  
   - targetId at the time: `47A50C5437DE1711BD34B9356C835DAB`  
 - **Session:** `mcp:openrouter-credits-20260809`  
@@ -164,10 +164,10 @@ For a **process crash**, “may still be executing” is false. A better signal 
 
 ### Related HTML report / run logs (may still be on disk)
 
-- `reports/2026-08-09_03-31-59-aiui-mcp-steps.html` — successful Add Credits + amount 5  
-- `reports/2026-08-09_03-33-48-aiui-mcp-steps.html` — post-restart aborted run  
-- `reports/2026-08-09_03-34-16-aiui-mcp-steps.html` — `mcp:or-buy-5` aborted  
-- `reports/logs/C__Projects_vibe_ai-ui-automation_.aiui-mcp-steps.md-2026-08-09T03-32-07-298Z.log` — run log covering the crashing step (if retained)
+- `reports/2026-08-09_03-31-59-steptix-mcp-steps.html` — successful Add Credits + amount 5  
+- `reports/2026-08-09_03-33-48-steptix-mcp-steps.html` — post-restart aborted run  
+- `reports/2026-08-09_03-34-16-steptix-mcp-steps.html` — `mcp:or-buy-5` aborted  
+- `reports/logs/C__Projects_vibe_ai-ui-automation_.steptix-mcp-steps.md-2026-08-09T03-32-07-298Z.log` — run log covering the crashing step (if retained)
 
 ---
 
@@ -232,7 +232,7 @@ Fixing the crash is primary. Hardening recovery (refuse to recreate a session id
 
 ## Suggested investigation order for the next agent
 
-1. Confirm crash still present in `.aiui/mcp-server.log` (search `handleJavaScriptDialog` / `No dialog is showing`).  
+1. Confirm crash still present in `.steptix/mcp-server.log` (search `handleJavaScriptDialog` / `No dialog is showing`).  
 2. Find Sessions API bootstrap (`serve` / server listen) and whether any `process.on('uncaughtException'|'unhandledRejection')` exists — today the log shows bare Node default.  
 3. Trace CDP attach path: where `page` objects are created after `Connecting to Chrome over CDP` and add dialog handler + tests.  
 4. Reproduce with a minimal HTML page that calls `alert()` in a racy way under CDP attach (more reliable than OpenRouter payment UI).  

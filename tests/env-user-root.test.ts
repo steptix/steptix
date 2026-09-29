@@ -15,7 +15,7 @@ import {
 let tmpDir: string;
 
 beforeEach(() => {
-  tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-user-root-')));
+  tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-user-root-')));
 });
 
 afterEach(() => {
@@ -28,25 +28,25 @@ function deps(): UserRootDeps {
 }
 
 describe('userRootDir', () => {
-  it('win32: LOCALAPPDATA\\aiui', () => {
+  it('win32: LOCALAPPDATA\\steptix', () => {
     const dir = userRootDir({ env: { LOCALAPPDATA: 'C:\\Users\\x\\AppData\\Local' }, platform: 'win32' });
-    expect(dir).toBe(path.join('C:\\Users\\x\\AppData\\Local', 'aiui'));
+    expect(dir).toBe(path.join('C:\\Users\\x\\AppData\\Local', 'steptix'));
   });
 
   it('win32 without LOCALAPPDATA falls back to the home directory shape', () => {
     const dir = userRootDir({ env: {}, platform: 'win32', homedir: () => 'C:\\Users\\x' });
-    expect(dir).toBe(path.join('C:\\Users\\x', 'AppData', 'Local', 'aiui'));
+    expect(dir).toBe(path.join('C:\\Users\\x', 'AppData', 'Local', 'steptix'));
   });
 
-  it('POSIX: $XDG_CONFIG_HOME/aiui when set', () => {
+  it('POSIX: $XDG_CONFIG_HOME/steptix when set', () => {
     const dir = userRootDir({ env: { XDG_CONFIG_HOME: '/home/x/.config' }, platform: 'linux' });
-    expect(dir).toBe(path.join('/home/x/.config', 'aiui'));
+    expect(dir).toBe(path.join('/home/x/.config', 'steptix'));
   });
 
-  it('POSIX: ~/.aiui when XDG_CONFIG_HOME is unset or blank', () => {
+  it('POSIX: ~/.steptix when XDG_CONFIG_HOME is unset or blank', () => {
     for (const env of [{}, { XDG_CONFIG_HOME: '  ' }]) {
       const dir = userRootDir({ env, platform: 'linux', homedir: () => '/home/x' });
-      expect(dir).toBe(path.join('/home/x', '.aiui'));
+      expect(dir).toBe(path.join('/home/x', '.steptix'));
     }
   });
 });
@@ -57,8 +57,8 @@ describe('readUserRootEnv', () => {
   });
 
   it('parses an existing file', () => {
-    fs.mkdirSync(path.join(tmpDir, 'aiui'), { recursive: true });
-    fs.writeFileSync(path.join(tmpDir, 'aiui', '.env'), 'AI_MODEL=m1\n');
+    fs.mkdirSync(path.join(tmpDir, 'steptix'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, 'steptix', '.env'), 'AI_MODEL=m1\n');
     expect(readUserRootEnv(deps())).toEqual({ AI_MODEL: 'm1' });
   });
 });
@@ -68,7 +68,7 @@ describe('ensureMachineKey', () => {
     const result = ensureMachineKey(deps());
 
     expect(result.created).toBe(true);
-    expect(result.key).toMatch(/^aiui_[0-9a-f]{64}$/);
+    expect(result.key).toMatch(/^steptix_[0-9a-f]{64}$/);
     expect(result.path).toBe(userRootEnvPath(deps()));
     expect(fs.readFileSync(result.path, 'utf-8')).toContain(`${MACHINE_KEY_VAR}=${result.key}`);
   });

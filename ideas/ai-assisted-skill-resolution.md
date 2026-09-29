@@ -55,7 +55,7 @@ Properties:
   real consequences for the prompt cache and the assertion-code cache, both
   keyed on the expanded steps.
 - **Cost & latency.** Parse-time AI calls are paid on every test load,
-  including the watch loop and TestBench's live preview. Caching by
+  including the watch loop and Steptix's live preview. Caching by
   line-hash is feasible but adds another cache to reason about.
 - **Failure mode.** A deterministic parser fails fast and obviously. An AI
   fallback fails *plausibly* — it returns a wrong skill confidently — and

@@ -14,8 +14,8 @@ The `site_search` skill shows the two ways a skill gets values, side by side:
   call, and never set by this test.
 
 > **Run with an environment selected.** A skill's `${…}` dataSource only
-> resolves when the run supplies an env. In the TestBench sidebar pick an env
-> (e.g. **local**) before running; on the CLI use `aiui run … --env local`.
+> resolves when the run supplies an env. In the Steptix sidebar pick an env
+> (e.g. **local**) before running; on the CLI use `steptix run … --env local`.
 > (Any env works — the engine file has no `${envName}` in its path, so it's the
 > same file every time.)
 

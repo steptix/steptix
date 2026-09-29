@@ -17,7 +17,7 @@ import type {
 } from './types.js';
 
 /**
- * The step recorder (stories/testbench-record-steps.md, decisions 4–7, 10).
+ * The step recorder (stories/steptix-record-steps.md, decisions 4–7, 10).
  *
  * Watches ONE browser context — the session's active one — while a recording
  * runs: every page it has, every tab it opens, every frame in them. The page
@@ -111,7 +111,7 @@ const MAX_STEP_TEXT = 4_000;
 
 /**
  * A toolbar command from the page, after the recorder has checked it came
- * from a document it gave a token to (stories/testbench-record-toolbar.md,
+ * from a document it gave a token to (stories/steptix-record-toolbar.md,
  * "The page cannot drive the toolbar"). Pause and resume, Add check, and the
  * shortcuts that only move focus in the page are the recorder's own; the rest
  * go to the recording (`RecordStepsRun`).
@@ -129,7 +129,7 @@ export type ToolbarCommand =
   /** The step box: one line or several, exactly as typed — after the drawer
    *  step `after` names (its `+`), else at the end. */
   | { kind: 'step'; text: string; after?: { id?: string; index?: number; revision?: number } }
-  /** The drawer: a step reworded in place (stories/testbench-record-edit-steps.md). */
+  /** The drawer: a step reworded in place (stories/steptix-record-edit-steps.md). */
   | { kind: 'edit-step'; id: string; text: string }
   /** The drawer: a step's ✕, and a struck row's Restore. */
   | { kind: 'delete-step'; id: string }
@@ -208,7 +208,7 @@ interface ContextHook {
   key: string;
   /**
    * Each frame's token: the one its CURRENT document's script accepted
-   * (stories/testbench-record-toolbar.md, "The page cannot drive the
+   * (stories/steptix-record-toolbar.md, "The page cannot drive the
    * toolbar"). Kept per context, not per recording: a document's script
    * accepts one token for its whole life, across recordings.
    */
@@ -711,7 +711,7 @@ export class StepRecorder {
   private chain: Promise<void> = Promise.resolve();
   private hook: ContextHook | null = null;
 
-  // Pause (stories/testbench-record-toolbar.md, "Pause and resume").
+  // Pause (stories/steptix-record-toolbar.md, "Pause and resume").
   private paused = false;
   private pausedAt = 0;
   /** Time spent paused so far: left out of every gap and of the clock. */
@@ -1122,7 +1122,7 @@ export class StepRecorder {
   }
 
   /**
-   * The toolbar's messages (stories/testbench-record-toolbar.md, "On the
+   * The toolbar's messages (stories/steptix-record-toolbar.md, "On the
    * wire"): commands, a step, the box's unsent text, focus reports and the
    * check-in. Each must carry this document's token; a step must also come
    * from a top-level frame. Anything else is refused, and said in the log.
@@ -1316,7 +1316,7 @@ export class StepRecorder {
     if (this.discarding) return;
     const previous = this.lastActingPage;
     // The first tab acted in after a resume is where the author is (decision
-    // 6 of stories/testbench-record-toolbar.md): adopted, with no `tab` event.
+    // 6 of stories/steptix-record-toolbar.md): adopted, with no `tab` event.
     const adopt = this.adoptNextTab;
     this.adoptNextTab = false;
     if (!adopt && previous && previous !== page && !this.openedSinceLastAction.has(page)) {
@@ -1590,7 +1590,7 @@ export class StepRecorder {
         }
         // The recorder's own toolbar (the top frame's): painted out like a
         // secret, so the model never sees it and a run never looks for it
-        // (stories/testbench-record-toolbar.md, "Screenshots").
+        // (stories/steptix-record-toolbar.md, "Screenshots").
         const toolbarList = Array.isArray(found['toolbar']) ? found['toolbar'] : [];
         for (const raw of toolbarList) {
           const b = box(raw);

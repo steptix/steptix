@@ -503,7 +503,7 @@ export function createApiServer(
   // still watch the server go away.
   //
   // `server.close()` alone is not a work gate: it refuses new *connections*
-  // but a client already holding a keep-alive socket — which TestBench does —
+  // but a client already holding a keep-alive socket — which Steptix does —
   // can still send a request during the seconds `closeAll()` spends shutting
   // browsers down. That request would create a session and launch a browser
   // after the map was drained, and then be killed mid-run by the exit,
@@ -534,8 +534,8 @@ export function createApiServer(
   // Body: `{ force?: boolean }`. A run in flight refuses with 409 unless
   // forced. Open-but-idle sessions do NOT block a stop — they are closed as
   // part of it (story server-lifecycle §2). That asymmetry is the whole
-  // point: TestBench sessions stay open for reuse indefinitely, so blocking
-  // on them would mean `aiui stop` never works.
+  // point: Steptix sessions stay open for reuse indefinitely, so blocking
+  // on them would mean `steptix stop` never works.
   app.post('/admin/shutdown', (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const force = body.force === true;
@@ -979,7 +979,7 @@ export function createApiServer(
         }
         request.withinCompileRun = body.withinCompileRun;
       }
-      // Re-run-with-variables fields (testbench "re-run a skill step"):
+      // Re-run-with-variables fields (steptix "re-run a skill step"):
       // `seedScope` injects captured/runtime vars before the run; `startAt`
       // starts execution partway into the expanded skill body. Both optional.
       if (
@@ -1083,7 +1083,7 @@ export function createApiServer(
       }
 
       // A Record Steps recording holds this session's queue
-      // (stories/testbench-record-steps.md, decision 3). A run is REFUSED
+      // (stories/steptix-record-steps.md, decision 3). A run is REFUSED
       // rather than queued behind it: it would sit on an open stream with
       // nothing on it for as long as the author keeps clicking, then run in a
       // browser the author has moved on from. Before the stream opens, so it
@@ -1143,7 +1143,7 @@ export function createApiServer(
     }
   });
 
-  // POST /sessions/:id/record-steps (stories/testbench-record-steps.md, On the
+  // POST /sessions/:id/record-steps (stories/steptix-record-steps.md, On the
   // wire).
   //
   // Always SSE. Everything that can refuse is decided BEFORE the stream opens,
@@ -1194,7 +1194,7 @@ export function createApiServer(
   // recording is running (SPEC-record-steps.md §9.3), 400 for a body that is
   // none of the ten. Drop and Restore also take a step of the draft's id
   // (record:draft.ids): a delete of that step and the actions behind it
-  // (stories/testbench-record-edit-steps.md). An edit-step that cannot apply
+  // (stories/steptix-record-edit-steps.md). An edit-step that cannot apply
   // (an unknown step, a secret from the editor, an empty text) is a 202 that
   // says why in `ignored`.
   //
@@ -1681,7 +1681,7 @@ export function createApiServer(
   //
   // Both routes sit behind the auth middleware, so both bump the idle monitor.
   // That is fine only because no client polls them: flick refreshes on open
-  // plus a manual button, TestBench does not use them at all, and an MCP tool
+  // plus a manual button, Steptix does not use them at all, and an MCP tool
   // call is a user action. A polling client here would silently defeat the
   // idle timeout — the failure `/health` was deliberately kept pre-auth to
   // avoid (idle-monitor.ts:10). Worth remembering before adding a caller.
@@ -1795,7 +1795,7 @@ export function createApiServer(
 
       const includeForeign = req.query['includeForeign'] === 'true' || req.query['includeForeign'] === '1';
       // Whether the caller may see foreign tab titles and URLs. The server
-      // cannot tell an agent from a human — TestBench and flick authenticate
+      // cannot tell an agent from a human — Steptix and flick authenticate
       // too — so it honours what it is asked. The withholding gate is
       // MCP-side (§6): the MCP client simply does not ask for these unless
       // `mcp.cdp.allowUnowned` is set.
@@ -1898,7 +1898,7 @@ export function createApiServer(
       const profile = (body.profile as string | undefined) ?? DEFAULT_PROFILE;
       const reset = body.reset === true;
 
-      // Launch settings come from the aiui.config.json of the root the browser
+      // Launch settings come from the steptix.config.json of the root the browser
       // is launched into — read exactly there, no walk-up, so the user root's
       // own file governs a machine-wide browser and nothing above it can. Read
       // per request rather than off the server's startup config: the server is
@@ -1913,7 +1913,7 @@ export function createApiServer(
       } catch (err) {
         res.status(statusForCdpFailure('invalid_input')).json({
           error:
-            `Cannot start a browser for ${projectRoot}: its aiui.config.json could not be ` +
+            `Cannot start a browser for ${projectRoot}: its steptix.config.json could not be ` +
             'loaded, so the launch settings it governs are unknown. ' +
             `${err instanceof Error ? err.message : String(err)}`,
           reason: 'config_invalid',
@@ -2173,7 +2173,7 @@ export function createApiServer(
         plan = { kind: 'content', opts };
       }
 
-      // The synthetic `<root>/.aiui-peek.md`, and it is required rather than
+      // The synthetic `<root>/.steptix-peek.md`, and it is required rather than
       // optional: it is the only thing a project root resolves from, and
       // without it the capture would silently run under library defaults that
       // differ from the project's (a 100k dom clip against a configured 300k,
@@ -2312,7 +2312,7 @@ export function createApiServer(
           targetId,
           // The root the SETTINGS came from, which is the claim
           // stories/mcp-no-project.md asks every result to make. Null when no
-          // `aiui.config.json` stood above the synthetic path, in which case
+          // `steptix.config.json` stood above the synthetic path, in which case
           // the server's own defaults were used and saying otherwise would be
           // an invention.
           root: bundle.projectRoot,
@@ -2685,7 +2685,7 @@ export async function startServer(config: Config): Promise<void> {
 
   async function shutdown(reason: string): Promise<void> {
     // Re-entrancy guard: SIGINT twice, or an idle expiry racing an explicit
-    // `aiui stop`, must not run teardown twice.
+    // `steptix stop`, must not run teardown twice.
     if (shuttingDown) return;
     shuttingDown = true;
     stopIdleReaper();
@@ -2705,9 +2705,9 @@ export async function startServer(config: Config): Promise<void> {
     //
     // The work gate is `beginShutdown()`, not `server.close()`. That matters
     // twice over: `close()` only refuses new *connections*, so a client on an
-    // already-open keep-alive socket (TestBench holds one) could otherwise
+    // already-open keep-alive socket (Steptix holds one) could otherwise
     // slip a run in while browsers were closing — and closing the listener
-    // early also makes `/health` go dark instantly, so `aiui stop`'s
+    // early also makes `/health` go dark instantly, so `steptix stop`'s
     // confirmation poll would report "stopped" while teardown was still
     // running. Keeping the listener up until sessions are closed is what
     // makes that confirmation mean anything.
@@ -2718,7 +2718,7 @@ export async function startServer(config: Config): Promise<void> {
       logger.warn(`Error while closing sessions: ${err instanceof Error ? err.message : String(err)}`);
     }
     server.close();
-    // Give the in-flight response (the `aiui stop` caller's 200) time to
+    // Give the in-flight response (the `steptix stop` caller's 200) time to
     // flush before the socket dies with the process.
     setTimeout(() => process.exit(0), SHUTDOWN_GRACE_MS);
   }
@@ -3001,7 +3001,7 @@ function parseErrandRequest(raw: unknown): ErrandRequest | string {
     return '"targetId" is required and must be a non-empty string';
   }
 
-  // The synthetic `<root>/.aiui-errand.md`. Required: it is the only thing a
+  // The synthetic `<root>/.steptix-errand.md`. Required: it is the only thing a
   // project root is resolved from, and without it the project layer of
   // `effectiveSettings` falls back to server defaults with nothing saying so.
   const testFilePath = body.testFilePath;
@@ -3060,7 +3060,7 @@ function parseErrandRequest(raw: unknown): ErrandRequest | string {
 
 /**
  * Validate a `POST /sessions/:id/record-steps` body
- * (stories/testbench-record-steps.md, On the wire). Answers the request, or the
+ * (stories/steptix-record-steps.md, On the wire). Answers the request, or the
  * 400's sentence.
  *
  * Built field by field from an allow-list, as the steps route builds
@@ -3118,7 +3118,7 @@ export function parseRecordStepsRequest(raw: unknown): RecordStepsRequest | stri
     }
     request.env = env;
   }
-  // The browser toolbar (stories/testbench-record-toolbar.md, "The wire,
+  // The browser toolbar (stories/steptix-record-toolbar.md, "The wire,
   // exactly"). Absent: on, docked bottom centre, not minimised.
   if (body.toolbar !== undefined && body.toolbar !== null) {
     if (typeof body.toolbar !== 'object' || Array.isArray(body.toolbar)) {

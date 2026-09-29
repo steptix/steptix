@@ -1,6 +1,6 @@
 /**
  * Record Steps — the prompt, the answer parser and the file-safety pass
- * (stories/testbench-record-steps.md, decisions 7–10; docs/specs/SPEC-record-steps.md §8).
+ * (stories/steptix-record-steps.md, decisions 7–10; docs/specs/SPEC-record-steps.md §8).
  *
  * Pure functions, no browser: what the model is told, what it is never shown,
  * and what happens to an answer that does not fit.

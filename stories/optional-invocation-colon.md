@@ -76,13 +76,13 @@ step the server would happily run:
    guarantee relies on holds by construction rather than by comment.
 3. **Code-behind's never-generate rule**
    (src/codebehind/live-compile.ts): the same `isCodeStep` predicate.
-4. **TestBench's line matcher** — `parseInvocationLine`, which backs F12
+4. **Steptix's line matcher** — `parseInvocationLine`, which backs F12
    / Ctrl+Click targets, the step-into tool-line detection, and
    `rootFrameSteps`' skill filter. It moved from definition-provider.ts
    into invocation-target-core.ts (the vscode-free mirror file) so
    `node --test` parity rows can pin it, and the three hand-rolled
    regexes in commands/index.ts now call it instead of carrying private
-   copies. testbench-native is a separate package and genuinely cannot
+   copies. steptix-vscode is a separate package and genuinely cannot
    import the parser; everything in `src/` can, and now does.
 
 **Why the two in-package mirrors became calls rather than regexes.** They
@@ -135,6 +135,6 @@ file at parse time. Worth recording as the reason those two rules exist.
   `run_errand`; `[skills]` prose not swept in.
 - tests/codebehind-live-compile.test.ts — colon-less rows in the
   never-generate table.
-- testbench-native/tests/invocation-target-core.test.js —
+- steptix-vscode/tests/invocation-target-core.test.js —
   `parseInvocationLine` parity rows: both spellings, name ranges,
   prose non-matches, near-miss scan.

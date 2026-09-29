@@ -27,7 +27,7 @@ when the key goes empty, and returns `null` when unchanged. `tests/session-manag
 one AiClient built (not rebuilt), `syncAuth` called per batch, and an omitted
 `AI_API_KEY` / `AI_MODEL` reverts to the server base rather than sticking.
 
-**Server-only, no version bump** (nothing under `testbench-native/` or
+**Server-only, no version bump** (nothing under `steptix-vscode/` or
 `runner-core/`). The follow-ups below remain open.
 
 ## Symptom (user report)
@@ -36,15 +36,15 @@ one AiClient built (not rebuilt), `syncAuth` called per batch, and an omitted
 > test again, the run still uses the old model/key. I have to close the session
 > (or reload the VS Code window) for the change to take effect.
 
-Confirmed. The connection knobs (`SERVER_URL`, `AIUI_SERVER_API_KEY`) and `${env.*}`
+Confirmed. The connection knobs (`SERVER_URL`, `STEPTIX_SERVER_API_KEY`) and `${env.*}`
 substitutions *are* picked up every run — only the AI model/key are frozen.
 
 ## Mechanism
 
-TestBench-native is a thin client: it re-reads the whole `.env` from disk on
-**every** run ([run-controller.ts:858](../testbench-native/src/extension/run-controller.ts#L858))
+Steptix is a thin client: it re-reads the whole `.env` from disk on
+**every** run ([run-controller.ts:858](../steptix-vscode/src/extension/run-controller.ts#L858))
 and ships the parsed map as `env` on **every** batch
-([run-controller.ts:1205](../testbench-native/src/extension/run-controller.ts#L1205)).
+([run-controller.ts:1205](../steptix-vscode/src/extension/run-controller.ts#L1205)).
 So the fresh values reach the server each run. The server is where they get
 dropped:
 
@@ -59,7 +59,7 @@ dropped:
 
 2. **Sessions are reused across runs.** A session is keyed by the test file path.
    The controller only closes/recreates it on its *first* run or in batch mode
-   ([run-controller.ts:811-819](../testbench-native/src/extension/run-controller.ts#L811)).
+   ([run-controller.ts:811-819](../steptix-vscode/src/extension/run-controller.ts#L811)).
    A second F5 on the same file reuses the live session, so `executeSteps` finds
    an existing session and never re-enters `createSession`
    ([session-manager.ts:715-736](../src/server/session-manager.ts#L715)). The
@@ -89,9 +89,9 @@ resolves the in-run `pendingRunControl` promise inside the same
 the remainder of that run and only refreshes on the next batch. That is the
 cleaner boundary anyway. This removes the need for a client-side "fresh run"
 flag and keeps the change **server-only** — no `runner-core` /
-`testbench-native` edits, no wire-protocol field, **no extension version bump**
+`steptix-vscode` edits, no wire-protocol field, **no extension version bump**
 (per CLAUDE.md the bump is only for code bundled into a VSIX; this isn't).
-Restart the aiui server and it's live.
+Restart the Steptix server and it's live.
 
 ## Fix sketch (cheapest correct)
 
@@ -171,16 +171,16 @@ the actual bug (cf. the recurring "test at the client seam" lesson).
 - **`AI_MODEL` in a `.env.<name>` is still ignored for the AI client.** The
   override (here and at creation today) reads the client-shipped `request.env`,
   which is the base `.env` the extension parsed
-  ([run-controller.ts:858](../testbench-native/src/extension/run-controller.ts#L858)) —
+  ([run-controller.ts:858](../steptix-vscode/src/extension/run-controller.ts#L858)) —
   **not** the server-resolved `.env.<name>` bundle
   ([session-manager.ts:582](../src/server/session-manager.ts#L582)). So an
   environment-specific `AI_MODEL`/`AI_API_KEY` set only in `.env.<name>` won't
   reach the AI client. Pre-existing behaviour, not a regression from this fix,
   but stated so it isn't mistaken for a new bug afterward.
-- **Per-project `aiui.config.json` `ai.model` is still ignored on the server
+- **Per-project `steptix.config.json` `ai.model` is still ignored on the server
   path.** The session's `AiClient` is built from the server's *startup*
   `this.config.ai` plus the `.env` override — the test project's own
-  `aiui.config.json` `ai` block never reaches the running client
+  `steptix.config.json` `ai` block never reaches the running client
   ([session-manager.ts:909](../src/server/session-manager.ts#L909) uses
   `this.config.ai`, while the per-project config loaded at
   [session-manager.ts:570](../src/server/session-manager.ts#L570) feeds only

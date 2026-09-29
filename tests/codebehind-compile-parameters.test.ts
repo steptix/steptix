@@ -11,7 +11,7 @@ import { parseTestFile } from '../src/parser/markdown.js';
  * (stories/codebehind-compile-as-a-run.md §What was built, "Parameters").
  *
  * Caught live: `tests/github with sections.md` declares
- * `- username: $GITHUB_USERNAME`, runs green from TestBench — which resolves
+ * `- username: $GITHUB_USERNAME`, runs green from Steptix — which resolves
  * `$VAR` on the client before sending — and compiled with the literal
  * `$GITHUB_USERNAME` typed into the username field. The parser keeps `$VAR`
  * as written; only the CLI's file runner ever resolved it, from `process.env`,

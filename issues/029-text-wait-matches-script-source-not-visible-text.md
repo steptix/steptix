@@ -86,7 +86,7 @@ Minor caveat: `innerText` normalizes whitespace and reflects `text-transform`
   lives only in `textContent` (script source) and not `innerText` — assert it
   returns **false** (the old `textContent` check would have returned true), then
   returns **true** once `innerText` contains it. A direct regression guard.
-- **live** (`testbench-native/.../wait-timeout.test.cjs`): revert the string-split
+- **live** (`steptix-vscode/.../wait-timeout.test.cjs`): revert the string-split
   workaround so the script source again contains the literal `'Ready now'`. With
   the fix the slow-success scenario blocks ~35s and passes; reverting the fix makes
   it match the script source and fail the `waitMs > 12s` assertion.

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { userRootDir } from '../env/user-root.js';
 
 /** File names that identify a project root when walking up from a test file. */
-const PROJECT_MARKERS = ['aiui.config.json'];
+const PROJECT_MARKERS = ['steptix.config.json'];
 
 /**
  * win32 path comparison folds case; every other platform does not.
@@ -24,13 +24,13 @@ export function comparable(target: string): string {
  *
  * Used to anchor per-project resolution — config, env/data, the upload
  * fence — against the test's project, NOT against the server's CWD, which may
- * be elsewhere (testbench-native embeds the server and launches it from the
+ * be elsewhere (steptix-vscode embeds the server and launches it from the
  * user's workspace, but third-party callers may invoke it from anywhere).
  *
  * **The machine-wide user root is a boundary** (stories/mcp-no-project.md):
  * when the walk reaches it, it is returned whether or not a marker is there.
  * The user root is a real root — project-less MCP runs anchor their synthetic
- * test path inside it — and its `aiui.config.json` legitimately may not exist,
+ * test path inside it — and its `steptix.config.json` legitimately may not exist,
  * since nothing machine-writes it. Without the boundary the walk would carry
  * on into `%LOCALAPPDATA%` and the home directory, and a stray config file
  * anywhere up there would silently become the "project" whose `.env` and

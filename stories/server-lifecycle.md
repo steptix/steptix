@@ -1,16 +1,16 @@
-# Server lifecycle — auto-start from TestBench, health, stop, idle shutdown
+# Server lifecycle — auto-start from Steptix, health, stop, idle shutdown
 
 > **Verification rule for this story.** "Done" means: (1) with no server
-> running and `testbench-native.serverAutoStart.command` configured, hitting
-> Run on a test in TestBench native starts the server in the background,
+> running and `steptix.serverAutoStart.command` configured, hitting
+> Run on a test in Steptix native starts the server in the background,
 > waits for it to become healthy, and the test runs — no terminal involved;
 > (2) the server keeps running after the test finishes and after VS Code is
 > closed, and exits on its own after 60 minutes with no run in flight and no
 > authenticated API traffic — closing any sessions/browsers still open;
-> (3) `aiui status` prints running/not-running (exit code 0/1) plus version,
-> uptime, session counts, and inspector state; (4) `aiui stop` stops a
+> (3) `steptix status` prints running/not-running (exit code 0/1) plus version,
+> uptime, session counts, and inspector state; (4) `steptix stop` stops a
 > server that has no run in flight (closing idle sessions), refuses with a
-> clear message while a run is executing, and `aiui stop --force` stops it
+> clear message while a run is executing, and `steptix stop --force` stops it
 > anyway; (5) tool step-into still works against the auto-started server,
 > attaching to the inspector port reported by `/health` (not the hardcoded
 > settings), including when the server was started with `--inspect=0`. A VS
@@ -19,11 +19,11 @@
 
 ## Context
 
-Today the TestBench native extension is a pure HTTP client: it reads
-`SERVER_URL` + `AIUI_SERVER_API_KEY` from the project's `.env.<name>` fixture and
+Today the Steptix native extension is a pure HTTP client: it reads
+`SERVER_URL` + `STEPTIX_SERVER_API_KEY` from the project's `.env.<name>` fixture and
 calls the Sessions API. If the server isn't running, the run fails with
-TB010 (connect-failed, mapped in
-[run-controller.ts §mapApiErrorToPayload](../testbench-native/src/extension/run-controller.ts))
+STX010 (connect-failed, mapped in
+[run-controller.ts §mapApiErrorToPayload](../steptix-vscode/src/extension/run-controller.ts))
 and the user has to switch to a terminal, start the server manually
 (`node --env-file=templates/.env ... serve`), and come back.
 
@@ -35,7 +35,7 @@ than firing an authenticated API call and interpreting the failure.
 
 Separately, tool step-into has a latent wrong-process bug: the extension
 attaches VS Code's Node debugger to a hardcoded `inspectorPort` setting
-(default 9229, [extension.ts §handleToolAwaitingDebugger](../testbench-native/src/extension/extension.ts)).
+(default 9229, [extension.ts §handleToolAwaitingDebugger](../steptix-vscode/src/extension/extension.ts)).
 If another node process holds 9229, the server starts **without an
 inspector** (node only warns), the extension attaches to the *other*
 process's inspector, the ack releases the server, its `debugger;` is a
@@ -50,7 +50,7 @@ as a side effect of health reporting.
   minutes, only when `--idle-timeout` is passed; manual launches without
   the flag keep today's run-forever behaviour.
 - **Idle means "no run in flight AND no authenticated request for N
-  minutes"** — NOT "no open sessions". Interactive TestBench runs keep
+  minutes"** — NOT "no open sessions". Interactive Steptix runs keep
   their session (and browser) open indefinitely for reuse, and sessions
   survive VS Code reloads by design, so a session-count-based definition
   would never fire. Open-but-idle sessions do not pin the server; the idle
@@ -65,7 +65,7 @@ as a side effect of health reporting.
   auto-start uses `--inspect=0` so inspector port conflicts cannot occur
   for auto-started servers. The `inspectorPort`/`inspectorHost` settings
   become a fallback for servers whose `/health` predates this story.
-- **`aiui stop` refuses while a run is in flight** unless `--force`. Open
+- **`steptix stop` refuses while a run is in flight** unless `--force`. Open
   sessions with no run executing do not block a stop — they are closed as
   part of it.
 - **`/health` does not reset the idle timer** — otherwise the status bar's
@@ -83,7 +83,7 @@ sensitive). Response:
 ```json
 {
   "ok": true,
-  "service": "ai-ui-automation",
+  "service": "steptix",
   "version": "<package.json version>",
   "pid": 12345,
   "startedAt": "2026-07-23T10:00:00.000Z",
@@ -170,25 +170,25 @@ Behind the auth middleware. Body: `{ "force": true }` optional.
   the idle definition with no server-side changes. The keep-alive stops
   when the run resumes, is stopped, or the controller is disposed.
 
-### 4. CLI: `aiui status`, `aiui stop`
+### 4. CLI: `steptix status`, `steptix stop`
 
 Both new commands resolve the target URL the same way: `--url <url>` flag
 if given, else `http://<config.server.host>:<config.server.port>` from the
 loaded config (same discovery as `serve`).
 
-- **`aiui status [--url] [--json]`** — GET `/health` (2 s timeout).
+- **`steptix status [--url] [--json]`** — GET `/health` (2 s timeout).
   - Healthy + `service` matches: print version, pid, uptime, open
     sessions, runs in flight, inspector url or `none`, idle timeout.
     Exit 0.
   - Connection refused/timeout: `not running`. Exit 1.
   - Responds but wrong/absent `service` (or non-JSON): `port occupied by
-    another process (or an older aiui server without /health)`. Exit 2.
+    another process (or an older Steptix server without /health)`. Exit 2.
   - `--json` emits the raw health body (plus `{ running: false }` when
     down) for scripting.
-- **`aiui stop [--url] [--force]`** — POST `/admin/shutdown` with
-  `AIUI_SERVER_API_KEY` from the environment (same sourcing as `serve`; error
+- **`steptix stop [--url] [--force]`** — POST `/admin/shutdown` with
+  `STEPTIX_SERVER_API_KEY` from the environment (same sourcing as `serve`; error
   out if unset). On 409, print runs-in-flight and open-session counts and
-  suggest `--force`; the message explains that open TestBench sessions
+  suggest `--force`; the message explains that open Steptix sessions
   alone don't block a stop, only an executing run does. On 401, say the
   CLI's key (from cwd `./.env`) doesn't match the server's and name both
   sources. Exit 0 on accepted stop, 1 otherwise. After the 200, poll
@@ -196,7 +196,7 @@ loaded config (same discovery as `serve`).
 
 ### 5. Extension: auto-start on Run
 
-New settings (all under `testbench-native.`):
+New settings (all under `steptix-vscode.`):
 
 | Setting | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -218,7 +218,7 @@ blank `cwd` to the open workspace folder would let a hostile repo control
 *what the command resolves to* even though it can't set the settings —
 opening a repo whose `SERVER_URL` points at a down localhost port would
 execute that repo's `dist/index.js`. If `command` is set and `cwd` is
-blank, the spawn is refused with the TB028 diagnostic
+blank, the spawn is refused with the STX028 diagnostic
 ("serverAutoStart.cwd is not set").
 
 Suggested value for this machine (docs + setting description):
@@ -232,13 +232,13 @@ inspector port (discovered via `/health`, §7); `--idle-timeout 60` arms the
 self-stop only for auto-started servers.
 
 A machine that has only the package installed (a test project depending on
-`ai-ui-automation`, no checkout) runs the same server as
-`npx aiui serve --idle-timeout 60` with `cwd` = that project, or as
-`node --inspect=0 node_modules/ai-ui-automation/dist/index.js serve
+`steptix`, no checkout) runs the same server as
+`npx steptix serve --idle-timeout 60` with `cwd` = that project, or as
+`node --inspect=0 node_modules/steptix/dist/index.js serve
 --idle-timeout 60` to keep the inspector for step-into. The setting
 descriptions carry both forms; `cwd` is "whichever the command is written
-against", not "the checkout". Same for TB010's fix text, which names
-`npx aiui serve` rather than a command that needs the repo
+against", not "the checkout". Same for STX010's fix text, which names
+`npx steptix serve` rather than a command that needs the repo
 ([issue 050](../issues/resolved/050-codebehind-compile-fetch-failed.md)).
 
 Pre-run flow (in the run controller, after env resolution gives
@@ -249,10 +249,10 @@ auto-start error:
 
 1. `GET SERVER_URL/health`, ~1 s timeout.
 2. **2xx JSON + `service` matches** ⇒ proceed; remember `inspector` for §7.
-3. **2xx JSON but `service` mismatches** ⇒ fail the run with TB027
-   ("SERVER_URL responds but is not an ai-ui-automation server"). Never
+3. **2xx JSON but `service` mismatches** ⇒ fail the run with STX027
+   ("SERVER_URL responds but is not a Steptix server"). Never
    spawn on top of a foreign process's port.
-4. **Reachable but non-2xx or non-JSON** (e.g. an older aiui server whose
+4. **Reachable but non-2xx or non-JSON** (e.g. an older Steptix server whose
    Express 404s `/health` — indistinguishable from a foreign server by
    this probe) ⇒ treat as "reachable, identity unknown": proceed with the
    run on the legacy path (settings-based inspector fallback, §7.4).
@@ -260,21 +260,21 @@ auto-start error:
    whether it's really our server (existing TB01x mapping).
 5. **Down (connect-failed/timeout)**: if `SERVER_URL` host is not
    localhost, or `serverAutoStart.command` is unset ⇒ current behaviour
-   (TB010), whose message gains a hint: "configure
-   testbench-native.serverAutoStart to start it automatically".
+   (STX010), whose message gains a hint: "configure
+   steptix.serverAutoStart to start it automatically".
 6. **Down + localhost + configured** ⇒ spawn:
    - `child_process.spawn(command, { cwd, shell: true, detached: true,
      windowsHide: true, stdio: ['ignore', logFd, logFd] })`, then
      `unref()`. Detached so the server outlives VS Code (a locked
      requirement).
    - `logFd` appends to `<globalStorage>/server.log` (one rolling file;
-     truncate when > 5 MB at open). A "TestBench: Show Server Log" command
+     truncate when > 5 MB at open). A "Steptix: Show Server Log" command
      opens it.
    - Poll `/health` every 250 ms until `ok` + `service` match, up to
      `readyTimeoutSeconds`, respecting the run's abort signal. Then
      proceed with the run.
    - Timeout, or the child exits before health goes green ⇒ fail with
-     TB028 ("server auto-start failed — see server log"), including the
+     STX028 ("server auto-start failed — see server log"), including the
      log's last lines in the diagnostic if cheaply available.
 7. **Two-window race**: both windows pass step 5 and spawn; the loser's
    child fails to bind the port and dies (EADDRINUSE is unhandled in
@@ -283,8 +283,8 @@ auto-start error:
    self-resolving; no locking needed. The dead child just leaves a line in
    the log.
 
-**Error codes.** TB026 is taken (Monaco inline-sections refusal), so the
-new codes are **TB027** (foreign service on SERVER_URL) and **TB028**
+**Error codes.** STX026 is taken (Monaco inline-sections refusal), so the
+new codes are **STX027** (foreign service on SERVER_URL) and **STX028**
 (auto-start failed). Both go into the runner-core error catalogue with
 sample contexts carrying `serverUrl` verbatim (house pattern per the
 SERVER_URL-audit test in
@@ -303,11 +303,11 @@ substitute a tiny fixture script or a spy.
 
 ### 6. Extension: visibility + manual control
 
-- **Status bar item**: `AIUI ⏵ 0.4.2` (running; open sessions / runs in
-  flight on hover) / `AIUI ○` (stopped) / `AIUI ⚠` (unrecognized
+- **Status bar item**: `STEPTIX ⏵ 0.4.2` (running; open sessions / runs in
+  flight on hover) / `STEPTIX ○` (stopped) / `STEPTIX ⚠` (unrecognized
   response). The ⚠ hover must not imply the port is foreign — per §5.4 it
-  may be an older aiui server without `/health`: "unrecognized response
-  on SERVER_URL — may be an older aiui server without /health; runs will
+  may be an older Steptix server without `/health`: "unrecognized response
+  on SERVER_URL — may be an older Steptix server without /health; runs will
   still be attempted". Poll `/health` every 30 s and immediately after
   run start/end and Start/Stop commands. Health polling is free of
   idle-timer side effects (§3).
@@ -320,16 +320,16 @@ substitute a tiny fixture script or a spy.
   note the common case of no active env selected and `SERVER_URL` in the
   base `.env` must still show the item.
 - **Commands** (palette + status-bar click menu):
-  - `TestBench: Start Server` — same spawn+poll as §5.6, without a run.
-  - `TestBench: Stop Server` — POST `/admin/shutdown` (key sourced as
+  - `Steptix: Start Server` — same spawn+poll as §5.6, without a run.
+  - `Steptix: Stop Server` — POST `/admin/shutdown` (key sourced as
     above). On 409, offer "Force stop" in the warning toast.
-  - `TestBench: Server Status` — toast with the `/health` summary.
-  - `TestBench: Show Server Log` — opens the §5 log file.
+  - `Steptix: Server Status` — toast with the `/health` summary.
+  - `Steptix: Show Server Log` — opens the §5 log file.
 - **Force-stopping during this window's own run** tears the session down
-  under the open SSE stream, which surfaces in the runner panel as TB014
+  under the open SSE stream, which surfaces in the runner panel as STX014
   (stream-dropped). That's expected, not a bug; the Stop Server toast's
   force option says "the current run will fail with a dropped-stream
-  error". No attempt to suppress the TB014 — the run genuinely died.
+  error". No attempt to suppress the STX014 — the run genuinely died.
 
 ### 7. Extension: inspector discovery (fixes the wrong-process attach)
 
@@ -359,8 +359,8 @@ suppresses our attach.
 
 - Server + CLI changes (§1–4) live in `src/` — they ship via server
   restart and need **no** extension version bump.
-- Extension changes (§5–7) bump the `testbench-native` patch version, per
-  the standing rule; the `runner-core` change (TB027/TB028) is bundled
+- Extension changes (§5–7) bump the `steptix-vscode` patch version, per
+  the standing rule; the `runner-core` change (STX027/STX028) is bundled
   into that same bump.
 - `runner-core` is also bundled into `testbench-monaco`, but Monaco is
   deliberately **not** repackaged for this story: the new codes are never
@@ -408,18 +408,18 @@ units:
 
 ### runner-core (`node --test`)
 
-- TB027/TB028 catalogue entries + sample contexts carrying `serverUrl`;
+- STX027/STX028 catalogue entries + sample contexts carrying `serverUrl`;
   audit suite passes.
 
 ### Extension integration (electron harness, FakeApiClient + injected probe)
 
 - Pre-run health probe (injected): healthy ⇒ no spawn; foreign service ⇒
-  TB027; non-2xx/non-JSON ⇒ legacy path, no spawn, no refusal; down + no
-  setting ⇒ TB010 with the new hint.
+  STX027; non-2xx/non-JSON ⇒ legacy path, no spawn, no refusal; down + no
+  setting ⇒ STX010 with the new hint.
 - Auto-start (injected spawn + scripted probe): down + configured ⇒ spawn
-  invoked, probe flips healthy, run proceeds; probe never healthy ⇒ TB028
+  invoked, probe flips healthy, run proceeds; probe never healthy ⇒ STX028
   within `readyTimeoutSeconds`; Stop during the poll ⇒ status `aborted`,
-  no TB028; `command` set but `cwd` blank ⇒ TB028 ("cwd is not set"), no
+  no STX028; `command` set but `cwd` blank ⇒ STX028 ("cwd is not set"), no
   spawn attempted.
 - Breakpoint-pause keep-alive: run paused at a breakpoint ⇒ periodic
   `GET /sessions/:id` observed on the (fake) client while paused; stops
@@ -432,8 +432,8 @@ units:
 ### Live (manual or `test:live`)
 
 - End-to-end on this machine: no server running → Run → server appears
-  (Task Manager), test passes, VS Code closed, server still up, `aiui
-  status` exit 0, `aiui stop` closes the open interactive session and
+  (Task Manager), test passes, VS Code closed, server still up, `steptix
+  status` exit 0, `steptix stop` closes the open interactive session and
   stops, step-into lands in tool source with `--inspect=0`.
 - Idle: server with an open session but no traffic and a short
   `--idle-timeout` exits on its own, closing the browser.
@@ -446,16 +446,16 @@ units:
   "child died early" detection in §5.6 — detect via health-poll timeout
   rather than child `exit` events if the latter proves unreliable.
 - **`--env-file` in the command**: the api key the *server* loads must
-  match the `AIUI_SERVER_API_KEY` in the *project's* `.env.<name>` the
+  match the `STEPTIX_SERVER_API_KEY` in the *project's* `.env.<name>` the
   extension sends. Mismatch ⇒ server starts healthy but the run gets 401
-  (existing TB011 path). Same hazard CLI-side: `aiui stop` sources its key
+  (existing STX011 path). Same hazard CLI-side: `steptix stop` sources its key
   from cwd `./.env`, which can differ from the server's `templates/.env` —
   §4 defines the 401 message for this. Document in the setting
   description; no code beyond messages.
 - **Status-bar poll target when multiple projects/envs point at different
   ports** — the item tracks the workspace-root composition only;
   acceptable for now.
-- **`aiui stop` confirmation of exit** polls `/health` going dark; if the
+- **`steptix stop` confirmation of exit** polls `/health` going dark; if the
   grace-delay exit ever hangs behind the 10 s fallback, `stop` may report
   "still stopping" — acceptable, message says so.
 - **Two pause flavors, one server-visible.** Step-mode / tool-debugger
@@ -482,7 +482,7 @@ W1 — server core (/health, shutdown, IdleMonitor, runsInFlight)
  │
  ├────────────► W2 — CLI status/stop        (needs W1's /health shape)
  │
-W3 — runner-core TB027/TB028               (independent of W1/W2)
+W3 — runner-core STX027/STX028               (independent of W1/W2)
  │
  ▼
 W4 — extension run-controller plumbing      (needs W3 codes; coded
@@ -517,7 +517,7 @@ Files: `src/server/session-manager.ts`, `src/server/api-server.ts`,
 **As built**, W1 also added `src/server/health.ts` (the `/health` contract —
 `HEALTH_SERVICE_ID`, the response type, and a dependency-free `probeHealth`
 the CLI can use without dragging in express/playwright) and
-`src/utils/version.ts` (one `getPackageVersion()` for both `aiui --version`
+`src/utils/version.ts` (one `getPackageVersion()` for both `steptix --version`
 and `/health.version`, which previously read `package.json` twice with
 different fallbacks). `startIdleReaper` lives in `idle-monitor.ts` rather
 than inline in `startServer`, so the idle conjunction that ships is the one
@@ -563,7 +563,7 @@ for stop; post-200 confirm poll). Plain `fetch` with
 `0.5` became `0` and silently disarmed the timeout). `stop` probes
 `/health` and checks `service` BEFORE sending the key: §1's "clients MUST
 check it" applies to it too, and a foreign process on the configured port
-should not be handed `AIUI_SERVER_API_KEY`. Both commands export a
+should not be handed `STEPTIX_SERVER_API_KEY`. Both commands export a
 `Promise<number>` exit code rather than calling `process.exit`, so the
 contract is testable against a stub server.
 
@@ -571,15 +571,15 @@ contract is testable against a stub server.
 
 Files: `runner-core/src/errors.ts`, `runner-core/tests/errors.test.js`.
 
-TB027 (foreign service on SERVER_URL) + TB028 (auto-start failed), sample
-contexts carrying `serverUrl` verbatim — mirror the existing TB010–TB014
+STX027 (foreign service on SERVER_URL) + STX028 (auto-start failed), sample
+contexts carrying `serverUrl` verbatim — mirror the existing STX010–STX014
 entries and the SERVER_URL-audit test pattern. **Run `node --test` in
 runner-core** — root vitest does not cover it.
 
 ### W4 — extension run-controller plumbing
 
-Files: `testbench-native/src/extension/run-controller.ts`, plus a new
-`testbench-native/src/extension/server-manager.ts` for the
+Files: `steptix-vscode/src/extension/run-controller.ts`, plus a new
+`steptix-vscode/src/extension/server-manager.ts` for the
 spawn/log/poll logic so run-controller stays lean.
 
 - Constructor-inject `healthProbe?` and `spawnServer?` next to
@@ -619,8 +619,8 @@ leave the server with no run in flight and no traffic while a human thinks,
 which is the blind spot §3 describes.
 - Pre-run flow exactly per the §5.1–5.7 decision tree, including: move
   the `AbortController` creation ahead of the health/spawn phase; abort
-  ⇒ `aborted`, not TB028; the TB010 message gains the settings hint;
-  refuse spawn when `cwd` is blank (TB028 diagnostic); store
+  ⇒ `aborted`, not STX028; the STX010 message gains the settings hint;
+  refuse spawn when `cwd` is blank (STX028 diagnostic); store
   `health.inspector` run-scoped alongside `currentServerUrl`.
 - Breakpoint-pause keep-alive per §3: 5-min `GET /sessions/:id` via the
   existing client while paused; cleared on resume/stop/dispose.
@@ -628,7 +628,7 @@ which is the blind spot §3 describes.
 
 ### W5 — inspector attach
 
-File: `testbench-native/src/extension/extension.ts`
+File: `steptix-vscode/src/extension/extension.ts`
 (`handleToolAwaitingDebugger`).
 
 §7 order: health-reported ws URL (normalize `0.0.0.0`/`::` →
@@ -651,12 +651,12 @@ port.
 
 ### W6 — status bar, commands, settings
 
-Files: `testbench-native/src/extension/extension.ts`,
-`testbench-native/src/extension/server-status-bar.ts` (new),
-`testbench-native/package.json` (contributes).
+Files: `steptix-vscode/src/extension/extension.ts`,
+`steptix-vscode/src/extension/server-status-bar.ts` (new),
+`steptix-vscode/package.json` (contributes).
 
 **As built**, the commands live in
-`testbench-native/src/extension/server-commands.ts` (new) rather than in
+`steptix-vscode/src/extension/server-commands.ts` (new) rather than in
 `commands/index.ts`, and `resolveServerTarget` is a free function in
 `server-status-bar.ts` so the command layer doesn't need a UI widget to
 find `SERVER_URL`. `readyTimeoutSeconds` is machine-scoped too — a
@@ -676,22 +676,22 @@ driven browser usually holds focus.
 
 ### W7 — extension integration tests
 
-Files: `testbench-native/tests/integration/…` (extend), fixtures.
+Files: `steptix-vscode/tests/integration/…` (extend), fixtures.
 
 Cases exactly as listed in the spec's integration section, using the
 injected probe/spawn — do not stand up a real HTTP server unless a case
 genuinely needs one. Follow the existing harness structure
 (FakeApiClient, runtime-generated gitignored `.env.*` fixtures,
-TESTBENCH_GREP).
+STEPTIX_GREP).
 
 ### W8 — ship
 
 **Status: 0.5.67 → 0.5.68 built, packaged and installed.** The live smoke
 (step 4) is the remaining item and needs a human at the editor.
 
-1. Bump `testbench-native/package.json` patch version (the runner-core
+1. Bump `steptix-vscode/package.json` patch version (the runner-core
    change rides this bump; Monaco deliberately untouched, §8).
-2. `npm run build && npm run package` in testbench-native; install the
+2. `npm run build && npm run package` in steptix-vscode; install the
    VSIX via the code.cmd CLI shim at its full path (plain `code`
    resolves to the GUI exe); reload the window; confirm the new version
    in the Extensions panel.
@@ -718,13 +718,13 @@ TESTBENCH_GREP).
 - Root `npm test` occasionally fails ALL files at once (transient
   worker-pool crash, ~8 s, 0 tests). Re-run before believing it's a
   regression.
-- testbench-native builds with esbuild — it does NOT typecheck. Run the
+- steptix-vscode builds with esbuild — it does NOT typecheck. Run the
   typecheck script (or `tsc --noEmit`) explicitly.
 - Test at the client seam: server endpoints get
   supertest-through-real-app tests, not resolver units.
 - Live suite: server via
   `node --env-file=templates/.env --import tsx src/index.ts serve`, then
-  `TESTBENCH_LIVE_GREP=… npm run test:live` in testbench-native.
+  `STEPTIX_LIVE_GREP=… npm run test:live` in steptix-vscode.
   `store-as-survives-breakpoint` and `pause-resume` are known-flaky —
   re-run in isolation before calling a regression.
 - VS Code commands/message types are often registered in two places —

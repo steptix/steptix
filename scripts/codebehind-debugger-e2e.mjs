@@ -47,12 +47,12 @@ function fail(msg) {
   exitCode = 1;
 }
 
-/** AIUI_SERVER_API_KEY from the checkout's .env (seeded by init-worktree). */
+/** STEPTIX_SERVER_API_KEY from the checkout's .env (seeded by init-worktree). */
 async function readApiKey() {
   const envText = await fs.readFile(path.join(process.cwd(), '.env'), 'utf-8');
-  const line = envText.split(/\r?\n/).find((l) => l.startsWith('AIUI_SERVER_API_KEY='));
-  if (!line) throw new Error('AIUI_SERVER_API_KEY not found in .env');
-  return line.slice('AIUI_SERVER_API_KEY='.length).trim();
+  const line = envText.split(/\r?\n/).find((l) => l.startsWith('STEPTIX_SERVER_API_KEY='));
+  if (!line) throw new Error('STEPTIX_SERVER_API_KEY not found in .env');
+  return line.slice('STEPTIX_SERVER_API_KEY='.length).trim();
 }
 
 async function pollUntil(probe, label, timeoutMs = 30_000) {
@@ -167,14 +167,14 @@ try {
   const apiKey = await readApiKey();
 
   // ── Scratch project: a test path + sibling .steps.ts, nothing else. ──────
-  // No node_modules on purpose: the entry imports 'ai-ui-automation/codebehind'
+  // No node_modules on purpose: the entry imports 'steptix/codebehind'
   // and must resolve through the server's self-resolving loader (PR #78).
   scratchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cb-debug-e2e-'));
   const testFilePath = path.join(scratchDir, 'debugme.md');
   const stepsFilePath = path.join(scratchDir, 'debugme.steps.ts');
   await fs.writeFile(
     stepsFilePath,
-    `import { defineSteps } from 'ai-ui-automation/codebehind';
+    `import { defineSteps } from 'steptix/codebehind';
 
 export default defineSteps([
   {
@@ -285,7 +285,7 @@ export default defineSteps([
     // that matters for F9 breakpoints is one frame over: the freshly-bundled
     // temp module for OUR steps file was parsed with an inline sourcemap
     // whose sources resolve back to the canonical .steps.ts.
-    const cacheDirName = '.aiui-codebehind-cache';
+    const cacheDirName = '.steptix-codebehind-cache';
     const bundled = [...cdp.scripts.values()].filter(
       (s) => s.url.includes(cacheDirName) && s.url.endsWith('.mjs'),
     );

@@ -118,7 +118,7 @@ vocabulary is whatever the prompt says it is, and the prompt does not say
   step written as `\attachments\logo.png` is a rooted path on Windows and
   means `C:\attachments\logo.png`. The Sessions API server runs the browser,
   so the file must be readable by *that* process, which is fine for
-  TestBench on the same machine and worth a clear error everywhere else.
+  Steptix on the same machine and worth a clear error everywhere else.
 - **Multiple files.** `filePath` is a single string. `setInputFiles` accepts
   an array; the action shape does not.
 
@@ -245,7 +245,7 @@ per place tests live:
 - `fixtures/tests/attachments/` — used by the root vitest for part 1 and by
   any `fixtures/tests/*.md` that uploads.
 - `templates/init/tests/attachments/` — used by `templates/init/tests/`,
-  the live TestBench workspace, so `securebank-upload.md` can say
+  the live Steptix workspace, so `securebank-upload.md` can say
   `\attachments\logo.png`.
 
 Contents: `logo.png` (a real 16×16 PNG, 87 bytes), `statement.pdf` (a
@@ -354,9 +354,9 @@ test-relative — nobody writes `C:\attachments` in a test. Decided
   skill that needs its own fixtures can reach them with `..` (below), and a
   future story can add a skill-relative form if that turns out to be wanted.
 - `..` is allowed, but anything that resolves **outside the project root**
-  (the `aiui.config.json` folder) is refused with a clear error — the server
+  (the `steptix.config.json` folder) is refused with a clear error — the server
   should not be a file-read oracle for arbitrary paths just because a test
-  asked. Projects with no `aiui.config.json` fall back to the test file's
+  asked. Projects with no `steptix.config.json` fall back to the test file's
   folder as the fence.
 - Refuse a path that is missing or is a directory before any browser
   action, naming both the resolved absolute path and the base it was
@@ -389,7 +389,7 @@ machine-independent.
   prompt's rule 1 ("no resolved literals") extends to absolute file paths.
 - **Report.** Already renders `filePath`; add `filePaths` as a joined list.
 - **Docs.** `SPEC-SESSIONS-API.md` drops "File uploads" from out-of-scope;
-  `SPEC.md §6.1` gains `filePaths`; the Flick/TestBench step-writing docs
+  `SPEC.md §6.1` gains `filePaths`; the Flick/Steptix step-writing docs
   gain the phrasing examples.
 
 ## Non-goals
@@ -403,7 +403,7 @@ machine-independent.
   saved a file — is a separate story
   ([tools-with-playwright-access.md](tools-with-playwright-access.md)
   already mentions it).
-- **Uploading from the TestBench machine to a remote server.** When the
+- **Uploading from the Steptix machine to a remote server.** When the
   extension and the Sessions API server are on different machines the file
   has to be on the server's side. Shipping bytes over the Sessions API is
   out of scope; the error message says where the file was looked for.

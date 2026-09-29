@@ -139,7 +139,7 @@ vi.mock('../src/browser/cdp-registry.js', async (importOriginal) => {
         {
           engine: 'edge',
           profile: 'default',
-          profileDir: 'C:/proj/.aiui/cdp-profiles/edge-default',
+          profileDir: 'C:/proj/.steptix/cdp-profiles/edge-default',
           live: true,
           port: CDP_PORT,
           scope: 'project',
@@ -481,15 +481,15 @@ beforeAll(async () => {
   tmpDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-errand-')));
   await fs.writeFile(
     path.join(tmpDir, '.env'),
-    `SERVER_URL=${baseUrl}\nAIUI_SERVER_API_KEY=${API_KEY}\nAI_API_KEY=project-ai-key\nAI_MODEL=project-model\n`,
+    `SERVER_URL=${baseUrl}\nSTEPTIX_SERVER_API_KEY=${API_KEY}\nAI_API_KEY=project-ai-key\nAI_MODEL=project-model\n`,
   );
   // An environment with a name, so `${env.X}` is actually resolved rather than
   // passed through — which is the only state in which an UNKNOWN name throws.
   await fs.writeFile(path.join(tmpDir, '.env.uat'), 'ERRAND_USER=zoe\n');
-  await fs.writeFile(path.join(tmpDir, 'aiui.config.json'), JSON.stringify({ tests: { dir: './tests' } }));
+  await fs.writeFile(path.join(tmpDir, 'steptix.config.json'), JSON.stringify({ tests: { dir: './tests' } }));
 
-  previousRoots = process.env['AIUI_MCP_ROOTS'];
-  process.env['AIUI_MCP_ROOTS'] = tmpDir;
+  previousRoots = process.env['STEPTIX_MCP_ROOTS'];
+  process.env['STEPTIX_MCP_ROOTS'] = tmpDir;
 
   const mcp = createMcpServer({
     createApiClient,
@@ -510,8 +510,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (previousRoots === undefined) delete process.env['AIUI_MCP_ROOTS'];
-  else process.env['AIUI_MCP_ROOTS'] = previousRoots;
+  if (previousRoots === undefined) delete process.env['STEPTIX_MCP_ROOTS'];
+  else process.env['STEPTIX_MCP_ROOTS'] = previousRoots;
   await client?.close();
   await new Promise<void>((r) => server?.close(() => r()));
   resetRegistry();

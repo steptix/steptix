@@ -15,13 +15,13 @@ context, finalised when the context closes. So the feature is mostly *plumbing*
 — wire a config flag to that option, then surface the resulting file.
 
 This spec covers three things the reader (and the original request) asked:
-**where the setting lives**, **whether TestBench can load the video**, and
+**where the setting lives**, **whether Steptix can load the video**, and
 **how the report links to it**.
 
-## Enabling it — a flag in `aiui.config.json`
+## Enabling it — a flag in `steptix.config.json`
 
 Video is a **browser capture** concern, so it belongs in the existing
-`browser` block of `aiui.config.json`, right next to the screenshot toggles it
+`browser` block of `steptix.config.json`, right next to the screenshot toggles it
 resembles (`fullPageScreenshots`, `captureScreenshotsPerAction`):
 
 ```jsonc
@@ -54,7 +54,7 @@ resembles (`fullPageScreenshots`, `captureScreenshotsPerAction`):
   worth inspecting.
 - **Default off** on purpose: recording costs disk (a 30-second run is ~1-3 MB)
   and a little CPU. Authors opt in when they want it.
-- **Discoverability:** include `"video": "off"` in the `aiui init` template
+- **Discoverability:** include `"video": "off"` in the `steptix init` template
   ([src/cli/commands/init.ts:86-104](../src/cli/commands/init.ts#L86-L104)) so
   new projects see the knob exists.
 
@@ -129,27 +129,27 @@ naturally when the HTML is opened from disk.
 
 **Tradeoff to state plainly:** the report stops being a single portable file. To
 move/email it you now need the `videos/` dir too (screenshots still travel inside
-the HTML). For local debugging and TestBench (below) this is a non-issue; a
+the HTML). For local debugging and Steptix (below) this is a non-issue; a
 "self-contained export" (zip, or base64-inline short clips) is a possible
 follow-up.
 
-## TestBench & Flick access — yes, via the report
+## Steptix & Flick access — yes, via the report
 
-**The question "does TestBench have access to load the video?" — yes, for free,
+**The question "does Steptix have access to load the video?" — yes, for free,
 through the report it already opens.**
 
-TestBench-native's **Open Last Report** command does
+Steptix's **Open Last Report** command does
 `vscode.env.openExternal(vscode.Uri.file(reportPath))`
-([testbench-native/.../commands/index.ts:431-449](../testbench-native/src/extension/commands/index.ts#L431-L449)) —
+([steptix-vscode/.../commands/index.ts:431-449](../steptix-vscode/src/extension/commands/index.ts#L431-L449)) —
 it hands the absolute report path to the OS, which opens the local HTML in the
 real browser. A real browser opening a local file **will load and play a
 relative-linked sibling `.webm`**. So:
 
-- **No TestBench code change is needed for the basic feature.** The server
+- **No Steptix code change is needed for the basic feature.** The server
   already announces `reportPath` on the `done` event
   ([runner-core/src/protocol.ts:129-138](../runner-core/src/protocol.ts#L129-L138));
-  TestBench already opens it; the embedded `<video>` rides along.
-- It works because **TestBench and the server run on the same machine**
+  Steptix already opens it; the embedded `<video>` rides along.
+- It works because **Steptix and the server run on the same machine**
   (localhost:3100 in the normal setup), so the file paths the server writes are
   reachable when the report opens.
 
@@ -177,10 +177,10 @@ extension change.**
 - `browser.video` flag → record → rename → `TestReport.videoRelPath` →
   `<video>` in the report template.
 - Entirely **main-package** work (`src/config`, `src/browser`, `src/report`,
-  `src/server` report assembly). `runner-core` and the TestBench extensions are
+  `src/server` report assembly). `runner-core` and the Steptix extensions are
   untouched, so **no extension version bump** (per CLAUDE.md the bump is only for
   code bundled into a VSIX).
-- TestBench's existing "Open Last Report" plays it. Done.
+- Steptix's existing "Open Last Report" plays it. Done.
 
 **Tier 2 — first-class "Open Video" (optional, later). Touches the shared
 protocol.**
@@ -188,9 +188,9 @@ protocol.**
   ([runner-core/src/protocol.ts:129-138](../runner-core/src/protocol.ts#L129-L138))
   and its `api-client` mirror, so a client can open the `.webm` directly without
   going through the report.
-- Add a `testbench-native.openLastVideo` command (sibling to `openLastReport`).
-- Because `runner-core` bundles into the TestBench VSIXes, this is a **patch
-  bump** for `runner-core` + both testbench variants (per CLAUDE.md), and a
+- Add a `steptix.openLastVideo` command (sibling to `openLastReport`).
+- Because `runner-core` bundles into the Steptix VSIXes, this is a **patch
+  bump** for `runner-core` + both steptix variants (per CLAUDE.md), and a
   `flick-vscode` opportunity if it grows report access.
 - Optional further step for remote servers: a `GET /sessions/:id/video` endpoint
   (or static-serve `outputDir`) so the link works off-box; the report `<video>`
@@ -206,7 +206,7 @@ protocol.**
 | 4 | **Disk + perf** | ~1-3 MB per short run, minor CPU. Hence default off, and consider pruning old `videos/` alongside any future report retention policy. |
 | 5 | **Headed & headless** | Both record fine. |
 | 6 | **Portability** | File-linked, so the `.html` alone no longer carries the video (screenshots still do). See the report section. |
-| 7 | **Server path: link appears at session close** | On the server/TestBench path the recorded context is **reused across runs**, and the `.webm` finalises only when the **session is closed** — an explicit session delete or server shutdown (NOT at the end of each run, and NOT on a plain re-run that reuses the session). So the video link can lag well behind the run that produced it. The CLI path closes per run, so it's immediate there. |
+| 7 | **Server path: link appears at session close** | On the server/Steptix path the recorded context is **reused across runs**, and the `.webm` finalises only when the **session is closed** — an explicit session delete or server shutdown (NOT at the end of each run, and NOT on a plain re-run that reuses the session). So the video link can lag well behind the run that produced it. The CLI path closes per run, so it's immediate there. |
 | 8 | **Reusable session: last run wins** | A reused session keeps **one** context-spanning recording across all its runs; under `retain-on-failure` that single `.webm` is kept/dropped by the **last** run's outcome — a passing final run drops a recording that contains an earlier failure. |
 | 9 | **Orphan `.webm` on a no-report run** | A recorded server session that produces no linkable report (e.g. a zero-step batch) leaves its hash-named `.webm` in `videos/`. Harmless but accumulates — disk hygiene, not correctness. |
 
@@ -227,7 +227,7 @@ never silent record-and-keep.)
 | [src/report/template.ts](../src/report/template.ts) + [generator.ts](../src/report/generator.ts#L76) | render a `<video controls>` block when `videoRelPath` is set |
 | tests | config parse (tri-state + boolean sugar); manager passes `recordVideo` when not `'off'` and omits it under CDP; retain-on-failure **deletes** the `.webm` on pass / **keeps** it on fail; report renders the `<video>` block when `videoRelPath` present and omits it otherwise |
 
-No `runner-core`/TestBench changes in Tier 1 → no extension version bump.
+No `runner-core`/Steptix changes in Tier 1 → no extension version bump.
 
 ## Decisions (settled)
 

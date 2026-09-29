@@ -1,6 +1,6 @@
 /**
  * Record Steps — editing and deleting steps while recording, in the draft
- * engine, without a browser (stories/testbench-record-edit-steps.md).
+ * engine, without a browser (stories/steptix-record-edit-steps.md).
  *
  * The model is scripted: by default it writes one step per recorded ACTION
  * (the events before an action ride with it), names each after its target,

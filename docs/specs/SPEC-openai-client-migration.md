@@ -1,9 +1,9 @@
 # Spec: migrate `AiClient` off `/v2` onto the OpenAI protocol
 
 Status: ready for review
-Primary project: **ai-ui-automation**
+Primary project: **steptix**
 Depends on: **aiapi PR #2 (native `/v1/chat/completions`) merged AND deployed** (§9)
-Touches: ai-ui-automation only — `@pkent/aigateway` and aiapi are NOT modified.
+Touches: steptix only — `@pkent/aigateway` and aiapi are NOT modified.
 
 ---
 
@@ -188,8 +188,8 @@ variant `{ ok: false, body: <error message> }`. Keep the `logger.debug` POST lin
   (note `runner-core/` has its own `sse-parser.ts`; the api-server's own SSE may
   also use it). Remove from deps only if the grep comes back empty in `src/`.
 
-`AiClient` is server-side and **not** bundled into the testbench VSIXes (verified:
-no `ai/client` import under `runner-core/` or `testbench-*/`), so the `openai` dep
+`AiClient` is server-side and **not** bundled into the steptix VSIXes (verified:
+no `ai/client` import under `runner-core/` or `steptix-*/`), so the `openai` dep
 does not affect extension size. It is pulled into the CLI/server and the Tauri
 (Flick) Node side.
 

@@ -40,7 +40,7 @@
  * its grammar identical to it — the separator class is `[ \t:]`, the colon is
  * optional, case is tolerated — but it does not call it. Two reasons, in
  * order: this file is mirrored in `runner-core/src/use-step.ts`, which cannot
- * import `src/`; and it is loaded DIRECTLY as `.ts` by testbench-native's
+ * import `src/`; and it is loaded DIRECTLY as `.ts` by steptix-vscode's
  * mirror suite under Node's type stripping, where a `./x.js` specifier does
  * not resolve to `x.ts`. Import-free is the price of both, the same price
  * `set-step.ts` and `control-line.ts` pay. What keeps the grammars from

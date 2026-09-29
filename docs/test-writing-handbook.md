@@ -1,7 +1,7 @@
 # Writing natural-language tests: a handbook for AI authors
 
 This file is meant to be pasted into the context of an AI that writes tests for
-**ai-ui-automation** (the `aiui` CLI, the TestBench VS Code extension, and the
+**steptix** (the `steptix` CLI, the Steptix VS Code extension, and the
 MCP server all run the same test files). It explains how the framework reads a
 test, which phrasings map to real browser actions, and how to reuse work
 through skills and tools. Every statement was checked against the source on
@@ -50,7 +50,7 @@ Every other line is sent to the executing model together with:
 - the current URL, the viewport size and device class, the open tabs and
   browsers, and the outcome of earlier steps;
 - every `context/**/*.md` file in the project, verbatim;
-- a screenshot, only when `ai.sendScreenshots` is on in `aiui.config.json`
+- a screenshot, only when `ai.sendScreenshots` is on in `steptix.config.json`
   (it is off by default, so assume the model works from the DOM).
 
 The model returns **one action per turn**. The framework performs it with
@@ -142,10 +142,10 @@ The order of `## Config` and `## Parameters` does not matter.
 - Write `1. text`, unindented, one instruction per physical line. The numbers
   are not checked, so a renumbering mistake does not break the file. HTML
   comments and blank lines between steps are fine.
-- Do not wrap a step onto a second line. The CLI folds it, but TestBench sees
+- Do not wrap a step onto a second line. The CLI folds it, but Steptix sees
   only the first line and refuses the file before running.
 - Write `1.` rather than `1)` or a bullet. The CLI happens to accept those,
-  but TestBench does not see them as steps, and a file that also has sections
+  but Steptix does not see them as steps, and a file that also has sections
   rejects them outright.
 - Keep explanations out of step text. A trailing note becomes part of the
   instruction the model must satisfy.
@@ -161,7 +161,7 @@ The order of `## Config` and `## Parameters` does not matter.
 
 Exactly six keys survive parsing: `tags` (a list, or a comma-separated
 string), `timeout`, `env`, `dataFile`, `dataSources` (a mapping), and `type`
-(`skill` or `test`). TestBench additionally honours `disabled: true`, which
+(`skill` or `test`). Steptix additionally honours `disabled: true`, which
 hides the file from its test list. Write `timeout: 90s` as a string; a bare
 YAML number is dropped without a warning.
 
@@ -509,7 +509,7 @@ condition in it is literal (§3.8), in which case the chain is decided from the
 values and there is no call at all — the first that holds wins, and its tail
 runs. Every other member — the other guard lines and every step of their
 tails — is marked skipped, which is what the report and the
-TestBench gutter then show you.
+Steptix gutter then show you.
 
 File `tests/pay-invoice.md`:
 
@@ -550,7 +550,7 @@ A chain is consecutive step lines, and an `[input:]` line is a step, so an
 `[input:]` between an `If` and its `Otherwise` breaks the chain. Any numbered
 step between two members does: the `Otherwise` is then refused as having *"no
 decision to be the alternative of"* — by the parser, by the server, and by
-TestBench before it runs, in that one wording and naming that one line. Put the
+Steptix before it runs, in that one wording and naming that one line. Put the
 input step before the `If`. Inside a tail's section body it is fine.
 
 #### `then return` is not a tail
@@ -591,7 +591,7 @@ the tail, and the run carries on after the whole chain.
 `While` asks before each pass, `Repeat … until` asks after each one, and `For
 each` asks nothing at all — the list is its bound. Both asking loops stop at a
 **cap**: the line's own `, up to N times`, or `execution.maxLoopIterations`
-from `aiui.config.json`, which is 25. **Reaching the cap fails the loop line.**
+from `steptix.config.json`, which is 25. **Reaching the cap fails the loop line.**
 A cap is a bug net, not an exit; write the condition the page really reaches.
 
 `For each` needs a real list. Its second variable must hold a JSON array — what
@@ -649,7 +649,7 @@ costs nothing per pass. `Otherwise` and `For each` have nothing to compile;
 their tails do.
 
 **Hooks do not dispatch control lines.** A `## Hooks` entry — or an
-`execution.defaultHooks` entry in `aiui.config.json` — that reads like one is
+`execution.defaultHooks` entry in `steptix.config.json` — that reads like one is
 handed to the model as a single prose instruction, and the run warns that it
 did; put the decision in a numbered step under `## Steps`, or in a `### Section`
 the hook calls.
@@ -733,7 +733,7 @@ The details:
   its `afterEach` hooks like any passed step.
 - A hook may not return. There is no flow to leave from inside one, and the
   line is refused at parse.
-- A conditional flow-control step compiles like any other: `aiui compile`
+- A conditional flow-control step compiles like any other: `steptix compile`
   writes an entry that reads the condition off the page and calls
   `step.exit()` when it holds, so the replay returns with no model call. The
   unconditional form is never compiled — it already costs nothing.
@@ -761,7 +761,7 @@ return`, and when it holds the step fails with your words.
 
 When the condition does not hold, nothing happens and the next step runs. When
 it does, the run stops as it does on any failure, and the error on the row, in
-the run log, in the TestBench hover and in the MCP summary is *The variable
+the run log, in the Steptix hover and in the MCP summary is *The variable
 value was peanuts. Expected apples* — not the framework's account of what it
 compared.
 
@@ -788,7 +788,7 @@ carries on with the next step.
 
 The step runs as itself, with its usual retries. If it fails, the row says so —
 amber rather than red — and the next step runs. A warning you wrote leads: it is
-the first line of the TestBench hover, it opens the run log's `⚠ step 6 failed —
+the first line of the Steptix hover, it opens the run log's `⚠ step 6 failed —
 continuing:` line with the framework's own error bracketed after it, and it
 reaches an MCP agent on the step's row. What actually went wrong is never
 dropped; your sentence just goes first, because it is the one that says the
@@ -846,7 +846,7 @@ The details:
   skipped for the same reason: you have already written the cause, and a
   guessed paragraph above your sentence would only argue with it. Nothing
   presents it as a malfunction either — including a *compiled* one, which
-  reaches the client out of the entry that `aiui compile` wrote and would
+  reaches the client out of the entry that `steptix compile` wrote and would
   otherwise be reported as broken code rather than as the line doing what it
   says.
 - The model never sees an `otherwise` tail. It is handed the body and nothing
@@ -905,7 +905,7 @@ The details:
 - A line that asks for two endings at once — `If x then return otherwise
   continue` — is refused by name rather than resolved, at parse and again at
   run time on the raw API path.
-- Both forms compile. `aiui compile` writes `step.fail('The variable value was
+- Both forms compile. `steptix compile` writes `step.fail('The variable value was
   peanuts. Expected apples')` for the conditional `fail`, and passes your
   message straight into the entry's `step.expect(…, 'Page did not contain
   account details')` for an `otherwise fail … with message` tail, so a replay
@@ -1085,7 +1085,7 @@ that pass on — so for a table you change as you go, re-find by a value, or use
 `Repeat … until` so each pass reads the page as it is now.
 
 The read also leaves that numbering on the page: every data row of the table
-it read carries `data-aiui-row="N"`, the same N as the record's `_row`, and a
+it read carries `data-steptix-row="N"`, the same N as the record's `_row`, and a
 later step's "row 7 of the …" resolves through that attribute rather than
 through counting or an element id. You never write it — it is there so that
 "row 7" means the seventh row of DATA and not the seventh `<tr>`, on a grid
@@ -1169,7 +1169,7 @@ changed falls back to asking again. Two things it deliberately is not: it is nev
 about *your* mistakes — a header you spelled wrong, a short row, a selector
 matching several tables keep the refusals below — and it can be turned off
 entirely with `tableStructure: strict` in the `## Config` block (or
-`"tables": { "structure": "strict" }` in `aiui.config.json` for a whole
+`"tables": { "structure": "strict" }` in `steptix.config.json` for a whole
 project), which makes the shape refusal stand as the step failure. Use it when
 a run must never spend a model call nobody planned. `table-odd-shapes.md` is
 the worked example.
@@ -1293,7 +1293,7 @@ test is reading.
   (§3.10) a key press goes to whatever has OS focus, which is the whole point
   of that surface and also why it is not a substitute for `Go back`.
 - A `prompt` for clarification is what the model does when a step is
-  underspecified. On the CLI a person answers; on TestBench, MCP and CI the
+  underspecified. On the CLI a person answers; on Steptix, MCP and CI the
   step is skipped or fails. Underspecified steps are therefore not portable.
 
 ### 3.10 Leaving the page: `[use computer]` and `[use browser]`
@@ -1342,12 +1342,12 @@ name field`, `Press Ctrl+S`.
 
 **What you must arrange yourself.**
 
-- **The project has to opt in.** `desktop.enabled: true` in `aiui.config.json`,
+- **The project has to opt in.** `desktop.enabled: true` in `steptix.config.json`,
   which defaults to `false`. A test file in a shared project must not be able
   to move the mouse on a machine whose owner did not allow it.
 - **`[use computer]` does nothing to arrange the screen.** It changes what the
   model is shown and how its answer is performed, and nothing else. When a run
-  starts from TestBench, VS Code is frontmost and the browser is behind it, so
+  starts from Steptix, VS Code is frontmost and the browser is behind it, so
   the first screenshot is a picture of the editor unless a step brings the
   window forward. Write that step — it is what `Focus the window whose title
   contains …` is for.
@@ -1470,14 +1470,14 @@ the executor substitutes it when acting. Never write `***` as a value
 yourself; the framework refuses an action containing it. If a non-secret name
 is caught by the rule, list it under `unmask` in `## Config`. The hatch
 governs what is shown *live* — the `## Values` block the model reads, and
-TestBench's Variables view, Variables panel and skill re-run rows — and
+Steptix's Variables view, Variables panel and skill re-run rows — and
 deliberately nothing that is written to a file: the report, the run log and
 the console line still star an unmasked name, so an `unmask` line can never
 put a real credential into an artefact you send someone. Two smaller surfaces
 still show the mask because no run is attached to ask: the `[input:]` echo and
-the gutter hover. One caveat while it lasts: running from TestBench does not
+the gutter hover. One caveat while it lasts: running from Steptix does not
 send the list to the server at all, so `unmask` currently takes effect only on
-the `aiui` CLI and the MCP tools
+the `steptix` CLI and the MCP tools
 (`docs/specs/SPEC-structured-table-reads.md` §14).
 
 **A name the page chose** is decided more narrowly. A table read's column
@@ -1515,7 +1515,7 @@ that same whole-key author rule, and on every surface that shows them: the
 Run Rows picker, the gutter hover and the Output banner as well as the report.
 A `## Steps` data table headed `user.apikey` is a heading you typed.
 
-TestBench reads it the same way, because the run tells it which names a pass
+Steptix reads it the same way, because the run tells it which names a pass
 bound: every scope update carries that list, so a data-file `user.apikey` is
 starred in the Variables view exactly as it is in the report, while a loop's
 `{{payment.keyword}}` beside it stays readable. Against an older server that
@@ -1533,7 +1533,7 @@ else can be caught by it, so a one-character `password` parameter or
 
 **Where it applies.** The report, the run log, the console step line, the
 `## Values` block and the DOM the model is shown — and, on the client side,
-TestBench's Variables view and its Variables panel. Those two mask the same
+Steptix's Variables view and its Variables panel. Those two mask the same
 way, and they also look *inside* a captured value: a `readTable` capture is a
 whole table under one ordinary name (`{{payments}}`), and the record one pass
 binds (`{{payment}}`) is one row of it, so no name rule could catch either.
@@ -1581,7 +1581,7 @@ one data row, no `{{` inside a cell, no second table, no table together with
 first: a compiled run records row one, and an empty cell in the recorded row
 cannot stand in for the parameter.
 
-Run one row with `aiui run tests/sign-in-matrix.md --row 2` (one-based). The
+Run one row with `steptix run tests/sign-in-matrix.md --row 2` (one-based). The
 MCP `run_test_file` tool runs only the first row and says so in a warning.
 
 `dataFile: data/cases.json` in frontmatter does the same from a JSON array of
@@ -1704,7 +1704,7 @@ File `tests/greeting.md`:
 
 ### 6.1 The skill file
 
-- `type: skill` in frontmatter is what keeps the file out of `aiui run`'s test
+- `type: skill` in frontmatter is what keeps the file out of `steptix run`'s test
   discovery and stops MCP running it as a test. Resolution does not depend on
   it, but always write it.
 - The `# Title` is a display name; the call path selects the file.
@@ -1803,7 +1803,7 @@ arguments arrive spread on the one argument beside `page`, `context`,
 File `tools/src/check_health.ts`:
 
 ```ts
-import { tool } from 'ai-ui-automation/tools';
+import { tool } from 'steptix/tools';
 
 export default tool(async ({ baseUrl, context }) => {
   const res = await context.request.get(`${baseUrl}/api/health`);
@@ -1831,7 +1831,7 @@ name and the call must be path-qualified:
 File `tools/src/strings.ts`:
 
 ```ts
-import { tool } from 'ai-ui-automation/tools';
+import { tool } from 'steptix/tools';
 
 export const slugify = tool<{ s: string }>(({ s }) =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
@@ -1857,7 +1857,7 @@ validation, and a description in the report.
 File `tools/src/extract_order_ids.ts`:
 
 ```ts
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 export default defineTool({
   name: 'extract_order_ids',
@@ -1889,7 +1889,7 @@ export default defineTool({
 File `tools/src/visit_each.ts`:
 
 ```ts
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 export default defineTool({
   name: 'visit_each',
@@ -1964,7 +1964,7 @@ that returns an object stores it JSON-encoded, and one that returns
 - A broken tool file only fails the steps that reference it. The failure
   message names the scanned directory and the tools it found.
 - The tools directory is its own small Node project: a `package.json` with
-  `"type": "module"` and dev dependencies on `ai-ui-automation`, `playwright`
+  `"type": "module"` and dev dependencies on `steptix`, `playwright`
   and `typescript`, plus a `tsconfig.json`. The README's "One-time setup"
   section has both files. The long-running server reloads a tool when its
   file changes; the CLI loads once per run.
@@ -2106,7 +2106,7 @@ so keep `afterEach` to checks you mean as hard requirements. `[no-hooks]` on a
 step skips the two per-step hooks for it; on a section or skill call it covers
 the whole expanded body.
 
-Hooks exist only on the CLI file runner. TestBench, the Sessions API and the
+Hooks exist only on the CLI file runner. Steptix, the Sessions API and the
 MCP server drop them without a warning, so anything a test needs in order to
 pass belongs in `## Steps`.
 
@@ -2131,12 +2131,12 @@ tool that calls the API and sets a declared output.
 ## 10. Running and validating
 
 ```bash
-npx aiui list
-npx aiui run tests/login.md
-npx aiui run tests/ --tag smoke --headless
-npx aiui run tests/login.md --env staging
-npx aiui run tests/sign-in-matrix.md --row 2
-npx aiui compile tests/login.md --env staging
+npx steptix list
+npx steptix run tests/login.md
+npx steptix run tests/ --tag smoke --headless
+npx steptix run tests/login.md --env staging
+npx steptix run tests/sign-in-matrix.md --row 2
+npx steptix compile tests/login.md --env staging
 ```
 
 `run` also takes `--timeout <ms>`, `--browser <engine>`, `--bail`,
@@ -2170,7 +2170,7 @@ chain is decided in code only when every member has an answer without the
 model. An entry that throws is flagged ⚠ and the model decides for the rest of
 the run. A compiled loop that reaches its cap asks the model once whether the
 condition really still holds, so an entry that never says stop is caught
-rather than trusted. `aiui compile` also compares each loop's passes on its
+rather than trusted. `steptix compile` also compares each loop's passes on its
 replay with the recording's, and prints a `Warning:` — naming the step that
 captured a `For each`'s list — when they differ; check that step's selector,
 unless the list really changed between the two runs.
@@ -2181,7 +2181,7 @@ Interactive markers, for a person at the keyboard only:
   value and stores it as `{{otp_code}}`.
 - `[interactive] Explore the dashboard` opens a REPL of ad-hoc steps.
 
-Away from the CLI's terminal (TestBench, MCP, CI) both are reported as
+Away from the CLI's terminal (Steptix, MCP, CI) both are reported as
 skipped, and a skipped step counts as not run. Do not put them in unattended
 tests.
 
@@ -2199,7 +2199,7 @@ state), `get_page_content` (to read real labels before writing steps),
 browser tools are available. Limits that affect how green a result really is:
 `run_test_file` runs only the first table row, ignores `dataFile` rows,
 executes no hooks, and skips `[input:]` and `[interactive]` steps. Validate
-the whole file with the CLI or TestBench when those matter.
+the whole file with the CLI or Steptix when those matter.
 
 A test is "written" when it parses, "checked" when every step ran green
 against the real application, and only the second is evidence. Read the

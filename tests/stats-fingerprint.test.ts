@@ -96,7 +96,7 @@ describe('gitCommitAt', () => {
   let tmp: string;
 
   beforeEach(() => {
-    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-stats-git-')));
+    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-stats-git-')));
   });
 
   afterEach(() => {
@@ -173,8 +173,8 @@ describe('gitCommitAt', () => {
 
   it('asks the folder it is given, never a parent', () => {
     write('repo/.git/HEAD', `${SHA}\n`);
-    fs.mkdirSync(path.join(tmp, 'repo/node_modules/ai-ui-automation'), { recursive: true });
-    expect(gitCommitAt(path.join(tmp, 'repo/node_modules/ai-ui-automation'))).toBeUndefined();
+    fs.mkdirSync(path.join(tmp, 'repo/node_modules/steptix'), { recursive: true });
+    expect(gitCommitAt(path.join(tmp, 'repo/node_modules/steptix'))).toBeUndefined();
   });
 });
 

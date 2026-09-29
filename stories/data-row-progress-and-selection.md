@@ -1,8 +1,8 @@
-# Data rows in TestBench — see which rows are done, run the rows you choose
+# Data rows in Steptix — see which rows are done, run the rows you choose
 
 Built. A follow-on to
 [data-driven-rows.md](data-driven-rows.md), whose part A put the run-level
-row loop in TestBench (a table under `## Steps` runs the steps once per
+row loop in Steptix (a table under `## Steps` runs the steps once per
 row, one report at the end) and whose part B put the section-level loop on
 the server (a table under a `### Section` runs that body once per row,
 inside one run). This story is about what those loops still leave you
@@ -189,14 +189,14 @@ everything, as a cursor on a step does today; Run This Row is the one-row
 gesture, not the cursor.
 
 **You write:** after a run with two red rows, click **↻ Re-run failed** in
-the Rows header (or run *TestBench: Re-run Failed Rows* from the palette).
+the Rows header (or run *Steptix: Re-run Failed Rows* from the palette).
 **You get:** just those rows, by their table numbers, resolved from the file
 as it is now rather than from the numbers the panel happens to be showing.
 The button is there while that table has a red row — including after a window
 reload, since the marks persist and the offer is read off them. Editing the
 row drops its mark, and with it the offer for that row.
 
-**You write:** *TestBench: Run Rows…* from the command palette.
+**You write:** *Steptix: Run Rows…* from the command palette.
 **You get:** a quick pick with one checkbox per row — its number, its
 values, its last status, grouped by table when the file has more than one
 — and Run runs the ticked ones. The keyboard path to the same thing.
@@ -463,7 +463,7 @@ tables' data-row lines to the paintable set"; selecting run rows is
   the hover on a stale mark from an earlier run would otherwise lie about
   this run. `Clear Run Statuses` clears rows with the steps.
 - **Persistence.** Row marks persist with the step marks in
-  `.testbench/run-state.json` and are dropped by the same signature check
+  `.steptix/run-state.json` and are dropped by the same signature check
   when the file changes — every table's `rowLines` join the step lines in
   the signature, so editing a table (add, remove, reorder a row) drops its
   row marks rather than letting ✓ sit on a row that now holds different
@@ -549,7 +549,7 @@ tables' data-row lines to the paintable set"; selecting run rows is
   The CLI does not send it and is unchanged.
 - **A compile never carries a narrowing, by construction.** Not because the
   wire drops it: `parseCompileRequest`'s four-field copy governs `POST
-  /codebehind/compile` only, and TestBench does not compile through that route
+  /codebehind/compile` only, and Steptix does not compile through that route
   — it compiles through the ordinary step route, one request carrying both
   `sections` and `compile`, so `runSteps` would ride a compile-mode run
   perfectly happily. What makes a narrowed *Run & Compile* unreachable is the
@@ -710,7 +710,7 @@ takes them as its third argument and ships them as `runSteps`.
 
 - **Run This Row** — `editor/lineNumber/context`, beside *Run This Step*,
   shown when the clicked line is a data row of any table (a
-  `testbench-native.dataRowLines` context key, the pattern *Repair this
+  `steptix.dataRowLines` context key, the pattern *Repair this
   step* uses with `staleStepLines`). A run-table row runs
   `runLines([], { rows: [n] })`; a section-table row runs `runLines([], {
   sectionRows: { <name>: [n] } })`.
@@ -1068,7 +1068,7 @@ drag over the heading depends on.
 
 - Rows from `dataFile:`. There are no table lines to paint; the Rows
   section and *Run Rows…* are the surfaces that would carry them, once
-  TestBench loops that source at all.
+  Steptix loops that source at all.
 - A persistent "skip this row" marker in the file. Useful for a row that
   is known-broken for a week; it is a file-format change on both runners
   and its own story.
@@ -1084,7 +1084,7 @@ drag over the heading depends on.
 ## Open for review
 
 - Whether the running-row highlight should also follow the *current
-  step* — VS Code's debugger highlights the current line, and TestBench
+  step* — VS Code's debugger highlights the current line, and Steptix
   has never done that for steps; adding it for rows alone might make
   steps look under-painted by comparison.
 - Whether the Rows section should show the values at all, or just the

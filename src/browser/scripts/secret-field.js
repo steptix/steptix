@@ -7,7 +7,7 @@
 //                      __SECRET_FIELD_RULE__ stands
 //   dom-cleaner.ts     the `expand` walk (expandDomSubtree), interpolated into
 //                      its template literal
-//   record-steps.js    the step recorder (stories/testbench-record-steps.md,
+//   record-steps.js    the step recorder (stories/steptix-record-steps.md,
 //                      decision 7), same placeholder as capture-dom.js
 //
 // It used to be copied into the first two by hand, each copy with a comment

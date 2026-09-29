@@ -1,4 +1,4 @@
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 /**
  * Reads `document.title` from the current page and stores it as `page_title`.

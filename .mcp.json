@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "aiui": {
+    "steptix": {
       "command": "node",
       "args": ["dist/index.js", "mcp"]
     }

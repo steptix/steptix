@@ -2,7 +2,7 @@
  * The `GET /health` contract, shared by the server that serves it and the CLI
  * that probes it.
  *
- * Deliberately dependency-free: `aiui status` must be able to answer "is it
+ * Deliberately dependency-free: `steptix status` must be able to answer "is it
  * running?" without dragging in express, the session manager, or (through it)
  * playwright. Importing this from `api-server.ts` would cost a browser stack
  * to print one line.
@@ -13,7 +13,7 @@
  * port as ours — that check is what makes "never spawn on top of a foreign
  * process's port" enforceable (stories/server-lifecycle.md §1, §5.3).
  */
-export const HEALTH_SERVICE_ID = 'ai-ui-automation';
+export const HEALTH_SERVICE_ID = 'steptix';
 
 export interface HealthResponse {
   ok: true;
@@ -33,7 +33,7 @@ export interface HealthResponse {
 /**
  * Outcome of a health probe. The three arms are the three things a caller can
  * do about it, which is why "reachable but not recognizably ours" is its own
- * arm rather than folded into `down`: an older aiui server whose Express 404s
+ * arm rather than folded into `down`: an older Steptix server whose Express 404s
  * `/health` is indistinguishable from a foreign process by this probe, and
  * both must NOT be spawned on top of.
  */
@@ -98,7 +98,7 @@ export async function probeHealth(
       detail:
         typeof service === 'string'
           ? `service is "${service}", not "${HEALTH_SERVICE_ID}"`
-          : 'response is not an ai-ui-automation health body',
+          : 'response is not a Steptix health body',
     };
   }
 

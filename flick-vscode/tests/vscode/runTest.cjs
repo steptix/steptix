@@ -2,7 +2,7 @@
 // launches it via the bin/code.cmd wrapper (Code.exe rejects the flags
 // directly on Windows), and runs Mocha inside the Extension Development Host.
 //
-// Mirrors testbench-native/tests/integration/runTest.cjs so both extensions
+// Mirrors steptix-vscode/tests/integration/runTest.cjs so both extensions
 // share the same conventions for paths, env vars and report capture.
 const path = require('node:path');
 const cp = require('node:child_process');

@@ -94,7 +94,7 @@ describe('a [use …] row renders as a mode marker (§10.1)', () => {
     const html = renderStep({
       ...modeStep('computer'),
       status: 'failed',
-      error: 'computer mode is disabled for this project; set `desktop.enabled: true` in aiui.config.json',
+      error: 'computer mode is disabled for this project; set `desktop.enabled: true` in steptix.config.json',
     });
 
     expect(html).toContain('step-mode-failed');

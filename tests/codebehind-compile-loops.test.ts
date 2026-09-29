@@ -19,7 +19,7 @@ import {
 } from '../src/codebehind/compile.js';
 
 /**
- * The boxed compile — `aiui compile` — over a file that loops and decides
+ * The boxed compile — `steptix compile` — over a file that loops and decides
  * (stories/codebehind-loops-and-conditions.md, "Boxed compile").
  *
  * No browser: the runner is scripted with the rows a real run hands back — one
@@ -337,7 +337,7 @@ function forEachReplay(): CompileRunOutcome {
 
 // ── A While ──────────────────────────────────────────────────────────────────
 
-describe('aiui compile — a While whose body runs three passes', () => {
+describe('steptix compile — a While whose body runs three passes', () => {
   it('compiles green: one entry per line from pass 1, a condition from a held and a not-held page', async () => {
     const md = await write('statements.md', WHILE_MD);
     const test = await parseTestFile(md);
@@ -537,7 +537,7 @@ describe('aiui compile — a While whose body runs three passes', () => {
 
 // ── A For each ───────────────────────────────────────────────────────────────
 
-describe('aiui compile — a For each over three items', () => {
+describe('steptix compile — a For each over three items', () => {
   it("generates the body from pass 1 with pass 1's values, not the run's final map", async () => {
     const md = await write('accounts.md', FOR_EACH_MD);
     const test = await parseTestFile(md);
@@ -608,7 +608,7 @@ describe('aiui compile — a For each over three items', () => {
 
 // ── The replay checks the conditions (decision 11) ──────────────────────────
 
-describe('aiui compile — a replay whose condition answers differently from the recording', () => {
+describe('steptix compile — a replay whose condition answers differently from the recording', () => {
   it('fails that condition entry, and repairs it from the recorded page with both answers', async () => {
     const md = await write('statements.md', WHILE_MD);
     const test = await parseTestFile(md);
@@ -777,7 +777,7 @@ describe('aiui compile — a replay whose condition answers differently from the
 
 // ── A stale chain member ────────────────────────────────────────────────────
 
-describe('aiui compile — a chain member whose condition entry broke', () => {
+describe('steptix compile — a chain member whose condition entry broke', () => {
   it('regenerates the member the guard row names as stale, not the member that held', async () => {
     const IF = 'If the Cash checkbox is ticked, then Pay with cash';
     const ELSE_IF = 'Else if the Card checkbox is ticked, then Pay by card';
@@ -789,7 +789,7 @@ describe('aiui compile — a chain member whose condition entry broke', () => {
     await write(
       'pay.steps.ts',
       [
-        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        "import { defineSteps } from 'steptix/codebehind';",
         'export default defineSteps([',
         `  { source: ${JSON.stringify(IF)}, async condition({ page }) { return (await page.locator('#cash').count()) > 0; } },`,
         `  { source: ${JSON.stringify(ELSE_IF)}, async condition({ page }) { return (await page.locator('#card').count()) > 0; } },`,
@@ -849,7 +849,7 @@ describe('aiui compile — a chain member whose condition entry broke', () => {
 
 // ── A condition nothing asked ───────────────────────────────────────────────
 
-describe('aiui compile — a condition line the recording never asked', () => {
+describe('steptix compile — a condition line the recording never asked', () => {
   it('is not generated, and is named not attempted with a reason that says so', async () => {
     const md = await write(
       'nested.md',
@@ -914,7 +914,7 @@ describe('aiui compile — a condition line the recording never asked', () => {
 
 // ── The evidence pass of a stale body step (review finding R4) ──────────────
 
-describe('aiui compile — a body entry that ran as code on pass 1 and healed on pass 2', () => {
+describe('steptix compile — a body entry that ran as code on pass 1 and healed on pass 2', () => {
   it('regenerates it from the HEALED pass through the repair prompt — never ai: true from pass 1', async () => {
     const md = await write('statements.md', WHILE_MD);
     // Every line compiled but the last, so the compile runs a Record with
@@ -922,7 +922,7 @@ describe('aiui compile — a body entry that ran as code on pass 1 and healed on
     await write(
       'statements.steps.ts',
       [
-        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        "import { defineSteps } from 'steptix/codebehind';",
         'export default defineSteps([',
         "  { source: 'Open the statements page', async run({ page }) { await page.goto('/s'); } },",
         `  { source: ${JSON.stringify(WHILE_LINE)}, async condition({ page }) { return (await page.locator('#next:enabled').count()) > 0; } },`,
@@ -983,7 +983,7 @@ describe('aiui compile — a body entry that ran as code on pass 1 and healed on
 
 // ── A pass's values: captures inside the body, and an enclosing loop (R5) ────
 
-describe('aiui compile — per-pass values folded forward from the start', () => {
+describe('steptix compile — per-pass values folded forward from the start', () => {
   const PAY_MD = [
     '# Pay',
     '',
@@ -1133,7 +1133,7 @@ describe('aiui compile — per-pass values folded forward from the start', () =>
 
 // ── The boxed prompts mask what the run masked (review round 2, F1) ─────────
 
-describe('aiui compile — the prompts mask what the run masked', () => {
+describe('steptix compile — the prompts mask what the run masked', () => {
   // §7.6's case: a data file's own dotted heading holding a credential, and a
   // value no key names as secret that holds the same credential inside it.
   const KEY = 'uk_live_1234';
@@ -1224,7 +1224,7 @@ describe('aiui compile — the prompts mask what the run masked', () => {
     await write(
       'keys.steps.ts',
       [
-        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        "import { defineSteps } from 'steptix/codebehind';",
         'export default defineSteps([',
         // Step 1 has no entry, so the compile records (with code-behind on).
         "  { source: 'Type {{auth}} into the Authorization box', async run({ page, step }) { await page.fill('#a', step.getVar('auth') ?? ''); } },",
@@ -1263,7 +1263,7 @@ describe('aiui compile — the prompts mask what the run masked', () => {
 
 // ── Review round 3: what round 2's masks still got wrong (G2–G4) ────────────
 
-describe('aiui compile — the prompts mask what the run masked, round 3', () => {
+describe('steptix compile — the prompts mask what the run masked, round 3', () => {
   /** A step typing what the transcript names by placeholder. */
   function typedRow(index: number, page: string, value: string, over: Partial<StepResult> = {}): StepResult {
     return stepRow(index, page, {
@@ -1442,7 +1442,7 @@ describe('aiui compile — the prompts mask what the run masked, round 3', () =>
 
 // ── Writes the fold cannot see from `outputs` (review round 2, F2) ──────────
 
-describe('aiui compile — writes a row carries elsewhere, and writes no row carries', () => {
+describe('steptix compile — writes a row carries elsewhere, and writes no row carries', () => {
   it("binds a [tool:] step's outputs, so the leak guard holds the value the step typed", async () => {
     const md = await write(
       'orders.md',
@@ -1545,7 +1545,7 @@ describe('aiui compile — writes a row carries elsewhere, and writes no row car
 
 // ── The replay checks every loop's passes (review round 2, F10) ─────────────
 
-describe("aiui compile — a replay whose loop runs a different number of passes from the recording's", () => {
+describe("steptix compile — a replay whose loop runs a different number of passes from the recording's", () => {
   const READ = 'Read the name of every account in the Your accounts panel [store as: accounts]';
   const LOOP = 'For each {{account}} in {{accounts}}, Check the account';
   const RECORDED = '["Everyday","Savings","Travel"]';

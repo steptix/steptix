@@ -286,16 +286,16 @@ describe('the MCP pre-flight knows what a [use ai] step will name', () => {
   const created: string[] = [];
 
   beforeEach(() => {
-    root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'aiui-use-ai-')));
+    root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'steptix-use-ai-')));
     created.push(root);
-    writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify({}));
+    writeFileSync(path.join(root, 'steptix.config.json'), JSON.stringify({}));
     writeFileSync(path.join(root, '.env'), 'SERVER_URL=http://127.0.0.1:3100\n');
-    process.env['AIUI_MCP_ROOTS'] = root;
+    process.env['STEPTIX_MCP_ROOTS'] = root;
   });
 
   afterEach(() => {
     for (const d of created.splice(0)) rmSync(d, { recursive: true, force: true });
-    delete process.env['AIUI_MCP_ROOTS'];
+    delete process.env['STEPTIX_MCP_ROOTS'];
   });
 
   const warningsFor = async (steps: string[]): Promise<string> => {

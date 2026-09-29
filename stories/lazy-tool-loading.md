@@ -23,7 +23,7 @@ Two problems fall out of "import everything, up front":
    catches it and returns the **entire session** as `status: 'error'`. A test
    that never invokes the broken tool — or uses no tools at all — fails before a
    single step runs. This is a real, observed failure: a `check_health.ts` whose
-   `import { tool } from 'ai-ui-automation/tools'` couldn't resolve took down an
+   `import { tool } from 'steptix/tools'` couldn't resolve took down an
    unrelated, tool-free test.
 
 2. **It doesn't scale.** A project with thousands of tools pays to `import()`

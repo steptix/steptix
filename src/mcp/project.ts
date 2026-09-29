@@ -1,6 +1,6 @@
 /**
  * Which project an MCP call runs against, and everything that project says
- * about itself: its `aiui.config.json`, its skills/tools directories, its
+ * about itself: its `steptix.config.json`, its skills/tools directories, its
  * composed environment, and the Sessions API it talks to.
  *
  * Confinement (§4a of stories/mcp-server.md) is the security boundary of this
@@ -38,7 +38,7 @@ import {
 } from './errors.js';
 import { PreflightFailure, type ProjectContext, type ResolveProjectArgs } from './types.js';
 
-const CONFIG_FILENAME = 'aiui.config.json';
+const CONFIG_FILENAME = 'steptix.config.json';
 
 /**
  * Where a project-less call looks for its Sessions API server when neither the
@@ -74,7 +74,7 @@ export function fail(error: McpToolError): never {
 /**
  * The roots a *project* may be selected from, canonicalised.
  *
- * `AIUI_MCP_ROOTS` split on `path.delimiter`, else the process cwd. The env
+ * `STEPTIX_MCP_ROOTS` split on `path.delimiter`, else the process cwd. The env
  * var is required for the machine-global hosts (Codex CLI, Copilot CLI),
  * whose spawn cwd is not the project — for them the host config's `env` block
  * is the only per-server configuration surface there is.
@@ -84,14 +84,14 @@ export function fail(error: McpToolError): never {
  *
  * Deliberately does NOT include the user root, and the split against
  * `allowedRoots` is the answer to a question stories/mcp-no-project.md left
- * open: an `AIUI_MCP_ROOTS` naming exactly one directory keeps implying
+ * open: a `STEPTIX_MCP_ROOTS` naming exactly one directory keeps implying
  * "that's the project" (the machine-global hosts depend on it), because the
  * user root joins the *allow-list*, never the candidate list. It is the
  * fallback when the configured world has no config, not a project that
  * competes with them.
  */
 export function configuredRoots(): string[] {
-  const configured = process.env['AIUI_MCP_ROOTS'];
+  const configured = process.env['STEPTIX_MCP_ROOTS'];
   const entries =
     configured !== undefined && configured.trim() !== ''
       ? configured
@@ -224,7 +224,7 @@ export function canonicalTestFilePath(target: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// aiui.config.json
+// steptix.config.json
 // ---------------------------------------------------------------------------
 
 /** The handful of fields the MCP reads. Everything is `unknown` because this
@@ -236,10 +236,10 @@ interface RawProjectConfig {
 }
 
 /**
- * Read `aiui.config.json` directly — never `loadConfig`.
+ * Read `steptix.config.json` directly — never `loadConfig`.
  *
  * `loadConfig` folds `process.env` (`AI_API_KEY`, `AI_MODEL`,
- * `AIUI_SERVER_API_KEY`) into its result and always materialises relative
+ * `STEPTIX_SERVER_API_KEY`) into its result and always materialises relative
  * `tests.skillsDir`/`toolsDir`, so "the project's config" would silently
  * include the MCP host process's environment. The ban is on the loader, not
  * on its default literals — those are reused below.
@@ -268,7 +268,7 @@ function stringField(value: unknown): string | null {
 }
 
 /**
- * Walk up from `startDir` looking for `aiui.config.json`, stopping at `bound`.
+ * Walk up from `startDir` looking for `steptix.config.json`, stopping at `bound`.
  *
  * The bound is §4a rule 4 and it is load-bearing: the server's own
  * `resolveProjectRoot` walks 50 levels to the filesystem root, which here
@@ -327,13 +327,13 @@ function resolveProjectDir(
  * and where the allowed roots are.
  */
 /**
- * `mcp.cdp` from `aiui.config.json` — the §6 gate's only input.
+ * `mcp.cdp` from `steptix.config.json` — the §6 gate's only input.
  *
  * A config file rather than a tool argument on purpose. The existing
  * `allow_foreign_session` precedent has the right shape but is the wrong gate
  * here: an agent sets its own boolean, so it stops accidents, not a page that
  * talks the agent into setting one — and behind this gate sits a browser
- * holding live logged-in sessions. `aiui.config.json` is the only gate a human
+ * holding live logged-in sessions. `steptix.config.json` is the only gate a human
  * actually holds, and an agent cannot write it.
  *
  * Read here rather than through `loadConfig` for the same reason everything
@@ -360,7 +360,7 @@ function readMcpCdpConfig(config: RawProjectConfig): {
 }
 
 /**
- * `desktop.reportScreenshots` from `aiui.config.json` — whether a computer-mode
+ * `desktop.reportScreenshots` from `steptix.config.json` — whether a computer-mode
  * capture may leave the run (docs/specs/SPEC-use-computer.md §10.1).
  *
  * The switch is written for the report, and this module applies it to the one
@@ -400,7 +400,7 @@ export function resolveTestsGlob(project: ProjectContext): { dir: string; patter
 /**
  * Everything about a project except which server it talks to.
  *
- * The split exists so `SERVER_URL` and `AIUI_SERVER_API_KEY` are read exactly once,
+ * The split exists so `SERVER_URL` and `STEPTIX_SERVER_API_KEY` are read exactly once,
  * *after* any `.env.<name>` overlay: an overlay may name a different server
  * than the base `.env` does, and checking before it lands would both refuse a
  * project whose URL lives only in the overlay and report the wrong file in the
@@ -424,7 +424,7 @@ function firstNonEmpty(...values: (string | undefined)[]): string | null {
  * field and into any child we spawn. But these two keys specifically do fall
  * back to `process.env`, at lowest precedence and without ever entering the
  * map: for Codex CLI and Copilot CLI the host config's `env` block is the only
- * per-server configuration surface a user has, and `AIUI_MCP_ROOTS` is already
+ * per-server configuration surface a user has, and `STEPTIX_MCP_ROOTS` is already
  * read from exactly that channel.
  *
  * User scope gets one extra rung: a missing `SERVER_URL` defaults to
@@ -445,8 +445,8 @@ function withServerDiscovery(fields: ProjectDraft): ProjectContext {
   // the server's state: down + loopback may generate a key and spawn with it,
   // while a running server means a refusal naming the file to write.
   const apiKey = firstNonEmpty(
-    fields.env['AIUI_SERVER_API_KEY'],
-    process.env['AIUI_SERVER_API_KEY'],
+    fields.env['STEPTIX_SERVER_API_KEY'],
+    process.env['STEPTIX_SERVER_API_KEY'],
     readMachineKey() ?? undefined,
   );
 
@@ -518,9 +518,9 @@ async function layerEnvFile(
  *    any directory, can execute code from a path no repo owns and no review
  *    covers — so it is never consulted, not merely defaulted away.
  *  - The `.env` is read directly (`readUserRootEnv`), never by the project
- *    walk-up read: walking up from `%LOCALAPPDATA%\aiui` would adopt stray
+ *    walk-up read: walking up from `%LOCALAPPDATA%\steptix` would adopt stray
  *    `.env` files in `%LOCALAPPDATA%` or the home directory as ours.
- *  - An absent `aiui.config.json` reads as all-defaults, because nothing may
+ *  - An absent `steptix.config.json` reads as all-defaults, because nothing may
  *    create it. The resolved path is still recorded: it is the file a human
  *    would have to write to set `mcp.cdp.allowUnowned`, and refusals name it.
  */
@@ -604,7 +604,7 @@ function selectStartDirectory(
  * confined against. `configuredRoots()` is what a *project* may be selected
  * from: the user root never implies a project, it is where resolution lands
  * when no project does (stories/mcp-no-project.md). Selecting from the wider
- * list would break the machine-global hosts, whose single `AIUI_MCP_ROOTS`
+ * list would break the machine-global hosts, whose single `STEPTIX_MCP_ROOTS`
  * entry must keep meaning "that's the project".
  */
 export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectContext> {
@@ -652,7 +652,7 @@ export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectC
   }
 
   // Where the config sits, canonicalised — `fs.existsSync` follows symlinks,
-  // so a symlinked `aiui.config.json` inside a root can name a directory
+  // so a symlinked `steptix.config.json` inside a root can name a directory
   // outside it, and everything below (skills, tools, `.env`) is resolved
   // relative to this.
   const projectRootReal = canonicalize(path.dirname(configPath));
@@ -674,8 +674,8 @@ export async function resolveProject(args: ResolveProjectArgs): Promise<ProjectC
   // CONFIGURED roots, NOT `allowedRoots()`. The user root joined the
   // addressing allow-list so `project_root: <userRoot>` could route to user
   // scope (above); letting it also widen where a project's own untrusted
-  // `aiui.config.json`, `.env` symlink or `dataSources` may reach would hand
-  // that config a path into `%LOCALAPPDATA%\aiui` — the machine key, and a
+  // `steptix.config.json`, `.env` symlink or `dataSources` may reach would hand
+  // that config a path into `%LOCALAPPDATA%\steptix` — the machine key, and a
   // skills/tools directory no repo owns. `selection` restores the pre-story
   // boundary exactly. A planted config in a user-root SUBDIRECTORY named via
   // `project_root` fails here rather than loading as a project.

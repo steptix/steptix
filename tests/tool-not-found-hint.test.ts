@@ -54,7 +54,7 @@ describe('ToolCatalogue.require — error message', () => {
     cat.diagnostics = { toolsDir: '/x', toolsDirMissing: false, filesScanned: 0 };
     const msg = cat.buildNotFoundMessage('my_tool');
     expect(msg).toContain('Registered tools: [none]');
-    expect(msg).toContain("import { defineTool } from 'ai-ui-automation/tools'");
+    expect(msg).toContain("import { defineTool } from 'steptix/tools'");
     expect(msg).toContain("name: 'my_tool'");
     expect(msg).toContain('async run(args, { page, step, log })');
   });
@@ -79,7 +79,7 @@ describe('ToolCatalogue.require — error message', () => {
 
 describe('loadToolCatalogue — diagnostics', () => {
   it('attaches diagnostics with toolsDirMissing: true when dir is absent', async () => {
-    const tmp = mkdtempSync(path.join(tmpdir(), 'aiui-tools-missing-'));
+    const tmp = mkdtempSync(path.join(tmpdir(), 'steptix-tools-missing-'));
     rmSync(tmp, { recursive: true, force: true });
     const cat = await loadToolCatalogue(tmp);
     expect(cat.size).toBe(0);
@@ -89,7 +89,7 @@ describe('loadToolCatalogue — diagnostics', () => {
   });
 
   it('attaches diagnostics with file count when dir exists', async () => {
-    const tmp = mkdtempSync(path.join(tmpdir(), 'aiui-tools-empty-'));
+    const tmp = mkdtempSync(path.join(tmpdir(), 'steptix-tools-empty-'));
     mkdirSync(tmp, { recursive: true });
     const cat = await loadToolCatalogue(tmp);
     expect(cat.diagnostics?.toolsDirMissing).toBe(false);
@@ -140,7 +140,7 @@ describe('renderToolStep — "how to register a tool" hint', () => {
     // Recipe is HTML-escaped, so single quotes become &#039;. Match on
     // substrings that survive escaping rather than the raw recipe.
     expect(html).toContain('import { defineTool } from');
-    expect(html).toContain('ai-ui-automation/tools');
+    expect(html).toContain('steptix/tools');
     expect(html).toContain('tests.toolsDir');
   });
 

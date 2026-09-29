@@ -40,8 +40,8 @@ is *before* the streaming path consumes the response body — breaking mid-strea
 cancellation. Keeping the signal live for the whole response lifetime is the
 correct semantics; the bounded, run-scoped retention is the acceptable cost.
 
-**Server-only, no version bump** (nothing under `testbench-native/` or
-`runner-core/`). Restart the aiui server and it's live.
+**Server-only, no version bump** (nothing under `steptix-vscode/` or
+`runner-core/`). Restart the Steptix server and it's live.
 
 **Tests.** `tests/ai-client.test.ts` — fetch gets a signal that fires on run
 abort and the call rejects; timeout-only path still works. `tests/retry.test.ts`
@@ -117,10 +117,10 @@ actions) before the between-step check at the next iteration finally halts.
   actions don't take an `AbortSignal`. That's seconds (bounded by the action
   timeout), not the 2-minute AI window, and cancelling mid-action is a much
   larger, separate change. Document it; don't fix it here.
-- **Server-only.** Nothing under `testbench-native/` or `runner-core/` changes,
+- **Server-only.** Nothing under `steptix-vscode/` or `runner-core/` changes,
   so **no extension version bump** (per CLAUDE.md). The stop wire-path
   (SSE close → abort) is already in place; we're only making the existing signal
-  reach deeper. Restart the aiui server and it's live.
+  reach deeper. Restart the Steptix server and it's live.
 
 ## Fix sketch (three layers, smallest-to-deepest)
 

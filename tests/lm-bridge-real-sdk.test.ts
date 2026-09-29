@@ -3,7 +3,7 @@
  * (stories/copilot-lm-bridge.md §Part A).
  *
  * Everything else about the bridge is tested against a hand-written reader:
- * testbench-native's own unit tests assert the shapes it builds, and its
+ * steptix-vscode's own unit tests assert the shapes it builds, and its
  * integration suite drives them over a real socket — but both sides of those
  * are ours, so a shape both agree on can still be one the OpenAI SDK rejects.
  * Here the request comes from `@pkent/aigateway` (which is the OpenAI SDK) and
@@ -27,7 +27,7 @@ import { AIGateway } from '@pkent/aigateway';
 import {
   chatCompletionBody,
   streamFrames,
-} from '../testbench-native/src/extension/lm-bridge-core.js';
+} from '../steptix-vscode/src/extension/lm-bridge-core.js';
 
 /** What the bridge would answer with, for a fixed reply. */
 const REPLY = '{"entry":"compiled"}';

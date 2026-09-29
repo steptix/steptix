@@ -52,7 +52,7 @@ function mergeConfig(defaults: Config, overrides: UserConfig): Config {
 
 /**
  * Resolve the config file path. With an explicit `configPath` (from `--config`)
- * that path is used as-is; otherwise we look for `aiui.config.json` in the cwd.
+ * that path is used as-is; otherwise we look for `steptix.config.json` in the cwd.
  * Returns `null` when no config file is present (an unconfigured project is
  * valid and falls back to defaults).
  */
@@ -63,7 +63,7 @@ function resolveConfigPath(configPath?: string, projectRoot: string = process.cw
     return path.resolve(process.cwd(), configPath);
   }
 
-  const candidate = path.resolve(projectRoot, 'aiui.config.json');
+  const candidate = path.resolve(projectRoot, 'steptix.config.json');
   return existsSync(candidate) ? candidate : null;
 }
 
@@ -105,7 +105,7 @@ function withEnvDefaults(config: Config): Config {
     result = { ...result, ai: { ...result.ai, effort: effort.trim() as NonNullable<AiConfig['effort']> } };
   }
 
-  const serverApiKey = process.env['AIUI_SERVER_API_KEY'];
+  const serverApiKey = process.env['STEPTIX_SERVER_API_KEY'];
   if (serverApiKey !== undefined) {
     result = { ...result, server: { ...result.server, apiKey: serverApiKey } };
   }
@@ -142,7 +142,7 @@ function withEnvDefaults(config: Config): Config {
  * the user root's `.env` apply only when neither the environment nor the
  * project's config file set one.
  *
- * `project .env → project aiui.config.json → user-root .env → built-in`
+ * `project .env → project steptix.config.json → user-root .env → built-in`
  *
  * This is deliberately NOT a `process.env` preload. `withEnvDefaults` lets an
  * env `AI_MODEL` override the config file — correct for a value the caller
@@ -279,7 +279,7 @@ export function aiConfigured(ai: AiConfig): boolean {
 }
 
 /**
- * Load and merge configuration from `aiui.config.json` + defaults.
+ * Load and merge configuration from `steptix.config.json` + defaults.
  *
  * A missing config file is valid — the project runs on defaults. A config
  * file that exists but contains malformed JSON (or a non-object top level) is
@@ -363,8 +363,8 @@ export async function loadConfig(configPath?: string, projectRoot: string = proc
  */
 const RETIRED_SECTIONS: Readonly<Record<string, string>> = {
   cache:
-    'the step cache was removed, so "cache" in aiui.config.json does nothing — '
-    + 'delete it, and the project\'s .cache/ directory. Code-behind (`aiui compile`) '
+    'the step cache was removed, so "cache" in steptix.config.json does nothing — '
+    + 'delete it, and the project\'s .cache/ directory. Code-behind (`steptix compile`) '
     + 'is how a step replays without a model call now.',
 };
 

@@ -12,7 +12,7 @@ The skill returns successfully whether or not an obstacle was found — it's a
 no-op when the page is already clean.
 
 Intended use: as a `beforeEach` hook in a test's `## Hooks` section, or as a
-project-level default hook in `aiui.config.json`:
+project-level default hook in `steptix.config.json`:
 
 ```json
 {

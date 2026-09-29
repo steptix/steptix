@@ -715,7 +715,7 @@ async function decideCondition(args: {
         reasoning:
           (byPolicy
             ? 'The condition\'s code-behind entry threw, and this run forbids AI ' +
-              '(runSettings.ai: off, or ai.allowInRuns: false in aiui.config.json), ' +
+              '(runSettings.ai: off, or ai.allowInRuns: false in steptix.config.json), ' +
               'so the condition was not decided by the model. '
             : 'The condition\'s code-behind entry threw, and this machine has no AI ' +
               'configured, so the condition was not decided by the model. ') +
@@ -1085,7 +1085,7 @@ function conditionTexts(request: GuardRequest): readonly string[] {
  * Returns a {@link ConditionVerdict}, the judge's own shape, so the caller has
  * one code path: same `selected`, same `reasoning` slot, and `aiInteractions`
  * empty because nothing was asked. That is what keeps the guard row, the loop
- * marker, the report and TestBench identical to a judged decision — the only
+ * marker, the report and Steptix identical to a judged decision — the only
  * visible difference is whose words are in `aiExplanation`.
  *
  * The rule itself — substitute as quoted literals, refuse a condition whose
@@ -1155,7 +1155,7 @@ function exitFailed(
  *
  * Names the cap AND where the cap came from, because the two have different
  * fixes: a line's own `, up to N times` is edited on the line, and the config
- * default is edited in `aiui.config.json`. Both ways out are spelled, along
+ * default is edited in `steptix.config.json`. Both ways out are spelled, along
  * with the third possibility — that the exit condition is wrong and no cap
  * would have helped.
  */

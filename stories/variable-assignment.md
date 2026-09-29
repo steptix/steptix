@@ -106,14 +106,14 @@ the page.
 > partial-re-run guard does not refuse on the target; (6) the value is
 > visible everywhere a capture is: the CLI step line, the report's
 > ◆ Captured box, the `capture` stream event with `source: "assignment"`,
-> `session.outputs`, the errand receipt's `captures`, and the TestBench
+> `session.outputs`, the errand receipt's `captures`, and the Steptix
 > Variables panel with a label that says it was *assigned* rather than read
 > from the page; (7) a value assembled from a secret-named variable, or
 > assigned to a secret-named target, is masked by value in every output
 > [secret-redaction](secret-redaction.md) covers; (8) compile treats it as it
 > treats `[tool:]` — ineligible, "dispatched, not compiled" — never an
 > `ai: true` write-off, never a healed step, and a hand-written `.steps.ts`
-> entry for that text is never consulted; (9) TestBench completes `{{x}}`
+> entry for that text is never consulted; (9) Steptix completes `{{x}}`
 > after a `Set {{x}}` line, F12 on a later `{{x}}` lands on that line, and
 > the MCP `run_test_file` / `run_steps` pre-flight does not warn that the
 > target "has no value and will reach the AI literally"; (10) an opening
@@ -270,9 +270,9 @@ Everything below is read out of the current tree.
   test: the same scan appears to have no exclusion for `[store as:]` /
   `[as:]` captures either — see §Open questions.
 
-- **TestBench has two scanners of its own, and one contract.**
+- **Steptix has two scanners of its own, and one contract.**
   `CAPTURE_PATTERNS` in
-  `testbench-native/src/extension/env-data-completion-core.ts` is the list
+  `steptix-vscode/src/extension/env-data-completion-core.ts` is the list
   of "things that write a variable" — `[input:]`, `[output:]`,
   `[store as:]`/`[as:]`, `out.x="alias"` — and it feeds *both* `{{}}`
   completion and F12 (`env-data-definition.ts` calls `captureNamesBefore`).
@@ -311,7 +311,7 @@ Everything below is read out of the current tree.
   Section names may not contain `{{` (`sectionNameError`,
   `src/parser/section-match.ts`), so no heading can equal it. The editor's
   "Did you mean section …?" warning
-  (`testbench-native/src/extension/section-diagnostics-core.ts`) fires on an
+  (`steptix-vscode/src/extension/section-diagnostics-core.ts`) fires on an
   edit distance of 1–2 between the whole step text and a heading; the two
   braces a heading cannot contain already put a `Set` line further away than
   that, before the quotes are counted.
@@ -426,7 +426,7 @@ whole interpolated line. For any other step the two are the same string.
   list before it warns — a written name is not a missing one.
 - **`compile.ts`** reports `ineligible: 'a Set step is dispatched, not
   compiled'` when `parseSetStep(text)` matches, beside the `[tool:]` case.
-- **Parity.** The runtime regex and the two TestBench mirrors are pinned by
+- **Parity.** The runtime regex and the two Steptix mirrors are pinned by
   one fixture table of authored lines → `{ name, template } | null | error`,
   consumed by the root vitest, the webview test and the extension test, the
   way the sections work pinned its classifiers. A mirror that drifts fails a
@@ -476,7 +476,7 @@ whole interpolated line. For any other step the two are the same string.
   closed, but its own comment mandates the collapse-to-`'capture'` default,
   so a not-yet-upgraded client shows the value with the old label and
   nothing breaks. The cost is a runner-core change and therefore a
-  `testbench-native` patch bump; the webview change would have forced the
+  `steptix-vscode` patch bump; the webview change would have forced the
   bump anyway.
 
 - **Not a new step *class* on the wire.** `ClassifiedStep` in runner-core
@@ -553,10 +553,10 @@ modelled on `tests/cli-viewport.test.ts` (CLI), the `capture events stream
 with source="capture"` case in `tests/api-server.test.ts` (server), the
 errand suite, and the runner-adapter suite; a runner-core `node --test` case
 for the widened union; a fixture test file exercising the securebank example
-above, run live through the CLI and through TestBench against the fixture app
+above, run live through the CLI and through Steptix against the fixture app
 with the token counter at zero for the `Set` step.
 
-`testbench-native/package.json` patch bump (runner-core and webview both
+`steptix-vscode/package.json` patch bump (runner-core and webview both
 change).
 
 ## Not in this story
@@ -697,10 +697,10 @@ why it must differ from the sibling it was modelled on — the obvious later
 Automated (as of the first build; rounds three to seven added more — see
 below): 45 new tests across the grammar, the resolver, the parse-time
 refusals, the two editor mirrors and the server and errand HTTP seams. Root
-suite 3691 green; testbench-native 575 pass / 1 skipped.
+suite 3691 green; steptix-vscode 575 pass / 1 skipped.
 
 **Final counts, after seven review rounds:** root 3728 across 183 files,
-testbench-native 577 (1 skipped), runner-core 522, and the live TestBench
+steptix-vscode 577 (1 skipped), runner-core 522, and the live Steptix
 suite 33/33. The three Set-specific root files alone hold 77 tests.
 
 ### Still open
@@ -715,7 +715,7 @@ suite 33/33. The three Set-specific root files alone hold 77 tests.
   [issues/resolved/052](../issues/resolved/052-electron-runner-never-resolved-env-data-refs.md).
   The premise was half wrong, as §What the review found says below: the
   parser never baked anything for that runner, because that runner never
-  handed it an env context. It does now — `AUTOMATION_ENV`, which `aiui ui
+  handed it an env context. It does now — `AUTOMATION_ENV`, which `steptix ui
   --env` sets for the Electron process, or the test's own `env:` frontmatter
   — and every step then resolves `${…}` before `{{…}}`, the CLI's order. The
   Set branch's threading went live with it.)*
@@ -896,7 +896,7 @@ reached.
   text and the run loop saw authored text.
 - **`[no-hooks] Set …` was prose on both server paths.** runner-core keeps
   the marker on the wire deliberately, and `parseSetStep` required it
-  pre-stripped — so TestBench, the primary client, never recognised such a
+  pre-stripped — so Steptix, the primary client, never recognised such a
   line. Round one had "fixed" this in the two editor mirrors, which meant the
   editors offered a completion and an F12 target for a step the server would
   not assign: the fix widened the divergence it was meant to close. The

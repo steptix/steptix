@@ -232,12 +232,12 @@ beforeAll(async () => {
   tmpDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'mcp-seam-')));
   await fs.writeFile(
     path.join(tmpDir, '.env'),
-    `SERVER_URL=${baseUrl}\nAIUI_SERVER_API_KEY=${API_KEY}\nAI_API_KEY=project-ai-key\nAI_MODEL=project-model\n`,
+    `SERVER_URL=${baseUrl}\nSTEPTIX_SERVER_API_KEY=${API_KEY}\nAI_API_KEY=project-ai-key\nAI_MODEL=project-model\n`,
   );
   // The environment overlay, so `${env.GREETING}` has something to resolve to
   // — and resolving it is the evidence that `envName` survived the wire.
   await fs.writeFile(path.join(tmpDir, '.env.uat'), 'GREETING=hello-from-uat\n');
-  await fs.writeFile(path.join(tmpDir, 'aiui.config.json'), JSON.stringify({ tests: { dir: './tests' } }));
+  await fs.writeFile(path.join(tmpDir, 'steptix.config.json'), JSON.stringify({ tests: { dir: './tests' } }));
 
   await fs.mkdir(path.join(tmpDir, 'tests'), { recursive: true });
   testFilePath = path.join(tmpDir, 'tests', 'seam.md');
@@ -262,8 +262,8 @@ beforeAll(async () => {
     ].join('\n'),
   );
 
-  previousRoots = process.env['AIUI_MCP_ROOTS'];
-  process.env['AIUI_MCP_ROOTS'] = tmpDir;
+  previousRoots = process.env['STEPTIX_MCP_ROOTS'];
+  process.env['STEPTIX_MCP_ROOTS'] = tmpDir;
 
   const mcp = createMcpServer({
     createApiClient,
@@ -281,8 +281,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (previousRoots === undefined) delete process.env['AIUI_MCP_ROOTS'];
-  else process.env['AIUI_MCP_ROOTS'] = previousRoots;
+  if (previousRoots === undefined) delete process.env['STEPTIX_MCP_ROOTS'];
+  else process.env['STEPTIX_MCP_ROOTS'] = previousRoots;
   await client?.close();
   await new Promise<void>((r) => server?.close(() => r()));
   resetRegistry();
@@ -359,7 +359,7 @@ describe('run_test_file over the real HTTP seam', () => {
       });
 
       expect(res.isError).toBe(true);
-      expect(JSON.stringify(res.content)).toContain('AIUI_MCP_ROOTS');
+      expect(JSON.stringify(res.content)).toContain('STEPTIX_MCP_ROOTS');
     } finally {
       await fs.rm(elsewhere, { recursive: true, force: true }).catch(() => {});
     }

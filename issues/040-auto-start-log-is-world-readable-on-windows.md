@@ -5,9 +5,9 @@ on the platform this project primarily runs on.
 **Area:**
 [src/mcp/server-start.ts:638](../src/mcp/server-start.ts#L638) (`openSync(logPath, 'a', 0o600)` — the mode that does nothing on win32);
 [src/mcp/server-start.ts:612](../src/mcp/server-start.ts#L612) (the comment recording the measurement);
-`LOG_RELATIVE_PATH` = `<project_root>/.aiui/mcp-server.log`;
+`LOG_RELATIVE_PATH` = `<project_root>/.steptix/mcp-server.log`;
 [src/server/session-manager.ts](../src/server/session-manager.ts) (`logger.step(...)` writes the **post-interpolation** step text, which is what lands in the file);
-[.gitignore](../.gitignore) (`.aiui/` — the file is at least not committable).
+[.gitignore](../.gitignore) (`.steptix/` — the file is at least not committable).
 **Related:** [stories/mcp-server.md §5](../stories/mcp-server.md) (log file
 rules and the §Risks entry), [038](038-server-identity-is-a-public-constant.md),
 [039](039-toctou-between-confinement-check-and-read.md).
@@ -16,7 +16,7 @@ rules and the §Risks entry), [038](038-server-identity-is-a-public-constant.md)
 ## Summary
 
 When the MCP server auto-starts a Sessions API server, the child's stdout and
-stderr go to `<project_root>/.aiui/mcp-server.log`, opened with mode `0o600`.
+stderr go to `<project_root>/.steptix/mcp-server.log`, opened with mode `0o600`.
 That mode is honoured on POSIX and **inert on Windows** — measured on this
 machine, the file lands as mode `666`. Node on Windows can only express the
 read-only bit; there is no owner-only ACL available through `fs`.
@@ -42,7 +42,7 @@ Two mitigations are already in place and should not be mistaken for a fix:
   so a failing start cannot quote an *earlier* server's steps into a tool
   result that reaches the model provider. That closes the egress-to-the-agent
   path. It does not change what is on disk.
-- **`.aiui/` is gitignored**, so the file cannot be committed by accident.
+- **`.steptix/` is gitignored**, so the file cannot be committed by accident.
 
 What remains is local disclosure: any user on a shared Windows machine can
 read another user's project log. Note this is not unique to the MCP path —
@@ -72,7 +72,7 @@ prevent.
    Ugly and platform-specific, but it makes `0o600`'s intent true everywhere.
 3. **Move the log out of the project directory** to per-user storage
    (`%LOCALAPPDATA%`), which is at least not world-readable by default on a
-   normal Windows setup, and drop the `.aiui/` directory entirely. Loses the
+   normal Windows setup, and drop the `.steptix/` directory entirely. Loses the
    "it's right next to the project" discoverability the current path was
    chosen for.
 4. **Log less.** Run the auto-started server at `warn` — but the whole value

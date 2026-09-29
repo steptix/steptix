@@ -15,7 +15,7 @@ export function registerStatusCommand(program: Command): void {
   program
     .command('status')
     .description('Report whether the Sessions API server is running')
-    .option('-c, --config <path>', 'Path to config file (default: auto-discover aiui.config.json)')
+    .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
     .option('--url <url>', 'Server base URL (default: from config server.host/port)')
     .option('--json', 'Emit the raw /health body as JSON', false)
     .action(async (opts: StatusOptions) => {
@@ -44,12 +44,12 @@ export async function statusCommand(opts: StatusOptions): Promise<number> {
       );
     } else if (unrecognized) {
       // Reachable but not recognizably ours. Could genuinely be a foreign
-      // process on the port, or an aiui server predating /health — the probe
+      // process on the port, or a Steptix server predating /health — the probe
       // cannot tell, and the message must not claim it can.
       console.log(
-        `${chalk.yellow('unrecognized')} — ${baseUrl} answered (${result.detail}) but is not an ` +
-          'ai-ui-automation server: the port is occupied by another process (or an older ' +
-          'aiui server without /health)',
+        `${chalk.yellow('unrecognized')} — ${baseUrl} answered (${result.detail}) but is not a ` +
+          'Steptix server: the port is occupied by another process (or an older ' +
+          'Steptix server without /health)',
       );
     } else {
       console.log(`${chalk.red('not running')} — nothing listening on ${baseUrl}`);
@@ -64,7 +64,7 @@ export async function statusCommand(opts: StatusOptions): Promise<number> {
   }
 
   // `??` throughout, not just for the documented-nullable fields: the probe
-  // only verifies `service` + `ok`, so an aiui build whose /health predates a
+  // only verifies `service` + `ok`, so a Steptix build whose /health predates a
   // field must degrade to "unknown" rather than printing `undefined` (or,
   // worse, `undefinedm`).
   const unknown = chalk.dim('unknown');

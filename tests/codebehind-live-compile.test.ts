@@ -272,7 +272,7 @@ describe('a Set step and a [use ai] step are never written into the file', () =>
     const outcome = await compiler.finish({ tokensUsed: 0 });
 
     // Measured without the Set check: this file held
-    //   { // Kept as AI by `aiui compile`: the recorded run performed no page
+    //   { // Kept as AI by `steptix compile`: the recorded run performed no page
     //     // actions for this step
     //     source: 'Set {{ref}} to "Ref: {{order}}"', ai: true },
     const file = outcome.files[stepsFile] ?? '';
@@ -605,7 +605,7 @@ describe('the trailing generation queue', () => {
     await compiler.finish({ tokensUsed: 0 });
 
     await expect(fs.access(stepsFile)).rejects.toThrow();
-    const candidate = path.join(dir, '.aiui-codebehind-cache', 'checkout.steps.ts.candidate');
+    const candidate = path.join(dir, '.steptix-codebehind-cache', 'checkout.steps.ts.candidate');
     expect(await fs.readFile(candidate, 'utf-8')).toContain("source: 'Sign in'");
   });
 });
@@ -613,7 +613,7 @@ describe('the trailing generation queue', () => {
 describe('a step healing a broken entry', () => {
   /** The entry the runtime loaded and that threw, as it sits in the file. */
   const BROKEN = [
-    "import { defineSteps } from 'ai-ui-automation/codebehind';",
+    "import { defineSteps } from 'steptix/codebehind';",
     'export default defineSteps([',
     "  { source: 'Sign in', async run(ctx) { await ctx.page.click('a[href=\"/login\"]'); } },",
     ']);',
@@ -659,7 +659,7 @@ describe('a step healing a broken entry', () => {
     await fs.writeFile(
       stepsFile,
       [
-        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        "import { defineSteps } from 'steptix/codebehind';",
         'export default defineSteps([',
         `  { source: '${LINE}', async run(ctx) { await ctx.page.fill('#h', ctx.step.getVar('auth') ?? ''); } },`,
         ']);',
@@ -916,7 +916,7 @@ describe('the tail reports its progress', () => {
     // Row 2 of a data-driven Run & Compile from a client that keeps one
     // session across the rows and sends the later ones with
     // `compileContinues`. tests/api-server-rows-compile.test.ts drives that
-    // shape; no shipped client does — TestBench puts the compile fields on the
+    // shape; no shipped client does — Steptix puts the compile fields on the
     // first planned row's batches only and recycles the session between rows,
     // and the server clears a `'steps'` compile off the session after every
     // request, so neither route can continue one compiler across rows. Every
@@ -971,7 +971,7 @@ describe('the tail reports its progress', () => {
  */
 describe('a looped entry that failed on a later row', () => {
   const BROKEN = [
-    "import { defineSteps } from 'ai-ui-automation/codebehind';",
+    "import { defineSteps } from 'steptix/codebehind';",
     'export default defineSteps([',
     "  { source: 'Upload {{file}}', async run(ctx) { await ctx.page.click('a[href=\"/x\"]'); } },",
     ']);',
@@ -983,9 +983,9 @@ describe('a looped entry that failed on a later row', () => {
   async function writeSidecar(
     rows: Array<{ occurrence?: number; stale: boolean; error?: string }>,
   ): Promise<void> {
-    await fs.mkdir(path.join(dir, '.aiui-codebehind-cache'), { recursive: true });
+    await fs.mkdir(path.join(dir, '.steptix-codebehind-cache'), { recursive: true });
     await fs.writeFile(
-      path.join(dir, '.aiui-codebehind-cache', 'checkout.last-run.json'),
+      path.join(dir, '.steptix-codebehind-cache', 'checkout.last-run.json'),
       JSON.stringify({
         test: testFile,
         ranAt: new Date().toISOString(),
@@ -1074,7 +1074,7 @@ describe('a looped entry that failed on a later row', () => {
     await fs.writeFile(
       stepsFile,
       [
-        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        "import { defineSteps } from 'steptix/codebehind';",
         'export default defineSteps([',
         "  { source: 'Upload {{file}}', async run(ctx) { await ctx.page.click('#first'); } },",
         "  { source: 'Upload {{file}}', async run(ctx) { await ctx.page.click('#second'); } },",
@@ -1319,7 +1319,7 @@ describe('a return-skipped sibling of an entry nothing wrote', () => {
  */
 describe('a repeated entry, and which iteration repairs it', () => {
   const BROKEN_FILE = [
-    "import { defineSteps } from 'ai-ui-automation/codebehind';",
+    "import { defineSteps } from 'steptix/codebehind';",
     'export default defineSteps([',
     "  { source: 'Upload {{file}}', async run(ctx) { await ctx.page.click('a[href=\"/x\"]'); } },",
     ']);',
@@ -1675,7 +1675,7 @@ describe('a repair of a step that quotes one of its own values', () => {
   const entryFor = (source: string, body: string): string =>
     `{ source: '${source}', async run({ page, step }) { ${body} } }`;
   const fileWith = (source: string, body: string): string =>
-    "import { defineSteps } from 'ai-ui-automation/codebehind';\nexport default defineSteps([\n" +
+    "import { defineSteps } from 'steptix/codebehind';\nexport default defineSteps([\n" +
     `  ${entryFor(source, body)},\n]);\n`;
   const answerFor = (source: string, body: string): string =>
     JSON.stringify({ entry: entryFor(source, body) });

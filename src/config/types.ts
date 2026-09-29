@@ -39,8 +39,8 @@ export interface AiConfig {
    * Compile, repair and errands are deliberately NOT gated by it; they are
    * requests *for* AI.
    *
-   * Scope: every path that runs a test — the Sessions API server (TestBench,
-   * MCP, the HTTP API), the `aiui run` CLI and the Runner UI. The two
+   * Scope: every path that runs a test — the Sessions API server (Steptix,
+   * MCP, the HTTP API), the `steptix run` CLI and the Runner UI. The two
    * non-server paths resolve no run settings, so the per-session `ai` override
    * cannot reach them and this key is the whole switch there.
    *
@@ -95,7 +95,7 @@ export interface DomNoiseReductionConfig {
 }
 
 /** How this framework launches a CDP browser (`start_cdp_browser`,
- *  `POST /cdp/browsers`). Read from the `aiui.config.json` of the root the
+ *  `POST /cdp/browsers`). Read from the `steptix.config.json` of the root the
  *  browser is launched into — the project's, or the user root's for a
  *  machine-wide browser. Applies at launch only: a browser that is already
  *  running keeps whatever it was started with. */
@@ -121,7 +121,7 @@ export interface BrowserConfig {
   /** When set, every context this launch creates gets EXACTLY this viewport —
    *  headed or headless — instead of the viewport/windowSize pair. Set by the
    *  runner/server from a test's `## Config: viewport:`; settable in
-   *  aiui.config.json to pin a whole project (stories/per-test-viewport.md §8).
+   *  steptix.config.json to pin a whole project (stories/per-test-viewport.md §8).
    *
    *  The three sizing keys are NOT interchangeable, and the distinction is the
    *  reason this one exists: `viewport` applies headless only, `windowSize`
@@ -245,7 +245,7 @@ export interface BrowserConfig {
 /**
  * The computer surface (docs/specs/SPEC-use-computer.md §5.10).
  *
- * Every key here is per project, in `aiui.config.json`, and `enabled` is the
+ * Every key here is per project, in `steptix.config.json`, and `enabled` is the
  * reason the section exists at all: a test file in a shared repository must
  * not be able to move the mouse on a machine whose owner did not allow it
  * (§5.1 item 1).
@@ -286,10 +286,10 @@ export interface TestsConfig {
   /** Directory containing test .md files */
   dir: string;
   /** Directory containing per-environment JSON data files, resolved relative to
-   *  the project root (the dir holding `aiui.config.json`). `${data.X}` loads
+   *  the project root (the dir holding `steptix.config.json`). `${data.X}` loads
    *  `<dataDir>/<envName>.json`. Default `data`. A leading slash / drive root is
    *  treated as an absolute path; use `./data` for the project-relative form.
-   *  Replaces the former `AIUI_DATA_DIR` env var. */
+   *  Replaces the former `STEPTIX_DATA_DIR` env var. */
   dataDir: string;
   /** Directory containing context .md files */
   contextDir: string;
@@ -383,7 +383,7 @@ export interface ServerConfig {
   /**
    * Shut the server down after this many minutes with **no run in flight and
    * no authenticated API request** — deliberately not "no open sessions",
-   * since TestBench keeps sessions open for reuse indefinitely and a
+   * since Steptix keeps sessions open for reuse indefinitely and a
    * session-count rule would never fire. `GET /health` is unauthenticated and
    * never resets the timer, so the status bar's poll can't keep the server
    * alive. The idle shutdown closes any open sessions (browsers included) on
@@ -429,7 +429,7 @@ export interface TablesConfig {
  */
 export interface LoggingConfig {
   /**
-   * Threshold for the console + testbench SSE output stream. Levels are
+   * Threshold for the console + steptix SSE output stream. Levels are
    * suppressed below this threshold:
    *   - 'silent': nothing
    *   - 'error':  errors only
@@ -451,7 +451,7 @@ export interface LoggingConfig {
 /**
  * How much reach an MCP agent has over CDP browsers.
  *
- * Lives in `aiui.config.json` rather than in a tool argument on purpose. The
+ * Lives in `steptix.config.json` rather than in a tool argument on purpose. The
  * existing `allow_foreign_session` precedent is the right *shape* but the
  * wrong *gate* here: an agent sets its own boolean, so it stops accidents, not
  * a page that talks the agent into setting one — and behind this gate sits a
@@ -487,7 +487,7 @@ export interface McpConfig {
 
 /**
  * This project's part in the scoreboard — the machine-local record of every
- * AI action and step, read with `aiui stats` (docs/specs/SPEC-scoreboard.md).
+ * AI action and step, read with `steptix stats` (docs/specs/SPEC-scoreboard.md).
  */
 export interface StatsConfig {
   /**
@@ -495,7 +495,7 @@ export interface StatsConfig {
    *
    * `false` keeps them out of `<user root>/stats/` entirely — for a project
    * whose step text should not be kept even locally. Other projects on the
-   * machine still record. `AIUI_STATS=off` (environment or the machine-wide
+   * machine still record. `STEPTIX_STATS=off` (environment or the machine-wide
    * `.env`) turns recording off for every project at once (§6.4).
    */
   enabled?: boolean;
@@ -534,7 +534,7 @@ export type AiOffReason = 'policy' | 'no-key';
  * RETAINED on the session (stories/run-settings.md §1–§2).
  *
  * Deliberately not part of `Config`: nothing here is a config-file key, and
- * nothing here is ever written to `aiui.config.json`. Every field is
+ * nothing here is ever written to `steptix.config.json`. Every field is
  * independently optional — a request carrying `{capture}` changes capture and
  * leaves the model alone. `null` on the model and the booleans, and `'default'`
  * on the enum, clear that one override and fall back to the project/server
@@ -568,7 +568,7 @@ export type SettingSource = 'server' | 'project' | 'session';
  *
  * `capture` carries a fourth value the tool enum does not: `'custom'`, for the
  * one boolean pair the enum cannot express (per-action capture on, failure
- * capture off). It is only reachable from a hand-written `aiui.config.json`,
+ * capture off). It is only reachable from a hand-written `steptix.config.json`,
  * and naming it is more honest than rounding it to `'every-step'`.
  */
 export interface EffectiveSettings {

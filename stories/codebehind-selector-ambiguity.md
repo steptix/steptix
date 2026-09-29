@@ -453,7 +453,7 @@ the shape `aborted` already established, and **the token cost attributed to it**
 "4 steps healed, 18.2k tokens" and the recurring price of leaving them broken is
 impossible to miss. Plus `--fail-on-healed`, so CI can make it a build failure.
 
-**In TestBench**, the same fact lands on the run's closing summary line, in the
+**In Steptix**, the same fact lands on the run's closing summary line, in the
 house shape compile already uses:
 
 ```
@@ -618,7 +618,7 @@ tokens are.
 - **A page-precondition gate on Repair.** The framework cannot check it by
   inspection, and the provenance that would answer it is not tracked. Repair
   follows `runStepHere`: run, and let a wrong page fail the step.
-- **CLI `aiui compile --repair`.** Deferred; the gutter action and Run & Compile
+- **CLI `steptix compile --repair`.** Deferred; the gutter action and Run & Compile
   cover both moments.
 - **Retiring rule 8 or the repair prompt.** Both stay; they now key off facts.
 - **Changing the boxed compile's replay rounds.** They already prove entries
@@ -673,7 +673,7 @@ tokens are.
   unaffected by healing.
 - `--fail-on-healed` turns a healed run into a non-zero exit; without it the
   exit code is unchanged from today.
-- TestBench's run summary names the healed count and its token cost; a run with
+- Steptix's run summary names the healed count and its token cost; a run with
   no healed steps says nothing new.
 - A step stale on three consecutive runs shows "3 runs in a row" on its ⚠, and
   the count resets when the step passes as code.
@@ -681,7 +681,7 @@ tokens are.
   failure, and written off as `ai: true` after the configured attempts.
 - An entry for an element the application has removed declines with a reason
   rather than inventing a selector.
-- `browser.ambiguousTarget` is honoured on the server and TestBench paths, not
+- `browser.ambiguousTarget` is honoured on the server and Steptix paths, not
   only the CLI.
 - Secrets: `resolvedSelector` goes through the same recording redaction as every
   other recorded string — asserted by a recording whose `aria-label` carries a
@@ -755,8 +755,8 @@ matter.
 the `Config` the executor is handed by spreading the *server's* startup config
 and re-sourcing only a named handful of values from the project. Anything not
 named there keeps the server's answer no matter what the project's
-`aiui.config.json` says — so a key can be correct on `ProjectBundle`, correct
-under the CLI, and silently server-global on the server and TestBench paths,
+`steptix.config.json` says — so a key can be correct on `ProjectBundle`, correct
+under the CLI, and silently server-global on the server and Steptix paths,
 which are the ones anybody actually uses. `browser.ambiguousTarget` is named in
 both places, and the list in run-settings has a comment saying why it has to
 grow by hand.

@@ -29,7 +29,7 @@ describe('resolveVideoMode', () => {
   });
 
   it('falls back to off on an unrecognised value (typo in a hand-edited config)', () => {
-    // Values the TS type forbids but a hand-edited aiui.config.json could carry
+    // Values the TS type forbids but a hand-edited steptix.config.json could carry
     // (the loader does no per-field validation). Must fail safe to 'off' rather
     // than record-and-keep — a typo'd "retain-on-faliure" must NOT behave like 'on'.
     const bad = (v: string) => resolveVideoMode(v as unknown as BrowserConfig['video']);

@@ -29,7 +29,7 @@ let tmp: string;
 let deps: UserRootDeps;
 
 beforeEach(() => {
-  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-run-stats-')));
+  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-run-stats-')));
   deps = { env: { LOCALAPPDATA: tmp, XDG_CONFIG_HOME: tmp }, platform: process.platform };
 });
 
@@ -110,12 +110,12 @@ describe('openRunStats', () => {
     });
   });
 
-  it('a forced suite wins over AIUI_STATS_SUITE; the project switch and AIUI_STATS both turn it off', () => {
-    const live: UserRootDeps = { ...deps, env: { ...deps.env, AIUI_STATS_SUITE: 'live' } };
+  it('a forced suite wins over STEPTIX_STATS_SUITE; the project switch and STEPTIX_STATS both turn it off', () => {
+    const live: UserRootDeps = { ...deps, env: { ...deps.env, STEPTIX_STATS_SUITE: 'live' } };
     expect(openRunStats({ projectRoot: tmp, deps: live }).suite).toBe('live');
     expect(openRunStats({ projectRoot: tmp, suite: 'compile', deps: live }).suite).toBe('compile');
     expect(openRunStats({ projectRoot: tmp, projectEnabled: false, deps }).enabled).toBe(false);
-    expect(openRunStats({ projectRoot: tmp, deps: { ...deps, env: { ...deps.env, AIUI_STATS: 'off' } } }).enabled).toBe(false);
+    expect(openRunStats({ projectRoot: tmp, deps: { ...deps, env: { ...deps.env, STEPTIX_STATS: 'off' } } }).enabled).toBe(false);
   });
 
   it('continues a run id, and carries the row', () => {
@@ -174,7 +174,7 @@ describe('recordExecutedStep', () => {
     recordExecutedStep(result(), undefined, { stepText: 'a' });
     recordExecutedStep(result(), openRunStats({ projectRoot: tmp, projectEnabled: false, deps }), { stepText: 'a' });
     await flushStatsWrites();
-    expect(fs.existsSync(path.join(tmp, 'aiui', 'stats'))).toBe(false);
+    expect(fs.existsSync(path.join(tmp, 'steptix', 'stats'))).toBe(false);
   });
 
   it('a malformed result costs its lines, never the step', async () => {
@@ -258,12 +258,12 @@ describe('the project switch fails closed (finding 5)', () => {
   it('projectStatsSwitch: the test root’s own config decides, not the run’s', async () => {
     const quiet = path.join(tmp, 'quiet');
     fs.mkdirSync(quiet);
-    fs.writeFileSync(path.join(quiet, 'aiui.config.json'), '{ "stats": { "enabled": false } }');
+    fs.writeFileSync(path.join(quiet, 'steptix.config.json'), '{ "stats": { "enabled": false } }');
     expect(await projectStatsSwitch(quiet, { stats: { enabled: true } })).toBe(false);
 
     const loud = path.join(tmp, 'loud');
     fs.mkdirSync(loud);
-    fs.writeFileSync(path.join(loud, 'aiui.config.json'), '{}');
+    fs.writeFileSync(path.join(loud, 'steptix.config.json'), '{}');
     expect(await projectStatsSwitch(loud, { stats: { enabled: false } })).toBe(true);
 
     // No root, or no config file at the root: the run's own config.
@@ -281,7 +281,7 @@ describe('the project switch fails closed (finding 5)', () => {
       ] as const) {
         const root = path.join(tmp, `bad-${name}`);
         fs.mkdirSync(root);
-        fs.writeFileSync(path.join(root, 'aiui.config.json'), body);
+        fs.writeFileSync(path.join(root, 'steptix.config.json'), body);
         expect(await projectStatsSwitch(root, {}), name).toBe(false);
       }
       const messages = warn.mock.calls.map((call) => String(call[0]));
@@ -336,7 +336,7 @@ describe('recordRunEnd', () => {
   it('a run with no step lines and no report writes nothing; with a report it still links it', async () => {
     recordRunEnd(openRunStats({ projectRoot: tmp, deps }), { status: 'passed', report: null });
     await flushStatsWrites();
-    expect(fs.existsSync(path.join(tmp, 'aiui', 'stats'))).toBe(false);
+    expect(fs.existsSync(path.join(tmp, 'steptix', 'stats'))).toBe(false);
 
     recordRunEnd(openRunStats({ projectRoot: tmp, deps }), { status: 'passed', report: path.join(tmp, 'r.html') });
     expect((await written()).runs).toHaveLength(1);

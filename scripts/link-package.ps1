@@ -7,7 +7,7 @@
 
 # --- Configure these ---------------------------------------------------------
 
-# Change this path to point to the ai-ui-automation directory.
+# Change this path to point to the Steptix directory.
 $PackagePath = "C:\Projects\vibe\ai-ui-automation"
 
 # Change this path to be the root folder where the test project is in.
@@ -23,7 +23,7 @@ if (-not (Test-Path $PackagePath -PathType Container)) {
     throw "PackagePath does not exist (or is not a directory): $PackagePath"
 }
 
-# Use the package folder's own name as the link name (e.g. "ai-ui-automation").
+# Use the package folder's own name as the link name (e.g. "steptix").
 $linkName = Split-Path $PackagePath -Leaf
 $linkPath = Join-Path $NodeModulesPath $linkName
 

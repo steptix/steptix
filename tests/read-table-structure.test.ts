@@ -537,8 +537,8 @@ describe('readTable — a { kind: "table" } mapping (§7.10)', () => {
       kind: 'table', rows: ':scope', header: { selector: ':scope', bodyRow: 1 },
     });
     expect(await page.evaluate(() =>
-      Array.from(document.querySelectorAll('[data-aiui-row]'))
-        .map((e) => `${e.getAttribute('data-aiui-row')}:${(e as HTMLElement).innerText.trim().split('\t')[0]}`)))
+      Array.from(document.querySelectorAll('[data-steptix-row]'))
+        .map((e) => `${e.getAttribute('data-steptix-row')}:${(e as HTMLElement).innerText.trim().split('\t')[0]}`)))
       .toEqual(['1:Alice Smith', '2:Bob Jones']);
   });
 
@@ -883,12 +883,12 @@ describe('readTable — a { kind: "collection" } mapping (§7.10)', () => {
     expect(result.dataRowCount).toBe(3);
   });
 
-  it('stamps data-aiui-row on the items it numbered', async () => {
+  it('stamps data-steptix-row on the items it numbered', async () => {
     await load(cards());
     await mapped('#accounts', CARD_COLUMNS, CARD_MAPPING);
     expect(await page.evaluate(() =>
-      Array.from(document.querySelectorAll('[data-aiui-row]'))
-        .map((e) => [e.className, e.getAttribute('data-aiui-row')])))
+      Array.from(document.querySelectorAll('[data-steptix-row]'))
+        .map((e) => [e.className, e.getAttribute('data-steptix-row')])))
       .toEqual([
         ['account-card', '1'],
         ['account-card', '2'],

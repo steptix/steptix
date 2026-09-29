@@ -25,7 +25,7 @@
  * `--disable-blink-features=AutomationControlled`, because a Chrome started
  * with `--remote-debugging-port` otherwise tells every page it is automated
  * (`navigator.webdriver === true`). It is opt-in through
- * `browser.cdp.hideAutomation` in `aiui.config.json` — see
+ * `browser.cdp.hideAutomation` in `steptix.config.json` — see
  * `AUTOMATION_CONTROLLED_FLAG` and `LaunchOptions.hideAutomation`.
  *
  * All deps are injectable so tests can stub fs / spawn / fetch / sleep without
@@ -298,7 +298,7 @@ export async function launchCdpBrowser(
       error:
         `Cannot create the browser profile directory ${opts.profileDir}: ` +
         `${err instanceof Error ? err.message : String(err)}\n` +
-        'Fix permissions on .aiui/cdp-profiles/ and retry.',
+        'Fix permissions on .steptix/cdp-profiles/ and retry.',
     };
   }
 

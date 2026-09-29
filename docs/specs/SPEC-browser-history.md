@@ -260,7 +260,7 @@ index is shown again; go forward, and the linked page is shown again.
 7. Verify the Dashboard page is shown
 ```
 
-Run by `aiui run -t browser-history` from `templates/init`, with the env
+Run by `steptix run -t browser-history` from `templates/init`, with the env
 passthrough the other template tests need.
 
 ## 11. Tests

@@ -740,7 +740,7 @@ describe('a return inside a skill body', () => {
 
   it('quotes the AUTHORED line in every reason, never the resolved argument', async () => {
     // The reason string is written to a wire event, a run log, an HTML report
-    // cell and a TestBench hover. The expander has already put the call's
+    // cell and a Steptix hover. The expander has already put the call's
     // arguments into the step text by the time the loop sees it, so a reason
     // built from `effectiveSteps[i]` publishes the password in all four places.
     // `expansionRawSteps` is the match side, which the expander never
@@ -804,7 +804,7 @@ describe('a return inside a skill body', () => {
  * server interpolates each row into `steps` before recursing, and `matchInput`
  * fell back to that. So a body line reading `If {{password}} is already
  * remembered then return` published the row's password on all four surfaces —
- * wire event, run log, report cell, TestBench hover — and the flow-control
+ * wire event, run log, report cell, Steptix hover — and the flow-control
  * story carved it out as a documented leak.
  *
  * The expander now pins a looped body's match side to the section's own

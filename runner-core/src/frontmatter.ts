@@ -1,5 +1,5 @@
 /**
- * Minimal YAML frontmatter parser scoped to the fields TestBench actually
+ * Minimal YAML frontmatter parser scoped to the fields Steptix actually
  * reads. Not a full YAML implementation — we only need `type`, `disabled`,
  * `env`, `tags`, and the `# Heading` line that follows the frontmatter.
  *
@@ -33,7 +33,7 @@ const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/;
  * Parse the YAML frontmatter at the top of a markdown file. Returns an
  * empty object if there's no frontmatter or it's malformed.
  *
- * Recognises the four fields TestBench uses; anything else in the
+ * Recognises the four fields Steptix uses; anything else in the
  * frontmatter is ignored. Unknown keys do not produce errors — this
  * parser is intentionally tolerant so users can add their own metadata.
  */

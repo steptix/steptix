@@ -304,7 +304,7 @@ export function splitTableRow(raw: string): string[] {
  * or null when it has none.
  *
  * The client side of the same read `src/parser/data-rows.ts` does on the CLI,
- * and on the TestBench path it is the *only* side that does it — the server
+ * and on the Steptix path it is the *only* side that does it — the server
  * receives already-extracted `steps`, never the file — so the validation has
  * to be here too, or a malformed table the CLI refuses would run silently
  * wrong in the editor. `runner-core/tests/data-rows.test.js` and the root
@@ -358,7 +358,7 @@ export function parseDataRows(text: string, filePath = '<buffer>'): DataTableSca
  * fixtures. Sections are found the same way that scanner finds them, so the
  * two agree about what a section heading is.
  *
- * This is the shape TestBench needs to *paint* a section table — `headerLine`
+ * This is the shape Steptix needs to *paint* a section table — `headerLine`
  * for the header summary and `rowLines` for the per-row status marks
  * (stories/data-row-progress-and-selection.md §Section tables). The runner
  * only ever wanted the cell values, which is what `parseSectionDataRows`

@@ -8,7 +8,7 @@ set. Three code paths write to it
 ([session-manager.ts:1456](../src/server/session-manager.ts#L1456),
 [:1551](../src/server/session-manager.ts#L1551),
 [:1675](../src/server/session-manager.ts#L1675)). Downstream consumers
-(flick-vscode's batch outputs panel, testbench's Variables panel) can't
+(flick-vscode's batch outputs panel, steptix's Variables panel) can't
 tell a parameter apart from a runtime capture apart from a skill's
 return value.
 
@@ -136,11 +136,11 @@ overwrite anyway.
   Parameters are stable for the life of a session — the auto-collapse
   rule handles their noise without delta logic.
 
-### testbench-native
+### steptix-vscode
 
 - Update Variables panel
-  ([variables-view.ts](../testbench-native/src/extension/variables-view.ts),
-  [testbench-runner.jsx](../testbench-native/src/webview/testbench-runner.jsx))
+  ([variables-view.ts](../steptix-vscode/src/extension/variables-view.ts),
+  [steptix-runner.jsx](../steptix-vscode/src/webview/steptix-runner.jsx))
   to read `source` on `CaptureEvent` and visually distinguish
   `toolOutput` from `capture` (e.g., a small icon, italics, or a
   sub-group). Parameters already render distinctly because they arrive
@@ -207,7 +207,7 @@ No version flag needed. Both changes are purely additive.
     correctly for a test with a parameter, a capture, and a skill
     output.
 
-### testbench-native
+### steptix-vscode
 
 11. **Variables panel test** — feed `capture` events with
     `source: 'toolOutput'` and `source: 'capture'` through the existing
@@ -225,7 +225,7 @@ Land in this order so each step is independently reviewable:
    runner-core protocol). Lands second.
 3. **flick-vscode** consumes `outputSources` + delta filter + sectioned
    UI with Parameters auto-collapsed.
-4. **testbench-native** Variables panel uses `source` (cosmetic; can
+4. **steptix-vscode** Variables panel uses `source` (cosmetic; can
    ship later, independently).
 
 Each step has its own commit + tests; each step keeps old clients

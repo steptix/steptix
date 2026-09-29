@@ -114,9 +114,9 @@ is silently wrong:
 
 | Path | Project `.env` reaches `process.env`? |
 | --- | --- |
-| `aiui run` | Yes — `cli/index.ts` calls `loadDefaultEnvFileSync()` at module scope |
+| `steptix run` | Yes — `cli/index.ts` calls `loadDefaultEnvFileSync()` at module scope |
 | Electron Runner UI | Yes — `ui/main/index.ts` does the same |
-| Sessions API server (TestBench) | **No** |
+| Sessions API server (Steptix) | **No** |
 | MCP | **No** |
 
 The server path is not an oversight to repair. `project-bundle.ts` resolves
@@ -147,7 +147,7 @@ machine-wide. It also would not generalise: the credential chain is more than
 one variable, and forwarding a region while credentials still came from the
 machine would be the confusing half-measure.
 
-One consequence worth naming: TestBench's `serverAutoStart` launches the server
+One consequence worth naming: Steptix's `serverAutoStart` launches the server
 as a child process, so the server inherits the environment of whatever launched
 VS Code. A region exported in a terminal *after* VS Code started is not in that
 environment. Set it where it persists — the user's environment variables, the
@@ -254,7 +254,7 @@ fits.
 
 ### The CLI keyless gap — a real hole, with a one-line fix
 
-`ai.allowInRuns` and `runSettings.ai` are server-path only; the `aiui run` CLI
+`ai.allowInRuns` and `runSettings.ai` are server-path only; the `steptix run` CLI
 resolves no run settings and computes keyless from `aiConfigured` alone, where
 a blank `AI_API_KEY=` is the only switch. For a Mode-2 Bedrock project there is
 no key to blank, so **a CI user loses their only way to force a no-AI run** —
@@ -266,11 +266,11 @@ CLI/server inconsistency that forced a doc-scoping fix earlier.
 
 **Not one line, though — two, and the second is the one that bites.** `runTest`
 is shared with the compiler: `compileTest` drives it through
-`createTestFileRunner`, so a gate added there gates `aiui compile` as well, and
+`createTestFileRunner`, so a gate added there gates `steptix compile` as well, and
 the switch's own documented carve-out ("Compile, repair and errands are
 deliberately NOT gated by it; they are requests *for* AI" — `src/config/types.ts`
 and the JSON schema) stops being true on the CLI. The failure is total and
-silent in the worst direction: `aiui compile` on an `allowInRuns: false` project
+silent in the worst direction: `steptix compile` on an `allowInRuns: false` project
 refuses every step and writes nothing, on exactly the projects that set the
 switch in order to *have* compiled steps to replay.
 

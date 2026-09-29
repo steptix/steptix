@@ -133,7 +133,7 @@ banner. The exit code is non-zero if any row failed. A wrong expectation
 in row 3 goes red on row 3, the matrix line for row 3 is the red one, and
 the remaining rows still run. `## Latest runs` gains one line, not five.
 
-**You write:** the same file, and press Run in TestBench.
+**You write:** the same file, and press Run in Steptix.
 **You get:** the gutter paints the steps for row 1, clears, then paints
 them for row 2, and so on, with the same banner line in the output log at
 each boundary. When the loop ends the gutter shows the *worst* status each
@@ -174,7 +174,7 @@ failure re-enters at the call and runs every iteration again.
 **You write:** a table under `## Steps` and `dataFile: users.csv` in the
 frontmatter.
 **You get:** a parse error naming both — a run has one source of rows —
-from the CLI, from TestBench's diagnostics, and from a run.
+from the CLI, from Steptix's diagnostics, and from a run.
 
 **You write:** the step *"Verify {{outcome}}"* and compile the sign-in
 test to code-behind.
@@ -345,7 +345,7 @@ and never compiles, since no recorded field carries a verb; write two
 steps or two rows of a noun instead. And a section's columns are bound
 only inside that section's body: `{{payee}}` in step 3 of the payee
 example, after the call, is an unresolved placeholder that reaches the
-model as text, and TestBench's completion will not offer it there.
+model as text, and Steptix's completion will not offer it there.
 
 ## Context — what exists, and what is missing
 
@@ -375,7 +375,7 @@ load-bearing in one other place: `buildReportBaseName` also names the
 run's `.webm`, so the videos are told apart by it too
 ([test-runner.ts:1387](../src/runner/test-runner.ts),
 [manager.ts:1650](../src/browser/manager.ts)). Nothing under `tests/`
-asserts the suffix. `aiui list`
+asserts the suffix. `steptix list`
 prints a `data-driven` tag from the frontmatter alone; it never parses the
 body. The compile pipeline's `firstDataRow`
 ([compile.ts](../src/codebehind/compile.ts)) records against row 1 and
@@ -397,28 +397,28 @@ merged verbatim; `resolveCompileParameters` does the same. A
 Decision 3 makes cells follow the parameter rule, which fixes `dataFile:`
 rows too.
 
-**The Sessions API path does not loop for runs.** TestBench parses
+**The Sessions API path does not loop for runs.** Steptix parses
 `## Config` and `## Parameters` on the client with runner-core's
 [test-meta.ts](../runner-core/src/test-meta.ts), resolves `$VAR` with
 `resolveValueFromEnv` against the `.env` overlay, and posts the run —
 `steps`, `sourceLines`, `parameters`, `sections`, `testFilePath`… — to
 `POST /sessions/:id/steps`
-([run-controller.ts](../testbench-native/src/extension/run-controller.ts),
+([run-controller.ts](../steptix-vscode/src/extension/run-controller.ts),
 `streamSteps`). One Run is one batch per contiguous step block: an
 `[input:]` or `[interactive]` step splits it into several `streamSteps`
 calls, so the row loop wraps that block loop rather than replacing it. The
 server takes `parameters` as given
 ([session-manager.ts](../src/server/session-manager.ts), "Build the
 parameter map") and interpolates `{{…}}` per step, leaving an unresolved
-placeholder literal. So a `dataFile:` test run from TestBench runs *once*,
+placeholder literal. So a `dataFile:` test run from Steptix runs *once*,
 with `{{email}}` reaching the model as text if `## Parameters` did not
 also define it. The same is true of the MCP `run_test_file` path
 ([assemble.ts](../src/mcp/assemble.ts)), which reads `parsed.parameters`
 and posts one batch, and of the old Electron UI's `runner-adapter`, which
-takes `instances[0]` on purpose. TestBench's *compile* path is different:
+takes `instances[0]` on purpose. Steptix's *compile* path is different:
 [compile-runner.ts](../src/server/compile-runner.ts) parses the file
 server-side and already applies `firstDataRow`, so a `dataFile:` compile
-from TestBench records row 1 today. Runs are the gap.
+from Steptix records row 1 today. Runs are the gap.
 
 **The server writes a report per *batch*, and the client could not write
 one if it wanted to.** `fullStepResults` is declared inside `postSteps`
@@ -431,7 +431,7 @@ what crosses the SSE stream is `StepResultResponse`
 ([:673](../src/server/session-manager.ts)) —
 `{ step, status, actions, screenshot, reasoning, outputs }` — with no
 turns, durations, token attribution, DOM snapshots or code-behind
-provenance, and neither `testbench-native/src` nor `runner-core/src`
+provenance, and neither `steptix-vscode/src` nor `runner-core/src`
 imports `generateReport` or `renderReport` at all. That settles decision
 12's hardest half before it is asked: the accumulation is the server's.
 The precedent for *where* it lives is `lastRunInfo`
@@ -455,7 +455,7 @@ snapshots on the frame so the Variables view can show them at a pause and
 today. Code-behind is generated once per body, not per call: "a section
 invoked twice binds both invocations to the same entries", frame-aware
 `getVar` doing the per-call mapping (stories/step-codebehind.md, "Skill
-variables"). TestBench ships section definitions in the batch's
+variables"). Steptix ships section definitions in the batch's
 `sections` field (`{ name, headingLine, steps, stepLines }`, contract
 §3.2), because the server cannot read an unsaved buffer. Part B is "a
 section call with rows is N calls, each a frame with `inputs`" — the
@@ -543,7 +543,7 @@ is a new branch in the walk, not a new parser. No test or skill file under
    because today a row value bypasses that branch (§"Context"): on the
    CLI, `resolveValue` applies the `$` test to a data-row value before
    returning it (which fixes `dataFile:` rows at the same time), and
-   `resolveCompileParameters` follows suit; in TestBench the loop passes
+   `resolveCompileParameters` follows suit; in Steptix the loop passes
    each row through `resolveSection`. A `$` cell whose variable is unset
    stays literal with a warning, as a parameter does. A literal dollar
    amount therefore cannot start a cell — write `USD 100` or put the `$`
@@ -568,7 +568,7 @@ is a new branch in the walk, not a new parser. No test or skill file under
 
 5. **Every run row is a fresh browser, and the run loop lives in the
    caller.** Row 1 signs in; row 2 must not start on the dashboard. The CLI
-   already gives each instance its own browser. TestBench keeps its
+   already gives each instance its own browser. Steptix keeps its
    *existing* session id (`<file>` for an interactive run,
    `<file>::run-<n>` for a batch run) and closes the session at every row
    boundary, so the next row's batch creates it afresh under the same id.
@@ -578,7 +578,7 @@ is a new branch in the walk, not a new parser. No test or skill file under
    collision `::run-<n>` was minted to avoid. The row number rides the
    request, not the id. The server stays row-agnostic for *executing* the
    run loop: it runs a batch with some `parameters`, as now. Two thin loops
-   (CLI has one, TestBench gains one) are cheaper and safer than one fat
+   (CLI has one, Steptix gains one) are cheaper and safer than one fat
    server loop that would have to thread rows through step painting, pause,
    breakpoints and re-run. What the server is *not* agnostic about is the
    report: it accumulates step results across the rows' batches and renders
@@ -597,7 +597,7 @@ is a new branch in the walk, not a new parser. No test or skill file under
    ran gets a line in the one report's matrix table (decision 12), and why
    a row that did not run gets one too, reading "not run". The CLI's exit
    code and `--bail` behave as they do
-   across tests (bail stops after the first failing row); TestBench's Stop
+   across tests (bail stops after the first failing row); Steptix's Stop
    stops the current row and paints the remaining rows' steps as skipped,
    reported as "not run (stopped)". A pause inside a multi-row run loop —
    breakpoint, Pause, `[input:]`, `[interactive]` — ends the loop after
@@ -618,10 +618,10 @@ is a new branch in the walk, not a new parser. No test or skill file under
    (§"Painting, pause, re-run" under part B). Rows never run in parallel
    in this story.
 
-7. **Run one row.** CLI: `aiui run test.md --row 3` (1-based, matching the
+7. **Run one row.** CLI: `steptix run test.md --row 3` (1-based, matching the
    row's position in the table and the number its matrix line carries; out
    of range is an error naming the count; the pattern
-   must match exactly one file). TestBench: a *Run this row* CodeLens on
+   must match exactly one file). Steptix: a *Run this row* CodeLens on
    each table row — a new provider, the extension has none today — which
    for a run-level table is the ordinary interactive run with the rows
    narrowed to one, so nothing about pause, breakpoints, F11, the
@@ -639,12 +639,12 @@ is a new branch in the walk, not a new parser. No test or skill file under
 8. **Row runs never use the step cache.** The cache is being removed and
    this story adds nothing to it. While it still exists, a run that has
    rows anywhere — under `## Steps` or under a section — forces it off the
-   way a TestBench re-run already does (`cacheEnabled` omitted from the
+   way a Steptix re-run already does (`cacheEnabled` omitted from the
    batch; the CLI passes `cacheEnabled: false` for the instance). Replay
    economy for rows comes from code-behind, which is the surviving
    mechanism.
 
-9. **Rows are read once, when Run is pressed.** TestBench re-reads the
+9. **Rows are read once, when Run is pressed.** Steptix re-reads the
    live buffer per step block for `fullSteps` and `sections`; rows — both
    kinds — are snapshotted at the start so a mid-run table edit cannot
    change the count, reorder rows, or make the matrix table's row numbers
@@ -674,7 +674,7 @@ is a new branch in the walk, not a new parser. No test or skill file under
 11. **Compile records row 1 and iteration 1, and only the first run row
     writes the recording.** The author puts a fully populated row first;
     an empty referenced value in the recorded row declines the step with a
-    reason that says so (§"Code-behind"). On the TestBench path only the
+    reason that says so (§"Code-behind"). On the Steptix path only the
     first selected run row's batch carries `compile`; the remaining rows
     run plain, so a matrix Run & Compile produces one recording and one
     generation rather than five that overwrite each other. They are still
@@ -700,7 +700,7 @@ is a new branch in the walk, not a new parser. No test or skill file under
     One thing rides on `compile` and not on `withinCompileRun`, and it is
     the "one compile per test file at a time" lock: it is acquired for the
     batch that asks for a compile, so rows 2..N hold none and another
-    client's compile of the same file can start mid-loop — TestBench's own
+    client's compile of the same file can start mid-loop — Steptix's own
     `isRunning` covers the same-client case, and the pre-rows code left the
     same gap between rows. Not closed here.
 
@@ -764,7 +764,7 @@ is a new branch in the walk, not a new parser. No test or skill file under
   for parameters today (the `interpolateEnvData` call on
   `parsed.parameters`), so `dataRows` and `parameters` see the same
   context. `parseSkillFile` refuses a table under the skill's `## Steps`.
-- `dataFile:` plus a table throws from the parser. `aiui list` does not
+- `dataFile:` plus a table throws from the parser. `steptix list` does not
   parse the body, so it gains a scan for a pipe-led line between
   `## Steps` and its first numbered item, to print the `data-driven` tag
   for inline tables; it does not report the conflict.
@@ -825,7 +825,7 @@ is a new branch in the walk, not a new parser. No test or skill file under
   an object of string values.
 - What they change. The run-log header line gains `dataRow=N/M`, and one
   `output` info event `Row N of M` is emitted at batch start so
-  TestBench's log and the Test Explorer's output both carry it — both as
+  Steptix's log and the Test Explorer's output both carry it — both as
   before. What is new is the report: **a batch carrying `dataRow` writes
   no report at all.** It appends its `fullStepResults` — each step stamped
   with `loop: { kind: 'row', index: dataRow, count: dataRowCount, values:
@@ -925,7 +925,7 @@ expand on the server, and MCP already sends `sections`.
   body content (they precede any `###`, so today they are simply prose;
   the test pins it).
 
-### TestBench (`testbench-native`)
+### Steptix (`steptix-vscode`)
 
 - `run-controller` parses run rows next to `parseParameters` and
   snapshots them (decision 9). With rows, `run` becomes a loop around the
@@ -988,7 +988,7 @@ expand on the server, and MCP already sends `sections`.
 
 ### Step cache
 
-Forced off for row runs (decision 8). TestBench's loop omits
+Forced off for row runs (decision 8). Steptix's loop omits
 `cacheEnabled` from every row batch, and from any batch whose `sections`
 carry rows; `runTest` on the CLI passes `cacheEnabled: false` when the
 instance has a `dataRowIndex` or the parsed test has a looped section.
@@ -1033,7 +1033,7 @@ whose `condition` echoes the parameter value verbatim: it must decline.
 needs no `projectRoot` for inline rows, so compile-runner's guard becomes
 `test.dataRows || bundle.projectRoot` and its info line gets an inline
 variant. `resolveCompileParameters` consumes the row and applies the `$`
-rule (decision 3). On the TestBench path the `LiveCompiler` is per session
+rule (decision 3). On the Steptix path the `LiveCompiler` is per session
 and `writeRecording` wipes the directory each compiling run, which is why
 decision 11 sends `compile` on the first selected row only; *Compile This
 Step* inside a row run uses that row's parameters and splices against the
@@ -1053,7 +1053,7 @@ A `'run'` compile does not turn execution off, so every row writes:
 replay, while the recording beside the test is row 1's (decision 11) —
 they can disagree, and last-writer-wins is not worse than row-1-only for
 the question the sidecar's readers ask ("does this entry still work?").
-The ⚠ hover is not one of those readers: TestBench paints it from the
+The ⚠ hover is not one of those readers: Steptix paints it from the
 live step event's `codeBehindStale` and reads no sidecar. A worst-of-rows
 merge is a follow-on.
 
@@ -1132,7 +1132,7 @@ second.
 ### Hooks
 
 `before`/`after` hooks run per row on the CLI, because each row is a full
-`runTest`; the Sessions API has no hook handling at all, so from TestBench
+`runTest`; the Sessions API has no hook handling at all, so from Steptix
 they run zero times. That is today's split, unchanged, but a `before` hook
 that seeds state (the fixture's `/api/documents`, say) now runs five times
 on one path and never on the other — worth knowing when writing one.
@@ -1245,7 +1245,7 @@ before the call line is parsed, so `[skill: x email="{{email}}"]` works.
   would be per call today.
 - `$VAR` cells do not resolve where skill args resolve — skill args never
   resolve `$VAR`. The CLI parser applies `resolveValue`'s `$` branch per
-  cell; TestBench resolves cells with `resolveValueFromEnv` before shipping
+  cell; Steptix resolves cells with `resolveValueFromEnv` before shipping
   `rows`, as it does for `## Parameters`. `${env.X}` cells are interpolated
   at parse time with the rest of the file.
 
@@ -1258,7 +1258,7 @@ before the call line is parsed, so `[skill: x email="{{email}}"]` works.
   `table` token: `marked` folds it into the list item. The raw scan is
   therefore the refusing side for "table after a step", run per section
   span as well as for the `## Steps` head, so the CLI refuses what
-  TestBench's wrap pre-flight already refuses and the two paths do not
+  Steptix's wrap pre-flight already refuses and the two paths do not
   diverge.
 - The editor side needs nothing to *find* the body: `classifyLines` makes
   pipe lines prose, `extractSections` (runner-core `step-lines.ts`, the
@@ -1328,8 +1328,8 @@ before the call line is parsed, so `[skill: x email="{{email}}"]` works.
   ends the batch and parks the same way, resumes the same way. The server
   refuses any `startAt` whose step's frame chain contains a looped section
   and no iteration — the way an unanchored `startAt` is refused today —
-  and TestBench mirrors it in the pre-flight as a new TB code (next free
-  is TB032; runner-core `node --test` and the `SAMPLE_CONTEXTS` audit
+  and Steptix mirrors it in the pre-flight as a new TB code (next free
+  is STX032; runner-core `node --test` and the `SAMPLE_CONTEXTS` audit
   follow). An iteration-aware anchor is a follow-on.
 - *Run selected body lines* runs a body detached at the root frame, with
   no invocation and no row, so `{{file}}` would reach the model as text —
@@ -1567,7 +1567,7 @@ its first numbered step past the table; `section-index` unchanged;
 `frontmatter` reads `dataFile`; the two new TB codes are in
 `SAMPLE_CONTEXTS`.
 
-**TestBench integration** (FakeApiClient harness, `batch-mode.test.cjs`
+**Steptix integration** (FakeApiClient harness, `batch-mode.test.cjs`
 and `viewport.test.cjs` patterns): a 3-row file posts three batches on one
 session id with per-row `parameters` and
 `dataRow`/`dataRowCount`/`dataRowValues`, with
@@ -1603,7 +1603,7 @@ asserts the leak-guard *error* became a *decline*); the assert-condition-
 echo minimum case declines; an empty recorded value declines with the
 "populated row first" reason; `firstDataRow` reads inline rows without a
 project root; replay rows 1 and 2 (`tests/codebehind-healed-run.test.ts`
-home) and assert no heal on either; a two-row TestBench run leaves row 1's
+home) and assert no heal on either; a two-row Steptix run leaves row 1's
 recording on disk. Part B, second PR (`tests/codebehind-vars.test.ts`,
 `tests/codebehind-skill-params.test.ts` patterns): inside a looped section
 frame `getVar('file')` reads that iteration's inputs; skill → looped
@@ -1613,7 +1613,7 @@ value; the upload fixture compiles body line 1 to a `filePath(getVar('file'))`
 entry and declines body line 2; three iterations bind to the same two
 entries.
 
-**Live** (`testbench-native/tests/integration/live/`): the sign-in fixture
+**Live** (`steptix-vscode/tests/integration/live/`): the sign-in fixture
 against `fixtures/test-app`, all five rows; assert from disk
 (stop-report's pattern) that the run left **one** HTML file, that it
 holds five matrix lines and thirty steps, and that no `-row` file exists
@@ -1629,7 +1629,7 @@ Part A first: parser, runner and the report merge (CLI-complete, useful on
 its own; the `$VAR` fix and the one-report change both reach `dataFile:`
 users immediately, since `dataFile:` is what writes `-rowN` files today),
 then the Sessions API fields, the accumulator and its finalise route, plus
-the MCP notice, then TestBench. Part B after part A has landed,
+the MCP notice, then Steptix. Part B after part A has landed,
 as two PRs: the runtime half (scanners, expander loop, wire and contract,
 painting fix, secrets, resume refusals, report badge), then the
 code-behind scope change. Every part bundles runner-core changes
@@ -1729,11 +1729,11 @@ change was not separately reviewed.
 **Claims-vs-code** confirmed most of the code claims and corrected these:
 a data-row value bypasses `$VAR` resolution today (decision 3 is new work,
 and fixes `dataFile:` rows); the run-log *file* is not titled with the
-row, only the console line; `aiui list` prints a tag from the frontmatter
+row, only the console line; `steptix list` prints a tag from the frontmatter
 and never parses the body; the CLI summary already counts each row as a
 separate test, so "the test is green only if every row is" was a new
 aggregate, now dropped in favour of the existing per-instance listing;
-TestBench posts one batch per step block, not one per run; the generator's
+Steptix posts one batch per step block, not one per run; the generator's
 mechanism is `stepParameters` plus a leak guard, not `resolveInputValue`;
 the cache key is the step index on the CLI, and rows already share a cache
 directory under test; the "action cache kept for now" citation pointed at
@@ -1744,14 +1744,14 @@ rule; nothing tests `expandTestInstances` today. (It also found that a
 reserved `## Data` name had to join two `RESERVED_SECTION_NAMES` sets;
 moot now that there is no reserved heading.)
 
-**Design and test plan** found four blockers on the TestBench half. A
+**Design and test plan** found four blockers on the Steptix half. A
 `::row-<n>` session id broke Continue after a pause (which posts to the
 stable id), the keep-alive and the out-of-band session ops, and would have
 recreated the leftover-session collision — replaced by the existing id
 with a close at every row boundary (decision 5), and a pause now ends the
 run loop (decision 6). Row 2 would have launched without `baseUrl` because
 the write-once config flag is reset per run, not per row — the boundary
-is now spelled out step by step (§"TestBench"). `dataRow` on the request
+is now spelled out step by step (§"Steptix"). `dataRow` on the request
 cannot give the CLI's report title because the server names from the file
 basename — the story then promised the suffix, the meta line, a run-log
 field and an output event (the first two are gone as of 2026-09-04; the
@@ -1770,8 +1770,8 @@ diagnostic is a story of its own; no CodeLens provider exists yet; under
 `cdp:` step 2 fails rather than "differs"; the runner loop needs an
 injectable `runTest` to be testable.
 
-**Adversarial** overlapped on `$VAR` cells, the compile-on-TestBench
-overwrite, the vouching fields, `aiui list`, the report-name mismatch and
+**Adversarial** overlapped on `$VAR` cells, the compile-on-Steptix
+overwrite, the vouching fields, `steptix list`, the report-name mismatch and
 the diagnostic, and added: `\|` is a legal pipe in a cell and a raw scan
 that ignores it reports a false ragged row; the run-history marker lands
 inside the last section and would have tripped the "one table" rule;
@@ -1851,7 +1851,7 @@ tokens, breakpoints fire per iteration, and nothing about a row reaches
   loop-finishing variants are deferred.
 - `$VAR` cells resolve by the parameter rule at `resolveValue`,
   `resolveCompileParameters`, the CLI parser (section cells) and the
-  TestBench loop/scanner; `dataFile:` rows benefit.
+  Steptix loop/scanner; `dataFile:` rows benefit.
 - Section rows bind at expansion time, with the authored body snapshotted
   as the match side; nested bodies see enclosing rows, inner wins.
 - Every frame's secret-named `inputs` join the secret list on both
@@ -1860,7 +1860,7 @@ tokens, breakpoints fire per iteration, and nothing about a row reaches
 - Vouching fields for the compile decline: `value`, `filePath(s)`, `url`;
   never `selector` or any assert field. Empty recorded value declines
   with the "populated row first" reason.
-- Only run row 1 writes the recording and the sidecar; TestBench sends
+- Only run row 1 writes the recording and the sidecar; Steptix sends
   `compile` on the first selected row only. A section loop records every
   iteration in its one run and generates once per body, and needs the
   scope-composition change before any of it compiles.
@@ -1971,14 +1971,14 @@ section records the reversal and what it took; decision 12 is the rule and
   counting" part A leaned on, and it is what made a five-row smoke test
   read as five tests in `Total:`
   ([run.ts:250](../src/cli/commands/run.ts)).
-- **The Sessions API accumulates on the server, not in TestBench.** Not a
+- **The Sessions API accumulates on the server, not in Steptix.** Not a
   preference: `fullStepResults` is local to `postSteps` and holds real
   `StepResult`s ([session-manager.ts:2265](../src/server/session-manager.ts)),
   while the client is sent `StepResultResponse`
   ([:673](../src/server/session-manager.ts)) — six fields, no turns, no
   durations, no token attribution, no code-behind provenance — and neither
-  `testbench-native/src` nor `runner-core/src` imports `generateReport` or
-  `renderReport`. TestBench aggregating would mean a second full-fidelity
+  `steptix-vscode/src` nor `runner-core/src` imports `generateReport` or
+  `renderReport`. Steptix aggregating would mean a second full-fidelity
   wire shape and moving report rendering into an extension that has never
   rendered one. So the server accumulates.
 - **The accumulator lives on the manager, keyed like `lastRunInfo`.**

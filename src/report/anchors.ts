@@ -13,7 +13,7 @@
  *                                    (a report or a line written before it)
  *
  * Built from exactly what a step line records — `step`, `row`, `hook` and
- * `hookIndex` — so a reader of the lines (`aiui stats --failures`) builds the
+ * `hookIndex` — so a reader of the lines (`steptix stats --failures`) builds the
  * id the report rendered without opening the report.
  *
  * One id can still fit several cards: a loop body runs its steps once per

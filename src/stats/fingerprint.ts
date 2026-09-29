@@ -1,7 +1,7 @@
 /**
  * Which rules, and which build, a line was written under (§5.5) — so a change
  * to the step prompt can be judged by the lines on either side of it
- * (`aiui stats --by prompt`).
+ * (`steptix stats --by prompt`).
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';

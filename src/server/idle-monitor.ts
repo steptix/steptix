@@ -3,7 +3,7 @@
  *
  * "Idle" for shutdown purposes is **no run in flight AND no authenticated
  * request for N minutes** — deliberately NOT "no open sessions". Interactive
- * TestBench runs keep their session (and browser) open indefinitely for reuse
+ * Steptix runs keep their session (and browser) open indefinitely for reuse
  * and survive VS Code reloads by design, so a session-count-based definition
  * would never fire. See stories/server-lifecycle.md §3.
  *

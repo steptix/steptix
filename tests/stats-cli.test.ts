@@ -1,8 +1,8 @@
 /**
- * `aiui stats` end to end (docs/specs/SPEC-scoreboard.md §9, §15 "The
+ * `steptix stats` end to end (docs/specs/SPEC-scoreboard.md §9, §15 "The
  * command"): the real command against a fixture month file in a temp user
  * root — never the real %LOCALAPPDATA% — with the clock and the time zone
- * pinned, the way `aiui status` and `aiui stop` are tested (console captured,
+ * pinned, the way `steptix status` and `steptix stop` are tested (console captured,
  * exit code returned).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -22,7 +22,7 @@ let out: string[];
 let err: string[];
 
 beforeEach(() => {
-  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-stats-cli-')));
+  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-stats-cli-')));
   out = [];
   err = [];
   vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
@@ -48,12 +48,12 @@ function stats(opts: StatsOptions = {}, env: Record<string, string> = {}): Promi
 }
 
 function statsDir(): string {
-  return path.join(tmp, 'aiui', 'stats');
+  return path.join(tmp, 'steptix', 'stats');
 }
 
 function machineEnv(content: string): void {
-  fs.mkdirSync(path.join(tmp, 'aiui'), { recursive: true });
-  fs.writeFileSync(path.join(tmp, 'aiui', '.env'), content);
+  fs.mkdirSync(path.join(tmp, 'steptix'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'steptix', '.env'), content);
 }
 
 function writeMonth(month: string, content: string): void {
@@ -230,7 +230,7 @@ function writeFixture(): Fixture {
 const NOTES = ['', 'Note: skipped 1 line that could not be read.', 'Note: removed 1 month file older than 6 months.'];
 const RETRIES = 'First try ok and Most common failure count each step’s first attempt; Actions counts retries too.';
 
-describe('aiui stats', () => {
+describe('steptix stats', () => {
   it('by default: the last 30 days of your runs by selector form, then the steps and cost lines', async () => {
     writeFixture();
     expect(await stats()).toBe(0);
@@ -258,7 +258,7 @@ describe('aiui stats', () => {
       ...NOTES,
     ]);
     expect(err).toEqual([]);
-    // §6.3: the start of `aiui stats` ages out old months.
+    // §6.3: the start of `steptix stats` ages out old months.
     expect(fs.readdirSync(statsDir()).sort()).toEqual(['actions-2026-08.jsonl', 'actions-2026-09.jsonl']);
   });
 
@@ -492,7 +492,7 @@ describe('aiui stats', () => {
       '',
       'Nothing recorded yet.',
       `Every run keeps a line per AI action and step in ${statsDir()}, one file a month.`,
-      `Recording is on. AIUI_STATS=off in ${path.join(tmp, 'aiui', '.env')} turns it off for the whole machine.`,
+      `Recording is on. STEPTIX_STATS=off in ${path.join(tmp, 'steptix', '.env')} turns it off for the whole machine.`,
     ]);
     expect(err).toEqual([]);
   });
@@ -509,7 +509,7 @@ describe('aiui stats', () => {
   });
 
   it('a stats folder that cannot be read is an error, not an empty month', async () => {
-    fs.mkdirSync(path.join(tmp, 'aiui'), { recursive: true });
+    fs.mkdirSync(path.join(tmp, 'steptix'), { recursive: true });
     fs.writeFileSync(statsDir(), 'a file where the folder should be');
     expect(await stats()).toBe(1);
     expect(err.join('\n')).toContain(`could not read ${statsDir()}`);
@@ -518,13 +518,13 @@ describe('aiui stats', () => {
 
   it('nothing in the default window: says the window is the default, and where older months are', async () => {
     writeMonth('2026-08', jsonl([{ v: 1, kind: 'run', t: '2026-08-01T00:00:00.000Z', run: 'r', project: tmp, test: null, suite: 'user', status: 'passed', steps: 0, firstTry: 0, failed: 0, report: null }]));
-    machineEnv('AIUI_STATS=off\n');
+    machineEnv('STEPTIX_STATS=off\n');
     expect(await stats()).toBe(0);
     expect(out.slice(2)).toEqual([
       'Nothing recorded in the last 30 days, the default window.',
       'Earlier months are on disk, the latest 2026-08: --since 2026-08-01 reaches it.',
       `Every run keeps a line per AI action and step in ${statsDir()}, one file a month.`,
-      `Recording is off on this machine: AIUI_STATS=off in ${path.join(tmp, 'aiui', '.env')}.`,
+      `Recording is off on this machine: STEPTIX_STATS=off in ${path.join(tmp, 'steptix', '.env')}.`,
     ]);
 
     // A window the user typed is theirs: no advice about the default.
@@ -533,16 +533,16 @@ describe('aiui stats', () => {
     expect(out[2]).toBe('Nothing recorded in this window.');
   });
 
-  it('recording is judged by the machine .env; this shell’s own AIUI_STATS=off is said apart', async () => {
+  it('recording is judged by the machine .env; this shell’s own STEPTIX_STATS=off is said apart', async () => {
     writeMonth('2026-08', '');
-    expect(await stats({}, { AIUI_STATS: 'off' })).toBe(0);
+    expect(await stats({}, { STEPTIX_STATS: 'off' })).toBe(0);
     expect(out[out.length - 1]).toBe(
-      'Recording is on for this machine, but AIUI_STATS=off in this shell’s environment: runs started from here record nothing.',
+      'Recording is on for this machine, but STEPTIX_STATS=off in this shell’s environment: runs started from here record nothing.',
     );
     out = [];
-    expect(await stats({ json: true }, { AIUI_STATS: 'off' })).toBe(0);
+    expect(await stats({ json: true }, { STEPTIX_STATS: 'off' })).toBe(0);
     expect(JSON.parse(out.join('\n')).recording).toBe(true);
-    machineEnv('AIUI_STATS=0\n');
+    machineEnv('STEPTIX_STATS=0\n');
     out = [];
     expect(await stats({ json: true })).toBe(0);
     expect(JSON.parse(out.join('\n')).recording).toBe(false);
@@ -689,7 +689,7 @@ describe('aiui stats', () => {
   });
 });
 
-describe('retention, from aiui stats (§6.3)', () => {
+describe('retention, from steptix stats (§6.3)', () => {
   const monthFiles = () => fs.readdirSync(statsDir()).filter((name) => name.endsWith('.jsonl')).sort();
 
   it('a bad flag prunes nothing: the flags are checked before anything is touched', async () => {
@@ -724,11 +724,11 @@ describe('retention, from aiui stats (§6.3)', () => {
   it('keeps as many months as the machine .env says, whatever this shell says', async () => {
     writeFixture();
     // This shell asks for one month: ignored, or it would delete August.
-    expect(await stats({}, { AIUI_STATS_RETAIN_MONTHS: '1' })).toBe(0);
+    expect(await stats({}, { STEPTIX_STATS_RETAIN_MONTHS: '1' })).toBe(0);
     expect(monthFiles()).toEqual(['actions-2026-08.jsonl', 'actions-2026-09.jsonl']);
     // The machine asks for twelve: January stays.
     writeMonth('2026-01', '');
-    machineEnv('AIUI_STATS_RETAIN_MONTHS=12\n');
+    machineEnv('STEPTIX_STATS_RETAIN_MONTHS=12\n');
     out = [];
     expect(await stats()).toBe(0);
     expect(monthFiles()).toEqual(['actions-2026-01.jsonl', 'actions-2026-08.jsonl', 'actions-2026-09.jsonl']);
@@ -779,11 +779,11 @@ describe('parseWhen: --since and --until', () => {
 describe('the stats command in the CLI', () => {
   /** Point the environment's user root at `tmp` for the length of `body`. */
   async function withUserRoot<T>(body: () => Promise<T>): Promise<T> {
-    const saved = { LOCALAPPDATA: process.env['LOCALAPPDATA'], XDG_CONFIG_HOME: process.env['XDG_CONFIG_HOME'], AIUI_STATS: process.env['AIUI_STATS'] };
+    const saved = { LOCALAPPDATA: process.env['LOCALAPPDATA'], XDG_CONFIG_HOME: process.env['XDG_CONFIG_HOME'], STEPTIX_STATS: process.env['STEPTIX_STATS'] };
     const exitCode = process.exitCode;
     process.env['LOCALAPPDATA'] = tmp;
     process.env['XDG_CONFIG_HOME'] = tmp;
-    delete process.env['AIUI_STATS'];
+    delete process.env['STEPTIX_STATS'];
     try {
       return await body();
     } finally {

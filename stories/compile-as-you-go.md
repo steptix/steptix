@@ -110,7 +110,7 @@ story stops paying.
 
 ### Run & Compile
 
-A new TestBench command, `testbench-native.runAndCompile`, beside Run in the
+A new Steptix command, `steptix.runAndCompile`, beside Run in the
 panel and the command palette. It is a run first: it goes through the same
 run machinery, appears in `GET /sessions` as a run, paints the gutter,
 honours breakpoints, Pause and Stop. The step request carries one new flag,
@@ -150,7 +150,7 @@ transcript is still a transcript.
 
 ### Compile This Step
 
-The command keeps its id (`testbench-native.compileStepCodeBehind`) and its
+The command keeps its id (`steptix.compileStepCodeBehind`) and its
 gutter spot, and stops being a whole-test compile. Right-click resolves the
 clicked line to the authored step; the extension needs a session for the
 document — the active one, or it opens one, as the first Run does — and
@@ -209,7 +209,7 @@ generates from what is on disk; the step runs now and the new transcript
 replaces the old one. No "reuse the recording from Tuesday?" prompt, no
 staleness heuristics.
 
-Mechanically the recording dir (`.aiui-codebehind-cache/<name>.recording/`,
+Mechanically the recording dir (`.steptix-codebehind-cache/<name>.recording/`,
 one JSON per step plus DOM files) is today "replaced wholesale by the next
 one". A Run & Compile run keeps that rule — it is a full run, its recording
 supersedes the old one entirely. A single-step compile cannot replace
@@ -257,7 +257,7 @@ because the server behaves differently per mode (Review and a wholesale
 recording on `'run'`; no Review, a spliced recording and code-behind
 disabled on `'steps'`), and a bare boolean would leave it guessing which
 the client meant. The run stream gains two frame types, shaped like the
-compile stream's so TestBench's folding code carries over:
+compile stream's so Steptix's folding code carries over:
 
 - `compile:step` — an entry was generated, declined, or skipped for a step,
   with the step's line for the gutter.
@@ -265,16 +265,16 @@ compile stream's so TestBench's folding code carries over:
   Run & Compile path): proposed content by absolute `.steps.ts` path, plus
   the summary (compiled / declined / unproven / not attempted). The server
   still never writes under the project — proposals ride the wire and
-  TestBench applies them through the diff, as today.
+  Steptix applies them through the diff, as today.
 
 The per-test-file compile lock still applies (one compile per file at a
 time, `POST /codebehind/compile`'s rule), now covering a Run & Compile and a
 single-step compile of the same file too.
 
 `POST /codebehind/compile` — the boxed pipeline, Replay included — stays,
-unchanged, as the CLI's `aiui compile` path: headless callers have no diff
+unchanged, as the CLI's `steptix compile` path: headless callers have no diff
 to click and no session they are watching, and "record, replay until green,
-write" is still the right shape there. TestBench's whole-test **Compile
+write" is still the right shape there. Steptix's whole-test **Compile
 Code-behind** command and the panel's Compile button become Run & Compile;
 the box is no longer reachable from the extension.
 
@@ -285,7 +285,7 @@ the box is no longer reachable from the extension.
   compile-as-a-run.
 - **Parallel generation.** The trailing queue is serialized on purpose;
   entry chaining is worth more than the seconds.
-- **CLI `aiui run --compile`.** Parity is cheap later; the CLI keeps its
+- **CLI `steptix run --compile`.** Parity is cheap later; the CLI keeps its
   boxed compile for now.
 - **Retiring the last-run sidecar or the ⚠/`</>` marks.** They are
   load-bearing here.
@@ -343,7 +343,7 @@ Everything above, in one pass. Where the build deviated, and why:
   the step's line "for the gutter", which the boxed compile used to paint ▶
   while the model worked. Here the step has already finished and painted ✓ by
   the time its entry is generated, and repainting ▶ would undo that. The line
-  still rides the frame — the run log uses it — but TestBench folds these
+  still rides the frame — the run log uses it — but Steptix folds these
   frames into the log only.
 - **A Stop skips generations that have not started; the in-flight one
   finishes.** The story says the queue drains at run end and says nothing
@@ -367,8 +367,8 @@ Everything above, in one pass. Where the build deviated, and why:
   The story says the box "is no longer reachable from the extension"; a
   method nothing calls is worse than that, so the client method, its
   `ApiClientLike` declaration and the integration tests that drove it are
-  gone. `POST /codebehind/compile` is untouched and is still `aiui compile`.
-- **The old `testbench-native.compileCodeBehind` command id stays**, pointed
+  gone. `POST /codebehind/compile` is untouched and is still `steptix compile`.
+- **The old `steptix.compileCodeBehind` command id stays**, pointed
   at Run & Compile, so the panel button and any keybinding keep working — but
   it is hidden from the palette, where two entries for one flow would only
   confuse.
@@ -500,7 +500,7 @@ step, and a selection spanning two scopes.
 
 Verified by running: root 2891 (vitest, 145 files) including a new HTTP seam
 suite (`api-server-compile-mode.test.ts`) and a new unit suite
-(`codebehind-live-compile.test.ts`); runner-core 441; testbench-native unit
+(`codebehind-live-compile.test.ts`); runner-core 441; steptix-vscode unit
 225 and integration 203; the full live suite 24/24 against
 `fixtures/test-app`, the section-body case included. Live through the extension against
 `fixtures/test-app`: Run & Compile on `compile-codebehind.md` runs the test

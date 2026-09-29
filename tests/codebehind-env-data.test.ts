@@ -656,7 +656,7 @@ describe('compileTest on a test that navigates to ${data.url}', () => {
   });
 
   it('writes the step off with the reason when the compile has no environment to read', async () => {
-    // `aiui compile login.md` with no --env: the parser left `${data.url}`
+    // `steptix compile login.md` with no --env: the parser left `${data.url}`
     // literal, so the recording's AI step did whatever it did with that text.
     // The generator does not guess; the entry says why it is AI.
     const md = await write('login.md', MD);

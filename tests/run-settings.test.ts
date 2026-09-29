@@ -96,7 +96,7 @@ describe('captureModeOf', () => {
 
   it('names the cell the tool enum cannot express', () => {
     // Per-action capture on, failure capture off. Nobody asks for it through the
-    // enum, but a hand-written aiui.config.json can set it — and rounding it to
+    // enum, but a hand-written steptix.config.json can set it — and rounding it to
     // 'every-step' would tell the reader failures are photographed when they are
     // not.
     expect(captureModeOf(true, false)).toBe('custom');

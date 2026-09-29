@@ -108,7 +108,7 @@ describe('`## Steps`', () => {
 
 describe('project `defaultHooks`', () => {
   async function loadWith(defaultHooks: Record<string, string[]>): Promise<void> {
-    const configPath = path.join(tmpDir, 'aiui.config.json');
+    const configPath = path.join(tmpDir, 'steptix.config.json');
     await fs.writeFile(
       configPath,
       JSON.stringify({ execution: { defaultHooks } }, null, 2),

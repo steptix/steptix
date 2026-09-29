@@ -123,7 +123,7 @@ describe('a code-behind file that does not load', () => {
     // the file never loaded, or it would report "passed as code" for code
     // that never ran (stories/codebehind-recording-on-disk.md §What was built).
     const md = await write('booking.md', TEST_MD);
-    const stepsFile = await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    const stepsFile = await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: 'Enter the booking code', async run({ page }) { const x = ; } },
 ]);
@@ -150,7 +150,7 @@ export default defineSteps([
 describe('code-behind end to end', () => {
   it('runs a fully covered test with zero AI calls', async () => {
     const md = await write('booking.md', TEST_MD);
-    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   {
     source: 'Enter the booking code',
@@ -200,7 +200,7 @@ export default defineSteps([
 
   it('fails the step outright when a step.expect fails — broken code heals, a failed assertion does not', async () => {
     const md = await write('booking.md', TEST_MD);
-    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   {
     source: 'Enter the booking code',
@@ -227,7 +227,7 @@ export default defineSteps([
     expect(result.fromCodeBehind).toBe(true);
   });
 
-  const BROKEN_STEPS = `import { defineSteps } from 'ai-ui-automation/codebehind';
+  const BROKEN_STEPS = `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   {
     source: 'Enter the booking code',
@@ -367,7 +367,7 @@ export default defineSteps([
     expect(result.codeBehindStale).toBeUndefined();
   });
 
-  it('never writes a .steps.ts from a run — generation is `aiui compile`', async () => {
+  it('never writes a .steps.ts from a run — generation is `steptix compile`', async () => {
     const md = await write('booking.md', TEST_MD);
     const { client, calls } = scriptedClient([ACTION_PLAN]);
     const { steps, registry } = await registryFor(md);
@@ -423,7 +423,7 @@ export default defineSteps([
 
   it('leaves an `ai: true` step to the AI, and never rewrites the file', async () => {
     const md = await write('booking.md', TEST_MD);
-    await write('booking.steps.ts', `import { defineSteps } from 'ai-ui-automation/codebehind';
+    await write('booking.steps.ts', `import { defineSteps } from 'steptix/codebehind';
 export default defineSteps([
   { source: 'Enter the booking code', ai: true },
 ]);
@@ -466,7 +466,7 @@ export default defineSteps([
     });
     expect(html).toContain('⚠ ran under AI — code-behind failed');
     expect(html).toContain('locator.fill: Timeout 30000ms exceeded');
-    expect(html).toContain('aiui compile /p/tests/booking.md --only-stale');
+    expect(html).toContain('steptix compile /p/tests/booking.md --only-stale');
     // ⚠ outranks the code mark: the step did NOT run as code.
     expect(html).not.toContain('cb-mark');
 

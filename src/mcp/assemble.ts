@@ -64,7 +64,7 @@ import type {
  * never existence-checked: it does not exist, and running it through the
  * missing-file detector would refuse every `run_steps` call.
  */
-const SYNTHETIC_STEPS_BASENAME = '.aiui-mcp-steps.md';
+const SYNTHETIC_STEPS_BASENAME = '.steptix-mcp-steps.md';
 
 /** `[input:]` / `[interactive]` as the server matches them — steps it will
  *  decline to run unattended. */
@@ -94,7 +94,7 @@ const ANY_PLACEHOLDER = /\$\{[^}]*\}/g;
  *  either resolves or throws. */
 const NAMESPACE_PLACEHOLDER = /\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z0-9_.\-]+)\s*\}/g;
 
-/** TestBench's whole-value `$VAR` form. Deliberately anchored so `${env.X}`
+/** Steptix's whole-value `$VAR` form. Deliberately anchored so `${env.X}`
  *  and `${data.X}` cannot match — they have their own resolution path, and
  *  reporting them as unresolvable `$VAR`s would be noise on top of a real
  *  diagnostic. */
@@ -266,7 +266,7 @@ export async function assembleTestFile(args: AssembleTestFileArgs): Promise<Asse
       `This test has ${parsed.dataRows!.length} data rows; only row 1 is run ` +
         `here (${Object.entries(firstRow)
           .map(([k, v]) => `${k}=${v}`)
-          .join(', ')}). Run it from the CLI or TestBench to run every row.`,
+          .join(', ')}). Run it from the CLI or Steptix to run every row.`,
     );
   }
 
@@ -529,7 +529,7 @@ function usableSourceLines(
  * (in a loose list) and the `[no-hooks]` marker is gone. Measured on a loose
  * body carrying both, `steps` is `["Click Save for {{file}}", "Type hello"]`
  * where `rawSteps` — and runner-core's `extractSections`, which is what
- * TestBench ships — is `["Click **Save** for {{file}}", "[no-hooks] Type
+ * Steptix ships — is `["Click **Save** for {{file}}", "[no-hooks] Type
  * \`hello\`"]`.
  *
  * That difference is not cosmetic once a body loops: the server has no
@@ -579,7 +579,7 @@ function confineDataSources(
   // runs for `run_test_file` (project scope), and a project's frontmatter
   // `dataSources` — with `~` expansion, so no symlink even needed — must not
   // be allowed to read out of the user root that joined the addressing
-  // allow-list. `~/AppData/Local/aiui/...` is refused here rather than shipped
+  // allow-list. `~/AppData/Local/steptix/...` is refused here rather than shipped
   // to the server, which confines nothing of its own.
   const roots = configuredRoots();
   for (const [name, declaredPath] of Object.entries(declared)) {
@@ -649,7 +649,7 @@ function projectConfig(
   // is a real projection — a key absent from here never reaches the wire, so an
   // MCP-run test would silently lose its `viewport:` and pass at the wrong size.
   // Not resolved here on purpose: §3 puts the one validator on the server, so
-  // `run_test_file` and a Run in TestBench refuse `390` with the same words.
+  // `run_test_file` and a Run in Steptix refuse `390` with the same words.
   if (resolved['viewport'] !== undefined) out.viewport = resolved['viewport'];
   // Same projection, same reason (SPEC-structured-table-reads.md §7.10): a key
   // absent from this whitelist never reaches the wire, so without this line an
@@ -700,7 +700,7 @@ function projectConfig(
   }
 
   // `logging` is a process-global `setLogLevel` on the server, so sending one
-  // would quieten a concurrent TestBench run's output too (§2). These two keys
+  // would quieten a concurrent Steptix run's output too (§2). These two keys
   // therefore go nowhere, which is worth saying out loud to an author who set
   // them.
   const ignored = ['consoleLogLevel', 'serverFileLogLevel'].filter(
@@ -723,7 +723,7 @@ function projectConfig(
  * The server interpolates *steps* only — `baseUrl` goes straight to
  * `page.goto` and `parameters` are merged verbatim — so `- baseUrl: $BASE_URL`
  * would otherwise navigate to the literal string. Two syntaxes, deliberately:
- * `${env.X}` as the CLI resolves it, and TestBench's whole-value `$VAR`. They
+ * `${env.X}` as the CLI resolves it, and Steptix's whole-value `$VAR`. They
  * fail differently, and that asymmetry is intentional: `${env.FOO}` is
  * unambiguously a reference, so an unknown one is fatal (CLI fail-fast),
  * whereas a bare `$FOO` is indistinguishable from prose and is left alone.

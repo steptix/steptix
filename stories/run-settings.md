@@ -28,7 +28,7 @@ This story gives the agent five settings it can change on a live session:
   run made zero AI calls, by policy", printed in the report.
 
 Every setting is scoped to one session. That matters because the same server
-also serves TestBench: a setting that applied server-wide would let an agent
+also serves Steptix: a setting that applied server-wide would let an agent
 silently slow down, or inflate the cost of, a run someone is doing by hand.
 
 Each run reports back which settings were in effect, so a preference that stops
@@ -89,7 +89,7 @@ reachable from a tool call.
 | Per-session `config` on the wire | **Write-once** | `baseUrl`, `timeout`, `cdp` — the server throws on an existing session ([session-manager.ts:1179](../src/server/session-manager.ts)) |
 | The server's startup config | **Not at all** | The model and every screenshot setting |
 
-That third row is the problem. `aiui serve` calls `loadConfig` once
+That third row is the problem. `steptix serve` calls `loadConfig` once
 ([serve.ts](../src/cli/commands/serve.ts)) and the result is `this.config` for
 the process's whole life. The executor is handed exactly that object at both
 call sites — [session-manager.ts:2896](../src/server/session-manager.ts) for a
@@ -103,7 +103,7 @@ branched step and [:3273](../src/server/session-manager.ts) for an ordinary one
 | `browser.fullPageScreenshots` | passed to every `captureScreenshot` call | Full page vs viewport |
 | `ai.sendScreenshots` | [step-executor.ts:476](../src/runner/step-executor.ts), [:552](../src/runner/step-executor.ts) | Whether the image goes to the model |
 
-Editing `aiui.config.json` does not help: the server already loaded it. The
+Editing `steptix.config.json` does not help: the server already loaded it. The
 per-batch project bundle re-reads it, but only four values are taken from there
 — `reports.outputDir` and `browser.video` at session creation
 ([:894](../src/server/session-manager.ts)), `tests.dataDir`
@@ -187,13 +187,13 @@ They are dead, and exposing them would be shipping a lie.
   Retention already prevents the revert; the echo is what makes the state
   visible without asking.
 
-- **Session-scoped, never process-wide.** The same server serves TestBench.
+- **Session-scoped, never process-wide.** The same server serves Steptix.
   A global setting would let an agent's choice change the cost and speed of a
   human's concurrent run, which is precisely the objection
   [assemble.ts:560](../src/mcp/assemble.ts) already records against forwarding
   log levels.
 
-- **Nothing here writes `aiui.config.json`.** `mcp.cdp.allowUnowned` is
+- **Nothing here writes `steptix.config.json`.** `mcp.cdp.allowUnowned` is
   deliberately gated on a file the agent cannot write
   ([project.ts:283](../src/mcp/project.ts)); a config-writing tool would hand
   the agent the key to its own CDP gate. Persistence, if it is ever wanted, is a
@@ -457,16 +457,16 @@ seams as below: `ai` accepted on the wire and an unknown value is a 400;
 
 ## Out of scope
 
-- A TestBench run-button toggle for `ai` — the extensions get the wire for
+- A Steptix run-button toggle for `ai` — the extensions get the wire for
   free; surfacing a mode chooser in their UI is an extension story.
-- Writing `aiui.config.json`, or any persistence beyond the session.
+- Writing `steptix.config.json`, or any persistence beyond the session.
 - Server-wide settings changes.
 - `reports.includeScreenshots` / `reports.embedScreenshots` — dead knobs;
   either delete them or implement them, in a separate change.
 - Returning every step's screenshot to the caller.
 - Adding the model to the step cache key.
 - Threading the project bundle into the executor call sites wholesale (§2).
-- Any change to the TestBench extensions — they are HTTP clients and get the
+- Any change to the Steptix extensions — they are HTTP clients and get the
   route for free.
 - Video (`browser.video`), which is already per-project and already resolved at
   session creation.
@@ -524,7 +524,7 @@ every assertion passes for the wrong reason:
 2. A second `run_steps` on that session with no settings → still every step.
 3. `model` override → the run log shows the model change and the run answers on
    the new model, with the browser untouched.
-4. A TestBench run on another session during (1) → unaffected.
+4. A Steptix run on another session during (1) → unaffected.
 5. `get_run_settings` against a stopped server → reports it is not running and
    starts nothing.
 
@@ -539,7 +539,7 @@ every assertion passes for the wrong reason:
   pictures. Documented rather than reconciled — the model's request genuinely
   needs the image.
 - **Retention across clients.** Because settings live on the session, a
-  TestBench user attached to the same session inherits whatever the agent set.
+  Steptix user attached to the same session inherits whatever the agent set.
   That is the intended semantic, and the echo is what makes it discoverable —
   but it is worth watching in real use.
 - **The cache interaction** is warned about, not solved.
@@ -565,7 +565,7 @@ the retention test and the cross-session isolation test first — both fail
 silently in production and nowhere else.
 
 **W2 — `GET /config`.** §6. The route, redaction, the optional session lookup.
-Independently useful: TestBench can show the effective settings without any MCP
+Independently useful: Steptix can show the effective settings without any MCP
 involvement.
 
 **W3 — MCP tools.** §1, §4, §6, §8. Client method, schemas, the settings
@@ -583,7 +583,7 @@ the empty-string-means-failure normalisation is the whole of it.
 
 - **Rebuild `dist/` and restart the Sessions API server.** The running server
   executes compiled `dist/`, and the MCP server the host spawns runs `dist/`
-  too — a `src/` edit is live for neither until `npm run build`. No TestBench
+  too — a `src/` edit is live for neither until `npm run build`. No Steptix
   version bump: this is server-side, and the extensions are HTTP clients.
 - **The route's request builder is an explicit allow-list.** Widening a type
   without adding the branch compiles and drops the field at runtime.

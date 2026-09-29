@@ -27,10 +27,10 @@ let root: string;
 let testDir: string;
 
 beforeAll(async () => {
-  root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-cb-upload-'));
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-cb-upload-'));
   testDir = path.join(root, 'tests');
   await fs.mkdir(path.join(testDir, 'attachments'), { recursive: true });
-  await fs.writeFile(path.join(root, 'aiui.config.json'), '{}');
+  await fs.writeFile(path.join(root, 'steptix.config.json'), '{}');
   await fs.writeFile(path.join(testDir, 'attachments', 'logo.png'), 'png');
 });
 

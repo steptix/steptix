@@ -1,7 +1,7 @@
 # Value-only assertions — `Assert that X is at least 5`
 
 > **Verification rule for this story.** "Done" means the demo
-> `fixtures/tests/extract-orders-demo.md` runs through `npx aiui run … --env
+> `fixtures/tests/extract-orders-demo.md` runs through `npx steptix run … --env
 > local` against a live test-app server with all three assertion steps
 > passing — no markdown changes, no new tools, no `expected` field on the
 > author's side. Vitest passing alone does not constitute "done"; the
@@ -65,7 +65,7 @@ exists to avoid.
    literal and no new tool boilerplate.
 2. The three demo assertions in
    [fixtures/tests/extract-orders-demo.md](../fixtures/tests/extract-orders-demo.md)
-   all pass under `npx aiui run`.
+   all pass under `npx steptix run`.
 3. The existing three assertion shapes (DOM equality, DOM count, API
    field) keep working byte-for-byte. No regression in the existing
    passing tests.
@@ -299,7 +299,7 @@ gate at line 1286.
 10. **End-to-end CLI verification** (this is the success criterion, not a
     nice-to-have):
     a. Spawn the test-app server (`npx tsx fixtures/test-app/server.ts`).
-    b. Run `npx aiui run fixtures/tests/extract-orders-demo.md --env local`.
+    b. Run `npx steptix run fixtures/tests/extract-orders-demo.md --env local`.
     c. Confirm exit code 0 and all 3 assertion steps PASS.
     d. Kill the server.
     e. If it fails, debug the failure — DO NOT change the demo to dodge

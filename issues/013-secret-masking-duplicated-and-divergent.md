@@ -1,8 +1,8 @@
 # 013 — Secret-name masking is implemented in five places with two different regexes
 
 **Status:** open / low priority
-**Area:** [runner-core/src/repl.ts](../runner-core/src/repl.ts), [src/parser/parameters.ts](../src/parser/parameters.ts), [testbench-monaco/src/webview/lib/variables-panel.js](../testbench-monaco/src/webview/lib/variables-panel.js), [testbench-native/src/webview/lib/variables-panel.js](../testbench-native/src/webview/lib/variables-panel.js) — secret detection
-**Related:** Variables panel rendering (TestBench), CLI log redaction
+**Area:** [runner-core/src/repl.ts](../runner-core/src/repl.ts), [src/parser/parameters.ts](../src/parser/parameters.ts), [testbench-monaco/src/webview/lib/variables-panel.js](../testbench-monaco/src/webview/lib/variables-panel.js), [steptix-vscode/src/webview/lib/variables-panel.js](../steptix-vscode/src/webview/lib/variables-panel.js) — secret detection
+**Related:** Variables panel rendering (Steptix), CLI log redaction
 **Opened:** 2026-05-19
 
 ## Summary
@@ -24,7 +24,7 @@ needs to be added (e.g., `bearer`, `credential`, `passphrase`,
 |---|---|---|---|
 | 1 | [runner-core/src/repl.ts:121-125](../runner-core/src/repl.ts#L121-L125) `maskIfSecret` | `password\|secret\|token\|apikey\|api_key` | up to 8 `*`, `(empty)` for empty |
 | 2 | [testbench-monaco/src/webview/lib/variables-panel.js:115-119](../testbench-monaco/src/webview/lib/variables-panel.js#L115-L119) `maskIfSecretInline` | `password\|secret\|token\|apikey\|api_key` | up to 8 `*`, `(empty)` for empty |
-| 3 | [testbench-native/src/webview/lib/variables-panel.js:139-144](../testbench-native/src/webview/lib/variables-panel.js#L139-L144) `maskIfSecretInline` | `password\|secret\|token\|apikey\|api_key` | up to 8 `*`, `(empty)` for empty |
+| 3 | [steptix-vscode/src/webview/lib/variables-panel.js:139-144](../steptix-vscode/src/webview/lib/variables-panel.js#L139-L144) `maskIfSecretInline` | `password\|secret\|token\|apikey\|api_key` | up to 8 `*`, `(empty)` for empty |
 | 4 | [src/parser/parameters.ts:82](../src/parser/parameters.ts#L82) `isSecret` (CLI prompt hint) | `password\|secret\|token\|key` | hides input via `(input hidden)` label |
 | 5 | [src/parser/parameters.ts:149-154](../src/parser/parameters.ts#L149-L154) `maskSecret` (log output) | `password\|secret\|token\|key` | literal `***`, `(empty)` for empty |
 
@@ -42,7 +42,7 @@ A variable named simply `key` (e.g., `account_key`, `lookup_key`,
   ([src/parser/parameters.ts:82](../src/parser/parameters.ts#L82)).
 - The **CLI debug log** masks the value as `***`
   ([src/parser/parameters.ts:150](../src/parser/parameters.ts#L150)).
-- The **TestBench Variables panel** and **TestBench output log** show the
+- The **Steptix Variables panel** and **Steptix output log** show the
   full value, because the runner-core regex requires `apikey`/`api_key`,
   not bare `key`.
 
@@ -55,11 +55,11 @@ Variables panel. Confusing rather than dangerous.
 Three independent reasons converged:
 
 1. **Webview can't import Node modules.** The webview JS bundle is
-   sandboxed; it can't `require('ai-ui-automation-runner-core')`. The
+   sandboxed; it can't `require('steptix-runner-core')`. The
    two webview copies were hand-mirrored from runner-core so the panel
    could render the right masking without a host round-trip.
-2. **Two TestBench variants ship in parallel.** `testbench-monaco` and
-   `testbench-native` share no source — `runner-core` is the only common
+2. **Two Steptix variants ship in parallel.** `testbench-monaco` and
+   `steptix-vscode` share no source — `runner-core` is the only common
    ground — so the webview copy got duplicated again.
 3. **`parameters.ts` lives server-side** in `src/parser/`. It was written
    before `runner-core` existed as an extraction target, and its
@@ -127,7 +127,7 @@ For Option 1:
 
 - The current `runner-core/tests/repl.test.js` `maskIfSecret` cases stay.
 - New: `dist-webview/secret.js` imported and exercised the same way.
-- The webview bundlers (esbuild for testbench-native, the monaco
+- The webview bundlers (esbuild for steptix-vscode, the monaco
   variant's bundler) include the file without modification.
 
 ## Discovered while
@@ -140,6 +140,6 @@ actually has two different answers depending on who you ask.
 
 - Adding a new secret-shaped name (`bearer`, `passphrase`, `cvv`, …).
 - A user reports masking inconsistency between the CLI output and the
-  TestBench Variables panel.
+  Steptix Variables panel.
 - Refactoring `src/parser/parameters.ts` for any other reason — fold the
   consolidation in then.

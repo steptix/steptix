@@ -2,7 +2,7 @@
 //
 // Spins up everything end-to-end with real tokens:
 //   1. fixtures/test-app/server.ts on http://localhost:8787 (the target site)
-//   2. ai-ui-automation Sessions API server on http://localhost:3100
+//   2. steptix Sessions API server on http://localhost:3100
 //      (real `serve` subcommand, loading templates/.env for AI_API_KEY etc.)
 //   3. VS Code with the flick-vscode extension under @vscode/test-electron
 //   4. A Mocha suite that drives Flick to submit a real step batch and
@@ -12,7 +12,7 @@
 //
 // Required (from templates/.env, picked up by this bootstrap and forwarded):
 //   AI_API_KEY        - real model credentials, tokens will be spent
-//   AIUI_SERVER_API_KEY    - shared secret between Flick and the API server
+//   STEPTIX_SERVER_API_KEY    - shared secret between Flick and the API server
 //
 // Run via:  npm run test:vscode-live
 const path = require('node:path');
@@ -130,10 +130,10 @@ async function waitForPortFree(url, label, timeoutMs = 5_000) {
 async function main() {
   const envFile = path.join(REPO_ROOT, 'templates', '.env');
   const env = loadEnvFile(envFile);
-  if (!env.AI_API_KEY || !env.AIUI_SERVER_API_KEY) {
+  if (!env.AI_API_KEY || !env.STEPTIX_SERVER_API_KEY) {
     console.error(
       `Required env not found at ${envFile}.\n` +
-        '  Need AI_API_KEY and AIUI_SERVER_API_KEY. (The live test makes real AI calls.)',
+        '  Need AI_API_KEY and STEPTIX_SERVER_API_KEY. (The live test makes real AI calls.)',
     );
     process.exit(2);
   }
@@ -192,7 +192,7 @@ async function main() {
       env: {
         ...process.env,
         AI_API_KEY: env.AI_API_KEY,
-        AIUI_SERVER_API_KEY: env.AIUI_SERVER_API_KEY,
+        STEPTIX_SERVER_API_KEY: env.STEPTIX_SERVER_API_KEY,
         AI_MODEL: env.AI_MODEL || process.env.AI_MODEL || '',
       },
       stdio: ['ignore', 'inherit', 'inherit'],
@@ -235,7 +235,7 @@ async function main() {
         ELECTRON_ENABLE_LOGGING: '1',
         FLICK_TEST_REPORT: reportPath,
         FLICK_LIVE_API_URL: `http://127.0.0.1:${API_PORT}`,
-        FLICK_LIVE_API_KEY: env.AIUI_SERVER_API_KEY,
+        FLICK_LIVE_API_KEY: env.STEPTIX_SERVER_API_KEY,
         FLICK_LIVE_TEST_APP_URL: `http://localhost:${TEST_APP_PORT}`,
       },
     });

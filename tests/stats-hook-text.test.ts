@@ -14,7 +14,7 @@ import { parseTestFile } from '../src/parser/markdown.js';
 import { resolveHooks } from '../src/runner/hooks.js';
 import { DEFAULT_CONFIG } from '../src/config/defaults.js';
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-stats-hook-text-'));
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-stats-hook-text-'));
 afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 const ENV = { env: { SIGNIN_NAME: 'alice-SECRET-name' }, data: {}, envName: 'uat' };

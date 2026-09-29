@@ -1,4 +1,4 @@
-// Generate the JSON Schema for `aiui.config.json` from the `UserConfig`
+// Generate the JSON Schema for `steptix.config.json` from the `UserConfig`
 // TypeScript type, so the schema can never drift from the source of truth in
 // src/config/types.ts. JSDoc comments on the config interfaces become schema
 // `description`s (editor hover docs); string-union types become enums.
@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
-const outPath = path.join(projectRoot, 'schema', 'aiui.config.schema.json');
+const outPath = path.join(projectRoot, 'schema', 'steptix.config.schema.json');
 
 const schema = createGenerator({
   path: path.join(projectRoot, 'src/config/types.ts'),

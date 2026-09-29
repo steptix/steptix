@@ -3,7 +3,7 @@
 ## In plain terms
 
 The MCP server today can only work inside a project. Every tool call walks
-upward looking for `aiui.config.json`, and if it doesn't find one the call is
+upward looking for `steptix.config.json`, and if it doesn't find one the call is
 refused before it does anything — not just `run_steps`, but
 `list_cdp_browsers` and `server_status` too. So the moment you're not sitting
 in a repo that has a config file, the whole server does nothing.
@@ -14,7 +14,7 @@ me my openrouter tab"*, *"check whether I'm still logged into the admin
 console"*. Nothing about that is project-shaped.
 
 The same anchor causes a second problem even when there *is* a project.
-Browsers are recorded as belonging to a project root — `.aiui/cdp-profiles/`
+Browsers are recorded as belonging to a project root — `.steptix/cdp-profiles/`
 under that exact directory — so the signed-in Chrome you've been using all
 week stops being yours the moment you work from a git worktree, a sibling
 repo, or no repo at all. Same machine, same browser, same you.
@@ -34,7 +34,7 @@ than a guess.
 
 **You say:** *"What browsers do I have open?"* — from a directory with no
 project in sight
-**You get:** the list, instead of *"No aiui.config.json found, so there is no
+**You get:** the list, instead of *"No steptix.config.json found, so there is no
 project to run against."*
 
 **You say:** *"Show me the openrouter tab"*
@@ -58,7 +58,7 @@ from anywhere. Today there's no way to say this at all.
 project, and no project resolved. Not a confusing failure three layers down.
 
 > **Verification rule for this story.** "Done" means: (1) from a directory
-> with no `aiui.config.json` anywhere above it, `list_cdp_browsers`,
+> with no `steptix.config.json` anywhere above it, `list_cdp_browsers`,
 > `start_cdp_browser`, `focus_cdp_tab` and `close_cdp_tab` all answer instead
 > of failing preflight; (2) `run_steps` completes project-less against a real
 > page, including `get_page_content` with `format: "screenshot"`, with the
@@ -83,9 +83,9 @@ project, and no project resolved. Not a confusing failure three layers down.
 
 | Capability | Status | Where |
 | --- | --- | --- |
-| Resolve a project from cwd / `project_root` / `AIUI_MCP_ROOTS` | ✅ shipped | [project.ts:444](../src/mcp/project.ts:444) |
-| Refuse when no `aiui.config.json` is found | ✅ shipped — and this is the blocker | [project.ts:489](../src/mcp/project.ts:489) |
-| `SERVER_URL` / `AIUI_SERVER_API_KEY` falling back to `process.env` | ✅ shipped | [project.ts:360](../src/mcp/project.ts:360) |
+| Resolve a project from cwd / `project_root` / `STEPTIX_MCP_ROOTS` | ✅ shipped | [project.ts:444](../src/mcp/project.ts:444) |
+| Refuse when no `steptix.config.json` is found | ✅ shipped — and this is the blocker | [project.ts:489](../src/mcp/project.ts:489) |
+| `SERVER_URL` / `STEPTIX_SERVER_API_KEY` falling back to `process.env` | ✅ shipped | [project.ts:360](../src/mcp/project.ts:360) |
 | Prove browser ownership from disk, not memory | ✅ shipped | [cdp-registry.ts:240](../src/browser/cdp-registry.ts:240) |
 | Ownership scoped to exactly one root | ✅ shipped — and this is the second blocker | [cdp-registry.ts:156](../src/browser/cdp-registry.ts:156) |
 | Any tool working with no project at all | ❌ nothing | every tool goes through `resolveProject` |
@@ -101,8 +101,8 @@ Four unrelated things, fused into one path:
 
 | Supplies | Genuinely project-shaped? |
 | --- | --- |
-| `SERVER_URL`, `AIUI_SERVER_API_KEY` | No — already falls back to `process.env` |
-| `.aiui/cdp-profiles/` — the browsers | **No** — personal and machine-scoped |
+| `SERVER_URL`, `STEPTIX_SERVER_API_KEY` | No — already falls back to `process.env` |
+| `.steptix/cdp-profiles/` — the browsers | **No** — personal and machine-scoped |
 | `skillsDir`, `toolsDir`, `.env` interpolation | Yes — these are the project's code |
 | `mcp.cdp.allowUnowned` | Yes — a human's decision about one project |
 
@@ -114,14 +114,14 @@ and only accidentally live in a repo.
 A directory outside any project, holding the same things a project root holds:
 
 ```
-%LOCALAPPDATA%\aiui\           (Windows)
-$XDG_CONFIG_HOME/aiui/  or  ~/.aiui/     (everywhere else)
-├── aiui.config.json
+%LOCALAPPDATA%\steptix\           (Windows)
+$XDG_CONFIG_HOME/steptix/  or  ~/.steptix/     (everywhere else)
+├── steptix.config.json
 ├── .env
-└── .aiui/
+└── .steptix/
     └── cdp-profiles/
         └── chrome-default/
-            ├── .aiui-profile
+            ├── .steptix-profile
             └── DevToolsActivePort
 ```
 
@@ -129,10 +129,10 @@ Identical layout on purpose — `cdpProfilesRoot()` and `knownProfiles()` work
 against it unchanged, and the ownership proof stays exactly what it is today:
 a port that traces back to a profile directory we made. No new trust model,
 no marker-scanning of arbitrary paths, no registry in memory. Note the nested
-`.aiui/cdp-profiles/` — the user root is a *real* project root, so it carries
-the same `.aiui/` subdirectory a project does (the browsers live at
-`%LOCALAPPDATA%\aiui\.aiui\cdp-profiles\`, and the auto-start log at
-`%LOCALAPPDATA%\aiui\.aiui\mcp-server.log`). "Same layout" is the whole point:
+`.steptix/cdp-profiles/` — the user root is a *real* project root, so it carries
+the same `.steptix/` subdirectory a project does (the browsers live at
+`%LOCALAPPDATA%\steptix\.steptix\cdp-profiles\`, and the auto-start log at
+`%LOCALAPPDATA%\steptix\.steptix\mcp-server.log`). "Same layout" is the whole point:
 one `cdpProfilesRoot(root)` serves both.
 
 Created on first use, not on install. A machine that never runs a project-less
@@ -196,7 +196,7 @@ project-scoped is that it's confined to a project someone chose.
 
 ## The user root's `.env`
 
-The `AIUI_SERVER_API_KEY` half of that file is
+The `STEPTIX_SERVER_API_KEY` half of that file is
 [machine-key.md](machine-key.md)'s job, and that story ships first. By the
 time this one lands, the user root's `.env` already exists and already holds
 the machine key, written by whichever process needed one first. This story
@@ -210,15 +210,15 @@ What this story does add:
   ever spawns on a loopback host (§5 arm 4) — and a distinctive port avoids
   colliding with the project server people already run on 3100, which
   auto-start would refuse as an unrecognized service.
-- **The zero-file path stays open.** `SERVER_URL` and `AIUI_SERVER_API_KEY`
-  set in the MCP host config's `env` block (where `AIUI_MCP_ROOTS` lives
+- **The zero-file path stays open.** `SERVER_URL` and `STEPTIX_SERVER_API_KEY`
+  set in the MCP host config's `env` block (where `STEPTIX_MCP_ROOTS` lives
   today) are picked up by the `process.env` step with nothing on disk at
   all.
 
 ## Locked decisions
 
 - **The `.env` may be machine-written ([machine-key.md](machine-key.md)'s
-  rule); the `aiui.config.json` never is.** The `.env` holds a loopback
+  rule); the `steptix.config.json` never is.** The `.env` holds a loopback
   secret that grants nothing outside the machine. The config holds
   `allowUnowned`, which is a *permission* — and a machine-global one applies
   in every conversation, forever, with no repo to scope or review it. First
@@ -255,7 +255,7 @@ What this story does add:
 
 ## Not in this story
 
-- **The machine key itself.** How `AIUI_SERVER_API_KEY` is generated, where
+- **The machine key itself.** How `STEPTIX_SERVER_API_KEY` is generated, where
   it lives, and who reads it is [machine-key.md](machine-key.md) — reviewed
   and implemented first, on its own.
 
@@ -270,14 +270,14 @@ What this story does add:
 ## Open questions — resolved in the build
 
 - **Discovering the `allowUnowned` file.** An absent user-root
-  `aiui.config.json` reads as "all defaults", since nothing may create it
+  `steptix.config.json` reads as "all defaults", since nothing may create it
   (§Locked). Resolved: the reach-refusal message names the exact config path
   for the *resolved scope* — a project's own file, or
-  `%LOCALAPPDATA%\aiui\aiui.config.json` for a project-less call — and says
+  `%LOCALAPPDATA%\steptix\steptix.config.json` for a project-less call — and says
   "creating the file if it does not exist yet". That refusal is the discovery
   path.
 
-- **`AIUI_MCP_ROOTS` with one entry.** Resolved: it still means "that's the
+- **`STEPTIX_MCP_ROOTS` with one entry.** Resolved: it still means "that's the
   project". The split is `configuredRoots()` (project *candidates* — the env
   var, or cwd) versus `allowedRoots()` (`configuredRoots()` **plus** the user
   root — the confinement/addressing allow-list). A project is only ever
@@ -291,7 +291,7 @@ What this story does add:
   tools, `.env`, `.env.<name>`, `tests.dir`, `dataSources`) is confined
   against `configuredRoots()`, **not** the wider allow-list. The user root
   joining the allow-list is for addressing only; letting a project's own
-  untrusted `aiui.config.json` reach into `%LOCALAPPDATA%\aiui` through it
+  untrusted `steptix.config.json` reach into `%LOCALAPPDATA%\steptix` through it
   would hand that config the machine key and a skills/tools directory no repo
   owns. The wide list confines only the two things that legitimately name the
   user root — the resolution arguments and a user-*scope* resolution's own

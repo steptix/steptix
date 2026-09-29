@@ -25,7 +25,7 @@ import { envReferenceFor } from './write-steps.js';
 
 /**
  * One recording, from `POST /sessions/:id/record-steps` to its `done` frame
- * (stories/testbench-record-steps.md, "On the wire").
+ * (stories/steptix-record-steps.md, "On the wire").
  *
  * The session manager decides whether a recording may start and what it holds
  * while it runs (the queue, the in-flight count, the session's one recording
@@ -78,7 +78,7 @@ type AbortCause = 'cancel' | 'session-closed';
 
 type Phase = 'starting' | 'recording' | 'writing' | 'done';
 
-/** How long the toolbar's confirmations stay (stories/testbench-record-toolbar.md). */
+/** How long the toolbar's confirmations stay (stories/steptix-record-toolbar.md). */
 const ADDED_NOTICE_MS = 4_000;
 const REMOVED_NOTICE_MS = 8_000;
 const NOTHING_TO_UNDO_MS = 3_000;
@@ -191,7 +191,7 @@ export class RecordStepsRun {
   /** The stream's emit, once `run` has it. */
   private out: RecordEventListener = () => {};
 
-  // The browser toolbar (stories/testbench-record-toolbar.md).
+  // The browser toolbar (stories/steptix-record-toolbar.md).
   private readonly toolbarEnabled: boolean;
   private dock: ToolbarDock;
   private minimised: boolean;
@@ -210,7 +210,7 @@ export class RecordStepsRun {
   };
   /**
    * Steps deleted since the last step landed, for the drawer: struck through
-   * where they were, with Restore (stories/testbench-record-edit-steps.md,
+   * where they were, with Restore (stories/steptix-record-edit-steps.md,
    * "The drawer"). From any source — the drawer, the panel, the file, Undo.
    */
   private deletedRows: Array<{ id: string; text: string; afterId: string | null }> = [];
@@ -319,7 +319,7 @@ export class RecordStepsRun {
     this.endWith(
       'ended',
       this.cancelSource === 'stream'
-        ? 'Recording ended: TestBench closed the recording. Nothing was written.'
+        ? 'Recording ended: Steptix closed the recording. Nothing was written.'
         : 'Recording ended: it was cancelled in VS Code. Nothing was written.',
     );
     return { type: 'done', status: 'aborted' };
@@ -337,7 +337,7 @@ export class RecordStepsRun {
     const edited = new Set(this.draftView.edited);
     // No lock: "locked" is the engine's word for what the MODEL may not
     // rewrite, and nothing is locked against the author
-    // (stories/testbench-record-edit-steps.md, decision 1). `yours`: a step
+    // (stories/steptix-record-edit-steps.md, decision 1). `yours`: a step
     // the author wrote, or one they reworded.
     const steps = this.draftView.steps.slice(0, MAX_TOOLBAR_STEPS).map((text, i) => ({
       id: this.draftView.ids[i] ?? '',
@@ -576,7 +576,7 @@ export class RecordStepsRun {
 
   /**
    * A step the author wrote — from the toolbar's box, the editor or the panel
-   * (stories/testbench-record-toolbar.md, "Steps you write"). Typing still
+   * (stories/steptix-record-toolbar.md, "Steps you write"). Typing still
    * open is collected first; the draft is brought up to date (the toolbar
    * says "Adding…" meanwhile); the lines go in exactly as written and lock
    * everything up to them. `record:step` goes out for each, before the draft
@@ -593,7 +593,7 @@ export class RecordStepsRun {
     if (typed.length === 0) return 'ignored';
     // A secret the recording knows goes in as `{{name}}`, never in clear
     // (review, finding 5). Not from the editor: that line is the author's own
-    // text in the file, which the recording does not rewrite, and TestBench
+    // text in the file, which the recording does not rewrite, and Steptix
     // knows it by the text it sent — so it is refused, saying what to write.
     const safe = authorStepSecrets(typed, this.namedSecrets(), this.file.parameters);
     const refs = safe.names.map((n) => `{{${n}}}`).join(', ');
@@ -645,7 +645,7 @@ export class RecordStepsRun {
       const first = added[0]!.index + 1;
       const last = added[added.length - 1]!.index + 1;
       const where = first === last ? `Added as step ${first}` : `Added as steps ${first}–${last}`;
-      // Nothing is locked against the author (stories/testbench-record-edit-steps.md,
+      // Nothing is locked against the author (stories/steptix-record-edit-steps.md,
       // decision 1), so the bar no longer says "steps 1–7 locked".
       this.setNotice({
         kind: 'added',
@@ -661,7 +661,7 @@ export class RecordStepsRun {
   }
 
   /**
-   * The author reworded a step (stories/testbench-record-edit-steps.md) — from
+   * The author reworded a step (stories/steptix-record-edit-steps.md) — from
    * the drawer, the file or the panel. One line, exactly as written bar a
    * leading number or list marker. A secret the recording knows is written as
    * `{{name}}`, as in a step the author adds; from the editor it is refused
@@ -853,7 +853,7 @@ export class RecordStepsRun {
         const r = this.dropOrRestore(control.id, dropping, control.source ?? 'panel');
         if (r === true) {
           // A step of the draft deleted from the panel or the file: the bar
-          // says so too, with Restore (stories/testbench-record-edit-steps.md, "Delete").
+          // says so too, with Restore (stories/steptix-record-edit-steps.md, "Delete").
           if (kind === 'step' && dropping) this.removedNotice(control.id, text);
           else if (kind === 'step') this.setNotice(null);
           if (left && !this.toldStays.has(left.id)) {
@@ -1198,7 +1198,7 @@ function fileSecrets(file: TargetFileSummary): KnownSecret[] {
 }
 
 /**
- * Secrets the request's `.env` carries (TestBench sends the file's resolved
+ * Secrets the request's `.env` carries (Steptix sends the file's resolved
  * `.env` with the recording): every secret-named key's value, and the value
  * each `$VAR` parameter of the target file will resolve to — the request's
  * `.env` first, then the server's environment, as a run resolves it. A

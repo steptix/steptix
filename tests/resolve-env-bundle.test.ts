@@ -1,6 +1,6 @@
 /**
  * Tests for the unified env+data resolver used by every entry point
- * (CLI, programmatic, server, testbench).
+ * (CLI, programmatic, server, steptix).
  *
  * The server path is **pure** — it composes a per-project env map and never
  * mutates the global `process.env`. The CLI path opts into mutation with
@@ -18,7 +18,7 @@ describe('resolveEnvBundle', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
-    tmpRoot = mkdtempSync(path.join(tmpdir(), 'aiui-bundle-'));
+    tmpRoot = mkdtempSync(path.join(tmpdir(), 'steptix-bundle-'));
     mkdirSync(path.join(tmpRoot, 'data'), { recursive: true });
   });
   afterEach(() => {

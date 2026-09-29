@@ -236,7 +236,7 @@ async function createSession(id: string, testFilePath?: string): Promise<void> {
 }
 
 beforeAll(async () => {
-  tmpRoot = mkdtempSync(path.join(tmpdir(), 'aiui-content-'));
+  tmpRoot = mkdtempSync(path.join(tmpdir(), 'steptix-content-'));
   const { app } = createApiServer(testConfig);
   ({ server, baseUrl } = await listenOnRandomPort(app));
 }, 30_000);
@@ -594,7 +594,7 @@ describe('GET /sessions/:id/content — project config, not server config', () =
     const projectRoot = path.join(tmpRoot, 'proj-a');
     mkdirSync(path.join(projectRoot, 'tests'), { recursive: true });
     writeFileSync(
-      path.join(projectRoot, 'aiui.config.json'),
+      path.join(projectRoot, 'steptix.config.json'),
       JSON.stringify({ browser: { domSnapshotCharLimit: PROJECT_CHAR_LIMIT } }),
     );
     const testFile = path.join(projectRoot, 'tests', 'a.md');

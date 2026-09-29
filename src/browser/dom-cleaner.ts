@@ -44,12 +44,12 @@ const ALLOWED_DOM_ATTRIBUTES: readonly string[] = [
   // and `accept` tells the model which field wants which kind of file.
   'accept', 'multiple',
   // The row numbering `readTable` leaves on a table it has read
-  // (SPEC-structured-table-reads §7.4): `data-aiui-row="7"` IS the framework's
+  // (SPEC-structured-table-reads §7.4): `data-steptix-row="7"` IS the framework's
   // answer to "row 7 of the Orders table", and the allowlist would otherwise
   // drop it with the rest of the `data-*` noise — leaving the model to count
   // rows or, measured on RadGrid, to build an id from the number and act on
   // the row below. The `expand` walk already emits every `data-*`.
-  'data-aiui-row',
+  'data-steptix-row',
 ];
 
 /**
@@ -851,7 +851,7 @@ export async function findInDom(
  * The attribute {@link stampFirstMatch} writes. `expand` prints every other
  * `data-*` attribute, so it skips this one by name.
  */
-const TARGET_STAMP = 'data-aiui-target';
+const TARGET_STAMP = 'data-steptix-target';
 
 interface StampedElement {
   /** Plain CSS that finds the stamped element with `document.querySelector`. */
@@ -1059,9 +1059,9 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
       // Walk all attributes once and pick up the prefix-match families:
       //   - aria-*  (full accessibility surface)
       //   - data-*  (test/state hooks; expand is zoomed-in so full fidelity)
-      // Skip data-testid and data-aiui-row since both are already in the named
+      // Skip data-testid and data-steptix-row since both are already in the named
       // list above — emitted here too, a row a readTable had numbered came out
-      // as data-aiui-row="8" data-aiui-row="8". Skip the framework's own
+      // as data-steptix-row="8" data-steptix-row="8". Skip the framework's own
       // lookup stamp too: it is on the element only while this walk runs.
       const allAttrs = el.attributes;
       for (let i = 0; i < allAttrs.length; i++) {
@@ -1072,7 +1072,7 @@ export async function expandDomSubtree(page: Page, selector: string): Promise<st
         } else if (
           a.name.indexOf('data-') === 0
           && a.name !== 'data-testid'
-          && a.name !== 'data-aiui-row'
+          && a.name !== 'data-steptix-row'
           && a.name !== '${TARGET_STAMP}'
         ) {
           // A field whose \`value\` was just masked must not hand the same

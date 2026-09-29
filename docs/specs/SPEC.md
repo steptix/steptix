@@ -1,4 +1,4 @@
-# ai-ui-automation — Technical Specification v1.0
+# Steptix — Technical Specification v1.0
 
 **Author:** Greg (AI Tech Lead) / Paul Kent
 **Date:** 2026-03-26
@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-**ai-ui-automation** is a CLI tool that executes UI tests written in natural language (Markdown). It uses Playwright to drive a browser and an AI model (via the aiapi gateway) to interpret instructions, interact with the DOM, evaluate assertions, and produce detailed HTML reports.
+**steptix** is a CLI tool that executes UI tests written in natural language (Markdown). It uses Playwright to drive a browser and an AI model (via the aiapi gateway) to interpret instructions, interact with the DOM, evaluate assertions, and produce detailed HTML reports.
 
 ### Core Principles
 
@@ -24,7 +24,7 @@
 ```
 ┌─────────────────────────────────────────────────────┐
 │                    CLI (Entry Point)                 │
-│  npx aiui run tests/ --tag smoke --headless   │
+│  npx steptix run tests/ --tag smoke --headless   │
 └──────────────┬──────────────────────────────────────┘
                │
                ▼
@@ -253,7 +253,7 @@ An `### Name` heading **inside `## Steps`** defines a named block of reusable st
 2. Click the checkout button
 ```
 
-Here steps 1 and 4 both call `### Login`, and step 3 calls `### Checkout`. Each call expands inline to the section's body before the run, so the runner, the report, and TestBench's debugger see the fully-expanded flow.
+Here steps 1 and 4 both call `### Login`, and step 3 calls `### Checkout`. Each call expands inline to the section's body before the run, so the runner, the report, and Steptix's debugger see the fully-expanded flow.
 
 **When to use a section instead of a skill:** a section groups steps *within one test* and shares the test's scope — no parameters, no outputs, no second file. Reach for a skill when a block is shared *across* tests or genuinely needs its own inputs.
 
@@ -264,11 +264,11 @@ Here steps 1 and 4 both call `### Login`, and step 3 calls `### Checkout`. Each 
 - A section may call other sections in the same file, and may call skills. Skill files follow the same grammar, so a skill body may define and invoke its own sections.
 - Sections are macros, not functions: **no per-section `## Parameters`/`## Outputs`**, and a section invoked twice runs twice. A `[store as: X]` inside a test-file section body is visible to every later step of the test.
 
-**Matching** is on the step's raw text (minus the `N. ` prefix), trimmed and **case-insensitive** — `Login`, `login`, and `LOGIN` all call `### Login`. Inline markdown is *not* normalized: `1. **Login**` is an ordinary AI step, not a call. A step that parses as `[skill:]`, `[tool:]`, `[input:]`, or `[interactive]` is never a section call. A trailing period or a typo is a near-miss, not a call — TestBench (Native) squiggles those as "Did you mean…?" while you type.
+**Matching** is on the step's raw text (minus the `N. ` prefix), trimmed and **case-insensitive** — `Login`, `login`, and `LOGIN` all call `### Login`. Inline markdown is *not* normalized: `1. **Login**` is an ordinary AI step, not a call. A step that parses as `[skill:]`, `[tool:]`, `[input:]`, or `[interactive]` is never a section call. A trailing period or a typo is a near-miss, not a call — Steptix squiggles those as "Did you mean…?" while you type.
 
 **Names** may contain spaces (`### Log in as admin`). Refused at parse time: a reserved H2 keyword (`Steps`, `Config`, `Parameters`, `Outputs`, `Hooks`), a name beginning with `[`, a name containing `{{`, an empty name, and a duplicate (case-insensitively) within one file.
 
-**Editor support.** TestBench (Native) runs sectioned files with full debug parity — gutter status on body lines, breakpoints inside a body, step-into a section, and a call stack that names it — plus go-to-definition, links, completion, and the diagnostics above. TestBench (Monaco), the legacy variant, has no sections support and refuses to run a sectioned file (TB026) rather than mis-run it; use TestBench (Native) or the CLI.
+**Editor support.** Steptix runs sectioned files with full debug parity — gutter status on body lines, breakpoints inside a body, step-into a section, and a call stack that names it — plus go-to-definition, links, completion, and the diagnostics above. TestBench (Monaco), the legacy variant, has no sections support and refuses to run a sectioned file (STX026) rather than mis-run it; use Steptix or the CLI.
 
 Hooks never resolve to sections: a `## Hooks` entry or a project `defaultHooks` entry equal to a section name stays an ordinary AI step.
 
@@ -530,15 +530,15 @@ When a step fails and is retried, the retry is not blind — it includes context
 
 ## 7. Configuration
 
-### `aiui.config.json`
+### `steptix.config.json`
 
 A plain JSON object. Every key is optional and falls back to the built-in
 defaults (omitted keys, and omitted siblings of partial nested objects, inherit
 from `DEFAULT_CONFIG` via a recursive deep merge). Editing inside VS Code with
-the TestBench extension provides autocomplete + validation automatically (the
-extension ships the schema and binds it to `aiui.config.json`); outside the
+the Steptix extension provides autocomplete + validation automatically (the
+extension ships the schema and binds it to `steptix.config.json`); outside the
 extension, an optional `"$schema"` key pointing at
-`./node_modules/ai-ui-automation/schema/aiui.config.schema.json` gives the same.
+`./node_modules/steptix/schema/steptix.config.schema.json` gives the same.
 
 ```json
 {
@@ -595,37 +595,37 @@ Field notes:
 
 ```bash
 # Run all tests
-npx aiui run
+npx steptix run
 
 # Run specific test file
-npx aiui run tests/login-flow.md
+npx steptix run tests/login-flow.md
 
 # Run all tests in a directory
-npx aiui run tests/
+npx steptix run tests/
 
 # Run tests matching tag
-npx aiui run --tag smoke
-npx aiui run --tag "smoke,critical"   # AND logic
+npx steptix run --tag smoke
+npx steptix run --tag "smoke,critical"   # AND logic
 
 # Run headless
-npx aiui run --headless
+npx steptix run --headless
 
 # Specify config
-npx aiui run --config ./custom.config.ts
+npx steptix run --config ./custom.config.ts
 
 # Initialise project structure
-npx aiui init
+npx steptix init
 
 # List discovered tests
-npx aiui list
-npx aiui list --tag smoke
+npx steptix list
+npx steptix list --tag smoke
 ```
 
 ### CLI Flags
 
 | Flag              | Type    | Default                  | Description                        |
 |-------------------|---------|--------------------------|------------------------------------|
-| `--config`        | string  | `aiui.config.json` | Path to config file                |
+| `--config`        | string  | `steptix.config.json` | Path to config file                |
 | `--tag`           | string  | —                        | Filter by tag (comma-separated)    |
 | `--headless`      | boolean | `false`                  | Run browser in headless mode       |
 | `--timeout`       | number  | `60000`                  | Test timeout in ms                 |
@@ -634,13 +634,13 @@ npx aiui list --tag smoke
 | `--bail`          | boolean | `false`                  | Stop on first failure              |
 | `--browser`       | string  | `chromium`               | Browser engine                     |
 
-### `aiui init`
+### `steptix init`
 
 Scaffolds a new project:
 
 ```
 my-project/
-├── aiui.config.json
+├── steptix.config.json
 ├── context/
 │   └── app-overview.md
 ├── tests/
@@ -826,7 +826,7 @@ Both v2 endpoints use the same Bearer token auth as the gateway's other routes.
 ## 11. Project Structure
 
 ```
-ai-ui-automation/
+steptix/
 ├── package.json
 ├── tsconfig.json
 ├── src/
@@ -969,7 +969,7 @@ The following actions were tried and failed. Choose a DIFFERENT approach — do 
 
 ```
 1. CLI parses arguments
-2. Load config from aiui.config.json
+2. Load config from steptix.config.json
 3. Discover test files (filtered by --tag if specified)
 4. Load context files from context/
 5. For each test file:

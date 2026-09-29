@@ -1,10 +1,10 @@
 {
-  "name": "ai-ui-automation",
+  "name": "steptix",
   "version": "1.0.0",
   "description": "AI-powered UI test automation using natural language Markdown test files",
   "type": "module",
   "bin": {
-    "aiui": "./dist/index.js"
+    "steptix": "./dist/index.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -10,10 +10,10 @@ import { resolveCodeBehindCacheDir, type CodeBehindBinding } from './loader.js';
  *
  * Runs no longer write code-behind, so the only thing a run leaves behind for
  * the next compile is this: which steps ran as code, which ran under AI, and
- * which had an entry that broke. `aiui compile --only-stale` and the TestBench
+ * which had an entry that broke. `steptix compile --only-stale` and the Steptix
  * gutter read it instead of re-running the test to find out.
  *
- * Gitignored (it lives in `.aiui-codebehind-cache/`, already ignored), and
+ * Gitignored (it lives in `.steptix-codebehind-cache/`, already ignored), and
  * strictly advisory: everything here is best-effort, and a missing or
  * unreadable sidecar means "nothing known", never an error.
  */
@@ -138,7 +138,7 @@ export function lastRunStaleMemberRow(args: {
   };
 }
 
-/** `tests/github.md` → `tests/.aiui-codebehind-cache/github.last-run.json`. */
+/** `tests/github.md` → `tests/.steptix-codebehind-cache/github.last-run.json`. */
 export function lastRunPathFor(markdownFile: string): string {
   const resolved = path.resolve(markdownFile);
   const base = path.basename(resolved, path.extname(resolved));

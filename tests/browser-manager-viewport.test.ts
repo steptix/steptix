@@ -142,7 +142,7 @@ afterEach(() => {
 describe('fixedViewport pins the context viewport', () => {
   it('HEADED: the context gets the exact size, not the null that means "ask the window"', async () => {
     // The whole feature, in one assertion. Headed is the default and what a
-    // TestBench user watches, and `viewport: null` there is why setting
+    // Steptix user watches, and `viewport: null` there is why setting
     // `browser.viewport` today does nothing in the setup people actually run.
     const { newContext } = launchFake();
     await launchBrowser(baseConfig({ headed: true, fixedViewport: MOBILE }));

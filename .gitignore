@@ -9,19 +9,18 @@ memory/
 # Temp tool modules written by the server's hot-reload (issue 033). Created
 # inside the tools dir as a dot-dir; files are deleted right after import, so
 # this is normally empty, but ignore it so a stray temp .mjs never gets staged.
-.aiui-tool-cache/
+.steptix-tool-cache/
 # Same thing for step code-behind: temp `.mjs` bundles written beside a
 # `.steps.ts` so it can be imported (and validated) with fresh code. The
 # `.steps.ts` files themselves ARE committed — that is the point of the
 # feature; only this dot-dir is transient.
-.aiui-codebehind-cache/
-# Rolling log of servers the MCP server auto-started (.aiui/mcp-server.log).
-# Per-machine, and it holds whatever the server printed — step text and
-# resolved values included — so it must never be committed.
-.aiui/
-# TestBench per-workspace run-state (gutter ✓/✗ marks). Travels in the
-# project zip but stays out of git to avoid churn. Matches at any depth.
-.testbench/
+.steptix-codebehind-cache/
+# Per-machine state at any depth: the MCP server's rolling log of servers it
+# auto-started (mcp-server.log, which holds whatever the server printed — step
+# text and resolved values included — so it must never be committed), CDP
+# profiles, and the extension's run-state.json (gutter ✓/✗ marks; travels in
+# the project zip but stays out of git to avoid churn).
+.steptix/
 *.tsbuildinfo
 .env
 .env.*
@@ -30,9 +29,9 @@ memory/
 .claude/worktrees/
 .claude/scheduled_tasks.lock
 
-# TestBench (VS Code extension)
-testbench-native/.vscode-test/
-testbench-native/*.vsix
+# Steptix (VS Code extension)
+steptix-vscode/.vscode-test/
+steptix-vscode/*.vsix
 
 # flick-vscode CDP launcher's per-engine browser profiles. Created when the
 # user clicks "Launch with CDP" — full Chrome/Edge user-data-dir (cookies,
@@ -43,6 +42,6 @@ flick-vscode/*.vsix
 # Parallel live-suite scratch: one directory per shard, holding that shard's
 # copy of templates/, its VS Code user-data/extensions dirs, its server log and
 # its per-file reports. Wiped and rebuilt at the start of every parallel run.
-# Beside templates/ rather than under testbench-native/ so a shard workspace
+# Beside templates/ rather than under steptix-vscode/ so a shard workspace
 # resolves bare imports through the same node_modules chain the real one does.
 .live-shards/

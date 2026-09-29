@@ -18,7 +18,7 @@
  * `executeStep` and the condition JUDGE are mocked; the AI client answers a
  * generation prompt with an entry (a `condition` for a condition prompt) and a
  * review with the file unchanged. The fixtures live under `tests/` so a
- * candidate importing `ai-ui-automation/codebehind` resolves.
+ * candidate importing `steptix/codebehind` resolves.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
@@ -274,7 +274,7 @@ beforeAll(async () => {
   await fs.mkdir(tmpDir, { recursive: true });
   // A project of its own, so the route resolves THIS directory rather than
   // the repository's config.
-  await fs.writeFile(path.join(tmpDir, 'aiui.config.json'), JSON.stringify({}));
+  await fs.writeFile(path.join(tmpDir, 'steptix.config.json'), JSON.stringify({}));
 });
 
 afterAll(async () => {

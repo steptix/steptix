@@ -4,7 +4,7 @@
  *
  * Every case runs the real `checkVisionRoute` against a fake `fetch`, so the
  * thing under test is the decision and the request it makes, not the network.
- * The bodies are the CONTRACT §15.3 gives the bridge (`aiui_bridge.images`,
+ * The bodies are the CONTRACT §15.3 gives the bridge (`steptix_bridge.images`,
  * per-model `image_input`), spelled out here rather than imported from the
  * bridge, which is another package built by another hand.
  */
@@ -54,7 +54,7 @@ function bridgeBody(
 ): unknown {
   return {
     object: 'list',
-    aiui_bridge: { name: 'testbench-copilot-bridge', images },
+    steptix_bridge: { name: 'steptix-copilot-bridge', images },
     data: models.map((m) => ({
       id: m.id,
       object: 'model',
@@ -135,7 +135,7 @@ describe('checkVisionRoute — the bridge refuses', () => {
     const result = await checkVisionRoute(BRIDGE_AI, { fetch });
     expect(result).toEqual({ ok: false, error: BRIDGE_STRIPS_IMAGES_MESSAGE });
     expect(BRIDGE_STRIPS_IMAGES_MESSAGE).toBe(
-      'Computer mode needs the model to see the screen, but the TestBench Copilot bridge drops ' +
+      'Computer mode needs the model to see the screen, but the Steptix Copilot bridge drops ' +
         'images on this VS Code (it has no image support for language models). Update VS Code, ' +
         'or run computer-mode steps with a model that is not routed through the bridge.',
     );
@@ -249,7 +249,7 @@ describe('checkVisionRoute — everything else proceeds', () => {
     expect((await checkVisionRoute(BRIDGE_AI, { fetch })).ok).toBe(true);
   });
 
-  it('an endpoint with no aiui_bridge field is not the bridge: proceeds', async () => {
+  it('an endpoint with no steptix_bridge field is not the bridge: proceeds', async () => {
     const { fetch } = fakeFetch(200, {
       object: 'list',
       data: [{ id: 'copilot/gpt-5.6-luna', object: 'model', image_input: false }],

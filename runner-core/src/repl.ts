@@ -134,7 +134,7 @@ export function interpretReplCommand(
  * This decides a FLAT name only. A dotted one is `root.property`, whose
  * property came off a page rather than out of the author's head, and that goes
  * through {@link isRecordSecretKey} instead — see {@link isSecretVarName}.
- * `tests/record-secret-parity.test.js` in testbench-native reads the literal
+ * `tests/record-secret-parity.test.js` in steptix-vscode reads the literal
  * out of the server's source and fails if this one drifts from it.
  */
 const SECRET_NAME = /password|secret|token|key/i;
@@ -148,7 +148,7 @@ export const SECRET_NAME_PATTERN = SECRET_NAME;
  *
  * Exported for the one other client surface that answers this question about
  * an author-chosen name — the `${env.X}` / `${data.X.Y}` completion dropdown
- * (testbench-native/src/extension/env-data-completion-core.ts), which asks it
+ * (steptix-vscode/src/extension/env-data-completion-core.ts), which asks it
  * of a '.'-joined data PATH, where every segment is author-chosen and none of
  * them is a record column. Not for a runtime variable name: that may be
  * dotted, and {@link isSecretVarName} is the rule for those.
@@ -160,7 +160,7 @@ export function isSecretFlatName(name: string): boolean {
 /**
  * Is a RECORD COLUMN's name a secret? The mirror of `isRecordSecretKey`
  * (src/utils/secrets.ts), regex for regex — `tests/record-secret-parity.test.js`
- * in testbench-native reads both sources and fails if they drift.
+ * in steptix-vscode reads both sources and fails if they drift.
  *
  * Narrower than {@link SECRET_NAME} on purpose, and the reason is on the
  * server side: a record's keys are picked off the page — a `readTable` column
@@ -348,7 +348,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  * held no secret would be this helper inventing a change.
  *
  * Kept line for line with `maskRecordSecretsInline`
- * (testbench-native/src/webview/lib/variables-panel.js), which the webview
+ * (steptix-vscode/src/webview/lib/variables-panel.js), which the webview
  * bundle uses because it can import nothing from here: the parity test
  * compares the two bodies with the TypeScript spellings normalised away, so a
  * change made in one and not the other fails rather than drifts.

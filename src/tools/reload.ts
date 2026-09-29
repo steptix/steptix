@@ -16,10 +16,10 @@ import { logger } from '../utils/logger.js';
  * So we esbuild-bundle the tool to a uniquely-named temp `.mjs` and import
  * that. `bundle:true` inlines the tool's relative helpers *fresh* (a unique
  * entry path alone wouldn't reload an unchanged-path helper); `packages:
- * 'external'` leaves bare deps (`ai-ui-automation/tools`, playwright, …) for
+ * 'external'` leaves bare deps (`steptix/tools`, playwright, …) for
  * Node to resolve at import time. ~20 ms warm, in-process — so the live
  * Playwright `page` handle is preserved (a worker/subprocess couldn't receive
- * it). The CLI is one-shot and keeps the direct import; only `serve`/TestBench
+ * it). The CLI is one-shot and keeps the direct import; only `serve`/Steptix
  * needs this.
  */
 
@@ -47,16 +47,16 @@ export interface BundledOutput {
 // resolvable. Import it lazily the first time a reload is needed so the
 // one-shot CLI path — which never hot-reloads — doesn't pay the load cost.
 /** The framework's own package name — what generated files import. */
-const FRAMEWORK_PACKAGE = 'ai-ui-automation';
+const FRAMEWORK_PACKAGE = 'steptix';
 
 /**
- * Resolve `ai-ui-automation` and its subpaths to the running framework when
+ * Resolve `steptix` and its subpaths to the running framework when
  * the project cannot.
  *
- * A generated `.steps.ts` (or a tool) imports `ai-ui-automation/codebehind`,
+ * A generated `.steps.ts` (or a tool) imports `steptix/codebehind`,
  * and `packages: 'external'` leaves that for Node to resolve from the temp
  * module's location — which is the project's cache dir. A tests-only project
- * driven from TestBench has no `node_modules` and no reason to have one, and
+ * driven from Steptix has no `node_modules` and no reason to have one, and
  * the import then fails, the loader warns, and every step falls back to AI.
  * Caught live on a project with a freshly compiled, correct `.steps.ts`.
  *
@@ -71,9 +71,9 @@ const FRAMEWORK_PACKAGE = 'ai-ui-automation';
  */
 function frameworkSelfResolvePlugin(cacheDir: string): import('esbuild').Plugin {
   return {
-    name: 'ai-ui-automation-self-resolve',
+    name: 'steptix-self-resolve',
     setup(build) {
-      build.onResolve({ filter: /^ai-ui-automation(\/.*)?$/ }, async (args) => {
+      build.onResolve({ filter: /^steptix(\/.*)?$/ }, async (args) => {
         if (await frameworkResolvesFrom(cacheDir)) return undefined;
         const target = await frameworkExportPath(args.path);
         if (!target) return undefined;
@@ -87,7 +87,7 @@ function frameworkSelfResolvePlugin(cacheDir: string): import('esbuild').Plugin 
 }
 
 /**
- * Would Node find `ai-ui-automation` from `dir`? True for an installed (or
+ * Would Node find `steptix` from `dir`? True for an installed (or
  * linked) package in any `node_modules` above it, and for the framework's own
  * checkout, where the nearest `package.json` IS the package (self-reference
  * through `exports`).
@@ -115,7 +115,7 @@ async function frameworkResolvesFrom(dir: string): Promise<boolean> {
 let frameworkRootPromise: Promise<string | null> | undefined;
 
 /** The framework's own package root: the nearest `package.json` above this
- *  module named `ai-ui-automation`. Works from `dist/` and from `src/`. */
+ *  module named `steptix`. Works from `dist/` and from `src/`. */
 function frameworkRoot(): Promise<string | null> {
   if (!frameworkRootPromise) {
     frameworkRootPromise = (async () => {
@@ -141,7 +141,7 @@ function frameworkRoot(): Promise<string | null> {
 }
 
 /** The absolute path the framework's `package.json` exports for a specifier —
- *  `ai-ui-automation/codebehind` → `<root>/dist/codebehind/index.js`. */
+ *  `steptix/codebehind` → `<root>/dist/codebehind/index.js`. */
 async function frameworkExportPath(specifier: string): Promise<string | null> {
   const root = await frameworkRoot();
   if (!root) return null;
@@ -189,7 +189,7 @@ export async function bundleAndImport(
 
   // Unique temp filename per call. A content-hash-only name would collide when
   // two concurrent sessions sharing one toolsDir bundle the *same* content into
-  // the *same* `.aiui-tool-cache` — the first finisher's delete (below) would
+  // the *same* `.steptix-tool-cache` — the first finisher's delete (below) would
   // yank the file out from under the others' import(), surfacing the exact
   // "cannot find module" failure this feature set out to kill. The randomUUID
   // suffix makes each write independent; the hash prefix is kept only as a
@@ -249,7 +249,7 @@ export async function bundleToolModule(
     // in cacheDir. A tool that resolves a sibling resource via
     // `new URL('./data', import.meta.url)` then behaves identically on the
     // server (bundled) and the CLI (direct import); without this it would
-    // resolve inside `.aiui-tool-cache/` and ENOENT. (The framework's own tool
+    // resolve inside `.steptix-tool-cache/` and ENOENT. (The framework's own tool
     // subgraph uses no `import.meta`, so this is safe even when a tool imports
     // it by absolute path and esbuild inlines it.)
     //
@@ -309,14 +309,14 @@ export async function signatureOf(inputs: string[]): Promise<string> {
 }
 
 /** Name of the temp-module cache directory created inside the tools dir. */
-export const TOOL_CACHE_DIRNAME = '.aiui-tool-cache';
+export const TOOL_CACHE_DIRNAME = '.steptix-tool-cache';
 
 /**
  * Where to write temp tool modules for `toolsDir`: a dot-directory **inside**
  * the tools dir itself.
  *
  * Co-locating is what makes bare-specifier resolution work everywhere. A
- * temp `.mjs` resolves `ai-ui-automation/tools` (and playwright, …) by the same
+ * temp `.mjs` resolves `steptix/tools` (and playwright, …) by the same
  * walk-up the tool file uses — whether the package is found via a real
  * `node_modules` entry (installed dep or a symlink, as the fixtures use) *or*
  * via package self-reference (tools living inside the framework repo). A

@@ -18,7 +18,7 @@ heals through AI for that one step and is **flagged** for the next compile,
 so files never change under an author mid-run.
 
 Example. The author has `tests/github.md` green under AI and presses
-**TestBench: Compile Code-behind** (or runs `aiui compile tests/github.md`).
+**Steptix: Compile Code-behind** (or runs `steptix compile tests/github.md`).
 The Runner panel shows:
 
 ```
@@ -69,7 +69,7 @@ concrete:
    literal — produces code that *passes* on the day it is written; only a
    review that asks "should this be computed?" catches it.
 3. **Surprising side effects.** Files change while a test runs, inside
-   whatever tool the author is using. In TestBench that is a file changing
+   whatever tool the author is using. In Steptix that is a file changing
    under an open editor.
 
 The fix is to give generation the whole test, a review pass, and an
@@ -79,7 +79,7 @@ at the end. That is a compiler with a test suite, and it gets to iterate.
 ## Design
 
 > **Amended by [codebehind-compile-as-a-run.md](codebehind-compile-as-a-run.md).**
-> Ordinary TestBench runs capture the step context a compile needs, so the
+> Ordinary Steptix runs capture the step context a compile needs, so the
 > run the author just watched is the recording and Record — when one is still
 > needed — runs in the editor's own session. Record and Replay events ride the
 > compile stream and paint the gutter like a run. A compile proposes what
@@ -98,13 +98,13 @@ codeBehindStale?: { file: string; source: string; error: string };
 ```
 
 The report renders it as **⚠ ran under AI — code-behind failed**, the run
-summary counts it ("7 steps as code, 1 AI, 1 stale"), and TestBench shows
+summary counts it ("7 steps as code, 1 AI, 1 stale"), and Steptix shows
 ⚠ in the gutter. The `codebehind.generate` config key is removed: there is
 no longer anything for it to gate.
 
-Every run also writes `.aiui-codebehind-cache/<name>.last-run.json` beside
+Every run also writes `.steptix-codebehind-cache/<name>.last-run.json` beside
 the test — per step: `source`, `section`, `status`, `fromCodeBehind`,
-`stale` — so `--only-stale` and the TestBench gutter have something to read
+`stale` — so `--only-stale` and the Steptix gutter have something to read
 without re-running. A run compile drove is excluded: a Record (code-behind
 off, everything AI) or a Replay (candidate, not the real file) would stamp
 its own shape over the findings the compile is acting on. A green compile
@@ -112,7 +112,7 @@ clears the `stale` flags it just fixed, so the next `--only-stale` doesn't
 regenerate them again.
 
 Server runs write it too — the same sidecar, from the batched step loop —
-because a TestBench run is how most people run a test, and without it the
+because a Steptix run is how most people run a test, and without it the
 only runs `--only-stale` could see were CLI ones. Only for a batch that covers
 the whole test as it stands: a subset batch (a breakpoint continuation, an
 `[input:]` split, a partial re-run) knows about some of the steps, and a
@@ -129,7 +129,7 @@ or an "applied" call back to the server.
 ### The compile pipeline
 
 `compileTest(options)` in `src/codebehind/compile.ts`, one core used by the
-CLI in-process and by the server for TestBench. Phases, in order:
+CLI in-process and by the server for Steptix. Phases, in order:
 
 **1. Select.** Decide which steps get (re)generated — the set **S**:
 steps with no entry, steps flagged stale (from the last-run sidecar, or from
@@ -149,7 +149,7 @@ step's `StepResult` — the action transcript, DOM snapshot and URL *before*
 the step (captured at turn 1) and *after* it (the post-step capture),
 resolved parameters, outputs, assertions. Code-behind is **off** for this
 run: a step served by its existing entry produces no transcript, so
-recompiling it would have nothing to work from. TestBench may instead pass a
+recompiling it would have nothing to work from. Steptix may instead pass a
 `sessionId` of a completed, green run whose results still carry DOM
 snapshots ("Compile from this run"); then this phase is skipped, and because
 that run *did* use code-behind, its `codeBehindStale` flags feed selection.
@@ -219,10 +219,10 @@ step stale, stops, and says "existing entry for step *k* fails; recompile it
 with `--steps k` (or Compile This Step)".
 
 **6. Write.** On green, the CLI writes the file(s) and prints the summary;
-TestBench receives the proposed content and opens a diff. Every file is
+Steptix receives the proposed content and opens a diff. Every file is
 esbuild-validated before it lands, so a file that would not compile is never
 written at all. Nothing is written on a non-green compile: the candidate is
-left at `.aiui-codebehind-cache/<name>.steps.ts.candidate` and the summary
+left at `.steptix-codebehind-cache/<name>.steps.ts.candidate` and the summary
 says where, so entries can be salvaged by hand. A green compile deletes any
 candidate a previous red one left, which would otherwise read as current.
 
@@ -245,8 +245,8 @@ Skills: a test that invokes skills compiles entries into the skill's own
 
 | Surface | Full compile | One step |
 |---|---|---|
-| CLI | `aiui compile tests/github.md` with `--only-stale`, `--all`, `--steps 3-5`, `--dry-run`, `--max-rounds N` | `aiui compile tests/github.md --steps 5` |
-| TestBench | **Compile Code-behind** — editor title button beside Run All, command palette | **Compile This Step** in the line-number context menu, beside Run This Step |
+| CLI | `steptix compile tests/github.md` with `--only-stale`, `--all`, `--steps 3-5`, `--dry-run`, `--max-rounds N` | `steptix compile tests/github.md --steps 5` |
+| Steptix | **Compile Code-behind** — editor title button beside Run All, command palette | **Compile This Step** in the line-number context menu, beside Run This Step |
 | Runner panel | **Compile from this run** after a green run (passes the session id; skips Record) | — |
 
 `--dry-run` runs everything but Write and prints the candidate. Exit code 0
@@ -279,11 +279,11 @@ means a different step would be silent and wrong.
   as a Run does (stories/server-lifecycle.md §5): `server http://localhost:3100
   (SERVER_URL in C:\AITests\.env)`, then `server healthy at … (v0.9.1)` — or
   a spawn when `serverAutoStart` is configured and nothing answers, or a
-  refusal (TB027) when the port belongs to something else. A compile that
+  refusal (STX027) when the port belongs to something else. A compile that
   still cannot get through is reported in the catalogue's words with the
-  transport reason attached — *TB010: Cannot reach the ai-ui-automation
+  transport reason attached — *STX010: Cannot reach the steptix
   server at http://localhost:3100 (fetch failed: connect ECONNREFUSED
-  127.0.0.1:3100). Start it with 'npx aiui serve' …* — never a bare "fetch failed", which
+  127.0.0.1:3100). Start it with 'npx steptix serve' …* — never a bare "fetch failed", which
   is what Node says for every kind of transport failure (refused,
   unresolvable host, bad certificate) with the actual reason hidden on the
   error's `cause`. See [issue 050](../issues/resolved/050-codebehind-compile-fetch-failed.md).
@@ -299,7 +299,7 @@ means a different step would be silent and wrong.
   undoable and shows in Source Control like any edit. The CLI writes
   directly because it is the scriptable path.
 
-  Apply returns focus to the test file. Every TestBench command works against
+  Apply returns focus to the test file. Every Steptix command works against
   the active editor, and the diff it was pressed in is not a test file — so
   without that, the author's next act (Run, to see the `</>` marks) silently does
   nothing. A file being created for the first time is written with
@@ -343,7 +343,7 @@ fromSessionId?, select?: { onlyStale?, all?, steps? }, maxRounds?,
 dryRun? }` — streams phase and step events in the same framing as step
 streaming, then a final `{ status: 'green' | 'failed', files: Record<path,
 content>, summary }`. The server writes nothing under the project except
-the gitignored candidate; TestBench applies. One compile per test file at a
+the gitignored candidate; Steptix applies. One compile per test file at a
 time. The project bundle is resolved per request, as for any run; the
 `api-server` field allow-list must name every new field — an unlisted field
 is silently dropped.
@@ -362,7 +362,7 @@ around. Making it engage means either a "record for compile" run mode or
 capturing context on ordinary runs, and both are their own decision.
 
 > **Decided by [codebehind-compile-as-a-run.md](codebehind-compile-as-a-run.md):**
-> ordinary TestBench runs capture context (`StepRequest.captureStepContext`),
+> ordinary Steptix runs capture context (`StepRequest.captureStepContext`),
 > so a plain Run *is* what the compile reuses — green, or red as a prefix.
 > `fromSessionId` becomes `sessionId`, which is also the session a Record
 > runs in when one is still needed.
@@ -395,7 +395,7 @@ does step 7 bind into" only have to disagree once for a skill's entries to
 land in the test's file. For the same reason the server parses the test **from
 disk**: the pipeline needs the whole expansion, and the replay runs the file
 itself. The `steps` the client sends are a guard — a length mismatch says so
-on the stream — and TestBench saves the buffer before compiling.
+on the stream — and Steptix saves the buffer before compiling.
 
 `dryRun` is accepted for parity with the CLI flag and ignored: the server
 never writes under the project, so a client asking for `dryRun: false` gets
@@ -422,7 +422,7 @@ compileTest({
 
 It prints nothing and writes nothing under the project except the gitignored
 candidate (and, when `dryRun` is false, the `.steps.ts` files themselves — the
-server should pass `dryRun: true` and apply through TestBench). A server that
+server should pass `dryRun: true` and apply through Steptix). A server that
 wants compile to drive its own browser session supplies `runner`; without one
 the default runs `runTest` in-process.
 
@@ -435,7 +435,7 @@ the default runs `runTest` in-process.
 ## Implementation outline
 
 Both phases are built. Phase A was the core, the CLI and the runtime policy;
-phase B the server endpoint, `runner-core` and `testbench-native`.
+phase B the server endpoint, `runner-core` and `steptix-vscode`.
 
 New:
 
@@ -445,7 +445,7 @@ New:
   `buildStepCodePrompt` grows the whole-test, candidate-file and
   before/after-DOM sections and the post-condition rule; the
   `{"entry": null, "reason"}` decline, parsed by `parseStepCodeOrDecline`.
-- `src/cli/commands/compile.ts` — `aiui compile`.
+- `src/cli/commands/compile.ts` — `steptix compile`.
 - `src/server/compile-runner.ts` — `CodeBehindCompiler`: the per-file lock,
   the project resolution, the `fromSessionId` decision, and the
   `CompileRunner` that drives the session machinery. Beside the errand runner
@@ -455,7 +455,7 @@ New:
   shared `postSse` the step stream now uses too; step event fields
   `fromCodeBehind`, `codeBehindStale`; `ApiErrorKind` gains `conflict` so a
   409 reads as "already compiling" rather than a server fault.
-- `testbench-native/src/extension/codebehind-diff.ts` — the virtual-document
+- `steptix-vscode/src/extension/codebehind-diff.ts` — the virtual-document
   provider, the proposal, Apply/Discard.
 
 Modified in phase B:
@@ -467,7 +467,7 @@ Modified in phase B:
   knobs plus `onRunDetails`), the last-run sidecar write, the retained
   `lastRunDetails` behind `fromSessionId`, and the two new fields on
   `step:pass`.
-- `testbench-native` — commands `compileCodeBehind`, `compileStepCodeBehind`,
+- `steptix-vscode` — commands `compileCodeBehind`, `compileStepCodeBehind`,
   `openCodeBehind`, `applyCodeBehind`, `discardCodeBehind`; `</>`/⚠ decorations
   and the `pass-code-behind` / `pass-stale` statuses; both run logs and the
   editor summary counting them; the panel's Compile button and the

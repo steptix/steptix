@@ -29,7 +29,7 @@ export function resolveAmbiguousTarget(config: Config): AmbiguousTargetMode {
 /**
  * Resolved per-project context for a run: the project's config + the env/data
  * bundle, anchored at the test file's project root (NOT the server's cwd).
- * `projectRoot` is null when no `aiui.config.json` was found above the test
+ * `projectRoot` is null when no `steptix.config.json` was found above the test
  * file (the defaults fallback). See
  * stories/project-scoped-data-dir-and-env.md.
  */
@@ -49,7 +49,7 @@ export interface ProjectBundle {
    * and never the project's. Same shape as `browser.video`, which
    * `resolveSessionOutput` reads off the bundle at session creation for exactly
    * this reason. A per-project key consumed at session-creation time that does
-   * not come off the bundle is silently ignored on the server and TestBench
+   * not come off the bundle is silently ignored on the server and Steptix
    * paths and works only under the CLI — see the implementation note in
    * stories/codebehind-selector-ambiguity.md.
    *
@@ -101,7 +101,7 @@ export class ProjectBundleResolver {
    * Resolve the per-project config + env/data bundle for a step batch from the
    * test file's project root. mtime-cached; returns the cached bundle when no
    * input file changed, otherwise reloads. A null project root (no
-   * `aiui.config.json` above the file) falls back to server defaults with no
+   * `steptix.config.json` above the file) falls back to server defaults with no
    * project `.env`/data.
    */
   async resolve(testFilePath: string | undefined, envName: string | null): Promise<ProjectBundle> {
@@ -139,7 +139,7 @@ export class ProjectBundleResolver {
         config = await loadConfig(undefined, projectRoot);
       } catch (err) {
         throw new Error(
-          `Failed to load aiui.config.json for project "${projectRoot}": ${(err as Error).message}`,
+          `Failed to load steptix.config.json for project "${projectRoot}": ${(err as Error).message}`,
         );
       }
     }
@@ -159,7 +159,7 @@ export class ProjectBundleResolver {
         }
         envBundle = { envName, env: baseline, data: {} };
         logger.warn(
-          'No aiui.config.json found above the test file — using defaults ' +
+          'No steptix.config.json found above the test file — using defaults ' +
             '(no project .env/data). ${data.*} references will fail if used.',
         );
       }
@@ -189,7 +189,7 @@ export class ProjectBundleResolver {
   ): Promise<Map<string, number>> {
     const paths: string[] = [];
     if (projectRoot) {
-      paths.push(pathJoin(projectRoot, 'aiui.config.json'));
+      paths.push(pathJoin(projectRoot, 'steptix.config.json'));
       paths.push(pathJoin(projectRoot, '.env'));
       if (envName) {
         paths.push(pathJoin(projectRoot, `.env.${envName}`));

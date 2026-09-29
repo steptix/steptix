@@ -39,7 +39,7 @@ function fakeProject(overrides: Partial<ProjectContext> = {}): ProjectContext {
     scope: 'project',
     configSearch: [],
     projectRoot: PROJECT_ROOT,
-    configPath: `${PROJECT_ROOT}/aiui.config.json`,
+    configPath: `${PROJECT_ROOT}/steptix.config.json`,
     env: { AI_API_KEY: 'project-ai-key' },
     envName: null,
     serverUrl: 'http://127.0.0.1:3100',
@@ -89,7 +89,7 @@ const RUNNING = [
     engine: 'edge',
     profile: 'default',
     port: 51000,
-    profileDir: 'c:/proj/.aiui/cdp-profiles/edge-default',
+    profileDir: 'c:/proj/.steptix/cdp-profiles/edge-default',
     scope: 'project',
     tabs: TABS,
   },
@@ -610,7 +610,7 @@ describe('the receipt', () => {
 
     await errand(h);
 
-    expect(h.errands[0]?.testFilePath).toMatch(/[\\/]\.aiui-errand\.md$/);
+    expect(h.errands[0]?.testFilePath).toMatch(/[\\/]\.steptix-errand\.md$/);
     expect(h.errands[0]?.root).toBe(PROJECT_ROOT);
     expect(h.errands[0]?.scope).toBe('project');
     // The project's own .env, so the run bills and behaves as the project

@@ -11,9 +11,9 @@ today several of those outputs carry it anyway.
 Two outputs of a run show the password in clear text:
 
 **The console.** Every step is announced with its placeholders already filled
-in. This is the server's stdout when TestBench drives a run (which the
-`aiui serve` terminal shows, and `%LOCALAPPDATA%\aiui\serve-manual.log`
-keeps), and the terminal when `aiui run` drives it:
+in. This is the server's stdout when Steptix drives a run (which the
+`steptix serve` terminal shows, and `%LOCALAPPDATA%\steptix\serve-manual.log`
+keeps), and the terminal when `steptix run` drives it:
 
 ```
 [2026-08-23 07:58:35] Step 7/8: Enter the username paul@example.com
@@ -88,9 +88,9 @@ two can't disagree about what a secret is:
 - **The console step line**, on all three runners that print one: the CLI
   (`src/runner/test-runner.ts`), the Sessions API (`src/server/session-manager.ts`)
   and errands (`src/server/errand-runner.ts`, whose line goes to stderr under
-  `aiui mcp` — the host's MCP log).
+  `steptix mcp` — the host's MCP log).
 - **The `TestReport`**, before anything renders or persists it: the HTML
-  report, `aiui run`'s end-of-run `FAILED TESTS` summary (which prints the
+  report, `steptix run`'s end-of-run `FAILED TESTS` summary (which prints the
   failed steps' text), the run-history line appended to the test file, and
   the failure diagnosis prompt. Covered on the CLI, the server (including the
   re-render that adds the video link when a session closes) and the Electron
@@ -142,7 +142,7 @@ Everything above, on the branch `feat/secret-redaction`. Proof:
   report get `***`; `tests/api-server-errands.test.ts` the same for an
   errand's line; `tests/test-runner-clarification-control.test.ts` the CLI
   runner, report and diagnosis. Root suite 2804/2804.
-- Live, through the worktree's `aiui run` on a scratch project: a
+- Live, through the worktree's `steptix run` on a scratch project: a
   `password: $PW` parameter whose value contains an `&`, a local form page,
   three steps under the model (41k tokens). The console printed `Step 2/3:
   Type *** into the password field and click Go`; the 259 KB report held the
@@ -150,7 +150,7 @@ Everything above, on the branch `feat/secret-redaction`. Proof:
   nine places, the action JSON reading `"value": "***"`; the `full`-mode
   run log, 188 KB with every prompt and reply, likewise none.
 
-Nothing in `testbench-native/` or `runner-core/` changed — the extension
+Nothing in `steptix-vscode/` or `runner-core/` changed — the extension
 sees only a line number on `step:start` and paints the file's own text — so
 there is no version bump; the server picks this up on restart.
 

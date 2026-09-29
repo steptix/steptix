@@ -301,7 +301,7 @@ function parseViewportFromTestConfig(testConfig: TestConfig): ViewportSize | und
 }
 
 /**
- * The code-behind knobs `aiui compile` needs from a run, and nothing else.
+ * The code-behind knobs `steptix compile` needs from a run, and nothing else.
  *
  * Kept off the positional parameters so ordinary callers are unaffected, and
  * shaped for the compiler rather than for users: none of these has a config
@@ -344,7 +344,7 @@ export interface RunTestExtras {
    * (stories/run-settings.md §9) — the whole point of it is to spend tokens
    * once so later runs spend none. The server has always said so via
    * `bypassAiPolicy` (src/server/session-manager.ts, src/server/errand-runner.ts);
-   * this is the same escape hatch on the in-process path, which `aiui compile`
+   * this is the same escape hatch on the in-process path, which `steptix compile`
    * takes.
    *
    * Set by {@link createTestFileRunner} and nothing else. It is not a config
@@ -379,7 +379,7 @@ export interface RunTestExtras {
    * itself, with no report (a compile's record and replay runs).
    */
   stats?: RunStats;
-  /** The suite a run this call opens records under, over `AIUI_STATS_SUITE`:
+  /** The suite a run this call opens records under, over `STEPTIX_STATS_SUITE`:
    *  `compile` for a compile's runs (§5.6). Ignored when `stats` is given. */
   statsSuite?: StatsSuite;
 }
@@ -409,18 +409,18 @@ export async function runTest(
   /**
    * May this run use AI at all? The CLI resolves no run settings, so
    * `runSettings.ai` never reaches here — but `ai.allowInRuns` is a project
-   * setting in `aiui.config.json`, and until now the CLI ignored it outright.
+   * setting in `steptix.config.json`, and until now the CLI ignored it outright.
    *
    * That was survivable only while a blank `AI_API_KEY=` was a working
    * substitute. For a project whose provider self-authenticates there is no key
    * to blank (stories/bedrock-provider.md §"The CLI keyless gap"), which would
    * leave a CI user with no way to force a no-AI run in exactly the setup this
    * is for. Honouring it here also retires the CLI/server split, so the same
-   * `aiui.config.json` means the same thing on both paths.
+   * `steptix.config.json` means the same thing on both paths.
    *
    * `bypassAiPolicy` is the one exception, and it is not a hole in the switch:
    * a compile is a request FOR AI (stories/run-settings.md §9), so gating it
-   * would mean `aiui compile` produced nothing on the very projects that set
+   * would mean `steptix compile` produced nothing on the very projects that set
    * `allowInRuns: false` in order to have something to replay. The server
    * already carved out exactly this; the flag is how the in-process path says
    * the same thing.
@@ -461,7 +461,7 @@ export async function runTest(
 
   // Where a file named in an "Upload file ..." step lives: beside the test that
   // names it, fenced by the project root (stories/upload-action.md §3). The CLI
-  // always has both, so an upload step works from a plain `aiui run`.
+  // always has both, so an upload step works from a plain `steptix run`.
   const uploadPaths = { baseDir: path.dirname(test.filePath), projectRoot };
 
   // Determine timeout: frontmatter > config section > global default
@@ -606,7 +606,7 @@ export async function runTest(
    *
    * The CLI has no session id, so the test's own FILE PATH is the identity —
    * stable across the run, unique per test, and the thing a human reading
-   * `aiui-computer.lock` would want to see. `title` is the fallback for a test
+   * `steptix-computer.lock` would want to see. `title` is the fallback for a test
    * parsed from a string with no file behind it.
    */
   const computerLockId = `cli:${test.filePath || test.title}`;
@@ -1632,7 +1632,7 @@ export async function runTest(
           // ends the run the way the SERVER ends an aborted one — the step in
           // flight is recorded `interrupted`, the report is marked `aborted`,
           // and the report is still written. Nothing today sets
-          // `extras.signal` (`aiui run` and `compile` both leave it unset), so
+          // `extras.signal` (`steptix run` and `compile` both leave it unset), so
           // this is the hook for whoever wires one rather than a live path.
           if (extras.signal?.aborted || (err as Error | undefined)?.name === 'AbortError') {
             logger.info(`Run stopped at step ${i + 1} while deciding "${redact(guardText, secretsNow())}"`);
@@ -2767,7 +2767,7 @@ export async function runTest(
     // which are not steps of the test.
     const healedSteps = countStepOrigins(stepResults).stale;
     // Everything downstream of here — the HTML report, the diagnosis prompt,
-    // the run-history line, `aiui run`'s failed-steps summary — sees the
+    // the run-history line, `steptix run`'s failed-steps summary — sees the
     // masked copy. The step results themselves (and the recording written
     // above, which masks on its own) keep the values the run used.
     report = redactReport({
@@ -2887,7 +2887,7 @@ export async function runTest(
     // A run of its own writes its run line here (§8.2): a compile's runs,
     // which write no report. Counted after the diagnosis, whose call belongs to
     // the run. Flushed in the `finally` below, because the process may exit
-    // straight after — `aiui compile` does, on success and on a throw alike.
+    // straight after — `steptix compile` does, on success and on a throw alike.
     if (ownsStats) {
       recordRunEnd(runStats, {
         status: report.status,
@@ -3068,7 +3068,7 @@ export async function runTests(
     runTestFn?: typeof runTest;
   } = {},
 ): Promise<RunSummary> {
-  // `aiui run` exits as soon as this returns — and calls `process.exit(1)` the
+  // `steptix run` exits as soon as this returns — and calls `process.exit(1)` the
   // moment it throws — so an append still queued would die with the process.
   // Flushed in a `finally`, bounded, so a run that throws keeps the lines of
   // the steps it did run and a stalled disk cannot hold the exit.
@@ -3114,7 +3114,7 @@ async function runTestsUnflushed(
     // the tally the run line counts from.
     //
     // The switch is the TEST's project's, read from the root its lines are
-    // filed under — not `config`'s, which is whichever `aiui.config.json` the
+    // filed under — not `config`'s, which is whichever `steptix.config.json` the
     // working directory holds (§6.4).
     const projectRoot = await resolveProjectRoot(test.filePath);
     const testStats = openRunStats({

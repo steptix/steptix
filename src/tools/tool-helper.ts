@@ -12,7 +12,7 @@ import type { ToolScope } from './types.js';
  * differ between the two copies, so `isDeferredTool` would fail to recognise a
  * `tool(...)` result coming from the bundle. `Symbol.for` is shared across both.
  */
-export const IS_DEFERRED_TOOL = Symbol.for('ai-ui-automation/deferred-tool');
+export const IS_DEFERRED_TOOL = Symbol.for('steptix/deferred-tool');
 
 export interface DeferredTool<R = unknown> {
   readonly [IS_DEFERRED_TOOL]: true;

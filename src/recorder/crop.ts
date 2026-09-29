@@ -2,7 +2,7 @@ import Jimp from 'jimp';
 import type { ActionCrop, Box } from './types.js';
 
 /**
- * The picture that goes with one recorded action (stories/testbench-record-steps.md,
+ * The picture that goes with one recorded action (stories/steptix-record-steps.md,
  * decision 6): a crop of the viewport around the target, the target's box drawn
  * on it, scaled down.
  *

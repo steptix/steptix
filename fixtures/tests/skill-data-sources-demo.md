@@ -10,9 +10,9 @@ active environment. The skill `open_dashboard_for_env` declares
 `dataSources: endpoints: ../data/${envName}-endpoints.json` in its
 frontmatter — so:
 
-- `aiui run … --env local`   → skill loads `fixtures/data/local-endpoints.json`
-- `aiui run … --env staging` → skill loads `fixtures/data/staging-endpoints.json`
-- `aiui run … --env uat`     → skill loads `fixtures/data/uat-endpoints.json`
+- `steptix run … --env local`   → skill loads `fixtures/data/local-endpoints.json`
+- `steptix run … --env staging` → skill loads `fixtures/data/staging-endpoints.json`
+- `steptix run … --env uat`     → skill loads `fixtures/data/uat-endpoints.json`
 
 The test itself stays env-agnostic: it just invokes the skill. The skill
 exports the page title as an output, which the test renames to

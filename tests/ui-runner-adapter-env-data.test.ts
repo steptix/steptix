@@ -6,7 +6,7 @@
  * / `${data.x}` reference for it and never recorded `parsedTest.envData` for
  * the run; the step loop then ran only the `{{…}}` pass. Net effect, for as
  * long as the feature has existed: `Go to ${env.BASE_URL}/login` reached the
- * model as exactly that text. `aiui ui --env staging` could not change it — it
+ * model as exactly that text. `steptix ui --env staging` could not change it — it
  * loaded the VALUES of `.env.staging` into the process but never said which
  * environment had been picked.
  *
@@ -51,7 +51,7 @@ vi.mock('../src/ai/client.js', () => ({
   },
 }));
 
-// Defaults only — no machine `.env`, no `aiui.config.json` discovery — so the
+// Defaults only — no machine `.env`, no `steptix.config.json` discovery — so the
 // run reads exactly the project written below. `aiConfigured` stays real.
 vi.mock('../src/config/loader.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/config/loader.js')>()),
@@ -190,7 +190,7 @@ let root: string;
 beforeEach(() => {
   // `realpathSync` because the adapter resolves the project from `process.cwd()`
   // and a temp dir can be reached through a short-name alias on Windows.
-  root = realpathSync(mkdtempSync(path.join(tmpdir(), 'aiui-ui-envdata-')));
+  root = realpathSync(mkdtempSync(path.join(tmpdir(), 'steptix-ui-envdata-')));
   process.chdir(root);
   // The minimum scenario: nothing selects an environment unless the test does.
   delete process.env['AUTOMATION_ENV'];
@@ -261,7 +261,7 @@ describe('UIRunnerAdapter resolves ${env.X} / ${data.x} in step text', () => {
       });
     }
     // The overlay reaches `process.env` for the run's duration, as it does
-    // for `aiui run`, so a `## Parameters` `$VAR` — which reads `process.env`
+    // for `steptix run`, so a `## Parameters` `$VAR` — which reads `process.env`
     // directly — sees it; and it is gone when the run ends.
     expect(envSeenByExecutor).toEqual([UAT_SEEN, UAT_SEEN, UAT_SEEN]);
     expect(process.env['BASE_URL']).toBeUndefined();
@@ -269,7 +269,7 @@ describe('UIRunnerAdapter resolves ${env.X} / ${data.x} in step text', () => {
     expect(events.at(-1)).toMatchObject({ channel: 'runner:complete', data: { status: 'passed' } });
   });
 
-  it('AUTOMATION_ENV — what `aiui ui --env <name>` sets for the Electron process — selects the environment for a test with no frontmatter', async () => {
+  it('AUTOMATION_ENV — what `steptix ui --env <name>` sets for the Electron process — selects the environment for a test with no frontmatter', async () => {
     process.env['AUTOMATION_ENV'] = 'uat';
     const file = writeProject(root, STEPS_WITH_REFS);
 
@@ -284,7 +284,7 @@ describe('UIRunnerAdapter resolves ${env.X} / ${data.x} in step text', () => {
     expect(executorOptions().every((o) => o.envData?.envName === 'uat')).toBe(true);
   });
 
-  it('with no environment selected a `${…}` is left as written, as `aiui run` without `--env` leaves it', async () => {
+  it('with no environment selected a `${…}` is left as written, as `steptix run` without `--env` leaves it', async () => {
     const file = writeProject(root, STEPS_NO_SET);
 
     const events = await runAdapter(file);

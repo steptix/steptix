@@ -162,7 +162,7 @@ export const KEYLESS_HEAL_SKIPPED_ERROR =
  */
 export const POLICY_HEAL_SKIPPED_ERROR =
   'replay failed and was not healed: this run forbids AI ' +
-  '(runSettings.ai: off, or ai.allowInRuns: false in aiui.config.json). ' +
+  '(runSettings.ai: off, or ai.allowInRuns: false in steptix.config.json). ' +
   'Repair this step, or run again with AI allowed.';
 
 /**
@@ -899,7 +899,7 @@ async function executeStepUnrecorded(
       },
     });
 
-    // No generation hook here any more. Generation is `aiui compile` — a
+    // No generation hook here any more. Generation is `steptix compile` — a
     // deliberate act with whole-test context, a review pass and replay-to-green
     // — so a run never rewrites a file under the author
     // (stories/codebehind-compile.md, "The runtime stops generating").
@@ -1463,7 +1463,7 @@ async function runCodeBehindStep(
         aiExplanation:
           (byPolicy
             ? 'The code-behind entry threw, and this run forbids AI ' +
-              '(runSettings.ai: off, or ai.allowInRuns: false in aiui.config.json), ' +
+              '(runSettings.ai: off, or ai.allowInRuns: false in steptix.config.json), ' +
               'so the step was not re-run under AI. '
             : 'The code-behind entry threw, and this machine has no AI configured, ' +
               'so the step was not re-run under AI. ') +

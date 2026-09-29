@@ -50,7 +50,7 @@ function fakeProject(overrides: Partial<ProjectContext> = {}): ProjectContext {
     scope: 'project',
     configSearch: [],
     projectRoot: PROJECT_ROOT,
-    configPath: `${PROJECT_ROOT}/aiui.config.json`,
+    configPath: `${PROJECT_ROOT}/steptix.config.json`,
     env: { AI_API_KEY: 'project-ai-key' },
     envName: null,
     serverUrl: 'http://127.0.0.1:3100',
@@ -100,7 +100,7 @@ const RUNNING = [
     engine: 'edge',
     profile: 'default',
     port: 51000,
-    profileDir: 'c:/proj/.aiui/cdp-profiles/edge-default',
+    profileDir: 'c:/proj/.steptix/cdp-profiles/edge-default',
     scope: 'project',
     tabs: TABS,
   },
@@ -466,7 +466,7 @@ describe('the result', () => {
 
     await peek(h);
 
-    expect(h.peeks[0]?.testFilePath).toMatch(/[\\/]\.aiui-peek\.md$/);
+    expect(h.peeks[0]?.testFilePath).toMatch(/[\\/]\.steptix-peek\.md$/);
     // Under the project root, so the root it resolves to is the one this call
     // addressed. Separator-agnostic: `path.join` uses the platform's.
     expect(path.dirname(h.peeks[0]!.testFilePath)).toBe(path.normalize(PROJECT_ROOT));
@@ -550,7 +550,7 @@ describe('the result', () => {
   });
 
   it('falls back to the addressed root when the server reports none', async () => {
-    // Null means no `aiui.config.json` stood above the synthetic path, so the
+    // Null means no `steptix.config.json` stood above the synthetic path, so the
     // server used its own defaults — the root this call addressed is then the
     // honest thing to report, because it is the root the path was built from.
     const h = await connect({ peek: (args) => peekedTab(args, { root: null as never }) });

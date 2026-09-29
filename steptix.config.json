@@ -1,0 +1,39 @@
+{
+  "$schema": "./schema/steptix.config.schema.json",
+  "ai": {
+    "gatewayUrl": "https://llm.corp.example",
+    "maxInputTokens": 1000000,
+    "streamResponses": false,
+    "sendScreenshots": false
+  },
+  "browser": {
+    "headed": true,
+    "slowMo": 0,
+    "browser": "chromium",
+    "stealth": false,
+    "bypassCSP": false,
+    "cdp": { "hideAutomation": false }
+  },
+  "tests": {
+    "dir": "./fixtures/tests",
+    "dataDir": "./fixtures/data",
+    "contextDir": "./fixtures/context",
+    "skillsDir": "./fixtures/skills",
+    "toolsDir": "./fixtures/tools/src",
+    "pattern": "**/*.md"
+  },
+  "execution": {
+    "timeout": 3600000,
+    "retries": 1,
+    "screenshotOnFailure": true,
+    "promptOnAmbiguity": true
+  },
+  "reports": {
+    "outputDir": "./reports",
+    "includeScreenshots": true,
+    "includeDomSnapshots": true,
+    "includeAiReasoning": true,
+    "embedScreenshots": true
+  },
+  "server": { "host": "127.0.0.1", "port": 3100 }
+}

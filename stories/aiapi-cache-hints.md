@@ -1,8 +1,8 @@
-# aiapi cache hints for ai-ui-automation
+# aiapi cache hints for Steptix
 
 ## Summary
 
-`ai-ui-automation` now emits provider-neutral cache hints to `aiapi` v2 by marking stable system prompt text blocks with `cache: true`.
+`steptix` now emits provider-neutral cache hints to `aiapi` v2 by marking stable system prompt text blocks with `cache: true`.
 
 This lets `aiapi`:
 - map cacheable Anthropic text blocks to Anthropic `cache_control`

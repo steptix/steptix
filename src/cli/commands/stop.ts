@@ -27,7 +27,7 @@ export function registerStopCommand(program: Command): void {
   program
     .command('stop')
     .description('Stop a running Sessions API server (closing any open sessions)')
-    .option('-c, --config <path>', 'Path to config file (default: auto-discover aiui.config.json)')
+    .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
     .option('--url <url>', 'Server base URL (default: from config server.host/port)')
     .option('--force', 'Stop even while a run is executing', false)
     .action(async (opts: StopOptions) => {
@@ -44,7 +44,7 @@ export async function stopCommand(opts: StopOptions): Promise<number> {
   // then the machine key — which is what lets a bare shell stop a server
   // `serve` started bare. Never generated here: a key that no server holds
   // stops nothing.
-  const envKey = process.env['AIUI_SERVER_API_KEY'];
+  const envKey = process.env['STEPTIX_SERVER_API_KEY'];
   const apiKey = envKey ?? readMachineKey() ?? undefined;
   /** Where the key came from, for the 401 message — naming the actual source
    *  is what makes a mismatch diagnosable instead of a hunt. The CLI entry
@@ -56,7 +56,7 @@ export async function stopCommand(opts: StopOptions): Promise<number> {
       : `the machine key at ${userRootEnvPath()}`;
   if (!apiKey) {
     console.error(
-      chalk.red('No AIUI_SERVER_API_KEY available') +
+      chalk.red('No STEPTIX_SERVER_API_KEY available') +
         ` — none in the environment, and ${userRootEnvPath()} has none. ` +
         'The stop request cannot authenticate without the key the server was started with.',
     );
@@ -67,8 +67,8 @@ export async function stopCommand(opts: StopOptions): Promise<number> {
 
   // §1: clients MUST check `service` before treating a port as ours. Without
   // this, a foreign process squatting the configured port is handed
-  // AIUI_SERVER_API_KEY in a request it could never honour anyway. A pre-/health
-  // aiui server also lands here — it has no /admin/shutdown either, so
+  // STEPTIX_SERVER_API_KEY in a request it could never honour anyway. A pre-/health
+  // steptix server also lands here — it has no /admin/shutdown either, so
   // refusing with a clear message beats posting a key at a 404.
   const probe = await probeHealth(baseUrl, PROBE_TIMEOUT_MS);
   if (probe.kind === 'down') {
@@ -80,9 +80,9 @@ export async function stopCommand(opts: StopOptions): Promise<number> {
   }
   if (probe.kind === 'unrecognized') {
     console.error(
-      chalk.yellow(`Refusing to send the API key: ${baseUrl} answered (${probe.detail}) but is not an `) +
-        'ai-ui-automation server — the port is occupied by another process (or an older ' +
-        'aiui server without /health, which has no shutdown endpoint either).',
+      chalk.yellow(`Refusing to send the API key: ${baseUrl} answered (${probe.detail}) but is not a `) +
+        'Steptix server — the port is occupied by another process (or an older ' +
+        'Steptix server without /health, which has no shutdown endpoint either).',
     );
     return 1;
   }
@@ -114,7 +114,7 @@ export async function stopCommand(opts: StopOptions): Promise<number> {
     );
     console.error(
       chalk.dim(
-        'Open TestBench sessions alone never block a stop — they are closed as part of it. ' +
+        'Open Steptix sessions alone never block a stop — they are closed as part of it. ' +
           'Only a run that is actually executing does.',
       ),
     );
@@ -129,7 +129,7 @@ export async function stopCommand(opts: StopOptions): Promise<number> {
     console.error(chalk.red('Unauthorized (401) — the API key sent does not match the server\'s.'));
     console.error(
       chalk.dim(
-        `  this CLI sent AIUI_SERVER_API_KEY from ${keySource}\n` +
+        `  this CLI sent STEPTIX_SERVER_API_KEY from ${keySource}\n` +
           `  the server at ${baseUrl} holds whatever key it was started with (an explicit --env-file, say)\n` +
           '  export that key in this shell, or restart the server bare so it uses the machine key.',
       ),
@@ -145,9 +145,9 @@ export async function stopCommand(opts: StopOptions): Promise<number> {
   }
 
   // 503 means the shutdown gate is already up — an idle expiry, or another
-  // `aiui stop`, got there first. The server is doing exactly what was asked,
+  // `steptix stop`, got there first. The server is doing exactly what was asked,
   // so this is a success — but it still has to be *confirmed*, or a wrapper
-  // doing `aiui stop && start-server` races the teardown into EADDRINUSE.
+  // doing `steptix stop && start-server` races the teardown into EADDRINUSE.
   console.log(
     alreadyStopping
       ? `${baseUrl} is already shutting down — waiting for it to exit...`
@@ -172,6 +172,6 @@ export async function stopCommand(opts: StopOptions): Promise<number> {
   console.log(
     chalk.yellow('Stop accepted, but the server is still answering — it may still be shutting down.'),
   );
-  console.log(chalk.dim(`Re-check with ${chalk.bold('aiui status')}.`));
+  console.log(chalk.dim(`Re-check with ${chalk.bold('steptix status')}.`));
   return 0;
 }

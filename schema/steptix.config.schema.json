@@ -1,0 +1,567 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$ref": "#/definitions/UserConfig",
+  "definitions": {
+    "UserConfig": {
+      "$ref": "#/definitions/DeepPartial%3CConfig%3E"
+    },
+    "DeepPartial<Config>": {
+      "type": "object",
+      "properties": {
+        "ai": {
+          "$ref": "#/definitions/DeepPartial%3CAiConfig%3E"
+        },
+        "browser": {
+          "$ref": "#/definitions/DeepPartial%3CBrowserConfig%3E"
+        },
+        "desktop": {
+          "$ref": "#/definitions/DeepPartial%3CDesktopConfig%3E"
+        },
+        "tests": {
+          "$ref": "#/definitions/DeepPartial%3CTestsConfig%3E"
+        },
+        "execution": {
+          "$ref": "#/definitions/DeepPartial%3CExecutionConfig%3E"
+        },
+        "reports": {
+          "$ref": "#/definitions/DeepPartial%3CReportsConfig%3E"
+        },
+        "api": {
+          "$ref": "#/definitions/DeepPartial%3CApiConfig%3E"
+        },
+        "server": {
+          "$ref": "#/definitions/DeepPartial%3CServerConfig%3E"
+        },
+        "logging": {
+          "$ref": "#/definitions/DeepPartial%3CLoggingConfig%3E"
+        },
+        "tables": {
+          "$ref": "#/definitions/DeepPartial%3Cdef-interface-src_config_types.ts-20463-21581-src_config_types.ts-0-29782226896703235751837%3E"
+        },
+        "mcp": {
+          "$ref": "#/definitions/McpConfig",
+          "description": "MCP-only settings. Optional, and deliberately without a `defaults.ts` entry so absence stays absence through `deepMerge` — the same treatment as `server.idleTimeoutMinutes`. Declared here for the rest of the framework and for the generated JSON schema; the MCP path reads the raw parsed config rather than the loader (stories/mcp-server.md §3), so this declaration is documentation and schema, not the read path."
+        },
+        "stats": {
+          "$ref": "#/definitions/StatsConfig",
+          "description": "The scoreboard (docs/specs/SPEC-scoreboard.md §6.4). Optional and without a `defaults.ts` entry, like `mcp`: absent means \"record\", and absence survives `deepMerge` so nothing has to tell an unset switch from a true one."
+        },
+        "$schema": {
+          "type": "string",
+          "description": "URL or path to this JSON Schema, enabling editor autocomplete and validation. Ignored at runtime."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<AiConfig>": {
+      "type": "object",
+      "properties": {
+        "gatewayUrl": {
+          "type": "string",
+          "description": "Base URL for the aiapi gateway"
+        },
+        "apiKey": {
+          "type": "string",
+          "description": "Bearer token for authentication"
+        },
+        "model": {
+          "type": "string",
+          "description": "Model identifier"
+        },
+        "maxInputTokens": {
+          "type": "number",
+          "description": "Maximum input tokens per request"
+        },
+        "effort": {
+          "description": "Reasoning effort for ROUTINE calls (`AI_EFFORT`): one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Unset means today's behavior — no effort on the wire. The `retry` and `authoring` profiles set their own and are deliberately NOT lowered by this: a global cost knob should not make failure diagnosis worse.\n\nThe generated JSON schema leaves this untyped because `Effort` resolves through an ambient module declaration. That is deliberate rather than worked around: restating the seven levels here would create a second source of truth that goes stale the next time a provider adds one, and the gateway already rejects an unknown level at the first call with `invalid_effort`."
+        },
+        "streamResponses": {
+          "type": "boolean",
+          "description": "Use streaming endpoint instead of vision"
+        },
+        "sendScreenshots": {
+          "type": "boolean",
+          "description": "Include a screenshot in each AI request (set false to reduce token usage)"
+        },
+        "diagnoseFailures": {
+          "type": "boolean",
+          "description": "Run a post-failure AI diagnosis pass and attach the result to the report"
+        },
+        "allowInRuns": {
+          "type": "boolean",
+          "description": "May a run use AI at all? Default `true`, so absence is exactly today's behaviour (stories/run-settings.md §9).\n\nThe project-level floor under the per-session `ai` run setting: `false` makes a run behave like a keyless one no matter which keys are configured — compiled steps replay, and anything needing a model is skipped or refused. Compile, repair and errands are deliberately NOT gated by it; they are requests *for* AI.\n\nScope: every path that runs a test — the Sessions API server (Steptix, MCP, the HTTP API), the `steptix run` CLI and the Runner UI. The two non-server paths resolve no run settings, so the per-session `ai` override cannot reach them and this key is the whole switch there.\n\nNeither of those two honoured it until stories/bedrock-provider.md: blanking `AI_API_KEY=` was a working substitute right up until a provider that authenticates itself, where there is no key to blank and a CI user would have had no way to force a no-AI run at all."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<BrowserConfig>": {
+      "type": "object",
+      "properties": {
+        "headed": {
+          "type": "boolean",
+          "description": "Show browser window (false = headless)"
+        },
+        "viewport": {
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-5936-5970-src_config_types.ts-5878-5971-src_config_types.ts-5777-13668-src_config_types.ts-0-29782449752545%3E"
+        },
+        "windowSize": {
+          "$ref": "#/definitions/DeepPartial%3Cstructure-src_config_types.ts-6027-6061-src_config_types.ts-5971-6062-src_config_types.ts-5777-13668-src_config_types.ts-0-297821327565221%3E"
+        },
+        "fixedViewport": {
+          "type": "object",
+          "properties": {
+            "width": {
+              "type": "number"
+            },
+            "height": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "width",
+            "height"
+          ],
+          "additionalProperties": false,
+          "description": "When set, every context this launch creates gets EXACTLY this viewport — headed or headless — instead of the viewport/windowSize pair. Set by the runner/server from a test's `## Config: viewport:`; settable in steptix.config.json to pin a whole project (stories/per-test-viewport.md §8).\n\nThe three sizing keys are NOT interchangeable, and the distinction is the reason this one exists: `viewport` applies headless only, `windowSize` sizes the headed WINDOW (whose page area is then whatever is left after browser chrome), and `fixedViewport` pins the PAGE in both modes — which is the only one of the three a CSS-breakpoint test can rely on.\n\nRefused by the CDP attach path: the browser is the user's own and its size is theirs (§2)."
+        },
+        "slowMo": {
+          "type": "number",
+          "description": "Milliseconds to wait between Playwright actions (for debugging)"
+        },
+        "browser": {
+          "type": "string",
+          "enum": [
+            "chromium",
+            "firefox",
+            "webkit"
+          ],
+          "description": "Browser engine to use"
+        },
+        "fullPageScreenshots": {
+          "type": "boolean",
+          "description": "Capture full-page screenshots (entire scrollable page) instead of viewport-only"
+        },
+        "stealth": {
+          "type": "boolean",
+          "description": "Apply puppeteer-extra-plugin-stealth to Chromium. Some sites (e.g. Polymer 1 stacks) break when stealth monkey-patches navigator/chrome internals — turn this off to load such sites. Chromium only; default true."
+        },
+        "bypassCSP": {
+          "type": "boolean",
+          "description": "Bypass Content-Security-Policy on the page. Useful when CSP blocks scripts the site itself needs (cascading failures). Default false."
+        },
+        "ambiguousTarget": {
+          "type": "string",
+          "enum": [
+            "first",
+            "fail"
+          ],
+          "description": "What a SINGULAR action does when its selector resolves to more than one candidate element. `'first'` (default, and today's behaviour) acts on the first of them; `'fail'` refuses to act and returns the count, which flows into the turn's collected failures and reaches the AI as \"3 elements matched — use a more specific selector\". The AI then re-plans, usually by scoping to a container. The rule it enforces: don't let the AI resolve ambiguity by accident.\n\n\"More than one\" is measured against EACH ACTION'S OWN tolerance — the question is always \"did this action's `.first()` pick from more than one candidate?\". Click, type, select, hover and upload filter to visible before taking the first, so they gate on the VISIBLE count. A singular `read` takes `.first()` over every match (reading a hidden element is legitimate, so it waits for attachment rather than visibility), so it gates on the TOTAL. Gating a read on the visible count would let it capture out of a hidden first match while reporting one visible candidate — the worse of the two failures, since a wrong click fails loudly and a wrong read silently poisons a variable later steps trust.\n\nFor the visible-filtered actions this is deliberately NOT the total, and the distinction is the design rather than an implementation detail. Gating those on ALL matches was considered and declined: it would give literal parity with Playwright's strict mode, but it would fail the common case where a selector matches one visible element plus a hidden duplicate (the mobile-nav drawer, the print-only copy) — a case where the AI is demonstrably right and only the generated code-behind needed fixing. Read gating on the total is not an exception to that reasoning but an application of it: a read has no visible filter to be right about. The recorded measurement already hands generation a verified unique handle there, so failing the run would be pure cost.\n\nWhat `'fail'` buys is the case measurement cannot settle: three visible matches, the AI took the first, and no amount of counting says whether it was the one the step meant. Only the AI can settle it, and only by being told its selector was ambiguous.\n\nOff by default because it changes the behaviour of a path that currently works, costs an AI turn each time it fires, and can turn a green test red — which is the point, and is therefore the author's call about a suite rather than a guess the framework makes on their behalf.\n\nPlural actions are exempt by construction (`read` with `multiple: true`, `count`): many matches is their purpose. Unrelated to `execution.promptOnAmbiguity`, which asks the HUMAN when the AI cannot determine the next action. See stories/codebehind-selector-ambiguity.md."
+        },
+        "cdp": {
+          "$ref": "#/definitions/CdpBrowserConfig",
+          "description": "Launch settings for CDP browsers this framework starts. See CdpBrowserConfig. Nothing here applies to a browser attached to by port."
+        },
+        "domNoiseReduction": {
+          "$ref": "#/definitions/DomNoiseReductionConfig",
+          "description": "DOM snapshot noise-reduction toggles — the primary lever for keeping AI input compact on framework-heavy pages. See DomNoiseReductionConfig."
+        },
+        "maxIframeDepth": {
+          "type": "number",
+          "description": "Maximum nesting depth for recursive iframe content capture in DOM snapshots. Iframes deeper than this are emitted as a placeholder comment instead of recursing. Default 5."
+        },
+        "domSnapshotCharLimit": {
+          "type": "number",
+          "description": "Hard character cap on the rendered DOM snapshot. Snapshots that exceed this length are truncated with a marker. Prevents runaway token usage on pathologically large pages. Default 300000."
+        },
+        "captureScreenshotsPerAction": {
+          "type": "boolean",
+          "description": "Capture a screenshot before/after every action and on each AI turn. When `false`, per-action screenshots are skipped to reduce runtime cost, but end-of-step and on-failure captures still fire so HTML reports retain visual context. Note: when `ai.sendScreenshots` is true, screenshots are still captured per turn regardless of this flag — the AI needs them in its request. Default true."
+        },
+        "video": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "off"
+            },
+            {
+              "type": "string",
+              "const": "on"
+            },
+            {
+              "type": "string",
+              "const": "retain-on-failure"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "description": "Record a `.webm` video of the browser session, surfaced as a `<video>` link in the HTML report. Tri-state, matching Playwright's own `video` vocabulary:   - `'off'` (default): record nothing.   - `'on'`: record every run and keep the file.   - `'retain-on-failure'`: record every run but delete the file on a     passing run, keeping it only for failed/aborted runs. Boolean `true`/`false` are accepted as sugar for `'on'`/`'off'`. The `| boolean` arm is REQUIRED so the generated JSON schema (built from `UserConfig`) accepts `\"video\": true/false` instead of enum-rejecting it. Default 'off'."
+        },
+        "launchArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra Chromium command-line arguments, appended to the `--window-size` the launcher already passes (docs/specs/SPEC-use-computer.md §5.10).\n\nIt exists for the two cases where what a test needs to drive is decided by a browser flag rather than by anything in the page. The measured one: `--disable-print-preview` makes Chromium's Print button open the OPERATING SYSTEM's print dialog instead of its own preview, which is a native window and therefore reachable from computer mode. The other is `--ozone-platform=x11` on a Wayland desktop, without which the browser and its GTK dialogs are not X11 windows and libnut cannot see them (§11).\n\nChromium only, and applies at LAUNCH: a browser attached to over CDP is the user's own and was started with whatever it was started with."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<structure-src_config_types.ts-5936-5970-src_config_types.ts-5878-5971-src_config_types.ts-5777-13668-src_config_types.ts-0-29782449752545>": {
+      "type": "object",
+      "properties": {
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<structure-src_config_types.ts-6027-6061-src_config_types.ts-5971-6062-src_config_types.ts-5777-13668-src_config_types.ts-0-297821327565221>": {
+      "type": "object",
+      "properties": {
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "CdpBrowserConfig": {
+      "type": "object",
+      "properties": {
+        "hideAutomation": {
+          "type": "boolean",
+          "description": "Start the browser with `--disable-blink-features=AutomationControlled`, so pages read `navigator.webdriver` as `false` the way they do in a Chrome started by hand. A remote-debuggable Chrome otherwise reports `true` to every page, and some sites refuse a browser that says so — which defeats the point of a browser a human signs into. While it is on, Chrome shows its \"unsupported command-line flag\" bar on launch; dismiss it. A human-held choice, deliberately a config file setting and not a tool argument. Default false."
+        }
+      },
+      "additionalProperties": false,
+      "description": "How this framework launches a CDP browser (`start_cdp_browser`, `POST /cdp/browsers`). Read from the `steptix.config.json` of the root the browser is launched into — the project's, or the user root's for a machine-wide browser. Applies at launch only: a browser that is already running keeps whatever it was started with."
+    },
+    "DomNoiseReductionConfig": {
+      "type": "object",
+      "properties": {
+        "collapseRepetitiveDom": {
+          "type": "boolean",
+          "description": "Collapse long repetitive sibling runs (table rows, list items, card grids) in DOM snapshots into head + omission marker + tail. Reduces token usage on pages with hundreds of similar elements. Default true."
+        },
+        "compactSvg": {
+          "type": "boolean",
+          "description": "Strip inner geometry (paths, shapes) from <svg> elements in DOM snapshots, keeping the opening tag + <title>/<desc> children only. Large SVG icon sets are the biggest per-element token cost on many sites. Default true."
+        },
+        "hideHiddenInputs": {
+          "type": "boolean",
+          "description": "Drop `<input type=\"hidden\">` elements from DOM snapshots. They are never interactable by the AI and often carry long opaque values (CSRF tokens, encoded state). Default true."
+        },
+        "hideDisplayNoneElements": {
+          "type": "boolean",
+          "description": "Drop elements (and their subtrees) whose computed style is `display: none`. Slightly costlier to detect — requires `getComputedStyle` per element — but cuts large amounts of off-screen template/menu markup on many SPAs. Default true."
+        },
+        "hideAriaHiddenElements": {
+          "type": "boolean",
+          "description": "Drop elements (and their subtrees) marked `aria-hidden=\"true\"`. Default true."
+        },
+        "useDomAttributeAllowlist": {
+          "type": "boolean",
+          "description": "Restrict attributes emitted in the whole-page DOM snapshot to a curated allowlist (id, data-testid, name, type, role, aria-*, alt, label, etc.). Drops framework noise like `data-react-*`, `data-emotion`, long Tailwind/Bootstrap class strings, etc. Default true."
+        },
+        "dropUnstableIds": {
+          "type": "boolean",
+          "description": "Drop `id` attributes that match known framework-generated unstable patterns (React 18 useId, Radix UI, Headless UI, MUI, React server- streaming). Prevents the AI from picking a selector that won't survive the next render. Default false (opt-in)."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Group of independent toggles that reduce DOM-snapshot noise — the primary lever for keeping AI input compact on framework-heavy pages.\n\nEach flag is independent. Hard-cap settings that are NOT noise filters (`maxIframeDepth`, `domSnapshotCharLimit`) live flat on `BrowserConfig` since they're safety guards rather than reductions."
+    },
+    "DeepPartial<DesktopConfig>": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Opt in to `[use computer]` for this project. Default false; with it off, the directive fails the step and says so (§5.1 item 1)."
+        },
+        "maxImageWidth": {
+          "type": "number",
+          "description": "The longer side, in pixels, of the screenshot the model is shown (§5.2). A full-screen grab is downscaled to fit and never upscaled; a `zoom` is scaled UP to this, which is what makes small print readable on a downscaled 4K desktop. Default 1600."
+        },
+        "settleMs": {
+          "type": "number",
+          "description": "Milliseconds to wait after any action that touches the screen, before the next capture (§5.5). Native UIs redraw asynchronously and a dialog takes a moment to appear. Default 300."
+        },
+        "reportScreenshots": {
+          "type": "boolean",
+          "description": "Embed desktop captures in the HTML report (§10.1). A desktop capture is the WHOLE SCREEN, including whatever else is on it, and the text redaction in `src/utils/secrets.ts` cannot mask pixels — so this switch is about privacy, not about report size. Default true."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<TestsConfig>": {
+      "type": "object",
+      "properties": {
+        "dir": {
+          "type": "string",
+          "description": "Directory containing test .md files"
+        },
+        "dataDir": {
+          "type": "string",
+          "description": "Directory containing per-environment JSON data files, resolved relative to the project root (the dir holding `steptix.config.json`). `${data.X}` loads `<dataDir>/<envName>.json`. Default `data`. A leading slash / drive root is treated as an absolute path; use `./data` for the project-relative form. Replaces the former `STEPTIX_DATA_DIR` env var."
+        },
+        "contextDir": {
+          "type": "string",
+          "description": "Directory containing context .md files"
+        },
+        "skillsDir": {
+          "type": "string",
+          "description": "Directory containing skill .md files (reusable parameterised step macros)"
+        },
+        "toolsDir": {
+          "type": "string",
+          "description": "Directory containing tool .ts/.js files (deterministic code callable from tests via `[tool: name ...]`). Files are auto-discovered at run start; each must default-export a `defineTool(...)` result."
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Glob pattern for discovering test files"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<ExecutionConfig>": {
+      "type": "object",
+      "properties": {
+        "timeout": {
+          "type": "number",
+          "description": "Default test timeout in milliseconds"
+        },
+        "retries": {
+          "type": "number",
+          "description": "Number of retries per failed step"
+        },
+        "screenshotOnFailure": {
+          "type": "boolean",
+          "description": "Capture screenshot on step failure"
+        },
+        "promptOnAmbiguity": {
+          "type": "boolean",
+          "description": "Ask user when AI cannot determine next action"
+        },
+        "maxTurns": {
+          "type": "number",
+          "description": "Maximum number of AI turns per step for multi-turn execution (default: 15)"
+        },
+        "maxLoopIterations": {
+          "type": "number",
+          "description": "Cap on the passes a single `While` or `Repeat … until` loop line may make before the framework gives up (default: 25). A per-line `, up to N times` suffix overrides it for that line; `For each` ignores it, since the list is its bound.\n\nReaching the cap with the exit condition still unmet **fails the loop line** rather than exiting quietly — a loop that hit its cap has not done what the author asked (stories/control-flow.md, decision 9)."
+        },
+        "interactiveOnFailure": {
+          "type": "boolean",
+          "description": "Drop into a REPL when a step fails after retries (headed + TTY only)."
+        },
+        "defaultHooks": {
+          "$ref": "#/definitions/DefaultHooksConfig",
+          "description": "Default `## Hooks` entries merged into every test unless the test sets `hooks: replace` in frontmatter."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DefaultHooksConfig": {
+      "type": "object",
+      "properties": {
+        "before": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "beforeEach": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "afterEach": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "after": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Project-level default hooks merged into every test's `## Hooks` section. Per-test `hooks: replace` frontmatter disables merging for that test."
+    },
+    "DeepPartial<ReportsConfig>": {
+      "type": "object",
+      "properties": {
+        "outputDir": {
+          "type": "string",
+          "description": "Directory to write HTML reports"
+        },
+        "includeScreenshots": {
+          "type": "boolean",
+          "description": "Include screenshots in report"
+        },
+        "includeDomSnapshots": {
+          "type": "boolean",
+          "description": "Include DOM snapshots in report"
+        },
+        "includeAiReasoning": {
+          "type": "boolean",
+          "description": "Include AI reasoning trace in report"
+        },
+        "embedScreenshots": {
+          "type": "boolean",
+          "description": "Embed screenshots as base64 (vs separate files)"
+        },
+        "openInBrowserAfterRun": {
+          "type": "boolean",
+          "description": "After a test run completes, open the last generated HTML report in the OS default browser. Driven by the OPEN_REPORT_IN_BROWSER_AFTER_RUN env var. Skipped automatically when the `CI` env var is set."
+        },
+        "appendRunHistoryToTestFile": {
+          "type": "boolean",
+          "description": "After a test completes, append a \"Latest runs\" section at the bottom of the test .md file linking to generated HTML reports. Driven by the APPEND_RUN_HISTORY_TO_TEST_FILE env var. Default false."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<ApiConfig>": {
+      "type": "object",
+      "properties": {
+        "specsDir": {
+          "type": "string",
+          "description": "Directory to cache downloaded OpenAPI/Swagger specs"
+        },
+        "requestTimeout": {
+          "type": "number",
+          "description": "Default timeout per API request in milliseconds"
+        },
+        "redactSensitive": {
+          "type": "boolean",
+          "description": "Redact auth values (API keys, tokens, cookies) in HTML reports"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<ServerConfig>": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "Host to bind the API server to"
+        },
+        "port": {
+          "type": "number",
+          "description": "Port to listen on"
+        },
+        "apiKey": {
+          "type": "string",
+          "description": "API key for authentication (checked via x-api-key header)"
+        },
+        "idleTimeoutMinutes": {
+          "type": "number",
+          "description": "Shut the server down after this many minutes with **no run in flight and no authenticated API request** — deliberately not \"no open sessions\", since Steptix keeps sessions open for reuse indefinitely and a session-count rule would never fire. `GET /health` is unauthenticated and never resets the timer, so the status bar's poll can't keep the server alive. The idle shutdown closes any open sessions (browsers included) on its way out.\n\nAbsent or 0 ⇒ run forever (today's behaviour for manual launches). `serve --idle-timeout <minutes>` overrides this. Optional on purpose: there is no `defaults.ts` entry, so absence stays absence through `deepMerge`. See stories/server-lifecycle.md §3."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<LoggingConfig>": {
+      "type": "object",
+      "properties": {
+        "consoleLogLevel": {
+          "type": "string",
+          "enum": [
+            "silent",
+            "error",
+            "warn",
+            "info",
+            "debug"
+          ],
+          "description": "Threshold for the console + steptix SSE output stream. Levels are suppressed below this threshold:   - 'silent': nothing   - 'error':  errors only   - 'warn':   errors + warnings   - 'info':   errors + warnings + info (no debug noise)   - 'debug':  everything, including BEGIN/END traceOp markers The run log file always captures every level regardless of this setting."
+        },
+        "serverFileLogLevel": {
+          "type": "string",
+          "enum": [
+            "off",
+            "compact",
+            "full"
+          ],
+          "description": "Per-run server log file mode:   - 'off':     no file written   - 'compact': inline log lines only (no AI request/response payloads)   - 'full':    log lines + full AI request/response trace blocks"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "DeepPartial<def-interface-src_config_types.ts-20463-21581-src_config_types.ts-0-29782226896703235751837>": {
+      "type": "object",
+      "properties": {
+        "structure": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "strict"
+          ],
+          "description": "What a `readTable` does when the page's structure cannot decide how to read it — headings written as `<td>`, a header table after the rows, a card list, one key/value table per record (§5.9).\n\n  - `'ask'` (default): the runtime shows the model a sketch of the region     ONCE, validates the answer against the page and reads     deterministically. A later read of the same region in the same run     reuses the mapping with no model call.   - `'strict'`: no question. The shape refusal stands as the step failure,     so a run that must be deterministic never spends an unplanned model     call (§7.10 \"Cost and control\").\n\nA test overrides the project with `## Config: tableStructure: strict`. Only the four SHAPE refusals reach this switch — an author's own mistake (a header typo, a short row, a selector matching several elements) is refused as before, whatever this says."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deeply partial version of Config for user-provided overrides"
+    },
+    "McpConfig": {
+      "type": "object",
+      "properties": {
+        "cdp": {
+          "$ref": "#/definitions/McpCdpConfig"
+        }
+      },
+      "additionalProperties": false
+    },
+    "McpCdpConfig": {
+      "type": "object",
+      "properties": {
+        "allowUnowned": {
+          "type": "boolean",
+          "description": "Let an agent attach to a CDP browser this project's framework did not launch, and stop withholding foreign browsers' tab titles and URLs.\n\nDefault false. This is the only setting that widens an agent's reach, and a refusal names it precisely so the agent can ask the user for it instead of silently failing or probing other ports."
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "Override the port list swept when looking for browsers this project did not start. Default `[9222, 9223, 9229]`.\n\nDiscovery only — nothing here influences what we launch on. Our own browsers pick their own ports (§3) and are found through the registry, never by scanning."
+        }
+      },
+      "additionalProperties": false,
+      "description": "How much reach an MCP agent has over CDP browsers.\n\nLives in `steptix.config.json` rather than in a tool argument on purpose. The existing `allow_foreign_session` precedent is the right *shape* but the wrong *gate* here: an agent sets its own boolean, so it stops accidents, not a page that talks the agent into setting one — and behind this gate sits a browser holding live logged-in sessions. A config file is the only gate a human actually holds.\n\nSee stories/mcp-cdp-browser.md §6."
+    },
+    "StatsConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Record this project's runs. Default true.\n\n`false` keeps them out of `<user root>/stats/` entirely — for a project whose step text should not be kept even locally. Other projects on the machine still record. `STEPTIX_STATS=off` (environment or the machine-wide `.env`) turns recording off for every project at once (§6.4)."
+        }
+      },
+      "additionalProperties": false,
+      "description": "This project's part in the scoreboard — the machine-local record of every AI action and step, read with `steptix stats` (docs/specs/SPEC-scoreboard.md)."
+    }
+  }
+}

@@ -240,7 +240,7 @@
       "expectsCliParseError": "equal-lengths assert: the fenced numbered line at 20 is a step to the raw scan and invisible to marked"
     },
     "classification-hashes.md": {
-      "note": "Hashes-only headings at depths 3, 4 and 7. All classify as section-heading with an EMPTY name — ANY_HEADING_RE cannot see them (it demands a non-space after the hashes), so without the dedicated rule they would be prose and TestBench would run the bodies as main-flow steps while the CLI errored. Per contract 5 each hashes-only line both closes the preceding body and opens a new section, so this file yields THREE single-step empty-name sections, not one merged section. Empty names never enter SectionIndex.sections; all three land in duplicates under the empty-string key. The CLI must reject this file (empty section name).",
+      "note": "Hashes-only headings at depths 3, 4 and 7. All classify as section-heading with an EMPTY name — ANY_HEADING_RE cannot see them (it demands a non-space after the hashes), so without the dedicated rule they would be prose and Steptix would run the bodies as main-flow steps while the CLI errored. Per contract 5 each hashes-only line both closes the preceding body and opens a new section, so this file yields THREE single-step empty-name sections, not one merged section. Empty names never enter SectionIndex.sections; all three land in duplicates under the empty-string key. The CLI must reject this file (empty section name).",
       "lines": [
         {
           "line": 1,

@@ -74,7 +74,7 @@ vi.mock('../src/codebehind/compile.js', async (importOriginal) => ({
         unproven: [],
         writtenOffAi: [],
         notAttempted: [],
-        recordingDir: '/x/.aiui-codebehind-cache/x.recording',
+        recordingDir: '/x/.steptix-codebehind-cache/x.recording',
       },
     };
   }),
@@ -330,7 +330,7 @@ beforeAll(async () => {
   if (typeof addr === 'object' && addr !== null) baseUrl = `http://127.0.0.1:${addr.port}`;
 
   projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'compile-flow-control-'));
-  await fs.writeFile(path.join(projectRoot, 'aiui.config.json'), JSON.stringify({}));
+  await fs.writeFile(path.join(projectRoot, 'steptix.config.json'), JSON.stringify({}));
   await fs.mkdir(path.join(projectRoot, 'skills'), { recursive: true });
   await fs.writeFile(path.join(projectRoot, 'skills', 'login.md'), LOGIN_SKILL);
   await fs.writeFile(path.join(projectRoot, 'section.md'), SECTION_MD);

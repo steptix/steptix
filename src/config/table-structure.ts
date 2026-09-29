@@ -1,6 +1,6 @@
 /**
  * The `## Config: tableStructure:` value and its project-wide twin
- * `tables.structure` in `aiui.config.json`
+ * `tables.structure` in `steptix.config.json`
  * (docs/specs/SPEC-structured-table-reads.md §7.10, "Cost and control").
  *
  * One validator, three callers — the CLI's `runTest`, the server's

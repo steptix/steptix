@@ -38,7 +38,7 @@ import {
 import type { SelectorForm, StatsSource, StatsSuite } from '../../stats/types.js';
 
 /**
- * `aiui stats`: the scoreboard, read (docs/specs/SPEC-scoreboard.md §9).
+ * `steptix stats`: the scoreboard, read (docs/specs/SPEC-scoreboard.md §9).
  *
  * Reads `<user root>/stats/`, prints one table and the steps and cost lines,
  * or one of two lists — failed actions, costly steps — each entry linked to
@@ -412,7 +412,7 @@ interface Recording {
   /** From the machine `.env`, the one switch every process on the machine
    *  reads — a server started elsewhere does not see this shell. */
   machine: boolean;
-  /** `AIUI_STATS=off` in this shell's environment: runs started from here do
+  /** `STEPTIX_STATS=off` in this shell's environment: runs started from here do
    *  not record, whatever the machine says. */
   offInThisShell: boolean;
   /** Months kept (§6.3), from the machine `.env`. */
@@ -424,7 +424,7 @@ function recordingFor(deps: UserRootDeps | undefined): Recording {
   const shell = deps?.env ?? process.env;
   return {
     machine: machine.enabled,
-    offInThisShell: parseBoolEnv(shell['AIUI_STATS']) === false,
+    offInThisShell: parseBoolEnv(shell['STEPTIX_STATS']) === false,
     retainMonths: machine.retainMonths,
   };
 }
@@ -477,7 +477,7 @@ async function runStats(opts: StatsOptions, seams: StatsSeams): Promise<number> 
   const costly = plan.view === 'costly' ? listCostly(selection, listOptions) : undefined;
 
   const recording = recordingFor(deps);
-  // §6.3: old months go at every start of `aiui stats`, as at the server's —
+  // §6.3: old months go at every start of `steptix stats`, as at the server's —
   // but only once the read is done, and never a month from the start of the
   // window on, so asking about an old month is not what deletes it.
   const pruned = await pruneStatsFiles({ retainMonths: recording.retainMonths, now, deps, keepFrom: plan.query.since });
@@ -959,11 +959,11 @@ function hiddenByDefaults(selection: StatsSelection): string[] {
 
 function recordingLine(recording: Recording, deps: UserRootDeps | undefined): string {
   const file = userRootEnvPath(deps);
-  if (!recording.machine) return `Recording is off on this machine: AIUI_STATS=off in ${file}.`;
+  if (!recording.machine) return `Recording is off on this machine: STEPTIX_STATS=off in ${file}.`;
   if (recording.offInThisShell) {
-    return 'Recording is on for this machine, but AIUI_STATS=off in this shell’s environment: runs started from here record nothing.';
+    return 'Recording is on for this machine, but STEPTIX_STATS=off in this shell’s environment: runs started from here record nothing.';
   }
-  return `Recording is on. AIUI_STATS=off in ${file} turns it off for the whole machine.`;
+  return `Recording is on. STEPTIX_STATS=off in ${file} turns it off for the whole machine.`;
 }
 
 function renderNothing(args: {

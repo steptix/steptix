@@ -8,7 +8,7 @@
  * lists different lengths.
  */
 // A VALUE import, and the only one in this file that leaves src/mcp — so it
-// is on the `aiui mcp` startup path that tests/mcp-entry-graph.test.ts pins.
+// is on the `steptix mcp` startup path that tests/mcp-entry-graph.test.ts pins.
 // Safe: src/utils/secrets.ts reaches parameters.ts, interpolate-env-data.ts,
 // data-loader.ts and logger.ts, all of which this process already loads
 // through src/mcp/tools.ts, and none of which reaches playwright.
@@ -259,7 +259,7 @@ function isRootFrame(frame: FrameInfo | undefined): boolean {
  *
  * Every other string a folded run carries is text the SERVER wrote and
  * masked on its way out: a step's line, an error, an `output` message. A
- * `capture` event is different by design — it exists so the TestBench
+ * `capture` event is different by design — it exists so the Steptix
  * Variables panel can hold the real value and reveal it on request, so the
  * server sends it raw and each client decides. The MCP client had no such
  * decision: `captures{}` went into `run_test_file` / `run_steps` /
@@ -703,7 +703,7 @@ export function foldRun(input: FoldInput): FoldedRun {
       // send the caller to change a setting that cannot bring it back.
       warnings.push(
         'No screenshot returned: the step ran in computer mode, where a screenshot is of the ' +
-          "whole desktop, and desktop.reportScreenshots is false in this project's aiui.config.json.",
+          "whole desktop, and desktop.reportScreenshots is false in this project's steptix.config.json.",
       );
     } else {
       // Nothing to return, and the cause is almost always the capture setting

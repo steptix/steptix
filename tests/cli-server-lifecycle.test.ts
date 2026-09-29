@@ -99,7 +99,7 @@ afterEach(async () => {
   await stopStub();
 });
 
-describe('aiui status', () => {
+describe('steptix status', () => {
   it('exits 0 and reports the health summary when the server is ours', async () => {
     const url = await startStub((req, res) => {
       expect(req.url).toBe('/health');
@@ -136,18 +136,18 @@ describe('aiui status', () => {
     expect(out.join('\n')).toMatch(/not running/);
   });
 
-  it('exits 2 when the port answers but is not an aiui server', async () => {
+  it('exits 2 when the port answers but is not a Steptix server', async () => {
     const url = await startStub((_req, res) => json(res, 200, JSON.stringify({ service: 'grafana' })));
 
     const code = await statusCommand({ url });
 
     expect(code).toBe(2);
-    // The message must leave room for "older aiui server" — the probe cannot
+    // The message must leave room for "older Steptix server" — the probe cannot
     // distinguish that from a genuinely foreign process.
-    expect(out.join('\n')).toMatch(/older aiui server/);
+    expect(out.join('\n')).toMatch(/older Steptix server/);
   });
 
-  it('exits 2 for a legacy aiui server whose /health 404s', async () => {
+  it('exits 2 for a legacy Steptix server whose /health 404s', async () => {
     const url = await startStub((_req, res) => json(res, 404, JSON.stringify({ error: 'Not Found' })));
 
     expect(await statusCommand({ url })).toBe(2);
@@ -175,8 +175,8 @@ describe('aiui status', () => {
   });
 });
 
-describe('aiui stop', () => {
-  const savedKey = process.env['AIUI_SERVER_API_KEY'];
+describe('steptix stop', () => {
+  const savedKey = process.env['STEPTIX_SERVER_API_KEY'];
   // The machine-key chain reads the user root's .env — redirect it into an
   // empty tmp dir so these tests see this machine's real key never.
   const savedUserRoot = {
@@ -186,15 +186,15 @@ describe('aiui stop', () => {
   let userRootTmp: string;
 
   beforeEach(() => {
-    process.env['AIUI_SERVER_API_KEY'] = 'cli-key';
-    userRootTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-stop-test-'));
+    process.env['STEPTIX_SERVER_API_KEY'] = 'cli-key';
+    userRootTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-stop-test-'));
     process.env['LOCALAPPDATA'] = userRootTmp;
     process.env['XDG_CONFIG_HOME'] = userRootTmp;
   });
 
   afterEach(() => {
-    if (savedKey === undefined) delete process.env['AIUI_SERVER_API_KEY'];
-    else process.env['AIUI_SERVER_API_KEY'] = savedKey;
+    if (savedKey === undefined) delete process.env['STEPTIX_SERVER_API_KEY'];
+    else process.env['STEPTIX_SERVER_API_KEY'] = savedKey;
     for (const [k, v] of Object.entries(savedUserRoot)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
@@ -203,22 +203,22 @@ describe('aiui stop', () => {
   });
 
   it('errors out when no key exists anywhere, without making a request', async () => {
-    delete process.env['AIUI_SERVER_API_KEY'];
+    delete process.env['STEPTIX_SERVER_API_KEY'];
     let hit = false;
     const url = await startStub(() => {
       hit = true;
     });
 
     expect(await stopCommand({ url })).toBe(1);
-    expect(err.join('\n')).toMatch(/No AIUI_SERVER_API_KEY available/);
+    expect(err.join('\n')).toMatch(/No STEPTIX_SERVER_API_KEY available/);
     expect(hit).toBe(false);
   });
 
   it('falls back to the machine key when the environment has none', async () => {
-    delete process.env['AIUI_SERVER_API_KEY'];
-    const aiuiDir = path.join(userRootTmp, 'aiui');
-    fs.mkdirSync(aiuiDir, { recursive: true });
-    fs.writeFileSync(path.join(aiuiDir, '.env'), 'AIUI_SERVER_API_KEY=machine-key\n');
+    delete process.env['STEPTIX_SERVER_API_KEY'];
+    const steptixDir = path.join(userRootTmp, 'steptix');
+    fs.mkdirSync(steptixDir, { recursive: true });
+    fs.writeFileSync(path.join(steptixDir, '.env'), 'STEPTIX_SERVER_API_KEY=machine-key\n');
 
     let sentKey: string | undefined;
     const url = await startStub((req, res) => {
@@ -285,10 +285,10 @@ describe('aiui stop', () => {
     expect(text).toMatch(/3 session\(s\) open/);
     expect(text).toMatch(/--force/);
     // The distinction that makes the 409 rule comprehensible.
-    expect(text).toMatch(/Open TestBench sessions alone never block a stop/);
+    expect(text).toMatch(/Open Steptix sessions alone never block a stop/);
   });
 
-  it('refuses to send the key to a port that is not an aiui server', async () => {
+  it('refuses to send the key to a port that is not a Steptix server', async () => {
     let shutdownHit = false;
     const url = await startStub((req, res) => {
       if (req.url === '/admin/shutdown') shutdownHit = true;
@@ -299,9 +299,9 @@ describe('aiui stop', () => {
 
     expect(code).toBe(1);
     // §1: check `service` BEFORE treating the port as ours. Handing
-    // AIUI_SERVER_API_KEY to a foreign process is the thing being prevented.
+    // STEPTIX_SERVER_API_KEY to a foreign process is the thing being prevented.
     expect(shutdownHit).toBe(false);
-    expect(err.join('\n')).toMatch(/not an ai-ui-automation server/);
+    expect(err.join('\n')).toMatch(/not a Steptix server/);
   });
 
   it('exits 1 on 401 naming both key sources', async () => {
@@ -348,9 +348,9 @@ describe('aiui stop', () => {
       json(res, 200, healthBody());
     });
 
-    // An idle expiry (or another `aiui stop`) got there first. Reporting a
+    // An idle expiry (or another `steptix stop`) got there first. Reporting a
     // failure would be wrong — but so would returning before the port is
-    // free, since `aiui stop && start-server` would then hit EADDRINUSE.
+    // free, since `steptix stop && start-server` would then hit EADDRINUSE.
     const code = await stopCommand({ url, confirmTimeoutMs: 3_000, confirmPollMs: 20 });
 
     expect(code).toBe(0);

@@ -204,8 +204,8 @@ describe('the role form through the framework', () => {
     await page.setContent(PAGE);
     const subtree = await expandDomSubtree(page, 'role=listbox[name="Title"]');
     expect(subtree).toContain('Mrs');
-    expect(subtree).not.toContain('data-aiui-target');
-    expect(await page.locator('[data-aiui-target]').count()).toBe(0);
+    expect(subtree).not.toContain('data-steptix-target');
+    expect(await page.locator('[data-steptix-target]').count()).toBe(0);
     // Misses and bad selectors still answer in band, naming what was asked for.
     expect(await expandDomSubtree(page, 'role=listbox[name="Nope"]'))
       .toBe('[expand] No element found for selector: role=listbox[name="Nope"]');
@@ -217,7 +217,7 @@ describe('the role form through the framework', () => {
     const found = await findInDom(page, 'Mr', 'role=listbox[name="Title"]');
     expect(found.containerError).toBeUndefined();
     expect(found.matches.map((m) => m.text.trim()).sort()).toEqual(['Mr', 'Mrs']);
-    expect(await page.locator('[data-aiui-target]').count()).toBe(0);
+    expect(await page.locator('[data-steptix-target]').count()).toBe(0);
     const missing = await findInDom(page, 'Mr', 'role=listbox[name="Nope"]');
     expect(missing.containerError).toBe('No element matches container selector: role=listbox[name="Nope"]');
   });

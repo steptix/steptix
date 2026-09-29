@@ -25,7 +25,7 @@
  *  - caller's choice — `resolveRunSelection` and `classifySelectedSteps`,
  *    whose `scope` argument defaults to main-flow. `resolveRunSelection` is
  *    the only function allowed to *pick* the scope; see
- *    testbench-native/stories/specs/sections-run-and-resume.md §4.1.
+ *    steptix-vscode/stories/specs/sections-run-and-resume.md §4.1.
  *  - main + body     — `extractStepLineIds`, which lives in the extension
  *    hosts and webviews, not here.
  */
@@ -73,7 +73,7 @@ const STEP_LINE_RE = /^\d+\.\s+\S/;
 /**
  * A heading line made of nothing but hashes. `ANY_HEADING_RE` demands a
  * non-space after the hashes and so cannot see these at all — without the
- * dedicated rule a bare `###` would classify as prose, and TestBench would
+ * dedicated rule a bare `###` would classify as prose, and Steptix would
  * run the items below it as main-flow steps while the CLI refused the file
  * with an empty-name parse error. Contract §5 rule 3.
  */
@@ -411,7 +411,7 @@ export function stepWrapsAt(
  *
  * The consumer is the run-time pre-flight: a wrapped step cannot be
  * represented on the wire (the `sections` payload carries one string per
- * step), so a file containing one executes differently from TestBench than
+ * step), so a file containing one executes differently from Steptix than
  * from the CLI and must be refused rather than silently truncated.
  *
  * Wrapped **main-flow** steps have always been truncated by `extractSteps`,
@@ -481,7 +481,7 @@ export interface RunSelection {
  *  4. Otherwise (a heading, prose, a blank) → every main-flow step at or
  *     below the lowest selected line, so clicking `## Steps` and pressing Run
  *     still runs the file.
- *  5. Nothing left → `[]`, and the caller reports TB025.
+ *  5. Nothing left → `[]`, and the caller reports STX025.
  */
 export function resolveRunSelection(
   text: string,
@@ -547,7 +547,7 @@ export function classifySelectedSteps(
  *  - If the selection contains no step lines (user clicked a heading,
  *    blank line, prose), fall back to "every step at or below the first
  *    selected line" — so clicking `## Steps` and pressing Run executes
- *    the whole section instead of failing with TB021.
+ *    the whole section instead of failing with STX021.
  *  - If the fallback finds nothing (selection is past the last step),
  *    return `[]` — caller decides how to surface that.
  *
@@ -592,7 +592,7 @@ export function resolveRunLines(text: string, requestedLines: number[]): number[
  * the alternative of. But the rule is stated on the chain rather than on the
  * `[input:]`, because that is a document the CLI parser cannot produce — an
  * `[input:]` line IS a numbered step, so it breaks the chain before it can sit
- * inside one, and blaming it would leave TestBench and the CLI pointing at
+ * inside one, and blaming it would leave Steptix and the CLI pointing at
  * different lines for the same file.
  *
  * A step whose text names a defined section is a CALL, not a control line

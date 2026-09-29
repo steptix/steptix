@@ -90,7 +90,7 @@ const INTERACTIVE_STEP_PATTERN = /^\[interactive\]\s*(.*)/i;
  * Does this run have no AI — for want of a key, or because the project forbids
  * it? Mirrored from the CLI runner, which is the closer sibling than the server:
  * neither resolves run settings, so `runSettings.ai` never reaches either and
- * `ai.allowInRuns` in `aiui.config.json` is the whole switch.
+ * `ai.allowInRuns` in `steptix.config.json` is the whole switch.
  *
  * Honoured here as well as in the CLI on purpose. Before
  * stories/bedrock-provider.md the rule was clean — "the non-server paths ignore
@@ -104,7 +104,7 @@ function runIsKeyless(config: Config): boolean {
 }
 
 /**
- * The env/data context for one named environment, composed the way `aiui run`
+ * The env/data context for one named environment, composed the way `steptix run`
  * composes it: this process's environment, the project's base `.env` for
  * anything missing, `.env.<name>` on top, and `data/<name>.json`. The project
  * is the working directory, as it already is for `skillsDir` and `loadConfig`
@@ -261,7 +261,7 @@ export class UIRunnerAdapter {
       this.emit('runner:log', { level, message });
     });
 
-    // The environment this window was launched with — `aiui ui --env` and
+    // The environment this window was launched with — `steptix ui --env` and
     // the shell — which a run pinned to an environment overlays for its own
     // duration (`envContextFor`) and must not leave behind for the next one.
     const envBefore = { ...process.env };
@@ -498,7 +498,7 @@ export class UIRunnerAdapter {
    * why the substitution has to happen here, per step, and why a runner
    * that skips the first pass sends `${env.BASE_URL}` to the model verbatim
    * (issues/resolved/052). With no context — no environment selected — a
-   * `${…}` is left as written, as `aiui run` without `--env` leaves it.
+   * `${…}` is left as written, as `steptix run` without `--env` leaves it.
    */
   private resolveStepText(raw: string): string {
     const envData = this.test?.envData;
@@ -532,8 +532,8 @@ export class UIRunnerAdapter {
     // `dataSources`, and recording `parsedTest.envData` for the run — only when
     // it is handed a context. This runner never handed it one, so those
     // references reached the model as literal text on every run since the
-    // feature landed (issues/resolved/052). Same precedence as `aiui run`:
-    // AUTOMATION_ENV, which `aiui ui --env` sets for this process, then the
+    // feature landed (issues/resolved/052). Same precedence as `steptix run`:
+    // AUTOMATION_ENV, which `steptix ui --env` sets for this process, then the
     // test's own `env:` frontmatter, then none — and none leaves a `${…}` as
     // written, exactly as the CLI does without `--env`.
     const skillsDir = pathResolve(process.cwd(), this.config.tests.skillsDir);

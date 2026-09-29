@@ -169,7 +169,7 @@ export type InvocationKind = (typeof INVOCATION_KINDS)[number];
  * Case-SENSITIVE, matching the scanner. `[SKILL: x]` is prose to the runner,
  * so a mirror that claims it would refuse a step the server runs happily.
  *
- * (testbench-native cannot import this — separate package — and mirrors it in
+ * (steptix-vscode cannot import this — separate package — and mirrors it in
  * `invocation-target-core.ts`, pinned by that package's parity tests.)
  */
 export function invocationTokenPattern(

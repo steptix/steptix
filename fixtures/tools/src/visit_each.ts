@@ -1,4 +1,4 @@
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 /**
  * Visit every URL in `urls` in order, capturing each page's title into the

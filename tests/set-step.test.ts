@@ -3,7 +3,7 @@
  * (stories/variable-assignment.md).
  *
  * The fixture table at the bottom is the parity table the story asks for: the
- * runtime's reading of every authored line, in one place, so the two TestBench
+ * runtime's reading of every authored line, in one place, so the two Steptix
  * mirrors can be checked against the same rows rather than against a
  * description of them.
  */
@@ -206,7 +206,7 @@ describe('resolveSetTemplate', () => {
  *
  * The authored lines live in `fixtures/set-step/grammar-lines.json`. THIS
  * file pins what the runtime does with each of them; the mirrors' suite
- * (testbench-native/tests/set-step-mirrors.test.js) pins that the editor
+ * (steptix-vscode/tests/set-step-mirrors.test.js) pins that the editor
  * scanners agree, by calling `parseSetStep` rather than imitating it.
  *
  * The previous version of this was a table here and a hand-copied table

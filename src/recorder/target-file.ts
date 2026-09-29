@@ -1,6 +1,6 @@
 /**
  * What the model is told about the file the recorded steps go into
- * (stories/testbench-record-steps.md, decision 9: "the file around the cursor
+ * (stories/steptix-record-steps.md, decision 9: "the file around the cursor
  * (its `baseUrl`, parameters and section names, so it can write `Navigate to
  * login.html` and reuse `{{password}}`)").
  *

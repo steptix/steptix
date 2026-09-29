@@ -1,0 +1,712 @@
+{
+  "name": "steptix-vscode",
+  "displayName": "Steptix",
+  "publisher": "pkent",
+  "version": "0.5.160",
+  "description": "Write, run and debug Steptix natural-language tests in VS Code",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./dist/extension/extension.js",
+  "categories": [
+    "Other",
+    "Testing"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "jsonValidation": [
+      {
+        "fileMatch": "steptix.config.json",
+        "url": "./schema/steptix.config.schema.json"
+      }
+    ],
+    "breakpoints": [
+      {
+        "language": "markdown"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "steptix",
+          "title": "Steptix",
+          "icon": "./icons/steptix.svg"
+        }
+      ]
+    },
+    "views": {
+      "steptix": [
+        {
+          "id": "steptix.runner",
+          "name": "Test Runner",
+          "type": "webview",
+          "icon": "./icons/steptix.svg",
+          "contextualTitle": "Steptix"
+        },
+        {
+          "id": "steptix.callStack",
+          "name": "Call Stack",
+          "contextualTitle": "Steptix"
+        },
+        {
+          "id": "steptix.variables",
+          "name": "Variables",
+          "contextualTitle": "Steptix"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "steptix.callStack",
+        "contents": "No active run.\n\nThe call stack populates while a test is running and descends into a `[skill: ...]` invocation.\n\n[Run a Test](command:steptix.runSelected)"
+      },
+      {
+        "view": "steptix.variables",
+        "contents": "No active run.\n\nVariables populate while a test is running and update after each step.\n\n[Run a Test](command:steptix.runSelected)"
+      }
+    ],
+    "configuration": {
+      "title": "Steptix",
+      "properties": {
+        "steptix.defaultEnvFile": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute or workspace-relative path used when walk-up finds no .env next to (or above) the test file."
+        },
+        "steptix.consoleLogLevel": {
+          "type": "string",
+          "enum": [
+            "",
+            "silent",
+            "error",
+            "warn",
+            "info",
+            "debug"
+          ],
+          "default": "",
+          "description": "Console + output-panel log threshold for test runs. Leave blank to use the server's configured default. A test's '## Config: consoleLogLevel' setting overrides this."
+        },
+        "steptix.serverFileLogLevel": {
+          "type": "string",
+          "enum": [
+            "",
+            "off",
+            "compact",
+            "full"
+          ],
+          "default": "",
+          "description": "Per-run log file written by the server under reports/logs/. 'off' disables; 'compact' = log lines only; 'full' = log lines + AI request/response trace. Leave blank to use the server's configured default. A test's '## Config: serverFileLogLevel' setting overrides this."
+        },
+        "steptix.activeEnv": {
+          "type": "string",
+          "default": "",
+          "description": "Active environment name. Selects '.env.<name>' (secrets/URLs) and 'data/<name>.json' (structured test data) for the next run. Leave blank for no env selection. Pick via the '🌐 env: ...' status-bar item or 'Steptix: Select Environment' command."
+        },
+        "steptix.testsGlob": {
+          "type": "string",
+          "default": "**/*.md",
+          "description": "Glob pattern of files to consider as candidate tests in the Test Explorer. Files still must contain '## Steps' and not be marked 'type: skill' or 'disabled: true' in frontmatter. Narrow this (e.g. 'tests/**/*.md') for faster discovery on large repos."
+        },
+        "steptix.inspectorPort": {
+          "type": "number",
+          "default": 9229,
+          "description": "Fallback Node inspector port for tool step-into, used only when the server's /health does not report an inspector URL (i.e. a server predating that field). Otherwise the extension attaches to whatever /health reports, which is ground truth from inside the server process. Only used when the run targets a local server."
+        },
+        "steptix.inspectorHost": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Fallback host for the Node inspector socket, used only alongside steptix.inspectorPort when /health reports no inspector URL. Only used when the run targets a local server."
+        },
+        "steptix.autoAttachStepsBreakpoints": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a run starts with enabled breakpoints in any .steps.ts file, automatically attach VS Code's Node debugger to the (local) server so those breakpoints bind when the step's code-behind executes. Turn off to attach only via F11 step-into."
+        },
+        "steptix.serverAutoStart.command": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Shell command Steptix runs to start the Steptix server when a run or a code-behind compile finds nothing listening on a **localhost** `SERVER_URL`. Empty disables auto-start entirely.\n\nSuggested values — set `steptix.serverAutoStart.cwd` to match:\n\n- With the `steptix` package installed in your test project (`cwd` = that project):\n\n  `npx steptix serve --idle-timeout 60`\n\n- With a checkout of the framework (`cwd` = the checkout):\n\n  `node --inspect=0 dist/index.js serve --idle-timeout 60`\n\nNo `--env-file` is needed: `serve` reads the machine key from `%LOCALAPPDATA%\\steptix\\.env` (`~/.steptix/.env` elsewhere) and generates one there on first start — the same file Steptix reads, so the two always agree. Pass `--env-file` only to pin a different key or AI settings for this server.\n\n`--idle-timeout 60` makes the server stop itself after an hour with no run in flight and no API traffic. `--inspect=0` lets Node pick a free inspector port, which the extension discovers via `/health`; it is what lets step-into descend into tool code. To keep that with the package form, run its entry point through Node directly: `node --inspect=0 node_modules/steptix/dist/index.js serve --idle-timeout 60`.\n\n**This setting is machine-scoped: it can only be set in User settings, never by a workspace.** The extension executes it verbatim, so a workspace-settable value would let any cloned repo run arbitrary code the moment you pressed Run."
+        },
+        "steptix.serverAutoStart.cwd": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Working directory for `steptix.serverAutoStart.command`: the test project the `steptix` package is installed in, or your checkout of the framework — whichever the command is written against. **Required whenever a command is set**; auto-start is refused (STX028) if it is blank.\n\nIt is not defaulted to the open workspace folder on purpose: the suggested commands resolve against it (`npx` looks the package up from it; `dist/index.js` is a relative path), so defaulting would let a repo you merely opened decide what that command resolves to, even though the repo cannot set the command itself.\n\n**Machine-scoped: User settings only.**"
+        },
+        "steptix.serverAutoStart.readyTimeoutSeconds": {
+          "type": "number",
+          "default": 20,
+          "scope": "machine",
+          "description": "How long to poll /health after starting the server before giving up with STX028. Machine-scoped like the other serverAutoStart settings: a workspace-settable value would let a cloned repo stretch a failed start into a very long wait."
+        },
+        "steptix.lmBridge.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "Publish this window's language models (GitHub Copilot, and any other `vscode.lm` provider) to Steptix as an OpenAI-compatible endpoint on 127.0.0.1, so compiling and repairing steps run on your Copilot seat instead of an API key.\n\nUse **Steptix: Use Copilot for AI** rather than flipping this by hand: that command is also where Copilot's consent dialog is raised, and it writes the matching `AI_MODEL` / `AI_GATEWAY_URL` / `AI_API_KEY` lines into the project `.env`.\n\nCompiling and repairing spend Copilot premium requests; running a compiled test spends none.\n\n**Machine-scoped: User settings only.** A workspace-settable switch would let any cloned repo open a listener and start spending a subscription."
+        },
+        "steptix.lmBridge.port": {
+          "type": "integer",
+          "default": 18790,
+          "minimum": 1,
+          "maximum": 65535,
+          "scope": "machine",
+          "markdownDescription": "Loopback port for the language-model bridge. One instance per machine: a second window finding the port taken stands by and claims it when the owning window closes.\n\nChanging this orphans every `.env` that **Steptix: Use Copilot for AI** has already written, since each carries the port it was set up with — rerun that command in those projects to heal them.\n\n**Machine-scoped: User settings only**, for the same reason as `#steptix.lmBridge.enabled#`."
+        },
+        "steptix.recordSteps.browserToolbar": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show the Record Steps toolbar inside the recorded page: Pause, Add check, Add step, Undo, Stop and Cancel without leaving the browser. Turn it off to steer recordings from the Steptix panel only. Where you dock the toolbar is remembered between recordings."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "steptix.revealSectionLine",
+        "title": "Steptix: Go to Section",
+        "enablement": "false"
+      },
+      {
+        "command": "steptix.showCompileProgress",
+        "title": "Steptix: Show Compile Progress",
+        "enablement": "false"
+      },
+      {
+        "command": "steptix.runAndCompile",
+        "title": "Steptix: Run & Compile",
+        "icon": "$(code)"
+      },
+      {
+        "command": "steptix.compileCodeBehind",
+        "title": "Steptix: Compile Code-behind",
+        "icon": "$(code)"
+      },
+      {
+        "command": "steptix.compileStepCodeBehind",
+        "title": "Steptix: Compile This Step"
+      },
+      {
+        "command": "steptix.repairStep",
+        "title": "Steptix: Repair this step"
+      },
+      {
+        "command": "steptix.openCodeBehind",
+        "title": "Steptix: Open Code-behind"
+      },
+      {
+        "command": "steptix.applyCodeBehind",
+        "title": "Steptix: Apply Compiled Code-behind",
+        "icon": "$(check)"
+      },
+      {
+        "command": "steptix.discardCodeBehind",
+        "title": "Steptix: Discard Compiled Code-behind",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "steptix.startServer",
+        "title": "Steptix: Start Server",
+        "icon": "$(play)"
+      },
+      {
+        "command": "steptix.stopServer",
+        "title": "Steptix: Stop Server",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "steptix.serverStatus",
+        "title": "Steptix: Server Status"
+      },
+      {
+        "command": "steptix.useCopilotForAi",
+        "title": "Steptix: Use Copilot for AI"
+      },
+      {
+        "command": "steptix.showServerLog",
+        "title": "Steptix: Show Server Log"
+      },
+      {
+        "command": "steptix.serverMenu",
+        "title": "Steptix: Server…",
+        "enablement": "false"
+      },
+      {
+        "command": "steptix.runSelected",
+        "title": "Steptix: Run Selected Step(s)",
+        "icon": "$(play)"
+      },
+      {
+        "command": "steptix.runAll",
+        "title": "Steptix: Run All Steps",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "steptix.stop",
+        "title": "Steptix: Stop Run",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "steptix.pause",
+        "title": "Steptix: Pause Run",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "steptix.restartSession",
+        "title": "Steptix: Close Session",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "steptix.runSkillStepsOnStoppedSession",
+        "title": "Steptix: Run Selected Skill Steps on Stopped Session",
+        "icon": "$(debug-rerun)"
+      },
+      {
+        "command": "steptix.toggleBreakpoint",
+        "title": "Steptix: Toggle Breakpoint",
+        "icon": "$(debug-breakpoint)"
+      },
+      {
+        "command": "steptix.runStepHere",
+        "title": "Steptix: Run This Step"
+      },
+      {
+        "command": "steptix.runRow",
+        "title": "Steptix: Run This Row"
+      },
+      {
+        "command": "steptix.runRows",
+        "title": "Steptix: Run Rows…"
+      },
+      {
+        "command": "steptix.rerunFailedRows",
+        "title": "Steptix: Re-run Failed Rows"
+      },
+      {
+        "command": "steptix.renumberSteps",
+        "title": "Steptix: Renumber Steps"
+      },
+      {
+        "command": "steptix.resume",
+        "title": "Steptix: Resume from Breakpoint",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "steptix.clearBreakpoints",
+        "title": "Steptix: Clear All Breakpoints"
+      },
+      {
+        "command": "steptix.clearStatuses",
+        "title": "Steptix: Clear Run Statuses"
+      },
+      {
+        "command": "steptix.revealEnvFile",
+        "title": "Steptix: Reveal Resolved .env"
+      },
+      {
+        "command": "steptix.openLastReport",
+        "title": "Steptix: Open Last Report",
+        "icon": "$(file)"
+      },
+      {
+        "command": "steptix.showRunLog",
+        "title": "Steptix: Show Run Log",
+        "icon": "$(output)"
+      },
+      {
+        "command": "steptix.dismissError",
+        "title": "Steptix: Dismiss Error"
+      },
+      {
+        "command": "steptix.selectEnv",
+        "title": "Steptix: Select Environment"
+      },
+      {
+        "command": "steptix.focusRunner",
+        "title": "Steptix: Focus Runner Panel"
+      },
+      {
+        "command": "steptix.openInEditor",
+        "title": "Steptix: Open Runner in Editor",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "steptix.stepInto",
+        "title": "Steptix: Step Into",
+        "icon": "$(debug-step-into)"
+      },
+      {
+        "command": "steptix.stepOver",
+        "title": "Steptix: Step Over",
+        "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "steptix.stepOut",
+        "title": "Steptix: Step Out",
+        "icon": "$(debug-step-out)"
+      },
+      {
+        "command": "steptix.continueRun",
+        "title": "Steptix: Continue Run",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "steptix.recordSteps",
+        "title": "Steptix: Record Steps",
+        "icon": "$(record)"
+      },
+      {
+        "command": "steptix.recordNewTest",
+        "title": "Steptix: Record New Test",
+        "icon": "$(record)"
+      },
+      {
+        "command": "steptix.stopRecording",
+        "title": "Steptix: Stop Recording",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "steptix.recordAddCheck",
+        "title": "Steptix: Add Check",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "steptix.cancelRecording",
+        "title": "Steptix: Cancel Recording",
+        "icon": "$(close)"
+      },
+      {
+        "command": "steptix.pauseRecording",
+        "title": "Steptix: Pause Recording",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "steptix.resumeRecording",
+        "title": "Steptix: Resume Recording",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "steptix.addStepToRecording",
+        "title": "Steptix: Add Step to Recording",
+        "icon": "$(edit)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "steptix.openLastReport",
+          "when": "view == steptix.runner",
+          "group": "navigation@1"
+        },
+        {
+          "command": "steptix.openInEditor",
+          "when": "view == steptix.runner",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "steptix.runSelected",
+          "when": "steptix.activeFile && !steptix.running && !steptix.paused && !steptix.recording",
+          "group": "navigation@1"
+        },
+        {
+          "command": "steptix.pause",
+          "when": "steptix.activeFile && steptix.running && !steptix.stepPaused",
+          "group": "navigation@1"
+        },
+        {
+          "command": "steptix.continueRun",
+          "when": "steptix.activeFile && (steptix.stepPaused || (steptix.paused && !steptix.running))",
+          "group": "navigation@1"
+        },
+        {
+          "command": "steptix.stepOver",
+          "when": "steptix.activeFile && (steptix.stepPaused || (steptix.paused && !steptix.running))",
+          "group": "navigation@2"
+        },
+        {
+          "command": "steptix.stepInto",
+          "when": "steptix.activeFile && (steptix.stepPaused || (steptix.paused && !steptix.running))",
+          "group": "navigation@3"
+        },
+        {
+          "command": "steptix.stepOut",
+          "when": "steptix.activeFile && steptix.stepPaused",
+          "group": "navigation@4"
+        },
+        {
+          "command": "steptix.stop",
+          "when": "steptix.activeFile && (steptix.running || steptix.paused)",
+          "group": "navigation@5"
+        },
+        {
+          "command": "steptix.restartSession",
+          "when": "steptix.activeFile && !steptix.recording",
+          "group": "navigation@6"
+        },
+        {
+          "command": "steptix.runAndCompile",
+          "when": "steptix.activeFile && !steptix.running && !steptix.recording",
+          "group": "navigation@7"
+        },
+        {
+          "command": "steptix.applyCodeBehind",
+          "when": "steptix.codeBehindProposal",
+          "group": "navigation@8"
+        },
+        {
+          "command": "steptix.discardCodeBehind",
+          "when": "steptix.codeBehindProposal",
+          "group": "navigation@9"
+        },
+        {
+          "command": "steptix.recordSteps",
+          "when": "steptix.activeFile && !steptix.recording && (!steptix.running || steptix.stepPaused)",
+          "group": "navigation@10"
+        },
+        {
+          "command": "steptix.recordAddCheck",
+          "when": "steptix.recording",
+          "group": "navigation@1"
+        },
+        {
+          "command": "steptix.stopRecording",
+          "when": "steptix.recording",
+          "group": "navigation@2"
+        },
+        {
+          "command": "steptix.pauseRecording",
+          "when": "steptix.recording && !steptix.recordingPaused",
+          "group": "navigation@3"
+        },
+        {
+          "command": "steptix.resumeRecording",
+          "when": "steptix.recordingPaused",
+          "group": "navigation@3"
+        }
+      ],
+      "editor/lineNumber/context": [
+        {
+          "command": "steptix.toggleBreakpoint",
+          "when": "steptix.activeFile",
+          "group": "1_breakpoint@1"
+        },
+        {
+          "command": "steptix.runStepHere",
+          "when": "steptix.activeFile",
+          "group": "2_run@1"
+        },
+        {
+          "command": "steptix.runRow",
+          "when": "steptix.activeFile && editorLineNumber in steptix.dataRowLines",
+          "group": "2_run@2"
+        },
+        {
+          "command": "steptix.repairStep",
+          "when": "steptix.activeFile && editorLineNumber in steptix.staleStepLines",
+          "group": "2_run@2"
+        },
+        {
+          "command": "steptix.compileStepCodeBehind",
+          "when": "steptix.activeFile",
+          "group": "2_run@3"
+        },
+        {
+          "command": "steptix.openCodeBehind",
+          "when": "steptix.activeFile",
+          "group": "2_run@4"
+        },
+        {
+          "command": "steptix.renumberSteps",
+          "when": "steptix.activeFile",
+          "group": "2z_edit@1"
+        },
+        {
+          "command": "steptix.clearBreakpoints",
+          "when": "steptix.activeFile",
+          "group": "3_clear@1"
+        },
+        {
+          "command": "steptix.clearStatuses",
+          "when": "steptix.activeFile",
+          "group": "3_clear@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "steptix.runSkillStepsOnStoppedSession",
+          "when": "steptix.skillDebugActive && editorLangId == markdown",
+          "group": "2_run@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "steptix.runSkillStepsOnStoppedSession",
+          "when": "steptix.skillDebugActive"
+        },
+        {
+          "command": "steptix.repairStep",
+          "when": "steptix.activeFile && steptix.hasStaleStep"
+        },
+        {
+          "command": "steptix.runRow",
+          "when": "false"
+        },
+        {
+          "command": "steptix.runRows",
+          "when": "steptix.activeFile"
+        },
+        {
+          "command": "steptix.rerunFailedRows",
+          "when": "steptix.activeFile && steptix.hasFailedRows"
+        },
+        {
+          "command": "steptix.renumberSteps",
+          "when": "steptix.activeFile"
+        },
+        {
+          "command": "steptix.applyCodeBehind",
+          "when": "steptix.codeBehindProposal"
+        },
+        {
+          "command": "steptix.discardCodeBehind",
+          "when": "steptix.codeBehindProposal"
+        },
+        {
+          "command": "steptix.compileCodeBehind",
+          "when": "false"
+        },
+        {
+          "command": "steptix.recordSteps",
+          "when": "steptix.activeFile && !steptix.recording"
+        },
+        {
+          "command": "steptix.recordNewTest",
+          "when": "!steptix.recording"
+        },
+        {
+          "command": "steptix.stopRecording",
+          "when": "steptix.recording"
+        },
+        {
+          "command": "steptix.recordAddCheck",
+          "when": "steptix.recording"
+        },
+        {
+          "command": "steptix.cancelRecording",
+          "when": "steptix.recording"
+        },
+        {
+          "command": "steptix.pauseRecording",
+          "when": "steptix.recording && !steptix.recordingPaused"
+        },
+        {
+          "command": "steptix.resumeRecording",
+          "when": "steptix.recordingPaused"
+        },
+        {
+          "command": "steptix.addStepToRecording",
+          "when": "steptix.recording"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "steptix.runSelected",
+        "key": "f5",
+        "when": "editorTextFocus && steptix.activeFile && !steptix.running && !steptix.paused && !steptix.recording"
+      },
+      {
+        "command": "steptix.pause",
+        "key": "f5",
+        "when": "editorTextFocus && steptix.activeFile && steptix.running && !steptix.stepPaused"
+      },
+      {
+        "command": "steptix.continueRun",
+        "key": "f5",
+        "when": "editorTextFocus && steptix.activeFile && (steptix.stepPaused || (steptix.paused && !steptix.running))"
+      },
+      {
+        "command": "steptix.stop",
+        "key": "shift+f5",
+        "when": "editorTextFocus && steptix.activeFile && (steptix.running || steptix.paused)"
+      },
+      {
+        "command": "-workbench.action.debug.start",
+        "key": "f5",
+        "when": "editorTextFocus && steptix.activeFile"
+      },
+      {
+        "command": "-workbench.action.debug.stop",
+        "key": "shift+f5",
+        "when": "editorTextFocus && steptix.activeFile"
+      },
+      {
+        "command": "steptix.toggleBreakpoint",
+        "key": "f9",
+        "when": "editorTextFocus && steptix.activeFile"
+      },
+      {
+        "command": "steptix.stepInto",
+        "key": "f11",
+        "when": "editorTextFocus && steptix.activeFile && (!steptix.running || steptix.stepPaused)"
+      },
+      {
+        "command": "steptix.stepOver",
+        "key": "f10",
+        "when": "editorTextFocus && steptix.activeFile && (steptix.stepPaused || (steptix.paused && !steptix.running))"
+      },
+      {
+        "command": "steptix.stepOut",
+        "key": "shift+f11",
+        "when": "editorTextFocus && steptix.activeFile && steptix.stepPaused"
+      }
+    ]
+  },
+  "scripts": {
+    "typecheck:extension": "tsc -p tsconfig.extension.json --noEmit",
+    "copy:schema": "node -e \"const fs=require('fs');fs.mkdirSync('schema',{recursive:true});fs.copyFileSync('../schema/steptix.config.schema.json','schema/steptix.config.schema.json')\"",
+    "build:runner-core": "npm run build --prefix ../runner-core",
+    "build:extension": "node esbuild.extension.js",
+    "build:webview": "vite build --config vite.config.webview.js",
+    "build": "npm run build:runner-core && npm run copy:schema && npm run build:webview && npm run build:extension",
+    "watch:extension": "node esbuild.extension.js --watch",
+    "watch:webview": "vite build --config vite.config.webview.js --watch",
+    "watch": "concurrently -n webview,extension -c blue,green \"npm:watch:webview\" \"npm:watch:extension\"",
+    "dev": "npm run build && code --extensionDevelopmentPath=.",
+    "package": "vsce package --no-dependencies",
+    "test": "node --test tests/*.test.js",
+    "test:integration": "npm run build && node tests/integration/runTest.cjs",
+    "test:live": "npm run build && node tests/integration/runLiveTest.cjs"
+  },
+  "dependencies": {
+    "steptix-runner-core": "file:../runner-core",
+    "jsonc-parser": "^3.3.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@types/vscode": "^1.90.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.2.0",
+    "concurrently": "^9.0.0",
+    "esbuild": "^0.28.0",
+    "glob": "^13.0.6",
+    "mocha": "^10.8.2",
+    "playwright-core": "^1.59.1",
+    "typescript": "^5.5.0",
+    "vite": "^7.0.0"
+  },
+  "overrides": {
+    "serialize-javascript": "^7.0.5"
+  }
+}

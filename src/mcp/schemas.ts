@@ -70,12 +70,12 @@ const projectRoot = z
   .string()
   .optional()
   .describe(
-    'Absolute path of the project (the directory containing aiui.config.json). ' +
+    'Absolute path of the project (the directory containing steptix.config.json). ' +
       '**Omit this unless you have a real project path — do NOT pass a guess ' +
       'like the current working directory or a home folder.** A path outside ' +
       'the allowed roots is refused outright, and you rarely need it: it is ' +
       'optional when the server was started inside the project, or when ' +
-      'AIUI_MCP_ROOTS names exactly one directory. With no project anywhere, ' +
+      'STEPTIX_MCP_ROOTS names exactly one directory. With no project anywhere, ' +
       'most tools fall back to the machine-wide user root and say so via ' +
       'scope: "user" in their results — for your own machine-wide browsers, ' +
       'omit project_root entirely and use scope: "user" instead.',
@@ -109,7 +109,7 @@ const envName = z
   .string()
   .optional()
   .describe(
-    'Environment name, selecting .env.<name> beside aiui.config.json. Drives ' +
+    'Environment name, selecting .env.<name> beside steptix.config.json. Drives ' +
       '${env.X} and ${data.X} substitution.',
   );
 
@@ -167,7 +167,7 @@ const cdpTarget = z
       'one. Address it by `profile` (preferred) or `port`; both together ' +
       'must name the same browser. Only browsers this project started are ' +
       'permitted; anything else is refused unless a human sets ' +
-      'mcp.cdp.allowUnowned in aiui.config.json.',
+      'mcp.cdp.allowUnowned in steptix.config.json.',
   );
 
 const toolConfig = z
@@ -577,7 +577,7 @@ export const peekTabOutput = toolSchema({
   scope: rootScope.describe(
     'Which root that was. "user" means no project resolved and the peek ran ' +
       'against the machine-wide user root — if you expected a project, its ' +
-      'aiui.config.json did not resolve; say so rather than reporting a normal read.',
+      'steptix.config.json did not resolve; say so rather than reporting a normal read.',
   ),
 });
 
@@ -686,7 +686,7 @@ const settingSource = z
   .enum(['server', 'project', 'session'])
   .describe(
     '`server` — the server\'s startup config. `project` — this project\'s ' +
-      'aiui.config.json or .env. `session` — set on this session by a tool call.',
+      'steptix.config.json or .env. `session` — set on this session by a tool call.',
   );
 
 export const getRunSettingsOutput = toolSchema({
@@ -1085,7 +1085,7 @@ export const listCdpBrowsersOutput = toolSchema({
     .describe(
       'Which root this call resolved against. "user" means no project resolved ' +
         'and only the machine-wide user root was swept — if you expected a ' +
-        "project's browsers and they are missing, its aiui.config.json did not " +
+        "project's browsers and they are missing, its steptix.config.json did not " +
         'resolve.',
     ),
   running: z.array(
@@ -1273,7 +1273,7 @@ export const runResultOutput = toolSchema({
     .describe(
       'Which root the run resolved against. "user" means no project was found ' +
         'and the run went project-less against the machine-wide user root — if ' +
-        'you expected a project, its aiui.config.json did not resolve; say so ' +
+        'you expected a project, its steptix.config.json did not resolve; say so ' +
         'rather than reporting a normal run.',
     ),
   sessionCreated: z.boolean(),
@@ -1322,7 +1322,7 @@ export const runErrandOutput = toolSchema({
   scope: rootScope.describe(
     'Which root that was. "user" means no project resolved and the errand ran ' +
       'against the machine-wide user root — if you expected a project, its ' +
-      'aiui.config.json did not resolve; say so rather than reporting a normal run.',
+      'steptix.config.json did not resolve; say so rather than reporting a normal run.',
   ),
   steps: z.array(foldedStep),
   captures: z

@@ -95,17 +95,17 @@ export function loadDefaultEnvFileSync(projectRoot: string = process.cwd()): voi
 }
 
 /**
- * One-time warning if the removed `AIUI_DATA_DIR` env var is still set. The
+ * One-time warning if the removed `STEPTIX_DATA_DIR` env var is still set. The
  * per-environment data directory is now configured via `tests.dataDir` in
- * `aiui.config.json` (default `data`). Surfaces stale `.env` entries loudly
+ * `steptix.config.json` (default `data`). Surfaces stale `.env` entries loudly
  * instead of silently ignoring them. See
  * stories/project-scoped-data-dir-and-env.md.
  */
 export function warnIfDeprecatedDataDirEnv(): void {
-  if (process.env['AIUI_DATA_DIR'] !== undefined) {
+  if (process.env['STEPTIX_DATA_DIR'] !== undefined) {
     logger.warn(
-      'AIUI_DATA_DIR is no longer supported and is ignored — set `tests.dataDir` ' +
-        'in aiui.config.json instead (default: `data`).',
+      'STEPTIX_DATA_DIR is no longer supported and is ignored — set `tests.dataDir` ' +
+        'in steptix.config.json instead (default: `data`).',
     );
   }
 }

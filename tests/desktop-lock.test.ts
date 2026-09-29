@@ -4,7 +4,7 @@
  * refuses a second live holder and takes over a dead one").
  *
  * Every case runs against a lock file in a temp directory of its own, never
- * `os.tmpdir()/aiui-computer.lock`. That path is machine-global by design, and
+ * `os.tmpdir()/steptix-computer.lock`. That path is machine-global by design, and
  * a suite that wrote to it would fight the developer's own running server for
  * the mouse — the exact collision the lock exists to prevent.
  */
@@ -25,8 +25,8 @@ let dir: string;
 let lockPath: string;
 
 beforeEach(() => {
-  dir = mkdtempSync(path.join(os.tmpdir(), 'aiui-lock-test-'));
-  lockPath = path.join(dir, 'aiui-computer.lock');
+  dir = mkdtempSync(path.join(os.tmpdir(), 'steptix-lock-test-'));
+  lockPath = path.join(dir, 'steptix-computer.lock');
 });
 
 afterEach(() => {
@@ -127,8 +127,8 @@ describe('isPidAlive', () => {
 });
 
 describe('the default lock path', () => {
-  it('is os.tmpdir()/aiui-computer.lock (§5.9)', () => {
-    expect(computerLockPath()).toBe(path.join(os.tmpdir(), 'aiui-computer.lock'));
+  it('is os.tmpdir()/steptix-computer.lock (§5.9)', () => {
+    expect(computerLockPath()).toBe(path.join(os.tmpdir(), 'steptix-computer.lock'));
   });
 
   it('formats the in-use message from a record', () => {

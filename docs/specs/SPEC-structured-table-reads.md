@@ -70,7 +70,7 @@ order ID, or the row number the snapshot recorded as `_row` (§4.5).
   deliberately mirrored modules.
 - All run loops already apply `ControlPlan.pass.bindings` to their live variable
   map, so object support belongs in the shared planner/runtime binding shape,
-  not as separate CLI/server/TestBench implementations.
+  not as separate CLI/server/Steptix implementations.
 
 ### 1.2 Why v1 uses `readTable`, not a generic `readCollection`
 
@@ -105,7 +105,7 @@ belongs to.
    extraction modes (`checked`, `value`, `attribute`; §7.4) and the
    whole-table assertions of §4.9 / §7.7.
 3. **Code-behind and editor.** `tables.read` in generated code-behind (§9),
-   and TestBench completion, hover and go-to-definition for dotted bindings
+   and Steptix completion, hover and go-to-definition for dotted bindings
    (§8.4).
 
 Everything §14 lists is outside all three.
@@ -136,7 +136,7 @@ Everything §14 lists is outside all three.
 - Resolve direct property placeholders such as `{{order.status}}` in step text,
   generated code-behind, reports, and every run surface.
 - Behave the same through the CLI, Sessions API, MCP-backed test runs, Electron
-  runner, and TestBench.
+  runner, and Steptix.
 - Fail loudly on ambiguous or unsupported table structure instead of returning
   plausible but misaligned data.
 - Preserve all existing scalar-array `For each` and `read multiple: true`
@@ -288,9 +288,9 @@ payments table, and “the row for Origin Energy” is ambiguous on both passes;
 ```
 
 A read also leaves its numbering on the page. Every data row of the table it
-read carries `data-aiui-row="N"`, the same N as that row's record `_row`
+read carries `data-steptix-row="N"`, the same N as that row's record `_row`
 (§7.4), so a later step finds "row 3" as the row matching
-`[data-aiui-row="3"]` inside that table rather than counting rows itself or
+`[data-steptix-row="3"]` inside that table rather than counting rows itself or
 computing an element id from the number.
 
 A row number survives leaving the page and coming back, which a DOM handle
@@ -1127,10 +1127,10 @@ Teach the step-planning prompt:
   with the leaf, `"Q1 > Fee"`. (Rule 13d "BANDED HEADERS".)
 - "Row N" is the Nth DATA row of that table, counting from 1 — header,
   filter, hidden and expanded-detail rows do not count — and after any read
-  of the table every data row carries `data-aiui-row="N"` (§7.4). The
+  of the table every data row carries `data-steptix-row="N"` (§7.4). The
   selector for "row 7" is therefore the TABLE's own selector followed by
-  `[data-aiui-row="7"]` — `#RadGrid1 [data-aiui-row="7"]`,
-  `table[aria-label="Orders"] [data-aiui-row="7"]` — and that scoping is
+  `[data-steptix-row="7"]` — `#RadGrid1 [data-steptix-row="7"]`,
+  `table[aria-label="Orders"] [data-steptix-row="7"]` — and that scoping is
   required, not tidiness: the bare attribute matches row 7 of every table
   read in this run. NEVER compute an element id or a selector
   from the number: measured on RadGrid, ids run `RadGrid1_ctl00__0`, `__1`, …
@@ -1693,7 +1693,7 @@ yields only the rows it has rendered (§10).
 
 **The numbering is left on the page.** In the same evaluation that builds
 the records, every data row of the read table — all of them, not only the
-`limit`-selected ones — is stamped `data-aiui-row="N"`, N being exactly the
+`limit`-selected ones — is stamped `data-steptix-row="N"`, N being exactly the
 `_row` its record carries. The stamps are written only when the read
 SUCCEEDS: a read refused for any reason leaves the page exactly as it found
 it, so a failed step never leaves a numbering behind for a later step to
@@ -1707,7 +1707,7 @@ the extractor makes, and it exists because of a measured failure: asked to
 "Click Review in row 7", the model reasoned "the seventh data row" and
 computed the id `RadGrid1_ctl00__7`, which is the EIGHTH row, and the step
 passed green having reviewed the wrong applicant. A later step now finds
-"row 7" as the row matching `[data-aiui-row="7"]` inside that table, which is
+"row 7" as the row matching `[data-steptix-row="7"]` inside that table, which is
 the framework's own count and cannot drift from the record. A re-read after
 paging, sorting or filtering renumbers; a re-render that drops the
 attributes leaves nothing stale, only nothing, and the model falls back to
@@ -1820,7 +1820,7 @@ on the JSON's formatting (a tool may pretty-print), and its result is memoised
 per value so `secretsNow()` does not re-parse a 500-row capture on every call.
 
 **The client masks the values; the wire tells it how.** `frame:scope` carries
-raw values by design, so TestBench's Variables view and Variables panel apply
+raw values by design, so Steptix's Variables view and Variables panel apply
 the same two rules themselves — including inside a value that holds records,
 which is the one case no name rule can catch: `payments` is a whole table and
 `payment` one record of it, both under names the author chose and neither of
@@ -1878,7 +1878,7 @@ of the contract, not an implementation detail.
 to a file.** It exists because `isSecretName` matches `keyword`, and a column
 the model has to find in the DOM arriving as `***` costs the model its eyes
 rather than merely its logs — so the hatch governs the prompt's `## Values`
-block, and now, over `frame:scope`, TestBench's Variables view, its Variables
+block, and now, over `frame:scope`, Steptix's Variables view, its Variables
 panel and the skill re-run rows. The report, the run log, the console step
 line and the compile recording are deliberately untouched by it
 (`src/parser/types.ts`): they are artefacts that leave the machine, and an
@@ -1892,10 +1892,10 @@ looking at while they debug. Two surfaces the hatch still does not reach are
 gaps rather than policy: the `[input:]` echo and the gutter hover render an
 author-chosen map through `maskIfSecretAuthored`, with no run attached to ask.
 
-The server can only forward a list it was given, and on the TestBench path it
+The server can only forward a list it was given, and on the Steptix path it
 is not given one yet — `RunController`'s per-session `config` carries
 `baseUrl`, `timeout` and `viewport` and nothing else (§14), so `## Config:
-unmask:` is inert end to end for a TestBench run and `frame:scope` carries no
+unmask:` is inert end to end for a Steptix run and `frame:scope` carries no
 `unmask` field on it. The CLI and MCP paths read the hatch straight off the
 parsed test, so it works there today, and the wire is ready for the day the
 extension sends it.
@@ -2335,11 +2335,11 @@ action carries `mapping`.
 
 **Cost and control.** One model call per structure per run, on every run.
 `## Config` `tableStructure: strict` (and `"tables": { "structure": "strict" }` in
-`aiui.config.json`) turns the question off for a test or a project, so a
-run that must be deterministic gets the refusal instead. TestBench's own
+`steptix.config.json`) turns the question off for a test or a project, so a
+run that must be deterministic gets the refusal instead. Steptix's own
 client does not forward `tableStructure` (its per-session config carries
 `baseUrl`, `timeout` and `viewport`, as it does not forward `unmask`, §14);
-a test run from TestBench takes the project's `aiui.config.json` value.
+a test run from Steptix takes the project's `steptix.config.json` value.
 
 ---
 
@@ -2455,7 +2455,7 @@ change what `{{1st}}` means for existing tests (`runner-core/src/data-rows.ts`
 documents that looseness as deliberate), and nothing accepted a dotted name
 before, so only the new segment gets the identifier rule. As built, the one
 definition is `PLACEHOLDER_SOURCE` in `src/parser/parameters.ts`, imported by
-every copy in `src/` and mirrored — with a parity test — in TestBench.
+every copy in `src/` and mirrored — with a parity test — in Steptix.
 
 All copies of the grammar must change together, including at least:
 
@@ -2463,8 +2463,8 @@ All copies of the grammar must change together, including at least:
 - `src/runner/placeholder-substitution.ts`;
 - `src/skills/expander.ts`;
 - placeholder accounting/leak checks in `src/codebehind/generate.ts`;
-- TestBench completion/definition hit tests in
-  `testbench-native/src/extension/env-data-completion-core.ts` and
+- Steptix completion/definition hit tests in
+  `steptix-vscode/src/extension/env-data-completion-core.ts` and
   `env-data-definition-core.ts`;
 - any runner-core mirror which classifies or reports runtime placeholders.
 
@@ -2586,7 +2586,7 @@ very line this section opens with is one of them.
 `When prompted …, then return` is a watch, and stays with the judge.
 The grammar lives in one exported parser beside `set-step.ts` and
 `flow-control-step.ts` (`src/parser/literal-condition.ts`) so the handbook
-can name it and TestBench can one day show it on hover. Anything with prose
+can name it and Steptix can one day show it on hover. Anything with prose
 in it — `the Cash checkbox is ticked`, `"a" is "a" and "b" is "b"` — is not
 literal and is judged. A condition in which a placeholder survived
 substitution (`{{` or `${` still present) is never literal either: the
@@ -2609,10 +2609,10 @@ item's properties too: a plain tail such as `For each {{order}} in
 example) logs nothing on entry, while `{{other.id}}` on the same line, a
 root no loop binds, still warns.
 
-### 8.4 Loop reporting and TestBench
+### 8.4 Loop reporting and Steptix
 
 - Loop markers and `frame:scope` must include the dotted property bindings so
-  the TestBench Variables panel can show the current row fields — and
+  the Steptix Variables panel can show the current row fields — and
   `frame:scope` must say WHICH of its dotted names those are, in a
   `bindings: string[]` beside the scope (§7.6). The scope is a copy, and whose
   a dotted name is lives in a registry keyed on the server's live map, so
@@ -2638,7 +2638,7 @@ root no loop binds, still warns.
 - `_row` leads the properties in that view, which needs saying because a
   plain sort does not do it: `_` is code unit 95, between the upper-case
   letters and the lower-case ones, so an `Amount` alias came out first.
-- TestBench must recognize a dotted reference as one token rather than treating
+- Steptix must recognize a dotted reference as one token rather than treating
   `{{order}}` as a partial token followed by text.
 - Minimum v1 editor behavior: no false diagnostic and correct hover/runtime
   value while running.
@@ -2786,8 +2786,8 @@ root or a literal value that can be inlined into generated source.
 | RadGrid header table | Refused as the header-only pick, naming `#RadGrid1`. |
 | RadGrid non-scrolling form (one table, three `<thead>` rows, pager in `<tfoot>`) | Reads with no pairing; the `<tfoot>` is excluded as always. |
 | A `${item._row}` in an action field on a run with no environment | Refused before the action runs, naming `{{item._row}}`. |
-| An element id built from `_row` (`#grid__{{item._row}}`) or from a literal "row N" | Forbidden by the prompt: ids are arbitrary (RadGrid's are zero-based); after a read the row is the table's own selector followed by `[data-aiui-row="N"]`, the scoping required because the bare attribute matches a row in every table read this run; with no stamp, counted among data rows. |
-| `data-aiui-row` stamps after a read | Every data row of the read table, 1..N, equal to `_row`; none on header, filter, spacer, placeholder, detail or hidden rows; written only when the read SUCCEEDS, a refused read leaving the page untouched; a re-read renumbers and clears stale stamps from every descendant of that table, nested tables included; nothing outside the table touched. |
+| An element id built from `_row` (`#grid__{{item._row}}`) or from a literal "row N" | Forbidden by the prompt: ids are arbitrary (RadGrid's are zero-based); after a read the row is the table's own selector followed by `[data-steptix-row="N"]`, the scoping required because the bare attribute matches a row in every table read this run; with no stamp, counted among data rows. |
+| `data-steptix-row` stamps after a read | Every data row of the read table, 1..N, equal to `_row`; none on header, filter, spacer, placeholder, detail or hidden rows; written only when the read SUCCEEDS, a refused read leaving the page untouched; a re-read renumbers and clears stale stamps from every descendant of that table, nested tables included; nothing outside the table touched. |
 | No header row, columns named by header | Fail with the §5.4 message: name columns by position. |
 | No header row, columns named by position | Supported; every column needs an explicit alias. |
 | Header row present, columns named by position | Supported; the header is excluded from the body and otherwise ignored for those columns. Reordering breaks the read by design (§4.4). |
@@ -2817,7 +2817,7 @@ root or a literal value that can be inlined into generated source.
 | Array item is an object from a tool/API | Direct safe properties become dotted bindings using the same rules. |
 | Secret-named property | Mask on report/log/UI surfaces, retain raw only in execution scope. The property takes the record-column rule and the root the author-chosen one, either being enough, or the whole name read as one credential key (§7.6): `payment.password`, `token.payee` and `api.key` mask, `payment.sort_key` does not. A dotted name no `For each` registered takes the author rule on the whole key. |
 | A record column's value is shorter than four characters | It does not join the free-text mask set (§7.6), which would replace it everywhere. The entry named for it is still masked, at any length — that mask is in place, under its own key. |
-| A whole capture under a plain name (`payments`, or one pass's `payment`) | No name rule can catch it. The report redacts by value; the TestBench Variables view and panel mask each secret COLUMN inside the JSON and leave the rest readable. |
+| A whole capture under a plain name (`payments`, or one pass's `payment`) | No name rule can catch it. The report redacts by value; the Steptix Variables view and panel mask each secret COLUMN inside the JSON and leave the rest readable. |
 | `div[role="grid"]` of `role="row"` / `columnheader` / `gridcell` (MUI DataGrid) | Read as a table by header name (§7.9); `aria-colindex` orders cells; `role="none"` fillers skipped. |
 | Pinned columns as row fragments with the same `aria-rowindex` (ag-Grid) | Joined into one record by row index (§7.9). |
 | ARIA grid with several header rows | The header grid of §7.3b over `aria-colspan`/`aria-rowspan`. |
@@ -2865,7 +2865,7 @@ The implementing agent should inspect and update at least these areas:
 - `src/ai/prompts.ts` — `buildGridStructurePrompt`; `src/ai/action-parser.ts`
   strips `mapping` from model output.
 - `src/config/table-structure.ts` — `tableStructureOf`, the one place
-  `## Config: tableStructure:` and `aiui.config.json`'s `tables.structure`
+  `## Config: tableStructure:` and `steptix.config.json`'s `tables.structure`
   are resolved into one answer.
 - `src/runner/structure-memo.ts` — the run's memo (`createStructureMemo`,
   `structureMemoKey`) and the one-per-run lifetime of §7.10, threaded
@@ -2893,13 +2893,13 @@ The implementing agent should inspect and update at least these areas:
 - `src/codebehind/generate.ts`, review/repair prompts and static checks.
 - code-behind generation, replay, and stale-healing tests.
 
-### TestBench and reporting
+### Steptix and reporting
 
-- TestBench runtime-placeholder completion/definition core files.
+- Steptix runtime-placeholder completion/definition core files.
 - Variables view and protocol tests for dotted loop bindings.
 - Report/log secret masking tests for record properties.
 - The client's two copies of the record-column rule — `runner-core/src/repl.ts`
-  for the Variables view, `testbench-native/src/webview/lib/variables-panel.js`
+  for the Variables view, `steptix-vscode/src/webview/lib/variables-panel.js`
   for the panel — and a parity test reading the server's patterns out of
   `src/utils/secrets.ts`, since `frame:scope` carries raw values and neither
   copy can import the original.
@@ -2908,7 +2908,7 @@ The implementing agent should inspect and update at least these areas:
   `src/server/session-manager.ts`, the protocol type, the `ScopeMasking`
   argument on `maskIfSecret` / `maskIfSecretInline`, and the thread from the
   event through `RunController` to the Variables view and the webview panel.
-- One live TestBench fixture proving extraction -> object loop -> row-scoped
+- One live Steptix fixture proving extraction -> object loop -> row-scoped
   verification across the real extension/server/browser path.
 
 ### Documentation and packaging
@@ -2939,8 +2939,8 @@ The implementing agent should inspect and update at least these areas:
   record what today's runtime does with the same table (§12).
 - (Phase 2) A parser for the §7.7 assertion forms beside `set-step.ts` and
   `control-line.ts`, and the shared number/date normaliser it and tools use.
-- Because this changes `runner-core` and TestBench-visible behavior, bump the
-  patch version in `testbench-native/package.json` as required by `CLAUDE.md`.
+- Because this changes `runner-core` and Steptix-visible behavior, bump the
+  patch version in `steptix-vscode/package.json` as required by `CLAUDE.md`.
 
 ### What review found, by round
 
@@ -3081,7 +3081,7 @@ states the rule. Two entries predate the review rounds and say so.
   BODY row taken as the header whose cells are all blank was treated as no
   header, became record 1 and shifted every `_row`, so §7.3b.5 is a
   `<thead>` rule only; the stamp selector was unscoped, and
-  `[data-aiui-row="7"]` alone matches a row in every table read this run
+  `[data-steptix-row="7"]` alone matches a row in every table read this run
   (§6.3); and the dom-cleaner allowlist was unpinned. Found in the document:
   the width was described as a row's cell count in three places where it is
   the header grid's; the detail-row bullet sat after numbering and `limit`
@@ -3133,7 +3133,7 @@ states the rule. Two entries predate the review rounds and say so.
     in that refusal — never bound, never a guard failure (§8.2).
 18. Dotted placeholders substitute in step text and every string leaf of an
     emitted action, but `columns[].key` is not substituted.
-19. Loop markers, reports, and TestBench scope carry the current properties.
+19. Loop markers, reports, and Steptix scope carry the current properties.
 20. Secret-named record properties are masked on every presentation surface.
 21. (Phase 3) Generated code uses the shared table helper, compiles, and
     replays against reordered columns with zero AI calls.
@@ -3174,7 +3174,7 @@ states the rule. Two entries predate the review rounds and say so.
     `a stepped-over group row is a data row — record 1, or a short row (§4.8)`
     pinning that stepping over is not deleting. A leading U+FEFF does not
     smuggle a record past the `/^\s*[[{]/` sniff, in `runner-core/tests/repl.test.js`
-    and in `testbench-native/tests/record-secret-parity.test.js` (which also
+    and in `steptix-vscode/tests/record-secret-parity.test.js` (which also
     compares the two record-masking mirrors body for body, so the strip
     cannot be added to one copy only).
 21d. From the fifth and sixth rounds, whose subject was the pins themselves.
@@ -3195,7 +3195,7 @@ states the rule. Two entries predate the review rounds and say so.
     the two client parity corpora import runner-core's SOURCE rather than its
     `dist/`, so a mutation of `parseControlLine` fails
     `tests/placeholder-dotted.test.ts` and one of `extractSections` fails
-    `testbench-native/tests/sections-copy-parity.test.js`, neither of which a
+    `steptix-vscode/tests/sections-copy-parity.test.js`, neither of which a
     build-free `npm test` could have seen before.
 22. (Phase 2) Each §7.7 form passes and fails on a fixed record list, the
     failure names the offending rows, and the number parser accepts `$1,234.56`,
@@ -3263,12 +3263,12 @@ states the rule. Two entries predate the review rounds and say so.
     when `item._row` is bound and the run has no environment, naming
     `{{item._row}}` (`tests/step-executor-placeholders.test.ts` or the
     placeholder-substitution suite).
-28a. The stamp (§7.4): a read leaves `data-aiui-row` 1..N on exactly the data
+28a. The stamp (§7.4): a read leaves `data-steptix-row` 1..N on exactly the data
     rows; a re-read after a filter hides a row renumbers and clears the
     hidden row's stamp; a refused read leaves no stamp at all; a stale stamp
     inside a detail row's nested table is cleared with the rest; an inserted
     detail row does not shift the numbers; RadGrid's `__7` row carries
-    `data-aiui-row="8"`; the DOM snapshot keeps the attribute.
+    `data-steptix-row="8"`; the DOM snapshot keeps the attribute.
 29. The ARIA table model (§7.9), on inline copies of the §5.8 shapes: the
     MUI grid reads by header name with `aria-colindex` ordering and the
     `role="none"` filler skipped; `aria-rowindex` is not `_row`; ag-Grid's
@@ -3296,7 +3296,7 @@ states the rule. Two entries predate the review rounds and say so.
     columns asks again, and a memo entry that no longer validates is
     re-asked, a miss after that failing with both answers; `mapping` emitted by
     the model is stripped by the parser; `tableStructure: strict` in
-    `## Config` and `tables.structure` in `aiui.config.json` turns the question off.
+    `## Config` and `tables.structure` in `steptix.config.json` turns the question off.
 31. The structure prompt (`tests/prompts-grid-structure.test.ts`) carries the
     three answer kinds, the "answer from the sketch only" rule, the
     collection rules, and `none`; and rule 13d carries the ARIA-grid and
@@ -3304,9 +3304,9 @@ states the rule. Two entries predate the review rounds and say so.
 
 ### End-to-end proof
 
-The fixtures exist (§11) and so do the tests: `aiui run -t table-read` from
+The fixtures exist (§11) and so do the tests: `steptix run -t table-read` from
 `templates/init` runs the twelve acceptance files, and phase 1 is done when
-they are green through the CLI and through TestBench. The three proofs below
+they are green through the CLI and through Steptix. The three proofs below
 are `table-orders.md`, `table-orders-limit.md` and
 `table-payments-review.md`; the other five are `table-payments-approve.md`
 and `table-payments-reference.md` (the "after" of two baselines),
@@ -3383,7 +3383,7 @@ status:
 - the loop body runs exactly once per object;
 - each body instruction contains the correctly substituted property values;
 - the checkbox column never appears in any record;
-- TestBench displays three iteration bands and current dotted variables;
+- Steptix displays three iteration bands and current dotted variables;
 - the HTML report shows all three passes;
 - after compilation, the same run performs no model call for the table-read
   step and returns the same records.
@@ -3437,7 +3437,7 @@ fixture was built to distinguish.
 The feature is complete only when:
 
 1. (Phase 1) The canonical test in §4.1 works through CLI and Sessions API.
-2. (Phase 1) The TestBench live path in §12 works and paints/reports loops
+2. (Phase 1) The Steptix live path in §12 works and paints/reports loops
    correctly.
 3. (Phase 1) Header-based extraction survives column reordering and a checkbox
    first column without changing the test.
@@ -3451,7 +3451,7 @@ The feature is complete only when:
 7. (Phase 3) Code-behind replay uses the same extractor as the AI action.
 8. (Phase 1) Limits, unsupported structures, empty tables, placeholder rows,
    pagination, virtualization, and snapshot semantics are documented.
-9. (Every phase) Documentation and the TestBench patch version are updated in
+9. (Every phase) Documentation and the Steptix patch version are updated in
    the same change.
 10. (Phase 1) An authored first-N read produces a validated `limit`, selects
     visible data rows in DOM order, and drives only those object-loop passes
@@ -3524,7 +3524,7 @@ Moved out of v1 after review, each with why and what would bring it back:
 - **Per-row failure summary.** `otherwise continue` already lets a pass
   survive a failing step, and the pass runs on to its end. What is missing is
   the report line — “3 of 40 rows failed: rows 7, 19, 31” — and a collapsed
-  pass in the report and in TestBench when it passed cleanly. Forty passes of
+  pass in the report and in Steptix when it passed cleanly. Forty passes of
   four steps is 160 rows nobody reads.
 - **A `<tbody>` totals row steps over a genuine one-cell header**
   ([issues/058](../../issues/058-tbody-totals-row-steps-over-a-one-cell-header.md)).
@@ -3604,11 +3604,11 @@ Moved out of v1 after review, each with why and what would bring it back:
   under the code-behind work rather than a note here.
 - **Per-row evidence.** A screenshot per pass, named by a record field, for
   the audit trail a payments table wants. Report/evidence story.
-- **TestBench never sends `## Config: unmask:` to the server.**
+- **Steptix never sends `## Config: unmask:` to the server.**
   `RunController`'s per-session `config` object is built from three keys —
   `baseUrl`, `timeout`, `viewport` — so a test's `unmask` list reaches the
   server only on the CLI and MCP paths, which read it straight off the parsed
-  test. The hatch is therefore inert end to end for a TestBench run: the model
+  test. The hatch is therefore inert end to end for a Steptix run: the model
   sees `***` in the `## Values` block and the Variables surfaces star the name,
   not because the client cannot read an `unmask` list (it can — `frame:scope`
   carries one and `maskIfSecret` honours it, §7.6) but because the run never

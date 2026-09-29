@@ -15,9 +15,9 @@ import { loadConfig } from '../src/config/loader.js';
 const dirs: string[] = [];
 
 function projectWith(config: Record<string, unknown>): string {
-  const dir = mkdtempSync(path.join(tmpdir(), 'aiui-stats-config-'));
+  const dir = mkdtempSync(path.join(tmpdir(), 'steptix-stats-config-'));
   dirs.push(dir);
-  writeFileSync(path.join(dir, 'aiui.config.json'), JSON.stringify(config, null, 2), 'utf8');
+  writeFileSync(path.join(dir, 'steptix.config.json'), JSON.stringify(config, null, 2), 'utf8');
   return dir;
 }
 
@@ -41,7 +41,7 @@ describe('loadConfig — the stats section', () => {
   ])('refuses stats.enabled as %s, naming the file and the key', async (_label, stats, message) => {
     const dir = projectWith({ stats });
     await expect(loadConfig(undefined, dir)).rejects.toThrow(message);
-    await expect(loadConfig(undefined, dir)).rejects.toThrow(path.join(dir, 'aiui.config.json'));
+    await expect(loadConfig(undefined, dir)).rejects.toThrow(path.join(dir, 'steptix.config.json'));
   });
 
   it.each([

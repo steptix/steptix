@@ -33,7 +33,7 @@ Ranked by user impact. Line references are as of commit 197c50c.
 
 2. **A misplaced or misspelled `[use ai]` passes green and stores nothing**
    (high). This happens when `… [use ai] [store as: text]` is run from
-   TestBench (the squiggle doesn't block Run), from a hook or via the
+   Steptix (the squiggle doesn't block Run), from a hook or via the
    Sessions API. It also happens with `[use-ai]`, `[ai]` or `[useai]`, and
    with the new extension talking to an old server. The line reaches the page
    model, which makes up an `ai` action, and the executor's fallback counts
@@ -51,7 +51,7 @@ Ranked by user impact. Line references are as of commit 197c50c.
    and make no model call, is still open.
 
 3. **A secret-named generated value is sent in clear** (high). It appears in
-   the step-pass `output`, which reaches TestBench's Output log and Test
+   the step-pass `output`, which reaches Steptix's Output log and Test
    Results, MCP `steps[].output`, and the HTTP `reasoning`. The report and
    `captures` mask it. `Set` leaks the same way. Sources:
    `use-ai-step-runner.ts:286`, `session-manager.ts:7053` and `:7213`, and
@@ -91,7 +91,7 @@ Ranked by user impact. Line references are as of commit 197c50c.
 10. **A long answer cut off at the 4096-token output limit is reported as
     "not a JSON object"** (low, plausible). The retry then uses the same cap.
 
-11. **TestBench completion and F12 miss `[output: x]` and `[store as : x]`
+11. **Steptix completion and F12 miss `[output: x]` and `[store as : x]`
     names on a `[use ai]` line** (low). The Variables panel does list them
     (`env-data-completion-core.ts:258-263`).
 
@@ -120,5 +120,5 @@ Ranked by user impact. Line references are as of commit 197c50c.
 
 - Someone picks up finding 2. Re-check its old-server case first against the
   server as it stands after the step-cache removal.
-- Anyone reports a green step that stored nothing, or a secret in a TestBench
+- Anyone reports a green step that stored nothing, or a secret in a Steptix
   log. Findings 2 and 3 are the likely cause.

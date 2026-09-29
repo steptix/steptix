@@ -4,7 +4,7 @@
 
 Today every test reads structured data from exactly one file:
 `<dataDir>/<envName>.json` (where `dataDir` is `tests.dataDir` in
-`aiui.config.json`, default `data`). Steps reference it via `${data.X.Y}`. The
+`steptix.config.json`, default `data`). Steps reference it via `${data.X.Y}`. The
 active env is selected by `--env <name>`, the matching `.env.<name>` file
 contributes its values, and `$VAR` leaves inside the JSON resolve against the
 environment.

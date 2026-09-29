@@ -366,7 +366,7 @@ beforeEach(async () => {
   deliberateFailures.clear();
   (logger.info as unknown as { mockClear: () => void }).mockClear();
   await fs.rm(stepsFilePath, { force: true });
-  await fs.rm(path.join(tmpDir, '.aiui-codebehind-cache'), { recursive: true, force: true });
+  await fs.rm(path.join(tmpDir, '.steptix-codebehind-cache'), { recursive: true, force: true });
 });
 
 /** A fresh session per run: the server creates it on first POST. */
@@ -555,7 +555,7 @@ describe('compile on a session that forbids AI', () => {
     await fs.writeFile(
       stepsFilePath,
       [
-        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        "import { defineSteps } from 'steptix/codebehind';",
         'export default defineSteps([',
         "  { source: 'Open the dashboard', async run() {} },",
         ']);',
@@ -754,7 +754,7 @@ it('puts the tail on the wire: a forecast at run end, then counts and a Review s
     await fs.writeFile(
       stepsFilePath,
       [
-        "import { defineSteps } from 'ai-ui-automation/codebehind';",
+        "import { defineSteps } from 'steptix/codebehind';",
         'export default defineSteps([',
         "  { source: 'Open the dashboard', async run() {} },",
         ']);',
@@ -818,7 +818,7 @@ describe('recompiling a step whose entry broke', () => {
     // disk is where the ⚠ the author is looking at came from, and the only
     // record of what broke.
     const BROKEN = [
-      "import { defineSteps } from 'ai-ui-automation/codebehind';",
+      "import { defineSteps } from 'steptix/codebehind';",
       'export default defineSteps([',
       "  { source: 'Open the dashboard', async run(ctx) { await ctx.page.click('a[href=\"/x\"]'); } },",
       ']);',
@@ -827,9 +827,9 @@ describe('recompiling a step whose entry broke', () => {
 
     beforeEach(async () => {
       await fs.writeFile(stepsFilePath, BROKEN, 'utf-8');
-      await fs.mkdir(path.join(tmpDir, '.aiui-codebehind-cache'), { recursive: true });
+      await fs.mkdir(path.join(tmpDir, '.steptix-codebehind-cache'), { recursive: true });
       await fs.writeFile(
-        path.join(tmpDir, '.aiui-codebehind-cache', 'checkout.last-run.json'),
+        path.join(tmpDir, '.steptix-codebehind-cache', 'checkout.last-run.json'),
         JSON.stringify({
           test: testFilePath,
           ranAt: new Date().toISOString(),
@@ -1039,7 +1039,7 @@ describe('recompiling a step whose entry broke', () => {
   });
 
   it('folds the drive-letter case, so two spellings of one file take one lock', () => {
-    // TestBench's paths come from `uri.fsPath`, which lower-cases the drive;
+    // Steptix's paths come from `uri.fsPath`, which lower-cases the drive;
     // a CLI or MCP caller's usually does not.
     if (process.platform !== 'win32') return;
     expect(compileLockKey('C:\\Projects\\a\\b.md')).toBe(compileLockKey('c:\\Projects\\a\\b.md'));
@@ -1055,7 +1055,7 @@ describe('recompiling a step whose entry broke', () => {
     expect(stepCalls.every((c) => c.opts['captureStepContext'] === undefined)).toBe(true);
     expect(frames.some((f) => f.type.startsWith('compile:'))).toBe(false);
     expect(await readRecording(testFilePath)).toBeNull();
-    expect(recordingDirFor(testFilePath)).toContain('.aiui-codebehind-cache');
+    expect(recordingDirFor(testFilePath)).toContain('.steptix-codebehind-cache');
   });
 
   describe('compile:"steps" riding a startAt/endAt slice — a skill-file single-step compile', () => {
@@ -1111,7 +1111,7 @@ describe('recompiling a step whose entry broke', () => {
     beforeEach(async () => {
       await fs.rm(path.join(skillsDir, 'login.steps.ts'), { force: true });
       await fs.rm(path.join(skillsDir, 'repeated.steps.ts'), { force: true });
-      await fs.rm(path.join(skillsDir, '.aiui-codebehind-cache'), { recursive: true, force: true });
+      await fs.rm(path.join(skillsDir, '.steptix-codebehind-cache'), { recursive: true, force: true });
     });
 
     function sliceBody(line: number, extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -1511,7 +1511,7 @@ describe('compile a run a step\'s own text ended', () => {
     // but only while steps remain after the ending one, which is the BOXED
     // compiler's rule, the field being the answer to "why has step N no entry".
     // This path used to set it on every ending, so a summary carried the field
-    // and an `error` `aiui compile` never wrote — and a `green` carrying an
+    // and an `error` `steptix compile` never wrote — and a `green` carrying an
     // `error` is what made `compileResultLine` say "◐ Compiled nothing…".
     expect(result.summary.stoppedAt).toBeUndefined();
     expect(result.summary.endedAsWritten).toEqual(endedAsWritten);
@@ -1533,7 +1533,7 @@ describe('compile a run a step\'s own text ended', () => {
     // arithmetic is under test — where dropping `stoppedAt` could turn a partial
     // into a green.
     const optedOut = [
-      "import { defineSteps } from 'ai-ui-automation/codebehind';",
+      "import { defineSteps } from 'steptix/codebehind';",
       'export default defineSteps([',
       `  { source: ${JSON.stringify(FAIL_STEP)}, ai: true },`,
       ']);',

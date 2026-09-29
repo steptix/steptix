@@ -9,7 +9,7 @@
  * the v2 envelope does, so tokens reach the step lines the production way.
  *
  * The lines land in a temporary user root. Every project is a folder of its
- * own with an `aiui.config.json`, because the server resolves a project per
+ * own with a `steptix.config.json`, because the server resolves a project per
  * request from the test file's path — and the project's `stats.enabled` is
  * the one that counts, never the server's own config.
  */
@@ -261,7 +261,7 @@ async function api(method: string, route: string, body?: unknown): Promise<{ sta
 function project(name: string, steps: string[], stats?: { enabled: boolean }): { root: string; file: string } {
   const root = path.join(tmp, `${name}-${++unique}`);
   fs.mkdirSync(path.join(root, 'tests'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify(stats ? { stats } : {}));
+  fs.writeFileSync(path.join(root, 'steptix.config.json'), JSON.stringify(stats ? { stats } : {}));
   const file = path.join(root, 'tests', `${name}.md`);
   fs.writeFileSync(file, `# ${name}\n\n## Steps\n${steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n`);
   return { root, file };
@@ -302,12 +302,12 @@ const stepLines = (all: StatsLine[]) => all.filter((l): l is StatsStepLine => l.
 const runLines = (all: StatsLine[]) => all.filter((l): l is StatsRunLine => l.kind === 'run');
 
 beforeAll(async () => {
-  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-stats-api-seam-')));
+  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-stats-api-seam-')));
   userRoot = path.join(tmp, 'user-root');
   fs.mkdirSync(userRoot, { recursive: true });
-  for (const key of ['AIUI_STATS', 'AIUI_STATS_SUITE', 'LOCALAPPDATA', 'XDG_CONFIG_HOME']) savedEnv[key] = process.env[key];
-  delete process.env['AIUI_STATS'];
-  delete process.env['AIUI_STATS_SUITE'];
+  for (const key of ['STEPTIX_STATS', 'STEPTIX_STATS_SUITE', 'LOCALAPPDATA', 'XDG_CONFIG_HOME']) savedEnv[key] = process.env[key];
+  delete process.env['STEPTIX_STATS'];
+  delete process.env['STEPTIX_STATS_SUITE'];
   process.env['LOCALAPPDATA'] = userRoot;
   process.env['XDG_CONFIG_HOME'] = userRoot;
   deps = { env: { LOCALAPPDATA: userRoot, XDG_CONFIG_HOME: userRoot }, platform: process.platform };
@@ -327,8 +327,8 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await flushStatsWrites();
-  fs.rmSync(path.join(userRoot, 'aiui', 'stats'), { recursive: true, force: true });
-  delete process.env['AIUI_STATS_SUITE'];
+  fs.rmSync(path.join(userRoot, 'steptix', 'stats'), { recursive: true, force: true });
+  delete process.env['STEPTIX_STATS_SUITE'];
 });
 
 describe('a Sessions API batch records its actions, steps and run', () => {
@@ -390,10 +390,10 @@ describe('a Sessions API batch records its actions, steps and run', () => {
     await api('DELETE', `/sessions/${id}`);
   });
 
-  it('a server tagged AIUI_STATS_SUITE=live writes suite: live (acceptance 4)', async () => {
+  it('a server tagged STEPTIX_STATS_SUITE=live writes suite: live (acceptance 4)', async () => {
     const { file } = project('live', ['Open the cart']);
     gw.respond = () => ({ text: plan('#cart'), usage: { input_tokens: 10, output_tokens: 1 } });
-    process.env['AIUI_STATS_SUITE'] = 'live';
+    process.env['STEPTIX_STATS_SUITE'] = 'live';
     const id = `seam-${++unique}`;
     await api('POST', `/sessions/${id}/steps`, { steps: ['Open the cart'], testFilePath: file });
     await api('DELETE', `/sessions/${id}`);
@@ -412,7 +412,7 @@ describe('a Sessions API batch records its actions, steps and run', () => {
     expect((await api('POST', `/sessions/${q}/steps`, { steps: ['Click Go'], testFilePath: quiet.file })).body.status).toBe('passed');
     await api('DELETE', `/sessions/${q}`);
     await flushStatsWrites();
-    expect(fs.existsSync(path.join(userRoot, 'aiui', 'stats'))).toBe(false);
+    expect(fs.existsSync(path.join(userRoot, 'steptix', 'stats'))).toBe(false);
 
     const l = `seam-${++unique}`;
     await api('POST', `/sessions/${l}/steps`, { steps: ['Click Go'], testFilePath: loud.file });
@@ -473,7 +473,7 @@ describe('a Stop on the Sessions API: the client closes the stream mid-call (fin
       if (text.includes('## Current Step\nPay for the order')) {
         payCalls++;
         if (payCalls === 1) return { text: plan('button:text-is("Pay")'), usage: { input_tokens: 3000, output_tokens: 90 } };
-        // The retry's call is in flight when the user stops: TestBench closes
+        // The retry's call is in flight when the user stops: Steptix closes
         // the stream, and the server's run signal is what reaches the call.
         client.abort();
         return hangUntilStopped(signal);

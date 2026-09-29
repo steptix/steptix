@@ -11,11 +11,11 @@ Status: draft, not yet reviewed.
 > step stale so a later keyed compile selects and repairs it; (2)
 > `AI_GATEWAY_URL` set in a project's
 > `.env` reaches the AiClient on **both** paths — a CLI run in that project,
-> and a server run where the TestBench extension shipped that `.env` as env
+> and a server run where the Steptix extension shipped that `.env` as env
 > overrides — proven at the api-server seam, not just in loader units;
 > (3) with neither env nor config-file value, a machine-wide
-> `%LOCALAPPDATA%\aiui\.env` `AI_GATEWAY_URL` applies, and a project
-> `aiui.config.json` `gatewayUrl` still beats the machine value; (4) editing
+> `%LOCALAPPDATA%\steptix\.env` `AI_GATEWAY_URL` applies, and a project
+> `steptix.config.json` `gatewayUrl` still beats the machine value; (4) editing
 > `AI_GATEWAY_URL` in a workspace `.env` between two runs on a reused session
 > takes effect on the second run without recycling the session, same as
 > `AI_MODEL` today.
@@ -55,7 +55,7 @@ AI_GATEWAY_URL=https://llm.corp.example
 
 `aibroker/` already means "OpenAI-compatible endpoint at `gatewayUrl`"
 ([SPEC-aibroker-routing.md](../docs/specs/SPEC-aibroker-routing.md)); today the URL can
-only come from `defaults.ts` or the tracked `aiui.config.json`. This story
+only come from `defaults.ts` or the tracked `steptix.config.json`. This story
 adds the env var; it changes **no** routing semantics.
 
 ## Part A — `AI_GATEWAY_URL`
@@ -65,7 +65,7 @@ of value as `model` — non-secret routing the caller may export explicitly —
 so it takes model's precedence, not `apiKey`'s fill-only rule:
 
 ```
-process env / project .env  >  aiui.config.json  >  user-root .env  >  built-in default
+process env / project .env  >  steptix.config.json  >  user-root .env  >  built-in default
 ```
 
 Three write sites, and all three are required (each covers a path the others
@@ -85,7 +85,7 @@ don't):
    honours **only** `apiKey` and `model` and would silently drop this var.
    This is the exact per-project-bundle trap from the codebehind-env-data
    work: without this site, the loader change works in every unit test and
-   does nothing on the TestBench path. Add `AI_GATEWAY_URL` (trimmed,
+   does nothing on the Steptix path. Add `AI_GATEWAY_URL` (trimmed,
    non-empty) beside `AI_MODEL`. Grep for any sibling overlay sites
    (errand-runner's `desiredAi` assembly, compile path) — every consumer of
    env overrides must honour the same set.
@@ -105,10 +105,10 @@ stories/run-settings.md), no URL validation beyond what `buildGateway`
 already does (trailing-slash strip). Docs: mention the var wherever
 `AI_MODEL`'s env handling is documented — which is [.env.example](../.env.example),
 commented out since the default is right for non-corporate users, and the
-env-var table in [README.md](../README.md). Not the `init` template: `aiui
-init` scaffolds `aiui.config.json`, `tests/`, `context/` and `skills/` and no
+env-var table in [README.md](../README.md). Not the `init` template: `steptix
+init` scaffolds `steptix.config.json`, `tests/`, `context/` and `skills/` and no
 `.env` at all, so there are no template `.env` comments to add it to. The
-scaffolded `aiui.config.json` should NOT pin a `gatewayUrl` either — a value
+scaffolded `steptix.config.json` should NOT pin a `gatewayUrl` either — a value
 there is a deliberate choice that beats the machine floor forever, and one
 copied out of a template is nobody's choice.
 
@@ -144,13 +144,13 @@ the report states intent, not a caught crash):
    **Accounting and repair are decoupled, deliberately.** In the run's own
    result the step is NOT flagged `codeBehindStale`: every heal counter —
    `healedSteps`, `healedTokens`, `countStepOrigins`, the report's amber
-   "healed" banner, TestBench's healed-step summary — is read off that field,
+   "healed" banner, Steptix's healed-step summary — is read off that field,
    and nothing healed here. But the failure's advice ("recompile or repair
    this step where AI is available") has to be actionable on the machine that
    *does* have a model, so the result carries the entry's failure separately
    (`codeBehindHealSkipped`) and **both** last-run sidecar writers record the
    row as stale, with the underlying thrown message. That is what
-   `collectStaleKeys` reads for `aiui compile --only-stale`, and what
+   `collectStaleKeys` reads for `steptix compile --only-stale`, and what
    `priorFailure` reads to turn Compile This Step into a repair rather than a
    blind regeneration. The row also carries `healSkipped`, which keeps the
    consecutive-heal streak (`staleRuns`, the "healed under AI (3 runs in a
@@ -202,7 +202,7 @@ unchanged; only the error the request-time failure produces changes.
 | Compile, errand, `run_steps` with AI | fails fast with `AiNotConfiguredError` copy |
 
 Report/wire shape: additive only — the step `error` string and the existing
-diagnosis slot carry the copy; no new required fields, no `TBxxx` code, so
+diagnosis slot carry the copy; no new required fields, no `STXxxx` code, so
 the runner-core audit suite is untouched and no extension change or version
 bump is needed (the extensions are HTTP clients; this ships by server
 restart).
@@ -217,7 +217,7 @@ restart).
   api-server entry with env overrides carrying `AI_GATEWAY_URL`, assert the
   AiConfig the run was built with — beside the existing
   `applyEnvToAiConfig` coverage. A loader-only test would have passed while
-  the TestBench path dropped the value.
+  the Steptix path dropped the value.
 - **Minimum scenario** (no primed inputs): keyless tests must fake
   `readUserRootEnv` and clear `AI_API_KEY` from the process env — on a dev
   machine the machine-wide key silently un-keylesses the test and conditions
@@ -248,5 +248,5 @@ restart).
 ## Rollout
 
 Server-side only: `npm run build`, restart the `:3100` server. No
-`testbench-native` version bump. `.env.example`/init-template comment update
+`steptix-vscode` version bump. `.env.example`/init-template comment update
 rides along.

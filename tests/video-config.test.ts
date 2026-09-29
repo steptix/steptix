@@ -25,7 +25,7 @@ describe('browser.video — loader tri-state + boolean sugar', () => {
   let tmpDir: string;
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-video-'));
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-video-'));
   });
 
   afterEach(async () => {
@@ -33,7 +33,7 @@ describe('browser.video — loader tri-state + boolean sugar', () => {
   });
 
   async function writeConfig(obj: unknown): Promise<string> {
-    const file = path.join(tmpDir, 'aiui.config.json');
+    const file = path.join(tmpDir, 'steptix.config.json');
     await fs.writeFile(file, JSON.stringify(obj), 'utf8');
     return file;
   }
@@ -64,13 +64,13 @@ describe('browser.video — loader tri-state + boolean sugar', () => {
   });
 });
 
-describe('aiui.config.schema.json — browser.video enum|boolean', () => {
+describe('steptix.config.schema.json — browser.video enum|boolean', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let validate: any;
 
   beforeEach(async () => {
     const schemaText = await fs.readFile(
-      path.resolve(__dirname, '../schema/aiui.config.schema.json'),
+      path.resolve(__dirname, '../schema/steptix.config.schema.json'),
       'utf8',
     );
     const ajv = new Ajv({ strict: false, allErrors: true });

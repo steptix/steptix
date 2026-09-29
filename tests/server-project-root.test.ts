@@ -3,7 +3,7 @@
  * its user-root boundary (stories/mcp-no-project.md).
  *
  * A project-less MCP run anchors its synthetic test path inside the user root,
- * whose `aiui.config.json` legitimately may not exist. Without the boundary
+ * whose `steptix.config.json` legitimately may not exist. Without the boundary
  * the walk continues into `%LOCALAPPDATA%` and the home directory, and any
  * stray config file up there silently becomes the "project" whose `.env` and
  * report directory the run uses.
@@ -18,7 +18,7 @@ const created: string[] = [];
 const originalEnv = { ...process.env };
 
 function makeTmp(): string {
-  const dir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'aiui-proot-')));
+  const dir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'steptix-proot-')));
   created.push(dir);
   return dir;
 }
@@ -38,13 +38,13 @@ afterEach(() => {
 });
 
 function userRoot(): string {
-  return path.join(process.env['LOCALAPPDATA']!, 'aiui');
+  return path.join(process.env['LOCALAPPDATA']!, 'steptix');
 }
 
 describe('resolveProjectRoot', () => {
   it('finds a marker by walking up, as before', async () => {
     const proj = makeTmp();
-    writeFileSync(path.join(proj, 'aiui.config.json'), '{}');
+    writeFileSync(path.join(proj, 'steptix.config.json'), '{}');
     mkdirSync(path.join(proj, 'tests'), { recursive: true });
 
     expect(await resolveProjectRoot(path.join(proj, 'tests', 'x.md'))).toBe(proj);
@@ -53,18 +53,18 @@ describe('resolveProjectRoot', () => {
   it('stops AT the user root when no marker exists inside it', async () => {
     // The stray-config trap: a marker one level ABOVE the user root (in
     // LOCALAPPDATA itself) must never be adopted.
-    writeFileSync(path.join(path.dirname(userRoot()), 'aiui.config.json'), '{}');
+    writeFileSync(path.join(path.dirname(userRoot()), 'steptix.config.json'), '{}');
     mkdirSync(userRoot(), { recursive: true });
 
-    const anchored = path.join(userRoot(), '.aiui-mcp-steps.md');
+    const anchored = path.join(userRoot(), '.steptix-mcp-steps.md');
     expect(await resolveProjectRoot(anchored)).toBe(userRoot());
   });
 
   it('a marker inside the user root still wins normally', async () => {
     mkdirSync(userRoot(), { recursive: true });
-    writeFileSync(path.join(userRoot(), 'aiui.config.json'), '{}');
+    writeFileSync(path.join(userRoot(), 'steptix.config.json'), '{}');
 
-    const anchored = path.join(userRoot(), '.aiui-mcp-steps.md');
+    const anchored = path.join(userRoot(), '.steptix-mcp-steps.md');
     expect(await resolveProjectRoot(anchored)).toBe(userRoot());
   });
 
@@ -76,7 +76,7 @@ describe('resolveProjectRoot', () => {
     // sibling levels exactly as before.
     const elsewhere = makeTmp();
     mkdirSync(path.join(elsewhere, 'deep'), { recursive: true });
-    writeFileSync(path.join(elsewhere, 'aiui.config.json'), '{}');
+    writeFileSync(path.join(elsewhere, 'steptix.config.json'), '{}');
 
     expect(await resolveProjectRoot(path.join(elsewhere, 'deep', 'x.md'))).toBe(elsewhere);
   });

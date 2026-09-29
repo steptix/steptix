@@ -1,9 +1,9 @@
 /**
  * What a skipped step looks like in the Runner UI.
  *
- * A MIRROR of `testbench-native/src/extension/step-skip-core.ts`, which is the
+ * A MIRROR of `steptix-vscode/src/extension/step-skip-core.ts`, which is the
  * original and carries the reasoning. Copied rather than imported because the
- * two live in different packages: `testbench-native` is a `file:`-installed VS
+ * two live in different packages: `steptix-vscode` is a `file:`-installed VS
  * Code extension that depends on `runner-core`, and nothing in it may be
  * imported from `src/`. The module it mirrors is already VS-Code-free for the
  * same kind of reason.
@@ -11,7 +11,7 @@
  * It exists because the Runner UI was the one surface the merged presentation
  * did not reach: it printed `— Step 5 skipped: Skipped: another branch of this
  * decision was taken` — a different glyph, a different separator, a
- * capitalised "Step", and the word "skipped" twice — while the six TestBench
+ * capitalised "Step", and the word "skipped" twice — while the six Steptix
  * surfaces beside it printed `◌ step 5 skipped — another branch of this
  * decision was taken`. The story claims "one glyph, one paint precedence, one
  * sentence"; this is what makes that true of the fourth client too.

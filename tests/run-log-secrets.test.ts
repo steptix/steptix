@@ -17,7 +17,7 @@ async function withRunLog(
   secrets: () => string[],
   body: () => void,
 ): Promise<string> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiui-runlog-secrets-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'steptix-runlog-secrets-'));
   const runLog = openRunLogFile('t', dir);
   if (!runLog) throw new Error('no run log');
   const detach = attachRunLogBridges(runLog, mode, secrets);

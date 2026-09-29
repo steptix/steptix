@@ -573,7 +573,7 @@ carries the regression test §Tests names.
 
 - **Rebuild `dist/` and restart the Sessions API server** before testing by
   hand — the MCP server the host (e.g. Claude Code) spawns runs `dist/`, and
-  the route lives in the separately-running server process. No TestBench
+  the route lives in the separately-running server process. No Steptix
   extension bump: this is all server-side.
 - **Output schemas are SDK-validated** — every new field `.nullable()`, never
   optional.

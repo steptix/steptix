@@ -20,8 +20,8 @@ export type EnvLookup = Record<string, string | undefined>;
 
 /**
  * Load `<dataDir>/<envName>.json` from `projectRoot`. `dataDir` comes from
- * `tests.dataDir` in `aiui.config.json` (default `data`) — the former
- * `AIUI_DATA_DIR` env var is gone. `$VAR` string leaves resolve against
+ * `tests.dataDir` in `steptix.config.json` (default `data`) — the former
+ * `STEPTIX_DATA_DIR` env var is gone. `$VAR` string leaves resolve against
  * `envMap` (the per-project env map on the server; `process.env` on the CLI).
  * Missing file returns an empty object (caller decides whether that's an
  * error — interpolation throws on first use).

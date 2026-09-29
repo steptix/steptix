@@ -3,7 +3,7 @@ import { buildSelect, exitCodeFor, parseStepRange } from '../src/cli/commands/co
 import { createCli } from '../src/cli/index.js';
 
 /**
- * `aiui compile`'s argument surface (stories/codebehind-compile.md, "What the
+ * `steptix compile`'s argument surface (stories/codebehind-compile.md, "What the
  * author runs").
  *
  * The flag parsing is pure and tested directly. The exit codes are driven

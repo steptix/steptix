@@ -329,16 +329,16 @@ function newTestFile(root = projectRoot): string {
 }
 
 beforeAll(async () => {
-  projectRoot = mkdtempSync(path.join(tmpdir(), 'aiui-table-structure-'));
+  projectRoot = mkdtempSync(path.join(tmpdir(), 'steptix-table-structure-'));
   mkdirSync(path.join(projectRoot, 'tests'), { recursive: true });
-  writeFileSync(path.join(projectRoot, 'aiui.config.json'), JSON.stringify({}));
+  writeFileSync(path.join(projectRoot, 'steptix.config.json'), JSON.stringify({}));
 
-  // A second project whose aiui.config.json turns the question off for
+  // A second project whose steptix.config.json turns the question off for
   // everything under it — the `tables.structure` half of the switch.
-  strictProjectRoot = mkdtempSync(path.join(tmpdir(), 'aiui-table-strict-'));
+  strictProjectRoot = mkdtempSync(path.join(tmpdir(), 'steptix-table-strict-'));
   mkdirSync(path.join(strictProjectRoot, 'tests'), { recursive: true });
   writeFileSync(
-    path.join(strictProjectRoot, 'aiui.config.json'),
+    path.join(strictProjectRoot, 'steptix.config.json'),
     JSON.stringify({ tables: { structure: 'strict' } }),
   );
 
@@ -633,7 +633,7 @@ describe('the structure question through the real Sessions API entry', () => {
     await api('DELETE', `/sessions/ts-strict`);
   });
 
-  it('asks nothing under a project whose aiui.config.json sets tables.structure: strict', async () => {
+  it('asks nothing under a project whose steptix.config.json sets tables.structure: strict', async () => {
     // The per-PROJECT half. `runConfig` is spread from the SERVER's startup
     // config, which says `ask`, so this only passes if the value is
     // re-sourced from the bundle resolved at the test file's own root.

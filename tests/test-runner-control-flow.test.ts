@@ -1311,7 +1311,7 @@ describe('hooks around control flow', () => {
  * The CLI's half of the pairing rule the event-emitting loops follow.
  *
  * The console has no persistent paint to get stuck — that was the server's
- * `step:start` and TestBench's `running` gutter — but it has the same shape of
+ * `step:start` and Steptix's `running` gutter — but it has the same shape of
  * claim: `logger.step` prints a `Step N/M:` header, and a guard that asks
  * nobody records no row and reports nothing afterwards. So the invariant here
  * is that the console announces exactly the guard visits the REPORT keeps.

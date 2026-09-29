@@ -13,8 +13,8 @@ forces every entry point to re-implement env selection ad hoc.
 Concretely:
 
 - The CLI has `--env <name>` already.
-- The VS Code testbench has no env-switching UI; it walks-up to the nearest
-  `.env` (see [run-controller.ts:155](../testbench/src/extension/run-controller.ts#L155))
+- The VS Code steptix has no env-switching UI; it walks-up to the nearest
+  `.env` (see [run-controller.ts:155](../steptix/src/extension/run-controller.ts#L155))
   and that's it.
 - Programmatic callers and CI need a third path.
 - Test data like `users.admin.email` doesn't fit naturally in flat `.env` files;
@@ -40,7 +40,7 @@ Concretely:
 ### File layout
 
 ```
-ai-ui-automation/
+steptix/
 ├── .env                       ← shared defaults (already exists)
 ├── .env.uat                   ← env-specific secrets / URLs (already exists)
 ├── .env.staging
@@ -108,8 +108,8 @@ A new `resolveEnvBundle({ envName, projectRoot })` function returns
 
 | Entry point | How env name is selected |
 |---|---|
-| CLI `aiui run` | `--env <name>` flag (existing) |
-| VS Code testbench | Status-bar dropdown writes `testbench.activeEnv` workspace setting |
+| CLI `steptix run` | `--env <name>` flag (existing) |
+| VS Code steptix | Status-bar dropdown writes `steptix.activeEnv` workspace setting |
 | Programmatic `runTests()` | Caller passes `--env` flag through to `runCommand` |
 | CI (GitHub Actions) | `AUTOMATION_ENV` envvar |
 | Per-test override | Frontmatter `env: <name>` (escape hatch for tests pinned to one env) |
@@ -127,14 +127,14 @@ when `.env.<name>` is missing.)
 A status-bar item: `🌐 env: uat` (visible while a `.md` test is open).
 Click → QuickPick listing every env discovered by scanning `data/*.json` ∪
 `.env.*` filenames in the workspace. Selection writes
-`testbench.activeEnv` to the workspace settings (so it persists across reloads
+`steptix.activeEnv` to the workspace settings (so it persists across reloads
 and is per-workspace, not global).
 
 The next F5 picks up the new env automatically — `run-controller.runLines`
 reads the setting and passes it through the existing `env` field on
-`streamSteps`. (For v1, the testbench server-side flow is unchanged — only the
+`streamSteps`. (For v1, the Steptix server-side flow is unchanged — only the
 `.env` selection moves; structured `data/*.json` interpolation runs at
-markdown parse-time on the CLI/server side and works the same for testbench
+markdown parse-time on the CLI/server side and works the same for steptix
 runs as for CLI runs.)
 
 ### Implementation outline
@@ -158,7 +158,7 @@ runs as for CLI runs.)
 5. **CLI wiring** — `runCommand` calls `resolveEnvBundle({ envName: opts.env,
    projectRoot: cwd })` and passes the result into `parseTestFile`.
 
-6. **Testbench** — new `EnvSelectorItem` (status-bar) + `testbench.activeEnv`
+6. **Steptix** — new `EnvSelectorItem` (status-bar) + `steptix.activeEnv`
    setting + plumb through `run-controller.runLines` so the runner-core sees
    the chosen env.
 
@@ -214,7 +214,7 @@ ADMIN_PWD=...
 
 Switching:
 
-1. **CLI:** `aiui run delegate-approval.md --env uat` then `--env staging`.
+1. **CLI:** `steptix run delegate-approval.md --env uat` then `--env staging`.
 2. **VS Code:** click status-bar `🌐 env: uat` → pick `staging` → F5.
 3. **CI:** the workflow sets `AUTOMATION_ENV=staging`.
 
@@ -237,7 +237,7 @@ The test file never changes between runs.
 - `{{parameter}}` interpolation is unchanged.
 - The `dataFile:` frontmatter (CSV/JSON rows for data-driven tests) is a
   separate, orthogonal feature — kept untouched.
-- VS Code testbench: when `testbench.activeEnv` is unset, behaviour matches
+- VS Code steptix: when `steptix.activeEnv` is unset, behaviour matches
   today's walk-up `.env` resolution.
 
 ## Open questions (deferred)

@@ -2,7 +2,7 @@
 
 Status: ready for review
 Spans two repos: **`@pkent/aigateway`** (new `aibroker` provider) and
-**ai-ui-automation** (`AiClient` rework). aiapi is **unchanged**.
+**steptix** (`AiClient` rework). aiapi is **unchanged**.
 
 ---
 
@@ -33,7 +33,7 @@ model string is the single source of truth.
 | Repo | Change |
 |---|---|
 | **`@pkent/aigateway`** | Add an `aibroker` provider (an OpenAI-compatible provider that **requires** a `baseURL` — no hardcoded URL). Register it. Tests + README + version bump 1.1.0 → **1.2.0**. Publish (user). |
-| **ai-ui-automation** | Rework `AiClient` to route **all** calls through `@pkent/aigateway` (replacing the direct `openai` SDK from #9). The model prefix drives routing; the consumer supplies the gateway `baseURL` only for `aibroker/` models. |
+| **steptix** | Rework `AiClient` to route **all** calls through `@pkent/aigateway` (replacing the direct `openai` SDK from #9). The model prefix drives routing; the consumer supplies the gateway `baseURL` only for `aibroker/` models. |
 | **aiapi** | **None.** It already authenticates via Bearer like OpenAI; the `aibroker` provider sends `Bearer <AI_API_KEY>` to `/v1/chat/completions`, which it already validates. |
 
 ---
@@ -119,7 +119,7 @@ Follow the existing `test/aigateway.test.js` pattern (`fakeOpenAIClient({ captur
 
 ---
 
-## PART B — ai-ui-automation: `AiClient` rework
+## PART B — Steptix: `AiClient` rework
 
 Rework `AiClient` ([src/ai/client.ts](../../src/ai/client.ts)) to route **all** calls
 through `@pkent/aigateway` instead of the direct `openai` SDK. The public
@@ -245,7 +245,7 @@ Preserve: never leak the key value; keep the delete-vs-assign for `exactOptional
 - **`package.json`**: add `@pkent/aigateway` (`^1.2.0`); **remove `openai`** (no
   longer imported directly — it becomes transitive via `@pkent/aigateway`).
 - **Types:** `@pkent/aigateway` ships **no TypeScript types** (plain JS). Add a
-  local ambient declaration in ai-ui-automation (e.g.
+  local ambient declaration in steptix (e.g.
   `src/types/aigateway.d.ts`) for the surface used: the `AIGateway` class
   (`constructor(model, key, options?)`, `chat(messages, opts?): Promise<V2Response>`,
   `stream(messages, opts?): AsyncIterable<{type:'text_delta',text}> & { final: Promise<V2Response> }`)
@@ -260,7 +260,7 @@ Preserve: never leak the key value; keep the delete-vs-assign for `exactOptional
 
 `@pkent/aigateway` is consumed from **npm** (aiapi uses `^1.1.0` from the
 registry). So the `aibroker` provider must exist in a published version before
-ai-ui-automation can depend on it in production.
+steptix can depend on it in production.
 
 1. **Implement + review Part A**, bump to 1.2.0.
 2. **User publishes `@pkent/aigateway@1.2.0`** to npm (like the aiapi deploy — a
@@ -283,7 +283,7 @@ being *imported* at test time, but not from being *installed*. So:
 **Part A (`@pkent/aigateway`):** `node --test`, offline (§A.3). All existing
 tests still pass.
 
-**Part B (ai-ui-automation, vitest):** rewrite `tests/ai-client.test.ts` to
+**Part B (steptix, vitest):** rewrite `tests/ai-client.test.ts` to
 `vi.mock('@pkent/aigateway')` (was mocking `openai`). Assert:
 - `chat`/`stream` called with the passed-through `messages` (no cache-strip), `maxTokens: 4096`,
   `responseFormat`, and the composite `signal`.

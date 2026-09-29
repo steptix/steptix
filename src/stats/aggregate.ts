@@ -1,6 +1,6 @@
 /**
  * The scoreboard's arithmetic (docs/specs/SPEC-scoreboard.md §9): what
- * `aiui stats` prints, as pure functions over the lines `readStatsLines`
+ * `steptix stats` prints, as pure functions over the lines `readStatsLines`
  * returns. No clock and no disk: "now", and whether a report is still there
  * (§8.4), come in as arguments.
  *

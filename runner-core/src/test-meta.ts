@@ -1,6 +1,6 @@
 /**
  * Minimal parser for the `## Config` and `## Parameters` sections of a
- * TestBench markdown file. Mirrors the subset of `src/parser/markdown.ts`
+ * Steptix markdown file. Mirrors the subset of `src/parser/markdown.ts`
  * the extension actually needs at run-time, without pulling in the full
  * markdown parser (and its tokenizer dependency).
  *

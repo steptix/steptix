@@ -1,5 +1,5 @@
 {
-  "_comment": "Authored step instructions for the Set-grammar parity check (stories/variable-assignment.md). ONE list, three readers: the runtime parser (tests/set-step.test.ts pins what it does), the TestBench completion/F12 scanner and the webview Variables panel (testbench-native/tests/set-step-mirrors.test.js pins that they AGREE with it, by calling it). Adding a row here is how a new grammar case gets checked everywhere at once — which is the thing hand-copied tables kept failing to do.",
+  "_comment": "Authored step instructions for the Set-grammar parity check (stories/variable-assignment.md). ONE list, three readers: the runtime parser (tests/set-step.test.ts pins what it does), the Steptix completion/F12 scanner and the webview Variables panel (steptix-vscode/tests/set-step-mirrors.test.js pins that they AGREE with it, by calling it). Adding a row here is how a new grammar case gets checked everywhere at once — which is the thing hand-copied tables kept failing to do.",
   "lines": [
     "Set {{a}} to \"b\"",
     "set {{a}} to \"{{b}} and {{c}}\"",

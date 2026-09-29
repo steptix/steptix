@@ -93,7 +93,7 @@ export interface RunStats extends StatsContext {
 
 export interface OpenRunStatsArgs {
   /** The root of the project the run uses — `null` when none resolved (no
-   *  `aiui.config.json` above the test), which falls back to the test's
+   *  `steptix.config.json` above the test), which falls back to the test's
    *  folder, then to the working directory. */
   projectRoot: string | null | undefined;
   /** The test file, absolute or relative to the working directory; absent or
@@ -107,7 +107,7 @@ export interface OpenRunStatsArgs {
    * its type, does not.
    */
   projectEnabled?: boolean | undefined;
-  /** A suite that overrides `AIUI_STATS_SUITE`: `compile` for a compile's
+  /** A suite that overrides `STEPTIX_STATS_SUITE`: `compile` for a compile's
    *  runs (§5.6). */
   suite?: StatsSuite | undefined;
   /** An id to continue — a data-row run's rows share one (§8.1). */
@@ -199,13 +199,13 @@ const unreadableSwitches = new Set<string>();
 
 /**
  * The switch of the project a TEST belongs to (§6.4), for a runner that loaded
- * its config from somewhere else — `aiui run` and the Runner UI load the
- * working directory's `aiui.config.json`, while a test's lines are filed
+ * its config from somewhere else — `steptix run` and the Runner UI load the
+ * working directory's `steptix.config.json`, while a test's lines are filed
  * under the project root its own path resolves to. Recording one project's
  * steps under another project's switch is how a project that said "never
  * keep my step text" gets it kept.
  *
- * Reads `<projectRoot>/aiui.config.json`'s `stats` section only — the rest of
+ * Reads `<projectRoot>/steptix.config.json`'s `stats` section only — the rest of
  * that file is not this run's business, and a problem in it must not fail a
  * run that never read it. No root, or no config file at the root: the run's
  * own config decides. A file that does not parse, or a `stats` section of the
@@ -217,7 +217,7 @@ export async function projectStatsSwitch(
   runConfig: { readonly stats?: unknown } | null | undefined,
 ): Promise<boolean> {
   if (!projectRoot) return statsEnabledIn(runConfig);
-  const file = path.join(projectRoot, 'aiui.config.json');
+  const file = path.join(projectRoot, 'steptix.config.json');
   let raw: string;
   try {
     raw = await fs.promises.readFile(file, 'utf-8');
@@ -247,7 +247,7 @@ export const STATS_FLUSH_TIMEOUT_MS = 2_000;
 
 /**
  * Wait for the scoreboard's queued appends, but never longer than
- * `timeoutMs`. For a process about to exit (`aiui run`), whose unawaited
+ * `timeoutMs`. For a process about to exit (`steptix run`), whose unawaited
  * appends die with it: called in a `finally`, so a run that throws still
  * keeps its lines, and bounded, so an append stalled on a slow or locked disk
  * cannot hold the process open. Never rejects.

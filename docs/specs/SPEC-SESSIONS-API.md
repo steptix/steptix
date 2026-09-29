@@ -8,7 +8,7 @@ A REST API server that allows callers to send natural language test steps for ex
 
 ## Startup
 
-- New CLI command (e.g. `ai-ui-automation serve`) starts the API server.
+- New CLI command (e.g. `steptix serve`) starts the API server.
 - Server listens on a configurable host and port, defined in the existing project config file.
 - A default API key is defined in the config file. All requests must include this key in the `x-api-key` header.
 
@@ -471,7 +471,7 @@ List all active sessions.
 
 ### POST /sessions/:id/record-steps
 
-Start recording the author's actions in the session's browser (TestBench's
+Start recording the author's actions in the session's browser (Steptix's
 **Record Steps**). Always a Server-Sent Events response: `record:action`
 frames as the author works, then — after a `stop` control — the steps a model
 wrote from them. Creates the session when absent, accepting `config` on that

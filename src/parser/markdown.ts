@@ -1288,7 +1288,7 @@ export function scanStepSpans(rawContent: string, filePath: string): StepSpanSca
   // a step line and a heading are (HASHES_ONLY_RE catches a line that is
   // nothing but hashes: ANY_HEADING_RE demands a non-space after them, so
   // without it such a line reads as prose to every parser — the CLI would
-  // throw its empty-name error while TestBench ran the "body" items as
+  // throw its empty-name error while Steptix ran the "body" items as
   // main-flow steps).
   const lines = rawContent.split(/\r?\n/);
   const entries: StepSpanEntry[] = [];

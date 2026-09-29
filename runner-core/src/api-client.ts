@@ -1,8 +1,8 @@
 /**
- * HTTP+SSE client for the ai-ui-automation API server.
+ * HTTP+SSE client for the steptix API server.
  *
  * Transport-only: no error formatting, no .env parsing. Callers map the
- * `ApiClientError` codes below into the user-facing TBxxx catalogue.
+ * `ApiClientError` codes below into the user-facing STXxxx catalogue.
  */
 
 import { SseParser, type SseFrame } from './sse-parser.js';
@@ -65,7 +65,7 @@ export interface StreamStepsRequest {
   /**
    * Active environment name. The server uses it to load `.env.<envName>` and
    * `<dataDir>/<envName>.json` (`dataDir` = `tests.dataDir` in the project's
-   * `aiui.config.json`, default `data`) from the **test file's project root**
+   * `steptix.config.json`, default `data`) from the **test file's project root**
    * (resolved from `testFilePath`, not the server's cwd) and apply `${env.X}` /
    * `${data.X.Y}` interpolation to each step. Empty/omitted ⇒ no env-data
    * interpolation (steps with `${...}` placeholders will fail).
@@ -88,7 +88,7 @@ export interface StreamStepsRequest {
    * (stories/per-test-viewport.md §3). The client does not resolve or
    * validate it: the server owns the one resolver and the one error message,
    * so a client that pre-parsed it could only disagree with the server. `$VAR`
-   * resolution still happens client-side (TestBench's `.env` overlay), same as
+   * resolution still happens client-side (Steptix's `.env` overlay), same as
    * `baseUrl` — what travels is the post-`$VAR`, pre-preset string.
    */
   config?: { baseUrl?: string; timeout?: string; viewport?: string };
@@ -167,7 +167,7 @@ export interface StreamStepsRequest {
   sourceUris?: string[];
   /**
    * Absolute path to the project's skills directory (`skillsDir` in
-   * `aiui.config.*`). When supplied, the server runs `expandSkills` over the
+   * `steptix.config.*`). When supplied, the server runs `expandSkills` over the
    * incoming `steps`, dispatches the flattened result, and emits
    * `frame:push` / `frame:pop` events around each skill body. Omit to use
    * the legacy behaviour (raw steps shipped straight to the runner — fine
@@ -222,7 +222,7 @@ export interface StreamStepsRequest {
   testFilePath?: string;
   /**
    * Absolute path to the project's tools directory (`toolsDir` in
-   * `aiui.config.*`). When supplied, the server loads the tool catalogue
+   * `steptix.config.*`). When supplied, the server loads the tool catalogue
    * once per session and dispatches `[tool: ...]` steps through
    * `executeToolStep` — without it, tool lines reach the AI as plain text.
    */
@@ -363,7 +363,7 @@ export class ApiClientError extends Error {
  * "connection lost" error toast on intentional cancellation.
  *
  * Cross-bundle safe: when runner-core is bundled into a consumer (e.g.
- * esbuild bundles it into the testbench extension), `instanceof` against
+ * esbuild bundles it into the Steptix extension), `instanceof` against
  * an ApiClientError thrown by a different copy of this module returns
  * false. Fall back to duck-typing by name + kind so test fakes and any
  * non-bundled callers also signal aborts correctly.
@@ -508,7 +508,7 @@ export class ApiClient {
   }
 
   /**
-   * Record Steps (stories/testbench-record-steps.md §On the wire): hold the
+   * Record Steps (stories/steptix-record-steps.md §On the wire): hold the
    * session while the author clicks through the app, and stream one
    * `record:action` per action, then `record:result` and `done` once
    * `controlRecordSteps({ action: 'stop' })` arrives.
@@ -695,7 +695,7 @@ export class ApiClient {
   /**
    * Liveness probe: `GET /sessions/:id`. Returns true if the server still
    * holds a live (non-closed) session under this id, false if it's gone
-   * (404). The testbench "re-run a skill step" path calls this before reusing
+   * (404). The steptix "re-run a skill step" path calls this before reusing
    * a session — the server would otherwise silently replace a dead session
    * with a fresh blank browser and run the tail against `about:blank`.
    * Throws `ApiClientError('connect-failed')` if the server is unreachable so

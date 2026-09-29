@@ -24,7 +24,7 @@
  * for the first time from a server that has already opened a browser.
  *
  * Import-free, exactly as the original is, so the mirror is cheapest to keep
- * honest and so testbench-native's suite can load either side directly under
+ * honest and so steptix-vscode's suite can load either side directly under
  * Node's type stripping. Every decision below is argued in the original's
  * comments and not repeated here.
  */

@@ -366,7 +366,7 @@ describe('launchCdpBrowser', () => {
     }) as unknown as LauncherDeps['spawn'];
 
     const result = await launchCdpBrowser(
-      { engine: 'chrome', profileDir: 'C:\\proj\\.aiui\\cdp-profiles\\chrome-default' },
+      { engine: 'chrome', profileDir: 'C:\\proj\\.steptix\\cdp-profiles\\chrome-default' },
       stubDeps({ spawn }),
     );
 
@@ -439,12 +439,12 @@ describe('launchCdpBrowser', () => {
     }) as unknown as LauncherDeps['spawn'];
 
     await launchCdpBrowser(
-      { engine: 'chrome', profileDir: 'C:\\my proj\\.aiui\\cdp-profiles\\chrome-a b' },
+      { engine: 'chrome', profileDir: 'C:\\my proj\\.steptix\\cdp-profiles\\chrome-a b' },
       stubDeps({ spawn }),
     );
 
     const dirArg = args.find((a) => a.startsWith('--user-data-dir='));
-    expect(dirArg).toBe('--user-data-dir=C:\\my proj\\.aiui\\cdp-profiles\\chrome-a b');
+    expect(dirArg).toBe('--user-data-dir=C:\\my proj\\.steptix\\cdp-profiles\\chrome-a b');
     expect(args.filter((a) => a.includes('my proj'))).toHaveLength(1);
   });
 
@@ -548,7 +548,7 @@ describe('launchCdpBrowser', () => {
     if (result.ok) return;
     expect(result.error).toContain('C:\\p\\chrome-default');
     expect(result.error).toContain('EACCES');
-    expect(result.error).toContain('.aiui/cdp-profiles/');
+    expect(result.error).toContain('.steptix/cdp-profiles/');
   });
 
   it('does not spawn at all when the binary is missing', async () => {

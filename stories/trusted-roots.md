@@ -1,24 +1,24 @@
 # Trusted roots — approve a project once, on any host
 
 > **Verification rule for this story.** "Done" means: (1) with no
-> `AIUI_MCP_ROOTS` set, asking `run_test_file` for a path in a project that is
+> `STEPTIX_MCP_ROOTS` set, asking `run_test_file` for a path in a project that is
 > neither the MCP server's cwd nor approved is refused with a message
-> containing a **runnable** `aiui trust "…"` line, correctly quoted for a path
+> containing a **runnable** `steptix trust "…"` line, correctly quoted for a path
 > containing spaces; (2) running that command once makes every later call in
 > that project succeed — **on the next call, with no host restart** — and it
 > keeps working after switching host (e.g. Claude Code → OpenCode) with no
 > per-host configuration; (3) a project that *is* the MCP server's cwd still
-> needs no approval at all, exactly as today; (4) `AIUI_MCP_ROOTS`, when set,
-> still wins outright and the trust file is not consulted; (5) `aiui trust`
+> needs no approval at all, exactly as today; (4) `STEPTIX_MCP_ROOTS`, when set,
+> still wins outright and the trust file is not consulted; (5) `steptix trust`
 > on a directory containing the user's home directory prints a prominent
 > warning naming what it exposes, and proceeds; (6) a trusted directory that
 > has since been deleted is skipped without breaking the other entries, while
-> a non-existent `AIUI_MCP_ROOTS` entry stays fatal.
+> a non-existent `STEPTIX_MCP_ROOTS` entry stays fatal.
 
 ## Context
 
 §4a of [mcp-server.md](mcp-server.md) gives the MCP server exactly two
-sources for its allow-list: `AIUI_MCP_ROOTS` if set, else the MCP process
+sources for its allow-list: `STEPTIX_MCP_ROOTS` if set, else the MCP process
 cwd. Both are frozen when the host (e.g. Claude Code) spawns the process.
 That was the right minimum for the first release, and it is the *only*
 confinement in the system — the Sessions API server does no path checking of
@@ -72,27 +72,27 @@ reloads every few seconds, is a good trade.
   appears only when reaching *outside*, which is the only case that was ever
   friction.
 
-- **`AIUI_MCP_ROOTS` wins outright; when set, the trust file is not read.**
+- **`STEPTIX_MCP_ROOTS` wins outright; when set, the trust file is not read.**
   Codex CLI and Copilot CLI have the variable as their only configuration
   surface, and an explicit override silently unioned with a stale trust file
   is worse than one that means what it says.
 
 - **Approval is our own CLI command, not a host prompt.** MCP elicitation
   would route through the host and inherit precisely the uneven support that
-  makes the `roots` capability unreliable. `aiui trust` behaves identically
+  makes the `roots` capability unreliable. `steptix trust` behaves identically
   no matter what launched the MCP server — and a web page cannot run it,
   which is the entire security property.
 
 - **The trust file is read on every call, uncached.** `allowedRoots()` is
   already called per request and deliberately uncached. Keeping it that way
-  is what lets `aiui trust` take effect on the *next tool call*. Caching
+  is what lets `steptix trust` take effect on the *next tool call*. Caching
   would reintroduce the approve-then-restart-your-session cycle that makes
   the environment variable painful today, which would defeat the story. The
   read is a few hundred bytes at single-digit calls per minute.
 
-- **Whole-drive trust warns loudly; it does not refuse.** `aiui trust C:\`
+- **Whole-drive trust warns loudly; it does not refuse.** `steptix trust C:\`
   proceeds after printing what it exposes. Refusing would push the user to
-  `AIUI_MCP_ROOTS=C:\`, which is the same boundary with **no warning at
+  `STEPTIX_MCP_ROOTS=C:\`, which is the same boundary with **no warning at
   all** — strictly worse, because it is silent. The warning is the value
   here; the refusal is not.
 
@@ -105,14 +105,14 @@ reloads every few seconds, is a good trade.
 
 - **The refusal message suggests a path but performs no walk.** It names
   `path.dirname(refusedPath)` and says "or a parent directory holding several
-  projects". Walking upward to locate the nearest `aiui.config.json` would
+  projects". Walking upward to locate the nearest `steptix.config.json` would
   mean stat-ing paths *outside* the boundary purely to write a friendlier
   message — and §7 already reasons about not distinguishing "absent" from
   "outside your roots". The human is the right decider for which directory to
   approve, and they can edit the command before running it.
 
 - **A missing trusted entry is skipped with a warning; a missing
-  `AIUI_MCP_ROOTS` entry stays fatal.** Deleting an old project must not
+  `STEPTIX_MCP_ROOTS` entry stays fatal.** Deleting an old project must not
   break the MCP server for every other project. An explicit environment
   variable naming a directory that does not exist is a configuration error
   and keeps today's `badRootEntry` behaviour.
@@ -121,8 +121,8 @@ reloads every few seconds, is a good trade.
 
 ### 1. The trust file
 
-`path.join(os.homedir(), '.aiui', 'config.json')` —
-`C:\Users\Paul Kent\.aiui\config.json` on this machine. `AIUI_CONFIG_HOME`
+`path.join(os.homedir(), '.steptix', 'config.json')` —
+`C:\Users\Paul Kent\.steptix\config.json` on this machine. `STEPTIX_CONFIG_HOME`
 overrides the *directory*, which is how the tests get a sandbox and how a CI
 account with an unusable home directory opts out.
 
@@ -133,7 +133,7 @@ account with an unusable home directory opts out.
 ```
 
 An object, not a bare array, so later fields do not force a format break.
-**Unknown top-level keys are preserved across writes** — `aiui trust` must
+**Unknown top-level keys are preserved across writes** — `steptix trust` must
 not clobber a field written by a newer version of the tool.
 
 Failure semantics differ by direction, deliberately:
@@ -143,7 +143,7 @@ Failure semantics differ by direction, deliberately:
 - **Malformed file on read** → empty list, plus a warning carried into the
   refusal message. A corrupt file must not brick every tool call, but it must
   be *visible*, or trust silently stops working and nothing says why.
-- **Malformed file on write** → `aiui trust` refuses. Overwriting a file we
+- **Malformed file on write** → `steptix trust` refuses. Overwriting a file we
   could not parse would discard whatever was in it.
 
 ### 2. `allowedRoots()`
@@ -151,7 +151,7 @@ Failure semantics differ by direction, deliberately:
 [src/mcp/project.ts §allowedRoots](../src/mcp/project.ts) gains one branch:
 
 ```
-AIUI_MCP_ROOTS set and non-empty  → exactly those entries      (unchanged)
+STEPTIX_MCP_ROOTS set and non-empty  → exactly those entries      (unchanged)
 otherwise                         → trustedRoots() ∪ [cwd]     (new)
 ```
 
@@ -162,20 +162,20 @@ Canonicalise before deduping, or `C:\Projects\AITests` and
 `C:\PROJ~1\AITests` both survive as separate entries.
 
 The only new asymmetry is the failure semantics locked above: trust entries
-that fail to resolve are dropped, `AIUI_MCP_ROOTS` entries that fail to
+that fail to resolve are dropped, `STEPTIX_MCP_ROOTS` entries that fail to
 resolve still call `fail(badRootEntry(...))`.
 
-### 3. `aiui trust`
+### 3. `steptix trust`
 
 A normal CLI command in `src/cli/commands/trust.ts`, registered from
 [src/cli/index.ts](../src/cli/index.ts) alongside the others. (Unlike
-`aiui mcp`, which bypasses the CLI per §1 of mcp-server.md, there is nothing
+`steptix mcp`, which bypasses the CLI per §1 of mcp-server.md, there is nothing
 special about this one.)
 
 ```
-aiui trust <path>     approve a directory
-aiui trust --list     show approved directories
-aiui untrust <path>   remove one
+steptix trust <path>     approve a directory
+steptix trust --list     show approved directories
+steptix untrust <path>   remove one
 ```
 
 `trust <path>`:
@@ -188,10 +188,10 @@ aiui untrust <path>   remove one
    home directory, or contains it. Name the consequence concretely — *"this
    puts `C:\Users\Paul Kent\.ssh` inside the boundary"* — not an abstract
    caution. Proceed.
-4. **No-project note** if there is no `aiui.config.json` directly in the
+4. **No-project note** if there is no `steptix.config.json` directly in the
    directory. Phrased as information, not a warning: approving a parent that
    holds several projects is a legitimate and expected use.
-5. Append, preserving unknown keys, creating `~/.aiui/` if needed.
+5. Append, preserving unknown keys, creating `~/.steptix/` if needed.
 
 ### 4. The refusal message
 
@@ -204,10 +204,10 @@ it is outside every allowed root.
 Allowed roots: C:\Projects\vibe\ai-ui-automation
 
 Approve the project once — this takes effect on the next call, no restart:
-  aiui trust "C:\Projects\AITests\tests"
+  steptix trust "C:\Projects\AITests\tests"
 (or a parent directory holding several projects)
 
-For machine-global hosts, AIUI_MCP_ROOTS still overrides this entirely.
+For machine-global hosts, STEPTIX_MCP_ROOTS still overrides this entirely.
 ```
 
 The quoting is part of the contract, not cosmetic: the path that exposed this
@@ -217,7 +217,7 @@ runnable. There is a test for exactly that.
 ### 5. Relationship to the `roots` capability
 
 If the MCP `roots` capability is implemented later it slots in as another
-layer — `AIUI_MCP_ROOTS` → host-supplied roots → trusted roots → cwd — and
+layer — `STEPTIX_MCP_ROOTS` → host-supplied roots → trusted roots → cwd — and
 removes the need to approve anything on hosts that support it. Nothing here
 forecloses that. It is a separate story.
 
@@ -225,17 +225,17 @@ forecloses that. It is a separate story.
 
 - The MCP `roots` client capability (separate story).
 - Any confinement in the Sessions API server. It has none today; adding some
-  is a much larger change and its existing clients (CLI, TestBench) are
+  is a much larger change and its existing clients (CLI, Steptix) are
   trusted callers by design.
 - Per-root scopes or permissions. Trust is all-or-nothing per directory.
 - Expiring or auditing approvals.
-- Any change to `AIUI_MCP_ROOTS` semantics.
+- Any change to `STEPTIX_MCP_ROOTS` semantics.
 
 ## Composition
 
 | File | Change |
 |---|---|
-| `src/config/user-config.ts` | **new** — read/write `~/.aiui/config.json`, unknown-key preservation, malformed handling. Not under `src/mcp/` because the CLI writes it too. |
+| `src/config/user-config.ts` | **new** — read/write `~/.steptix/config.json`, unknown-key preservation, malformed handling. Not under `src/mcp/` because the CLI writes it too. |
 | [src/mcp/project.ts](../src/mcp/project.ts) | `allowedRoots()` gains the union branch and the skip-missing-trusted-entry rule. |
 | [src/mcp/errors.ts](../src/mcp/errors.ts) | `pathOutsideRoots` rewritten per §4. |
 | `src/cli/commands/trust.ts` | **new** — `trust` / `--list` / `untrust`. |
@@ -248,25 +248,25 @@ forecloses that. It is a separate story.
 ### Unit / seam (vitest)
 
 In [tests/mcp-project.test.ts](../tests/mcp-project.test.ts) plus a new
-`tests/user-config.test.ts`, all with `AIUI_CONFIG_HOME` pointed at a temp
+`tests/user-config.test.ts`, all with `STEPTIX_CONFIG_HOME` pointed at a temp
 directory:
 
 - No env var, no trust file → cwd only. **This is the today-behaviour
   regression test** and it must not move.
-- `AIUI_MCP_ROOTS` set *and* a populated trust file → exactly the env var's
+- `STEPTIX_MCP_ROOTS` set *and* a populated trust file → exactly the env var's
   entries; the trust file is not read.
 - Trust file + cwd → union, deduplicated after canonicalisation.
 - A trusted entry that no longer exists → skipped; the remaining entries and
   cwd still resolve.
-- An `AIUI_MCP_ROOTS` entry that does not exist → still fatal
+- A `STEPTIX_MCP_ROOTS` entry that does not exist → still fatal
   (`badRootEntry`).
 - A trusted entry that is a symlink → realpath'd before comparison, so it
   cannot widen the boundary by pointing elsewhere later.
-- Malformed trust file → reads as empty, warning surfaces; `aiui trust`
+- Malformed trust file → reads as empty, warning surfaces; `steptix trust`
   refuses to overwrite it.
 - Unknown top-level keys survive a `trust` write.
-- `aiui trust` twice on the same path → idempotent, exit 0.
-- `aiui trust` on a path containing `os.homedir()` → warns, still writes.
+- `steptix trust` twice on the same path → idempotent, exit 0.
+- `steptix trust` on a path containing `os.homedir()` → warns, still writes.
 - **`pathOutsideRoots` on a path containing spaces emits a runnable, quoted
   command.**
 
@@ -281,7 +281,7 @@ directory:
 ## Risks / open
 
 - **The home directory is not a barrier against the agent itself.** Claude
-  Code can write to `~/.aiui/config.json` if asked. The property this design
+  Code can write to `~/.steptix/config.json` if asked. The property this design
   actually provides is *visibility*: writing a trust file is a conspicuous,
   reviewable action, whereas reading a test file is routine. That is a raised
   bar, not a wall, and the story should not claim otherwise.
@@ -292,7 +292,7 @@ directory:
   where the path means something else. The existence check makes them skip
   rather than mis-apply, but a same-path-different-content collision is
   possible in principle.
-- **Open:** should `aiui trust --list` mark entries that no longer resolve?
+- **Open:** should `steptix trust --list` mark entries that no longer resolve?
   Cheap and useful, but it is the only place the CLI would need the skip
   logic from §2. Probably yes; not blocking.
 
@@ -303,20 +303,20 @@ directory:
 ```
 W1 user-config module
       ├──> W2 allowedRoots precedence ──> W4 refusal message ──> W5 docs
-      └──> W3 aiui trust CLI ─────────────────────────────────┘
+      └──> W3 steptix trust CLI ─────────────────────────────────┘
 ```
 
 ## Workstreams
 
 **W1 — `src/config/user-config.ts`.** Read/write, path resolution including
-`AIUI_CONFIG_HOME`, unknown-key preservation, the three failure semantics
+`STEPTIX_CONFIG_HOME`, unknown-key preservation, the three failure semantics
 from §1. Tests: `tests/user-config.test.ts`. No consumers yet.
 
 **W2 — `allowedRoots()` precedence.** The union branch, canonical dedupe,
 skip-missing-trusted vs fatal-missing-env. Tests extend
 `tests/mcp-project.test.ts`, leading with the unchanged-behaviour case.
 
-**W3 — `aiui trust` / `--list` / `untrust`.** Command module plus
+**W3 — `steptix trust` / `--list` / `untrust`.** Command module plus
 registration; the containment warning and the no-project note. Independent of
 W2 — the CLI writes the file, the MCP server reads it, and they meet only at
 W1's module.

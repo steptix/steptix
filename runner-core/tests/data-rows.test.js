@@ -10,7 +10,7 @@ import {
 /**
  * The client-side read of a data table (stories/data-driven-rows.md, part A).
  *
- * On the TestBench path this is the ONLY side that reads the table — the
+ * On the Steptix path this is the ONLY side that reads the table — the
  * server is handed already-extracted `steps` and never sees the file — so
  * these shapes have to be refused here as well as in `src/parser/data-rows.ts`.
  * The corpus below is deliberately the same set of cases as the server suite's
@@ -104,7 +104,7 @@ test('reports the buffer name in errors so a diagnostic can point at it', () => 
 });
 
 /**
- * `scanSectionDataTables` — the full scan per section, which TestBench needs
+ * `scanSectionDataTables` — the full scan per section, which Steptix needs
  * to PAINT a section table (headerLine for the summary, rowLines for the
  * marks). `parseSectionDataRows` is a projection of it, so every case here
  * also asserts the two agree; a second, drifting scan is exactly what the

@@ -442,7 +442,7 @@ describe('api-server step-into protocol', () => {
     // Regression: the module-level skill cache in src/skills/expander.ts is
     // keyed by `filePath::envName` with no mtime invalidation. The Electron
     // UI runner clears the cache at run-start; the API server (which
-    // testbench-native talks to) did not. Result: editing a skill file
+    // steptix-vscode talks to) did not. Result: editing a skill file
     // during a paused run was masked by the stale parse until the server
     // restarted.
     //
@@ -526,15 +526,15 @@ type: skill
   describe('project-root wiring', () => {
     // The api-server-stepmode test infrastructure puts its skillsDir at
     // `os.tmpdir()/stepmode-skills-XXXX`, NOT inside a real project. These
-    // tests need a directory tree the project-root resolver can find an
-    // aiui.config marker in (code-behind, recordings, env/data files), so we
+    // tests need a directory tree the project-root resolver can find a
+    // steptix.config marker in (code-behind, recordings, env/data files), so we
     // set one up per-test.
     let projectRoot: string;
     let testFile: string;
 
     beforeEach(async () => {
       projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'stepmode-project-'));
-      await fs.writeFile(path.join(projectRoot, 'aiui.config.json'), '{}\n');
+      await fs.writeFile(path.join(projectRoot, 'steptix.config.json'), '{}\n');
       testFile = path.join(projectRoot, 'test.md');
       await fs.writeFile(testFile, '# test\n');
     });
@@ -560,7 +560,7 @@ type: skill
       await fs.writeFile(
         stepsFile,
         [
-          "import { defineSteps } from 'ai-ui-automation/codebehind';",
+          "import { defineSteps } from 'steptix/codebehind';",
           "export default defineSteps([{ source: 'just one step', async run() { const x = ; } }]);",
           '',
         ].join('\n'),
@@ -1531,7 +1531,7 @@ type: skill
 
     beforeEach(async () => {
       root = await fs.mkdtemp(path.join(os.tmpdir(), 'stepmode-secrets-'));
-      await fs.writeFile(path.join(root, 'aiui.config.json'), '{}\n');
+      await fs.writeFile(path.join(root, 'steptix.config.json'), '{}\n');
       await fs.writeFile(
         path.join(root, '.env.uat'),
         ['GITHUB_USERNAME=octocat', 'GITHUB_PASSWORD=hunter2-uat-secret', ''].join('\n'),

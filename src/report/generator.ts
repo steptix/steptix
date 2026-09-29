@@ -10,7 +10,7 @@ import { toDataUri } from '../browser/screenshot.js';
 import { logger } from '../utils/logger.js';
 
 /**
- * The code-behind mark — `</>` — the same drawing TestBench paints in the
+ * The code-behind mark — `</>` — the same drawing Steptix paints in the
  * gutter and on its Compile button. Inline SVG in `currentColor`, so it takes
  * the badge's or title's colour; `.cb-mark` in template.ts sets the baseline.
  */
@@ -918,7 +918,7 @@ export function renderCodeBehindStale(
   <div class="failure-message">${escapeHtml(stale.error)}</div>
   <div class="tool-section">
     <div class="tool-section-label">Recompile</div>
-    <div class="tool-logs"><div class="tool-log-line">aiui compile ${escapeHtml(
+    <div class="tool-logs"><div class="tool-log-line">steptix compile ${escapeHtml(
       stale.file.replace(/\.steps\.ts$/, '.md'),
     )} --only-stale</div></div>
   </div>
@@ -991,7 +991,7 @@ function renderToolHintBlock(toolStep: NonNullable<StepResult['toolStep']>): str
   if (!errorLog) return '';
   const toolName = escapeHtml(toolStep.name);
   const recipe = `// tools/${toolStep.name}.ts
-import { defineTool } from 'ai-ui-automation/tools';
+import { defineTool } from 'steptix/tools';
 
 export default defineTool({
   name: '${toolStep.name}',
@@ -1004,7 +1004,7 @@ export default defineTool({
     <div class="tool-hint-body">
       <p>The framework couldn't find <code>${toolName}</code> in the tool catalogue.
          Drop a TypeScript file into the directory configured as
-         <code>tests.toolsDir</code> in <code>aiui.config.json</code>. Its default
+         <code>tests.toolsDir</code> in <code>steptix.config.json</code>. Its default
          export must be a <code>defineTool(...)</code> result, like:</p>
       <pre class="tool-hint-recipe">${escapeHtml(recipe)}</pre>
       <p class="tool-hint-foot">If the tool already exists, double-check that

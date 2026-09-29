@@ -367,7 +367,7 @@ live tests re-run in isolation before being called regressions.
 
 - **Rebuild `dist/` and restart the Sessions API server** — the running server
   executes compiled output, so none of this is live until `npm run build`. No
-  TestBench version bump: this is all server-side, and the extensions are HTTP
+  Steptix version bump: this is all server-side, and the extensions are HTTP
   clients.
 - **Editing the system prompt invalidates the provider-side prompt cache
   prefix** (the blocks are marked cacheable) — a one-time cost on the first

@@ -25,7 +25,7 @@ dataSources:
 ---
 ```
 
-`aiui run … --env staging` loads `../data/staging-endpoints.json`;
+`steptix run … --env staging` loads `../data/staging-endpoints.json`;
 `--env uat` loads `../data/uat-endpoints.json`. The skill itself never
 changes.
 
@@ -40,7 +40,7 @@ Identical shape to the test-level feature:
 type: skill
 dataSources:
   endpoints: ../data/${envName}-endpoints.json
-  catalog:   ~/aiui/shared-fixtures.json
+  catalog:   ~/steptix/shared-fixtures.json
   static:    ./skill-fixtures.json
 ---
 ```
@@ -245,7 +245,7 @@ tags: [smoke, skills, data]
 1. [skill: open_dashboard_for_env]
 ```
 
-Run `aiui run fixtures/tests/skill-data-sources-demo.md --env local` →
+Run `steptix run fixtures/tests/skill-data-sources-demo.md --env local` →
 the skill picks `local-endpoints.json` and navigates to
 `http://localhost:8787/`. Run with `--env uat` → it'd pick UAT.
 

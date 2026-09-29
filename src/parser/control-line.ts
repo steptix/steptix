@@ -238,7 +238,7 @@ const IDENT_RE = /^[A-Za-z_]\w*$/;
  * checked three times because each check sees a different document:
  *
  *  1. `validateControlFlow` (markdown.ts), on a file the CLI parses;
- *  2. the EXPANDER, which is the wire path's only parser — TestBench never
+ *  2. the EXPANDER, which is the wire path's only parser — Steptix never
  *     calls `parseTestContent`, and an `Otherwise` that opened a chain of its
  *     own there would run its tail unconditionally;
  *  3. runner-core's pre-flight (`danglingChainMemberError`), which refuses the
@@ -401,7 +401,7 @@ export function parseControlLine(instruction: string): ControlLine | null {
  * target are definitions too — but the run loops interpolate the raw header
  * line like any other step, so `interpolate` warned
  * `Unresolved placeholder: {{payment}}` on every pass-zero visit to every
- * correct table loop. Seen in a live TestBench run, where it is noise that
+ * correct table loop. Seen in a live Steptix run, where it is noise that
  * looks like a diagnosis.
  *
  * A set rather than a string, because the answer is "which names", and the

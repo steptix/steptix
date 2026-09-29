@@ -17,7 +17,7 @@ export function registerListCommand(program: Command): void {
   program
     .command('list [target]')
     .description('List discovered test files with their tags and metadata')
-    .option('-c, --config <path>', 'Path to config file (default: auto-discover aiui.config.json)')
+    .option('-c, --config <path>', 'Path to config file (default: auto-discover steptix.config.json)')
     .option('-t, --tag <tags>', 'Filter tests by tag (comma-separated, AND logic)')
     .option('--json', 'Output as JSON', false)
     .action(async (target: string | undefined, opts: ListOptions) => {

@@ -347,9 +347,9 @@ describe('API Server', () => {
     // tests called the resolver directly and never exercised the body parse,
     // which is exactly where envName was being dropped).
     it('parses envName + interpolates ${data.X} server-side (would 500 on a missing path)', async () => {
-      const root = mkdtempSync(path.join(tmpdir(), 'aiui-apienv-'));
+      const root = mkdtempSync(path.join(tmpdir(), 'steptix-apienv-'));
       try {
-        writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
+        writeFileSync(path.join(root, 'steptix.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
         writeFileSync(path.join(root, '.env.uat'), 'X=1\n');
         mkdirSync(path.join(root, 'data'), { recursive: true });
         writeFileSync(path.join(root, 'data', 'uat.json'), JSON.stringify({ url: 'https://example.test/' }));
@@ -372,9 +372,9 @@ describe('API Server', () => {
     });
 
     it('resolves ${data.X} to the data-file value when envName is sent', async () => {
-      const root = mkdtempSync(path.join(tmpdir(), 'aiui-apienv2-'));
+      const root = mkdtempSync(path.join(tmpdir(), 'steptix-apienv2-'));
       try {
-        writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
+        writeFileSync(path.join(root, 'steptix.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
         writeFileSync(path.join(root, '.env.uat'), 'X=1\n');
         mkdirSync(path.join(root, 'data'), { recursive: true });
         writeFileSync(path.join(root, 'data', 'uat.json'), JSON.stringify({ url: 'https://example.test/' }));
@@ -411,9 +411,9 @@ describe('API Server', () => {
     // path. Resolved relative to testFilePath's dir; needs an active env (same
     // as the CLI — the `${...}` pass only runs when an env is selected).
     it('resolves test-level ${name.X} dataSources sent on the request', async () => {
-      const root = mkdtempSync(path.join(tmpdir(), 'aiui-ds-'));
+      const root = mkdtempSync(path.join(tmpdir(), 'steptix-ds-'));
       try {
-        writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
+        writeFileSync(path.join(root, 'steptix.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
         writeFileSync(path.join(root, '.env.local'), 'X=1\n');
         mkdirSync(path.join(root, 'shared'), { recursive: true });
         writeFileSync(path.join(root, 'shared', 'catalog.json'), JSON.stringify({ site: { url: 'https://cat.test/' } }));
@@ -446,9 +446,9 @@ describe('API Server', () => {
     });
 
     it('rejects a reserved dataSource name (env/data) loudly instead of shadowing', async () => {
-      const root = mkdtempSync(path.join(tmpdir(), 'aiui-ds-res-'));
+      const root = mkdtempSync(path.join(tmpdir(), 'steptix-ds-res-'));
       try {
-        writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
+        writeFileSync(path.join(root, 'steptix.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
         writeFileSync(path.join(root, '.env.local'), 'X=1\n');
         mkdirSync(path.join(root, 'shared'), { recursive: true });
         writeFileSync(path.join(root, 'shared', 'catalog.json'), JSON.stringify({ x: 1 }));
@@ -965,7 +965,7 @@ describe('server lifecycle', () => {
 
       expect(body).toMatchObject({
         ok: true,
-        service: 'ai-ui-automation',
+        service: 'steptix',
         pid: process.pid,
         idleTimeoutMinutes: 60,
       });
@@ -1165,11 +1165,11 @@ describe('server lifecycle', () => {
 
     it('runsInFlight returns to zero after a run throws', async () => {
       // A stranded counter would disable the idle timeout for the rest of the
-      // process's life and make every later `aiui stop` answer 409 — so the
+      // process's life and make every later `steptix stop` answer 409 — so the
       // decrement has to be in a `finally`, not on the success path.
-      const root = mkdtempSync(path.join(tmpdir(), 'aiui-inflight-'));
+      const root = mkdtempSync(path.join(tmpdir(), 'steptix-inflight-'));
       try {
-        writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
+        writeFileSync(path.join(root, 'steptix.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
         writeFileSync(path.join(root, '.env.uat'), 'X=1\n');
         mkdirSync(path.join(root, 'data'), { recursive: true });
         writeFileSync(path.join(root, 'data', 'uat.json'), JSON.stringify({ url: 'https://example.test/' }));

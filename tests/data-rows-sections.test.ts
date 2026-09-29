@@ -5,10 +5,10 @@ import os from 'node:os';
 import { parseTestFile, parseTestContent } from '../src/parser/markdown.js';
 import { clearSkillCache, expandSkills } from '../src/skills/expander.js';
 // The CLIENT's producers — nothing else in the repo can answer "what does
-// TestBench actually put on the wire".
+// Steptix actually put on the wire".
 //
 // From `src/`, not `dist/`. Nothing in the root's `npm run build` compiles
-// runner-core (only testbench-native's `build:runner-core` and runner-core's
+// runner-core (only steptix-vscode's `build:runner-core` and runner-core's
 // own `prepare` do), so a guard reading `dist/` asserts against whatever bytes
 // were last built there — which can be older than the source the extension is
 // about to bundle. A regression in step-lines.ts would then ship green.

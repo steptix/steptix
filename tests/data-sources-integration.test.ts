@@ -37,8 +37,8 @@ let homeDir: string;
 const originalEnv = { ...process.env };
 
 beforeAll(() => {
-  tmpRoot = mkdtempSync(path.join(tmpdir(), 'aiui-datasources-'));
-  homeDir = mkdtempSync(path.join(tmpdir(), 'aiui-home-'));
+  tmpRoot = mkdtempSync(path.join(tmpdir(), 'steptix-datasources-'));
+  homeDir = mkdtempSync(path.join(tmpdir(), 'steptix-home-'));
   // Pretend home is the temp home dir so `~/...` paths land somewhere we
   // control. os.homedir() reads $HOME on POSIX and USERPROFILE on Windows.
   process.env['HOME'] = homeDir;

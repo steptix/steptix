@@ -1,5 +1,5 @@
 /**
- * Several processes appending to one month file at once — TestBench's server,
+ * Several processes appending to one month file at once — Steptix's server,
  * a CLI run, four live-suite servers — leave a file in which every line parses
  * (docs/specs/SPEC-scoreboard.md §6.2, acceptance 6, here in seconds rather
  * than a minute).
@@ -41,7 +41,7 @@ await flushStatsWrites();
 let tmp: string;
 
 beforeEach(() => {
-  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aiui-stats-concurrency-')));
+  tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'steptix-stats-concurrency-')));
 });
 
 afterEach(() => {

@@ -2,7 +2,7 @@
  * Tests for SessionManager's per-project env/data/config resolution
  * (`resolveProjectBundle`): the bundle is anchored at the TEST FILE's project
  * root (not the server cwd), mtime-cached, isolated per project, with a defaults
- * fallback when no aiui.config.json is found and a hard error on malformed config.
+ * fallback when no steptix.config.json is found and a hard error on malformed config.
  *
  * `resolveProjectBundle` is private; we reach it via a cast since it's a pure
  * filesystem operation (no browser/AI needed) and is the riskiest new code.
@@ -33,7 +33,7 @@ function resolveBundle(
   }).resolveProjectBundle(testFilePath, envName);
 }
 
-/** Write a minimal project: aiui.config.json (+dataDir), .env.<env>, <dataDir>/<env>.json. */
+/** Write a minimal project: steptix.config.json (+dataDir), .env.<env>, <dataDir>/<env>.json. */
 function writeProject(
   root: string,
   opts: { dataDir?: string; configJson?: string; env?: string; envVars?: string; data?: unknown } = {},
@@ -42,7 +42,7 @@ function writeProject(
   mkdirSync(path.join(root, 'tests'), { recursive: true });
   const configJson =
     opts.configJson ?? JSON.stringify({ tests: { dataDir } });
-  writeFileSync(path.join(root, 'aiui.config.json'), configJson);
+  writeFileSync(path.join(root, 'steptix.config.json'), configJson);
   if (opts.env) {
     writeFileSync(path.join(root, `.env.${opts.env}`), opts.envVars ?? '');
     if (opts.data !== undefined) {
@@ -58,7 +58,7 @@ describe('SessionManager.resolveProjectBundle', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
-    tmp = mkdtempSync(path.join(tmpdir(), 'aiui-pb-'));
+    tmp = mkdtempSync(path.join(tmpdir(), 'steptix-pb-'));
     mgr = new SessionManager(structuredClone(DEFAULT_CONFIG));
   });
   afterEach(() => {
@@ -137,9 +137,9 @@ describe('SessionManager.resolveProjectBundle', () => {
     expect(second).toBe(first); // cached: identical object, no re-read
   });
 
-  it('falls back to defaults when no aiui.config.json is found above the test file', async () => {
+  it('falls back to defaults when no steptix.config.json is found above the test file', async () => {
     // A bare temp dir with no config anywhere up to the fs root.
-    const stray = mkdtempSync(path.join(tmpdir(), 'aiui-noconfig-'));
+    const stray = mkdtempSync(path.join(tmpdir(), 'steptix-noconfig-'));
     try {
       const bundle = await resolveBundle(mgr, path.join(stray, 't.md'), 'uat');
       expect(bundle.projectRoot).toBeNull();
@@ -152,14 +152,14 @@ describe('SessionManager.resolveProjectBundle', () => {
     }
   });
 
-  it('throws on a malformed project aiui.config.json (fails only this request)', async () => {
+  it('throws on a malformed project steptix.config.json (fails only this request)', async () => {
     const root = path.join(tmp, 'projBad');
     mkdirSync(path.join(root, 'tests'), { recursive: true });
-    writeFileSync(path.join(root, 'aiui.config.json'), '{ not valid json');
+    writeFileSync(path.join(root, 'steptix.config.json'), '{ not valid json');
 
     await expect(
       resolveBundle(mgr, path.join(root, 'tests', 't.md'), 'uat'),
-    ).rejects.toThrow(/aiui\.config\.json/);
+    ).rejects.toThrow(/steptix\.config\.json/);
   });
 
   it('loads no env/data when envName is null', async () => {
@@ -185,14 +185,14 @@ describe('SessionManager.resolveProjectBundle', () => {
   it('a thrown bad-config does not poison the cache — a later fix is picked up', async () => {
     const root = path.join(tmp, 'projRecover');
     mkdirSync(path.join(root, 'tests'), { recursive: true });
-    writeFileSync(path.join(root, 'aiui.config.json'), '{ not valid json');
+    writeFileSync(path.join(root, 'steptix.config.json'), '{ not valid json');
     const t = path.join(root, 'tests', 't.md');
 
-    await expect(resolveBundle(mgr, t, null)).rejects.toThrow(/aiui\.config\.json/);
+    await expect(resolveBundle(mgr, t, null)).rejects.toThrow(/steptix\.config\.json/);
 
     // Fix the config; the failed attempt must not have been cached, and the
     // in-flight entry must have been cleaned up, so this now succeeds.
-    writeFileSync(path.join(root, 'aiui.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
+    writeFileSync(path.join(root, 'steptix.config.json'), JSON.stringify({ tests: { dataDir: 'data' } }));
     const bundle = await resolveBundle(mgr, t, null);
     expect(bundle.config.tests.dataDir).toBe('data');
   });
@@ -220,7 +220,7 @@ describe('SessionManager.resolveProjectBundle', () => {
  * The story's implementation note is the whole point of this block: a new key
  * under `browser` consumed at session-creation time has to arrive through the
  * project bundle, or it is honoured only under the CLI and silently ignored
- * everywhere a server (and therefore TestBench) runs the test. So the
+ * everywhere a server (and therefore Steptix) runs the test. So the
  * assertions are deliberately about *whose* config decided the value, not just
  * about the value being readable — a bundle that echoed the server's startup
  * config would pass a naive "is it 'fail'?" check while shipping the bug.
@@ -229,7 +229,7 @@ describe("resolveProjectBundle — browser.ambiguousTarget", () => {
   let tmp: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(path.join(tmpdir(), 'aiui-amb-'));
+    tmp = mkdtempSync(path.join(tmpdir(), 'steptix-amb-'));
   });
   afterEach(() => {
     rmSync(tmp, { recursive: true, force: true });
@@ -247,7 +247,7 @@ describe("resolveProjectBundle — browser.ambiguousTarget", () => {
     writeProject(root, { configJson: JSON.stringify({ browser: { ambiguousTarget: 'fail' } }) });
 
     // Server startup config is the built-in default ('first'). The ONLY place
-    // 'fail' exists is the project's own aiui.config.json.
+    // 'fail' exists is the project's own steptix.config.json.
     const bundle = await resolveBundle(managerWith(), path.join(root, 'tests', 't.md'), null);
 
     expect(bundle.projectRoot).toBe(root);
@@ -296,7 +296,7 @@ describe("resolveProjectBundle — browser.ambiguousTarget", () => {
 
     expect((await resolveBundle(mgr, t, null)).ambiguousTarget).toBe('first');
 
-    const configFile = path.join(root, 'aiui.config.json');
+    const configFile = path.join(root, 'steptix.config.json');
     writeFileSync(configFile, JSON.stringify({ browser: { ambiguousTarget: 'fail' } }));
     const future = new Date(Date.now() + 5000);
     utimesSync(configFile, future, future);
@@ -305,9 +305,9 @@ describe("resolveProjectBundle — browser.ambiguousTarget", () => {
   });
 
   it('falls back to the server startup config when there is no project root', async () => {
-    // No aiui.config.json anywhere above the file: the server's own value is
+    // No steptix.config.json anywhere above the file: the server's own value is
     // the only one there is, which is the documented null-project fallback.
-    const stray = mkdtempSync(path.join(tmpdir(), 'aiui-amb-noconfig-'));
+    const stray = mkdtempSync(path.join(tmpdir(), 'steptix-amb-noconfig-'));
     try {
       const bundle = await resolveBundle(managerWith('fail'), path.join(stray, 't.md'), null);
       expect(bundle.projectRoot).toBeNull();

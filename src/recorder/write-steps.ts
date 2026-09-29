@@ -6,7 +6,7 @@ import type { TargetFileSummary } from './target-file.js';
 import type { RecordedAction } from './types.js';
 
 /**
- * The model's side of live drafting (stories/testbench-record-steps.md,
+ * The model's side of live drafting (stories/steptix-record-steps.md,
  * decision 9): one draft call, and a strict reading of what comes back. When
  * calls happen, and what their answers do to the draft, is the draft engine's
  * (./draft-engine.ts).
@@ -51,9 +51,9 @@ function cleanSteps(raw: readonly string[]): Array<{ text: string; from: number 
   return (
     raw
       // A step is one physical line (handbook §2): a wrapped one would be seen
-      // by TestBench as a step and a stray line.
+      // by Steptix as a step and a stray line.
       .map((s, from) => ({ text: s.replace(/\s*[\r\n]+\s*/g, ' ').trim(), from }))
-      // Numbers are TestBench's to assign.
+      // Numbers are Steptix's to assign.
       .map((s) => ({ text: s.text.replace(/^\d+[.)]\s+/, ''), from: s.from }))
       .filter((s) => s.text !== '')
   );
@@ -65,7 +65,7 @@ function cleanSteps(raw: readonly string[]): Array<{ text: string; from: number 
  * Forgiving about the envelope — a Markdown fence, prose around the object, a
  * step that starts `3. ` — because none of that changes what the author gets.
  * Strict about the content: `steps` must be a list of strings, and a parameter
- * needs a usable name and a string value, because TestBench writes both into
+ * needs a usable name and a string value, because Steptix writes both into
  * the file verbatim.
  */
 export function parseRecordStepsAnswer(text: string): RecordStepsAnswer {
@@ -142,7 +142,7 @@ export interface DraftAnswer extends RecordStepsAnswer {
   replaceFrom: number | undefined;
   /**
    * Which recorded actions each step describes, by the numbers the prompt
-   * showed — parallel to `steps` (stories/testbench-record-edit-steps.md, "The
+   * showed — parallel to `steps` (stories/steptix-record-edit-steps.md, "The
    * wire, exactly"). Undefined when the model left it out, or gave anything
    * that is not one list of whole numbers per step: the engine then infers the
    * mapping. Read only for its shape here; whether the numbers make sense for
@@ -189,14 +189,14 @@ function escapeRegExp(s: string): string {
 
 /**
  * The parameter half of the file-safety pass — rules the prompt states,
- * enforced rather than hoped for, because TestBench writes what it is given.
+ * enforced rather than hoped for, because Steptix writes what it is given.
  * Applied to every draft, so the panel shows what will be inserted, and
  * idempotent on a draft it already settled.
  *
  * - A parameter the file already has under the same name with a DIFFERENT
  *   value is renamed (`email` → `email_2`) and the steps rewritten to match
  *   (decision 8: "never overwrites an existing line with a different value").
- *   TestBench keeps an existing line as it is, so without this the steps would
+ *   Steptix keeps an existing line as it is, so without this the steps would
  *   silently type the old value. Two `.env` references under one name are the
  *   exception: the model meant the file's own and spelled the variable its own
  *   way, so the file's is kept.

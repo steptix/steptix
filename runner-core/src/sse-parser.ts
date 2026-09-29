@@ -2,7 +2,7 @@
  * Server-Sent Events frame parser.
  *
  * Implements just enough of the WHATWG event-source spec for what the
- * ai-ui-automation server emits: `event:` and `data:` fields, blank-line
+ * Steptix server emits: `event:` and `data:` fields, blank-line
  * frame terminator. Comments (lines starting with `:`) and unknown fields
  * are ignored.
  */

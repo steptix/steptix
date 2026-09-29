@@ -1,7 +1,7 @@
 /**
  * Reading and using the Record Steps toolbar from a test.
  *
- * The toolbar lives in a CLOSED shadow root (stories/testbench-record-toolbar.md),
+ * The toolbar lives in a CLOSED shadow root (stories/steptix-record-toolbar.md),
  * so neither the page nor Playwright's selectors can look inside it. DevTools
  * can: `DOM.getDocument` with `pierce: true` returns closed roots too, with
  * their type. These helpers read the bar's text and find its buttons that way,
@@ -59,7 +59,7 @@ function textOf(node: DomNode): string {
 
 /** The toolbar host in the TOP document (not in frames), or null. */
 function hostOf(root: DomNode): DomNode | null {
-  return find(root, (n) => n.localName === 'aiui-recorder');
+  return find(root, (n) => n.localName === 'steptix-recorder');
 }
 
 export interface ToolbarSnapshot {

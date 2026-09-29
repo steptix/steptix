@@ -1681,7 +1681,7 @@ describe('undispatchedDirectiveError — what may not reach the computer-surface
   it('names the missing toolsDir, and how to supply one', () => {
     expect(undispatchedDirectiveError('[tool: open_calculator]', none)).toBe(
       '[tool: open_calculator] was not run: this request carried no tools directory (toolsDir), ' +
-        "so no tool is loaded — declare tests.toolsDir in the project's aiui.config.json so the " +
+        "so no tool is loaded — declare tests.toolsDir in the project's steptix.config.json so the " +
         'client sends one. In computer mode a tool line is never handed to the model, because it ' +
         'would act it out on the real screen.',
     );

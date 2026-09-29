@@ -251,9 +251,9 @@ const NOOP = JSON.stringify({
 });
 
 beforeAll(async () => {
-  projectRoot = mkdtempSync(path.join(tmpdir(), 'aiui-fc-literal-'));
+  projectRoot = mkdtempSync(path.join(tmpdir(), 'steptix-fc-literal-'));
   mkdirSync(path.join(projectRoot, 'tests'), { recursive: true });
-  writeFileSync(path.join(projectRoot, 'aiui.config.json'), JSON.stringify({}));
+  writeFileSync(path.join(projectRoot, 'steptix.config.json'), JSON.stringify({}));
   testFilePath = path.join(projectRoot, 'tests', 'table-payments-review.md');
   writeFileSync(testFilePath, '# Review\n\n## Steps\n1. placeholder\n');
   const { app } = createApiServer(testConfig());

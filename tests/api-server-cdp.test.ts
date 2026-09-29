@@ -197,7 +197,7 @@ function post(body: unknown, headers: Record<string, string> = auth) {
 const liveProfile = (over: Record<string, unknown> = {}) => ({
   engine: 'edge',
   profile: 'default',
-  profileDir: path.join(PROJECT, '.aiui', 'cdp-profiles', 'edge-default'),
+  profileDir: path.join(PROJECT, '.steptix', 'cdp-profiles', 'edge-default'),
   live: true,
   port: 51000,
   tabs: [{ targetId: 'T1', title: 'Orders', url: 'https://shop/orders' }],
@@ -208,7 +208,7 @@ const liveProfile = (over: Record<string, unknown> = {}) => ({
 const dormantProfile = (over: Record<string, unknown> = {}) => ({
   engine: 'edge',
   profile: 'admin',
-  profileDir: path.join(PROJECT, '.aiui', 'cdp-profiles', 'edge-admin'),
+  profileDir: path.join(PROJECT, '.steptix', 'cdp-profiles', 'edge-admin'),
   live: false,
   port: null,
   tabs: null,
@@ -280,9 +280,9 @@ const PAGE_TEXT = 'Orders\n3 open\nTotal $120.00';
  *  Its identity is the point: the route must pass it through untouched. */
 const SHOT_B64 = 'c2NyZWVuc2hvdC1ieXRlcw==';
 
-/** The synthetic `<root>/.aiui-peek.md` the MCP side sends. No such file
+/** The synthetic `<root>/.steptix-peek.md` the MCP side sends. No such file
  *  exists and none is read — it is only what a project root resolves from. */
-const PEEK_FILE = path.join(PROJECT, '.aiui-peek.md');
+const PEEK_FILE = path.join(PROJECT, '.steptix-peek.md');
 
 /** A page the capture functions never actually touch (they are stubbed), but
  *  whose `url()`/`title()` the extraction really does read. */
@@ -308,9 +308,9 @@ function attachedSession(page = attachedPage()) {
   };
 }
 
-/** The synthetic `<root>/.aiui-navigate.md`, the navigate route's twin of the
+/** The synthetic `<root>/.steptix-navigate.md`, the navigate route's twin of the
  *  peek's. Never read from disk, never exists. */
-const NAV_FILE = path.join(PROJECT, '.aiui-navigate.md');
+const NAV_FILE = path.join(PROJECT, '.steptix-navigate.md');
 
 function navigate(
   body: Record<string, unknown>,
@@ -441,7 +441,7 @@ describe('GET /cdp/browsers', () => {
     expect(body.available[0]).toEqual({
       engine: 'edge',
       profile: 'admin',
-      profileDir: path.join(PROJECT, '.aiui', 'cdp-profiles', 'edge-admin'),
+      profileDir: path.join(PROJECT, '.steptix', 'cdp-profiles', 'edge-admin'),
       scope: 'project',
     });
     // Not `port: null` — a port-shaped hole invites a caller to try it.
@@ -584,7 +584,7 @@ describe('user-root sweep', () => {
       ok: true,
       engine: 'chrome',
       profile: 'default',
-      profileDir: path.join(userRoot(), '.aiui', 'cdp-profiles', 'chrome-default'),
+      profileDir: path.join(userRoot(), '.steptix', 'cdp-profiles', 'chrome-default'),
       port: 52000,
       binary: 'C:\\chrome.exe',
       tabs: [],
@@ -614,7 +614,7 @@ describe('POST /cdp/browsers', () => {
     ok: true,
     engine: 'edge',
     profile: 'default',
-    profileDir: path.join(PROJECT, '.aiui', 'cdp-profiles', 'edge-default'),
+    profileDir: path.join(PROJECT, '.steptix', 'cdp-profiles', 'edge-default'),
     port: 51000,
     binary: 'C:\\msedge.exe',
     tabs: [],
@@ -647,13 +647,13 @@ describe('POST /cdp/browsers', () => {
     });
   }
 
-describe('browser.cdp.hideAutomation comes from the launch root\'s own aiui.config.json', () => {
+describe('browser.cdp.hideAutomation comes from the launch root\'s own steptix.config.json', () => {
     // A real directory, because the point is that the SERVER reads the file of
     // the root it was asked to launch into — a unit test of the registry would
     // say nothing about whether the route ever looked.
     let root: string;
     beforeEach(async () => {
-      root = await fsp.mkdtemp(path.join(os.tmpdir(), 'aiui-cdp-launch-'));
+      root = await fsp.mkdtemp(path.join(os.tmpdir(), 'steptix-cdp-launch-'));
       startCdpBrowserMock.mockResolvedValue(ok('launched_into_new_profile'));
     });
     afterEach(async () => {
@@ -669,7 +669,7 @@ describe('browser.cdp.hideAutomation comes from the launch root\'s own aiui.conf
 
     it('is passed through when the file turns it on', async () => {
       await fsp.writeFile(
-        path.join(root, 'aiui.config.json'),
+        path.join(root, 'steptix.config.json'),
         JSON.stringify({ browser: { cdp: { hideAutomation: true } } }),
         'utf8',
       );
@@ -683,7 +683,7 @@ describe('browser.cdp.hideAutomation comes from the launch root\'s own aiui.conf
       // The user root sits under %LOCALAPPDATA%; a walk-up from it could adopt
       // a stray file above. A child dir of a configured root is the same shape.
       await fsp.writeFile(
-        path.join(root, 'aiui.config.json'),
+        path.join(root, 'steptix.config.json'),
         JSON.stringify({ browser: { cdp: { hideAutomation: true } } }),
         'utf8',
       );
@@ -696,12 +696,12 @@ describe('browser.cdp.hideAutomation comes from the launch root\'s own aiui.conf
     });
 
     it('a malformed file refuses the launch with config_invalid and starts nothing', async () => {
-      await fsp.writeFile(path.join(root, 'aiui.config.json'), '{ not json', 'utf8');
+      await fsp.writeFile(path.join(root, 'steptix.config.json'), '{ not json', 'utf8');
       const res = await post({ projectRoot: root, engine: 'chrome' });
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.reason).toBe('config_invalid');
-      expect(body.error).toContain('aiui.config.json');
+      expect(body.error).toContain('steptix.config.json');
       expect(startCdpBrowserMock).not.toHaveBeenCalled();
     });
   });
@@ -714,7 +714,7 @@ describe('browser.cdp.hideAutomation comes from the launch root\'s own aiui.conf
       engine: 'chrome',
       profile: 'default',
       reset: true,
-      // No aiui.config.json at C:\proj, so the launch setting is its default.
+      // No steptix.config.json at C:\proj, so the launch setting is its default.
       hideAutomation: false,
     });
   });
@@ -1080,7 +1080,7 @@ describe('DELETE /cdp/browsers/:port/tabs/:targetId', () => {
           port: 51000,
           targetId: 'T1',
           steps: ['click something'],
-          testFilePath: path.join(PROJECT, '.aiui-errand.md'),
+          testFilePath: path.join(PROJECT, '.steptix-errand.md'),
           root: PROJECT,
           scope: 'project',
         }),
@@ -1266,7 +1266,7 @@ describe('GET /cdp/browsers/:port/tabs/:targetId/content', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       targetId: 'T1',
-      // Null: no `aiui.config.json` stands above the synthetic path in this
+      // Null: no `steptix.config.json` stands above the synthetic path in this
       // suite, so the capture ran under the server's own defaults — and saying
       // otherwise would be an invention.
       root: null,
@@ -1522,7 +1522,7 @@ describe('GET /cdp/browsers/:port/tabs/:targetId/content', () => {
     const base = `${baseUrl}/cdp/browsers/51000/tabs/T1/content`;
     expect((await fetch(base, { headers: auth })).status).toBe(400);
     expect(
-      (await fetch(`${base}?testFilePath=.aiui-peek.md`, { headers: auth })).status,
+      (await fetch(`${base}?testFilePath=.steptix-peek.md`, { headers: auth })).status,
     ).toBe(400);
     expect(launchBrowserMock).not.toHaveBeenCalled();
   });

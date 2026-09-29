@@ -330,7 +330,7 @@ describe('startCdpBrowser', () => {
     expect(result.ok).toBe(true);
   });
 
-  it('writes the .aiui-profile marker on every launch', async () => {
+  it('writes the .steptix-profile marker on every launch', async () => {
     const { deps, files } = fakeFs({ dirs: [PROFILES] });
     const { launch } = launcherStub();
     await startCdpBrowser(
@@ -1572,7 +1572,7 @@ describe('focusCdpTab', () => {
 // ---------------------------------------------------------------------------
 
 describe('knownProfilesAcross', () => {
-  const USER = path.join('C:', 'users', 'x', 'aiui');
+  const USER = path.join('C:', 'users', 'x', 'steptix');
   const PROJ_PROFILES = cdpProfilesRoot(ROOT);
   const USER_PROFILES = cdpProfilesRoot(USER);
   const portFile = (dir: string) => path.join(dir, 'DevToolsActivePort');
@@ -1630,7 +1630,7 @@ describe('knownProfilesAcross', () => {
 });
 
 describe('close/focus over a user-scoped sweep', () => {
-  const USER = path.join('C:', 'users', 'x', 'aiui');
+  const USER = path.join('C:', 'users', 'x', 'steptix');
   const USER_PROFILES = cdpProfilesRoot(USER);
   const USER_DIR = path.join(USER_PROFILES, 'edge-default');
   const PORT = 52000;

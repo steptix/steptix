@@ -119,7 +119,7 @@ Three decisions this needs, none of them obvious:
 **Who writes it — the MCP or the server?** The MCP is simpler: `foldRun` already
 holds the bytes and the tool knows `projectRoot`, so it is a file write and one
 field. The server is more *correct*: it owns `reportOutputDir`, it has the bytes
-at capture time, and doing it there would give TestBench and flick the same
+at capture time, and doing it there would give Steptix and flick the same
 paths for free instead of making this an MCP-only nicety. It is also the larger
 change, and it puts a file write on the hot path of every captured step rather
 than on the few that get returned. **Recommendation: MCP side**, because the

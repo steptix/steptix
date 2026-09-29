@@ -1,6 +1,6 @@
 /**
  * Record Steps — the toolbar in the recorded page, against a real Chromium
- * (stories/testbench-record-toolbar.md; docs/specs/SPEC-record-steps.md §3.3).
+ * (stories/steptix-record-toolbar.md; docs/specs/SPEC-record-steps.md §3.3).
  *
  * The recorder here is driven the way `RecordStepsRun` drives it — a toolbar
  * block to show, and the commands it hands back through `onToolbar` — so each
@@ -65,7 +65,7 @@ const PAGES: Record<string, string> = {
     <body><button id="b">Continue</button></body></html>`,
   // A page that goes for the recorder's control object before anything else.
   '/claims.html': `<!doctype html><html><head><title>Claims</title><script>
-    var ctl = window.__aiuiRecordStepsCtl;
+    var ctl = window.__steptixRecordStepsCtl;
     window.claimed = ctl ? ctl.claim('x') : 'no control';
     window.pushed = ctl ? ctl.setState({ recording: true, bar: true, toolbar: { phase: 'done', endText: 'Fake' } }) : 'no control';
     window.flushed = ctl ? JSON.stringify(ctl.flush()) : 'no control';
@@ -188,7 +188,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 function hostState(p: Page): Promise<{ present: boolean; topLayer: boolean; width: number; height: number; parent: string }> {
   return p.evaluate(() => {
-    const host = document.querySelector('aiui-recorder');
+    const host = document.querySelector('steptix-recorder');
     if (!host) return { present: false, topLayer: false, width: 0, height: 0, parent: '' };
     const r = host.getBoundingClientRect();
     return {
@@ -241,10 +241,10 @@ describe('the toolbar is in the page', () => {
     expect(bar?.status).toMatch(/^REC 00:0\d · 0 actions$/);
     expect(bar?.sub).toContain('No steps yet');
     // The page cannot look in.
-    expect(await page.evaluate(() => document.querySelector('aiui-recorder')!.shadowRoot)).toBeNull();
+    expect(await page.evaluate(() => document.querySelector('steptix-recorder')!.shadowRoot)).toBeNull();
     // Only in the top document: a frame gets none.
     const frame = page.frames().find((f) => f.url().endsWith('/frame.html'))!;
-    expect(await frame.evaluate(() => document.querySelector('aiui-recorder') === null)).toBe(true);
+    expect(await frame.evaluate(() => document.querySelector('steptix-recorder') === null)).toBe(true);
 
     // A full navigation: a new document, and the bar is back.
     await page.goto(`${origin}/other.html`);
@@ -523,7 +523,7 @@ describe('the page cannot drive the toolbar', () => {
     await recorder.start();
     await until(() => hostState(page), (s) => s.present, 'the toolbar');
     const answers = await page.evaluate(async () => {
-      const bind = (window as unknown as Record<string, (m: unknown) => Promise<unknown>>)['__aiuiRecordSteps']!;
+      const bind = (window as unknown as Record<string, (m: unknown) => Promise<unknown>>)['__steptixRecordSteps']!;
       const out: unknown[] = [];
       out.push(await bind({ type: 'step', text: 'Evil step' }));
       out.push(await bind({ type: 'toolbar', command: 'stop' }));
@@ -534,7 +534,7 @@ describe('the page cannot drive the toolbar', () => {
       out.push(Object.keys(hello).includes('token'));
       out.push(await bind({ type: 'toolbar', command: 'cancel', token: hello['token'] }));
       out.push(await bind({ type: 'checkin' }));
-      const ctl = (window as unknown as Record<string, { claim(t: string): boolean }>)['__aiuiRecordStepsCtl']!;
+      const ctl = (window as unknown as Record<string, { claim(t: string): boolean }>)['__steptixRecordStepsCtl']!;
       out.push(ctl.claim('mine'));
       return out;
     });
@@ -595,7 +595,7 @@ describe('a strict Content-Security-Policy', () => {
       const shot = await page.screenshot({ type: 'png' });
       const image = await Jimp.read(shot);
       const box = await page.evaluate(() => {
-        const r = document.querySelector('aiui-recorder')!.getBoundingClientRect();
+        const r = document.querySelector('steptix-recorder')!.getBoundingClientRect();
         return { x: r.x, y: r.y, w: r.width, h: r.height };
       });
       let graphite = 0;
@@ -636,7 +636,7 @@ describe('using the bar', () => {
     await until(async () => commands.length, (n) => n === 1, 'the dock');
     expect(commands).toEqual([{ kind: 'dock', dock: 'tl' }]);
     const at = await page.evaluate(() => {
-      const r = document.querySelector('aiui-recorder')!.getBoundingClientRect();
+      const r = document.querySelector('steptix-recorder')!.getBoundingClientRect();
       return { x: Math.round(r.x), y: Math.round(r.y) };
     });
     expect(at).toEqual({ x: 16, y: 16 });
@@ -648,7 +648,7 @@ describe('using the bar', () => {
     await startOn('/app.html');
     await page.focus('#email');
     await page.keyboard.press('Alt+Shift+R');
-    await until(async () => page.evaluate(() => document.activeElement?.tagName), (t) => t === 'AIUI-RECORDER', 'focus on the bar');
+    await until(async () => page.evaluate(() => document.activeElement?.tagName), (t) => t === 'STEPTIX-RECORDER', 'focus on the bar');
     // Pause is first: two to the right is Add step.
     await page.keyboard.press('ArrowRight');
     await page.keyboard.press('ArrowRight');
@@ -861,7 +861,7 @@ describe('the control object (finding 11)', () => {
   }, 30_000);
 });
 
-// ── The drawer: edit, delete and insert steps (stories/testbench-record-edit-steps.md) ──
+// ── The drawer: edit, delete and insert steps (stories/steptix-record-edit-steps.md) ──
 
 describe('the Steps so far drawer', () => {
   const STEPS = [
@@ -1125,7 +1125,7 @@ describe('the Steps so far drawer', () => {
   it('the page cannot drive it: a page script sending an edit or a delete without the token changes nothing', async () => {
     await drawerOpen();
     await page.evaluate(`(async () => {
-      const b = window.__aiuiRecordSteps;
+      const b = window.__steptixRecordSteps;
       await b({ type: 'edit-step', id: 'd1', text: 'Injected' });
       await b({ type: 'edit-step', id: 'd1', text: 'Injected', token: 'guess' });
       await b({ type: 'toolbar', command: 'delete-step', id: 'd1', token: 'guess' });

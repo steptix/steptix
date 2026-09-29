@@ -1179,9 +1179,9 @@ describe('the dead-section warning is emitted exactly once', () => {
     warnings.length = 0;
     const sessionId = nextSession();
 
-    // A test file under a directory with a corrupt aiui.config.json.
+    // A test file under a directory with a corrupt steptix.config.json.
     const badDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sections-badcfg-'));
-    await fs.writeFile(path.join(badDir, 'aiui.config.json'), '{ not json');
+    await fs.writeFile(path.join(badDir, 'steptix.config.json'), '{ not json');
     const badTestFile = path.join(badDir, 'checkout.md');
     await fs.writeFile(badTestFile, '# placeholder\n');
 
@@ -1197,7 +1197,7 @@ describe('the dead-section warning is emitted exactly once', () => {
     expect(warnings.filter((w) => /never invoked/i.test(w))).toEqual([]);
 
     // The author fixes the config and re-runs the same document.
-    await fs.writeFile(path.join(badDir, 'aiui.config.json'), '{}');
+    await fs.writeFile(path.join(badDir, 'steptix.config.json'), '{}');
     const second = await postSteps(body(badTestFile), sessionId);
     expect(second.status).toBe(200);
     expect(warnings.filter((w) => /never invoked/i.test(w))).toHaveLength(1);

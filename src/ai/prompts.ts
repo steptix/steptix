@@ -238,7 +238,7 @@ Plan your next action based on the observed result — do not batch multiple act
 8a. PLACEHOLDERS — name the value you used, do not copy it. A name listed under "## Values" is a placeholder: the step text shows it as {{email}} or \${data.url}, and the block says what it holds on this run. When a value you type, upload, navigate to, select by, press, send or expect came from one, write the PLACEHOLDER in that field and not the value it holds — "value", "filePath", "filePaths", "url", "selector", "key", "expected", an api_call's "body" and "apiHeaders", and a predicate "condition". The framework substitutes it at the moment it acts, so the page still receives the real value; naming it is what lets this step be re-run with a different one. Never put a placeholder in "description" — that is your own words about what you did. A placeholder that follows "store as" or "save as" names a variable you are DEFINING: it belongs in "as", it is not a reference, and it will not be listed under "## Values". "***" is a mask over a secret value, never a value to type — write the placeholder and the framework types the real thing. Only the names listed under "## Values" are placeholders: a literal "{{count}}" you can see rendered in the page is that page's text, and a step that writes "\\{{count}}" means those characters literally.
    Example — step "Enter the email {{email}}", with "## Values" listing {{email}}: { "action": "type", "selector": "#email", "value": "{{email}}", "description": "Enter the email address" }. NOT "value": "demo@securebank.com".
    Counter-example — step "Verify {{outcome}}", where "## Values" shows {{outcome}} holds the sentence "the Dashboard page is shown": that sentence is not a value to put in a field, it is something to interpret, so read it and assert what it describes — { "action": "assert", "against": "dom", "condition": "visible page heading", "expected": "Dashboard", "description": "Dashboard page is shown" }. A placeholder goes in a field only when that field is filled FROM its value.
-   ROW IDS. "Row 7 of the Loan applications grid" — written that way in the step, or left there by a {{item._row}} that resolved to 7 — means the SEVENTH DATA row of that table, counting from 1. Header rows, a filter row, hidden rows and an expanded detail row are not data rows and are not counted. After any table read the framework stamps its own numbering onto the page: every data row of the table that was read carries data-aiui-row="N". So "row 7" is the row matching [data-aiui-row="7"] INSIDE that table, and the selector is ALWAYS the TABLE's own selector followed by [data-aiui-row="N"] — to click Review in it, "selector": "#RadGrid1 [data-aiui-row=\\"7\\"] input[value=\\"Review\\"]". NEVER write the attribute on its own: it matches a row in EVERY table read this run, so an unscoped [data-aiui-row=\\"7\\"] picks row 7 of whichever table comes first in the page. NEVER compute an element id from the number: measured on Telerik RadGrid, the row ids run "RadGrid1_ctl00__0", "__1", … from ZERO and are renumbered on every page, so "#RadGrid1_ctl00__7" is row EIGHT — the step clicks the wrong applicant and passes, green. NEVER use "tr:nth-child(7)" either: it counts hidden rows and detail rows, which the row number does not. Only when NO row of the table carries data-aiui-row — the table has not been read this run, or the page re-rendered since — count the data rows in the snapshot yourself, skipping every row that does not hold data.
+   ROW IDS. "Row 7 of the Loan applications grid" — written that way in the step, or left there by a {{item._row}} that resolved to 7 — means the SEVENTH DATA row of that table, counting from 1. Header rows, a filter row, hidden rows and an expanded detail row are not data rows and are not counted. After any table read the framework stamps its own numbering onto the page: every data row of the table that was read carries data-steptix-row="N". So "row 7" is the row matching [data-steptix-row="7"] INSIDE that table, and the selector is ALWAYS the TABLE's own selector followed by [data-steptix-row="N"] — to click Review in it, "selector": "#RadGrid1 [data-steptix-row=\\"7\\"] input[value=\\"Review\\"]". NEVER write the attribute on its own: it matches a row in EVERY table read this run, so an unscoped [data-steptix-row=\\"7\\"] picks row 7 of whichever table comes first in the page. NEVER compute an element id from the number: measured on Telerik RadGrid, the row ids run "RadGrid1_ctl00__0", "__1", … from ZERO and are renumbered on every page, so "#RadGrid1_ctl00__7" is row EIGHT — the step clicks the wrong applicant and passes, green. NEVER use "tr:nth-child(7)" either: it counts hidden rows and detail rows, which the row number does not. Only when NO row of the table carries data-steptix-row — the table has not been read this run, or the page re-rendered since — count the data rows in the snapshot yourself, skipping every row that does not hold data.
 9. For "navigate" actions, set "url" to the full or relative URL
 10. For "type" actions, set "value" to the text to type
 10a. UPLOADING A FILE. A step that names a file PATH — a token with a file extension or a folder separator, e.g. "Upload file \\attachments\\logo.png", "Attach receipt-1.png and receipt-2.png", "Use the Choose file button to upload id.pdf" — is an upload. (A "choose"/"select" with no path is a dropdown: rule 11.) Emit an "upload" action: { "action": "upload", "selector": "#statement-file", "filePath": "attachments/logo.png", "description": "Upload logo.png as the statement" }.
@@ -1315,7 +1315,7 @@ export function formatLoopBlock(loop: LoopContext | undefined, subject: 'step' |
  * by PATH for a `${…}` reference, so
  * `${data.secrets.smtp.host}` masks exactly as `envDataSecretValues` masks its
  * value. The model never needs a secret's value to name the placeholder that
- * holds it, and masking here is what makes the CLI and TestBench compiles
+ * holds it, and masking here is what makes the CLI and Steptix compiles
  * agree: only the CLI's was masked before, by the accident of reading
  * `report.parameters` after `redactReport`.
  *
@@ -2562,7 +2562,7 @@ export function buildUseAiPrompt(
 }
 
 // ---------------------------------------------------------------------------
-// Record Steps (stories/testbench-record-steps.md, decision 9)
+// Record Steps (stories/steptix-record-steps.md, decision 9)
 // ---------------------------------------------------------------------------
 
 /** The two lines that fence the recording in the question below. */
@@ -2584,7 +2584,7 @@ export interface RecordStepsPromptInput {
    * The draft so far: its steps and its whole parameter list. Absent or empty
    * for a full (re)draft, which writes the draft from the start.
    *
-   * With the browser toolbar (stories/testbench-record-toolbar.md) a draft
+   * With the browser toolbar (stories/steptix-record-toolbar.md) a draft
    * also has LOCKED leading steps and steps the AUTHOR wrote, and some calls
    * insert rather than replace the tail (`insertAt`).
    */
@@ -2610,7 +2610,7 @@ export interface RecordStepsPromptInput {
          * The recorded actions each step stands for, by the numbers the
          * recording gives them — parallel to `steps`; null (or absent) for a
          * step of the author's, which stands for none
-         * (stories/testbench-record-edit-steps.md, "Which actions a step
+         * (stories/steptix-record-edit-steps.md, "Which actions a step
          * stands for").
          */
         stepActions?: ReadonlyArray<readonly number[] | null> | undefined;
@@ -2803,7 +2803,7 @@ export function buildRecordStepsPrompt(input: RecordStepsPromptInput): ChatMessa
     input.draft?.insertAt === undefined ? undefined : Math.max(0, Math.min(input.draft.insertAt, draftSteps.length));
   // The furthest back an ordinary call may start: three steps, and never past
   // a locked step, one the author wrote or one they reworded (§8,
-  // stories/testbench-record-toolbar.md, stories/testbench-record-edit-steps.md).
+  // stories/steptix-record-toolbar.md, stories/steptix-record-edit-steps.md).
   const floor = Math.max(
     0,
     draftSteps.length - RECORD_DRAFT_REWRITE_LIMIT,

@@ -297,7 +297,7 @@ export function planAtGuard(
  * visit that will send a closing one. `guardRows` records nothing for a visit
  * that asks nobody — a `Repeat`'s first pass, and every revisit of a `For
  * each`, including the one that finds the list exhausted — so an opening
- * signal sent there is never answered. TestBench paints `running` on
+ * signal sent there is never answered. Steptix paints `running` on
  * `step:start` and clears it on the next event for that line, so an unanswered
  * one left the guard's line painted `running` after the run had finished
  * (stories/control-flow.md §"What the live run found").

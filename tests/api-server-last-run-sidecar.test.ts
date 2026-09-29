@@ -238,7 +238,7 @@ async function postSteps(body: unknown, sessionId = nextSession()): Promise<any>
 const FULL = ['Open the shop', 'Sign in', 'Check out'];
 const LINES = [3, 4, 5];
 
-/** A batch of `FULL[from, to)`, shaped as TestBench sends one. `null` sends no
+/** A batch of `FULL[from, to)`, shaped as Steptix sends one. `null` sends no
  *  `fullSteps` at all — not `undefined`, which a caller passing it explicitly
  *  would find silently replaced by the default. */
 const batch = (
@@ -256,7 +256,7 @@ const batch = (
 // ─────────────────────────────────────────────────────────────────────
 describe('a batch that is the whole test writes the sidecar', () => {
   it('when it sends no fullSteps at all', async () => {
-    // The shape every caller but TestBench sends, and TestBench's own before
+    // The shape every caller but Steptix sends, and Steptix's own before
     // it learned to split. No `fullSteps` means nothing says this is a slice.
     const testFilePath = await newTestFile();
     const body = await postSteps(batch(testFilePath, 0, 3, null));
@@ -273,10 +273,10 @@ describe('a batch that is the whole test writes the sidecar', () => {
   });
 
   it('when its fullSteps is the batch itself', async () => {
-    // What TestBench sends for an unbroken Run: `steps` and `fullSteps` both
+    // What Steptix sends for an unbroken Run: `steps` and `fullSteps` both
     // the whole document. Two separate arrays on the wire, so this is the
     // element-wise comparison answering "equal" — a check that any `fullSteps`
-    // means a slice would write nothing here, and no ordinary TestBench run
+    // means a slice would write nothing here, and no ordinary Steptix run
     // would ever leave a sidecar.
     const testFilePath = await newTestFile();
     const body = await postSteps(batch(testFilePath, 0, 3, [...FULL]));

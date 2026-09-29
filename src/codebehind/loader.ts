@@ -18,14 +18,14 @@ import type { StepCodeEntry } from './types.js';
  */
 
 /** Name of the temp-module cache directory created beside a `.steps.ts`. */
-export const CODEBEHIND_CACHE_DIRNAME = '.aiui-codebehind-cache';
+export const CODEBEHIND_CACHE_DIRNAME = '.steptix-codebehind-cache';
 
 /**
  * Where to write temp code-behind modules for a `.steps.ts`: a dot-directory
  * **beside the source file**, for the reason spelled out in
  * [resolveToolCacheDir](../tools/reload.ts) — a `node_modules` path segment
  * makes Node's `LOOKUP_PACKAGE_SCOPE` return null, and the package
- * self-reference `ai-ui-automation/codebehind` becomes unresolvable.
+ * self-reference `steptix/codebehind` becomes unresolvable.
  */
 export function resolveCodeBehindCacheDir(stepsFile: string): string {
   return path.join(path.dirname(path.resolve(stepsFile)), CODEBEHIND_CACHE_DIRNAME);
@@ -398,7 +398,7 @@ async function loadCodeBehindFile(
 ): Promise<LoadedCodeBehind> {
   // Stat first. Most tests have no code-behind, and without this every step
   // batch would pay an esbuild load to discover that — and `bundleToolModule`
-  // would create an `.aiui-codebehind-cache` dir beside every test file on the
+  // would create an `.steptix-codebehind-cache` dir beside every test file on the
   // way to failing.
   try {
     await fs.access(file);

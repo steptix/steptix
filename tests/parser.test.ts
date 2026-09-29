@@ -328,7 +328,7 @@ describe('parseTestFile — env/data references in steps', () => {
   let dir: string;
 
   beforeAll(() => {
-    dir = mkdtempSync(path.join(tmpdir(), 'aiui-parser-envdata-'));
+    dir = mkdtempSync(path.join(tmpdir(), 'steptix-parser-envdata-'));
   });
   afterAll(() => {
     rmSync(dir, { recursive: true, force: true });

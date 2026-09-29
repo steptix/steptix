@@ -1062,7 +1062,7 @@ export class BrowserTracker {
         // sessions never enter the tracker" — true of the CLI test-runner,
         // which special-cases `initialSession.cdp` in its `finally`, but NOT
         // of `SessionManager.closeSession`, which calls this unconditionally.
-        // That is the path TestBench, flick and MCP all use.
+        // That is the path Steptix, flick and MCP all use.
         //
         // Nothing was being destroyed: `context.close()` and `browser.close()`
         // are both verified no-ops against a `connectOverCDP` connection
@@ -1600,8 +1600,8 @@ async function connectOverCdpSession(
   //
   // The CLI (§6) and the server (§4) both refuse `viewport:` + `cdp:` earlier,
   // with a message naming both keys. This is the backstop for every other way a
-  // `fixedViewport` can reach here — notably a project-wide pin (§8) in an
-  // `aiui.config.json` whose tests attach over CDP.
+  // `fixedViewport` can reach here — notably a project-wide pin (§8) in a
+  // `steptix.config.json` whose tests attach over CDP.
   if (config.fixedViewport) {
     throw new Error(
       `A fixed viewport (${formatViewport(config.fixedViewport)}) cannot be applied to a ` +
